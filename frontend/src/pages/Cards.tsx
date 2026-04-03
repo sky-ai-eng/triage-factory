@@ -83,18 +83,22 @@ export default function Cards() {
 
     const hesitationMs = Date.now() - cardStart
 
-    if (action === 'snooze') {
-      await fetch(`/api/tasks/${task.id}/snooze`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ until: '2h', hesitation_ms: hesitationMs }),
-      })
-    } else {
-      await fetch(`/api/tasks/${task.id}/swipe`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, hesitation_ms: hesitationMs }),
-      })
+    try {
+      const res = action === 'snooze'
+        ? await fetch(`/api/tasks/${task.id}/snooze`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ until: '2h', hesitation_ms: hesitationMs }),
+          })
+        : await fetch(`/api/tasks/${task.id}/swipe`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action, hesitation_ms: hesitationMs }),
+          })
+
+      if (!res.ok) return
+    } catch {
+      return
     }
 
     setUndoTask({ id: task.id, action })
@@ -105,7 +109,12 @@ export default function Cards() {
 
   const undo = async () => {
     if (!undoTask) return
-    await fetch(`/api/tasks/${undoTask.id}/undo`, { method: 'POST' })
+    try {
+      const res = await fetch(`/api/tasks/${undoTask.id}/undo`, { method: 'POST' })
+      if (!res.ok) return
+    } catch {
+      return
+    }
     setUndoTask(null)
     fetchQueue()
   }

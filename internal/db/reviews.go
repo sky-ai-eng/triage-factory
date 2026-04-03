@@ -103,6 +103,8 @@ func DeletePendingReview(database *sql.DB, reviewID string) error {
 // IsPendingCommentID checks if a comment ID belongs to a local pending review.
 func IsPendingCommentID(database *sql.DB, commentID string) bool {
 	var count int
-	database.QueryRow(`SELECT COUNT(*) FROM pending_review_comments WHERE id = ?`, commentID).Scan(&count)
+	if err := database.QueryRow(`SELECT COUNT(*) FROM pending_review_comments WHERE id = ?`, commentID).Scan(&count); err != nil {
+		return false
+	}
 	return count > 0
 }

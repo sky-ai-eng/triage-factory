@@ -295,7 +295,9 @@ func prSubmitReview(client *ghclient.Client, database *db.DB, args []string) {
 	exitOnErr(err)
 
 	// Clean up local state
-	db.DeletePendingReview(database.Conn, reviewID)
+	if err := db.DeletePendingReview(database.Conn, reviewID); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to clean up local review state: %v\n", err)
+	}
 
 	printJSON(map[string]any{
 		"github_review_id": ghReviewID,

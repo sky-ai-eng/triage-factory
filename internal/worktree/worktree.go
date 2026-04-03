@@ -51,7 +51,9 @@ func Create(owner, repo, cloneURL, sha, runID string) (string, error) {
 		return "", fmt.Errorf("fetch: %w", err)
 	}
 	// Also fetch PR refs so we can check out PR head SHAs
-	gitRun(bareDir, "fetch", "origin", "+refs/pull/*/head:refs/pull/*/head")
+	if err := gitRun(bareDir, "fetch", "origin", "+refs/pull/*/head:refs/pull/*/head"); err != nil {
+		return "", fmt.Errorf("fetch PR refs: %w", err)
+	}
 
 	// Create worktree at target SHA
 	wtDir := runDir(runID)
@@ -119,7 +121,9 @@ func pruneAll(baseDir string) {
 			return nil
 		}
 		if info.IsDir() && strings.HasSuffix(path, ".git") {
-			gitRun(path, "worktree", "prune")
+			if err := gitRun(path, "worktree", "prune"); err != nil {
+				log.Printf("[worktree] prune %s: %v", path, err)
+			}
 			return filepath.SkipDir
 		}
 		return nil

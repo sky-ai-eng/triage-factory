@@ -219,6 +219,10 @@ func (s *Spawner) runPRReview(runID string, task domain.Task, owner, repo string
 		}
 	}
 
+	if err := scanner.Err(); err != nil {
+		log.Printf("[delegate] scanner error for run %s: %v", runID, err)
+	}
+
 	// Wait for process to exit
 	if err := cmd.Wait(); err != nil {
 		stderr := stderrBuf.String()

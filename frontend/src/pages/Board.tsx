@@ -41,27 +41,37 @@ export default function Board() {
   const [overColumn, setOverColumn] = useState<ColumnId | null>(null)
 
   const fetchTasks = useCallback(async () => {
-    const [queuedRes, claimedRes, delegatedRes, doneRes] = await Promise.all([
-      fetch('/api/queue').then((r) => r.json()),
-      fetch('/api/tasks?status=claimed').then((r) => r.json()),
-      fetch('/api/tasks?status=delegated').then((r) => r.json()),
-      fetch('/api/tasks?status=done').then((r) => r.json()),
-    ])
-    setQueued(queuedRes)
-    setClaimed(claimedRes)
-    setDelegated(delegatedRes)
-    setDone(doneRes)
+    try {
+      const [queuedRes, claimedRes, delegatedRes, doneRes] = await Promise.all([
+        fetch('/api/queue').then((r) => r.ok ? r.json() : []),
+        fetch('/api/tasks?status=claimed').then((r) => r.ok ? r.json() : []),
+        fetch('/api/tasks?status=delegated').then((r) => r.ok ? r.json() : []),
+        fetch('/api/tasks?status=done').then((r) => r.ok ? r.json() : []),
+      ])
+      setQueued(queuedRes)
+      setClaimed(claimedRes)
+      setDelegated(delegatedRes)
+      setDone(doneRes)
 
-    for (const task of delegatedRes) {
-      const runsRes = await fetch(`/api/agent/runs?task_id=${task.id}`)
-      const runs: AgentRun[] = await runsRes.json()
-      if (runs.length > 0) {
-        const latestRun = runs[0]
-        setAgentRuns((prev) => ({ ...prev, [task.id]: latestRun }))
-        const msgsRes = await fetch(`/api/agent/runs/${latestRun.ID}/messages`)
-        const msgs: AgentMessage[] = await msgsRes.json()
-        setAgentMessages((prev) => ({ ...prev, [latestRun.ID]: msgs }))
+      for (const task of delegatedRes) {
+        try {
+          const runsRes = await fetch(`/api/agent/runs?task_id=${task.id}`)
+          if (!runsRes.ok) continue
+          const runs: AgentRun[] = await runsRes.json()
+          if (runs.length > 0) {
+            const latestRun = runs[0]
+            setAgentRuns((prev) => ({ ...prev, [task.id]: latestRun }))
+            const msgsRes = await fetch(`/api/agent/runs/${latestRun.ID}/messages`)
+            if (!msgsRes.ok) continue
+            const msgs: AgentMessage[] = await msgsRes.json()
+            setAgentMessages((prev) => ({ ...prev, [latestRun.ID]: msgs }))
+          }
+        } catch {
+          // Individual agent run fetch failed — skip it
+        }
       }
+    } catch {
+      // Network error — keep stale data
     }
   }, [])
 
@@ -282,7 +292,7 @@ export default function Board() {
             </div>
           }
         >
-          <SortableContext items={inProgress.map((i) => i.task.id)} strategy={verticalListSortingStrategy}>
+          <SortableContext items={inProgress.filter((i) => !(i.type === 'agent' && agentRuns[i.task.id])).map((i) => i.task.id)} strategy={verticalListSortingStrategy}>
             {inProgress.length === 0 ? (
               <EmptyColumn>Nothing in progress</EmptyColumn>
             ) : (

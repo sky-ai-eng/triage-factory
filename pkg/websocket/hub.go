@@ -25,8 +25,9 @@ type Hub struct {
 }
 
 type client struct {
-	conn *ws.Conn
-	send chan []byte
+	conn   *ws.Conn
+	send   chan []byte
+	closed chan struct{} // signals writePump to exit
 }
 
 // NewHub creates a new websocket hub.
@@ -39,7 +40,6 @@ func NewHub() *Hub {
 // HandleWS is the HTTP handler for websocket upgrade requests.
 func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := ws.Accept(w, r, &ws.AcceptOptions{
-		// Allow all origins for localhost dev
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
@@ -48,8 +48,9 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	c := &client{
-		conn: conn,
-		send: make(chan []byte, 64),
+		conn:   conn,
+		send:   make(chan []byte, 64),
+		closed: make(chan struct{}),
 	}
 
 	h.mu.Lock()
@@ -61,15 +62,16 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
 	// Start write pump in background
 	go h.writePump(c)
 
-	// Read pump (blocks until disconnect) — we don't expect client messages,
-	// but we need to read to detect close frames.
+	// Read pump (blocks until disconnect)
 	h.readPump(c)
 
-	// Cleanup
+	// Cleanup: remove from map first (under write lock so Broadcast can't
+	// see this client), then signal writePump to exit via closed channel.
+	// We never close c.send — writePump drains it naturally.
 	h.mu.Lock()
 	delete(h.clients, c)
 	h.mu.Unlock()
-	close(c.send)
+	close(c.closed)
 	conn.Close(ws.StatusNormalClosure, "")
 
 	log.Printf("[ws] client disconnected (%d total)", h.clientCount())
@@ -90,7 +92,6 @@ func (h *Hub) Broadcast(evt Event) {
 		select {
 		case c.send <- data:
 		default:
-			// Client buffer full, skip
 			log.Println("[ws] dropping message for slow client")
 		}
 	}
@@ -102,7 +103,6 @@ func (h *Hub) readPump(c *client) {
 		if err != nil {
 			return
 		}
-		// Discard any client messages — we're server-push only
 	}
 }
 
@@ -112,10 +112,9 @@ func (h *Hub) writePump(c *client) {
 
 	for {
 		select {
-		case msg, ok := <-c.send:
-			if !ok {
-				return
-			}
+		case <-c.closed:
+			return
+		case msg := <-c.send:
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			err := c.conn.Write(ctx, ws.MessageText, msg)
 			cancel()
@@ -123,7 +122,6 @@ func (h *Hub) writePump(c *client) {
 				return
 			}
 		case <-ticker.C:
-			// Send ping to keep connection alive
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			err := c.conn.Ping(ctx)
 			cancel()
