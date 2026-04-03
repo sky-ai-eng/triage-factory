@@ -137,7 +137,7 @@ func (s *Spawner) runPRReview(runID string, task domain.Task, owner, repo string
 		"--model", s.model,
 		"--output-format", "stream-json",
 		"--verbose",
-		"--allowedTools", fmt.Sprintf("Bash(%s exec *),Read,Glob,Grep", selfBin),
+		"--allowedTools", fmt.Sprintf("Bash(%s exec *),Read,Glob,Grep,WebSearch,WebFetch", selfBin),
 		"--max-turns", "100",
 	}
 
