@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
+	"time"
 	"unicode"
 
 	"github.com/google/uuid"
+	"github.com/sky-ai-eng/todo-tinder/internal/ai"
 	"github.com/sky-ai-eng/todo-tinder/internal/db"
 	"github.com/sky-ai-eng/todo-tinder/internal/domain"
 	ghclient "github.com/sky-ai-eng/todo-tinder/internal/github"
@@ -287,6 +290,9 @@ func prSubmitReview(client *ghclient.Client, database *db.DB, args []string) {
 		}
 	}
 
+	// Inject header and footer with run metadata
+	body = buildReviewBody(body, database)
+
 	// Submit atomically to GitHub
 	ghReviewID, actualEvent, err := client.SubmitReview(
 		review.Owner, review.Repo, review.PRNumber,
@@ -497,4 +503,66 @@ func exitOnErr(err error) {
 func exitErr(msg string) {
 	fmt.Fprintln(os.Stderr, msg)
 	os.Exit(1)
+}
+
+// buildReviewBody wraps the agent's review body with a header and a metadata footer.
+func buildReviewBody(body string, database *db.DB) string {
+	header := "# Todo Tinder: AI Review\n\n"
+
+	runID := os.Getenv("TODOTINDER_RUN_ID")
+	if runID == "" {
+		return header + body
+	}
+
+	// Look up run for duration info
+	run, err := db.GetAgentRun(database.Conn, runID)
+	if err != nil || run == nil {
+		return header + body
+	}
+
+	// Sum tokens and calculate cost
+	totals, err := db.RunTokenTotals(database.Conn, runID)
+	if err != nil {
+		return header + body
+	}
+
+	model := totals.Model
+	if model == "" {
+		model = run.Model
+	}
+
+	cost := ai.CalculateCostUSD(model, totals.InputTokens, totals.OutputTokens, totals.CacheReadTokens, totals.CacheCreationTokens)
+
+	// Pretty-print model name
+	modelDisplay := model
+	switch {
+	case strings.Contains(model, "opus"):
+		modelDisplay = "Claude Opus"
+	case strings.Contains(model, "sonnet"):
+		modelDisplay = "Claude Sonnet"
+	case strings.Contains(model, "haiku"):
+		modelDisplay = "Claude Haiku"
+	}
+
+	// Calculate elapsed time from run start
+	elapsed := prettyElapsed(time.Since(run.StartedAt))
+
+	footer := fmt.Sprintf("\n\n---\nTime: %s | Model: %s | Cost: ~$%.3f", elapsed, modelDisplay, cost)
+
+	return header + body + footer
+}
+
+func prettyElapsed(d time.Duration) string {
+	s := int(d.Seconds())
+	if s < 60 {
+		return fmt.Sprintf("%ds", s)
+	}
+	m := s / 60
+	s = s % 60
+	if m < 60 {
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	h := m / 60
+	m = m % 60
+	return fmt.Sprintf("%dh %dm", h, m)
 }

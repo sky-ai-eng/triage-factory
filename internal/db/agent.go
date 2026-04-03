@@ -223,6 +223,36 @@ func MessagesForRun(database *sql.DB, runID string) ([]domain.AgentMessage, erro
 	return messages, rows.Err()
 }
 
+// TokenTotals holds summed token counts for a run.
+type TokenTotals struct {
+	Model               string
+	InputTokens         int
+	OutputTokens        int
+	CacheReadTokens     int
+	CacheCreationTokens int
+	NumTurns            int
+}
+
+// RunTokenTotals sums token usage across all assistant messages in a run.
+func RunTokenTotals(database *sql.DB, runID string) (*TokenTotals, error) {
+	row := database.QueryRow(`
+		SELECT COALESCE(MAX(model), ''),
+		       COALESCE(SUM(input_tokens), 0),
+		       COALESCE(SUM(output_tokens), 0),
+		       COALESCE(SUM(cache_read_tokens), 0),
+		       COALESCE(SUM(cache_creation_tokens), 0),
+		       COUNT(*)
+		FROM agent_messages
+		WHERE run_id = ? AND role = 'assistant'
+	`, runID)
+
+	var t TokenTotals
+	if err := row.Scan(&t.Model, &t.InputTokens, &t.OutputTokens, &t.CacheReadTokens, &t.CacheCreationTokens, &t.NumTurns); err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
 func nullStr(s string) sql.NullString {
 	if s == "" {
 		return sql.NullString{}

@@ -143,6 +143,7 @@ func (s *Spawner) runPRReview(runID string, task domain.Task, owner, repo string
 
 	cmd := exec.Command("claude", args...)
 	cmd.Dir = wtPath
+	cmd.Env = append(os.Environ(), "TODOTINDER_RUN_ID="+runID)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
