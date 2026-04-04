@@ -12,7 +12,7 @@ import (
 // taskColumns is the canonical SELECT column list for queryTasks. Every query that
 // feeds into queryTasks must use this exact list so the Scan stays in sync.
 const taskColumns = `id, source, source_id, source_url, title, description, repo, author, labels, severity,
-       diff_additions, diff_deletions, files_changed, ci_status, relevance_reason, source_status,
+       diff_additions, diff_deletions, files_changed, ci_status, relevance_reason, source_status, scoring_status,
        created_at, fetched_at, status, priority_score, ai_summary,
        priority_reasoning, agent_confidence, snooze_until`
 
@@ -91,7 +91,7 @@ func queryTasks(database *sql.DB, query string, args ...any) ([]domain.Task, err
 		var t domain.Task
 		var labelsStr sql.NullString
 		var desc, repo, author, severity, aiSummary, priorityReasoning sql.NullString
-		var ciStatus, relevanceReason, sourceStatus sql.NullString
+		var ciStatus, relevanceReason, sourceStatus, scoringStatus sql.NullString
 		var priorityScore, agentConfidence sql.NullFloat64
 		var diffAdditions, diffDeletions, filesChanged sql.NullInt64
 		var snoozeUntil sql.NullTime
@@ -99,7 +99,7 @@ func queryTasks(database *sql.DB, query string, args ...any) ([]domain.Task, err
 		err := rows.Scan(
 			&t.ID, &t.Source, &t.SourceID, &t.SourceURL, &t.Title,
 			&desc, &repo, &author, &labelsStr, &severity,
-			&diffAdditions, &diffDeletions, &filesChanged, &ciStatus, &relevanceReason, &sourceStatus,
+			&diffAdditions, &diffDeletions, &filesChanged, &ciStatus, &relevanceReason, &sourceStatus, &scoringStatus,
 			&t.CreatedAt, &t.FetchedAt,
 			&t.Status, &priorityScore, &aiSummary,
 			&priorityReasoning, &agentConfidence, &snoozeUntil,
@@ -117,6 +117,7 @@ func queryTasks(database *sql.DB, query string, args ...any) ([]domain.Task, err
 		t.CIStatus = ciStatus.String
 		t.RelevanceReason = relevanceReason.String
 		t.SourceStatus = sourceStatus.String
+		t.ScoringStatus = scoringStatus.String
 		t.DiffAdditions = int(diffAdditions.Int64)
 		t.DiffDeletions = int(diffDeletions.Int64)
 		t.FilesChanged = int(filesChanged.Int64)

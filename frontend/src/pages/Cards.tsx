@@ -21,6 +21,7 @@ interface Task {
   files_changed?: number
   ci_status?: string
   relevance_reason?: string
+  scoring_status: string
   created_at: string
   status: string
   priority_score: number | null
@@ -38,7 +39,6 @@ const SWIPE_VELOCITY = 300
 export default function Cards() {
   const [tasks, setTasks] = useState<Task[]>([])
   const [loadState, setLoadState] = useState<LoadState>('loading')
-  const [scoringIds, setScoringIds] = useState<Set<string>>(new Set())
   const [cardStart, setCardStart] = useState(Date.now())
   const [undoTask, setUndoTask] = useState<{ id: string; action: string } | null>(null)
   const hasFetched = useRef(false)
@@ -74,14 +74,8 @@ export default function Cards() {
       fetchQueue(true)
     }
 
-    if (event.type === 'scoring_started') {
-      const ids = new Set(event.data.task_ids)
-      setScoringIds(ids)
-    }
-
-    if (event.type === 'scoring_completed') {
-      setScoringIds(new Set())
-      // Refetch to get updated scores — keep current card stable
+    if (event.type === 'scoring_started' || event.type === 'scoring_completed') {
+      // Refetch to pick up scoring_status changes
       fetchQueue(true)
     }
   }, [fetchQueue]))
@@ -185,7 +179,7 @@ export default function Cards() {
             <SwipeCard
               key={tasks[1].id}
               task={tasks[1]}
-              isScoring={scoringIds.has(tasks[1].id)}
+              isScoring={tasks[1].scoring_status === 'scoring'}
               style={{
                 zIndex: 1,
                 transform: 'scale(0.96) translateY(10px)',
@@ -200,7 +194,7 @@ export default function Cards() {
           <SwipeCard
             key={tasks[0].id}
             task={tasks[0]}
-            isScoring={scoringIds.has(tasks[0].id)}
+            isScoring={tasks[0].scoring_status === 'scoring'}
             onSwipe={swipe}
             style={{ zIndex: 2 }}
             interactive

@@ -20,6 +20,7 @@ type Task struct {
 	CIStatus          string // "success" | "failure" | "pending" | ""
 	RelevanceReason   string // "review_requested" | "authored" | "mentioned" | "assigned"
 	SourceStatus      string // Original status in external system (e.g. Jira workflow status)
+	ScoringStatus     string // "unscored" | "scoring" | "scored"
 	CreatedAt         time.Time
 	FetchedAt         time.Time
 	Status            string

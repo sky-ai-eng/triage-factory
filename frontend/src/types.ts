@@ -14,6 +14,7 @@ export interface Task {
   files_changed?: number
   ci_status?: string
   relevance_reason?: string
+  scoring_status: string
   created_at: string
   status: string
   priority_score: number | null

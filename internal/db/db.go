@@ -54,6 +54,9 @@ func Migrate(db *sql.DB) error {
 
 var migrations = []string{
 	`ALTER TABLE tasks ADD COLUMN source_status TEXT`,
+	`ALTER TABLE tasks ADD COLUMN scoring_status TEXT DEFAULT 'unscored'`,
+	`UPDATE tasks SET scoring_status = 'scored' WHERE ai_summary IS NOT NULL AND scoring_status IS NULL`,
+	`UPDATE tasks SET scoring_status = 'unscored' WHERE ai_summary IS NULL AND scoring_status IS NULL`,
 }
 
 const schema = `
@@ -74,6 +77,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     ci_status TEXT,
     relevance_reason TEXT,
     source_status TEXT,
+    scoring_status TEXT DEFAULT 'unscored',
     created_at DATETIME NOT NULL,
     fetched_at DATETIME NOT NULL,
     status TEXT DEFAULT 'queued',

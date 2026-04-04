@@ -96,6 +96,11 @@ func (r *Runner) run() {
 		taskIDs[i] = t.ID
 	}
 
+	// Persist scoring state before calling AI
+	if err := db.MarkScoring(r.database, taskIDs); err != nil {
+		log.Printf("[ai] error marking tasks as scoring: %v", err)
+	}
+
 	if r.callbacks.OnScoringStarted != nil {
 		r.callbacks.OnScoringStarted(taskIDs)
 	}
