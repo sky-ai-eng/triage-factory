@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/todo-tinder/internal/ai"
@@ -426,8 +425,9 @@ func isLocalID(id string) bool {
 	if len(id) == 0 {
 		return false
 	}
-	// GitHub IDs are numeric, our local IDs are UUIDs
-	return !unicode.IsDigit(rune(id[0]))
+	// GitHub IDs are purely numeric, our local IDs are UUIDs (contain hyphens).
+	_, err := strconv.Atoi(id)
+	return err != nil
 }
 
 // --- argument parsing helpers ---
