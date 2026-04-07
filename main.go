@@ -12,6 +12,8 @@ import (
 	"github.com/sky-ai-eng/todo-tinder/internal/config"
 	"github.com/sky-ai-eng/todo-tinder/internal/db"
 	"github.com/sky-ai-eng/todo-tinder/internal/delegate"
+	"github.com/sky-ai-eng/todo-tinder/internal/domain"
+	"github.com/sky-ai-eng/todo-tinder/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/todo-tinder/internal/github"
 	"github.com/sky-ai-eng/todo-tinder/internal/jira"
 	"github.com/sky-ai-eng/todo-tinder/internal/poller"
@@ -85,8 +87,35 @@ func main() {
 	// Clean up any orphaned worktrees from crashed runs
 	worktree.Cleanup()
 
-	// Start AI scoring runner (long-lived, doesn't depend on credentials)
+	// Seed event type catalog
+	if err := db.SeedEventTypes(database); err != nil {
+		log.Fatalf("failed to seed event types: %v", err)
+	}
+
+	// Event bus — central pub/sub replacing direct callbacks
+	bus := eventbus.New()
+
 	wsHub := srv.WSHub()
+
+	// Subscriber: WS broadcaster — forwards ALL events to the frontend
+	bus.Subscribe(eventbus.Subscriber{
+		Name: "ws-broadcast",
+		Handle: func(evt domain.Event) {
+			wsHub.Broadcast(websocket.Event{
+				Type:  "event",
+				Data:  evt,
+			})
+			// Also send the legacy "tasks_updated" for backward compat
+			if evt.EventType == domain.EventSystemPollCompleted {
+				wsHub.Broadcast(websocket.Event{
+					Type: "tasks_updated",
+					Data: map[string]any{},
+				})
+			}
+		},
+	})
+
+	// Start AI scoring runner
 	scorer := ai.NewRunner(database, ai.RunnerCallbacks{
 		OnScoringStarted: func(taskIDs []string) {
 			wsHub.Broadcast(websocket.Event{
@@ -104,14 +133,17 @@ func main() {
 	scorer.Start()
 	log.Println("[ai] scorer started (model: haiku)")
 
-	// Poller manager — handles starting/stopping pollers on credential changes
-	pollerMgr := poller.NewManager(database, func() {
-		wsHub.Broadcast(websocket.Event{
-			Type: "tasks_updated",
-			Data: map[string]any{},
-		})
-		scorer.Trigger()
+	// Subscriber: scorer trigger — only reacts to poll-complete sentinels
+	bus.Subscribe(eventbus.Subscriber{
+		Name:   "scorer",
+		Filter: []string{"system:poll:"},
+		Handle: func(evt domain.Event) {
+			scorer.Trigger()
+		},
 	})
+
+	// Poller manager — uses event bus instead of direct callbacks
+	pollerMgr := poller.NewManager(database, bus)
 
 	// Spawner state — protected by mutex for hot-reload
 	var spawnerMu sync.Mutex

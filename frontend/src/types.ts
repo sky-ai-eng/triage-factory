@@ -14,6 +14,7 @@ export interface Task {
   files_changed?: number
   ci_status?: string
   relevance_reason?: string
+  event_type?: string
   scoring_status: string
   created_at: string
   status: string
@@ -59,9 +60,19 @@ export interface ToolCall {
   input: Record<string, any>
 }
 
+export interface TriageEvent {
+  id?: number
+  event_type: string
+  task_id: string
+  source_id: string
+  metadata: string
+  created_at: string
+}
+
 export type WSEvent =
   | { type: 'agent_run_update'; run_id: string; data: { status: string } }
   | { type: 'agent_message'; run_id: string; data: AgentMessage }
+  | { type: 'event'; data: TriageEvent }
   | { type: 'tasks_updated'; data: Record<string, never> }
   | { type: 'scoring_started'; data: { task_ids: string[] } }
   | { type: 'scoring_completed'; data: { task_ids: string[] } }

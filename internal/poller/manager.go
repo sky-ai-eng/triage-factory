@@ -8,23 +8,24 @@ import (
 
 	"github.com/sky-ai-eng/todo-tinder/internal/auth"
 	"github.com/sky-ai-eng/todo-tinder/internal/config"
+	"github.com/sky-ai-eng/todo-tinder/internal/eventbus"
 )
 
 // Manager manages the lifecycle of pollers, allowing them to be
 // stopped and restarted when credentials or config change.
 type Manager struct {
-	database   *sql.DB
-	onNewTasks func()
+	database *sql.DB
+	bus      *eventbus.Bus
 
 	mu     sync.Mutex
 	github *GitHubPoller
 	jira   *JiraPoller
 }
 
-func NewManager(database *sql.DB, onNewTasks func()) *Manager {
+func NewManager(database *sql.DB, bus *eventbus.Bus) *Manager {
 	return &Manager{
-		database:   database,
-		onNewTasks: onNewTasks,
+		database: database,
+		bus:      bus,
 	}
 }
 
@@ -60,7 +61,7 @@ func (m *Manager) Restart() {
 			if interval < 10*time.Second {
 				interval = time.Minute
 			}
-			m.github = NewGitHubPoller(creds.GitHubURL, creds.GitHubPAT, ghUser.Login, m.database, interval, m.onNewTasks)
+			m.github = NewGitHubPoller(creds.GitHubURL, creds.GitHubPAT, ghUser.Login, m.database, interval, m.bus)
 			m.github.Start()
 			log.Printf("[github] poller started (interval: %s, user: %s)", interval, ghUser.Login)
 		}
@@ -72,7 +73,7 @@ func (m *Manager) Restart() {
 		if interval < 10*time.Second {
 			interval = time.Minute
 		}
-		m.jira = NewJiraPoller(creds.JiraURL, creds.JiraPAT, cfg.Jira.Projects, cfg.Jira.PickupStatuses, m.database, interval, m.onNewTasks)
+		m.jira = NewJiraPoller(creds.JiraURL, creds.JiraPAT, cfg.Jira.Projects, cfg.Jira.PickupStatuses, m.database, interval, m.bus)
 		m.jira.Start()
 		log.Printf("[jira] poller started (interval: %s, projects: %v, statuses: %v)", interval, cfg.Jira.Projects, cfg.Jira.PickupStatuses)
 	}

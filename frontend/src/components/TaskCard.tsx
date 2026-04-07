@@ -1,5 +1,6 @@
 import { forwardRef } from 'react'
 import type { Task } from '../types'
+import EventBadge from './EventBadge'
 
 interface Props {
   task: Task
@@ -26,6 +27,7 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
           }`}>
             {task.source === 'github' ? 'GH' : 'Jira'}
           </span>
+          <EventBadge eventType={task.event_type} compact />
           {task.repo && <span className="text-[11px] text-text-tertiary truncate">{task.repo}</span>}
         </div>
 

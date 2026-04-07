@@ -42,21 +42,8 @@ func Open() (*sql.DB, error) {
 
 // Migrate runs the schema migration on the database.
 func Migrate(db *sql.DB) error {
-	if _, err := db.Exec(schema); err != nil {
-		return err
-	}
-	// Add columns that may not exist in older databases (ALTER TABLE IF NOT EXISTS isn't supported).
-	for _, stmt := range migrations {
-		db.Exec(stmt) // Ignore "duplicate column" errors
-	}
-	return nil
-}
-
-var migrations = []string{
-	`ALTER TABLE tasks ADD COLUMN source_status TEXT`,
-	`ALTER TABLE tasks ADD COLUMN scoring_status TEXT DEFAULT 'unscored'`,
-	`UPDATE tasks SET scoring_status = 'scored' WHERE ai_summary IS NOT NULL AND scoring_status IS NULL`,
-	`UPDATE tasks SET scoring_status = 'unscored' WHERE ai_summary IS NULL AND scoring_status IS NULL`,
+	_, err := db.Exec(schema)
+	return err
 }
 
 const schema = `
@@ -78,6 +65,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     relevance_reason TEXT,
     source_status TEXT,
     scoring_status TEXT DEFAULT 'unscored',
+    event_type TEXT,
     created_at DATETIME NOT NULL,
     fetched_at DATETIME NOT NULL,
     status TEXT DEFAULT 'queued',
@@ -164,4 +152,35 @@ CREATE INDEX IF NOT EXISTS idx_agent_runs_task_id ON agent_runs(task_id);
 CREATE INDEX IF NOT EXISTS idx_agent_messages_run_id ON agent_messages(run_id);
 CREATE INDEX IF NOT EXISTS idx_swipe_events_task_id ON swipe_events(task_id);
 CREATE INDEX IF NOT EXISTS idx_pending_review_comments_review_id ON pending_review_comments(review_id);
+
+CREATE TABLE IF NOT EXISTS event_types (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    category TEXT NOT NULL,
+    label TEXT NOT NULL,
+    description TEXT,
+    default_priority REAL DEFAULT 0.5
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL REFERENCES event_types(id),
+    task_id TEXT REFERENCES tasks(id),
+    source_id TEXT NOT NULL,
+    metadata TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS poller_state (
+    source TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    state_json TEXT NOT NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (source, source_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
+CREATE INDEX IF NOT EXISTS idx_events_task_id ON events(task_id);
+CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_event_type ON tasks(event_type);
 `

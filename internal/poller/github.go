@@ -13,22 +13,30 @@ import (
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/todo-tinder/internal/db"
 	"github.com/sky-ai-eng/todo-tinder/internal/domain"
+	"github.com/sky-ai-eng/todo-tinder/internal/eventbus"
 )
 
 // GitHubPoller fetches tasks from the GitHub API on an interval.
 type GitHubPoller struct {
-	baseURL    string
-	pat        string
-	username   string
-	database   *sql.DB
-	client     *http.Client
-	interval   time.Duration
-	stop       chan struct{}
-	onNewTasks func() // called after new tasks are ingested
+	baseURL  string
+	pat      string
+	username string
+	database *sql.DB
+	client   *http.Client
+	interval time.Duration
+	stop     chan struct{}
+	bus      *eventbus.Bus
+}
+
+// ghItemState is the snapshot we store in poller_state for diffing between polls.
+type ghItemState struct {
+	CIStatus  string `json:"ci_status"`
+	Mergeable string `json:"mergeable_state"`
+	Reason    string `json:"reason"` // relevance_reason at time of snapshot
+	IsMerged  bool   `json:"is_merged"`
 }
 
 // apiBase returns the correct API base URL.
-// github.com uses api.github.com; GHE uses {host}/api/v3.
 func ghAPIBase(baseURL string) string {
 	if baseURL == "https://github.com" {
 		return "https://api.github.com"
@@ -36,22 +44,22 @@ func ghAPIBase(baseURL string) string {
 	return baseURL + "/api/v3"
 }
 
-func NewGitHubPoller(baseURL, pat, username string, database *sql.DB, interval time.Duration, onNewTasks func()) *GitHubPoller {
+func NewGitHubPoller(baseURL, pat, username string, database *sql.DB, interval time.Duration, bus *eventbus.Bus) *GitHubPoller {
 	return &GitHubPoller{
-		baseURL:    ghAPIBase(strings.TrimRight(baseURL, "/")),
-		pat:        pat,
-		username:   username,
-		database:   database,
-		client:     &http.Client{Timeout: 15 * time.Second},
-		interval:   interval,
-		stop:       make(chan struct{}),
-		onNewTasks: onNewTasks,
+		baseURL:  ghAPIBase(strings.TrimRight(baseURL, "/")),
+		pat:      pat,
+		username: username,
+		database: database,
+		client:   &http.Client{Timeout: 15 * time.Second},
+		interval: interval,
+		stop:     make(chan struct{}),
+		bus:      bus,
 	}
 }
 
 func (p *GitHubPoller) Start() {
 	go func() {
-		p.poll() // poll immediately on start
+		p.poll()
 		ticker := time.NewTicker(p.interval)
 		defer ticker.Stop()
 		for {
@@ -85,7 +93,7 @@ func (p *GitHubPoller) poll() {
 		allTasks = append(allTasks, reviewPRs...)
 	}
 
-	// 2. Self-authored open PRs (with CI status — no extra API call, uses head SHA from details)
+	// 2. Self-authored open PRs (with CI status)
 	authoredPRs, err := p.searchPRs(
 		fmt.Sprintf("author:%s+type:pr+state:open", p.username),
 		"authored", true,
@@ -107,7 +115,7 @@ func (p *GitHubPoller) poll() {
 		allTasks = append(allTasks, mentionedPRs...)
 	}
 
-	// 4. Self-authored merged PRs from the last 30 days → status "done"
+	// 4. Self-authored merged PRs from the last 30 days -> status "done"
 	cutoff := time.Now().AddDate(0, 0, -30).Format("2006-01-02")
 	mergedPRs, err := p.searchPRs(
 		fmt.Sprintf("author:%s+type:pr+is:merged+merged:>=%s", p.username, cutoff),
@@ -133,23 +141,166 @@ func (p *GitHubPoller) poll() {
 	}
 
 	inserted := 0
+	eventsEmitted := 0
 	for _, t := range tasks {
+		// Detect events via state diffing BEFORE upsert
+		events := p.diffAndEmit(t)
+		eventsEmitted += len(events)
+
+		// Set the event_type on the task to the most recent event (if any)
+		if len(events) > 0 {
+			t.EventType = events[len(events)-1].EventType
+		}
+
 		if err := db.UpsertTask(p.database, t); err != nil {
 			log.Printf("[github] error upserting task %s: %v", t.SourceID, err)
 			continue
 		}
 		inserted++
+
+		// Record events and publish to bus
+		for _, evt := range events {
+			// Resolve task ID (may have been assigned by a previous upsert)
+			evt.TaskID = t.ID
+			if id, err := db.RecordEvent(p.database, evt); err != nil {
+				log.Printf("[github] error recording event: %v", err)
+			} else {
+				evt.ID = id
+			}
+			db.SetTaskEventType(p.database, t.ID, evt.EventType)
+			p.bus.Publish(evt)
+		}
+
+		// Save new state snapshot
+		p.saveState(t)
 	}
-	log.Printf("[github] poll complete: %d tasks processed (%d review, %d authored, %d mentioned, %d merged)",
-		inserted, len(reviewPRs), len(authoredPRs), len(mentionedPRs), len(mergedPRs))
-	if inserted > 0 && p.onNewTasks != nil {
-		p.onNewTasks()
+
+	log.Printf("[github] poll complete: %d tasks processed, %d events emitted (%d review, %d authored, %d mentioned, %d merged)",
+		inserted, eventsEmitted, len(reviewPRs), len(authoredPRs), len(mentionedPRs), len(mergedPRs))
+
+	// Emit batch-complete sentinel so subscribers (scorer) know the cycle is done
+	if inserted > 0 {
+		p.bus.Publish(domain.Event{
+			EventType: domain.EventSystemPollCompleted,
+			SourceID:  "github",
+			Metadata:  mustJSON(map[string]any{"tasks": inserted, "events": eventsEmitted}),
+			CreatedAt: time.Now(),
+		})
 	}
 }
 
+// diffAndEmit compares current task state against the stored poller_state snapshot
+// and returns typed events for any detected transitions.
+func (p *GitHubPoller) diffAndEmit(t domain.Task) []domain.Event {
+	prevJSON, err := db.GetPollerState(p.database, "github", t.SourceID)
+	if err != nil {
+		log.Printf("[github] error loading poller state for %s: %v", t.SourceID, err)
+	}
+
+	current := ghItemState{
+		CIStatus:  t.CIStatus,
+		Mergeable: "", // we don't fetch mergeable_state in the poller (that's dashboard-only)
+		Reason:    t.RelevanceReason,
+		IsMerged:  t.Status == "done",
+	}
+
+	var events []domain.Event
+	now := time.Now()
+
+	if prevJSON == "" {
+		// First time seeing this item — emit the appropriate "new" event
+		eventType := p.initialEventType(t)
+		if eventType != "" {
+			events = append(events, domain.Event{
+				EventType: eventType,
+				TaskID:    t.ID,
+				SourceID:  t.SourceID,
+				Metadata:  mustJSON(map[string]string{"reason": "first_seen"}),
+				CreatedAt: now,
+			})
+		}
+		return events
+	}
+
+	// Parse previous state
+	var prev ghItemState
+	if err := json.Unmarshal([]byte(prevJSON), &prev); err != nil {
+		log.Printf("[github] error parsing previous state for %s: %v", t.SourceID, err)
+		return events
+	}
+
+	// Detect CI transitions
+	if prev.CIStatus != current.CIStatus && current.CIStatus != "" {
+		switch current.CIStatus {
+		case "success":
+			events = append(events, domain.Event{
+				EventType: domain.EventGitHubPRCIPassed,
+				TaskID:    t.ID,
+				SourceID:  t.SourceID,
+				Metadata:  mustJSON(map[string]string{"prev": prev.CIStatus, "new": current.CIStatus}),
+				CreatedAt: now,
+			})
+		case "failure":
+			events = append(events, domain.Event{
+				EventType: domain.EventGitHubPRCIFailed,
+				TaskID:    t.ID,
+				SourceID:  t.SourceID,
+				Metadata:  mustJSON(map[string]string{"prev": prev.CIStatus, "new": current.CIStatus}),
+				CreatedAt: now,
+			})
+		}
+	}
+
+	// Detect merge
+	if !prev.IsMerged && current.IsMerged {
+		events = append(events, domain.Event{
+			EventType: domain.EventGitHubPRMerged,
+			TaskID:    t.ID,
+			SourceID:  t.SourceID,
+			Metadata:  mustJSON(map[string]string{"reason": "merged"}),
+			CreatedAt: now,
+		})
+	}
+
+	return events
+}
+
+// initialEventType returns the event type for a newly-seen item based on relevance reason.
+func (p *GitHubPoller) initialEventType(t domain.Task) string {
+	if t.Status == "done" {
+		return domain.EventGitHubPRMerged
+	}
+	switch t.RelevanceReason {
+	case "review_requested":
+		return domain.EventGitHubPRReviewRequested
+	case "authored":
+		return domain.EventGitHubPROpened
+	case "mentioned":
+		return domain.EventGitHubPRMentioned
+	default:
+		return domain.EventGitHubPROpened
+	}
+}
+
+// saveState persists the current snapshot for future diffing.
+func (p *GitHubPoller) saveState(t domain.Task) {
+	state := ghItemState{
+		CIStatus:  t.CIStatus,
+		Reason:    t.RelevanceReason,
+		IsMerged:  t.Status == "done",
+	}
+	data, _ := json.Marshal(state)
+	if err := db.SetPollerState(p.database, "github", t.SourceID, string(data)); err != nil {
+		log.Printf("[github] error saving poller state for %s: %v", t.SourceID, err)
+	}
+}
+
+func mustJSON(v any) string {
+	data, _ := json.Marshal(v)
+	return string(data)
+}
+
 // searchPRs runs a GitHub search query and returns tasks tagged with the given relevance reason.
-// If fetchCI is true, also fetches CI check status using the head SHA from the PR details
-// (no extra API call since the details endpoint already returns it).
 func (p *GitHubPoller) searchPRs(query, reason string, fetchCI bool) ([]domain.Task, error) {
 	url := fmt.Sprintf("%s/search/issues?q=%s&per_page=100", p.baseURL, query)
 
@@ -170,7 +321,6 @@ func (p *GitHubPoller) searchPRs(query, reason string, fetchCI bool) ([]domain.T
 		t := item.toTask()
 		t.RelevanceReason = reason
 
-		// Fetch PR details (diff stats + head SHA)
 		repoName := item.repoFullName()
 		if item.PullRequest != nil && repoName != "" {
 			details, err := p.fetchPRDetails(repoName, item.Number)
@@ -181,7 +331,6 @@ func (p *GitHubPoller) searchPRs(query, reason string, fetchCI bool) ([]domain.T
 				t.DiffDeletions = details.Deletions
 				t.FilesChanged = details.ChangedFiles
 
-				// CI status from the same details response — no extra API call
 				if fetchCI && details.Head.SHA != "" {
 					t.CIStatus = p.fetchCIStatusBySHA(repoName, details.Head.SHA)
 				}
@@ -193,29 +342,25 @@ func (p *GitHubPoller) searchPRs(query, reason string, fetchCI bool) ([]domain.T
 }
 
 // fetchCIStatusBySHA gets the combined check-run conclusion for a commit SHA.
-// Returns "success", "failure", "pending", or "" if unavailable.
 func (p *GitHubPoller) fetchCIStatusBySHA(repoFullName, sha string) string {
 	if repoFullName == "" || sha == "" {
 		return ""
 	}
 
-	// Use the combined status endpoint (covers both status checks and check runs)
 	url := fmt.Sprintf("%s/repos/%s/commits/%s/status", p.baseURL, repoFullName, sha)
 	body, err := p.get(url)
 	if err != nil {
-		// Try check-runs endpoint as fallback (GitHub Actions use check runs, not statuses)
 		return p.fetchCheckRunStatus(repoFullName, sha)
 	}
 
 	var status struct {
-		State    string `json:"state"` // "success", "failure", "pending"
+		State    string `json:"state"`
 		Statuses []any  `json:"statuses"`
 	}
 	if err := json.Unmarshal(body, &status); err != nil {
 		return ""
 	}
 
-	// If no legacy statuses exist, check the check-runs API
 	if len(status.Statuses) == 0 {
 		return p.fetchCheckRunStatus(repoFullName, sha)
 	}
@@ -223,7 +368,6 @@ func (p *GitHubPoller) fetchCIStatusBySHA(repoFullName, sha string) string {
 	return status.State
 }
 
-// fetchCheckRunStatus gets CI status from the check-runs API (GitHub Actions).
 func (p *GitHubPoller) fetchCheckRunStatus(repoFullName, sha string) string {
 	url := fmt.Sprintf("%s/repos/%s/commits/%s/check-runs?per_page=100", p.baseURL, repoFullName, sha)
 	body, err := p.get(url)
@@ -233,8 +377,8 @@ func (p *GitHubPoller) fetchCheckRunStatus(repoFullName, sha string) string {
 
 	var result struct {
 		CheckRuns []struct {
-			Status     string `json:"status"`     // "queued", "in_progress", "completed"
-			Conclusion string `json:"conclusion"` // "success", "failure", "neutral", "cancelled", "skipped", "timed_out", "action_required"
+			Status     string `json:"status"`
+			Conclusion string `json:"conclusion"`
 		} `json:"check_runs"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
@@ -245,7 +389,6 @@ func (p *GitHubPoller) fetchCheckRunStatus(repoFullName, sha string) string {
 		return ""
 	}
 
-	// Aggregate: any failure → "failure", any pending → "pending", else "success"
 	hasFailure := false
 	hasPending := false
 	for _, cr := range result.CheckRuns {
@@ -349,7 +492,6 @@ func (item ghSearchItem) repoFullName() string {
 	if item.Repository != nil {
 		return item.Repository.FullName
 	}
-	// Extract from HTML URL: https://github.example.com/owner/repo/pull/123
 	parts := strings.Split(item.HTMLURL, "/")
 	if len(parts) >= 5 {
 		return parts[len(parts)-4] + "/" + parts[len(parts)-3]

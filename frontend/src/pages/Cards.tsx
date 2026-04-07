@@ -4,6 +4,7 @@ import type { PanInfo } from 'motion/react'
 import * as Tooltip from '@radix-ui/react-tooltip'
 import type { WSEvent } from '../types'
 import { useWebSocket } from '../hooks/useWebSocket'
+import EventBadge from '../components/EventBadge'
 
 interface Task {
   id: string
@@ -21,6 +22,7 @@ interface Task {
   files_changed?: number
   ci_status?: string
   relevance_reason?: string
+  event_type?: string
   scoring_status: string
   created_at: string
   status: string
@@ -348,6 +350,7 @@ function SwipeCard({ task, onSwipe, style, interactive = true, isScoring = false
           }`}>
             {task.source === 'github' ? 'GitHub' : 'Jira'}
           </span>
+          <EventBadge eventType={task.event_type} />
           {task.repo && (
             <span className="text-[12px] text-text-tertiary">{task.repo}</span>
           )}

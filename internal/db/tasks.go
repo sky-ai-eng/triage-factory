@@ -13,7 +13,7 @@ import (
 // feeds into queryTasks must use this exact list so the Scan stays in sync.
 const taskColumns = `id, source, source_id, source_url, title, description, repo, author, labels, severity,
        diff_additions, diff_deletions, files_changed, ci_status, relevance_reason, source_status, scoring_status,
-       created_at, fetched_at, status, priority_score, ai_summary,
+       event_type, created_at, fetched_at, status, priority_score, ai_summary,
        priority_reasoning, agent_confidence, snooze_until`
 
 // UpsertTask inserts a new task or updates an existing one matched by (source, source_id).
@@ -26,8 +26,8 @@ func UpsertTask(db *sql.DB, t domain.Task) error {
 	}
 
 	_, err = db.Exec(`
-		INSERT INTO tasks (id, source, source_id, source_url, title, description, repo, author, labels, severity, diff_additions, diff_deletions, files_changed, ci_status, relevance_reason, source_status, status, created_at, fetched_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO tasks (id, source, source_id, source_url, title, description, repo, author, labels, severity, diff_additions, diff_deletions, files_changed, ci_status, relevance_reason, source_status, event_type, status, created_at, fetched_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(source, source_id) DO UPDATE SET
 			source_url = excluded.source_url,
 			title = excluded.title,
@@ -42,12 +42,13 @@ func UpsertTask(db *sql.DB, t domain.Task) error {
 			ci_status = excluded.ci_status,
 			relevance_reason = excluded.relevance_reason,
 			source_status = excluded.source_status,
+			event_type = COALESCE(excluded.event_type, tasks.event_type),
 			fetched_at = excluded.fetched_at
 	`,
 		t.ID, t.Source, t.SourceID, t.SourceURL,
 		t.Title, t.Description, t.Repo, t.Author,
 		string(labelsJSON), t.Severity, t.DiffAdditions, t.DiffDeletions, t.FilesChanged,
-		t.CIStatus, t.RelevanceReason, t.SourceStatus, t.Status,
+		t.CIStatus, t.RelevanceReason, t.SourceStatus, t.EventType, t.Status,
 		t.CreatedAt, t.FetchedAt,
 	)
 	return err
@@ -91,7 +92,7 @@ func queryTasks(database *sql.DB, query string, args ...any) ([]domain.Task, err
 		var t domain.Task
 		var labelsStr sql.NullString
 		var desc, repo, author, severity, aiSummary, priorityReasoning sql.NullString
-		var ciStatus, relevanceReason, sourceStatus, scoringStatus sql.NullString
+		var ciStatus, relevanceReason, sourceStatus, scoringStatus, eventType sql.NullString
 		var priorityScore, agentConfidence sql.NullFloat64
 		var diffAdditions, diffDeletions, filesChanged sql.NullInt64
 		var snoozeUntil sql.NullTime
@@ -100,7 +101,7 @@ func queryTasks(database *sql.DB, query string, args ...any) ([]domain.Task, err
 			&t.ID, &t.Source, &t.SourceID, &t.SourceURL, &t.Title,
 			&desc, &repo, &author, &labelsStr, &severity,
 			&diffAdditions, &diffDeletions, &filesChanged, &ciStatus, &relevanceReason, &sourceStatus, &scoringStatus,
-			&t.CreatedAt, &t.FetchedAt,
+			&eventType, &t.CreatedAt, &t.FetchedAt,
 			&t.Status, &priorityScore, &aiSummary,
 			&priorityReasoning, &agentConfidence, &snoozeUntil,
 		)
@@ -118,6 +119,7 @@ func queryTasks(database *sql.DB, query string, args ...any) ([]domain.Task, err
 		t.RelevanceReason = relevanceReason.String
 		t.SourceStatus = sourceStatus.String
 		t.ScoringStatus = scoringStatus.String
+		t.EventType = eventType.String
 		t.DiffAdditions = int(diffAdditions.Int64)
 		t.DiffDeletions = int(diffDeletions.Int64)
 		t.FilesChanged = int(filesChanged.Int64)

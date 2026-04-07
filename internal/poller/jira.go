@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/todo-tinder/internal/db"
 	"github.com/sky-ai-eng/todo-tinder/internal/domain"
+	"github.com/sky-ai-eng/todo-tinder/internal/eventbus"
 )
 
 // JiraPoller fetches tasks from the Jira API on an interval.
@@ -26,10 +27,17 @@ type JiraPoller struct {
 	client         *http.Client
 	interval       time.Duration
 	stop           chan struct{}
-	onNewTasks     func()
+	bus            *eventbus.Bus
 }
 
-func NewJiraPoller(baseURL, pat string, projects, pickupStatuses []string, database *sql.DB, interval time.Duration, onNewTasks func()) *JiraPoller {
+// jiraItemState is the snapshot stored in poller_state for diffing.
+type jiraItemState struct {
+	Status   string `json:"status"`
+	Assignee string `json:"assignee"`
+	Priority string `json:"priority"`
+}
+
+func NewJiraPoller(baseURL, pat string, projects, pickupStatuses []string, database *sql.DB, interval time.Duration, bus *eventbus.Bus) *JiraPoller {
 	return &JiraPoller{
 		baseURL:        strings.TrimRight(baseURL, "/"),
 		pat:            pat,
@@ -39,7 +47,7 @@ func NewJiraPoller(baseURL, pat string, projects, pickupStatuses []string, datab
 		client:         &http.Client{Timeout: 15 * time.Second},
 		interval:       interval,
 		stop:           make(chan struct{}),
-		onNewTasks:     onNewTasks,
+		bus:            bus,
 	}
 }
 
@@ -68,7 +76,7 @@ func (p *JiraPoller) poll() {
 
 	var allTasks []domain.Task
 
-	// 1. Unassigned pickup tasks → queued
+	// 1. Unassigned pickup tasks -> queued
 	pickupTasks, err := p.fetchPickupTasks()
 	if err != nil {
 		log.Printf("[jira] error fetching pickup tasks: %v", err)
@@ -76,7 +84,7 @@ func (p *JiraPoller) poll() {
 		allTasks = append(allTasks, pickupTasks...)
 	}
 
-	// 2. Assigned to me, in progress → claimed
+	// 2. Assigned to me, in progress -> claimed
 	inProgressTasks, err := p.fetchAssignedByStatus([]string{"In Progress", "In Review"}, "claimed")
 	if err != nil {
 		log.Printf("[jira] error fetching in-progress tasks: %v", err)
@@ -84,7 +92,7 @@ func (p *JiraPoller) poll() {
 		allTasks = append(allTasks, inProgressTasks...)
 	}
 
-	// 3. Assigned to me, done in last 30 days → done
+	// 3. Assigned to me, done in last 30 days -> done
 	doneTasks, err := p.fetchAssignedDone()
 	if err != nil {
 		log.Printf("[jira] error fetching done tasks: %v", err)
@@ -103,30 +111,159 @@ func (p *JiraPoller) poll() {
 	}
 
 	inserted := 0
+	eventsEmitted := 0
 	for _, t := range tasks {
+		// Detect events via state diffing
+		events := p.diffAndEmit(t)
+		eventsEmitted += len(events)
+
+		if len(events) > 0 {
+			t.EventType = events[len(events)-1].EventType
+		}
+
 		if err := db.UpsertTask(p.database, t); err != nil {
 			log.Printf("[jira] error upserting task %s: %v", t.SourceID, err)
 			continue
 		}
 		inserted++
+
+		// Record events and publish
+		for _, evt := range events {
+			evt.TaskID = t.ID
+			if id, err := db.RecordEvent(p.database, evt); err != nil {
+				log.Printf("[jira] error recording event: %v", err)
+			} else {
+				evt.ID = id
+			}
+			db.SetTaskEventType(p.database, t.ID, evt.EventType)
+			p.bus.Publish(evt)
+		}
+
+		// Save state snapshot
+		p.saveState(t)
 	}
-	log.Printf("[jira] poll complete: %d tasks processed (%d pickup, %d in-progress, %d done)",
-		inserted, len(pickupTasks), len(inProgressTasks), len(doneTasks))
-	if inserted > 0 && p.onNewTasks != nil {
-		p.onNewTasks()
+
+	log.Printf("[jira] poll complete: %d tasks processed, %d events emitted (%d pickup, %d in-progress, %d done)",
+		inserted, eventsEmitted, len(pickupTasks), len(inProgressTasks), len(doneTasks))
+
+	// Emit batch-complete sentinel so subscribers (scorer) know the cycle is done
+	if inserted > 0 {
+		p.bus.Publish(domain.Event{
+			EventType: domain.EventSystemPollCompleted,
+			SourceID:  "jira",
+			Metadata:  mustJSON(map[string]any{"tasks": inserted, "events": eventsEmitted}),
+			CreatedAt: time.Now(),
+		})
 	}
 }
 
-// fetchPickupTasks gets unassigned tickets in configured projects that are
-// in one of the configured pickup statuses.
+// diffAndEmit compares current state against stored snapshot and returns typed events.
+func (p *JiraPoller) diffAndEmit(t domain.Task) []domain.Event {
+	prevJSON, err := db.GetPollerState(p.database, "jira", t.SourceID)
+	if err != nil {
+		log.Printf("[jira] error loading poller state for %s: %v", t.SourceID, err)
+	}
+
+	current := jiraItemState{
+		Status:   t.SourceStatus,
+		Assignee: t.Author,
+		Priority: t.Severity,
+	}
+
+	var events []domain.Event
+	now := time.Now()
+
+	if prevJSON == "" {
+		// First time seeing this item
+		eventType := p.initialEventType(t)
+		if eventType != "" {
+			events = append(events, domain.Event{
+				EventType: eventType,
+				TaskID:    t.ID,
+				SourceID:  t.SourceID,
+				Metadata:  mustJSON(map[string]string{"reason": "first_seen"}),
+				CreatedAt: now,
+			})
+		}
+		return events
+	}
+
+	var prev jiraItemState
+	if err := json.Unmarshal([]byte(prevJSON), &prev); err != nil {
+		log.Printf("[jira] error parsing previous state for %s: %v", t.SourceID, err)
+		return events
+	}
+
+	// Detect status change
+	if prev.Status != current.Status && current.Status != "" {
+		eventType := domain.EventJiraIssueStatusChanged
+		if t.Status == "done" {
+			eventType = domain.EventJiraIssueCompleted
+		}
+		events = append(events, domain.Event{
+			EventType: eventType,
+			TaskID:    t.ID,
+			SourceID:  t.SourceID,
+			Metadata:  mustJSON(map[string]string{"prev_status": prev.Status, "new_status": current.Status}),
+			CreatedAt: now,
+		})
+	}
+
+	// Detect assignment change
+	if prev.Assignee != current.Assignee && current.Assignee != "" {
+		events = append(events, domain.Event{
+			EventType: domain.EventJiraIssueAssigned,
+			TaskID:    t.ID,
+			SourceID:  t.SourceID,
+			Metadata:  mustJSON(map[string]string{"prev_assignee": prev.Assignee, "new_assignee": current.Assignee}),
+			CreatedAt: now,
+		})
+	}
+
+	// Detect priority change
+	if prev.Priority != current.Priority && current.Priority != "" {
+		events = append(events, domain.Event{
+			EventType: domain.EventJiraIssuePriorityChanged,
+			TaskID:    t.ID,
+			SourceID:  t.SourceID,
+			Metadata:  mustJSON(map[string]string{"prev_priority": prev.Priority, "new_priority": current.Priority}),
+			CreatedAt: now,
+		})
+	}
+
+	return events
+}
+
+func (p *JiraPoller) initialEventType(t domain.Task) string {
+	switch t.Status {
+	case "done":
+		return domain.EventJiraIssueCompleted
+	case "claimed":
+		return domain.EventJiraIssueAssigned
+	default:
+		return domain.EventJiraIssueAvailable
+	}
+}
+
+func (p *JiraPoller) saveState(t domain.Task) {
+	state := jiraItemState{
+		Status:   t.SourceStatus,
+		Assignee: t.Author,
+		Priority: t.Severity,
+	}
+	data, _ := json.Marshal(state)
+	if err := db.SetPollerState(p.database, "jira", t.SourceID, string(data)); err != nil {
+		log.Printf("[jira] error saving poller state for %s: %v", t.SourceID, err)
+	}
+}
+
+// fetchPickupTasks gets unassigned tickets in configured projects.
 func (p *JiraPoller) fetchPickupTasks() ([]domain.Task, error) {
 	if len(p.projects) == 0 || len(p.pickupStatuses) == 0 {
 		return nil, nil
 	}
 
 	projectList := strings.Join(p.projects, ", ")
-
-	// Quote each status name for JQL
 	quoted := make([]string, len(p.pickupStatuses))
 	for i, s := range p.pickupStatuses {
 		quoted[i] = fmt.Sprintf("%q", s)
@@ -233,8 +370,8 @@ type jiraSearchResult struct {
 }
 
 type jiraIssue struct {
-	Key    string      `json:"key"`
-	Fields jiraFields  `json:"fields"`
+	Key    string     `json:"key"`
+	Fields jiraFields `json:"fields"`
 }
 
 type jiraFields struct {

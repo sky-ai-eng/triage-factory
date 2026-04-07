@@ -27,6 +27,7 @@ type taskJSON struct {
 	FilesChanged    int      `json:"files_changed,omitempty"`
 	CIStatus        string   `json:"ci_status,omitempty"`
 	RelevanceReason string   `json:"relevance_reason,omitempty"`
+	EventType       string   `json:"event_type,omitempty"`
 	ScoringStatus   string   `json:"scoring_status"`
 	CreatedAt       string   `json:"created_at"`
 	Status          string   `json:"status"`
@@ -57,6 +58,7 @@ func taskToJSON(t domain.Task) taskJSON {
 		FilesChanged:    t.FilesChanged,
 		CIStatus:        t.CIStatus,
 		RelevanceReason: t.RelevanceReason,
+		EventType:       t.EventType,
 		ScoringStatus:   t.ScoringStatus,
 		CreatedAt:       t.CreatedAt.Format(time.RFC3339),
 		Status:          t.Status,
