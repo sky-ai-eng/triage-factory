@@ -1,35 +1,21 @@
-import { useState, useEffect, useCallback } from 'react'
-import type { Prompt } from '../types'
+import { useState, useCallback } from 'react'
 import PromptDrawer from '../components/PromptDrawer'
+import BindingGraph from '../components/BindingGraph'
 
 export default function Prompts() {
-  const [prompts, setPrompts] = useState<Prompt[]>([])
-  const [loading, setLoading] = useState(true)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [isNew, setIsNew] = useState(false)
-
-  const fetchPrompts = useCallback(async () => {
-    try {
-      const res = await fetch('/api/prompts')
-      if (res.ok) {
-        setPrompts(await res.json())
-      }
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  useEffect(() => { fetchPrompts() }, [fetchPrompts])
+  const [graphKey, setGraphKey] = useState(0)
 
   const openNew = () => {
     setSelectedId(null)
     setIsNew(true)
   }
 
-  const openEdit = (id: string) => {
+  const openEdit = useCallback((id: string) => {
     setIsNew(false)
     setSelectedId(id)
-  }
+  }, [])
 
   const closeDrawer = () => {
     setSelectedId(null)
@@ -38,24 +24,19 @@ export default function Prompts() {
 
   const handleSaved = () => {
     closeDrawer()
-    fetchPrompts()
+    setGraphKey(k => k + 1) // force graph refetch
   }
 
   const handleDeleted = () => {
     closeDrawer()
-    fetchPrompts()
+    setGraphKey(k => k + 1)
   }
 
   return (
-    <div className="max-w-3xl mx-auto">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-[17px] font-semibold text-text-primary">Prompts</h1>
-          <p className="text-[13px] text-text-tertiary mt-0.5">
-            Delegation strategies for your triage events
-          </p>
-        </div>
+    <div className="flex flex-col" style={{ height: 'calc(100vh - 120px)' }}>
+      {/* Compact header */}
+      <div className="flex items-center justify-between mb-4 shrink-0">
+        <h1 className="text-[17px] font-semibold text-text-primary">Prompts</h1>
         <button
           onClick={openNew}
           className="text-[13px] font-semibold text-white bg-accent hover:bg-accent/90 px-4 py-2 rounded-full transition-colors"
@@ -64,53 +45,10 @@ export default function Prompts() {
         </button>
       </div>
 
-      {/* Prompt list */}
-      {loading ? (
-        <div className="space-y-3">
-          {[...Array(3)].map((_, i) => (
-            <div key={i} className="h-[100px] rounded-2xl bg-black/[0.03] animate-pulse" />
-          ))}
-        </div>
-      ) : prompts.length === 0 ? (
-        <div className="text-center py-16">
-          <p className="text-text-tertiary text-sm mb-4">No prompts yet</p>
-          <button
-            onClick={openNew}
-            className="text-[13px] font-medium text-accent hover:text-accent/80 transition-colors"
-          >
-            Create your first prompt
-          </button>
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {prompts.map(prompt => (
-            <button
-              key={prompt.id}
-              onClick={() => openEdit(prompt.id)}
-              className="w-full text-left p-5 rounded-2xl border border-border-subtle bg-surface-raised/60 hover:bg-surface-raised hover:border-accent/20 hover:shadow-sm transition-all duration-150 group"
-            >
-              <div className="flex items-center gap-3 mb-2">
-                <h3 className="text-[14px] font-semibold text-text-primary group-hover:text-accent transition-colors">
-                  {prompt.name}
-                </h3>
-                {prompt.source === 'system' && (
-                  <span className="text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-black/[0.04] text-text-tertiary">
-                    System
-                  </span>
-                )}
-                {prompt.usage_count > 0 && (
-                  <span className="text-[10px] text-text-tertiary ml-auto">
-                    Used {prompt.usage_count}x
-                  </span>
-                )}
-              </div>
-              <p className="text-[12px] text-text-tertiary line-clamp-2 leading-relaxed font-mono">
-                {prompt.body.slice(0, 200)}{prompt.body.length > 200 ? '...' : ''}
-              </p>
-            </button>
-          ))}
-        </div>
-      )}
+      {/* Graph fills remaining space */}
+      <div className="flex-1 min-h-0">
+        <BindingGraph key={graphKey} onPromptClick={openEdit} />
+      </div>
 
       <PromptDrawer
         promptId={selectedId}

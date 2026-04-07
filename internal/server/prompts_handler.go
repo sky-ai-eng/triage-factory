@@ -9,6 +9,30 @@ import (
 	"github.com/sky-ai-eng/todo-tinder/internal/domain"
 )
 
+func (s *Server) handleEventTypes(w http.ResponseWriter, r *http.Request) {
+	types, err := db.ListEventTypes(s.db)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if types == nil {
+		types = []domain.EventType{}
+	}
+	writeJSON(w, http.StatusOK, types)
+}
+
+func (s *Server) handleAllBindings(w http.ResponseWriter, r *http.Request) {
+	bindings, err := db.ListAllBindings(s.db)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if bindings == nil {
+		bindings = []domain.PromptBinding{}
+	}
+	writeJSON(w, http.StatusOK, bindings)
+}
+
 func (s *Server) handlePromptsList(w http.ResponseWriter, r *http.Request) {
 	prompts, err := db.ListPrompts(s.db)
 	if err != nil {
@@ -138,6 +162,50 @@ func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (s *Server) handleBindingCreate(w http.ResponseWriter, r *http.Request) {
+	var b domain.PromptBinding
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	if b.PromptID == "" || b.EventType == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "prompt_id and event_type required"})
+		return
+	}
+	if err := db.CreateBinding(s.db, b); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, b)
+}
+
+func (s *Server) handleBindingDelete(w http.ResponseWriter, r *http.Request) {
+	promptID := r.URL.Query().Get("prompt_id")
+	eventType := r.URL.Query().Get("event_type")
+	if promptID == "" || eventType == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "prompt_id and event_type query params required"})
+		return
+	}
+	if err := db.DeleteBinding(s.db, promptID, eventType); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (s *Server) handleBindingSetDefault(w http.ResponseWriter, r *http.Request) {
+	var b domain.PromptBinding
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	if err := db.SetBindingDefault(s.db, b.PromptID, b.EventType, b.IsDefault); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, b)
 }
 
 func (s *Server) handlePromptBindingsGet(w http.ResponseWriter, r *http.Request) {

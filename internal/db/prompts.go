@@ -187,6 +187,40 @@ func FindDefaultPrompt(db *sql.DB, eventType string) (*domain.Prompt, error) {
 	return nil, nil
 }
 
+// CreateBinding adds a single binding.
+func CreateBinding(db *sql.DB, b domain.PromptBinding) error {
+	_, err := db.Exec(`
+		INSERT OR IGNORE INTO prompt_bindings (prompt_id, event_type, is_default)
+		VALUES (?, ?, ?)
+	`, b.PromptID, b.EventType, b.IsDefault)
+	return err
+}
+
+// DeleteBinding removes a single binding.
+func DeleteBinding(db *sql.DB, promptID, eventType string) error {
+	_, err := db.Exec(`DELETE FROM prompt_bindings WHERE prompt_id = ? AND event_type = ?`, promptID, eventType)
+	return err
+}
+
+// SetBindingDefault toggles the is_default flag. Clears other defaults for the same event_type first.
+func SetBindingDefault(db *sql.DB, promptID, eventType string, isDefault bool) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if isDefault {
+		if _, err := tx.Exec(`UPDATE prompt_bindings SET is_default = 0 WHERE event_type = ? AND is_default = 1`, eventType); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`UPDATE prompt_bindings SET is_default = ? WHERE prompt_id = ? AND event_type = ?`, isDefault, promptID, eventType); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // IncrementPromptUsage bumps the usage_count for a prompt.
 func IncrementPromptUsage(db *sql.DB, promptID string) error {
 	_, err := db.Exec(`UPDATE prompts SET usage_count = usage_count + 1 WHERE id = ?`, promptID)

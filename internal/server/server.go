@@ -77,6 +77,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/settings", s.handleSettingsPost)
 	s.mux.HandleFunc("GET /api/jira/statuses", s.handleJiraStatuses)
 
+	s.mux.HandleFunc("GET /api/event-types", s.handleEventTypes)
+	s.mux.HandleFunc("GET /api/bindings", s.handleAllBindings)
+	s.mux.HandleFunc("POST /api/bindings", s.handleBindingCreate)
+	s.mux.HandleFunc("DELETE /api/bindings", s.handleBindingDelete)
+	s.mux.HandleFunc("POST /api/bindings/set-default", s.handleBindingSetDefault)
 	s.mux.HandleFunc("GET /api/prompts", s.handlePromptsList)
 	s.mux.HandleFunc("POST /api/prompts", s.handlePromptCreate)
 	s.mux.HandleFunc("GET /api/prompts/{id}", s.handlePromptGet)
