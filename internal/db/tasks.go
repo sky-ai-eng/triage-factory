@@ -26,8 +26,8 @@ func UpsertTask(db *sql.DB, t domain.Task) error {
 	}
 
 	_, err = db.Exec(`
-		INSERT INTO tasks (id, source, source_id, source_url, title, description, repo, author, labels, severity, diff_additions, diff_deletions, files_changed, ci_status, relevance_reason, source_status, created_at, fetched_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO tasks (id, source, source_id, source_url, title, description, repo, author, labels, severity, diff_additions, diff_deletions, files_changed, ci_status, relevance_reason, source_status, status, created_at, fetched_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(source, source_id) DO UPDATE SET
 			source_url = excluded.source_url,
 			title = excluded.title,
@@ -47,7 +47,7 @@ func UpsertTask(db *sql.DB, t domain.Task) error {
 		t.ID, t.Source, t.SourceID, t.SourceURL,
 		t.Title, t.Description, t.Repo, t.Author,
 		string(labelsJSON), t.Severity, t.DiffAdditions, t.DiffDeletions, t.FilesChanged,
-		t.CIStatus, t.RelevanceReason, t.SourceStatus,
+		t.CIStatus, t.RelevanceReason, t.SourceStatus, t.Status,
 		t.CreatedAt, t.FetchedAt,
 	)
 	return err

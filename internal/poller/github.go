@@ -107,7 +107,22 @@ func (p *GitHubPoller) poll() {
 		allTasks = append(allTasks, mentionedPRs...)
 	}
 
-	// Deduplicate by source_id, preferring earlier entries (review_requested > authored > mentioned)
+	// 4. Self-authored merged PRs from the last 30 days → status "done"
+	cutoff := time.Now().AddDate(0, 0, -30).Format("2006-01-02")
+	mergedPRs, err := p.searchPRs(
+		fmt.Sprintf("author:%s+type:pr+is:merged+merged:>=%s", p.username, cutoff),
+		"authored", false,
+	)
+	if err != nil {
+		log.Printf("[github] error fetching merged PRs: %v", err)
+	} else {
+		for i := range mergedPRs {
+			mergedPRs[i].Status = "done"
+		}
+		allTasks = append(allTasks, mergedPRs...)
+	}
+
+	// Deduplicate by source_id, preferring earlier entries (review_requested > authored > mentioned > merged)
 	seen := map[string]bool{}
 	var tasks []domain.Task
 	for _, t := range allTasks {
@@ -125,8 +140,8 @@ func (p *GitHubPoller) poll() {
 		}
 		inserted++
 	}
-	log.Printf("[github] poll complete: %d tasks processed (%d review, %d authored, %d mentioned)",
-		inserted, len(reviewPRs), len(authoredPRs), len(mentionedPRs))
+	log.Printf("[github] poll complete: %d tasks processed (%d review, %d authored, %d mentioned, %d merged)",
+		inserted, len(reviewPRs), len(authoredPRs), len(mentionedPRs), len(mergedPRs))
 	if inserted > 0 && p.onNewTasks != nil {
 		p.onNewTasks()
 	}
@@ -136,7 +151,7 @@ func (p *GitHubPoller) poll() {
 // If fetchCI is true, also fetches CI check status using the head SHA from the PR details
 // (no extra API call since the details endpoint already returns it).
 func (p *GitHubPoller) searchPRs(query, reason string, fetchCI bool) ([]domain.Task, error) {
-	url := fmt.Sprintf("%s/search/issues?q=%s&per_page=50", p.baseURL, query)
+	url := fmt.Sprintf("%s/search/issues?q=%s&per_page=100", p.baseURL, query)
 
 	body, err := p.get(url)
 	if err != nil {

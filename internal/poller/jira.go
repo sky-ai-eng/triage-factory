@@ -66,10 +66,40 @@ func (p *JiraPoller) Stop() {
 func (p *JiraPoller) poll() {
 	log.Println("[jira] polling for tasks...")
 
-	tasks, err := p.fetchPickupTasks()
+	var allTasks []domain.Task
+
+	// 1. Unassigned pickup tasks → queued
+	pickupTasks, err := p.fetchPickupTasks()
 	if err != nil {
-		log.Printf("[jira] error fetching tasks: %v", err)
-		return
+		log.Printf("[jira] error fetching pickup tasks: %v", err)
+	} else {
+		allTasks = append(allTasks, pickupTasks...)
+	}
+
+	// 2. Assigned to me, in progress → claimed
+	inProgressTasks, err := p.fetchAssignedByStatus([]string{"In Progress", "In Review"}, "claimed")
+	if err != nil {
+		log.Printf("[jira] error fetching in-progress tasks: %v", err)
+	} else {
+		allTasks = append(allTasks, inProgressTasks...)
+	}
+
+	// 3. Assigned to me, done in last 30 days → done
+	doneTasks, err := p.fetchAssignedDone()
+	if err != nil {
+		log.Printf("[jira] error fetching done tasks: %v", err)
+	} else {
+		allTasks = append(allTasks, doneTasks...)
+	}
+
+	// Deduplicate by source_id
+	seen := map[string]bool{}
+	var tasks []domain.Task
+	for _, t := range allTasks {
+		if !seen[t.SourceID] {
+			seen[t.SourceID] = true
+			tasks = append(tasks, t)
+		}
 	}
 
 	inserted := 0
@@ -80,7 +110,8 @@ func (p *JiraPoller) poll() {
 		}
 		inserted++
 	}
-	log.Printf("[jira] poll complete: %d tasks processed", inserted)
+	log.Printf("[jira] poll complete: %d tasks processed (%d pickup, %d in-progress, %d done)",
+		inserted, len(pickupTasks), len(inProgressTasks), len(doneTasks))
 	if inserted > 0 && p.onNewTasks != nil {
 		p.onNewTasks()
 	}
@@ -104,6 +135,50 @@ func (p *JiraPoller) fetchPickupTasks() ([]domain.Task, error) {
 
 	jql := fmt.Sprintf(`project IN (%s) AND status IN (%s) AND assignee IS EMPTY`, projectList, statusList)
 	return p.search(jql)
+}
+
+// fetchAssignedByStatus gets tickets assigned to the user in given statuses.
+func (p *JiraPoller) fetchAssignedByStatus(statuses []string, taskStatus string) ([]domain.Task, error) {
+	if len(p.projects) == 0 {
+		return nil, nil
+	}
+
+	projectList := strings.Join(p.projects, ", ")
+	quoted := make([]string, len(statuses))
+	for i, s := range statuses {
+		quoted[i] = fmt.Sprintf("%q", s)
+	}
+	statusList := strings.Join(quoted, ", ")
+
+	jql := fmt.Sprintf(`project IN (%s) AND assignee = currentUser() AND status IN (%s)`, projectList, statusList)
+	tasks, err := p.search(jql)
+	if err != nil {
+		return nil, err
+	}
+	for i := range tasks {
+		tasks[i].Status = taskStatus
+		tasks[i].RelevanceReason = "assigned"
+	}
+	return tasks, nil
+}
+
+// fetchAssignedDone gets tickets assigned to the user that were completed in the last 30 days.
+func (p *JiraPoller) fetchAssignedDone() ([]domain.Task, error) {
+	if len(p.projects) == 0 {
+		return nil, nil
+	}
+
+	projectList := strings.Join(p.projects, ", ")
+	jql := fmt.Sprintf(`project IN (%s) AND assignee = currentUser() AND status = Done AND resolved >= -30d`, projectList)
+	tasks, err := p.search(jql)
+	if err != nil {
+		return nil, err
+	}
+	for i := range tasks {
+		tasks[i].Status = "done"
+		tasks[i].RelevanceReason = "assigned"
+	}
+	return tasks, nil
 }
 
 func (p *JiraPoller) search(jql string) ([]domain.Task, error) {
