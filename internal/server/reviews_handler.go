@@ -1,9 +1,13 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/sky-ai-eng/todo-tinder/internal/db"
 	ghclient "github.com/sky-ai-eng/todo-tinder/internal/github"
@@ -116,10 +120,13 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Build the final review body with header + footer using actual run data
+	body := buildFinalReviewBody(s.db, review.RunID, review.ReviewBody)
+
 	// Submit to GitHub
 	ghReviewID, actualEvent, err := s.ghClient.SubmitReview(
 		review.Owner, review.Repo, review.PRNumber,
-		review.CommitSHA, review.ReviewEvent, review.ReviewBody, ghComments,
+		review.CommitSHA, review.ReviewEvent, body, ghComments,
 	)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
@@ -264,4 +271,64 @@ func (s *Server) handleReviewDiff(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Write([]byte(diff))
+}
+
+// buildFinalReviewBody wraps the agent's raw review body with a header and
+// a metadata footer using actual run data (real cost, not estimated).
+func buildFinalReviewBody(database *sql.DB, runID, rawBody string) string {
+	header := "# Triage Tinder: AI Review\n\n"
+
+	if runID == "" {
+		return header + rawBody
+	}
+
+	run, err := db.GetAgentRun(database, runID)
+	if err != nil || run == nil {
+		return header + rawBody
+	}
+
+	// Use actual cost from the completed run
+	cost := 0.0
+	if run.TotalCostUSD != nil {
+		cost = *run.TotalCostUSD
+	}
+
+	// Pretty-print model name
+	model := run.Model
+	switch {
+	case strings.Contains(model, "opus"):
+		model = "Claude Opus"
+	case strings.Contains(model, "sonnet"):
+		model = "Claude Sonnet"
+	case strings.Contains(model, "haiku"):
+		model = "Claude Haiku"
+	}
+
+	// Duration from the completed run
+	elapsed := "?"
+	if run.DurationMs != nil {
+		elapsed = prettyDuration(*run.DurationMs)
+	} else if run.CompletedAt != nil {
+		elapsed = prettyDuration(int(run.CompletedAt.Sub(run.StartedAt).Milliseconds()))
+	}
+
+	footer := fmt.Sprintf("\n\n---\nTime: %s | Model: %s | Cost: $%.3f", elapsed, model, cost)
+
+	return header + rawBody + footer
+}
+
+func prettyDuration(ms int) string {
+	d := time.Duration(ms) * time.Millisecond
+	s := int(d.Seconds())
+	if s < 60 {
+		return fmt.Sprintf("%ds", s)
+	}
+	m := s / 60
+	s = s % 60
+	if m < 60 {
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	h := m / 60
+	m = m % 60
+	return fmt.Sprintf("%dh %dm", h, m)
 }

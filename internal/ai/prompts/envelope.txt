@@ -21,6 +21,8 @@ todotinder exec gh pr comment-update <comment_id> --body <text>
 todotinder exec gh pr comment-delete <comment_id>
 todotinder exec gh pr submit-review <review_id> --event <approve|comment|request_changes> --body <summary>
 
+The --body for submit-review should begin with a ## title (e.g. "## Looks good — minor nits") followed by your summary. A top-level heading and metadata footer will be invisibly added automatically; use ## for your title.
+
 For multi-line --body arguments, use a heredoc:
 todotinder exec gh pr add-review-comment <review_id> --file <path> --line <N> --body "$(cat <<'EOF'
 Your comment here.

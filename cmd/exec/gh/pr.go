@@ -290,9 +290,9 @@ func prSubmitReview(client *ghclient.Client, database *db.DB, args []string) {
 		}
 	}
 
-	// In preview mode, defer the submission for user approval instead of posting.
+	// In preview mode, store the raw body — the server injects header/footer
+	// with actual cost data at submit time.
 	if os.Getenv("TODOTINDER_REVIEW_PREVIEW") == "1" {
-		body = buildReviewBody(body, database)
 		err = db.SetPendingReviewSubmission(database.Conn, reviewID, body, ghEvent)
 		exitOnErr(err)
 
