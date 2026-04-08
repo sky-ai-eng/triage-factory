@@ -58,35 +58,31 @@ body {
 }
 
 /* Addition lines — warm sage green, very soft */
-.diff-unified .diff-line-insert .diff-code,
-.diff-split .diff-line-insert .diff-code {
+/* Classes are on the <td> itself: diff-code-insert, diff-gutter-insert */
+/* <tr> gets diff-line-new-only in unified view */
+.diff-code-insert {
   background: rgba(90, 140, 106, 0.06);
 }
-.diff-unified .diff-line-insert .diff-gutter,
-.diff-split .diff-line-insert .diff-gutter {
+.diff-gutter-insert {
   background: rgba(90, 140, 106, 0.04);
   color: var(--color-claim);
 }
 
 /* Deletion lines — warm rose, very soft */
-.diff-unified .diff-line-delete .diff-code,
-.diff-split .diff-line-delete .diff-code {
+.diff-code-delete {
   background: rgba(196, 90, 90, 0.06);
 }
-.diff-unified .diff-line-delete .diff-gutter,
-.diff-split .diff-line-delete .diff-gutter {
+.diff-gutter-delete {
   background: rgba(196, 90, 90, 0.04);
   color: var(--color-dismiss);
 }
 
-/* Word-level edit highlights */
-.diff-unified .diff-code-edit .diff-code-insert,
-.diff-split .diff-code-edit .diff-code-insert {
+/* Word-level edit highlights (markEdits enhancer) */
+.diff-code-edit .diff-code-insert {
   background: rgba(90, 140, 106, 0.16);
   border-radius: 2px;
 }
-.diff-unified .diff-code-edit .diff-code-delete,
-.diff-split .diff-code-edit .diff-code-delete {
+.diff-code-edit .diff-code-delete {
   background: rgba(196, 90, 90, 0.16);
   border-radius: 2px;
 }
