@@ -230,7 +230,7 @@ func (s *Spawner) runPRReview(ctx context.Context, runID string, task domain.Tas
 
 	cmd := exec.Command("claude", args...)
 	cmd.Dir = wtPath
-	cmd.Env = append(os.Environ(), "TODOTINDER_RUN_ID="+runID)
+	cmd.Env = append(os.Environ(), "TODOTINDER_RUN_ID="+runID, "TODOTINDER_REVIEW_PREVIEW=1")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdout, err := cmd.StdoutPipe()
