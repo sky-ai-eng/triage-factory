@@ -151,3 +151,49 @@ body {
 .token.bold { font-weight: 600; }
 
 .token.italic { font-style: italic; }
+
+/* ── Review markdown rendering ── */
+.review-markdown h1 { font-size: 1.25em; font-weight: 600; margin: 0.8em 0 0.4em; color: var(--color-text-primary); }
+.review-markdown h2 { font-size: 1.1em; font-weight: 600; margin: 0.7em 0 0.3em; color: var(--color-text-primary); }
+.review-markdown h3 { font-size: 1em; font-weight: 600; margin: 0.6em 0 0.2em; color: var(--color-text-primary); }
+.review-markdown p { margin: 0.4em 0; }
+.review-markdown ul, .review-markdown ol { margin: 0.4em 0; padding-left: 1.5em; }
+.review-markdown li { margin: 0.15em 0; }
+.review-markdown code {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 0.9em;
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 4px;
+  padding: 0.15em 0.35em;
+}
+.review-markdown pre {
+  background: rgba(0, 0, 0, 0.03);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 8px;
+  padding: 0.75em 1em;
+  overflow-x: auto;
+  margin: 0.5em 0;
+}
+.review-markdown pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+}
+.review-markdown blockquote {
+  border-left: 3px solid var(--color-accent);
+  padding-left: 0.75em;
+  margin: 0.5em 0;
+  color: var(--color-text-tertiary);
+}
+.review-markdown a {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.review-markdown hr {
+  border: none;
+  border-top: 1px solid var(--color-border-subtle);
+  margin: 0.75em 0;
+}
+.review-markdown strong { font-weight: 600; color: var(--color-text-primary); }
+.review-markdown em { font-style: italic; }

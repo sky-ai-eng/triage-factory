@@ -1,4 +1,5 @@
 import { useState } from "react";
+import Markdown from "react-markdown";
 
 interface Props {
   owner: string;
@@ -66,6 +67,7 @@ export default function ReviewSummary({
   submitting,
 }: Props) {
   const [editingBody, setEditingBody] = useState(false);
+  const [rawView, setRawView] = useState(false);
   const [draft, setDraft] = useState(reviewBody);
 
   const saveBody = () => {
@@ -121,7 +123,7 @@ export default function ReviewSummary({
             <textarea
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
-              className="w-full min-h-[120px] text-[13px] leading-relaxed text-text-primary bg-white/40 border border-border-subtle rounded-xl px-4 py-3 resize-y focus:outline-none focus:border-accent/30 focus:ring-1 focus:ring-accent/10"
+              className="w-full min-h-[120px] text-[13px] leading-relaxed text-text-primary bg-white/40 border border-border-subtle rounded-xl px-4 py-3 resize-y focus:outline-none focus:border-accent/30 focus:ring-1 focus:ring-accent/10 font-mono"
               placeholder="Review summary..."
               autoFocus
             />
@@ -141,16 +143,41 @@ export default function ReviewSummary({
             </div>
           </div>
         ) : (
-          <div
-            onClick={() => {
-              setDraft(reviewBody);
-              setEditingBody(true);
-            }}
-            className="text-[13px] leading-relaxed text-text-secondary bg-white/30 rounded-xl px-4 py-3 border border-transparent hover:border-border-subtle cursor-text transition-colors min-h-[48px] whitespace-pre-wrap"
-          >
-            {reviewBody || (
-              <span className="text-text-tertiary italic">No summary provided</span>
-            )}
+          <div className="relative group">
+            {/* View toggle + edit button */}
+            <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-10">
+              <button
+                onClick={() => setRawView(!rawView)}
+                className="text-[10px] text-text-tertiary hover:text-text-secondary px-1.5 py-0.5 rounded bg-white/60 border border-border-subtle transition-colors"
+              >
+                {rawView ? "Preview" : "Raw"}
+              </button>
+              <button
+                onClick={() => { setDraft(reviewBody); setEditingBody(true); }}
+                className="text-[10px] text-text-tertiary hover:text-accent px-1.5 py-0.5 rounded bg-white/60 border border-border-subtle transition-colors"
+              >
+                Edit
+              </button>
+            </div>
+
+            <div className="bg-white/30 rounded-xl px-4 py-3 border border-transparent hover:border-border-subtle transition-colors min-h-[48px]">
+              {!reviewBody ? (
+                <span
+                  onClick={() => { setDraft(reviewBody); setEditingBody(true); }}
+                  className="text-[13px] text-text-tertiary italic cursor-text"
+                >
+                  No summary provided
+                </span>
+              ) : rawView ? (
+                <pre className="text-[12.5px] leading-relaxed text-text-secondary font-mono whitespace-pre-wrap">
+                  {reviewBody}
+                </pre>
+              ) : (
+                <div className="review-markdown text-[13px] leading-relaxed text-text-secondary">
+                  <Markdown>{reviewBody}</Markdown>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
