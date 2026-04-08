@@ -35,18 +35,18 @@ body {
   --diff-font-size: 12.5px;
 
   /* Insert (addition) — warm sage green */
-  --diff-gutter-insert-background-color: rgba(90, 140, 106, 0.04);
+  --diff-gutter-insert-background-color: rgba(90, 140, 106, 0.08);
   --diff-gutter-insert-text-color: var(--color-claim);
-  --diff-code-insert-background-color: rgba(90, 140, 106, 0.06);
+  --diff-code-insert-background-color: rgba(90, 140, 106, 0.10);
   --diff-code-insert-text-color: inherit;
-  --diff-code-insert-edit-background-color: rgba(90, 140, 106, 0.18);
+  --diff-code-insert-edit-background-color: rgba(90, 140, 106, 0.24);
 
   /* Delete (removal) — warm rose */
-  --diff-gutter-delete-background-color: rgba(196, 90, 90, 0.04);
+  --diff-gutter-delete-background-color: rgba(196, 90, 90, 0.08);
   --diff-gutter-delete-text-color: var(--color-dismiss);
-  --diff-code-delete-background-color: rgba(196, 90, 90, 0.06);
+  --diff-code-delete-background-color: rgba(196, 90, 90, 0.10);
   --diff-code-delete-text-color: inherit;
-  --diff-code-delete-edit-background-color: rgba(196, 90, 90, 0.18);
+  --diff-code-delete-edit-background-color: rgba(196, 90, 90, 0.24);
 
   /* Selection */
   --diff-gutter-selected-background-color: rgba(196, 122, 90, 0.08);
