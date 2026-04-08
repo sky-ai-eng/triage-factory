@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -125,8 +126,8 @@ type Issue struct {
 	Key    string `json:"key"`
 	Self   string `json:"self"`
 	Fields struct {
-		Summary     string  `json:"summary"`
-		Description string  `json:"description"`
+		Summary     string          `json:"summary"`
+		Description json.RawMessage `json:"description"`
 		Status      *Status `json:"status,omitempty"`
 		IssueType   *struct {
 			Name string `json:"name"`
@@ -215,9 +216,13 @@ func (c *Client) GetChildIssues(parentKey string) ([]Issue, error) {
 
 	// Query 2: Epic Link (Server/DC epic children)
 	epicField, err := c.epicLinkField()
-	if err == nil && epicField != "" {
+	if err != nil {
+		log.Printf("[jira] warning: epic link field discovery failed: %v", err)
+	} else if epicField != "" {
 		epicIssues, err := c.SearchIssues(fmt.Sprintf("cf[%s] = %s ORDER BY created ASC", extractFieldID(epicField), parentKey), nil, 100)
-		if err == nil {
+		if err != nil {
+			log.Printf("[jira] warning: epic link query failed for %s: %v", parentKey, err)
+		} else {
 			for _, issue := range epicIssues {
 				if !seen[issue.Key] {
 					seen[issue.Key] = true
@@ -514,7 +519,10 @@ func (c *Client) postJSON(url string, payload any) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response from POST %s: %w", url, err)
+	}
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("POST %s returned %d: %s", url, resp.StatusCode, string(body))
 	}

@@ -116,7 +116,7 @@ func ticketUnassign(client *jiraclient.Client, args []string) {
 
 func ticketCreate(client *jiraclient.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: jira ticket create <project> --type <type> --summary <text> [--description <text>] [--parent <key>]")
+		exitErr("usage: jira ticket create <project> --type <type> --summary <text> [--description <text>] [--parent <key>] [--priority <priority>]")
 	}
 	project := args[0]
 	issueType := flagVal(args, "--type")
