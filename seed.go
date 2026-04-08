@@ -17,7 +17,7 @@ func seedDefaultPrompts(database *sql.DB) {
 		Body:   ai.PRReviewPromptTemplate,
 		Source: "system",
 	}, []domain.PromptBinding{
-		{PromptID: "system-pr-review", EventType: "github:pr:", IsDefault: true},
+		{PromptID: "system-pr-review", EventType: "github:pr:review_requested", IsDefault: true},
 	})
 	if err != nil {
 		log.Printf("[seed] warning: failed to seed PR review prompt: %v", err)
