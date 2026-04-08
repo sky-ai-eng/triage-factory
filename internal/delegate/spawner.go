@@ -300,6 +300,17 @@ func (s *Spawner) runPRReview(ctx context.Context, runID string, task domain.Tas
 				}
 			}
 			db.CompleteAgentRun(s.database, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultLink, resultSummary)
+
+			// Check if the agent deferred a review for user approval
+			if status == "completed" {
+				if pendingReview, _ := db.PendingReviewByRunID(s.database, runID); pendingReview != nil {
+					status = "pending_approval"
+					if _, err := s.database.Exec(`UPDATE agent_runs SET status = ? WHERE id = ?`, status, runID); err != nil {
+						log.Printf("[delegate] warning: failed to set pending_approval for run %s: %v", runID, err)
+					}
+				}
+			}
+
 			if status == "completed" {
 				if _, err := s.database.Exec(`UPDATE tasks SET status = 'done' WHERE id = ?`, task.ID); err != nil {
 					log.Printf("[delegate] warning: failed to update task %s to done: %v", task.ID, err)
