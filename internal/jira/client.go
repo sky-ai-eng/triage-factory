@@ -161,6 +161,25 @@ type Transition struct {
 	To   Status `json:"to"`
 }
 
+// Priority represents a Jira priority level.
+type Priority struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// ListPriorities returns all priority levels configured on the instance.
+func (c *Client) ListPriorities() ([]Priority, error) {
+	body, err := c.get(fmt.Sprintf("%s/rest/api/2/priority", c.baseURL))
+	if err != nil {
+		return nil, err
+	}
+	var priorities []Priority
+	if err := json.Unmarshal(body, &priorities); err != nil {
+		return nil, fmt.Errorf("parse priorities: %w", err)
+	}
+	return priorities, nil
+}
+
 // GetIssue fetches a single issue by key.
 func (c *Client) GetIssue(issueKey string) (*Issue, error) {
 	url := fmt.Sprintf("%s/rest/api/2/issue/%s", c.baseURL, issueKey)
@@ -265,9 +284,8 @@ func (c *Client) ListIssueTypes(projectKey string) ([]IssueType, error) {
 	return project.IssueTypes, nil
 }
 
-// CreateIssue creates a new issue. If parentKey is non-empty, the issue is
-// linked as a child (Cloud uses fields.parent, Server/DC uses Epic Link).
-func (c *Client) CreateIssue(projectKey, issueType, summary, description, parentKey string) (string, error) {
+// CreateIssue creates a new issue. parentKey and priority are optional (pass empty to skip).
+func (c *Client) CreateIssue(projectKey, issueType, summary, description, parentKey, priority string) (string, error) {
 	fields := map[string]any{
 		"project":   map[string]string{"key": projectKey},
 		"issuetype": map[string]string{"name": issueType},
@@ -275,6 +293,9 @@ func (c *Client) CreateIssue(projectKey, issueType, summary, description, parent
 	}
 	if description != "" {
 		fields["description"] = description
+	}
+	if priority != "" {
+		fields["priority"] = map[string]string{"name": priority}
 	}
 
 	if parentKey != "" {
@@ -308,6 +329,14 @@ func (c *Client) CreateIssue(projectKey, issueType, summary, description, parent
 		return "", fmt.Errorf("parse create response: %w", err)
 	}
 	return result.Key, nil
+}
+
+// SetPriority updates the priority of an issue.
+func (c *Client) SetPriority(issueKey, priority string) error {
+	url := fmt.Sprintf("%s/rest/api/2/issue/%s", c.baseURL, issueKey)
+	return c.put(url, map[string]any{"fields": map[string]any{
+		"priority": map[string]string{"name": priority},
+	}})
 }
 
 // SetParent links an existing issue under a parent.

@@ -37,6 +37,10 @@ func handleTicket(client *jiraclient.Client, args []string) {
 		ticketListTypes(client, flags)
 	case "list-children":
 		ticketListChildren(client, flags)
+	case "list-priorities":
+		ticketListPriorities(client)
+	case "set-priority":
+		ticketSetPriority(client, flags)
 	default:
 		exitErr(fmt.Sprintf("unknown ticket action: %s", action))
 	}
@@ -115,6 +119,7 @@ func ticketCreate(client *jiraclient.Client, args []string) {
 	summary := flagVal(args, "--summary")
 	description := flagVal(args, "--description")
 	parentKey := flagVal(args, "--parent")
+	priority := flagVal(args, "--priority")
 
 	if issueType == "" {
 		exitErr("--type is required")
@@ -123,7 +128,7 @@ func ticketCreate(client *jiraclient.Client, args []string) {
 		exitErr("--summary is required")
 	}
 
-	key, err := client.CreateIssue(project, issueType, summary, description, parentKey)
+	key, err := client.CreateIssue(project, issueType, summary, description, parentKey, priority)
 	exitOnErr(err)
 	printJSON(map[string]any{"ok": true, "key": key})
 }
@@ -152,6 +157,26 @@ func ticketListChildren(client *jiraclient.Client, args []string) {
 		children = []jiraclient.Issue{}
 	}
 	printJSON(children)
+}
+
+func ticketListPriorities(client *jiraclient.Client) {
+	priorities, err := client.ListPriorities()
+	exitOnErr(err)
+	printJSON(priorities)
+}
+
+func ticketSetPriority(client *jiraclient.Client, args []string) {
+	if len(args) < 1 {
+		exitErr("usage: jira ticket set-priority <key> --priority <priority>")
+	}
+	key := args[0]
+	priority := flagVal(args, "--priority")
+	if priority == "" {
+		exitErr("--priority is required")
+	}
+	err := client.SetPriority(key, priority)
+	exitOnErr(err)
+	printJSON(map[string]any{"ok": true, "key": key, "priority": priority})
 }
 
 func ticketListTypes(client *jiraclient.Client, args []string) {

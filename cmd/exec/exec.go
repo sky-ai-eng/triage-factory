@@ -104,10 +104,12 @@ Jira Ticket Commands:
   jira ticket comment <key> --body <text>                 Add a comment
   jira ticket assign <key>                                Assign to the authenticated user
   jira ticket unassign <key>                              Remove assignee
-  jira ticket create <project> --type <type> --summary <text> [--description <text>] [--parent <key>]
+  jira ticket create <project> --type <type> --summary <text> [--description <text>] [--parent <key>] [--priority <priority>]
   jira ticket set-parent <key> --parent <parent_key>      Link issue under a parent
   jira ticket list-types <project>                        List available issue types
   jira ticket list-children <key>                         List child issues (subtasks + epic children)
+  jira ticket list-priorities                             List available priority levels
+  jira ticket set-priority <key> --priority <priority>    Update issue priority
 
 All commands print JSON to stdout on success, errors to stderr.`)
 }
