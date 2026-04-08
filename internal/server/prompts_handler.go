@@ -21,6 +21,35 @@ func (s *Server) handleEventTypes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, types)
 }
 
+func (s *Server) handleEventTypeToggle(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	if err := db.UpdateEventTypeEnabled(s.db, id, req.Enabled); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "enabled": req.Enabled})
+}
+
+func (s *Server) handleEventTypeReorder(w http.ResponseWriter, r *http.Request) {
+	var ids []string
+	if err := json.NewDecoder(r.Body).Decode(&ids); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "expected array of event type IDs"})
+		return
+	}
+	if err := db.ReorderEventTypes(s.db, ids); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "reordered"})
+}
+
 func (s *Server) handleAllBindings(w http.ResponseWriter, r *http.Request) {
 	bindings, err := db.ListAllBindings(s.db)
 	if err != nil {

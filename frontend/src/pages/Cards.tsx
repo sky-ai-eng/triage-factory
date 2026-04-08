@@ -6,6 +6,7 @@ import { useNavigate } from 'react-router-dom'
 import type { WSEvent } from '../types'
 import { useWebSocket } from '../hooks/useWebSocket'
 import EventBadge from '../components/EventBadge'
+import EventFilterPanel from '../components/EventFilterPanel'
 import PromptPicker from '../components/PromptPicker'
 
 interface Task {
@@ -46,6 +47,7 @@ export default function Cards() {
   const [cardStart, setCardStart] = useState(Date.now())
   const [undoTask, setUndoTask] = useState<{ id: string; action: string } | null>(null)
   const [showPromptPicker, setShowPromptPicker] = useState(false)
+  const [filterOpen, setFilterOpen] = useState(false)
   const shiftHeld = useRef(false)
   const hasFetched = useRef(false)
   const navigate = useNavigate()
@@ -74,8 +76,8 @@ export default function Cards() {
         return data
       })
       if (!preserveCurrent) setCardStart(Date.now())
-      setLoadState(data.length === 0 ? (hasFetched.current ? 'empty' : 'loading') : 'ready')
       hasFetched.current = true
+      setLoadState(data.length === 0 ? 'empty' : 'ready')
     }
   }, [])
 
@@ -200,6 +202,13 @@ export default function Cards() {
           <span className="text-accent text-2xl">~</span>
         </div>
         <p className="text-text-secondary text-sm">All clear. Nothing to triage.</p>
+        <div className="relative">
+          <EventFilterPanel
+            open={filterOpen}
+            onToggle={() => setFilterOpen(o => !o)}
+            onChange={() => fetchQueue()}
+          />
+        </div>
       </div>
     )
   }
@@ -207,10 +216,17 @@ export default function Cards() {
   return (
     <Tooltip.Provider delayDuration={300}>
       <div className="flex flex-col items-center justify-center min-h-[70vh] gap-8">
-        {/* Counter */}
-        <p className="text-[13px] text-text-tertiary font-medium tracking-wide">
-          {tasks.length} item{tasks.length !== 1 ? 's' : ''} in queue
-        </p>
+        {/* Counter + filter toggle */}
+        <div className="flex items-center gap-3 relative">
+          <p className="text-[13px] text-text-tertiary font-medium tracking-wide">
+            {tasks.length} item{tasks.length !== 1 ? 's' : ''} in queue
+          </p>
+          <EventFilterPanel
+            open={filterOpen}
+            onToggle={() => setFilterOpen(o => !o)}
+            onChange={() => fetchQueue()}
+          />
+        </div>
 
         {/* Card stack */}
         <div className="relative w-full max-w-[400px] h-[380px]">

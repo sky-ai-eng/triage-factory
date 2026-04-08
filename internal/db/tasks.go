@@ -16,6 +16,12 @@ const taskColumns = `id, source, source_id, source_url, title, description, repo
        event_type, created_at, fetched_at, status, priority_score, ai_summary,
        priority_reasoning, agent_confidence, snooze_until`
 
+// qualifiedTaskColumns is taskColumns with tasks. prefix, for use in JOINs where column names are ambiguous.
+const qualifiedTaskColumns = `tasks.id, tasks.source, tasks.source_id, tasks.source_url, tasks.title, tasks.description, tasks.repo, tasks.author, tasks.labels, tasks.severity,
+       tasks.diff_additions, tasks.diff_deletions, tasks.files_changed, tasks.ci_status, tasks.relevance_reason, tasks.source_status, tasks.scoring_status,
+       tasks.event_type, tasks.created_at, tasks.fetched_at, tasks.status, tasks.priority_score, tasks.ai_summary,
+       tasks.priority_reasoning, tasks.agent_confidence, tasks.snooze_until`
+
 // UpsertTask inserts a new task or updates an existing one matched by (source, source_id).
 // Only updates metadata fields — does not overwrite status, priority_score, ai_summary,
 // or agent_confidence so that user/AI state is preserved across polls.
@@ -42,7 +48,7 @@ func UpsertTask(db *sql.DB, t domain.Task) error {
 			ci_status = excluded.ci_status,
 			relevance_reason = excluded.relevance_reason,
 			source_status = excluded.source_status,
-			event_type = COALESCE(excluded.event_type, tasks.event_type),
+			event_type = COALESCE(NULLIF(excluded.event_type, ''), tasks.event_type),
 			fetched_at = excluded.fetched_at
 	`,
 		t.ID, t.Source, t.SourceID, t.SourceURL,
@@ -54,11 +60,16 @@ func UpsertTask(db *sql.DB, t domain.Task) error {
 	return err
 }
 
-// QueuedTasks returns all tasks with status 'queued', ordered by priority_score descending.
+// QueuedTasks returns queued tasks, filtered to only enabled event types.
+// Orders by user-defined event type sort_order first, then AI priority_score within each tier.
+// Tasks with no event_type (or an unknown one) sort last.
 func QueuedTasks(db *sql.DB) ([]domain.Task, error) {
-	return queryTasks(db, `SELECT `+taskColumns+` FROM tasks
-		WHERE status = 'queued' AND (snooze_until IS NULL OR snooze_until <= datetime('now'))
-		ORDER BY COALESCE(priority_score, 0.5) DESC`)
+	return queryTasks(db, `SELECT `+qualifiedTaskColumns+` FROM tasks
+		LEFT JOIN event_types et ON tasks.event_type = et.id
+		WHERE tasks.status = 'queued'
+			AND (tasks.snooze_until IS NULL OR tasks.snooze_until <= datetime('now'))
+			AND (tasks.event_type IS NULL OR et.enabled = 1 OR et.enabled IS NULL)
+		ORDER BY COALESCE(et.sort_order, 999) ASC, COALESCE(tasks.priority_score, 0.5) DESC`)
 }
 
 // TasksByStatus returns tasks filtered by status.

@@ -79,6 +79,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/jira/statuses", s.handleJiraStatuses)
 
 	s.mux.HandleFunc("GET /api/event-types", s.handleEventTypes)
+	s.mux.HandleFunc("PUT /api/event-types/{id}/toggle", s.handleEventTypeToggle)
+	s.mux.HandleFunc("PUT /api/event-types/reorder", s.handleEventTypeReorder)
 	s.mux.HandleFunc("GET /api/bindings", s.handleAllBindings)
 	s.mux.HandleFunc("POST /api/bindings", s.handleBindingCreate)
 	s.mux.HandleFunc("DELETE /api/bindings", s.handleBindingDelete)

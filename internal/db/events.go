@@ -7,11 +7,12 @@ import (
 	"github.com/sky-ai-eng/todo-tinder/internal/domain"
 )
 
-// SeedEventTypes inserts the canonical event type catalog. Skips rows that already exist.
+// SeedEventTypes inserts the canonical event type catalog. Skips rows that already exist,
+// preserving user customizations to enabled/sort_order.
 func SeedEventTypes(db *sql.DB) error {
 	stmt, err := db.Prepare(`
-		INSERT OR IGNORE INTO event_types (id, source, category, label, description, default_priority)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT OR IGNORE INTO event_types (id, source, category, label, description, default_priority, enabled, sort_order)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return err
@@ -19,7 +20,7 @@ func SeedEventTypes(db *sql.DB) error {
 	defer stmt.Close()
 
 	for _, et := range domain.AllEventTypes() {
-		if _, err := stmt.Exec(et.ID, et.Source, et.Category, et.Label, et.Description, et.DefaultPriority); err != nil {
+		if _, err := stmt.Exec(et.ID, et.Source, et.Category, et.Label, et.Description, et.DefaultPriority, et.Enabled, et.SortOrder); err != nil {
 			return err
 		}
 	}

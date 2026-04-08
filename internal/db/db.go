@@ -160,7 +160,9 @@ CREATE TABLE IF NOT EXISTS event_types (
     category TEXT NOT NULL,
     label TEXT NOT NULL,
     description TEXT,
-    default_priority REAL DEFAULT 0.5
+    default_priority REAL DEFAULT 0.5,
+    enabled BOOLEAN DEFAULT 1,
+    sort_order INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS events (

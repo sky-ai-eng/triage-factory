@@ -79,6 +79,17 @@ export interface Prompt {
   updated_at: string
 }
 
+export interface EventType {
+  id: string
+  source: string
+  category: string
+  label: string
+  description: string
+  default_priority: number
+  enabled: boolean
+  sort_order: number
+}
+
 export interface PromptBinding {
   prompt_id: string
   event_type: string

@@ -11,6 +11,8 @@ type EventType struct {
 	Label           string  `json:"label"`             // Human-readable: "Review Requested"
 	Description     string  `json:"description"`
 	DefaultPriority float64 `json:"default_priority"`
+	Enabled         bool    `json:"enabled"`
+	SortOrder       int     `json:"sort_order"`
 }
 
 // Event is a single occurrence of an EventType, emitted by a poller or system component.
@@ -66,32 +68,35 @@ const (
 )
 
 // AllEventTypes returns the full seed catalog.
+// Order determines default sort_order. Enabled reflects whether the event type
+// should appear in the triage queue by default (actionable = enabled, informational = disabled).
+// Enabled does not affect whether a specific event type is listened for - only shown.
 func AllEventTypes() []EventType {
 	return []EventType{
-		// GitHub PR events
-		{ID: EventGitHubPRReviewRequested, Source: "github", Category: "pr", Label: "Review Requested", Description: "Someone requested your review on a PR", DefaultPriority: 0.8},
-		{ID: EventGitHubPRReviewReceived, Source: "github", Category: "pr", Label: "Review Received", Description: "Your PR received a review", DefaultPriority: 0.7},
-		{ID: EventGitHubPRApproved, Source: "github", Category: "pr", Label: "PR Approved", Description: "Your PR was approved", DefaultPriority: 0.9},
-		{ID: EventGitHubPRChangesReq, Source: "github", Category: "pr", Label: "Changes Requested", Description: "A reviewer requested changes on your PR", DefaultPriority: 0.85},
-		{ID: EventGitHubPRCIPassed, Source: "github", Category: "pr", Label: "CI Passed", Description: "CI checks passed on your PR", DefaultPriority: 0.6},
-		{ID: EventGitHubPRCIFailed, Source: "github", Category: "pr", Label: "CI Failed", Description: "CI checks failed on your PR", DefaultPriority: 0.75},
-		{ID: EventGitHubPRMerged, Source: "github", Category: "pr", Label: "PR Merged", Description: "Your PR was merged", DefaultPriority: 0.3},
-		{ID: EventGitHubPRMentioned, Source: "github", Category: "pr", Label: "Mentioned", Description: "You were @mentioned in a PR", DefaultPriority: 0.5},
-		{ID: EventGitHubPRConflicts, Source: "github", Category: "pr", Label: "Merge Conflicts", Description: "Your PR has merge conflicts", DefaultPriority: 0.7},
-		{ID: EventGitHubPROpened, Source: "github", Category: "pr", Label: "Authored PR", Description: "Your open pull request is being tracked", DefaultPriority: 0.4},
-		{ID: EventGitHubPRReadyForReview, Source: "github", Category: "pr", Label: "Ready for Review", Description: "A draft PR was marked ready for review", DefaultPriority: 0.7},
+		// --- Enabled: actionable events, ordered by urgency ---
+		{ID: EventGitHubPRChangesReq, Source: "github", Category: "pr", Label: "Changes Requested", Description: "A reviewer requested changes on your PR", DefaultPriority: 0.85, Enabled: true, SortOrder: 0},
+		{ID: EventGitHubPRCIFailed, Source: "github", Category: "pr", Label: "CI Failed", Description: "CI checks failed on your PR", DefaultPriority: 0.75, Enabled: true, SortOrder: 1},
+		{ID: EventGitHubPRReviewRequested, Source: "github", Category: "pr", Label: "Review Requested", Description: "Someone requested your review on a PR", DefaultPriority: 0.8, Enabled: true, SortOrder: 2},
+		{ID: EventGitHubPRConflicts, Source: "github", Category: "pr", Label: "Merge Conflicts", Description: "Your PR has merge conflicts", DefaultPriority: 0.7, Enabled: true, SortOrder: 3},
+		{ID: EventGitHubPRReadyForReview, Source: "github", Category: "pr", Label: "Ready for Review", Description: "A draft PR was marked ready for review", DefaultPriority: 0.7, Enabled: true, SortOrder: 4},
+		{ID: EventJiraIssueAssigned, Source: "jira", Category: "issue", Label: "Issue Assigned", Description: "Issue was assigned to you", DefaultPriority: 0.6, Enabled: true, SortOrder: 5},
+		{ID: EventGitHubPRApproved, Source: "github", Category: "pr", Label: "PR Approved", Description: "Your PR was approved — ready to merge", DefaultPriority: 0.9, Enabled: true, SortOrder: 6},
+		{ID: EventGitHubPRReviewReceived, Source: "github", Category: "pr", Label: "Review Received", Description: "Your PR received a review", DefaultPriority: 0.7, Enabled: true, SortOrder: 7},
+		{ID: EventGitHubPRMentioned, Source: "github", Category: "pr", Label: "Mentioned", Description: "You were @mentioned in a PR", DefaultPriority: 0.5, Enabled: true, SortOrder: 8},
+		{ID: EventJiraIssueAvailable, Source: "jira", Category: "issue", Label: "Issue Available", Description: "New unassigned issue in pickup queue", DefaultPriority: 0.5, Enabled: true, SortOrder: 9},
+		{ID: EventJiraIssuePriorityChanged, Source: "jira", Category: "issue", Label: "Priority Changed", Description: "Issue priority was changed", DefaultPriority: 0.5, Enabled: true, SortOrder: 10},
 
-		// Jira events
-		{ID: EventJiraIssueAvailable, Source: "jira", Category: "issue", Label: "Issue Available", Description: "New unassigned issue in pickup queue", DefaultPriority: 0.5},
-		{ID: EventJiraIssueAssigned, Source: "jira", Category: "issue", Label: "Issue Assigned", Description: "Issue was assigned to you", DefaultPriority: 0.6},
-		{ID: EventJiraIssueStatusChanged, Source: "jira", Category: "issue", Label: "Status Changed", Description: "Issue status changed", DefaultPriority: 0.4},
-		{ID: EventJiraIssueCompleted, Source: "jira", Category: "issue", Label: "Issue Completed", Description: "Issue was marked as done", DefaultPriority: 0.2},
-		{ID: EventJiraIssuePriorityChanged, Source: "jira", Category: "issue", Label: "Priority Changed", Description: "Issue priority was changed", DefaultPriority: 0.5},
+		// --- Disabled: informational / terminal states ---
+		{ID: EventGitHubPRCIPassed, Source: "github", Category: "pr", Label: "CI Passed", Description: "CI checks passed on your PR", DefaultPriority: 0.6, Enabled: false, SortOrder: 11},
+		{ID: EventGitHubPROpened, Source: "github", Category: "pr", Label: "Authored PR", Description: "Your open pull request is being tracked", DefaultPriority: 0.4, Enabled: false, SortOrder: 12},
+		{ID: EventJiraIssueStatusChanged, Source: "jira", Category: "issue", Label: "Status Changed", Description: "Issue status changed", DefaultPriority: 0.4, Enabled: false, SortOrder: 13},
+		{ID: EventGitHubPRMerged, Source: "github", Category: "pr", Label: "PR Merged", Description: "Your PR was merged", DefaultPriority: 0.3, Enabled: false, SortOrder: 14},
+		{ID: EventJiraIssueCompleted, Source: "jira", Category: "issue", Label: "Issue Completed", Description: "Issue was marked as done", DefaultPriority: 0.2, Enabled: false, SortOrder: 15},
 
-		// System events
-		{ID: EventSystemPollCompleted, Source: "system", Category: "poll", Label: "Poll Complete", Description: "A poller finished a cycle and ingested tasks", DefaultPriority: 0.0},
-		{ID: EventSystemScoringCompleted, Source: "system", Category: "scoring", Label: "Scoring Complete", Description: "AI scoring finished for tasks", DefaultPriority: 0.0},
-		{ID: EventSystemDelegationCompleted, Source: "system", Category: "delegation", Label: "Delegation Complete", Description: "Agent delegation run completed", DefaultPriority: 0.0},
-		{ID: EventSystemDelegationFailed, Source: "system", Category: "delegation", Label: "Delegation Failed", Description: "Agent delegation run failed", DefaultPriority: 0.0},
+		// --- System events (never shown in triage UI) ---
+		{ID: EventSystemPollCompleted, Source: "system", Category: "poll", Label: "Poll Complete", Description: "A poller finished a cycle and ingested tasks", DefaultPriority: 0.0, Enabled: false, SortOrder: 100},
+		{ID: EventSystemScoringCompleted, Source: "system", Category: "scoring", Label: "Scoring Complete", Description: "AI scoring finished for tasks", DefaultPriority: 0.0, Enabled: false, SortOrder: 101},
+		{ID: EventSystemDelegationCompleted, Source: "system", Category: "delegation", Label: "Delegation Complete", Description: "Agent delegation run completed", DefaultPriority: 0.0, Enabled: false, SortOrder: 102},
+		{ID: EventSystemDelegationFailed, Source: "system", Category: "delegation", Label: "Delegation Failed", Description: "Agent delegation run failed", DefaultPriority: 0.0, Enabled: false, SortOrder: 103},
 	}
 }
