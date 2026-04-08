@@ -2,6 +2,7 @@ import { useState, useMemo } from "react";
 import { Diff, Hunk, markEdits, tokenize, getChangeKey } from "react-diff-view";
 import type { FileData, HunkData, ChangeData } from "react-diff-view";
 import ReviewComment from "./ReviewComment";
+import { refractor, languageForPath } from "../lib/highlight";
 
 export interface FileComment {
   id: string;
@@ -64,16 +65,21 @@ export default function DiffFile({
     return map;
   }, [comments, file.hunks, onUpdateComment, onDeleteComment]);
 
-  // Tokenize with word-level edit marks
+  // Tokenize with syntax highlighting + word-level edit marks
+  const displayPath = file.newPath === "/dev/null" ? file.oldPath : file.newPath;
   const tokens = useMemo(() => {
+    const lang = languageForPath(displayPath);
     try {
       return tokenize(file.hunks, {
+        ...(lang
+          ? { highlight: true, refractor, language: lang }
+          : { highlight: false }),
         enhancers: [markEdits(file.hunks, { type: "block" })],
       });
     } catch {
       return undefined;
     }
-  }, [file.hunks]);
+  }, [file.hunks, displayPath]);
 
   // Count additions and deletions
   const stats = useMemo(() => {
@@ -88,7 +94,6 @@ export default function DiffFile({
     return { additions, deletions };
   }, [file.hunks]);
 
-  const displayPath = file.newPath === "/dev/null" ? file.oldPath : file.newPath;
   const commentCount = comments.length;
 
   return (

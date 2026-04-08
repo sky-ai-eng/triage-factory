@@ -109,3 +109,45 @@ body {
   color: var(--color-text-tertiary);
   font-style: italic;
 }
+
+/* ── Syntax highlighting tokens (Prism/refractor) ── */
+/* Warm, muted palette that works on our light surface */
+.token.comment,
+.token.prolog,
+.token.doctype,
+.token.cdata { color: #a09a94; font-style: italic; }
+
+.token.punctuation { color: #8a8480; }
+
+.token.property,
+.token.tag,
+.token.boolean,
+.token.number,
+.token.constant,
+.token.symbol { color: #b06040; }
+
+.token.selector,
+.token.attr-name,
+.token.string,
+.token.char,
+.token.builtin { color: #5a8c6a; }
+
+.token.operator,
+.token.entity,
+.token.url { color: #8a7060; }
+
+.token.atrule,
+.token.attr-value,
+.token.keyword { color: #7a6aad; }
+
+.token.function,
+.token.class-name { color: #c47a5a; }
+
+.token.regex,
+.token.important,
+.token.variable { color: #b8943a; }
+
+.token.important,
+.token.bold { font-weight: 600; }
+
+.token.italic { font-style: italic; }
