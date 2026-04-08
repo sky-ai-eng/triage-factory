@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	jiraclient "github.com/sky-ai-eng/todo-tinder/internal/jira"
 )
@@ -37,6 +39,8 @@ func handleTicket(client *jiraclient.Client, args []string) {
 		ticketListTypes(client, flags)
 	case "list-children":
 		ticketListChildren(client, flags)
+	case "search":
+		ticketSearch(client, flags)
 	case "list-priorities":
 		ticketListPriorities(client)
 	case "set-priority":
@@ -157,6 +161,36 @@ func ticketListChildren(client *jiraclient.Client, args []string) {
 		children = []jiraclient.Issue{}
 	}
 	printJSON(children)
+}
+
+func ticketSearch(client *jiraclient.Client, args []string) {
+	jql := flagVal(args, "--jql")
+	if jql == "" {
+		exitErr("--jql is required")
+	}
+
+	var fields []string
+	if f := flagVal(args, "--fields"); f != "" {
+		for _, field := range strings.Split(f, ",") {
+			fields = append(fields, strings.TrimSpace(field))
+		}
+	}
+
+	maxResults := 50
+	if m := flagVal(args, "--max"); m != "" {
+		v, err := strconv.Atoi(m)
+		if err != nil {
+			exitErr("--max must be a number")
+		}
+		maxResults = v
+	}
+
+	issues, err := client.SearchIssues(jql, fields, maxResults)
+	exitOnErr(err)
+	if issues == nil {
+		issues = []jiraclient.Issue{}
+	}
+	printJSON(issues)
 }
 
 func ticketListPriorities(client *jiraclient.Client) {

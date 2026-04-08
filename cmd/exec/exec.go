@@ -107,6 +107,7 @@ Jira Ticket Commands:
   jira ticket create <project> --type <type> --summary <text> [--description <text>] [--parent <key>] [--priority <priority>]
   jira ticket set-parent <key> --parent <parent_key>      Link issue under a parent
   jira ticket list-types <project>                        List available issue types
+  jira ticket search --jql <jql> [--fields <f1,f2,...>] [--max <N>]  Search issues via JQL
   jira ticket list-children <key>                         List child issues (subtasks + epic children)
   jira ticket list-priorities                             List available priority levels
   jira ticket set-priority <key> --priority <priority>    Update issue priority

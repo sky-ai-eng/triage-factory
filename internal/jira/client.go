@@ -202,7 +202,7 @@ func (c *Client) GetChildIssues(parentKey string) ([]Issue, error) {
 	var result []Issue
 
 	// Query 1: direct parent relationship (Cloud + Server/DC subtasks)
-	issues, err := c.searchIssues(fmt.Sprintf("parent = %s ORDER BY created ASC", parentKey))
+	issues, err := c.SearchIssues(fmt.Sprintf("parent = %s ORDER BY created ASC", parentKey), nil, 100)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +216,7 @@ func (c *Client) GetChildIssues(parentKey string) ([]Issue, error) {
 	// Query 2: Epic Link (Server/DC epic children)
 	epicField, err := c.epicLinkField()
 	if err == nil && epicField != "" {
-		epicIssues, err := c.searchIssues(fmt.Sprintf("cf[%s] = %s ORDER BY created ASC", extractFieldID(epicField), parentKey))
+		epicIssues, err := c.SearchIssues(fmt.Sprintf("cf[%s] = %s ORDER BY created ASC", extractFieldID(epicField), parentKey), nil, 100)
 		if err == nil {
 			for _, issue := range epicIssues {
 				if !seen[issue.Key] {
@@ -230,13 +230,24 @@ func (c *Client) GetChildIssues(parentKey string) ([]Issue, error) {
 	return result, nil
 }
 
-// searchIssues runs a JQL query and returns matching issues.
-func (c *Client) searchIssues(jql string) ([]Issue, error) {
+// DefaultSearchFields is the default set of fields returned by SearchIssues.
+var DefaultSearchFields = []string{"summary", "description", "status", "issuetype", "priority", "assignee", "parent", "labels"}
+
+// SearchIssues runs a JQL query and returns matching issues.
+// If fields is nil, DefaultSearchFields is used. Pass []string{"*all"} for everything.
+func (c *Client) SearchIssues(jql string, fields []string, maxResults int) ([]Issue, error) {
+	if fields == nil {
+		fields = DefaultSearchFields
+	}
+	if maxResults <= 0 {
+		maxResults = 100
+	}
+
 	url := fmt.Sprintf("%s/rest/api/2/search", c.baseURL)
 	payload := map[string]any{
 		"jql":        jql,
-		"maxResults": 100,
-		"fields":     []string{"summary", "description", "status", "issuetype", "priority", "assignee", "parent", "labels"},
+		"maxResults": maxResults,
+		"fields":     fields,
 	}
 	respBody, err := c.postJSON(url, payload)
 	if err != nil {
