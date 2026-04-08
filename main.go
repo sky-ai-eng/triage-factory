@@ -122,6 +122,9 @@ func main() {
 	})
 
 	// Start AI scoring runner
+	// Profile gate — scorer waits for this before running
+	profileGate := repoprofile.NewProfileGate(database)
+
 	scorer := ai.NewRunner(database, ai.RunnerCallbacks{
 		OnScoringStarted: func(taskIDs []string) {
 			wsHub.Broadcast(websocket.Event{
@@ -136,6 +139,7 @@ func main() {
 			})
 		},
 	})
+	scorer.SetProfileGate(profileGate.Ready)
 	scorer.Start()
 	log.Println("[ai] scorer started (model: haiku)")
 
@@ -155,34 +159,54 @@ func main() {
 	spawner := delegate.NewSpawner(database, nil, wsHub, "")
 	srv.SetSpawner(spawner)
 
-	// Wire up credential change callback: restarts pollers + updates spawner
-	srv.SetOnCredentialsChanged(func() {
-		log.Println("[server] credentials changed, restarting pollers...")
+	// GitHub changed: invalidate profiles → stop all → re-profile → restart all
+	srv.SetOnGitHubChanged(func() {
+		log.Println("[server] GitHub config changed, full restart...")
 
-		pollerMgr.Restart()
+		profileGate.Invalidate()
+		pollerMgr.StopAll()
 
 		cfg, _ := config.Load()
 		creds, _ := auth.Load()
 
-		if creds.GitHubPAT != "" && creds.GitHubURL != "" {
+		if cfg.GitHub.Ready(creds.GitHubPAT, creds.GitHubURL) {
 			ghClient := ghclient.NewClient(creds.GitHubURL, creds.GitHubPAT)
 			spawner.UpdateCredentials(ghClient, cfg.AI.Model)
 			srv.SetGitHubClient(ghClient)
-			log.Println("[delegate] spawner credentials updated")
 
-			// Trigger repo profiling if repos are configured
-			if len(cfg.GitHub.Repos) > 0 {
-				go func() {
-					profiler := repoprofile.NewProfiler(ghClient, database)
-					if err := profiler.Run(context.Background(), cfg.GitHub.Repos); err != nil {
-						log.Printf("[repoprofile] profiling failed: %v", err)
-					}
-				}()
-			}
+			// Re-profile, then signal ready and restart all pollers
+			go func() {
+				profiler := repoprofile.NewProfiler(ghClient, database)
+				repos, _ := db.GetConfiguredRepoNames(database)
+				if err := profiler.Run(context.Background(), repos); err != nil {
+					log.Printf("[repoprofile] profiling failed: %v", err)
+				}
+				profileGate.Signal()
+				pollerMgr.RestartAll()
+				scorer.Trigger()
+			}()
 		} else {
 			spawner.UpdateCredentials(nil, "")
 			srv.SetGitHubClient(nil)
+			pollerMgr.RestartAll()
 		}
+
+		// Also refresh Jira client in case it's configured
+		if creds.JiraPAT != "" && creds.JiraURL != "" {
+			srv.SetJiraClient(jira.NewClient(creds.JiraURL, creds.JiraPAT), cfg.Jira.InProgressStatus)
+		} else {
+			srv.SetJiraClient(nil, "")
+		}
+	})
+
+	// Jira changed: restart only the Jira poller
+	srv.SetOnJiraChanged(func() {
+		log.Println("[server] Jira config changed, restarting Jira poller...")
+
+		cfg, _ := config.Load()
+		creds, _ := auth.Load()
+
+		pollerMgr.RestartJira()
 
 		if creds.JiraPAT != "" && creds.JiraURL != "" {
 			srv.SetJiraClient(jira.NewClient(creds.JiraURL, creds.JiraPAT), cfg.Jira.InProgressStatus)
@@ -192,32 +216,35 @@ func main() {
 	})
 
 	// Initial start with current credentials
-	pollerMgr.Restart()
-
 	cfg, _ := config.Load()
 	creds, _ := auth.Load()
-	if creds.GitHubPAT != "" && creds.GitHubURL != "" {
+	repoCount, _ := db.CountConfiguredRepos(database)
+
+	if cfg.GitHub.Ready(creds.GitHubPAT, creds.GitHubURL) && repoCount > 0 {
 		ghClient := ghclient.NewClient(creds.GitHubURL, creds.GitHubPAT)
 		spawner.UpdateCredentials(ghClient, cfg.AI.Model)
 		srv.SetGitHubClient(ghClient)
-		log.Println("[delegate] spawner ready")
+		log.Printf("[delegate] spawner ready (%d repos configured)", repoCount)
 
-		// Profile repos on startup if configured
-		if len(cfg.GitHub.Repos) > 0 {
-			go func() {
-				profiler := repoprofile.NewProfiler(ghClient, database)
-				if err := profiler.Run(context.Background(), cfg.GitHub.Repos); err != nil {
-					log.Printf("[repoprofile] initial profiling failed: %v", err)
-				}
-			}()
-		}
+		// Profile repos, then signal ready, start pollers, and trigger scoring
+		go func() {
+			profiler := repoprofile.NewProfiler(ghClient, database)
+			repos, _ := db.GetConfiguredRepoNames(database)
+			if err := profiler.Run(context.Background(), repos); err != nil {
+				log.Printf("[repoprofile] initial profiling failed: %v", err)
+			}
+			profileGate.Signal()
+			pollerMgr.RestartAll()
+			scorer.Trigger()
+		}()
+	} else {
+		// Not fully configured — start pollers immediately (may be empty)
+		pollerMgr.RestartAll()
 	}
+
 	if creds.JiraPAT != "" && creds.JiraURL != "" {
 		srv.SetJiraClient(jira.NewClient(creds.JiraURL, creds.JiraPAT), cfg.Jira.InProgressStatus)
 	}
-
-	// Score any tasks already in the DB without scores
-	scorer.Trigger()
 
 	if err := srv.ListenAndServe(addr); err != nil {
 		log.Fatalf("server error: %v", err)

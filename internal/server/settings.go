@@ -3,10 +3,13 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/sky-ai-eng/todo-tinder/internal/auth"
 	"github.com/sky-ai-eng/todo-tinder/internal/config"
+	"github.com/sky-ai-eng/todo-tinder/internal/db"
+	"github.com/sky-ai-eng/todo-tinder/internal/domain"
 	ghclient "github.com/sky-ai-eng/todo-tinder/internal/github"
 	"github.com/sky-ai-eng/todo-tinder/internal/jira"
 )
@@ -21,11 +24,10 @@ type settingsResponse struct {
 }
 
 type githubSettings struct {
-	Enabled      bool     `json:"enabled"`
-	BaseURL      string   `json:"base_url"`
-	HasToken     bool     `json:"has_token"`
-	PollInterval string   `json:"poll_interval"`
-	Repos        []string `json:"repos"`
+	Enabled      bool   `json:"enabled"`
+	BaseURL      string `json:"base_url"`
+	HasToken     bool   `json:"has_token"`
+	PollInterval string `json:"poll_interval"`
 }
 
 type jiraSettings struct {
@@ -62,7 +64,6 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 			BaseURL:      cfg.GitHub.BaseURL,
 			HasToken:     creds.GitHubPAT != "",
 			PollInterval: cfg.GitHub.PollInterval.String(),
-			Repos:        cfg.GitHub.Repos,
 		},
 		Jira: jiraSettings{
 			Enabled:          creds.JiraPAT != "",
@@ -83,9 +84,6 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	if resp.GitHub.Repos == nil {
-		resp.GitHub.Repos = []string{}
-	}
 	if resp.Jira.Projects == nil {
 		resp.Jira.Projects = []string{}
 	}
@@ -106,7 +104,6 @@ type settingsUpdateRequest struct {
 	JiraPAT       string `json:"jira_pat"` // empty means "keep existing"
 
 	// Config
-	GitHubRepos          []string `json:"github_repos"`
 	GitHubPollInterval   string   `json:"github_poll_interval"`
 	JiraPollInterval     string   `json:"jira_poll_interval"`
 	JiraProjects         []string `json:"jira_projects"`
@@ -123,13 +120,24 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Load existing state
+	// Load existing state — snapshot for change detection
 	cfg, err := config.Load()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load config: " + err.Error()})
 		return
 	}
 	creds, _ := auth.Load() // auth errors are non-fatal
+
+	// Snapshot pre-change values for diffing
+	prevGHURL := creds.GitHubURL
+	prevGHPAT := creds.GitHubPAT
+	prevGHPollInterval := cfg.GitHub.PollInterval
+	prevJiraURL := creds.JiraURL
+	prevJiraPAT := creds.JiraPAT
+	prevJiraProjects := cfg.Jira.Projects
+	prevJiraPickupStatuses := cfg.Jira.PickupStatuses
+	prevJiraInProgressStatus := cfg.Jira.InProgressStatus
+	prevJiraPollInterval := cfg.Jira.PollInterval
 
 	// --- Handle GitHub ---
 	if req.GitHubEnabled {
@@ -206,9 +214,6 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 			cfg.Jira.PollInterval = d
 		}
 	}
-	if req.GitHubRepos != nil {
-		cfg.GitHub.Repos = req.GitHubRepos
-	}
 	if req.JiraProjects != nil {
 		cfg.Jira.Projects = req.JiraProjects
 	}
@@ -235,9 +240,24 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Restart pollers and spawner with new credentials/config
-	if s.onCredentialsChanged != nil {
-		go s.onCredentialsChanged()
+	// Detect what changed and fire the appropriate callback
+	ghChanged := creds.GitHubURL != prevGHURL ||
+		creds.GitHubPAT != prevGHPAT ||
+		cfg.GitHub.PollInterval != prevGHPollInterval
+
+	jiraChanged := creds.JiraURL != prevJiraURL ||
+		creds.JiraPAT != prevJiraPAT ||
+		!slices.Equal(cfg.Jira.Projects, prevJiraProjects) ||
+		!slices.Equal(cfg.Jira.PickupStatuses, prevJiraPickupStatuses) ||
+		cfg.Jira.InProgressStatus != prevJiraInProgressStatus ||
+		cfg.Jira.PollInterval != prevJiraPollInterval
+
+	if ghChanged && s.onGitHubChanged != nil {
+		// GitHub change triggers full restart (includes Jira poller restart)
+		go s.onGitHubChanged()
+	} else if jiraChanged && s.onJiraChanged != nil {
+		// Jira-only change — just restart Jira poller
+		go s.onJiraChanged()
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
@@ -306,4 +326,75 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, repos)
+}
+
+// handleRepoProfiles returns all configured repo profiles from the DB.
+func (s *Server) handleRepoProfiles(w http.ResponseWriter, r *http.Request) {
+	profiles, err := db.GetAllRepoProfiles(s.db)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if profiles == nil {
+		profiles = []domain.RepoProfile{}
+	}
+
+	type repoJSON struct {
+		ID          string  `json:"id"`
+		Owner       string  `json:"owner"`
+		Repo        string  `json:"repo"`
+		Description string  `json:"description,omitempty"`
+		HasReadme   bool    `json:"has_readme"`
+		HasClaudeMd bool    `json:"has_claude_md"`
+		HasAgentsMd bool    `json:"has_agents_md"`
+		ProfileText string  `json:"profile_text,omitempty"`
+		ProfiledAt  *string `json:"profiled_at,omitempty"`
+	}
+
+	result := make([]repoJSON, len(profiles))
+	for i, p := range profiles {
+		result[i] = repoJSON{
+			ID:          p.ID,
+			Owner:       p.Owner,
+			Repo:        p.Repo,
+			Description: p.Description,
+			HasReadme:   p.HasReadme,
+			HasClaudeMd: p.HasClaudeMd,
+			HasAgentsMd: p.HasAgentsMd,
+			ProfileText: p.ProfileText,
+		}
+		if p.ProfiledAt != nil {
+			t := p.ProfiledAt.Format("2006-01-02T15:04:05Z")
+			result[i].ProfiledAt = &t
+		}
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// handleReposSave updates the configured repos in the DB and triggers re-profiling.
+func (s *Server) handleReposSave(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Repos []string `json:"repos"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if len(req.Repos) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "at least one repo is required"})
+		return
+	}
+
+	if err := db.SetConfiguredRepos(s.db, req.Repos); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	// Trigger GitHub changed — re-profiles and restarts pollers
+	if s.onGitHubChanged != nil {
+		go s.onGitHubChanged()
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "repos": len(req.Repos)})
 }

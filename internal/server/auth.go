@@ -7,6 +7,7 @@ import (
 
 	"github.com/sky-ai-eng/todo-tinder/internal/auth"
 	"github.com/sky-ai-eng/todo-tinder/internal/config"
+	"github.com/sky-ai-eng/todo-tinder/internal/db"
 )
 
 type setupRequest struct {
@@ -28,8 +29,8 @@ func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.GitHubURL == "" && req.JiraURL == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "at least one service URL is required"})
+	if req.GitHubURL == "" || req.GitHubPAT == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub URL and token are required"})
 		return
 	}
 
@@ -84,9 +85,9 @@ func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[auth] warning: failed to save config: %v", err)
 	}
 
-	// Restart pollers and spawner with new credentials
-	if s.onCredentialsChanged != nil {
-		go s.onCredentialsChanged()
+	// Setup always includes GitHub — trigger full restart
+	if s.onGitHubChanged != nil {
+		go s.onGitHubChanged()
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -102,10 +103,14 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	repoCount, _ := db.CountConfiguredRepos(s.db)
+
+	// GitHub is mandatory — configured requires GitHub creds + at least one repo
 	result := map[string]any{
-		"configured": creds.GitHubPAT != "" || creds.JiraPAT != "",
-		"github":     creds.GitHubPAT != "",
-		"jira":       creds.JiraPAT != "",
+		"configured":   creds.GitHubPAT != "" && creds.GitHubURL != "" && repoCount > 0,
+		"github":       creds.GitHubPAT != "",
+		"jira":         creds.JiraPAT != "",
+		"github_repos": repoCount,
 	}
 
 	if creds.GitHubURL != "" {

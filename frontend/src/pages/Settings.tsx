@@ -1,5 +1,4 @@
 import { useState, useEffect } from 'react'
-import RepoPickerModal from '../components/RepoPickerModal'
 
 interface JiraStatus {
   id: string
@@ -34,10 +33,9 @@ interface SettingsData {
 export default function Settings() {
   const [data, setData] = useState<SettingsData | null>(null)
   const [form, setForm] = useState({
-    github_enabled: false,
+    github_enabled: true,
     github_url: '',
     github_pat: '',
-    github_repos: [] as string[],
     jira_enabled: false,
     jira_url: '',
     jira_pat: '',
@@ -53,7 +51,6 @@ export default function Settings() {
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [jiraStatuses, setJiraStatuses] = useState<JiraStatus[]>([])
   const [statusesLoading, setStatusesLoading] = useState(false)
-  const [repoPickerOpen, setRepoPickerOpen] = useState(false)
 
   useEffect(() => {
     fetch('/api/settings')
@@ -61,10 +58,9 @@ export default function Settings() {
       .then((d: SettingsData) => {
         setData(d)
         setForm({
-          github_enabled: d.github.enabled,
+          github_enabled: true,
           github_url: d.github.base_url || '',
           github_pat: '',
-          github_repos: d.github.repos || [],
           jira_enabled: d.jira.enabled,
           jira_url: d.jira.base_url || '',
           jira_pat: '',
@@ -121,7 +117,6 @@ export default function Settings() {
           github_enabled: form.github_enabled,
           github_url: form.github_url,
           github_pat: form.github_pat || undefined,
-          github_repos: form.github_repos,
           jira_enabled: form.jira_enabled,
           jira_url: form.jira_url,
           jira_pat: form.jira_pat || undefined,
@@ -161,17 +156,10 @@ export default function Settings() {
       <h1 className="text-[22px] font-semibold text-text-primary tracking-tight mb-6">Settings</h1>
       <form onSubmit={save} className="space-y-5">
 
-        {/* GitHub */}
+        {/* GitHub (always on) */}
         <Section>
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-[13px] font-medium text-text-secondary">GitHub</h2>
-            <Toggle
-              enabled={form.github_enabled}
-              onChange={(v) => setForm((f) => ({ ...f, github_enabled: v }))}
-            />
-          </div>
-          {form.github_enabled && (
-            <div className="space-y-3">
+          <h2 className="text-[13px] font-medium text-text-secondary mb-4">GitHub</h2>
+          <div className="space-y-3">
               <Field label="Base URL">
                 <input
                   type="url"
@@ -203,35 +191,7 @@ export default function Settings() {
                 </select>
               </Field>
 
-              {/* Watched repos */}
-              <div>
-                <span className="text-[11px] text-text-tertiary mb-1.5 block">Watched repositories</span>
-                <div className="flex items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setRepoPickerOpen(true)}
-                    className="text-[11px] text-accent hover:text-accent/80 border border-accent/20 rounded-xl px-3 py-2 transition-colors"
-                  >
-                    {form.github_repos.length > 0
-                      ? `${form.github_repos.length} repo${form.github_repos.length !== 1 ? 's' : ''} selected`
-                      : 'Select Repositories'}
-                  </button>
-                </div>
-                {form.github_repos.length > 0 && (
-                  <div className="flex flex-wrap gap-1.5 mt-2">
-                    {form.github_repos.map((name) => (
-                      <span
-                        key={name}
-                        className="text-[11px] px-2.5 py-1 rounded-full bg-accent/[0.08] border border-accent/20 text-accent"
-                      >
-                        {name}
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </div>
             </div>
-          )}
         </Section>
 
         {/* Jira */}
@@ -419,17 +379,6 @@ export default function Settings() {
         </Section>
       </form>
 
-      {/* Repo picker modal */}
-      {repoPickerOpen && (
-        <RepoPickerModal
-          selected={form.github_repos}
-          onSave={(repos) => {
-            setForm((f) => ({ ...f, github_repos: repos }))
-            setRepoPickerOpen(false)
-          }}
-          onClose={() => setRepoPickerOpen(false)}
-        />
-      )}
     </div>
   )
 }

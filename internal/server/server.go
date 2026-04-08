@@ -13,10 +13,6 @@ import (
 	"github.com/sky-ai-eng/todo-tinder/pkg/websocket"
 )
 
-// OnCredentialsChanged is called after credentials are saved. The caller
-// wires this to restart pollers and the delegation spawner.
-type OnCredentialsChanged func()
-
 // Server is the main HTTP server for Todo Tinder.
 type Server struct {
 	db                    *sql.DB
@@ -27,7 +23,8 @@ type Server struct {
 	ghClient              *ghclient.Client
 	jiraClient            *jira.Client
 	jiraInProgressStatus  string
-	onCredentialsChanged  OnCredentialsChanged
+	onGitHubChanged       func() // GitHub creds/repos changed — full restart + re-profile
+	onJiraChanged         func() // Jira config changed — restart Jira poller only
 }
 
 // New creates a new server with the given database and registers all routes.
@@ -79,6 +76,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/settings", s.handleSettingsPost)
 	s.mux.HandleFunc("POST /api/skills/import", s.handleSkillsImport)
 	s.mux.HandleFunc("GET /api/github/repos", s.handleGitHubRepos)
+	s.mux.HandleFunc("GET /api/repos", s.handleRepoProfiles)
+	s.mux.HandleFunc("POST /api/repos", s.handleReposSave)
 	s.mux.HandleFunc("GET /api/jira/statuses", s.handleJiraStatuses)
 
 	s.mux.HandleFunc("GET /api/reviews/{id}", s.handleReviewGet)
@@ -143,9 +142,16 @@ func (s *Server) SetSpawner(sp *delegate.Spawner) {
 	s.spawner = sp
 }
 
-// SetOnCredentialsChanged registers a callback for when credentials are updated.
-func (s *Server) SetOnCredentialsChanged(fn OnCredentialsChanged) {
-	s.onCredentialsChanged = fn
+// SetOnGitHubChanged registers a callback for GitHub config changes (creds, URL, repos).
+// This triggers a full restart: invalidate profiles → stop all pollers → re-profile → restart.
+func (s *Server) SetOnGitHubChanged(fn func()) {
+	s.onGitHubChanged = fn
+}
+
+// SetOnJiraChanged registers a callback for Jira config changes.
+// This restarts only the Jira poller.
+func (s *Server) SetOnJiraChanged(fn func()) {
+	s.onJiraChanged = fn
 }
 
 // SetGitHubClient sets the GitHub client for review approval submissions.

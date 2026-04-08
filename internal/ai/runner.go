@@ -19,12 +19,13 @@ type RunnerCallbacks struct {
 // Runner manages AI scoring as a background process.
 // It exposes a Trigger channel that pollers signal after ingesting new tasks.
 type Runner struct {
-	database  *sql.DB
-	callbacks RunnerCallbacks
-	trigger   chan struct{}
-	stop      chan struct{}
-	mu        sync.Mutex
-	running   bool
+	database     *sql.DB
+	callbacks    RunnerCallbacks
+	profileReady func() bool // returns true when repo profiles are available
+	trigger      chan struct{}
+	stop         chan struct{}
+	mu           sync.Mutex
+	running      bool
 }
 
 func NewRunner(database *sql.DB, callbacks RunnerCallbacks) *Runner {
@@ -34,6 +35,12 @@ func NewRunner(database *sql.DB, callbacks RunnerCallbacks) *Runner {
 		trigger:   make(chan struct{}, 1),
 		stop:      make(chan struct{}),
 	}
+}
+
+// SetProfileGate sets the function used to check if repo profiles are ready.
+// If not set, scoring proceeds without gating.
+func (r *Runner) SetProfileGate(fn func() bool) {
+	r.profileReady = fn
 }
 
 // Trigger signals the runner to check for unscored tasks.
@@ -77,6 +84,13 @@ func (r *Runner) run() {
 		r.running = false
 		r.mu.Unlock()
 	}()
+
+	// Wait for repo profiles before scoring — stale or missing profiles
+	// lead to incorrect repo matches that would need re-scoring anyway.
+	if r.profileReady != nil && !r.profileReady() {
+		log.Println("[ai] skipping scoring cycle: repo profiles not ready")
+		return
+	}
 
 	tasks, err := db.UnscoredTasks(r.database)
 	if err != nil {
