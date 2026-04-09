@@ -69,153 +69,206 @@ func (s *Spawner) Cancel(runID string) error {
 	return nil
 }
 
-// DelegatePR kicks off an async PR review agent run.
-// If explicitPromptID is non-empty, that prompt is used instead of the default lookup.
-func (s *Spawner) DelegatePR(task domain.Task, explicitPromptID string) (string, error) {
-	// Snapshot mutable config under lock
+// runConfig holds everything the generic agent runner needs.
+type runConfig struct {
+	scope    string // what the agent is scoped to (repo, PR, issue)
+	toolsRef string // tool documentation to inject
+	wtPath   string // worktree path (empty = no working directory)
+	hasWT    bool   // whether a worktree was created (controls cleanup)
+}
+
+// Delegate kicks off an async agent run for any task type.
+// Routes to the appropriate worktree setup based on task source.
+func (s *Spawner) Delegate(task domain.Task, explicitPromptID string) (string, error) {
 	s.mu.Lock()
 	ghClient := s.ghClient
 	model := s.model
 	s.mu.Unlock()
 
-	if ghClient == nil {
-		return "", fmt.Errorf("GitHub credentials not configured")
-	}
-
-	// Parse owner/repo from task
-	owner, repo := parseOwnerRepo(task.Repo)
-	if owner == "" || repo == "" {
-		return "", fmt.Errorf("cannot parse owner/repo from task.Repo: %q", task.Repo)
-	}
-	prNumber := 0
-	fmt.Sscanf(task.SourceID, "%d", &prNumber)
-	if prNumber == 0 {
-		return "", fmt.Errorf("invalid PR number from task.SourceID: %q", task.SourceID)
-	}
-
-	// Resolve which prompt to use:
-	// 1. Explicit prompt_id from the frontend picker
-	// 2. Default prompt for the task's event type
-	// No fallback — if no prompt is found, fail loudly
-	var promptID string
-	var mission string
-	if explicitPromptID != "" {
-		p, err := db.GetPrompt(s.database, explicitPromptID)
-		if err != nil {
-			return "", fmt.Errorf("failed to load prompt %s: %w", explicitPromptID, err)
-		}
-		if p == nil {
-			return "", fmt.Errorf("prompt %s not found", explicitPromptID)
-		}
-		promptID = p.ID
-		mission = p.Body
-	} else if task.EventType != "" {
-		p, err := db.FindDefaultPrompt(s.database, task.EventType)
-		if err != nil {
-			return "", fmt.Errorf("failed to look up default prompt for %s: %w", task.EventType, err)
-		}
-		if p != nil {
-			promptID = p.ID
-			mission = p.Body
-		}
-	}
-	if mission == "" {
-		return "", fmt.Errorf("no prompt available for event type %q — configure one on the Prompts page", task.EventType)
+	// Resolve prompt
+	promptID, mission, err := s.resolvePrompt(task, explicitPromptID)
+	if err != nil {
+		return "", err
 	}
 	db.IncrementPromptUsage(s.database, promptID)
 
 	runID := uuid.New().String()
-
-	// Create agent run record with prompt reference
 	if err := db.CreateAgentRun(s.database, domain.AgentRun{
 		ID:       runID,
 		TaskID:   task.ID,
 		PromptID: promptID,
-		Status:   "cloning",
+		Status:   "initializing",
 		Model:    model,
 	}); err != nil {
 		return "", fmt.Errorf("create agent run: %w", err)
 	}
+	s.broadcastRunUpdate(runID, "initializing")
 
-	s.broadcastRunUpdate(runID, "cloning")
-
-	// Create cancellable context for the entire run lifecycle
 	ctx, cancel := context.WithCancel(context.Background())
 	s.mu.Lock()
 	s.cancels[runID] = cancel
 	s.mu.Unlock()
 
-	// Run async — pass snapshotted ghClient/model so credential changes don't affect in-flight runs
 	go func() {
+		startTime := time.Now()
 		defer func() {
 			s.mu.Lock()
 			delete(s.cancels, runID)
 			s.mu.Unlock()
-			cancel() // release context resources
+			cancel()
 		}()
-		s.runPRReview(ctx, runID, task, owner, repo, prNumber, mission, ghClient, model)
+
+		// Phase 1: set up worktree + build config based on task source
+		var cfg runConfig
+		var setupErr error
+
+		switch task.Source {
+		case "github":
+			cfg, setupErr = s.setupGitHub(ctx, runID, task, ghClient)
+		case "jira":
+			cfg, setupErr = s.setupJira(ctx, runID, task, ghClient)
+		default:
+			setupErr = fmt.Errorf("unsupported task source: %s", task.Source)
+		}
+
+		if setupErr != nil {
+			if ctx.Err() != nil {
+				s.handleCancelled(runID, startTime, cfg.hasWT)
+				return
+			}
+			s.failRun(runID, setupErr.Error())
+			return
+		}
+
+		// Phase 2: run the agent
+		s.runAgent(ctx, runID, task, mission, cfg, startTime, model)
 	}()
 
 	return runID, nil
 }
 
-func (s *Spawner) runPRReview(ctx context.Context, runID string, task domain.Task, owner, repo string, prNumber int, mission string, ghClient *ghclient.Client, model string) {
-	startTime := time.Now()
+// DelegatePR is a convenience wrapper that calls Delegate for backward compatibility.
+func (s *Spawner) DelegatePR(task domain.Task, explicitPromptID string) (string, error) {
+	return s.Delegate(task, explicitPromptID)
+}
 
-	// Helper: check if we were cancelled and handle cleanup
-	cancelled := func() bool {
-		if ctx.Err() != nil {
-			elapsed := int(time.Since(startTime).Milliseconds())
-			db.CompleteAgentRun(s.database, runID, "cancelled", 0, elapsed, 0, "cancelled", "", "Cancelled by user")
-			s.broadcastRunUpdate(runID, "cancelled")
-			worktree.Remove(runID) // clean up any partial worktree
-			return true
-		}
-		return false
+// setupGitHub prepares a worktree for a GitHub PR task.
+func (s *Spawner) setupGitHub(ctx context.Context, runID string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
+	if ghClient == nil {
+		return runConfig{}, fmt.Errorf("GitHub credentials not configured")
 	}
 
-	// 1. Get PR details for clone URL and head SHA
+	owner, repo := parseOwnerRepo(task.Repo)
+	if owner == "" || repo == "" {
+		return runConfig{}, fmt.Errorf("cannot parse owner/repo from task.Repo: %q", task.Repo)
+	}
+
+	prNumber := 0
+	fmt.Sscanf(task.SourceID, "%d", &prNumber)
+	if prNumber == 0 {
+		return runConfig{}, fmt.Errorf("invalid PR number from task.SourceID: %q", task.SourceID)
+	}
+
 	s.updateStatus(runID, "fetching")
 	pr, err := ghClient.GetPR(owner, repo, prNumber, false)
 	if err != nil {
-		if cancelled() {
-			return
-		}
-		s.failRun(runID, "failed to fetch PR: "+err.Error())
-		return
+		return runConfig{}, fmt.Errorf("failed to fetch PR: %w", err)
 	}
 
-	// 2. Create worktree
 	s.updateStatus(runID, "cloning")
-	wtPath, err := worktree.Create(ctx, owner, repo, pr.CloneURL, pr.HeadSHA, prNumber, runID)
+	wtPath, err := worktree.CreateForPR(ctx, owner, repo, pr.CloneURL, pr.HeadRef, prNumber, runID)
 	if err != nil {
-		if cancelled() {
-			return
-		}
-		s.failRun(runID, "failed to create worktree: "+err.Error())
-		return
+		return runConfig{}, fmt.Errorf("failed to create worktree: %w", err)
 	}
-	s.updateStatus(runID, "worktree_created")
-	defer worktree.Remove(runID)
 
-	// Update run with worktree path
 	if _, err := s.database.Exec(`UPDATE agent_runs SET worktree_path = ? WHERE id = ?`, wtPath, runID); err != nil {
 		log.Printf("[delegate] warning: failed to update worktree path for run %s: %v", runID, err)
 	}
 
-	// 3. Resolve our own binary path so the agent can call todotinder exec
+	return runConfig{
+		scope:    fmt.Sprintf("Repository: %s/%s\nPR: #%d\nBranch: %s", owner, repo, prNumber, pr.HeadRef),
+		toolsRef: ai.GHToolsTemplate,
+		wtPath:   wtPath,
+		hasWT:    true,
+	}, nil
+}
+
+// setupJira prepares a worktree (if applicable) for a Jira task.
+func (s *Spawner) setupJira(ctx context.Context, runID string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
+	// Look up matched repos from the task's scoring results
+	matchedRepos, err := db.GetTaskMatchedRepos(s.database, task.ID)
+	if err != nil {
+		return runConfig{}, fmt.Errorf("failed to look up matched repos: %w", err)
+	}
+
+	switch len(matchedRepos) {
+	case 0:
+		// No repo match — pure Jira task, no worktree
+		log.Printf("[delegate] Jira task %s: no matched repo, running without worktree", task.SourceID)
+		return runConfig{
+			scope:    fmt.Sprintf("Jira issue: %s", task.SourceID),
+			toolsRef: ai.JiraToolsTemplate,
+		}, nil
+
+	case 1:
+		// Single repo match — clone and create feature branch
+		repoID := matchedRepos[0]
+		profile, err := db.GetRepoProfile(s.database, repoID)
+		if err != nil || profile == nil {
+			return runConfig{}, fmt.Errorf("failed to load repo profile for %s: %v", repoID, err)
+		}
+		if profile.CloneURL == "" {
+			return runConfig{}, fmt.Errorf("repo %s has no clone URL — try re-profiling", repoID)
+		}
+
+		s.updateStatus(runID, "cloning")
+		baseBranch := profile.BaseBranch
+		if baseBranch == "" {
+			baseBranch = profile.DefaultBranch
+		}
+		featureBranch := "feature/" + task.SourceID
+
+		wtPath, err := worktree.CreateForBranch(ctx, profile.Owner, profile.Repo, profile.CloneURL, baseBranch, featureBranch, runID)
+		if err != nil {
+			return runConfig{}, fmt.Errorf("failed to create worktree: %w", err)
+		}
+
+		if _, err := s.database.Exec(`UPDATE agent_runs SET worktree_path = ? WHERE id = ?`, wtPath, runID); err != nil {
+			log.Printf("[delegate] warning: failed to update worktree path for run %s: %v", runID, err)
+		}
+
+		// Agent gets both GH and Jira tools when it has a repo (may need to create PRs)
+		return runConfig{
+			scope:    fmt.Sprintf("Repository: %s\nJira issue: %s\nBranch: %s", repoID, task.SourceID, featureBranch),
+			toolsRef: ai.GHToolsTemplate + "\n\n" + ai.JiraToolsTemplate,
+			wtPath:   wtPath,
+			hasWT:    true,
+		}, nil
+
+	default:
+		// Multiple matches — ambiguous, block for now
+		return runConfig{}, fmt.Errorf("Jira task %s matched %d repos (%s) — cannot determine which to clone",
+			task.SourceID, len(matchedRepos), strings.Join(matchedRepos, ", "))
+	}
+}
+
+// runAgent is the generic agent execution loop. Works for any task type.
+func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model string) {
+	if cfg.hasWT {
+		defer worktree.Remove(runID)
+	}
+
 	selfBin, err := os.Executable()
 	if err != nil {
 		s.failRun(runID, "failed to resolve own binary path: "+err.Error())
 		return
 	}
 
-	// 4. Build prompt: envelope (tool guidance) + mission (what to do)
-	prompt := buildPrompt(mission, owner, repo, prNumber, selfBin)
+	prompt := buildPrompt(mission, cfg.scope, cfg.toolsRef, selfBin)
 
-	// 5. Spawn claude in its own process group so we can kill the entire tree
 	s.updateStatus(runID, "agent_starting")
-	if cancelled() {
+	if ctx.Err() != nil {
+		s.handleCancelled(runID, startTime, cfg.hasWT)
 		return
 	}
 
@@ -224,12 +277,14 @@ func (s *Spawner) runPRReview(ctx context.Context, runID string, task domain.Tas
 		"--model", model,
 		"--output-format", "stream-json",
 		"--verbose",
-		"--allowedTools", fmt.Sprintf("Bash(%s exec *),Read,Glob,Grep,WebSearch,WebFetch", selfBin),
+		"--allowedTools", fmt.Sprintf("Bash(%s exec *),Bash(git commit *),Bash(git add *),Bash(git push *),Bash(git merge *),Bash(git rebase *),Bash(git fetch *),Bash(git checkout *),Read,Write,Edit,Glob,Grep,WebSearch,WebFetch", selfBin),
 		"--max-turns", "100",
 	}
 
 	cmd := exec.Command("claude", args...)
-	cmd.Dir = wtPath
+	if cfg.wtPath != "" {
+		cmd.Dir = cfg.wtPath
+	}
 	cmd.Env = append(os.Environ(), "TODOTINDER_RUN_ID="+runID, "TODOTINDER_REVIEW_PREVIEW=1")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
@@ -248,12 +303,10 @@ func (s *Spawner) runPRReview(ctx context.Context, runID string, task domain.Tas
 	}
 
 	pgid := cmd.Process.Pid
-	log.Printf("[delegate] claude started (pid: %d, pgid: %d, cwd: %s)", cmd.Process.Pid, pgid, wtPath)
+	log.Printf("[delegate] claude started (pid: %d, pgid: %d, cwd: %s)", cmd.Process.Pid, pgid, cfg.wtPath)
 
-	// Watch for context cancellation and kill the entire process group
 	go func() {
 		<-ctx.Done()
-		// Kill the entire process group (negative PID = group)
 		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
 			log.Printf("[delegate] warning: failed to kill process group %d: %v", pgid, err)
 		}
@@ -261,10 +314,9 @@ func (s *Spawner) runPRReview(ctx context.Context, runID string, task domain.Tas
 
 	s.updateStatus(runID, "running")
 
-	// 6. Parse NDJSON stream
 	stream := newStreamState()
 	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024) // 1MB buffer for large lines
+	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -274,7 +326,6 @@ func (s *Spawner) runPRReview(ctx context.Context, runID string, task domain.Tas
 
 		messages, completion := stream.parseLine(line, runID)
 
-		// Store and broadcast each completed message
 		for _, msg := range messages {
 			id, err := db.InsertAgentMessage(s.database, *msg)
 			if err != nil {
@@ -285,7 +336,6 @@ func (s *Spawner) runPRReview(ctx context.Context, runID string, task domain.Tas
 			s.broadcastMessage(runID, msg)
 		}
 
-		// Handle completion
 		if completion != nil {
 			resultLink, resultSummary := "", ""
 			status := "completed"
@@ -293,7 +343,7 @@ func (s *Spawner) runPRReview(ctx context.Context, runID string, task domain.Tas
 				status = "failed"
 			}
 			if parsed := parseAgentResult(completion.Result); parsed != nil {
-				resultLink = parsed.Link
+				resultLink = parsed.PrimaryLink()
 				resultSummary = parsed.Summary
 				if parsed.Status == "failed" {
 					status = "failed"
@@ -301,7 +351,6 @@ func (s *Spawner) runPRReview(ctx context.Context, runID string, task domain.Tas
 			}
 			db.CompleteAgentRun(s.database, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultLink, resultSummary)
 
-			// Check if the agent deferred a review for user approval
 			if status == "completed" {
 				if pendingReview, _ := db.PendingReviewByRunID(s.database, runID); pendingReview != nil {
 					status = "pending_approval"
@@ -326,9 +375,9 @@ func (s *Spawner) runPRReview(ctx context.Context, runID string, task domain.Tas
 		log.Printf("[delegate] scanner error for run %s: %v", runID, err)
 	}
 
-	// Wait for process to exit
 	if err := cmd.Wait(); err != nil {
-		if cancelled() {
+		if ctx.Err() != nil {
+			s.handleCancelled(runID, startTime, cfg.hasWT)
 			return
 		}
 		stderr := stderrBuf.String()
@@ -336,9 +385,43 @@ func (s *Spawner) runPRReview(ctx context.Context, runID string, task domain.Tas
 		return
 	}
 
-	// If we got here without a result line, mark as completed
 	db.CompleteAgentRun(s.database, runID, "completed", 0, 0, 0, "unknown", "", "")
 	s.broadcastRunUpdate(runID, "completed")
+}
+
+// resolvePrompt finds the mission text for a task, either from an explicit ID or the default binding.
+func (s *Spawner) resolvePrompt(task domain.Task, explicitPromptID string) (string, string, error) {
+	if explicitPromptID != "" {
+		p, err := db.GetPrompt(s.database, explicitPromptID)
+		if err != nil {
+			return "", "", fmt.Errorf("failed to load prompt %s: %w", explicitPromptID, err)
+		}
+		if p == nil {
+			return "", "", fmt.Errorf("prompt %s not found", explicitPromptID)
+		}
+		return p.ID, p.Body, nil
+	}
+
+	if task.EventType != "" {
+		p, err := db.FindDefaultPrompt(s.database, task.EventType)
+		if err != nil {
+			return "", "", fmt.Errorf("failed to look up default prompt for %s: %w", task.EventType, err)
+		}
+		if p != nil {
+			return p.ID, p.Body, nil
+		}
+	}
+
+	return "", "", fmt.Errorf("no prompt available for event type %q — configure one on the Prompts page", task.EventType)
+}
+
+func (s *Spawner) handleCancelled(runID string, startTime time.Time, hasWT bool) {
+	elapsed := int(time.Since(startTime).Milliseconds())
+	db.CompleteAgentRun(s.database, runID, "cancelled", 0, elapsed, 0, "cancelled", "", "Cancelled by user")
+	s.broadcastRunUpdate(runID, "cancelled")
+	if hasWT {
+		worktree.Remove(runID)
+	}
 }
 
 func (s *Spawner) updateStatus(runID, status string) {
@@ -354,7 +437,6 @@ func (s *Spawner) failRun(runID, errMsg string) {
 		log.Printf("[delegate] warning: failed to mark run %s as failed: %v", runID, err)
 	}
 
-	// Store error as a message
 	db.InsertAgentMessage(s.database, domain.AgentMessage{
 		RunID:   runID,
 		Role:    "assistant",
@@ -389,9 +471,32 @@ func (s *Spawner) broadcastMessage(runID string, msg *domain.AgentMessage) {
 }
 
 type agentResult struct {
-	Status  string `json:"status"`
-	Link    string `json:"link"`
-	Summary string `json:"summary"`
+	Status  string         `json:"status"`
+	Link    string         `json:"link"`  // legacy — single URL
+	Summary string         `json:"summary"`
+	Links   map[string]any `json:"links"` // new — keyed URLs (pr_review, pr, jira_issues)
+}
+
+// PrimaryLink returns the most relevant URL from the result.
+func (r *agentResult) PrimaryLink() string {
+	if r.Link != "" {
+		return r.Link
+	}
+	for _, key := range []string{"pr_review", "pr"} {
+		if v, ok := r.Links[key]; ok {
+			if s, ok := v.(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+	if v, ok := r.Links["jira_issues"]; ok {
+		if arr, ok := v.([]any); ok && len(arr) > 0 {
+			if s, ok := arr[0].(string); ok {
+				return s
+			}
+		}
+	}
+	return ""
 }
 
 // parseAgentResult extracts the structured {status, link, summary} JSON from
@@ -402,17 +507,14 @@ func parseAgentResult(text string) *agentResult {
 		return nil
 	}
 
-	// Try direct parse first
 	var result agentResult
 	if json.Unmarshal([]byte(text), &result) == nil && result.Summary != "" {
 		return &result
 	}
 
-	// Strip markdown fences
 	stripped := text
 	if idx := strings.Index(stripped, "```"); idx >= 0 {
 		stripped = stripped[idx+3:]
-		// Skip optional language tag (e.g. "json")
 		if nl := strings.Index(stripped, "\n"); nl >= 0 {
 			stripped = stripped[nl+1:]
 		}
@@ -425,7 +527,6 @@ func parseAgentResult(text string) *agentResult {
 		}
 	}
 
-	// Try to find a JSON object anywhere in the text
 	if start := strings.Index(text, "{"); start >= 0 {
 		if end := strings.LastIndex(text, "}"); end > start {
 			candidate := text[start : end+1]
@@ -438,19 +539,16 @@ func parseAgentResult(text string) *agentResult {
 	return nil
 }
 
-// buildPrompt composes the system envelope + mission body, with variable substitution.
-// The envelope provides tool guidance, repo scoping, and completion format.
-// The mission is the user/system prompt that describes what the agent should do.
-func buildPrompt(mission, owner, repo string, prNumber int, binaryPath string) string {
-	r := strings.NewReplacer(
-		"{{OWNER}}", owner,
-		"{{REPO}}", repo,
-		"{{PR_NUMBER}}", fmt.Sprintf("%d", prNumber),
-		"todotinder exec", binaryPath+" exec",
-	)
-	envelope := r.Replace(ai.EnvelopeTemplate)
-	body := r.Replace(mission)
-	return body + "\n\n" + envelope
+// buildPrompt composes: mission + envelope (scope, tools, completion contract).
+func buildPrompt(mission, scope, toolsRef, binaryPath string) string {
+	envelope := strings.NewReplacer(
+		"{{SCOPE}}", scope,
+		"{{TOOLS_REFERENCE}}", toolsRef,
+	).Replace(ai.EnvelopeTemplate)
+
+	body := strings.ReplaceAll(mission, "todotinder exec", binaryPath+" exec")
+	full := body + "\n\n" + envelope
+	return strings.ReplaceAll(full, "{{BINARY_PATH}}", binaryPath)
 }
 
 func parseOwnerRepo(s string) (string, string) {

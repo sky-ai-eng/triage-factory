@@ -1,0 +1,11 @@
+Jira interactions use `{{BINARY_PATH}} exec jira`. Run `{{BINARY_PATH}} exec jira --help` for the full command list, and `--help` on any subcommand for details.
+
+Workflows:
+- Inspect an issue: `exec jira ticket view <KEY>`, `exec jira ticket list-children <KEY>`, `exec jira ticket list-transitions <KEY>`.
+- Mutate an issue: `exec jira ticket transition`, `exec jira ticket assign`, `exec jira ticket comment`, `exec jira ticket set-priority`.
+- Create issues: `exec jira ticket create`. Use `--parent` to create sub-issues.
+- Search: `exec jira ticket search --jql "<query>"`. JQL is passed through directly.
+
+Gotchas:
+- Server/DC vs Cloud differences (parent linking, description format) are handled internally — you don't need to worry about them.
+- For multi-line `--body` or `--description` arguments, use the same heredoc pattern as GitHub tools.

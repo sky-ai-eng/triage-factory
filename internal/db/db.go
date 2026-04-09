@@ -222,6 +222,9 @@ CREATE TABLE IF NOT EXISTS repo_profiles (
     has_claude_md BOOLEAN DEFAULT 0,
     has_agents_md BOOLEAN DEFAULT 0,
     profile_text TEXT,
+    clone_url TEXT,
+    default_branch TEXT,
+    base_branch TEXT,
     profiled_at DATETIME,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(owner, repo)

@@ -166,8 +166,8 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 	// Trigger delegation on swipe-up
 	if req.Action == "delegate" && s.spawner != nil {
 		task, err := db.GetTask(s.db, id)
-		if err == nil && task != nil && task.Source == "github" {
-			runID, err := s.spawner.DelegatePR(*task, req.PromptID)
+		if err == nil && task != nil {
+			runID, err := s.spawner.Delegate(*task, req.PromptID)
 			if err != nil {
 				response["delegate_error"] = err.Error()
 			} else {

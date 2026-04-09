@@ -82,13 +82,24 @@ func (p *Profiler) Run(ctx context.Context, repos []string) error {
 			log.Printf("[repoprofile] %s: get AGENTS.md: %v", name, err)
 		}
 
+		// Fetch repo metadata (default branch, clone URL)
+		var defaultBranch, cloneURL string
+		if meta, err := p.gh.GetRepoMeta(owner, repo); err != nil {
+			log.Printf("[repoprofile] %s: get repo meta: %v", name, err)
+		} else {
+			defaultBranch = meta.DefaultBranch
+			cloneURL = meta.CloneURL
+		}
+
 		prof := domain.RepoProfile{
-			ID:          name,
-			Owner:       owner,
-			Repo:        repo,
-			HasReadme:   readme != "",
-			HasClaudeMd: claudeMd != "",
-			HasAgentsMd: agentsMd != "",
+			ID:            name,
+			Owner:         owner,
+			Repo:          repo,
+			HasReadme:     readme != "",
+			HasClaudeMd:   claudeMd != "",
+			HasAgentsMd:   agentsMd != "",
+			CloneURL:      cloneURL,
+			DefaultBranch: defaultBranch,
 		}
 
 		// Persist docs flags immediately so the UI can show them before profiling completes

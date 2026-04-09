@@ -9,24 +9,28 @@ import (
 )
 
 // UpsertRepoProfile inserts or updates a repo profile.
-// On conflict it updates all metadata fields while preserving the row identity.
+// On conflict it updates profiling metadata but preserves user-configured fields (base_branch).
 func UpsertRepoProfile(database *sql.DB, p domain.RepoProfile) error {
 	_, err := database.Exec(`
-		INSERT INTO repo_profiles (id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text, profiled_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+		INSERT INTO repo_profiles (id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, profiled_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
 		ON CONFLICT(id) DO UPDATE SET
-			description  = excluded.description,
-			has_readme   = excluded.has_readme,
-			has_claude_md = excluded.has_claude_md,
-			has_agents_md = excluded.has_agents_md,
-			profile_text = excluded.profile_text,
-			profiled_at  = excluded.profiled_at,
-			updated_at   = datetime('now')
+			description    = excluded.description,
+			has_readme     = excluded.has_readme,
+			has_claude_md  = excluded.has_claude_md,
+			has_agents_md  = excluded.has_agents_md,
+			profile_text   = excluded.profile_text,
+			clone_url      = excluded.clone_url,
+			default_branch = excluded.default_branch,
+			profiled_at    = excluded.profiled_at,
+			updated_at     = datetime('now')
 	`,
 		p.ID, p.Owner, p.Repo,
 		nullIfEmpty(p.Description),
 		p.HasReadme, p.HasClaudeMd, p.HasAgentsMd,
 		nullIfEmpty(p.ProfileText),
+		nullIfEmpty(p.CloneURL),
+		nullIfEmpty(p.DefaultBranch),
 		p.ProfiledAt,
 	)
 	return err
@@ -35,7 +39,7 @@ func UpsertRepoProfile(database *sql.DB, p domain.RepoProfile) error {
 // GetAllRepoProfiles returns all repo profiles, including those without profile text.
 func GetAllRepoProfiles(database *sql.DB) ([]domain.RepoProfile, error) {
 	rows, err := database.Query(`
-		SELECT id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text, profiled_at
+		SELECT id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch, profiled_at
 		FROM repo_profiles
 		ORDER BY id
 	`)
@@ -47,13 +51,16 @@ func GetAllRepoProfiles(database *sql.DB) ([]domain.RepoProfile, error) {
 	var profiles []domain.RepoProfile
 	for rows.Next() {
 		var p domain.RepoProfile
-		var description, profileText sql.NullString
+		var description, profileText, cloneURL, defaultBranch, baseBranch sql.NullString
 		var profiledAt sql.NullTime
-		if err := rows.Scan(&p.ID, &p.Owner, &p.Repo, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &profiledAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Owner, &p.Repo, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch, &profiledAt); err != nil {
 			return nil, err
 		}
 		p.Description = description.String
 		p.ProfileText = profileText.String
+		p.CloneURL = cloneURL.String
+		p.DefaultBranch = defaultBranch.String
+		p.BaseBranch = baseBranch.String
 		if profiledAt.Valid {
 			p.ProfiledAt = &profiledAt.Time
 		}
@@ -65,7 +72,7 @@ func GetAllRepoProfiles(database *sql.DB) ([]domain.RepoProfile, error) {
 // GetRepoProfilesWithContent returns all repo profiles that have a non-null profile_text.
 func GetRepoProfilesWithContent(database *sql.DB) ([]domain.RepoProfile, error) {
 	rows, err := database.Query(`
-		SELECT id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text
+		SELECT id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch
 		FROM repo_profiles
 		WHERE profile_text IS NOT NULL AND profile_text != ''
 		ORDER BY id
@@ -78,13 +85,15 @@ func GetRepoProfilesWithContent(database *sql.DB) ([]domain.RepoProfile, error) 
 	var profiles []domain.RepoProfile
 	for rows.Next() {
 		var p domain.RepoProfile
-		var description sql.NullString
-		var profileText sql.NullString
-		if err := rows.Scan(&p.ID, &p.Owner, &p.Repo, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText); err != nil {
+		var description, profileText, cloneURL, defaultBranch, baseBranch sql.NullString
+		if err := rows.Scan(&p.ID, &p.Owner, &p.Repo, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch); err != nil {
 			return nil, err
 		}
 		p.Description = description.String
 		p.ProfileText = profileText.String
+		p.CloneURL = cloneURL.String
+		p.DefaultBranch = defaultBranch.String
+		p.BaseBranch = baseBranch.String
 		profiles = append(profiles, p)
 	}
 	return profiles, rows.Err()
@@ -188,6 +197,53 @@ func splitOwnerRepo(s string) [2]string {
 		}
 	}
 	return [2]string{s, ""}
+}
+
+// UpdateRepoBaseBranch sets the base branch for a repo. Empty string stores NULL.
+func UpdateRepoBaseBranch(database *sql.DB, repoID, baseBranch string) error {
+	_, err := database.Exec(`UPDATE repo_profiles SET base_branch = ?, updated_at = datetime('now') WHERE id = ?`,
+		nullIfEmpty(baseBranch), repoID)
+	return err
+}
+
+// GetRepoProfile returns a single repo profile by ID (owner/repo), or nil if not found.
+func GetRepoProfile(database *sql.DB, repoID string) (*domain.RepoProfile, error) {
+	var p domain.RepoProfile
+	var description, profileText, cloneURL, defaultBranch, baseBranch sql.NullString
+	var profiledAt sql.NullTime
+	err := database.QueryRow(`
+		SELECT id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch, profiled_at
+		FROM repo_profiles WHERE id = ?
+	`, repoID).Scan(&p.ID, &p.Owner, &p.Repo, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch, &profiledAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	p.Description = description.String
+	p.ProfileText = profileText.String
+	p.CloneURL = cloneURL.String
+	p.DefaultBranch = defaultBranch.String
+	p.BaseBranch = baseBranch.String
+	if profiledAt.Valid {
+		p.ProfiledAt = &profiledAt.Time
+	}
+	return &p, nil
+}
+
+// GetTaskMatchedRepos returns the matched repo IDs for a task, or an empty slice.
+func GetTaskMatchedRepos(database *sql.DB, taskID string) ([]string, error) {
+	var raw sql.NullString
+	err := database.QueryRow(`SELECT matched_repos FROM tasks WHERE id = ?`, taskID).Scan(&raw)
+	if err != nil || !raw.Valid || raw.String == "" {
+		return nil, err
+	}
+	var repos []string
+	if err := json.Unmarshal([]byte(raw.String), &repos); err != nil {
+		return nil, fmt.Errorf("parse matched_repos: %w", err)
+	}
+	return repos, nil
 }
 
 // UpdateTaskRepoMatch stores the repo match results for a task.

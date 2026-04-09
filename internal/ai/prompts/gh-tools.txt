@@ -1,0 +1,17 @@
+GitHub interactions use `{{BINARY_PATH}} exec gh`. Run `{{BINARY_PATH}} exec gh --help` for the full command list, and `--help` on any subcommand for details.
+
+Workflows:
+- Inspect a PR: `exec gh pr view`, `exec gh pr diff`, `exec gh pr files`. Use `-v` for full review/comment bodies.
+- Review a PR: `exec gh pr start-review` → `exec gh pr add-review-comment` (repeat) → `exec gh pr submit-review`.
+- Read files in the working directory for context beyond the diff.
+
+Gotchas:
+- The `--body` for `submit-review` should begin with a `##` title (e.g. "## Looks good — minor nits") followed by your summary. A top-level heading and metadata footer are added automatically; use `##` for yours.
+- For multi-line `--body` arguments, use a heredoc:
+  ```
+  {{BINARY_PATH}} exec gh pr add-review-comment <review_id> --file <path> --line <N> --body "$(cat <<'EOF'
+  Your comment here.
+  Can span multiple lines, include "quotes", and code blocks.
+  EOF
+  )"
+  ```

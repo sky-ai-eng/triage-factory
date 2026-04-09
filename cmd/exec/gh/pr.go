@@ -450,11 +450,33 @@ func isLocalID(id string) bool {
 
 func parseRepoAndNumber(args []string) (string, string, int) {
 	owner, repo := ownerRepo(args)
-	if len(args) < 1 {
+	// Find first positional arg (not a flag or flag value)
+	num := firstPositional(args)
+	if num == "" {
 		exitErr("PR number is required")
 	}
-	number := mustInt(args[0], "pr_number")
+	number := mustInt(num, "pr_number")
 	return owner, repo, number
+}
+
+// firstPositional returns the first argument that isn't a flag or a flag's value.
+func firstPositional(args []string) string {
+	skipNext := false
+	for _, a := range args {
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		if a == "--repo" || a == "--file" || a == "--pr" || a == "--body" || a == "--line" || a == "--start-line" || a == "--event" || a == "--status" {
+			skipNext = true
+			continue
+		}
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		return a
+	}
+	return ""
 }
 
 func ownerRepo(args []string) (string, string) {

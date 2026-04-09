@@ -78,6 +78,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/github/repos", s.handleGitHubRepos)
 	s.mux.HandleFunc("GET /api/repos", s.handleRepoProfiles)
 	s.mux.HandleFunc("POST /api/repos", s.handleReposSave)
+	s.mux.HandleFunc("PATCH /api/repos/{owner}/{repo}", s.handleRepoUpdate)
+	s.mux.HandleFunc("GET /api/repos/{owner}/{repo}/branches", s.handleRepoBranches)
 	s.mux.HandleFunc("GET /api/jira/statuses", s.handleJiraStatuses)
 
 	s.mux.HandleFunc("GET /api/reviews/{id}", s.handleReviewGet)
