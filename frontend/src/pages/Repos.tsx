@@ -22,7 +22,7 @@ function BranchInput({ profile, onSave }: { profile: RepoProfile; onSave: (branc
   const [branches, setBranches] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>()
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>(null)
 
   const placeholder = profile.default_branch || 'main'
 
