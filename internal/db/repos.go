@@ -208,6 +208,46 @@ func UpdateRepoBaseBranch(database *sql.DB, repoID, baseBranch string) error {
 	return err
 }
 
+// GetRepoProfile returns a single repo profile by ID (owner/repo), or nil if not found.
+func GetRepoProfile(database *sql.DB, repoID string) (*domain.RepoProfile, error) {
+	var p domain.RepoProfile
+	var description, profileText, cloneURL, defaultBranch, baseBranch sql.NullString
+	var profiledAt sql.NullTime
+	err := database.QueryRow(`
+		SELECT id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch, profiled_at
+		FROM repo_profiles WHERE id = ?
+	`, repoID).Scan(&p.ID, &p.Owner, &p.Repo, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch, &profiledAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	p.Description = description.String
+	p.ProfileText = profileText.String
+	p.CloneURL = cloneURL.String
+	p.DefaultBranch = defaultBranch.String
+	p.BaseBranch = baseBranch.String
+	if profiledAt.Valid {
+		p.ProfiledAt = &profiledAt.Time
+	}
+	return &p, nil
+}
+
+// GetTaskMatchedRepos returns the matched repo IDs for a task, or an empty slice.
+func GetTaskMatchedRepos(database *sql.DB, taskID string) ([]string, error) {
+	var raw sql.NullString
+	err := database.QueryRow(`SELECT matched_repos FROM tasks WHERE id = ?`, taskID).Scan(&raw)
+	if err != nil || !raw.Valid || raw.String == "" {
+		return nil, err
+	}
+	var repos []string
+	if err := json.Unmarshal([]byte(raw.String), &repos); err != nil {
+		return nil, fmt.Errorf("parse matched_repos: %w", err)
+	}
+	return repos, nil
+}
+
 // UpdateTaskRepoMatch stores the repo match results for a task.
 func UpdateTaskRepoMatch(database *sql.DB, taskID string, repos []string, blockedReason string) error {
 	reposJSON, err := json.Marshal(repos)
