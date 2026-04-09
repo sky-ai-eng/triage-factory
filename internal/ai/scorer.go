@@ -2,13 +2,16 @@ package ai
 
 import (
 	"bytes"
+	"database/sql"
 	_ "embed"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os/exec"
+	"strings"
 	"sync"
 
+	"github.com/sky-ai-eng/todo-tinder/internal/db"
 	"github.com/sky-ai-eng/todo-tinder/internal/domain"
 )
 
@@ -21,7 +24,10 @@ var EnvelopeTemplate string
 //go:embed prompts/pr-review.txt
 var PRReviewPromptTemplate string
 
-const batchSize = 20
+//go:embed prompts/repo-profile.txt
+var RepoProfilePrompt string
+
+const batchSize = 10
 
 // TaskInput is the minimal info we send to the LLM for scoring.
 type TaskInput struct {
@@ -41,11 +47,12 @@ type TaskInput struct {
 
 // TaskScore is what we get back from the LLM per task.
 type TaskScore struct {
-	ID                string  `json:"id"`
-	PriorityScore     float64 `json:"priority_score"`
-	AgentConfidence   float64 `json:"agent_confidence"`
-	PriorityReasoning string  `json:"priority_reasoning"`
-	Summary           string  `json:"summary"`
+	ID                string   `json:"id"`
+	PriorityScore     float64  `json:"priority_score"`
+	AgentConfidence   float64  `json:"agent_confidence"`
+	PriorityReasoning string   `json:"priority_reasoning"`
+	Summary           string   `json:"summary"`
+	Repos             []string `json:"repos"`
 }
 
 // scoringModel is always haiku — fast and cheap, plenty capable for
@@ -55,9 +62,20 @@ const scoringModel = "haiku"
 
 // ScoreTasks runs the AI scoring pipeline on a set of tasks.
 // It batches into chunks of batchSize and runs them in parallel.
-func ScoreTasks(tasks []domain.Task) ([]TaskScore, error) {
+func ScoreTasks(database *sql.DB, tasks []domain.Task) ([]TaskScore, error) {
 	if len(tasks) == 0 {
 		return nil, nil
+	}
+
+	// Load repo profiles for context injection.
+	repoContext := "(no repo profiles available)"
+	if database != nil {
+		profiles, err := db.GetRepoProfilesWithContent(database)
+		if err != nil {
+			log.Printf("[ai] error loading repo profiles: %v", err)
+		} else {
+			repoContext = formatRepoProfiles(profiles)
+		}
 	}
 
 	// Build inputs
@@ -101,7 +119,7 @@ func ScoreTasks(tasks []domain.Task) ([]TaskScore, error) {
 		wg.Add(1)
 		go func(idx int, b []TaskInput) {
 			defer wg.Done()
-			scores, err := scoreBatch(b)
+			scores, err := scoreBatch(b, repoContext)
 			results[idx] = batchResult{scores, err}
 		}(i, batch)
 	}
@@ -120,13 +138,13 @@ func ScoreTasks(tasks []domain.Task) ([]TaskScore, error) {
 	return allScores, nil
 }
 
-func scoreBatch(tasks []TaskInput) ([]TaskScore, error) {
+func scoreBatch(tasks []TaskInput, repoContext string) ([]TaskScore, error) {
 	tasksJSON, err := json.Marshal(tasks)
 	if err != nil {
 		return nil, fmt.Errorf("marshal tasks: %w", err)
 	}
 
-	prompt := fmt.Sprintf(batchPrioritizePrompt, string(tasksJSON))
+	prompt := fmt.Sprintf(batchPrioritizePrompt, repoContext, string(tasksJSON))
 
 	args := []string{
 		"-p", prompt,
@@ -155,7 +173,7 @@ func scoreBatch(tasks []TaskInput) ([]TaskScore, error) {
 	}
 
 	// The result might contain markdown fences despite the prompt — strip them
-	raw = stripCodeFences(raw)
+	raw = StripCodeFences(raw)
 
 	var scores []TaskScore
 	if err := json.Unmarshal(raw, &scores); err != nil {
@@ -165,7 +183,20 @@ func scoreBatch(tasks []TaskInput) ([]TaskScore, error) {
 	return scores, nil
 }
 
-func stripCodeFences(b []byte) []byte {
+// formatRepoProfiles renders profiles as a compact text block for the prompt.
+func formatRepoProfiles(profiles []domain.RepoProfile) string {
+	if len(profiles) == 0 {
+		return "(no repo profiles available)"
+	}
+	var sb strings.Builder
+	for _, p := range profiles {
+		sb.WriteString(fmt.Sprintf("repo: %s\n%s\n\n", p.ID, p.ProfileText))
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+// StripCodeFences removes markdown code fences from LLM output.
+func StripCodeFences(b []byte) []byte {
 	s := bytes.TrimSpace(b)
 	// Strip ```json ... ``` or ``` ... ```
 	if bytes.HasPrefix(s, []byte("```")) {

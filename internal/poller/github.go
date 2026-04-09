@@ -16,11 +16,16 @@ import (
 	"github.com/sky-ai-eng/todo-tinder/internal/eventbus"
 )
 
+// maxQueryLen is the maximum length of a GitHub search query string.
+// GitHub documents 256 as the limit for the q= parameter.
+const maxQueryLen = 256
+
 // GitHubPoller fetches tasks from the GitHub API on an interval.
 type GitHubPoller struct {
 	baseURL  string
 	pat      string
 	username string
+	repos    []string // if non-empty, only poll these repos
 	database *sql.DB
 	client   *http.Client
 	interval time.Duration
@@ -44,11 +49,12 @@ func ghAPIBase(baseURL string) string {
 	return baseURL + "/api/v3"
 }
 
-func NewGitHubPoller(baseURL, pat, username string, database *sql.DB, interval time.Duration, bus *eventbus.Bus) *GitHubPoller {
+func NewGitHubPoller(baseURL, pat, username string, repos []string, database *sql.DB, interval time.Duration, bus *eventbus.Bus) *GitHubPoller {
 	return &GitHubPoller{
 		baseURL:  ghAPIBase(strings.TrimRight(baseURL, "/")),
 		pat:      pat,
 		username: username,
+		repos:    repos,
 		database: database,
 		client:   &http.Client{Timeout: 15 * time.Second},
 		interval: interval,
@@ -300,8 +306,47 @@ func mustJSON(v any) string {
 	return string(data)
 }
 
+// scopedQueries takes a base search query and returns one or more queries
+// with +repo: qualifiers appended, batched to stay under maxQueryLen.
+// If no repos are configured, returns the base query as-is.
+func scopedQueries(base string, repos []string) []string {
+	if len(repos) == 0 {
+		return []string{base}
+	}
+
+	var queries []string
+	current := base
+	for _, repo := range repos {
+		term := "+repo:" + repo
+		if len(current)+len(term) > maxQueryLen {
+			// Current batch is full — flush it and start a new one
+			queries = append(queries, current)
+			current = base + term
+		} else {
+			current += term
+		}
+	}
+	queries = append(queries, current)
+	return queries
+}
+
 // searchPRs runs a GitHub search query and returns tasks tagged with the given relevance reason.
-func (p *GitHubPoller) searchPRs(query, reason string, fetchCI bool) ([]domain.Task, error) {
+// If repos are configured, scopes the query to those repos (batching if needed).
+func (p *GitHubPoller) searchPRs(baseQuery, reason string, fetchCI bool) ([]domain.Task, error) {
+	queries := scopedQueries(baseQuery, p.repos)
+
+	var allTasks []domain.Task
+	for _, query := range queries {
+		tasks, err := p.searchPRsQuery(query, reason, fetchCI)
+		if err != nil {
+			return nil, err
+		}
+		allTasks = append(allTasks, tasks...)
+	}
+	return allTasks, nil
+}
+
+func (p *GitHubPoller) searchPRsQuery(query, reason string, fetchCI bool) ([]domain.Task, error) {
 	url := fmt.Sprintf("%s/search/issues?q=%s&per_page=100", p.baseURL, query)
 
 	body, err := p.get(url)

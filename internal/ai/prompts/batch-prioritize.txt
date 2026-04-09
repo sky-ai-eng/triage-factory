@@ -5,9 +5,15 @@ For each task below, produce:
 - priority_reasoning: one concise sentence (under 100 chars) explaining WHY this has the priority it does. Focus on what makes it urgent or not. E.g. "Stale P1 blocking deploy" or "Low-risk docs update, no urgency."
 - agent_confidence (0.0-1.0): how suitable this task is for autonomous AI handling. For PRs, you're estimating PR review difficulty: small diffs = high, architecture decisions = low, large refactors = medium. For Jira tickets, you're estimating E2E implementation difficulty: bug fixes or light enhancements = high, massive refactors or open-ended architectural tasks = low.
 - summary: one concise sentence (under 100 chars) summarizing WHAT the PR or ticket does — its scope, the area of code it touches, and any notable risk. Don't just repeat the title in different words, offer something of value. Do NOT mention whether it needs human or AI handling. Do NOT mention priority or triage decisions. Just describe the change itself.
+- repos: for Jira tickets, identify which repository or repositories the work would be done in based on the repo profiles. For GitHub PRs, use the repo field from the task. Return an empty array if no repo match can be determined.
 
 Respond with ONLY a JSON array — no markdown fences, no explanation:
-[{"id": "...", "priority_score": 0.85, "agent_confidence": 0.7, "priority_reasoning": "...", "summary": "..."}, ...]
+[{"id": "...", "priority_score": 0.85, "agent_confidence": 0.7, "priority_reasoning": "...", "summary": "...", "repos": ["owner/repo"]}, ...]
 
-Tasks:
+<repo-profiles>
 %s
+</repo-profiles>
+
+<tasks>
+%s
+</tasks>

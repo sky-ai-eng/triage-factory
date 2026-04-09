@@ -73,6 +73,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     ai_summary TEXT,
     priority_reasoning TEXT,
     agent_confidence REAL,
+    matched_repos TEXT,
+    blocked_reason TEXT,
     snooze_until DATETIME,
     UNIQUE(source, source_id)
 );
@@ -210,4 +212,20 @@ CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
 CREATE INDEX IF NOT EXISTS idx_events_task_id ON events(task_id);
 CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_event_type ON tasks(event_type);
+
+CREATE TABLE IF NOT EXISTS repo_profiles (
+    id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    description TEXT,
+    has_readme BOOLEAN DEFAULT 0,
+    has_claude_md BOOLEAN DEFAULT 0,
+    has_agents_md BOOLEAN DEFAULT 0,
+    profile_text TEXT,
+    profiled_at DATETIME,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(owner, repo)
+);
+
+CREATE INDEX IF NOT EXISTS idx_repo_profiles_owner_repo ON repo_profiles(owner, repo);
 `

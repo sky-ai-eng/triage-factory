@@ -19,12 +19,13 @@ type RunnerCallbacks struct {
 // Runner manages AI scoring as a background process.
 // It exposes a Trigger channel that pollers signal after ingesting new tasks.
 type Runner struct {
-	database  *sql.DB
-	callbacks RunnerCallbacks
-	trigger   chan struct{}
-	stop      chan struct{}
-	mu        sync.Mutex
-	running   bool
+	database     *sql.DB
+	callbacks    RunnerCallbacks
+	profileReady func() bool // returns true when repo profiles are available
+	trigger      chan struct{}
+	stop         chan struct{}
+	mu           sync.Mutex
+	running      bool
 }
 
 func NewRunner(database *sql.DB, callbacks RunnerCallbacks) *Runner {
@@ -34,6 +35,12 @@ func NewRunner(database *sql.DB, callbacks RunnerCallbacks) *Runner {
 		trigger:   make(chan struct{}, 1),
 		stop:      make(chan struct{}),
 	}
+}
+
+// SetProfileGate sets the function used to check if repo profiles are ready.
+// If not set, scoring proceeds without gating.
+func (r *Runner) SetProfileGate(fn func() bool) {
+	r.profileReady = fn
 }
 
 // Trigger signals the runner to check for unscored tasks.
@@ -78,6 +85,13 @@ func (r *Runner) run() {
 		r.mu.Unlock()
 	}()
 
+	// Wait for repo profiles before scoring — stale or missing profiles
+	// lead to incorrect repo matches that would need re-scoring anyway.
+	if r.profileReady != nil && !r.profileReady() {
+		log.Println("[ai] skipping scoring cycle: repo profiles not ready")
+		return
+	}
+
 	tasks, err := db.UnscoredTasks(r.database)
 	if err != nil {
 		log.Printf("[ai] error fetching unscored tasks: %v", err)
@@ -105,10 +119,16 @@ func (r *Runner) run() {
 		r.callbacks.OnScoringStarted(taskIDs)
 	}
 
-	scores, err := ScoreTasks(tasks)
+	scores, err := ScoreTasks(r.database, tasks)
 	if err != nil {
 		log.Printf("[ai] scoring failed: %v", err)
 		return
+	}
+
+	// Build a source map for repo-match blocked_reason logic.
+	sourceByID := make(map[string]string, len(tasks))
+	for _, t := range tasks {
+		sourceByID[t.ID] = t.Source
 	}
 
 	updates := make([]domain.TaskScoreUpdate, len(scores))
@@ -119,6 +139,18 @@ func (r *Runner) run() {
 			AgentConfidence:   s.AgentConfidence,
 			PriorityReasoning: s.PriorityReasoning,
 			Summary:           s.Summary,
+		}
+
+		// Determine blocked reason for repo matching.
+		blockedReason := ""
+		if len(s.Repos) > 1 {
+			blockedReason = "multi_repo"
+		} else if len(s.Repos) == 0 && sourceByID[s.ID] == "jira" {
+			blockedReason = "no_repo_match"
+		}
+
+		if err := db.UpdateTaskRepoMatch(r.database, s.ID, s.Repos, blockedReason); err != nil {
+			log.Printf("[ai] error storing repo match for %s: %v", s.ID, err)
 		}
 	}
 

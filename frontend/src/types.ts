@@ -103,3 +103,5 @@ export type WSEvent =
   | { type: 'tasks_updated'; data: Record<string, never> }
   | { type: 'scoring_started'; data: { task_ids: string[] } }
   | { type: 'scoring_completed'; data: { task_ids: string[] } }
+  | { type: 'repo_docs_updated'; data: { id: string; has_readme: boolean; has_claude_md: boolean; has_agents_md: boolean } }
+  | { type: 'repo_profile_updated'; data: { id: string; profile_text: string } }

@@ -19,6 +19,7 @@ type Config struct {
 type GitHubConfig struct {
 	BaseURL      string        `yaml:"base_url"`
 	PollInterval time.Duration `yaml:"poll_interval"`
+
 }
 
 type JiraConfig struct {
@@ -37,6 +38,17 @@ type AIConfig struct {
 	Model                    string `yaml:"model"`
 	ReprioritizeThreshold    int    `yaml:"reprioritize_threshold"`
 	PreferenceUpdateInterval int    `yaml:"preference_update_interval"`
+}
+
+// Ready returns true if GitHub credentials are configured.
+// Repo count must be checked separately via the DB.
+func (c GitHubConfig) Ready(pat, url string) bool {
+	return pat != "" && url != ""
+}
+
+// Ready returns true if Jira is fully configured: credentials + at least one project.
+func (c JiraConfig) Ready(pat, url string) bool {
+	return pat != "" && url != "" && len(c.Projects) > 0
 }
 
 // Default returns a Config with sensible defaults matching the spec.

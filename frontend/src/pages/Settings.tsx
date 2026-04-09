@@ -32,7 +32,7 @@ interface SettingsData {
 export default function Settings() {
   const [data, setData] = useState<SettingsData | null>(null)
   const [form, setForm] = useState({
-    github_enabled: false,
+    github_enabled: true,
     github_url: '',
     github_pat: '',
     jira_enabled: false,
@@ -57,7 +57,7 @@ export default function Settings() {
       .then((d: SettingsData) => {
         setData(d)
         setForm({
-          github_enabled: d.github.enabled,
+          github_enabled: true,
           github_url: d.github.base_url || '',
           github_pat: '',
           jira_enabled: d.jira.enabled,
@@ -71,7 +71,6 @@ export default function Settings() {
           ai_model: d.ai.model,
           server_port: d.server.port,
         })
-        // Fetch available statuses if Jira is configured with projects
         if (d.jira.enabled && d.jira.projects?.length > 0) {
           fetchJiraStatuses(d.jira.projects)
         }
@@ -90,7 +89,7 @@ export default function Settings() {
         setJiraStatuses(statuses)
       }
     } catch {
-      // Non-critical — statuses just won't be selectable
+      // Non-critical
     } finally {
       setStatusesLoading(false)
     }
@@ -156,17 +155,10 @@ export default function Settings() {
       <h1 className="text-[22px] font-semibold text-text-primary tracking-tight mb-6">Settings</h1>
       <form onSubmit={save} className="space-y-5">
 
-        {/* GitHub */}
+        {/* GitHub (always on) */}
         <Section>
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-[13px] font-medium text-text-secondary">GitHub</h2>
-            <Toggle
-              enabled={form.github_enabled}
-              onChange={(v) => setForm((f) => ({ ...f, github_enabled: v }))}
-            />
-          </div>
-          {form.github_enabled && (
-            <div className="space-y-3">
+          <h2 className="text-[13px] font-medium text-text-secondary mb-4">GitHub</h2>
+          <div className="space-y-3">
               <Field label="Base URL">
                 <input
                   type="url"
@@ -197,8 +189,8 @@ export default function Settings() {
                   <option value="5m0s">5 minutes</option>
                 </select>
               </Field>
+
             </div>
-          )}
         </Section>
 
         {/* Jira */}
@@ -385,6 +377,7 @@ export default function Settings() {
           </button>
         </Section>
       </form>
+
     </div>
   )
 }

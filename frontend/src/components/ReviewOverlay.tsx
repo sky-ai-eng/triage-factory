@@ -103,14 +103,26 @@ export default function ReviewOverlay({ runID, open, onClose }: Props) {
     );
   }, [review?.id]);
 
-  // Body + event updates (local only — stored on submit)
-  const handleUpdateBody = useCallback((body: string) => {
+  // Body + event updates — persist to DB
+  const handleUpdateBody = useCallback(async (body: string) => {
+    if (!review) return;
     setReview((prev) => (prev ? { ...prev, review_body: body } : prev));
-  }, []);
+    await fetch(`/api/reviews/${review.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ review_body: body }),
+    });
+  }, [review?.id]);
 
-  const handleUpdateEvent = useCallback((event: string) => {
+  const handleUpdateEvent = useCallback(async (event: string) => {
+    if (!review) return;
     setReview((prev) => (prev ? { ...prev, review_event: event } : prev));
-  }, []);
+    await fetch(`/api/reviews/${review.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ review_event: event }),
+    });
+  }, [review?.id]);
 
   // Submit to GitHub
   const handleSubmit = useCallback(async () => {

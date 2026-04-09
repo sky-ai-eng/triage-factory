@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/sky-ai-eng/todo-tinder/internal/auth"
@@ -116,13 +117,24 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Load existing state
+	// Load existing state — snapshot for change detection
 	cfg, err := config.Load()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load config: " + err.Error()})
 		return
 	}
 	creds, _ := auth.Load() // auth errors are non-fatal
+
+	// Snapshot pre-change values for diffing
+	prevGHURL := creds.GitHubURL
+	prevGHPAT := creds.GitHubPAT
+	prevGHPollInterval := cfg.GitHub.PollInterval
+	prevJiraURL := creds.JiraURL
+	prevJiraPAT := creds.JiraPAT
+	prevJiraProjects := cfg.Jira.Projects
+	prevJiraPickupStatuses := cfg.Jira.PickupStatuses
+	prevJiraInProgressStatus := cfg.Jira.InProgressStatus
+	prevJiraPollInterval := cfg.Jira.PollInterval
 
 	// --- Handle GitHub ---
 	if req.GitHubEnabled {
@@ -225,9 +237,24 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Restart pollers and spawner with new credentials/config
-	if s.onCredentialsChanged != nil {
-		go s.onCredentialsChanged()
+	// Detect what changed and fire the appropriate callback
+	ghChanged := creds.GitHubURL != prevGHURL ||
+		creds.GitHubPAT != prevGHPAT ||
+		cfg.GitHub.PollInterval != prevGHPollInterval
+
+	jiraChanged := creds.JiraURL != prevJiraURL ||
+		creds.JiraPAT != prevJiraPAT ||
+		!slices.Equal(cfg.Jira.Projects, prevJiraProjects) ||
+		!slices.Equal(cfg.Jira.PickupStatuses, prevJiraPickupStatuses) ||
+		cfg.Jira.InProgressStatus != prevJiraInProgressStatus ||
+		cfg.Jira.PollInterval != prevJiraPollInterval
+
+	if ghChanged && s.onGitHubChanged != nil {
+		// GitHub change triggers full restart (includes Jira poller restart)
+		go s.onGitHubChanged()
+	} else if jiraChanged && s.onJiraChanged != nil {
+		// Jira-only change — just restart Jira poller
+		go s.onJiraChanged()
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
