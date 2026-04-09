@@ -150,17 +150,18 @@ func CreateForBranch(ctx context.Context, owner, repo, cloneURL, baseBranch, fea
 	return wtDir, nil
 }
 
-// detectDefaultBranch reads origin/HEAD from the bare repo to find the default branch.
+// detectDefaultBranch reads HEAD from the bare repo to find the default branch.
+// In a bare clone, HEAD points directly to refs/heads/<default> (not refs/remotes/origin/*).
 // Falls back to "main" if detection fails.
 func detectDefaultBranch(ctx context.Context, bareDir string) string {
-	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "refs/remotes/origin/HEAD")
+	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "HEAD")
 	cmd.Dir = bareDir
 	out, err := cmd.Output()
 	if err == nil {
-		// Output is like "refs/remotes/origin/main\n"
+		// Output is like "refs/heads/main\n"
 		ref := strings.TrimSpace(string(out))
-		if parts := strings.SplitN(ref, "refs/remotes/origin/", 2); len(parts) == 2 {
-			return parts[1]
+		if strings.HasPrefix(ref, "refs/heads/") {
+			return ref[len("refs/heads/"):]
 		}
 	}
 	return "main"

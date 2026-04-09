@@ -9,8 +9,6 @@ import (
 )
 
 // UpsertRepoProfile inserts or updates a repo profile.
-// On conflict it updates all metadata fields while preserving the row identity.
-// UpsertRepoProfile inserts or updates a repo profile.
 // On conflict it updates profiling metadata but preserves user-configured fields (base_branch).
 func UpsertRepoProfile(database *sql.DB, p domain.RepoProfile) error {
 	_, err := database.Exec(`

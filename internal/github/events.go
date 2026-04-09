@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -75,7 +76,7 @@ func (c *Client) ListBranches(owner, repo, query string, limit int) ([]Branch, e
 	}
 	path := fmt.Sprintf("/repos/%s/%s/branches?per_page=%d", owner, repo, limit)
 	if query != "" {
-		path += "&query=" + query
+		path += "&query=" + url.QueryEscape(query)
 	}
 	data, err := c.Get(path)
 	if err != nil {

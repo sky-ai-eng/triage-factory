@@ -94,8 +94,10 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	repoID := owner + "/" + repo
 
+	// Use json.RawMessage to distinguish null (clear) from omitted (no change).
+	// *string can't tell them apart — both decode to nil.
 	var req struct {
-		BaseBranch *string `json:"base_branch"` // pointer so we can distinguish null from missing
+		BaseBranch json.RawMessage `json:"base_branch,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
@@ -103,7 +105,14 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.BaseBranch != nil {
-		if err := db.UpdateRepoBaseBranch(s.db, repoID, *req.BaseBranch); err != nil {
+		var branch string
+		if string(req.BaseBranch) == "null" {
+			branch = "" // explicit null → clear
+		} else if err := json.Unmarshal(req.BaseBranch, &branch); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid base_branch value"})
+			return
+		}
+		if err := db.UpdateRepoBaseBranch(s.db, repoID, branch); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
