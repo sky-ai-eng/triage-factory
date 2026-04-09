@@ -187,7 +187,7 @@ func (s *Spawner) runPRReview(ctx context.Context, runID string, task domain.Tas
 
 	// 2. Create worktree
 	s.updateStatus(runID, "cloning")
-	wtPath, err := worktree.Create(ctx, owner, repo, pr.CloneURL, pr.HeadSHA, prNumber, runID)
+	wtPath, err := worktree.CreateForPR(ctx, owner, repo, pr.CloneURL, pr.HeadRef, prNumber, runID)
 	if err != nil {
 		if cancelled() {
 			return
