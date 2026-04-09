@@ -83,11 +83,12 @@ func (p *Profiler) Run(ctx context.Context, repos []string) error {
 		}
 
 		// Fetch repo metadata (default branch, clone URL)
-		var defaultBranch string
+		var defaultBranch, cloneURL string
 		if meta, err := p.gh.GetRepoMeta(owner, repo); err != nil {
 			log.Printf("[repoprofile] %s: get repo meta: %v", name, err)
 		} else {
 			defaultBranch = meta.DefaultBranch
+			cloneURL = meta.CloneURL
 		}
 
 		prof := domain.RepoProfile{
@@ -97,6 +98,7 @@ func (p *Profiler) Run(ctx context.Context, repos []string) error {
 			HasReadme:     readme != "",
 			HasClaudeMd:   claudeMd != "",
 			HasAgentsMd:   agentsMd != "",
+			CloneURL:      cloneURL,
 			DefaultBranch: defaultBranch,
 		}
 

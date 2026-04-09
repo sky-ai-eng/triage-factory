@@ -12,6 +12,7 @@ type RepoProfile struct {
 	HasClaudeMd bool
 	HasAgentsMd bool
 	ProfileText string
+	CloneURL      string // HTTPS clone URL (detected during profiling)
 	DefaultBranch string // repo's default branch (detected during profiling)
 	BaseBranch    string // user-configured branch to base feature work on (empty = use default)
 	ProfiledAt    *time.Time

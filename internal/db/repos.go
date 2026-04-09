@@ -14,14 +14,15 @@ import (
 // On conflict it updates profiling metadata but preserves user-configured fields (base_branch).
 func UpsertRepoProfile(database *sql.DB, p domain.RepoProfile) error {
 	_, err := database.Exec(`
-		INSERT INTO repo_profiles (id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text, default_branch, profiled_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+		INSERT INTO repo_profiles (id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, profiled_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
 		ON CONFLICT(id) DO UPDATE SET
 			description    = excluded.description,
 			has_readme     = excluded.has_readme,
 			has_claude_md  = excluded.has_claude_md,
 			has_agents_md  = excluded.has_agents_md,
 			profile_text   = excluded.profile_text,
+			clone_url      = excluded.clone_url,
 			default_branch = excluded.default_branch,
 			profiled_at    = excluded.profiled_at,
 			updated_at     = datetime('now')
@@ -30,6 +31,7 @@ func UpsertRepoProfile(database *sql.DB, p domain.RepoProfile) error {
 		nullIfEmpty(p.Description),
 		p.HasReadme, p.HasClaudeMd, p.HasAgentsMd,
 		nullIfEmpty(p.ProfileText),
+		nullIfEmpty(p.CloneURL),
 		nullIfEmpty(p.DefaultBranch),
 		p.ProfiledAt,
 	)
@@ -39,7 +41,7 @@ func UpsertRepoProfile(database *sql.DB, p domain.RepoProfile) error {
 // GetAllRepoProfiles returns all repo profiles, including those without profile text.
 func GetAllRepoProfiles(database *sql.DB) ([]domain.RepoProfile, error) {
 	rows, err := database.Query(`
-		SELECT id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text, default_branch, base_branch, profiled_at
+		SELECT id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch, profiled_at
 		FROM repo_profiles
 		ORDER BY id
 	`)
@@ -51,13 +53,14 @@ func GetAllRepoProfiles(database *sql.DB) ([]domain.RepoProfile, error) {
 	var profiles []domain.RepoProfile
 	for rows.Next() {
 		var p domain.RepoProfile
-		var description, profileText, defaultBranch, baseBranch sql.NullString
+		var description, profileText, cloneURL, defaultBranch, baseBranch sql.NullString
 		var profiledAt sql.NullTime
-		if err := rows.Scan(&p.ID, &p.Owner, &p.Repo, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &defaultBranch, &baseBranch, &profiledAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Owner, &p.Repo, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch, &profiledAt); err != nil {
 			return nil, err
 		}
 		p.Description = description.String
 		p.ProfileText = profileText.String
+		p.CloneURL = cloneURL.String
 		p.DefaultBranch = defaultBranch.String
 		p.BaseBranch = baseBranch.String
 		if profiledAt.Valid {
@@ -71,7 +74,7 @@ func GetAllRepoProfiles(database *sql.DB) ([]domain.RepoProfile, error) {
 // GetRepoProfilesWithContent returns all repo profiles that have a non-null profile_text.
 func GetRepoProfilesWithContent(database *sql.DB) ([]domain.RepoProfile, error) {
 	rows, err := database.Query(`
-		SELECT id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text, default_branch, base_branch
+		SELECT id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch
 		FROM repo_profiles
 		WHERE profile_text IS NOT NULL AND profile_text != ''
 		ORDER BY id
@@ -84,12 +87,13 @@ func GetRepoProfilesWithContent(database *sql.DB) ([]domain.RepoProfile, error) 
 	var profiles []domain.RepoProfile
 	for rows.Next() {
 		var p domain.RepoProfile
-		var description, profileText, defaultBranch, baseBranch sql.NullString
-		if err := rows.Scan(&p.ID, &p.Owner, &p.Repo, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &defaultBranch, &baseBranch); err != nil {
+		var description, profileText, cloneURL, defaultBranch, baseBranch sql.NullString
+		if err := rows.Scan(&p.ID, &p.Owner, &p.Repo, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch); err != nil {
 			return nil, err
 		}
 		p.Description = description.String
 		p.ProfileText = profileText.String
+		p.CloneURL = cloneURL.String
 		p.DefaultBranch = defaultBranch.String
 		p.BaseBranch = baseBranch.String
 		profiles = append(profiles, p)

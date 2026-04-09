@@ -47,21 +47,14 @@ func runDir(runID string) string {
 	return filepath.Join(os.TempDir(), runsDir, runID)
 }
 
-// Create sets up an isolated worktree for an agent run.
-// Ensures a bare clone exists, fetches the target PR ref, and creates a worktree at the given SHA.
-// Returns the worktree path.
-func Create(ctx context.Context, owner, repo, cloneURL, sha string, prNumber int, runID string) (string, error) {
-	// Serialize git operations per repo to avoid lock conflicts
-	mu := lockRepo(owner, repo)
-	mu.Lock()
-	defer mu.Unlock()
-
+// ensureBareClone creates a bare clone if it doesn't exist yet.
+// Must be called under the per-repo lock.
+func ensureBareClone(ctx context.Context, owner, repo, cloneURL string) (string, error) {
 	bareDir, err := repoDir(owner, repo)
 	if err != nil {
 		return "", fmt.Errorf("resolve repo dir: %w", err)
 	}
 
-	// Bare clone on first use (treeless: skip blobs until checkout needs them)
 	if _, err := os.Stat(bareDir); os.IsNotExist(err) {
 		log.Printf("[worktree] cloning %s/%s (first time)...", owner, repo)
 		if err := os.MkdirAll(filepath.Dir(bareDir), 0755); err != nil {
@@ -74,7 +67,31 @@ func Create(ctx context.Context, owner, repo, cloneURL, sha string, prNumber int
 		log.Printf("[worktree] clone %s/%s completed in %s", owner, repo, time.Since(start).Round(time.Millisecond))
 	}
 
-	// Only fetch the specific PR ref we need — not all refs
+	return bareDir, nil
+}
+
+// makeWorktreeDir creates the run directory for a worktree.
+func makeWorktreeDir(runID string) (string, error) {
+	wtDir := runDir(runID)
+	if err := os.MkdirAll(filepath.Dir(wtDir), 0755); err != nil {
+		return "", fmt.Errorf("mkdir runs: %w", err)
+	}
+	return wtDir, nil
+}
+
+// CreateForPR sets up an isolated worktree checked out at a PR's head SHA.
+// Ensures a bare clone exists, fetches the target PR ref, and creates a detached worktree.
+func CreateForPR(ctx context.Context, owner, repo, cloneURL, sha string, prNumber int, runID string) (string, error) {
+	mu := lockRepo(owner, repo)
+	mu.Lock()
+	defer mu.Unlock()
+
+	bareDir, err := ensureBareClone(ctx, owner, repo, cloneURL)
+	if err != nil {
+		return "", err
+	}
+
+	// Fetch only the specific PR ref
 	prRef := fmt.Sprintf("+refs/pull/%d/head:refs/pull/%d/head", prNumber, prNumber)
 	start := time.Now()
 	if err := gitRunCtx(ctx, bareDir, "fetch", "origin", prRef); err != nil {
@@ -82,18 +99,75 @@ func Create(ctx context.Context, owner, repo, cloneURL, sha string, prNumber int
 	}
 	log.Printf("[worktree] fetch PR #%d completed in %s", prNumber, time.Since(start).Round(time.Millisecond))
 
-	// Create worktree at target SHA
-	wtDir := runDir(runID)
-	if err := os.MkdirAll(filepath.Dir(wtDir), 0755); err != nil {
-		return "", fmt.Errorf("mkdir runs: %w", err)
+	wtDir, err := makeWorktreeDir(runID)
+	if err != nil {
+		return "", err
 	}
 
 	if err := gitRunCtx(ctx, bareDir, "worktree", "add", "--detach", wtDir, sha); err != nil {
 		return "", fmt.Errorf("worktree add: %w", err)
 	}
 
-	log.Printf("[worktree] created at %s (sha: %s)", wtDir, sha[:12])
+	log.Printf("[worktree] PR worktree at %s (sha: %s)", wtDir, sha[:12])
 	return wtDir, nil
+}
+
+// CreateForBranch sets up a worktree on a new feature branch based off a given base.
+// If baseBranch is empty, the repo's default branch is detected from origin/HEAD.
+func CreateForBranch(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, runID string) (string, error) {
+	mu := lockRepo(owner, repo)
+	mu.Lock()
+	defer mu.Unlock()
+
+	bareDir, err := ensureBareClone(ctx, owner, repo, cloneURL)
+	if err != nil {
+		return "", err
+	}
+
+	// Fetch the base branch
+	if baseBranch == "" {
+		baseBranch = detectDefaultBranch(ctx, bareDir)
+	}
+	baseRef := fmt.Sprintf("+refs/heads/%s:refs/heads/%s", baseBranch, baseBranch)
+	start := time.Now()
+	if err := gitRunCtx(ctx, bareDir, "fetch", "origin", baseRef); err != nil {
+		return "", fmt.Errorf("fetch base branch %s: %w", baseBranch, err)
+	}
+	log.Printf("[worktree] fetch %s completed in %s", baseBranch, time.Since(start).Round(time.Millisecond))
+
+	wtDir, err := makeWorktreeDir(runID)
+	if err != nil {
+		return "", err
+	}
+
+	// Create worktree with a new branch off the base
+	if err := gitRunCtx(ctx, bareDir, "worktree", "add", "-b", featureBranch, wtDir, "refs/heads/"+baseBranch); err != nil {
+		return "", fmt.Errorf("worktree add branch: %w", err)
+	}
+
+	log.Printf("[worktree] branch worktree at %s (%s from %s)", wtDir, featureBranch, baseBranch)
+	return wtDir, nil
+}
+
+// Create is an alias for CreateForPR for backward compatibility.
+func Create(ctx context.Context, owner, repo, cloneURL, sha string, prNumber int, runID string) (string, error) {
+	return CreateForPR(ctx, owner, repo, cloneURL, sha, prNumber, runID)
+}
+
+// detectDefaultBranch reads origin/HEAD from the bare repo to find the default branch.
+// Falls back to "main" if detection fails.
+func detectDefaultBranch(ctx context.Context, bareDir string) string {
+	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "refs/remotes/origin/HEAD")
+	cmd.Dir = bareDir
+	out, err := cmd.Output()
+	if err == nil {
+		// Output is like "refs/remotes/origin/main\n"
+		ref := strings.TrimSpace(string(out))
+		if parts := strings.SplitN(ref, "refs/remotes/origin/", 2); len(parts) == 2 {
+			return parts[1]
+		}
+	}
+	return "main"
 }
 
 // Remove cleans up a worktree after a run completes or fails.
