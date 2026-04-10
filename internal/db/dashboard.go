@@ -112,19 +112,6 @@ func GetDashboardStats(database *sql.DB, username string, sinceDays int) (*Dashb
 		return nil, err
 	}
 
-	// Also count review events from the events table for real-time accuracy
-	var eventReviewsGiven int
-	database.QueryRow(`
-		SELECT COUNT(*) FROM events
-		WHERE event_type IN ('github:pr:review_received', 'github:pr:approved', 'github:pr:changes_requested')
-		AND created_at >= ?
-	`, since).Scan(&eventReviewsGiven)
-
-	// Use the higher of snapshot count vs event count
-	if eventReviewsGiven > stats.ReviewsGiven {
-		stats.ReviewsGiven = eventReviewsGiven
-	}
-
 	// Build merged timeline
 	stats.MergedOverTime = buildTimeline(mergedByWeek, 5)
 
