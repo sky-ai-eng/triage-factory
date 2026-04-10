@@ -392,6 +392,7 @@ export default function Board() {
                   </div>
                   <button
                     onClick={() => setSidebarOpen(false)}
+                    aria-label="Close queue sidebar"
                     className="text-text-tertiary hover:text-text-secondary transition-colors text-lg leading-none px-1"
                   >
                     &times;
