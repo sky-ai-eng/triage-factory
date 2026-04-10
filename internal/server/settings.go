@@ -177,11 +177,12 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
-		// Disabled — clear GitHub credentials and tracked data
+		// Disabled — clear GitHub credentials, keychain entries, and tracked data
 		creds.GitHubURL = ""
 		creds.GitHubPAT = ""
 		creds.GitHubUsername = ""
 		cfg.GitHub.BaseURL = ""
+		auth.ClearGitHub()
 		if err := db.ClearTrackedItems(s.db, "github"); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{
 				"error": "failed to clear GitHub tracked items: " + err.Error(),
@@ -220,6 +221,7 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 		creds.JiraURL = ""
 		creds.JiraPAT = ""
 		cfg.Jira.BaseURL = ""
+		auth.ClearJira()
 		if err := db.ClearTrackedItems(s.db, "jira"); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{
 				"error": "failed to clear Jira tracked items: " + err.Error(),

@@ -76,14 +76,28 @@ func Load() (Credentials, error) {
 	return creds, nil
 }
 
-// Clear removes all credentials from the OS keychain.
-func Clear() error {
-	for _, key := range []string{keyGitHubURL, keyGitHubPAT, keyGitHubUsername, keyJiraURL, keyJiraPAT} {
+func deleteKeys(keys ...string) error {
+	for _, key := range keys {
 		if err := keyring.Delete(service, key); err != nil && err != keyring.ErrNotFound {
 			return fmt.Errorf("keychain delete %s: %w", key, err)
 		}
 	}
 	return nil
+}
+
+// Clear removes all credentials from the OS keychain.
+func Clear() error {
+	return deleteKeys(keyGitHubURL, keyGitHubPAT, keyGitHubUsername, keyJiraURL, keyJiraPAT)
+}
+
+// ClearGitHub removes GitHub credentials from the OS keychain.
+func ClearGitHub() error {
+	return deleteKeys(keyGitHubURL, keyGitHubPAT, keyGitHubUsername)
+}
+
+// ClearJira removes Jira credentials from the OS keychain.
+func ClearJira() error {
+	return deleteKeys(keyJiraURL, keyJiraPAT)
 }
 
 // IsConfigured returns true if at least one PAT is stored.
