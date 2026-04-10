@@ -137,6 +137,23 @@ export default function Settings() {
   }
 
   const disconnectJira = async () => {
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          github_enabled: form.github_enabled,
+          github_url: form.github_url,
+          github_poll_interval: form.github_poll_interval,
+          jira_enabled: false,
+          ai_model: form.ai_model,
+          server_port: form.server_port,
+        }),
+      })
+      if (!res.ok) return
+    } catch {
+      return
+    }
     setJiraConnected(false)
     setJiraStatuses([])
     setForm((f) => ({
