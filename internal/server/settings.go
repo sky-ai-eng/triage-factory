@@ -164,6 +164,18 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 			creds.GitHubPAT = req.GitHubPAT
 			creds.GitHubUsername = ghUser.Login
 		}
+		// Backfill username if we have a PAT but no stored username (e.g. upgrade)
+		if creds.GitHubPAT != "" && creds.GitHubUsername == "" {
+			url := creds.GitHubURL
+			if url == "" {
+				url = cfg.GitHub.BaseURL
+			}
+			if url != "" {
+				if ghUser, err := auth.ValidateGitHub(url, creds.GitHubPAT); err == nil {
+					creds.GitHubUsername = ghUser.Login
+				}
+			}
+		}
 	} else {
 		// Disabled — clear GitHub credentials and tracked data
 		creds.GitHubURL = ""
