@@ -91,10 +91,10 @@ The tracker stores these fields for each PR and diffs them between cycles:
 
 ## Event lifecycle
 
-1. **First seen** — when an item is first discovered, an initial event is emitted based on its current state (e.g. `review_requested` if the PR has pending review requests, `opened` if it's an authored PR)
+1. **First seen** — when an item is first discovered, an initial event is emitted based on its current state (e.g. `review_requested` if the PR has pending review requests, `opened` if it's an authored PR, `mentioned` if discovered via mentions query)
 2. **Transitions** — subsequent cycles compare snapshots and emit events for any field changes
-3. **Terminal** — when an item reaches a terminal state (merged, closed, done), it's marked with `terminal_at` and excluded from future refresh cycles
-4. **Pruning** — terminal items are deleted from `tracked_items` after 30 days
+3. **Terminal** — when an item reaches a terminal state (merged, closed, done), it's marked with `terminal_at` and excluded from future refresh cycles. Terminal items are retained indefinitely for dashboard statistics.
+4. **Reactivation** — if a terminal item reappears in discovery (e.g. a closed PR is reopened), `terminal_at` is cleared and tracking resumes
 
 ## Configuration
 
