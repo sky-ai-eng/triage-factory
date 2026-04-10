@@ -55,6 +55,8 @@ fragment PRFields on PullRequest {
 	comments { totalCount }
 	createdAt
 	updatedAt
+	mergedAt
+	closedAt
 }
 `
 
@@ -187,6 +189,8 @@ type gqlPR struct {
 	Comments        gqlCount      `json:"comments"`
 	CreatedAt       string        `json:"createdAt"`
 	UpdatedAt       string        `json:"updatedAt"`
+	MergedAt        string        `json:"mergedAt"`
+	ClosedAt        string        `json:"closedAt"`
 }
 
 type gqlRepo struct {
@@ -262,6 +266,8 @@ func (pr gqlPR) toSnapshot() domain.PRSnapshot {
 		CommentCount: pr.Comments.TotalCount,
 		CreatedAt:    pr.CreatedAt,
 		UpdatedAt:    pr.UpdatedAt,
+		MergedAt:     pr.MergedAt,
+		ClosedAt:     pr.ClosedAt,
 	}
 
 	if pr.HeadRepository != nil {

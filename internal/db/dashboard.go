@@ -44,7 +44,7 @@ func GetDashboardStats(database *sql.DB, username string, sinceDays int) (*Dashb
 	since := time.Now().AddDate(0, 0, -sinceDays)
 
 	rows, err := database.Query(`
-		SELECT snapshot, terminal_at FROM tracked_items
+		SELECT snapshot FROM tracked_items
 		WHERE source = 'github'
 	`)
 	if err != nil {
@@ -57,8 +57,7 @@ func GetDashboardStats(database *sql.DB, username string, sinceDays int) (*Dashb
 
 	for rows.Next() {
 		var snapJSON string
-		var terminalAt sql.NullTime
-		if err := rows.Scan(&snapJSON, &terminalAt); err != nil {
+		if err := rows.Scan(&snapJSON); err != nil {
 			continue
 		}
 
@@ -69,20 +68,21 @@ func GetDashboardStats(database *sql.DB, username string, sinceDays int) (*Dashb
 
 		switch {
 		case snap.Merged:
-			// Only count merges within the time window
-			if terminalAt.Valid && terminalAt.Time.After(since) {
+			mergedAt, err := time.Parse(time.RFC3339, snap.MergedAt)
+			if err != nil {
+				continue // no valid merge timestamp, skip
+			}
+			if mergedAt.After(since) {
 				stats.Merged++
-				week := mondayOf(terminalAt.Time)
-				mergedByWeek[week]++
-			} else if !terminalAt.Valid {
-				// Backfilled merge without terminal_at — count it if snapshot says merged
-				stats.Merged++
+				mergedByWeek[mondayOf(mergedAt)]++
 			}
 
 		case snap.State == "CLOSED":
-			if terminalAt.Valid && terminalAt.Time.After(since) {
-				stats.Closed++
-			} else if !terminalAt.Valid {
+			closedAt, err := time.Parse(time.RFC3339, snap.ClosedAt)
+			if err != nil {
+				continue
+			}
+			if closedAt.After(since) {
 				stats.Closed++
 			}
 

@@ -54,6 +54,8 @@ type PRSnapshot struct {
 	CommentCount int      `json:"comment_count"`
 	CreatedAt    string   `json:"created_at"`
 	UpdatedAt    string   `json:"updated_at"`
+	MergedAt     string   `json:"merged_at,omitempty"`
+	ClosedAt     string   `json:"closed_at,omitempty"`
 }
 
 // ReviewState captures one reviewer's latest review.
