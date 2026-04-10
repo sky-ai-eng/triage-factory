@@ -6,10 +6,11 @@ interface Props {
   task: Task
   style?: React.CSSProperties
   isDragging?: boolean
+  onRequeue?: () => void
 }
 
 const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDivElement>>(
-  ({ task, style, isDragging, ...props }, ref) => {
+  ({ task, style, isDragging, onRequeue, ...props }, ref) => {
     const age = formatAge(task.created_at)
 
     return (
@@ -51,16 +52,28 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
             <span>{age}</span>
           </div>
 
-          <a
-            href={task.source_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-[12px] text-accent hover:text-accent/70 font-medium transition-colors"
-            onClick={(e) => e.stopPropagation()}
-            onPointerDown={(e) => e.stopPropagation()}
-          >
-            Open
-          </a>
+          <div className="flex items-center gap-3">
+            {onRequeue && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onRequeue() }}
+                onPointerDown={(e) => e.stopPropagation()}
+                className="text-[12px] text-text-tertiary hover:text-text-primary font-medium transition-colors"
+                title="Return to queue"
+              >
+                Requeue
+              </button>
+            )}
+            <a
+              href={task.source_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[12px] text-accent hover:text-accent/70 font-medium transition-colors"
+              onClick={(e) => e.stopPropagation()}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              Open
+            </a>
+          </div>
         </div>
       </div>
     )

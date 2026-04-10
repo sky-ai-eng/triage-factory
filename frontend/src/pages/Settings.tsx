@@ -50,6 +50,9 @@ export default function Settings() {
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [jiraStatuses, setJiraStatuses] = useState<JiraStatus[]>([])
   const [statusesLoading, setStatusesLoading] = useState(false)
+  const [jiraConnected, setJiraConnected] = useState(false)
+  const [jiraConnecting, setJiraConnecting] = useState(false)
+  const [jiraConnectError, setJiraConnectError] = useState<string | null>(null)
 
   useEffect(() => {
     fetch('/api/settings')
@@ -71,8 +74,11 @@ export default function Settings() {
           ai_model: d.ai.model,
           server_port: d.server.port,
         })
-        if (d.jira.enabled && d.jira.projects?.length > 0) {
-          fetchJiraStatuses(d.jira.projects)
+        if (d.jira.has_token && d.jira.base_url) {
+          setJiraConnected(true)
+          if (d.jira.projects?.length > 0) {
+            fetchJiraStatuses(d.jira.projects)
+          }
         }
       })
   }, [])
@@ -93,6 +99,72 @@ export default function Settings() {
     } finally {
       setStatusesLoading(false)
     }
+  }
+
+  const connectJira = async () => {
+    setJiraConnecting(true)
+    setJiraConnectError(null)
+    try {
+      const res = await fetch('/api/jira/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: form.jira_url, pat: form.jira_pat }),
+      })
+      const body = await res.json()
+      if (!res.ok) {
+        setJiraConnectError(body.error || 'Connection failed')
+        return
+      }
+      // If URL changed from what was previously stored, wipe project/status config
+      if (data && data.jira.base_url && data.jira.base_url !== form.jira_url) {
+        setForm((f) => ({
+          ...f,
+          jira_pat: '',
+          jira_projects: '',
+          jira_pickup_statuses: [],
+          jira_in_progress_status: '',
+        }))
+        setJiraStatuses([])
+      } else {
+        setForm((f) => ({ ...f, jira_pat: '' }))
+      }
+      setJiraConnected(true)
+    } catch {
+      setJiraConnectError('Could not connect to server')
+    } finally {
+      setJiraConnecting(false)
+    }
+  }
+
+  const disconnectJira = async () => {
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          github_enabled: form.github_enabled,
+          github_url: form.github_url,
+          github_poll_interval: form.github_poll_interval,
+          jira_enabled: false,
+          ai_model: form.ai_model,
+          server_port: form.server_port,
+        }),
+      })
+      if (!res.ok) return
+    } catch {
+      return
+    }
+    setJiraConnected(false)
+    setJiraStatuses([])
+    setForm((f) => ({
+      ...f,
+      jira_enabled: false,
+      jira_url: '',
+      jira_pat: '',
+      jira_projects: '',
+      jira_pickup_statuses: [],
+      jira_in_progress_status: '',
+    }))
   }
 
   const update = (field: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
@@ -116,7 +188,7 @@ export default function Settings() {
           github_enabled: form.github_enabled,
           github_url: form.github_url,
           github_pat: form.github_pat || undefined,
-          jira_enabled: form.jira_enabled,
+          jira_enabled: jiraConnected,
           jira_url: form.jira_url,
           jira_pat: form.jira_pat || undefined,
           github_poll_interval: form.github_poll_interval,
@@ -208,12 +280,19 @@ export default function Settings() {
         <Section>
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-[13px] font-medium text-text-secondary">Jira</h2>
-            <Toggle
-              enabled={form.jira_enabled}
-              onChange={(v) => setForm((f) => ({ ...f, jira_enabled: v }))}
-            />
+            {jiraConnected && (
+              <button
+                type="button"
+                onClick={disconnectJira}
+                className="text-[11px] text-dismiss hover:text-dismiss/80 transition-colors"
+              >
+                Disconnect
+              </button>
+            )}
           </div>
-          {form.jira_enabled && (
+
+          {!jiraConnected ? (
+            /* Stage 1: Connect credentials */
             <div className="space-y-3">
               <Field label="Base URL">
                 <input
@@ -224,15 +303,36 @@ export default function Settings() {
                   className={inputClass}
                 />
               </Field>
-              <Field label={`Token${data.jira.has_token ? ' (leave blank to keep current)' : ''}`}>
+              <Field label="Personal Access Token">
                 <input
                   type="password"
-                  placeholder={data.jira.has_token ? '••••••••' : 'Jira Personal Access Token'}
+                  placeholder="Jira Personal Access Token"
                   value={form.jira_pat}
                   onChange={update('jira_pat')}
                   className={inputClass}
                 />
               </Field>
+              {jiraConnectError && (
+                <div className="rounded-xl px-4 py-2.5 text-[13px] bg-dismiss/[0.08] border border-dismiss/20 text-dismiss">
+                  {jiraConnectError}
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={connectJira}
+                disabled={jiraConnecting || !form.jira_url.trim() || !form.jira_pat.trim()}
+                className="w-full bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
+              >
+                {jiraConnecting ? 'Connecting...' : 'Connect'}
+              </button>
+            </div>
+          ) : (
+            /* Stage 2: Configure projects & statuses */
+            <div className="space-y-3">
+              <div className="flex items-center gap-2 rounded-xl bg-claim/[0.06] border border-claim/15 px-4 py-2.5">
+                <div className="w-1.5 h-1.5 rounded-full bg-claim shrink-0" />
+                <span className="text-[12px] text-claim">Connected to {form.jira_url.replace(/^https?:\/\//, '')}</span>
+              </div>
               <Field label="Poll interval">
                 <select
                   value={form.jira_poll_interval}
@@ -339,7 +439,11 @@ export default function Settings() {
 
         <button
           type="submit"
-          disabled={saving}
+          disabled={saving || (jiraConnected && (
+            !form.jira_projects.trim() ||
+            form.jira_pickup_statuses.length === 0 ||
+            !form.jira_in_progress_status
+          ))}
           className="w-full bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
         >
           {saving ? 'Saving...' : 'Save Settings'}
@@ -415,25 +519,6 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
-function Toggle({ enabled, onChange }: { enabled: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={enabled}
-      onClick={() => onChange(!enabled)}
-      className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-        enabled ? 'bg-accent' : 'bg-black/[0.08]'
-      }`}
-    >
-      <span
-        className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-sm transform transition-transform ${
-          enabled ? 'translate-x-4' : 'translate-x-0'
-        }`}
-      />
-    </button>
-  )
-}
 
 function StatusChip({ label, selected, onClick }: { label: string; selected: boolean; onClick: () => void }) {
   return (

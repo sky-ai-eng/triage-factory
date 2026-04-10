@@ -5,6 +5,8 @@ import AgentCard from '../components/AgentCard'
 import TaskCard from '../components/TaskCard'
 import PromptPicker from '../components/PromptPicker'
 import ReviewOverlay from '../components/ReviewOverlay'
+import EventBadge from '../components/EventBadge'
+import { motion, AnimatePresence } from 'motion/react'
 import {
   DndContext,
   DragOverlay,
@@ -20,32 +22,35 @@ import {
   SortableContext,
   verticalListSortingStrategy,
   useSortable,
-  arrayMove,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 
-type ColumnId = 'queue' | 'in_progress' | 'done'
-type InProgressFilter = 'all' | 'user' | 'agent'
+type ColumnId = 'queue' | 'you' | 'agent' | 'done'
 
 export default function Board() {
   const [queued, setQueued] = useState<Task[]>([])
   const [claimed, setClaimed] = useState<Task[]>([])
   const [delegated, setDelegated] = useState<Task[]>([])
   const [done, setDone] = useState<Task[]>([])
-  const [filter, setFilter] = useState<InProgressFilter>('all')
   const [loading, setLoading] = useState(true)
 
   // Agent run state
   const [agentRuns, setAgentRuns] = useState<Record<string, AgentRun>>({})
   const [agentMessages, setAgentMessages] = useState<Record<string, AgentMessage[]>>({})
 
+  // Sidebar state
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [search, setSearch] = useState('')
+  const [sourceFilter, setSourceFilter] = useState<'all' | 'github' | 'jira'>('all')
+
   // Drag state
   const [activeId, setActiveId] = useState<string | null>(null)
   const [overColumn, setOverColumn] = useState<ColumnId | null>(null)
+  const [draggingFromSidebar, setDraggingFromSidebar] = useState(false)
 
-  // Delegate/claim popup when dragging to in_progress
-  const [pendingInProgress, setPendingInProgress] = useState<Task | null>(null)
+  // Delegate flow
   const [showPromptPicker, setShowPromptPicker] = useState(false)
+  const pendingDelegateTask = useRef<Task | null>(null)
 
   // Review overlay
   const [reviewRunID, setReviewRunID] = useState<string | null>(null)
@@ -63,7 +68,7 @@ export default function Board() {
       setDelegated(delegatedRes)
       setDone(doneRes)
 
-      // Fetch agent runs for delegated and done tasks (done tasks may have agent history)
+      // Fetch agent runs for delegated and done tasks
       for (const task of [...delegatedRes, ...doneRes]) {
         try {
           const runsRes = await fetch(`/api/agent/runs?task_id=${task.id}`)
@@ -78,7 +83,7 @@ export default function Board() {
             setAgentMessages((prev) => ({ ...prev, [latestRun.ID]: msgs }))
           }
         } catch {
-          // Individual agent run fetch failed — skip it
+          // Individual agent run fetch failed — skip
         }
       }
     } catch {
@@ -128,14 +133,47 @@ export default function Board() {
     }
   }, [fetchTasks]))
 
-  // Build the in-progress list (claimed + delegated, agents first)
-  const inProgress = useMemo(() => {
-    const agentItems = delegated.map((t) => ({ task: t, type: 'agent' as const }))
-    const userItems = claimed.map((t) => ({ task: t, type: 'user' as const }))
-    if (filter === 'user') return userItems
-    if (filter === 'agent') return agentItems
-    return [...agentItems, ...userItems]
-  }, [claimed, delegated, filter])
+  // Agent column: attention-weighted ordering
+  // Top: needs review (pending_approval), then failed/cancelled, then running at bottom
+  const agentItems = useMemo(() => {
+    const weight = (t: Task) => {
+      const run = agentRuns[t.id]
+      if (!run) return 2
+      if (run.Status === 'pending_approval') return 0
+      if (run.Status === 'failed' || run.Status === 'cancelled') return 1
+      if (run.Status === 'completed') return 3
+      return 2 // running/active
+    }
+    return [...delegated].sort((a, b) => weight(a) - weight(b))
+  }, [delegated, agentRuns])
+
+  // Filtered queue for sidebar
+  const filteredQueue = useMemo(() => {
+    let items = queued
+    if (sourceFilter !== 'all') {
+      items = items.filter((t) => t.source === sourceFilter)
+    }
+    if (search.trim()) {
+      const q = search.toLowerCase()
+      items = items.filter((t) =>
+        t.title.toLowerCase().includes(q) ||
+        t.repo?.toLowerCase().includes(q) ||
+        t.author?.toLowerCase().includes(q) ||
+        t.ai_summary?.toLowerCase().includes(q) ||
+        t.event_type?.toLowerCase().includes(q)
+      )
+    }
+    return items
+  }, [queued, search, sourceFilter])
+
+  // Unique event types in queue for filter display
+  const queueEventTypes = useMemo(() => {
+    const types = new Set<string>()
+    for (const t of queued) {
+      if (t.event_type) types.add(t.event_type)
+    }
+    return Array.from(types)
+  }, [queued])
 
   // All tasks indexed for drag lookup
   const allTasks = useMemo(() => {
@@ -149,7 +187,8 @@ export default function Board() {
   // Column membership for dragging
   const getColumn = useCallback((taskId: string): ColumnId | null => {
     if (queued.some((t) => t.id === taskId)) return 'queue'
-    if (claimed.some((t) => t.id === taskId) || delegated.some((t) => t.id === taskId)) return 'in_progress'
+    if (claimed.some((t) => t.id === taskId)) return 'you'
+    if (delegated.some((t) => t.id === taskId)) return 'agent'
     if (done.some((t) => t.id === taskId)) return 'done'
     return null
   }, [queued, claimed, delegated, done])
@@ -159,19 +198,23 @@ export default function Board() {
   )
 
   const handleDragStart = (event: DragStartEvent) => {
-    setActiveId(String(event.active.id))
+    const id = String(event.active.id)
+    setActiveId(id)
+    // Auto-collapse sidebar when dragging from it
+    if (sidebarOpen && getColumn(id) === 'queue') {
+      setDraggingFromSidebar(true)
+      setSidebarOpen(false)
+    }
   }
 
   const handleDragOver = (event: DragOverEvent) => {
     const { over } = event
     if (!over) { setOverColumn(null); return }
 
-    // over might be a column ID or another card's ID
     const overId = String(over.id)
-    if (['queue', 'in_progress', 'done'].includes(overId)) {
+    if (['you', 'agent', 'done'].includes(overId)) {
       setOverColumn(overId as ColumnId)
     } else {
-      // It's a card — figure out which column it's in
       const col = getColumn(overId)
       setOverColumn(col)
     }
@@ -179,61 +222,78 @@ export default function Board() {
 
   const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event
+    const wasDraggingFromSidebar = draggingFromSidebar
+
     setActiveId(null)
     setOverColumn(null)
+    setDraggingFromSidebar(false)
+
+    // Re-expand sidebar if drag came from there (regardless of outcome)
+    if (wasDraggingFromSidebar) {
+      setSidebarOpen(true)
+    }
 
     if (!over) return
 
     const taskId = String(active.id)
     const sourceCol = getColumn(taskId)
+    const task = allTasks.get(taskId)
+    if (!sourceCol || !task) return
 
     // Determine target column
     const overId = String(over.id)
     let targetCol: ColumnId
-    if (['queue', 'in_progress', 'done'].includes(overId)) {
+    if (['you', 'agent', 'done'].includes(overId)) {
       targetCol = overId as ColumnId
     } else {
-      targetCol = getColumn(overId) || sourceCol!
+      targetCol = getColumn(overId) || sourceCol
     }
 
-    if (!sourceCol) return
+    if (sourceCol === targetCol) return
 
-    // Same column — reorder
-    if (sourceCol === targetCol) {
-      if (sourceCol === 'queue') {
-        const oldIndex = queued.findIndex((t) => t.id === taskId)
-        const overTaskIndex = queued.findIndex((t) => t.id === overId)
-        if (oldIndex !== -1 && overTaskIndex !== -1 && oldIndex !== overTaskIndex) {
-          setQueued(arrayMove(queued, oldIndex, overTaskIndex))
-        }
-      }
-      // In-progress and done reordering is visual-only (no backend persistence needed)
-      return
-    }
-
-    // Cross-column move
-    const task = allTasks.get(taskId)
-    if (!task) return
-
-    // Moving to in_progress: show claim/delegate popup
-    if (targetCol === 'in_progress' && sourceCol !== 'in_progress') {
-      setPendingInProgress(task)
-      return
-    }
-
-    // Moving back to queue: undo
-    if (targetCol === 'queue' && sourceCol !== 'queue') {
-      // Optimistic UI
-      if (sourceCol === 'in_progress') {
-        setClaimed((prev) => prev.filter((t) => t.id !== taskId))
-        setDelegated((prev) => prev.filter((t) => t.id !== taskId))
-      } else if (sourceCol === 'done') {
-        setDone((prev) => prev.filter((t) => t.id !== taskId))
-      }
-      setQueued((prev) => [task, ...prev])
-
-      await fetch(`/api/tasks/${taskId}/undo`, { method: 'POST' })
+    // Queue → You: claim
+    if (sourceCol === 'queue' && targetCol === 'you') {
+      await fetch(`/api/tasks/${taskId}/swipe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'claim', hesitation_ms: 0 }),
+      })
       fetchTasks()
+      return
+    }
+
+    // Queue → Agent: delegate (prompt picker)
+    if (sourceCol === 'queue' && targetCol === 'agent') {
+      pendingDelegateTask.current = task
+      setShowPromptPicker(true)
+      return
+    }
+
+    // Queue → Done: dismiss
+    if (sourceCol === 'queue' && targetCol === 'done') {
+      await fetch(`/api/tasks/${taskId}/swipe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'dismiss', hesitation_ms: 0 }),
+      })
+      fetchTasks()
+      return
+    }
+
+    // You → Agent: delegate claimed task (SKY-133)
+    if (sourceCol === 'you' && targetCol === 'agent') {
+      pendingDelegateTask.current = task
+      setShowPromptPicker(true)
+      return
+    }
+
+    // Any → Queue: undo/requeue
+    if (targetCol === 'queue' || (wasDraggingFromSidebar && !['you', 'agent', 'done'].includes(overId))) {
+      // Don't requeue if source is already queue
+      if (sourceCol !== 'queue') {
+        await fetch(`/api/tasks/${taskId}/undo`, { method: 'POST' })
+        fetchTasks()
+      }
       return
     }
   }
@@ -242,25 +302,6 @@ export default function Board() {
     await fetch(`/api/tasks/${taskId}/undo`, { method: 'POST' })
     fetchTasks()
   }, [fetchTasks])
-
-  const handleClaimFromPopup = useCallback(async (task: Task) => {
-    setPendingInProgress(null)
-    await fetch(`/api/tasks/${task.id}/swipe`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'claim', hesitation_ms: 0 }),
-    })
-    fetchTasks()
-  }, [fetchTasks])
-
-  const handleDelegateFromPopup = useCallback((task: Task) => {
-    setPendingInProgress(null)
-    setShowPromptPicker(true)
-    // Store the task for when the picker resolves
-    pendingDelegateTask.current = task
-  }, [])
-
-  const pendingDelegateTask = useRef<Task | null>(null)
 
   const handlePromptSelected = useCallback(async (promptId: string) => {
     setShowPromptPicker(false)
@@ -293,136 +334,227 @@ export default function Board() {
       onDragOver={handleDragOver}
       onDragEnd={handleDragEnd}
     >
-      <div className="grid grid-cols-3 gap-6 min-h-[70vh]">
-        {/* Queue */}
-        <DroppableColumn
-          id="queue"
-          title="Queue"
-          count={queued.length}
-          isOver={overColumn === 'queue' && getColumn(activeId!) !== 'queue'}
-        >
-          <SortableContext items={queued.map((t) => t.id)} strategy={verticalListSortingStrategy}>
-            {queued.length === 0 ? (
-              <EmptyColumn>Queue is empty</EmptyColumn>
-            ) : (
-              queued.map((task) => (
-                <SortableTaskCard key={task.id} task={task} />
-              ))
-            )}
-          </SortableContext>
-        </DroppableColumn>
+      <div className="relative min-h-[70vh]">
+        {/* Queue sidebar — collapsed strip */}
+        <AnimatePresence mode="wait">
+          {!sidebarOpen && (
+            <motion.button
+              key="collapsed"
+              aria-label="Open queue sidebar"
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              transition={{ duration: 0.2, ease: 'easeOut' }}
+              onClick={() => setSidebarOpen(true)}
+              className="fixed left-4 top-20 bottom-4 w-10 z-30 bg-surface-raised/80 backdrop-blur-xl border border-border-glass rounded-2xl shadow-sm shadow-black/[0.03] flex flex-col items-center pt-4 gap-3 hover:border-accent/20 transition-colors group"
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="text-text-tertiary group-hover:text-accent transition-colors shrink-0">
+                <path d="M6 3l5 5-5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              <span className="text-[11px] font-medium text-text-tertiary bg-black/[0.04] rounded-full px-2 py-0.5 shrink-0">
+                {queued.length}
+              </span>
+              <span className="text-[10px] text-text-tertiary [writing-mode:vertical-lr] rotate-180 tracking-wider uppercase font-medium mt-1">
+                Queue
+              </span>
+            </motion.button>
+          )}
+        </AnimatePresence>
 
-        {/* In Progress */}
-        <DroppableColumn
-          id="in_progress"
-          title="In Progress"
-          count={inProgress.length}
-          isOver={overColumn === 'in_progress' && getColumn(activeId!) !== 'in_progress'}
-          headerRight={
-            <div className="flex gap-1">
-              {(['all', 'user', 'agent'] as const).map((f) => (
-                <button
-                  key={f}
-                  onClick={() => setFilter(f)}
-                  className={`text-[11px] px-2 py-0.5 rounded-full transition-colors ${
-                    filter === f
-                      ? 'bg-accent-soft text-accent'
-                      : 'text-text-tertiary hover:text-text-secondary'
-                  }`}
-                >
-                  {f === 'all' ? 'All' : f === 'user' ? 'You' : 'Agent'}
-                </button>
-              ))}
-            </div>
-          }
-        >
-          <SortableContext items={inProgress.filter((i) => !(i.type === 'agent' && agentRuns[i.task.id])).map((i) => i.task.id)} strategy={verticalListSortingStrategy}>
-            {inProgress.length === 0 ? (
-              <EmptyColumn>Nothing in progress</EmptyColumn>
-            ) : (
-              inProgress.map(({ task, type }) =>
-                type === 'agent' && agentRuns[task.id] ? (
-                  <AgentCard
-                    key={task.id}
-                    task={task}
-                    run={agentRuns[task.id]}
-                    messages={agentMessages[agentRuns[task.id].ID] || []}
-                    onRequeue={() => handleRequeue(task.id)}
-                    onReview={() => setReviewRunID(agentRuns[task.id].ID)}
-                  />
-                ) : (
-                  <SortableTaskCard key={task.id} task={task} />
-                )
-              )
-            )}
-          </SortableContext>
-        </DroppableColumn>
+        {/* Queue sidebar — expanded overlay */}
+        <AnimatePresence>
+          {sidebarOpen && (
+            <>
+              {/* Backdrop */}
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.2 }}
+                className="fixed inset-0 z-30"
+                onClick={() => setSidebarOpen(false)}
+              />
+              <motion.div
+                initial={{ x: -290, opacity: 0 }}
+                animate={{ x: 0, opacity: 1 }}
+                exit={{ x: -290, opacity: 0 }}
+                transition={{ type: 'spring', damping: 28, stiffness: 300 }}
+                className="fixed left-4 top-20 bottom-4 w-[280px] z-40 bg-surface-raised/95 backdrop-blur-xl border border-border-glass rounded-2xl shadow-xl shadow-black/[0.08] flex flex-col overflow-hidden"
+              >
+              {/* Header */}
+              <div className="px-4 pt-4 pb-3 border-b border-border-subtle shrink-0">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-[13px] font-semibold text-text-primary">Queue</h2>
+                    <span className="text-[11px] text-text-tertiary bg-black/[0.04] rounded-full px-2 py-0.5">
+                      {filteredQueue.length}{filteredQueue.length !== queued.length ? `/${queued.length}` : ''}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => setSidebarOpen(false)}
+                    aria-label="Close queue sidebar"
+                    className="text-text-tertiary hover:text-text-secondary transition-colors text-lg leading-none px-1"
+                  >
+                    &times;
+                  </button>
+                </div>
 
-        {/* Done */}
-        <DroppableColumn
-          id="done"
-          title="Done"
-          count={done.length}
-          isOver={overColumn === 'done' && getColumn(activeId!) !== 'done'}
-        >
-          <SortableContext items={done.filter((t) => !agentRuns[t.id]).map((t) => t.id)} strategy={verticalListSortingStrategy}>
-            {done.length === 0 ? (
-              <EmptyColumn>No completed items</EmptyColumn>
-            ) : (
-              done.map((task) =>
-                agentRuns[task.id] ? (
-                  <AgentCard
-                    key={task.id}
-                    task={task}
-                    run={agentRuns[task.id]}
-                    messages={agentMessages[agentRuns[task.id].ID] || []}
-                    onRequeue={() => handleRequeue(task.id)}
-                    onReview={() => setReviewRunID(agentRuns[task.id].ID)}
-                  />
+                {/* Search */}
+                <input
+                  type="text"
+                  placeholder="Search tasks..."
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  className="w-full bg-white/50 border border-border-subtle rounded-xl px-3 py-2 text-[12px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/40 transition-colors mb-2"
+                  autoFocus
+                />
+
+                {/* Source filter */}
+                <div className="flex gap-1 mb-1">
+                  {(['all', 'github', 'jira'] as const).map((f) => (
+                    <button
+                      key={f}
+                      onClick={() => setSourceFilter(f)}
+                      className={`text-[10px] px-2 py-0.5 rounded-full transition-colors ${
+                        sourceFilter === f
+                          ? 'bg-accent/10 text-accent font-medium'
+                          : 'text-text-tertiary hover:text-text-secondary'
+                      }`}
+                    >
+                      {f === 'all' ? 'All' : f === 'github' ? 'GitHub' : 'Jira'}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Event type quick-filter chips */}
+                {queueEventTypes.length > 0 && (
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {queueEventTypes.map((et) => (
+                      <button
+                        key={et}
+                        onClick={() => setSearch(et)}
+                        className="opacity-70 hover:opacity-100 transition-opacity"
+                      >
+                        <EventBadge eventType={et} compact />
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Scrollable task list */}
+              <div className="flex-1 overflow-y-auto p-2 space-y-2">
+                <p className="text-[10px] text-text-tertiary px-2 py-1">
+                  Drag tasks to a column
+                </p>
+                {filteredQueue.length === 0 ? (
+                  <p className="text-[12px] text-text-tertiary text-center py-8">
+                    {queued.length === 0 ? 'Queue is empty' : 'No matching tasks'}
+                  </p>
                 ) : (
-                  <SortableTaskCard key={task.id} task={task} />
+                  <SortableContext items={filteredQueue.map((t) => t.id)} strategy={verticalListSortingStrategy}>
+                    {filteredQueue.map((task) => (
+                      <SidebarTaskCard key={task.id} task={task} />
+                    ))}
+                  </SortableContext>
+                )}
+              </div>
+              </motion.div>
+            </>
+          )}
+        </AnimatePresence>
+
+        {/* Main board — 3 columns */}
+        <div
+          className="grid grid-cols-3 gap-6 min-h-[70vh]"
+          style={{ marginLeft: '3rem' }}
+        >
+          {/* You column */}
+          <DroppableColumn
+            id="you"
+            title="You"
+            count={claimed.length}
+            isOver={overColumn === 'you'}
+          >
+            <SortableContext items={claimed.map((t) => t.id)} strategy={verticalListSortingStrategy}>
+              {claimed.length === 0 ? (
+                <EmptyColumn>Nothing claimed</EmptyColumn>
+              ) : (
+                claimed.map((task) => (
+                  <SortableTaskCard key={task.id} task={task} onRequeue={() => handleRequeue(task.id)} />
+                ))
+              )}
+            </SortableContext>
+          </DroppableColumn>
+
+          {/* Agent column — attention-weighted */}
+          <DroppableColumn
+            id="agent"
+            title="Agent"
+            count={agentItems.length}
+            isOver={overColumn === 'agent'}
+          >
+            <SortableContext items={agentItems.filter((t) => !agentRuns[t.id]).map((t) => t.id)} strategy={verticalListSortingStrategy}>
+              {agentItems.length === 0 ? (
+                <EmptyColumn>No delegated tasks</EmptyColumn>
+              ) : (
+                agentItems.map((task) =>
+                  agentRuns[task.id] ? (
+                    <AgentCard
+                      key={task.id}
+                      task={task}
+                      run={agentRuns[task.id]}
+                      messages={agentMessages[agentRuns[task.id].ID] || []}
+                      onRequeue={() => handleRequeue(task.id)}
+                      onReview={() => setReviewRunID(agentRuns[task.id].ID)}
+                    />
+                  ) : (
+                    <SortableTaskCard key={task.id} task={task} onRequeue={() => handleRequeue(task.id)} />
+                  )
                 )
-              )
-            )}
-          </SortableContext>
-        </DroppableColumn>
+              )}
+            </SortableContext>
+          </DroppableColumn>
+
+          {/* Done column */}
+          <DroppableColumn
+            id="done"
+            title="Done"
+            count={done.length}
+            isOver={overColumn === 'done'}
+          >
+            <SortableContext items={done.filter((t) => !agentRuns[t.id]).map((t) => t.id)} strategy={verticalListSortingStrategy}>
+              {done.length === 0 ? (
+                <EmptyColumn>No completed items</EmptyColumn>
+              ) : (
+                done.map((task) =>
+                  agentRuns[task.id] ? (
+                    <AgentCard
+                      key={task.id}
+                      task={task}
+                      run={agentRuns[task.id]}
+                      messages={agentMessages[agentRuns[task.id].ID] || []}
+                      onRequeue={() => handleRequeue(task.id)}
+                      onReview={() => setReviewRunID(agentRuns[task.id].ID)}
+                    />
+                  ) : (
+                    <SortableTaskCard key={task.id} task={task} />
+                  )
+                )
+              )}
+            </SortableContext>
+          </DroppableColumn>
+        </div>
       </div>
 
-      {/* Drag overlay — floating card that follows the cursor */}
+      {/* Drag overlay — floating card that follows cursor */}
       <DragOverlay dropAnimation={null}>
         {activeTask && (
-          <div className="w-[calc((100vw-6rem)/3-1.5rem)]">
+          <div className="w-[250px]">
             <TaskCard task={activeTask} isDragging />
           </div>
         )}
       </DragOverlay>
-
-      {/* Claim vs Delegate popup */}
-      {pendingInProgress && (
-        <>
-          <div className="fixed inset-0 bg-black/10 backdrop-blur-sm z-40" onClick={() => setPendingInProgress(null)} />
-          <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 bg-surface-raised border border-border-glass rounded-2xl shadow-xl shadow-black/10 p-5 w-[300px]">
-            <h3 className="text-[14px] font-semibold text-text-primary mb-1">Move to In Progress</h3>
-            <p className="text-[12px] text-text-tertiary mb-4 leading-relaxed">
-              How do you want to handle <span className="text-text-secondary font-medium">{pendingInProgress.title.length > 40 ? pendingInProgress.title.slice(0, 37) + '...' : pendingInProgress.title}</span>?
-            </p>
-            <div className="flex gap-2">
-              <button
-                onClick={() => handleClaimFromPopup(pendingInProgress)}
-                className="flex-1 text-[13px] font-semibold text-claim bg-claim/10 hover:bg-claim/20 px-4 py-2 rounded-xl transition-colors"
-              >
-                Claim
-              </button>
-              <button
-                onClick={() => handleDelegateFromPopup(pendingInProgress)}
-                className="flex-1 text-[13px] font-semibold text-white bg-accent hover:bg-accent/90 px-4 py-2 rounded-xl transition-colors"
-              >
-                Delegate
-              </button>
-            </div>
-          </div>
-        </>
-      )}
 
       {/* Prompt picker for delegation */}
       <PromptPicker
@@ -442,7 +574,51 @@ export default function Board() {
   )
 }
 
-function SortableTaskCard({ task }: { task: Task }) {
+/** Compact card for the sidebar queue — smaller than a full TaskCard */
+function SidebarTaskCard({ task }: { task: Task }) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: task.id })
+
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.3 : 1,
+  }
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className="bg-white/60 backdrop-blur border border-border-subtle rounded-xl px-3 py-2.5 cursor-grab active:cursor-grabbing hover:border-accent/20 transition-colors"
+      {...attributes}
+      {...listeners}
+    >
+      <div className="flex items-center gap-1.5 mb-1">
+        <span className={`text-[9px] font-semibold uppercase tracking-wider px-1 py-0.5 rounded ${
+          task.source === 'github' ? 'bg-black/[0.04] text-text-secondary' : 'bg-blue-500/10 text-blue-600'
+        }`}>
+          {task.source === 'github' ? 'GH' : 'Jira'}
+        </span>
+        <EventBadge eventType={task.event_type} compact />
+      </div>
+      <h4 className="text-[12px] font-medium text-text-primary leading-snug line-clamp-2">
+        {task.title}
+      </h4>
+      <div className="flex items-center gap-2 mt-1 text-[10px] text-text-tertiary">
+        {task.repo && <span className="truncate">{task.repo}</span>}
+        {task.author && <span>{task.author}</span>}
+      </div>
+    </div>
+  )
+}
+
+function SortableTaskCard({ task, onRequeue }: { task: Task; onRequeue?: () => void }) {
   const {
     attributes,
     listeners,
@@ -464,6 +640,7 @@ function SortableTaskCard({ task }: { task: Task }) {
       task={task}
       style={style}
       isDragging={false}
+      onRequeue={onRequeue}
       {...attributes}
       {...listeners}
     />
@@ -475,14 +652,12 @@ function DroppableColumn({
   title,
   count,
   isOver,
-  headerRight,
   children,
 }: {
   id: string
   title: string
   count: number
   isOver: boolean
-  headerRight?: React.ReactNode
   children: React.ReactNode
 }) {
   const { setNodeRef } = useSortable({ id, data: { type: 'column' } })
@@ -496,7 +671,6 @@ function DroppableColumn({
             {count}
           </span>
         </div>
-        {headerRight}
       </div>
       <div
         ref={setNodeRef}
