@@ -198,7 +198,7 @@ export default function Board() {
 
     if (!sourceCol) return
 
-    // Same column — reorder
+    // Same column — reorder (local state only, no backend persistence)
     if (sourceCol === targetCol) {
       if (sourceCol === 'queue') {
         const oldIndex = queued.findIndex((t) => t.id === taskId)
@@ -206,8 +206,19 @@ export default function Board() {
         if (oldIndex !== -1 && overTaskIndex !== -1 && oldIndex !== overTaskIndex) {
           setQueued(arrayMove(queued, oldIndex, overTaskIndex))
         }
+      } else if (sourceCol === 'in_progress') {
+        const oldIndex = claimed.findIndex((t) => t.id === taskId)
+        const overTaskIndex = claimed.findIndex((t) => t.id === overId)
+        if (oldIndex !== -1 && overTaskIndex !== -1 && oldIndex !== overTaskIndex) {
+          setClaimed(arrayMove(claimed, oldIndex, overTaskIndex))
+        }
+      } else if (sourceCol === 'done') {
+        const oldIndex = done.findIndex((t) => t.id === taskId)
+        const overTaskIndex = done.findIndex((t) => t.id === overId)
+        if (oldIndex !== -1 && overTaskIndex !== -1 && oldIndex !== overTaskIndex) {
+          setDone(arrayMove(done, oldIndex, overTaskIndex))
+        }
       }
-      // In-progress and done reordering is visual-only (no backend persistence needed)
       return
     }
 
