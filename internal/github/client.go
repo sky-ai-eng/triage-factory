@@ -83,13 +83,19 @@ func (c *Client) GetRaw(path, accept string) ([]byte, error) {
 	return data, nil
 }
 
+// graphqlURL derives the GraphQL endpoint from the REST API base URL.
+func graphqlURL(baseURL string) string {
+	// GitHub.com REST: https://api.github.com     → GraphQL: https://api.github.com/graphql
+	// GHES REST:       https://<host>/api/v3      → GraphQL: https://<host>/api/graphql
+	if strings.Contains(baseURL, "api.github.com") {
+		return "https://api.github.com/graphql"
+	}
+	return strings.TrimSuffix(baseURL, "/v3") + "/graphql"
+}
+
 // PostGraphQL sends a GraphQL query to GitHub's GraphQL API.
 func (c *Client) PostGraphQL(body any) ([]byte, error) {
-	// GraphQL endpoint is always at the same base, just /graphql instead of REST
-	url := strings.TrimSuffix(c.baseURL, "/api/v3") + "/graphql"
-	if strings.Contains(c.baseURL, "api.github.com") {
-		url = "https://api.github.com/graphql"
-	}
+	url := graphqlURL(c.baseURL)
 
 	b, err := json.Marshal(body)
 	if err != nil {
