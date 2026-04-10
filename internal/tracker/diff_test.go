@@ -117,28 +117,49 @@ func TestDiffPR_ReviewRequestReAdded(t *testing.T) {
 func TestDiffPR_ReviewApproved(t *testing.T) {
 	prev := domain.PRSnapshot{
 		Number:  42,
+		Author:  "me",
 		Reviews: []domain.ReviewState{{Author: "alice", State: "COMMENTED"}},
 	}
 	curr := domain.PRSnapshot{
 		Number:  42,
+		Author:  "me",
 		Reviews: []domain.ReviewState{{Author: "alice", State: "APPROVED"}},
 	}
 
-	events := DiffPRSnapshots(prev, curr, "42", "")
+	events := DiffPRSnapshots(prev, curr, "42", "me")
 	assertEventTypes(t, events, []string{domain.EventGitHubPRApproved})
+}
+
+func TestDiffPR_ReviewApproved_NotAuthor(t *testing.T) {
+	// Review state changed on a PR we don't own — no event
+	prev := domain.PRSnapshot{
+		Number:  42,
+		Author:  "bob",
+		Reviews: []domain.ReviewState{{Author: "alice", State: "COMMENTED"}},
+	}
+	curr := domain.PRSnapshot{
+		Number:  42,
+		Author:  "bob",
+		Reviews: []domain.ReviewState{{Author: "alice", State: "APPROVED"}},
+	}
+
+	events := DiffPRSnapshots(prev, curr, "42", "me")
+	assertEventTypes(t, events, nil)
 }
 
 func TestDiffPR_ChangesRequested(t *testing.T) {
 	prev := domain.PRSnapshot{
 		Number:  42,
+		Author:  "me",
 		Reviews: []domain.ReviewState{{Author: "alice", State: "APPROVED"}},
 	}
 	curr := domain.PRSnapshot{
 		Number:  42,
+		Author:  "me",
 		Reviews: []domain.ReviewState{{Author: "alice", State: "CHANGES_REQUESTED"}},
 	}
 
-	events := DiffPRSnapshots(prev, curr, "42", "")
+	events := DiffPRSnapshots(prev, curr, "42", "me")
 	assertEventTypes(t, events, []string{domain.EventGitHubPRChangesReq})
 }
 

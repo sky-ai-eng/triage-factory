@@ -71,28 +71,30 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, sourceID, username string) []
 		})
 	}
 
-	// --- Review state changes ---
-	prevReviews := reviewMap(prev.Reviews)
-	currReviews := reviewMap(curr.Reviews)
-	for author, currState := range currReviews {
-		prevState := prevReviews[author]
-		if currState.State == prevState.State {
-			continue // no change for this reviewer
-		}
+	// --- Review state changes (only on PRs you authored) ---
+	if curr.Author == username {
+		prevReviews := reviewMap(prev.Reviews)
+		currReviews := reviewMap(curr.Reviews)
+		for author, currState := range currReviews {
+			prevState := prevReviews[author]
+			if currState.State == prevState.State {
+				continue // no change for this reviewer
+			}
 
-		switch currState.State {
-		case "APPROVED":
-			emit(domain.EventGitHubPRApproved, map[string]string{
-				"reviewer": author, "prev_state": prevState.State,
-			})
-		case "CHANGES_REQUESTED":
-			emit(domain.EventGitHubPRChangesReq, map[string]string{
-				"reviewer": author, "prev_state": prevState.State,
-			})
-		case "COMMENTED", "DISMISSED":
-			emit(domain.EventGitHubPRReviewReceived, map[string]string{
-				"reviewer": author, "state": currState.State,
-			})
+			switch currState.State {
+			case "APPROVED":
+				emit(domain.EventGitHubPRApproved, map[string]string{
+					"reviewer": author, "prev_state": prevState.State,
+				})
+			case "CHANGES_REQUESTED":
+				emit(domain.EventGitHubPRChangesReq, map[string]string{
+					"reviewer": author, "prev_state": prevState.State,
+				})
+			case "COMMENTED", "DISMISSED":
+				emit(domain.EventGitHubPRReviewReceived, map[string]string{
+					"reviewer": author, "state": currState.State,
+				})
+			}
 		}
 	}
 
