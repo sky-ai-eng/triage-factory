@@ -170,7 +170,13 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 		creds.GitHubPAT = ""
 		creds.GitHubUsername = ""
 		cfg.GitHub.BaseURL = ""
-		db.ClearTrackedItems(s.db, "github")
+		if err := db.ClearTrackedItems(s.db, "github"); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "failed to clear GitHub tracked items: " + err.Error(),
+				"field": "github",
+			})
+			return
+		}
 	}
 
 	// --- Handle Jira ---
