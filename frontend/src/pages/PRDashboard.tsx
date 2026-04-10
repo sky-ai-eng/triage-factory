@@ -84,10 +84,13 @@ export default function PRDashboard() {
     return () => { clearInterval(interval); document.removeEventListener('visibilitychange', handleVis) }
   }, [fetchAll])
 
-  const draftPRs = prs.filter((pr) => pr.state === 'open' && pr.draft)
-  const readyPRs = prs.filter((pr) => pr.state === 'open' && !pr.draft)
-  const mergedPRs = prs.filter((pr) => pr.state === 'merged')
-  const closedPRs = prs.filter((pr) => pr.state === 'closed')
+  const byRecent = (a: PRSummary, b: PRSummary) =>
+    new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+
+  const draftPRs = prs.filter((pr) => pr.state === 'open' && pr.draft).sort(byRecent)
+  const readyPRs = prs.filter((pr) => pr.state === 'open' && !pr.draft).sort(byRecent)
+  const mergedPRs = prs.filter((pr) => pr.state === 'merged').sort(byRecent)
+  const closedPRs = prs.filter((pr) => pr.state === 'closed').sort(byRecent)
 
   const prKey = (pr: PRSummary) => `${pr.repo}-${pr.number}`
   const prMap = new Map(prs.map((pr) => [prKey(pr), pr]))
