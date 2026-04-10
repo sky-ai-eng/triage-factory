@@ -173,7 +173,14 @@ export default function Setup() {
               className={inputClass}
             />
             <p className="text-[11px] text-text-tertiary">
-              Requires <code className="text-text-secondary">repo</code> and{' '}
+              Requires a{' '}
+              <a
+                href="https://github.com/settings/tokens/new?scopes=repo,read:org&description=Todo+Tinder"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-accent hover:underline"
+              >classic PAT</a>
+              {' '}with <code className="text-text-secondary">repo</code> and{' '}
               <code className="text-text-secondary">read:org</code> scopes.
             </p>
           </div>

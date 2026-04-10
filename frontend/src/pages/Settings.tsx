@@ -176,6 +176,17 @@ export default function Settings() {
                   onChange={update('github_pat')}
                   className={inputClass}
                 />
+                <p className="text-[11px] text-text-tertiary mt-1">
+                  Requires a{' '}
+                  <a
+                    href="https://github.com/settings/tokens/new?scopes=repo,read:org&description=Todo+Tinder"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-accent hover:underline"
+                  >classic PAT</a>
+                  {' '}with <code className="text-text-secondary">repo</code> and{' '}
+                  <code className="text-text-secondary">read:org</code> scopes.
+                </p>
               </Field>
               <Field label="Poll interval">
                 <select
