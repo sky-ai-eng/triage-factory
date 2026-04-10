@@ -62,15 +62,13 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, sourceID, username string) []
 	}
 
 	// --- Review requests ---
-	// New review requests (someone requested your review, or you re-requested theirs)
+	// Only fire when the authenticated user is the one being requested.
 	prevRR := toSet(prev.ReviewRequests)
 	currRR := toSet(curr.ReviewRequests)
-	for user := range currRR {
-		if !prevRR[user] {
-			emit(domain.EventGitHubPRReviewRequested, map[string]string{
-				"requested_reviewer": user,
-			})
-		}
+	if username != "" && currRR[username] && !prevRR[username] {
+		emit(domain.EventGitHubPRReviewRequested, map[string]string{
+			"requested_reviewer": username,
+		})
 	}
 
 	// --- Review state changes ---

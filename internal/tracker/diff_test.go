@@ -91,9 +91,18 @@ func TestDiffPR_ReviewRequestAdded(t *testing.T) {
 	prev := domain.PRSnapshot{Number: 42, ReviewRequests: []string{"alice"}}
 	curr := domain.PRSnapshot{Number: 42, ReviewRequests: []string{"alice", "bob"}}
 
-	events := DiffPRSnapshots(prev, curr, "42", "")
+	events := DiffPRSnapshots(prev, curr, "42", "bob")
 	assertEventTypes(t, events, []string{domain.EventGitHubPRReviewRequested})
 	assertMetaContains(t, events[0], "requested_reviewer", "bob")
+}
+
+func TestDiffPR_ReviewRequestAdded_OtherUser(t *testing.T) {
+	// Review requested for someone else — should NOT fire for us
+	prev := domain.PRSnapshot{Number: 42, ReviewRequests: []string{"alice"}}
+	curr := domain.PRSnapshot{Number: 42, ReviewRequests: []string{"alice", "bob"}}
+
+	events := DiffPRSnapshots(prev, curr, "42", "charlie")
+	assertEventTypes(t, events, nil)
 }
 
 func TestDiffPR_ReviewRequestReAdded(t *testing.T) {
@@ -101,7 +110,7 @@ func TestDiffPR_ReviewRequestReAdded(t *testing.T) {
 	prev := domain.PRSnapshot{Number: 42, ReviewRequests: nil}
 	curr := domain.PRSnapshot{Number: 42, ReviewRequests: []string{"alice"}}
 
-	events := DiffPRSnapshots(prev, curr, "42", "")
+	events := DiffPRSnapshots(prev, curr, "42", "alice")
 	assertEventTypes(t, events, []string{domain.EventGitHubPRReviewRequested})
 }
 
