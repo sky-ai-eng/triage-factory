@@ -5,8 +5,8 @@ import (
 	"log"
 	"sync"
 
-	"github.com/sky-ai-eng/todo-tinder/internal/db"
-	"github.com/sky-ai-eng/todo-tinder/internal/domain"
+	"github.com/sky-ai-eng/todo-triage/internal/db"
+	"github.com/sky-ai-eng/todo-triage/internal/domain"
 )
 
 // RunnerCallbacks are optional hooks fired during the scoring lifecycle.

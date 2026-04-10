@@ -255,24 +255,24 @@ function renderActivityLog(messages: AgentMessage[], isActive: boolean, run: Age
 function formatToolCall(name: string, input: Record<string, any>): string {
   if (name === 'Bash') {
     const cmd = String(input.command || '')
-    if (cmd.includes('todotinder exec gh pr view')) return 'Fetching PR details'
-    if (cmd.includes('todotinder exec gh pr diff') && input.command?.includes('--file'))
+    if (cmd.includes('todotriage exec gh pr view')) return 'Fetching PR details'
+    if (cmd.includes('todotriage exec gh pr diff') && input.command?.includes('--file'))
       return `Reading diff: ${extractFlag(cmd, '--file')}`
-    if (cmd.includes('todotinder exec gh pr diff')) return 'Reading full diff'
-    if (cmd.includes('todotinder exec gh pr files')) return 'Listing changed files'
-    if (cmd.includes('todotinder exec gh pr review-view')) return 'Expanding previous review'
-    if (cmd.includes('todotinder exec gh pr start-review')) return 'Starting review'
-    if (cmd.includes('todotinder exec gh pr add-review-comment')) {
+    if (cmd.includes('todotriage exec gh pr diff')) return 'Reading full diff'
+    if (cmd.includes('todotriage exec gh pr files')) return 'Listing changed files'
+    if (cmd.includes('todotriage exec gh pr review-view')) return 'Expanding previous review'
+    if (cmd.includes('todotriage exec gh pr start-review')) return 'Starting review'
+    if (cmd.includes('todotriage exec gh pr add-review-comment')) {
       const file = extractFlag(cmd, '--file')
       return file ? `Adding comment on ${file}` : 'Adding review comment'
     }
-    if (cmd.includes('todotinder exec gh pr submit-review')) {
+    if (cmd.includes('todotriage exec gh pr submit-review')) {
       const event = extractFlag(cmd, '--event')
       return `Submitting review (${event || 'comment'})`
     }
-    if (cmd.includes('todotinder exec gh pr comment-list-pending')) return 'Reviewing pending comments'
-    if (cmd.includes('todotinder exec gh pr add-comment')) return 'Adding comment'
-    if (cmd.includes('todotinder exec')) return `Running: ${cmd.split('todotinder exec ')[1]?.slice(0, 60)}`
+    if (cmd.includes('todotriage exec gh pr comment-list-pending')) return 'Reviewing pending comments'
+    if (cmd.includes('todotriage exec gh pr add-comment')) return 'Adding comment'
+    if (cmd.includes('todotriage exec')) return `Running: ${cmd.split('todotriage exec ')[1]?.slice(0, 60)}`
     return `Running command`
   }
   if (name === 'Read') return `Reading ${basename(String(input.file_path || ''))}`

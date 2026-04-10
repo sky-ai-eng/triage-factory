@@ -6,7 +6,7 @@ import (
 	"github.com/zalando/go-keyring"
 )
 
-const service = "todotinder"
+const service = "todotriage"
 
 // Keychain keys
 const (

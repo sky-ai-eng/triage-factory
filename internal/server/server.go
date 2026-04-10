@@ -7,13 +7,13 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/sky-ai-eng/todo-tinder/internal/delegate"
-	ghclient "github.com/sky-ai-eng/todo-tinder/internal/github"
-	"github.com/sky-ai-eng/todo-tinder/internal/jira"
-	"github.com/sky-ai-eng/todo-tinder/pkg/websocket"
+	"github.com/sky-ai-eng/todo-triage/internal/delegate"
+	ghclient "github.com/sky-ai-eng/todo-triage/internal/github"
+	"github.com/sky-ai-eng/todo-triage/internal/jira"
+	"github.com/sky-ai-eng/todo-triage/pkg/websocket"
 )
 
-// Server is the main HTTP server for Todo Tinder.
+// Server is the main HTTP server for Todo Triage.
 type Server struct {
 	db                    *sql.DB
 	mux                   *http.ServeMux

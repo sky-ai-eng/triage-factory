@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	jiraclient "github.com/sky-ai-eng/todo-tinder/internal/jira"
+	jiraclient "github.com/sky-ai-eng/todo-triage/internal/jira"
 )
 
 // Handle dispatches jira subcommands.
@@ -43,5 +43,5 @@ const HelpText = `Jira Ticket Commands:
   jira ticket list-priorities                                  List available priority levels`
 
 func printHelp() {
-	fmt.Printf("Usage: todotinder exec jira <resource> <action> [flags]\n\n%s\n\nAll commands print JSON to stdout on success, errors to stderr.\n", HelpText)
+	fmt.Printf("Usage: todotriage exec jira <resource> <action> [flags]\n\n%s\n\nAll commands print JSON to stdout on success, errors to stderr.\n", HelpText)
 }

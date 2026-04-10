@@ -9,11 +9,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sky-ai-eng/todo-tinder/internal/db"
-	"github.com/sky-ai-eng/todo-tinder/internal/domain"
-	"github.com/sky-ai-eng/todo-tinder/internal/eventbus"
-	ghclient "github.com/sky-ai-eng/todo-tinder/internal/github"
-	jiraclient "github.com/sky-ai-eng/todo-tinder/internal/jira"
+	"github.com/sky-ai-eng/todo-triage/internal/db"
+	"github.com/sky-ai-eng/todo-triage/internal/domain"
+	"github.com/sky-ai-eng/todo-triage/internal/eventbus"
+	ghclient "github.com/sky-ai-eng/todo-triage/internal/github"
+	jiraclient "github.com/sky-ai-eng/todo-triage/internal/jira"
 )
 
 const (

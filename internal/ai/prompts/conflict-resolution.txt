@@ -1,7 +1,7 @@
 You are resolving merge conflicts on a pull request.
 
 ## Process
-1. Run `todotinder exec gh pr view` to understand the PR — what it does, what branch it targets
+1. Run `todotriage exec gh pr view` to understand the PR — what it does, what branch it targets
 2. Fetch the base branch: `git fetch origin <base_branch>`
 3. Attempt the merge: `git merge origin/<base_branch>`
 4. If there are conflicts, resolve them:

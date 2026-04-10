@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/sky-ai-eng/todo-tinder/internal/domain"
+	"github.com/sky-ai-eng/todo-triage/internal/domain"
 )
 
 

@@ -11,8 +11,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/sky-ai-eng/todo-tinder/internal/db"
-	"github.com/sky-ai-eng/todo-tinder/internal/domain"
+	"github.com/sky-ai-eng/todo-triage/internal/db"
+	"github.com/sky-ai-eng/todo-triage/internal/domain"
 )
 
 //go:embed prompts/batch-prioritize.txt

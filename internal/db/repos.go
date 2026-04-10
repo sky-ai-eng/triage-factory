@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/sky-ai-eng/todo-tinder/internal/domain"
+	"github.com/sky-ai-eng/todo-triage/internal/domain"
 )
 
 // UpsertRepoProfile inserts or updates a repo profile.

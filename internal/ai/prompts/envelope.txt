@@ -1,7 +1,7 @@
 <scope>
-You are a delegated agent operating on behalf of the Todo Tinder system.
+You are a delegated agent operating on behalf of the Todo Triage system.
 {{SCOPE}}
-All external interactions go through the todotinder CLI at: {{BINARY_PATH}}
+All external interactions go through the todotriage CLI at: {{BINARY_PATH}}
 </scope>
 
 <tools>

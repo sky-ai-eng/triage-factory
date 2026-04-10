@@ -1,8 +1,8 @@
-# Todo Tinder
+# Todo Triage
 
 Engineering backlog triaged by AI, delegated to agents.
 
-Todo Tinder pulls in everything that needs your attention across GitHub and Jira, scores it with AI, and lets you blast through it. Swipe right to claim, swipe up to hand it to a Claude Code agent, swipe left to make it go away. The things you delegate get done how you want them done using custom prompts you write or import from Claude Code skills. PR reviews, Jira implementations, and merge conflict resolution are all handled automatically in isolated worktrees, streaming results back in real time.
+Todo Triage pulls in everything that needs your attention across GitHub and Jira, scores it with AI, and lets you blast through it. Swipe right to claim, swipe up to hand it to a Claude Code agent, swipe left to make it go away. The things you delegate get done how you want them done using custom prompts you write or import from Claude Code skills. PR reviews, Jira implementations, and merge conflict resolution are all handled automatically in isolated worktrees, streaming results back in real time.
 
 It runs as a single Go binary on your machine. No hosted service, no team rollout, no DevOps. Credentials live in the OS keychain, and the only things that leave your machine are API calls to GitHub, Jira, and Claude.
 
@@ -14,7 +14,7 @@ It runs as a single Go binary on your machine. No hosted service, no team rollou
 
 **Board** — Three-column kanban (You / Agent / Done) with a collapsible, searchable queue sidebar. Drag tasks between columns. Drag from You to Agent to delegate something you already claimed. The Agent column is attention-weighted: tasks needing your review float to the top, running tasks sink to the bottom.
 
-**Agent delegation** — When you delegate a task, Todo Tinder spins up a headless Claude Code instance in an isolated git worktree. The agent works autonomously — reviewing PRs, implementing Jira tickets, resolving merge conflicts, or anything else you can dream up — and streams its activity back to the board in real time. When it's done, you review and approve.
+**Agent delegation** — When you delegate a task, Todo Triage spins up a headless Claude Code instance in an isolated git worktree. The agent works autonomously — reviewing PRs, implementing Jira tickets, resolving merge conflicts, or anything else you can dream up — and streams its activity back to the board in real time. When it's done, you review and approve.
 
 **Prompt routing** — A visual graph editor maps event types to delegation prompts. "Review requested" routes to your PR review prompt, "Jira assigned" routes to your implementation prompt. Drag event types onto prompt nodes to wire them up.
 
@@ -27,15 +27,15 @@ It runs as a single Go binary on your machine. No hosted service, no team rollou
 ## Quick start
 
 ```bash
-git clone https://github.com/sky-ai-eng/todo-tinder.git
-cd todo-tinder
+git clone https://github.com/sky-ai-eng/todo-triage.git
+cd todo-triage
 
 # Build
 cd frontend && npm install && npm run build && cd ..
-go build -o ./todotinder .
+go build -o ./todotriage .
 
 # Run
-./todotinder
+./todotriage
 ```
 
 Requires Go 1.23+ (update local `go.mod`), Node.js 20+, and the [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code). On first launch you'll be guided through connecting GitHub and/or Jira.

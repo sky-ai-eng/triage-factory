@@ -3,9 +3,9 @@ package server
 import (
 	"net/http"
 
-	"github.com/sky-ai-eng/todo-tinder/internal/db"
-	"github.com/sky-ai-eng/todo-tinder/internal/domain"
-	"github.com/sky-ai-eng/todo-tinder/pkg/websocket"
+	"github.com/sky-ai-eng/todo-triage/internal/db"
+	"github.com/sky-ai-eng/todo-triage/internal/domain"
+	"github.com/sky-ai-eng/todo-triage/pkg/websocket"
 )
 
 func (s *Server) handleAgentStatus(w http.ResponseWriter, r *http.Request) {

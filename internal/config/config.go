@@ -8,7 +8,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config represents ~/.todotinder/config.yaml.
+// Config represents ~/.todotriage/config.yaml.
 type Config struct {
 	GitHub GitHubConfig `yaml:"github"`
 	Jira   JiraConfig   `yaml:"jira"`
@@ -71,13 +71,13 @@ func Default() Config {
 	}
 }
 
-// configPath returns the path to ~/.todotinder/config.yaml.
+// configPath returns the path to ~/.todotriage/config.yaml.
 func configPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".todotinder", "config.yaml"), nil
+	return filepath.Join(home, ".todotriage", "config.yaml"), nil
 }
 
 // Load reads the config from disk, falling back to defaults for missing fields.

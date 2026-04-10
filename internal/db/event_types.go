@@ -3,7 +3,7 @@ package db
 import (
 	"database/sql"
 
-	"github.com/sky-ai-eng/todo-tinder/internal/domain"
+	"github.com/sky-ai-eng/todo-triage/internal/domain"
 )
 
 // ListEventTypes returns all event types from the catalog, ordered by user sort order.

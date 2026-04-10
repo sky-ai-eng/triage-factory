@@ -1,4 +1,4 @@
-# Contributing to Todo Tinder
+# Contributing to Todo Triage
 
 Thanks for contributing.
 

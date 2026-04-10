@@ -1,4 +1,4 @@
-Todo Tinder Individual Contributor License Agreement
+Todo Triage Individual Contributor License Agreement
 
 Version 1.0
 
@@ -11,7 +11,7 @@ Purpose
 
 The purpose of this Agreement is to permit You to contribute code,
 documentation, bug fixes, design materials, tests, or other materials
-("Contributions") to the Todo Tinder project ("Project") while allowing the
+("Contributions") to the Todo Triage project ("Project") while allowing the
 Maintainer to use, distribute, sublicense, and relicense those Contributions as
 part of the Project and any derivative works.
 

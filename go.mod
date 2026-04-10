@@ -1,4 +1,4 @@
-module github.com/sky-ai-eng/todo-tinder
+module github.com/sky-ai-eng/todo-triage
 
 go 1.26.1
 

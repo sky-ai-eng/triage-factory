@@ -5,7 +5,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/sky-ai-eng/todo-tinder/internal/domain"
+	"github.com/sky-ai-eng/todo-triage/internal/domain"
 )
 
 // SeedPrompt inserts a prompt if it doesn't exist. Returns true if it was inserted.

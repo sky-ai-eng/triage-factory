@@ -15,7 +15,7 @@ export default function Shell() {
     <div className="min-h-screen bg-surface text-text-primary">
       <nav className="sticky top-0 z-50 backdrop-blur-xl bg-surface-overlay border-b border-border-subtle px-8 py-4 flex items-center gap-10">
         <span className="text-base font-semibold tracking-tight text-text-primary">
-          Todo Tinder
+          Todo Triage
         </span>
         <div className="flex gap-1 flex-1">
           {navItems.map((item) => (

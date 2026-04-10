@@ -6,10 +6,10 @@ import (
 	"slices"
 	"time"
 
-	"github.com/sky-ai-eng/todo-tinder/internal/auth"
-	"github.com/sky-ai-eng/todo-tinder/internal/config"
-	"github.com/sky-ai-eng/todo-tinder/internal/db"
-	"github.com/sky-ai-eng/todo-tinder/internal/jira"
+	"github.com/sky-ai-eng/todo-triage/internal/auth"
+	"github.com/sky-ai-eng/todo-triage/internal/config"
+	"github.com/sky-ai-eng/todo-triage/internal/db"
+	"github.com/sky-ai-eng/todo-triage/internal/jira"
 )
 
 // settingsResponse combines config values with auth status so the frontend

@@ -13,7 +13,7 @@ type DB struct {
 	Conn *sql.DB
 }
 
-// Open returns a connection to the SQLite database at ~/.todotinder/todotinder.db.
+// Open returns a connection to the SQLite database at ~/.todotriage/todotriage.db.
 // Creates the directory if it doesn't exist.
 func Open() (*sql.DB, error) {
 	home, err := os.UserHomeDir()
@@ -21,12 +21,12 @@ func Open() (*sql.DB, error) {
 		return nil, err
 	}
 
-	dir := filepath.Join(home, ".todotinder")
+	dir := filepath.Join(home, ".todotriage")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, err
 	}
 
-	dbPath := filepath.Join(dir, "todotinder.db")
+	dbPath := filepath.Join(dir, "todotriage.db")
 	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_foreign_keys=on")
 	if err != nil {
 		return nil, err

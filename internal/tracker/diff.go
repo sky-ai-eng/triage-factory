@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/sky-ai-eng/todo-tinder/internal/domain"
+	"github.com/sky-ai-eng/todo-triage/internal/domain"
 )
 
 // DiffPRSnapshots compares two PR snapshots and returns events for every detected transition.

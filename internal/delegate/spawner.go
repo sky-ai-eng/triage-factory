@@ -16,12 +16,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sky-ai-eng/todo-tinder/internal/ai"
-	"github.com/sky-ai-eng/todo-tinder/internal/db"
-	"github.com/sky-ai-eng/todo-tinder/internal/domain"
-	ghclient "github.com/sky-ai-eng/todo-tinder/internal/github"
-	"github.com/sky-ai-eng/todo-tinder/internal/worktree"
-	"github.com/sky-ai-eng/todo-tinder/pkg/websocket"
+	"github.com/sky-ai-eng/todo-triage/internal/ai"
+	"github.com/sky-ai-eng/todo-triage/internal/db"
+	"github.com/sky-ai-eng/todo-triage/internal/domain"
+	ghclient "github.com/sky-ai-eng/todo-triage/internal/github"
+	"github.com/sky-ai-eng/todo-triage/internal/worktree"
+	"github.com/sky-ai-eng/todo-triage/pkg/websocket"
 )
 
 // Spawner manages delegated agent runs.
@@ -287,7 +287,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	if cfg.wtPath != "" {
 		cmd.Dir = cfg.wtPath
 	}
-	cmd.Env = append(os.Environ(), "TODOTINDER_RUN_ID="+runID, "TODOTINDER_REVIEW_PREVIEW=1")
+	cmd.Env = append(os.Environ(), "TODOTRIAGE_RUN_ID="+runID, "TODOTRIAGE_REVIEW_PREVIEW=1")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdout, err := cmd.StdoutPipe()
@@ -548,7 +548,7 @@ func buildPrompt(mission, scope, toolsRef, binaryPath string) string {
 		"{{TOOLS_REFERENCE}}", toolsRef,
 	).Replace(ai.EnvelopeTemplate)
 
-	body := strings.ReplaceAll(mission, "todotinder exec", binaryPath+" exec")
+	body := strings.ReplaceAll(mission, "todotriage exec", binaryPath+" exec")
 	full := body + "\n\n" + envelope
 	return strings.ReplaceAll(full, "{{BINARY_PATH}}", binaryPath)
 }

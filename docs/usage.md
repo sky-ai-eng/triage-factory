@@ -10,10 +10,10 @@
 
 ```bash
 # Default (port 3000, opens browser)
-./todotinder
+./todotriage
 
 # Custom port, no browser
-./todotinder --port 8080 --no-browser
+./todotriage --port 8080 --no-browser
 ```
 
 ## CLI subcommands
@@ -22,15 +22,15 @@ The binary exposes subcommands used internally by delegation agents. You don't n
 
 ```bash
 # Execute GitHub commands in the context of a delegated run
-./todotinder exec gh pr view --owner sky-ai-eng --repo myrepo --number 42
+./todotriage exec gh pr view --owner sky-ai-eng --repo myrepo --number 42
 
 # Check agent run status
-./todotinder status <run-id>
+./todotriage status <run-id>
 ```
 
 ## Configuration
 
-Config lives at `~/.todotinder/config.yaml` and can be edited via the Settings page or directly:
+Config lives at `~/.todotriage/config.yaml` and can be edited via the Settings page or directly:
 
 ```yaml
 github:

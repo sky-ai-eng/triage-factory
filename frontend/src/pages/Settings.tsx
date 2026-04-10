@@ -251,7 +251,7 @@ export default function Settings() {
                 <p className="text-[11px] text-text-tertiary mt-1">
                   Requires a{' '}
                   <a
-                    href="https://github.com/settings/tokens/new?scopes=repo,read:org&description=Todo+Tinder"
+                    href="https://github.com/settings/tokens/new?scopes=repo,read:org&description=Todo+Triage"
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-accent hover:underline"

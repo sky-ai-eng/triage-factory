@@ -31,8 +31,8 @@ func lockRepo(owner, repo string) *sync.Mutex {
 }
 
 const (
-	reposDir = ".todotinder/repos" // bare clones: ~/.todotinder/repos/{owner}/{repo}.git
-	runsDir  = "todotinder-runs"   // worktrees: /tmp/todotinder-runs/{run-id}
+	reposDir = ".todotriage/repos" // bare clones: ~/.todotriage/repos/{owner}/{repo}.git
+	runsDir  = "todotriage-runs"   // worktrees: /tmp/todotriage-runs/{run-id}
 )
 
 func repoDir(owner, repo string) (string, error) {

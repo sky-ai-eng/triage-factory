@@ -5,11 +5,11 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sky-ai-eng/todo-tinder/internal/auth"
-	"github.com/sky-ai-eng/todo-tinder/internal/config"
-	"github.com/sky-ai-eng/todo-tinder/internal/db"
-	"github.com/sky-ai-eng/todo-tinder/internal/domain"
-	ghclient "github.com/sky-ai-eng/todo-tinder/internal/github"
+	"github.com/sky-ai-eng/todo-triage/internal/auth"
+	"github.com/sky-ai-eng/todo-triage/internal/config"
+	"github.com/sky-ai-eng/todo-triage/internal/db"
+	"github.com/sky-ai-eng/todo-triage/internal/domain"
+	ghclient "github.com/sky-ai-eng/todo-triage/internal/github"
 )
 
 // handleGitHubRepos returns all repositories the authenticated user has access to.

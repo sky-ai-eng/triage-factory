@@ -4,7 +4,7 @@ import (
 	"log"
 	"sync"
 
-	"github.com/sky-ai-eng/todo-tinder/internal/domain"
+	"github.com/sky-ai-eng/todo-triage/internal/domain"
 )
 
 // Handler is a function that processes an event. Handlers are called synchronously

@@ -4,13 +4,13 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/sky-ai-eng/todo-tinder/cmd/exec/gh"
-	jiraexec "github.com/sky-ai-eng/todo-tinder/cmd/exec/jira"
-	"github.com/sky-ai-eng/todo-tinder/internal/auth"
-	"github.com/sky-ai-eng/todo-tinder/internal/config"
-	"github.com/sky-ai-eng/todo-tinder/internal/db"
-	ghclient "github.com/sky-ai-eng/todo-tinder/internal/github"
-	jiraclient "github.com/sky-ai-eng/todo-tinder/internal/jira"
+	"github.com/sky-ai-eng/todo-triage/cmd/exec/gh"
+	jiraexec "github.com/sky-ai-eng/todo-triage/cmd/exec/jira"
+	"github.com/sky-ai-eng/todo-triage/internal/auth"
+	"github.com/sky-ai-eng/todo-triage/internal/config"
+	"github.com/sky-ai-eng/todo-triage/internal/db"
+	ghclient "github.com/sky-ai-eng/todo-triage/internal/github"
+	jiraclient "github.com/sky-ai-eng/todo-triage/internal/jira"
 )
 
 // Handle dispatches exec subcommands.
@@ -49,7 +49,7 @@ func Handle(args []string) {
 			return
 		}
 		if creds.GitHubPAT == "" {
-			fmt.Fprintln(os.Stderr, "GitHub not configured. Run todotinder and complete setup first.")
+			fmt.Fprintln(os.Stderr, "GitHub not configured. Run todotriage and complete setup first.")
 			os.Exit(1)
 		}
 		baseURL := cfg.GitHub.BaseURL
@@ -65,14 +65,14 @@ func Handle(args []string) {
 			return
 		}
 		if creds.JiraPAT == "" || creds.JiraURL == "" {
-			fmt.Fprintln(os.Stderr, "Jira not configured. Run todotinder and complete setup first.")
+			fmt.Fprintln(os.Stderr, "Jira not configured. Run todotriage and complete setup first.")
 			os.Exit(1)
 		}
 		jClient := jiraclient.NewClient(creds.JiraURL, creds.JiraPAT)
 		jiraexec.Handle(jClient, cmdArgs)
 
 	default:
-		fmt.Fprintf(os.Stderr, "unknown exec command: %s\nRun 'todotinder exec --help' for usage.\n", cmd)
+		fmt.Fprintf(os.Stderr, "unknown exec command: %s\nRun 'todotriage exec --help' for usage.\n", cmd)
 		os.Exit(1)
 	}
 }
@@ -87,5 +87,5 @@ func isHelp(args []string) bool {
 }
 
 func printHelp() {
-	fmt.Printf("Usage: todotinder exec <service> <resource> <action> [flags]\n\n%s\n\n%s\n\nAll commands print JSON to stdout on success, errors to stderr.\n", gh.HelpText, jiraexec.HelpText)
+	fmt.Printf("Usage: todotriage exec <service> <resource> <action> [flags]\n\n%s\n\n%s\n\nAll commands print JSON to stdout on success, errors to stderr.\n", gh.HelpText, jiraexec.HelpText)
 }

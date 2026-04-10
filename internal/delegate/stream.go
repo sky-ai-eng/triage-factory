@@ -3,7 +3,7 @@ package delegate
 import (
 	"encoding/json"
 
-	"github.com/sky-ai-eng/todo-tinder/internal/domain"
+	"github.com/sky-ai-eng/todo-triage/internal/domain"
 )
 
 // streamState tracks the current assistant message being accumulated

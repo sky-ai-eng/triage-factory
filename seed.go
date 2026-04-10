@@ -4,9 +4,9 @@ import (
 	"database/sql"
 	"log"
 
-	"github.com/sky-ai-eng/todo-tinder/internal/ai"
-	"github.com/sky-ai-eng/todo-tinder/internal/db"
-	"github.com/sky-ai-eng/todo-tinder/internal/domain"
+	"github.com/sky-ai-eng/todo-triage/internal/ai"
+	"github.com/sky-ai-eng/todo-triage/internal/db"
+	"github.com/sky-ai-eng/todo-triage/internal/domain"
 )
 
 func seedDefaultPrompts(database *sql.DB) {

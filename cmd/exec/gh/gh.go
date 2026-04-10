@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/sky-ai-eng/todo-tinder/internal/db"
-	"github.com/sky-ai-eng/todo-tinder/internal/github"
+	"github.com/sky-ai-eng/todo-triage/internal/db"
+	"github.com/sky-ai-eng/todo-triage/internal/github"
 )
 
 // HelpText is the help output for gh commands, shared with the top-level exec help.
@@ -49,5 +49,5 @@ func Handle(client *github.Client, database *db.DB, args []string) {
 }
 
 func printHelp() {
-	fmt.Printf("Usage: todotinder exec gh <resource> <action> [flags]\n\n%s\n\nAll commands print JSON to stdout on success, errors to stderr.\n", HelpText)
+	fmt.Printf("Usage: todotriage exec gh <resource> <action> [flags]\n\n%s\n\nAll commands print JSON to stdout on success, errors to stderr.\n", HelpText)
 }

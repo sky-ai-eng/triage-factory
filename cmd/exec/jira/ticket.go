@@ -7,12 +7,12 @@ import (
 	"strconv"
 	"strings"
 
-	jiraclient "github.com/sky-ai-eng/todo-tinder/internal/jira"
+	jiraclient "github.com/sky-ai-eng/todo-triage/internal/jira"
 )
 
 func handleTicket(client *jiraclient.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: todotinder exec jira ticket <action> [flags]")
+		exitErr("usage: todotriage exec jira ticket <action> [flags]")
 	}
 
 	action := args[0]

@@ -152,7 +152,7 @@ export default function Setup() {
           <div>
             <h1 className="text-[22px] font-semibold text-text-primary tracking-tight">Connect GitHub</h1>
             <p className="text-[13px] text-text-tertiary mt-1.5 leading-relaxed">
-              Todo Tinder needs access to your GitHub to watch repositories and manage PRs.
+              Todo Triage needs access to your GitHub to watch repositories and manage PRs.
               Tokens are stored in your OS keychain and never leave your machine.
             </p>
           </div>
@@ -175,7 +175,7 @@ export default function Setup() {
             <p className="text-[11px] text-text-tertiary">
               Requires a{' '}
               <a
-                href="https://github.com/settings/tokens/new?scopes=repo,read:org&description=Todo+Tinder"
+                href="https://github.com/settings/tokens/new?scopes=repo,read:org&description=Todo+Triage"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-accent hover:underline"
