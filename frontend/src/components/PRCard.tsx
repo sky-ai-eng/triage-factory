@@ -42,7 +42,11 @@ export default function PRCard({ pr }: { pr: PRSummary }) {
       >
         {/* Merge indicator */}
         <div className="shrink-0">
-          {!expanded ? (
+          {pr.state === 'merged' ? (
+            <div className="w-2.5 h-2.5 rounded-full bg-claim" />
+          ) : pr.state === 'closed' ? (
+            <div className="w-2.5 h-2.5 rounded-full bg-dismiss" />
+          ) : !expanded ? (
             <div className={`w-2.5 h-2.5 rounded-full ${pr.draft ? 'bg-text-tertiary/30' : 'bg-accent/40'}`} />
           ) : canMerge === true ? (
             <div className="w-2.5 h-2.5 rounded-full bg-claim" title="Ready to merge" />
@@ -61,6 +65,16 @@ export default function PRCard({ pr }: { pr: PRSummary }) {
             {pr.draft && (
               <span className="text-[10px] font-medium text-text-tertiary bg-black/[0.05] rounded px-1.5 py-0.5">
                 DRAFT
+              </span>
+            )}
+            {pr.state === 'merged' && (
+              <span className="text-[10px] font-medium text-claim bg-claim/10 rounded px-1.5 py-0.5">
+                MERGED
+              </span>
+            )}
+            {pr.state === 'closed' && (
+              <span className="text-[10px] font-medium text-dismiss bg-dismiss/10 rounded px-1.5 py-0.5">
+                CLOSED
               </span>
             )}
           </div>

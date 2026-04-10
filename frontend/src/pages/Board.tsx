@@ -22,6 +22,7 @@ import {
   SortableContext,
   verticalListSortingStrategy,
   useSortable,
+  arrayMove,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 
@@ -249,7 +250,27 @@ export default function Board() {
       targetCol = getColumn(overId) || sourceCol
     }
 
-    if (sourceCol === targetCol) return
+    // Same column — reorder (local state only, no backend persistence)
+    if (sourceCol === targetCol) {
+      if (sourceCol === 'you') {
+        const oldIndex = claimed.findIndex((t) => t.id === taskId)
+        const overTaskIndex = claimed.findIndex((t) => t.id === overId)
+        if (oldIndex !== -1 && overTaskIndex !== -1 && oldIndex !== overTaskIndex) {
+          setClaimed(arrayMove(claimed, oldIndex, overTaskIndex))
+        }
+      } else if (sourceCol === 'done') {
+        const oldIndex = done.findIndex((t) => t.id === taskId)
+        const overTaskIndex = done.findIndex((t) => t.id === overId)
+        if (oldIndex !== -1 && overTaskIndex !== -1 && oldIndex !== overTaskIndex) {
+          setDone(arrayMove(done, oldIndex, overTaskIndex))
+        }
+      }
+      return
+    }
+
+    // Block cross-column moves for externally terminal tasks (merged/closed PRs)
+    const terminalEvents = ['github:pr:merged', 'github:pr:closed']
+    if (terminalEvents.includes(task.event_type || '')) return
 
     // Queue → You: claim
     if (sourceCol === 'queue' && targetCol === 'you') {

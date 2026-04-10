@@ -35,6 +35,11 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, sourceID, username string) []
 		emit(domain.EventGitHubPRMerged, map[string]string{})
 	}
 
+	// Closed without merging
+	if prev.State != "CLOSED" && curr.State == "CLOSED" && !curr.Merged {
+		emit(domain.EventGitHubPRClosed, map[string]string{})
+	}
+
 	// Draft → Ready for review
 	if prev.IsDraft && !curr.IsDraft {
 		emit(domain.EventGitHubPRReadyForReview, map[string]string{})
@@ -190,7 +195,7 @@ func initialPREvents(snap domain.PRSnapshot, sourceID, username string, now time
 	}
 
 	if snap.State == "CLOSED" {
-		// Closed-unmerged PRs are backfill for dashboard stats only — no triage event.
+		add(domain.EventGitHubPRClosed)
 		return events
 	}
 

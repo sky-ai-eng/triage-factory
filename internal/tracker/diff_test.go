@@ -47,6 +47,33 @@ func TestDiffPR_FirstSeen_Merged(t *testing.T) {
 	assertEventTypes(t, events, []string{domain.EventGitHubPRMerged})
 }
 
+func TestDiffPR_FirstSeen_Closed(t *testing.T) {
+	events := DiffPRSnapshots(domain.PRSnapshot{}, domain.PRSnapshot{
+		Number: 42,
+		State:  "CLOSED",
+		Merged: false,
+	}, "42", "alice")
+
+	assertEventTypes(t, events, []string{domain.EventGitHubPRClosed})
+}
+
+func TestDiffPR_OpenToClosed(t *testing.T) {
+	prev := domain.PRSnapshot{Number: 42, State: "OPEN", Merged: false}
+	curr := domain.PRSnapshot{Number: 42, State: "CLOSED", Merged: false}
+
+	events := DiffPRSnapshots(prev, curr, "42", "")
+	assertEventTypes(t, events, []string{domain.EventGitHubPRClosed})
+}
+
+func TestDiffPR_OpenToMerged_EmitsMergedNotClosed(t *testing.T) {
+	// Merged PRs (Merged=true) should emit github:pr:merged, not github:pr:closed
+	prev := domain.PRSnapshot{Number: 42, State: "OPEN", Merged: false}
+	curr := domain.PRSnapshot{Number: 42, State: "MERGED", Merged: true}
+
+	events := DiffPRSnapshots(prev, curr, "42", "")
+	assertEventTypes(t, events, []string{domain.EventGitHubPRMerged})
+}
+
 func TestDiffPR_CITransition(t *testing.T) {
 	prev := domain.PRSnapshot{Number: 42, CIState: "PENDING"}
 

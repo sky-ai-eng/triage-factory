@@ -47,6 +47,7 @@ const (
 	EventGitHubPRMentioned       = "github:pr:mentioned"
 	EventGitHubPRConflicts       = "github:pr:conflicts"
 	EventGitHubPROpened          = "github:pr:opened"
+	EventGitHubPRClosed          = "github:pr:closed"
 	EventGitHubPRReadyForReview  = "github:pr:ready_for_review"
 )
 
@@ -93,7 +94,8 @@ func AllEventTypes() []EventType {
 		{ID: EventGitHubPROpened, Source: "github", Category: "pr", Label: "Authored PR", Description: "Your open pull request is being tracked", DefaultPriority: 0.4, Enabled: false, SortOrder: 12},
 		{ID: EventJiraIssueStatusChanged, Source: "jira", Category: "issue", Label: "Status Changed", Description: "Issue status changed", DefaultPriority: 0.4, Enabled: false, SortOrder: 13},
 		{ID: EventGitHubPRMerged, Source: "github", Category: "pr", Label: "PR Merged", Description: "Your PR was merged", DefaultPriority: 0.3, Enabled: false, SortOrder: 14},
-		{ID: EventJiraIssueCompleted, Source: "jira", Category: "issue", Label: "Issue Completed", Description: "Issue was marked as done", DefaultPriority: 0.2, Enabled: false, SortOrder: 15},
+		{ID: EventGitHubPRClosed, Source: "github", Category: "pr", Label: "PR Closed", Description: "A pull request was closed without merging", DefaultPriority: 0.2, Enabled: false, SortOrder: 15},
+		{ID: EventJiraIssueCompleted, Source: "jira", Category: "issue", Label: "Issue Completed", Description: "Issue was marked as done", DefaultPriority: 0.2, Enabled: false, SortOrder: 16},
 
 		// --- System events (never shown in triage UI) ---
 		{ID: EventSystemPollCompleted, Source: "system", Category: "poll", Label: "Poll Complete", Description: "A poller finished a cycle and ingested tasks", DefaultPriority: 0.0, Enabled: false, SortOrder: 100},

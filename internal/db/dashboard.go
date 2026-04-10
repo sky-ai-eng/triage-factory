@@ -123,10 +123,11 @@ func GetDashboardStats(database *sql.DB, username string, sinceDays int) (*Dashb
 }
 
 // GetDashboardPRs returns PR summaries from tracked items for the dashboard list.
+// Includes open, merged, and closed PRs.
 func GetDashboardPRs(database *sql.DB) ([]PRSummaryRow, error) {
 	rows, err := database.Query(`
 		SELECT snapshot FROM tracked_items
-		WHERE source = 'github' AND terminal_at IS NULL
+		WHERE source = 'github'
 		ORDER BY last_polled DESC
 	`)
 	if err != nil {
@@ -146,8 +147,9 @@ func GetDashboardPRs(database *sql.DB) ([]PRSummaryRow, error) {
 			continue
 		}
 
-		if snap.State != "OPEN" {
-			continue // dashboard list shows open PRs only
+		state := stateToLower(snap.State)
+		if snap.Merged {
+			state = "merged"
 		}
 
 		prs = append(prs, PRSummaryRow{
@@ -155,7 +157,7 @@ func GetDashboardPRs(database *sql.DB) ([]PRSummaryRow, error) {
 			Title:     snap.Title,
 			Repo:      snap.Repo,
 			Author:    snap.Author,
-			State:     stateToLower(snap.State),
+			State:     state,
 			Draft:     snap.IsDraft,
 			Labels:    snap.Labels,
 			CreatedAt: snap.CreatedAt,

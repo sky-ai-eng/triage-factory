@@ -11,6 +11,7 @@ const EVENT_DISPLAY: Record<string, { label: string; description: string; color:
   'github:pr:mentioned':        { label: 'Mentioned',        description: 'You were @mentioned in this pull request', color: 'bg-indigo-500/10 text-indigo-600' },
   'github:pr:conflicts':        { label: 'Conflicts',        description: 'This pull request has merge conflicts that need resolving', color: 'bg-red-500/10 text-red-600' },
   'github:pr:opened':           { label: 'Authored PR',       description: 'Your open pull request is being tracked', color: 'bg-sky-500/10 text-sky-600' },
+  'github:pr:closed':           { label: 'Closed',           description: 'A pull request was closed without merging', color: 'bg-slate-500/10 text-slate-600' },
   'github:pr:ready_for_review': { label: 'Ready for Review', description: 'A draft pull request was marked ready for review', color: 'bg-blue-500/10 text-blue-600' },
   'jira:issue:available':       { label: 'Available',        description: 'Unassigned issue available for pickup in your project', color: 'bg-slate-500/10 text-slate-600' },
   'jira:issue:assigned':        { label: 'Assigned',         description: 'This issue was assigned to you', color: 'bg-blue-500/10 text-blue-600' },

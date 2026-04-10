@@ -84,8 +84,13 @@ export default function PRDashboard() {
     return () => { clearInterval(interval); document.removeEventListener('visibilitychange', handleVis) }
   }, [fetchAll])
 
-  const draftPRs = prs.filter((pr) => pr.draft)
-  const readyPRs = prs.filter((pr) => !pr.draft)
+  const byRecent = (a: PRSummary, b: PRSummary) =>
+    new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+
+  const draftPRs = prs.filter((pr) => pr.state === 'open' && pr.draft).sort(byRecent)
+  const readyPRs = prs.filter((pr) => pr.state === 'open' && !pr.draft).sort(byRecent)
+  const mergedPRs = prs.filter((pr) => pr.state === 'merged').sort(byRecent)
+  const closedPRs = prs.filter((pr) => pr.state === 'closed').sort(byRecent)
 
   const prKey = (pr: PRSummary) => `${pr.repo}-${pr.number}`
   const prMap = new Map(prs.map((pr) => [prKey(pr), pr]))
@@ -237,6 +242,26 @@ export default function PRDashboard() {
           ) : null}
         </DragOverlay>
       </DndContext>
+
+      {/* Merged & closed — non-draggable history */}
+      {(mergedPRs.length > 0 || closedPRs.length > 0) && (
+        <div className="grid grid-cols-2 gap-6 mt-6">
+          <StaticColumn title="Recently merged" count={mergedPRs.length}>
+            {mergedPRs.length === 0 ? (
+              <p className="text-[12px] text-text-tertiary text-center py-8">No merged PRs</p>
+            ) : (
+              mergedPRs.map((pr) => <PRCard key={prKey(pr)} pr={pr} />)
+            )}
+          </StaticColumn>
+          <StaticColumn title="Closed" count={closedPRs.length}>
+            {closedPRs.length === 0 ? (
+              <p className="text-[12px] text-text-tertiary text-center py-8">No closed PRs</p>
+            ) : (
+              closedPRs.map((pr) => <PRCard key={prKey(pr)} pr={pr} />)
+            )}
+          </StaticColumn>
+        </div>
+      )}
     </div>
   )
 }
@@ -279,6 +304,22 @@ function DroppableColumn({ id, title, count, isOver, children }: {
           isOver ? 'bg-accent/5 border-accent/20' : 'bg-black/[0.01]'
         }`}
       >
+        {children}
+      </div>
+    </div>
+  )
+}
+
+function StaticColumn({ title, count, children }: { title: string; count: number; children: React.ReactNode }) {
+  return (
+    <div className="flex flex-col min-h-0">
+      <h2 className="text-[13px] font-medium text-text-secondary mb-3 px-1 shrink-0">
+        {title}
+        <span className="ml-2 text-text-tertiary bg-black/[0.04] rounded-full px-2 py-0.5 text-[11px]">
+          {count}
+        </span>
+      </h2>
+      <div className="rounded-2xl border border-border-subtle p-3 space-y-3 flex-1 overflow-y-auto bg-black/[0.01] max-h-[400px]">
         {children}
       </div>
     </div>

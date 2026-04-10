@@ -246,4 +246,5 @@ CREATE TABLE IF NOT EXISTS tracked_items (
 
 CREATE INDEX IF NOT EXISTS idx_tracked_items_active ON tracked_items(source, tracked_since) WHERE terminal_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_tracked_items_active_polled ON tracked_items(source, last_polled) WHERE terminal_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_tracked_items_source_polled ON tracked_items(source, last_polled DESC);
 `

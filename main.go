@@ -178,7 +178,7 @@ func main() {
 			go func() {
 				profiler := repoprofile.NewProfiler(ghClient, database, wsHub)
 				repos, _ := db.GetConfiguredRepoNames(database)
-				if err := profiler.Run(context.Background(), repos); err != nil {
+				if err := profiler.Run(context.Background(), repos, true); err != nil {
 					log.Printf("[repoprofile] profiling failed: %v", err)
 				}
 				profileGate.Signal()
@@ -230,7 +230,7 @@ func main() {
 		go func() {
 			profiler := repoprofile.NewProfiler(ghClient, database, wsHub)
 			repos, _ := db.GetConfiguredRepoNames(database)
-			if err := profiler.Run(context.Background(), repos); err != nil {
+			if err := profiler.Run(context.Background(), repos, false); err != nil {
 				log.Printf("[repoprofile] initial profiling failed: %v", err)
 			}
 			profileGate.Signal()

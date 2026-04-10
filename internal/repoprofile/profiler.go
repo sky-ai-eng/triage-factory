@@ -22,6 +22,7 @@ const (
 	profileBatchSize = 5
 	profilingModel   = "haiku"
 	maxDocChars      = 10000
+	reprofileTTL     = 3 * 24 * time.Hour // skip repos profiled within the last 3 days
 )
 
 // Profiler builds and persists AI-generated profiles for GitHub repositories.
@@ -44,7 +45,8 @@ type repoWithDocs struct {
 
 // Run profiles the given repos (from config). For each, it fetches docs
 // (README.md, CLAUDE.md, AGENTS.md), then batches through Haiku for profiling.
-func (p *Profiler) Run(ctx context.Context, repos []string) error {
+// If force is true, the TTL check is skipped (used for manual re-profile).
+func (p *Profiler) Run(ctx context.Context, repos []string, force bool) error {
 	if len(repos) == 0 {
 		log.Printf("[repoprofile] no repos configured, skipping")
 		return nil
@@ -66,6 +68,22 @@ func (p *Profiler) Run(ctx context.Context, repos []string) error {
 			continue
 		}
 		owner, repo := parts[0], parts[1]
+
+		// Skip repos that were recently profiled (unless forced)
+		if !force {
+			existing, err := db.GetRepoProfile(p.database, name)
+			if err != nil {
+				log.Printf("[repoprofile] %s: failed to check profile: %v", name, err)
+				continue
+			}
+			if existing != nil && existing.ProfiledAt != nil {
+				age := time.Since(*existing.ProfiledAt)
+				if age < reprofileTTL {
+					log.Printf("[repoprofile] %s: profiled %s ago, skipping (TTL %s)", name, age.Round(time.Hour), reprofileTTL)
+					continue
+				}
+			}
+		}
 
 		readme, err := p.gh.GetFileContent(owner, repo, "README.md")
 		if err != nil {
