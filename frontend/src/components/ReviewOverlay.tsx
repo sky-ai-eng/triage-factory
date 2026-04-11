@@ -37,6 +37,10 @@ export default function ReviewOverlay({ runID, open, onClose }: Props) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  // Extract the primitive id so useCallback deps below can reference a stable
+  // value (string | undefined) instead of review?.id, which is what the
+  // exhaustive-deps rule complains about.
+  const reviewId = review?.id
 
   // Fetch review data + diff
   useEffect(() => {
@@ -75,8 +79,8 @@ export default function ReviewOverlay({ runID, open, onClose }: Props) {
   // Comment operations
   const handleUpdateComment = useCallback(
     async (commentId: string, body: string) => {
-      if (!review) return
-      await fetch(`/api/reviews/${review.id}/comments/${commentId}`, {
+      if (!reviewId) return
+      await fetch(`/api/reviews/${reviewId}/comments/${commentId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ body }),
@@ -90,55 +94,55 @@ export default function ReviewOverlay({ runID, open, onClose }: Props) {
           : prev,
       )
     },
-    [review?.id],
+    [reviewId],
   )
 
   const handleDeleteComment = useCallback(
     async (commentId: string) => {
-      if (!review) return
-      await fetch(`/api/reviews/${review.id}/comments/${commentId}`, {
+      if (!reviewId) return
+      await fetch(`/api/reviews/${reviewId}/comments/${commentId}`, {
         method: 'DELETE',
       })
       setReview((prev) =>
         prev ? { ...prev, comments: prev.comments.filter((c) => c.id !== commentId) } : prev,
       )
     },
-    [review?.id],
+    [reviewId],
   )
 
   // Body + event updates — persist to DB
   const handleUpdateBody = useCallback(
     async (body: string) => {
-      if (!review) return
+      if (!reviewId) return
       setReview((prev) => (prev ? { ...prev, review_body: body } : prev))
-      await fetch(`/api/reviews/${review.id}`, {
+      await fetch(`/api/reviews/${reviewId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ review_body: body }),
       })
     },
-    [review?.id],
+    [reviewId],
   )
 
   const handleUpdateEvent = useCallback(
     async (event: string) => {
-      if (!review) return
+      if (!reviewId) return
       setReview((prev) => (prev ? { ...prev, review_event: event } : prev))
-      await fetch(`/api/reviews/${review.id}`, {
+      await fetch(`/api/reviews/${reviewId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ review_event: event }),
       })
     },
-    [review?.id],
+    [reviewId],
   )
 
   // Submit to GitHub
   const handleSubmit = useCallback(async () => {
-    if (!review) return
+    if (!reviewId) return
     setSubmitting(true)
     try {
-      const res = await fetch(`/api/reviews/${review.id}/submit`, {
+      const res = await fetch(`/api/reviews/${reviewId}/submit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       })
@@ -152,7 +156,7 @@ export default function ReviewOverlay({ runID, open, onClose }: Props) {
     } finally {
       setSubmitting(false)
     }
-  }, [review?.id, onClose])
+  }, [reviewId, onClose])
 
   // Discard — just close for now (review stays in DB, can re-open)
   const handleDiscard = useCallback(() => {

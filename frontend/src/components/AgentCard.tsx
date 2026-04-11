@@ -11,36 +11,7 @@ interface Props {
 
 export default function AgentCard({ task, run, messages, onRequeue, onReview }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
-  const [elapsed, setElapsed] = useState('')
-
-  // Auto-scroll to bottom when new messages arrive
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-    }
-  }, [messages.length])
-
-  // Live elapsed timer — use fixed duration for completed runs
-  useEffect(() => {
-    const isRunning = [
-      'cloning',
-      'fetching',
-      'worktree_created',
-      'agent_starting',
-      'running',
-    ].includes(run.Status)
-
-    if (!isRunning && run.DurationMs) {
-      setElapsed(formatDurationMs(run.DurationMs))
-      return
-    }
-
-    const update = () => setElapsed(formatElapsed(run.StartedAt))
-    update()
-    if (!isRunning) return
-    const interval = setInterval(update, 1000)
-    return () => clearInterval(interval)
-  }, [run.StartedAt, run.Status, run.DurationMs])
+  const [now, setNow] = useState(() => Date.now())
 
   const isActive = [
     'cloning',
@@ -49,6 +20,25 @@ export default function AgentCard({ task, run, messages, onRequeue, onReview }: 
     'agent_starting',
     'running',
   ].includes(run.Status)
+
+  // Auto-scroll to bottom when new messages arrive
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+    }
+  }, [messages.length])
+
+  // Tick `now` once per second while the run is active so the elapsed display
+  // updates live. When the run ends, we stop ticking and display the fixed
+  // duration derived from run.DurationMs below.
+  useEffect(() => {
+    if (!isActive) return
+    const interval = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(interval)
+  }, [isActive])
+
+  const elapsed =
+    !isActive && run.DurationMs ? formatDurationMs(run.DurationMs) : formatElapsed(run.StartedAt, now)
   const isFailed = run.Status === 'failed'
   const isCancelled = run.Status === 'cancelled'
   const isPendingApproval = run.Status === 'pending_approval'
@@ -433,8 +423,8 @@ function formatToolResult(tc: ToolCall, result: AgentMessage): string {
   return text.length > 80 ? text.slice(0, 77) + '...' : text
 }
 
-function formatElapsed(dateStr: string): string {
-  const diff = Date.now() - new Date(dateStr).getTime()
+function formatElapsed(dateStr: string, now: number = Date.now()): string {
+  const diff = now - new Date(dateStr).getTime()
   const seconds = Math.floor(diff / 1000)
   if (seconds < 60) return `${seconds}s`
   const minutes = Math.floor(seconds / 60)

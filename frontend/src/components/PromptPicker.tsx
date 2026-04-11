@@ -11,18 +11,24 @@ interface Props {
 
 export default function PromptPicker({ open, onSelect, onClose, onEditPrompts }: Props) {
   const [prompts, setPrompts] = useState<Prompt[]>([])
-  const [loading, setLoading] = useState(true)
+  // Derived: we're "loading" until the first fetch populates prompts.
+  // After that, subsequent opens show cached prompts instantly.
+  const loading = open && prompts.length === 0
 
   useEffect(() => {
     if (!open) return
-    setLoading(true)
+    let cancelled = false
     fetch('/api/prompts')
       .then((res) => res.json())
       .then((data: Prompt[]) => {
-        setPrompts(data)
-        setLoading(false)
+        if (!cancelled) setPrompts(data)
       })
-      .catch(() => setLoading(false))
+      .catch(() => {
+        // ignore — empty prompt list will render
+      })
+    return () => {
+      cancelled = true
+    }
   }, [open])
 
   return (

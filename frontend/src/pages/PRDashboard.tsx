@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   PieChart,
   Pie,
@@ -74,9 +74,12 @@ export default function PRDashboard() {
   const [activeId, setActiveId] = useState<string | null>(null)
   const [overColumn, setOverColumn] = useState<ColumnId | null>(null)
 
+  // Tracks whether we've completed a first fetch. Used to avoid flashing
+  // skeletons on every interval refresh — they should only show on cold load.
+  // A ref (not state) because flipping it shouldn't trigger a re-render.
+  const hasLoadedOnce = useRef(false)
   const fetchAll = useCallback(async () => {
-    // Only show skeletons if we have no cached data at all
-    if (prs.length === 0 && !stats) setLoading(true)
+    if (!hasLoadedOnce.current) setLoading(true)
     try {
       const [prsRes, statsRes] = await Promise.all([
         fetch('/api/dashboard/prs').then((r) => r.json()),
@@ -86,6 +89,7 @@ export default function PRDashboard() {
       setStats(statsRes)
       saveCache('pr-dash-prs', prsRes)
       saveCache('pr-dash-stats', statsRes)
+      hasLoadedOnce.current = true
     } finally {
       setLoading(false)
     }

@@ -81,6 +81,10 @@ export default function Settings() {
           }
         }
       })
+    // fetchJiraStatuses intentionally omitted — this effect is a one-shot
+    // mount loader, and the call always passes projects explicitly so no
+    // closure staleness is possible.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const fetchJiraStatuses = async (projects?: string[]) => {

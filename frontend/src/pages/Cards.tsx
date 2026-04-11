@@ -88,7 +88,11 @@ export default function Cards() {
     }
   }, [])
 
+  // Initial queue load on mount. fetchQueue calls setState internally, which
+  // the lint rule flags transitively — but fetching data on mount is the
+  // canonical use of an effect and the safe pattern here.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchQueue()
   }, [fetchQueue])
 

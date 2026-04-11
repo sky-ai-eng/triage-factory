@@ -57,8 +57,14 @@ function subscribe(handler: Handler) {
 // --- React hook ---
 
 export function useWebSocket(handler: Handler) {
+  // Latest-ref pattern: keep a mutable reference to the freshest handler
+  // closure so the stable wrapper below always dispatches to it, without
+  // having to re-subscribe on every render. The assignment lives in an
+  // effect (not inline during render) per react-hooks/refs.
   const handlerRef = useRef(handler)
-  handlerRef.current = handler
+  useEffect(() => {
+    handlerRef.current = handler
+  }, [handler])
 
   // Stable wrapper so the subscription identity doesn't change on re-renders
   const stableHandler = useCallback((event: WSEvent) => {

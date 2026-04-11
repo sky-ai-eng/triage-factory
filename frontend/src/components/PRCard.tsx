@@ -13,17 +13,25 @@ interface PRStatusData {
 
 export default function PRCard({ pr }: { pr: PRSummary }) {
   const [status, setStatus] = useState<PRStatusData | null>(null)
-  const [loading, setLoading] = useState(false)
   const [expanded, setExpanded] = useState(false)
+  // Derived: we're "loading" whenever the row is expanded but we haven't
+  // received status data yet. Replaces a separate setLoading call.
+  const loading = expanded && status === null
 
   useEffect(() => {
     if (!expanded) return
-    setLoading(true)
+    let cancelled = false
     fetch(`/api/dashboard/prs/${pr.number}/status?repo=${pr.repo}`)
       .then((r) => r.json())
-      .then((d) => setStatus(d))
-      .catch(() => {})
-      .finally(() => setLoading(false))
+      .then((d) => {
+        if (!cancelled) setStatus(d)
+      })
+      .catch(() => {
+        // ignore — status badge just won't render
+      })
+    return () => {
+      cancelled = true
+    }
   }, [expanded, pr.number, pr.repo])
 
   const age = formatAge(pr.updated_at)
