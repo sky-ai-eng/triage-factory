@@ -121,7 +121,9 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 				log.Printf("[tracker] corrupt snapshot for %s, skipping diff: %v", item.SourceID, err)
 				// Overwrite with fresh state so next cycle can diff cleanly
 				snapJSON, _ := json.Marshal(newSnap)
-				db.UpdateTrackedSnapshot(t.database, "github", item.SourceID, string(snapJSON))
+				if err := db.UpdateTrackedSnapshot(t.database, "github", item.SourceID, string(snapJSON)); err != nil {
+					log.Printf("[tracker] failed to rewrite corrupt snapshot for %s: %v", item.SourceID, err)
+				}
 				continue
 			}
 		}
@@ -143,7 +145,9 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 				evt.ID = id
 			}
 			if item.TaskID != "" {
-				db.SetTaskEventType(t.database, item.TaskID, evt.EventType)
+				if err := db.SetTaskEventType(t.database, item.TaskID, evt.EventType); err != nil {
+					log.Printf("[tracker] failed to set event type for task %s: %v", item.TaskID, err)
+				}
 			}
 			t.bus.Publish(evt)
 			eventsEmitted++
@@ -152,11 +156,15 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 		// Sync task status when PR state changes
 		if item.TaskID != "" && prevSnap.State != newSnap.State {
 			newTaskStatus := prStateToTaskStatus(newSnap)
-			t.database.Exec(`UPDATE tasks SET status = ? WHERE id = ? AND status != ?`, newTaskStatus, item.TaskID, newTaskStatus)
+			if _, err := t.database.Exec(`UPDATE tasks SET status = ? WHERE id = ? AND status != ?`, newTaskStatus, item.TaskID, newTaskStatus); err != nil {
+				log.Printf("[tracker] failed to sync task status for %s: %v", item.TaskID, err)
+			}
 		}
 
 		if newSnap.Merged || newSnap.State == "CLOSED" {
-			db.MarkTerminal(t.database, "github", item.SourceID)
+			if err := db.MarkTerminal(t.database, "github", item.SourceID); err != nil {
+				log.Printf("[tracker] failed to mark github/%s terminal: %v", item.SourceID, err)
+			}
 		}
 	}
 
@@ -298,7 +306,9 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 			if err := json.Unmarshal([]byte(item.Snapshot), &prevSnap); err != nil {
 				log.Printf("[tracker] corrupt snapshot for %s, skipping diff: %v", item.SourceID, err)
 				snapJSON, _ := json.Marshal(newSnap)
-				db.UpdateTrackedSnapshot(t.database, "jira", item.SourceID, string(snapJSON))
+				if err := db.UpdateTrackedSnapshot(t.database, "jira", item.SourceID, string(snapJSON)); err != nil {
+					log.Printf("[tracker] failed to rewrite corrupt snapshot for %s: %v", item.SourceID, err)
+				}
 				continue
 			}
 		}
@@ -308,7 +318,9 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		// Sync task status when the source status changes
 		if item.TaskID != "" && (prevSnap.Status != newSnap.Status || prevSnap.Assignee != newSnap.Assignee) {
 			newTaskStatus := jiraStatusToTaskStatus(newSnap)
-			t.database.Exec(`UPDATE tasks SET status = ? WHERE id = ? AND status != ?`, newTaskStatus, item.TaskID, newTaskStatus)
+			if _, err := t.database.Exec(`UPDATE tasks SET status = ? WHERE id = ? AND status != ?`, newTaskStatus, item.TaskID, newTaskStatus); err != nil {
+				log.Printf("[tracker] failed to sync task status for %s: %v", item.TaskID, err)
+			}
 		}
 
 		snapJSON, _ := json.Marshal(newSnap)
@@ -324,14 +336,18 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 				evt.ID = id
 			}
 			if item.TaskID != "" {
-				db.SetTaskEventType(t.database, item.TaskID, evt.EventType)
+				if err := db.SetTaskEventType(t.database, item.TaskID, evt.EventType); err != nil {
+					log.Printf("[tracker] failed to set event type for task %s: %v", item.TaskID, err)
+				}
 			}
 			t.bus.Publish(evt)
 			eventsEmitted++
 		}
 
 		if isJiraTerminal(newSnap.Status) {
-			db.MarkTerminal(t.database, "jira", item.SourceID)
+			if err := db.MarkTerminal(t.database, "jira", item.SourceID); err != nil {
+				log.Printf("[tracker] failed to mark jira/%s terminal: %v", item.SourceID, err)
+			}
 		}
 	}
 
@@ -563,7 +579,9 @@ func jiraStatusToTaskStatus(snap domain.JiraSnapshot) string {
 // resolveTaskID looks up the task ID for a source+sourceID pair.
 func (t *Tracker) resolveTaskID(source, sourceID string) string {
 	var id string
-	t.database.QueryRow(`SELECT id FROM tasks WHERE source = ? AND source_id = ?`, source, sourceID).Scan(&id)
+	// sql.ErrNoRows is expected here for un-tracked items; any other error
+	// leaves id empty which the caller handles the same way.
+	_ = t.database.QueryRow(`SELECT id FROM tasks WHERE source = ? AND source_id = ?`, source, sourceID).Scan(&id)
 	return id
 }
 

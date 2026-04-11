@@ -39,7 +39,9 @@ func (c *Client) GetPRStatus(owner, repo string, number int) (*PRStatus, error) 
 		return nil, err
 	}
 	var pr map[string]any
-	json.Unmarshal(prData, &pr)
+	if err := json.Unmarshal(prData, &pr); err != nil {
+		return nil, fmt.Errorf("parse PR response: %w", err)
+	}
 
 	if m, ok := pr["mergeable"].(bool); ok {
 		status.Mergeable = &m
@@ -127,7 +129,9 @@ func (c *Client) MarkPRReady(owner, repo string, number int) error {
 		return err
 	}
 	var pr map[string]any
-	json.Unmarshal(data, &pr)
+	if err := json.Unmarshal(data, &pr); err != nil {
+		return fmt.Errorf("parse PR response: %w", err)
+	}
 	nodeID := strVal(pr, "node_id")
 	if nodeID == "" {
 		return fmt.Errorf("could not get node_id for PR %d", number)
@@ -151,7 +155,9 @@ func (c *Client) ConvertPRToDraft(owner, repo string, number int) error {
 		return err
 	}
 	var pr map[string]any
-	json.Unmarshal(data, &pr)
+	if err := json.Unmarshal(data, &pr); err != nil {
+		return fmt.Errorf("parse PR response: %w", err)
+	}
 	nodeID := strVal(pr, "node_id")
 	if nodeID == "" {
 		return fmt.Errorf("could not get node_id for PR %d", number)

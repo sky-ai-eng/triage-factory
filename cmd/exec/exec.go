@@ -36,7 +36,10 @@ func Handle(args []string) {
 		os.Exit(1)
 	}
 	defer conn.Close()
-	db.Migrate(conn)
+	if err := db.Migrate(conn); err != nil {
+		fmt.Fprintf(os.Stderr, "error running migrations: %v\n", err)
+		os.Exit(1)
+	}
 	database := &db.DB{Conn: conn}
 
 	cmd := args[0]

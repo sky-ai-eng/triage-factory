@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"slices"
 	"time"
@@ -182,7 +183,9 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 		creds.GitHubPAT = ""
 		creds.GitHubUsername = ""
 		cfg.GitHub.BaseURL = ""
-		auth.ClearGitHub()
+		if err := auth.ClearGitHub(); err != nil {
+			log.Printf("[settings] failed to clear GitHub keychain entry: %v", err)
+		}
 		if err := db.ClearTrackedItems(s.db, "github"); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{
 				"error": "failed to clear GitHub tracked items: " + err.Error(),
@@ -221,7 +224,9 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 		creds.JiraURL = ""
 		creds.JiraPAT = ""
 		cfg.Jira.BaseURL = ""
-		auth.ClearJira()
+		if err := auth.ClearJira(); err != nil {
+			log.Printf("[settings] failed to clear Jira keychain entry: %v", err)
+		}
 		if err := db.ClearTrackedItems(s.db, "jira"); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{
 				"error": "failed to clear Jira tracked items: " + err.Error(),

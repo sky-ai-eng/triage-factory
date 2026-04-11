@@ -299,7 +299,7 @@ func Cleanup() {
 }
 
 func pruneAll(baseDir string) {
-	filepath.Walk(baseDir, func(path string, info os.FileInfo, err error) error {
+	if err := filepath.Walk(baseDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -310,7 +310,9 @@ func pruneAll(baseDir string) {
 			return filepath.SkipDir
 		}
 		return nil
-	})
+	}); err != nil {
+		log.Printf("[worktree] walk %s: %v", baseDir, err)
+	}
 }
 
 func gitRunCtx(ctx context.Context, dir string, args ...string) error {

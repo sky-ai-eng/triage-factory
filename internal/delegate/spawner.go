@@ -90,7 +90,9 @@ func (s *Spawner) Delegate(task domain.Task, explicitPromptID string) (string, e
 	if err != nil {
 		return "", err
 	}
-	db.IncrementPromptUsage(s.database, promptID)
+	if err := db.IncrementPromptUsage(s.database, promptID); err != nil {
+		log.Printf("[delegate] warning: failed to increment usage for prompt %s: %v", promptID, err)
+	}
 
 	runID := uuid.New().String()
 	if err := db.CreateAgentRun(s.database, domain.AgentRun{
@@ -249,7 +251,7 @@ func (s *Spawner) setupJira(ctx context.Context, runID string, task domain.Task,
 
 	default:
 		// Multiple matches — ambiguous, block for now
-		return runConfig{}, fmt.Errorf("Jira task %s matched %d repos (%s) — cannot determine which to clone",
+		return runConfig{}, fmt.Errorf("jira task %s matched %d repos (%s) — cannot determine which to clone",
 			task.SourceID, len(matchedRepos), strings.Join(matchedRepos, ", "))
 	}
 }
@@ -257,7 +259,9 @@ func (s *Spawner) setupJira(ctx context.Context, runID string, task domain.Task,
 // runAgent is the generic agent execution loop. Works for any task type.
 func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model string) {
 	if cfg.hasWT {
-		defer worktree.Remove(runID)
+		// Best-effort cleanup on return; the worktree ID is unique per run
+		// so a failed remove just leaves a dangling directory under _worktrees.
+		defer func() { _ = worktree.Remove(runID) }()
 	}
 
 	// Determine the cwd for the child claude. For tasks without a repo (Jira no-match)
@@ -367,7 +371,9 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 					status = "failed"
 				}
 			}
-			db.CompleteAgentRun(s.database, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultLink, resultSummary)
+			if err := db.CompleteAgentRun(s.database, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultLink, resultSummary); err != nil {
+				log.Printf("[delegate] warning: failed to record completion for run %s: %v", runID, err)
+			}
 
 			if status == "completed" {
 				if pendingReview, _ := db.PendingReviewByRunID(s.database, runID); pendingReview != nil {
@@ -384,7 +390,9 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 				}
 			}
 			s.broadcastRunUpdate(runID, status)
-			cmd.Wait()
+			// We've already captured the result from stdout; just drain any
+			// remaining subprocess state. Exit code is not load-bearing here.
+			_ = cmd.Wait()
 			return
 		}
 	}
@@ -403,7 +411,9 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		return
 	}
 
-	db.CompleteAgentRun(s.database, runID, "completed", 0, 0, 0, "unknown", "", "")
+	if err := db.CompleteAgentRun(s.database, runID, "completed", 0, 0, 0, "unknown", "", ""); err != nil {
+		log.Printf("[delegate] warning: failed to record fallback completion for run %s: %v", runID, err)
+	}
 	s.broadcastRunUpdate(runID, "completed")
 }
 
@@ -435,10 +445,13 @@ func (s *Spawner) resolvePrompt(task domain.Task, explicitPromptID string) (stri
 
 func (s *Spawner) handleCancelled(runID string, startTime time.Time, hasWT bool) {
 	elapsed := int(time.Since(startTime).Milliseconds())
-	db.CompleteAgentRun(s.database, runID, "cancelled", 0, elapsed, 0, "cancelled", "", "Cancelled by user")
+	if err := db.CompleteAgentRun(s.database, runID, "cancelled", 0, elapsed, 0, "cancelled", "", "Cancelled by user"); err != nil {
+		log.Printf("[delegate] warning: failed to record cancellation for run %s: %v", runID, err)
+	}
 	s.broadcastRunUpdate(runID, "cancelled")
 	if hasWT {
-		worktree.Remove(runID)
+		// Best-effort cleanup; same rationale as the defer in runAgent.
+		_ = worktree.Remove(runID)
 	}
 }
 
@@ -455,13 +468,15 @@ func (s *Spawner) failRun(runID, errMsg string) {
 		log.Printf("[delegate] warning: failed to mark run %s as failed: %v", runID, err)
 	}
 
-	db.InsertAgentMessage(s.database, domain.AgentMessage{
+	if _, err := db.InsertAgentMessage(s.database, domain.AgentMessage{
 		RunID:   runID,
 		Role:    "assistant",
 		Subtype: "text",
 		Content: "Error: " + errMsg,
 		IsError: true,
-	})
+	}); err != nil {
+		log.Printf("[delegate] warning: failed to record failure message for run %s: %v", runID, err)
+	}
 
 	s.broadcastRunUpdate(runID, "failed")
 }

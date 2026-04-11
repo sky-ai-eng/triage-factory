@@ -72,7 +72,9 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
 	delete(h.clients, c)
 	h.mu.Unlock()
 	close(c.closed)
-	conn.Close(ws.StatusNormalClosure, "")
+	// Best-effort close; the client is already gone in most cases so
+	// the error (broken pipe / already-closed) is not actionable.
+	_ = conn.Close(ws.StatusNormalClosure, "")
 
 	log.Printf("[ws] client disconnected (%d total)", h.clientCount())
 }

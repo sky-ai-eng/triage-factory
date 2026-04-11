@@ -54,9 +54,10 @@ func GetPromptStats(db *sql.DB, promptID string) (*PromptStats, error) {
 		stats.SuccessRate = float64(stats.CompletedRuns) / float64(stats.TotalRuns)
 	}
 
-	// Last used
+	// Last used — sql.ErrNoRows is expected for prompts that have never run.
+	// Any other error leaves lastUsed invalid, which we handle identically.
 	var lastUsed sql.NullTime
-	db.QueryRow(`SELECT MAX(started_at) FROM agent_runs WHERE prompt_id = ?`, promptID).Scan(&lastUsed)
+	_ = db.QueryRow(`SELECT MAX(started_at) FROM agent_runs WHERE prompt_id = ?`, promptID).Scan(&lastUsed)
 	if lastUsed.Valid {
 		s := lastUsed.Time.Format(time.RFC3339)
 		stats.LastUsedAt = &s
@@ -79,7 +80,9 @@ func GetPromptStats(db *sql.DB, promptID string) (*PromptStats, error) {
 	for rows.Next() {
 		var day string
 		var cnt int
-		rows.Scan(&day, &cnt)
+		if err := rows.Scan(&day, &cnt); err != nil {
+			continue
+		}
 		dayMap[day] = cnt
 	}
 

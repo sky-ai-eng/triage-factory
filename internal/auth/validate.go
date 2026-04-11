@@ -105,7 +105,7 @@ func ValidateJira(baseURL, pat string) (*JiraUser, error) {
 	case http.StatusForbidden:
 		return nil, fmt.Errorf("insufficient permissions: Jira returned 403 Forbidden")
 	default:
-		return nil, fmt.Errorf("Jira API error %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("jira API error %d: %s", resp.StatusCode, string(body))
 	}
 
 	var user JiraUser

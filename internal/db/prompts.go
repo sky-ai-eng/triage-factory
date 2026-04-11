@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 	"time"
 
@@ -12,7 +13,9 @@ import (
 func SeedPrompt(db *sql.DB, p domain.Prompt, bindings []domain.PromptBinding) error {
 	// Skip if already seeded
 	var exists int
-	db.QueryRow(`SELECT COUNT(*) FROM prompts WHERE id = ?`, p.ID).Scan(&exists)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM prompts WHERE id = ?`, p.ID).Scan(&exists); err != nil {
+		return fmt.Errorf("check prompt existence: %w", err)
+	}
 	if exists > 0 {
 		return nil
 	}
