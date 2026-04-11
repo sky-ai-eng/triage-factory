@@ -124,6 +124,15 @@ func actionsDownloadLogs(client *github.Client, args []string) {
 //
 // Returns the number of bytes downloaded on success.
 func downloadAndExtractLogs(client *github.Client, owner, repo string, runID int64, destDir string) (int64, error) {
+	// Clobber any previous extraction for the same run_id. The command owns
+	// this directory completely (<cwd>/_scratch/ci-logs/<run_id>), so a
+	// re-run should produce a clean state — otherwise stale entries from an
+	// older extraction (jobs that no longer exist, renamed matrix legs)
+	// would sit alongside the current run's files and mislead the agent
+	// reading them back.
+	if err := os.RemoveAll(destDir); err != nil {
+		return 0, fmt.Errorf("clear stale destination directory: %w", err)
+	}
 	if err := os.MkdirAll(destDir, 0755); err != nil {
 		return 0, fmt.Errorf("create destination directory: %w", err)
 	}
@@ -179,10 +188,21 @@ func downloadAndExtractLogs(client *github.Client, owner, repo string, runID int
 // parameterized so tests can exercise the guard without writing 100 MB of
 // real content; production callers pass maxPerFileBytes.
 //
+// maxFileBytes must be positive. There is no "unlimited" mode — callers
+// that want effectively no cap should pass math.MaxInt64 explicitly rather
+// than relying on a sentinel. Non-positive values are a programmer error
+// and return immediately, because silently treating them as "no cap" once
+// led to a subtle bug where the runtime io.LimitReader path turned into
+// "reject everything" for negative inputs.
+//
 // destDir must already exist. Returns the first error encountered, which
 // aborts the rest of the extraction — partial extraction left on disk is
 // expected and fine, the caller (downloadLogs) fails the whole command.
 func extractZip(zipPath, destDir string, maxFileBytes int64) error {
+	if maxFileBytes <= 0 {
+		return fmt.Errorf("extractZip: maxFileBytes must be positive, got %d", maxFileBytes)
+	}
+
 	reader, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return fmt.Errorf("open zip: %w", err)
@@ -227,7 +247,9 @@ func extractZipEntry(entry *zip.File, absDest, absDestWithSep string, maxFileByt
 	// UncompressedSize64 (adversarial case) — standard zip writers overwrite
 	// this field with the real size, so for a well-formed zip the header
 	// and content agree and this path is effectively a fast rejection.
-	if maxFileBytes >= 0 && int64(entry.UncompressedSize64) > maxFileBytes {
+	// extractZip guarantees maxFileBytes > 0, so the comparison is always
+	// meaningful here.
+	if int64(entry.UncompressedSize64) > maxFileBytes {
 		return fmt.Errorf("archive entry %q exceeds per-file size cap: %d bytes", entry.Name, entry.UncompressedSize64)
 	}
 

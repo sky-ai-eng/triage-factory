@@ -150,6 +150,32 @@ func TestExtractZip_PathTraversalRejected(t *testing.T) {
 	}
 }
 
+// TestExtractZip_RejectsNonPositiveCap is the regression guard for a subtle
+// bug: the extraction path had a conditional header check (`maxFileBytes >= 0`)
+// but an unconditional runtime LimitReader check, which meant that for any
+// negative cap the header check silently treated it as "no cap" while the
+// runtime check turned into "reject everything" (io.LimitReader with a
+// negative limit reads 0 bytes, and n > negativeValue is always true).
+// The fix is a precondition: maxFileBytes must be positive, and callers
+// that want effectively unlimited should pass math.MaxInt64 explicitly
+// instead of a sentinel.
+func TestExtractZip_RejectsNonPositiveCap(t *testing.T) {
+	data := buildZip(t, map[string]string{"any.txt": "content"})
+	zipPath := writeZipFile(t, data)
+	destDir := t.TempDir()
+
+	for _, cap := range []int64{-1, 0} {
+		err := extractZip(zipPath, destDir, cap)
+		if err == nil {
+			t.Errorf("cap=%d: expected precondition error, got nil", cap)
+			continue
+		}
+		if !strings.Contains(err.Error(), "maxFileBytes must be positive") {
+			t.Errorf("cap=%d: error should mention precondition, got: %v", cap, err)
+		}
+	}
+}
+
 // TestExtractZip_PerFileSizeCapRejected verifies the per-entry size guard
 // fires when real content exceeds the cap. Uses a small cap (1 KB) against
 // a 2 KB payload so the test stays cheap — the guard is parameterized so
@@ -316,6 +342,55 @@ func TestDownloadAndExtractLogs_FailureCleansUp(t *testing.T) {
 	after := countCILogTempFiles(t)
 	if after != before {
 		t.Errorf("temp zip files leaked on failure: before=%d after=%d", before, after)
+	}
+}
+
+// TestDownloadAndExtractLogs_ClobberStaleRunDir verifies that re-running
+// download-logs for the same run_id does NOT leave behind files from a
+// previous extraction. The command owns <cwd>/_scratch/ci-logs/<run_id>
+// completely, so any stale entries — an old job directory that no longer
+// exists in the current workflow run, a renamed matrix leg — have to be
+// cleared before the fresh extract. Otherwise the agent reading back the
+// destination can't tell which files belong to this run.
+func TestDownloadAndExtractLogs_ClobberStaleRunDir(t *testing.T) {
+	zipBytes := buildZip(t, map[string]string{
+		"current-job/step1.txt": "fresh content\n",
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(zipBytes)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(zipBytes)
+	}))
+	t.Cleanup(srv.Close)
+
+	client := github.NewClient(srv.URL, "test-token")
+	destDir := filepath.Join(t.TempDir(), "_scratch", "ci-logs", "123")
+
+	// Pre-populate destDir with stale content from an imaginary previous
+	// run: an old job directory and a stale top-level summary file that
+	// the new archive does not include.
+	mustMkdir(t, filepath.Join(destDir, "removed-job"))
+	mustWrite(t, filepath.Join(destDir, "removed-job", "old-step.txt"), "stale from previous run\n")
+	mustWrite(t, filepath.Join(destDir, "0_old-summary.txt"), "stale summary\n")
+
+	if _, err := downloadAndExtractLogs(client, "owner", "repo", 123, destDir); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Fresh content must be present
+	if content, err := os.ReadFile(filepath.Join(destDir, "current-job", "step1.txt")); err != nil {
+		t.Errorf("fresh file missing: %v", err)
+	} else if string(content) != "fresh content\n" {
+		t.Errorf("fresh content = %q, want %q", string(content), "fresh content\n")
+	}
+
+	// Stale content must be gone — not merged, not left alongside.
+	if _, err := os.Stat(filepath.Join(destDir, "removed-job")); !os.IsNotExist(err) {
+		t.Errorf("stale directory %q should have been removed, stat err: %v", "removed-job", err)
+	}
+	if _, err := os.Stat(filepath.Join(destDir, "0_old-summary.txt")); !os.IsNotExist(err) {
+		t.Errorf("stale file %q should have been removed, stat err: %v", "0_old-summary.txt", err)
 	}
 }
 
