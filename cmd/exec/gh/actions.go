@@ -55,6 +55,11 @@ func handleActions(client *github.Client, args []string) {
 // <cwd>/_scratch/ci-logs/<run_id>/, and prints the destination path plus a
 // top-level directory listing on stdout so agents can orient immediately.
 // Everything goes to stderr on failure with a non-zero exit.
+//
+// The resource-owning work (temp file + destination directory) lives in
+// downloadAndExtractLogs so defers actually fire on error — exitErr calls
+// os.Exit, which skips defers, so inlining the logic here would leak the
+// temp zip (and leave a half-extracted destDir) on every failure path.
 func actionsDownloadLogs(client *github.Client, args []string) {
 	owner, repo, err := resolveRepo(flagVal(args, "--repo"))
 	if err != nil {
@@ -78,42 +83,17 @@ func actionsDownloadLogs(client *github.Client, args []string) {
 		exitErr(fmt.Sprintf("resolve cwd: %v", err))
 	}
 	destDir := filepath.Join(cwd, "_scratch", "ci-logs", strconv.FormatInt(runID, 10))
-	if err := os.MkdirAll(destDir, 0755); err != nil {
-		exitErr(fmt.Sprintf("create destination directory: %v", err))
-	}
 
-	// Stream the archive to a temp file. We can't extract from a stream
-	// because archive/zip needs ReaderAt for the central directory at the
-	// end of the file.
-	tmpFile, err := os.CreateTemp("", "todotriage-ci-logs-*.zip")
+	bytesDownloaded, err := downloadAndExtractLogs(client, owner, repo, runID, destDir)
 	if err != nil {
-		exitErr(fmt.Sprintf("create temp file: %v", err))
-	}
-	tmpPath := tmpFile.Name()
-	defer func() {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpPath)
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-	defer cancel()
-
-	apiPath := fmt.Sprintf("/repos/%s/%s/actions/runs/%d/logs", owner, repo, runID)
-	bytesDownloaded, err := client.DownloadArtifact(ctx, apiPath, tmpFile, maxArchiveBytes)
-	if err != nil {
-		exitErr(fmt.Sprintf("download logs: %v", err))
-	}
-	// Close before reopening for read — archive/zip needs exclusive read access.
-	if err := tmpFile.Close(); err != nil {
-		exitErr(fmt.Sprintf("close temp file: %v", err))
-	}
-
-	if err := extractZip(tmpPath, destDir, maxPerFileBytes); err != nil {
-		exitErr(fmt.Sprintf("extract archive: %v", err))
+		exitErr(err.Error())
 	}
 
 	// Top-level directory listing so the agent can see which jobs are
-	// available without a separate tool call.
+	// available without a separate tool call. Kept outside the transactional
+	// inner function because a listing failure on a successfully-extracted
+	// destDir shouldn't roll back the extraction — the bytes are good even
+	// if we can't enumerate them.
 	entries, err := topLevelEntries(destDir)
 	if err != nil {
 		exitErr(fmt.Sprintf("list extracted entries: %v", err))
@@ -128,6 +108,69 @@ func actionsDownloadLogs(client *github.Client, args []string) {
 	for _, e := range entries {
 		fmt.Printf("  %s\n", e)
 	}
+}
+
+// downloadAndExtractLogs owns every on-disk resource the command needs: the
+// destination directory and the temp zip file. It's split out from
+// actionsDownloadLogs specifically so that defers actually run on failure —
+// the outer function uses exitErr (→ os.Exit), which skips defers, so any
+// cleanup logic has to live under a function that can return an error.
+//
+// Cleanup semantics:
+//   - Temp zip: always removed on return, success or failure.
+//   - destDir:  kept on success, removed on any failure, so a partial
+//     extraction never leaves stale files around that could look like a
+//     valid state to the next retry.
+//
+// Returns the number of bytes downloaded on success.
+func downloadAndExtractLogs(client *github.Client, owner, repo string, runID int64, destDir string) (int64, error) {
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return 0, fmt.Errorf("create destination directory: %w", err)
+	}
+	// Track success so we can roll back destDir on any failure path. The
+	// closure captures this by reference — setting success=true at the end
+	// of the happy path is what disarms the cleanup.
+	success := false
+	defer func() {
+		if !success {
+			_ = os.RemoveAll(destDir)
+		}
+	}()
+
+	// Stream the archive to a temp file. We can't extract from a stream
+	// because archive/zip needs ReaderAt for the central directory at the
+	// end of the file.
+	tmpFile, err := os.CreateTemp("", "todotriage-ci-logs-*.zip")
+	if err != nil {
+		return 0, fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		_ = tmpFile.Close() // idempotent-safe; second close just returns ErrClosed
+		_ = os.Remove(tmpPath)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	apiPath := fmt.Sprintf("/repos/%s/%s/actions/runs/%d/logs", owner, repo, runID)
+	bytesDownloaded, err := client.DownloadArtifact(ctx, apiPath, tmpFile, maxArchiveBytes)
+	if err != nil {
+		return 0, fmt.Errorf("download logs: %w", err)
+	}
+	// Close before reopening for read — archive/zip needs exclusive read
+	// access and goes through the filesystem path, not our handle. The
+	// deferred Close above will no-op on this already-closed file.
+	if err := tmpFile.Close(); err != nil {
+		return 0, fmt.Errorf("close temp file: %w", err)
+	}
+
+	if err := extractZip(tmpPath, destDir, maxPerFileBytes); err != nil {
+		return 0, fmt.Errorf("extract archive: %w", err)
+	}
+
+	success = true
+	return bytesDownloaded, nil
 }
 
 // extractZip safely extracts zipPath into destDir. Rejects any entry whose

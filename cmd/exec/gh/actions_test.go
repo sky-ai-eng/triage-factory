@@ -3,10 +3,15 @@ package gh
 import (
 	"archive/zip"
 	"bytes"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sky-ai-eng/todo-triage/internal/github"
 )
 
 // buildZip creates an in-memory zip archive from a map of path → contents.
@@ -222,5 +227,130 @@ func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatalf("write %q: %v", path, err)
+	}
+}
+
+// countCILogTempFiles counts currently-orphaned temp zip files matching the
+// pattern we write in downloadAndExtractLogs. Used by the transactional
+// tests below to assert that no temp file is leaked on either the happy or
+// the failure path. The count is taken as a delta (before vs after) so
+// concurrent tests in the same package don't pollute the assertion.
+func countCILogTempFiles(t *testing.T) int {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "todotriage-ci-logs-*.zip"))
+	if err != nil {
+		t.Fatalf("glob temp files: %v", err)
+	}
+	return len(matches)
+}
+
+// TestDownloadAndExtractLogs_HappyPath verifies the success path: the
+// destination directory is populated with extracted content and the temp
+// zip file is cleaned up. Guards against a regression where the refactor
+// to the inner function accidentally drops a cleanup defer.
+func TestDownloadAndExtractLogs_HappyPath(t *testing.T) {
+	zipBytes := buildZip(t, map[string]string{
+		"job1/step1.txt": "log content\n",
+		"job2/step1.txt": "other log\n",
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(zipBytes)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(zipBytes)
+	}))
+	t.Cleanup(srv.Close)
+
+	client := github.NewClient(srv.URL, "test-token")
+	destDir := filepath.Join(t.TempDir(), "_scratch", "ci-logs", "123")
+
+	before := countCILogTempFiles(t)
+	n, err := downloadAndExtractLogs(client, "owner", "repo", 123, destDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n != int64(len(zipBytes)) {
+		t.Errorf("bytes = %d, want %d", n, len(zipBytes))
+	}
+
+	// Extracted content is present under destDir
+	if content, err := os.ReadFile(filepath.Join(destDir, "job1", "step1.txt")); err != nil {
+		t.Errorf("extracted file missing: %v", err)
+	} else if string(content) != "log content\n" {
+		t.Errorf("extracted content = %q, want %q", string(content), "log content\n")
+	}
+
+	// No leaked temp zip
+	after := countCILogTempFiles(t)
+	if after != before {
+		t.Errorf("temp zip files leaked on success: before=%d after=%d", before, after)
+	}
+}
+
+// TestDownloadAndExtractLogs_FailureCleansUp is the regression test for the
+// exit-defer-cleanup bug: when the download step fails, both the temp zip
+// file AND the destination directory must be cleaned up. A previous version
+// used exitErr (→ os.Exit) inline, which skipped defers and leaked both.
+func TestDownloadAndExtractLogs_FailureCleansUp(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	client := github.NewClient(srv.URL, "test-token")
+	destDir := filepath.Join(t.TempDir(), "_scratch", "ci-logs", "123")
+
+	before := countCILogTempFiles(t)
+	_, err := downloadAndExtractLogs(client, "owner", "repo", 123, destDir)
+	if err == nil {
+		t.Fatal("expected error on 404, got nil")
+	}
+
+	// destDir must have been rolled back — no stale partial extraction left
+	// behind to confuse a retry.
+	if _, statErr := os.Stat(destDir); !os.IsNotExist(statErr) {
+		t.Errorf("expected destDir to be removed on failure, but stat returned: %v", statErr)
+	}
+
+	// Temp zip must have been cleaned up.
+	after := countCILogTempFiles(t)
+	if after != before {
+		t.Errorf("temp zip files leaked on failure: before=%d after=%d", before, after)
+	}
+}
+
+// TestDownloadAndExtractLogs_ExtractFailureCleansUp covers the other
+// failure boundary: download succeeds, extraction fails (invalid zip).
+// Both resources must still be cleaned up because the success flag never
+// flips.
+func TestDownloadAndExtractLogs_ExtractFailureCleansUp(t *testing.T) {
+	// Serve garbage that isn't a valid zip. Downloads fine, zip.OpenReader
+	// rejects it.
+	garbage := []byte("this is definitely not a zip file, it is just some text")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(garbage)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(garbage)
+	}))
+	t.Cleanup(srv.Close)
+
+	client := github.NewClient(srv.URL, "test-token")
+	destDir := filepath.Join(t.TempDir(), "_scratch", "ci-logs", "123")
+
+	before := countCILogTempFiles(t)
+	_, err := downloadAndExtractLogs(client, "owner", "repo", 123, destDir)
+	if err == nil {
+		t.Fatal("expected extraction failure on invalid zip, got nil")
+	}
+	if !strings.Contains(err.Error(), "extract archive") {
+		t.Errorf("error should mention extraction, got: %v", err)
+	}
+
+	if _, statErr := os.Stat(destDir); !os.IsNotExist(statErr) {
+		t.Errorf("expected destDir to be removed on extract failure, but stat returned: %v", statErr)
+	}
+	after := countCILogTempFiles(t)
+	if after != before {
+		t.Errorf("temp zip files leaked on extract failure: before=%d after=%d", before, after)
 	}
 }
