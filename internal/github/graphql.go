@@ -3,6 +3,8 @@ package github
 import (
 	"encoding/json"
 	"fmt"
+	"log"
+	"strings"
 
 	"github.com/sky-ai-eng/todo-triage/internal/domain"
 )
@@ -47,7 +49,23 @@ fragment PRFields on PullRequest {
 		nodes {
 			commit {
 				oid
-				statusCheckRollup { state }
+				checkSuites(first: 100) {
+					pageInfo { hasNextPage }
+					nodes {
+						workflowRun { databaseId }
+						checkRuns(first: 100) {
+							pageInfo { hasNextPage }
+							nodes {
+								databaseId
+								name
+								status
+								conclusion
+								completedAt
+								detailsUrl
+							}
+						}
+					}
+				}
 			}
 		}
 	}
@@ -231,12 +249,48 @@ type gqlCommits struct {
 }
 
 type gqlCommit struct {
-	OID               string           `json:"oid"`
-	StatusCheckRollup *gqlStatusRollup `json:"statusCheckRollup"`
+	OID         string         `json:"oid"`
+	CheckSuites gqlCheckSuites `json:"checkSuites"`
 }
 
-type gqlStatusRollup struct {
-	State string `json:"state"`
+type gqlCheckSuites struct {
+	PageInfo gqlPageInfo     `json:"pageInfo"`
+	Nodes    []gqlCheckSuite `json:"nodes"`
+}
+
+type gqlCheckSuite struct {
+	WorkflowRun *gqlWorkflowRun `json:"workflowRun"`
+	CheckRuns   gqlCheckRuns    `json:"checkRuns"`
+}
+
+// gqlWorkflowRun is non-nil only for check suites originating from GitHub
+// Actions workflows. Third-party CI systems (Supabase, Circle, etc.) produce
+// check suites with workflowRun == nil.
+type gqlWorkflowRun struct {
+	DatabaseID int64 `json:"databaseId"`
+}
+
+type gqlCheckRuns struct {
+	PageInfo gqlPageInfo   `json:"pageInfo"`
+	Nodes    []gqlCheckRun `json:"nodes"`
+}
+
+// gqlPageInfo is a minimal subset of GitHub's PageInfo used only to detect
+// when a connection was truncated at the first-N limit. We don't paginate
+// (matrix builds deep enough to blow through 100×100 check runs aren't a real
+// case today) but we log a warning if we hit the limit so we notice before
+// missing events becomes a silent failure mode.
+type gqlPageInfo struct {
+	HasNextPage bool `json:"hasNextPage"`
+}
+
+type gqlCheckRun struct {
+	DatabaseID  int64  `json:"databaseId"`
+	Name        string `json:"name"`
+	Status      string `json:"status"`
+	Conclusion  string `json:"conclusion"`
+	CompletedAt string `json:"completedAt"`
+	DetailsURL  string `json:"detailsUrl"`
 }
 
 type gqlLabelNodes struct {
@@ -274,13 +328,49 @@ func (pr gqlPR) toSnapshot() domain.PRSnapshot {
 		snap.HeadRepo = pr.HeadRepository.NameWithOwner
 	}
 
-	// CI state from latest commit
+	// CI check runs from the latest commit.
+	//
+	// Even when the commit has no check suites, we initialize CheckRuns to a
+	// non-nil empty slice so downstream diff logic can distinguish "polled,
+	// nothing here" (empty) from "unknown prior state" (nil, meaning an old
+	// snapshot from before this field existed).
+	snap.CheckRuns = []domain.CheckRun{}
 	if len(pr.Commits.Nodes) > 0 {
 		commit := pr.Commits.Nodes[0].Commit
 		snap.HeadSHA = commit.OID
-		if commit.StatusCheckRollup != nil {
-			snap.CIState = commit.StatusCheckRollup.State
+
+		// Pagination truncation watchdog. The query caps at 100 suites and
+		// 100 runs per suite — plenty for realistic PRs (even a heavy matrix
+		// build caps around ~30 runs per suite × 5-8 suites). If we ever
+		// blow past these, log once so we catch it before missing events
+		// becomes a silent failure. Paginating would mean real cursor
+		// logic; preferring the simpler cap + warning until there's pressure.
+		if commit.CheckSuites.PageInfo.HasNextPage {
+			log.Printf("[github] WARN: check suites truncated at 100 for %s#%d — some CI state may be missing from snapshot", snap.Repo, snap.Number)
 		}
+
+		var raw []domain.CheckRun
+		for _, suite := range commit.CheckSuites.Nodes {
+			if suite.CheckRuns.PageInfo.HasNextPage {
+				log.Printf("[github] WARN: check runs truncated at 100 within a suite for %s#%d — some CI state may be missing from snapshot", snap.Repo, snap.Number)
+			}
+			var workflowRunID int64
+			if suite.WorkflowRun != nil {
+				workflowRunID = suite.WorkflowRun.DatabaseID
+			}
+			for _, cr := range suite.CheckRuns.Nodes {
+				raw = append(raw, domain.CheckRun{
+					ID:            cr.DatabaseID,
+					Name:          cr.Name,
+					Status:        strings.ToLower(cr.Status),
+					Conclusion:    strings.ToLower(cr.Conclusion),
+					CompletedAt:   cr.CompletedAt,
+					DetailsURL:    cr.DetailsURL,
+					WorkflowRunID: workflowRunID,
+				})
+			}
+		}
+		snap.CheckRuns = domain.DedupCheckRunsByName(raw)
 	}
 
 	// Review requests

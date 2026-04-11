@@ -75,19 +75,194 @@ func TestDiffPR_OpenToMerged_EmitsMergedNotClosed(t *testing.T) {
 }
 
 func TestDiffPR_CITransition(t *testing.T) {
-	prev := domain.PRSnapshot{Number: 42, CIState: "PENDING"}
+	// Baseline: one check, still running.
+	pending := domain.PRSnapshot{
+		Number: 42,
+		CheckRuns: []domain.CheckRun{
+			{ID: 1, Name: "test", Status: "in_progress"},
+		},
+	}
 
-	// success
-	events := DiffPRSnapshots(prev, domain.PRSnapshot{Number: 42, CIState: "SUCCESS"}, "42", "")
+	// pending → same id completing as success: fires CIPassed
+	events := DiffPRSnapshots(pending, domain.PRSnapshot{
+		Number: 42,
+		CheckRuns: []domain.CheckRun{
+			{ID: 1, Name: "test", Status: "completed", Conclusion: "success"},
+		},
+	}, "42", "")
 	assertEventTypes(t, events, []string{domain.EventGitHubPRCIPassed})
 
-	// failure
-	events = DiffPRSnapshots(prev, domain.PRSnapshot{Number: 42, CIState: "FAILURE"}, "42", "")
+	// pending → same id completing as failure: fires CIFailed
+	// (case 2 in the diff logic: existing ID, prior conclusion wasn't failing)
+	events = DiffPRSnapshots(pending, domain.PRSnapshot{
+		Number: 42,
+		CheckRuns: []domain.CheckRun{
+			{ID: 1, Name: "test", Status: "completed", Conclusion: "failure"},
+		},
+	}, "42", "")
 	assertEventTypes(t, events, []string{domain.EventGitHubPRCIFailed})
+	assertMetaContains(t, events[0], "primary_check_name", "test")
+	assertMetaContains(t, events[0], "primary_conclusion", "failure")
 
 	// no change → no events
-	events = DiffPRSnapshots(prev, domain.PRSnapshot{Number: 42, CIState: "PENDING"}, "42", "")
+	events = DiffPRSnapshots(pending, pending, "42", "")
 	assertEventTypes(t, events, nil)
+
+	// nil prev.CheckRuns (unknown prior state, e.g. old snapshot) → no fire
+	// even if curr has a failing check. Guards against spurious events on
+	// the first poll after this field landed.
+	events = DiffPRSnapshots(
+		domain.PRSnapshot{Number: 42, CheckRuns: nil},
+		domain.PRSnapshot{
+			Number: 42,
+			CheckRuns: []domain.CheckRun{
+				{ID: 99, Name: "test", Status: "completed", Conclusion: "failure"},
+			},
+		},
+		"42", "",
+	)
+	assertEventTypes(t, events, nil)
+}
+
+// TestDiffPR_CIFailure_Scenario_B reproduces the "missed PENDING" bug that
+// the old scalar-CIState logic could not detect:
+//
+//	FAILURE → fix pushed → poller sees FAILURE again on the new SHA without
+//	having observed the intermediate PENDING → old aggregate stayed FAILURE
+//	→ no event fired → auto-delegation stuck.
+//
+// With per-check-run identity, the retry produces a new check_run_id at the
+// new SHA, and the diff logic fires on the new ID.
+func TestDiffPR_CIFailure_Scenario_B_RetryAtNewSHA(t *testing.T) {
+	prev := domain.PRSnapshot{
+		Number:  42,
+		HeadSHA: "abc123",
+		CheckRuns: []domain.CheckRun{
+			{ID: 100, Name: "test", Status: "completed", Conclusion: "failure"},
+		},
+	}
+	curr := domain.PRSnapshot{
+		Number:  42,
+		HeadSHA: "def456",
+		CheckRuns: []domain.CheckRun{
+			{ID: 200, Name: "test", Status: "completed", Conclusion: "failure"},
+		},
+	}
+
+	events := DiffPRSnapshots(prev, curr, "42", "")
+	types := eventTypes(events)
+	assertContains(t, types, domain.EventGitHubPRCIFailed)
+	assertContains(t, types, domain.EventGitHubPRNewCommits)
+}
+
+// TestDiffPR_CIFailure_Scenario_C reproduces the "different check fails"
+// bug that the old scalar-CIState logic could not detect:
+//
+//	Check A fails → agent fixes A → rerun → A passes, B newly fails →
+//	aggregate rollup stays FAILURE → no transition → no event fired →
+//	auto-delegation stuck.
+//
+// With per-check-run identity, B's new failing ID isn't in prev, so fires.
+func TestDiffPR_CIFailure_Scenario_C_DifferentCheckFails(t *testing.T) {
+	prev := domain.PRSnapshot{
+		Number: 42,
+		CheckRuns: []domain.CheckRun{
+			{ID: 100, Name: "unit", Status: "completed", Conclusion: "failure"},
+			{ID: 101, Name: "integration", Status: "completed", Conclusion: "success"},
+		},
+	}
+	curr := domain.PRSnapshot{
+		Number: 42,
+		CheckRuns: []domain.CheckRun{
+			{ID: 200, Name: "unit", Status: "completed", Conclusion: "success"},
+			{ID: 201, Name: "integration", Status: "completed", Conclusion: "failure"},
+		},
+	}
+
+	events := DiffPRSnapshots(prev, curr, "42", "")
+	assertEventTypes(t, events, []string{domain.EventGitHubPRCIFailed})
+	assertMetaContains(t, events[0], "primary_check_name", "integration")
+	assertMetaContains(t, events[0], "count", "1")
+}
+
+// TestDiffPR_CIPassed_PermissiveConclusions verifies that the aggregate
+// CIPassed transition fires for check-run conclusions outside the narrow
+// success/skipped/neutral set — specifically "stale" (which GitHub emits
+// after a rebase and treats as non-blocking), empty conclusion on a
+// completed run, and any future enum values. Regression guard for a real
+// bug where CIStatusFromCheckRuns only recognized three conclusions,
+// causing stable "stale" PRs to never report the aggregate success state.
+func TestDiffPR_CIPassed_PermissiveConclusions(t *testing.T) {
+	prev := domain.PRSnapshot{
+		Number: 42,
+		CheckRuns: []domain.CheckRun{
+			{ID: 1, Name: "test", Status: "in_progress"},
+		},
+	}
+
+	// stale → success-like, fires CIPassed
+	events := DiffPRSnapshots(prev, domain.PRSnapshot{
+		Number: 42,
+		CheckRuns: []domain.CheckRun{
+			{ID: 1, Name: "test", Status: "completed", Conclusion: "stale"},
+		},
+	}, "42", "")
+	assertEventTypes(t, events, []string{domain.EventGitHubPRCIPassed})
+
+	// empty conclusion on a completed run → also success-like
+	events = DiffPRSnapshots(prev, domain.PRSnapshot{
+		Number: 42,
+		CheckRuns: []domain.CheckRun{
+			{ID: 1, Name: "test", Status: "completed", Conclusion: ""},
+		},
+	}, "42", "")
+	assertEventTypes(t, events, []string{domain.EventGitHubPRCIPassed})
+
+	// Mixed: one stale + one success → still passes
+	events = DiffPRSnapshots(prev, domain.PRSnapshot{
+		Number: 42,
+		CheckRuns: []domain.CheckRun{
+			{ID: 1, Name: "test", Status: "completed", Conclusion: "success"},
+			{ID: 2, Name: "lint", Status: "completed", Conclusion: "stale"},
+		},
+	}, "42", "")
+	assertContains(t, eventTypes(events), domain.EventGitHubPRCIPassed)
+}
+
+// Stable CI — same IDs, same conclusions poll-to-poll — fires nothing.
+func TestDiffPR_CIFailure_StableCI_NoEvent(t *testing.T) {
+	snap := domain.PRSnapshot{
+		Number: 42,
+		CheckRuns: []domain.CheckRun{
+			{ID: 100, Name: "test", Status: "completed", Conclusion: "failure"},
+		},
+	}
+	events := DiffPRSnapshots(snap, snap, "42", "")
+	assertEventTypes(t, events, nil)
+}
+
+// Multiple checks newly fail in the same poll — fire once with a count and
+// the full list in metadata, not one event per failing check.
+func TestDiffPR_CIFailure_MultipleNewFailures_OneEvent(t *testing.T) {
+	prev := domain.PRSnapshot{
+		Number:    42,
+		CheckRuns: []domain.CheckRun{},
+	}
+	curr := domain.PRSnapshot{
+		Number: 42,
+		CheckRuns: []domain.CheckRun{
+			{ID: 10, Name: "build", Status: "completed", Conclusion: "failure"},
+			{ID: 11, Name: "lint", Status: "completed", Conclusion: "failure"},
+			{ID: 12, Name: "test", Status: "completed", Conclusion: "failure"},
+		},
+	}
+
+	events := DiffPRSnapshots(prev, curr, "42", "")
+	assertEventTypes(t, events, []string{domain.EventGitHubPRCIFailed})
+	assertMetaContains(t, events[0], "count", "3")
+	assertMetaContains(t, events[0], "failing_checks", "build")
+	assertMetaContains(t, events[0], "failing_checks", "lint")
+	assertMetaContains(t, events[0], "failing_checks", "test")
 }
 
 func TestDiffPR_NewCommits(t *testing.T) {
@@ -223,14 +398,18 @@ func TestDiffPR_ChangesRequested(t *testing.T) {
 
 func TestDiffPR_MultipleEvents(t *testing.T) {
 	prev := domain.PRSnapshot{
-		Number:    42,
-		CIState:   "PENDING",
+		Number: 42,
+		CheckRuns: []domain.CheckRun{
+			{ID: 1, Name: "test", Status: "in_progress"},
+		},
 		Mergeable: "UNKNOWN",
 		IsDraft:   true,
 	}
 	curr := domain.PRSnapshot{
-		Number:    42,
-		CIState:   "SUCCESS",
+		Number: 42,
+		CheckRuns: []domain.CheckRun{
+			{ID: 1, Name: "test", Status: "completed", Conclusion: "success"},
+		},
 		Mergeable: "CONFLICTING",
 		IsDraft:   false,
 	}
@@ -245,8 +424,10 @@ func TestDiffPR_MultipleEvents(t *testing.T) {
 
 func TestDiffPR_NoChange(t *testing.T) {
 	snap := domain.PRSnapshot{
-		Number:    42,
-		CIState:   "SUCCESS",
+		Number: 42,
+		CheckRuns: []domain.CheckRun{
+			{ID: 1, Name: "test", Status: "completed", Conclusion: "success"},
+		},
 		Mergeable: "MERGEABLE",
 		Reviews:   []domain.ReviewState{{Author: "alice", State: "APPROVED"}},
 	}

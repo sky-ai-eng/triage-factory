@@ -3,17 +3,22 @@ package github
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
+
+	"github.com/sky-ai-eng/todo-triage/internal/domain"
 )
 
 // PRStatus is the live status for a single PR, fetched on demand.
 type PRStatus struct {
-	Mergeable      *bool         `json:"mergeable"` // null = unknown/calculating
-	AutoMerge      bool          `json:"auto_merge"`
-	MergeableState string        `json:"mergeable_state"` // "clean", "dirty", "blocked", "behind", "unknown"
-	Reviews        []ReviewState `json:"reviews"`
-	ChecksStatus   ChecksStatus  `json:"checks_status"`
-	Conflicts      bool          `json:"conflicts"`
-	ReviewDecision string        `json:"review_decision"` // "approved", "changes_requested", "review_required", ""
+	Mergeable      *bool             `json:"mergeable"` // null = unknown/calculating
+	AutoMerge      bool              `json:"auto_merge"`
+	MergeableState string            `json:"mergeable_state"` // "clean", "dirty", "blocked", "behind", "unknown"
+	Reviews        []ReviewState     `json:"reviews"`
+	ChecksStatus   ChecksStatus      `json:"checks_status"`
+	CheckRuns      []domain.CheckRun `json:"check_runs"` // deduped by name, latest execution per check
+	Conflicts      bool              `json:"conflicts"`
+	ReviewDecision string            `json:"review_decision"` // "approved", "changes_requested", "review_required", ""
 }
 
 type ReviewState struct {
@@ -84,7 +89,18 @@ func (c *Client) GetPRStatus(owner, repo string, number int) (*PRStatus, error) 
 	// Derive review decision
 	status.ReviewDecision = deriveReviewDecision(status.Reviews)
 
-	// 3. Check runs on the head SHA
+	// 3. Check runs on the head SHA. The endpoint returns every check run
+	// recorded against this SHA, including re-runs — the same logical check
+	// (by name) can appear multiple times if anyone clicked "re-run failed
+	// jobs." We dedup by name keeping the highest ID (monotonic creation
+	// order == latest execution) so the display reflects current state, not
+	// the full execution history.
+	//
+	// Check runs are decoded into a typed struct rather than map[string]any
+	// because check-run IDs are int64s that can be larger than float64's
+	// exact-integer range (2^53). Decoding through an any/float64 path would
+	// lose precision and break the ID-based dedup and diff identity.
+	status.CheckRuns = []domain.CheckRun{}
 	headSHA := ""
 	if head, ok := pr["head"].(map[string]any); ok {
 		headSHA, _ = head["sha"].(string)
@@ -92,33 +108,86 @@ func (c *Client) GetPRStatus(owner, repo string, number int) (*PRStatus, error) 
 	if headSHA != "" {
 		checksData, err := c.Get(fmt.Sprintf("/repos/%s/%s/commits/%s/check-runs?per_page=100", owner, repo, headSHA))
 		if err == nil {
-			var checksResp map[string]any
-			if json.Unmarshal(checksData, &checksResp) == nil {
-				if runs, ok := checksResp["check_runs"].([]any); ok {
-					status.ChecksStatus.Total = len(runs)
-					for _, r := range runs {
-						run, ok := r.(map[string]any)
-						if !ok {
-							continue
-						}
-						conclusion := strVal(run, "conclusion")
-						runStatus := strVal(run, "status")
-						if runStatus == "completed" {
-							if conclusion == "success" || conclusion == "skipped" || conclusion == "neutral" {
-								status.ChecksStatus.Passing++
-							} else {
-								status.ChecksStatus.Failing++
-							}
-						} else {
-							status.ChecksStatus.Pending++
-						}
-					}
+			var resp restCheckRunsResponse
+			if json.Unmarshal(checksData, &resp) == nil {
+				raw := make([]domain.CheckRun, 0, len(resp.CheckRuns))
+				for _, run := range resp.CheckRuns {
+					raw = append(raw, domain.CheckRun{
+						ID:            run.ID,
+						Name:          run.Name,
+						Status:        strings.ToLower(run.Status),
+						Conclusion:    strings.ToLower(run.Conclusion),
+						CompletedAt:   run.CompletedAt,
+						DetailsURL:    run.DetailsURL,
+						WorkflowRunID: parseWorkflowRunIDFromURL(run.DetailsURL),
+					})
 				}
+				status.CheckRuns = domain.DedupCheckRunsByName(raw)
 			}
+		}
+	}
+	// Derive aggregate counts from the deduped list so the bar chart reflects
+	// one entry per logical check, not per-execution. This is the fix for the
+	// "additive Checks display" — before this ticket, re-runs on the same SHA
+	// inflated the totals.
+	for _, cr := range status.CheckRuns {
+		status.ChecksStatus.Total++
+		switch {
+		case cr.Status != "completed":
+			status.ChecksStatus.Pending++
+		case domain.IsFailingConclusion(cr.Conclusion):
+			status.ChecksStatus.Failing++
+		default:
+			status.ChecksStatus.Passing++
 		}
 	}
 
 	return status, nil
+}
+
+// restCheckRunsResponse is the typed decoding of GitHub's REST
+// /repos/{owner}/{repo}/commits/{ref}/check-runs endpoint. Decoding through a
+// typed struct (rather than map[string]any → float64 → int64) keeps check run
+// IDs exact — they're int64s that can eventually exceed float64's 2^53
+// precision limit, and any loss there would silently break dedup and diff
+// identity.
+type restCheckRunsResponse struct {
+	CheckRuns []restCheckRun `json:"check_runs"`
+}
+
+type restCheckRun struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Status      string `json:"status"`
+	Conclusion  string `json:"conclusion"`
+	CompletedAt string `json:"completed_at"`
+	DetailsURL  string `json:"details_url"`
+}
+
+// parseWorkflowRunIDFromURL extracts the GitHub Actions workflow run ID from a
+// check-run details URL of the form
+//
+//	https://github.com/owner/repo/actions/runs/12345/job/67890
+//
+// Returns 0 for non-Actions check runs (URLs that don't match this pattern —
+// e.g. third-party CI systems that post their own details_url). Kept ID-only
+// so the log-download ticket has a clean numeric handle to work with.
+func parseWorkflowRunIDFromURL(url string) int64 {
+	const marker = "/actions/runs/"
+	idx := strings.Index(url, marker)
+	if idx < 0 {
+		return 0
+	}
+	rest := url[idx+len(marker):]
+	end := strings.Index(rest, "/")
+	if end < 0 {
+		end = len(rest)
+	}
+	n, err := strconv.ParseInt(rest[:end], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // MarkPRReady marks a draft PR as ready for review. Requires GraphQL.

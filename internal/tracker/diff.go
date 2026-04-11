@@ -1,6 +1,7 @@
 package tracker
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -46,15 +47,77 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, sourceID, username string) []
 	}
 
 	// --- CI transitions ---
-	if prev.CIState != curr.CIState && curr.CIState != "" {
-		switch curr.CIState {
-		case "SUCCESS":
+	//
+	// Identity for CI failures is the check-run ID (monotonic per execution),
+	// not the aggregate rollup. This fixes two scenarios the old scalar
+	// transition check missed:
+	//
+	//   B: FAILURE → fix pushed → poller sees FAILURE again before seeing
+	//      PENDING. Old code: prev == curr == FAILURE, no fire. New code:
+	//      the new execution has a new ID not in prev, fires.
+	//
+	//   C: check A fails → event fires → fix → A passes, B newly fails.
+	//      Old code: aggregate stays FAILURE, no fire. New code: B's new
+	//      failing ID isn't in prev, fires.
+	//
+	// Guard: nil prev.CheckRuns means "unknown prior state" (an old snapshot
+	// from before this field existed). Skip the whole CI section in that case
+	// to avoid spurious events on the first poll after this field lands. An
+	// empty-but-non-nil slice is distinguishable and still gets evaluated
+	// (prevByID is empty, any curr failure fires as a new execution — which
+	// is correct).
+	if prev.CheckRuns != nil {
+		prevByID := make(map[int64]domain.CheckRun, len(prev.CheckRuns))
+		for _, cr := range prev.CheckRuns {
+			prevByID[cr.ID] = cr
+		}
+
+		// New or newly-failing check runs. Two cases fire here:
+		//   1. A failing CheckRun with an ID we haven't seen before (new
+		//      execution — retry or new commit).
+		//   2. A failing CheckRun with an ID we *have* seen but whose prior
+		//      conclusion wasn't failing (same execution completing as
+		//      failed — pending → failure on the same run).
+		var newFailing []domain.CheckRun
+		for _, cr := range curr.CheckRuns {
+			if !domain.IsFailingConclusion(cr.Conclusion) {
+				continue
+			}
+			prevCR, existed := prevByID[cr.ID]
+			if existed && domain.IsFailingConclusion(prevCR.Conclusion) {
+				continue // already failing last poll, not a new signal
+			}
+			newFailing = append(newFailing, cr)
+		}
+		if len(newFailing) > 0 {
+			primary := newFailing[0]
+			meta := map[string]string{
+				"count":                fmt.Sprintf("%d", len(newFailing)),
+				"primary_check_run_id": fmt.Sprintf("%d", primary.ID),
+				"primary_check_name":   primary.Name,
+				"primary_conclusion":   primary.Conclusion,
+				"primary_details_url":  primary.DetailsURL,
+			}
+			if primary.WorkflowRunID != 0 {
+				meta["primary_workflow_run_id"] = fmt.Sprintf("%d", primary.WorkflowRunID)
+			}
+			// Full list as JSON so consumers that care about every failing
+			// check (auto-delegation prompts, task memory) can parse it.
+			if blob, err := json.Marshal(newFailing); err == nil {
+				meta["failing_checks"] = string(blob)
+			}
+			emit(domain.EventGitHubPRCIFailed, meta)
+		}
+
+		// Aggregate pass transition. Preserves the old scalar-era semantics
+		// of EventGitHubPRCIPassed: "the rollup just became all-green." Stays
+		// an aggregate signal rather than per-check because users care about
+		// "my PR is ready" not "check #3 passed."
+		prevStatus := domain.CIStatusFromCheckRuns(prev.CheckRuns)
+		currStatus := domain.CIStatusFromCheckRuns(curr.CheckRuns)
+		if currStatus == "success" && prevStatus != "success" {
 			emit(domain.EventGitHubPRCIPassed, map[string]string{
-				"prev": prev.CIState, "new": curr.CIState,
-			})
-		case "FAILURE", "ERROR":
-			emit(domain.EventGitHubPRCIFailed, map[string]string{
-				"prev": prev.CIState, "new": curr.CIState,
+				"prev": prevStatus, "new": currStatus,
 			})
 		}
 	}

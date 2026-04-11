@@ -459,16 +459,6 @@ func prSnapshotToTask(snap domain.PRSnapshot, username string) domain.Task {
 		}
 	}
 
-	ciStatus := ""
-	switch snap.CIState {
-	case "SUCCESS":
-		ciStatus = "success"
-	case "FAILURE", "ERROR":
-		ciStatus = "failure"
-	case "PENDING", "EXPECTED":
-		ciStatus = "pending"
-	}
-
 	return domain.Task{
 		ID:              uuid.New().String(),
 		Source:          "github",
@@ -481,7 +471,7 @@ func prSnapshotToTask(snap domain.PRSnapshot, username string) domain.Task {
 		DiffAdditions:   snap.Additions,
 		DiffDeletions:   snap.Deletions,
 		FilesChanged:    snap.ChangedFiles,
-		CIStatus:        ciStatus,
+		CIStatus:        domain.CIStatusFromCheckRuns(snap.CheckRuns),
 		RelevanceReason: reason,
 		CreatedAt:       parseTimeOrNow(snap.CreatedAt),
 		FetchedAt:       time.Now(),
