@@ -31,6 +31,22 @@ func TestParseGitRemoteURL(t *testing.T) {
 		// git://
 		{"git:// with .git", "git://github.com/octo/repo.git", "octo", "repo", true},
 
+		// Tolerated edge cases
+		{"trailing slash", "https://github.com/octo/repo/", "octo", "repo", true},
+		{"trailing slash after .git", "https://github.com/octo/repo.git/", "octo", "repo", true},
+		{"scp with trailing slash", "git@github.com:octo/repo.git/", "octo", "repo", true},
+
+		// Multi-segment path rejection (regression guard for silent
+		// mis-resolution on Bitbucket / nested GitLab / custom layouts).
+		// These are rejected rather than guessed because "first two" and
+		// "last two" are both wrong in different environments, and
+		// silent wrong-target is worse than a hard error that prompts
+		// --repo.
+		{"bitbucket scm layout rejected", "https://bitbucket.example.com/scm/project/repo.git", "", "", false},
+		{"gitlab nested groups rejected", "https://gitlab.com/group/subgroup/repo.git", "", "", false},
+		{"deep gitlab nesting rejected", "https://gitlab.com/a/b/c/d/repo.git", "", "", false},
+		{"scp bitbucket layout rejected", "git@bitbucket.org:scm/project/repo.git", "", "", false},
+
 		// Failures
 		{"empty string", "", "", "", false},
 		{"no path", "https://github.com", "", "", false},

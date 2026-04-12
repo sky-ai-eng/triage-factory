@@ -98,11 +98,32 @@ func parseGitRemoteURL(url string) (owner, repo string, ok bool) {
 }
 
 // splitRepoPath takes the path portion of a git URL (after the host) and
-// extracts owner + repo, stripping the .git suffix.
+// extracts owner + repo, stripping trailing slashes and the .git suffix.
+//
+// Requires exactly two path segments. Multi-segment paths are rejected as
+// ambiguous rather than guessing which segments form the owner/repo pair:
+//
+//   - Bitbucket's /scm/project/repo.git — taking the first two silently
+//     targets "scm/project" instead of "project/repo"; taking the last
+//     two works here but fails elsewhere
+//   - GitLab nested groups /group/subgroup/repo.git — neither "first two"
+//     nor "last two" is universally correct without knowing how the user
+//     wants nested groups flattened
+//   - GHES/Gitea custom layouts
+//
+// todo-triage is GitHub-focused and GitHub paths are always exactly
+// owner/repo, so a 2-segment requirement covers every supported case.
+// Users with non-GitHub remotes get a clean rejection from resolveRepo
+// and a clear prompt to pass --repo explicitly instead of silently
+// targeting the wrong repository.
 func splitRepoPath(path string) (owner, repo string, ok bool) {
+	// Tolerate a trailing slash, then the .git suffix, then another
+	// trailing slash (for the unusual "owner/repo.git/" form).
+	path = strings.TrimSuffix(path, "/")
 	path = strings.TrimSuffix(path, ".git")
+	path = strings.TrimSuffix(path, "/")
 	parts := strings.Split(path, "/")
-	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return "", "", false
 	}
 	return parts[0], parts[1], true

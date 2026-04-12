@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // clientAgainst wires a Client at a specific test server's base URL. The
@@ -152,6 +153,83 @@ func TestDownloadArtifact_StreamOverflowWithoutContentLength(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "too large") {
 		t.Errorf("error should mention size, got: %v", err)
+	}
+}
+
+// countingTransport is a test RoundTripper that delegates to another
+// transport and counts the requests it sees. Used to verify that
+// DownloadArtifact actually uses the Transport configured on c.http
+// rather than constructing a fresh http.Client that ignores it.
+type countingTransport struct {
+	inner http.RoundTripper
+	calls int
+}
+
+func (c *countingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	c.calls++
+	return c.inner.RoundTrip(req)
+}
+
+// TestDownloadArtifact_InheritsClientTransport is the regression guard
+// for the "fresh http.Client ignores c.http configuration" bug. If
+// DownloadArtifact creates its own http.Client without cloning c.http,
+// any custom Transport attached to c.http (corporate proxy, GHES root
+// CA bundle, etc.) would be silently dropped — downloads would work in
+// dev but break in production. The test installs a counting Transport
+// on c.http and verifies the download path routes through it.
+func TestDownloadArtifact_InheritsClientTransport(t *testing.T) {
+	payload := []byte("inherited transport body")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(payload)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(payload)
+	}))
+	t.Cleanup(srv.Close)
+
+	counter := &countingTransport{inner: http.DefaultTransport}
+	c := &Client{
+		baseURL: srv.URL,
+		pat:     "test-token",
+		http:    &http.Client{Transport: counter},
+	}
+
+	var dst bytes.Buffer
+	if _, err := c.DownloadArtifact(context.Background(), "/anywhere", &dst, 1024); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if counter.calls != 1 {
+		t.Errorf("expected 1 RoundTrip through the custom transport, got %d — DownloadArtifact is not inheriting c.http.Transport", counter.calls)
+	}
+}
+
+// TestDownloadArtifact_OverridesTimeoutWithoutMutatingClient verifies
+// that the shallow-copy approach doesn't mutate the shared client. If
+// DownloadArtifact ever regressed to setting Timeout on c.http directly
+// (instead of on a local copy), the original client's timeout would
+// leak to subsequent callers — observably as "my next 30-second API
+// call now has a 15-minute timeout."
+func TestDownloadArtifact_OverridesTimeoutWithoutMutatingClient(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "4")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data"))
+	}))
+	t.Cleanup(srv.Close)
+
+	shared := &http.Client{
+		Transport: http.DefaultTransport,
+		Timeout:   30 * time.Second,
+	}
+	c := &Client{baseURL: srv.URL, pat: "test-token", http: shared}
+
+	var dst bytes.Buffer
+	if _, err := c.DownloadArtifact(context.Background(), "/anywhere", &dst, 1024); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if shared.Timeout != 30*time.Second {
+		t.Errorf("shared client Timeout was mutated: got %v, want 30s", shared.Timeout)
 	}
 }
 

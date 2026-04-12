@@ -74,11 +74,21 @@ func (c *Client) Delete(path string) ([]byte, error) {
 // checked up front when GitHub provides it, and io.LimitReader wraps the
 // copy as a belt-and-suspenders guard in case the header is missing or wrong.
 //
-// This method uses its own http.Client with a 15-minute timeout because the
-// shared c.http (30s) is unusable for multi-hundred-MB downloads. Redirects
-// are followed automatically; Go's stdlib strips the Authorization header on
-// cross-origin redirects, which is the right behavior here — the signed S3
-// URL would reject our Bearer token anyway.
+// Uses a shallow copy of c.http with Timeout overridden to downloadTimeout.
+// The shared client's 30-second timeout is unusable for multi-hundred-MB
+// downloads, but we can't simply construct a fresh http.Client because that
+// would discard any Transport/proxy/TLS configuration that was attached to
+// c.http — which matters in enterprise environments with corporate proxies
+// or GHES instances with custom root CAs. Shallow-copying the struct and
+// overriding only Timeout preserves every other field (Transport, Jar,
+// CheckRedirect) while extending the download window. The copy is safe
+// because http.Client's fields are value types or interfaces that we don't
+// mutate.
+//
+// Redirects are followed automatically by the inherited transport; Go's
+// stdlib strips the Authorization header on cross-origin redirects, which
+// is the right behavior here — the signed S3 URL would reject our Bearer
+// token anyway.
 //
 // Returns the number of bytes written to dst.
 func (c *Client) DownloadArtifact(ctx context.Context, path string, dst io.Writer, maxBytes int64) (int64, error) {
@@ -91,7 +101,10 @@ func (c *Client) DownloadArtifact(ctx context.Context, path string, dst io.Write
 	req.Header.Set("Authorization", "Bearer "+c.pat)
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
-	client := &http.Client{Timeout: downloadTimeout}
+	// Shallow copy so the long-download timeout doesn't bleed into other
+	// API calls that share the same client. Inherits Transport/Jar/CheckRedirect.
+	client := *c.http
+	client.Timeout = downloadTimeout
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("download request %s: %w", path, err)
