@@ -372,7 +372,15 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		// Retries that produce new completions are merged into the totals
 		// so cost/duration accounting reflects the full invocation, not
 		// just the initial call.
-		completion = s.runMemoryGate(ctx, runID, task.ID, claudeCwd, completion, stream.SessionID())
+		//
+		// Pass model + repoEnv explicitly rather than letting the gate
+		// read live spawner state, so a concurrent UpdateCredentials
+		// can't silently switch models or drop repo context mid-run.
+		repoEnv := ""
+		if cfg.owner != "" && cfg.repo != "" {
+			repoEnv = cfg.owner + "/" + cfg.repo
+		}
+		completion = s.runMemoryGate(ctx, runID, task.ID, claudeCwd, completion, stream.SessionID(), model, repoEnv)
 
 		// Ingest the agent-written memory file (if present) or flag the
 		// run as memory_missing. Either way the run still counts as
@@ -501,15 +509,33 @@ func (s *Spawner) consumeClaudeStream(stdout io.Reader, runID string, stream *st
 	return nil, scanner.Err()
 }
 
-// ResumeOptions configures a ResumeWithMessage invocation. The struct
-// is empty today but exists so callers can add fields later without a
-// signature change rippling through SKY-141 and SKY-139.
+// ResumeOptions configures a ResumeWithMessage invocation. Callers that
+// care about consistency with an earlier invocation should populate these
+// explicitly — the fallbacks read live Spawner state and will race with
+// UpdateCredentials if the user rotates auth mid-run.
 type ResumeOptions struct {
-	// Model overrides the spawner's current model. Empty = use the
-	// spawner default, which is the right choice for the memory-gate
-	// retry loop in SKY-141 (we want the continuation to use the same
-	// model the initial invocation ran under).
+	// Model overrides the live spawner model. **Always pass this** when
+	// resuming within a single logical run (e.g. the memory-gate retry
+	// loop) — read from the value you captured at run start, not from
+	// s.model at resume time. If UpdateCredentials runs between the
+	// initial invocation and a resume, the live spawner model may point
+	// at a different model than the initial invocation ran under, which
+	// would silently switch models mid-run.
+	//
+	// Empty falls back to the live spawner model, which is only the
+	// right choice for callers that genuinely want "current spawner
+	// state" (none exist today, but the door's open).
 	Model string
+
+	// RepoEnv, if non-empty, is passed to the resumed subprocess as
+	// TODOTRIAGE_REPO=<value>. Preserves the GitHub repo context that
+	// the initial runAgent invocation set up for gh subcommands so
+	// resumes don't lose the implicit --repo default. Format is
+	// "owner/name" — composed by the caller from cfg.owner and cfg.repo.
+	//
+	// Left empty for Jira-no-match runs that never had repo context in
+	// the first place.
+	RepoEnv string
 }
 
 // ResumeOutcome bundles what ResumeWithMessage returns: the raw
@@ -579,6 +605,13 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, runID, sessionID, cwd, 
 	cmd := exec.Command("claude", args...)
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(), "TODOTRIAGE_RUN_ID="+runID, "TODOTRIAGE_REVIEW_PREVIEW=1")
+	// Preserve the initial run's GitHub repo context so gh subcommands
+	// in the resumed session keep their implicit --repo default. Without
+	// this, a resumed run on a GitHub task could suddenly fail any gh
+	// invocation that relied on the env var set in runAgent.
+	if opts.RepoEnv != "" {
+		cmd.Env = append(cmd.Env, "TODOTRIAGE_REPO="+opts.RepoEnv)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdout, err := cmd.StdoutPipe()
@@ -725,10 +758,15 @@ func writeSystemStubMemory(database *sql.DB, runID, taskID, reason string) {
 // num_turns accounting reflects the full span of the run.
 //
 // The gate does not touch agent_runs status — that remains the caller's
-// responsibility. The gate's only side effects are (a) spawning resume
-// subprocesses via ResumeWithMessage, which write their own messages to
-// agent_messages via consumeClaudeStream's persistence, and (b) logging
-// progress for operator diagnosis.
+// responsibility. Side effects: (a) spawns resume subprocesses via
+// ResumeWithMessage, whose messages land in agent_messages via
+// consumeClaudeStream's persistence, (b) logs progress for operator
+// diagnosis.
+//
+// Model and repoEnv are passed in rather than read from live spawner
+// state so the gate's retries use the same model and repo context as
+// the initial invocation. If we read s.model at resume time, a
+// concurrent UpdateCredentials could silently switch models mid-run.
 //
 // If no session id is available (shouldn't happen in practice because
 // consumeClaudeStream persists the init event, but defensive), the gate
@@ -738,7 +776,7 @@ func (s *Spawner) runMemoryGate(
 	ctx context.Context,
 	runID, taskID, cwd string,
 	initial *runCompletion,
-	sessionID string,
+	sessionID, model, repoEnv string,
 ) *runCompletion {
 	if memoryFileExists(cwd, runID) {
 		return initial
@@ -749,6 +787,8 @@ func (s *Spawner) runMemoryGate(
 		return initial
 	}
 
+	resumeOpts := ResumeOptions{Model: model, RepoEnv: repoEnv}
+
 	current := initial
 	for attempt := 1; attempt <= maxMemoryRetries; attempt++ {
 		log.Printf("[delegate] run %s: memory file missing after attempt %d, resuming", runID, attempt-1)
@@ -758,7 +798,7 @@ func (s *Spawner) runMemoryGate(
 				"if this recurs — then return your completion JSON again.",
 			runID,
 		)
-		outcome, err := s.ResumeWithMessage(ctx, runID, sessionID, cwd, msg, ResumeOptions{})
+		outcome, err := s.ResumeWithMessage(ctx, runID, sessionID, cwd, msg, resumeOpts)
 		if err != nil {
 			log.Printf("[delegate] run %s: resume attempt %d failed: %v", runID, attempt, err)
 			// Give up on further retries — the caller will mark
