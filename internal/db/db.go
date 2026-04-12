@@ -267,8 +267,7 @@ CREATE TABLE IF NOT EXISTS prompt_triggers (
     cooldown_seconds INTEGER NOT NULL DEFAULT 60,
     enabled BOOLEAN NOT NULL DEFAULT 1,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(event_type, trigger_type)
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_prompt_triggers_event_type ON prompt_triggers(event_type) WHERE enabled = 1;

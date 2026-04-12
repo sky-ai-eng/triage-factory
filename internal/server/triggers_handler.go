@@ -87,6 +87,18 @@ func (s *Server) handleTriggerToggle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
+
+	// Verify the trigger exists before updating
+	existing, err := db.GetPromptTrigger(s.db, id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if existing == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "trigger not found"})
+		return
+	}
+
 	if err := db.SetTriggerEnabled(s.db, id, req.Enabled); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

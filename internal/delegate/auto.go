@@ -98,10 +98,5 @@ func MaybeAutoDelegate(database *sql.DB, spawner *Spawner, evt domain.Event) {
 			continue
 		}
 		log.Printf("[auto-delegate] started run %s for task %s", runID, task.ID)
-
-		// Only fire one trigger per event — the unique constraint on
-		// (event_type, trigger_type) means at most one match in V1,
-		// but this break makes the intent explicit.
-		break
 	}
 }

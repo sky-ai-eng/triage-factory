@@ -375,6 +375,10 @@ func (c *Client) SubmitReview(owner, repo string, number int, commitSHA, event, 
 
 	data, err := c.Post(fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews", owner, repo, number), payload)
 	if err != nil {
+		errStr := err.Error()
+		if strings.Contains(errStr, "422") && event == "REQUEST_CHANGES" {
+			return 0, event, fmt.Errorf("cannot request changes on your own pull request — change the review type to Comment")
+		}
 		return 0, event, err
 	}
 
