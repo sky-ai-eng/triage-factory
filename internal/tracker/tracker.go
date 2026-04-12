@@ -71,22 +71,64 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 		}
 	}
 
-	// Phase 2: Refresh all tracked items via GraphQL batch
-	nodeIDs, err := db.ListNodeIDs(t.database, "github")
+	// Phase 2: Refresh tracked items.
+	//
+	// Load tracked items first (we also need them for Phase 3 diffing)
+	// and classify by stored-snapshot state so we can use the right
+	// GraphQL fragment for each tier:
+	//
+	//   Open PRs     → full fragment (includes check runs for CI diffing)
+	//   Terminal PRs → lightweight fragment (CI is irrelevant; much cheaper)
+	//
+	// Terminal PRs go through exactly one refresh after discovery (to get
+	// final state), then MarkTerminal excludes them from future polls.
+	tracked, err := db.ListActiveTrackedItems(t.database, "github")
 	if err != nil {
-		return 0, fmt.Errorf("list node IDs: %w", err)
+		return 0, fmt.Errorf("list tracked items: %w", err)
 	}
-	if len(nodeIDs) == 0 {
+
+	var openIDs, terminalIDs []string
+	for _, item := range tracked {
+		if item.NodeID == "" {
+			continue
+		}
+		var snap domain.PRSnapshot
+		if item.Snapshot != "" && item.Snapshot != "{}" {
+			_ = json.Unmarshal([]byte(item.Snapshot), &snap)
+		}
+		if snap.Merged || snap.State == "CLOSED" || snap.State == "MERGED" {
+			terminalIDs = append(terminalIDs, item.NodeID)
+		} else {
+			openIDs = append(openIDs, item.NodeID)
+		}
+	}
+
+	if len(openIDs) == 0 && len(terminalIDs) == 0 {
 		return 0, nil
 	}
 
-	refreshed, err := client.RefreshPRs(nodeIDs)
-	if err != nil {
-		return 0, fmt.Errorf("refresh PRs: %w", err)
+	refreshed := make(map[string]domain.PRSnapshot)
+	if len(openIDs) > 0 {
+		open, err := client.RefreshPRs(openIDs, true)
+		if err != nil {
+			return 0, fmt.Errorf("refresh open PRs: %w", err)
+		}
+		for k, v := range open {
+			refreshed[k] = v
+		}
+	}
+	if len(terminalIDs) > 0 {
+		terminal, err := client.RefreshPRs(terminalIDs, false)
+		if err != nil {
+			return 0, fmt.Errorf("refresh terminal PRs: %w", err)
+		}
+		for k, v := range terminal {
+			refreshed[k] = v
+		}
 	}
 
 	// Phase 3: Diff, upsert tasks, and emit events
-	tracked, err := db.ListActiveTrackedItems(t.database, "github")
+	// (reuses `tracked` from Phase 2 — same active set, no extra query)
 	if err != nil {
 		return 0, fmt.Errorf("list tracked items: %w", err)
 	}

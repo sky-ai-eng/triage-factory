@@ -9,10 +9,10 @@ import (
 	"github.com/sky-ai-eng/todo-triage/internal/domain"
 )
 
-// prFragment is the GraphQL fragment used for both discovery and refresh.
-// Contains every field needed to build a PRSnapshot.
-const prFragment = `
-fragment PRFields on PullRequest {
+// prBaseFields are the common GraphQL fields shared between the discovery
+// and full fragments. Kept as a const so the two fragments stay in sync on
+// everything except the CI check-run block.
+const prBaseFields = `
 	id
 	number
 	title
@@ -45,23 +45,63 @@ fragment PRFields on PullRequest {
 		}
 	}
 	reviews(first: 1) { totalCount }
+`
+
+// prDiscoveryFragment is a lightweight GraphQL fragment for discovery
+// and for refreshing terminal (merged/closed) PRs. It fetches PR
+// identity, metadata, reviews, and head SHA — but NOT check runs.
+//
+// Check runs are omitted because:
+//   - Discovery only needs to find PRs and seed tracked_items; the
+//     next refresh cycle fills in CI detail for any PRs that need it.
+//   - Merged/closed PRs are terminal — CI status is historical noise.
+//
+// The resulting snapshot has CheckRuns == nil, which the diff logic
+// (diff.go:69) treats as "unknown prior state" and skips CI events.
+//
+// Node budget: ~50 per PR (no nested connections beyond reviews).
+// A 50-result discovery query costs ~2,500 nodes — trivial compared
+// to the 500,000-node ceiling.
+const prDiscoveryFragment = `
+fragment PRDiscoveryFields on PullRequest {
+` + prBaseFields + `
+	commits(last: 1) {
+		nodes {
+			commit { oid }
+		}
+	}
+	labels(first: 10) { nodes { name } }
+	comments { totalCount }
+	createdAt
+	updatedAt
+	mergedAt
+	closedAt
+}
+`
+
+// prFullFragment includes everything in the discovery fragment plus
+// per-check-run CI data from the head commit's check suites. Used by
+// RefreshPRs for OPEN PRs only — these are the ones where CI state
+// changes drive events (github:pr:ci_failed, github:pr:ci_passed).
+//
+// Node budget per PR: ~1,060 (20 suites × 50 runs + overhead).
+// A RefreshPRs call for N open PRs costs roughly N × 1,060 nodes,
+// so ~470 open PRs fit in a single query before hitting the 500k
+// ceiling. If your tracked-open set grows past that, the fix is to
+// batch RefreshPRs calls, not to bump page caps.
+//
+// Page caps (20 suites, 50 runs per suite) are load-bearing:
+// 100/100 pushes a 50-result query to ~507k nodes and hard-errors.
+// Do not bump without re-running the math. The hasNextPage watchdogs
+// in toSnapshot() log when we truncate, so real truncation becomes
+// visible in operator logs instead of being silent.
+const prFullFragment = `
+fragment PRFullFields on PullRequest {
+` + prBaseFields + `
 	commits(last: 1) {
 		nodes {
 			commit {
 				oid
-				# Page caps are load-bearing: GitHub's GraphQL node budget is
-				# 500,000 per query, and this is a doubly-nested connection
-				# that's also wrapped by search(first: N) for discovery and
-				# nodes(ids: [...]) for refresh. Cost per PR here is
-				# 20 suites * 50 runs = 1,000 nodes. A discovery query of
-				# first: 50 therefore budgets 50 * 1,000 = 50,000 nodes on
-				# check data alone, well under the ceiling.
-				#
-				# Max-page-size (100/100) pushes a 50-result discovery to
-				# ~507k nodes and hard-errors out of GitHub's limit. Do not
-				# bump these without re-running the math: the hasNextPage
-				# watchdogs below log when we truncate, so real truncation
-				# becomes visible in operator logs instead of being silent.
 				checkSuites(first: 20) {
 					pageInfo { hasNextPage }
 					nodes {
@@ -107,11 +147,11 @@ func (c *Client) DiscoverPRs(searchQuery string, limit int) ([]DiscoveredPR, err
 	query := fmt.Sprintf(`
 		query($q: String!, $limit: Int!) {
 			search(query: $q, type: ISSUE, first: $limit) {
-				nodes { ...PRFields }
+				nodes { ...PRDiscoveryFields }
 			}
 		}
 		%s
-	`, prFragment)
+	`, prDiscoveryFragment)
 
 	data, err := c.PostGraphQL(map[string]any{
 		"query":     query,
@@ -139,7 +179,7 @@ func (c *Client) DiscoverPRs(searchQuery string, limit int) ([]DiscoveredPR, err
 		}
 		results = append(results, DiscoveredPR{
 			NodeID:   pr.ID,
-			Snapshot: pr.toSnapshot(),
+			Snapshot: pr.toDiscoverySnapshot(),
 		})
 	}
 	return results, nil
@@ -147,17 +187,33 @@ func (c *Client) DiscoverPRs(searchQuery string, limit int) ([]DiscoveredPR, err
 
 // RefreshPRs batch-fetches current state for tracked PRs using their GraphQL node IDs.
 // Returns a map of node ID → snapshot. Missing/deleted PRs are silently omitted.
-func (c *Client) RefreshPRs(nodeIDs []string) (map[string]domain.PRSnapshot, error) {
+//
+// includeCheckRuns controls which fragment is used and whether the resulting
+// snapshots carry CI data:
+//   - true  → prFullFragment, CheckRuns populated. Use for OPEN PRs where
+//     CI state changes drive events.
+//   - false → prDiscoveryFragment, CheckRuns == nil. Use for terminal
+//     (merged/closed) PRs where CI status is irrelevant. Also dramatically
+//     cheaper per-node (~50 vs ~1,060) so the 500k-node budget stretches
+//     further on large tracked sets.
+func (c *Client) RefreshPRs(nodeIDs []string, includeCheckRuns bool) (map[string]domain.PRSnapshot, error) {
 	if len(nodeIDs) == 0 {
 		return nil, nil
 	}
 
+	fragment := prDiscoveryFragment
+	fragmentSpread := "PRDiscoveryFields"
+	if includeCheckRuns {
+		fragment = prFullFragment
+		fragmentSpread = "PRFullFields"
+	}
+
 	query := fmt.Sprintf(`
 		query($ids: [ID!]!) {
-			nodes(ids: $ids) { ...PRFields }
+			nodes(ids: $ids) { ...%s }
 		}
 		%s
-	`, prFragment)
+	`, fragmentSpread, fragment)
 
 	data, err := c.PostGraphQL(map[string]any{
 		"query":     query,
@@ -188,7 +244,11 @@ func (c *Client) RefreshPRs(nodeIDs []string) (map[string]domain.PRSnapshot, err
 		if pr.Number == 0 {
 			continue
 		}
-		results[nodeIDs[i]] = pr.toSnapshot()
+		if includeCheckRuns {
+			results[nodeIDs[i]] = pr.toSnapshot()
+		} else {
+			results[nodeIDs[i]] = pr.toDiscoverySnapshot()
+		}
 	}
 	return results, nil
 }
@@ -313,8 +373,25 @@ type gqlLabelNodes struct {
 	} `json:"nodes"`
 }
 
-// toSnapshot converts the GraphQL response to our extracted snapshot type.
-func (pr gqlPR) toSnapshot() domain.PRSnapshot {
+// toSnapshot builds a full snapshot with CheckRuns populated — used by
+// RefreshPRs for open PRs.
+func (pr gqlPR) toSnapshot() domain.PRSnapshot { return pr.buildSnapshot(true) }
+
+// toDiscoverySnapshot builds a lightweight snapshot with CheckRuns == nil
+// (unknown prior state). Used by DiscoverPRs and by RefreshPRs for
+// terminal PRs where CI is irrelevant.
+func (pr gqlPR) toDiscoverySnapshot() domain.PRSnapshot { return pr.buildSnapshot(false) }
+
+// buildSnapshot is the shared implementation for both snapshot methods.
+// includeCheckRuns controls whether CI data is populated:
+//
+//   - true: CheckRuns is a non-nil slice (possibly empty). The diff logic
+//     (diff.go:69) treats this as "known CI state" and evaluates check
+//     transitions.
+//   - false: CheckRuns stays nil. The diff logic skips the entire CI
+//     section, preventing spurious events on first startup or for
+//     terminal PRs that don't need CI tracking.
+func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
 	snap := domain.PRSnapshot{
 		Number:       pr.Number,
 		Title:        pr.Title,
@@ -342,51 +419,46 @@ func (pr gqlPR) toSnapshot() domain.PRSnapshot {
 		snap.HeadRepo = pr.HeadRepository.NameWithOwner
 	}
 
-	// CI check runs from the latest commit.
-	//
-	// Even when the commit has no check suites, we initialize CheckRuns to a
-	// non-nil empty slice so downstream diff logic can distinguish "polled,
-	// nothing here" (empty) from "unknown prior state" (nil, meaning an old
-	// snapshot from before this field existed).
-	snap.CheckRuns = []domain.CheckRun{}
 	if len(pr.Commits.Nodes) > 0 {
 		commit := pr.Commits.Nodes[0].Commit
 		snap.HeadSHA = commit.OID
 
-		// Pagination truncation watchdog. The query caps at 20 suites and
-		// 50 runs per suite — plenty for realistic PRs (even a heavy matrix
-		// build caps around ~30 runs per suite × 5-8 suites). If we ever
-		// blow past these, log once so we catch it before missing events
-		// becomes a silent failure. Paginating would mean real cursor
-		// logic; preferring the simpler cap + warning until there's pressure.
-		// Do not raise these caps without re-running the node-budget math
-		// in the prFragment comment — 100/100 hits GitHub's 500k node limit.
-		if commit.CheckSuites.PageInfo.HasNextPage {
-			log.Printf("[github] WARN: check suites truncated at 20 for %s#%d — some CI state may be missing from snapshot", snap.Repo, snap.Number)
-		}
+		if includeCheckRuns {
+			// Initialize to non-nil empty so downstream diff sees "polled,
+			// nothing here" rather than "unknown prior state" (nil).
+			snap.CheckRuns = []domain.CheckRun{}
 
-		var raw []domain.CheckRun
-		for _, suite := range commit.CheckSuites.Nodes {
-			if suite.CheckRuns.PageInfo.HasNextPage {
-				log.Printf("[github] WARN: check runs truncated at 50 within a suite for %s#%d — some CI state may be missing from snapshot", snap.Repo, snap.Number)
+			// Pagination truncation watchdog. Do not raise caps without
+			// re-running the node-budget math in prFullFragment's comment.
+			if commit.CheckSuites.PageInfo.HasNextPage {
+				log.Printf("[github] WARN: check suites truncated at 20 for %s#%d — some CI state may be missing from snapshot", snap.Repo, snap.Number)
 			}
-			var workflowRunID int64
-			if suite.WorkflowRun != nil {
-				workflowRunID = suite.WorkflowRun.DatabaseID
+
+			var raw []domain.CheckRun
+			for _, suite := range commit.CheckSuites.Nodes {
+				if suite.CheckRuns.PageInfo.HasNextPage {
+					log.Printf("[github] WARN: check runs truncated at 50 within a suite for %s#%d — some CI state may be missing from snapshot", snap.Repo, snap.Number)
+				}
+				var workflowRunID int64
+				if suite.WorkflowRun != nil {
+					workflowRunID = suite.WorkflowRun.DatabaseID
+				}
+				for _, cr := range suite.CheckRuns.Nodes {
+					raw = append(raw, domain.CheckRun{
+						ID:            cr.DatabaseID,
+						Name:          cr.Name,
+						Status:        strings.ToLower(cr.Status),
+						Conclusion:    strings.ToLower(cr.Conclusion),
+						CompletedAt:   cr.CompletedAt,
+						DetailsURL:    cr.DetailsURL,
+						WorkflowRunID: workflowRunID,
+					})
+				}
 			}
-			for _, cr := range suite.CheckRuns.Nodes {
-				raw = append(raw, domain.CheckRun{
-					ID:            cr.DatabaseID,
-					Name:          cr.Name,
-					Status:        strings.ToLower(cr.Status),
-					Conclusion:    strings.ToLower(cr.Conclusion),
-					CompletedAt:   cr.CompletedAt,
-					DetailsURL:    cr.DetailsURL,
-					WorkflowRunID: workflowRunID,
-				})
-			}
+			snap.CheckRuns = domain.DedupCheckRunsByName(raw)
 		}
-		snap.CheckRuns = domain.DedupCheckRunsByName(raw)
+		// If !includeCheckRuns, snap.CheckRuns stays nil — "unknown prior
+		// state" — so the diff logic skips CI evaluation for this snapshot.
 	}
 
 	// Review requests
