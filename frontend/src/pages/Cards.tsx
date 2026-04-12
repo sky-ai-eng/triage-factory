@@ -48,25 +48,8 @@ export default function Cards() {
   const [undoTask, setUndoTask] = useState<{ id: string; action: string } | null>(null)
   const [showPromptPicker, setShowPromptPicker] = useState(false)
   const [filterOpen, setFilterOpen] = useState(false)
-  const shiftHeld = useRef(false)
   const hasFetched = useRef(false)
   const navigate = useNavigate()
-
-  // Track shift key for prompt picker override
-  useEffect(() => {
-    const down = (e: KeyboardEvent) => {
-      if (e.key === 'Shift') shiftHeld.current = true
-    }
-    const up = (e: KeyboardEvent) => {
-      if (e.key === 'Shift') shiftHeld.current = false
-    }
-    window.addEventListener('keydown', down)
-    window.addEventListener('keyup', up)
-    return () => {
-      window.removeEventListener('keydown', down)
-      window.removeEventListener('keyup', up)
-    }
-  }, [])
 
   const fetchQueue = useCallback(async (preserveCurrent = false) => {
     const res = await fetch('/api/queue')
@@ -118,14 +101,10 @@ export default function Cards() {
     const task = tasks[0]
     if (!task) return
 
-    // Delegate: if shift is held or no prompt_id provided, show the picker
+    // Delegate always requires an explicit prompt pick
     if (action === 'delegate' && !promptId) {
-      if (shiftHeld.current) {
-        setShowPromptPicker(true)
-        return
-      }
-      // Check if a default prompt exists by trying to delegate —
-      // if the backend returns a delegate_error about no prompt, show picker
+      setShowPromptPicker(true)
+      return
     }
 
     const hesitationMs = Date.now() - cardStart
@@ -149,15 +128,6 @@ export default function Cards() {
             })
 
       if (!res.ok) return
-
-      // If delegate failed due to missing prompt, show picker instead
-      if (action === 'delegate') {
-        const data = await res.json()
-        if (data.delegate_error && data.delegate_error.includes('no prompt available')) {
-          setShowPromptPicker(true)
-          return
-        }
-      }
     } catch {
       return
     }
@@ -189,10 +159,8 @@ export default function Cards() {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'ArrowLeft') swipe('dismiss')
       else if (e.key === 'ArrowRight') swipe('claim')
-      else if (e.key === 'ArrowUp') {
-        shiftHeld.current = e.shiftKey
-        swipe('delegate')
-      } else if (e.key === 'ArrowDown') swipe('snooze')
+      else if (e.key === 'ArrowUp') swipe('delegate')
+      else if (e.key === 'ArrowDown') swipe('snooze')
       else if ((e.ctrlKey || e.metaKey) && e.key === 'z') undo()
     }
     window.addEventListener('keydown', handler)

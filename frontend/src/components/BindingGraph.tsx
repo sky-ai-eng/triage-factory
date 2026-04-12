@@ -15,7 +15,7 @@ import {
   applyNodeChanges,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import type { Prompt, PromptBinding } from '../types'
+import type { Prompt, PromptTrigger } from '../types'
 
 interface EventType {
   id: string
@@ -199,22 +199,21 @@ function saveLayout(layout: SavedLayout) {
 function BindingGraphInner({ onPromptClick }: GraphProps) {
   const [eventTypes, setEventTypes] = useState<EventType[]>([])
   const [prompts, setPrompts] = useState<Prompt[]>([])
-  const [bindings, setBindings] = useState<PromptBinding[]>([])
+  const [triggers, setTriggers] = useState<PromptTrigger[]>([])
   const [nodes, setNodes] = useState<Node[]>([])
   const [loading, setLoading] = useState(true)
   const [activeEventIds, setActiveEventIds] = useState<Set<string>>(new Set())
   const [confirmPopup, setConfirmPopup] = useState<{
     x: number
     y: number
-    promptId: string
-    eventType: string
+    triggerId: string
   } | null>(null)
   const layoutRef = useRef<SavedLayout>(loadLayout())
   const { screenToFlowPosition } = useReactFlow()
 
   // Refs so callbacks don't go stale
-  const bindingsRef = useRef(bindings)
-  bindingsRef.current = bindings
+  const triggersRef = useRef(triggers)
+  triggersRef.current = triggers
   const onPromptClickRef = useRef(onPromptClick)
   onPromptClickRef.current = onPromptClick
 
@@ -224,17 +223,17 @@ function BindingGraphInner({ onPromptClick }: GraphProps) {
       return r.json()
     }
     try {
-      const [etRes, pRes, bRes] = await Promise.all([
+      const [etRes, pRes, tRes] = await Promise.all([
         fetch('/api/event-types').then((r) => parseOrThrow(r, 'event-types')),
         fetch('/api/prompts').then((r) => parseOrThrow(r, 'prompts')),
-        fetch('/api/bindings').then((r) => parseOrThrow(r, 'bindings')),
+        fetch('/api/triggers').then((r) => parseOrThrow(r, 'triggers')),
       ])
       setEventTypes(etRes)
       setPrompts(pRes)
-      setBindings(bRes)
+      setTriggers(tRes)
 
       const saved = layoutRef.current
-      const boundIds = new Set((bRes as PromptBinding[]).map((b) => b.event_type))
+      const boundIds = new Set((tRes as PromptTrigger[]).map((t) => t.event_type))
       const active = new Set<string>()
       for (const id of Object.keys(saved.eventPositions)) active.add(id)
       for (const id of boundIds) active.add(id)
@@ -255,13 +254,10 @@ function BindingGraphInner({ onPromptClick }: GraphProps) {
   // Remove event from canvas
   const removeEvent = useCallback(
     (eventTypeId: string) => {
-      const toDelete = bindingsRef.current.filter((b) => b.event_type === eventTypeId)
+      const toDelete = triggersRef.current.filter((t) => t.event_type === eventTypeId)
       Promise.all(
-        toDelete.map((b) =>
-          fetch(
-            `/api/bindings?prompt_id=${encodeURIComponent(b.prompt_id)}&event_type=${encodeURIComponent(b.event_type)}`,
-            { method: 'DELETE' },
-          ),
+        toDelete.map((t) =>
+          fetch(`/api/triggers/${encodeURIComponent(t.id)}`, { method: 'DELETE' }),
         ),
       ).then(() => {
         setActiveEventIds((prev) => {
@@ -329,25 +325,30 @@ function BindingGraphInner({ onPromptClick }: GraphProps) {
   }, [eventTypes, prompts, activeEventIds, removeEvent])
 
   // Build edges
-  const edges: Edge[] = bindings
-    .filter((b) => activeEventIds.has(b.event_type))
-    .map((b) => ({
-      id: `${b.prompt_id}__${b.event_type}`,
-      source: `et:${b.event_type}`,
-      target: `p:${b.prompt_id}`,
+  const edges: Edge[] = triggers
+    .filter((t) => activeEventIds.has(t.event_type))
+    .map((t) => ({
+      id: t.id,
+      source: `et:${t.event_type}`,
+      target: `p:${t.prompt_id}`,
       type: 'default',
-      animated: b.is_default,
+      animated: t.enabled,
       style: {
-        stroke: b.is_default ? 'var(--color-claim)' : 'var(--color-text-tertiary)',
-        strokeWidth: b.is_default ? 2 : 1,
-        strokeDasharray: b.is_default ? undefined : '5 5',
-        opacity: b.is_default ? 1 : 0.5,
+        stroke: t.enabled ? 'var(--color-accent)' : 'var(--color-text-tertiary)',
+        strokeWidth: t.enabled ? 2 : 1,
+        strokeDasharray: t.enabled ? undefined : '5 5',
+        opacity: t.enabled ? 1 : 0.5,
       },
-      markerEnd: b.is_default
-        ? { type: MarkerType.ArrowClosed, color: 'var(--color-claim)' }
-        : undefined,
-      label: b.is_default ? 'default' : '',
-      labelStyle: { fontSize: 9, fill: 'var(--color-claim)', fontWeight: 600 },
+      markerEnd: {
+        type: MarkerType.ArrowClosed,
+        color: t.enabled ? 'var(--color-accent)' : 'var(--color-text-tertiary)',
+      },
+      label: t.enabled ? 'auto' : 'disabled',
+      labelStyle: {
+        fontSize: 9,
+        fill: t.enabled ? 'var(--color-accent)' : 'var(--color-text-tertiary)',
+        fontWeight: 600,
+      },
       labelBgStyle: { fill: 'white', fillOpacity: 0.8 },
     }))
 
@@ -373,72 +374,60 @@ function BindingGraphInner({ onPromptClick }: GraphProps) {
     if (dirty) saveLayout(layout)
   }, [])
 
-  // Connect event -> prompt
+  // Connect event -> prompt (creates a new trigger)
   const onConnect = useCallback(
     async (connection: Connection) => {
       const eventType = connection.source?.replace('et:', '')
       const promptId = connection.target?.replace('p:', '')
       if (!eventType || !promptId) return
 
-      const existingForEvent = bindingsRef.current.filter((b) => b.event_type === eventType)
-      const isDefault = existingForEvent.length === 0
-
       try {
-        await fetch('/api/bindings', {
+        await fetch('/api/triggers', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            prompt_id: promptId,
-            event_type: eventType,
-            is_default: isDefault,
-          }),
+          body: JSON.stringify({ prompt_id: promptId, event_type: eventType }),
         })
         fetchAll()
       } catch {
-        // ignore — caller will retry on next interval
+        // ignore
       }
     },
     [fetchAll],
   )
 
-  const doDeleteBinding = useCallback(
-    async (promptId: string, eventType: string) => {
+  const doDeleteTrigger = useCallback(
+    async (triggerId: string) => {
       try {
-        await fetch(
-          `/api/bindings?prompt_id=${encodeURIComponent(promptId)}&event_type=${encodeURIComponent(eventType)}`,
-          { method: 'DELETE' },
-        )
+        await fetch(`/api/triggers/${encodeURIComponent(triggerId)}`, { method: 'DELETE' })
         fetchAll()
       } catch {
-        // ignore — caller will retry on next interval
+        // ignore
       }
     },
     [fetchAll],
   )
 
-  // Click edge to toggle default or delete
+  // Click edge to toggle enabled/disabled; long-press or confirm to delete
   const onEdgeClick: EdgeMouseHandler = useCallback(
     async (event, edge) => {
-      const [promptId, eventType] = edge.id.split('__')
-      const binding = bindingsRef.current.find(
-        (b) => b.prompt_id === promptId && b.event_type === eventType,
-      )
-      if (!binding) return
+      const trigger = triggersRef.current.find((t) => t.id === edge.id)
+      if (!trigger) return
 
-      if (binding.is_default) {
-        // Show confirm popup at click position
+      if (event.shiftKey) {
+        // Shift-click: show delete confirm
         const mouseEvent = event as unknown as MouseEvent
-        setConfirmPopup({ x: mouseEvent.clientX, y: mouseEvent.clientY, promptId, eventType })
+        setConfirmPopup({ x: mouseEvent.clientX, y: mouseEvent.clientY, triggerId: trigger.id })
       } else {
+        // Regular click: toggle enabled
         try {
-          await fetch('/api/bindings/set-default', {
+          await fetch(`/api/triggers/${encodeURIComponent(trigger.id)}/toggle`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ prompt_id: promptId, event_type: eventType, is_default: true }),
+            body: JSON.stringify({ enabled: !trigger.enabled }),
           })
           fetchAll()
         } catch {
-          // ignore — caller will retry on next interval
+          // ignore
         }
       }
     },
@@ -503,7 +492,7 @@ function BindingGraphInner({ onPromptClick }: GraphProps) {
             className="fixed z-50 bg-surface-raised/95 backdrop-blur-xl border border-border-glass rounded-xl shadow-xl shadow-black/10 px-4 py-3 w-[220px]"
             style={{ left: confirmPopup.x - 110, top: confirmPopup.y - 80 }}
           >
-            <p className="text-[12px] text-text-primary font-medium mb-3">Remove this binding?</p>
+            <p className="text-[12px] text-text-primary font-medium mb-3">Remove this trigger?</p>
             <div className="flex items-center justify-end gap-2">
               <button
                 onClick={() => setConfirmPopup(null)}
@@ -513,7 +502,7 @@ function BindingGraphInner({ onPromptClick }: GraphProps) {
               </button>
               <button
                 onClick={() => {
-                  doDeleteBinding(confirmPopup.promptId, confirmPopup.eventType)
+                  doDeleteTrigger(confirmPopup.triggerId)
                   setConfirmPopup(null)
                 }}
                 className="text-[11px] font-semibold text-white bg-red-500 hover:bg-red-600 px-3 py-1 rounded-md transition-colors"

@@ -90,10 +90,16 @@ export interface EventType {
   sort_order: number
 }
 
-export interface PromptBinding {
+export interface PromptTrigger {
+  id: string
   prompt_id: string
+  trigger_type: string
   event_type: string
-  is_default: boolean
+  max_iterations: number
+  cooldown_seconds: number
+  enabled: boolean
+  created_at: string
+  updated_at: string
 }
 
 export type WSEvent =

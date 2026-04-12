@@ -3,9 +3,7 @@ package domain
 import "time"
 
 // PromptTrigger defines an automation rule that fires a prompt in response to
-// an event. This is separate from PromptBinding, which controls swipe-UX
-// defaults (which prompt pre-fills the picker). PromptTrigger controls what
-// runs automatically without user intervention.
+// an event — what runs automatically without user intervention.
 type PromptTrigger struct {
 	ID                 string    `json:"id"`
 	PromptID           string    `json:"prompt_id"`

@@ -860,30 +860,22 @@ func materializePriorMemories(database *sql.DB, cwd, taskID string) {
 	}
 }
 
-// resolvePrompt finds the mission text for a task, either from an explicit ID or the default binding.
+// resolvePrompt finds the mission text for a task from an explicit prompt ID.
+// Manual delegation always requires the caller to pick a prompt; auto-delegation
+// supplies the prompt_id from the trigger row.
 func (s *Spawner) resolvePrompt(task domain.Task, explicitPromptID string) (string, string, error) {
-	if explicitPromptID != "" {
-		p, err := db.GetPrompt(s.database, explicitPromptID)
-		if err != nil {
-			return "", "", fmt.Errorf("failed to load prompt %s: %w", explicitPromptID, err)
-		}
-		if p == nil {
-			return "", "", fmt.Errorf("prompt %s not found", explicitPromptID)
-		}
-		return p.ID, p.Body, nil
+	if explicitPromptID == "" {
+		return "", "", fmt.Errorf("no prompt specified — select one from the prompt picker")
 	}
 
-	if task.EventType != "" {
-		p, err := db.FindDefaultPrompt(s.database, task.EventType)
-		if err != nil {
-			return "", "", fmt.Errorf("failed to look up default prompt for %s: %w", task.EventType, err)
-		}
-		if p != nil {
-			return p.ID, p.Body, nil
-		}
+	p, err := db.GetPrompt(s.database, explicitPromptID)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to load prompt %s: %w", explicitPromptID, err)
 	}
-
-	return "", "", fmt.Errorf("no prompt available for event type %q — configure one on the Prompts page", task.EventType)
+	if p == nil {
+		return "", "", fmt.Errorf("prompt %s not found", explicitPromptID)
+	}
+	return p.ID, p.Body, nil
 }
 
 func (s *Spawner) handleCancelled(runID string, startTime time.Time, hasWT bool) {

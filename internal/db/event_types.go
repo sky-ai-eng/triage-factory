@@ -47,22 +47,3 @@ func ReorderEventTypes(db *sql.DB, ids []string) error {
 	}
 	return tx.Commit()
 }
-
-// ListAllBindings returns every prompt binding in the system.
-func ListAllBindings(db *sql.DB) ([]domain.PromptBinding, error) {
-	rows, err := db.Query(`SELECT prompt_id, event_type, is_default FROM prompt_bindings`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var bindings []domain.PromptBinding
-	for rows.Next() {
-		var b domain.PromptBinding
-		if err := rows.Scan(&b.PromptID, &b.EventType, &b.IsDefault); err != nil {
-			return nil, err
-		}
-		bindings = append(bindings, b)
-	}
-	return bindings, rows.Err()
-}

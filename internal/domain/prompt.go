@@ -15,11 +15,3 @@ type Prompt struct {
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
 }
-
-// PromptBinding links a prompt to an event type. Multiple prompts can bind to
-// the same event type; one is marked as the default for automatic delegation.
-type PromptBinding struct {
-	PromptID  string `json:"prompt_id"`
-	EventType string `json:"event_type"` // FK to event_types.id, or a prefix like "github:" for broad matching
-	IsDefault bool   `json:"is_default"` // only one default per event_type
-}
