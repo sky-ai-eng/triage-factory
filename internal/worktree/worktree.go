@@ -174,16 +174,8 @@ func CreateForPR(ctx context.Context, owner, repo, cloneURL, headBranch string, 
 		return "", fmt.Errorf("worktree add: %w", err)
 	}
 
-	if err := writeLocalExcludes(wtDir); err != nil {
-		// The worktree has already been registered with the bare repo at
-		// this point, so we must roll it back before returning — otherwise
-		// the caller sees an error AND has no handle to clean up with,
-		// leaking a half-configured worktree directory. Remove handles
-		// both the directory removal and the bare-repo worktree prune.
-		if rmErr := Remove(runID); rmErr != nil {
-			log.Printf("[worktree] rollback after exclude-write failure: %v", rmErr)
-		}
-		return "", fmt.Errorf("write local git excludes: %w", err)
+	if err := addExcludesOrRollback(runID, wtDir); err != nil {
+		return "", err
 	}
 
 	log.Printf("[worktree] PR worktree at %s (branch: %s)", wtDir, headBranch)
@@ -231,19 +223,28 @@ func CreateForBranch(ctx context.Context, owner, repo, cloneURL, baseBranch, fea
 		}
 	}
 
-	if err := writeLocalExcludes(wtDir); err != nil {
-		// Same rollback rationale as in CreateForPR: the worktree is
-		// already registered and on disk, so we own the cleanup if any
-		// post-add step fails. Remove handles both the directory and the
-		// bare-repo prune.
-		if rmErr := Remove(runID); rmErr != nil {
-			log.Printf("[worktree] rollback after exclude-write failure: %v", rmErr)
-		}
-		return "", fmt.Errorf("write local git excludes: %w", err)
+	if err := addExcludesOrRollback(runID, wtDir); err != nil {
+		return "", err
 	}
 
 	log.Printf("[worktree] branch worktree at %s (%s from %s)", wtDir, featureBranch, baseBranch)
 	return wtDir, nil
+}
+
+// addExcludesOrRollback wraps writeLocalExcludes with the rollback both
+// Create* functions need: if the exclude write fails, the worktree is
+// already registered with the bare repo and on disk, so we must call Remove
+// to unwind it before returning. Without rollback the caller sees an error
+// but has no handle to clean up with, leaking a half-configured worktree
+// and its bare-repo registration.
+func addExcludesOrRollback(runID, wtDir string) error {
+	if err := writeLocalExcludes(wtDir); err != nil {
+		if rmErr := Remove(runID); rmErr != nil {
+			log.Printf("[worktree] rollback after exclude-write failure: %v", rmErr)
+		}
+		return fmt.Errorf("write local git excludes: %w", err)
+	}
+	return nil
 }
 
 // managedExcludePatterns are the gitignore patterns writeLocalExcludes
