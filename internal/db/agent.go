@@ -16,9 +16,9 @@ func CreateAgentRun(database *sql.DB, run domain.AgentRun) error {
 		triggerType = "manual"
 	}
 	_, err := database.Exec(`
-		INSERT INTO agent_runs (id, task_id, prompt_id, status, model, worktree_path, trigger_type)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath, triggerType)
+		INSERT INTO agent_runs (id, task_id, prompt_id, status, model, worktree_path, trigger_type, trigger_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath, triggerType, nullIfEmpty(run.TriggerID))
 	return err
 }
 
@@ -166,6 +166,36 @@ func MarkAgentRunMemoryMissing(database *sql.DB, runID string) error {
 		UPDATE agent_runs SET memory_missing = 1 WHERE id = ?
 	`, runID)
 	return err
+}
+
+// HasActiveRunForTask returns true if the task has any agent run that hasn't
+// reached a terminal state. Used as an in-flight gate for auto-delegation.
+func HasActiveRunForTask(database *sql.DB, taskID string) (bool, error) {
+	var count int
+	err := database.QueryRow(`
+		SELECT COUNT(*) FROM agent_runs
+		WHERE task_id = ? AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable', 'pending_approval')
+	`, taskID).Scan(&count)
+	return count > 0, err
+}
+
+// LastAutoRunStartedAt returns the started_at time of the most recent
+// non-manual run for a task. Returns nil if no auto runs exist.
+// Used for cooldown checks in auto-delegation gating.
+func LastAutoRunStartedAt(database *sql.DB, taskID string) (*time.Time, error) {
+	var startedAt sql.NullTime
+	err := database.QueryRow(`
+		SELECT started_at FROM agent_runs
+		WHERE task_id = ? AND trigger_type != 'manual'
+		ORDER BY started_at DESC LIMIT 1
+	`, taskID).Scan(&startedAt)
+	if err == sql.ErrNoRows || !startedAt.Valid {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &startedAt.Time, nil
 }
 
 // InsertAgentMessage inserts a message and returns its ID.

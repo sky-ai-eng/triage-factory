@@ -36,6 +36,19 @@ func seedDefaultPrompts(database *sql.DB) {
 		log.Printf("[seed] warning: failed to seed conflict resolution prompt: %v", err)
 	}
 
+	// CI fix prompt — auto-fired on CI failures
+	err = db.SeedPrompt(database, domain.Prompt{
+		ID:     "system-ci-fix",
+		Name:   "CI Fix",
+		Body:   ai.CIFixPromptTemplate,
+		Source: "system",
+	}, []domain.PromptBinding{
+		{PromptID: "system-ci-fix", EventType: "github:pr:ci_failed", IsDefault: false},
+	})
+	if err != nil {
+		log.Printf("[seed] warning: failed to seed CI fix prompt: %v", err)
+	}
+
 	// Default Jira implementation prompt — bound to assigned issues
 	err = db.SeedPrompt(database, domain.Prompt{
 		ID:     "system-jira-implement",
@@ -47,5 +60,18 @@ func seedDefaultPrompts(database *sql.DB) {
 	})
 	if err != nil {
 		log.Printf("[seed] warning: failed to seed Jira implement prompt: %v", err)
+	}
+
+	// Default trigger: auto-fire CI fix on CI failures
+	if err := db.SavePromptTrigger(database, domain.PromptTrigger{
+		ID:              "system-trigger-ci-fix",
+		PromptID:        "system-ci-fix",
+		TriggerType:     domain.TriggerTypeEvent,
+		EventType:       domain.EventGitHubPRCIFailed,
+		MaxIterations:   3,
+		CooldownSeconds: 60,
+		Enabled:         true,
+	}); err != nil {
+		log.Printf("[seed] warning: failed to seed CI fix trigger: %v", err)
 	}
 }

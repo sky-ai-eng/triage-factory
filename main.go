@@ -159,6 +159,15 @@ func main() {
 	spawner := delegate.NewSpawner(database, nil, wsHub, "")
 	srv.SetSpawner(spawner)
 
+	// Subscriber: auto-delegation — fires matching prompt_triggers on non-system events
+	bus.Subscribe(eventbus.Subscriber{
+		Name:   "auto-delegate",
+		Filter: []string{"github:", "jira:"},
+		Handle: func(evt domain.Event) {
+			delegate.MaybeAutoDelegate(database, spawner, evt)
+		},
+	})
+
 	// GitHub changed: invalidate profiles → stop all → re-profile → restart all
 	srv.SetOnGitHubChanged(func() {
 		log.Println("[server] GitHub config changed, full restart...")

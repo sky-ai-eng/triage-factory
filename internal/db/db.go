@@ -105,7 +105,8 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     result_summary TEXT,
     session_id TEXT,
     memory_missing BOOLEAN DEFAULT 0,
-    trigger_type TEXT NOT NULL DEFAULT 'manual'
+    trigger_type TEXT NOT NULL DEFAULT 'manual',
+    trigger_id TEXT REFERENCES prompt_triggers(id)
 );
 
 CREATE TABLE IF NOT EXISTS agent_messages (

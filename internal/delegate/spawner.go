@@ -83,7 +83,7 @@ type runConfig struct {
 
 // Delegate kicks off an async agent run for any task type.
 // Routes to the appropriate worktree setup based on task source.
-func (s *Spawner) Delegate(task domain.Task, explicitPromptID string, triggerType string) (string, error) {
+func (s *Spawner) Delegate(task domain.Task, explicitPromptID string, triggerType string, triggerID string) (string, error) {
 	s.mu.Lock()
 	ghClient := s.ghClient
 	model := s.model
@@ -109,6 +109,7 @@ func (s *Spawner) Delegate(task domain.Task, explicitPromptID string, triggerTyp
 		Status:      "initializing",
 		Model:       model,
 		TriggerType: triggerType,
+		TriggerID:   triggerID,
 	}); err != nil {
 		return "", fmt.Errorf("create agent run: %w", err)
 	}
@@ -159,7 +160,7 @@ func (s *Spawner) Delegate(task domain.Task, explicitPromptID string, triggerTyp
 
 // DelegatePR is a convenience wrapper that calls Delegate for backward compatibility.
 func (s *Spawner) DelegatePR(task domain.Task, explicitPromptID string) (string, error) {
-	return s.Delegate(task, explicitPromptID, "manual")
+	return s.Delegate(task, explicitPromptID, "manual", "")
 }
 
 // setupGitHub prepares a worktree for a GitHub PR task.

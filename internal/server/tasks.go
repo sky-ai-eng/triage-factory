@@ -167,7 +167,7 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 	if req.Action == "delegate" && s.spawner != nil {
 		task, err := db.GetTask(s.db, id)
 		if err == nil && task != nil {
-			runID, err := s.spawner.Delegate(*task, req.PromptID, "manual")
+			runID, err := s.spawner.Delegate(*task, req.PromptID, "manual", "")
 			if err != nil {
 				response["delegate_error"] = err.Error()
 			} else {

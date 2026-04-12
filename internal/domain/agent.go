@@ -21,6 +21,7 @@ type AgentRun struct {
 	SessionID     string // Claude Code session_id captured from `claude -p --output-format json`, used for --resume
 	MemoryMissing bool   // true if the pre-complete memory-file gate was exhausted without the agent writing a memory file
 	TriggerType   string // "manual" | "event" (matches prompt_triggers.trigger_type vocabulary)
+	TriggerID     string // FK to prompt_triggers.id — populated for auto runs only
 }
 
 // AgentMessage represents a single message within an agent run.
