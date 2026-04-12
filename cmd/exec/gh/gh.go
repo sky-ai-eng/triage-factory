@@ -27,7 +27,16 @@ Direct Comments (hit GitHub API immediately):
   gh pr comment-reply <comment_id> --pr <N> --body <text> Reply to a thread
   gh pr comment-react <comment_id> --repo o/r --emoji <e> React to a comment
   gh pr comment-update <comment_id> --body <text>         Edit (local pending or remote)
-  gh pr comment-delete <comment_id>                       Delete (local pending or remote)`
+  gh pr comment-delete <comment_id>                       Delete (local pending or remote)
+
+GitHub Actions Commands:
+  gh actions download-logs <run_id> [--repo o/r]          Download & extract the full log
+                                                          archive for a workflow run into
+                                                          ./_scratch/ci-logs/<run_id>/
+
+Repo Resolution (all gh commands):
+  Priority order: --repo flag > TODOTRIAGE_REPO env var > .git/config origin of cwd.
+  Commands fail with a clear error if none resolve.`
 
 // Handle dispatches gh subcommands.
 func Handle(client *github.Client, database *db.DB, args []string) {
@@ -42,6 +51,8 @@ func Handle(client *github.Client, database *db.DB, args []string) {
 	switch resource {
 	case "pr":
 		handlePR(client, database, cmdArgs)
+	case "actions":
+		handleActions(client, cmdArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown gh resource: %s\n", resource)
 		os.Exit(1)

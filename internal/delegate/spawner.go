@@ -75,6 +75,8 @@ type runConfig struct {
 	toolsRef string // tool documentation to inject
 	wtPath   string // worktree path (empty = no working directory)
 	hasWT    bool   // whether a worktree was created (controls cleanup)
+	owner    string // resolved GitHub owner (empty for no-repo Jira runs)
+	repo     string // resolved GitHub repo (empty for no-repo Jira runs)
 }
 
 // Delegate kicks off an async agent run for any task type.
@@ -194,6 +196,8 @@ func (s *Spawner) setupGitHub(ctx context.Context, runID string, task domain.Tas
 		toolsRef: ai.GHToolsTemplate,
 		wtPath:   wtPath,
 		hasWT:    true,
+		owner:    owner,
+		repo:     repo,
 	}, nil
 }
 
@@ -247,6 +251,8 @@ func (s *Spawner) setupJira(ctx context.Context, runID string, task domain.Task,
 			toolsRef: ai.GHToolsTemplate + "\n\n" + ai.JiraToolsTemplate,
 			wtPath:   wtPath,
 			hasWT:    true,
+			owner:    profile.Owner,
+			repo:     profile.Repo,
 		}, nil
 
 	default:
@@ -308,6 +314,15 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	cmd := exec.Command("claude", args...)
 	cmd.Dir = claudeCwd
 	cmd.Env = append(os.Environ(), "TODOTRIAGE_RUN_ID="+runID, "TODOTRIAGE_REVIEW_PREVIEW=1")
+	// Set TODOTRIAGE_REPO when the run has a resolved GitHub repo context
+	// so gh subcommands can default to the right target without the agent
+	// needing to pass --repo on every invocation. Left unset for Jira runs
+	// with no matched repo; those commands either fall back to .git/config
+	// (unlikely — no worktree) or hard-error, which is correct since they
+	// shouldn't be touching GitHub.
+	if cfg.owner != "" && cfg.repo != "" {
+		cmd.Env = append(cmd.Env, "TODOTRIAGE_REPO="+cfg.owner+"/"+cfg.repo)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdout, err := cmd.StdoutPipe()

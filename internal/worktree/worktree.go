@@ -174,6 +174,18 @@ func CreateForPR(ctx context.Context, owner, repo, cloneURL, headBranch string, 
 		return "", fmt.Errorf("worktree add: %w", err)
 	}
 
+	if err := writeLocalExcludes(wtDir); err != nil {
+		// The worktree has already been registered with the bare repo at
+		// this point, so we must roll it back before returning — otherwise
+		// the caller sees an error AND has no handle to clean up with,
+		// leaking a half-configured worktree directory. Remove handles
+		// both the directory removal and the bare-repo worktree prune.
+		if rmErr := Remove(runID); rmErr != nil {
+			log.Printf("[worktree] rollback after exclude-write failure: %v", rmErr)
+		}
+		return "", fmt.Errorf("write local git excludes: %w", err)
+	}
+
 	log.Printf("[worktree] PR worktree at %s (branch: %s)", wtDir, headBranch)
 	return wtDir, nil
 }
@@ -219,8 +231,242 @@ func CreateForBranch(ctx context.Context, owner, repo, cloneURL, baseBranch, fea
 		}
 	}
 
+	if err := writeLocalExcludes(wtDir); err != nil {
+		// Same rollback rationale as in CreateForPR: the worktree is
+		// already registered and on disk, so we own the cleanup if any
+		// post-add step fails. Remove handles both the directory and the
+		// bare-repo prune.
+		if rmErr := Remove(runID); rmErr != nil {
+			log.Printf("[worktree] rollback after exclude-write failure: %v", rmErr)
+		}
+		return "", fmt.Errorf("write local git excludes: %w", err)
+	}
+
 	log.Printf("[worktree] branch worktree at %s (%s from %s)", wtDir, featureBranch, baseBranch)
 	return wtDir, nil
+}
+
+// managedExcludePatterns are the gitignore patterns writeLocalExcludes
+// ensures are present in .git/info/exclude for every delegated worktree.
+//
+// - _scratch/    — CI log archives, other ephemeral download targets (SKY-146)
+// - task_memory/ — cross-run structured audit entries (SKY-141)
+var managedExcludePatterns = []string{"_scratch/", "task_memory/"}
+
+// Markers delimiting the managed section of .git/info/exclude. writeLocalExcludes
+// rewrites the content between these markers in place when both are present,
+// and appends a fresh marker block otherwise. Using explicit markers means
+// the managed section remains a self-contained complete manifest of our
+// patterns regardless of how managedExcludePatterns evolves — growing the
+// list reuses the existing section instead of appending a second header.
+const (
+	managedExcludeBegin = "# todotriage: begin managed exclude block (do not edit)"
+	managedExcludeEnd   = "# todotriage: end managed exclude block"
+)
+
+// writeLocalExcludes ensures the worktree's .git/info/exclude file contains
+// every pattern in managedExcludePatterns so agents can't accidentally
+// commit our infrastructure directories.
+//
+// Content outside our marked section is never touched: user patterns,
+// tool-managed lines from other tools, and git's stock comment header
+// are all preserved verbatim. Only the lines between managedExcludeBegin
+// and managedExcludeEnd get rewritten, and only if the rewritten content
+// differs from what's already there. On a file that doesn't yet have the
+// markers, the managed section is appended at EOF in a single pass. On
+// subsequent runs the markers exist, so we replace in place — which means
+// growing managedExcludePatterns expands the section rather than tacking
+// a duplicate header at the end of the file.
+//
+// Uses .git/info/exclude rather than a committed .gitignore because these
+// paths are infrastructure concerns, not something the tracked repo should
+// know or care about.
+//
+// Fails closed: if any step fails we return the error and the caller is
+// responsible for rolling back the partially-created worktree. A worktree
+// without the excludes is a footgun (agents could commit hundreds of log
+// files), so rolling back the worktree on error is the safer behavior
+// than silently proceeding.
+//
+// Worktrees in git use a per-worktree info directory — for a linked
+// worktree, `.git` is a file containing `gitdir: <path>`, and
+// `info/exclude` lives under that gitdir. For a plain checkout `.git` is
+// a directory. Both layouts are handled.
+func writeLocalExcludes(wtDir string) error {
+	excludePath, err := resolveExcludePath(wtDir)
+	if err != nil {
+		return err
+	}
+
+	existing, err := os.ReadFile(excludePath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read exclude file: %w", err)
+	}
+	existingStr := string(existing)
+
+	// Build the canonical managed block from the current pattern list.
+	// Always written as a complete manifest — never a delta — so a
+	// growing managedExcludePatterns just expands this same block rather
+	// than accumulating multiple header sections over time.
+	var block strings.Builder
+	block.WriteString(managedExcludeBegin)
+	block.WriteString("\n")
+	for _, p := range managedExcludePatterns {
+		block.WriteString(p)
+		block.WriteString("\n")
+	}
+	block.WriteString(managedExcludeEnd)
+	block.WriteString("\n")
+	managedBlock := block.String()
+
+	newContent, changed := mergeManagedBlock(existingStr, managedBlock)
+	if !changed {
+		return nil // file already contains exactly this managed block; no-op
+	}
+
+	if err := os.MkdirAll(filepath.Dir(excludePath), 0755); err != nil {
+		return fmt.Errorf("mkdir info dir: %w", err)
+	}
+	if err := os.WriteFile(excludePath, []byte(newContent), 0644); err != nil {
+		return fmt.Errorf("write exclude file: %w", err)
+	}
+	return nil
+}
+
+// mergeManagedBlock returns the updated file contents with managedBlock
+// installed, and a bool indicating whether the content actually changed
+// (used for idempotency — we skip the rewrite if the file is already
+// what we want).
+//
+// Marker search is direction-aware in two ways:
+//
+//  1. We find the begin marker via LastIndex, not Index. If the file has
+//     an earlier stray or orphaned begin marker (a truncated block whose
+//     end was hand-deleted, a quoted reference in a user comment, stale
+//     content from a broken previous run), matching the *first* begin
+//     would pair it with the real end marker later in the file and
+//     clobber every line in between — violating the "content outside our
+//     marked section is never touched" guarantee. LastIndex locks onto
+//     the most recent begin, leaving any stray earlier markers and the
+//     user content around them untouched.
+//
+//  2. We find the end marker via Index on the slice *after* the begin
+//     position. Searching the whole file for end would pick up the first
+//     occurrence, which could sit before begin in unrelated content. The
+//     earlier-end + later-begin pair would look malformed, causing us to
+//     append a duplicate managed block every run.
+//
+// If a valid begin...end pair is found, the bytes between them (plus the
+// trailing newline after end) are replaced with managedBlock. Everything
+// outside the markers is preserved byte-for-byte. If no valid pair
+// exists, managedBlock is appended at EOF with a blank-line separator.
+//
+// Known limitation: a file with a genuinely duplicate valid managed
+// block (two complete begin...end pairs) has only its last pair rewritten
+// on each run. Earlier blocks remain as orphaned duplicates, which git
+// dedupes internally for gitignore purposes but looks ugly to a human
+// reader. We don't expect to produce this state ourselves — only hand
+// editing could cause it, and the cleanup is a manual edit.
+func mergeManagedBlock(existing, managedBlock string) (string, bool) {
+	beginIdx := strings.LastIndex(existing, managedExcludeBegin)
+	if beginIdx >= 0 {
+		searchFrom := beginIdx + len(managedExcludeBegin)
+		if relEnd := strings.Index(existing[searchFrom:], managedExcludeEnd); relEnd >= 0 {
+			endIdx := searchFrom + relEnd
+			// Consume up to and including the newline that follows the
+			// end marker so the final structure is
+			// [before][managedBlock][after] without introducing or losing
+			// blank lines at the seams.
+			afterEnd := endIdx + len(managedExcludeEnd)
+			if afterEnd < len(existing) && existing[afterEnd] == '\n' {
+				afterEnd++
+			}
+			candidate := existing[:beginIdx] + managedBlock + existing[afterEnd:]
+			if candidate == existing {
+				return existing, false
+			}
+			return candidate, true
+		}
+	}
+
+	// No valid marker pair found. Append the managed block at EOF,
+	// ensuring the pre-existing content is newline-terminated and
+	// separated from our block by a blank line for readability.
+	var suffix strings.Builder
+	if existing != "" {
+		if !strings.HasSuffix(existing, "\n") {
+			suffix.WriteString("\n")
+		}
+		suffix.WriteString("\n")
+	}
+	suffix.WriteString(managedBlock)
+	return existing + suffix.String(), true
+}
+
+// resolveExcludePath returns the filesystem path of .git/info/exclude for
+// a worktree, handling both the linked-worktree case (where .git is a
+// pointer file) and the plain-checkout case (where .git is a directory).
+//
+// The linked-worktree branch parses only the first line of the pointer
+// file (git's canonical format is exactly `gitdir: <path>\n`, but some
+// third-party tools append extra config to the same file — we ignore
+// anything past the first newline). It then validates:
+//
+//  1. The first line starts with "gitdir:". Without this check a
+//     corrupted or non-pointer file would have its content interpreted
+//     as a literal path and we'd write to an arbitrary disk location.
+//  2. The parsed gitdir already exists as a directory. An otherwise-
+//     valid-looking pointer referencing a missing or file-shaped
+//     target would silently get its parent created by MkdirAll on the
+//     write path — rejecting here prevents that.
+func resolveExcludePath(wtDir string) (string, error) {
+	gitFile := filepath.Join(wtDir, ".git")
+	info, err := os.Stat(gitFile)
+	if err != nil {
+		return "", fmt.Errorf("stat .git: %w", err)
+	}
+	if info.IsDir() {
+		// Plain checkout
+		return filepath.Join(gitFile, "info", "exclude"), nil
+	}
+	// Linked worktree: .git is a pointer file like "gitdir: /path/to/worktrees/<name>"
+	data, err := os.ReadFile(gitFile)
+	if err != nil {
+		return "", fmt.Errorf("read .git pointer: %w", err)
+	}
+	// Only the first line is part of the gitdir pointer. Anything past
+	// the first newline is unrelated content (extra config some tools
+	// write) and we ignore it.
+	firstLine := string(data)
+	if nl := strings.IndexByte(firstLine, '\n'); nl >= 0 {
+		firstLine = firstLine[:nl]
+	}
+	firstLine = strings.TrimSpace(firstLine)
+	const prefix = "gitdir:"
+	if !strings.HasPrefix(firstLine, prefix) {
+		return "", fmt.Errorf(".git file is not a valid worktree pointer (missing %q prefix): %q", prefix, firstLine)
+	}
+	gitdir := strings.TrimSpace(strings.TrimPrefix(firstLine, prefix))
+	if gitdir == "" {
+		return "", fmt.Errorf(".git pointer has empty gitdir path")
+	}
+	if !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(wtDir, gitdir)
+	}
+	// Validate the referenced gitdir actually exists as a directory
+	// before we return a path inside it. Without this, a pointer file
+	// with a bogus (but prefix-valid) target would pass the textual
+	// checks above and silently get its info/ parent created via
+	// MkdirAll on the write path — writing to an arbitrary location
+	// under that target.
+	gitdirInfo, err := os.Stat(gitdir)
+	if err != nil {
+		return "", fmt.Errorf(".git pointer references missing gitdir %q: %w", gitdir, err)
+	}
+	if !gitdirInfo.IsDir() {
+		return "", fmt.Errorf(".git pointer references %q which is not a directory", gitdir)
+	}
+	return filepath.Join(gitdir, "info", "exclude"), nil
 }
 
 // branchExists checks whether a branch ref exists in the bare repo.

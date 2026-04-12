@@ -15,9 +15,6 @@ import (
 	ghclient "github.com/sky-ai-eng/todo-triage/internal/github"
 )
 
-const defaultOwner = "sky-ai-eng"
-const defaultRepo = "sky"
-
 func handlePR(client *ghclient.Client, database *db.DB, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: todotriage exec gh pr <action> [flags]")
@@ -479,21 +476,18 @@ func firstPositional(args []string) string {
 	return ""
 }
 
+// ownerRepo resolves the target repo for a PR subcommand. Delegates to the
+// shared resolveRepo so --repo flag, TODOTRIAGE_REPO env, and .git/config
+// fallback all behave consistently across every gh command. Passes the
+// full args slice (not just the flag value) so resolveRepo can detect
+// "--repo present but empty" and fail loudly instead of silently falling
+// back to env/git resolution.
 func ownerRepo(args []string) (string, string) {
-	if v := flagVal(args, "--repo"); v != "" {
-		parts := splitOwnerRepo(v)
-		return parts[0], parts[1]
+	owner, repo, err := resolveRepo(args)
+	if err != nil {
+		exitErr(err.Error())
 	}
-	return defaultOwner, defaultRepo
-}
-
-func splitOwnerRepo(s string) [2]string {
-	for i, c := range s {
-		if c == '/' {
-			return [2]string{s[:i], s[i+1:]}
-		}
-	}
-	return [2]string{s, ""}
+	return owner, repo
 }
 
 func hasFlag(args []string, flag string) bool {
