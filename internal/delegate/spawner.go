@@ -436,10 +436,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		return
 	}
 
-	if err := db.CompleteAgentRun(s.database, runID, "completed", 0, 0, 0, "unknown", "", ""); err != nil {
-		log.Printf("[delegate] warning: failed to record fallback completion for run %s: %v", runID, err)
-	}
-	s.broadcastRunUpdate(runID, "completed")
+	s.failRun(runID, "claude exited cleanly without producing a result event")
 }
 
 // consumeClaudeStream scans NDJSON output from claude -p, persists each
