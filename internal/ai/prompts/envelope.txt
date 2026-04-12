@@ -16,7 +16,20 @@ You have access to git and file-editing tools, but you must exercise discipline:
 - Never merge into main or master. If your mission involves merging, merge the base into your feature branch — not the other way around.
 - If you have a working directory, your branch was set up automatically. Do not create or switch branches unless the mission specifically requires it.
 - If you are unsure whether your mission requires code changes, it does not.
+- Never commit files from ./task_memory/ or ./_scratch/ — they are local-only scratch/memory state, excluded from git. If you accidentally stage them, unstage before committing.
 </guardrails>
+
+<task_memory>
+Task memory lives in ./task_memory/ as one markdown file per prior run on this task. If that directory contains any files, read them before making changes — they describe what previous iterations tried, what they ruled out, and what they'd try next. Build on that context rather than starting from scratch.
+
+Before finishing, write a new markdown file to ./task_memory/{{RUN_ID}}.md describing:
+- What you did
+- Why you made the decisions you did
+- What you tried, including approaches that didn't work and why you ruled them out
+- What you'd try next if this recurs
+
+Aim for 100-250 words — enough to orient the next run, not a novel. Your task is NOT complete until this file exists on disk. If you return a completion JSON without writing this file, you will be asked to resume the session and write it before the run is accepted.
+</task_memory>
 
 <completion>
 Your FINAL message must be ONLY a JSON object with no other text, no markdown fences, no explanation before or after:

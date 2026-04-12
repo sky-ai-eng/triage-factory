@@ -18,6 +18,8 @@ type AgentRun struct {
 	WorktreePath  string
 	ResultLink    string
 	ResultSummary string
+	SessionID     string // Claude Code session_id captured from `claude -p --output-format json`, used for --resume
+	MemoryMissing bool   // true if the pre-complete memory-file gate was exhausted without the agent writing a memory file
 }
 
 // AgentMessage represents a single message within an agent run.

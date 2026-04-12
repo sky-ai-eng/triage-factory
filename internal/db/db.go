@@ -101,7 +101,9 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     stop_reason TEXT,
     worktree_path TEXT,
     result_link TEXT,
-    result_summary TEXT
+    result_summary TEXT,
+    session_id TEXT,
+    memory_missing BOOLEAN DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS agent_messages (
@@ -247,4 +249,16 @@ CREATE TABLE IF NOT EXISTS tracked_items (
 CREATE INDEX IF NOT EXISTS idx_tracked_items_active ON tracked_items(source, tracked_since) WHERE terminal_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_tracked_items_active_polled ON tracked_items(source, last_polled) WHERE terminal_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_tracked_items_source_polled ON tracked_items(source, last_polled DESC);
+
+CREATE TABLE IF NOT EXISTS task_memory (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL REFERENCES agent_runs(id),
+    content TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'agent',
+    created_at DATETIME NOT NULL,
+    UNIQUE(run_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_memory_task_id ON task_memory(task_id, created_at);
 `

@@ -7,9 +7,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -288,13 +290,19 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// for this cwd. Safety-railed to only touch entries under $TMPDIR.
 	defer worktree.RemoveClaudeProjectDir(claudeCwd)
 
+	// Materialize any prior task memories into ./task_memory/ so the agent
+	// sees what previous iterations on this task have already tried. The
+	// directory is git-excluded by writeLocalExcludes (managedExcludePatterns
+	// in internal/worktree/worktree.go) so nothing leaks into the PR.
+	materializePriorMemories(s.database, claudeCwd, task.ID)
+
 	selfBin, err := os.Executable()
 	if err != nil {
 		s.failRun(runID, "failed to resolve own binary path: "+err.Error())
 		return
 	}
 
-	prompt := buildPrompt(mission, cfg.scope, cfg.toolsRef, selfBin)
+	prompt := buildPrompt(mission, cfg.scope, cfg.toolsRef, selfBin, runID)
 
 	s.updateStatus(runID, "agent_starting")
 	if ctx.Err() != nil {
@@ -352,68 +360,78 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	s.updateStatus(runID, "running")
 
 	stream := newStreamState()
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-
-		messages, completion := stream.parseLine(line, runID)
-
-		for _, msg := range messages {
-			id, err := db.InsertAgentMessage(s.database, *msg)
-			if err != nil {
-				log.Printf("[delegate] error storing message: %v", err)
-				continue
-			}
-			msg.ID = int(id)
-			s.broadcastMessage(runID, msg)
-		}
-
-		if completion != nil {
-			resultLink, resultSummary := "", ""
-			status := "completed"
-			if completion.IsError {
-				status = "failed"
-			}
-			if parsed := parseAgentResult(completion.Result); parsed != nil {
-				resultLink = parsed.PrimaryLink()
-				resultSummary = parsed.Summary
-				if parsed.Status == "failed" {
-					status = "failed"
-				}
-			}
-			if err := db.CompleteAgentRun(s.database, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultLink, resultSummary); err != nil {
-				log.Printf("[delegate] warning: failed to record completion for run %s: %v", runID, err)
-			}
-
-			if status == "completed" {
-				if pendingReview, _ := db.PendingReviewByRunID(s.database, runID); pendingReview != nil {
-					status = "pending_approval"
-					if _, err := s.database.Exec(`UPDATE agent_runs SET status = ? WHERE id = ?`, status, runID); err != nil {
-						log.Printf("[delegate] warning: failed to set pending_approval for run %s: %v", runID, err)
-					}
-				}
-			}
-
-			if status == "completed" {
-				if _, err := s.database.Exec(`UPDATE tasks SET status = 'done' WHERE id = ?`, task.ID); err != nil {
-					log.Printf("[delegate] warning: failed to update task %s to done: %v", task.ID, err)
-				}
-			}
-			s.broadcastRunUpdate(runID, status)
-			// We've already captured the result from stdout; just drain any
-			// remaining subprocess state. Exit code is not load-bearing here.
-			_ = cmd.Wait()
-			return
-		}
+	completion, streamErr := s.consumeClaudeStream(stdout, runID, stream)
+	if streamErr != nil {
+		log.Printf("[delegate] scanner error for run %s: %v", runID, streamErr)
 	}
 
-	if err := scanner.Err(); err != nil {
-		log.Printf("[delegate] scanner error for run %s: %v", runID, err)
+	if completion != nil {
+		// Enforce the pre-complete task_memory write gate. If the agent
+		// returned a completion JSON without writing ./task_memory/<runID>.md,
+		// resume the session with a correction message (up to 2 retries).
+		// Retries that produce new completions are merged into the totals
+		// so cost/duration accounting reflects the full invocation, not
+		// just the initial call.
+		//
+		// Pass model + repoEnv explicitly rather than letting the gate
+		// read live spawner state, so a concurrent UpdateCredentials
+		// can't silently switch models or drop repo context mid-run.
+		repoEnv := ""
+		if cfg.owner != "" && cfg.repo != "" {
+			repoEnv = cfg.owner + "/" + cfg.repo
+		}
+		completion = s.runMemoryGate(ctx, runID, task.ID, claudeCwd, completion, stream.SessionID(), model, repoEnv)
+
+		// Ingest the agent-written memory file (if present) or flag the
+		// run as memory_missing. Either way the run still counts as
+		// completed — we don't fail a run just because the agent skipped
+		// the memory write, but we DO surface the gap.
+		if memoryFileExists(claudeCwd, runID) {
+			if err := ingestAgentMemory(s.database, claudeCwd, runID, task.ID); err != nil {
+				log.Printf("[delegate] warning: failed to ingest memory file for run %s: %v", runID, err)
+			}
+		} else {
+			log.Printf("[delegate] run %s: memory file missing after gate retries, flagging memory_missing", runID)
+			if err := db.MarkAgentRunMemoryMissing(s.database, runID); err != nil {
+				log.Printf("[delegate] warning: failed to mark memory_missing for run %s: %v", runID, err)
+			}
+		}
+
+		resultLink, resultSummary := "", ""
+		status := "completed"
+		if completion.IsError {
+			status = "failed"
+		}
+		if parsed := parseAgentResult(completion.Result); parsed != nil {
+			resultLink = parsed.PrimaryLink()
+			resultSummary = parsed.Summary
+			if parsed.Status == "failed" {
+				status = "failed"
+			}
+		}
+		if err := db.CompleteAgentRun(s.database, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultLink, resultSummary); err != nil {
+			log.Printf("[delegate] warning: failed to record completion for run %s: %v", runID, err)
+		}
+
+		if status == "completed" {
+			if pendingReview, _ := db.PendingReviewByRunID(s.database, runID); pendingReview != nil {
+				status = "pending_approval"
+				if _, err := s.database.Exec(`UPDATE agent_runs SET status = ? WHERE id = ?`, status, runID); err != nil {
+					log.Printf("[delegate] warning: failed to set pending_approval for run %s: %v", runID, err)
+				}
+			}
+		}
+
+		if status == "completed" {
+			if _, err := s.database.Exec(`UPDATE tasks SET status = 'done' WHERE id = ?`, task.ID); err != nil {
+				log.Printf("[delegate] warning: failed to update task %s to done: %v", task.ID, err)
+			}
+		}
+		s.broadcastRunUpdate(runID, status)
+		// We've already captured the result from stdout; just drain any
+		// remaining subprocess state. Exit code is not load-bearing here.
+		_ = cmd.Wait()
+		return
 	}
 
 	if err := cmd.Wait(); err != nil {
@@ -426,10 +444,410 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		return
 	}
 
-	if err := db.CompleteAgentRun(s.database, runID, "completed", 0, 0, 0, "unknown", "", ""); err != nil {
-		log.Printf("[delegate] warning: failed to record fallback completion for run %s: %v", runID, err)
+	s.failRun(runID, "claude exited cleanly without producing a result event")
+}
+
+// consumeClaudeStream scans NDJSON output from claude -p, persists each
+// accumulated message via InsertAgentMessage, broadcasts them to UI
+// subscribers, and returns the first `result` event seen as a
+// *runCompletion. Shared between the initial agent invocation and the
+// ResumeWithMessage helper so stream handling stays consistent across
+// both entry points.
+//
+// Session id is persisted on agent_runs as soon as the `system/init`
+// event surfaces it, not at stream close. Inline persistence means any
+// mid-run consumer (a future concurrent gate, or a panic handler
+// recovering from a crash) can read it from the database without
+// waiting for the stream to complete. On resume the same stream still
+// carries a fresh init event with the same session id, so writing it
+// again is idempotent.
+//
+// Returns nil *runCompletion if the stream ended without a result event
+// — the caller treats that as an involuntary failure and decides via
+// cmd.Wait() whether to attribute the failure to cancellation or a
+// real crash.
+func (s *Spawner) consumeClaudeStream(stdout io.Reader, runID string, stream *streamState) (*runCompletion, error) {
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+
+	sessionPersisted := false
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		messages, completion := stream.parseLine(line, runID)
+
+		// Persist session id the first time it appears. Done inline so
+		// mid-run consumers can read it from agent_runs without needing
+		// the stream to have closed first.
+		if !sessionPersisted {
+			if sid := stream.SessionID(); sid != "" {
+				if err := db.SetAgentRunSession(s.database, runID, sid); err != nil {
+					log.Printf("[delegate] warning: failed to persist session_id for run %s: %v", runID, err)
+				}
+				sessionPersisted = true
+			}
+		}
+
+		for _, msg := range messages {
+			id, err := db.InsertAgentMessage(s.database, *msg)
+			if err != nil {
+				log.Printf("[delegate] error storing message: %v", err)
+				continue
+			}
+			msg.ID = int(id)
+			s.broadcastMessage(runID, msg)
+		}
+
+		if completion != nil {
+			return completion, nil
+		}
 	}
-	s.broadcastRunUpdate(runID, "completed")
+	return nil, scanner.Err()
+}
+
+// ResumeOptions configures a ResumeWithMessage invocation. Callers that
+// care about consistency with an earlier invocation should populate these
+// explicitly — the fallbacks read live Spawner state and will race with
+// UpdateCredentials if the user rotates auth mid-run.
+type ResumeOptions struct {
+	// Model overrides the live spawner model. **Always pass this** when
+	// resuming within a single logical run (e.g. the memory-gate retry
+	// loop) — read from the value you captured at run start, not from
+	// s.model at resume time. If UpdateCredentials runs between the
+	// initial invocation and a resume, the live spawner model may point
+	// at a different model than the initial invocation ran under, which
+	// would silently switch models mid-run.
+	//
+	// Empty falls back to the live spawner model, which is only the
+	// right choice for callers that genuinely want "current spawner
+	// state" (none exist today, but the door's open).
+	Model string
+
+	// RepoEnv, if non-empty, is passed to the resumed subprocess as
+	// TODOTRIAGE_REPO=<value>. Preserves the GitHub repo context that
+	// the initial runAgent invocation set up for gh subcommands so
+	// resumes don't lose the implicit --repo default. Format is
+	// "owner/name" — composed by the caller from cfg.owner and cfg.repo.
+	//
+	// Left empty for Jira-no-match runs that never had repo context in
+	// the first place.
+	RepoEnv string
+}
+
+// ResumeOutcome bundles what ResumeWithMessage returns: the raw
+// completion event from the resumed stream (nil if none was observed),
+// the parsed agent result JSON (nil if the completion text didn't
+// contain a parseable envelope), and captured stderr for diagnostics.
+//
+// Callers decide how to interpret a nil Completion — the memory-gate
+// retry loop treats it as "retry again if attempts remain, else flag
+// memory_missing," while a yield-resume flow might treat it as a
+// session-level failure and surface an error.
+type ResumeOutcome struct {
+	Completion *runCompletion
+	Result     *agentResult
+	StderrText string
+}
+
+// ResumeWithMessage resumes a prior headless claude session with a new
+// user message and streams the result through the same message-
+// persistence path as the initial invocation. Used by the SKY-141
+// task-memory write-gate retry loop, and designed to be reusable by
+// SKY-139's yield-to-user flow once that ticket lands.
+//
+// Callers pass the sessionID captured during the initial run (read
+// from agent_runs.session_id, populated by consumeClaudeStream), the
+// cwd the original run used so the resumed subprocess sees the same
+// worktree, and the user message to append to the conversation. The
+// runID is reused so resumed messages append to the existing
+// agent_messages stream — the UI sees one coherent conversation.
+//
+// This helper does NOT update agent_runs status. The caller manages
+// lifecycle: the memory-gate retry loop keeps the run in its current
+// state during retries and only finalizes once the gate passes or
+// gives up. Mirroring the initial invocation's status updates here
+// would produce double CompleteAgentRun writes with stale
+// cost/duration fields overwriting the real totals.
+func (s *Spawner) ResumeWithMessage(ctx context.Context, runID, sessionID, cwd, message string, opts ResumeOptions) (*ResumeOutcome, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("resume: missing session id")
+	}
+	if cwd == "" {
+		return nil, fmt.Errorf("resume: missing cwd")
+	}
+
+	s.mu.Lock()
+	model := s.model
+	s.mu.Unlock()
+	if opts.Model != "" {
+		model = opts.Model
+	}
+
+	selfBin, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("resolve own binary path: %w", err)
+	}
+
+	args := []string{
+		"-p", message,
+		"--resume", sessionID,
+		"--model", model,
+		"--output-format", "stream-json",
+		"--verbose",
+		"--allowedTools", fmt.Sprintf("Bash(%s exec *),Bash(git commit *),Bash(git add *),Bash(git push *),Bash(git merge *),Bash(git rebase *),Bash(git fetch *),Bash(git checkout *),Read,Write,Edit,Glob,Grep,WebSearch,WebFetch", selfBin),
+		"--max-turns", "100",
+	}
+
+	cmd := exec.Command("claude", args...)
+	cmd.Dir = cwd
+	cmd.Env = append(os.Environ(), "TODOTRIAGE_RUN_ID="+runID, "TODOTRIAGE_REVIEW_PREVIEW=1")
+	// Preserve the initial run's GitHub repo context so gh subcommands
+	// in the resumed session keep their implicit --repo default. Without
+	// this, a resumed run on a GitHub task could suddenly fail any gh
+	// invocation that relied on the env var set in runAgent.
+	if opts.RepoEnv != "" {
+		cmd.Env = append(cmd.Env, "TODOTRIAGE_REPO="+opts.RepoEnv)
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdout pipe: %w", err)
+	}
+
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start claude resume: %w", err)
+	}
+
+	pgid := cmd.Process.Pid
+	go func() {
+		<-ctx.Done()
+		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+			// Best-effort; subprocess may have already exited
+			_ = err
+		}
+	}()
+
+	stream := newStreamState()
+	completion, streamErr := s.consumeClaudeStream(stdout, runID, stream)
+
+	waitErr := cmd.Wait()
+
+	outcome := &ResumeOutcome{
+		Completion: completion,
+		StderrText: stderrBuf.String(),
+	}
+	if completion != nil {
+		outcome.Result = parseAgentResult(completion.Result)
+	}
+
+	// A stream error with no completion means the subprocess produced
+	// malformed output or died mid-stream. Surface it to the caller so
+	// the gate can decide whether to retry or give up.
+	if streamErr != nil && completion == nil {
+		return outcome, fmt.Errorf("resume stream: %w", streamErr)
+	}
+
+	// A wait error without a captured completion is an involuntary
+	// failure — the subprocess exited without sending a result event.
+	// Either cancellation (via ctx) or a genuine crash.
+	if waitErr != nil && completion == nil {
+		if ctx.Err() != nil {
+			return outcome, ctx.Err()
+		}
+		return outcome, fmt.Errorf("claude resume failed: %w (stderr: %s)", waitErr, stderrBuf.String())
+	}
+
+	return outcome, nil
+}
+
+// maxMemoryRetries is the hard cap on how many times the write-gate
+// will resume a run to ask the agent to write its memory file. Chosen
+// in the SKY-141 design: 0 retries is too strict (one missed write
+// shouldn't discard work), 3+ is overkill (if the agent ignored the
+// first correction, a third attempt is almost never the one that
+// works). Not a config knob because no one needs to tune it per-run.
+const maxMemoryRetries = 2
+
+// memoryFileExists returns true iff the agent wrote ./task_memory/<runID>.md
+// during the run. Used by the write-gate both before retrying (is another
+// attempt needed?) and after (did the retry succeed?).
+func memoryFileExists(cwd, runID string) bool {
+	_, err := os.Stat(filepath.Join(cwd, "task_memory", runID+".md"))
+	return err == nil
+}
+
+// ingestAgentMemory reads an agent-written memory file from the worktree
+// and saves it as a task_memory row. Called after the write-gate has
+// verified the file is present. Returns an error only on read/DB failure —
+// "file missing" is not an error here because the caller already checked.
+func ingestAgentMemory(database *sql.DB, cwd, runID, taskID string) error {
+	path := filepath.Join(cwd, "task_memory", runID+".md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read memory file %s: %w", path, err)
+	}
+	mem := domain.TaskMemory{
+		ID:        uuid.New().String(),
+		TaskID:    taskID,
+		RunID:     runID,
+		Content:   string(data),
+		Source:    "agent",
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := db.SaveTaskMemory(database, mem); err != nil {
+		return fmt.Errorf("save memory row: %w", err)
+	}
+	return nil
+}
+
+// runMemoryGate enforces the pre-complete task_memory file requirement.
+//
+// If the agent wrote ./task_memory/<runID>.md during its initial
+// invocation, returns the original completion unchanged. Otherwise
+// resumes the session (up to maxMemoryRetries times) with a correction
+// message and re-checks after each attempt. Completions from resumed
+// sessions are merged into the returned completion so cost/duration/
+// num_turns accounting reflects the full span of the run.
+//
+// The gate does not touch agent_runs status — that remains the caller's
+// responsibility. Side effects: (a) spawns resume subprocesses via
+// ResumeWithMessage, whose messages land in agent_messages via
+// consumeClaudeStream's persistence, (b) logs progress for operator
+// diagnosis.
+//
+// Model and repoEnv are passed in rather than read from live spawner
+// state so the gate's retries use the same model and repo context as
+// the initial invocation. If we read s.model at resume time, a
+// concurrent UpdateCredentials could silently switch models mid-run.
+//
+// If no session id is available (shouldn't happen in practice because
+// consumeClaudeStream persists the init event, but defensive), the gate
+// logs and returns without retrying. The caller will see a missing
+// memory file and flag memory_missing.
+func (s *Spawner) runMemoryGate(
+	ctx context.Context,
+	runID, taskID, cwd string,
+	initial *runCompletion,
+	sessionID, model, repoEnv string,
+) *runCompletion {
+	if memoryFileExists(cwd, runID) {
+		return initial
+	}
+
+	if sessionID == "" {
+		log.Printf("[delegate] run %s: memory file missing and no session id available — cannot gate-retry", runID)
+		return initial
+	}
+
+	resumeOpts := ResumeOptions{Model: model, RepoEnv: repoEnv}
+
+	current := initial
+	for attempt := 1; attempt <= maxMemoryRetries; attempt++ {
+		log.Printf("[delegate] run %s: memory file missing after attempt %d, resuming", runID, attempt-1)
+		msg := fmt.Sprintf(
+			"You returned a completion JSON but did not write your memory file to ./task_memory/%s.md. "+
+				"Write it now — one paragraph of what you did, one of why, one of what to try next "+
+				"if this recurs — then return your completion JSON again.",
+			runID,
+		)
+		outcome, err := s.ResumeWithMessage(ctx, runID, sessionID, cwd, msg, resumeOpts)
+		if err != nil {
+			log.Printf("[delegate] run %s: resume attempt %d failed: %v", runID, attempt, err)
+			// Give up on further retries — the caller will mark
+			// memory_missing. Don't wipe out the initial completion's
+			// accounting just because the retry subprocess crashed.
+			return current
+		}
+		if outcome.Completion != nil {
+			current = mergeCompletion(current, outcome.Completion)
+		}
+		if memoryFileExists(cwd, runID) {
+			return current
+		}
+	}
+
+	return current
+}
+
+// mergeCompletion combines an initial completion event with one from a
+// resumed session so final accounting reflects total cost, duration, and
+// turn count across all invocations. The result text and stop_reason
+// come from the resume (that's what the caller wants to report as the
+// final outcome), but cost and turns are summed.
+//
+// If either the resume's Result or StopReason is empty, the base's
+// values are preserved — partial resume outcomes shouldn't blank
+// fields that were already populated.
+func mergeCompletion(base, resume *runCompletion) *runCompletion {
+	merged := *base
+	merged.CostUSD += resume.CostUSD
+	merged.DurationMs += resume.DurationMs
+	merged.NumTurns += resume.NumTurns
+	if resume.IsError {
+		merged.IsError = true
+	}
+	if resume.Result != "" {
+		merged.Result = resume.Result
+	}
+	if resume.StopReason != "" {
+		merged.StopReason = resume.StopReason
+	}
+	return &merged
+}
+
+// materializePriorMemories writes any existing task_memory rows for the
+// task into <cwd>/task_memory/<prior_run_id>.md as individual markdown
+// files, so a fresh agent invocation sees what previous iterations on
+// the same task have already tried. The agent is taught to read this
+// directory by the envelope.
+//
+// Pattern: DB is the source of truth, we materialize into the worktree
+// at startup, and ingest back on completion. The worktree is destroyed
+// after every run, so these files never outlive their run on disk —
+// only the DB rows do.
+//
+// Degrades gracefully: database errors, mkdir failures, or per-file
+// write failures are logged but do not fail the run. An agent running
+// without materialized priors is still useful, just without the
+// cross-run memory benefit. This "advisory" posture only holds for
+// the read side — the write-before-finish gate is enforced separately
+// for NEW memories produced during the run.
+func materializePriorMemories(database *sql.DB, cwd, taskID string) {
+	memories, err := db.GetTaskMemoriesForTask(database, taskID)
+	if err != nil {
+		log.Printf("[delegate] warning: failed to load prior task memories for task %s: %v", taskID, err)
+		return
+	}
+	if len(memories) == 0 {
+		return
+	}
+
+	memDir := filepath.Join(cwd, "task_memory")
+	if err := os.MkdirAll(memDir, 0755); err != nil {
+		log.Printf("[delegate] warning: failed to create task_memory dir at %s: %v", memDir, err)
+		return
+	}
+
+	written := 0
+	for _, m := range memories {
+		filename := filepath.Join(memDir, m.RunID+".md")
+		if err := os.WriteFile(filename, []byte(m.Content), 0644); err != nil {
+			log.Printf("[delegate] warning: failed to materialize task memory %s: %v", filename, err)
+			continue
+		}
+		written++
+	}
+	if written > 0 {
+		log.Printf("[delegate] materialized %d prior task memories for task %s", written, taskID)
+	}
 }
 
 // resolvePrompt finds the mission text for a task, either from an explicit ID or the default binding.
@@ -479,6 +897,7 @@ func (s *Spawner) updateStatus(runID, status string) {
 
 func (s *Spawner) failRun(runID, errMsg string) {
 	log.Printf("[delegate] run %s failed: %s", runID, errMsg)
+
 	if _, err := s.database.Exec(`UPDATE agent_runs SET status = 'failed' WHERE id = ?`, runID); err != nil {
 		log.Printf("[delegate] warning: failed to mark run %s as failed: %v", runID, err)
 	}
@@ -587,11 +1006,12 @@ func parseAgentResult(text string) *agentResult {
 	return nil
 }
 
-// buildPrompt composes: mission + envelope (scope, tools, completion contract).
-func buildPrompt(mission, scope, toolsRef, binaryPath string) string {
+// buildPrompt composes: mission + envelope (scope, tools, task memory, completion contract).
+func buildPrompt(mission, scope, toolsRef, binaryPath, runID string) string {
 	envelope := strings.NewReplacer(
 		"{{SCOPE}}", scope,
 		"{{TOOLS_REFERENCE}}", toolsRef,
+		"{{RUN_ID}}", runID,
 	).Replace(ai.EnvelopeTemplate)
 
 	body := strings.ReplaceAll(mission, "todotriage exec", binaryPath+" exec")

@@ -11,11 +11,18 @@ import (
 type streamState struct {
 	currentMsgID string
 	current      *domain.AgentMessage
+	sessionID    string // captured from the system/init event at stream start
 }
 
 func newStreamState() *streamState {
 	return &streamState{}
 }
+
+// SessionID returns the Claude Code session_id captured from the stream's
+// `system/init` event, or empty if that event hasn't been seen yet.
+// Used by the spawner to persist the id on agent_runs so later `--resume`
+// invocations (write-gate retry, SKY-139 yield) can attach to the session.
+func (s *streamState) SessionID() string { return s.sessionID }
 
 // flush returns the accumulated assistant message (if any) and resets state.
 func (s *streamState) flush() *domain.AgentMessage {
@@ -36,6 +43,17 @@ func (s *streamState) parseLine(line []byte, runID string) ([]*domain.AgentMessa
 	lineType, _ := raw["type"].(string)
 
 	switch lineType {
+	case "system":
+		// system/init carries session_id we need for --resume. Other system
+		// subtypes are ignored — they're metadata for the harness, not
+		// content the spawner needs to persist.
+		if subtype, _ := raw["subtype"].(string); subtype == "init" {
+			if sid, ok := raw["session_id"].(string); ok {
+				s.sessionID = sid
+			}
+		}
+		return nil, nil
+
 	case "assistant":
 		return s.handleAssistant(raw, runID), nil
 

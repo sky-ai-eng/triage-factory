@@ -41,7 +41,7 @@ func GetAgentRun(database *sql.DB, runID string) (*domain.AgentRun, error) {
 	row := database.QueryRow(`
 		SELECT id, task_id, status, model, started_at, completed_at,
 		       total_cost_usd, duration_ms, num_turns, stop_reason, worktree_path,
-		       result_link, result_summary
+		       result_link, result_summary, session_id, memory_missing
 		FROM agent_runs WHERE id = ?
 	`, runID)
 
@@ -49,11 +49,11 @@ func GetAgentRun(database *sql.DB, runID string) (*domain.AgentRun, error) {
 	var completedAt sql.NullTime
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns sql.NullInt64
-	var stopReason, worktreePath, model, resultLink, resultSummary sql.NullString
+	var stopReason, worktreePath, model, resultLink, resultSummary, sessionID sql.NullString
 
 	err := row.Scan(&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
-		&resultLink, &resultSummary)
+		&resultLink, &resultSummary, &sessionID, &r.MemoryMissing)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -66,6 +66,7 @@ func GetAgentRun(database *sql.DB, runID string) (*domain.AgentRun, error) {
 	r.WorktreePath = worktreePath.String
 	r.ResultLink = resultLink.String
 	r.ResultSummary = resultSummary.String
+	r.SessionID = sessionID.String
 	if completedAt.Valid {
 		r.CompletedAt = &completedAt.Time
 	}
@@ -89,7 +90,7 @@ func AgentRunsForTask(database *sql.DB, taskID string) ([]domain.AgentRun, error
 	rows, err := database.Query(`
 		SELECT id, task_id, status, model, started_at, completed_at,
 		       total_cost_usd, duration_ms, num_turns, stop_reason, worktree_path,
-		       result_link, result_summary
+		       result_link, result_summary, session_id, memory_missing
 		FROM agent_runs WHERE task_id = ? ORDER BY started_at DESC
 	`, taskID)
 	if err != nil {
@@ -103,11 +104,11 @@ func AgentRunsForTask(database *sql.DB, taskID string) ([]domain.AgentRun, error
 		var completedAt sql.NullTime
 		var costUSD sql.NullFloat64
 		var durationMs, numTurns sql.NullInt64
-		var stopReason, worktreePath, model, resultLink, resultSummary sql.NullString
+		var stopReason, worktreePath, model, resultLink, resultSummary, sessionID sql.NullString
 
 		if err := rows.Scan(&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
 			&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
-			&resultLink, &resultSummary); err != nil {
+			&resultLink, &resultSummary, &sessionID, &r.MemoryMissing); err != nil {
 			return nil, err
 		}
 
@@ -116,6 +117,7 @@ func AgentRunsForTask(database *sql.DB, taskID string) ([]domain.AgentRun, error
 		r.WorktreePath = worktreePath.String
 		r.ResultLink = resultLink.String
 		r.ResultSummary = resultSummary.String
+		r.SessionID = sessionID.String
 		if completedAt.Valid {
 			r.CompletedAt = &completedAt.Time
 		}
@@ -134,6 +136,32 @@ func AgentRunsForTask(database *sql.DB, taskID string) ([]domain.AgentRun, error
 		runs = append(runs, r)
 	}
 	return runs, rows.Err()
+}
+
+// SetAgentRunSession stores the Claude Code session_id captured from
+// `claude -p --output-format json` output. Called as soon as the spawner
+// parses the init event from the stream so subsequent resume calls have a
+// session to attach to. Separate from CompleteAgentRun because the session
+// id needs to be persisted mid-run, before any terminal state is reached —
+// the write-gate retry loop in SKY-141 depends on being able to resume a
+// run whose initial invocation returned but failed the memory-file check.
+func SetAgentRunSession(database *sql.DB, runID, sessionID string) error {
+	_, err := database.Exec(`
+		UPDATE agent_runs SET session_id = ? WHERE id = ?
+	`, sessionID, runID)
+	return err
+}
+
+// MarkAgentRunMemoryMissing flags a run whose pre-complete memory-file gate
+// exhausted all retries without the agent producing a memory file. The run
+// still completes (we don't punish the agent for partial success by failing
+// the run outright), but downstream UI and diagnostics surface the flag so
+// the gap is visible. Called from the write-gate retry loop in SKY-141.
+func MarkAgentRunMemoryMissing(database *sql.DB, runID string) error {
+	_, err := database.Exec(`
+		UPDATE agent_runs SET memory_missing = 1 WHERE id = ?
+	`, runID)
+	return err
 }
 
 // InsertAgentMessage inserts a message and returns its ID.

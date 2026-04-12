@@ -49,11 +49,24 @@ fragment PRFields on PullRequest {
 		nodes {
 			commit {
 				oid
-				checkSuites(first: 100) {
+				# Page caps are load-bearing: GitHub's GraphQL node budget is
+				# 500,000 per query, and this is a doubly-nested connection
+				# that's also wrapped by search(first: N) for discovery and
+				# nodes(ids: [...]) for refresh. Cost per PR here is
+				# 20 suites * 50 runs = 1,000 nodes. A discovery query of
+				# first: 50 therefore budgets 50 * 1,000 = 50,000 nodes on
+				# check data alone, well under the ceiling.
+				#
+				# Max-page-size (100/100) pushes a 50-result discovery to
+				# ~507k nodes and hard-errors out of GitHub's limit. Do not
+				# bump these without re-running the math: the hasNextPage
+				# watchdogs below log when we truncate, so real truncation
+				# becomes visible in operator logs instead of being silent.
+				checkSuites(first: 20) {
 					pageInfo { hasNextPage }
 					nodes {
 						workflowRun { databaseId }
-						checkRuns(first: 100) {
+						checkRuns(first: 50) {
 							pageInfo { hasNextPage }
 							nodes {
 								databaseId
@@ -277,9 +290,10 @@ type gqlCheckRuns struct {
 
 // gqlPageInfo is a minimal subset of GitHub's PageInfo used only to detect
 // when a connection was truncated at the first-N limit. We don't paginate
-// (matrix builds deep enough to blow through 100×100 check runs aren't a real
+// (matrix builds deep enough to blow through 20×50 check runs aren't a real
 // case today) but we log a warning if we hit the limit so we notice before
-// missing events becomes a silent failure mode.
+// missing events becomes a silent failure mode. See the page-cap comment
+// inside prFragment for why the caps are what they are.
 type gqlPageInfo struct {
 	HasNextPage bool `json:"hasNextPage"`
 }
@@ -339,20 +353,22 @@ func (pr gqlPR) toSnapshot() domain.PRSnapshot {
 		commit := pr.Commits.Nodes[0].Commit
 		snap.HeadSHA = commit.OID
 
-		// Pagination truncation watchdog. The query caps at 100 suites and
-		// 100 runs per suite — plenty for realistic PRs (even a heavy matrix
+		// Pagination truncation watchdog. The query caps at 20 suites and
+		// 50 runs per suite — plenty for realistic PRs (even a heavy matrix
 		// build caps around ~30 runs per suite × 5-8 suites). If we ever
 		// blow past these, log once so we catch it before missing events
 		// becomes a silent failure. Paginating would mean real cursor
 		// logic; preferring the simpler cap + warning until there's pressure.
+		// Do not raise these caps without re-running the node-budget math
+		// in the prFragment comment — 100/100 hits GitHub's 500k node limit.
 		if commit.CheckSuites.PageInfo.HasNextPage {
-			log.Printf("[github] WARN: check suites truncated at 100 for %s#%d — some CI state may be missing from snapshot", snap.Repo, snap.Number)
+			log.Printf("[github] WARN: check suites truncated at 20 for %s#%d — some CI state may be missing from snapshot", snap.Repo, snap.Number)
 		}
 
 		var raw []domain.CheckRun
 		for _, suite := range commit.CheckSuites.Nodes {
 			if suite.CheckRuns.PageInfo.HasNextPage {
-				log.Printf("[github] WARN: check runs truncated at 100 within a suite for %s#%d — some CI state may be missing from snapshot", snap.Repo, snap.Number)
+				log.Printf("[github] WARN: check runs truncated at 50 within a suite for %s#%d — some CI state may be missing from snapshot", snap.Repo, snap.Number)
 			}
 			var workflowRunID int64
 			if suite.WorkflowRun != nil {
