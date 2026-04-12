@@ -277,4 +277,5 @@ CREATE TABLE IF NOT EXISTS prompt_triggers (
 );
 
 CREATE INDEX IF NOT EXISTS idx_prompt_triggers_event_type ON prompt_triggers(event_type) WHERE enabled = 1;
+CREATE INDEX IF NOT EXISTS idx_prompt_triggers_prompt_id_created_at ON prompt_triggers(prompt_id, created_at);
 `
