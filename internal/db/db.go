@@ -261,4 +261,21 @@ CREATE TABLE IF NOT EXISTS task_memory (
 );
 
 CREATE INDEX IF NOT EXISTS idx_task_memory_task_id ON task_memory(task_id, created_at);
+
+CREATE TABLE IF NOT EXISTS prompt_triggers (
+    id TEXT PRIMARY KEY,
+    prompt_id TEXT NOT NULL REFERENCES prompts(id) ON DELETE CASCADE,
+    trigger_type TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    scope_predicate_json TEXT,
+    max_iterations INTEGER NOT NULL DEFAULT 3,
+    cooldown_seconds INTEGER NOT NULL DEFAULT 60,
+    enabled BOOLEAN NOT NULL DEFAULT 1,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(event_type, trigger_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_prompt_triggers_event_type ON prompt_triggers(event_type) WHERE enabled = 1;
+CREATE INDEX IF NOT EXISTS idx_prompt_triggers_prompt_id_created_at ON prompt_triggers(prompt_id, created_at);
 `
