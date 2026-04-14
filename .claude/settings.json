@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "jq -r '.tool_input.file_path // empty' | { read -r f; [ -z \"$f\" ] && exit 0; case \"$f\" in *.go) \"$(go env GOPATH)/bin/goimports\" -w \"$f\" ;; /Users/aidan/TT/triage-factory/frontend/*) case \"$f\" in *.ts|*.tsx|*.css|*.json) (cd /Users/aidan/TT/triage-factory/frontend && npx --no-install prettier --write \"$f\") ;; esac ;; esac; } 2>/dev/null || true",
+            "command": "jq -r '.tool_input.file_path // empty' | { read -r f; [ -z \"$f\" ] && exit 0; case \"$f\" in *.go) \"$(go env GOPATH)/bin/goimports\" -w \"$f\" ;; */frontend/*) case \"$f\" in *.ts|*.tsx|*.css|*.json) repo_root=\"$(git rev-parse --show-toplevel)\" && (cd \"$repo_root/frontend\" && npx --no-install prettier --write \"$f\") ;; esac ;; esac; } 2>/dev/null || true",
             "timeout": 15
           }
         ]
