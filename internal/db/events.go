@@ -12,12 +12,19 @@ import (
 // category/label/description are persisted (no enabled, default_priority,
 // sort_order — those concerns moved to task_rules).
 //
-// Uses INSERT OR REPLACE so updated labels/descriptions in code propagate to
-// existing rows; user-mutable preference data lives elsewhere.
+// Uses ON CONFLICT DO UPDATE (true upsert) rather than INSERT OR REPLACE so
+// that updated labels/descriptions propagate without a DELETE+INSERT cycle.
+// REPLACE would trip ON DELETE RESTRICT against task_rules / prompt_triggers /
+// tasks rows that reference the event_type on every reseed after the first.
 func SeedEventTypes(db *sql.DB) error {
 	stmt, err := db.Prepare(`
-		INSERT OR REPLACE INTO events_catalog (id, source, category, label, description)
+		INSERT INTO events_catalog (id, source, category, label, description)
 		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			source = excluded.source,
+			category = excluded.category,
+			label = excluded.label,
+			description = excluded.description
 	`)
 	if err != nil {
 		return err

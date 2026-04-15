@@ -71,6 +71,7 @@ func SeedTaskRules(db *sql.DB) error {
 		},
 	}
 
+	var inserted int64
 	for _, r := range rules {
 		var pred any
 		if r.Predicate == "" {
@@ -78,11 +79,17 @@ func SeedTaskRules(db *sql.DB) error {
 		} else {
 			pred = r.Predicate
 		}
-		if _, err := stmt.Exec(r.ID, r.EventType, pred, r.Name, r.DefaultPriority, r.SortOrder, now, now); err != nil {
+		res, err := stmt.Exec(r.ID, r.EventType, pred, r.Name, r.DefaultPriority, r.SortOrder, now, now)
+		if err != nil {
 			return err
 		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		inserted += n
 	}
-	log.Printf("[db] seeded %d task_rules", len(rules))
+	log.Printf("[db] seeded %d new task_rules (%d already existed)", inserted, int64(len(rules))-inserted)
 	return nil
 }
 
