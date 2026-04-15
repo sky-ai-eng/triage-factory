@@ -18,6 +18,8 @@ It runs as a single Go binary on your machine. No hosted service, no team rollou
 
 **Prompt routing** — A visual graph editor maps event types to delegation prompts. "Review requested" routes to your PR review prompt, "Jira assigned" routes to your implementation prompt. Drag event types onto prompt nodes to wire them up.
 
+Events are **entity state transitions**, not per-action signals — `ci_failed` fires when the PR's aggregate CI state flips to red, not once per failed check. This keeps tasks deduplicated (one "CI failing on PR #42" card, not six) and lets resolution events (`ci_passed`, `changes_resolved`, `review_submitted`) cleanly auto-close the original task when the situation resolves.
+
 ![Prompt routing graph](docs/imgs/prompts-page.png)
 
 **PR dashboard** — Status donut, merge timeline, review balance, and 30-day totals. All your open, merged, and closed PRs in one place. Drag between "Ready for review" and "Drafts" to convert, all while keeping an eye on build status and merge conflicts.
