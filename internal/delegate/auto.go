@@ -64,7 +64,7 @@ func MaybeAutoDelegate(database *sql.DB, spawner *Spawner, evt domain.Event) {
 	}
 
 	for _, trigger := range triggers {
-		// Gate 4: iteration cap
+		// Gate 4: breaker threshold
 		if task.ConsecutiveUnsuccessfulRuns >= trigger.BreakerThreshold {
 			log.Printf("[auto-delegate] skipping trigger %s for task %s: breaker tripped (%d >= %d)",
 				trigger.ID, task.ID, task.ConsecutiveUnsuccessfulRuns, trigger.BreakerThreshold)
