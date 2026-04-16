@@ -193,6 +193,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     close_reason TEXT,                  -- run_completed | user_claimed | user_dismissed | auto_closed_by_event | entity_closed
     close_event_type TEXT REFERENCES events_catalog(id),
     closed_at DATETIME,
+    -- Repo match: AI scorer writes the repo IDs this task's work should run
+    -- against (critical for Jira tasks whose entity doesn't carry a repo).
+    -- The spawner reads matched_repos to pick the worktree. blocked_reason
+    -- captures why delegation is blocked (e.g., "multi_repo", "no_repo_match").
+    matched_repos TEXT,                 -- JSON array of repo IDs, or NULL
+    blocked_reason TEXT,                -- "multi_repo" | "no_repo_match" | NULL
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
