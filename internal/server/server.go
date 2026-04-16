@@ -94,6 +94,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/event-types", s.handleEventTypes)
 	s.mux.HandleFunc("PUT /api/event-types/{id}/toggle", s.handleEventTypeToggle)
 	s.mux.HandleFunc("PUT /api/event-types/reorder", s.handleEventTypeReorder)
+	s.mux.HandleFunc("GET /api/event-schemas", s.handleEventSchemasList)
+	s.mux.HandleFunc("GET /api/event-schemas/{event_type}", s.handleEventSchemaGet)
 	s.mux.HandleFunc("GET /api/triggers", s.handleTriggersList)
 	s.mux.HandleFunc("POST /api/triggers", s.handleTriggerCreate)
 	s.mux.HandleFunc("DELETE /api/triggers/{id}", s.handleTriggerDelete)

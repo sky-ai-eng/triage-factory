@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 )
 
 func (s *Server) handleTriggersList(w http.ResponseWriter, r *http.Request) {
@@ -24,10 +25,11 @@ func (s *Server) handleTriggersList(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTriggerCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		PromptID        string `json:"prompt_id"`
-		EventType       string `json:"event_type"`
-		MaxIterations   int    `json:"max_iterations"`
-		CooldownSeconds int    `json:"cooldown_seconds"`
+		PromptID           string `json:"prompt_id"`
+		EventType          string `json:"event_type"`
+		ScopePredicateJSON string `json:"scope_predicate_json"`
+		MaxIterations      int    `json:"max_iterations"`
+		CooldownSeconds    int    `json:"cooldown_seconds"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
@@ -35,6 +37,20 @@ func (s *Server) handleTriggerCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.PromptID == "" || req.EventType == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "prompt_id and event_type are required"})
+		return
+	}
+
+	// Reject unregistered event types early — saves a downstream FK violation
+	// and gives a clearer error to the client.
+	if _, ok := events.Get(req.EventType); !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown event_type: " + req.EventType})
+		return
+	}
+
+	// Canonicalise the predicate. Empty / {} / null normalises to "" (match-all).
+	canonicalPredicate, err := events.ValidatePredicateJSON(req.EventType, req.ScopePredicateJSON)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 
@@ -65,6 +81,10 @@ func (s *Server) handleTriggerCreate(w http.ResponseWriter, r *http.Request) {
 		MaxIterations:   req.MaxIterations,
 		CooldownSeconds: req.CooldownSeconds,
 		Enabled:         true,
+	}
+	// Empty canonical string → match-all → NULL in DB.
+	if canonicalPredicate != "" {
+		trigger.ScopePredicateJSON = &canonicalPredicate
 	}
 
 	if err := db.SavePromptTrigger(s.db, trigger); err != nil {
