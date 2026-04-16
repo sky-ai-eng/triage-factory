@@ -642,9 +642,9 @@ func (t *Tracker) resolveTaskID(source, sourceID string) string {
 // EmitPollComplete publishes the system poll-completed sentinel.
 func (t *Tracker) EmitPollComplete(source string, taskCount, eventCount int) {
 	t.bus.Publish(domain.Event{
-		EventType: domain.EventSystemPollCompleted,
-		SourceID:  source,
-		Metadata:  mustJSON(map[string]any{"tasks": taskCount, "events": eventCount}),
-		CreatedAt: time.Now(),
+		EventType:    domain.EventSystemPollCompleted,
+		SourceID:     source,
+		MetadataJSON: mustJSON(map[string]any{"tasks": taskCount, "events": eventCount}),
+		CreatedAt:    time.Now(),
 	})
 }

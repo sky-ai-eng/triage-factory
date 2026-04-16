@@ -28,7 +28,7 @@ func (s *Server) handleTriggerCreate(w http.ResponseWriter, r *http.Request) {
 		PromptID           string `json:"prompt_id"`
 		EventType          string `json:"event_type"`
 		ScopePredicateJSON string `json:"scope_predicate_json"`
-		MaxIterations      int    `json:"max_iterations"`
+		BreakerThreshold   int    `json:"breaker_threshold"`
 		CooldownSeconds    int    `json:"cooldown_seconds"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -55,8 +55,8 @@ func (s *Server) handleTriggerCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Apply defaults
-	if req.MaxIterations <= 0 {
-		req.MaxIterations = 3
+	if req.BreakerThreshold <= 0 {
+		req.BreakerThreshold = 4
 	}
 	if req.CooldownSeconds <= 0 {
 		req.CooldownSeconds = 60
@@ -74,13 +74,13 @@ func (s *Server) handleTriggerCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	trigger := domain.PromptTrigger{
-		ID:              uuid.New().String(),
-		PromptID:        req.PromptID,
-		TriggerType:     domain.TriggerTypeEvent,
-		EventType:       req.EventType,
-		MaxIterations:   req.MaxIterations,
-		CooldownSeconds: req.CooldownSeconds,
-		Enabled:         true,
+		ID:               uuid.New().String(),
+		PromptID:         req.PromptID,
+		TriggerType:      domain.TriggerTypeEvent,
+		EventType:        req.EventType,
+		BreakerThreshold: req.BreakerThreshold,
+		CooldownSeconds:  req.CooldownSeconds,
+		Enabled:          true,
 	}
 	// Empty canonical string → match-all → NULL in DB.
 	if canonicalPredicate != "" {

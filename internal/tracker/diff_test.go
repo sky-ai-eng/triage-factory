@@ -542,12 +542,12 @@ func assertContains(t *testing.T, types []string, expected string) {
 
 func assertMetaContains(t *testing.T, event domain.Event, key, value string) {
 	t.Helper()
-	if event.Metadata == "" {
+	if event.MetadataJSON == "" {
 		t.Fatalf("event metadata is empty")
 	}
 	// Simple substring check — metadata is JSON
-	if !contains(event.Metadata, value) {
-		t.Errorf("expected metadata to contain %s=%s, got %s", key, value, event.Metadata)
+	if !contains(event.MetadataJSON, value) {
+		t.Errorf("expected metadata to contain %s=%s, got %s", key, value, event.MetadataJSON)
 	}
 }
 

@@ -171,6 +171,7 @@ There is no generalized cascade map. Tasks close via three explicit paths:
    - `ci_check_passed` handler: query "any failing check-runs remain on this entity at the latest SHA?" — if no, close active `ci_check_failed` tasks on the entity (`close_reason=auto_closed_by_event`, `close_event_type=github:pr:ci_check_passed`).
    - `review_approved` / `review_commented` / `review_dismissed` handler: if this reviewer's most recent prior review on the same PR was `changes_requested` AND no other reviewer currently has an outstanding `changes_requested`, close active `review_changes_requested` tasks on the entity.
    - `review_submitted{reviewer_is_self: true}` handler: close any active `review_requested` task on the same entity (I submitted my review → the request is satisfied).
+   - `jira:issue:assigned{assignee_is_self: false}` handler: close any active `jira:issue:assigned` or `jira:issue:available` task on the same entity. Covers two cases: an issue I was assigned got reassigned to someone else ("my" task is stale), and an unassigned issue in my pickup queue got claimed by someone else ("available" task is stale). The issue itself is still open in Jira, so entity lifecycle doesn't help here — this is strictly "my context on this changed."
 
 Anything not covered by one of these paths stays open until the user dismisses it or a run handles it. We deliberately don't try to auto-close every situation — when in doubt, leave the task surfaced.
 

@@ -64,7 +64,7 @@ func SeedTaskRules(db *sql.DB) error {
 		{
 			ID:              "system-rule-jira-assigned",
 			EventType:       domain.EventJiraIssueAssigned,
-			Predicate:       "", // null — match-all
+			Predicate:       `{"assignee_is_self":true}`,
 			Name:            "Jira issue assigned to me",
 			DefaultPriority: 0.60,
 			SortOrder:       4,

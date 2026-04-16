@@ -95,7 +95,7 @@ export interface PromptTrigger {
   prompt_id: string
   trigger_type: string
   event_type: string
-  max_iterations: number
+  breaker_threshold: number
   cooldown_seconds: number
   enabled: boolean
   created_at: string

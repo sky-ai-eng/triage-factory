@@ -18,7 +18,7 @@ import (
 //  1. Global kill switch (config.AI.AutoDelegateEnabled)
 //  2. Trigger lookup (prompt_triggers for the event type)
 //  3. In-flight gate (no active run for this task)
-//  4. Iteration cap (consecutive_unsuccessful_runs < max_iterations)
+//  4. Breaker threshold (consecutive_unsuccessful_runs < breaker_threshold)
 //  5. Cooldown (last auto-run started_at + cooldown_seconds < now)
 func MaybeAutoDelegate(database *sql.DB, spawner *Spawner, evt domain.Event) {
 	if evt.TaskID == "" {
@@ -65,9 +65,9 @@ func MaybeAutoDelegate(database *sql.DB, spawner *Spawner, evt domain.Event) {
 
 	for _, trigger := range triggers {
 		// Gate 4: iteration cap
-		if task.ConsecutiveUnsuccessfulRuns >= trigger.MaxIterations {
+		if task.ConsecutiveUnsuccessfulRuns >= trigger.BreakerThreshold {
 			log.Printf("[auto-delegate] skipping trigger %s for task %s: breaker tripped (%d >= %d)",
-				trigger.ID, task.ID, task.ConsecutiveUnsuccessfulRuns, trigger.MaxIterations)
+				trigger.ID, task.ID, task.ConsecutiveUnsuccessfulRuns, trigger.BreakerThreshold)
 			continue
 		}
 

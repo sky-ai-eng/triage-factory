@@ -118,7 +118,7 @@ func SavePromptTrigger(db *sql.DB, t domain.PromptTrigger) error {
 			enabled = excluded.enabled,
 			updated_at = ?
 	`, t.ID, t.PromptID, t.TriggerType, t.EventType, t.ScopePredicateJSON,
-		t.MaxIterations, t.CooldownSeconds, t.Enabled, now, now, now)
+		t.BreakerThreshold, t.CooldownSeconds, t.Enabled, now, now, now)
 	return err
 }
 
@@ -140,7 +140,7 @@ func SetTriggerEnabled(db *sql.DB, id string, enabled bool) error {
 func scanTrigger(rows *sql.Rows) (domain.PromptTrigger, error) {
 	var t domain.PromptTrigger
 	err := rows.Scan(&t.ID, &t.PromptID, &t.TriggerType, &t.EventType, &t.ScopePredicateJSON,
-		&t.MaxIterations, &t.CooldownSeconds, &t.Enabled, &t.CreatedAt, &t.UpdatedAt)
+		&t.BreakerThreshold, &t.CooldownSeconds, &t.Enabled, &t.CreatedAt, &t.UpdatedAt)
 	return t, err
 }
 
@@ -148,6 +148,6 @@ func scanTrigger(rows *sql.Rows) (domain.PromptTrigger, error) {
 func scanTriggerRow(row *sql.Row) (domain.PromptTrigger, error) {
 	var t domain.PromptTrigger
 	err := row.Scan(&t.ID, &t.PromptID, &t.TriggerType, &t.EventType, &t.ScopePredicateJSON,
-		&t.MaxIterations, &t.CooldownSeconds, &t.Enabled, &t.CreatedAt, &t.UpdatedAt)
+		&t.BreakerThreshold, &t.CooldownSeconds, &t.Enabled, &t.CreatedAt, &t.UpdatedAt)
 	return t, err
 }

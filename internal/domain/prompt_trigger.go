@@ -10,7 +10,7 @@ type PromptTrigger struct {
 	TriggerType        string    `json:"trigger_type"`         // V1: only "event" is accepted
 	EventType          string    `json:"event_type"`           // required for trigger_type="event"
 	ScopePredicateJSON *string   `json:"scope_predicate_json"` // nullable; null = match-all
-	MaxIterations      int       `json:"max_iterations"`       // per-task cap before circuit breaker
+	BreakerThreshold   int       `json:"breaker_threshold"`    // consecutive-failure count that trips the per-(entity, prompt) breaker
 	CooldownSeconds    int       `json:"cooldown_seconds"`     // min seconds between auto-fires per task
 	Enabled            bool      `json:"enabled"`
 	CreatedAt          time.Time `json:"created_at"`

@@ -902,7 +902,7 @@ func (s *Spawner) updateStatus(runID, status string) {
 //
 // Rules:
 //   - Auto runs (trigger_type != "manual") that fail or are unsolvable increment the counter.
-//     When the counter reaches the trigger's max_iterations threshold, a system event is emitted.
+//     When the counter reaches the trigger's breaker_threshold, a system event is emitted.
 //   - Any successful run (manual or auto) resets the counter to zero.
 //   - Manual runs that fail or are unsolvable do not touch the counter.
 func (s *Spawner) updateBreakerCounter(taskID, triggerType, status string) {
@@ -923,13 +923,13 @@ func (s *Spawner) updateBreakerCounter(taskID, triggerType, status string) {
 
 		// Emit a suspension event exactly once — on the transition, not on
 		// every subsequent failure. The actual gating (skip auto-fires when
-		// counter >= max_iterations) is enforced by the auto-delegation hook
+		// counter >= breaker_threshold) is enforced by the auto-delegation hook
 		// in SKY-147.
 		if newCount == 2 {
 			if _, err := db.RecordEvent(s.database, domain.Event{
-				EventType: domain.EventSystemTaskAutoSuspended,
-				TaskID:    taskID,
-				Metadata:  fmt.Sprintf(`{"consecutive_failures": %d}`, newCount),
+				EventType:    domain.EventSystemTaskAutoSuspended,
+				TaskID:       taskID,
+				MetadataJSON: fmt.Sprintf(`{"consecutive_failures": %d}`, newCount),
 			}); err != nil {
 				log.Printf("[delegate] warning: failed to record auto-suspension event for task %s: %v", taskID, err)
 			}

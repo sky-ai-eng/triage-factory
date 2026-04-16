@@ -56,16 +56,15 @@ func seedDefaultPrompts(database *sql.DB) {
 
 	// Default trigger: auto-fire CI fix on per-check CI failures.
 	// Uses the new per-action event type EventGitHubPRCICheckFailed (split on
-	// conclusion per docs/data-model-target.md). MaxIterations on the struct
-	// maps to the renamed `breaker_threshold` column.
+	// conclusion per docs/data-model-target.md).
 	if err := db.SavePromptTrigger(database, domain.PromptTrigger{
-		ID:              "system-trigger-ci-fix",
-		PromptID:        "system-ci-fix",
-		TriggerType:     domain.TriggerTypeEvent,
-		EventType:       domain.EventGitHubPRCICheckFailed,
-		MaxIterations:   3,
-		CooldownSeconds: 60,
-		Enabled:         true,
+		ID:               "system-trigger-ci-fix",
+		PromptID:         "system-ci-fix",
+		TriggerType:      domain.TriggerTypeEvent,
+		EventType:        domain.EventGitHubPRCICheckFailed,
+		BreakerThreshold: 3,
+		CooldownSeconds:  60,
+		Enabled:          true,
 	}); err != nil {
 		log.Printf("[seed] warning: failed to seed CI fix trigger: %v", err)
 	}

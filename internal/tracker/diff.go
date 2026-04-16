@@ -17,10 +17,10 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, sourceID, username string) []
 
 	emit := func(eventType string, meta map[string]string) {
 		events = append(events, domain.Event{
-			EventType: eventType,
-			SourceID:  sourceID,
-			Metadata:  mustJSON(meta),
-			CreatedAt: now,
+			EventType:    eventType,
+			SourceID:     sourceID,
+			MetadataJSON: mustJSON(meta),
+			CreatedAt:    now,
 		})
 	}
 
@@ -192,10 +192,10 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, sourceID string) []domain
 
 	emit := func(eventType string, meta map[string]string) {
 		events = append(events, domain.Event{
-			EventType: eventType,
-			SourceID:  sourceID,
-			Metadata:  mustJSON(meta),
-			CreatedAt: now,
+			EventType:    eventType,
+			SourceID:     sourceID,
+			MetadataJSON: mustJSON(meta),
+			CreatedAt:    now,
 		})
 	}
 
@@ -256,10 +256,10 @@ func initialPREvents(snap domain.PRSnapshot, sourceID, username string, now time
 	var events []domain.Event
 	add := func(eventType string) {
 		events = append(events, domain.Event{
-			EventType: eventType,
-			SourceID:  sourceID,
-			Metadata:  mustJSON(map[string]string{"reason": "first_seen"}),
-			CreatedAt: now,
+			EventType:    eventType,
+			SourceID:     sourceID,
+			MetadataJSON: mustJSON(map[string]string{"reason": "first_seen"}),
+			CreatedAt:    now,
 		})
 	}
 
@@ -295,10 +295,10 @@ func initialJiraEvents(snap domain.JiraSnapshot, sourceID string, now time.Time)
 	var events []domain.Event
 	add := func(eventType string) {
 		events = append(events, domain.Event{
-			EventType: eventType,
-			SourceID:  sourceID,
-			Metadata:  mustJSON(map[string]string{"reason": "first_seen"}),
-			CreatedAt: now,
+			EventType:    eventType,
+			SourceID:     sourceID,
+			MetadataJSON: mustJSON(map[string]string{"reason": "first_seen"}),
+			CreatedAt:    now,
 		})
 	}
 
