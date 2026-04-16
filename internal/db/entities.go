@@ -144,13 +144,6 @@ func ListActiveEntities(db *sql.DB, source string) ([]domain.Entity, error) {
 	return entities, rows.Err()
 }
 
-// ClearEntityItems deletes all entities (and cascading tasks/events) for a
-// given source. Used when disconnecting a provider (e.g. disabling GitHub).
-func ClearEntityItems(db *sql.DB, source string) error {
-	_, err := db.Exec(`DELETE FROM entities WHERE source = ?`, source)
-	return err
-}
-
 func scanEntity(row *sql.Row) (*domain.Entity, error) {
 	var e domain.Entity
 	err := row.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,

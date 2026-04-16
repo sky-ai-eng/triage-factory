@@ -9,7 +9,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/config"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 )
 
@@ -182,19 +181,16 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// Disabled — clear GitHub credentials, keychain entries, and tracked data
+		// Disconnect is a soft gesture — clear credentials and stop polling,
+		// but keep entities/tasks/runs/memory intact. Reconnecting the same
+		// account resumes where we left off. Full wipe is a separate
+		// destructive action (not implemented in v1).
 		creds.GitHubURL = ""
 		creds.GitHubPAT = ""
 		creds.GitHubUsername = ""
 		cfg.GitHub.BaseURL = ""
 		if err := auth.ClearGitHub(); err != nil {
 			log.Printf("[settings] failed to clear GitHub keychain entry: %v", err)
-		}
-		if err := db.ClearEntityItems(s.db, "github"); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": "failed to clear GitHub entities: " + err.Error(),
-				"field": "github",
-			})
-			return
 		}
 	}
 
@@ -225,19 +221,13 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 			creds.JiraDisplayName = jiraUser.DisplayName
 		}
 	} else {
+		// Soft disconnect — keep entities/tasks/runs/memory intact.
 		creds.JiraURL = ""
 		creds.JiraPAT = ""
 		creds.JiraDisplayName = ""
 		cfg.Jira.BaseURL = ""
 		if err := auth.ClearJira(); err != nil {
 			log.Printf("[settings] failed to clear Jira keychain entry: %v", err)
-		}
-		if err := db.ClearEntityItems(s.db, "jira"); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": "failed to clear Jira entities: " + err.Error(),
-				"field": "jira",
-			})
-			return
 		}
 	}
 
