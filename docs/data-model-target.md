@@ -133,7 +133,7 @@ Declarative rules for creating tasks from events. Independent of automation. A u
 | `github:pr:review_changes_requested` | `{AuthorIsSelf: true}` | a reviewer is blocking my PR — I need to act                     |
 | `github:pr:review_commented`        | `{AuthorIsSelf: true}` | someone left non-blocking comments on my PR — I should look      |
 | `github:pr:review_requested`        | (null — match-all)     | someone asked for my review — always surface                     |
-| `jira:issue:assigned`               | (null — match-all)     | assignment to me is intrinsic — always surface                   |
+| `jira:issue:assigned`               | `{AssigneeIsSelf: true}` | assigned to me — surface; reassignments to others ignored        |
 
 Users can disable or narrow any seeded rule, and adjust `default_priority` / `sort_order` to tune their queue. Predicate-driven events where the default scope isn't obvious (`new_commits`, `label_added`) ship with **no** default rule — user configures one if they want manual-triage surfacing, or a trigger's predicate implicitly handles it via the forgiving path.
 
