@@ -277,6 +277,7 @@ type GitHubPRCICheckPassedMetadata struct {
 	AuthorIsSelf bool     `json:"author_is_self"`
 	CheckRunID   int64    `json:"check_run_id"`
 	CheckName    string   `json:"check_name"`
+	Conclusion   string   `json:"conclusion"` // "success", "neutral", "skipped", "stale", etc.
 	HeadSHA      string   `json:"head_sha"`
 	Repo         string   `json:"repo"`
 	PRNumber     int      `json:"pr_number"`
@@ -288,6 +289,7 @@ type GitHubPRCICheckPassedPredicate struct {
 	AuthorIsSelf *bool   `json:"author_is_self,omitempty"`
 	Author       *string `json:"author,omitempty"`
 	CheckName    *string `json:"check_name,omitempty"`
+	Conclusion   *string `json:"conclusion,omitempty" doc:"Filter by specific non-failing conclusion (success, neutral, skipped, stale)."`
 	Repo         *string `json:"repo,omitempty"`
 	IsDraft      *bool   `json:"is_draft,omitempty"`
 	HasLabel     *string `json:"has_label,omitempty"`
@@ -297,6 +299,7 @@ func (p GitHubPRCICheckPassedPredicate) Matches(m GitHubPRCICheckPassedMetadata)
 	return boolEq(p.AuthorIsSelf, m.AuthorIsSelf) &&
 		strEq(p.Author, m.Author) &&
 		strEq(p.CheckName, m.CheckName) &&
+		strEq(p.Conclusion, m.Conclusion) &&
 		strEq(p.Repo, m.Repo) &&
 		boolEq(p.IsDraft, m.IsDraft) &&
 		hasLabel(p.HasLabel, m.Labels)

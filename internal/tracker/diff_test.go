@@ -228,6 +228,82 @@ func TestDiff_CI_FailureToSuccess_EmitsCheckPassed(t *testing.T) {
 	}
 }
 
+func TestDiff_CI_FailureToSkipped_EmitsCheckPassed(t *testing.T) {
+	// A check that was failing and transitions to skipped (e.g., path filter
+	// excludes the changed files on a new commit) should emit ci_check_passed
+	// so ci_check_failed tasks can close via inline check.
+	prev := basePRSnapshot()
+	prev.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "integration", Conclusion: "failure"},
+	}
+	curr := basePRSnapshot()
+	curr.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "integration", Conclusion: "skipped"},
+	}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	passed := findEvents(evts, domain.EventGitHubPRCICheckPassed)
+	if len(passed) != 1 {
+		t.Errorf("expected 1 ci_check_passed (failure→skipped), got %d", len(passed))
+	}
+	meta := decodeMetadata[events.GitHubPRCICheckPassedMetadata](t, passed[0])
+	if meta.Conclusion != "skipped" {
+		t.Errorf("expected Conclusion=skipped, got %s", meta.Conclusion)
+	}
+}
+
+func TestDiff_CI_FailureToNeutral_EmitsCheckPassed(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "lint", Conclusion: "failure"},
+	}
+	curr := basePRSnapshot()
+	curr.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "lint", Conclusion: "neutral"},
+	}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	passed := findEvents(evts, domain.EventGitHubPRCICheckPassed)
+	if len(passed) != 1 {
+		t.Errorf("expected 1 ci_check_passed (failure→neutral), got %d", len(passed))
+	}
+}
+
+func TestDiff_CI_SkippedToSkipped_NoEvent(t *testing.T) {
+	// Already non-failing → still non-failing = no event.
+	prev := basePRSnapshot()
+	prev.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "optional", Conclusion: "skipped"},
+	}
+	curr := basePRSnapshot()
+	curr.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "optional", Conclusion: "skipped"},
+	}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	if len(findEvents(evts, domain.EventGitHubPRCICheckPassed)) != 0 {
+		t.Error("should not emit ci_check_passed when already non-failing")
+	}
+}
+
+func TestDiff_CI_PendingToSkipped_EmitsCheckPassed(t *testing.T) {
+	// Pending (empty conclusion) → skipped = new non-failing conclusion.
+	prev := basePRSnapshot()
+	prev.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "optional", Conclusion: ""}, // pending
+	}
+	curr := basePRSnapshot()
+	curr.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "optional", Conclusion: "skipped"},
+	}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	passed := findEvents(evts, domain.EventGitHubPRCICheckPassed)
+	if len(passed) != 1 {
+		t.Errorf("expected 1 ci_check_passed (pending→skipped), got %d", len(passed))
+	}
+}
+
 // --- Reviews ----------------------------------------------------------------
 
 func TestDiff_Review_NewChangesRequested(t *testing.T) {

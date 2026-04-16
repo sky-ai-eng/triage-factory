@@ -107,13 +107,18 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string) []
 					HeadSHA: curr.HeadSHA, Repo: curr.Repo, PRNumber: curr.Number,
 					IsDraft: curr.IsDraft, Labels: curr.Labels,
 				})
-			} else if cr.Conclusion == "success" {
-				if existed && prevCR.Conclusion == "success" {
-					continue // already passing, old signal
+			} else if cr.Conclusion != "" && !domain.IsFailingConclusion(cr.Conclusion) {
+				// Any non-failing completed conclusion counts as "passed":
+				// success, neutral, skipped, stale. This matters for the
+				// inline close check — a check that was failing and transitions
+				// to skipped (e.g., path filter on new commits) needs to emit
+				// ci_check_passed so ci_check_failed tasks can close.
+				if existed && !domain.IsFailingConclusion(prevCR.Conclusion) && prevCR.Conclusion != "" {
+					continue // already non-failing, old signal
 				}
 				emit(domain.EventGitHubPRCICheckPassed, "", events.GitHubPRCICheckPassedMetadata{
 					Author: curr.Author, AuthorIsSelf: authorIsSelf,
-					CheckRunID: cr.ID, CheckName: cr.Name,
+					CheckRunID: cr.ID, CheckName: cr.Name, Conclusion: cr.Conclusion,
 					HeadSHA: curr.HeadSHA, Repo: curr.Repo, PRNumber: curr.Number,
 					IsDraft: curr.IsDraft, Labels: curr.Labels,
 				})
