@@ -44,13 +44,14 @@ func NewRouter(db *sql.DB, spawner *delegate.Spawner, scorer Scorer, ws *websock
 // from the bus's per-subscriber goroutine.
 func (r *Router) HandleEvent(evt domain.Event) {
 	// Step 1: Always record — durable audit log regardless of routing outcome.
+	// Later routing logic relies on evt.ID referring to a persisted event row,
+	// so stop here if the insert fails.
 	id, err := dbpkg.RecordEvent(r.db, evt)
 	if err != nil {
 		log.Printf("[router] failed to record event %s: %v", evt.EventType, err)
-		// Don't bail — still try routing so the event isn't silently lost.
-	} else {
-		evt.ID = id
+		return
 	}
+	evt.ID = id
 
 	// Step 2: Entity lifecycle — entity-terminating events close the entity
 	// and cascade-close all its tasks. Return after — no task creation on a
