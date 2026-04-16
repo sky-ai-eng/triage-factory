@@ -51,6 +51,31 @@ func FindOrCreateEntity(db *sql.DB, source, sourceID, kind, title, url string) (
 	return entity, true, nil
 }
 
+// MarkEntityClosed sets state='closed' and closed_at=now without the task
+// cascade. Used at discovery time when the initial snapshot is already terminal
+// (merged/closed PR, completed Jira issue) — the entity was never active, so
+// there are no tasks to cascade-close.
+func MarkEntityClosed(db *sql.DB, entityID string) error {
+	_, err := db.Exec(`
+		UPDATE entities SET state = 'closed', closed_at = ? WHERE id = ?
+	`, time.Now(), entityID)
+	return err
+}
+
+// ReactivateEntity transitions a closed entity back to active. Used when a
+// previously-terminal entity reappears as open (e.g., reopened PR, reopened
+// Jira issue). Returns true if the entity was actually reactivated.
+func ReactivateEntity(db *sql.DB, entityID string) (bool, error) {
+	result, err := db.Exec(`
+		UPDATE entities SET state = 'active', closed_at = NULL WHERE id = ? AND state = 'closed'
+	`, entityID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := result.RowsAffected()
+	return n > 0, nil
+}
+
 // UpdateEntitySnapshot updates the snapshot_json and last_polled_at for an entity.
 func UpdateEntitySnapshot(db *sql.DB, entityID, snapshotJSON string) error {
 	_, err := db.Exec(`

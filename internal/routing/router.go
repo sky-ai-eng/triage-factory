@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/config"
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -170,7 +171,11 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	r.ws.Broadcast(websocket.Event{Type: "tasks_updated", Data: map[string]any{}})
 
 	// Step 9: Auto-delegate for matching triggers.
-	if created {
+	// Gate: global kill switch — if auto-delegation is disabled, skip all triggers.
+	if cfg, err := config.Load(); err != nil || !cfg.AI.AutoDelegateEnabled {
+		// Disabled or config error — skip auto-delegation entirely.
+		// Inline close checks still run below.
+	} else if created {
 		// Auto-delegate fires immediately on task creation (cooldown doesn't
 		// gate the first fire). Only triggers with min_autonomy_suitability==0
 		// fire now; gated triggers defer to post-scoring re-derivation (SKY-181).
@@ -283,6 +288,19 @@ func (r *Router) fireDelegate(task *domain.Task, trigger domain.PromptTrigger) {
 
 // --- Inline close checks --------------------------------------------------
 
+// closeTaskWithAudit closes a task and records the closing event in task_events
+// so the full close timeline is reconstructable. All inline close checks use
+// this instead of calling dbpkg.CloseTask directly.
+func (r *Router) closeTaskWithAudit(taskID, closingEventID, closeReason, closeEventType string) error {
+	if err := dbpkg.CloseTask(r.db, taskID, closeReason, closeEventType); err != nil {
+		return err
+	}
+	if closingEventID != "" {
+		_ = dbpkg.RecordTaskEvent(r.db, taskID, closingEventID, "closed")
+	}
+	return nil
+}
+
 func (r *Router) runInlineCloseChecks(evt domain.Event, entityID string) {
 	switch evt.EventType {
 	case domain.EventGitHubPRCICheckPassed:
@@ -332,7 +350,7 @@ func (r *Router) closeCheckCIPassed(evt domain.Event, entityID string) {
 
 	// All green — close the failure tasks.
 	for _, t := range failedTasks {
-		if err := dbpkg.CloseTask(r.db, t.ID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed); err != nil {
+		if err := r.closeTaskWithAudit(t.ID, evt.ID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed); err != nil {
 			log.Printf("[router] failed to close ci_check_failed task %s: %v", t.ID, err)
 		} else {
 			log.Printf("[router] inline-closed task %s (ci_check_failed → ci_check_passed)", t.ID)
@@ -398,7 +416,7 @@ func (r *Router) closeCheckReviewResolved(evt domain.Event, entityID string) {
 		return
 	}
 	for _, t := range tasks {
-		if err := dbpkg.CloseTask(r.db, t.ID, "auto_closed_by_event", evt.EventType); err != nil {
+		if err := r.closeTaskWithAudit(t.ID, evt.ID, "auto_closed_by_event", evt.EventType); err != nil {
 			log.Printf("[router] failed to close changes_requested task %s: %v", t.ID, err)
 		} else {
 			log.Printf("[router] inline-closed task %s (review resolved by %s)", t.ID, reviewer)
@@ -422,7 +440,7 @@ func (r *Router) closeCheckReviewSubmitted(evt domain.Event, entityID string) {
 		return
 	}
 	for _, t := range tasks {
-		if err := dbpkg.CloseTask(r.db, t.ID, "auto_closed_by_event", domain.EventGitHubPRReviewSubmitted); err != nil {
+		if err := r.closeTaskWithAudit(t.ID, evt.ID, "auto_closed_by_event", domain.EventGitHubPRReviewSubmitted); err != nil {
 			log.Printf("[router] failed to close review_requested task %s: %v", t.ID, err)
 		} else {
 			log.Printf("[router] inline-closed task %s (review submitted by self)", t.ID)
@@ -449,7 +467,7 @@ func (r *Router) closeCheckJiraReassigned(evt domain.Event, entityID string) {
 			continue
 		}
 		for _, t := range tasks {
-			if err := dbpkg.CloseTask(r.db, t.ID, "auto_closed_by_event", domain.EventJiraIssueAssigned); err != nil {
+			if err := r.closeTaskWithAudit(t.ID, evt.ID, "auto_closed_by_event", domain.EventJiraIssueAssigned); err != nil {
 				log.Printf("[router] failed to close %s task %s: %v", eventType, t.ID, err)
 			} else {
 				log.Printf("[router] inline-closed task %s (jira reassigned away)", t.ID)

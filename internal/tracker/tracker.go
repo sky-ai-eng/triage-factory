@@ -60,15 +60,32 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 		}
 
 		if created {
-			// Seed the discovery snapshot so Phase 2 can classify open vs terminal.
+			// Seed the discovery snapshot.
 			snapJSON, _ := json.Marshal(snap)
 			if err := db.UpdateEntitySnapshot(t.database, entity.ID, string(snapJSON)); err != nil {
 				log.Printf("[tracker] failed to seed snapshot for %s: %v", sid, err)
+			}
+			// If the PR is already terminal, mark the entity closed immediately
+			// so it doesn't sit in the active refresh set forever (Phase 3
+			// won't emit a merged/closed event because prev==curr).
+			if snap.Merged || snap.State == "CLOSED" || snap.State == "MERGED" {
+				if err := db.MarkEntityClosed(t.database, entity.ID); err != nil {
+					log.Printf("[tracker] failed to mark entity %s closed on discovery: %v", sid, err)
+				}
 			}
 		} else {
 			// Update title if changed.
 			if entity.Title != snap.Title {
 				_ = db.UpdateEntityTitle(t.database, entity.ID, snap.Title)
+			}
+			// Reactivate if a previously-closed entity reappears as open
+			// (e.g., reopened PR).
+			if !snap.Merged && snap.State != "CLOSED" && snap.State != "MERGED" && entity.State == "closed" {
+				if reactivated, err := db.ReactivateEntity(t.database, entity.ID); err != nil {
+					log.Printf("[tracker] error reactivating %s: %v", sid, err)
+				} else if reactivated {
+					log.Printf("[tracker] reactivated entity %s (reopened)", sid)
+				}
 			}
 		}
 	}
@@ -246,8 +263,23 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 			if err := db.UpdateEntitySnapshot(t.database, entity.ID, string(snapJSON)); err != nil {
 				log.Printf("[tracker] failed to seed snapshot for %s: %v", snap.Key, err)
 			}
-		} else if entity.Title != snap.Summary {
-			_ = db.UpdateEntityTitle(t.database, entity.ID, snap.Summary)
+			if isJiraTerminal(snap.Status) {
+				if err := db.MarkEntityClosed(t.database, entity.ID); err != nil {
+					log.Printf("[tracker] failed to mark entity %s closed on discovery: %v", snap.Key, err)
+				}
+			}
+		} else {
+			if entity.Title != snap.Summary {
+				_ = db.UpdateEntityTitle(t.database, entity.ID, snap.Summary)
+			}
+			// Reactivate if a previously-closed issue reappears as open.
+			if !isJiraTerminal(snap.Status) && entity.State == "closed" {
+				if reactivated, err := db.ReactivateEntity(t.database, entity.ID); err != nil {
+					log.Printf("[tracker] error reactivating %s: %v", snap.Key, err)
+				} else if reactivated {
+					log.Printf("[tracker] reactivated entity %s (reopened)", snap.Key)
+				}
+			}
 		}
 	}
 

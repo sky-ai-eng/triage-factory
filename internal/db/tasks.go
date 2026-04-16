@@ -44,7 +44,10 @@ func FindOrCreateTask(db *sql.DB, entityID, eventType, dedupKey, primaryEventID 
 		return nil, false, err
 	}
 
-	// Create new task.
+	// Create new task. If a concurrent goroutine raced us past the SELECT
+	// above, the partial unique index (entity_id, event_type, dedup_key)
+	// WHERE status NOT IN ('done','dismissed') will reject the INSERT. In
+	// that case, re-read the winner's row.
 	id := uuid.New().String()
 	now := time.Now()
 	_, err = db.Exec(`
@@ -53,6 +56,21 @@ func FindOrCreateTask(db *sql.DB, entityID, eventType, dedupKey, primaryEventID 
 		VALUES (?, ?, ?, ?, ?, 'queued', ?, 'pending', ?)
 	`, id, entityID, eventType, dedupKey, primaryEventID, defaultPriority, now)
 	if err != nil {
+		// Race: another goroutine created the task between our SELECT and
+		// INSERT. Re-read to return the winner's row.
+		var raced domain.Task
+		err2 := scanTaskRow(db.QueryRow(`
+			SELECT `+taskColumnsWithEntity+`
+			FROM tasks t
+			JOIN entities e ON t.entity_id = e.id
+			WHERE t.entity_id = ? AND t.event_type = ? AND t.dedup_key = ?
+				AND t.status NOT IN ('done', 'dismissed')
+			LIMIT 1
+		`, entityID, eventType, dedupKey), &raced)
+		if err2 == nil {
+			return &raced, false, nil
+		}
+		// Genuine error (not a race).
 		return nil, false, err
 	}
 
@@ -63,8 +81,6 @@ func FindOrCreateTask(db *sql.DB, entityID, eventType, dedupKey, primaryEventID 
 	return task, true, nil
 }
 
-// BumpTask records a new event on an existing task. Updates primary_event_id
-// to the latest event. If the task is snoozed, un-snoozes it (wake-on-bump).
 // BumpTask records a new matching event on an existing task. Does NOT update
 // primary_event_id — that stays as the original spawning event (the task_events
 // junction with kind=bumped tracks subsequent events). If the task is snoozed,
