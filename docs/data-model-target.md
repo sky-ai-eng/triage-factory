@@ -82,7 +82,7 @@ Every poller-detected change or system-emitted signal. Append-only.
 | column          | type                   | notes                                                        |
 | --------------- | ---------------------- | ------------------------------------------------------------ |
 | `id`            | TEXT PK                | UUID                                                         |
-| `entity_id`     | TEXT FK → entities(id) | nullable (system events without entity context)              |
+| `entity_id`     | TEXT FK → entities(id) | nullable; in practice always set in v1 (system events aren't persisted — see "System bookkeeping" in Event routing) |
 | `event_type`    | TEXT NOT NULL          | `github:pr:ci_check_failed`, `system:prompt:auto_suspended`, etc. |
 | `dedup_key`     | TEXT NOT NULL DEFAULT '' | open-set discriminator value (label name, status name); empty for events that dedup purely on event_type. See "Dedup key" in routing section. |
 | `metadata_json` | TEXT                   | structured detail, shape defined by per-event-type Go struct |
@@ -480,7 +480,16 @@ After task creation routing, the event handler may run a targeted close check sp
 
 ### 3. System bookkeeping
 
-Events are always recorded in the `events` table, regardless of whether rules/triggers/inline checks matched. Durable log.
+External-source events (`github:*`, `jira:*`, `linear:*`) are always recorded in the `events` table, regardless of whether rules/triggers/inline checks matched. Durable log — these are real-world observations from systems we don't own, so the audit trail is the canonical record.
+
+**System events (`system:*`) are ephemeral bus signals, NOT persisted in the events table.** Every system event is either a pure tick (`system:poll:completed` drives the scorer) or a redundant echo of state already written elsewhere:
+
+- `system:scoring:completed` → `tasks.scoring_status=scored` + `priority_score` + `autonomy_suitability` already capture the outcome
+- `system:delegation:completed` / `system:delegation:failed` → `runs.status` + `runs.stop_reason` already capture the outcome
+- `system:prompt:auto_suspended` → derivable from `runs` via the breaker query
+- `system:task:delegation_blocked_by_subtasks` → the absence of a `runs` row for the attempted delegation is the evidence
+
+Persisting them would double-write information already queryable from `runs` and `tasks`, and `poll:completed` in particular would add ~2,880 rows/day/source of pure noise. The router's bus subscription filters to `github:` and `jira:` prefixes; system events go to the scorer-trigger and WS-broadcast subscribers only.
 
 ### Poller emission — diff against snapshot
 
