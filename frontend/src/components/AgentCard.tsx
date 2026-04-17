@@ -38,7 +38,9 @@ export default function AgentCard({ task, run, messages, onRequeue, onReview }: 
   }, [isActive])
 
   const elapsed =
-    !isActive && run.DurationMs ? formatDurationMs(run.DurationMs) : formatElapsed(run.StartedAt, now)
+    !isActive && run.DurationMs
+      ? formatDurationMs(run.DurationMs)
+      : formatElapsed(run.StartedAt, now)
   const isFailed = run.Status === 'failed'
   const isCancelled = run.Status === 'cancelled'
   const isPendingApproval = run.Status === 'pending_approval'
@@ -109,10 +111,9 @@ export default function AgentCard({ task, run, messages, onRequeue, onReview }: 
               task.source === 'github' ? 'bg-black/[0.04]' : 'bg-blue-500/10 text-blue-600'
             }`}
           >
-            {task.source === 'github' ? 'GH' : 'Jira'}
+            {task.source === 'github' ? (task.entity_kind === 'pr' ? 'PR' : 'GH') : 'Jira'}
           </span>
-          {task.repo && <span>{task.repo}</span>}
-          {task.source === 'github' && <span>#{task.source_id.split('#').pop()}</span>}
+          <span className="truncate">{task.source_id}</span>
         </div>
       </div>
 
@@ -252,22 +253,12 @@ function renderActivityLog(messages: AgentMessage[], isActive: boolean, run: Age
         key="result-summary"
         className="mx-2 my-2 rounded-xl backdrop-blur-sm bg-white/50 border border-border-glass p-3.5"
       >
-        <div className="flex items-center justify-between mb-2">
+        <div className="mb-2">
           <span
             className={`text-[11px] font-semibold tracking-wide ${isFailed ? 'text-dismiss' : 'text-text-primary'}`}
           >
             {run.Status === 'cancelled' ? '◼ Cancelled' : isFailed ? '✗ Failed' : '✓ Done'}
           </span>
-          {run.ResultLink && (
-            <a
-              href={run.ResultLink}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-[11px] text-accent hover:text-accent/70 font-medium transition-colors"
-            >
-              View →
-            </a>
-          )}
         </div>
         <p className="text-[12px] leading-relaxed text-text-secondary">{run.ResultSummary}</p>
       </div>,

@@ -23,19 +23,8 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
         {...props}
       >
         <div className="flex items-center gap-2 mb-2">
-          <span
-            className={`text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded ${
-              task.source === 'github'
-                ? 'bg-black/[0.04] text-text-secondary'
-                : 'bg-blue-500/10 text-blue-600'
-            }`}
-          >
-            {task.source === 'github' ? 'GH' : 'Jira'}
-          </span>
+          <SourceBadge task={task} />
           <EventBadge eventType={task.event_type} compact />
-          {task.repo && (
-            <span className="text-[11px] text-text-tertiary truncate">{task.repo}</span>
-          )}
         </div>
 
         <h3 className="text-[13px] font-semibold text-text-primary leading-snug line-clamp-2 mb-1">
@@ -48,17 +37,6 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
 
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-[11px] text-text-tertiary">
-            {task.author && <span>{task.author}</span>}
-            {(task.diff_additions || task.diff_deletions) && (
-              <span>
-                {task.diff_additions ? (
-                  <span className="text-claim">+{task.diff_additions}</span>
-                ) : null}
-                {task.diff_deletions ? (
-                  <span className="text-dismiss ml-1">-{task.diff_deletions}</span>
-                ) : null}
-              </span>
-            )}
             <span>{age}</span>
           </div>
 
@@ -95,6 +73,19 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
 
 TaskCard.displayName = 'TaskCard'
 export default TaskCard
+
+function SourceBadge({ task }: { task: Task }) {
+  const isGitHub = task.source === 'github'
+  return (
+    <span
+      className={`text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded ${
+        isGitHub ? 'bg-black/[0.04] text-text-secondary' : 'bg-blue-500/10 text-blue-600'
+      }`}
+    >
+      {isGitHub ? (task.entity_kind === 'pr' ? 'PR' : 'GH') : 'Jira'}
+    </span>
+  )
+}
 
 function formatAge(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime()

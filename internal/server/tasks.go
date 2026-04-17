@@ -31,17 +31,6 @@ type taskJSON struct {
 	AISummary           string   `json:"ai_summary,omitempty"`
 	PriorityReasoning   string   `json:"priority_reasoning,omitempty"`
 	CloseReason         string   `json:"close_reason,omitempty"`
-	// Legacy fields — kept in the API response at zero values so the
-	// frontend doesn't break on missing keys. Will be removed when the
-	// frontend is updated to the entity model.
-	Repo          string   `json:"repo,omitempty"`
-	Author        string   `json:"author,omitempty"`
-	Labels        []string `json:"labels"`
-	Description   string   `json:"description,omitempty"`
-	DiffAdditions int      `json:"diff_additions,omitempty"`
-	DiffDeletions int      `json:"diff_deletions,omitempty"`
-	FilesChanged  int      `json:"files_changed,omitempty"`
-	CIStatus      string   `json:"ci_status,omitempty"`
 }
 
 func taskToJSON(t domain.Task) taskJSON {
@@ -64,7 +53,6 @@ func taskToJSON(t domain.Task) taskJSON {
 		AISummary:           t.AISummary,
 		PriorityReasoning:   t.PriorityReasoning,
 		CloseReason:         t.CloseReason,
-		Labels:              []string{}, // empty, not nil — keeps JSON as []
 	}
 }
 

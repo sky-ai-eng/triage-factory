@@ -3,38 +3,12 @@ import { motion, useMotionValue, useTransform, AnimatePresence } from 'motion/re
 import type { PanInfo } from 'motion/react'
 import * as Tooltip from '@radix-ui/react-tooltip'
 import { useNavigate } from 'react-router-dom'
-import type { WSEvent } from '../types'
+import type { Task, WSEvent } from '../types'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { SlidersHorizontal } from 'lucide-react'
 import EventBadge from '../components/EventBadge'
 import PromptPicker from '../components/PromptPicker'
 import TaskRulesPanel from '../components/TaskRulesPanel'
-
-interface Task {
-  id: string
-  source: string
-  source_id: string
-  source_url: string
-  title: string
-  description?: string
-  repo?: string
-  author?: string
-  labels: string[]
-  severity?: string
-  diff_additions?: number
-  diff_deletions?: number
-  files_changed?: number
-  ci_status?: string
-  relevance_reason?: string
-  event_type?: string
-  scoring_status: string
-  created_at: string
-  status: string
-  priority_score: number | null
-  ai_summary?: string
-  priority_reasoning?: string
-  agent_confidence: number | null
-}
 
 type SwipeAction = 'claim' | 'dismiss' | 'snooze' | 'delegate'
 type LoadState = 'loading' | 'empty' | 'ready'
@@ -464,10 +438,13 @@ function SwipeCard({
                 : 'bg-blue-500/10 text-blue-600'
             }`}
           >
-            {task.source === 'github' ? 'GitHub' : 'Jira'}
+            {task.source === 'github'
+              ? task.entity_kind === 'pr'
+                ? 'Pull Request'
+                : 'GitHub'
+              : 'Jira'}
           </span>
           <EventBadge eventType={task.event_type} />
-          {task.repo && <span className="text-[12px] text-text-tertiary">{task.repo}</span>}
           {task.severity && (
             <span className="text-[11px] font-medium text-accent bg-accent-soft px-2 py-0.5 rounded-full">
               {task.severity}
@@ -517,62 +494,18 @@ function SwipeCard({
           </div>
         ) : null}
 
-        {/* Labels */}
-        {task.labels.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mb-3 shrink-0">
-            {task.labels.slice(0, 4).map((label) => (
-              <span
-                key={label}
-                className="text-[11px] text-text-tertiary bg-black/[0.04] px-2.5 py-0.5 rounded-full"
-              >
-                {label}
-              </span>
-            ))}
-          </div>
-        )}
-
         {/* Spacer */}
         <div className="flex-1" />
 
         {/* Metadata footer */}
         <div className="flex items-end justify-between shrink-0">
-          <div className="flex flex-col gap-0.5 text-[12px] text-text-tertiary">
-            <div className="flex items-center gap-1.5">
-              {task.author && <span>{task.author}</span>}
-              {task.author && <span className="opacity-30">·</span>}
-              <span>{age}</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              {task.diff_additions || task.diff_deletions ? (
-                <>
-                  <span className="inline-flex gap-1">
-                    {task.diff_additions ? (
-                      <span className="text-claim font-medium">
-                        +{compactNum(task.diff_additions)}
-                      </span>
-                    ) : null}
-                    {task.diff_deletions ? (
-                      <span className="text-dismiss font-medium">
-                        -{compactNum(task.diff_deletions)}
-                      </span>
-                    ) : null}
-                  </span>
-                  {task.files_changed != null && task.files_changed > 0 && (
-                    <>
-                      <span className="opacity-30">·</span>
-                      <span>{task.files_changed} files</span>
-                    </>
-                  )}
-                </>
-              ) : task.files_changed != null && task.files_changed > 0 ? (
-                <span>{task.files_changed} files</span>
-              ) : null}
-            </div>
+          <div className="text-[12px] text-text-tertiary">
+            <span>{age}</span>
           </div>
 
           <div className="flex items-center gap-3">
-            {task.agent_confidence != null ? (
-              <ConfidenceGauge value={task.agent_confidence} />
+            {task.autonomy_suitability != null ? (
+              <ConfidenceGauge value={task.autonomy_suitability} />
             ) : isScoring ? (
               <div className="w-7 h-[18px] rounded bg-black/[0.04] animate-pulse" />
             ) : null}
@@ -736,11 +669,6 @@ function ScoringShimmer() {
       </div>
     </div>
   )
-}
-
-function compactNum(n: number): string {
-  if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
-  return String(n)
 }
 
 function formatAge(dateStr: string): string {
