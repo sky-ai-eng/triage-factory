@@ -42,10 +42,13 @@ export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
     setLoading(true)
 
     fetch('/api/task-rules')
-      .then((r) => r.json())
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        return r.json()
+      })
       .then((data) => {
         if (!cancelled) {
-          setRules(data || [])
+          setRules(Array.isArray(data) ? data : [])
           setLoading(false)
         }
       })
