@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
+import * as Tooltip from '@radix-ui/react-tooltip'
 import { X } from 'lucide-react'
 import PredicateEditor from './PredicateEditor'
 import type { TaskRule, EventType } from '../types'
@@ -227,169 +228,173 @@ export default function TaskRuleEditor({
             exit={{ opacity: 0, scale: 0.95 }}
             transition={{ duration: 0.15 }}
           >
-            <div className="pointer-events-auto bg-surface-raised/95 backdrop-blur-2xl border border-border-glass rounded-2xl shadow-2xl shadow-black/10 w-[520px] max-h-[85vh] flex flex-col overflow-hidden">
-              {/* Header */}
-              <div className="px-6 pt-5 pb-3 flex items-center justify-between shrink-0">
-                <h2 className="text-[15px] font-semibold text-text-primary">
-                  {isEdit ? 'Edit Task Rule' : 'New Task Rule'}
-                </h2>
-                <button
-                  onClick={onClose}
-                  className="text-text-tertiary hover:text-text-secondary transition-colors"
-                >
-                  <X size={18} />
-                </button>
-              </div>
-
-              {/* Body — scrollable */}
-              <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5 min-h-0">
-                {/* Event type */}
-                <div>
-                  <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
-                    Event type
-                  </label>
-                  <select
-                    value={eventType}
-                    onChange={(e) => setEventType(e.target.value)}
-                    disabled={isEdit}
-                    className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <option value="">Select event type…</option>
-                    {eventTypes
-                      .filter((et) => et.source !== 'system')
-                      .map((et) => (
-                        <option key={et.id} value={et.id}>
-                          {et.label} ({et.id})
-                        </option>
-                      ))}
-                  </select>
-                </div>
-
-                {/* Name */}
-                <div>
-                  <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
-                    Name
-                  </label>
-                  <input
-                    type="text"
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    placeholder="e.g. CI failures on my PRs"
-                    className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors"
-                  />
-                </div>
-
-                {/* Predicate */}
-                {eventType && (
-                  <div>
-                    <label className="block text-[12px] font-medium text-text-secondary mb-2">
-                      When (predicate filter)
-                    </label>
-                    <div className="bg-black/[0.02] rounded-lg border border-border-subtle p-3">
-                      <PredicateEditor
-                        eventType={eventType}
-                        value={predicate}
-                        onChange={setPredicate}
-                      />
-                    </div>
-                    <p className="text-[11px] text-text-tertiary mt-1.5">
-                      Leave all fields on &ldquo;Any&rdquo; to match every event of this type.
-                    </p>
-                  </div>
-                )}
-
-                {/* Priority */}
-                <div>
-                  <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
-                    Default priority{' '}
-                    <span className="text-text-tertiary font-normal">({priority.toFixed(2)})</span>
-                  </label>
-                  <input
-                    type="range"
-                    min={0}
-                    max={1}
-                    step={0.05}
-                    value={priority}
-                    onChange={(e) => setPriority(parseFloat(e.target.value))}
-                    className="w-full accent-accent"
-                  />
-                  <div className="flex justify-between text-[10px] text-text-tertiary mt-0.5">
-                    <span>Low</span>
-                    <span>High</span>
-                  </div>
-                </div>
-
-                {/* Sort order */}
-                <div>
-                  <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
-                    Sort order
-                  </label>
-                  <input
-                    type="number"
-                    value={sortOrder}
-                    onChange={(e) => setSortOrder(parseInt(e.target.value) || 0)}
-                    className="w-[100px] px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors"
-                  />
-                  <p className="text-[11px] text-text-tertiary mt-1">
-                    Lower numbers appear first in the triage queue.
-                  </p>
-                </div>
-
-                {/* Enabled toggle — edit mode only */}
-                {isEdit && (
-                  <div className="flex items-center gap-3">
-                    <button
-                      type="button"
-                      onClick={() => setEnabled(!enabled)}
-                      className={`relative w-9 h-5 rounded-full transition-colors ${
-                        enabled ? 'bg-accent' : 'bg-black/10'
-                      }`}
-                    >
-                      <span
-                        className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
-                          enabled ? 'translate-x-4' : 'translate-x-0.5'
-                        }`}
-                      />
-                    </button>
-                    <span className="text-[13px] text-text-secondary">
-                      {enabled ? 'Enabled' : 'Disabled'}
-                    </span>
-                  </div>
-                )}
-              </div>
-
-              {/* Footer */}
-              <div className="px-6 py-4 border-t border-border-subtle flex items-center shrink-0">
-                {/* Left: delete */}
-                {isEdit && (
-                  <button
-                    onClick={handleDelete}
-                    disabled={deleting}
-                    className="text-[13px] font-medium text-dismiss hover:text-dismiss/80 transition-colors disabled:opacity-50"
-                  >
-                    {deleting ? 'Removing…' : rule?.source === 'system' ? 'Disable' : 'Delete'}
-                  </button>
-                )}
-
-                {/* Right: cancel + save */}
-                <div className="ml-auto flex items-center gap-3">
-                  {error && <span className="text-[12px] text-dismiss mr-2">{error}</span>}
+            <Tooltip.Provider delayDuration={300}>
+              <div className="pointer-events-auto bg-surface-raised/95 backdrop-blur-2xl border border-border-glass rounded-2xl shadow-2xl shadow-black/10 w-[520px] max-h-[85vh] flex flex-col overflow-hidden">
+                {/* Header */}
+                <div className="px-6 pt-5 pb-3 flex items-center justify-between shrink-0">
+                  <h2 className="text-[15px] font-semibold text-text-primary">
+                    {isEdit ? 'Edit Task Rule' : 'New Task Rule'}
+                  </h2>
                   <button
                     onClick={onClose}
-                    className="text-[13px] font-medium text-text-tertiary hover:text-text-secondary transition-colors"
+                    className="text-text-tertiary hover:text-text-secondary transition-colors"
                   >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handleSave}
-                    disabled={saving || !eventType || !name.trim()}
-                    className="text-[13px] font-semibold text-white bg-accent hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed px-5 py-2 rounded-full transition-colors"
-                  >
-                    {saving ? 'Saving…' : isEdit ? 'Save' : 'Create'}
+                    <X size={18} />
                   </button>
                 </div>
+
+                {/* Body — scrollable */}
+                <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5 min-h-0">
+                  {/* Event type */}
+                  <div>
+                    <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
+                      Event type
+                    </label>
+                    <select
+                      value={eventType}
+                      onChange={(e) => setEventType(e.target.value)}
+                      disabled={isEdit}
+                      className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <option value="">Select event type…</option>
+                      {eventTypes
+                        .filter((et) => et.source !== 'system')
+                        .map((et) => (
+                          <option key={et.id} value={et.id}>
+                            {et.label} ({et.id})
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+
+                  {/* Name */}
+                  <div>
+                    <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
+                      Name
+                    </label>
+                    <input
+                      type="text"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      placeholder="e.g. CI failures on my PRs"
+                      className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors"
+                    />
+                  </div>
+
+                  {/* Predicate */}
+                  {eventType && (
+                    <div>
+                      <label className="block text-[12px] font-medium text-text-secondary mb-2">
+                        When (predicate filter)
+                      </label>
+                      <div className="bg-black/[0.02] rounded-lg border border-border-subtle p-3">
+                        <PredicateEditor
+                          eventType={eventType}
+                          value={predicate}
+                          onChange={setPredicate}
+                        />
+                      </div>
+                      <p className="text-[11px] text-text-tertiary mt-1.5">
+                        Leave all fields on &ldquo;Any&rdquo; to match every event of this type.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Priority */}
+                  <div>
+                    <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
+                      Default priority{' '}
+                      <span className="text-text-tertiary font-normal">
+                        ({priority.toFixed(2)})
+                      </span>
+                    </label>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      value={priority}
+                      onChange={(e) => setPriority(parseFloat(e.target.value))}
+                      className="w-full accent-accent"
+                    />
+                    <div className="flex justify-between text-[10px] text-text-tertiary mt-0.5">
+                      <span>Low</span>
+                      <span>High</span>
+                    </div>
+                  </div>
+
+                  {/* Sort order */}
+                  <div>
+                    <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
+                      Sort order
+                    </label>
+                    <input
+                      type="number"
+                      value={sortOrder}
+                      onChange={(e) => setSortOrder(parseInt(e.target.value) || 0)}
+                      className="w-[100px] px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors"
+                    />
+                    <p className="text-[11px] text-text-tertiary mt-1">
+                      Lower numbers appear first in the triage queue.
+                    </p>
+                  </div>
+
+                  {/* Enabled toggle — edit mode only */}
+                  {isEdit && (
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => setEnabled(!enabled)}
+                        className={`relative w-9 h-5 rounded-full transition-colors ${
+                          enabled ? 'bg-accent' : 'bg-black/10'
+                        }`}
+                      >
+                        <span
+                          className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
+                            enabled ? 'translate-x-4' : 'translate-x-0.5'
+                          }`}
+                        />
+                      </button>
+                      <span className="text-[13px] text-text-secondary">
+                        {enabled ? 'Enabled' : 'Disabled'}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Footer */}
+                <div className="px-6 py-4 border-t border-border-subtle flex items-center shrink-0">
+                  {/* Left: delete */}
+                  {isEdit && (
+                    <button
+                      onClick={handleDelete}
+                      disabled={deleting}
+                      className="text-[13px] font-medium text-dismiss hover:text-dismiss/80 transition-colors disabled:opacity-50"
+                    >
+                      {deleting ? 'Removing…' : rule?.source === 'system' ? 'Disable' : 'Delete'}
+                    </button>
+                  )}
+
+                  {/* Right: cancel + save */}
+                  <div className="ml-auto flex items-center gap-3">
+                    {error && <span className="text-[12px] text-dismiss mr-2">{error}</span>}
+                    <button
+                      onClick={onClose}
+                      className="text-[13px] font-medium text-text-tertiary hover:text-text-secondary transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleSave}
+                      disabled={saving || !eventType || !name.trim()}
+                      className="text-[13px] font-semibold text-white bg-accent hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed px-5 py-2 rounded-full transition-colors"
+                    >
+                      {saving ? 'Saving…' : isEdit ? 'Save' : 'Create'}
+                    </button>
+                  </div>
+                </div>
               </div>
-            </div>
+            </Tooltip.Provider>
           </motion.div>
         </>
       )}
