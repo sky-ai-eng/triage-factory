@@ -115,9 +115,9 @@ export default function EventFilterPanel({ open, onToggle, onChange }: Props) {
             {/* Invisible backdrop — click to close */}
             <motion.div
               className="fixed inset-0 z-40"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
+              initial={{ opacity: 0, pointerEvents: 'none' as const }}
+              animate={{ opacity: 1, pointerEvents: 'auto' as const }}
+              exit={{ opacity: 0, pointerEvents: 'none' as const }}
               onClick={onToggle}
             />
             <motion.div
