@@ -253,7 +253,10 @@ export default function TaskRuleEditor({
                     </label>
                     <select
                       value={eventType}
-                      onChange={(e) => setEventType(e.target.value)}
+                      onChange={(e) => {
+                        setEventType(e.target.value)
+                        setPredicate({}) // Reset predicate when switching event types in create mode.
+                      }}
                       disabled={isEdit}
                       className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >

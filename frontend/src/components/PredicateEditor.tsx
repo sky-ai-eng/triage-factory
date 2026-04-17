@@ -42,13 +42,9 @@ export default function PredicateEditor({ eventType, value, onChange }: Predicat
         }
       })
 
-    // Reset predicate when event type changes.
-    onChange({})
-
     return () => {
       cancelled = true
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- onChange is stable, eventType is the trigger
   }, [eventType])
 
   const setField = (name: string, val: unknown) => {
