@@ -230,15 +230,17 @@ function SortableRuleRow({
   }
 
   return (
-    <div ref={setNodeRef} style={style} className="flex items-start gap-1 group">
-      {/* Drag handle */}
-      <button
-        {...attributes}
-        {...listeners}
-        className="mt-3.5 shrink-0 cursor-grab active:cursor-grabbing text-text-tertiary/40 hover:text-text-tertiary transition-colors"
-      >
+    <div
+      ref={setNodeRef}
+      style={style}
+      {...attributes}
+      {...listeners}
+      className="flex items-start gap-1 group cursor-grab active:cursor-grabbing"
+    >
+      {/* Drag affordance icon */}
+      <div className="mt-3.5 shrink-0 text-text-tertiary/30 group-hover:text-text-tertiary/60 transition-colors">
         <GripVertical size={14} />
-      </button>
+      </div>
 
       {/* Row content — click to edit */}
       <button
