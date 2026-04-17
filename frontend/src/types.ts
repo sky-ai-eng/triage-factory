@@ -102,6 +102,31 @@ export interface PromptTrigger {
   updated_at: string
 }
 
+export interface TaskRule {
+  id: string
+  event_type: string
+  scope_predicate_json: string | null
+  enabled: boolean
+  name: string
+  default_priority: number
+  sort_order: number
+  source: 'system' | 'user'
+  created_at: string
+  updated_at: string
+}
+
+export interface FieldSchema {
+  name: string
+  type: 'bool' | 'string' | 'int' | 'string_list'
+  enum_values?: string[]
+  description?: string
+}
+
+export interface EventSchema {
+  event_type: string
+  fields: FieldSchema[]
+}
+
 export type WSEvent =
   | { type: 'agent_run_update'; run_id: string; data: { status: string } }
   | { type: 'agent_message'; run_id: string; data: AgentMessage }

@@ -28,16 +28,3 @@ func ListEventTypes(db *sql.DB) ([]domain.EventType, error) {
 	}
 	return types, rows.Err()
 }
-
-// UpdateEventTypeEnabled is a no-op shim. The events_catalog is read-only;
-// the enabled concern moved to task_rules. Kept so the existing HTTP handler
-// compiles. Sub-ticket SKY-180 will rewrite the handler around task_rules CRUD.
-func UpdateEventTypeEnabled(db *sql.DB, id string, enabled bool) error {
-	return nil
-}
-
-// ReorderEventTypes is a no-op shim. The events_catalog is read-only; sort
-// order moved to task_rules. Kept so the existing HTTP handler compiles.
-func ReorderEventTypes(db *sql.DB, ids []string) error {
-	return nil
-}

@@ -27,6 +27,7 @@ interface EventType {
 
 interface GraphProps {
   onPromptClick?: (promptId: string) => void
+  onTriggerDeleted?: (eventType: string, predicate?: string | null) => void
 }
 
 // --- Custom Nodes ---
@@ -196,7 +197,7 @@ function saveLayout(layout: SavedLayout) {
 
 // --- Inner Graph ---
 
-function BindingGraphInner({ onPromptClick }: GraphProps) {
+function BindingGraphInner({ onPromptClick, onTriggerDeleted }: GraphProps) {
   const [eventTypes, setEventTypes] = useState<EventType[]>([])
   const [prompts, setPrompts] = useState<Prompt[]>([])
   const [triggers, setTriggers] = useState<PromptTrigger[]>([])
@@ -216,6 +217,8 @@ function BindingGraphInner({ onPromptClick }: GraphProps) {
   triggersRef.current = triggers
   const onPromptClickRef = useRef(onPromptClick)
   onPromptClickRef.current = onPromptClick
+  const onTriggerDeletedRef = useRef(onTriggerDeleted)
+  onTriggerDeletedRef.current = onTriggerDeleted
 
   const fetchAll = useCallback(async () => {
     const parseOrThrow = async (r: Response, label: string) => {
@@ -397,9 +400,15 @@ function BindingGraphInner({ onPromptClick }: GraphProps) {
 
   const doDeleteTrigger = useCallback(
     async (triggerId: string) => {
+      // Capture trigger info before deletion for the forgiving banner callback.
+      const deleted = triggersRef.current.find((t) => t.id === triggerId)
       try {
         await fetch(`/api/triggers/${encodeURIComponent(triggerId)}`, { method: 'DELETE' })
-        fetchAll()
+        await fetchAll()
+        // Notify parent so it can check coverage and show the forgiving banner.
+        if (deleted) {
+          onTriggerDeletedRef.current?.(deleted.event_type)
+        }
       } catch {
         // ignore
       }

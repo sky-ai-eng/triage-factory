@@ -5,9 +5,10 @@ import * as Tooltip from '@radix-ui/react-tooltip'
 import { useNavigate } from 'react-router-dom'
 import type { WSEvent } from '../types'
 import { useWebSocket } from '../hooks/useWebSocket'
+import { SlidersHorizontal } from 'lucide-react'
 import EventBadge from '../components/EventBadge'
-import EventFilterPanel from '../components/EventFilterPanel'
 import PromptPicker from '../components/PromptPicker'
+import TaskRulesPanel from '../components/TaskRulesPanel'
 
 interface Task {
   id: string
@@ -47,7 +48,7 @@ export default function Cards() {
   const [cardStart, setCardStart] = useState(() => Date.now())
   const [undoTask, setUndoTask] = useState<{ id: string; action: string } | null>(null)
   const [showPromptPicker, setShowPromptPicker] = useState(false)
-  const [filterOpen, setFilterOpen] = useState(false)
+  const [rulesOpen, setRulesOpen] = useState(false)
   const hasFetched = useRef(false)
   const navigate = useNavigate()
 
@@ -193,13 +194,21 @@ export default function Cards() {
           <span className="text-accent text-2xl">~</span>
         </div>
         <p className="text-text-secondary text-sm">All clear. Nothing to triage.</p>
-        <div className="relative">
-          <EventFilterPanel
-            open={filterOpen}
-            onToggle={() => setFilterOpen((o) => !o)}
-            onChange={() => fetchQueue()}
-          />
+        <div className="flex items-center gap-2 relative">
+          <button
+            onClick={() => setRulesOpen((o) => !o)}
+            className={`flex items-center gap-1.5 text-[12px] font-medium px-3 py-1.5 rounded-full border transition-colors ${
+              rulesOpen
+                ? 'bg-accent/10 text-accent border-accent/20'
+                : 'text-text-tertiary border-border-subtle hover:text-text-secondary'
+            }`}
+            title="Task rules"
+          >
+            <SlidersHorizontal size={14} />
+            <span>Rules</span>
+          </button>
         </div>
+        <TaskRulesPanel open={rulesOpen} onClose={() => setRulesOpen(false)} />
       </div>
     )
   }
@@ -212,11 +221,18 @@ export default function Cards() {
           <p className="text-[13px] text-text-tertiary font-medium tracking-wide">
             {tasks.length} item{tasks.length !== 1 ? 's' : ''} in queue
           </p>
-          <EventFilterPanel
-            open={filterOpen}
-            onToggle={() => setFilterOpen((o) => !o)}
-            onChange={() => fetchQueue()}
-          />
+          <button
+            onClick={() => setRulesOpen((o) => !o)}
+            className={`flex items-center gap-1.5 text-[12px] font-medium px-3 py-1.5 rounded-full border transition-colors ${
+              rulesOpen
+                ? 'bg-accent/10 text-accent border-accent/20'
+                : 'text-text-tertiary border-border-subtle hover:text-text-secondary'
+            }`}
+            title="Task rules"
+          >
+            <SlidersHorizontal size={14} />
+            <span>Rules</span>
+          </button>
         </div>
 
         {/* Card stack */}
@@ -309,6 +325,8 @@ export default function Cards() {
           navigate('/prompts')
         }}
       />
+
+      <TaskRulesPanel open={rulesOpen} onClose={() => setRulesOpen(false)} />
     </Tooltip.Provider>
   )
 }
