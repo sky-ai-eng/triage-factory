@@ -345,13 +345,13 @@ export default function TaskRuleEditor({
                       <button
                         type="button"
                         onClick={() => setEnabled(!enabled)}
-                        className={`relative w-9 h-5 rounded-full transition-colors ${
+                        className={`relative w-8 h-[18px] rounded-full transition-colors ${
                           enabled ? 'bg-accent' : 'bg-black/10'
                         }`}
                       >
                         <span
-                          className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
-                            enabled ? 'translate-x-4' : 'translate-x-0.5'
+                          className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white shadow transition-transform ${
+                            enabled ? 'translate-x-[14px]' : 'translate-x-[2px]'
                           }`}
                         />
                       </button>
