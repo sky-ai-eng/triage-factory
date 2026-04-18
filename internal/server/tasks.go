@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -134,17 +135,34 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 
 	response := map[string]any{"status": newStatus}
 
-	// On claim: if Jira task, assign to self and transition to in-progress
+	// On claim: if Jira task, assign to self and transition to in-progress.
+	// Claim guard: with multiple tasks per entity, a second claim on the same
+	// Jira issue would re-assign + re-transition redundantly (and probably error).
+	// Check current state first and skip mutations that are already done.
 	if req.Action == "claim" && s.jiraClient != nil && s.jiraInProgressStatus != "" {
 		task, err := db.GetTask(s.db, id)
 		if err == nil && task != nil && task.EntitySource == "jira" {
 			go func(issueKey, targetStatus string) {
-				if err := s.jiraClient.AssignToSelf(issueKey); err != nil {
-					log.Printf("[jira] failed to assign %s: %v", issueKey, err)
+				state := s.jiraClient.GetClaimState(issueKey)
+
+				needAssign := state == nil || !state.AssignedToSelf
+				needTransition := state == nil || !strings.EqualFold(state.StatusName, targetStatus)
+
+				if !needAssign && !needTransition {
+					log.Printf("[jira] claim guard: %s already assigned to self and in %q, skipping", issueKey, targetStatus)
 					return
 				}
-				if err := s.jiraClient.TransitionTo(issueKey, targetStatus); err != nil {
-					log.Printf("[jira] failed to transition %s to %q: %v", issueKey, targetStatus, err)
+
+				if needAssign {
+					if err := s.jiraClient.AssignToSelf(issueKey); err != nil {
+						log.Printf("[jira] failed to assign %s: %v", issueKey, err)
+						return
+					}
+				}
+				if needTransition {
+					if err := s.jiraClient.TransitionTo(issueKey, targetStatus); err != nil {
+						log.Printf("[jira] failed to transition %s to %q: %v", issueKey, targetStatus, err)
+					}
 				}
 			}(task.EntitySourceID, s.jiraInProgressStatus)
 		}
@@ -204,9 +222,21 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Revert Jira ticket: unassign and transition back to original status
+	// Revert Jira ticket: unassign and transition back to original status.
+	// Undo guard: if someone else reassigned the issue or the status diverged
+	// from what we stored, don't step on their manual changes.
 	if task != nil && task.EntitySource == "jira" && task.SourceStatus != "" && s.jiraClient != nil {
 		go func(issueKey, originalStatus string) {
+			state := s.jiraClient.GetClaimState(issueKey)
+			if state != nil && !state.AssignedToSelf {
+				log.Printf("[jira] undo guard: %s reassigned to someone else, skipping undo", issueKey)
+				return
+			}
+			if state != nil && !strings.EqualFold(state.StatusName, s.jiraInProgressStatus) {
+				log.Printf("[jira] undo guard: %s status is %q (not %q), skipping undo", issueKey, state.StatusName, s.jiraInProgressStatus)
+				return
+			}
+
 			if err := s.jiraClient.Unassign(issueKey); err != nil {
 				log.Printf("[jira] failed to unassign %s on undo: %v", issueKey, err)
 			}

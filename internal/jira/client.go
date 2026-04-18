@@ -121,6 +121,43 @@ func (c *Client) TransitionTo(issueKey, targetStatusName string) error {
 	return fmt.Errorf("no transition to %q found (available: %s)", targetStatusName, strings.Join(available, ", "))
 }
 
+// ClaimState describes the assignee + status of a Jira issue, used by
+// claim guards to skip redundant API mutations on multi-task entities.
+type ClaimState struct {
+	AssignedToSelf bool
+	StatusName     string // current workflow status
+}
+
+// GetClaimState fetches the current assignee and status of an issue and
+// checks whether the assignee is the authenticated user. Returns nil on
+// any error — callers treat failure as "unknown, proceed normally".
+func (c *Client) GetClaimState(issueKey string) *ClaimState {
+	issue, err := c.GetIssue(issueKey)
+	if err != nil {
+		log.Printf("[jira] claim guard: failed to fetch %s: %v", issueKey, err)
+		return nil
+	}
+
+	myself, err := c.currentUser()
+	if err != nil {
+		log.Printf("[jira] claim guard: failed to get current user: %v", err)
+		return nil
+	}
+
+	state := &ClaimState{}
+	if issue.Fields.Status != nil {
+		state.StatusName = issue.Fields.Status.Name
+	}
+	if issue.Fields.Assignee != nil {
+		if myself.AccountID != "" {
+			state.AssignedToSelf = issue.Fields.Assignee.AccountID == myself.AccountID
+		} else {
+			state.AssignedToSelf = issue.Fields.Assignee.Name == myself.Name
+		}
+	}
+	return state
+}
+
 // Issue represents core fields of a Jira issue.
 type Issue struct {
 	Key    string `json:"key"`
