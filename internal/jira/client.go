@@ -8,15 +8,18 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
 // Client wraps the Jira REST API v2.
 type Client struct {
-	baseURL    string
-	pat        string
-	http       *http.Client
-	cachedSelf *currentUserResponse // lazily populated by currentUser()
+	baseURL  string
+	pat      string
+	http     *http.Client
+	selfOnce sync.Once
+	selfVal  *currentUserResponse
+	selfErr  error
 }
 
 func NewClient(baseURL, pat string) *Client {
@@ -466,19 +469,20 @@ type currentUserResponse struct {
 }
 
 func (c *Client) currentUser() (*currentUserResponse, error) {
-	if c.cachedSelf != nil {
-		return c.cachedSelf, nil
-	}
-	body, err := c.get(fmt.Sprintf("%s/rest/api/2/myself", c.baseURL))
-	if err != nil {
-		return nil, err
-	}
-	var user currentUserResponse
-	if err := json.Unmarshal(body, &user); err != nil {
-		return nil, fmt.Errorf("parse myself: %w", err)
-	}
-	c.cachedSelf = &user
-	return &user, nil
+	c.selfOnce.Do(func() {
+		body, err := c.get(fmt.Sprintf("%s/rest/api/2/myself", c.baseURL))
+		if err != nil {
+			c.selfErr = err
+			return
+		}
+		var user currentUserResponse
+		if err := json.Unmarshal(body, &user); err != nil {
+			c.selfErr = fmt.Errorf("parse myself: %w", err)
+			return
+		}
+		c.selfVal = &user
+	})
+	return c.selfVal, c.selfErr
 }
 
 func (c *Client) getTransitions(issueKey string) ([]Transition, error) {
