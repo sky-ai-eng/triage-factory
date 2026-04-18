@@ -232,7 +232,7 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[jira] undo guard: %s reassigned to someone else, skipping undo", issueKey)
 				return
 			}
-			if state != nil && !strings.EqualFold(state.StatusName, s.jiraInProgressStatus) {
+			if state != nil && s.jiraInProgressStatus != "" && !strings.EqualFold(state.StatusName, s.jiraInProgressStatus) {
 				log.Printf("[jira] undo guard: %s status is %q (not %q), skipping undo", issueKey, state.StatusName, s.jiraInProgressStatus)
 				return
 			}
