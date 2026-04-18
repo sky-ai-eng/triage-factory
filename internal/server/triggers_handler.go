@@ -25,11 +25,12 @@ func (s *Server) handleTriggersList(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTriggerCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		PromptID           string `json:"prompt_id"`
-		EventType          string `json:"event_type"`
-		ScopePredicateJSON string `json:"scope_predicate_json"`
-		BreakerThreshold   int    `json:"breaker_threshold"`
-		CooldownSeconds    int    `json:"cooldown_seconds"`
+		PromptID               string   `json:"prompt_id"`
+		EventType              string   `json:"event_type"`
+		ScopePredicateJSON     string   `json:"scope_predicate_json"`
+		BreakerThreshold       int      `json:"breaker_threshold"`
+		CooldownSeconds        int      `json:"cooldown_seconds"`
+		MinAutonomySuitability *float64 `json:"min_autonomy_suitability"` // pointer: absent → default 0.0
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
@@ -62,6 +63,16 @@ func (s *Server) handleTriggerCreate(w http.ResponseWriter, r *http.Request) {
 		req.CooldownSeconds = 60
 	}
 
+	// Validate + default min_autonomy_suitability
+	var minAutonomy float64
+	if req.MinAutonomySuitability != nil {
+		minAutonomy = *req.MinAutonomySuitability
+		if minAutonomy < 0 || minAutonomy > 1 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "min_autonomy_suitability must be between 0 and 1"})
+			return
+		}
+	}
+
 	// Validate prompt exists
 	prompt, err := db.GetPrompt(s.db, req.PromptID)
 	if err != nil {
@@ -74,13 +85,14 @@ func (s *Server) handleTriggerCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	trigger := domain.PromptTrigger{
-		ID:               uuid.New().String(),
-		PromptID:         req.PromptID,
-		TriggerType:      domain.TriggerTypeEvent,
-		EventType:        req.EventType,
-		BreakerThreshold: req.BreakerThreshold,
-		CooldownSeconds:  req.CooldownSeconds,
-		Enabled:          true,
+		ID:                     uuid.New().String(),
+		PromptID:               req.PromptID,
+		TriggerType:            domain.TriggerTypeEvent,
+		EventType:              req.EventType,
+		BreakerThreshold:       req.BreakerThreshold,
+		CooldownSeconds:        req.CooldownSeconds,
+		MinAutonomySuitability: minAutonomy,
+		Enabled:                true,
 	}
 	// Empty canonical string → match-all → NULL in DB.
 	if canonicalPredicate != "" {
@@ -122,9 +134,10 @@ func (s *Server) handleTriggerUpdate(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
 	var req struct {
-		ScopePredicateJSON string `json:"scope_predicate_json"`
-		BreakerThreshold   int    `json:"breaker_threshold"`
-		CooldownSeconds    int    `json:"cooldown_seconds"`
+		ScopePredicateJSON     string  `json:"scope_predicate_json"`
+		BreakerThreshold       int     `json:"breaker_threshold"`
+		CooldownSeconds        int     `json:"cooldown_seconds"`
+		MinAutonomySuitability float64 `json:"min_autonomy_suitability"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
@@ -149,6 +162,10 @@ func (s *Server) handleTriggerUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cooldown_seconds must be >= 0"})
 		return
 	}
+	if req.MinAutonomySuitability < 0 || req.MinAutonomySuitability > 1 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "min_autonomy_suitability must be between 0 and 1"})
+		return
+	}
 
 	// Canonicalise the predicate against the existing event_type — the client
 	// can't change event_type on an update, so we use the trigger's current
@@ -163,6 +180,7 @@ func (s *Server) handleTriggerUpdate(w http.ResponseWriter, r *http.Request) {
 	updated := *existing
 	updated.BreakerThreshold = req.BreakerThreshold
 	updated.CooldownSeconds = req.CooldownSeconds
+	updated.MinAutonomySuitability = req.MinAutonomySuitability
 	if canonicalPredicate == "" {
 		updated.ScopePredicateJSON = nil
 	} else {

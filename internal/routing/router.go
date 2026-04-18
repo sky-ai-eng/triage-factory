@@ -253,6 +253,11 @@ func (r *Router) tryAutoDelegateWithCooldown(task *domain.Task, trigger domain.P
 // fireDelegate transitions the task to delegated status, broadcasts the
 // change, then fires the spawner.
 func (r *Router) fireDelegate(task *domain.Task, trigger domain.PromptTrigger) {
+	if r.spawner == nil {
+		log.Printf("[router] spawner not configured, skipping delegation for task %s", task.ID)
+		return
+	}
+
 	// Transition task queued → delegated BEFORE spawning so the frontend
 	// reflects the state change immediately and dedup logic sees it.
 	if err := dbpkg.SetTaskStatus(r.db, task.ID, "delegated"); err != nil {
@@ -296,6 +301,87 @@ func (r *Router) revertTaskStatus(taskID, status string) {
 		Type: "task_updated",
 		Data: map[string]any{"task_id": taskID, "status": status},
 	})
+}
+
+// --- Post-scoring re-derive (SKY-181) ------------------------------------
+
+// ReDeriveAfterScoring re-checks deferred triggers for tasks that just
+// received AI scores. Triggers with MinAutonomySuitability > 0 are skipped
+// during HandleEvent and deferred to this callback, which fires from the
+// scorer's OnScoringCompleted hook.
+func (r *Router) ReDeriveAfterScoring(taskIDs []string) {
+	// Global kill switch — same gate as HandleEvent step 9.
+	cfg, err := config.Load()
+	if err != nil || !cfg.AI.AutoDelegateEnabled {
+		return
+	}
+
+	for _, taskID := range taskIDs {
+		r.reDeriveTask(taskID)
+	}
+}
+
+func (r *Router) reDeriveTask(taskID string) {
+	task, err := dbpkg.GetTask(r.db, taskID)
+	if err != nil || task == nil {
+		return
+	}
+
+	// Only re-derive queued tasks — claimed/delegated/done are already handled.
+	if task.Status != "queued" {
+		return
+	}
+
+	// No score landed — nothing to gate against.
+	if task.AutonomySuitability == nil {
+		return
+	}
+
+	// Fetch triggers for this event type.
+	triggers, err := dbpkg.GetActiveTriggersForEvent(r.db, task.EventType)
+	if err != nil {
+		log.Printf("[router] re-derive: failed to query triggers for %s: %v", task.EventType, err)
+		return
+	}
+
+	// Fetch the primary event's metadata for predicate matching.
+	metadata, err := dbpkg.GetEventMetadata(r.db, task.PrimaryEventID)
+	if err != nil {
+		log.Printf("[router] re-derive: failed to fetch event metadata for %s: %v", task.PrimaryEventID, err)
+		return
+	}
+
+	for _, trigger := range triggers {
+		// Only process deferred triggers — immediate ones already fired in HandleEvent.
+		if trigger.MinAutonomySuitability <= 0 {
+			continue
+		}
+
+		// Autonomy gate.
+		if *task.AutonomySuitability < trigger.MinAutonomySuitability {
+			log.Printf("[router] re-derive: task %s suitability %.2f < trigger %s threshold %.2f, skipping",
+				taskID, *task.AutonomySuitability, trigger.ID, trigger.MinAutonomySuitability)
+			continue
+		}
+
+		// Predicate match — same logic as HandleEvent step 6.
+		predJSON := ""
+		if trigger.ScopePredicateJSON != nil {
+			predJSON = *trigger.ScopePredicateJSON
+		}
+		matched, err := matchPredicate(task.EventType, predJSON, metadata)
+		if err != nil {
+			log.Printf("[router] re-derive: trigger %s predicate error: %v", trigger.ID, err)
+			continue
+		}
+		if !matched {
+			continue
+		}
+
+		log.Printf("[router] re-derive: task %s suitability %.2f >= trigger %s threshold %.2f, firing",
+			taskID, *task.AutonomySuitability, trigger.ID, trigger.MinAutonomySuitability)
+		r.tryAutoDelegate(task, trigger, task.EntityID)
+	}
 }
 
 // --- Inline close checks --------------------------------------------------

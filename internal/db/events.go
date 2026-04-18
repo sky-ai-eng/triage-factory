@@ -96,6 +96,19 @@ func SetPollerState(db *sql.DB, source, sourceID, stateJSON string) error {
 	return err
 }
 
+// GetEventMetadata returns the metadata_json for a single event by ID.
+// Returns "" both when the event doesn't exist and when its metadata is
+// NULL — the caller (re-derive predicate matching) treats both as "no
+// metadata to match against", which is the correct behavior.
+func GetEventMetadata(db *sql.DB, eventID string) (string, error) {
+	var metadata string
+	err := db.QueryRow(`SELECT COALESCE(metadata_json, '') FROM events WHERE id = ?`, eventID).Scan(&metadata)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return metadata, err
+}
+
 // RecentEvents returns the most recent N events, newest first.
 func RecentEvents(db *sql.DB, limit int) ([]domain.Event, error) {
 	rows, err := db.Query(`

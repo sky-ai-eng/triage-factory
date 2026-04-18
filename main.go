@@ -131,6 +131,10 @@ func main() {
 	// Profile gate — scorer waits for this before running
 	profileGate := repoprofile.NewProfileGate(database)
 
+	// Declare eventRouter early so the scorer callback can reference it.
+	// Actual initialization happens below after the spawner is created.
+	var eventRouter *routing.Router
+
 	scorer := ai.NewRunner(database, ai.RunnerCallbacks{
 		OnScoringStarted: func(taskIDs []string) {
 			wsHub.Broadcast(websocket.Event{
@@ -143,6 +147,13 @@ func main() {
 				Type: "scoring_completed",
 				Data: map[string]any{"task_ids": taskIDs},
 			})
+			// Post-scoring re-derive: check deferred triggers whose
+			// min_autonomy_suitability threshold the scored tasks now meet.
+			// Runs async so it doesn't block the scorer from clearing its
+			// running flag and handling subsequent Trigger() calls.
+			if eventRouter != nil {
+				go eventRouter.ReDeriveAfterScoring(taskIDs)
+			}
 		},
 	})
 	scorer.SetProfileGate(profileGate.Ready)
@@ -165,10 +176,10 @@ func main() {
 	spawner := delegate.NewSpawner(database, nil, wsHub, "")
 	srv.SetSpawner(spawner)
 
-	// Subscriber: event router — records events, creates/bumps tasks, auto-
-	// delegates on matching triggers, runs inline close checks. Replaces the
-	// old "auto-delegate" subscriber.
-	eventRouter := routing.NewRouter(database, spawner, scorer, wsHub)
+	// Event router — records events, creates/bumps tasks, auto-delegates on
+	// matching triggers, runs inline close checks. Also handles post-scoring
+	// re-derive via the scorer callback wired above.
+	eventRouter = routing.NewRouter(database, spawner, scorer, wsHub)
 	bus.Subscribe(eventbus.Subscriber{
 		Name:   "router",
 		Filter: []string{"github:", "jira:"},
