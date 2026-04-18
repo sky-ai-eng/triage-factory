@@ -133,9 +133,17 @@ type ClaimState struct {
 // checks whether the assignee is the authenticated user. Returns nil on
 // any error — callers treat failure as "unknown, proceed normally".
 func (c *Client) GetClaimState(issueKey string) *ClaimState {
-	issue, err := c.GetIssue(issueKey)
+	// Fetch only assignee + status to minimize payload. The ?fields param
+	// works identically on Cloud and Server/DC (v2 REST API).
+	url := fmt.Sprintf("%s/rest/api/2/issue/%s?fields=assignee,status", c.baseURL, issueKey)
+	body, err := c.get(url)
 	if err != nil {
 		log.Printf("[jira] claim guard: failed to fetch %s: %v", issueKey, err)
+		return nil
+	}
+	var issue Issue
+	if err := json.Unmarshal(body, &issue); err != nil {
+		log.Printf("[jira] claim guard: failed to parse %s: %v", issueKey, err)
 		return nil
 	}
 
