@@ -169,8 +169,11 @@ func (s *Server) handleReposSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Trigger GitHub changed — re-profiles and restarts pollers
+	// Trigger GitHub changed — re-profiles and restarts pollers (including
+	// Jira). Mark Jira restarted synchronously so jiraPollReady flips false
+	// before the async callback starts.
 	if s.onGitHubChanged != nil {
+		s.MarkJiraRestarted()
 		go s.onGitHubChanged()
 	}
 

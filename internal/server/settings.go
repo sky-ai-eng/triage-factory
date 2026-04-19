@@ -292,11 +292,17 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 		cfg.Jira.DoneStatus != prevJiraDoneStatus ||
 		cfg.Jira.PollInterval != prevJiraPollInterval
 
+	// Mark Jira restarted synchronously before launching the async callback so
+	// jiraPollReady flips false before this request returns. Otherwise the
+	// frontend can race ahead and hit /api/jira/stock while the old state is
+	// still reported as ready.
 	if ghChanged && s.onGitHubChanged != nil {
 		// GitHub change triggers full restart (includes Jira poller restart)
+		s.MarkJiraRestarted()
 		go s.onGitHubChanged()
 	} else if jiraChanged && s.onJiraChanged != nil {
 		// Jira-only change — just restart Jira poller
+		s.MarkJiraRestarted()
 		go s.onJiraChanged()
 	}
 

@@ -193,7 +193,6 @@ func main() {
 
 		profileGate.Invalidate()
 		pollerMgr.StopAll()
-		srv.MarkJiraRestarted() // full restart cycles the Jira poller too
 
 		cfg, _ := config.Load()
 		creds, _ := auth.Load()
@@ -235,7 +234,6 @@ func main() {
 		cfg, _ := config.Load()
 		creds, _ := auth.Load()
 
-		srv.MarkJiraRestarted()
 		pollerMgr.RestartJira()
 
 		if creds.JiraPAT != "" && creds.JiraURL != "" {
