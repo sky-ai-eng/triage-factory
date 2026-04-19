@@ -30,13 +30,18 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
   const [saving, setSaving] = useState(false)
   const [selections, setSelections] = useState<Record<string, Action>>({})
 
-  // Keep a ref to whether the component is still mounted so retry timers don't
-  // setState after unmount.
+  // Keep refs for component lifecycle and polling so retry timers don't
+  // continue firing after unmount.
   const mountedRef = useRef(true)
+  const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
+      if (pollTimeoutRef.current) {
+        clearTimeout(pollTimeoutRef.current)
+        pollTimeoutRef.current = null
+      }
     }
   }, [])
 
@@ -56,7 +61,13 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
       if (!mountedRef.current) return
       if (data.status === 'polling') {
         setPolling(true)
-        setTimeout(fetchStock, POLL_INTERVAL_MS)
+        if (pollTimeoutRef.current) {
+          clearTimeout(pollTimeoutRef.current)
+        }
+        pollTimeoutRef.current = setTimeout(() => {
+          pollTimeoutRef.current = null
+          fetchStock()
+        }, POLL_INTERVAL_MS)
         return
       }
       setTickets(data.tickets || [])
