@@ -165,7 +165,10 @@ export default function Setup() {
   }
 
   const canSaveJiraConfig =
-    jiraForm.projects.trim() !== '' &&
+    jiraForm.projects
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean).length > 0 &&
     jiraForm.pickup_statuses.length > 0 &&
     jiraForm.in_progress_status !== ''
 
