@@ -1,4 +1,5 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
+import { RotateCw } from 'lucide-react'
 
 interface GitHubRepo {
   full_name: string
@@ -43,29 +44,31 @@ export default function RepoPickerModal({
   const [search, setSearch] = useState('')
   const [checked, setChecked] = useState<Set<string>>(new Set(selected))
 
-  useEffect(() => {
-    if (!cachedRepos) fetchRepos()
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const fetchRepos = async () => {
+  const fetchRepos = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
       const res = await fetch('/api/github/repos')
       if (!res.ok) {
-        const data = await res.json()
-        setError(data.error || 'Failed to fetch repos')
+        const data = await res.json().catch(() => ({}))
+        console.error('Failed to fetch repos:', data.error || `HTTP ${res.status}`)
+        setError('Failed to fetch repositories')
         return
       }
       const data: GitHubRepo[] = await res.json()
       setRepos(data)
       onReposFetched?.(data)
-    } catch {
-      setError('Could not connect to server')
+    } catch (err) {
+      console.error('Failed to fetch repos:', err)
+      setError('Failed to fetch repositories')
     } finally {
       setLoading(false)
     }
-  }
+  }, [onReposFetched])
+
+  useEffect(() => {
+    if (!cachedRepos) fetchRepos()
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const filtered = useMemo(() => {
     if (!search.trim()) return repos
@@ -134,8 +137,16 @@ export default function RepoPickerModal({
         )}
 
         {error && (
-          <div className="rounded-xl bg-dismiss/[0.08] border border-dismiss/20 px-4 py-2.5 text-[13px] text-dismiss">
-            {error}
+          <div className="flex flex-col items-center justify-center py-12 gap-3">
+            <div className="text-[13px] text-text-secondary text-center">{error}</div>
+            <button
+              type="button"
+              onClick={fetchRepos}
+              className="flex items-center gap-1.5 text-[12px] font-medium text-accent hover:text-accent/80 transition-colors"
+            >
+              <RotateCw size={13} />
+              Retry
+            </button>
           </div>
         )}
 
