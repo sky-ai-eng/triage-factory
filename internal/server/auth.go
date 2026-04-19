@@ -135,3 +135,12 @@ func (s *Server) handleAuthDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
 }
+
+// DELETE /api/auth/jira — clears Jira credentials only, preserving GitHub.
+func (s *Server) handleAuthDeleteJira(w http.ResponseWriter, r *http.Request) {
+	if err := auth.ClearJira(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
+}

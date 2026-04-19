@@ -203,8 +203,25 @@ export default function Setup() {
     }
   }
 
-  const backFromJiraConfig = () => {
+  const backFromJiraConfig = async () => {
     setError('')
+    // Disconnect Jira — clear stored credentials so the user must
+    // re-enter at least the PAT to reconnect.
+    try {
+      await fetch('/api/auth/jira', { method: 'DELETE' })
+    } catch {
+      // Best-effort — proceed with local state reset regardless.
+    }
+    setJiraConnected(false)
+    setJiraConfigured(false)
+    setJiraForm((f) => ({
+      ...f,
+      pat: '',
+      projects: '',
+      pickup_statuses: [],
+      in_progress_status: '',
+    }))
+    setJiraStatuses([])
     setStep('jira-creds')
   }
 

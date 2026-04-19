@@ -375,20 +375,37 @@ func (s *Server) handleJiraStatuses(w http.ResponseWriter, r *http.Request) {
 
 	client := jira.NewClient(creds.JiraURL, creds.JiraPAT)
 
-	// Collect statuses across all projects, deduplicated
-	seen := map[string]bool{}
-	var statuses []jira.Status
-	for _, proj := range projects {
+	// Intersect statuses across all projects — only return statuses that
+	// exist in every project. A union would let users pick a status that
+	// fails on some projects (TransitionTo can't find the transition).
+	var counts map[string]int            // status name → number of projects it appears in
+	var canonical map[string]jira.Status // status name → first-seen Status object
+	for i, proj := range projects {
 		projectStatuses, err := client.ProjectStatuses(proj)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch statuses for " + proj + ": " + err.Error()})
 			return
 		}
+		if i == 0 {
+			counts = make(map[string]int, len(projectStatuses))
+			canonical = make(map[string]jira.Status, len(projectStatuses))
+		}
+		seen := map[string]bool{}
 		for _, st := range projectStatuses {
 			if !seen[st.Name] {
 				seen[st.Name] = true
-				statuses = append(statuses, st)
+				counts[st.Name]++
+				if _, ok := canonical[st.Name]; !ok {
+					canonical[st.Name] = st
+				}
 			}
+		}
+	}
+
+	var statuses []jira.Status
+	for name, count := range counts {
+		if count == len(projects) {
+			statuses = append(statuses, canonical[name])
 		}
 	}
 
