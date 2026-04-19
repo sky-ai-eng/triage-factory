@@ -351,6 +351,12 @@ function TicketRow({
               <span>·</span>
             </>
           )}
+          {ticket.status && !ticket.already_done && (
+            <>
+              <span className="text-text-secondary font-medium">{ticket.status}</span>
+              {(ticket.issue_type || ticket.priority) && <span>·</span>}
+            </>
+          )}
           {ticket.issue_type && (
             <>
               <span>{ticket.issue_type}</span>
@@ -358,7 +364,7 @@ function TicketRow({
             </>
           )}
           {ticket.priority && <span>{ticket.priority}</span>}
-          {!ticket.issue_type && !ticket.priority && !ticket.parent_key && (
+          {!ticket.status && !ticket.issue_type && !ticket.priority && !ticket.parent_key && (
             <span className="italic">no metadata</span>
           )}
         </div>

@@ -480,7 +480,7 @@ export default function Setup() {
             </div>
 
             {jiraStatuses.length > 0 && (
-              <div className="space-y-6">
+              <div className="space-y-4">
                 <JiraStatusRule
                   label="Pickup"
                   description="Poll for unassigned tickets in these states."
@@ -491,21 +491,21 @@ export default function Setup() {
                 />
                 <JiraStatusRule
                   label="In progress"
-                  description="Statuses that count as actively being worked on. Many teams have just one; some have several (e.g. In Progress, In Review)."
+                  description="Count as actively being worked on."
                   allStatuses={jiraStatuses}
                   value={jiraForm.in_progress}
                   onChange={(v) => setJiraForm((f) => ({ ...f, in_progress: v }))}
                   requireCanonical={true}
-                  canonicalPrompt="When TF claims a ticket, set Jira status to"
+                  canonicalPrompt="Claim →"
                 />
                 <JiraStatusRule
                   label="Done"
-                  description="Statuses that count as complete. Add every variant your team uses (e.g. Resolved + Verified) so TF auto-closes tickets in any of them."
+                  description="Count as complete (add every variant — e.g. Resolved + Verified)."
                   allStatuses={jiraStatuses}
                   value={jiraForm.done}
                   onChange={(v) => setJiraForm((f) => ({ ...f, done: v }))}
                   requireCanonical={true}
-                  canonicalPrompt="When TF marks a ticket done, set Jira status to"
+                  canonicalPrompt="Complete →"
                 />
               </div>
             )}

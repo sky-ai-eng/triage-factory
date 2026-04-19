@@ -79,14 +79,14 @@ Link discovery sources:
 
 Every poller-detected change or system-emitted signal. Append-only.
 
-| column          | type                   | notes                                                        |
-| --------------- | ---------------------- | ------------------------------------------------------------ |
-| `id`            | TEXT PK                | UUID                                                         |
-| `entity_id`     | TEXT FK → entities(id) | nullable; in practice always set in v1 (system events aren't persisted — see "System bookkeeping" in Event routing) |
-| `event_type`    | TEXT NOT NULL          | `github:pr:ci_check_failed`, `system:prompt:auto_suspended`, etc. |
+| column          | type                     | notes                                                                                                                                         |
+| --------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`            | TEXT PK                  | UUID                                                                                                                                          |
+| `entity_id`     | TEXT FK → entities(id)   | nullable; in practice always set in v1 (system events aren't persisted — see "System bookkeeping" in Event routing)                           |
+| `event_type`    | TEXT NOT NULL            | `github:pr:ci_check_failed`, `system:prompt:auto_suspended`, etc.                                                                             |
 | `dedup_key`     | TEXT NOT NULL DEFAULT '' | open-set discriminator value (label name, status name); empty for events that dedup purely on event_type. See "Dedup key" in routing section. |
-| `metadata_json` | TEXT                   | structured detail, shape defined by per-event-type Go struct |
-| `created_at`    | DATETIME               |                                                              |
+| `metadata_json` | TEXT                     | structured detail, shape defined by per-event-type Go struct                                                                                  |
+| `created_at`    | DATETIME                 |                                                                                                                                               |
 
 **Index:** `(entity_id, created_at DESC)`, `(event_type, created_at DESC)`.
 
@@ -127,13 +127,13 @@ Declarative rules for creating tasks from events. Independent of automation. A u
 
 **Seeded defaults (v1):**
 
-| event_type                          | predicate              | why                                                              |
-| ----------------------------------- | ---------------------- | ---------------------------------------------------------------- |
-| `github:pr:ci_check_failed`         | `{AuthorIsSelf: true}` | failed checks on my own PRs need triage; ignore others' CI noise |
-| `github:pr:review_changes_requested` | `{AuthorIsSelf: true}` | a reviewer is blocking my PR — I need to act                     |
-| `github:pr:review_commented`        | `{AuthorIsSelf: true}` | someone left non-blocking comments on my PR — I should look      |
-| `github:pr:review_requested`        | (null — match-all)     | someone asked for my review — always surface                     |
-| `jira:issue:assigned`               | `{AssigneeIsSelf: true}` | assigned to me — surface; reassignments to others ignored        |
+| event_type                           | predicate                | why                                                              |
+| ------------------------------------ | ------------------------ | ---------------------------------------------------------------- |
+| `github:pr:ci_check_failed`          | `{AuthorIsSelf: true}`   | failed checks on my own PRs need triage; ignore others' CI noise |
+| `github:pr:review_changes_requested` | `{AuthorIsSelf: true}`   | a reviewer is blocking my PR — I need to act                     |
+| `github:pr:review_commented`         | `{AuthorIsSelf: true}`   | someone left non-blocking comments on my PR — I should look      |
+| `github:pr:review_requested`         | (null — match-all)       | someone asked for my review — always surface                     |
+| `jira:issue:assigned`                | `{AssigneeIsSelf: true}` | assigned to me — surface; reassignments to others ignored        |
 
 Users can disable or narrow any seeded rule, and adjust `default_priority` / `sort_order` to tune their queue. Predicate-driven events where the default scope isn't obvious (`new_commits`, `label_added`) ship with **no** default rule — user configures one if they want manual-triage surfacing, or a trigger's predicate implicitly handles it via the forgiving path.
 
@@ -166,8 +166,7 @@ There is no generalized cascade map. Tasks close via three explicit paths:
 
 1. **Run completion** — when a run terminates successfully on a task, that task closes (`close_reason=run_completed`). Already covered by the run lifecycle.
 2. **Entity lifecycle** — when an entity transitions to `closed` (e.g., `pr:merged`, `jira:issue:completed`), the state machine closes every active task on that entity (`close_reason=entity_closed`). Uniform; doesn't enumerate event types. See `entities` state machine below.
-3. **Inline narrow checks inside event handlers** — when a raw event arrives that *might* resolve a sibling task on the same entity, the handler does a targeted query and closes if appropriate. Each check is small, targeted, and lives next to the event that could trigger it. v1 examples:
-
+3. **Inline narrow checks inside event handlers** — when a raw event arrives that _might_ resolve a sibling task on the same entity, the handler does a targeted query and closes if appropriate. Each check is small, targeted, and lives next to the event that could trigger it. v1 examples:
    - `ci_check_passed` handler: query "any failing check-runs remain on this entity at the latest SHA?" — if no, close active `ci_check_failed` tasks on the entity (`close_reason=auto_closed_by_event`, `close_event_type=github:pr:ci_check_passed`).
    - `review_approved` / `review_commented` / `review_dismissed` handler: if this reviewer's most recent prior review on the same PR was `changes_requested` AND no other reviewer currently has an outstanding `changes_requested`, close active `review_changes_requested` tasks on the entity.
    - `review_submitted{reviewer_is_self: true}` handler: close any active `review_requested` task on the same entity (I submitted my review → the request is satisfied).
@@ -182,18 +181,18 @@ Anything not covered by one of these paths stays open until the user dismisses i
 - **Closed-enum discriminators** (CI conclusion: `failure` / `success`; review type: `approved` / `changes_requested` / `commented` / `dismissed`) → **split into separate event types.** The enum is small, stable, and typed event constants are self-documenting (`EventGitHubPRReviewApproved` reads better than `EventGitHubPRReviewReceived` + `Type: "approved"` predicate). So `ci_check_failed` / `ci_check_passed` are separate event types, as are `review_changes_requested` / `review_approved` / `review_commented` / `review_dismissed`.
 - **Open-set discriminators** (label name, Jira status, Linear status, project-configurable priority value) → **single event type with `dedup_key`** (see "Dedup key" below). The set is user/repo-defined and unbounded; you can't pre-enumerate event types for it.
 
-Attributes that don't change the *kind* of situation — reviewer identity, check name, repo, author — stay as metadata fields filterable by predicate. This keeps "parameterize don't split" intact for the Cartesian-product cases (`new_commits` doesn't fragment by author/draft/repo) while letting situation-changing closed-enum discriminators be first-class event types where dedup `(entity, event_type, dedup_key)` cleanly separates concerns.
+Attributes that don't change the _kind_ of situation — reviewer identity, check name, repo, author — stay as metadata fields filterable by predicate. This keeps "parameterize don't split" intact for the Cartesian-product cases (`new_commits` doesn't fragment by author/draft/repo) while letting situation-changing closed-enum discriminators be first-class event types where dedup `(entity, event_type, dedup_key)` cleanly separates concerns.
 
 **Dedup key (open-set discriminators).** Some events have a discriminator the schema can't enumerate at compile time (label name, status name). Adding a label `urgent` is a different situation than adding `wontfix` — both are `label_added` events but they shouldn't dedup together. To handle this, every event carries a `dedup_key TEXT` column (default empty string), and tasks dedup on `(entity_id, event_type, dedup_key)` instead of just `(entity_id, event_type)`.
 
-| event_type                       | dedup_key (set by emitter)         | effect                                                            |
-| -------------------------------- | ---------------------------------- | ----------------------------------------------------------------- |
-| `github:pr:ci_check_failed`      | `""` (empty)                       | one "CI failing" task per PR, bumped per failing check            |
-| `github:pr:review_changes_requested` | `""`                           | one "blocked" task per PR, bumped per blocking review             |
-| `github:pr:label_added`          | label name (`"self-review"`)       | one task per (PR, label) — different labels = different situations |
-| `github:pr:label_removed`        | label name                         | one task per (PR, label) for the removal                          |
-| `jira:issue:status_changed`      | new status name (`"In Review"`)    | one task per (issue, target status); bouncing back to same status bumps existing |
-| `github:pr:new_commits`          | `""`                               | one "new commits" task per PR                                     |
+| event_type                           | dedup_key (set by emitter)      | effect                                                                           |
+| ------------------------------------ | ------------------------------- | -------------------------------------------------------------------------------- |
+| `github:pr:ci_check_failed`          | `""` (empty)                    | one "CI failing" task per PR, bumped per failing check                           |
+| `github:pr:review_changes_requested` | `""`                            | one "blocked" task per PR, bumped per blocking review                            |
+| `github:pr:label_added`              | label name (`"self-review"`)    | one task per (PR, label) — different labels = different situations               |
+| `github:pr:label_removed`            | label name                      | one task per (PR, label) for the removal                                         |
+| `jira:issue:status_changed`          | new status name (`"In Review"`) | one task per (issue, target status); bouncing back to same status bumps existing |
+| `github:pr:new_commits`              | `""`                            | one "new commits" task per PR                                                    |
 
 Most events leave `dedup_key` empty — the event type itself is the unit of "what makes a situation distinct." Open-set events override at emission time. The split rule above (closed-enum discriminators get their own event_type) means `dedup_key` is rarely the right answer for those — only the genuinely open-set cases.
 
@@ -776,7 +775,7 @@ Walk-throughs of the key flows. If any requires contortion, the model is wrong.
 5. INSERT `task_events` (T1, each new event, kind=bumped).
 6. Auto-delegate subscriber evaluates the bump: trigger cooldown is 60s since T1 was created → skip. (If the bump arrives after the cooldown window, a second run R2 fires on the latest bumped state.)
 
-**Key point:** cooldown gates *subsequent* fires of the same trigger, not the initial fire on a fresh task. Auto-delegate always fires immediately on task creation if the trigger's gates (predicate, breaker, autonomy) pass — cooldown only kicks in for re-fires triggered by bumps.
+**Key point:** cooldown gates _subsequent_ fires of the same trigger, not the initial fire on a fresh task. Auto-delegate always fires immediately on task creation if the trigger's gates (predicate, breaker, autonomy) pass — cooldown only kicks in for re-fires triggered by bumps.
 
 **Tables touched:** `tasks` (UPDATE), `task_events` (new `bumped` rows). ✓
 
