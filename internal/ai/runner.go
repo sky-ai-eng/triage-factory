@@ -14,11 +14,12 @@ import (
 type RunnerCallbacks struct {
 	OnScoringStarted   func(taskIDs []string)
 	OnScoringCompleted func(taskIDs []string)
-	// OnBatchFailures fires once per scoring cycle if one or more batches
-	// errored. failed is the number of failed batches (out of total). Wired
-	// to a warning toast in main so the user knows tasks were skipped without
-	// log-diving. Fatal errors (DB failures) go through OnError.
-	OnBatchFailures func(failed, total int)
+	// OnTasksSkipped fires once per scoring cycle if one or more batches
+	// errored. skipped is the exact count of tasks that weren't scored;
+	// total is len(tasks) at cycle start. Wired to a warning toast in main
+	// so the user knows tasks were skipped without log-diving. Fatal errors
+	// (DB failures) go through OnError.
+	OnTasksSkipped func(skipped, total int)
 	// OnError fires on fatal scoring errors (query, write, or scorer-returned
 	// errors that abort the cycle).
 	OnError func(err error)
@@ -135,16 +136,14 @@ func (r *Runner) run() {
 		r.callbacks.OnScoringStarted(taskIDs)
 	}
 
-	scores, failedBatches, err := ScoreTasks(r.database, tasks)
+	scores, skippedTasks, err := ScoreTasks(r.database, tasks)
 	if err != nil {
 		log.Printf("[ai] scoring failed: %v", err)
 		r.reportError(err)
 		return
 	}
-	if failedBatches > 0 && r.callbacks.OnBatchFailures != nil {
-		// Compute total batch count from the number of tasks (ceil div).
-		total := (len(tasks) + batchSize - 1) / batchSize
-		r.callbacks.OnBatchFailures(failedBatches, total)
+	if skippedTasks > 0 && r.callbacks.OnTasksSkipped != nil {
+		r.callbacks.OnTasksSkipped(skippedTasks, len(tasks))
 	}
 
 	// Build a source map for repo-match blocked_reason logic.

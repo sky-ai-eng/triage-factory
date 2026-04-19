@@ -169,8 +169,8 @@ func main() {
 				go eventRouter.ReDeriveAfterScoring(taskIDs)
 			}
 		},
-		OnBatchFailures: func(failed, total int) {
-			toast.Warning(wsHub, fmt.Sprintf("AI scoring: %d of %d batches failed — %d tasks skipped this cycle", failed, total, failed*10))
+		OnTasksSkipped: func(skipped, total int) {
+			toast.Warning(wsHub, fmt.Sprintf("AI scoring: %d of %d tasks skipped this cycle", skipped, total))
 		},
 		OnError: func(err error) {
 			toast.Error(wsHub, fmt.Sprintf("AI scoring cycle aborted: %v", err))
