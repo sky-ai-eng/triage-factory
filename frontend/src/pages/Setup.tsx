@@ -120,6 +120,7 @@ export default function Setup() {
         setError(data.error || 'Failed to connect to Jira')
         return
       }
+      setJiraForm((f) => ({ ...f, pat: '' }))
       setJiraConnected(true)
       setStep('jira-config')
     } catch {
