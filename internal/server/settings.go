@@ -14,15 +14,26 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 )
 
-// validateStatusRule rejects rules where canonical isn't a member. requireCanon
-// additionally requires canonical to be set when members is non-empty (true
-// for InProgress/Done where TF needs a target to transition into; false for
-// Pickup where TF only reads).
-func validateStatusRule(name string, r config.JiraStatusRule, requireCanon bool) error {
+// validateStatusRule enforces the shape invariants for a JiraStatusRule.
+// hasWriteTarget distinguishes the two roles:
+//   - true (InProgress/Done): TF transitions into this state, so Canonical
+//     must be set whenever Members is non-empty, and must itself be a member.
+//   - false (Pickup): TF only reads this state, it never writes tickets back
+//     to it — Canonical must be empty. A non-empty Canonical is rejected even
+//     if it happens to be in Members, because storing it would let stale
+//     config drift through and later mislead readers ("why does Pickup have
+//     a canonical?").
+func validateStatusRule(name string, r config.JiraStatusRule, hasWriteTarget bool) error {
+	if !hasWriteTarget {
+		if r.Canonical != "" {
+			return fmt.Errorf("jira %s: canonical must be empty — this rule has no write target", name)
+		}
+		return nil
+	}
 	if r.Canonical != "" && !slices.Contains(r.Members, r.Canonical) {
 		return fmt.Errorf("jira %s: canonical status %q is not in members", name, r.Canonical)
 	}
-	if requireCanon && len(r.Members) > 0 && r.Canonical == "" {
+	if len(r.Members) > 0 && r.Canonical == "" {
 		return fmt.Errorf("jira %s: canonical status is required when members are set", name)
 	}
 	return nil
