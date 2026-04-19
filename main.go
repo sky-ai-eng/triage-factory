@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
@@ -253,15 +254,20 @@ func main() {
 				return
 			}
 			var meta struct {
-				Source string `json:"source"`
+				Source    string `json:"source"`
+				StartedAt int64  `json:"started_at"`
 			}
 			if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
 				log.Printf("[jira-poll-tracker] warning: failed to parse poll completion metadata: %v; raw metadata=%q", err, evt.MetadataJSON)
 				return
 			}
-			if meta.Source == "jira" {
-				srv.MarkJiraPollComplete()
+			if meta.Source != "jira" {
+				return
 			}
+			// Pass the poll's started_at so MarkJiraPollComplete can ignore
+			// stale sentinels from pre-restart poll goroutines that finish
+			// late — RestartJira doesn't cancel in-flight RefreshJira calls.
+			srv.MarkJiraPollComplete(time.Unix(0, meta.StartedAt))
 		},
 	})
 

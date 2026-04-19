@@ -198,9 +198,16 @@ func (s *Server) MarkJiraRestarted() {
 
 // MarkJiraPollComplete records a successful Jira poll cycle. Call from the
 // event-bus subscriber on system:poll:completed when source == "jira".
-func (s *Server) MarkJiraPollComplete() {
+// startedAt is the wall-clock time the poll cycle started; completions from
+// poll goroutines that started before the most recent MarkJiraRestarted are
+// ignored so an in-flight pre-restart poll can't incorrectly flip readiness
+// back to true.
+func (s *Server) MarkJiraPollComplete(startedAt time.Time) {
 	s.jiraPollMu.Lock()
 	defer s.jiraPollMu.Unlock()
+	if startedAt.Before(s.jiraRestartedAt) {
+		return
+	}
 	s.jiraLastPollAt = time.Now()
 }
 

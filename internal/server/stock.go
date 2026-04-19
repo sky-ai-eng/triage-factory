@@ -3,6 +3,7 @@ package server
 import (
 	"database/sql"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 
@@ -33,19 +34,23 @@ type stockTicket struct {
 // carry-over reads snapshots, which are seeded only after a full poll runs.
 func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 	creds, _ := auth.Load()
-	if creds.JiraPAT == "" || creds.JiraDisplayName == "" {
+	cfg, err := config.Load()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load config: " + err.Error()})
+		return
+	}
+
+	// Require full Jira configuration (PAT + URL + at least one project) plus
+	// a stored display name so we can match the assignee field. Partial config
+	// would silently stall on "polling" forever because the poller never has
+	// anything to do.
+	if !cfg.Jira.Ready(creds.JiraPAT, creds.JiraURL) || creds.JiraDisplayName == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Jira not configured"})
 		return
 	}
 
 	if !s.jiraPollReady() {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "polling"})
-		return
-	}
-
-	cfg, err := config.Load()
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load config: " + err.Error()})
 		return
 	}
 
@@ -75,6 +80,10 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		}
 		var snap domain.JiraSnapshot
 		if err := json.Unmarshal([]byte(e.SnapshotJSON), &snap); err != nil {
+			// Corrupt snapshot — skip this row but log so the state doesn't
+			// silently hide a stuck entity. The tracker will reseed on its
+			// next poll via UpdateEntitySnapshot.
+			log.Printf("[stock] skipping entity %s (%s): invalid snapshot: %v", e.ID, e.SourceID, err)
 			continue
 		}
 
@@ -147,7 +156,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	creds, _ := auth.Load()
-	if creds.JiraPAT == "" || creds.JiraURL == "" || creds.JiraDisplayName == "" {
+	if !cfg.Jira.Ready(creds.JiraPAT, creds.JiraURL) || creds.JiraDisplayName == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Jira not configured"})
 		return
 	}
@@ -244,6 +253,13 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 			}
+
+			// Refresh the snap with the known post-mutation state so the
+			// synthesized event metadata matches the ticket's actual Jira
+			// state at the moment of claim. Otherwise predicates that filter
+			// on status would see stale pre-claim values.
+			snap.Assignee = creds.JiraDisplayName
+			snap.Status = cfg.Jira.InProgressStatus
 
 			// Jira is now consistent — create the task and promote to claimed.
 			// If either of these fails the ticket stays assigned + in-progress
