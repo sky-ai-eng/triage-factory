@@ -269,7 +269,7 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		return false
 	}
 	// Phase 1: Discovery
-	discovered, err := t.discoverJira(client, baseURL, projects, pickupStatuses)
+	discovered, err := t.discoverJira(client, baseURL, projects, pickupStatuses, doneStatuses)
 	if err != nil {
 		log.Printf("[tracker] Jira discovery error: %v", err)
 	}
@@ -390,8 +390,13 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 	return eventsEmitted, nil
 }
 
-// discoverJira runs JQL queries to find new issues.
-func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projects, pickupStatuses []string) ([]jiraIssueState, error) {
+// discoverJira runs JQL queries to find new issues. doneStatuses is the
+// configured Done.Members set — used to exclude terminal tickets from the
+// assigned-user discovery query. Hardcoding the exclusion list would mean
+// any user-defined "done" variant (e.g. "Verified") stayed eligible for
+// rediscovery on every poll, churning the DB and contradicting the
+// per-deployment-workflow contract.
+func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projects, pickupStatuses, doneStatuses []string) ([]jiraIssueState, error) {
 	if len(projects) == 0 {
 		return nil, nil
 	}
@@ -408,8 +413,20 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 			`project IN (%s) AND status IN (%s) AND assignee IS EMPTY`, projectList, strings.Join(quoted, ", ")))
 	}
 
-	queries = append(queries, fmt.Sprintf(
-		`project IN (%s) AND assignee = currentUser() AND status NOT IN (Done, Closed, Resolved)`, projectList))
+	// Assigned-to-me query, with terminal statuses excluded via the user's
+	// Done.Members set. If empty (defensive — Ready() gates the poller on
+	// non-empty Done.Members, so we shouldn't hit this in practice), the
+	// NOT IN clause is dropped entirely rather than falling back to a
+	// hardcoded list that would contradict the user's workflow.
+	assignedJQL := fmt.Sprintf(`project IN (%s) AND assignee = currentUser()`, projectList)
+	if len(doneStatuses) > 0 {
+		quoted := make([]string, len(doneStatuses))
+		for i, s := range doneStatuses {
+			quoted[i] = fmt.Sprintf("%q", s)
+		}
+		assignedJQL += fmt.Sprintf(` AND status NOT IN (%s)`, strings.Join(quoted, ", "))
+	}
+	queries = append(queries, assignedJQL)
 
 	seen := map[string]bool{}
 	var all []jiraIssueState
