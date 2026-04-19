@@ -92,7 +92,7 @@ func (s *Server) handleTriggerCreate(w http.ResponseWriter, r *http.Request) {
 		BreakerThreshold:       req.BreakerThreshold,
 		CooldownSeconds:        req.CooldownSeconds,
 		MinAutonomySuitability: minAutonomy,
-		Enabled:                true,
+		Enabled:                false,
 	}
 	// Empty canonical string → match-all → NULL in DB.
 	if canonicalPredicate != "" {

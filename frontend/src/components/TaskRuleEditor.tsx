@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'motion/react'
 import * as Tooltip from '@radix-ui/react-tooltip'
 import { X } from 'lucide-react'
 import PredicateEditor from './PredicateEditor'
+import Slider from './Slider'
 import type { TaskRule, EventType } from '../types'
 
 interface TaskRuleEditorProps {
@@ -311,14 +312,13 @@ export default function TaskRuleEditor({
                         ({priority.toFixed(2)})
                       </span>
                     </label>
-                    <input
-                      type="range"
+                    <Slider
+                      value={priority}
+                      onChange={setPriority}
                       min={0}
                       max={1}
                       step={0.05}
-                      value={priority}
-                      onChange={(e) => setPriority(parseFloat(e.target.value))}
-                      className="w-full accent-accent"
+                      label="Default priority"
                     />
                     <div className="flex justify-between text-[10px] text-text-tertiary mt-0.5">
                       <span>Low</span>

@@ -6,6 +6,7 @@ import { Info } from 'lucide-react'
 import type { PromptTrigger } from '../types'
 import EventBadge from './EventBadge'
 import PredicateEditor from './PredicateEditor'
+import Slider from './Slider'
 
 interface TriggerConfigPanelProps {
   open: boolean
@@ -187,14 +188,13 @@ export default function TriggerConfigPanel({
                   description="0 = fire immediately on event. Higher values defer until AI scores the task above this threshold."
                 >
                   <div className="flex items-center gap-3">
-                    <input
-                      type="range"
+                    <Slider
+                      value={minAutonomy}
+                      onChange={setMinAutonomy}
                       min={0}
                       max={1}
                       step={0.05}
-                      value={minAutonomy}
-                      onChange={(e) => setMinAutonomy(Number(e.target.value))}
-                      className="flex-1 accent-accent"
+                      label="Min autonomy suitability"
                     />
                     <span className="text-[13px] font-medium text-text-primary w-[36px] text-right tabular-nums">
                       {minAutonomy.toFixed(2)}

@@ -48,6 +48,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/auth/setup", s.handleAuthSetup)
 	s.mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
 	s.mux.HandleFunc("DELETE /api/auth", s.handleAuthDelete)
+	s.mux.HandleFunc("DELETE /api/auth/jira", s.handleAuthDeleteJira)
 
 	s.mux.HandleFunc("GET /api/queue", s.handleQueue)
 	s.mux.HandleFunc("GET /api/tasks", s.handleTasks)

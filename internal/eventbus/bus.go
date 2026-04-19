@@ -39,7 +39,7 @@ func New() *Bus {
 // Subscribe registers a handler. Starts a goroutine that drains events to the handler.
 // Returns an unsubscribe function.
 func (b *Bus) Subscribe(sub Subscriber) func() {
-	ch := make(chan domain.Event, 64)
+	ch := make(chan domain.Event, 256)
 	entry := subscriberEntry{sub: sub, ch: ch}
 
 	b.mu.Lock()

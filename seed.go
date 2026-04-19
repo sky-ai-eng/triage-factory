@@ -54,17 +54,20 @@ func seedDefaultPrompts(database *sql.DB) {
 		log.Printf("[seed] warning: failed to seed Jira implement prompt: %v", err)
 	}
 
-	// Default trigger: auto-fire CI fix on per-check CI failures.
-	// Uses the new per-action event type EventGitHubPRCICheckFailed (split on
-	// conclusion per docs/data-model-target.md).
-	if err := db.SavePromptTrigger(database, domain.PromptTrigger{
-		ID:               "system-trigger-ci-fix",
-		PromptID:         "system-ci-fix",
-		TriggerType:      domain.TriggerTypeEvent,
-		EventType:        domain.EventGitHubPRCICheckFailed,
-		BreakerThreshold: 3,
-		CooldownSeconds:  60,
-		Enabled:          true,
+	// Default trigger: auto-fire CI fix on per-check CI failures on the
+	// user's own PRs. Shipped disabled — users opt in by enabling it.
+	// System triggers are static reference examples; users who want
+	// different behavior (e.g. all PRs) disable this and create their own.
+	authorIsSelf := `{"author_is_self":true}`
+	if err := db.SeedPromptTrigger(database, domain.PromptTrigger{
+		ID:                 "system-trigger-ci-fix",
+		PromptID:           "system-ci-fix",
+		TriggerType:        domain.TriggerTypeEvent,
+		EventType:          domain.EventGitHubPRCICheckFailed,
+		ScopePredicateJSON: &authorIsSelf,
+		BreakerThreshold:   3,
+		CooldownSeconds:    60,
+		Enabled:            false,
 	}); err != nil {
 		log.Printf("[seed] warning: failed to seed CI fix trigger: %v", err)
 	}
