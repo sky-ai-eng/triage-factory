@@ -194,6 +194,7 @@ export default function TriggerConfigPanel({
                       min={0}
                       max={1}
                       step={0.05}
+                      label="Min autonomy suitability"
                     />
                     <span className="text-[13px] font-medium text-text-primary w-[36px] text-right tabular-nums">
                       {minAutonomy.toFixed(2)}

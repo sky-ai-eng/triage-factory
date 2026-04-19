@@ -312,7 +312,14 @@ export default function TaskRuleEditor({
                         ({priority.toFixed(2)})
                       </span>
                     </label>
-                    <Slider value={priority} onChange={setPriority} min={0} max={1} step={0.05} />
+                    <Slider
+                      value={priority}
+                      onChange={setPriority}
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      label="Default priority"
+                    />
                     <div className="flex justify-between text-[10px] text-text-tertiary mt-0.5">
                       <span>Low</span>
                       <span>High</span>

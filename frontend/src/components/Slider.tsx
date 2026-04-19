@@ -6,9 +6,17 @@ interface SliderProps {
   min?: number
   max?: number
   step?: number
+  label: string
 }
 
-export default function Slider({ value, onChange, min = 0, max = 1, step = 0.05 }: SliderProps) {
+export default function Slider({
+  value,
+  onChange,
+  min = 0,
+  max = 1,
+  step = 0.05,
+  label,
+}: SliderProps) {
   return (
     <RadixSlider.Root
       value={[value]}
@@ -16,6 +24,7 @@ export default function Slider({ value, onChange, min = 0, max = 1, step = 0.05 
       min={min}
       max={max}
       step={step}
+      aria-label={label}
       className="relative flex items-center select-none touch-none w-full h-5"
     >
       <RadixSlider.Track className="relative grow rounded-full h-[4px] bg-black/[0.06]">
