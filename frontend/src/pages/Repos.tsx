@@ -305,6 +305,8 @@ function RepoCard({
                 <button
                   type="button"
                   onClick={() => setExpanded(true)}
+                  aria-label={`Show full profile for ${profile.id}`}
+                  aria-expanded={false}
                   className="mt-1 text-[11px] font-medium text-accent/80 hover:text-accent transition-colors"
                 >
                   Show more
@@ -315,6 +317,8 @@ function RepoCard({
               <button
                 type="button"
                 onClick={() => setExpanded(false)}
+                aria-label={`Collapse profile for ${profile.id}`}
+                aria-expanded={true}
                 className="mt-2 text-[11px] font-medium text-text-tertiary hover:text-text-secondary transition-colors"
               >
                 Show less
