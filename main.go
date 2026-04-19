@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
@@ -23,6 +24,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
+	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 
@@ -30,6 +32,16 @@ import (
 )
 
 const defaultPort = 3000
+
+// pluralize picks the singular or plural form of a noun based on count.
+// Used for toast copy where "1 entity tracked" vs "5 entities tracked"
+// reads nicer than a naive "(s)" suffix.
+func pluralize(n int, singular, plural string) string {
+	if n == 1 {
+		return singular
+	}
+	return plural
+}
 
 func main() {
 	// Dual-mode dispatch: exec/status commands are CLI-only (used by Claude Code agent)
@@ -157,6 +169,12 @@ func main() {
 				go eventRouter.ReDeriveAfterScoring(taskIDs)
 			}
 		},
+		OnTasksSkipped: func(skipped, total int) {
+			toast.Warning(wsHub, fmt.Sprintf("AI scoring: %d of %d tasks skipped this cycle", skipped, total))
+		},
+		OnError: func(err error) {
+			toast.Error(wsHub, fmt.Sprintf("AI scoring cycle aborted: %v", err))
+		},
 	})
 	scorer.SetProfileGate(profileGate.Ready)
 	scorer.Start()
@@ -172,8 +190,34 @@ func main() {
 		},
 	})
 
-	// Poller manager — uses event bus instead of direct callbacks
+	// Poller manager — uses event bus instead of direct callbacks.
+	// Poll errors are toasted with per-source time-based throttling: the
+	// poller fires OnError on every failure (raw signal), but we only
+	// refresh the user-facing toast every errorToastMinInterval. Without
+	// throttling, a persistent failure (expired PAT, network outage) would
+	// generate a sticky error toast every poll cycle (default 60s) until
+	// the user manually dismissed each one — badly spammy on the UI.
+	const errorToastMinInterval = 5 * time.Minute
+	var (
+		errorThrottleMu sync.Mutex
+		lastErrorToast  = map[string]time.Time{}
+	)
 	pollerMgr := poller.NewManager(database, bus)
+	pollerMgr.OnError = func(source string, err error) {
+		errorThrottleMu.Lock()
+		if last, ok := lastErrorToast[source]; ok && time.Since(last) < errorToastMinInterval {
+			errorThrottleMu.Unlock()
+			return
+		}
+		lastErrorToast[source] = time.Now()
+		errorThrottleMu.Unlock()
+
+		label := "Jira"
+		if source == "github" {
+			label = "GitHub"
+		}
+		toast.ErrorTitled(wsHub, label, fmt.Sprintf("Poll failed: %v", err))
+	}
 
 	// Create spawner once — credentials are hot-swapped in place
 	spawner := delegate.NewSpawner(database, nil, wsHub, "")
@@ -189,9 +233,35 @@ func main() {
 		Handle: eventRouter.HandleEvent,
 	})
 
+	// Tracks per-source "announce next poll completion as a toast". Set when
+	// a config change triggers a poller restart; cleared after the first
+	// post-restart completion fires the toast. Prevents every-minute spam
+	// while still giving users explicit feedback that their config took
+	// effect.
+	var (
+		announceMu      sync.Mutex
+		announcePending = map[string]bool{}
+	)
+	setAnnouncePending := func(source string) {
+		announceMu.Lock()
+		announcePending[source] = true
+		announceMu.Unlock()
+	}
+	shouldAnnounce := func(source string) bool {
+		announceMu.Lock()
+		defer announceMu.Unlock()
+		if announcePending[source] {
+			announcePending[source] = false
+			return true
+		}
+		return false
+	}
+
 	// GitHub changed: invalidate profiles → stop all → re-profile → restart all
 	srv.SetOnGitHubChanged(func() {
 		log.Println("[server] GitHub config changed, full restart...")
+		setAnnouncePending("github")
+		setAnnouncePending("jira")
 
 		profileGate.Invalidate()
 		pollerMgr.StopAll()
@@ -232,6 +302,7 @@ func main() {
 	// Jira changed: restart only the Jira poller
 	srv.SetOnJiraChanged(func() {
 		log.Println("[server] Jira config changed, restarting Jira poller...")
+		setAnnouncePending("jira")
 
 		cfg, _ := config.Load()
 		creds, _ := auth.Load()
@@ -245,10 +316,12 @@ func main() {
 		}
 	})
 
-	// Subscriber: track Jira poll completions so /api/jira/stock knows when
-	// snapshots are ready to read.
+	// Subscriber: track Jira/GitHub poll completions.
+	// Jira: gates /api/jira/stock so it knows when snapshots are ready.
+	// Both: surface a one-shot "first poll complete after config change"
+	// toast so users can see their settings change actually took effect.
 	bus.Subscribe(eventbus.Subscriber{
-		Name:   "jira-poll-tracker",
+		Name:   "poll-tracker",
 		Filter: []string{"system:poll:"},
 		Handle: func(evt domain.Event) {
 			if evt.EventType != domain.EventSystemPollCompleted {
@@ -257,25 +330,35 @@ func main() {
 			var meta struct {
 				Source    string `json:"source"`
 				StartedAt int64  `json:"started_at"`
+				Entities  int    `json:"entities"`
 			}
 			if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
-				log.Printf("[jira-poll-tracker] warning: failed to parse poll completion metadata: %v; raw metadata=%q", err, evt.MetadataJSON)
+				log.Printf("[poll-tracker] warning: failed to parse poll completion metadata: %v; raw metadata=%q", err, evt.MetadataJSON)
 				return
 			}
-			if meta.Source != "jira" {
-				return
+			if meta.Source == "jira" {
+				// Pass the poll's started_at so MarkJiraPollComplete can ignore
+				// stale sentinels from pre-restart poll goroutines that finish
+				// late — RestartJira doesn't cancel in-flight RefreshJira calls.
+				// A missing field yields StartedAt=0; pass a zero time.Time so
+				// MarkJiraPollComplete treats it as "unknown generation" and
+				// accepts it rather than getting stuck on {status:"polling"}.
+				var startedAt time.Time
+				if meta.StartedAt != 0 {
+					startedAt = time.Unix(0, meta.StartedAt)
+				}
+				srv.MarkJiraPollComplete(startedAt)
 			}
-			// Pass the poll's started_at so MarkJiraPollComplete can ignore
-			// stale sentinels from pre-restart poll goroutines that finish
-			// late — RestartJira doesn't cancel in-flight RefreshJira calls.
-			// A missing field yields StartedAt=0; pass a zero time.Time so
-			// MarkJiraPollComplete treats it as "unknown generation" and
-			// accepts it rather than getting stuck on {status:"polling"}.
-			var startedAt time.Time
-			if meta.StartedAt != 0 {
-				startedAt = time.Unix(0, meta.StartedAt)
+			if shouldAnnounce(meta.Source) {
+				label := "GitHub"
+				if meta.Source == "jira" {
+					label = "Jira"
+				}
+				toast.Info(wsHub, fmt.Sprintf(
+					"First %s poll complete — %d %s tracked",
+					label, meta.Entities, pluralize(meta.Entities, "entity", "entities"),
+				))
 			}
-			srv.MarkJiraPollComplete(startedAt)
 		},
 	})
 

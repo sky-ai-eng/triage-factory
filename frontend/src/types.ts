@@ -126,6 +126,13 @@ export interface EventSchema {
   fields: FieldSchema[]
 }
 
+export interface ToastPayload {
+  id: string
+  level: 'info' | 'success' | 'warning' | 'error'
+  title?: string
+  body: string
+}
+
 export type WSEvent =
   | { type: 'agent_run_update'; run_id: string; data: { status: string } }
   | { type: 'agent_message'; run_id: string; data: AgentMessage }
@@ -138,3 +145,4 @@ export type WSEvent =
       data: { id: string; has_readme: boolean; has_claude_md: boolean; has_agents_md: boolean }
     }
   | { type: 'repo_profile_updated'; data: { id: string; profile_text: string } }
+  | { type: 'toast'; data: ToastPayload }

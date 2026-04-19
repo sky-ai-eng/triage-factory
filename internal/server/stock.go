@@ -3,6 +3,7 @@ package server
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/toast"
 )
 
 // stockTicket is the per-row payload for the carry-over list.
@@ -177,6 +179,8 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 
 	applied := 0
 	queued := 0 // number of queue actions applied — gates the scorer trigger
+	claimed := 0
+	closed := 0
 	failed := make([]stockFailure, 0)
 
 	for _, a := range req.Actions {
@@ -296,6 +300,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, err.Error()})
 				continue
 			}
+			claimed++
 
 		case "done":
 			if cfg.Jira.Done.Canonical == "" {
@@ -318,6 +323,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, err.Error()})
 				continue
 			}
+			closed++
 		}
 
 		applied++
@@ -331,6 +337,15 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 	// two branches have nothing for the scorer to pick up.
 	if queued > 0 && s.scorerTrigger != nil {
 		s.scorerTrigger()
+	}
+
+	// Success toast with the per-action breakdown when at least one ticket
+	// applied cleanly. The frontend also shows a partial-failure warning toast
+	// if there are any failures; this one only fires on at-least-one-success.
+	if applied > 0 {
+		toast.Success(s.ws, fmt.Sprintf(
+			"Carry-over applied: %d queued, %d claimed, %d closed", queued, claimed, closed,
+		))
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{

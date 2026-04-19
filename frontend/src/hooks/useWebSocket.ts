@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback } from 'react'
 import type { WSEvent } from '../types'
+import { toastStore } from '../components/Toast/toastStore'
 
 type Handler = (event: WSEvent) => void
 
@@ -24,6 +25,17 @@ function ensureConnected() {
   ws.onmessage = (e) => {
     try {
       const event = JSON.parse(e.data) as WSEvent
+      // Global handler: any toast event goes straight into the store, no
+      // per-page listener required. Keeps consumers ignorant of WS plumbing.
+      if (event.type === 'toast') {
+        toastStore.push({
+          id: event.data.id,
+          level: event.data.level,
+          title: event.data.title,
+          body: event.data.body,
+        })
+        return
+      }
       for (const fn of listeners) {
         fn(event)
       }

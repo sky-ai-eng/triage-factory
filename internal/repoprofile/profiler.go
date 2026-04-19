@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -162,6 +163,11 @@ func (p *Profiler) Run(ctx context.Context, repos []string, force bool) error {
 		results, err := profileBatch(batch)
 		if err != nil {
 			log.Printf("[repoprofile] batch %d failed: %v", i/profileBatchSize+1, err)
+			repoNames := make([]string, len(batch))
+			for j, d := range batch {
+				repoNames[j] = d.profile.ID
+			}
+			toast.Warning(p.ws, fmt.Sprintf("Profiling failed for %s — rows saved without AI summary", strings.Join(repoNames, ", ")))
 			// Fallback: upsert without profile_text so the row at least exists.
 			for _, d := range batch {
 				if uErr := db.UpsertRepoProfile(p.database, d.profile); uErr != nil {

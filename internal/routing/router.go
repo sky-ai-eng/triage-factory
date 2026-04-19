@@ -3,6 +3,7 @@ package routing
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -211,6 +213,17 @@ func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.PromptTrigger
 	if failures >= trigger.BreakerThreshold {
 		log.Printf("[router] breaker tripped for entity %s prompt %s (%d >= %d)",
 			entityID, trigger.PromptID, failures, trigger.BreakerThreshold)
+		// Look up prompt name for the toast — opportunistic, falls back to a
+		// generic message if the lookup fails since the breaker trip itself
+		// is the load-bearing signal. One toast per trip (happens rarely).
+		promptName := ""
+		if p, perr := dbpkg.GetPrompt(r.db, trigger.PromptID); perr == nil && p != nil {
+			promptName = p.Name
+		}
+		if promptName == "" {
+			promptName = "prompt"
+		}
+		toast.Warning(r.ws, fmt.Sprintf("Auto-delegation paused: %s tripped the breaker (%d consecutive failures on this entity)", promptName, failures))
 		return
 	}
 

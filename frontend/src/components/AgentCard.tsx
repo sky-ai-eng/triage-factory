@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import type { AgentMessage, AgentRun, Task, ToolCall } from '../types'
 import SourceBadge from './SourceBadge'
+import { toast } from './Toast/toastStore'
+import { readError } from '../lib/api'
 
 interface Props {
   task: Task
@@ -85,7 +87,14 @@ export default function AgentCard({ task, run, messages, onRequeue, onReview }: 
             <span className="text-[11px] text-text-tertiary">{elapsed}</span>
             {isActive && (
               <button
-                onClick={() => fetch(`/api/agent/runs/${run.ID}/cancel`, { method: 'POST' })}
+                onClick={async () => {
+                  try {
+                    const res = await fetch(`/api/agent/runs/${run.ID}/cancel`, { method: 'POST' })
+                    if (!res.ok) toast.error(await readError(res, 'Failed to cancel run'))
+                  } catch (err) {
+                    toast.error(`Failed to cancel run: ${(err as Error).message}`)
+                  }
+                }}
                 className="text-dismiss/40 hover:text-dismiss transition-colors"
                 title="Cancel run"
               >

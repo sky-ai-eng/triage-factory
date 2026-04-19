@@ -1,5 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { ExternalLink, RotateCw } from 'lucide-react'
+import { toast } from './Toast/toastStore'
+import { readError } from '../lib/api'
 
 type Action = 'queue' | 'claim' | 'done'
 
@@ -138,9 +140,7 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
         body: JSON.stringify({ actions }),
       })
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        console.error('carry-over save failed:', data.error || `HTTP ${res.status}`)
-        setError('Failed to save')
+        toast.error(await readError(res, 'Failed to save carry-over selections'))
         return
       }
       const body = (await res.json()) as {
@@ -155,8 +155,11 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
 
       // Partial success: remove successfully applied rows from the list, keep
       // failed rows visible with inline error messages. The user can change or
-      // retry those selections, or skip to continue.
-      console.warn('carry-over partial failure:', failedList)
+      // retry those selections, or skip to continue. Surface a summary toast
+      // so the partial nature is obvious even if the failing rows scroll off.
+      toast.warning(
+        `Applied ${body.applied} ticket${body.applied === 1 ? '' : 's'}; ${failedList.length} failed — see inline errors`,
+      )
       const failedKeys = new Set(failedList.map((f) => f.issue_key))
       const appliedKeys = new Set(Object.keys(selections).filter((k) => !failedKeys.has(k)))
       setTickets((prev) => (prev ?? []).filter((t) => !appliedKeys.has(t.issue_key)))
@@ -174,8 +177,7 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
         }, {}),
       )
     } catch (err) {
-      console.error('carry-over save failed:', err)
-      setError('Failed to save')
+      toast.error(`Failed to save carry-over: ${(err as Error).message}`)
     } finally {
       if (mountedRef.current) setSaving(false)
     }

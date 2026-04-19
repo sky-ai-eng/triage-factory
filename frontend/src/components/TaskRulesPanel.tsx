@@ -20,6 +20,8 @@ import { CSS } from '@dnd-kit/utilities'
 import EventBadge from './EventBadge'
 import TaskRuleEditor from './TaskRuleEditor'
 import type { TaskRule } from '../types'
+import { toast } from './Toast/toastStore'
+import { readError } from '../lib/api'
 
 interface TaskRulesPanelProps {
   open: boolean
@@ -78,9 +80,13 @@ export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: !prev }),
       })
-      if (!res.ok) throw new Error()
-    } catch {
+      if (!res.ok) {
+        setRules((rs) => rs.map((r) => (r.id === rule.id ? { ...r, enabled: prev } : r)))
+        toast.error(await readError(res, 'Failed to toggle rule'))
+      }
+    } catch (err) {
       setRules((rs) => rs.map((r) => (r.id === rule.id ? { ...r, enabled: prev } : r)))
+      toast.error(`Failed to toggle rule: ${(err as Error).message}`)
     }
   }, [])
 
@@ -101,9 +107,13 @@ export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(reordered.map((r) => r.id)),
         })
-        if (!res.ok) throw new Error()
-      } catch {
-        refresh() // Revert on failure
+        if (!res.ok) {
+          toast.error(await readError(res, 'Failed to reorder rules'))
+          refresh() // Revert on failure
+        }
+      } catch (err) {
+        toast.error(`Failed to reorder rules: ${(err as Error).message}`)
+        refresh()
       }
     },
     [rules, refresh],

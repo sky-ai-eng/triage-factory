@@ -7,6 +7,8 @@ import type { PromptTrigger } from '../types'
 import EventBadge from './EventBadge'
 import PredicateEditor from './PredicateEditor'
 import Slider from './Slider'
+import { toast } from './Toast/toastStore'
+import { readError } from '../lib/api'
 
 interface TriggerConfigPanelProps {
   open: boolean
@@ -70,11 +72,13 @@ export default function TriggerConfigPanel({
       })
       if (!res.ok) {
         setEnabled(!checked)
+        toast.error(await readError(res, 'Failed to toggle trigger'))
         return
       }
       onRefresh?.()
-    } catch {
+    } catch (err) {
       setEnabled(!checked)
+      toast.error(`Failed to toggle trigger: ${(err as Error).message}`)
     }
   }
 
@@ -93,7 +97,13 @@ export default function TriggerConfigPanel({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      if (res.ok) onSaved()
+      if (res.ok) {
+        onSaved()
+      } else {
+        toast.error(await readError(res, 'Failed to save trigger'))
+      }
+    } catch (err) {
+      toast.error(`Failed to save trigger: ${(err as Error).message}`)
     } finally {
       setSaving(false)
     }
@@ -105,9 +115,13 @@ export default function TriggerConfigPanel({
       const res = await fetch(`/api/triggers/${encodeURIComponent(trigger.id)}`, {
         method: 'DELETE',
       })
-      if (res.ok) onDeleted()
-    } catch {
-      // ignore
+      if (res.ok) {
+        onDeleted()
+      } else {
+        toast.error(await readError(res, 'Failed to delete trigger'))
+      }
+    } catch (err) {
+      toast.error(`Failed to delete trigger: ${(err as Error).message}`)
     }
   }
 

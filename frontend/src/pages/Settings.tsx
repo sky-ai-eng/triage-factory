@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react'
 import JiraStatusRule, { type JiraStatusRuleValue } from '../components/JiraStatusRule'
+import { toast } from '../components/Toast/toastStore'
+import { readError } from '../lib/api'
 
 interface JiraStatus {
   id: string
@@ -68,7 +70,6 @@ export default function Settings() {
     server_port: 3000,
   })
   const [saving, setSaving] = useState(false)
-  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [jiraStatuses, setJiraStatuses] = useState<JiraStatus[]>([])
   const [statusesLoading, setStatusesLoading] = useState(false)
   const [jiraConnected, setJiraConnected] = useState(false)
@@ -208,7 +209,6 @@ export default function Settings() {
   const save = async (e: React.FormEvent) => {
     e.preventDefault()
     setSaving(true)
-    setMessage(null)
 
     const projects = form.jira_projects
       .split(',')
@@ -237,15 +237,14 @@ export default function Settings() {
           server_port: form.server_port,
         }),
       })
-      const body = await res.json()
       if (!res.ok) {
-        setMessage({ type: 'error', text: body.error || 'Save failed' })
+        toast.error(await readError(res, 'Failed to save settings'))
       } else {
-        setMessage({ type: 'success', text: 'Settings saved.' })
+        toast.success('Settings saved')
         setForm((f) => ({ ...f, github_pat: '', jira_pat: '' }))
       }
-    } catch {
-      setMessage({ type: 'error', text: 'Could not connect to server' })
+    } catch (err) {
+      toast.error(`Could not save settings: ${(err as Error).message}`)
     } finally {
       setSaving(false)
     }
@@ -476,19 +475,6 @@ export default function Settings() {
           </div>
         </Section>
 
-        {/* Message */}
-        {message && (
-          <div
-            className={`rounded-xl px-4 py-2.5 text-[13px] ${
-              message.type === 'success'
-                ? 'bg-claim/[0.08] border border-claim/20 text-claim'
-                : 'bg-dismiss/[0.08] border border-dismiss/20 text-dismiss'
-            }`}
-          >
-            {message.text}
-          </div>
-        )}
-
         <button
           type="submit"
           disabled={
@@ -519,15 +505,25 @@ export default function Settings() {
             <button
               type="button"
               onClick={async () => {
-                const res = await fetch('/api/skills/import', { method: 'POST' })
-                const data = await res.json()
-                setMessage({
-                  type: data.imported > 0 ? 'success' : 'error',
-                  text:
-                    data.imported > 0
-                      ? `Imported ${data.imported} skill${data.imported !== 1 ? 's' : ''} (${data.skipped} already imported)`
-                      : `No new skills found (${data.scanned} scanned, ${data.skipped} already imported)`,
-                })
+                try {
+                  const res = await fetch('/api/skills/import', { method: 'POST' })
+                  if (!res.ok) {
+                    toast.error(await readError(res, 'Failed to import skills'))
+                    return
+                  }
+                  const data = await res.json()
+                  if (data.imported > 0) {
+                    toast.success(
+                      `Imported ${data.imported} skill${data.imported !== 1 ? 's' : ''} (${data.skipped} already imported)`,
+                    )
+                  } else {
+                    toast.info(
+                      `No new skills found (${data.scanned} scanned, ${data.skipped} already imported)`,
+                    )
+                  }
+                } catch (err) {
+                  toast.error(`Failed to import skills: ${(err as Error).message}`)
+                }
               }}
               className="text-[13px] text-accent hover:text-accent/80 border border-accent/20 hover:border-accent/30 rounded-xl px-4 py-2 transition-colors shrink-0"
             >

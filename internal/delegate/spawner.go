@@ -22,9 +22,20 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
+
+// shortRunID truncates a run UUID to 8 chars for toast messages — full UUIDs
+// are noisy in a notification. Kept consistent so users can cross-reference
+// the runs page listing.
+func shortRunID(runID string) string {
+	if len(runID) < 8 {
+		return runID
+	}
+	return runID[:8]
+}
 
 // Spawner manages delegated agent runs.
 type Spawner struct {
@@ -152,6 +163,15 @@ func (s *Spawner) Delegate(task domain.Task, explicitPromptID string, triggerTyp
 		}
 
 		// Phase 2: run the agent
+		// Announce the run start once setup is done — the agent is about to
+		// actually execute work. Distinguish auto-fired (event trigger) from
+		// user-initiated (manual) so the user can tell at a glance whether
+		// they kicked this off or automation did.
+		verb := "Run started"
+		if triggerType == "event" {
+			verb = "Auto-fired"
+		}
+		toast.Info(s.wsHub, fmt.Sprintf("%s: %s (%s)", verb, truncateToastMsg(task.Title, 80), shortRunID(runID)))
 		s.runAgent(ctx, runID, task, mission, cfg, startTime, model, triggerType)
 	}()
 
@@ -442,6 +462,19 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			}
 		}
 		s.broadcastRunUpdate(runID, status)
+
+		// Toast the terminal state. Success cases auto-hide; failed/unsolvable
+		// show as an error toast so the user notices even if they've clicked
+		// away from the runs page.
+		switch status {
+		case "completed", "pending_approval":
+			toast.Success(s.wsHub, fmt.Sprintf("Run %s completed", shortRunID(runID)))
+		case "failed":
+			toast.Error(s.wsHub, fmt.Sprintf("Run %s failed: %s", shortRunID(runID), truncateToastMsg(resultSummary, 160)))
+		case "task_unsolvable":
+			toast.Warning(s.wsHub, fmt.Sprintf("Run %s — task unsolvable: %s", shortRunID(runID), truncateToastMsg(resultSummary, 140)))
+		}
+
 		// We've already captured the result from stdout; just drain any
 		// remaining subprocess state. Exit code is not load-bearing here.
 		_ = cmd.Wait()
@@ -927,6 +960,21 @@ func (s *Spawner) failRun(runID, taskID, triggerType, errMsg string) {
 
 	s.updateBreakerCounter(taskID, triggerType, "failed")
 	s.broadcastRunUpdate(runID, "failed")
+
+	// Surface as a sticky error toast so the user sees the failure even when
+	// they're not watching the runs page. Truncate the message — full stderr
+	// dumps don't fit in a toast card.
+	toast.Error(s.wsHub, fmt.Sprintf("Run %s failed: %s", shortRunID(runID), truncateToastMsg(errMsg, 160)))
+}
+
+// truncateToastMsg caps an error message at maxLen runes with an ellipsis.
+// Toasts show a short body; full errors belong in the runs log.
+func truncateToastMsg(s string, maxLen int) string {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	return string(runes[:maxLen-1]) + "…"
 }
 
 func (s *Spawner) broadcastRunUpdate(runID, status string) {

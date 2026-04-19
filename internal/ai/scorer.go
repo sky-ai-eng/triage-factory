@@ -78,9 +78,15 @@ const scoringModel = "haiku"
 
 // ScoreTasks runs the AI scoring pipeline on a set of tasks.
 // It batches into chunks of batchSize and runs them in parallel.
-func ScoreTasks(database *sql.DB, tasks []domain.Task) ([]TaskScore, error) {
+// The returned skippedTasks is the exact count of task inputs that were
+// in failed batches — computed per-batch rather than inferred from
+// failedBatches * batchSize so the final partial batch doesn't inflate
+// the count, and so the number stays correct if batchSize changes.
+// Failures are non-fatal: the function still returns whatever scores
+// succeeded, and the caller surfaces skippedTasks as a warning toast.
+func ScoreTasks(database *sql.DB, tasks []domain.Task) (scores []TaskScore, skippedTasks int, err error) {
 	if len(tasks) == 0 {
-		return nil, nil
+		return nil, 0, nil
 	}
 
 	// Load repo profiles for context injection.
@@ -157,17 +163,22 @@ func ScoreTasks(database *sql.DB, tasks []domain.Task) ([]TaskScore, error) {
 	}
 	wg.Wait()
 
-	// Collect results
+	// Collect results. Each failed batch's actual task count contributes to
+	// skippedTasks — walking batches[i] directly so the final partial batch
+	// doesn't get counted as a full batchSize and the number stays honest
+	// if batchSize changes.
 	var allScores []TaskScore
+	skipped := 0
 	for i, r := range results {
 		if r.err != nil {
-			log.Printf("[ai] batch %d/%d failed: %v", i+1, len(batches), r.err)
+			log.Printf("[ai] batch %d/%d failed (%d tasks skipped): %v", i+1, len(batches), len(batches[i]), r.err)
+			skipped += len(batches[i])
 			continue
 		}
 		allScores = append(allScores, r.scores...)
 	}
 
-	return allScores, nil
+	return allScores, skipped, nil
 }
 
 func scoreBatch(tasks []TaskInput, repoContext string) ([]TaskScore, error) {

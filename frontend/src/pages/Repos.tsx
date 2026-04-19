@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import RepoPickerModal from '../components/RepoPickerModal'
 import { useWebSocket } from '../hooks/useWebSocket'
+import { toast } from '../components/Toast/toastStore'
+import { readError } from '../lib/api'
 
 interface RepoProfile {
   id: string
@@ -158,10 +160,6 @@ export default function Repos() {
   const [pickerOpen, setPickerOpen] = useState(false)
   const [selectedRepos, setSelectedRepos] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
-  const [message, setMessage] = useState<{
-    type: 'success' | 'error'
-    text: string
-  } | null>(null)
 
   const fetchData = async () => {
     try {
@@ -214,7 +212,6 @@ export default function Repos() {
 
   const handleSaveRepos = async (repos: string[]) => {
     setSaving(true)
-    setMessage(null)
     try {
       const res = await fetch('/api/repos', {
         method: 'POST',
@@ -222,19 +219,15 @@ export default function Repos() {
         body: JSON.stringify({ repos }),
       })
       if (!res.ok) {
-        const data = await res.json()
-        setMessage({ type: 'error', text: data.error || 'Failed to save' })
+        toast.error(await readError(res, 'Failed to save repositories'))
       } else {
-        setMessage({
-          type: 'success',
-          text: 'Repositories updated. Profiling will run shortly.',
-        })
+        toast.success('Repositories updated — profiling will run shortly')
         setSelectedRepos(repos)
         // Re-fetch profiles after a delay to catch profiling results
         setTimeout(fetchData, 5000)
       }
-    } catch {
-      setMessage({ type: 'error', text: 'Could not connect to server' })
+    } catch (err) {
+      toast.error(`Could not save repositories: ${(err as Error).message}`)
     } finally {
       setSaving(false)
       setPickerOpen(false)
@@ -243,7 +236,6 @@ export default function Repos() {
 
   const handleReprofile = async () => {
     setSaving(true)
-    setMessage(null)
     try {
       // Saving the same repos triggers re-profiling via onGitHubChanged
       const res = await fetch('/api/repos', {
@@ -252,11 +244,13 @@ export default function Repos() {
         body: JSON.stringify({ repos: selectedRepos }),
       })
       if (res.ok) {
-        setMessage({ type: 'success', text: 'Re-profiling started.' })
+        toast.success('Re-profiling started')
         setTimeout(fetchData, 8000)
+      } else {
+        toast.error(await readError(res, 'Failed to start re-profile'))
       }
-    } catch {
-      setMessage({ type: 'error', text: 'Could not connect to server' })
+    } catch (err) {
+      toast.error(`Could not start re-profile: ${(err as Error).message}`)
     } finally {
       setSaving(false)
     }
@@ -300,18 +294,6 @@ export default function Repos() {
           </button>
         </div>
       </div>
-
-      {message && (
-        <div
-          className={`rounded-xl px-4 py-2.5 text-[13px] mb-5 ${
-            message.type === 'success'
-              ? 'bg-claim/[0.08] border border-claim/20 text-claim'
-              : 'bg-dismiss/[0.08] border border-dismiss/20 text-dismiss'
-          }`}
-        >
-          {message.text}
-        </div>
-      )}
 
       {profiles.length === 0 ? (
         <div className="backdrop-blur-xl bg-surface-raised border border-border-glass rounded-2xl p-12 text-center">
@@ -378,20 +360,24 @@ export default function Repos() {
                       profile={profile}
                       onSave={async (branch) => {
                         try {
-                          await fetch(`/api/repos/${profile.owner}/${profile.repo}`, {
+                          const res = await fetch(`/api/repos/${profile.owner}/${profile.repo}`, {
                             method: 'PATCH',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
                               base_branch: branch || null,
                             }),
                           })
+                          if (!res.ok) {
+                            toast.error(await readError(res, 'Failed to update base branch'))
+                            return
+                          }
                           setProfiles((prev) =>
                             prev.map((p) =>
                               p.id === profile.id ? { ...p, base_branch: branch } : p,
                             ),
                           )
-                        } catch {
-                          // non-critical
+                        } catch (err) {
+                          toast.error(`Failed to update base branch: ${(err as Error).message}`)
                         }
                       }}
                     />

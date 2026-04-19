@@ -5,6 +5,7 @@ import { X } from 'lucide-react'
 import PredicateEditor from './PredicateEditor'
 import Slider from './Slider'
 import type { TaskRule, EventType } from '../types'
+import { toast } from './Toast/toastStore'
 
 interface TaskRuleEditorProps {
   open: boolean
@@ -170,7 +171,9 @@ export default function TaskRuleEditor({
 
       onSaved()
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Something went wrong')
+      const msg = err instanceof Error ? err.message : 'Something went wrong'
+      setError(msg)
+      toast.error(`Failed to ${isEdit ? 'update' : 'create'} rule: ${msg}`)
     } finally {
       setSaving(false)
     }
@@ -202,7 +205,9 @@ export default function TaskRuleEditor({
       onDeleted?.()
       onClose()
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Something went wrong')
+      const msg = err instanceof Error ? err.message : 'Something went wrong'
+      setError(msg)
+      toast.error(`Failed to delete rule: ${msg}`)
     } finally {
       setDeleting(false)
     }

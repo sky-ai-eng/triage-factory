@@ -12,6 +12,7 @@ import Prompts from './pages/Prompts'
 import Repos from './pages/Repos'
 import Shell from './Shell'
 import AuthGate from './AuthGate'
+import ToastProvider from './components/Toast/ToastProvider'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
@@ -35,6 +36,7 @@ createRoot(document.getElementById('root')!).render(
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+      <ToastProvider />
     </BrowserRouter>
   </StrictMode>,
 )

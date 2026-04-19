@@ -22,6 +22,11 @@ type Manager struct {
 	bus      *eventbus.Bus
 	tracker  *tracker.Tracker
 
+	// OnError fires when a poll cycle returns an error. Source is "github"
+	// or "jira". Wired from main to a toast helper so users see the
+	// failure without log-diving; nil-safe if caller doesn't set it.
+	OnError func(source string, err error)
+
 	mu       sync.Mutex
 	ghStop   chan struct{}
 	jiraStop chan struct{}
@@ -32,6 +37,14 @@ func NewManager(database *sql.DB, bus *eventbus.Bus) *Manager {
 		database: database,
 		bus:      bus,
 		tracker:  tracker.New(database, bus),
+	}
+}
+
+// reportError invokes the OnError callback if set. Centralized so adding
+// behavior later (metrics, rate-limiting) has one call site.
+func (m *Manager) reportError(source string, err error) {
+	if m.OnError != nil {
+		m.OnError(source, err)
 	}
 }
 
@@ -140,6 +153,7 @@ func (m *Manager) startGitHub(cfg config.Config, creds auth.Credentials) {
 		// Initial poll
 		if _, err := m.tracker.RefreshGitHub(client, creds.GitHubUsername, repos); err != nil {
 			log.Printf("[github] tracker error: %v", err)
+			m.reportError("github", err)
 		}
 
 		ticker := time.NewTicker(interval)
@@ -149,6 +163,7 @@ func (m *Manager) startGitHub(cfg config.Config, creds auth.Credentials) {
 			case <-ticker.C:
 				if _, err := m.tracker.RefreshGitHub(client, creds.GitHubUsername, repos); err != nil {
 					log.Printf("[github] tracker error: %v", err)
+					m.reportError("github", err)
 				}
 			case <-stop:
 				return
@@ -182,6 +197,7 @@ func (m *Manager) startJira(cfg config.Config, creds auth.Credentials) {
 		// Initial poll
 		if _, err := m.tracker.RefreshJira(client, creds.JiraURL, cfg.Jira.Projects, cfg.Jira.Pickup.Members, cfg.Jira.Done.Members, creds.JiraDisplayName); err != nil {
 			log.Printf("[jira] tracker error: %v", err)
+			m.reportError("jira", err)
 		}
 
 		ticker := time.NewTicker(interval)
@@ -191,6 +207,7 @@ func (m *Manager) startJira(cfg config.Config, creds auth.Credentials) {
 			case <-ticker.C:
 				if _, err := m.tracker.RefreshJira(client, creds.JiraURL, cfg.Jira.Projects, cfg.Jira.Pickup.Members, cfg.Jira.Done.Members, creds.JiraDisplayName); err != nil {
 					log.Printf("[jira] tracker error: %v", err)
+					m.reportError("jira", err)
 				}
 			case <-stop:
 				return

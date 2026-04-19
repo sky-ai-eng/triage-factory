@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
+import { toast } from './Toast/toastStore'
+import { readError } from '../lib/api'
 
 interface Props {
   promptId: string | null
@@ -148,24 +150,24 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
     setError('')
 
     try {
-      if (isNew) {
-        const res = await fetch('/api/prompts', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, body }),
-        })
-        if (!res.ok) throw new Error('Failed to create')
-      } else {
-        const res = await fetch(`/api/prompts/${promptId}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, body }),
-        })
-        if (!res.ok) throw new Error('Failed to save')
+      const res = isNew
+        ? await fetch('/api/prompts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, body }),
+          })
+        : await fetch(`/api/prompts/${promptId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, body }),
+          })
+      if (!res.ok) {
+        toast.error(await readError(res, `Failed to ${isNew ? 'create' : 'save'} prompt`))
+        return
       }
       onSaved()
-    } catch {
-      setError('Failed to save prompt')
+    } catch (err) {
+      toast.error(`Failed to save prompt: ${(err as Error).message}`)
     } finally {
       setSaving(false)
     }
@@ -177,12 +179,14 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
     try {
       const res = await fetch(`/api/prompts/${promptId}`, { method: 'DELETE' })
       if (!res.ok) {
-        const body = await res.json().catch(() => null)
-        throw new Error(body?.error || 'Failed to delete')
+        toast.error(
+          await readError(res, `Failed to ${source === 'user' ? 'delete' : 'hide'} prompt`),
+        )
+        return
       }
       onDeleted?.()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to delete prompt')
+      toast.error(`Failed to delete prompt: ${(err as Error).message}`)
     } finally {
       setDeleting(false)
     }

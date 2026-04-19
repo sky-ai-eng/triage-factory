@@ -79,8 +79,13 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[ws] client disconnected (%d total)", h.clientCount())
 }
 
-// Broadcast sends an event to all connected clients.
+// Broadcast sends an event to all connected clients. Nil-receiver-safe:
+// a nil *Hub silently drops the event so callers that conditionally have
+// a hub (tests, pre-wired packages) don't have to guard every call site.
 func (h *Hub) Broadcast(evt Event) {
+	if h == nil {
+		return
+	}
 	data, err := json.Marshal(evt)
 	if err != nil {
 		log.Printf("[ws] marshal error: %v", err)

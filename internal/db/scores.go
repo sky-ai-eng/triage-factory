@@ -16,6 +16,20 @@ func MarkScoring(database *sql.DB, taskIDs []string) error {
 	return nil
 }
 
+// ResetScoringToPending flips scoring_status back to 'pending' for the given
+// task IDs. Used when a scoring batch failed so the tasks are retried on the
+// next cycle — without this, MarkScoring would have left them stuck in
+// 'in_progress' (UnscoredTasks only picks up 'pending') and they'd never
+// be rescored.
+func ResetScoringToPending(database *sql.DB, taskIDs []string) error {
+	for _, id := range taskIDs {
+		if _, err := database.Exec(`UPDATE tasks SET scoring_status = 'pending' WHERE id = ?`, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // UpdateTaskScores applies AI-generated scores and summaries to tasks,
 // and sets scoring_status = 'scored'.
 func UpdateTaskScores(database *sql.DB, updates []domain.TaskScoreUpdate) error {
