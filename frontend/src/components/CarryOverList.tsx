@@ -29,6 +29,9 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
   const [selections, setSelections] = useState<Record<string, Action>>({})
+  // Per-row error messages from the last POST. Cleared when the user changes a
+  // selection on that row so stale errors don't linger after a retry attempt.
+  const [failures, setFailures] = useState<Record<string, string>>({})
 
   // Keep refs for component lifecycle and polling so retry timers don't
   // continue firing after unmount.
@@ -96,6 +99,13 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
       }
       return next
     })
+    // Changing a selection invalidates any prior failure message on this row.
+    setFailures((prev) => {
+      if (!prev[issueKey]) return prev
+      const next = { ...prev }
+      delete next[issueKey]
+      return next
+    })
   }
 
   const selectionCount = Object.keys(selections).length
@@ -119,12 +129,36 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
         setError('Failed to save')
         return
       }
-      const body = await res.json()
-      if (body.failed && body.failed.length > 0) {
-        // Surface failed rows in the console and show a concise banner.
-        console.warn('carry-over partial failure:', body.failed)
+      const body = (await res.json()) as {
+        applied: number
+        failed?: { issue_key: string; action: string; error: string }[]
       }
-      onSave()
+      const failedList = body.failed ?? []
+      if (failedList.length === 0) {
+        onSave()
+        return
+      }
+
+      // Partial success: remove successfully applied rows from the list, keep
+      // failed rows visible with inline error messages. The user can change or
+      // retry those selections, or skip to continue.
+      console.warn('carry-over partial failure:', failedList)
+      const failedKeys = new Set(failedList.map((f) => f.issue_key))
+      const appliedKeys = new Set(Object.keys(selections).filter((k) => !failedKeys.has(k)))
+      setTickets((prev) => (prev ?? []).filter((t) => !appliedKeys.has(t.issue_key)))
+      setSelections((prev) => {
+        const next: Record<string, Action> = {}
+        for (const [k, v] of Object.entries(prev)) {
+          if (!appliedKeys.has(k)) next[k] = v
+        }
+        return next
+      })
+      setFailures(
+        failedList.reduce<Record<string, string>>((acc, f) => {
+          acc[f.issue_key] = f.error
+          return acc
+        }, {}),
+      )
     } catch (err) {
       console.error('carry-over save failed:', err)
       setError('Failed to save')
@@ -195,16 +229,25 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
         )}
 
         {!polling && !error && tickets && tickets.length > 0 && (
-          <div className="py-2 space-y-0.5">
-            {tickets.map((t) => (
-              <TicketRow
-                key={t.issue_key}
-                ticket={t}
-                selection={selections[t.issue_key]}
-                onToggle={(action) => toggle(t.issue_key, action)}
-              />
-            ))}
-          </div>
+          <>
+            {Object.keys(failures).length > 0 && (
+              <div className="mb-2 rounded-xl bg-dismiss/[0.06] border border-dismiss/20 px-3 py-2 text-[12px] text-dismiss">
+                Some actions couldn&rsquo;t be applied. Successful rows were saved; fix the
+                highlighted rows below or skip to continue.
+              </div>
+            )}
+            <div className="py-2 space-y-0.5">
+              {tickets.map((t) => (
+                <TicketRow
+                  key={t.issue_key}
+                  ticket={t}
+                  selection={selections[t.issue_key]}
+                  failure={failures[t.issue_key]}
+                  onToggle={(action) => toggle(t.issue_key, action)}
+                />
+              ))}
+            </div>
+          </>
         )}
       </div>
 
@@ -245,14 +288,20 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
 function TicketRow({
   ticket,
   selection,
+  failure,
   onToggle,
 }: {
   ticket: StockTicket
   selection: Action | undefined
+  failure?: string
   onToggle: (action: Action) => void
 }) {
   return (
-    <div className="flex items-start gap-3 px-3 py-2.5 rounded-xl hover:bg-black/[0.02] transition-colors">
+    <div
+      className={`flex items-start gap-3 px-3 py-2.5 rounded-xl transition-colors ${
+        failure ? 'bg-dismiss/[0.04] border border-dismiss/20' : 'hover:bg-black/[0.02]'
+      }`}
+    >
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <a
@@ -294,6 +343,11 @@ function TicketRow({
             <span className="italic">no metadata</span>
           )}
         </div>
+        {failure && (
+          <div className="mt-1 text-[11px] text-dismiss" title={failure}>
+            {failure}
+          </div>
+        )}
       </div>
 
       <TriSelector selection={selection} onToggle={onToggle} />
