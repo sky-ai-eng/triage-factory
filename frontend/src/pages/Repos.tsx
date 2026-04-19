@@ -1,4 +1,6 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import * as Popover from '@radix-ui/react-popover'
+import { ChevronDown, GitBranch, Plus, RotateCw } from 'lucide-react'
 import RepoPickerModal from '../components/RepoPickerModal'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { toast } from '../components/Toast/toastStore'
@@ -18,40 +20,44 @@ interface RepoProfile {
   profiled_at?: string
 }
 
-function BranchInput({
+// --- BranchPicker ----------------------------------------------------------
+// Radix Popover instead of a hand-rolled absolutely-positioned dropdown so
+// the list portals to body and isn't clipped by the card's stacking context
+// (the old `backdrop-blur-xl` on the card created its own paint boundary,
+// so a z-50 child could never escape it — classic z-index fail).
+
+function BranchPicker({
   profile,
   onSave,
 }: {
   profile: RepoProfile
   onSave: (branch: string) => void
 }) {
-  const [value, setValue] = useState(profile.base_branch || '')
   const [open, setOpen] = useState(false)
-
-  // Sync local state when the profile prop changes (e.g. after re-fetch or WS update)
-  useEffect(() => {
-    setValue(profile.base_branch || '')
-  }, [profile.base_branch])
+  const [query, setQuery] = useState(profile.base_branch || '')
   const [branches, setBranches] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
-  const placeholder = profile.default_branch || 'main'
+  useEffect(() => {
+    setQuery(profile.base_branch || '')
+  }, [profile.base_branch])
+
+  const effective = profile.base_branch || profile.default_branch || 'main'
+  const usingDefault = !profile.base_branch
 
   const fetchBranches = useCallback(
-    async (query: string) => {
+    async (q: string) => {
       setLoading(true)
       try {
         const res = await fetch(
-          `/api/repos/${profile.owner}/${profile.repo}/branches?q=${encodeURIComponent(query)}`,
+          `/api/repos/${profile.owner}/${profile.repo}/branches?q=${encodeURIComponent(q)}`,
         )
         if (res.ok) {
-          const data: string[] = await res.json()
-          setBranches(data)
+          setBranches((await res.json()) as string[])
         }
       } catch {
-        // non-critical
+        // non-critical — list just stays empty
       } finally {
         setLoading(false)
       }
@@ -59,100 +65,293 @@ function BranchInput({
     [profile.owner, profile.repo],
   )
 
-  const handleFocus = () => {
-    setOpen(true)
-    fetchBranches(value)
+  const handleOpenChange = (next: boolean) => {
+    setOpen(next)
+    if (next) {
+      fetchBranches(query)
+    }
   }
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleQueryChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const v = e.target.value
-    setValue(v)
+    setQuery(v)
     clearTimeout(debounceRef.current)
     debounceRef.current = setTimeout(() => fetchBranches(v), 200)
   }
 
   const handleSelect = (branch: string) => {
-    setValue(branch)
+    setQuery(branch)
     setOpen(false)
     onSave(branch)
   }
 
-  const handleBlur = () => {
-    // Delay to allow click on dropdown item
-    setTimeout(() => {
-      setOpen(false)
-      const effective = value.trim()
-      if (effective !== (profile.base_branch || '')) {
-        onSave(effective)
-      }
-    }, 150)
-  }
-
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
+      const v = query.trim()
       setOpen(false)
-      ;(e.target as HTMLInputElement).blur()
-      const effective = value.trim()
-      if (effective !== (profile.base_branch || '')) {
-        onSave(effective)
-      }
+      if (v !== (profile.base_branch || '')) onSave(v)
     }
     if (e.key === 'Escape') {
       setOpen(false)
-      setValue(profile.base_branch || '')
+      setQuery(profile.base_branch || '')
     }
   }
 
-  // Close on outside click
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [])
-
   return (
-    <div ref={ref} className="relative">
-      <input
-        type="text"
-        value={value}
-        onChange={handleChange}
-        onFocus={handleFocus}
-        onBlur={handleBlur}
-        onKeyDown={handleKeyDown}
-        placeholder={placeholder}
-        className="w-40 text-[12px] bg-transparent border border-border-subtle rounded-lg px-2.5 py-1.5 text-text-primary placeholder:text-text-tertiary/50 focus:outline-none focus:border-accent/40 transition-colors"
-      />
-      {open && (
-        <div className="absolute z-50 top-full mt-1 w-56 max-h-48 overflow-y-auto backdrop-blur-xl bg-surface-raised border border-border-glass rounded-xl shadow-lg shadow-black/[0.08]">
-          {loading && branches.length === 0 ? (
-            <div className="px-3 py-2 text-[11px] text-text-tertiary">Loading...</div>
-          ) : branches.length === 0 ? (
-            <div className="px-3 py-2 text-[11px] text-text-tertiary">No branches found</div>
-          ) : (
-            branches.map((b) => (
-              <button
-                key={b}
-                type="button"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => handleSelect(b)}
-                className={`w-full text-left px-3 py-1.5 text-[12px] hover:bg-accent/[0.06] transition-colors ${
-                  b === placeholder ? 'text-text-secondary font-medium' : 'text-text-primary'
-                }`}
-              >
-                {b}
-                {b === profile.default_branch && (
-                  <span className="ml-1.5 text-[10px] text-text-tertiary">default</span>
-                )}
-              </button>
-            ))
-          )}
-        </div>
-      )}
-    </div>
+    <Popover.Root open={open} onOpenChange={handleOpenChange}>
+      <Popover.Trigger asChild>
+        <button
+          type="button"
+          className={`group inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] transition-colors ${
+            open
+              ? 'bg-accent/10 text-accent'
+              : 'text-text-tertiary hover:text-text-secondary hover:bg-black/[0.03]'
+          }`}
+        >
+          <GitBranch size={11} strokeWidth={2} />
+          <span className={usingDefault ? 'text-text-tertiary' : 'text-text-secondary'}>
+            {effective}
+          </span>
+          <ChevronDown size={10} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          align="end"
+          sideOffset={6}
+          className="z-[60] w-64 origin-top-right rounded-xl border border-border-glass bg-surface-raised/95 backdrop-blur-xl shadow-lg shadow-black/[0.08] data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95"
+        >
+          <div className="px-2 pt-2 pb-1.5 border-b border-border-subtle">
+            <input
+              autoFocus
+              value={query}
+              onChange={handleQueryChange}
+              onKeyDown={handleKeyDown}
+              placeholder={profile.default_branch || 'main'}
+              className="w-full bg-transparent px-2 py-1 text-[12px] text-text-primary placeholder:text-text-tertiary/60 focus:outline-none"
+            />
+          </div>
+          <div className="max-h-56 overflow-y-auto py-1">
+            {loading && branches.length === 0 ? (
+              <div className="px-3 py-1.5 text-[11px] text-text-tertiary">Loading…</div>
+            ) : branches.length === 0 ? (
+              <div className="px-3 py-1.5 text-[11px] text-text-tertiary">No branches found</div>
+            ) : (
+              branches.map((b) => {
+                const isDefault = b === profile.default_branch
+                const isCurrent = b === (profile.base_branch || '')
+                return (
+                  <button
+                    key={b}
+                    type="button"
+                    onClick={() => handleSelect(b)}
+                    className={`flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-accent/[0.06] ${
+                      isCurrent ? 'text-accent' : 'text-text-primary'
+                    }`}
+                  >
+                    <span className="truncate">{b}</span>
+                    {isDefault && (
+                      <span className="shrink-0 text-[10px] text-text-tertiary">default</span>
+                    )}
+                  </button>
+                )
+              })
+            )}
+          </div>
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
   )
 }
+
+// --- StatusDot -------------------------------------------------------------
+// LED indicator with three states:
+//   ready     — filled accent with soft halo; docs present + profile generated
+//   profiling — hollow, pulsing; docs present but summary not back yet
+//   no-docs   — hollow, rust (dismiss color); profiling can never run
+//
+// The halo is a box-shadow rather than a filter so it stays crisp through
+// the card's backdrop-blur and doesn't smear with the glass.
+
+type DotState = 'ready' | 'profiling' | 'no-docs'
+
+function StatusDot({ state }: { state: DotState }) {
+  if (state === 'ready') {
+    return (
+      <span
+        className="block h-2 w-2 shrink-0 rounded-full bg-[var(--color-accent)]"
+        style={{ boxShadow: '0 0 8px 0 var(--color-accent-soft)' }}
+      />
+    )
+  }
+  if (state === 'profiling') {
+    return (
+      <span className="relative block h-2 w-2 shrink-0">
+        <span className="absolute inset-0 animate-ping rounded-full bg-[var(--color-accent)] opacity-50" />
+        <span className="absolute inset-0 rounded-full border border-[var(--color-accent)]" />
+      </span>
+    )
+  }
+  // no-docs
+  return (
+    <span
+      className="block h-2 w-2 shrink-0 rounded-full border"
+      style={{ borderColor: 'var(--color-dismiss)' }}
+    />
+  )
+}
+
+// --- RepoCard --------------------------------------------------------------
+
+function RepoCard({
+  profile,
+  onBranchChange,
+}: {
+  profile: RepoProfile
+  onBranchChange: (branch: string) => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const bodyRef = useRef<HTMLParagraphElement>(null)
+  const [isClamped, setIsClamped] = useState(false)
+
+  // After render, check whether the description actually overflows the
+  // clamp. Only show the "expand" affordance when there's something to
+  // expand — short profiles don't get a dangling toggle.
+  useEffect(() => {
+    const el = bodyRef.current
+    if (!el) return
+    if (expanded) return
+    setIsClamped(el.scrollHeight > el.clientHeight + 1)
+  }, [profile.profile_text, expanded])
+
+  const hasAnyDocs = profile.has_readme || profile.has_claude_md || profile.has_agents_md
+
+  const state: DotState = !hasAnyDocs ? 'no-docs' : profile.profile_text ? 'ready' : 'profiling'
+
+  return (
+    <article
+      className="
+        group relative overflow-hidden rounded-2xl border border-border-glass
+        bg-gradient-to-br from-white/70 via-white/50 to-white/35
+        p-5 shadow-sm shadow-black/[0.03] backdrop-blur-xl
+        transition-[box-shadow,border-color] duration-300
+        hover:border-white/90 hover:shadow-md hover:shadow-black/[0.05]
+      "
+    >
+      {/* Top-left catchlight — implies refraction without being loud */}
+      <span
+        aria-hidden
+        className="pointer-events-none absolute -left-8 -top-8 h-24 w-24 rounded-full bg-white/30 blur-2xl"
+      />
+
+      {/* Header row */}
+      <header className="relative flex items-center gap-3">
+        <StatusDot state={state} />
+        <h3 className="text-[13px] font-semibold tracking-tight text-text-primary truncate">
+          {profile.id}
+        </h3>
+        <div className="ml-auto flex items-center gap-3">
+          <BranchPicker profile={profile} onSave={onBranchChange} />
+          {profile.profiled_at && (
+            <span className="text-[10px] text-text-tertiary whitespace-nowrap tabular-nums">
+              {formatAge(profile.profiled_at)}
+            </span>
+          )}
+        </div>
+      </header>
+
+      {/* Recessed description well */}
+      <div className="relative mt-3 rounded-xl bg-black/[0.02] ring-1 ring-inset ring-black/[0.04] px-4 py-3">
+        {profile.profile_text ? (
+          <>
+            <p
+              ref={bodyRef}
+              className={`text-[12px] leading-relaxed text-text-secondary ${
+                expanded ? '' : 'line-clamp-3'
+              }`}
+            >
+              {profile.profile_text}
+            </p>
+            {isClamped && !expanded && (
+              <>
+                <div
+                  aria-hidden
+                  className="pointer-events-none absolute inset-x-4 bottom-0 h-5 rounded-b-xl bg-gradient-to-t from-[rgba(247,245,242,0.9)] to-transparent"
+                />
+                <button
+                  type="button"
+                  onClick={() => setExpanded(true)}
+                  className="mt-1 text-[11px] font-medium text-accent/80 hover:text-accent transition-colors"
+                >
+                  Show more
+                </button>
+              </>
+            )}
+            {expanded && (
+              <button
+                type="button"
+                onClick={() => setExpanded(false)}
+                className="mt-2 text-[11px] font-medium text-text-tertiary hover:text-text-secondary transition-colors"
+              >
+                Show less
+              </button>
+            )}
+          </>
+        ) : hasAnyDocs ? (
+          <div className="space-y-1.5">
+            <div className="h-2.5 w-full animate-pulse rounded-full bg-black/[0.05]" />
+            <div className="h-2.5 w-5/6 animate-pulse rounded-full bg-black/[0.05]" />
+            <div className="h-2.5 w-4/6 animate-pulse rounded-full bg-black/[0.05]" />
+          </div>
+        ) : (
+          <p className="text-[12px] italic text-text-tertiary">
+            No README, CLAUDE.md, or AGENTS.md — profile cannot be generated.
+          </p>
+        )}
+
+        {/* Doc presence pinned to the well's bottom-right */}
+        {hasAnyDocs && (
+          <div className="mt-3 flex items-center justify-end gap-1">
+            <DocChip label="README" present={profile.has_readme} />
+            <DocChip label="CLAUDE" present={profile.has_claude_md} />
+            <DocChip label="AGENTS" present={profile.has_agents_md} />
+          </div>
+        )}
+      </div>
+    </article>
+  )
+}
+
+function DocChip({ label, present }: { label: string; present: boolean }) {
+  if (!present) {
+    return (
+      <span className="rounded-full px-1.5 py-0.5 text-[9px] font-medium tracking-wide text-text-tertiary/50 line-through">
+        {label}
+      </span>
+    )
+  }
+  return (
+    <span className="rounded-full border border-accent/15 bg-accent/5 px-1.5 py-0.5 text-[9px] font-medium tracking-wide text-accent">
+      {label}
+    </span>
+  )
+}
+
+// --- Helpers ---------------------------------------------------------------
+
+function formatAge(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime()
+  const m = Math.floor(diff / 60000)
+  if (m < 1) return 'just now'
+  if (m < 60) return `${m}m`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h`
+  const d = Math.floor(h / 24)
+  if (d < 30) return `${d}d`
+  return `${Math.floor(d / 30)}mo`
+}
+
+// --- Page ------------------------------------------------------------------
 
 export default function Repos() {
   const [profiles, setProfiles] = useState<RepoProfile[]>([])
@@ -223,7 +422,6 @@ export default function Repos() {
       } else {
         toast.success('Repositories updated — profiling will run shortly')
         setSelectedRepos(repos)
-        // Re-fetch profiles after a delay to catch profiling results
         setTimeout(fetchData, 5000)
       }
     } catch (err) {
@@ -237,7 +435,6 @@ export default function Repos() {
   const handleReprofile = async () => {
     setSaving(true)
     try {
-      // Saving the same repos triggers re-profiling via onGitHubChanged
       const res = await fetch('/api/repos', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -256,141 +453,86 @@ export default function Repos() {
     }
   }
 
+  const handleBranchChange = (profile: RepoProfile) => async (branch: string) => {
+    try {
+      const res = await fetch(`/api/repos/${profile.owner}/${profile.repo}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ base_branch: branch || null }),
+      })
+      if (!res.ok) {
+        toast.error(await readError(res, 'Failed to update base branch'))
+        return
+      }
+      setProfiles((prev) =>
+        prev.map((p) => (p.id === profile.id ? { ...p, base_branch: branch } : p)),
+      )
+    } catch (err) {
+      toast.error(`Failed to update base branch: ${(err as Error).message}`)
+    }
+  }
+
+  const profiledCount = useMemo(() => profiles.filter((p) => p.profile_text).length, [profiles])
+
   if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-[50vh]">
-        <p className="text-text-tertiary text-[13px]">Loading repos...</p>
+      <div className="flex min-h-[50vh] items-center justify-center">
+        <p className="text-[13px] text-text-tertiary">Loading repos…</p>
       </div>
     )
   }
 
   return (
-    <div className="max-w-3xl mx-auto">
-      <div className="flex items-center justify-between mb-6">
+    <div className="mx-auto max-w-3xl">
+      {/* Etched gradient rail — subtle Halo HUD nod, warm copper fade */}
+      <div
+        aria-hidden
+        className="mb-4 h-px w-full bg-gradient-to-r from-transparent via-[var(--color-accent-soft)] to-transparent"
+      />
+
+      <header className="mb-6 flex items-start justify-between gap-6">
         <div>
-          <h1 className="text-[22px] font-semibold text-text-primary tracking-tight">
-            Repositories
-          </h1>
-          <p className="text-[13px] text-text-tertiary mt-1">
-            Watched repos appear in your triage queue and are used to match Jira tickets for
+          <div className="flex items-baseline gap-2">
+            <h1 className="text-[22px] font-semibold tracking-tight text-text-primary">
+              Repositories
+            </h1>
+            {profiles.length > 0 && (
+              <span className="text-[11px] tabular-nums text-text-tertiary">
+                {profiledCount}/{profiles.length} profiled
+              </span>
+            )}
+          </div>
+          <p className="mt-1 text-[13px] text-text-tertiary">
+            Watched repos surface in your triage queue and anchor Jira-to-code matching for
             delegation.
           </p>
         </div>
-        <div className="flex gap-2">
-          <button
-            type="button"
+        <div className="flex shrink-0 items-center gap-1">
+          <ActionButton
+            icon={<RotateCw size={12} />}
+            label={saving ? 'Working…' : 'Re-profile'}
             onClick={handleReprofile}
             disabled={saving || profiles.length === 0}
-            className="text-[13px] text-text-secondary hover:text-text-primary border border-border-subtle rounded-xl px-4 py-2 transition-colors disabled:opacity-40"
-          >
-            {saving ? 'Working...' : 'Re-profile'}
-          </button>
-          <button
-            type="button"
+          />
+          <ActionButton
+            icon={<Plus size={12} />}
+            label="Edit selection"
             onClick={() => setPickerOpen(true)}
-            className="text-[13px] text-accent hover:text-accent/80 border border-accent/20 rounded-xl px-4 py-2 transition-colors"
-          >
-            Edit Selection
-          </button>
+            accent
+          />
         </div>
-      </div>
+      </header>
 
       {profiles.length === 0 ? (
-        <div className="backdrop-blur-xl bg-surface-raised border border-border-glass rounded-2xl p-12 text-center">
-          <p className="text-[13px] text-text-tertiary mb-4">No repositories configured yet.</p>
-          <button
-            type="button"
-            onClick={() => setPickerOpen(true)}
-            className="text-[13px] text-accent hover:text-accent/80 border border-accent/20 rounded-xl px-4 py-2 transition-colors"
-          >
-            Select Repositories
-          </button>
-        </div>
+        <EmptyState onPick={() => setPickerOpen(true)} />
       ) : (
         <div className="space-y-3">
           {profiles.map((profile) => (
-            <div
+            <RepoCard
               key={profile.id}
-              className="backdrop-blur-xl bg-surface-raised/70 border border-border-glass rounded-2xl p-5 shadow-sm shadow-black/[0.02]"
-            >
-              <div className="flex items-start justify-between gap-4">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2 mb-1">
-                    <h3 className="text-[13px] font-semibold text-text-primary truncate">
-                      {profile.id}
-                    </h3>
-                    <div className="flex gap-1">
-                      {profile.has_readme && (
-                        <span className="text-[9px] text-text-tertiary border border-border-subtle rounded px-1 py-0.5">
-                          README
-                        </span>
-                      )}
-                      {profile.has_claude_md && (
-                        <span className="text-[9px] text-text-tertiary border border-border-subtle rounded px-1 py-0.5">
-                          CLAUDE
-                        </span>
-                      )}
-                      {profile.has_agents_md && (
-                        <span className="text-[9px] text-text-tertiary border border-border-subtle rounded px-1 py-0.5">
-                          AGENTS
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  {profile.profile_text ? (
-                    <p className="text-[12px] text-text-secondary leading-relaxed">
-                      {profile.profile_text}
-                    </p>
-                  ) : profile.has_readme || profile.has_claude_md || profile.has_agents_md ? (
-                    <div className="space-y-1.5 mt-1">
-                      <div className="h-3 bg-black/[0.04] rounded-full w-full animate-pulse" />
-                      <div className="h-3 bg-black/[0.04] rounded-full w-5/6 animate-pulse" />
-                      <div className="h-3 bg-black/[0.04] rounded-full w-4/6 animate-pulse" />
-                    </div>
-                  ) : (
-                    <p className="text-[12px] text-text-tertiary italic">
-                      No documentation files found — profile cannot be generated.
-                    </p>
-                  )}
-
-                  <div className="flex items-center gap-2 mt-3">
-                    <span className="text-[11px] text-text-tertiary">Base branch:</span>
-                    <BranchInput
-                      profile={profile}
-                      onSave={async (branch) => {
-                        try {
-                          const res = await fetch(`/api/repos/${profile.owner}/${profile.repo}`, {
-                            method: 'PATCH',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                              base_branch: branch || null,
-                            }),
-                          })
-                          if (!res.ok) {
-                            toast.error(await readError(res, 'Failed to update base branch'))
-                            return
-                          }
-                          setProfiles((prev) =>
-                            prev.map((p) =>
-                              p.id === profile.id ? { ...p, base_branch: branch } : p,
-                            ),
-                          )
-                        } catch (err) {
-                          toast.error(`Failed to update base branch: ${(err as Error).message}`)
-                        }
-                      }}
-                    />
-                  </div>
-                </div>
-
-                {profile.profiled_at && (
-                  <span className="text-[10px] text-text-tertiary shrink-0 whitespace-nowrap">
-                    {new Date(profile.profiled_at).toLocaleDateString()}
-                  </span>
-                )}
-              </div>
-            </div>
+              profile={profile}
+              onBranchChange={handleBranchChange(profile)}
+            />
           ))}
         </div>
       )}
@@ -402,6 +544,75 @@ export default function Repos() {
           onClose={() => setPickerOpen(false)}
         />
       )}
+    </div>
+  )
+}
+
+// --- Small building blocks -------------------------------------------------
+
+function ActionButton({
+  icon,
+  label,
+  onClick,
+  disabled,
+  accent,
+}: {
+  icon: React.ReactNode
+  label: string
+  onClick: () => void
+  disabled?: boolean
+  accent?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`
+        inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12px] font-medium
+        transition-colors disabled:opacity-40 disabled:hover:bg-transparent
+        ${
+          accent
+            ? 'text-accent hover:bg-accent/[0.08]'
+            : 'text-text-secondary hover:text-text-primary hover:bg-black/[0.03]'
+        }
+      `}
+    >
+      {icon}
+      {label}
+    </button>
+  )
+}
+
+function EmptyState({ onPick }: { onPick: () => void }) {
+  return (
+    <div
+      className="
+        relative overflow-hidden rounded-2xl border border-border-glass
+        bg-gradient-to-br from-white/70 via-white/50 to-white/35
+        p-12 text-center backdrop-blur-xl
+      "
+    >
+      <span
+        aria-hidden
+        className="pointer-events-none absolute -left-12 -top-12 h-36 w-36 rounded-full bg-white/30 blur-2xl"
+      />
+      <p className="relative text-[13px] text-text-secondary">No repositories configured yet.</p>
+      <p className="relative mt-1 text-[12px] text-text-tertiary">
+        Pick a few to start watching for PRs and to anchor Jira delegation.
+      </p>
+      <button
+        type="button"
+        onClick={onPick}
+        className="
+          relative mt-5 inline-flex items-center gap-1.5 rounded-full
+          border border-accent/25 px-4 py-1.5 text-[12px] font-medium text-accent
+          transition-colors hover:bg-accent/[0.06] hover:border-accent/40
+        "
+      >
+        <Plus size={12} />
+        Add repositories
+      </button>
     </div>
   )
 }
