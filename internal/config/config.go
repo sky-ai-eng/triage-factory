@@ -27,6 +27,7 @@ type JiraConfig struct {
 	Projects         []string      `yaml:"projects"`
 	PickupStatuses   []string      `yaml:"pickup_statuses"`
 	InProgressStatus string        `yaml:"in_progress_status"`
+	DoneStatus       string        `yaml:"done_status"`
 }
 
 type ServerConfig struct {

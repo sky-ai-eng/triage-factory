@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { CheckCircle2, ChevronRight } from 'lucide-react'
 import RepoPickerModal, { type GitHubRepo } from '../components/RepoPickerModal'
+import CarryOverList from '../components/CarryOverList'
 
 interface JiraStatus {
   id: string
@@ -9,8 +10,8 @@ interface JiraStatus {
 }
 
 // Setup flow steps:
-//   github → repos → integrations → jira-creds → jira-config → (back to integrations)
-type Step = 'github' | 'repos' | 'integrations' | 'jira-creds' | 'jira-config'
+//   github → repos → integrations → jira-creds → jira-config → jira-carry-over → integrations
+type Step = 'github' | 'repos' | 'integrations' | 'jira-creds' | 'jira-config' | 'jira-carry-over'
 
 export default function Setup() {
   const navigate = useNavigate()
@@ -31,6 +32,7 @@ export default function Setup() {
     projects: '',
     pickup_statuses: [] as string[],
     in_progress_status: '',
+    done_status: '',
   })
   const [jiraStatuses, setJiraStatuses] = useState<JiraStatus[]>([])
   const [statusesLoading, setStatusesLoading] = useState(false)
@@ -170,7 +172,8 @@ export default function Setup() {
       .map((s) => s.trim())
       .filter(Boolean).length > 0 &&
     jiraForm.pickup_statuses.length > 0 &&
-    jiraForm.in_progress_status !== ''
+    jiraForm.in_progress_status !== '' &&
+    jiraForm.done_status !== ''
 
   const saveJiraConfig = async () => {
     setError('')
@@ -190,6 +193,7 @@ export default function Setup() {
           jira_projects: projects,
           jira_pickup_statuses: jiraForm.pickup_statuses,
           jira_in_progress_status: jiraForm.in_progress_status,
+          jira_done_status: jiraForm.done_status,
         }),
       })
       if (!res.ok) {
@@ -197,8 +201,7 @@ export default function Setup() {
         setError(data.error || 'Failed to save Jira config')
         return
       }
-      setJiraConfigured(true)
-      setStep('integrations')
+      setStep('jira-carry-over')
     } catch {
       setError('Could not connect to server')
     } finally {
@@ -223,6 +226,7 @@ export default function Setup() {
       projects: '',
       pickup_statuses: [],
       in_progress_status: '',
+      done_status: '',
     }))
     setJiraStatuses([])
     setStep('jira-creds')
@@ -509,6 +513,26 @@ export default function Setup() {
                     ))}
                   </div>
                 </div>
+                <div>
+                  <span className="text-[11px] text-text-tertiary mb-1.5 block">
+                    Done status (set when you mark a ticket as complete)
+                  </span>
+                  <div className="flex flex-wrap gap-2">
+                    {jiraStatuses.map((s) => (
+                      <StatusChip
+                        key={s.id}
+                        label={s.name}
+                        selected={jiraForm.done_status === s.name}
+                        onClick={() =>
+                          setJiraForm((f) => ({
+                            ...f,
+                            done_status: f.done_status === s.name ? '' : s.name,
+                          }))
+                        }
+                      />
+                    ))}
+                  </div>
+                </div>
               </>
             )}
           </div>
@@ -525,10 +549,25 @@ export default function Setup() {
               disabled={loading || !canSaveJiraConfig}
               className={primaryBtnClass}
             >
-              {loading ? 'Saving...' : 'Save & Return'}
+              {loading ? 'Saving...' : 'Continue'}
             </button>
           </div>
         </div>
+      )}
+
+      {/* Step 6: Jira carry-over — decide what to do with existing assigned work */}
+      {step === 'jira-carry-over' && (
+        <CarryOverList
+          onSave={() => {
+            setJiraConfigured(true)
+            setStep('integrations')
+          }}
+          onSkip={() => {
+            setJiraConfigured(true)
+            setStep('integrations')
+          }}
+          onBack={() => setStep('jira-config')}
+        />
       )}
     </div>
   )

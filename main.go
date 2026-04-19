@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -192,6 +193,7 @@ func main() {
 
 		profileGate.Invalidate()
 		pollerMgr.StopAll()
+		srv.MarkJiraRestarted() // full restart cycles the Jira poller too
 
 		cfg, _ := config.Load()
 		creds, _ := auth.Load()
@@ -233,6 +235,7 @@ func main() {
 		cfg, _ := config.Load()
 		creds, _ := auth.Load()
 
+		srv.MarkJiraRestarted()
 		pollerMgr.RestartJira()
 
 		if creds.JiraPAT != "" && creds.JiraURL != "" {
@@ -240,6 +243,27 @@ func main() {
 		} else {
 			srv.SetJiraClient(nil, "")
 		}
+	})
+
+	// Subscriber: track Jira poll completions so /api/jira/stock knows when
+	// snapshots are ready to read.
+	bus.Subscribe(eventbus.Subscriber{
+		Name:   "jira-poll-tracker",
+		Filter: []string{"system:poll:"},
+		Handle: func(evt domain.Event) {
+			if evt.EventType != domain.EventSystemPollCompleted {
+				return
+			}
+			var meta struct {
+				Source string `json:"source"`
+			}
+			if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
+				return
+			}
+			if meta.Source == "jira" {
+				srv.MarkJiraPollComplete()
+			}
+		},
 	})
 
 	// Initial start with current credentials

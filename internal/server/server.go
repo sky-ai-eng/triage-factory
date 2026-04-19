@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -25,6 +27,13 @@ type Server struct {
 	jiraInProgressStatus string
 	onGitHubChanged      func() // GitHub creds/repos changed — full restart + re-profile
 	onJiraChanged        func() // Jira config changed — restart Jira poller only
+
+	// Jira poll readiness — used by /api/jira/stock to decide whether the
+	// poller has completed its first cycle after a restart. Carry-over reads
+	// from the DB and needs snapshots to be populated before showing tickets.
+	jiraPollMu      sync.RWMutex
+	jiraRestartedAt time.Time
+	jiraLastPollAt  time.Time
 }
 
 // New creates a new server with the given database and registers all routes.
@@ -83,6 +92,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/repos/{owner}/{repo}/branches", s.handleRepoBranches)
 	s.mux.HandleFunc("POST /api/jira/connect", s.handleJiraConnect)
 	s.mux.HandleFunc("GET /api/jira/statuses", s.handleJiraStatuses)
+	s.mux.HandleFunc("GET /api/jira/stock", s.handleJiraStockGet)
+	s.mux.HandleFunc("POST /api/jira/stock", s.handleJiraStockPost)
 
 	s.mux.HandleFunc("GET /api/reviews/{id}", s.handleReviewGet)
 	s.mux.HandleFunc("PATCH /api/reviews/{id}", s.handleReviewUpdate)
@@ -173,6 +184,32 @@ func (s *Server) SetGitHubClient(client *ghclient.Client) {
 func (s *Server) SetJiraClient(client *jira.Client, inProgressStatus string) {
 	s.jiraClient = client
 	s.jiraInProgressStatus = inProgressStatus
+}
+
+// MarkJiraRestarted records the moment the Jira poller was restarted. Clears
+// the last-poll timestamp so jiraPollReady reports false until a completion
+// event arrives. Call from the Jira-changed callback.
+func (s *Server) MarkJiraRestarted() {
+	s.jiraPollMu.Lock()
+	defer s.jiraPollMu.Unlock()
+	s.jiraRestartedAt = time.Now()
+	s.jiraLastPollAt = time.Time{}
+}
+
+// MarkJiraPollComplete records a successful Jira poll cycle. Call from the
+// event-bus subscriber on system:poll:completed when source == "jira".
+func (s *Server) MarkJiraPollComplete() {
+	s.jiraPollMu.Lock()
+	defer s.jiraPollMu.Unlock()
+	s.jiraLastPollAt = time.Now()
+}
+
+// jiraPollReady returns true when the poller has completed at least one cycle
+// since the last restart. Used by /api/jira/stock to gate the list response.
+func (s *Server) jiraPollReady() bool {
+	s.jiraPollMu.RLock()
+	defer s.jiraPollMu.RUnlock()
+	return !s.jiraLastPollAt.IsZero() && s.jiraLastPollAt.After(s.jiraRestartedAt)
 }
 
 // --- Stub handlers (to be implemented) ---
