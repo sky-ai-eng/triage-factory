@@ -86,7 +86,11 @@ function BranchPicker({
     setOpen(next)
     if (next) {
       fetchBranches(query)
+      return
     }
+
+    const v = query.trim()
+    if (v !== (profile.base_branch || '')) onSave(v)
   }
 
   const handleQueryChange = (e: React.ChangeEvent<HTMLInputElement>) => {
