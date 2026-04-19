@@ -339,9 +339,11 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 	log.Printf("[tracker] Jira refresh: %d discovered, %d entities, %d refreshed, %d events",
 		len(discovered), len(entities), len(refreshed), eventsEmitted)
 
-	if len(entities) > 0 {
-		t.EmitPollComplete("jira", len(entities), eventsEmitted)
-	}
+	// Always fire the sentinel — it means "a poll cycle completed," not "a
+	// poll produced work." Carry-over readiness depends on this firing even
+	// on an empty first poll (e.g. projects configured but nothing assigned
+	// yet), otherwise the setup step shimmers forever.
+	t.EmitPollComplete("jira", len(entities), eventsEmitted)
 
 	return eventsEmitted, nil
 }
