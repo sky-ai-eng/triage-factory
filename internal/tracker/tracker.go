@@ -389,7 +389,7 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 	seen := map[string]bool{}
 	var all []domain.JiraSnapshot
 
-	fields := []string{"summary", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment"}
+	fields := []string{"summary", "description", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment"}
 
 	for _, jql := range queries {
 		issues, err := client.SearchIssues(jql, fields, 100)
@@ -411,7 +411,7 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 // batchFetchJira fetches current state for tracked Jira issues.
 func (t *Tracker) batchFetchJira(client *jiraclient.Client, baseURL string, keys []string) (map[string]domain.JiraSnapshot, error) {
 	results := make(map[string]domain.JiraSnapshot, len(keys))
-	fields := []string{"summary", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment"}
+	fields := []string{"summary", "description", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment"}
 
 	for i := 0; i < len(keys); i += jiraBatchSize {
 		end := i + jiraBatchSize
