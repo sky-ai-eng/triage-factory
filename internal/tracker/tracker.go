@@ -365,12 +365,12 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		if e.Title != newSnap.Summary {
 			_ = db.UpdateEntityTitle(t.database, e.ID, newSnap.Summary)
 		}
-		// Description is kept on a dedicated column rather than in the
-		// snapshot; only write when it actually changed so we don't churn
-		// disk on every poll for unchanged multi-KB bodies.
-		if e.Description != newState.Description {
-			_ = db.UpdateEntityDescription(t.database, e.ID, newState.Description)
-		}
+		// Description intentionally not updated here — batchFetchJira
+		// excludes the description field to save bandwidth, so newState's
+		// description would be the empty-string parse result of an absent
+		// field and writing it back would wipe the stored value. Description
+		// is seeded and refreshed by phase 1 (discoverJira), which is the
+		// only place that actually carries the field in the response.
 
 		for _, evt := range events {
 			t.bus.Publish(evt)
@@ -450,10 +450,17 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 	return all, nil
 }
 
-// batchFetchJira fetches current state for tracked Jira issues.
+// batchFetchJira fetches current state for tracked Jira issues. Description
+// is deliberately excluded from the field list — it's seeded on discovery
+// and only relevant to the scorer, which reads from the stored column rather
+// than the API response. Skipping the multi-KB body on every poll saves
+// bandwidth and latency; the tradeoff is that descriptions for entities
+// that stop matching discovery's JQL (e.g. reassigned to someone else) stay
+// pinned at their last-captured value. Acceptable — description relevance
+// drops fast once a ticket is off the user's plate.
 func (t *Tracker) batchFetchJira(client *jiraclient.Client, baseURL string, keys []string) (map[string]jiraIssueState, error) {
 	results := make(map[string]jiraIssueState, len(keys))
-	fields := []string{"summary", "description", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment"}
+	fields := []string{"summary", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment"}
 
 	for i := 0; i < len(keys); i += jiraBatchSize {
 		end := i + jiraBatchSize
