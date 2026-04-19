@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"slices"
+	"sort"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
@@ -408,6 +409,9 @@ func (s *Server) handleJiraStatuses(w http.ResponseWriter, r *http.Request) {
 			statuses = append(statuses, canonical[name])
 		}
 	}
+	sort.Slice(statuses, func(i, j int) bool {
+		return statuses[i].Name < statuses[j].Name
+	})
 
 	writeJSON(w, http.StatusOK, statuses)
 }
