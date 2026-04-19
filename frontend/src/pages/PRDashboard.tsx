@@ -45,7 +45,7 @@ interface Stats {
   draft: number
   reviews_given: number
   reviews_received: number
-  merged_over_time: { week: string; count: number }[]
+  merged_over_time: { date: string; count: number }[]
 }
 
 type ColumnId = 'ready' | 'draft'
@@ -210,7 +210,7 @@ export default function PRDashboard() {
         <ChartCard title="Status">
           {stats ? <StatusDonut stats={stats} /> : <SkeletonDonut />}
         </ChartCard>
-        <ChartCard title="Merged this month">
+        <ChartCard title="Merged (14 days)">
           {stats ? <MergedTimeline data={stats.merged_over_time || []} /> : <SkeletonChart />}
         </ChartCard>
         <ChartCard title="Review balance">
@@ -443,13 +443,13 @@ function StatusDonut({ stats }: { stats: Stats }) {
   )
 }
 
-function MergedTimeline({ data }: { data: { week: string; count: number }[] }) {
+function MergedTimeline({ data }: { data: { date: string; count: number }[] }) {
   if (data.length === 0)
     return <p className="text-[12px] text-text-tertiary text-center py-4">No data</p>
 
   const formatted = data.map((d) => ({
     ...d,
-    label: new Date(d.week + 'T00:00:00').toLocaleDateString([], {
+    label: new Date(d.date + 'T00:00:00').toLocaleDateString([], {
       month: 'short',
       day: 'numeric',
     }),
@@ -480,7 +480,7 @@ function MergedTimeline({ data }: { data: { week: string; count: number }[] }) {
               const n = typeof value === 'number' ? value : Number(value)
               return [`${n} PR${n !== 1 ? 's' : ''}`, 'Merged']
             }}
-            labelFormatter={(label) => `Week of ${String(label)}`}
+            labelFormatter={(label) => String(label)}
           />
           <Area
             type="monotone"

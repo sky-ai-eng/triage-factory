@@ -20,7 +20,7 @@ type DashboardStats struct {
 }
 
 type DashboardPoint struct {
-	Week  string `json:"week"`
+	Date  string `json:"date"`
 	Count int    `json:"count"`
 }
 
@@ -53,7 +53,7 @@ func GetDashboardStats(database *sql.DB, username string, sinceDays int) (*Dashb
 	defer rows.Close()
 
 	stats := &DashboardStats{}
-	mergedByWeek := make(map[string]int)
+	mergedByDay := make(map[string]int)
 
 	for rows.Next() {
 		var snapJSON string
@@ -66,44 +66,36 @@ func GetDashboardStats(database *sql.DB, username string, sinceDays int) (*Dashb
 			continue
 		}
 
-		switch {
-		case snap.Merged:
-			mergedAt, err := time.Parse(time.RFC3339, snap.MergedAt)
-			if err != nil {
-				continue // no valid merge timestamp, skip
-			}
-			if mergedAt.After(since) {
-				stats.Merged++
-				mergedByWeek[mondayOf(mergedAt)]++
-			}
-
-		case snap.State == "CLOSED":
-			closedAt, err := time.Parse(time.RFC3339, snap.ClosedAt)
-			if err != nil {
-				continue
-			}
-			if closedAt.After(since) {
-				stats.Closed++
-			}
-
-		case snap.State == "OPEN" && snap.IsDraft:
-			stats.Draft++
-
-		case snap.State == "OPEN":
-			stats.Awaiting++
-		}
-
-		// Count reviews given (we reviewed someone else's PR)
-		// and reviews received (someone reviewed our PR)
 		if snap.Author == username {
-			// Our PR — count non-self reviews as received
+			// Our PR — count status and reviews received
+			switch {
+			case snap.Merged:
+				mergedAt, err := time.Parse(time.RFC3339, snap.MergedAt)
+				if err == nil && mergedAt.After(since) {
+					stats.Merged++
+					mergedByDay[mergedAt.Format("2006-01-02")]++
+				}
+
+			case snap.State == "CLOSED":
+				closedAt, err := time.Parse(time.RFC3339, snap.ClosedAt)
+				if err == nil && closedAt.After(since) {
+					stats.Closed++
+				}
+
+			case snap.State == "OPEN" && snap.IsDraft:
+				stats.Draft++
+
+			case snap.State == "OPEN":
+				stats.Awaiting++
+			}
+
 			for _, review := range snap.Reviews {
 				if review.Author != username {
 					stats.ReviewsReceived++
 				}
 			}
 		} else {
-			// Someone else's PR — check if we reviewed it
+			// Someone else's PR — only count reviews we gave
 			for _, review := range snap.Reviews {
 				if review.Author == username {
 					stats.ReviewsGiven++
@@ -116,15 +108,15 @@ func GetDashboardStats(database *sql.DB, username string, sinceDays int) (*Dashb
 		return nil, err
 	}
 
-	// Build merged timeline
-	stats.MergedOverTime = buildTimeline(mergedByWeek, 5)
+	// Build merged timeline — last 14 days, per day
+	stats.MergedOverTime = buildTimeline(mergedByDay, 14)
 
 	return stats, nil
 }
 
 // GetDashboardPRs returns PR summaries from entities for the dashboard list.
-// Includes open, merged, and closed PRs.
-func GetDashboardPRs(database *sql.DB) ([]PRSummaryRow, error) {
+// Only includes PRs authored by the given username.
+func GetDashboardPRs(database *sql.DB, username string) ([]PRSummaryRow, error) {
 	rows, err := database.Query(`
 		SELECT snapshot_json FROM entities
 		WHERE source = 'github' AND snapshot_json IS NOT NULL AND snapshot_json != ''
@@ -144,6 +136,9 @@ func GetDashboardPRs(database *sql.DB) ([]PRSummaryRow, error) {
 
 		var snap domain.PRSnapshot
 		if err := json.Unmarshal([]byte(snapJSON), &snap); err != nil {
+			continue
+		}
+		if snap.Author != username {
 			continue
 		}
 
@@ -182,23 +177,13 @@ func stateToLower(s string) string {
 	}
 }
 
-func mondayOf(t time.Time) string {
-	weekday := int(t.Weekday())
-	if weekday == 0 {
-		weekday = 7
-	}
-	monday := t.AddDate(0, 0, -(weekday - 1))
-	return monday.Format("2006-01-02")
-}
-
-func buildTimeline(buckets map[string]int, weeks int) []DashboardPoint {
+func buildTimeline(buckets map[string]int, days int) []DashboardPoint {
 	var points []DashboardPoint
 	now := time.Now()
-	for i := weeks - 1; i >= 0; i-- {
-		d := now.AddDate(0, 0, -i*7)
-		key := mondayOf(d)
+	for i := days - 1; i >= 0; i-- {
+		key := now.AddDate(0, 0, -i).Format("2006-01-02")
 		points = append(points, DashboardPoint{
-			Week:  key,
+			Date:  key,
 			Count: buckets[key],
 		})
 	}
