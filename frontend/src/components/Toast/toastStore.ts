@@ -32,9 +32,12 @@ function nextID(): string {
 
 function push(item: Omit<ToastItem, 'id'> & { id?: string }): string {
   const id = item.id ?? nextID()
-  // Dedup by id — if the backend sends the same toast twice (e.g. reconnect
-  // replay), we keep the first. Callers relying on dedup should pass a
-  // stable id; otherwise each call creates a new toast.
+  // Skip-on-duplicate-ID guards against rendering the same payload twice
+  // (e.g. a future WS replay-on-reconnect emitting an already-shown toast).
+  // It is NOT a mechanism to collapse recurring conditions — callers don't
+  // currently pass stable ids, so each Fire gets a fresh UUID and every
+  // call creates a new toast. If you want "one toast per auth-expired
+  // poll cycle", rate-limit at the emit site instead.
   if (state.some((t) => t.id === id)) return id
   state = [...state, { ...item, id }]
   emit()

@@ -27,8 +27,13 @@ const (
 )
 
 // Payload is the shape the frontend expects inside the WS event's Data.
-// Title is optional (short bold header above body); ID enables dedup on
-// the client side if the same underlying condition fires twice.
+// Title is optional (short bold header above body). ID is a stable key
+// for rendering — the client store uses it to avoid double-rendering if
+// the same payload arrives twice (e.g. future WS replay-on-reconnect).
+// It does NOT collapse "same underlying condition fires repeatedly":
+// each Fire call generates a fresh UUID, so a recurring failure produces
+// N distinct toasts. Rate-limiting that kind of noise is the emit site's
+// job, not the toast primitive's.
 type Payload struct {
 	ID    string `json:"id"`
 	Level Level  `json:"level"`
