@@ -37,7 +37,7 @@ func (s *Server) handleDashboardPRs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	prs, err := db.GetDashboardPRs(s.db)
+	prs, err := db.GetDashboardPRs(s.db, creds.GitHubUsername)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

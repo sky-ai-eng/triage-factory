@@ -66,44 +66,36 @@ func GetDashboardStats(database *sql.DB, username string, sinceDays int) (*Dashb
 			continue
 		}
 
-		switch {
-		case snap.Merged:
-			mergedAt, err := time.Parse(time.RFC3339, snap.MergedAt)
-			if err != nil {
-				continue // no valid merge timestamp, skip
-			}
-			if mergedAt.After(since) {
-				stats.Merged++
-				mergedByWeek[mondayOf(mergedAt)]++
-			}
-
-		case snap.State == "CLOSED":
-			closedAt, err := time.Parse(time.RFC3339, snap.ClosedAt)
-			if err != nil {
-				continue
-			}
-			if closedAt.After(since) {
-				stats.Closed++
-			}
-
-		case snap.State == "OPEN" && snap.IsDraft:
-			stats.Draft++
-
-		case snap.State == "OPEN":
-			stats.Awaiting++
-		}
-
-		// Count reviews given (we reviewed someone else's PR)
-		// and reviews received (someone reviewed our PR)
 		if snap.Author == username {
-			// Our PR — count non-self reviews as received
+			// Our PR — count status and reviews received
+			switch {
+			case snap.Merged:
+				mergedAt, err := time.Parse(time.RFC3339, snap.MergedAt)
+				if err == nil && mergedAt.After(since) {
+					stats.Merged++
+					mergedByWeek[mondayOf(mergedAt)]++
+				}
+
+			case snap.State == "CLOSED":
+				closedAt, err := time.Parse(time.RFC3339, snap.ClosedAt)
+				if err == nil && closedAt.After(since) {
+					stats.Closed++
+				}
+
+			case snap.State == "OPEN" && snap.IsDraft:
+				stats.Draft++
+
+			case snap.State == "OPEN":
+				stats.Awaiting++
+			}
+
 			for _, review := range snap.Reviews {
 				if review.Author != username {
 					stats.ReviewsReceived++
 				}
 			}
 		} else {
-			// Someone else's PR — check if we reviewed it
+			// Someone else's PR — only count reviews we gave
 			for _, review := range snap.Reviews {
 				if review.Author == username {
 					stats.ReviewsGiven++
@@ -123,8 +115,8 @@ func GetDashboardStats(database *sql.DB, username string, sinceDays int) (*Dashb
 }
 
 // GetDashboardPRs returns PR summaries from entities for the dashboard list.
-// Includes open, merged, and closed PRs.
-func GetDashboardPRs(database *sql.DB) ([]PRSummaryRow, error) {
+// Only includes PRs authored by the given username.
+func GetDashboardPRs(database *sql.DB, username string) ([]PRSummaryRow, error) {
 	rows, err := database.Query(`
 		SELECT snapshot_json FROM entities
 		WHERE source = 'github' AND snapshot_json IS NOT NULL AND snapshot_json != ''
@@ -144,6 +136,9 @@ func GetDashboardPRs(database *sql.DB) ([]PRSummaryRow, error) {
 
 		var snap domain.PRSnapshot
 		if err := json.Unmarshal([]byte(snapJSON), &snap); err != nil {
+			continue
+		}
+		if snap.Author != username {
 			continue
 		}
 
