@@ -83,6 +83,18 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 				if err := db.MarkEntityClosed(t.database, entity.ID); err != nil {
 					log.Printf("[tracker] failed to mark entity %s closed on discovery: %v", sid, err)
 				}
+			} else if username != "" && containsString(snap.ReviewRequests, username) {
+				// Backfill: user is a pending reviewer on a just-discovered
+				// open PR. DiffPRSnapshots' "no events on initial load" rule
+				// means pr:review_requested would never fire for requests that
+				// existed before we started watching — the user would only see
+				// them if someone re-requested. Synthesize the event + queued
+				// task directly so existing review-requests land in the queue
+				// on first connect. Mirrors the Jira carry-over queue path in
+				// handleJiraStockPost.
+				if err := t.backfillReviewRequested(entity.ID, snap, username); err != nil {
+					log.Printf("[tracker] failed to backfill review_requested for %s: %v", sid, err)
+				}
 			}
 		} else {
 			// Update title if changed.
@@ -250,6 +262,55 @@ func (t *Tracker) discoverGitHub(client *ghclient.Client, username string, repos
 	}
 
 	return all, nil
+}
+
+// backfillReviewRequested synthesizes a pr:review_requested event + queued
+// task for a PR being discovered for the first time with the session user
+// already in its requested-reviewer list. Uses db.RecordEvent (not
+// bus.Publish) so downstream routing doesn't double-create a task — we own
+// task creation here via FindOrCreateTask, identical to the Jira carry-over
+// queue path. The task's primary_event_id FK is satisfied by the synthesized
+// event's ID.
+func (t *Tracker) backfillReviewRequested(entityID string, snap domain.PRSnapshot, username string) error {
+	authorIsSelf := snap.Author == username
+	meta := events.GitHubPRReviewRequestedMetadata{
+		Author:       snap.Author,
+		AuthorIsSelf: authorIsSelf,
+		Repo:         snap.Repo,
+		PRNumber:     snap.Number,
+		IsDraft:      snap.IsDraft,
+		HeadSHA:      snap.HeadSHA,
+		Labels:       snap.Labels,
+		Title:        snap.Title,
+	}
+	metaJSON, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	eid := entityID
+	eventID, err := db.RecordEvent(t.database, domain.Event{
+		EntityID:     &eid,
+		EventType:    domain.EventGitHubPRReviewRequested,
+		MetadataJSON: string(metaJSON),
+	})
+	if err != nil {
+		return fmt.Errorf("record event: %w", err)
+	}
+	if _, _, err := db.FindOrCreateTask(t.database, entityID, domain.EventGitHubPRReviewRequested, "", eventID, 0.5); err != nil {
+		return fmt.Errorf("create task: %w", err)
+	}
+	return nil
+}
+
+// containsString reports whether s is present in items. Small loop rather
+// than slices.Contains to keep the tracker's import set minimal.
+func containsString(items []string, s string) bool {
+	for _, item := range items {
+		if item == s {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Jira ---
