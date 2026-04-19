@@ -18,7 +18,7 @@ func SeedTaskRules(db *sql.DB) error {
 	stmt, err := db.Prepare(`
 		INSERT OR IGNORE INTO task_rules
 			(id, event_type, scope_predicate_json, enabled, name, default_priority, sort_order, source, created_at, updated_at)
-		VALUES (?, ?, ?, 1, ?, ?, ?, 'system', ?, ?)
+		VALUES (?, ?, ?, 0, ?, ?, ?, 'system', ?, ?)
 	`)
 	if err != nil {
 		return err

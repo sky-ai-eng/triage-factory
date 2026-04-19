@@ -64,13 +64,14 @@ func TestSeedAndList(t *testing.T) {
 			t.Errorf("rules not sorted by sort_order: %d < %d", rules[i].SortOrder, rules[i-1].SortOrder)
 		}
 	}
-	// All seeded rules should be source=system and enabled.
+	// All seeded rules should be source=system and disabled by default.
+	// Users opt-in by enabling the rules they want.
 	for _, r := range rules {
 		if r.Source != "system" {
 			t.Errorf("seeded rule %s has source=%q, want system", r.ID, r.Source)
 		}
-		if !r.Enabled {
-			t.Errorf("seeded rule %s is disabled by default", r.ID)
+		if r.Enabled {
+			t.Errorf("seeded rule %s is enabled by default, want disabled", r.ID)
 		}
 	}
 }
@@ -248,16 +249,16 @@ func TestSeedTaskRules_Idempotent(t *testing.T) {
 	if err := SeedTaskRules(db); err != nil {
 		t.Fatalf("first seed: %v", err)
 	}
-	// Modify a seeded rule to verify re-seed doesn't overwrite.
-	if err := SetTaskRuleEnabled(db, "system-rule-ci-check-failed", false); err != nil {
-		t.Fatalf("disable: %v", err)
+	// Enable a seeded rule to verify re-seed doesn't revert it to disabled.
+	if err := SetTaskRuleEnabled(db, "system-rule-ci-check-failed", true); err != nil {
+		t.Fatalf("enable: %v", err)
 	}
 	if err := SeedTaskRules(db); err != nil {
 		t.Fatalf("second seed: %v", err)
 	}
 	got, _ := GetTaskRule(db, "system-rule-ci-check-failed")
-	if got.Enabled {
-		t.Error("re-seed overwrote user's disable — SeedTaskRules should use INSERT OR IGNORE")
+	if !got.Enabled {
+		t.Error("re-seed overwrote user's enable — SeedTaskRules should use INSERT OR IGNORE")
 	}
 	all, _ := ListTaskRules(db)
 	if len(all) != 5 {
