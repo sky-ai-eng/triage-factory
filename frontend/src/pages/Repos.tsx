@@ -452,29 +452,22 @@ function docURL(
   return `${root}/${profile.owner}/${profile.repo}/blob/${branch}/${filename}`
 }
 
-// deriveGitHubWebRoot converts a GitHub API URL to the corresponding web
-// root. Users store the API URL in settings (what the gh client needs);
-// the web UI lives at a different path on Enterprise.
+// sanitizeWebRoot validates and normalizes the stored GitHub base URL for
+// use as a link href. Settings stores the user-facing web root already —
+// "https://github.com" or "https://github.example.com" — because that's
+// what internal/github.NewClient takes (it derives the API base from it
+// internally). So no API→web conversion is needed here; we just trim a
+// trailing slash and reject obviously malformed input.
 //
-//   https://api.github.com           → https://github.com           (GH.com)
-//   https://api.github.com/          → https://github.com           (trailing slash)
-//   https://github.example.com/api/v3 → https://github.example.com  (GHE)
-//   https://github.com               → https://github.com           (already web)
-//
-// Returns undefined when the input is unparseable — caller renders
-// doc chips as non-clickable in that case. We don't guess github.com
-// because that's the wrong destination for Enterprise users.
-function deriveGitHubWebRoot(apiURL: string): string | undefined {
-  try {
-    const u = new URL(apiURL)
-    if (u.hostname === 'api.github.com') {
-      return 'https://github.com'
-    }
-    const path = u.pathname.replace(/\/api\/v[34]\/?$/, '')
-    return `${u.protocol}//${u.host}${path}`.replace(/\/+$/, '')
-  } catch {
+// Returns undefined when the input isn't a plausible http(s) URL — caller
+// renders doc chips as non-clickable rather than building hrefs from
+// junk that would 404 or worse.
+function sanitizeWebRoot(url: string): string | undefined {
+  const trimmed = url.trim().replace(/\/+$/, '')
+  if (!/^https?:\/\/\S+/i.test(trimmed)) {
     return undefined
   }
+  return trimmed
 }
 
 // --- Helpers ---------------------------------------------------------------
@@ -527,7 +520,7 @@ export default function Repos() {
       .then((data) => {
         const url = data?.github?.base_url
         if (typeof url === 'string' && url) {
-          setWebBaseURL(deriveGitHubWebRoot(url))
+          setWebBaseURL(sanitizeWebRoot(url))
         }
       })
       .catch(() => {
