@@ -189,13 +189,19 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		entity, err := db.GetEntityBySource(s.db, "jira", a.IssueKey)
+		issueKey := strings.TrimSpace(a.IssueKey)
+		if issueKey == "" {
+			failed = append(failed, stockFailure{a.IssueKey, a.Action, "missing issue_key"})
+			continue
+		}
+
+		entity, err := db.GetEntityBySource(s.db, "jira", issueKey)
 		if err != nil {
-			failed = append(failed, stockFailure{a.IssueKey, a.Action, "failed to load entity"})
+			failed = append(failed, stockFailure{issueKey, a.Action, "failed to load entity"})
 			continue
 		}
 		if entity == nil {
-			failed = append(failed, stockFailure{a.IssueKey, a.Action, "entity not found"})
+			failed = append(failed, stockFailure{issueKey, a.Action, "entity not found"})
 			continue
 		}
 
@@ -203,7 +209,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 		// on tickets that shouldn't be in carry-over at all — stale frontend
 		// state, tampered requests, or tickets that changed since GET.
 		if entity.SnapshotJSON == "" || entity.SnapshotJSON == "{}" {
-			failed = append(failed, stockFailure{a.IssueKey, a.Action, "no snapshot yet"})
+			failed = append(failed, stockFailure{issueKey, a.Action, "no snapshot yet"})
 			continue
 		}
 		var snap domain.JiraSnapshot
