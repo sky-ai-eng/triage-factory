@@ -527,10 +527,11 @@ func issueToState(issue jiraclient.Issue, baseURL string) jiraIssueState {
 	}
 }
 
-// truncateDescription caps the stored description at a rune count (not byte
-// count) so we never persist a string that ends mid-UTF-8-codepoint. Appends
-// an ellipsis when truncation happens so downstream readers can tell the
-// content was cut rather than a genuinely short description.
+// truncateDescription caps the stored description at maxRunes codepoints
+// (rune-based so we never persist a string that ends mid-UTF-8-codepoint).
+// Strict cap — when truncation happens the returned string contains exactly
+// maxRunes runes, with the last rune replaced by an ellipsis so downstream
+// readers can distinguish a cut string from a genuinely short one.
 func truncateDescription(s string, maxRunes int) string {
 	if maxRunes <= 0 {
 		return ""
@@ -539,7 +540,7 @@ func truncateDescription(s string, maxRunes int) string {
 	if len(runes) <= maxRunes {
 		return s
 	}
-	return string(runes[:maxRunes]) + "…"
+	return string(runes[:maxRunes-1]) + "…"
 }
 
 // --- Helpers ---
