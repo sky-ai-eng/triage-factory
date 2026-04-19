@@ -120,37 +120,76 @@ func GetEntityBySource(db *sql.DB, source, sourceID string) (*domain.Entity, err
 	return scanEntity(row)
 }
 
+// entitySnapshotsChunkSize caps the number of `?` placeholders per query so
+// we stay well under SQLite's default SQLITE_LIMIT_VARIABLE_NUMBER (999).
+// Chunking runs multiple round-trips but keeps the query schema compatible
+// with the default build — the scorer's entity set can easily exceed 1k
+// tasks on large repos.
+const entitySnapshotsChunkSize = 500
+
 // GetEntitySnapshots returns snapshot_json for the given entity IDs as a map
-// keyed by entity ID. Missing/empty snapshots are omitted. Used by the scorer
-// to enrich TaskInput without doing N per-task queries.
+// keyed by entity ID. Missing/empty snapshots are omitted. Callers commonly
+// pass duplicates (multiple tasks per entity), so IDs are deduplicated before
+// the query runs. Chunks the IN clause to respect SQLite's variable limit.
 func GetEntitySnapshots(database *sql.DB, ids []string) (map[string]string, error) {
 	out := make(map[string]string, len(ids))
 	if len(ids) == 0 {
 		return out, nil
 	}
-	placeholders := make([]string, len(ids))
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
+
+	// Dedupe first — the scorer passes one ID per task, and multiple tasks
+	// share an entity (e.g. ci_failed + new_commits on the same PR). Also
+	// pushes us further under the variable limit before chunking kicks in.
+	seen := make(map[string]struct{}, len(ids))
+	unique := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
 	}
-	query := `SELECT id, COALESCE(snapshot_json, '') FROM entities WHERE id IN (` +
-		strings.Join(placeholders, ",") + `)`
-	rows, err := database.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id, snap string
-		if err := rows.Scan(&id, &snap); err != nil {
+
+	for start := 0; start < len(unique); start += entitySnapshotsChunkSize {
+		end := start + entitySnapshotsChunkSize
+		if end > len(unique) {
+			end = len(unique)
+		}
+		chunk := unique[start:end]
+
+		placeholders := make([]string, len(chunk))
+		args := make([]any, len(chunk))
+		for i, id := range chunk {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		query := `SELECT id, COALESCE(snapshot_json, '') FROM entities WHERE id IN (` +
+			strings.Join(placeholders, ",") + `)`
+		rows, err := database.Query(query, args...)
+		if err != nil {
 			return nil, err
 		}
-		if snap != "" && snap != "{}" {
-			out[id] = snap
+		for rows.Next() {
+			var id, snap string
+			if err := rows.Scan(&id, &snap); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if snap != "" && snap != "{}" {
+				out[id] = snap
+			}
 		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
 	}
-	return out, rows.Err()
+
+	return out, nil
 }
 
 // ListActiveEntities returns all entities with state='active' for a given source.
