@@ -260,16 +260,20 @@ function SortableRuleRow({
         <GripVertical size={14} />
       </div>
 
-      {/* Row content — click to edit */}
+      {/* Row content — click to edit. min-w-0 on every flex-growing
+          ancestor so the truncate on the rule name actually fires; without
+          it, a long name (e.g. "Jira issue decomposition resolved (now
+          actionable)") pushes the row wider than the 340px panel and
+          forces horizontal scroll. */}
       <button
         onClick={onEdit}
-        className="flex-1 text-left px-3 py-3 rounded-xl hover:bg-black/[0.03] transition-colors"
+        className="flex-1 min-w-0 text-left px-3 py-3 rounded-xl hover:bg-black/[0.03] transition-colors"
       >
-        <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start justify-between gap-3 min-w-0">
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 min-w-0">
               <span
-                className={`text-[13px] font-medium truncate ${
+                className={`text-[13px] font-medium truncate min-w-0 ${
                   rule.enabled ? 'text-text-primary' : 'text-text-tertiary line-through'
                 }`}
               >
