@@ -286,7 +286,10 @@ export default function Setup() {
                 classic PAT
               </a>{' '}
               with <code className="text-text-secondary">repo</code> and{' '}
-              <code className="text-text-secondary">read:org</code> scopes.
+              <code className="text-text-secondary">read:org</code> scopes.{' '}
+              <code className="text-text-secondary">read:org</code> is needed to resolve your team
+              memberships so review requests sent to your teams (e.g. CODEOWNERS) surface as tasks —
+              without it, only PRs that request you individually will show up.
             </p>
           </div>
 
