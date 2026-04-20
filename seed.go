@@ -122,6 +122,25 @@ func seedDefaultPrompts(database *sql.DB) {
 		log.Printf("[seed] warning: failed to seed Jira implement trigger: %v", err)
 	}
 
+	// Companion trigger for the belated-discovery path (SKY-173): a ticket
+	// that had open subtasks on first poll suppresses assigned/available
+	// and only emits became_atomic when the decomposition collapses. Users
+	// who enable auto-implementation on assignment almost certainly want
+	// the same behavior for this belated signal — ship a parallel trigger
+	// rather than quietly dropping post-decomposition tickets on the floor.
+	if err := db.SeedPromptTrigger(database, domain.PromptTrigger{
+		ID:                 "system-trigger-jira-implement-atomic",
+		PromptID:           "system-jira-implement",
+		TriggerType:        domain.TriggerTypeEvent,
+		EventType:          domain.EventJiraIssueBecameAtomic,
+		ScopePredicateJSON: &assigneeIsSelf,
+		BreakerThreshold:   2,
+		CooldownSeconds:    600,
+		Enabled:            false,
+	}); err != nil {
+		log.Printf("[seed] warning: failed to seed Jira implement atomic trigger: %v", err)
+	}
+
 	// Trigger: fix review feedback when changes are requested on the user's
 	// own PR. Fires regardless of reviewer identity — self-review loop and
 	// external reviewer response route through the same prompt since the

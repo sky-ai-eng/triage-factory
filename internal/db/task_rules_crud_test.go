@@ -55,8 +55,8 @@ func TestSeedAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTaskRules: %v", err)
 	}
-	if len(rules) != 5 {
-		t.Errorf("expected 5 seeded rules, got %d", len(rules))
+	if len(rules) != 6 {
+		t.Errorf("expected 6 seeded rules, got %d", len(rules))
 	}
 	// Verify sort_order ordering.
 	for i := 1; i < len(rules); i++ {
@@ -260,7 +260,7 @@ func TestSeedTaskRules_Idempotent(t *testing.T) {
 		t.Error("re-seed overwrote user's disable — SeedTaskRules should use INSERT OR IGNORE")
 	}
 	all, _ := ListTaskRules(db)
-	if len(all) != 5 {
-		t.Errorf("expected 5 rules after re-seed, got %d", len(all))
+	if len(all) != 6 {
+		t.Errorf("expected 6 rules after re-seed, got %d", len(all))
 	}
 }

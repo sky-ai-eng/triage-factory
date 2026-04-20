@@ -32,6 +32,10 @@ type taskJSON struct {
 	AISummary           string   `json:"ai_summary,omitempty"`
 	PriorityReasoning   string   `json:"priority_reasoning,omitempty"`
 	CloseReason         string   `json:"close_reason,omitempty"`
+	// OpenSubtaskCount lets the UI flag a task whose Jira entity has open
+	// subtasks — the "consider decomposing" signal (SKY-173). Zero for
+	// GitHub tasks and Jira tickets without subtasks.
+	OpenSubtaskCount int `json:"open_subtask_count"`
 }
 
 func taskToJSON(t domain.Task) taskJSON {
@@ -54,6 +58,7 @@ func taskToJSON(t domain.Task) taskJSON {
 		AISummary:           t.AISummary,
 		PriorityReasoning:   t.PriorityReasoning,
 		CloseReason:         t.CloseReason,
+		OpenSubtaskCount:    t.OpenSubtaskCount,
 	}
 }
 

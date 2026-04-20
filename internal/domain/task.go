@@ -42,6 +42,12 @@ type Task struct {
 	EntitySourceID string `json:"entity_source_id"` // e.g. "owner/repo#42", "SKY-123"
 	EntitySource   string `json:"entity_source"`    // "github" | "jira"
 	EntityKind     string `json:"entity_kind"`      // "pr" | "issue"
+	// OpenSubtaskCount is extracted from the Jira entity's snapshot_json in
+	// the same join (json_extract). Zero for GitHub tasks and for Jira
+	// tickets with no subtasks. Surfaced so the UI can flag a task whose
+	// entity has gained subtasks since the task was created — SKY-173's
+	// "consider decomposing" pill.
+	OpenSubtaskCount int `json:"open_subtask_count"`
 }
 
 // TaskScoreUpdate holds the fields to update on a task after AI scoring.

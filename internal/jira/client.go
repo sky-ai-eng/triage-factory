@@ -199,6 +199,17 @@ type Issue struct {
 		Comment *struct {
 			Total int `json:"total"`
 		} `json:"comment,omitempty"`
+		// Subtasks inlined in the search response. Each element has its own
+		// minimal fields block with a Status; we only need .Fields.Status.Name
+		// to decide whether the subtask is still open. If Jira returns
+		// partial fields (older Server versions), missing Status just means
+		// we can't classify — treat as open to stay conservative.
+		Subtasks []struct {
+			Key    string `json:"key"`
+			Fields struct {
+				Status *Status `json:"status,omitempty"`
+			} `json:"fields"`
+		} `json:"subtasks,omitempty"`
 	} `json:"fields"`
 }
 

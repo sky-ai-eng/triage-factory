@@ -194,6 +194,42 @@ func (p JiraIssueCompletedPredicate) Matches(m JiraIssueCompletedMetadata) bool 
 }
 
 // -----------------------------------------------------------------------------
+// issue:became_atomic — last open subtask closed, parent is now an atomic
+// work unit. Fires when prev.OpenSubtaskCount > 0 && curr.OpenSubtaskCount
+// == 0. Acts as the belated discovery path: initial discovery of a parent
+// with open subtasks suppresses jira:issue:assigned/available so the ticket
+// doesn't clutter the queue; when the decomposition collapses, this event
+// runs the same task-creation path.
+// -----------------------------------------------------------------------------
+
+type JiraIssueBecameAtomicMetadata struct {
+	Assignee       string `json:"assignee"`
+	AssigneeIsSelf bool   `json:"assignee_is_self"`
+	IssueKey       string `json:"issue_key"`
+	Project        string `json:"project"`
+	IssueType      string `json:"issue_type"`
+	Priority       string `json:"priority"`
+	Status         string `json:"status"`
+	Summary        string `json:"summary"`
+}
+
+type JiraIssueBecameAtomicPredicate struct {
+	AssigneeIsSelf *bool   `json:"assignee_is_self,omitempty" doc:"Match issues assigned to you."`
+	Project        *string `json:"project,omitempty" doc:"Scope to a specific Jira project key."`
+	IssueType      *string `json:"issue_type,omitempty"`
+	Priority       *string `json:"priority,omitempty"`
+	Status         *string `json:"status,omitempty"`
+}
+
+func (p JiraIssueBecameAtomicPredicate) Matches(m JiraIssueBecameAtomicMetadata) bool {
+	return boolEq(p.AssigneeIsSelf, m.AssigneeIsSelf) &&
+		strEq(p.Project, m.Project) &&
+		strEq(p.IssueType, m.IssueType) &&
+		strEq(p.Priority, m.Priority) &&
+		strEq(p.Status, m.Status)
+}
+
+// -----------------------------------------------------------------------------
 // Registration.
 // -----------------------------------------------------------------------------
 
@@ -204,4 +240,5 @@ func init() {
 	Register(newSchema[JiraIssuePriorityChangedMetadata, JiraIssuePriorityChangedPredicate](domain.EventJiraIssuePriorityChanged))
 	Register(newSchema[JiraIssueCommentedMetadata, JiraIssueCommentedPredicate](domain.EventJiraIssueCommented))
 	Register(newSchema[JiraIssueCompletedMetadata, JiraIssueCompletedPredicate](domain.EventJiraIssueCompleted))
+	Register(newSchema[JiraIssueBecameAtomicMetadata, JiraIssueBecameAtomicPredicate](domain.EventJiraIssueBecameAtomic))
 }

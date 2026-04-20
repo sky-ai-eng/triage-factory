@@ -69,6 +69,20 @@ func SeedTaskRules(db *sql.DB) error {
 			DefaultPriority: 0.60,
 			SortOrder:       4,
 		},
+		{
+			// Companion to jira-assigned. A ticket that had subtasks
+			// suppresses the initial assigned event (SKY-173 — parents are
+			// containers, not work), then emits became_atomic when the last
+			// subtask closes. This rule gives that belated discovery path
+			// the same task-creation behavior the assignment rule would
+			// have given it.
+			ID:              "system-rule-jira-became-atomic",
+			EventType:       domain.EventJiraIssueBecameAtomic,
+			Predicate:       `{"assignee_is_self":true}`,
+			Name:            "Jira issue decomposition resolved (now actionable)",
+			DefaultPriority: 0.60,
+			SortOrder:       5,
+		},
 	}
 
 	var inserted int64

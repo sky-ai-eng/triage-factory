@@ -286,6 +286,14 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID, username string
 				IssueKey: curr.Key, Project: extractProject(curr.Key),
 				IssueType: curr.IssueType, FinalStatus: curr.Status,
 			})
+		} else if curr.OpenSubtaskCount > 0 {
+			// Parent-of-subtasks: suppress assigned/available on first
+			// discovery. The ticket is a container, not a work unit — the
+			// subtasks hold the atomic work, which will discover separately
+			// if they match the poller's JQL. If all subtasks later close,
+			// the became_atomic branch below fires the belated discovery.
+			// Entity itself is still created by the caller so we keep
+			// tracking state changes.
 		} else if curr.Assignee != "" {
 			emit(domain.EventJiraIssueAssigned, "", events.JiraIssueAssignedMetadata{
 				Assignee: curr.Assignee, AssigneeIsSelf: assigneeIsSelf,
@@ -358,6 +366,21 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID, username string
 			Assignee: curr.Assignee, AssigneeIsSelf: assigneeIsSelf,
 			Commenter: "", CommenterIsSelf: false, CommentID: "",
 			IssueKey: curr.Key, Project: project,
+		})
+	}
+
+	// Became atomic — the last open subtask closed. Belated discovery
+	// path: the first-discovery branch suppresses assigned/available when
+	// the ticket has open subtasks, so nothing's been created yet. This
+	// event runs the same task-creation routing as a fresh assignment.
+	// Only fires on the downward transition — if the parent genuinely
+	// never had subtasks, this condition is never true.
+	if prev.OpenSubtaskCount > 0 && curr.OpenSubtaskCount == 0 && !terminal(curr.Status) {
+		emit(domain.EventJiraIssueBecameAtomic, "", events.JiraIssueBecameAtomicMetadata{
+			Assignee: curr.Assignee, AssigneeIsSelf: assigneeIsSelf,
+			IssueKey: curr.Key, Project: project,
+			IssueType: curr.IssueType, Priority: curr.Priority,
+			Status: curr.Status, Summary: curr.Summary,
 		})
 	}
 

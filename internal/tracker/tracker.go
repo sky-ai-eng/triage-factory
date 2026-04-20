@@ -405,7 +405,7 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		keys[i] = e.SourceID
 	}
 
-	refreshed, err := t.batchFetchJira(client, baseURL, keys)
+	refreshed, err := t.batchFetchJira(client, baseURL, keys, doneStatuses)
 	if err != nil {
 		return 0, fmt.Errorf("batch fetch jira: %w", err)
 	}
@@ -504,7 +504,7 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 	seen := map[string]bool{}
 	var all []jiraIssueState
 
-	fields := []string{"summary", "description", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment"}
+	fields := []string{"summary", "description", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment", "subtasks"}
 
 	for _, jql := range queries {
 		issues, err := client.SearchIssues(jql, fields, 100)
@@ -515,7 +515,7 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 		for _, issue := range issues {
 			if !seen[issue.Key] {
 				seen[issue.Key] = true
-				all = append(all, issueToState(issue, baseURL))
+				all = append(all, issueToState(issue, baseURL, doneStatuses))
 			}
 		}
 	}
@@ -531,9 +531,9 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 // that stop matching discovery's JQL (e.g. reassigned to someone else) stay
 // pinned at their last-captured value. Acceptable — description relevance
 // drops fast once a ticket is off the user's plate.
-func (t *Tracker) batchFetchJira(client *jiraclient.Client, baseURL string, keys []string) (map[string]jiraIssueState, error) {
+func (t *Tracker) batchFetchJira(client *jiraclient.Client, baseURL string, keys []string, doneStatuses []string) (map[string]jiraIssueState, error) {
 	results := make(map[string]jiraIssueState, len(keys))
-	fields := []string{"summary", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment"}
+	fields := []string{"summary", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment", "subtasks"}
 
 	for i := 0; i < len(keys); i += jiraBatchSize {
 		end := i + jiraBatchSize
@@ -549,7 +549,7 @@ func (t *Tracker) batchFetchJira(client *jiraclient.Client, baseURL string, keys
 		}
 
 		for _, issue := range issues {
-			results[issue.Key] = issueToState(issue, baseURL)
+			results[issue.Key] = issueToState(issue, baseURL, doneStatuses)
 		}
 	}
 
@@ -568,8 +568,9 @@ type jiraIssueState struct {
 // issueToState converts a Jira API Issue into the diff-scope snapshot plus
 // a flattened description. The description is stored on entities.description
 // separately; the snapshot itself only carries fields that DiffJiraSnapshots
-// compares.
-func issueToState(issue jiraclient.Issue, baseURL string) jiraIssueState {
+// compares. doneStatuses is the user's configured Done.Members set, used
+// to decide which subtasks count as "open" when populating OpenSubtaskCount.
+func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []string) jiraIssueState {
 	snap := domain.JiraSnapshot{
 		Key:     issue.Key,
 		Summary: issue.Fields.Summary,
@@ -594,10 +595,37 @@ func issueToState(issue jiraclient.Issue, baseURL string) jiraIssueState {
 		snap.CommentCount = issue.Fields.Comment.Total
 	}
 	snap.Labels = issue.Fields.Labels
+	snap.OpenSubtaskCount = countOpenSubtasks(issue, doneStatuses)
 	return jiraIssueState{
 		Snap:        snap,
 		Description: truncateDescription(jiraclient.ExtractDescriptionText(issue.Fields.Description), descriptionStoreMaxRunes),
 	}
+}
+
+// countOpenSubtasks returns the number of subtasks on this issue whose
+// status is NOT in the configured Done.Members set. Missing/unknown status
+// is counted as open — conservative default: better to show a parent as
+// "has open subtasks" and suppress task creation than to wrongly surface
+// it as atomic when we couldn't classify.
+func countOpenSubtasks(issue jiraclient.Issue, doneStatuses []string) int {
+	if len(issue.Fields.Subtasks) == 0 {
+		return 0
+	}
+	done := make(map[string]struct{}, len(doneStatuses))
+	for _, s := range doneStatuses {
+		done[s] = struct{}{}
+	}
+	open := 0
+	for _, sub := range issue.Fields.Subtasks {
+		name := ""
+		if sub.Fields.Status != nil {
+			name = sub.Fields.Status.Name
+		}
+		if _, ok := done[name]; !ok {
+			open++
+		}
+	}
+	return open
 }
 
 // truncateDescription caps the stored description at maxRunes codepoints

@@ -185,4 +185,11 @@ type JiraSnapshot struct {
 	ParentKey    string   `json:"parent_key"`
 	CommentCount int      `json:"comment_count"`
 	URL          string   `json:"url"`
+	// OpenSubtaskCount is the number of this issue's child subtasks whose
+	// status is NOT in the configured Done.Members set. Used to suppress
+	// task creation for parent-of-subtasks tickets (the decomposition
+	// exists for a reason — delegating the parent is almost always wrong)
+	// and to fire jira:issue:became_atomic when an issue transitions from
+	// "has open subtasks" to "none open".
+	OpenSubtaskCount int `json:"open_subtask_count"`
 }

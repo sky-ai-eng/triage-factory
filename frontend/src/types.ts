@@ -20,6 +20,11 @@ export interface Task {
   ai_summary?: string
   priority_reasoning?: string
   close_reason?: string
+  // Non-zero when the Jira entity has open subtasks (status not in
+  // Done.Members). UI surfaces a "consider decomposing" hint when set —
+  // the task was created before subtasks appeared, or the user added them
+  // after starting work. Always 0 for GitHub tasks.
+  open_subtask_count?: number
 }
 
 export interface AgentRun {

@@ -90,6 +90,7 @@ const (
 	EventJiraIssueCompleted       = "jira:issue:completed"
 	EventJiraIssuePriorityChanged = "jira:issue:priority_changed"
 	EventJiraIssueCommented       = "jira:issue:commented"
+	EventJiraIssueBecameAtomic    = "jira:issue:became_atomic"
 )
 
 // System events
@@ -150,6 +151,7 @@ func AllEventTypes() []EventType {
 		{ID: EventJiraIssuePriorityChanged, Source: "jira", Category: "issue", Label: "Priority Changed", Description: "Issue priority was changed (uses dedup_key=new_priority)"},
 		{ID: EventJiraIssueCommented, Source: "jira", Category: "issue", Label: "New Comment", Description: "A new comment was added to an issue"},
 		{ID: EventJiraIssueCompleted, Source: "jira", Category: "issue", Label: "Issue Completed", Description: "Issue was marked as done"},
+		{ID: EventJiraIssueBecameAtomic, Source: "jira", Category: "issue", Label: "Issue Became Atomic", Description: "Last open subtask closed — parent is now an atomic work unit"},
 
 		// --- System events (never user-visible) ---
 		{ID: EventSystemPollCompleted, Source: "system", Category: "poll", Label: "Poll Complete", Description: "A poller finished a cycle"},
