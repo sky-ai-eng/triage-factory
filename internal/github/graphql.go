@@ -29,7 +29,8 @@ const prBaseFields = `
 	additions
 	deletions
 	changedFiles
-	reviewRequests(first: 10) {
+	reviewRequests(first: 100) {
+		pageInfo { hasNextPage }
 		nodes {
 			requestedReviewer {
 				... on User { login }
@@ -316,7 +317,8 @@ type gqlRepo struct {
 }
 
 type gqlRRNodes struct {
-	Nodes []struct {
+	PageInfo gqlPageInfo `json:"pageInfo"`
+	Nodes    []struct {
 		RequestedReviewer gqlReviewer `json:"requestedReviewer"`
 	} `json:"nodes"`
 }
@@ -488,7 +490,15 @@ func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
 		// state" — so the diff logic skips CI evaluation for this snapshot.
 	}
 
-	// Review requests
+	// Review requests. The first: cap is load-bearing for detecting whether
+	// the session user is a pending reviewer — if they fall outside the
+	// returned slice, both the discovery backfill (tracker.go) and the diff
+	// transition (diff.go) silently skip emitting review_requested. Log on
+	// truncation so a future CODEOWNERS-spam case that trips the cap is
+	// visible rather than manifesting as missing queue items.
+	if pr.ReviewRequests.PageInfo.HasNextPage {
+		log.Printf("[github] WARN: review requests truncated at 100 for %s#%d — reviewer detection may miss users past the cap", snap.Repo, snap.Number)
+	}
 	for _, rr := range pr.ReviewRequests.Nodes {
 		name := rr.RequestedReviewer.Login
 		if name == "" {
