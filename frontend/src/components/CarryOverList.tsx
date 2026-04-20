@@ -4,6 +4,7 @@ import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
 
 type Action = 'queue' | 'claim' | 'done'
+type Bucket = 'assigned' | 'available'
 
 interface StockTicket {
   issue_key: string
@@ -15,7 +16,14 @@ interface StockTicket {
   parent_key?: string
   parent_url?: string
   url: string
-  already_done?: boolean
+  bucket: Bucket
+  prefilled_action?: Action | ''
+}
+
+interface StockResponse {
+  status: 'polling' | 'ready'
+  assigned?: StockTicket[]
+  available?: StockTicket[]
 }
 
 interface Props {
@@ -27,7 +35,8 @@ interface Props {
 const POLL_INTERVAL_MS = 1500
 
 export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
-  const [tickets, setTickets] = useState<StockTicket[] | null>(null)
+  const [assigned, setAssigned] = useState<StockTicket[] | null>(null)
+  const [available, setAvailable] = useState<StockTicket[] | null>(null)
   const [polling, setPolling] = useState(true)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
@@ -63,7 +72,7 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
         }
         return
       }
-      const data = await res.json()
+      const data: StockResponse = await res.json()
       if (!mountedRef.current) return
       if (data.status === 'polling') {
         setPolling(true)
@@ -76,16 +85,20 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
         }, POLL_INTERVAL_MS)
         return
       }
-      const fetched: StockTicket[] = data.tickets || []
-      setTickets(fetched)
-      // Pre-select "done" for tickets already in any configured Done.Members
-      // status — one-click cleanup of orphan entities. User can still
-      // deselect or change the action before saving.
+      const assignedFetched = data.assigned ?? []
+      const availableFetched = data.available ?? []
+      setAssigned(assignedFetched)
+      setAvailable(availableFetched)
+
+      // Apply prefills: if a ticket carries a prefilled_action, seed it into
+      // selections unless the user has already chosen something (preserves
+      // prior edits on refetch). "Available" tickets get no prefill by
+      // design — the user must decide queue vs. claim each time.
       setSelections((prev) => {
         const next = { ...prev }
-        for (const t of fetched) {
-          if (t.already_done && next[t.issue_key] === undefined) {
-            next[t.issue_key] = 'done'
+        for (const t of [...assignedFetched, ...availableFetched]) {
+          if (t.prefilled_action && next[t.issue_key] === undefined) {
+            next[t.issue_key] = t.prefilled_action as Action
           }
         }
         return next
@@ -125,6 +138,8 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
   }
 
   const selectionCount = Object.keys(selections).length
+  const totalCount = (assigned?.length ?? 0) + (available?.length ?? 0)
+  const isEmpty = !polling && !error && totalCount === 0
 
   const handleSave = async () => {
     if (selectionCount === 0) return
@@ -153,16 +168,17 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
         return
       }
 
-      // Partial success: remove successfully applied rows from the list, keep
-      // failed rows visible with inline error messages. The user can change or
-      // retry those selections, or skip to continue. Surface a summary toast
-      // so the partial nature is obvious even if the failing rows scroll off.
+      // Partial success: remove successfully applied rows from both buckets,
+      // keep failed rows visible with inline errors. User can change or
+      // retry, or skip to continue. Surface a summary toast so the partial
+      // nature is obvious even if the failing rows scroll off.
       toast.warning(
         `Applied ${body.applied} ticket${body.applied === 1 ? '' : 's'}; ${failedList.length} failed — see inline errors`,
       )
       const failedKeys = new Set(failedList.map((f) => f.issue_key))
       const appliedKeys = new Set(Object.keys(selections).filter((k) => !failedKeys.has(k)))
-      setTickets((prev) => (prev ?? []).filter((t) => !appliedKeys.has(t.issue_key)))
+      setAssigned((prev) => (prev ?? []).filter((t) => !appliedKeys.has(t.issue_key)))
+      setAvailable((prev) => (prev ?? []).filter((t) => !appliedKeys.has(t.issue_key)))
       setSelections((prev) => {
         const next: Record<string, Action> = {}
         for (const [k, v] of Object.entries(prev)) {
@@ -189,14 +205,15 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
       <div className="px-6 pt-6 pb-4">
         <h2 className="text-[18px] font-semibold text-text-primary tracking-tight">Carry over</h2>
         <p className="text-[13px] text-text-tertiary mt-1 leading-relaxed">
-          Decide what to do with tickets already assigned to you. Queue for triage, claim as active,
-          or mark already-complete tickets done. Leave rows unselected to skip.
+          Queue your assigned work, or grab available tickets to get started. We&rsquo;ve
+          pre-selected what usually makes sense — review, adjust, and skip anything you don&rsquo;t
+          want.
         </p>
       </div>
 
       {/* Body */}
       <div className="flex-1 overflow-y-auto px-6 min-h-0">
-        {polling && tickets === null && (
+        {polling && assigned === null && available === null && (
           <div className="space-y-1 py-2">
             <p className="text-[12px] text-text-tertiary text-center pb-2">
               Fetching your tickets…
@@ -227,7 +244,8 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
               onClick={() => {
                 setError('')
                 setPolling(true)
-                setTickets(null)
+                setAssigned(null)
+                setAvailable(null)
                 fetchStock()
               }}
               className="flex items-center gap-1.5 text-[12px] font-medium text-accent hover:text-accent/80 transition-colors"
@@ -238,13 +256,13 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
           </div>
         )}
 
-        {!polling && !error && tickets && tickets.length === 0 && (
+        {isEmpty && (
           <p className="text-[13px] text-text-tertiary text-center py-12">
             No existing work to carry over.
           </p>
         )}
 
-        {!polling && !error && tickets && tickets.length > 0 && (
+        {!polling && !error && totalCount > 0 && (
           <>
             {Object.keys(failures).length > 0 && (
               <div className="mb-2 rounded-xl bg-dismiss/[0.06] border border-dismiss/20 px-3 py-2 text-[12px] text-dismiss">
@@ -252,16 +270,27 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
                 highlighted rows below or skip to continue.
               </div>
             )}
-            <div className="py-2 space-y-0.5">
-              {tickets.map((t) => (
-                <TicketRow
-                  key={t.issue_key}
-                  ticket={t}
-                  selection={selections[t.issue_key]}
-                  failure={failures[t.issue_key]}
-                  onToggle={(action) => toggle(t.issue_key, action)}
+            <div className="py-2 space-y-4">
+              {assigned && assigned.length > 0 && (
+                <Section
+                  title="Your tickets"
+                  caption="Assigned to you — pre-filled based on current status."
+                  tickets={assigned}
+                  selections={selections}
+                  failures={failures}
+                  onToggle={toggle}
                 />
-              ))}
+              )}
+              {available && available.length > 0 && (
+                <Section
+                  title="Available to claim"
+                  caption="Unassigned tickets in your pickup queue — grab what you want to work on."
+                  tickets={available}
+                  selections={selections}
+                  failures={failures}
+                  onToggle={toggle}
+                />
+              )}
             </div>
           </>
         )}
@@ -301,6 +330,44 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
   )
 }
 
+function Section({
+  title,
+  caption,
+  tickets,
+  selections,
+  failures,
+  onToggle,
+}: {
+  title: string
+  caption: string
+  tickets: StockTicket[]
+  selections: Record<string, Action>
+  failures: Record<string, string>
+  onToggle: (issueKey: string, action: Action) => void
+}) {
+  return (
+    <div>
+      <div className="px-1 pb-1.5">
+        <h3 className="text-[12px] font-semibold text-text-secondary uppercase tracking-wide">
+          {title}
+        </h3>
+        <p className="text-[11px] text-text-tertiary mt-0.5">{caption}</p>
+      </div>
+      <div className="space-y-0.5">
+        {tickets.map((t) => (
+          <TicketRow
+            key={t.issue_key}
+            ticket={t}
+            selection={selections[t.issue_key]}
+            failure={failures[t.issue_key]}
+            onToggle={(action) => onToggle(t.issue_key, action)}
+          />
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function TicketRow({
   ticket,
   selection,
@@ -333,11 +400,6 @@ function TicketRow({
           <span className="text-[13px] font-medium text-text-primary truncate">
             {ticket.summary}
           </span>
-          {ticket.already_done && (
-            <span className="shrink-0 text-[10px] text-text-tertiary bg-black/[0.04] rounded-full px-2 py-0.5">
-              already {ticket.status}
-            </span>
-          )}
         </div>
         <MetadataLine ticket={ticket} />
         {failure && (
@@ -354,16 +416,13 @@ function TicketRow({
 
 // MetadataLine renders ticket metadata in the order: status · priority ·
 // issue_type · parent. Separators are inserted only between present values
-// so trailing/leading dots never appear. Status is hidden when already_done
-// is showing it via the trailing pill on the first line.
+// so trailing/leading dots never appear.
 //
 // Each part carries its own stable key ("status" / "priority" / ...) so
-// React reconciliation doesn't mis-match nodes when visibility changes (e.g.
-// a ticket flipping already_done causes status to drop out of the list, and
-// index keys would then shift "priority" into "status"'s slot).
+// React reconciliation doesn't mis-match nodes when visibility changes.
 function MetadataLine({ ticket }: { ticket: StockTicket }) {
   const parts: { key: string; node: React.ReactNode }[] = []
-  if (ticket.status && !ticket.already_done) {
+  if (ticket.status) {
     parts.push({
       key: 'status',
       node: <span className="text-text-secondary font-medium">{ticket.status}</span>,

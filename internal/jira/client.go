@@ -199,6 +199,7 @@ type Issue struct {
 		Comment *struct {
 			Total int `json:"total"`
 		} `json:"comment,omitempty"`
+		Created string `json:"created,omitempty"`
 		// Subtasks inlined in the search response. Each element has its own
 		// minimal fields block with a Status; we only need .Fields.Status.Name
 		// to decide whether the subtask is still open. If Jira returns
@@ -302,7 +303,7 @@ func (c *Client) GetChildIssues(parentKey string) ([]Issue, error) {
 }
 
 // DefaultSearchFields is the default set of fields returned by SearchIssues.
-var DefaultSearchFields = []string{"summary", "description", "status", "issuetype", "priority", "assignee", "parent", "labels"}
+var DefaultSearchFields = []string{"summary", "description", "status", "issuetype", "priority", "assignee", "parent", "labels", "created"}
 
 // ExtractDescriptionText flattens a Jira issue description to plain text.
 // Server/DC returns description as a JSON string; Cloud returns an ADF

@@ -185,6 +185,11 @@ type JiraSnapshot struct {
 	ParentKey    string   `json:"parent_key"`
 	CommentCount int      `json:"comment_count"`
 	URL          string   `json:"url"`
+	// CreatedAt is Jira's ISO-8601 timestamp for when the ticket was created
+	// (fields.created). Used for newest-first ordering in carry-over. Empty
+	// on snapshots that predate this field — callers should fall back to the
+	// entity's TF-side created_at when sort-critical.
+	CreatedAt string `json:"created_at,omitempty"`
 	// OpenSubtaskCount is the number of this issue's child subtasks whose
 	// status is NOT in the configured Done.Members set. Used to suppress
 	// task creation for parent-of-subtasks tickets (the decomposition

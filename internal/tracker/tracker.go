@@ -504,7 +504,7 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 	seen := map[string]bool{}
 	var all []jiraIssueState
 
-	fields := []string{"summary", "description", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment", "subtasks"}
+	fields := []string{"summary", "description", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment", "subtasks", "created"}
 
 	for _, jql := range queries {
 		issues, err := client.SearchIssues(jql, fields, 100)
@@ -533,7 +533,7 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 // drops fast once a ticket is off the user's plate.
 func (t *Tracker) batchFetchJira(client *jiraclient.Client, baseURL string, keys []string, doneStatuses []string) (map[string]jiraIssueState, error) {
 	results := make(map[string]jiraIssueState, len(keys))
-	fields := []string{"summary", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment", "subtasks"}
+	fields := []string{"summary", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment", "subtasks", "created"}
 
 	for i := 0; i < len(keys); i += jiraBatchSize {
 		end := i + jiraBatchSize
@@ -595,6 +595,9 @@ func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []string)
 		snap.CommentCount = issue.Fields.Comment.Total
 	}
 	snap.Labels = issue.Fields.Labels
+	if issue.Fields.Created != "" {
+		snap.CreatedAt = issue.Fields.Created
+	}
 	snap.OpenSubtaskCount = countOpenSubtasks(issue, doneStatuses)
 	return jiraIssueState{
 		Snap:        snap,

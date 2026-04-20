@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/config"
@@ -17,7 +19,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 )
 
-// stockTicket is the per-row payload for the carry-over list.
+// stockTicket is the per-row payload for the carry-over list. Bucket +
+// PrefilledAction let the frontend render two sections ("Your tickets" /
+// "Available to claim") and seed the tri-selector with a sensible default
+// based on the ticket's current Jira status.
 type stockTicket struct {
 	IssueKey  string `json:"issue_key"`
 	Summary   string `json:"summary"`
@@ -28,17 +33,29 @@ type stockTicket struct {
 	ParentKey string `json:"parent_key,omitempty"`
 	ParentURL string `json:"parent_url,omitempty"`
 	URL       string `json:"url"`
-	// AlreadyDone is true when snap.Status is in the user's configured
-	// Done.Members set. Frontend pre-selects the "done" action so the user can
-	// close orphan entities with one click — the POST handler's no-op guard
-	// skips the Jira transition when the status is already in Done.Members.
-	AlreadyDone bool `json:"already_done,omitempty"`
+	// Bucket is "assigned" (assigned to the user) or "available" (unassigned
+	// in a Pickup-rule status). Frontend splits the list on this field.
+	Bucket string `json:"bucket"`
+	// PrefilledAction is "queue" | "claim" | "done" | "". Empty means the
+	// user must choose — we couldn't infer a sensible default from the
+	// current Jira status (e.g. an assigned ticket in a status that matches
+	// none of the configured Pickup/InProgress/Done rules, or any ticket in
+	// the available bucket).
+	PrefilledAction string `json:"prefilled_action,omitempty"`
 }
 
-// handleJiraStockGet lists non-terminal Jira tickets assigned to the user
-// that don't already have an active task. Returns {status: "polling"} if the
-// Jira poller hasn't completed its first cycle since the last config change —
-// carry-over reads snapshots, which are seeded only after a full poll runs.
+// handleJiraStockGet returns two carry-over buckets:
+//
+//   - assigned: non-terminal Jira tickets assigned to the user, with a
+//     prefilled action derived from the current status (Pickup → queue,
+//     InProgress → claim, Done → done; unmapped statuses → no prefill).
+//   - available: unassigned tickets currently in a Pickup-rule status —
+//     new work the user could grab.
+//
+// Tickets without snapshots yet, tickets with active tasks, and parents
+// with open subtasks (SKY-173) are skipped. Returns {status: "polling"}
+// while the Jira poller hasn't completed its first cycle since the last
+// config change — snapshots are seeded on first poll.
 func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 	creds, _ := auth.Load()
 	cfg, err := config.Load()
@@ -76,67 +93,132 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tickets := make([]stockTicket, 0, len(entities))
+	type scored struct {
+		ticket    stockTicket
+		createdAt string // ISO-8601 from snap.CreatedAt; empty for old snapshots
+		fallback  string // entity.CreatedAt as RFC3339 — sort key when snap.CreatedAt is empty
+	}
+
+	var assigned, available []scored
 	for _, e := range entities {
 		if _, hasTask := taskedEntityIDs[e.ID]; hasTask {
 			continue
 		}
-
 		if e.SnapshotJSON == "" || e.SnapshotJSON == "{}" {
 			continue
 		}
 		var snap domain.JiraSnapshot
 		if err := json.Unmarshal([]byte(e.SnapshotJSON), &snap); err != nil {
-			// Corrupt snapshot — skip this row but log so the state doesn't
-			// silently hide a stuck entity. The tracker will reseed on its
-			// next poll via UpdateEntitySnapshot.
 			log.Printf("[stock] skipping entity %s (%s): invalid snapshot: %v", e.ID, e.SourceID, err)
 			continue
 		}
-
-		if snap.Assignee != creds.JiraDisplayName {
-			continue
-		}
-		// Apply the same subtask gate as the normal discovery path (SKY-173):
-		// a parent ticket with open subtasks is a container, not a work unit,
-		// and shouldn't be an option in carry-over. Its subtasks (if assigned
-		// to the user) show up here on their own, and if the decomposition
-		// later collapses, became_atomic surfaces the parent via normal
-		// routing. Skipping without a flag — unlike AlreadyDone, there's no
-		// user-facing action for "parent with subtasks" in this UI.
+		// Subtask gate (SKY-173) applies to both buckets — a parent ticket
+		// with open subtasks is a container, not a work unit. Its subtasks
+		// (if assigned or available) surface on their own; if the
+		// decomposition later collapses, became_atomic routes the parent
+		// through the normal path.
 		if snap.OpenSubtaskCount > 0 {
 			continue
 		}
-		// Tickets in the Done.Members set should normally be closed by the
-		// tracker before they reach here, but in the transitional window right
-		// after a user widens Done.Members (e.g. adds "Verified") the next poll
-		// hasn't run yet. Include them with already_done=true so the user can
-		// clean up in one click without Jira side effects.
-		alreadyDone := cfg.Jira.Done.Contains(snap.Status)
 
 		var parentURL string
 		if snap.ParentKey != "" && cfg.Jira.BaseURL != "" {
 			parentURL = strings.TrimRight(cfg.Jira.BaseURL, "/") + "/browse/" + snap.ParentKey
 		}
 
-		tickets = append(tickets, stockTicket{
-			IssueKey:    snap.Key,
-			Summary:     snap.Summary,
-			Status:      snap.Status,
-			Project:     projectFromKey(snap.Key),
-			IssueType:   snap.IssueType,
-			Priority:    snap.Priority,
-			ParentKey:   snap.ParentKey,
-			ParentURL:   parentURL,
-			URL:         snap.URL,
-			AlreadyDone: alreadyDone,
+		baseTicket := stockTicket{
+			IssueKey:  snap.Key,
+			Summary:   snap.Summary,
+			Status:    snap.Status,
+			Project:   projectFromKey(snap.Key),
+			IssueType: snap.IssueType,
+			Priority:  snap.Priority,
+			ParentKey: snap.ParentKey,
+			ParentURL: parentURL,
+			URL:       snap.URL,
+		}
+
+		isSelf := snap.Assignee == creds.JiraDisplayName
+		isUnassigned := snap.Assignee == ""
+
+		switch {
+		case isSelf:
+			baseTicket.Bucket = "assigned"
+			baseTicket.PrefilledAction = prefillForAssigned(cfg.Jira, snap.Status)
+			assigned = append(assigned, scored{baseTicket, snap.CreatedAt, e.CreatedAt.Format("2006-01-02T15:04:05Z07:00")})
+
+		case isUnassigned && cfg.Jira.Pickup.Contains(snap.Status):
+			baseTicket.Bucket = "available"
+			baseTicket.PrefilledAction = "" // user decides
+			available = append(available, scored{baseTicket, snap.CreatedAt, e.CreatedAt.Format("2006-01-02T15:04:05Z07:00")})
+
+		default:
+			// Assigned to someone else, or unassigned but not in Pickup
+			// (in-progress orphan, stale Done) — no action in carry-over.
+			continue
+		}
+	}
+
+	// Newest-first within each bucket. Primary key is snap.CreatedAt (Jira's
+	// own creation timestamp); when a snapshot predates this field (zero
+	// value) we fall back to the entity's TF-side created_at so ordering
+	// degrades gracefully instead of jumping to top/bottom.
+	// Times are parsed to time.Time before comparison so timezone/offset
+	// format differences (e.g. "+0000" vs "-07:00") don't corrupt ordering.
+	byNewest := func(list []scored) {
+		sort.SliceStable(list, func(i, j int) bool {
+			iKey := list[i].createdAt
+			if iKey == "" {
+				iKey = list[i].fallback
+			}
+			jKey := list[j].createdAt
+			if jKey == "" {
+				jKey = list[j].fallback
+			}
+			it, iOK := parseTime(iKey)
+			jt, jOK := parseTime(jKey)
+			if iOK && jOK {
+				return it.After(jt)
+			}
+			return iKey > jKey
 		})
+	}
+	byNewest(assigned)
+	byNewest(available)
+
+	assignedOut := make([]stockTicket, len(assigned))
+	for i, s := range assigned {
+		assignedOut[i] = s.ticket
+	}
+	availableOut := make([]stockTicket, len(available))
+	for i, s := range available {
+		availableOut[i] = s.ticket
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":  "ready",
-		"tickets": tickets,
+		"status":    "ready",
+		"assigned":  assignedOut,
+		"available": availableOut,
 	})
+}
+
+// prefillForAssigned returns the carry-over action that matches the ticket's
+// current Jira status, or "" if none of the configured status rules apply.
+// Done.Contains takes precedence over InProgress (a ticket in a Done-rule
+// status should always be offered for closure, even if the user has
+// overlapping rule membership). Pickup is checked last so the "new work"
+// case is the default for simply-assigned-to-you tickets.
+func prefillForAssigned(cfg config.JiraConfig, status string) string {
+	switch {
+	case cfg.Done.Contains(status):
+		return "done"
+	case cfg.InProgress.Contains(status):
+		return "claim"
+	case cfg.Pickup.Contains(status):
+		return "queue"
+	default:
+		return ""
+	}
 }
 
 type stockAction struct {
@@ -150,11 +232,22 @@ type stockFailure struct {
 	Error    string `json:"error"`
 }
 
-// handleJiraStockPost applies carry-over actions. "queue" creates a queued
-// task, "claim" creates a claimed task + assigns and transitions the Jira
-// issue to in-progress, "done" transitions the Jira issue to done and closes
-// the entity. Transition failures are surfaced per-row; other actions still
-// apply.
+// handleJiraStockPost applies carry-over actions. Eligibility varies by
+// bucket:
+//
+//   - Assigned (snap.Assignee == self): queue/claim/done are all valid.
+//     queue emits jira:issue:assigned (no Jira mutation). claim emits
+//     jira:issue:assigned + assigns-to-self + transitions to InProgress.
+//     done transitions to Done + closes the entity; a no-op guard skips
+//     the transition when already in a Done-member status.
+//
+//   - Available (unassigned, Pickup status): queue emits jira:issue:available
+//     (no Jira mutation — user is parking it in the queue to decide later).
+//     claim behaves like the assigned-claim path (assign + transition +
+//     claimed task). done is rejected — closing an unassigned ticket from
+//     here is not a supported cleanup action.
+//
+// Transition failures are surfaced per-row; other actions still apply.
 func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Actions []stockAction `json:"actions"`
@@ -227,30 +320,46 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 			failed = append(failed, stockFailure{a.IssueKey, a.Action, "invalid snapshot"})
 			continue
 		}
-		if snap.Assignee != creds.JiraDisplayName {
-			failed = append(failed, stockFailure{a.IssueKey, a.Action, "not assigned to you"})
+
+		isSelf := snap.Assignee == creds.JiraDisplayName
+		isUnassigned := snap.Assignee == ""
+		isAvailable := isUnassigned && cfg.Jira.Pickup.Contains(snap.Status)
+
+		if !isSelf && !isAvailable {
+			failed = append(failed, stockFailure{a.IssueKey, a.Action, "ticket is not assigned to you and not in the available pickup queue"})
 			continue
 		}
+
 		// Defensive subtask gate (SKY-173 principle): queue/claim on a parent
 		// with open subtasks would create the exact non-atomic task the main
 		// flow works hard to suppress. The GET handler already filters these
 		// out so legitimate UI flows never submit them, but subtasks could be
 		// added between GET and POST, or the request could come from a stale
-		// frontend. "done" is still allowed — closing a parent with dangling
-		// subtasks is a valid cleanup action.
+		// frontend. "done" is still allowed on the assigned branch — closing
+		// a parent with dangling subtasks is a valid cleanup action.
 		if snap.OpenSubtaskCount > 0 && a.Action != "done" {
 			failed = append(failed, stockFailure{a.IssueKey, a.Action, "ticket has open subtasks — delegate those atomic subtasks directly rather than the parent"})
 			continue
 		}
-		// Tickets already in Done.Members are allowed through — the GET flags
-		// them as already_done so the user can close the orphan entity, and the
-		// "done" branch below no-ops the Jira transition when the status is
-		// already a Done member. queue/claim on an already-done ticket is
-		// pointless though, so reject those outright.
-		if cfg.Jira.Done.Contains(snap.Status) && a.Action != "done" {
+
+		// Available-bucket branches never make sense for "done" — closing an
+		// unassigned ticket from carry-over isn't a supported cleanup (the
+		// "done" flow is for orphan cleanup on your own assigned tickets that
+		// are already in a Done-rule status).
+		if isAvailable && a.Action == "done" {
+			failed = append(failed, stockFailure{a.IssueKey, a.Action, "ticket is not assigned to you; done is only for cleaning up your own already-complete tickets"})
+			continue
+		}
+
+		// Assigned-bucket: tickets in Done.Members are allowed through for
+		// the "done" action (no-op guard skips the Jira transition when the
+		// status is already a Done member); queue/claim on an already-done
+		// ticket is pointless, so reject those outright.
+		if isSelf && cfg.Jira.Done.Contains(snap.Status) && a.Action != "done" {
 			failed = append(failed, stockFailure{a.IssueKey, a.Action, "ticket is already in a done status — only the done action is valid"})
 			continue
 		}
+
 		if _, hasTask := taskedEntityIDs[entity.ID]; hasTask {
 			failed = append(failed, stockFailure{a.IssueKey, a.Action, "ticket already has an active task"})
 			continue
@@ -258,12 +367,23 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 
 		switch a.Action {
 		case "queue":
-			eventID, err := recordCarryOverAssignedEvent(s.db, entity.ID, snap, creds.JiraDisplayName)
+			// Available tickets synthesize jira:issue:available (they're
+			// unassigned — a synthesized jira:issue:assigned would be a
+			// lie). Assigned tickets use jira:issue:assigned as before.
+			var eventType string
+			var eventID string
+			if isAvailable {
+				eventType = domain.EventJiraIssueAvailable
+				eventID, err = recordCarryOverAvailableEvent(s.db, entity.ID, snap, creds.JiraDisplayName)
+			} else {
+				eventType = domain.EventJiraIssueAssigned
+				eventID, err = recordCarryOverAssignedEvent(s.db, entity.ID, snap, creds.JiraDisplayName)
+			}
 			if err != nil {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, "record event: " + err.Error()})
 				continue
 			}
-			if _, _, err := db.FindOrCreateTask(s.db, entity.ID, domain.EventJiraIssueAssigned, "", eventID, 0.5); err != nil {
+			if _, _, err := db.FindOrCreateTask(s.db, entity.ID, eventType, "", eventID, 0.5); err != nil {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, err.Error()})
 				continue
 			}
@@ -280,7 +400,10 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 			// Jira issue that never got assigned or transitioned. Claim-guard
 			// pattern skips the API calls when state is already correct —
 			// containment against InProgress.Members so a ticket in any
-			// in-progress variant isn't transitioned back to canonical.
+			// in-progress variant isn't transitioned back to canonical. For
+			// available tickets the state check is a no-op (they're
+			// unassigned by definition), but GetClaimState is cheap and keeps
+			// one code path for both branches.
 			state := client.GetClaimState(a.IssueKey)
 			if state == nil || !state.AssignedToSelf {
 				if err := client.AssignToSelf(a.IssueKey); err != nil {
@@ -300,13 +423,14 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 
 			// Refresh the snap with the known post-mutation state so the
 			// synthesized event metadata matches the ticket's actual Jira
-			// state at the moment of claim.
+			// state at the moment of claim. The assignee flips to self
+			// regardless of where we started.
 			snap.Assignee = creds.JiraDisplayName
 
-			// Jira is now consistent — create the task and promote to claimed.
-			// If either of these fails the ticket stays assigned + in-progress
-			// in Jira but has no task on our side; the next carry-over run
-			// would surface it again for retry.
+			// Both assigned and available claim paths end with a
+			// jira:issue:assigned event — after the AssignToSelf call, the
+			// user is the assignee in Jira too, so the event metadata is
+			// accurate for either starting state.
 			eventID, err := recordCarryOverAssignedEvent(s.db, entity.ID, snap, creds.JiraDisplayName)
 			if err != nil {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, "record event: " + err.Error()})
@@ -405,10 +529,54 @@ func recordCarryOverAssignedEvent(database *sql.DB, entityID string, snap domain
 	})
 }
 
+// recordCarryOverAvailableEvent is the available-bucket analogue of
+// recordCarryOverAssignedEvent: synthesizes a jira:issue:available event so
+// the carry-over "queue" action on an unassigned ticket has a real event
+// row to hang the task off. Mirrors the tracker's own emission path for
+// first-discovered available tickets (diff.go).
+func recordCarryOverAvailableEvent(database *sql.DB, entityID string, snap domain.JiraSnapshot, _ string) (string, error) {
+	meta := events.JiraIssueAvailableMetadata{
+		IssueKey:  snap.Key,
+		Project:   projectFromKey(snap.Key),
+		IssueType: snap.IssueType,
+		Priority:  snap.Priority,
+		Status:    snap.Status,
+		Summary:   snap.Summary,
+	}
+	metaJSON, err := json.Marshal(meta)
+	if err != nil {
+		return "", err
+	}
+	eid := entityID
+	return db.RecordEvent(database, domain.Event{
+		EntityID:     &eid,
+		EventType:    domain.EventJiraIssueAvailable,
+		MetadataJSON: string(metaJSON),
+	})
+}
+
 // projectFromKey pulls "SKY" out of "SKY-123". Mirrors tracker.extractProject.
 func projectFromKey(key string) string {
 	if i := strings.IndexByte(key, '-'); i > 0 {
 		return key[:i]
 	}
 	return key
+}
+
+// parseTime parses a timestamp string produced by Jira or TF's own
+// entity.CreatedAt. Jira's format omits the colon in the UTC offset
+// (e.g. "+0000"), which RFC3339 rejects; we try that layout before the
+// standard ones so the common case succeeds on the first attempt.
+func parseTime(s string) (time.Time, bool) {
+	for _, layout := range []string{
+		"2006-01-02T15:04:05.000-0700",
+		"2006-01-02T15:04:05-0700",
+		time.RFC3339Nano,
+		time.RFC3339,
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UTC(), true
+		}
+	}
+	return time.Time{}, false
 }
