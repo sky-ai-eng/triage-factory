@@ -24,6 +24,8 @@ import {
 import { SortableContext, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import PRCard from '../components/PRCard'
+import { useWebSocket } from '../hooks/useWebSocket'
+import type { WSEvent } from '../types'
 
 export interface PRSummary {
   number: number
@@ -108,7 +110,12 @@ export default function PRDashboard() {
   }, [fetchAll])
 
   useEffect(() => {
-    const interval = setInterval(fetchAll, 120000)
+    // WS-driven updates cover the common case; keep a longer interval as
+    // insurance against a missed message (useWebSocket auto-reconnects but
+    // doesn't replay events dropped during a disconnect window). 10m is
+    // generous enough to avoid redundant DB reads while still recovering
+    // within a user's typical session.
+    const interval = setInterval(fetchAll, 600000)
     const handleVis = () => {
       if (document.visibilityState === 'visible') fetchAll()
     }
@@ -118,6 +125,39 @@ export default function PRDashboard() {
       document.removeEventListener('visibilitychange', handleVis)
     }
   }, [fetchAll])
+
+  // Debounced refetch on PR-relevant events. A single poll cycle on one PR
+  // can emit a burst of events (new commit + ci_check_* + review_requested);
+  // coalescing into one refetch keeps the DB quiet without sacrificing
+  // perceived responsiveness.
+  //
+  // Memoized with useCallback — an inline handler would create a fresh
+  // function identity every render, causing useWebSocket's latest-ref
+  // update effect to re-run on each render (the subscription itself stays
+  // stable, but the ref-assignment effect is still a per-render tick).
+  // Since fetchAll is already stable (useCallback with []), this handler
+  // is effectively created once for the lifetime of the component.
+  const wsDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const handleWSEvent = useCallback(
+    (event: WSEvent) => {
+      if (event.type !== 'event') return
+      const evt = event.data.event_type
+      if (!evt || !evt.startsWith('github:pr:')) return
+      if (wsDebounceRef.current) clearTimeout(wsDebounceRef.current)
+      wsDebounceRef.current = setTimeout(() => {
+        wsDebounceRef.current = null
+        fetchAll()
+      }, 500)
+    },
+    [fetchAll],
+  )
+  useWebSocket(handleWSEvent)
+
+  useEffect(() => {
+    return () => {
+      if (wsDebounceRef.current) clearTimeout(wsDebounceRef.current)
+    }
+  }, [])
 
   const byRecent = (a: PRSummary, b: PRSummary) =>
     new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
