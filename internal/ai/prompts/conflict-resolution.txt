@@ -1,19 +1,27 @@
 You are resolving merge conflicts on a pull request.
 
+## Context
+
+- Repo: {{OWNER}}/{{REPO}}
+- PR: #{{PR_NUMBER}}
+- Head commit: {{HEAD_SHA}}
+
 ## Process
-1. Run `triagefactory exec gh pr view` to understand the PR — what it does, what branch it targets
-2. Fetch the base branch: `git fetch origin <base_branch>`
-3. Attempt the merge: `git merge origin/<base_branch>`
+
+1. Run `{{BINARY_PATH}} exec gh pr view` to understand the PR — what it does, what branch it targets.
+2. Fetch the base branch: `git fetch origin <base_branch>`.
+3. Attempt the merge: `git merge origin/<base_branch>`.
 4. If there are conflicts, resolve them:
-   - Read each conflicted file to understand both sides
-   - Make the resolution that preserves the intent of both the PR and the base branch changes
-   - If the PR's changes are clearly outdated by the base branch, prefer the base branch version
-   - If both sides made meaningful changes, combine them correctly
-5. After resolving all conflicts, run any existing tests to verify nothing is broken
-6. Commit the merge resolution and push
+   - Read each conflicted file to understand both sides.
+   - Make the resolution that preserves the intent of both the PR and the base branch changes.
+   - If the PR's changes are clearly outdated by the base branch, prefer the base branch version.
+   - If both sides made meaningful changes, combine them correctly.
+5. After resolving all conflicts, run any existing tests to verify nothing is broken.
+6. Commit the merge resolution and push.
 
 ## Guidelines
-- Never drop changes silently — if you discard one side, explain why in the commit message
-- If conflicts are too complex or ambiguous to resolve confidently, report failure rather than guessing
-- Keep the merge commit message descriptive: mention which conflicts were resolved and how
-- Do not rewrite history (no force push, no rebase if the branch has been shared)
+
+- Never drop changes silently — if you discard one side, explain why in the commit message.
+- If conflicts are too complex or ambiguous to resolve confidently, report failure rather than guessing.
+- Keep the merge commit message descriptive: mention which conflicts were resolved and how.
+- Do not rewrite history (no force push, no rebase if the branch has been shared).

@@ -11,10 +11,75 @@ interface Props {
   onDeleted?: () => void
 }
 
-const TEMPLATE_VARS = [
-  { name: '{{OWNER}}', desc: 'Repository owner' },
-  { name: '{{REPO}}', desc: 'Repository name' },
-  { name: '{{PR_NUMBER}}', desc: 'Pull request number' },
+// TEMPLATE_VAR_GROUPS mirrors what internal/delegate/placeholders.go
+// interpolates at runtime. If a prompt references a placeholder not listed
+// here, it falls through as a literal {{X}} string at spawn time — agents
+// see it and fail loudly, which is the right signal. Placeholders that
+// don't apply to the task's event type render empty (e.g. {{WORKFLOW_RUN_ID}}
+// on a Jira task).
+type TemplateVar = { name: string; desc: string }
+type TemplateVarGroup = { label: string; caption: string; vars: TemplateVar[] }
+
+const TEMPLATE_VAR_GROUPS: TemplateVarGroup[] = [
+  {
+    label: 'Always available',
+    caption: 'Populated on every delegation regardless of task source.',
+    vars: [
+      { name: '{{RUN_ID}}', desc: 'Current delegation run ID' },
+      { name: '{{BINARY_PATH}}', desc: 'Absolute path to the triagefactory CLI' },
+      { name: '{{TASK_TITLE}}', desc: 'Task title' },
+      { name: '{{EVENT_TYPE}}', desc: 'e.g. github:pr:ci_check_failed' },
+      {
+        name: '{{EVENT_METADATA_JSON}}',
+        desc: 'Raw event metadata as JSON — escape hatch for custom fields',
+      },
+    ],
+  },
+  {
+    label: 'GitHub PR tasks',
+    caption: 'Populated when the task is on a GitHub PR. Empty on Jira tasks.',
+    vars: [
+      { name: '{{OWNER}}', desc: 'Repo owner (e.g. sky-ai-eng)' },
+      { name: '{{REPO}}', desc: 'Repo name (e.g. triage-factory)' },
+      { name: '{{PR_NUMBER}}', desc: 'Pull request number' },
+      { name: '{{HEAD_SHA}}', desc: 'Commit SHA the event fired on' },
+    ],
+  },
+  {
+    label: 'GitHub CI events',
+    caption: 'Populated on ci_check_failed / ci_check_passed events.',
+    vars: [
+      {
+        name: '{{WORKFLOW_RUN_ID}}',
+        desc: 'GitHub Actions run ID — empty for third-party CI (Supabase, Circle, etc.)',
+      },
+      { name: '{{CHECK_NAME}}', desc: 'Failing check name (e.g. test, build)' },
+      { name: '{{CHECK_RUN_ID}}', desc: 'Check run ID' },
+      { name: '{{CHECK_URL}}', desc: "Link to the check's details page" },
+      { name: '{{CONCLUSION}}', desc: 'success / failure / neutral / skipped / stale' },
+    ],
+  },
+  {
+    label: 'GitHub review events',
+    caption: 'Populated on review_* events.',
+    vars: [
+      { name: '{{REVIEWER}}', desc: 'Login of the user who submitted the review' },
+      { name: '{{REVIEW_TYPE}}', desc: 'approved / commented / changes_requested / dismissed' },
+    ],
+  },
+  {
+    label: 'Jira issue tasks',
+    caption: 'Populated when the task is on a Jira issue. Empty on GitHub tasks.',
+    vars: [
+      { name: '{{ISSUE_KEY}}', desc: 'Full issue key (e.g. SKY-123)' },
+      { name: '{{PROJECT}}', desc: 'Project prefix (e.g. SKY)' },
+      { name: '{{ASSIGNEE}}', desc: 'Issue assignee display name' },
+      { name: '{{STATUS}}', desc: 'Current issue status (e.g. To Do)' },
+      { name: '{{PRIORITY}}', desc: 'Issue priority (e.g. High)' },
+      { name: '{{ISSUE_TYPE}}', desc: 'Issue type (e.g. Task, Bug, Story)' },
+      { name: '{{SUMMARY}}', desc: 'Issue summary / title' },
+    ],
+  },
 ]
 
 interface PromptStatsData {
@@ -263,23 +328,39 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
                 />
               </div>
 
-              {/* Template variables reference */}
+              {/* Template variables reference — grouped by applicability so
+                  authors can tell at a glance which ones resolve for which
+                  task types. Unresolved placeholders render empty at spawn
+                  time; prompts stay coherent either way. */}
               <div>
                 <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
                   Template Variables
                 </label>
-                <div className="bg-black/[0.02] rounded-lg border border-border-subtle p-3 space-y-1.5">
-                  {TEMPLATE_VARS.map((v) => (
-                    <div key={v.name} className="flex items-center gap-3">
-                      <code className="text-[11px] font-mono text-accent bg-accent/[0.06] px-1.5 py-0.5 rounded">
-                        {v.name}
-                      </code>
-                      <span className="text-[11px] text-text-tertiary">{v.desc}</span>
+                <div className="bg-black/[0.02] rounded-lg border border-border-subtle p-3 space-y-4">
+                  {TEMPLATE_VAR_GROUPS.map((group) => (
+                    <div key={group.label}>
+                      <div className="text-[11px] font-semibold text-text-secondary">
+                        {group.label}
+                      </div>
+                      <div className="text-[10px] text-text-tertiary mb-1.5">{group.caption}</div>
+                      <div className="space-y-1">
+                        {group.vars.map((v) => (
+                          <div key={v.name} className="flex items-start gap-3">
+                            <code className="text-[11px] font-mono text-accent bg-accent/[0.06] px-1.5 py-0.5 rounded shrink-0">
+                              {v.name}
+                            </code>
+                            <span className="text-[11px] text-text-tertiary leading-snug">
+                              {v.desc}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   ))}
-                  <p className="text-[10px] text-text-tertiary mt-2 pt-2 border-t border-border-subtle">
+                  <p className="text-[10px] text-text-tertiary pt-2 border-t border-border-subtle">
                     Tool guidance and completion format are injected automatically. You only need to
-                    write the mission.
+                    write the mission. Placeholders that don&rsquo;t apply to the task&rsquo;s event
+                    type render empty.
                   </p>
                 </div>
               </div>

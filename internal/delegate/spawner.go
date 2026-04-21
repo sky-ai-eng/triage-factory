@@ -332,7 +332,19 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		return
 	}
 
-	prompt := buildPrompt(mission, cfg.scope, cfg.toolsRef, selfBin, runID)
+	// Load the primary event's metadata so buildPrompt can flatten its
+	// fields into named placeholders (WORKFLOW_RUN_ID, HEAD_SHA, etc.) —
+	// see placeholders.go. A DB failure here is non-fatal: the replacer
+	// just leaves event-derived placeholders empty. FKs guarantee the
+	// event exists, so a real miss would be a DB-level problem we want
+	// to log and continue through rather than aborting the run.
+	metadataJSON, err := db.GetEventMetadata(s.database, task.PrimaryEventID)
+	if err != nil {
+		log.Printf("[delegate] warning: failed to load event metadata for task %s (event %s): %v — event placeholders will render empty", task.ID, task.PrimaryEventID, err)
+		metadataJSON = ""
+	}
+
+	prompt := buildPrompt(task, metadataJSON, mission, cfg.scope, cfg.toolsRef, selfBin, runID)
 
 	s.updateStatus(runID, "agent_starting")
 	if ctx.Err() != nil {
@@ -1069,16 +1081,21 @@ func parseAgentResult(text string) *agentResult {
 }
 
 // buildPrompt composes: mission + envelope (scope, tools, task memory, completion contract).
-func buildPrompt(mission, scope, toolsRef, binaryPath, runID string) string {
-	envelope := strings.NewReplacer(
-		"{{SCOPE}}", scope,
-		"{{TOOLS_REFERENCE}}", toolsRef,
-		"{{RUN_ID}}", runID,
-	).Replace(ai.EnvelopeTemplate)
-
+// buildPrompt composes mission + envelope and interpolates all placeholders
+// in one pass. See placeholders.go for the full catalog — every {{X}} in
+// the mission or envelope gets resolved here, with unknown names falling
+// through as literal braces so they're obvious to prompt authors on first
+// run. metadataJSON is the primary event's metadata blob ("" is fine —
+// event-derived placeholders just render empty).
+func buildPrompt(task domain.Task, metadataJSON, mission, scope, toolsRef, binaryPath, runID string) string {
+	// Compatibility shim: some early prompts were written with the literal
+	// "triagefactory exec" prefix on CLI invocations, assuming the binary
+	// was on PATH. The binary lives at an absolute path in the worktree
+	// session, so rewrite those before interpolation. New prompts should
+	// use {{BINARY_PATH}} directly.
 	body := strings.ReplaceAll(mission, "triagefactory exec", binaryPath+" exec")
-	full := body + "\n\n" + envelope
-	return strings.ReplaceAll(full, "{{BINARY_PATH}}", binaryPath)
+	full := body + "\n\n" + ai.EnvelopeTemplate
+	return BuildPromptReplacer(task, metadataJSON, runID, binaryPath, scope, toolsRef).Replace(full)
 }
 
 func parseOwnerRepo(s string) (string, string) {

@@ -242,16 +242,22 @@ func (p GitHubPRReviewDismissedPredicate) Matches(m GitHubPRReviewDismissedMetad
 // -----------------------------------------------------------------------------
 
 type GitHubPRCICheckFailedMetadata struct {
-	Author       string   `json:"author"`
-	AuthorIsSelf bool     `json:"author_is_self"`
-	CheckRunID   int64    `json:"check_run_id"`
-	CheckName    string   `json:"check_name"`
-	CheckURL     string   `json:"check_url"`
-	HeadSHA      string   `json:"head_sha"`
-	Repo         string   `json:"repo"`
-	PRNumber     int      `json:"pr_number"`
-	IsDraft      bool     `json:"is_draft"`
-	Labels       []string `json:"labels"`
+	Author       string `json:"author"`
+	AuthorIsSelf bool   `json:"author_is_self"`
+	CheckRunID   int64  `json:"check_run_id"`
+	CheckName    string `json:"check_name"`
+	CheckURL     string `json:"check_url"`
+	// WorkflowRunID is the GitHub Actions workflow run database ID this
+	// check belongs to, parsed from the check's DetailsURL in the tracker.
+	// Zero for third-party CI (Supabase, Circle, etc.) where the URL
+	// doesn't carry an Actions run — callers fall back to the list-runs
+	// subcommand to discover a matching run by PR / SHA.
+	WorkflowRunID int64    `json:"workflow_run_id,omitempty"`
+	HeadSHA       string   `json:"head_sha"`
+	Repo          string   `json:"repo"`
+	PRNumber      int      `json:"pr_number"`
+	IsDraft       bool     `json:"is_draft"`
+	Labels        []string `json:"labels"`
 }
 
 type GitHubPRCICheckFailedPredicate struct {
@@ -273,16 +279,17 @@ func (p GitHubPRCICheckFailedPredicate) Matches(m GitHubPRCICheckFailedMetadata)
 }
 
 type GitHubPRCICheckPassedMetadata struct {
-	Author       string   `json:"author"`
-	AuthorIsSelf bool     `json:"author_is_self"`
-	CheckRunID   int64    `json:"check_run_id"`
-	CheckName    string   `json:"check_name"`
-	Conclusion   string   `json:"conclusion"` // "success", "neutral", "skipped", "stale", etc.
-	HeadSHA      string   `json:"head_sha"`
-	Repo         string   `json:"repo"`
-	PRNumber     int      `json:"pr_number"`
-	IsDraft      bool     `json:"is_draft"`
-	Labels       []string `json:"labels"`
+	Author        string   `json:"author"`
+	AuthorIsSelf  bool     `json:"author_is_self"`
+	CheckRunID    int64    `json:"check_run_id"`
+	CheckName     string   `json:"check_name"`
+	WorkflowRunID int64    `json:"workflow_run_id,omitempty"`
+	Conclusion    string   `json:"conclusion"` // "success", "neutral", "skipped", "stale", etc.
+	HeadSHA       string   `json:"head_sha"`
+	Repo          string   `json:"repo"`
+	PRNumber      int      `json:"pr_number"`
+	IsDraft       bool     `json:"is_draft"`
+	Labels        []string `json:"labels"`
 }
 
 type GitHubPRCICheckPassedPredicate struct {

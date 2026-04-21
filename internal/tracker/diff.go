@@ -112,7 +112,8 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, us
 				emit(domain.EventGitHubPRCICheckFailed, "", events.GitHubPRCICheckFailedMetadata{
 					Author: curr.Author, AuthorIsSelf: authorIsSelf,
 					CheckRunID: cr.ID, CheckName: cr.Name, CheckURL: cr.DetailsURL,
-					HeadSHA: curr.HeadSHA, Repo: curr.Repo, PRNumber: curr.Number,
+					WorkflowRunID: cr.WorkflowRunID,
+					HeadSHA:       curr.HeadSHA, Repo: curr.Repo, PRNumber: curr.Number,
 					IsDraft: curr.IsDraft, Labels: curr.Labels,
 				})
 			} else if cr.Conclusion != "" && !domain.IsFailingConclusion(cr.Conclusion) {
@@ -127,7 +128,8 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, us
 				emit(domain.EventGitHubPRCICheckPassed, "", events.GitHubPRCICheckPassedMetadata{
 					Author: curr.Author, AuthorIsSelf: authorIsSelf,
 					CheckRunID: cr.ID, CheckName: cr.Name, Conclusion: cr.Conclusion,
-					HeadSHA: curr.HeadSHA, Repo: curr.Repo, PRNumber: curr.Number,
+					WorkflowRunID: cr.WorkflowRunID,
+					HeadSHA:       curr.HeadSHA, Repo: curr.Repo, PRNumber: curr.Number,
 					IsDraft: curr.IsDraft, Labels: curr.Labels,
 				})
 			}

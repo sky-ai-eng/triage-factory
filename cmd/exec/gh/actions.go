@@ -3,8 +3,10 @@ package gh
 import (
 	"archive/zip"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -54,9 +56,172 @@ func handleActions(client *github.Client, args []string) {
 	switch action {
 	case "download-logs":
 		actionsDownloadLogs(client, flags)
+	case "list-runs":
+		actionsListRuns(client, flags)
 	default:
 		exitErr(fmt.Sprintf("unknown actions action: %s", action))
 	}
+}
+
+// maxListedRuns caps the per-request run list. Agents asking "what runs are
+// on this PR" almost always want the newest few — hundreds of runs on a
+// long-lived PR would bloat the prompt context and make the output harder
+// to reason about. Keeping the cap tight also bounds the API page size.
+const maxListedRuns = 20
+
+// listRunsResult is the JSON envelope emitted on success by
+// `gh actions list-runs`. Field names mirror GitHub's API where practical
+// so agents reading the docs can cross-reference.
+type listRunsResult struct {
+	Owner   string        `json:"owner"`
+	Repo    string        `json:"repo"`
+	Filter  listRunFilter `json:"filter"`
+	Runs    []listRun     `json:"runs"`
+	HeadSHA string        `json:"head_sha,omitempty"` // resolved head SHA when --pr was used
+}
+
+type listRunFilter struct {
+	PR  int    `json:"pr,omitempty"`
+	SHA string `json:"sha,omitempty"`
+}
+
+type listRun struct {
+	RunID        int64  `json:"run_id"`
+	WorkflowName string `json:"workflow_name"`
+	Event        string `json:"event"`
+	Status       string `json:"status"`
+	Conclusion   string `json:"conclusion"`
+	HeadSHA      string `json:"head_sha"`
+	HeadBranch   string `json:"head_branch"`
+	CreatedAt    string `json:"created_at"`
+	URL          string `json:"url"`
+}
+
+// actionsListRuns implements `gh actions list-runs --pr N | --sha SHA`.
+//
+// Discovery fallback for CI-fix prompts: the primary event carries a
+// WorkflowRunID when the failing check is Actions-backed and the poller
+// saw it, but third-party CI (Supabase, Circle) lacks that field, and
+// force-pushes can stale-invalidate the stored ID. This command lets the
+// agent list runs for a PR or SHA and pick the right one.
+//
+// Exactly one of --pr / --sha is required. --pr takes a PR number and
+// resolves the head SHA before calling the Actions list endpoint; --sha
+// hits the endpoint directly.
+func actionsListRuns(client *github.Client, args []string) {
+	prStr := flagValue(args, "--pr")
+	sha := flagValue(args, "--sha")
+
+	if (prStr == "") == (sha == "") {
+		exitErr("usage: triagefactory exec gh actions list-runs (--pr <N> | --sha <SHA>) [--repo owner/repo]")
+	}
+
+	owner, repo, err := resolveRepo(args)
+	if err != nil {
+		exitErr(err.Error())
+	}
+
+	if prStr != "" {
+		prNum, err := strconv.Atoi(prStr)
+		if err != nil || prNum <= 0 {
+			exitErr(fmt.Sprintf("invalid --pr value %q: expected a positive integer", prStr))
+		}
+		// Compact fetch — GetPR is heavier than we need (pulls reviews and
+		// comments) but it's the existing path that correctly handles auth,
+		// retries, and error shapes. The extra calls are a few hundred
+		// milliseconds on a PR with normal activity — acceptable for a
+		// discovery command agents run at most once per task.
+		pr, err := client.GetPR(owner, repo, prNum, false)
+		if err != nil {
+			exitErr(fmt.Sprintf("fetch PR #%d: %v", prNum, err))
+		}
+		if pr.HeadSHA == "" {
+			exitErr(fmt.Sprintf("PR #%d has no head SHA — can't list runs for it", prNum))
+		}
+		sha = pr.HeadSHA
+	}
+
+	runs, err := fetchRunsForSHA(client, owner, repo, sha)
+	if err != nil {
+		exitErr(err.Error())
+	}
+
+	filter := listRunFilter{SHA: sha}
+	if prStr != "" {
+		// strconv.Atoi above already validated
+		n, _ := strconv.Atoi(prStr)
+		filter.PR = n
+	}
+
+	printJSON(listRunsResult{
+		Owner:   owner,
+		Repo:    repo,
+		Filter:  filter,
+		Runs:    runs,
+		HeadSHA: sha,
+	})
+}
+
+// fetchRunsForSHA queries GET /repos/{o}/{r}/actions/runs?head_sha=<sha>
+// and flattens the response to the subset of fields the agent needs.
+// Runs come back newest-first per GitHub's default ordering.
+func fetchRunsForSHA(client *github.Client, owner, repo, sha string) ([]listRun, error) {
+	q := url.Values{
+		"head_sha":              []string{sha},
+		"per_page":              []string{strconv.Itoa(maxListedRuns)},
+		"exclude_pull_requests": []string{"true"},
+	}
+	apiPath := fmt.Sprintf("/repos/%s/%s/actions/runs?%s", owner, repo, q.Encode())
+
+	data, err := client.Get(apiPath)
+	if err != nil {
+		return nil, fmt.Errorf("list workflow runs: %w", err)
+	}
+
+	var resp struct {
+		WorkflowRuns []struct {
+			ID         int64  `json:"id"`
+			Name       string `json:"name"`
+			Event      string `json:"event"`
+			Status     string `json:"status"`
+			Conclusion string `json:"conclusion"`
+			HeadSHA    string `json:"head_sha"`
+			HeadBranch string `json:"head_branch"`
+			CreatedAt  string `json:"created_at"`
+			HTMLURL    string `json:"html_url"`
+		} `json:"workflow_runs"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, fmt.Errorf("parse workflow runs: %w", err)
+	}
+
+	out := make([]listRun, 0, len(resp.WorkflowRuns))
+	for _, r := range resp.WorkflowRuns {
+		out = append(out, listRun{
+			RunID:        r.ID,
+			WorkflowName: r.Name,
+			Event:        r.Event,
+			Status:       r.Status,
+			Conclusion:   r.Conclusion,
+			HeadSHA:      r.HeadSHA,
+			HeadBranch:   r.HeadBranch,
+			CreatedAt:    r.CreatedAt,
+			URL:          r.HTMLURL,
+		})
+	}
+	return out, nil
+}
+
+// flagValue returns the value following the named flag in args, or "" if the
+// flag is absent. Simple linear scan — the arg lists are tiny and adding a
+// shared helper isn't worth the coordination cost.
+func flagValue(args []string, name string) string {
+	for i, a := range args {
+		if a == name && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 // downloadLogsResult is the JSON envelope emitted on success by

@@ -3,6 +3,7 @@ package gh
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -586,5 +587,126 @@ func TestDownloadAndExtractLogs_ExtractFailureCleansUp(t *testing.T) {
 	after := countCILogTempFiles(t)
 	if after != before {
 		t.Errorf("temp zip files leaked on extract failure: before=%d after=%d", before, after)
+	}
+}
+
+// --- list-runs tests -------------------------------------------------------
+
+// fetchRunsForSHA is the testable core of actionsListRuns — the outer handler
+// calls os.Exit on error, so we exercise the API-facing path here and trust
+// the glue (flag parsing, PR→SHA resolution) by inspection.
+func TestFetchRunsForSHA_ShapesResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/repos/owner/repo/actions/runs" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.URL.Query().Get("head_sha"); got != "abc123" {
+			t.Errorf("expected head_sha=abc123, got %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"total_count": 2,
+			"workflow_runs": [
+				{"id": 100, "name": "test", "event": "pull_request", "status": "completed", "conclusion": "failure", "head_sha": "abc123", "head_branch": "feat/x", "created_at": "2026-04-20T00:00:00Z", "html_url": "https://github.com/owner/repo/actions/runs/100"},
+				{"id": 101, "name": "lint", "event": "pull_request", "status": "completed", "conclusion": "success", "head_sha": "abc123", "head_branch": "feat/x", "created_at": "2026-04-20T00:01:00Z", "html_url": "https://github.com/owner/repo/actions/runs/101"}
+			]
+		}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	client := github.NewClient(srv.URL, "test-token")
+
+	runs, err := fetchRunsForSHA(client, "owner", "repo", "abc123")
+	if err != nil {
+		t.Fatalf("fetchRunsForSHA: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("expected 2 runs, got %d", len(runs))
+	}
+	if runs[0].RunID != 100 || runs[0].WorkflowName != "test" || runs[0].Conclusion != "failure" {
+		t.Errorf("first run shape wrong: %+v", runs[0])
+	}
+	if runs[1].RunID != 101 || runs[1].Conclusion != "success" {
+		t.Errorf("second run shape wrong: %+v", runs[1])
+	}
+}
+
+func TestFetchRunsForSHA_EmptyResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"total_count": 0, "workflow_runs": []}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	client := github.NewClient(srv.URL, "test-token")
+	runs, err := fetchRunsForSHA(client, "owner", "repo", "deadbeef")
+	if err != nil {
+		t.Fatalf("fetchRunsForSHA: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Errorf("expected empty runs, got %d", len(runs))
+	}
+}
+
+func TestFetchRunsForSHA_HTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	client := github.NewClient(srv.URL, "test-token")
+	_, err := fetchRunsForSHA(client, "owner", "repo", "abc123")
+	if err == nil {
+		t.Fatal("expected error on 404, got nil")
+	}
+}
+
+func TestFlagValue(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		flag string
+		want string
+	}{
+		{"present", []string{"--pr", "42"}, "--pr", "42"},
+		{"with-others", []string{"--repo", "o/r", "--pr", "42"}, "--pr", "42"},
+		{"absent", []string{"--repo", "o/r"}, "--pr", ""},
+		{"empty-args", []string{}, "--pr", ""},
+		{"flag-is-last-with-no-value", []string{"--pr"}, "--pr", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := flagValue(tc.args, tc.flag)
+			if got != tc.want {
+				t.Errorf("flagValue(%v, %q) = %q, want %q", tc.args, tc.flag, got, tc.want)
+			}
+		})
+	}
+}
+
+// Confirm the result struct serializes to the shape agents parse with jq.
+// If a field rename ever drifts this test would catch it before the prompt
+// templates started referencing stale JSON keys.
+func TestListRunsResult_JSONShape(t *testing.T) {
+	r := listRunsResult{
+		Owner:   "owner",
+		Repo:    "repo",
+		HeadSHA: "abc",
+		Filter:  listRunFilter{PR: 18},
+		Runs: []listRun{
+			{RunID: 1, WorkflowName: "test", Conclusion: "failure"},
+		},
+	}
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	s := string(data)
+	for _, key := range []string{`"owner"`, `"repo"`, `"filter"`, `"runs"`, `"head_sha"`, `"run_id"`, `"workflow_name"`, `"conclusion"`} {
+		if !strings.Contains(s, key) {
+			t.Errorf("expected JSON to contain %s; got %s", key, s)
+		}
 	}
 }

@@ -1,14 +1,33 @@
 A CI check has failed on a PR you own. Your job is to diagnose the failure, fix it, commit, and push to the PR branch.
 
+## Context
+
+- Repo: {{OWNER}}/{{REPO}}
+- PR: #{{PR_NUMBER}}
+- Head commit: {{HEAD_SHA}}
+- Failing check: {{CHECK_NAME}}
+- GitHub Actions run: {{WORKFLOW_RUN_ID}}
+
 ## Steps
 
-1. Your task metadata includes a `workflow_run_id` for the failing run. Start by running `triagefactory exec gh actions download-logs <run_id>` to pull the full log archive to `./_scratch/ci-logs/<run_id>/`.
-2. Read the failing job's logs in that directory to identify the root cause.
-3. Read any prior entries in `./task_memory/` before making changes — they describe what previous iterations on this task have already tried, and what has been ruled out.
+1. Download the failing run's logs. If {{WORKFLOW_RUN_ID}} is populated above, use it directly:
+
+       triagefactory exec gh actions download-logs {{WORKFLOW_RUN_ID}}
+
+   If {{WORKFLOW_RUN_ID}} is empty (non-Actions CI — Supabase, Circle, etc.) or the download fails because the stored run ID is stale (force-push recovery), list the runs for this PR and pick the relevant one:
+
+       triagefactory exec gh actions list-runs --pr {{PR_NUMBER}}
+
+   Logs extract to `./_scratch/ci-logs/<run_id>/`.
+
+2. Read the failing job's logs in that directory to identify the root cause. Prefer `grep -r` for the failing check name or known error markers over reading every file.
+
+3. Read any prior entries in `./task_memory/` before making changes — they describe what previous iterations on this task have already tried and what has been ruled out.
+
 4. Fix the issue, commit with a clear message explaining the root cause and fix, and push to the PR branch.
 
 ## Constraints
 
 - Do not merge. Do not force push. Only push to the branch you are already on.
 - If prior task memory shows a previous attempt at the same fix, try a different approach.
-- If the failure is in infrastructure (e.g. flaky runner, network timeout, quota exceeded) rather than code, report it as unsolvable — do not make code changes to work around infra issues.
+- If the failure is in infrastructure (flaky runner, network timeout, quota exceeded) rather than code, report it as unsolvable — do not make code changes to work around infra issues.

@@ -112,9 +112,9 @@ func TestDiff_CI_NewFailingCheck_EmitsPerCheck(t *testing.T) {
 	prev := basePRSnapshot()
 	curr := basePRSnapshot()
 	curr.CheckRuns = []domain.CheckRun{
-		{ID: 1, Name: "build", Conclusion: "failure"},
-		{ID: 2, Name: "test", Conclusion: "failure"},
-		{ID: 3, Name: "lint", Conclusion: "success"},
+		{ID: 1, Name: "build", Conclusion: "failure", WorkflowRunID: 555},
+		{ID: 2, Name: "test", Conclusion: "failure"}, // third-party CI — no workflow run
+		{ID: 3, Name: "lint", Conclusion: "success", WorkflowRunID: 777},
 	}
 
 	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
@@ -129,13 +129,30 @@ func TestDiff_CI_NewFailingCheck_EmitsPerCheck(t *testing.T) {
 		t.Errorf("expected 1 ci_check_passed event, got %d", len(passed))
 	}
 
-	// Verify metadata on the first failed check.
+	// Verify metadata on the first failed check — includes workflow_run_id
+	// for Actions-backed checks so auto-delegated CI-fix prompts can
+	// download logs without a discovery round-trip.
 	meta := decodeMetadata[events.GitHubPRCICheckFailedMetadata](t, failed[0])
 	if !meta.AuthorIsSelf {
 		t.Error("expected AuthorIsSelf=true")
 	}
 	if meta.Repo != "owner/repo" {
 		t.Errorf("expected Repo=owner/repo, got %s", meta.Repo)
+	}
+	if meta.WorkflowRunID != 555 {
+		t.Errorf("expected WorkflowRunID=555 on first failed check, got %d", meta.WorkflowRunID)
+	}
+
+	// Second failed check has no workflow run ID (third-party CI shape).
+	meta2 := decodeMetadata[events.GitHubPRCICheckFailedMetadata](t, failed[1])
+	if meta2.WorkflowRunID != 0 {
+		t.Errorf("expected WorkflowRunID=0 for third-party check, got %d", meta2.WorkflowRunID)
+	}
+
+	// Passed check carries its workflow run ID too.
+	passedMeta := decodeMetadata[events.GitHubPRCICheckPassedMetadata](t, passed[0])
+	if passedMeta.WorkflowRunID != 777 {
+		t.Errorf("expected WorkflowRunID=777 on passed check, got %d", passedMeta.WorkflowRunID)
 	}
 }
 
