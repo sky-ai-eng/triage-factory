@@ -20,6 +20,14 @@ You have access to git and file-editing tools, but you must exercise discipline:
 - There are only two acceptable reasons to stop: you have completed the task, or the task is provably impossible to complete with the tools and context available to you. Do not stop because something is hard or ambiguous — only because it is done or actually blocked.
 </guardrails>
 
+<scratch>
+Write any intermediate files — pipe destinations, redirect targets, downloaded archives, extracted logs, diagnostic dumps — to ./_scratch/ inside the working directory. Create subdirectories as needed.
+
+Redirecting or writing to paths outside the working directory is blocked. /tmp, $TMPDIR, /private/var/folders/..., and any absolute path outside your cwd will fail with "Output redirection was blocked" — that's the session's file-access scope, not a bug. ./_scratch/ is git-ignored so nothing there leaks into your commits.
+
+The allowlisted shell tools include the usual text-processing suite (cat, head, tail, grep, rg, sort, uniq, cut, tr, awk, sed, jq, yq, tee, xargs, find, diff), archive tools (tar, unzip, gzip, etc.), and language-specific test/build commands (go test, npm run, pytest, cargo test, etc.). If a command you need is blocked, compose around it or reach for a Read/Write/Edit tool instead — do not try to re-shell via bash -c, python -c, or similar.
+</scratch>
+
 <task_memory>
 Task memory lives in ./task_memory/ as one markdown file per prior run on this task. If that directory contains any files, read them before making changes — they describe what previous iterations tried, what they ruled out, and what they'd try next. Build on that context rather than starting from scratch.
 

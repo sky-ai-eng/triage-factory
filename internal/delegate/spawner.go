@@ -345,7 +345,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		"--model", model,
 		"--output-format", "stream-json",
 		"--verbose",
-		"--allowedTools", fmt.Sprintf("Bash(%s exec *),Bash(git commit *),Bash(git add *),Bash(git push *),Bash(git merge *),Bash(git rebase *),Bash(git fetch *),Bash(git checkout *),Read,Write,Edit,Glob,Grep,WebSearch,WebFetch", selfBin),
+		"--allowedTools", BuildAllowedTools(selfBin),
 		"--max-turns", "100",
 	}
 
@@ -645,7 +645,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, runID, sessionID, cwd, 
 		"--model", model,
 		"--output-format", "stream-json",
 		"--verbose",
-		"--allowedTools", fmt.Sprintf("Bash(%s exec *),Bash(git commit *),Bash(git add *),Bash(git push *),Bash(git merge *),Bash(git rebase *),Bash(git fetch *),Bash(git checkout *),Read,Write,Edit,Glob,Grep,WebSearch,WebFetch", selfBin),
+		"--allowedTools", BuildAllowedTools(selfBin),
 		"--max-turns", "100",
 	}
 
