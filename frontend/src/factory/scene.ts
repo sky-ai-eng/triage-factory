@@ -12,7 +12,7 @@
 
 import { Application, Container, Graphics, Text, Ticker } from 'pixi.js'
 import { Viewport } from 'pixi-viewport'
-import type { FieldSchema } from '../types'
+import type { FactoryEntity, FieldSchema } from '../types'
 import { FACTORY_EVENTS } from './events'
 import {
   buildStation,
@@ -284,6 +284,12 @@ export interface SceneHandle {
    * with the current snapshot, then on every `moved` / `zoomed` event, and
    * on container resize. Returns an unsubscribe function. */
   onView: (cb: (snapshot: ViewSnapshot) => void) => () => void
+  /** Replace the pool of entities items pull their metadata from. Passing
+   * an empty array falls back to the demo synthetic pool — useful on a
+   * fresh install before the poller has surfaced real data. Items already
+   * on-belt keep the metadata they were spawned with; new spawns pick
+   * from the updated pool. */
+  setEntityPool: (entities: FactoryEntity[]) => void
 }
 
 /** Predicate-field schemas keyed by event_type — what `GET /api/event-schemas` returns. */
@@ -485,6 +491,9 @@ export async function createFactoryScene(
       return () => {
         viewListeners.delete(cb)
       }
+    },
+    setEntityPool(entities) {
+      items.setEntityPool(entities)
     },
   }
 }
@@ -778,7 +787,10 @@ function buildItemSpawner(parent: Container, nodes: GraphNode[], edges: Edge[]) 
   }
 
   interface ItemMeta {
-    id: number
+    /** Stable label for the compact pill. For real entities this is the
+     * source id ("owner/repo#123" or "SKY-123"); for demo items it's
+     * `PR #<nextId>` as before. */
+    label: string
     mine: boolean
     title: string
     repo: string
@@ -859,8 +871,8 @@ function buildItemSpawner(parent: Container, nodes: GraphNode[], edges: Edge[]) 
   const OTHER_HANDLES = ['@maria', '@jun', '@priya', '@sam', '@alex', '@devon']
   const pick = <T>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)]
 
-  const genMeta = (id: number, mine: boolean): ItemMeta => ({
-    id,
+  const genDemoMeta = (id: number, mine: boolean): ItemMeta => ({
+    label: `PR #${id}`,
     mine,
     title: pick(TITLES),
     repo: pick(REPOS),
@@ -868,6 +880,31 @@ function buildItemSpawner(parent: Container, nodes: GraphNode[], edges: Edge[]) 
     diffAdd: 3 + Math.floor(Math.random() * 240),
     diffDel: Math.floor(Math.random() * 120),
   })
+
+  // Entity pool seeded from /api/factory/snapshot. When non-empty, new
+  // items spawn with real entity metadata (repo, title, author, diff);
+  // when empty we fall back to the demo pools above. Using a single
+  // pool with round-robin picking keeps the "same entity appears on
+  // multiple belts briefly" behaviour bounded — we don't want ten items
+  // all representing PR #42. Real belt paths still come from scripted
+  // journeys (current_event_type → station projection is a phase-2
+  // concern per the session plan).
+  let entityPool: FactoryEntity[] = []
+  const entityFromPool = (): ItemMeta | null => {
+    if (entityPool.length === 0) return null
+    const e = entityPool[Math.floor(Math.random() * entityPool.length)]
+    const label =
+      e.source === 'github' && e.number ? `PR #${e.number}` : e.source_id || e.title.slice(0, 18)
+    return {
+      label,
+      mine: e.mine,
+      title: e.title || e.source_id,
+      repo: e.repo ?? e.source_id ?? '',
+      author: e.source === 'github' ? (e.author ? `@${e.author}` : '') : e.assignee || '',
+      diffAdd: e.additions ?? 0,
+      diffDel: e.deletions ?? 0,
+    }
+  }
 
   // Pixi Text rasters at creation-time DPI. A 3× resolution keeps text
   // crisp up to the NEAR zoom ceiling without rebuilding textures when
@@ -910,7 +947,7 @@ function buildItemSpawner(parent: Container, nodes: GraphNode[], edges: Edge[]) 
     compactGroup.addChild(topHighlight)
 
     const compactText = new Text({
-      text: `PR #${meta.id}`,
+      text: meta.label,
       resolution: TEXT_RES,
       style: {
         fontFamily: 'Inter, system-ui, sans-serif',
@@ -1106,15 +1143,19 @@ function buildItemSpawner(parent: Container, nodes: GraphNode[], edges: Edge[]) 
   }
 
   return {
+    setEntityPool(next: FactoryEntity[]) {
+      entityPool = next
+    },
     update(dt: number, view: ViewContext) {
       sinceSpawn += dt
       if (sinceSpawn >= spawnInterval) {
         sinceSpawn = 0
-        // ~60% mine / 40% others — rough mix to exercise both tints. In
-        // the real-event model this will come from entity metadata
-        // (author_is_self) rather than a coin flip.
-        const mine = Math.random() < 0.6
-        items.push(createItem(genMeta(nextId++, mine)))
+        // Prefer a real entity from the snapshot pool. Falls back to the
+        // demo pool for fresh installs before the poller has surfaced
+        // anything. The mix toward "mine" is inherent in the pool itself
+        // once populated (the handler tags each entity), so no coin flip.
+        const meta = entityFromPool() ?? genDemoMeta(nextId++, Math.random() < 0.6)
+        items.push(createItem(meta))
       }
 
       const nearZoom = view.scale >= NEAR_ZOOM_THRESHOLD

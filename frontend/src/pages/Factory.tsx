@@ -5,19 +5,31 @@ import {
   type SchemaIndex,
   type ViewSnapshot,
 } from '../factory/scene'
-import StationDetailOverlay, { type StationRunSummary } from '../factory/StationDetailOverlay'
+import StationDetailOverlay, {
+  type StationRunSummary,
+  type StationThroughput,
+} from '../factory/StationDetailOverlay'
 import RunDrawer from '../factory/RunDrawer'
-import type { AgentRun, Task } from '../types'
+import { useWebSocket } from '../hooks/useWebSocket'
+import type { AgentRun, FactorySnapshot, Task } from '../types'
 
 type Phase = 'loading' | 'ready' | 'error'
+
+// How long after a triggering WS event before we refetch the factory
+// snapshot. Collapses rapid bursts (a poll cycle that emits a dozen events
+// in quick succession) into one HTTP call. 1.5s feels instant to the user
+// while giving the burst time to settle.
+const REFETCH_DEBOUNCE_MS = 1500
 
 export default function Factory() {
   const containerRef = useRef<HTMLDivElement>(null)
   const overlayRef = useRef<HTMLDivElement>(null)
+  const sceneRef = useRef<SceneHandle | null>(null)
   const [phase, setPhase] = useState<Phase>('loading')
   const [error, setError] = useState('')
   const [schemas, setSchemas] = useState<SchemaIndex | null>(null)
   const [snapshot, setSnapshot] = useState<ViewSnapshot | null>(null)
+  const [factoryData, setFactoryData] = useState<FactorySnapshot | null>(null)
   const [drawer, setDrawer] = useState<{ task: Task; run: AgentRun } | null>(null)
 
   // Fetch the predicate-field schemas once up front. Stations render their
@@ -45,12 +57,68 @@ export default function Factory() {
     }
   }, [])
 
+  // Fetch the factory snapshot — stations' runs + throughput, and the pool
+  // of active entities that drive belt items. Separate hook because it
+  // re-runs on WS events (debounced) while the schema fetch is one-shot.
+  useEffect(() => {
+    let cancelled = false
+    let pending: ReturnType<typeof setTimeout> | null = null
+
+    const load = () => {
+      fetch('/api/factory/snapshot')
+        .then((r) => {
+          if (!r.ok) throw new Error(`Failed to load factory snapshot (${r.status})`)
+          return r.json() as Promise<FactorySnapshot>
+        })
+        .then((data) => {
+          if (cancelled) return
+          setFactoryData(data)
+          sceneRef.current?.setEntityPool(data.entities)
+        })
+        .catch((err) => {
+          if (cancelled) return
+          console.warn('[factory] snapshot load failed:', err)
+        })
+    }
+
+    load()
+
+    const schedule = () => {
+      if (pending) return
+      pending = setTimeout(() => {
+        pending = null
+        load()
+      }, REFETCH_DEBOUNCE_MS)
+    }
+
+    // Events that plausibly invalidate the snapshot. `event` covers new
+    // entities/transitions; `tasks_updated` covers task creation and
+    // status flips; `agent_run_update` covers the run list inside
+    // stations.
+    ;(window as unknown as { __factoryRefetch?: () => void }).__factoryRefetch = schedule
+
+    return () => {
+      cancelled = true
+      if (pending) clearTimeout(pending)
+      delete (window as unknown as { __factoryRefetch?: () => void }).__factoryRefetch
+    }
+  }, [])
+
+  // WS hookup — we route interesting events through the window callback
+  // the effect above installs. Keeping the debounce in the effect closure
+  // avoids stale-state issues if the WS handler re-identifies.
+  useWebSocket((evt) => {
+    if (evt.type === 'event' || evt.type === 'tasks_updated' || evt.type === 'agent_run_update') {
+      const refetch = (window as unknown as { __factoryRefetch?: () => void }).__factoryRefetch
+      refetch?.()
+    }
+  })
+
   useEffect(() => {
     if (phase !== 'ready' || !schemas) return
     const container = containerRef.current
     if (!container) return
 
-    let sceneHandle: SceneHandle | null = null
     let unsubscribeView: (() => void) | null = null
     let cancelled = false
 
@@ -59,7 +127,11 @@ export default function Factory() {
         scene.destroy()
         return
       }
-      sceneHandle = scene
+      sceneRef.current = scene
+      // If a snapshot already landed while the scene was initializing,
+      // hand it off now so items stop using demo data the moment the
+      // pool is available.
+      if (factoryData) scene.setEntityPool(factoryData.entities)
       // Snapshot drives overlay placement. Setting via state is the simplest
       // integration — at ~13 stations and view events only firing during pan
       // and zoom interactions, React's reconciliation cost is negligible.
@@ -71,8 +143,13 @@ export default function Factory() {
     return () => {
       cancelled = true
       unsubscribeView?.()
-      sceneHandle?.destroy()
+      sceneRef.current?.destroy()
+      sceneRef.current = null
     }
+    // factoryData intentionally excluded — we don't rebuild the scene when
+    // the snapshot changes, we just push the new pool into the existing
+    // scene via sceneRef.current.setEntityPool in the fetch effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, schemas])
 
   const nearZoom = snapshot?.nearZoom ?? false
@@ -80,6 +157,25 @@ export default function Factory() {
 
   const handleOpenRun = (summary: StationRunSummary) => {
     setDrawer({ task: summary.task, run: summary.run })
+  }
+
+  // Resolve per-station overlay props from the factory snapshot. Stations
+  // with no activity get undefined so the overlay falls back to its own
+  // empty-state rendering.
+  const stationData = (eventType: string) => {
+    const fs = factoryData?.stations[eventType]
+    if (!fs) return { runs: undefined, throughput: undefined }
+    const runs: StationRunSummary[] = fs.runs.map((r) => ({
+      task: r.task,
+      run: r.run,
+      mine: r.mine,
+    }))
+    const throughput: StationThroughput = {
+      items24h: fs.items_24h,
+      triggered24h: fs.triggered_24h,
+      active: fs.active_runs,
+    }
+    return { runs, throughput }
   }
 
   return (
@@ -116,13 +212,18 @@ export default function Factory() {
           style={{ display: nearZoom ? 'block' : 'none' }}
         >
           {nearZoom &&
-            stations.map((placement) => (
-              <StationDetailOverlay
-                key={placement.id}
-                placement={placement}
-                onOpenRun={handleOpenRun}
-              />
-            ))}
+            stations.map((placement) => {
+              const { runs, throughput } = stationData(placement.eventType)
+              return (
+                <StationDetailOverlay
+                  key={placement.id}
+                  placement={placement}
+                  runs={runs}
+                  throughput={throughput}
+                  onOpenRun={handleOpenRun}
+                />
+              )
+            })}
         </div>
       </div>
 

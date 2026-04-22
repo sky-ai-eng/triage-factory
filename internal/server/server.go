@@ -105,6 +105,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/reviews/{id}/comments/{commentId}", s.handleReviewCommentDelete)
 	s.mux.HandleFunc("GET /api/agent/runs/{runID}/review", s.handleRunReview)
 
+	s.mux.HandleFunc("GET /api/factory/snapshot", s.handleFactorySnapshot)
+
 	s.mux.HandleFunc("GET /api/event-types", s.handleEventTypes)
 	s.mux.HandleFunc("GET /api/event-schemas", s.handleEventSchemasList)
 	s.mux.HandleFunc("GET /api/event-schemas/{event_type}", s.handleEventSchemaGet)

@@ -138,6 +138,45 @@ export interface ToastPayload {
   body: string
 }
 
+export interface FactoryEntity {
+  id: string
+  source: string
+  source_id: string
+  kind: string
+  title: string
+  url: string
+  mine: boolean
+  current_event_type?: string
+  last_event_at?: string
+  // GitHub PR fields.
+  number?: number
+  repo?: string
+  author?: string
+  additions?: number
+  deletions?: number
+  // Jira fields.
+  status?: string
+  priority?: string
+  assignee?: string
+}
+
+export interface FactoryStation {
+  event_type: string
+  items_24h: number
+  triggered_24h: number
+  active_runs: number
+  runs: Array<{
+    run: AgentRun
+    task: Task
+    mine: boolean
+  }>
+}
+
+export interface FactorySnapshot {
+  stations: Record<string, FactoryStation>
+  entities: FactoryEntity[]
+}
+
 export type WSEvent =
   | { type: 'agent_run_update'; run_id: string; data: { status: string } }
   | { type: 'agent_message'; run_id: string; data: AgentMessage }
