@@ -161,6 +161,16 @@ const NODE_DEFS: NodeDef[] = [
   // new_commits.
   { kind: 'splitter', label: 'next?', col: 26, row: 8, orientation: 'left' }, //             45 ci-passed split (input L, outputs T/R)
   { kind: 'pole', col: 27, row: 8 }, //                                                      46 east-turn on ci-passed refresh path; col-aligned with T-merger 43
+
+  // ─── Tunnel on the s_commits abandon-drop where it crosses the
+  // ci_failed loopback ──────────────────────────────────────────────────────
+  // The abandon-drop runs vertically at col 19 from s_commits (row 8) down
+  // to the bus merger (row 16). At row 13 it crosses the ci_failed → new_commits
+  // retry line (node 10 at col 26 row 13 → node 11 at col 13 row 13, running
+  // leftward). Diving under via a vertical tunnel at col 19 rows 12/14
+  // keeps both paths clear without adding a merger on the horizontal run.
+  { kind: 'tunnel_entrance', col: 19, row: 12, side: 'top' }, //                             47 above the retry loopback
+  { kind: 'tunnel_exit', col: 19, row: 14, side: 'bottom' }, //                              48 below the retry loopback
 ]
 
 interface EdgeDef {
@@ -184,7 +194,12 @@ const BELT_EDGES: EdgeDef[] = [
   { from: 3, to: 4, fromSide: 'right', toSide: 'left' }, //   merger_nc → new_commits
   { from: 4, to: 24, fromSide: 'right', toSide: 'left' }, //  new_commits → s_commits
   { from: 24, to: 5, fromSide: 'right', toSide: 'left' }, //  s_commits.right → ci_splitter
-  { from: 24, to: 27, fromSide: 'bottom', toSide: 'top' }, // s_commits.bottom → bus merger (abandon drop)
+  // s_commits abandon drop — splits into three segments via a vertical
+  // tunnel so the belt visually passes UNDER the ci_failed → new_commits
+  // retry line that runs east-west across row 13.
+  { from: 24, to: 47, fromSide: 'bottom', toSide: 'top' }, //  s_commits → tunnel entrance (row 8 → row 12)
+  { from: 47, to: 48, fromSide: 'top', toSide: 'bottom' }, //  invisible tunnel span (crosses row 13)
+  { from: 48, to: 27, fromSide: 'bottom', toSide: 'top' }, //  tunnel exit → bus merger (row 14 → row 16)
 
   // ─── CI branch (row 8 + loopback) ──────────────────────────────────────────
   // Conflicts is now reachable via a direct diagonal belt from ci_splitter.top.

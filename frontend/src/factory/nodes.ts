@@ -404,25 +404,21 @@ function drawPoleConnector(parent: Container, inSide: Side, outSide: Side) {
   tint.fill({ color: ACCENT, alpha: 0.1 })
   parent.addChild(tint)
 
-  // Edge strokes are trimmed at both ends — the adjacent belts already
-  // draw their own edges up to each port, and exact-pixel overlap at the
-  // port position produces a darker doubled line where the strokes stack
-  // (visible especially on the outer side of a 90° turn). Starting a few
-  // samples in avoids the overlap while the body/tint polygons still fill
-  // the full length, so there's no visible gap in the belt material.
-  const EDGE_TRIM = 2
-  const edgeStart = EDGE_TRIM
-  const edgeEnd = N - EDGE_TRIM
-
+  // Edge strokes follow the full curve. At the ports, our first/last
+  // sample lands on the same coordinate as the adjacent belt's
+  // terminating sample (tangents are designed to match), so the two
+  // strokes butt up without either gapping or doubling — just a single
+  // continuous shadow/highlight sweeping around the outside/inside of
+  // the turn.
   const topEdge = new Graphics()
-  topEdge.moveTo(nearPts[edgeStart].x, nearPts[edgeStart].y)
-  for (let i = edgeStart + 1; i <= edgeEnd; i++) topEdge.lineTo(nearPts[i].x, nearPts[i].y)
+  topEdge.moveTo(nearPts[0].x, nearPts[0].y)
+  for (let i = 1; i <= N; i++) topEdge.lineTo(nearPts[i].x, nearPts[i].y)
   topEdge.stroke({ width: 1.25, color: 0xffffff, alpha: 0.95 })
   parent.addChild(topEdge)
 
   const botEdge = new Graphics()
-  botEdge.moveTo(farPts[edgeStart].x, farPts[edgeStart].y)
-  for (let i = edgeStart + 1; i <= edgeEnd; i++) botEdge.lineTo(farPts[i].x, farPts[i].y)
+  botEdge.moveTo(farPts[0].x, farPts[0].y)
+  for (let i = 1; i <= N; i++) botEdge.lineTo(farPts[i].x, farPts[i].y)
   botEdge.stroke({ width: 1.25, color: 0x000000, alpha: 0.18 })
   parent.addChild(botEdge)
 }
