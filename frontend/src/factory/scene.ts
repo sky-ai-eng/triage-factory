@@ -815,10 +815,16 @@ function buildItemSpawner(
      * on reconcile so parked items don't all land on identical coords. */
     stackIdx: number
     /** FIFO queue of station node indices still to visit AFTER the
-     * current parkedAt / target. Each snapshot update refills this from
-     * the entity's recent_events chain so multi-event poll cycles show
-     * the full progression rather than teleporting to the latest. */
+     * current parkedAt / target. Each snapshot update appends new
+     * events (those with timestamp > lastSeenEventAt) so multi-event
+     * poll cycles show the full progression rather than teleporting
+     * to the latest. Repeated events (ci→new_commits→ci→new_commits)
+     * stay distinct instead of collapsing against the current anchor. */
     chain: number[]
+    /** ISO timestamp of the most recent event we've already incorporated
+     * into this item's chain. Events with `at` strictly greater than
+     * this value on the next reconcile are the NEW ones to append. */
+    lastSeenEventAt: string
   }
 
   const items = new Map<string, Item>()
@@ -1040,6 +1046,7 @@ function buildItemSpawner(
       hopsRemaining: MAX_HOPS,
       stackIdx: 0,
       chain: [],
+      lastSeenEventAt: '',
     }
   }
 
@@ -1137,61 +1144,76 @@ function buildItemSpawner(
     }
   }
 
-  // Build the full chain of station node indices from an entity's
-  // recent_events, oldest first. Non-station-mapped events are dropped;
-  // consecutive duplicates collapsed (no point animating ci_passed →
-  // ci_passed). Falls back to [current_event_type] if recent_events is
-  // absent — pre-existing entities on a snapshot before we added the
-  // field won't lose their parked position.
-  const chainFromEntity = (e: FactoryEntity): number[] => {
-    const chain: number[] = []
-    const push = (eventType: string) => {
-      const n = eventTypeToNode.get(eventType)
-      if (n == null) return
-      if (chain.length > 0 && chain[chain.length - 1] === n) return
-      chain.push(n)
-    }
-    if (e.recent_events && e.recent_events.length > 0) {
-      for (const ev of e.recent_events) push(ev.event_type)
-    } else if (e.current_event_type) {
-      push(e.current_event_type)
-    }
-    return chain
-  }
+  // Map one of the entity's events to its station node index, returning
+  // undefined if the event type isn't visualized on the board.
+  const eventToNode = (eventType: string): number | undefined => eventTypeToNode.get(eventType)
 
   return {
     setEntityPool(next: FactoryEntity[]) {
       const seen = new Set<string>()
       for (const e of next) {
-        const chain = chainFromEntity(e)
-        if (chain.length === 0) continue // event types not visualized on the board
+        const recent = e.recent_events ?? []
+        // Pick the station this entity should CURRENTLY be at — the last
+        // visualized station in its event history. Entities whose entire
+        // history is non-visualized (system events only) are skipped.
+        let latestStation = -1
+        let latestAt = ''
+        if (recent.length > 0) {
+          for (let i = recent.length - 1; i >= 0; i--) {
+            const n = eventToNode(recent[i].event_type)
+            if (n != null) {
+              latestStation = n
+              latestAt = recent[i].at
+              break
+            }
+          }
+        } else if (e.current_event_type) {
+          // Backward compat: snapshots without recent_events still park
+          // the item at its current event type.
+          const n = eventToNode(e.current_event_type)
+          if (n != null) {
+            latestStation = n
+            latestAt = e.last_event_at ?? ''
+          }
+        }
+        if (latestStation < 0) continue
         seen.add(e.id)
 
         const existing = items.get(e.id)
         if (existing) {
-          // Project the remaining-to-visit tail of the chain. Any station
-          // appearing at-or-before the item's current location (parkedAt
-          // or active target) is considered already visited; the queue
-          // is the suffix after that. For an item in motion the
-          // currently-traveling leg finishes naturally before the new
-          // chain is consulted.
-          const anchor = existing.target >= 0 ? existing.target : existing.parkedAt
-          let cut = -1
-          for (let i = chain.length - 1; i >= 0; i--) {
-            if (chain[i] === anchor) {
-              cut = i
-              break
-            }
+          // Append events that are NEW since we last reconciled. Identity
+          // is timestamp-based, not event-type-based — a repeated event
+          // type (ci_passed → new_commits → ci_passed) produces distinct
+          // chain entries rather than collapsing on the anchor.
+          const newEvents = recent.filter((ev) => ev.at > existing.lastSeenEventAt)
+          for (const ev of newEvents) {
+            const n = eventToNode(ev.event_type)
+            if (n == null) continue
+            // Dedupe against the immediate predecessor — the item's
+            // current destination (chain tail if queued, else its
+            // active target, else its parked station). Prevents a
+            // ci_passed event firing while the item is already heading
+            // to ci_passed from adding a redundant hop.
+            const tail =
+              existing.chain.length > 0
+                ? existing.chain[existing.chain.length - 1]
+                : existing.target >= 0
+                  ? existing.target
+                  : existing.parkedAt
+            if (n === tail) continue
+            existing.chain.push(n)
           }
-          existing.chain = cut >= 0 ? chain.slice(cut + 1) : chain.slice()
-          // If we're parked and the chain has something new to visit,
-          // pop the next station and start moving right away. Travel
-          // logic in update() handles further hops as each leg completes.
+          if (newEvents.length > 0) {
+            existing.lastSeenEventAt = newEvents[newEvents.length - 1].at
+          }
+          // If we're parked with something new queued, kick off travel
+          // now rather than waiting for a later tick. Travel logic in
+          // update() handles further hops as each leg completes.
           if (existing.parkedAt >= 0 && !existing.currentEdge && existing.chain.length > 0) {
-            const next = existing.chain.shift()!
-            const first = edgeToward(existing.parkedAt, next)
+            const nextStation = existing.chain.shift()!
+            const first = edgeToward(existing.parkedAt, nextStation)
             if (first) {
-              existing.target = next
+              existing.target = nextStation
               existing.currentEdge = first
               existing.t = 0
               existing.hopsRemaining = MAX_HOPS
@@ -1199,11 +1221,12 @@ function buildItemSpawner(
             }
           }
         } else {
-          // New entity: park at the oldest station in the chain and
-          // queue the rest so the full progression animates from there.
-          const first = chain[0]
-          const item = createItem(e.id, metaFromEntity(e), first)
-          item.chain = chain.slice(1)
+          // New entity: park at the latest visualized station, do NOT
+          // animate historical events. First mount of the factory
+          // shouldn't replay a PR's entire event history — only events
+          // that fire after the item exists produce movement.
+          const item = createItem(e.id, metaFromEntity(e), latestStation)
+          item.lastSeenEventAt = latestAt
           items.set(e.id, item)
         }
       }
