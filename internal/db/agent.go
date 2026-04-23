@@ -177,6 +177,35 @@ func HasActiveRunForTask(database *sql.DB, taskID string) (bool, error) {
 	return count > 0, err
 }
 
+// ActiveRunIDsForTask returns the IDs of runs on the task that haven't
+// reached a terminal state. Used by the task-close → run-cancel cascade
+// so any in-flight agent stops work the moment the system decides the
+// task is resolved (auto close, entity close, user dismiss).
+//
+// The terminal-state list matches HasActiveRunForTask — same answer to
+// "is this run still running," different shape. pending_approval counts
+// as terminal here: the process has exited and the user is deliberating,
+// cancelling it would discard work that's ready to apply.
+func ActiveRunIDsForTask(database *sql.DB, taskID string) ([]string, error) {
+	rows, err := database.Query(`
+		SELECT id FROM runs
+		WHERE task_id = ? AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable', 'pending_approval')
+	`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // LastAutoRunStartedAt returns the started_at time of the most recent
 // non-manual run for a task. Returns nil if no auto runs exist.
 // Used for cooldown checks in auto-delegation gating.

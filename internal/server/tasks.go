@@ -140,6 +140,24 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Dismiss is a terminal state — if the user swipes away a task mid-run
+	// (rare, but possible on a delegated card via the Board gesture rather
+	// than the AgentCard cancel button), the run must stop. Mirrors the
+	// inline-close and entity-close cascades: task state is authoritative;
+	// runs follow.
+	if req.Action == "dismiss" && s.spawner != nil {
+		ids, err := db.ActiveRunIDsForTask(s.db, id)
+		if err != nil {
+			log.Printf("[swipe] active-run lookup for task %s failed: %v", id, err)
+		} else {
+			for _, runID := range ids {
+				if err := s.spawner.Cancel(runID); err != nil {
+					log.Printf("[swipe] cancel run %s on dismiss of task %s: %v", runID, id, err)
+				}
+			}
+		}
+	}
+
 	response := map[string]any{"status": newStatus}
 
 	// On claim: if Jira task, assign to self and transition to in-progress.

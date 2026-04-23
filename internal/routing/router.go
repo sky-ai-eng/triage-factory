@@ -60,7 +60,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	// and cascade-close all its tasks. Return after — no task creation on a
 	// closing entity.
 	if evt.EntityID != nil && EntityTerminatingEvents[evt.EventType] {
-		closed, err := HandleEntityClose(r.db, *evt.EntityID)
+		closed, err := r.closeEntity(*evt.EntityID)
 		if err != nil {
 			log.Printf("[router] entity lifecycle error for %s: %v", *evt.EntityID, err)
 		}
@@ -420,10 +420,77 @@ func (r *Router) reDeriveTask(taskID string) {
 
 // --- Inline close checks --------------------------------------------------
 
+// cancelActiveRunsForTask asks the spawner to abort any non-terminal runs
+// on the task. Called before a task transitions to done/dismissed so the
+// agent stops work on a task the system has decided is resolved.
+//
+// Errors are logged and swallowed. "no active run" from the spawner is
+// expected when a run races us to natural completion between the DB
+// lookup and the cancel call — the run ends up terminal either way and
+// the task close will still land. Cancellation itself is fire-and-forget;
+// the spawner's handleCancelled writes the cancelled status asynchronously.
+func (r *Router) cancelActiveRunsForTask(taskID string) {
+	if r.spawner == nil {
+		return
+	}
+	ids, err := dbpkg.ActiveRunIDsForTask(r.db, taskID)
+	if err != nil {
+		log.Printf("[router] active-run lookup for task %s failed: %v", taskID, err)
+		return
+	}
+	for _, id := range ids {
+		if err := r.spawner.Cancel(id); err != nil {
+			log.Printf("[router] cancel run %s on close of task %s: %v", id, taskID, err)
+		}
+	}
+}
+
+// closeEntity cascades entity → tasks → runs: enumerate active tasks,
+// cancel any in-flight run on each, then flip the entity to closed and
+// batch-close its tasks with close_reason="entity_closed".
+//
+// Cancellation happens before the task close SQL so the spawner stops
+// work as promptly as possible. The cancel is async (handleCancelled
+// runs off a context done channel) but the task row is authoritative —
+// subsequent callers see 'done' immediately, and the run lands on
+// 'cancelled' when its goroutine unwinds.
+func (r *Router) closeEntity(entityID string) (int, error) {
+	if tasks, err := dbpkg.FindActiveTasksByEntity(r.db, entityID); err != nil {
+		// Non-fatal: better to cascade-close the entity than to abort
+		// because we couldn't enumerate tasks for cancellation. Any
+		// orphaned runs can be cleaned up by the existing startup
+		// worktree.Cleanup pass.
+		log.Printf("[router] entity close: list active tasks for %s failed: %v", entityID, err)
+	} else {
+		for _, t := range tasks {
+			r.cancelActiveRunsForTask(t.ID)
+		}
+	}
+
+	if err := dbpkg.CloseEntity(r.db, entityID); err != nil {
+		return 0, err
+	}
+	closed, err := dbpkg.CloseAllEntityTasks(r.db, entityID, "entity_closed")
+	if err != nil {
+		return closed, err
+	}
+	if closed > 0 {
+		log.Printf("[lifecycle] entity %s closed → %d tasks cascade-closed", entityID, closed)
+	}
+	return closed, nil
+}
+
 // closeTaskWithAudit closes a task and records the closing event in task_events
 // so the full close timeline is reconstructable. All inline close checks use
 // this instead of calling dbpkg.CloseTask directly.
+//
+// Also cancels any in-flight run on the task — task state is the
+// authoritative invalidation surface, so runs and queued firings derive
+// from it. Without the cancel, an inline close check that closes a task
+// mid-run would leave the agent churning on work the system already
+// considers resolved.
 func (r *Router) closeTaskWithAudit(taskID, closingEventID, closeReason, closeEventType string) error {
+	r.cancelActiveRunsForTask(taskID)
 	if err := dbpkg.CloseTask(r.db, taskID, closeReason, closeEventType); err != nil {
 		return err
 	}
