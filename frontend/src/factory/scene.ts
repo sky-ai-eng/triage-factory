@@ -372,8 +372,26 @@ export async function createFactoryScene(
   })
   ro.observe(container)
 
+  // Bucket edges by pole index so each buildPole call gets its {in, out}
+  // sides without nested-loop scanning. Poles are defined to have at most
+  // one incoming and one outgoing edge each (pure routing waypoints, not
+  // splitters or mergers). Single O(N + M) pass at scene init, outside
+  // the per-frame hot path entirely.
+  const poleIn = new Map<number, Side>()
+  const poleOut = new Map<number, Side>()
+  for (const edge of BELT_EDGES) {
+    if (NODE_DEFS[edge.to].kind === 'pole') poleIn.set(edge.to, edge.toSide)
+    if (NODE_DEFS[edge.from].kind === 'pole') poleOut.set(edge.from, edge.fromSide)
+  }
+  const poleConnection = (idx: number) => {
+    const inSide = poleIn.get(idx)
+    const outSide = poleOut.get(idx)
+    if (inSide && outSide) return { in: inSide, out: outSide }
+    return undefined
+  }
+
   // Build all graph nodes at their grid-defined positions.
-  const nodes: GraphNode[] = NODE_DEFS.map((def): GraphNode => {
+  const nodes: GraphNode[] = NODE_DEFS.map((def, idx): GraphNode => {
     const center = { x: g(def.col), y: g(def.row) }
     switch (def.kind) {
       case 'station':
@@ -384,7 +402,7 @@ export async function createFactoryScene(
           center,
         })
       case 'pole':
-        return buildPole(scene, center)
+        return buildPole(scene, center, poleConnection(idx))
       case 'tunnel_entrance':
       case 'tunnel_exit':
         return buildTunnel(scene, {
