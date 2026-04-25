@@ -30,11 +30,12 @@ func EnqueuePendingFiring(database *sql.DB, entityID, taskID, triggerID, trigger
 }
 
 // PopPendingFiringForEntity returns the oldest pending firing for the entity,
-// or nil if none. Does not mutate — the drainer is responsible for marking
-// the row 'fired' or 'skipped_stale' once it decides the outcome. Read-then-
-// mark is safe because pending_firings is per-entity and the drain hook
-// only fires from the spawner's terminal teardown for that entity, which is
-// already serialized by the entity's at-most-one-active-auto-run invariant.
+// or nil if none. Does not mutate or reserve the row — the drainer is
+// responsible for marking the row 'fired' or 'skipped_stale' once it decides
+// the outcome. Callers must not assume the read-then-mark sequence is safe on
+// its own: concurrent drains can observe the same pending row before either
+// marks it. The caller must therefore serialize draining for an entity or use
+// transactional/locking handling around the read→decision→mark sequence.
 func PopPendingFiringForEntity(database *sql.DB, entityID string) (*domain.PendingFiring, error) {
 	row := database.QueryRow(`
 		SELECT id, entity_id, task_id, trigger_id, triggering_event_id,
