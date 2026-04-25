@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/config"
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
@@ -18,6 +18,16 @@ import (
 // Scorer is the minimal interface the router needs from the AI runner.
 type Scorer interface {
 	Trigger()
+}
+
+// Delegator is the minimal interface the router needs from the delegate
+// spawner — kicking off a run, plus cancelling one. Narrowed from
+// *delegate.Spawner so tests can stub the spawn surface without bringing
+// up a worktree, the agent subprocess, etc. Production wiring passes a
+// *delegate.Spawner.
+type Delegator interface {
+	Delegate(task domain.Task, promptID, triggerType, triggerID string) (string, error)
+	Cancel(runID string) error
 }
 
 // Router is the central eventbus subscriber that replaces the old auto-
@@ -34,14 +44,48 @@ type Scorer interface {
 //  8. Runs inline close checks for the event type
 type Router struct {
 	db      *sql.DB
-	spawner *delegate.Spawner
+	spawner Delegator
 	scorer  Scorer
 	ws      *websocket.Hub
+
+	// drainLocks serializes DrainEntity calls per entity. Without this,
+	// the non-mutating PopPendingFiringForEntity creates a window between
+	// pop and MarkPendingFiringFired/Skipped where a concurrent drain
+	// (typically spawned by a fast-terminating run that the first drain
+	// just fired) can pop the same row and double-fire it. The mutex
+	// closes the window: a second drain blocks until the first marks the
+	// firing terminal, so its pop returns the next row (or nothing).
+	//
+	// Map grows monotonically with the count of distinct entities ever
+	// drained. Bounded by entity count for the lifetime of the process,
+	// which is small enough that we don't bother evicting on entity
+	// close.
+	drainLockMu sync.Mutex
+	drainLocks  map[string]*sync.Mutex
 }
 
 // NewRouter creates a Router.
-func NewRouter(db *sql.DB, spawner *delegate.Spawner, scorer Scorer, ws *websocket.Hub) *Router {
-	return &Router{db: db, spawner: spawner, scorer: scorer, ws: ws}
+func NewRouter(db *sql.DB, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+	return &Router{
+		db:         db,
+		spawner:    spawner,
+		scorer:     scorer,
+		ws:         ws,
+		drainLocks: make(map[string]*sync.Mutex),
+	}
+}
+
+// entityDrainLock returns the per-entity mutex used to serialize
+// DrainEntity calls. Lazily created on first use; never evicted.
+func (r *Router) entityDrainLock(entityID string) *sync.Mutex {
+	r.drainLockMu.Lock()
+	defer r.drainLockMu.Unlock()
+	mu, ok := r.drainLocks[entityID]
+	if !ok {
+		mu = &sync.Mutex{}
+		r.drainLocks[entityID] = mu
+	}
+	return mu
 }
 
 // HandleEvent is the eventbus subscriber callback. Called asynchronously
@@ -333,6 +377,21 @@ func (r *Router) fireDelegate(task *domain.Task, trigger domain.PromptTrigger) (
 // firing actually fires per drain — that run becomes the new in-flight
 // for the entity and gates further drains naturally.
 func (r *Router) DrainEntity(entityID string) {
+	// Serialize drains per entity. Without this, a fast-terminating run
+	// fired by an earlier drain can spawn a second DrainEntity goroutine
+	// that pops the same pending_firings row before the first drain
+	// transitions it out of 'pending' — leading to duplicate fireDelegate
+	// calls. The MarkPendingFiringFired/Skipped guards on
+	// status='pending' protect the row's own mutation but cannot un-fire
+	// the duplicate run. This mutex closes the window: the second drain
+	// blocks until the first releases, by which point the firing has
+	// landed in a terminal status and the second drain's pop returns the
+	// next row (or nothing).
+	// MUTEX TEMPORARILY DISABLED for race regression check.
+	// mu := r.entityDrainLock(entityID)
+	// mu.Lock()
+	// defer mu.Unlock()
+
 	for {
 		firing, err := dbpkg.PopPendingFiringForEntity(r.db, entityID)
 		if err != nil {

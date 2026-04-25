@@ -2,12 +2,43 @@ package routing
 
 import (
 	"database/sql"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
+
+// stubDelegator records every Delegate call and creates a real run row
+// each time so MarkPendingFiringFired's FK to runs(id) is satisfied. Used
+// by the drain race test to count fire attempts under concurrency.
+type stubDelegator struct {
+	db    *sql.DB
+	calls int64
+}
+
+func (s *stubDelegator) Delegate(task domain.Task, promptID, triggerType, triggerID string) (string, error) {
+	atomic.AddInt64(&s.calls, 1)
+	runID := fmt.Sprintf("stub-run-%d", time.Now().UnixNano())
+	if err := db.CreateAgentRun(s.db, domain.AgentRun{
+		ID:          runID,
+		TaskID:      task.ID,
+		PromptID:    promptID,
+		Status:      "running",
+		Model:       "stub",
+		TriggerType: triggerType,
+		TriggerID:   triggerID,
+	}); err != nil {
+		return "", err
+	}
+	return runID, nil
+}
+
+func (s *stubDelegator) Cancel(runID string) error { return nil }
 
 // setupDrainScenario seeds entity + prompt + event + task + trigger so a
 // pending firing can be enqueued and drained against a realistic FK graph.
@@ -208,5 +239,61 @@ func TestDrainEntity_EmptyQueue(t *testing.T) {
 	}
 	if len(rows) != 0 {
 		t.Errorf("expected empty queue, got %d rows", len(rows))
+	}
+}
+
+// TestDrainEntity_ConcurrentDrainsDoNotDoubleFire is the regression test
+// for the pop-fire-mark race: without per-entity serialization, a fast-
+// terminating run fired by drainer A could trigger drainer B before A
+// reached MarkPendingFiringFired, and B would pop the same still-pending
+// row and call Delegate again. With the per-entity mutex, the second
+// drainer blocks until the first marks the firing terminal, then sees
+// nothing pending and returns clean.
+//
+// We model the race directly by spawning N drainers concurrently against
+// a single pending firing and asserting Delegate fires exactly once.
+// Without the mutex this test is reliably racy in practice (every drainer
+// passes the validation guard, every drainer calls Delegate); with it,
+// only one drainer ever reaches Delegate.
+func TestDrainEntity_ConcurrentDrainsDoNotDoubleFire(t *testing.T) {
+	database := newTestDB(t)
+	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
+
+	if _, err := db.EnqueuePendingFiring(database, entityID, taskID, triggerID, eventID); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	stub := &stubDelegator{db: database}
+	router := NewRouter(database, stub, noopScorer{}, websocket.NewHub())
+
+	const drainers = 5
+	var wg sync.WaitGroup
+	wg.Add(drainers)
+	for i := 0; i < drainers; i++ {
+		go func() {
+			defer wg.Done()
+			router.DrainEntity(entityID)
+		}()
+	}
+	wg.Wait()
+
+	calls := atomic.LoadInt64(&stub.calls)
+	if calls != 1 {
+		t.Errorf("expected exactly 1 Delegate call across %d concurrent drains, got %d",
+			drainers, calls)
+	}
+
+	rows, err := db.ListPendingFiringsForEntity(database, entityID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 firing row, got %d", len(rows))
+	}
+	if rows[0].Status != domain.PendingFiringStatusFired {
+		t.Errorf("status = %q, want fired", rows[0].Status)
+	}
+	if rows[0].FiredRunID == nil {
+		t.Error("fired_run_id should be set on the winning drain's mark")
 	}
 }
