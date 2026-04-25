@@ -135,23 +135,25 @@ func ListFactoryActiveRuns(database *sql.DB) ([]FactoryActiveRun, error) {
 		var costUSD sql.NullFloat64
 		var durationMs, numTurns sql.NullInt64
 
-		if err := rows.Scan(
+		// Run half: nullable numeric/time columns scanned via NullX,
+		// nullable text columns COALESCEd in the SELECT above.
+		runTargets := []any{
 			&r.ID, &r.TaskID, &r.PromptID,
 			&r.Status, &r.Model, &r.StartedAt, &completedAt,
 			&costUSD, &durationMs, &numTurns,
 			&r.StopReason, &r.WorktreePath,
 			&r.ResultSummary, &r.SessionID,
 			&r.MemoryMissing, &r.TriggerType, &r.TriggerID,
-			&t.ID, &t.EntityID, &t.EventType, &t.DedupKey, &t.PrimaryEventID,
-			&t.Status, &t.PriorityScore, &t.AISummary, &t.AutonomySuitability,
-			&t.PriorityReasoning, &t.ScoringStatus, &t.Severity, &t.RelevanceReason,
-			&t.SourceStatus, &t.SnoozeUntil, &t.CloseReason, &t.CloseEventType,
-			&t.ClosedAt, &t.CreatedAt,
-			&t.Title, &t.SourceURL, &t.EntitySourceID, &t.EntitySource, &t.EntityKind,
-			&t.OpenSubtaskCount,
-		); err != nil {
+		}
+		// Task half: taskScanState holds the NullX intermediates on the
+		// caller's stack so NULL-able text columns (ai_summary, severity,
+		// close_reason, ...) don't error on "converting NULL to string" for
+		// unscored tasks, without a per-row closure/heap allocation.
+		var ts taskScanState
+		if err := rows.Scan(append(runTargets, ts.targets(&t)...)...); err != nil {
 			return nil, err
 		}
+		ts.finalize(&t)
 		if completedAt.Valid {
 			r.CompletedAt = &completedAt.Time
 		}

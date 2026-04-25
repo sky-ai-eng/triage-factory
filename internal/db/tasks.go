@@ -309,47 +309,64 @@ func scanTaskRow(row *sql.Row, t *domain.Task) error {
 	return scanFields(row, t)
 }
 
-// scanFields works for both *sql.Row and *sql.Rows via the Scanner interface.
-func scanFields(scanner interface{ Scan(...any) error }, t *domain.Task) error {
-	var priorityScore, autonomySuitability sql.NullFloat64
-	var aiSummary, priorityReasoning, severity, relevanceReason, sourceStatus sql.NullString
-	var scoringStatus, closeReason, closeEventType sql.NullString
-	var snoozeUntil, closedAt sql.NullTime
+// taskScanState holds the NullX intermediates for one row of
+// taskColumnsWithEntity. Declare it on the caller's stack (var s
+// taskScanState), call s.targets(t) to get scan-destination pointers, then
+// s.finalize(t) after Scan returns to copy the nullable values into t.
+// Keeping state in a struct (rather than a closure) avoids a per-row heap
+// allocation for the captured NullX variables and the closure itself.
+type taskScanState struct {
+	priorityScore, autonomySuitability sql.NullFloat64
+	aiSummary, priorityReasoning       sql.NullString
+	severity, relevanceReason          sql.NullString
+	sourceStatus, scoringStatus        sql.NullString
+	closeReason, closeEventType        sql.NullString
+	snoozeUntil, closedAt              sql.NullTime
+}
 
-	err := scanner.Scan(
+func (s *taskScanState) targets(t *domain.Task) []any {
+	return []any{
 		&t.ID, &t.EntityID, &t.EventType, &t.DedupKey, &t.PrimaryEventID,
-		&t.Status, &priorityScore, &aiSummary, &autonomySuitability,
-		&priorityReasoning, &scoringStatus, &severity, &relevanceReason,
-		&sourceStatus, &snoozeUntil, &closeReason, &closeEventType,
-		&closedAt, &t.CreatedAt,
+		&t.Status, &s.priorityScore, &s.aiSummary, &s.autonomySuitability,
+		&s.priorityReasoning, &s.scoringStatus, &s.severity, &s.relevanceReason,
+		&s.sourceStatus, &s.snoozeUntil, &s.closeReason, &s.closeEventType,
+		&s.closedAt, &t.CreatedAt,
 		// Entity JOIN columns:
 		&t.Title, &t.SourceURL, &t.EntitySourceID, &t.EntitySource, &t.EntityKind,
 		&t.OpenSubtaskCount,
-	)
-	if err != nil {
+	}
+}
+
+func (s *taskScanState) finalize(t *domain.Task) {
+	if s.priorityScore.Valid {
+		t.PriorityScore = &s.priorityScore.Float64
+	}
+	if s.autonomySuitability.Valid {
+		t.AutonomySuitability = &s.autonomySuitability.Float64
+	}
+	t.AISummary = s.aiSummary.String
+	t.PriorityReasoning = s.priorityReasoning.String
+	t.Severity = s.severity.String
+	t.RelevanceReason = s.relevanceReason.String
+	t.SourceStatus = s.sourceStatus.String
+	t.ScoringStatus = s.scoringStatus.String
+	t.CloseReason = s.closeReason.String
+	t.CloseEventType = s.closeEventType.String
+	if s.snoozeUntil.Valid {
+		t.SnoozeUntil = &s.snoozeUntil.Time
+	}
+	if s.closedAt.Valid {
+		t.ClosedAt = &s.closedAt.Time
+	}
+}
+
+// scanFields works for both *sql.Row and *sql.Rows via the Scanner interface.
+func scanFields(scanner interface{ Scan(...any) error }, t *domain.Task) error {
+	var s taskScanState
+	if err := scanner.Scan(s.targets(t)...); err != nil {
 		return err
 	}
-
-	if priorityScore.Valid {
-		t.PriorityScore = &priorityScore.Float64
-	}
-	if autonomySuitability.Valid {
-		t.AutonomySuitability = &autonomySuitability.Float64
-	}
-	t.AISummary = aiSummary.String
-	t.PriorityReasoning = priorityReasoning.String
-	t.Severity = severity.String
-	t.RelevanceReason = relevanceReason.String
-	t.SourceStatus = sourceStatus.String
-	t.ScoringStatus = scoringStatus.String
-	t.CloseReason = closeReason.String
-	t.CloseEventType = closeEventType.String
-	if snoozeUntil.Valid {
-		t.SnoozeUntil = &snoozeUntil.Time
-	}
-	if closedAt.Valid {
-		t.ClosedAt = &closedAt.Time
-	}
+	s.finalize(t)
 	return nil
 }
 
