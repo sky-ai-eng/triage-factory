@@ -411,6 +411,7 @@ func (r *Router) DrainEntity(entityID string) {
 		// Skipped or fire failed; record reason and continue draining.
 		if err := dbpkg.MarkPendingFiringSkipped(r.db, firing.ID, skipReason); err != nil {
 			log.Printf("[router] mark firing %d skipped (%s): %v", firing.ID, skipReason, err)
+			return
 		}
 		log.Printf("[router] skipped firing %d on entity %s: %s", firing.ID, entityID, skipReason)
 	}
