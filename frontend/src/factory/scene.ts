@@ -81,86 +81,88 @@ const NODE_DEFS: NodeDef[] = [
   { kind: 'pole', col: 26, row: 11 }, //                                                     9  east of ci_failed (right 1)
   { kind: 'pole', col: 26, row: 13 }, //                                                     10 south of pole 9 (right 1)
   { kind: 'pole', col: 13, row: 13 }, //                                                     11 west of pole 10, below merger_nc
-  // Review cycle moved UP to row 2. Flow goes: merger_main → review_requested
-  // → review_received, then loops back down via poles (35, 36, 37, 38) to
-  // splitter_B. This frees row 6 horizontally (saving ~6 cols) and lifts
-  // the skip-build arc, so conflicts sits at row 4 without needing a tunnel.
-  { kind: 'merger', col: 26, row: 4, orientation: 'right' }, //                              12 merger_main (up 1)
-  { kind: 'station', eventType: 'github:pr:review_requested', col: 29, row: 4 }, //          13 up 1
-  { kind: 'station', eventType: 'github:pr:review_received', col: 33, row: 4 }, //           14 up 1
-  { kind: 'splitter', label: 'review result', col: 30, row: 11, orientation: 'left' }, //    15 row 6→11 to match review_approved
-  { kind: 'pole', col: 30, row: 8 }, //                                                      16 E-shape top corner (review_commented row)
-  { kind: 'pole', col: 30, row: 14 }, //                                                     17 E-shape bottom corner (changes_requested row)
-  { kind: 'station', eventType: 'github:pr:review_commented', col: 34, row: 8 }, //          18 down 4, spaced 3 from approved
-  { kind: 'station', eventType: 'github:pr:review_approved', col: 34, row: 11 }, //          19 down 5 (middle)
-  { kind: 'station', eventType: 'github:pr:review_changes_requested', col: 34, row: 14 }, // 20 down 6, spaced 3 from approved
-  { kind: 'station', eventType: 'github:pr:merged', col: 41, row: 11 }, //                   21 right 1 so closed can clear bus merger 29 at col 38
-  { kind: 'station', eventType: 'github:pr:closed', col: 41, row: 16 }, //                   22 right 1 so the bus has belt room between merger 29 (col 38) and closed
+  // Review cycle on row 4. Flow: merger_main → review_requested, then loops
+  // back down via poles (34, 35, 36, 37) to splitter_B. The intermediate
+  // "review_received" station was a synthetic visualization-only event with
+  // no backing in the domain — removed in SKY-189-followup so the topology
+  // matches what the backend can actually emit.
+  { kind: 'merger', col: 26, row: 4, orientation: 'right' }, //                              12 merger_main
+  { kind: 'station', eventType: 'github:pr:review_requested', col: 30, row: 4 }, //          13 row 4
+  { kind: 'splitter', label: 'review result', col: 30, row: 11, orientation: 'left' }, //    14 splitter_B (row 11, matches review_approved)
+  { kind: 'pole', col: 30, row: 8 }, //                                                      15 E-shape top corner (review_commented row)
+  { kind: 'pole', col: 30, row: 14 }, //                                                     16 E-shape bottom corner (changes_requested row)
+  { kind: 'station', eventType: 'github:pr:review_commented', col: 34, row: 8 }, //          17 spaced 3 from approved
+  { kind: 'station', eventType: 'github:pr:review_approved', col: 34, row: 11 }, //          18 middle
+  { kind: 'station', eventType: 'github:pr:review_changes_requested', col: 34, row: 14 }, // 19 spaced 3 from approved
+  { kind: 'station', eventType: 'github:pr:merged', col: 41, row: 11 }, //                   20 col 41 so closed can clear bus merger 28 at col 38
+  { kind: 'station', eventType: 'github:pr:closed', col: 41, row: 16 }, //                   21 bus has belt room between merger 28 (col 38) and closed
 
   // ─── Closed-bus infrastructure ─────────────────────────────────────────────
-  { kind: 'splitter', label: 'continue?', col: 11, row: 6, orientation: 'left' }, //         23 s_rfr (moved right 1)
-  { kind: 'splitter', label: 'continue?', col: 19, row: 8, orientation: 'left' }, //         24 s_commits (right 1)
-  { kind: 'splitter', label: 'respond?', col: 37, row: 14, orientation: 'left' }, //         25 s_changes (down to changes_requested row)
-  { kind: 'pole', col: 11, row: 16 }, //                                                     26 bus entry (moved right 1, down 2)
-  { kind: 'merger', col: 19, row: 16, orientation: 'right' }, //                             27 bus + new_commits drop (aligned with s_commits col 19)
-  { kind: 'pole', col: 38, row: 8 }, //                                                      28 review_commented east-turn (east of review_commented row 8)
-  { kind: 'merger', col: 38, row: 16, orientation: 'right' }, //                             29 bus + review_commented drop
-  { kind: 'merger', col: 37, row: 16, orientation: 'right' }, //                             30 bus + changes_requested drop
+  { kind: 'splitter', label: 'continue?', col: 11, row: 6, orientation: 'left' }, //         22 s_rfr
+  { kind: 'splitter', label: 'continue?', col: 19, row: 8, orientation: 'left' }, //         23 s_commits
+  { kind: 'splitter', label: 'respond?', col: 37, row: 14, orientation: 'left' }, //         24 s_changes (changes_requested row)
+  { kind: 'pole', col: 11, row: 16 }, //                                                     25 bus entry
+  { kind: 'merger', col: 19, row: 16, orientation: 'right' }, //                             26 bus + new_commits drop (col 19, aligned with s_commits)
+  { kind: 'pole', col: 38, row: 8 }, //                                                      27 review_commented east-turn (east of review_commented row 8)
+  { kind: 'merger', col: 38, row: 16, orientation: 'right' }, //                             28 bus + review_commented drop
+  { kind: 'merger', col: 37, row: 16, orientation: 'right' }, //                             29 bus + changes_requested drop
 
   // ─── changes_requested retry path ───────────────────────────────────────────
-  // Vertical tunnel from s_changes straight up to near retry pole 31.
+  // Vertical tunnel from s_changes straight up to near retry pole 30.
   // The old row-2 horizontal tunnel is now a regular belt (nothing in the
   // way anymore since the review chain moved down to row 5).
-  { kind: 'pole', col: 37, row: 2 }, //                                                      31 retry: east end, turns south→west
-  { kind: 'tunnel_entrance', col: 37, row: 12, side: 'bottom' }, //                          32 vertical tunnel entrance (near s_changes)
-  { kind: 'tunnel_exit', col: 37, row: 4, side: 'top' }, //                                  33 vertical tunnel exit (near retry pole 31)
-  { kind: 'pole', col: 13, row: 2 }, //                                                      34 retry: west end, turns east→south into merger_nc.top
+  { kind: 'pole', col: 37, row: 2 }, //                                                      30 retry: east end, turns south→west
+  { kind: 'tunnel_entrance', col: 37, row: 12, side: 'bottom' }, //                          31 vertical tunnel entrance (near s_changes)
+  { kind: 'tunnel_exit', col: 37, row: 7, side: 'top' }, //                                  32 vertical tunnel exit (near retry pole 30)
+  { kind: 'pole', col: 13, row: 2 }, //                                                      33 retry: west end, turns east→south into merger_nc.top
 
-  // ─── Review-cycle return path (row 2 → row 3 → row 6) ──────────────────────
-  // Loop-back poles route review_received.right south then west, finally
+  // ─── Review-cycle return path (row 4 → row 6 → row 11) ─────────────────────
+  // Loop-back poles route review_requested.right south then west, finally
   // east into splitter_B.left. Two turns at the top (east→south→west),
-  // two at the left (west→south→east).
-  { kind: 'pole', col: 36, row: 4 }, //                                                      35 Pole_R1: up 1 to match review_received
-  { kind: 'pole', col: 36, row: 6 }, //                                                      36 Pole_R2: up 1
-  { kind: 'pole', col: 28, row: 6 }, //                                                      37 Pole_R3: up 1
-  { kind: 'pole', col: 28, row: 11 }, //                                                     38 Pole_R4: aligned with splitter_B row 11, feeds splitter_B.left horizontally
+  // two at the left (west→south→east). Pole_R1/R2 sit at col 34 — pulled in
+  // from col 36 when review_received was removed, since the row-4 horizontal
+  // run is now shorter (review_requested directly to Pole_R1).
+  { kind: 'pole', col: 33, row: 4 }, //                                                      34 Pole_R1
+  { kind: 'pole', col: 33, row: 6 }, //                                                      35 Pole_R2
+  { kind: 'pole', col: 29, row: 6 }, //                                                      36 Pole_R3
+  { kind: 'pole', col: 29, row: 11 }, //                                                     37 Pole_R4: aligned with splitter_B row 11, feeds splitter_B.left horizontally
 
   // ─── splitter_A top path (replaces direct arc to merger_main.top) ──────────
   // splitter_A.top goes up to pole A, east across to pole B (2 rows above
   // merger_main), then down into merger_main.top. Keeps the top path
   // axis-aligned with two gentle 90° bends.
-  { kind: 'pole', col: 12, row: 3 }, //                                                      39 pole A above splitter_A
-  { kind: 'pole', col: 26, row: 3 }, //                                                      40 pole B above merger_main
+  { kind: 'pole', col: 12, row: 3 }, //                                                      38 pole A above splitter_A
+  { kind: 'pole', col: 26, row: 3 }, //                                                      39 pole B above merger_main
 
   // ─── Tunnel on the review_commented drop where it crosses approved→merged ─
-  // Review_commented.right → east-turn pole 28 → VERTICAL DROP at col 38 →
-  // bus merger 2. With merged now at row 11, the approved→merged belt
-  // crosses col 38 row 11 — this tunnel lets the drop pass under it.
-  { kind: 'tunnel_entrance', col: 38, row: 10, side: 'top' }, //                             41 above approved→merged belt
-  { kind: 'tunnel_exit', col: 38, row: 12, side: 'bottom' }, //                              42 below approved→merged belt
+  // Review_commented.right → east-turn pole 27 → VERTICAL DROP at col 38 →
+  // bus merger 28. With merged at row 11, the approved→merged belt crosses
+  // col 38 row 11 — this tunnel lets the drop pass under it.
+  { kind: 'tunnel_entrance', col: 38, row: 10, side: 'top' }, //                             40 above approved→merged belt
+  { kind: 'tunnel_exit', col: 38, row: 12, side: 'bottom' }, //                              41 below approved→merged belt
 
   // ─── Conflicts retry: routes up to the row-2 retry line ─────────────────────
   // Conflicts.right → east-turn pole → vertical up to a new merger on the
   // retry line. The merger sits mid-line, splitting the old direct belt
-  // from pole 31 → pole 34 into two segments with conflicts joining from
+  // from pole 30 → pole 33 into two segments with conflicts joining from
   // below.
   //
   // T-merger now: conflicts enters from the left, the ci-passed "refresh"
   // path enters from the right, and the combined flow heads north to the
   // retry line. Before SKY-CI-refresh this was a plain pole — only one
   // input (conflicts) and one output (north).
-  { kind: 'merger', col: 27, row: 5, orientation: 'top' }, //                                43 T-merger: conflicts (L) + ci-passed refresh (R) → north
-  { kind: 'merger', col: 27, row: 2, orientation: 'left' }, //                               44 retry-line merger (conflicts drops in from south)
+  { kind: 'merger', col: 27, row: 5, orientation: 'top' }, //                                42 T-merger: conflicts (L) + ci-passed refresh (R) → north
+  { kind: 'merger', col: 27, row: 2, orientation: 'left' }, //                               43 retry-line merger (conflicts drops in from south)
 
   // ─── CI-passed split: continue to review OR refresh new_commits ────────────
   // CI passed used to flow diagonally straight to merger_main. Split it so
   // some runs bypass review and re-enter the build branch (as if they
   // pushed a new commit that needs re-validation). The right-hand branch
   // steps one column east then heads straight north into the T-merger at
-  // node 43, which feeds up to the retry line and back into merger_nc →
+  // node 42, which feeds up to the retry line and back into merger_nc →
   // new_commits.
-  { kind: 'splitter', label: 'next?', col: 26, row: 8, orientation: 'left' }, //             45 ci-passed split (input L, outputs T/R)
-  { kind: 'pole', col: 27, row: 8 }, //                                                      46 east-turn on ci-passed refresh path; col-aligned with T-merger 43
+  { kind: 'splitter', label: 'next?', col: 26, row: 8, orientation: 'left' }, //             44 ci-passed split (input L, outputs T/R)
+  { kind: 'pole', col: 27, row: 8 }, //                                                      45 east-turn on ci-passed refresh path; col-aligned with T-merger 42
 
   // ─── Tunnel on the s_commits abandon-drop where it crosses the
   // ci_failed loopback ──────────────────────────────────────────────────────
@@ -169,8 +171,8 @@ const NODE_DEFS: NodeDef[] = [
   // retry line (node 10 at col 26 row 13 → node 11 at col 13 row 13, running
   // leftward). Diving under via a vertical tunnel at col 19 rows 12/14
   // keeps both paths clear without adding a merger on the horizontal run.
-  { kind: 'tunnel_entrance', col: 19, row: 12, side: 'top' }, //                             47 above the retry loopback
-  { kind: 'tunnel_exit', col: 19, row: 14, side: 'bottom' }, //                              48 below the retry loopback
+  { kind: 'tunnel_entrance', col: 19, row: 12, side: 'top' }, //                             46 above the retry loopback
+  { kind: 'tunnel_exit', col: 19, row: 14, side: 'bottom' }, //                              47 below the retry loopback
 ]
 
 interface EdgeDef {
@@ -183,23 +185,23 @@ interface EdgeDef {
 const BELT_EDGES: EdgeDef[] = [
   // ─── Main flow row 6 ───────────────────────────────────────────────────────
   { from: 0, to: 1, fromSide: 'right', toSide: 'left' }, //   opened → rfr
-  { from: 1, to: 23, fromSide: 'right', toSide: 'left' }, //  rfr → s_rfr
-  { from: 23, to: 2, fromSide: 'right', toSide: 'left' }, //  s_rfr.right → splitter A
-  { from: 23, to: 26, fromSide: 'bottom', toSide: 'top' }, // s_rfr.bottom → bus entry pole (abandon drop)
+  { from: 1, to: 22, fromSide: 'right', toSide: 'left' }, //  rfr → s_rfr
+  { from: 22, to: 2, fromSide: 'right', toSide: 'left' }, //  s_rfr.right → splitter A
+  { from: 22, to: 25, fromSide: 'bottom', toSide: 'top' }, // s_rfr.bottom → bus entry pole (abandon drop)
   { from: 2, to: 3, fromSide: 'bottom', toSide: 'left' }, //  A.bottom → merger_nc  (dip into build branch)
-  // splitter_A top path: up to pole 39, east to pole 40, down to merger_main.top
-  { from: 2, to: 39, fromSide: 'top', toSide: 'bottom' }, //  A.top → pole 39.bottom  (vertical up)
-  { from: 39, to: 40, fromSide: 'right', toSide: 'left' }, // pole 39 → pole 40  (horizontal east at row 3)
-  { from: 40, to: 12, fromSide: 'bottom', toSide: 'top' }, // pole 40 → merger_main.top  (vertical down)
+  // splitter_A top path: up to pole 38, east to pole 39, down to merger_main.top
+  { from: 2, to: 38, fromSide: 'top', toSide: 'bottom' }, //  A.top → pole 38.bottom  (vertical up)
+  { from: 38, to: 39, fromSide: 'right', toSide: 'left' }, // pole 38 → pole 39  (horizontal east at row 3)
+  { from: 39, to: 12, fromSide: 'bottom', toSide: 'top' }, // pole 39 → merger_main.top  (vertical down)
   { from: 3, to: 4, fromSide: 'right', toSide: 'left' }, //   merger_nc → new_commits
-  { from: 4, to: 24, fromSide: 'right', toSide: 'left' }, //  new_commits → s_commits
-  { from: 24, to: 5, fromSide: 'right', toSide: 'left' }, //  s_commits.right → ci_splitter
+  { from: 4, to: 23, fromSide: 'right', toSide: 'left' }, //  new_commits → s_commits
+  { from: 23, to: 5, fromSide: 'right', toSide: 'left' }, //  s_commits.right → ci_splitter
   // s_commits abandon drop — splits into three segments via a vertical
   // tunnel so the belt visually passes UNDER the ci_failed → new_commits
   // retry line that runs east-west across row 13.
-  { from: 24, to: 47, fromSide: 'bottom', toSide: 'top' }, //  s_commits → tunnel entrance (row 8 → row 12)
-  { from: 47, to: 48, fromSide: 'top', toSide: 'bottom' }, //  invisible tunnel span (crosses row 13)
-  { from: 48, to: 27, fromSide: 'bottom', toSide: 'top' }, //  tunnel exit → bus merger (row 14 → row 16)
+  { from: 23, to: 46, fromSide: 'bottom', toSide: 'top' }, //  s_commits → tunnel entrance (row 8 → row 12)
+  { from: 46, to: 47, fromSide: 'top', toSide: 'bottom' }, //  invisible tunnel span (crosses row 13)
+  { from: 47, to: 26, fromSide: 'bottom', toSide: 'top' }, //  tunnel exit → bus merger (row 14 → row 16)
 
   // ─── CI branch (row 8 + loopback) ──────────────────────────────────────────
   // Conflicts is now reachable via a direct diagonal belt from ci_splitter.top.
@@ -210,67 +212,64 @@ const BELT_EDGES: EdgeDef[] = [
   { from: 5, to: 7, fromSide: 'right', toSide: 'left' }, //   ci_splitter → ci_passed
   { from: 5, to: 8, fromSide: 'bottom', toSide: 'left' }, //  ci_splitter.bottom → ci_failed
   // ci_passed splits: continue to review (top → merger_main) OR loop back
-  // to new_commits via the T-merger at node 43 (right → pole 46 → merger
-  // 43 → retry line).
-  { from: 7, to: 45, fromSide: 'right', toSide: 'left' }, //   ci_passed → splitter
-  { from: 45, to: 12, fromSide: 'top', toSide: 'bottom' }, //  splitter.top → merger_main.bottom (row 8 → row 4)
-  { from: 45, to: 46, fromSide: 'right', toSide: 'left' }, //  splitter.right → pole 46 (east, one step)
-  { from: 46, to: 43, fromSide: 'top', toSide: 'bottom' }, //  pole 46 → T-merger.bottom (vertical north, col 27)
+  // to new_commits via the T-merger at node 42 (right → pole 45 → merger
+  // 42 → retry line).
+  { from: 7, to: 44, fromSide: 'right', toSide: 'left' }, //   ci_passed → splitter
+  { from: 44, to: 12, fromSide: 'top', toSide: 'bottom' }, //  splitter.top → merger_main.bottom (row 8 → row 4)
+  { from: 44, to: 45, fromSide: 'right', toSide: 'left' }, //  splitter.right → pole 45 (east, one step)
+  { from: 45, to: 42, fromSide: 'top', toSide: 'bottom' }, //  pole 45 → T-merger.bottom (vertical north, col 27)
   { from: 8, to: 9, fromSide: 'right', toSide: 'left' }, //   ci_failed.right → pole(9)
   { from: 9, to: 10, fromSide: 'bottom', toSide: 'top' }, //  pole(9) → pole(10)
   { from: 10, to: 11, fromSide: 'left', toSide: 'right' }, // pole(10) → pole(11)
   { from: 11, to: 3, fromSide: 'top', toSide: 'bottom' }, //  pole(11) → merger_nc.bottom
 
-  // ─── Review cycle row 2 + loop-back via poles ──────────────────────────────
-  // merger_main → review_requested → review_received on row 2, then loop
-  // back down through Pole_R1..R4 into splitter_B.left on row 6.
+  // ─── Review cycle row 4 + loop-back via poles ──────────────────────────────
+  // merger_main → review_requested on row 4, then loop back down through
+  // Pole_R1..R4 (nodes 34..37) into splitter_B.left on row 11.
   { from: 12, to: 13, fromSide: 'right', toSide: 'left' }, // merger_main → review_requested
-  { from: 13, to: 14, fromSide: 'right', toSide: 'left' }, // review_requested → review_received
-  { from: 14, to: 35, fromSide: 'right', toSide: 'left' }, // review_received → Pole_R1 (row 2 east)
-  { from: 35, to: 36, fromSide: 'bottom', toSide: 'top' }, // Pole_R1 → Pole_R2 (south, row 2→3)
-  { from: 36, to: 37, fromSide: 'left', toSide: 'right' }, // Pole_R2 → Pole_R3 (west along row 3)
-  { from: 37, to: 38, fromSide: 'bottom', toSide: 'top' }, // Pole_R3 → Pole_R4 (south, row 3→6)
-  { from: 38, to: 15, fromSide: 'right', toSide: 'left' }, // Pole_R4 → splitter_B.left (east into splitter)
+  { from: 13, to: 34, fromSide: 'right', toSide: 'left' }, // review_requested → Pole_R1 (row 4 east)
+  { from: 34, to: 35, fromSide: 'bottom', toSide: 'top' }, // Pole_R1 → Pole_R2 (south, row 4→6)
+  { from: 35, to: 36, fromSide: 'left', toSide: 'right' }, // Pole_R2 → Pole_R3 (west along row 6)
+  { from: 36, to: 37, fromSide: 'bottom', toSide: 'top' }, // Pole_R3 → Pole_R4 (south, row 6→11)
+  { from: 37, to: 14, fromSide: 'right', toSide: 'left' }, // Pole_R4 → splitter_B.left (east into splitter)
 
   // ─── E-shape review outcomes ───────────────────────────────────────────────
-  { from: 15, to: 16, fromSide: 'top', toSide: 'bottom' }, // B.top → top pole
-  { from: 16, to: 18, fromSide: 'right', toSide: 'left' }, // top pole → review_commented
-  { from: 15, to: 19, fromSide: 'right', toSide: 'left' }, // B.right → review_approved
-  { from: 15, to: 17, fromSide: 'bottom', toSide: 'top' }, // B.bottom → bottom pole
-  { from: 17, to: 20, fromSide: 'right', toSide: 'left' }, // bottom pole → changes_requested
-  { from: 19, to: 21, fromSide: 'right', toSide: 'left' }, // review_approved → merged
+  { from: 14, to: 15, fromSide: 'top', toSide: 'bottom' }, // B.top → top pole
+  { from: 15, to: 17, fromSide: 'right', toSide: 'left' }, // top pole → review_commented
+  { from: 14, to: 18, fromSide: 'right', toSide: 'left' }, // B.right → review_approved
+  { from: 14, to: 16, fromSide: 'bottom', toSide: 'top' }, // B.bottom → bottom pole
+  { from: 16, to: 19, fromSide: 'right', toSide: 'left' }, // bottom pole → changes_requested
+  { from: 18, to: 20, fromSide: 'right', toSide: 'left' }, // review_approved → merged
 
   // ─── Closed-bus chain ──────────────────────────────────────────────────────
-  { from: 18, to: 28, fromSide: 'right', toSide: 'left' }, //  review_commented → east-turn pole
+  { from: 17, to: 27, fromSide: 'right', toSide: 'left' }, //  review_commented → east-turn pole
   // Drop passes under the approved→merged belt at row 11 via a vertical tunnel.
-  { from: 28, to: 41, fromSide: 'bottom', toSide: 'top' }, //  east-turn pole → tunnel entrance (short vertical)
-  { from: 41, to: 42, fromSide: 'top', toSide: 'bottom' }, //  vertical tunnel (invisible, crosses row 11)
-  { from: 42, to: 29, fromSide: 'bottom', toSide: 'top' }, //  tunnel exit → bus merger (drop continues south)
-  { from: 20, to: 25, fromSide: 'right', toSide: 'left' }, //  changes_requested → s_changes
-  { from: 25, to: 30, fromSide: 'bottom', toSide: 'top' }, //  s_changes.bottom → bus merger (abandon drop)
-  { from: 26, to: 27, fromSide: 'right', toSide: 'left' }, //  bus entry pole → bus merger 1
-  // Bus mergers sit at cols 37 (node 30) and 38 (node 29), so the chain has
-  // to hit 30 BEFORE 29 to stay monotonically left-to-right. Earlier this
-  // wired 27→29→30→22 which looped col 38→37 backwards before continuing
-  // to closed at col 40.
-  { from: 27, to: 30, fromSide: 'right', toSide: 'left' }, //  bus merger 1 → bus merger (col 37, picks up changes_requested)
-  { from: 30, to: 29, fromSide: 'right', toSide: 'left' }, //  col 37 → col 38 (picks up review_commented)
-  { from: 29, to: 22, fromSide: 'right', toSide: 'left' }, //  col 38 → closed
+  { from: 27, to: 40, fromSide: 'bottom', toSide: 'top' }, //  east-turn pole → tunnel entrance (short vertical)
+  { from: 40, to: 41, fromSide: 'top', toSide: 'bottom' }, //  vertical tunnel (invisible, crosses row 11)
+  { from: 41, to: 28, fromSide: 'bottom', toSide: 'top' }, //  tunnel exit → bus merger (drop continues south)
+  { from: 19, to: 24, fromSide: 'right', toSide: 'left' }, //  changes_requested → s_changes
+  { from: 24, to: 29, fromSide: 'bottom', toSide: 'top' }, //  s_changes.bottom → bus merger (abandon drop)
+  { from: 25, to: 26, fromSide: 'right', toSide: 'left' }, //  bus entry pole → bus merger 1
+  // Bus mergers sit at cols 37 (node 29) and 38 (node 28), so the chain has
+  // to hit 29 BEFORE 28 to stay monotonically left-to-right.
+  { from: 26, to: 29, fromSide: 'right', toSide: 'left' }, //  bus merger 1 → bus merger (col 37, picks up changes_requested)
+  { from: 29, to: 28, fromSide: 'right', toSide: 'left' }, //  col 37 → col 38 (picks up review_commented)
+  { from: 28, to: 21, fromSide: 'right', toSide: 'left' }, //  col 38 → closed
 
   // ─── changes_requested retry loopback ──────────────────────────────────────
-  // New: vertical tunnel from s_changes straight up to near retry pole 31.
+  // New: vertical tunnel from s_changes straight up to near retry pole 30.
   // Row-2 horizontal is now a regular belt (review chain moved, nothing
   // in the way).
-  { from: 25, to: 32, fromSide: 'top', toSide: 'bottom' }, //  s_changes.top → tunnel entrance (below, col 37)
-  { from: 32, to: 33, fromSide: 'bottom', toSide: 'top' }, //  vertical tunnel (invisible, col 37 rows 12→4)
-  { from: 33, to: 31, fromSide: 'top', toSide: 'bottom' }, //  tunnel exit → retry pole 31 (short vertical up)
-  // Retry line is split by merger 44 so conflicts can join from below.
-  { from: 31, to: 44, fromSide: 'left', toSide: 'right' }, //  retry pole 31 → merger 44 (row 2 west)
-  { from: 44, to: 34, fromSide: 'left', toSide: 'right' }, //  merger 44 → retry end pole 34 (row 2 west)
-  { from: 34, to: 3, fromSide: 'bottom', toSide: 'top' }, //   retry end pole → merger_nc.top
+  { from: 24, to: 31, fromSide: 'top', toSide: 'bottom' }, //  s_changes.top → tunnel entrance (below, col 37)
+  { from: 31, to: 32, fromSide: 'bottom', toSide: 'top' }, //  vertical tunnel (invisible, col 37 rows 12→4)
+  { from: 32, to: 30, fromSide: 'top', toSide: 'bottom' }, //  tunnel exit → retry pole 30 (short vertical up)
+  // Retry line is split by merger 43 so conflicts can join from below.
+  { from: 30, to: 43, fromSide: 'left', toSide: 'right' }, //  retry pole 30 → merger 43 (row 2 west)
+  { from: 43, to: 33, fromSide: 'left', toSide: 'right' }, //  merger 43 → retry end pole 33 (row 2 west)
+  { from: 33, to: 3, fromSide: 'bottom', toSide: 'top' }, //   retry end pole → merger_nc.top
   // Conflicts routes up to the retry line.
-  { from: 6, to: 43, fromSide: 'right', toSide: 'left' }, //   conflicts.right → pole 43 (horizontal east)
-  { from: 43, to: 44, fromSide: 'top', toSide: 'bottom' }, //  pole 43.top → merger 44.bottom (vertical north to retry line)
+  { from: 6, to: 42, fromSide: 'right', toSide: 'left' }, //   conflicts.right → pole 42 (horizontal east)
+  { from: 42, to: 43, fromSide: 'top', toSide: 'bottom' }, //  pole 42.top → merger 43.bottom (vertical north to retry line)
 ]
 
 function getPort(node: GraphNode, side: Side): Port | undefined {

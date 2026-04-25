@@ -153,17 +153,4 @@ export const FACTORY_EVENTS: Record<string, FactoryEvent> = {
     lifecycle: 'progress',
     glyph: 'bubble',
   },
-  // Synthetic factory-only event: represents the moment a review arrives,
-  // before the outcome has been classified. No corresponding backend event
-  // type — API predicate-field fetch will miss this key and the station
-  // will render without filter chips. Semantic placeholder to make the
-  // "review received → outcome split" topology legible.
-  'github:pr:review_received': {
-    eventType: 'github:pr:review_received',
-    label: 'Review Received',
-    source: 'github',
-    category: 'pr_review',
-    lifecycle: 'activation',
-    glyph: 'bubble',
-  },
 }
