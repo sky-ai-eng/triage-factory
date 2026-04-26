@@ -100,7 +100,6 @@ export interface PromptTrigger {
   event_type: string
   scope_predicate_json: string | null
   breaker_threshold: number
-  cooldown_seconds: number
   min_autonomy_suitability: number
   enabled: boolean
   created_at: string

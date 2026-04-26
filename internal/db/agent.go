@@ -206,25 +206,6 @@ func ActiveRunIDsForTask(database *sql.DB, taskID string) ([]string, error) {
 	return ids, rows.Err()
 }
 
-// LastAutoRunStartedAt returns the started_at time of the most recent
-// non-manual run for a task. Returns nil if no auto runs exist.
-// Used for cooldown checks in auto-delegation gating.
-func LastAutoRunStartedAt(database *sql.DB, taskID string) (*time.Time, error) {
-	var startedAt sql.NullTime
-	err := database.QueryRow(`
-		SELECT started_at FROM runs
-		WHERE task_id = ? AND trigger_type != 'manual'
-		ORDER BY started_at DESC LIMIT 1
-	`, taskID).Scan(&startedAt)
-	if err == sql.ErrNoRows || !startedAt.Valid {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &startedAt.Time, nil
-}
-
 // InsertAgentMessage inserts a message and returns its ID.
 func InsertAgentMessage(database *sql.DB, msg domain.AgentMessage) (int64, error) {
 	var toolCallsJSON, metadataJSON sql.NullString

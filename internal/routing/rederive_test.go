@@ -91,7 +91,6 @@ func setupReDeriveScenario(t *testing.T, database *sql.DB, minAutonomy float64) 
 		TriggerType:            domain.TriggerTypeEvent,
 		EventType:              domain.EventGitHubPRCICheckFailed,
 		BreakerThreshold:       4,
-		CooldownSeconds:        60,
 		MinAutonomySuitability: minAutonomy,
 		Enabled:                true,
 	}
@@ -222,7 +221,7 @@ func TestReDeriveAfterScoring_ZeroThresholdTrigger_SkippedByReDerive(t *testing.
 	db.SavePromptTrigger(database, domain.PromptTrigger{
 		ID: "t-zero", PromptID: "p2", TriggerType: domain.TriggerTypeEvent,
 		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: 4,
-		CooldownSeconds: 60, MinAutonomySuitability: 0.0, Enabled: true,
+		MinAutonomySuitability: 0.0, Enabled: true,
 	})
 
 	// Score the task
@@ -266,7 +265,7 @@ func TestReDeriveAfterScoring_PredicateMismatch_Skips(t *testing.T) {
 	db.SavePromptTrigger(database, domain.PromptTrigger{
 		ID: "t-pred", PromptID: "p3", TriggerType: domain.TriggerTypeEvent,
 		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: 4,
-		CooldownSeconds: 60, MinAutonomySuitability: 0.5, Enabled: true,
+		MinAutonomySuitability: 0.5, Enabled: true,
 		ScopePredicateJSON: &pred,
 	})
 

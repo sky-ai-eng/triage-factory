@@ -2,12 +2,12 @@ import { NavLink, Outlet } from 'react-router-dom'
 import { Settings } from 'lucide-react'
 
 const navItems = [
-  { to: '/', label: 'Triage' },
+  { to: '/', label: 'Factory' },
+  { to: '/triage', label: 'Triage' },
   { to: '/board', label: 'Board' },
   { to: '/prs', label: 'PRs' },
   { to: '/repos', label: 'Repos' },
   { to: '/prompts', label: 'Prompts' },
-  { to: '/factory', label: 'Factory' },
   { to: '/brief', label: 'Brief' },
 ]
 

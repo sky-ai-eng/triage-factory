@@ -27,13 +27,13 @@ createRoot(document.getElementById('root')!).render(
             </AuthGate>
           }
         >
-          <Route path="/" element={<Cards />} />
+          <Route path="/" element={<Factory />} />
+          <Route path="/triage" element={<Cards />} />
           <Route path="/board" element={<Board />} />
           <Route path="/prs" element={<PRDashboard />} />
           <Route path="/prompts" element={<Prompts />} />
           <Route path="/repos" element={<Repos />} />
           <Route path="/brief" element={<Brief />} />
-          <Route path="/factory" element={<Factory />} />
           <Route path="/settings" element={<Settings />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />

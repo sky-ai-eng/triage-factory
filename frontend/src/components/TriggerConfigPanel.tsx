@@ -30,7 +30,6 @@ export default function TriggerConfigPanel({
   const [predicate, setPredicate] = useState<Record<string, unknown>>({})
   const [minAutonomy, setMinAutonomy] = useState(0)
   const [breakerThreshold, setBreakerThreshold] = useState(4)
-  const [cooldownSeconds, setCooldownSeconds] = useState(60)
   const [enabled, setEnabled] = useState(true)
   const [promptName, setPromptName] = useState('')
   const [saving, setSaving] = useState(false)
@@ -44,7 +43,6 @@ export default function TriggerConfigPanel({
     setPredicate(parsePredicate(trigger.scope_predicate_json))
     setMinAutonomy(trigger.min_autonomy_suitability)
     setBreakerThreshold(trigger.breaker_threshold)
-    setCooldownSeconds(trigger.cooldown_seconds)
     setEnabled(trigger.enabled)
     setConfirmDelete(false)
     setPromptName('')
@@ -89,7 +87,6 @@ export default function TriggerConfigPanel({
       const body = {
         scope_predicate_json: Object.keys(predicate).length > 0 ? JSON.stringify(predicate) : '',
         breaker_threshold: breakerThreshold,
-        cooldown_seconds: cooldownSeconds,
         min_autonomy_suitability: minAutonomy,
       }
       const res = await fetch(`/api/triggers/${encodeURIComponent(trigger.id)}`, {
@@ -226,20 +223,6 @@ export default function TriggerConfigPanel({
                     min={1}
                     value={breakerThreshold}
                     onChange={(e) => setBreakerThreshold(Math.max(1, Number(e.target.value)))}
-                    className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors"
-                  />
-                </Section>
-
-                {/* Cooldown */}
-                <Section
-                  label="Cooldown (seconds)"
-                  description="Minimum time between auto-fires on the same task. Does not gate the first fire on task creation."
-                >
-                  <input
-                    type="number"
-                    min={0}
-                    value={cooldownSeconds}
-                    onChange={(e) => setCooldownSeconds(Math.max(0, Number(e.target.value)))}
                     className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors"
                   />
                 </Section>

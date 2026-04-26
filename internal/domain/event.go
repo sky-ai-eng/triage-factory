@@ -109,12 +109,8 @@ const (
 	EventSystemTaskDelegationBlockedSubtasks = "system:task:delegation_blocked_by_subtasks"
 )
 
-// AllEventTypes returns the canonical seed catalog for the new per-action
-// event model (see docs/data-model-target.md). Only the deprecated aggregate
-// constants (EventGitHubPRCIFailed, EventGitHubPRReviewReceived, etc.) are
-// deliberately omitted — they exist as Go constants for compile-compat with
-// downstream code that hasn't been migrated, but they're not seeded into
-// events_catalog so any runtime emission FK-fails until rewritten.
+// AllEventTypes returns the canonical seed catalog for the per-action
+// event model (see docs/data-model-target.md).
 //
 // DefaultPriority/Enabled/SortOrder fields on the struct are stale (the
 // events_catalog table no longer has those columns). AllEventTypes does not

@@ -26,7 +26,6 @@ Events are emitted once per transition, not continuously. If a PR stays in the s
 | **Merge Conflicts** | `github:pr:conflicts` | The PR's `mergeable` state transitions to `CONFLICTING` |
 | **Ready for Review** | `github:pr:ready_for_review` | The PR's `isDraft` changes from `true` to `false` |
 | **PR Approved** | `github:pr:approved` | A reviewer's latest review state changes to `APPROVED` |
-| **Review Received** | `github:pr:review_received` | A reviewer's latest review state changes to `COMMENTED` or `DISMISSED` |
 | **Mentioned** | `github:pr:mentioned` | PR discovered via `mentions:{user}` search. Note: new @mentions on an already-tracked PR cannot be detected without parsing comment bodies |
 
 ### Informational (hidden by default, toggleable)

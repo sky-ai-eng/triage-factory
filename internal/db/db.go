@@ -163,6 +163,12 @@ CREATE INDEX IF NOT EXISTS idx_task_rules_event_type_enabled
 -- === Prompt triggers (automation rules) ===================================
 -- When a trigger's predicate matches an event, fire the bound prompt against
 -- the resulting task (or implicitly create a task — see forgiving path).
+-- breaker_threshold guards true loops (a trigger that fires on its own
+-- output, repeatedly fails). Cooldown was removed in SKY-189: the queue's
+-- partial-unique dedup index on pending_firings already collapses event
+-- bursts to a single firing, and per-entity serialization means no two
+-- runs for the same entity can stack. Cooldown's remaining "minimum gap
+-- between distinct fires" job wasn't pulling weight.
 CREATE TABLE IF NOT EXISTS prompt_triggers (
     id TEXT PRIMARY KEY,
     prompt_id TEXT NOT NULL REFERENCES prompts(id) ON DELETE CASCADE,
@@ -170,7 +176,6 @@ CREATE TABLE IF NOT EXISTS prompt_triggers (
     event_type TEXT NOT NULL REFERENCES events_catalog(id) ON DELETE RESTRICT,
     scope_predicate_json TEXT,          -- typed per event type; null = match-all
     breaker_threshold INTEGER NOT NULL DEFAULT 4,
-    cooldown_seconds INTEGER NOT NULL DEFAULT 60,
     min_autonomy_suitability REAL NOT NULL DEFAULT 0.0,
     enabled BOOLEAN NOT NULL DEFAULT 1,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -316,6 +321,44 @@ CREATE TABLE IF NOT EXISTS run_memory (
 
 CREATE INDEX IF NOT EXISTS idx_run_memory_entity_created ON run_memory(entity_id, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_run_memory_run ON run_memory(run_id);
+
+-- === Pending firings (per-entity sequential delegation queue) =============
+-- A pending firing is an "intent to delegate" that couldn't run when its
+-- triggering event arrived because the entity already had an active auto
+-- run. The queue captures these so they get drained in arrival order once
+-- the active run terminates, replacing the previous behavior where blocked
+-- firings were dropped silently by the in-flight gate.
+--
+-- Manual delegations bypass this table entirely — see SKY-189. Auto runs
+-- (trigger_type='event' on runs) feed the gate; queued firings drain on
+-- auto-run terminal events via the spawner's QueueDrainer hook.
+--
+-- Soft-delete via status transitions preserves an audit trail of "what
+-- did the queue actually do for this entity," paired with the immutable
+-- events log to give the full per-entity story.
+CREATE TABLE IF NOT EXISTS pending_firings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    trigger_id TEXT NOT NULL REFERENCES prompt_triggers(id) ON DELETE CASCADE,
+    triggering_event_id TEXT NOT NULL REFERENCES events(id),
+    status TEXT NOT NULL DEFAULT 'pending',  -- pending | fired | skipped_stale
+    skip_reason TEXT,                        -- task_closed | trigger_disabled | breaker_tripped
+    queued_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    drained_at DATETIME,
+    fired_run_id TEXT REFERENCES runs(id)
+);
+
+-- Drain order: oldest pending first per entity. Partial index keeps it
+-- small even as the historical log grows.
+CREATE INDEX IF NOT EXISTS idx_pending_firings_entity_pending
+    ON pending_firings(entity_id, queued_at) WHERE status = 'pending';
+
+-- Collapse: at most one pending firing per (task_id, trigger_id). A second
+-- enqueue for the same combo while the first is still pending becomes a
+-- DO NOTHING — keep the oldest queued_at for fairness.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_firings_dedup
+    ON pending_firings(task_id, trigger_id) WHERE status = 'pending';
 
 -- === Swipe events (UI interaction log, separate from events) ==============
 -- Different subject (UI interaction, not entity state) + different consumers

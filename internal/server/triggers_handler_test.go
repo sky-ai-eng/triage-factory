@@ -116,7 +116,6 @@ func TestTriggerUpdate_WithAutonomySuitability(t *testing.T) {
 	rec = doJSON(t, s, "PUT", "/api/triggers/"+created.ID, map[string]any{
 		"scope_predicate_json":     "",
 		"breaker_threshold":        4,
-		"cooldown_seconds":         60,
 		"min_autonomy_suitability": 0.5,
 	})
 	if rec.Code != http.StatusOK {
@@ -158,7 +157,6 @@ func TestTriggerUpdate_AutonomySuitabilityOutOfRange(t *testing.T) {
 	rec = doJSON(t, s, "PUT", "/api/triggers/"+created.ID, map[string]any{
 		"scope_predicate_json":     "",
 		"breaker_threshold":        4,
-		"cooldown_seconds":         60,
 		"min_autonomy_suitability": 2.0,
 	})
 	if rec.Code != http.StatusBadRequest {
@@ -215,7 +213,6 @@ func TestTriggerRoundTrip_AutonomySuitability(t *testing.T) {
 	rec = doJSON(t, s, "PUT", "/api/triggers/"+created.ID, map[string]any{
 		"scope_predicate_json":     "",
 		"breaker_threshold":        5,
-		"cooldown_seconds":         120,
 		"min_autonomy_suitability": 0.3,
 	})
 	if rec.Code != http.StatusOK {

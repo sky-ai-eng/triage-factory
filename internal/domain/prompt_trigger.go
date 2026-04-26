@@ -11,7 +11,6 @@ type PromptTrigger struct {
 	EventType              string    `json:"event_type"`               // required for trigger_type="event"
 	ScopePredicateJSON     *string   `json:"scope_predicate_json"`     // nullable; null = match-all
 	BreakerThreshold       int       `json:"breaker_threshold"`        // consecutive-failure count that trips the per-(entity, prompt) breaker
-	CooldownSeconds        int       `json:"cooldown_seconds"`         // min seconds between auto-fires per task
 	MinAutonomySuitability float64   `json:"min_autonomy_suitability"` // 0.0 = fire immediately; >0 = defer until AI scores above threshold
 	Enabled                bool      `json:"enabled"`
 	CreatedAt              time.Time `json:"created_at"`

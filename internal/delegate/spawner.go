@@ -37,6 +37,15 @@ func shortRunID(runID string) string {
 	return runID[:8]
 }
 
+// QueueDrainer is the interface the spawner uses to notify the per-entity
+// firing queue that an auto run has reached a terminal state and the
+// entity may be ready to drain its next pending firing. Implemented by
+// the routing.Router. Manual runs do not call this — manual is fully
+// decoupled from the queue per the SKY-189 design.
+type QueueDrainer interface {
+	DrainEntity(entityID string)
+}
+
 // Spawner manages delegated agent runs.
 type Spawner struct {
 	database *sql.DB
@@ -46,6 +55,7 @@ type Spawner struct {
 	ghClient *ghclient.Client
 	model    string
 	cancels  map[string]context.CancelFunc // runID → cancel the entire run
+	drainer  QueueDrainer                  // nil-safe; set post-construction via SetQueueDrainer
 }
 
 func NewSpawner(database *sql.DB, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
@@ -56,6 +66,36 @@ func NewSpawner(database *sql.DB, ghClient *ghclient.Client, wsHub *websocket.Hu
 		model:    model,
 		cancels:  make(map[string]context.CancelFunc),
 	}
+}
+
+// SetQueueDrainer wires the firing-queue drainer into the spawner. Done
+// post-construction because the router (which implements QueueDrainer)
+// holds a reference to the spawner, so the spawner can't take it as a
+// constructor arg without a circular dependency. Same wiring pattern as
+// UpdateCredentials. Safe to call once at startup; nil drainer disables
+// the drain hook (used in tests).
+func (s *Spawner) SetQueueDrainer(d QueueDrainer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.drainer = d
+}
+
+// notifyDrainer fires the QueueDrainer hook for an entity if a drainer is
+// configured AND the run that just finished was an auto-fired one.
+// Manual runs are fully decoupled from the queue per SKY-189 — they
+// neither participate in the gate nor trigger drains. Runs in goroutine
+// to keep run-teardown latency unaffected.
+func (s *Spawner) notifyDrainer(triggerType, entityID string) {
+	if triggerType == "manual" || entityID == "" {
+		return
+	}
+	s.mu.Lock()
+	d := s.drainer
+	s.mu.Unlock()
+	if d == nil {
+		return
+	}
+	go d.DrainEntity(entityID)
 }
 
 // UpdateCredentials hot-swaps the GitHub client and model without
@@ -138,6 +178,13 @@ func (s *Spawner) Delegate(task domain.Task, explicitPromptID string, triggerTyp
 			delete(s.cancels, runID)
 			s.mu.Unlock()
 			cancel()
+			// Drain the per-entity firing queue. Fires after every
+			// terminal status (completed, failed, cancelled,
+			// task_unsolvable, pending_approval) since this defer
+			// runs unconditionally on goroutine exit. notifyDrainer
+			// itself filters out manual runs — manual is decoupled
+			// from the queue per SKY-189.
+			s.notifyDrainer(triggerType, task.EntityID)
 		}()
 
 		// Phase 1: set up worktree + build config based on task source

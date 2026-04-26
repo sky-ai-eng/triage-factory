@@ -1,15 +1,16 @@
 package routing
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/config"
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
@@ -21,6 +22,16 @@ type Scorer interface {
 	Trigger()
 }
 
+// Delegator is the minimal interface the router needs from the delegate
+// spawner — kicking off a run, plus cancelling one. Narrowed from
+// *delegate.Spawner so tests can stub the spawn surface without bringing
+// up a worktree, the agent subprocess, etc. Production wiring passes a
+// *delegate.Spawner.
+type Delegator interface {
+	Delegate(task domain.Task, promptID, triggerType, triggerID string) (string, error)
+	Cancel(runID string) error
+}
+
 // Router is the central eventbus subscriber that replaces the old auto-
 // delegate hook. On every event it:
 //  1. Records the event (durable audit log)
@@ -29,18 +40,54 @@ type Scorer interface {
 //  4. Matches task_rules + prompt_triggers via typed predicates
 //  5. Dedup-creates or bumps tasks
 //  6. Enqueues AI scoring
-//  7. Auto-delegates on matching triggers (with breaker + cooldown gates)
+//  7. Auto-delegates on matching triggers — fires if the entity is idle,
+//     enqueues onto pending_firings if the entity already has an active
+//     auto run or earlier queued firings (SKY-189).
 //  8. Runs inline close checks for the event type
 type Router struct {
 	db      *sql.DB
-	spawner *delegate.Spawner
+	spawner Delegator
 	scorer  Scorer
 	ws      *websocket.Hub
+
+	// drainLocks serializes DrainEntity calls per entity. Without this,
+	// the non-mutating PopPendingFiringForEntity creates a window between
+	// pop and MarkPendingFiringFired/Skipped where a concurrent drain
+	// (typically spawned by a fast-terminating run that the first drain
+	// just fired) can pop the same row and double-fire it. The mutex
+	// closes the window: a second drain blocks until the first marks the
+	// firing terminal, so its pop returns the next row (or nothing).
+	//
+	// Map grows monotonically with the count of distinct entities ever
+	// drained. Bounded by entity count for the lifetime of the process,
+	// which is small enough that we don't bother evicting on entity
+	// close.
+	drainLockMu sync.Mutex
+	drainLocks  map[string]*sync.Mutex
 }
 
 // NewRouter creates a Router.
-func NewRouter(db *sql.DB, spawner *delegate.Spawner, scorer Scorer, ws *websocket.Hub) *Router {
-	return &Router{db: db, spawner: spawner, scorer: scorer, ws: ws}
+func NewRouter(db *sql.DB, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+	return &Router{
+		db:         db,
+		spawner:    spawner,
+		scorer:     scorer,
+		ws:         ws,
+		drainLocks: make(map[string]*sync.Mutex),
+	}
+}
+
+// entityDrainLock returns the per-entity mutex used to serialize
+// DrainEntity calls. Lazily created on first use; never evicted.
+func (r *Router) entityDrainLock(entityID string) *sync.Mutex {
+	r.drainLockMu.Lock()
+	defer r.drainLockMu.Unlock()
+	mu, ok := r.drainLocks[entityID]
+	if !ok {
+		mu = &sync.Mutex{}
+		r.drainLocks[entityID] = mu
+	}
+	return mu
 }
 
 // HandleEvent is the eventbus subscriber callback. Called asynchronously
@@ -195,26 +242,17 @@ func (r *Router) HandleEvent(evt domain.Event) {
 
 	// Step 9: Auto-delegate for matching triggers.
 	// Gate: global kill switch — if auto-delegation is disabled, skip all triggers.
-	if cfg, err := config.Load(); err != nil || !cfg.AI.AutoDelegateEnabled {
-		// Disabled or config error — skip auto-delegation entirely.
-		// Inline close checks still run below.
-	} else if created {
-		// Auto-delegate fires immediately on task creation (cooldown doesn't
-		// gate the first fire). Only triggers with min_autonomy_suitability==0
-		// fire now; gated triggers defer to post-scoring re-derivation (SKY-181).
+	// Create vs bump no longer branches differently here: the per-entity
+	// queue handles bursts via its dedup index, and cooldown was removed
+	// in SKY-189 (collapse on (task_id, trigger_id) covers the same case
+	// the cooldown was protecting against). Triggers with
+	// min_autonomy_suitability > 0 still defer to post-scoring re-derive.
+	if cfg, err := config.Load(); err == nil && cfg.AI.AutoDelegateEnabled {
 		for _, trigger := range matchedTriggers {
 			if trigger.MinAutonomySuitability > 0 {
 				continue // deferred to post-scoring handler
 			}
-			r.tryAutoDelegate(task, trigger, entityID)
-		}
-	} else {
-		// Bump path: cooldown gates re-fires. Only fire if cooldown has elapsed.
-		for _, trigger := range matchedTriggers {
-			if trigger.MinAutonomySuitability > 0 {
-				continue
-			}
-			r.tryAutoDelegateWithCooldown(task, trigger, entityID)
+			r.tryAutoDelegate(task, trigger, entityID, evt.ID)
 		}
 	}
 
@@ -222,9 +260,20 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	r.runInlineCloseChecks(evt, entityID)
 }
 
-// tryAutoDelegate fires a trigger immediately (no cooldown check — used on
-// task creation). Checks breaker + in-flight gate only.
-func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.PromptTrigger, entityID string) {
+// tryAutoDelegate decides whether a matched (task, trigger) fires now or
+// queues. Order of checks: breaker (per-(entity,prompt)) → entity gate
+// (per-entity, auto-only) → fire or enqueue.
+//
+// Breaker is a hard skip — a tripped breaker means the user has work to
+// investigate before more runs land on this entity-prompt pair. Queueing
+// past it would just stack stale firings the user didn't ask for.
+//
+// Entity gate is the per-entity serialization point: at most one auto run
+// in flight per entity, regardless of which task/trigger it came from. If
+// the gate is closed (active auto run, or older firings already queued
+// for FIFO fairness), the firing enqueues onto pending_firings instead of
+// being dropped silently.
+func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.PromptTrigger, entityID string, triggeringEventID string) {
 	// Breaker gate.
 	failures, err := dbpkg.CountConsecutiveFailedRuns(r.db, entityID, trigger.PromptID)
 	if err != nil {
@@ -248,55 +297,47 @@ func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.PromptTrigger
 		return
 	}
 
-	// In-flight gate: don't stack runs on the same task.
-	active, err := dbpkg.HasActiveRunForTask(r.db, task.ID)
+	// Per-entity gate. Closed if any auto run is active on the entity OR
+	// any pending_firings rows are already queued (FIFO fairness).
+	canFire, err := dbpkg.EntityCanFireImmediately(r.db, entityID)
 	if err != nil {
-		log.Printf("[router] in-flight check error for task %s: %v", task.ID, err)
+		log.Printf("[router] entity gate query error for %s: %v", entityID, err)
 		return
 	}
-	if active {
-		return
-	}
-
-	r.fireDelegate(task, trigger)
-}
-
-// tryAutoDelegateWithCooldown is like tryAutoDelegate but also checks the
-// cooldown window. Used on bump events.
-func (r *Router) tryAutoDelegateWithCooldown(task *domain.Task, trigger domain.PromptTrigger, entityID string) {
-	// Cooldown gate.
-	if trigger.CooldownSeconds > 0 {
-		lastStart, err := dbpkg.LastAutoRunStartedAt(r.db, task.ID)
+	if !canFire {
+		inserted, err := dbpkg.EnqueuePendingFiring(r.db, entityID, task.ID, trigger.ID, triggeringEventID)
 		if err != nil {
-			log.Printf("[router] cooldown query error for task %s: %v", task.ID, err)
+			log.Printf("[router] enqueue firing failed (entity %s task %s trigger %s): %v",
+				entityID, task.ID, trigger.ID, err)
 			return
 		}
-		if lastStart != nil {
-			elapsed := int(time.Since(*lastStart).Seconds())
-			if elapsed < trigger.CooldownSeconds {
-				log.Printf("[router] cooldown active for task %s (%ds remaining)",
-					task.ID, trigger.CooldownSeconds-elapsed)
-				return
-			}
+		if inserted {
+			log.Printf("[router] queued firing on entity %s (task %s, trigger %s) — entity busy",
+				entityID, task.ID, trigger.ID)
+		} else {
+			log.Printf("[router] firing collapsed on entity %s (task %s, trigger %s) — duplicate already queued",
+				entityID, task.ID, trigger.ID)
 		}
+		return
 	}
 
-	r.tryAutoDelegate(task, trigger, entityID)
+	if _, err := r.fireDelegate(task, trigger); err != nil {
+		log.Printf("[router] fire failed for task %s (trigger %s): %v", task.ID, trigger.ID, err)
+	}
 }
 
 // fireDelegate transitions the task to delegated status, broadcasts the
-// change, then fires the spawner.
-func (r *Router) fireDelegate(task *domain.Task, trigger domain.PromptTrigger) {
+// change, then fires the spawner. Returns the run ID on success — used by
+// DrainEntity to record which run a queued firing materialized into.
+func (r *Router) fireDelegate(task *domain.Task, trigger domain.PromptTrigger) (string, error) {
 	if r.spawner == nil {
-		log.Printf("[router] spawner not configured, skipping delegation for task %s", task.ID)
-		return
+		return "", fmt.Errorf("spawner not configured")
 	}
 
 	// Transition task queued → delegated BEFORE spawning so the frontend
 	// reflects the state change immediately and dedup logic sees it.
 	if err := dbpkg.SetTaskStatus(r.db, task.ID, "delegated"); err != nil {
-		log.Printf("[router] failed to set task %s to delegated: %v", task.ID, err)
-		return
+		return "", fmt.Errorf("set task delegated: %w", err)
 	}
 	r.ws.Broadcast(websocket.Event{
 		Type: "task_updated",
@@ -309,18 +350,198 @@ func (r *Router) fireDelegate(task *domain.Task, trigger domain.PromptTrigger) {
 	// Re-read task to get entity-joined display fields the spawner needs.
 	fresh, err := dbpkg.GetTask(r.db, task.ID)
 	if err != nil || fresh == nil {
-		log.Printf("[router] failed to re-read task %s for delegation: %v", task.ID, err)
 		r.revertTaskStatus(task.ID, "queued")
-		return
+		if err != nil {
+			return "", fmt.Errorf("re-read task: %w", err)
+		}
+		return "", fmt.Errorf("task %s disappeared between status flip and re-read", task.ID)
 	}
 
 	runID, err := r.spawner.Delegate(*fresh, trigger.PromptID, "event", trigger.ID)
 	if err != nil {
-		log.Printf("[router] delegation failed for task %s: %v", task.ID, err)
 		r.revertTaskStatus(task.ID, "queued")
-		return
+		return "", err
 	}
 	log.Printf("[router] started run %s for task %s", runID, task.ID)
+	return runID, nil
+}
+
+// DrainEntity is the spawner's hook into the per-entity firing queue.
+// Called when an auto run terminates on the entity (any terminal status,
+// including pending_approval per the SKY-189 design — pending_approval
+// releases the entity lock so user deliberation doesn't block downstream
+// processing).
+//
+// Pops pending firings in FIFO order, validates each against current
+// state (task still active? trigger still enabled? breaker still under
+// threshold?), and fires the first valid one. Stale firings are
+// soft-deleted with a skip_reason and the loop continues. At most one
+// firing actually fires per drain — that run becomes the new in-flight
+// for the entity and gates further drains naturally.
+func (r *Router) DrainEntity(entityID string) {
+	// Serialize drains per entity. Without this, a fast-terminating run
+	// fired by an earlier drain can spawn a second DrainEntity goroutine
+	// that pops the same pending_firings row before the first drain
+	// transitions it out of 'pending' — leading to duplicate fireDelegate
+	// calls. The MarkPendingFiringFired/Skipped guards on
+	// status='pending' protect the row's own mutation but cannot un-fire
+	// the duplicate run. This mutex closes the window: the second drain
+	// blocks until the first releases, by which point the firing has
+	// landed in a terminal status and the second drain's pop returns the
+	// next row (or nothing).
+	mu := r.entityDrainLock(entityID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	for {
+		firing, err := dbpkg.PopPendingFiringForEntity(r.db, entityID)
+		if err != nil {
+			log.Printf("[router] drain pop error for entity %s: %v", entityID, err)
+			return
+		}
+		if firing == nil {
+			return // queue empty
+		}
+
+		runID, skipReason, transientErr := r.attemptDrainOne(firing)
+		if transientErr != nil {
+			// Transient failure (DB read, Delegate). Leave the firing in
+			// 'pending' state and bail the drain loop — marking
+			// 'skipped_stale' here would permanently drop a queued intent
+			// over a temporary problem. The periodic sweeper or the next
+			// run-terminal will retry.
+			log.Printf("[router] drain transient error on firing %d (entity %s): %v — leaving pending for retry",
+				firing.ID, entityID, transientErr)
+			return
+		}
+		if runID != "" {
+			if err := dbpkg.MarkPendingFiringFired(r.db, firing.ID, runID); err != nil {
+				// Durability race: the run was created (side-effect
+				// committed inside the spawner goroutine) but the UPDATE
+				// that records the firing→run association failed. The
+				// firing row is still 'pending' — a later DrainEntity
+				// would pop the same row and fire again, duplicating.
+				//
+				// Roll the side-effect chain back in reverse: Cancel the
+				// run we just spawned, then revert the task to 'queued'
+				// so the limbo state (task=delegated + no live run) is
+				// not externally visible. Mirrors what fireDelegate
+				// already does when spawner.Delegate itself fails. The
+				// firing stays 'pending' and the next drain re-fires
+				// fresh; until then the task reads as queued, which is
+				// honest.
+				log.Printf("[router] mark firing %d fired (run %s) failed: %v — rolling back: cancelling run + reverting task to queued",
+					firing.ID, runID, err)
+				if r.spawner != nil {
+					if cerr := r.spawner.Cancel(runID); cerr != nil {
+						log.Printf("[router] cancel run %s after mark-fired failure: %v — run may already be terminal, drain still triggers from its defer",
+							runID, cerr)
+					}
+				}
+				r.revertTaskStatus(firing.TaskID, "queued")
+			}
+			return // one fire per drain — the new run gates the rest
+		}
+		// Skipped or fire failed; record reason and continue draining.
+		if err := dbpkg.MarkPendingFiringSkipped(r.db, firing.ID, skipReason); err != nil {
+			log.Printf("[router] mark firing %d skipped (%s): %v", firing.ID, skipReason, err)
+			return
+		}
+		log.Printf("[router] skipped firing %d on entity %s: %s", firing.ID, entityID, skipReason)
+	}
+}
+
+// RunDrainSweeper periodically attempts to drain every entity that has at
+// least one pending firing. The sweeper is the safety net for stuck
+// queues: a firing left in 'pending' after a transient validation/fire
+// error needs *some* drain to retry it, and the natural trigger
+// (notifyDrainer from an auto-run terminal) only fires when an auto run
+// is actively terminating. If nothing's terminating — entity has no
+// active runs and no events arrive — the queue would otherwise sit
+// indefinitely.
+//
+// Cadence is 30s by default; tuneable via interval. Each tick lists
+// entities with pending firings (cheap — partial index) and calls
+// DrainEntity on each. DrainEntity's per-entity mutex makes the sweeper
+// safe to run alongside event-triggered drains: if a drain is already
+// running for an entity, the sweeper's call blocks then re-pops, which
+// is fine. Empty queues are no-ops.
+//
+// Returns when ctx is cancelled. Caller is responsible for the lifetime
+// (typically a goroutine started from main, cancelled at shutdown).
+func (r *Router) RunDrainSweeper(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ids, err := dbpkg.ListEntitiesWithPendingFirings(r.db)
+			if err != nil {
+				log.Printf("[router] drain sweeper: list error: %v", err)
+				continue
+			}
+			for _, eid := range ids {
+				if r.HasActiveAutoRunForEntity(eid) {
+					continue
+				}
+				r.DrainEntity(eid)
+			}
+		}
+	}
+}
+
+// attemptDrainOne validates a popped firing against current state and
+// fires it if everything still holds. Three outcomes:
+//
+//   - (runID, "", nil)         — fire succeeded; caller marks 'fired'.
+//   - ("", skipReason, nil)    — definitive "no longer relevant"; caller
+//     marks 'skipped_stale'. Reserved for: task_closed, trigger_disabled,
+//     breaker_tripped.
+//   - ("", "", err)            — transient failure (DB read, fire-time);
+//     caller leaves the firing in 'pending' state and bails the drain
+//     loop. The periodic sweeper or next run-terminal will retry.
+//
+// Validation reads from live tables, not from the firing row, so the
+// drainer reflects the world *now* — invalidation falls out for free
+// from the close cascade and trigger config.
+//
+// We classify Delegate errors as transient too: even when spawner.Delegate
+// refuses (rate-limited GitHub, missing creds, worktree race), the firing
+// intent is still valid and worth retrying. The breaker handles the
+// "actually broken, repeated failure" case via run-level failure counts —
+// but only once we've started enough runs to trip it. Until then, retry.
+func (r *Router) attemptDrainOne(firing *domain.PendingFiring) (runID, skipReason string, transientErr error) {
+	task, err := dbpkg.GetTask(r.db, firing.TaskID)
+	if err != nil {
+		return "", "", fmt.Errorf("task lookup: %w", err)
+	}
+	if task == nil || task.Status == "done" || task.Status == "dismissed" {
+		return "", domain.PendingFiringSkipTaskClosed, nil
+	}
+
+	trigger, err := dbpkg.GetPromptTrigger(r.db, firing.TriggerID)
+	if err != nil {
+		return "", "", fmt.Errorf("trigger lookup: %w", err)
+	}
+	if trigger == nil || !trigger.Enabled {
+		return "", domain.PendingFiringSkipTriggerDisabled, nil
+	}
+
+	failures, err := dbpkg.CountConsecutiveFailedRuns(r.db, firing.EntityID, trigger.PromptID)
+	if err != nil {
+		return "", "", fmt.Errorf("breaker query: %w", err)
+	}
+	if failures >= trigger.BreakerThreshold {
+		return "", domain.PendingFiringSkipBreakerTripped, nil
+	}
+
+	id, err := r.fireDelegate(task, *trigger)
+	if err != nil {
+		return "", "", fmt.Errorf("fire delegate: %w", err)
+	}
+	return id, "", nil
 }
 
 // revertTaskStatus sets a task back to the given status and broadcasts the
@@ -414,7 +635,11 @@ func (r *Router) reDeriveTask(taskID string) {
 
 		log.Printf("[router] re-derive: task %s suitability %.2f >= trigger %s threshold %.2f, firing",
 			taskID, *task.AutonomySuitability, trigger.ID, trigger.MinAutonomySuitability)
-		r.tryAutoDelegate(task, trigger, task.EntityID)
+		// Triggering event for the queued firing is the task's primary
+		// event — that's the one whose match scored autonomously above
+		// threshold. Real-event provenance keeps the audit trail honest
+		// when a re-derived firing ends up enqueued.
+		r.tryAutoDelegate(task, trigger, task.EntityID, task.PrimaryEventID)
 	}
 }
 

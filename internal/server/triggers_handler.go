@@ -29,7 +29,6 @@ func (s *Server) handleTriggerCreate(w http.ResponseWriter, r *http.Request) {
 		EventType              string   `json:"event_type"`
 		ScopePredicateJSON     string   `json:"scope_predicate_json"`
 		BreakerThreshold       int      `json:"breaker_threshold"`
-		CooldownSeconds        int      `json:"cooldown_seconds"`
 		MinAutonomySuitability *float64 `json:"min_autonomy_suitability"` // pointer: absent → default 0.0
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -59,9 +58,6 @@ func (s *Server) handleTriggerCreate(w http.ResponseWriter, r *http.Request) {
 	if req.BreakerThreshold <= 0 {
 		req.BreakerThreshold = 4
 	}
-	if req.CooldownSeconds <= 0 {
-		req.CooldownSeconds = 60
-	}
 
 	// Validate + default min_autonomy_suitability
 	var minAutonomy float64
@@ -90,7 +86,6 @@ func (s *Server) handleTriggerCreate(w http.ResponseWriter, r *http.Request) {
 		TriggerType:            domain.TriggerTypeEvent,
 		EventType:              req.EventType,
 		BreakerThreshold:       req.BreakerThreshold,
-		CooldownSeconds:        req.CooldownSeconds,
 		MinAutonomySuitability: minAutonomy,
 		Enabled:                false,
 	}
@@ -120,15 +115,15 @@ func (s *Server) handleTriggerCreate(w http.ResponseWriter, r *http.Request) {
 // PUT /api/triggers/{id}
 //
 // Updates the mutable-config subset of an existing trigger: scope predicate,
-// breaker threshold, cooldown. Deliberately does NOT accept prompt_id or
-// event_type — changing those means the trigger is semantically a different
-// thing (predicate schema is keyed on event_type, and the DB has a unique
-// constraint on (prompt_id, event_type)), so delete+recreate is the right
-// shape. `enabled` is owned by POST /api/triggers/{id}/toggle and is not
-// accepted here either.
+// breaker threshold, autonomy gate. Deliberately does NOT accept prompt_id
+// or event_type — changing those means the trigger is semantically a
+// different thing (predicate schema is keyed on event_type, and the DB has
+// a unique constraint on (prompt_id, event_type)), so delete+recreate is
+// the right shape. `enabled` is owned by POST /api/triggers/{id}/toggle
+// and is not accepted here either.
 //
-// All three body fields are required (PUT replace semantics): clients must
-// send the current values for fields they don't intend to change. Use a PATCH
+// All body fields are required (PUT replace semantics): clients must send
+// the current values for fields they don't intend to change. Use a PATCH
 // variant later if that becomes annoying.
 func (s *Server) handleTriggerUpdate(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
@@ -136,7 +131,6 @@ func (s *Server) handleTriggerUpdate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ScopePredicateJSON     string  `json:"scope_predicate_json"`
 		BreakerThreshold       int     `json:"breaker_threshold"`
-		CooldownSeconds        int     `json:"cooldown_seconds"`
 		MinAutonomySuitability float64 `json:"min_autonomy_suitability"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -158,10 +152,6 @@ func (s *Server) handleTriggerUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "breaker_threshold must be positive"})
 		return
 	}
-	if req.CooldownSeconds < 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cooldown_seconds must be >= 0"})
-		return
-	}
 	if req.MinAutonomySuitability < 0 || req.MinAutonomySuitability > 1 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "min_autonomy_suitability must be between 0 and 1"})
 		return
@@ -179,7 +169,6 @@ func (s *Server) handleTriggerUpdate(w http.ResponseWriter, r *http.Request) {
 	// Mutate only the config-subset fields; keep identity + toggle state.
 	updated := *existing
 	updated.BreakerThreshold = req.BreakerThreshold
-	updated.CooldownSeconds = req.CooldownSeconds
 	updated.MinAutonomySuitability = req.MinAutonomySuitability
 	if canonicalPredicate == "" {
 		updated.ScopePredicateJSON = nil

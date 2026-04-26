@@ -75,7 +75,7 @@ func seedDefaultPrompts(database *sql.DB) {
 	// --- Default triggers --------------------------------------------------
 	// All shipped disabled. System triggers are reference examples users
 	// opt into (or disable and replace with their own variations). Predicates
-	// conservative, cooldowns tuned for "probably safe to leave on".
+	// kept conservative.
 
 	authorIsSelf := `{"author_is_self":true}`
 	assigneeIsSelf := `{"assignee_is_self":true}`
@@ -88,7 +88,6 @@ func seedDefaultPrompts(database *sql.DB) {
 		EventType:          domain.EventGitHubPRCICheckFailed,
 		ScopePredicateJSON: &authorIsSelf,
 		BreakerThreshold:   3,
-		CooldownSeconds:    60,
 		Enabled:            false,
 	}); err != nil {
 		log.Printf("[seed] warning: failed to seed CI fix trigger: %v", err)
@@ -102,7 +101,6 @@ func seedDefaultPrompts(database *sql.DB) {
 		EventType:          domain.EventGitHubPRConflicts,
 		ScopePredicateJSON: &authorIsSelf,
 		BreakerThreshold:   2,
-		CooldownSeconds:    300,
 		Enabled:            false,
 	}); err != nil {
 		log.Printf("[seed] warning: failed to seed conflict resolution trigger: %v", err)
@@ -116,7 +114,6 @@ func seedDefaultPrompts(database *sql.DB) {
 		EventType:          domain.EventJiraIssueAssigned,
 		ScopePredicateJSON: &assigneeIsSelf,
 		BreakerThreshold:   2,
-		CooldownSeconds:    600,
 		Enabled:            false,
 	}); err != nil {
 		log.Printf("[seed] warning: failed to seed Jira implement trigger: %v", err)
@@ -135,7 +132,6 @@ func seedDefaultPrompts(database *sql.DB) {
 		EventType:          domain.EventJiraIssueBecameAtomic,
 		ScopePredicateJSON: &assigneeIsSelf,
 		BreakerThreshold:   2,
-		CooldownSeconds:    600,
 		Enabled:            false,
 	}); err != nil {
 		log.Printf("[seed] warning: failed to seed Jira implement atomic trigger: %v", err)
@@ -154,7 +150,6 @@ func seedDefaultPrompts(database *sql.DB) {
 		TriggerType:      domain.TriggerTypeEvent,
 		EventType:        domain.EventGitHubPRReviewRequested,
 		BreakerThreshold: 3,
-		CooldownSeconds:  300,
 		Enabled:          false,
 	}); err != nil {
 		log.Printf("[seed] warning: failed to seed PR review trigger: %v", err)
@@ -172,7 +167,6 @@ func seedDefaultPrompts(database *sql.DB) {
 		EventType:          domain.EventGitHubPRReviewChangesRequested,
 		ScopePredicateJSON: &authorIsSelf,
 		BreakerThreshold:   3,
-		CooldownSeconds:    300,
 		Enabled:            false,
 	}); err != nil {
 		log.Printf("[seed] warning: failed to seed fix-review-feedback trigger: %v", err)
