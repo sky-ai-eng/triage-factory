@@ -483,6 +483,9 @@ func (r *Router) RunDrainSweeper(ctx context.Context, interval time.Duration) {
 				continue
 			}
 			for _, eid := range ids {
+				if r.HasActiveAutoRunForEntity(eid) {
+					continue
+				}
 				r.DrainEntity(eid)
 			}
 		}
