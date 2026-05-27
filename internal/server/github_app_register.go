@@ -27,7 +27,7 @@ import (
 //
 // POST /api/orgs/{org_id}/github-app/register/start
 func (s *Server) handleGitHubAppRegisterStart(w http.ResponseWriter, r *http.Request) {
-	if s.authCfg == nil {
+	if s.deployCfg == nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -89,7 +89,7 @@ func (s *Server) handleGitHubAppRegisterStart(w http.ResponseWriter, r *http.Req
 	}
 	ghBase = strings.TrimRight(ghBase, "/")
 
-	publicURL := s.authCfg.publicURL
+	publicURL := s.deployCfg.publicURL
 
 	appName := "Triage Factory"
 	if org.Name != "" {
@@ -141,7 +141,7 @@ func (s *Server) handleGitHubAppRegisterStart(w http.ResponseWriter, r *http.Req
 		OrgID:     orgID,
 		ExpiresAt: timeNow().Add(10 * time.Minute).Unix(),
 	}
-	signed, err := state.sign(s.authCfg.stateKey)
+	signed, err := state.sign(s.deployCfg.hmacKey)
 	if err != nil {
 		internalError(w, "github-app", fmt.Errorf("sign state: %w", err))
 		return
@@ -168,7 +168,7 @@ func (s *Server) handleGitHubAppRegisterStart(w http.ResponseWriter, r *http.Req
 //
 // GET /api/orgs/{org_id}/github-app/register/callback?code=...&state=...
 func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.Request) {
-	if s.authCfg == nil {
+	if s.deployCfg == nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -184,7 +184,7 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 		return
 	}
 
-	state, err := parseAppRegisterState(stateRaw, s.authCfg.stateKey)
+	state, err := parseAppRegisterState(stateRaw, s.deployCfg.hmacKey)
 	if err != nil {
 		log.Printf("[github-app] invalid state: %v", err)
 		http.Error(w, "invalid or expired state token", http.StatusUnauthorized)
@@ -296,9 +296,8 @@ func (s *Server) requireOrgAdmin(w http.ResponseWriter, r *http.Request) (orgID,
 	}
 	userID = claims.Subject
 
-	if runmode.Current() != runmode.ModeMulti {
-		http.NotFound(w, r)
-		return
+	if runmode.Current() == runmode.ModeLocal {
+		return rawOrgID, userID, true
 	}
 
 	isAdmin, err := s.userIsOrgAdmin(r.Context(), userID, rawOrgID)

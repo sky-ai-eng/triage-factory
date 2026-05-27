@@ -78,7 +78,7 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		Teams:           newTeamsStore(tx, tx),
 		JiraStatusRules: newJiraStatusRulesStore(tx, tx),
 		Curator:         newCuratorStore(tx),
-		GitHubApps:      newGitHubAppsStore(),
+		GitHubApps:      newGitHubAppsStore(tx),
 	}
 	if err := fn(txStores); err != nil {
 		return err

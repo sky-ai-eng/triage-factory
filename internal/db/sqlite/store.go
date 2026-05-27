@@ -83,7 +83,7 @@ func New(conn *sql.DB) db.Stores {
 		// for completeness — handler-side helpers stay on the
 		// package-level *sql.DB calls until D9.
 		Curator:    newCuratorStore(conn),
-		GitHubApps: newGitHubAppsStore(),
+		GitHubApps: newGitHubAppsStore(conn),
 		Tx:         s,
 	}
 	return s.stores

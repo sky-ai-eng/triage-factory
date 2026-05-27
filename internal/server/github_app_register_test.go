@@ -14,11 +14,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestGitHubAppRegister_LocalMode_Returns404 pins that the manifest
-// registration endpoints are unreachable in local mode (authCfg is nil).
-func TestGitHubAppRegister_LocalMode_Returns404(t *testing.T) {
+// TestGitHubAppRegister_LocalMode_NilDeployConfig_Returns404 pins that
+// the endpoints return 404 when deployCfg is nil (server not fully
+// booted).
+func TestGitHubAppRegister_LocalMode_NilDeployConfig_Returns404(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
+	// Don't call SetDeployConfig — deployCfg stays nil.
 
 	for _, tc := range []struct {
 		method, path string
@@ -30,6 +32,28 @@ func TestGitHubAppRegister_LocalMode_Returns404(t *testing.T) {
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("%s %s: got %d, want 404", tc.method, tc.path, rec.Code)
 		}
+	}
+}
+
+// TestGitHubAppRegister_LocalMode_WithDeployConfig_Works verifies the
+// endpoints are reachable in local mode when deployCfg is wired.
+func TestGitHubAppRegister_LocalMode_WithDeployConfig_Works(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	var key [32]byte
+	if _, err := rand.Read(key[:]); err != nil {
+		t.Fatalf("seed key: %v", err)
+	}
+	s.SetDeployConfig("http://localhost:3000", key)
+
+	body := map[string]string{
+		"owner_type":  "user",
+		"owner_login": "testuser",
+	}
+	rec := doJSON(t, s, "POST", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/register/start", body)
+	// Should reach the handler (200 with manifest), not 404.
+	if rec.Code == http.StatusNotFound {
+		t.Errorf("start endpoint returned 404 in local mode with deployCfg wired; want reachable")
 	}
 }
 
@@ -117,7 +141,7 @@ func TestGitHubAppRegister_StartEndpoint_MultiMode(t *testing.T) {
 			jsonBody(bodyJSON))
 		req.Header.Set("Content-Type", "application/json")
 		req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: sidA})
-		req.Header.Set("Origin", rig.srv.authCfg.publicURL)
+		req.Header.Set("Origin", rig.srv.deployCfg.publicURL)
 		rec := httptest.NewRecorder()
 		rig.srv.mux.ServeHTTP(rec, req)
 
@@ -162,7 +186,7 @@ func TestGitHubAppRegister_StartEndpoint_MultiMode(t *testing.T) {
 			jsonBody(bodyJSON))
 		req.Header.Set("Content-Type", "application/json")
 		req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: sidB})
-		req.Header.Set("Origin", rig.srv.authCfg.publicURL)
+		req.Header.Set("Origin", rig.srv.deployCfg.publicURL)
 		rec := httptest.NewRecorder()
 		rig.srv.mux.ServeHTTP(rec, req)
 
@@ -177,7 +201,7 @@ func TestGitHubAppRegister_StartEndpoint_MultiMode(t *testing.T) {
 			jsonBody(bodyJSON))
 		req.Header.Set("Content-Type", "application/json")
 		req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: sidA})
-		req.Header.Set("Origin", rig.srv.authCfg.publicURL)
+		req.Header.Set("Origin", rig.srv.deployCfg.publicURL)
 		rec := httptest.NewRecorder()
 		rig.srv.mux.ServeHTTP(rec, req)
 
@@ -227,7 +251,7 @@ func TestGitHubAppRegister_CallbackEndpoint_MultiMode(t *testing.T) {
 		OrgID:     orgA.String(),
 		ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
 	}
-	signed, err := state.sign(rig.srv.authCfg.stateKey)
+	signed, err := state.sign(rig.srv.deployCfg.hmacKey)
 	if err != nil {
 		t.Fatalf("sign state: %v", err)
 	}
@@ -268,7 +292,7 @@ func TestGitHubAppRegister_CallbackEndpoint_MultiMode(t *testing.T) {
 			OrgID:     orgA.String(),
 			ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
 		}
-		signed2, _ := state2.sign(rig.srv.authCfg.stateKey)
+		signed2, _ := state2.sign(rig.srv.deployCfg.hmacKey)
 
 		req := httptest.NewRequest("GET",
 			"/api/orgs/"+orgA.String()+"/github-app/register/callback?code=test_code2&state="+signed2, nil)
@@ -286,7 +310,7 @@ func TestGitHubAppRegister_CallbackEndpoint_MultiMode(t *testing.T) {
 			OrgID:     orgA.String(),
 			ExpiresAt: time.Now().Add(-1 * time.Minute).Unix(),
 		}
-		tok, _ := expired.sign(rig.srv.authCfg.stateKey)
+		tok, _ := expired.sign(rig.srv.deployCfg.hmacKey)
 
 		req := httptest.NewRequest("GET",
 			"/api/orgs/"+orgA.String()+"/github-app/register/callback?code=c&state="+tok, nil)
@@ -304,7 +328,7 @@ func TestGitHubAppRegister_CallbackEndpoint_MultiMode(t *testing.T) {
 			OrgID:     "00000000-0000-0000-0000-ffffffffffff",
 			ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
 		}
-		tok, _ := wrongOrg.sign(rig.srv.authCfg.stateKey)
+		tok, _ := wrongOrg.sign(rig.srv.deployCfg.hmacKey)
 
 		req := httptest.NewRequest("GET",
 			"/api/orgs/"+orgA.String()+"/github-app/register/callback?code=c&state="+tok, nil)
