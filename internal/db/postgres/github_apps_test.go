@@ -102,9 +102,18 @@ func TestGitHubAppsStore_Postgres_ConflictOnDuplicate(t *testing.T) {
 			return fmt.Errorf("first Create: %w", err)
 		}
 
+		// Wrap the duplicate insert in a savepoint so the constraint
+		// violation doesn't abort the outer tx (Postgres puts the tx
+		// in an error state on any unhandled error).
+		if _, err := tx.ExecContext(ctx, "SAVEPOINT dup"); err != nil {
+			return fmt.Errorf("savepoint: %w", err)
+		}
 		app.AppID = "200"
 		app.Slug = "second"
 		err := stores.GitHubApps.CreateForOrg(ctx, app)
+		if _, rerr := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT dup"); rerr != nil {
+			return fmt.Errorf("rollback savepoint: %w", rerr)
+		}
 		if err == nil {
 			t.Error("second CreateForOrg should have failed with ErrGitHubAppExists")
 			return nil
@@ -220,4 +229,3 @@ func seedPgOrgAndUserForGitHubApps(t *testing.T, h *pgtest.Harness) (orgID, user
 	seedPgDefaultTeam(t, h, orgID, userID)
 	return orgID, userID
 }
-
