@@ -251,6 +251,7 @@ func substitutePathParams(path string) string {
 		"{id}":         zeroUUID,
 		"{runID}":      zeroUUID,
 		"{commentId}":  zeroUUID,
+		"{org_id}":     zeroUUID,
 		"{number}":     "0",
 		"{provider}":   "github",
 		"{owner}":      "octocat",

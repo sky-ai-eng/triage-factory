@@ -32,6 +32,35 @@ func newOrgsStore(app, admin queryer) db.OrgsStore {
 
 var _ db.OrgsStore = (*orgsStore)(nil)
 
+func (s *orgsStore) GetOrg(ctx context.Context, orgID string) (*domain.Org, error) {
+	return getOrg(ctx, s.app, orgID)
+}
+
+func (s *orgsStore) GetOrgSystem(ctx context.Context, orgID string) (*domain.Org, error) {
+	return getOrg(ctx, s.admin, orgID)
+}
+
+func getOrg(ctx context.Context, q queryer, orgID string) (*domain.Org, error) {
+	var (
+		o          domain.Org
+		owner      sql.NullString
+		isPersonal sql.NullBool
+	)
+	err := q.QueryRowContext(ctx, `
+		SELECT id::text, name, slug, owner_user_id::text, is_personal, created_at
+		  FROM orgs WHERE id = $1
+	`, orgID).Scan(&o.ID, &o.Name, &o.Slug, &owner, &isPersonal, &o.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read org: %w", err)
+	}
+	o.OwnerUserID = owner.String
+	o.IsPersonal = isPersonal.Valid && isPersonal.Bool
+	return &o, nil
+}
+
 func (s *orgsStore) ListActiveSystem(ctx context.Context) ([]string, error) {
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT id FROM orgs

@@ -27,6 +27,15 @@ import (
 // SQLite collapses the pool split to one connection; the `...System`
 // variants delegate to their non-System counterparts.
 type OrgsStore interface {
+	// GetOrg returns the org's metadata row, or nil if the org does
+	// not exist. App pool in Postgres (RLS gates by org membership);
+	// SQLite returns the sentinel row.
+	GetOrg(ctx context.Context, orgID string) (*domain.Org, error)
+
+	// GetOrgSystem mirrors GetOrg on the admin pool for callers
+	// without JWT-claims context. SQLite collapses to GetOrg.
+	GetOrgSystem(ctx context.Context, orgID string) (*domain.Org, error)
+
 	// ListActiveSystem returns the IDs of every active org in
 	// ascending id order. "Active" means deleted_at IS NULL in
 	// Postgres; SQLite has no soft-delete column, so the local-mode

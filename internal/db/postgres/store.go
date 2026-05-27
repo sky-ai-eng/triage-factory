@@ -226,8 +226,9 @@ func New(admin, app *sql.DB) db.Stores {
 		// (org_id, creator_user_id) pair), admin for the boot-time
 		// CancelOrphanedNonTerminalRequests sweep that runs before
 		// any JWT-claims context exists.
-		Curator: newCuratorStore(app, admin),
-		Tx:      s,
+		Curator:    newCuratorStore(app, admin),
+		GitHubApps: newGitHubAppsStore(app),
+		Tx:         s,
 	}
 	return s.stores
 }
@@ -288,5 +289,6 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		Teams:           newTeamsStore(tx, tx),
 		JiraStatusRules: newJiraStatusRulesStore(tx, tx),
 		Curator:         newCuratorStore(tx, tx),
+		GitHubApps:      newGitHubAppsStore(tx),
 	}
 }

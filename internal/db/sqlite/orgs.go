@@ -29,6 +29,24 @@ func newOrgsStore(q, _ queryer) db.OrgsStore { return &orgsStore{q: q} }
 
 var _ db.OrgsStore = (*orgsStore)(nil)
 
+func (s *orgsStore) GetOrg(ctx context.Context, orgID string) (*domain.Org, error) {
+	var o domain.Org
+	err := s.q.QueryRowContext(ctx, `
+		SELECT id, name, slug, created_at FROM orgs WHERE id = ?
+	`, orgID).Scan(&o.ID, &o.Name, &o.Slug, &o.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read org: %w", err)
+	}
+	return &o, nil
+}
+
+func (s *orgsStore) GetOrgSystem(ctx context.Context, orgID string) (*domain.Org, error) {
+	return s.GetOrg(ctx, orgID)
+}
+
 func (s *orgsStore) ListActiveSystem(ctx context.Context) ([]string, error) {
 	rows, err := s.q.QueryContext(ctx, `SELECT id FROM orgs ORDER BY id ASC`)
 	if err != nil {

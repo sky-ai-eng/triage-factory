@@ -82,8 +82,9 @@ func New(conn *sql.DB) db.Stores {
 		// production writes. The non-tx variant wired here exists
 		// for completeness — handler-side helpers stay on the
 		// package-level *sql.DB calls until D9.
-		Curator: newCuratorStore(conn),
-		Tx:      s,
+		Curator:    newCuratorStore(conn),
+		GitHubApps: newGitHubAppsStore(),
+		Tx:         s,
 	}
 	return s.stores
 }

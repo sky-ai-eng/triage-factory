@@ -189,6 +189,7 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// SyntheticClaimsWithTx claims via curator_requests_modify /
 		// curator_messages_modify / curator_pending_context_modify
 		// on (org_id, creator_user_id).
-		Curator: newCuratorStore(tx, s.admin),
+		Curator:    newCuratorStore(tx, s.admin),
+		GitHubApps: newGitHubAppsStore(tx),
 	}
 }

@@ -265,6 +265,23 @@ func (s *Server) userHasOrgAccess(ctx context.Context, userID, orgID string) (bo
 	return ok, err
 }
 
+// userIsOrgAdmin returns true when the calling user holds an 'owner'
+// or 'admin' role in the given org. Mirrors userHasOrgAccess but
+// delegates to tf.user_is_org_admin instead of tf.user_has_org_access.
+// Used by endpoints that gate on org-admin privilege (GitHub App
+// registration, future team management, etc.).
+func (s *Server) userIsOrgAdmin(ctx context.Context, userID, orgID string) (bool, error) {
+	var ok bool
+	err := tfdb.WithTx(ctx, s.db, tfdb.Claims{Sub: userID},
+		func(tx *sql.Tx) error {
+			return tx.QueryRowContext(ctx,
+				`SELECT tf.user_is_org_admin($1::uuid)`, orgID,
+			).Scan(&ok)
+		},
+	)
+	return ok, err
+}
+
 // needsRefresh is true when the JWT will expire within the refresh
 // window (60s). Keeps the threshold in one place; tests can shadow it.
 func needsRefresh(sess *sessions.Session) bool {
