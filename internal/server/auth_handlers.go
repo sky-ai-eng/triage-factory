@@ -44,37 +44,44 @@ var _ = tfdb.Claims{}
 // reaper, future async revoke).
 var gotrueHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
-// authConfig holds the multi-mode auth flow's configuration. Loaded
-// once at startup and passed to SetAuthDeps; everything in here is
-// publicly resolvable (URLs) or only-meaningful inside our own
-// signing — none of it is a credential the runtime should re-fetch.
-type authConfig struct {
-	// gotrueURL is the in-network base URL (e.g. http://gotrue:9999)
-	// for server-side calls — token exchange, refresh, etc. Distinct
-	// from publicURL because docker-compose internal hostnames don't
-	// resolve from the browser side.
-	gotrueURL string
-
+// deployConfig holds deployment-identity configuration that is
+// meaningful in both local and multi mode. Populated at boot via
+// SetDeployConfig (local mode) or SetAuthDeps (multi mode, which
+// calls SetDeployConfig internally).
+type deployConfig struct {
 	// publicURL is the externally-visible base for the TF deployment
-	// (e.g. https://triagefactory.acme.com). Used to construct
-	// browser-facing redirect URLs (gotrue's /authorize knows our
-	// /api/auth/callback path via the `redirect_to` query param).
+	// (e.g. "https://app.triagefactory.com" in multi,
+	// "http://localhost:3000" in local).
 	publicURL string
 
-	// stateKey signs the short-lived state cookie that carries
-	// return_to + CSRF + PKCE verifier through the OAuth roundtrip.
-	// Loaded from TF_COOKIE_SECRET, independent of the session
-	// encryption key — rotating one doesn't invalidate the other.
-	stateKey [32]byte
+	// hmacKey signs short-lived tokens (OAuth state cookies, manifest
+	// registration state). Loaded from TF_COOKIE_SECRET in multi mode;
+	// generated randomly at boot in local mode.
+	hmacKey [32]byte
 
 	// secureCookies hardens cookie attributes when the deployment is
-	// HTTPS. Derived from publicURL at SetAuthDeps time: if the URL
-	// starts with "https://", we use the __Host- cookie prefix
-	// (browser-enforced: Secure flag required, Path=/, no Domain)
-	// and force Secure=true. Local dev / tests with an http://
-	// publicURL get plain cookie names so the browser will accept
-	// them without TLS.
+	// HTTPS. Derived from publicURL at init time.
 	secureCookies bool
+}
+
+// authConfig holds GoTrue-only configuration for the multi-mode auth
+// flow. Nil in local mode.
+type authConfig struct {
+	// gotrueURL is the in-network base URL (e.g. http://gotrue:9999)
+	// for server-side calls — token exchange, refresh, etc.
+	gotrueURL string
+}
+
+// SetDeployConfig wires deployment-identity configuration that is
+// meaningful in both modes. Local-mode boot calls this directly;
+// multi-mode boot calls SetAuthDeps, which delegates here internally.
+func (s *Server) SetDeployConfig(publicURL string, hmacKey [32]byte) {
+	pub := strings.TrimRight(publicURL, "/")
+	s.deployCfg = &deployConfig{
+		publicURL:     pub,
+		hmacKey:       hmacKey,
+		secureCookies: strings.HasPrefix(pub, "https://"),
+	}
 }
 
 // SetAuthDeps wires the multi-mode auth dependencies into the server.
@@ -92,15 +99,14 @@ func (s *Server) SetAuthDeps(
 	gotrueURL, publicURL string,
 	cookieSecret [32]byte,
 ) error {
-	pub := strings.TrimRight(publicURL, "/")
+	s.SetDeployConfig(publicURL, cookieSecret)
+
+	gtURL := strings.TrimRight(gotrueURL, "/")
 	cfg := &authConfig{
-		gotrueURL:     strings.TrimRight(gotrueURL, "/"),
-		publicURL:     pub,
-		secureCookies: strings.HasPrefix(pub, "https://"),
-		stateKey:      cookieSecret,
+		gotrueURL: gtURL,
 	}
 
-	proxy, err := newGotrueProxy(cfg.gotrueURL)
+	proxy, err := newGotrueProxy(gtURL)
 	if err != nil {
 		return fmt.Errorf("gotrue proxy: %w", err)
 	}
@@ -166,7 +172,7 @@ func (s *Server) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 		CodeVerifier: codeVerifier,
 		ExpiresAt:    timeNow().Add(10 * time.Minute).Unix(),
 	}
-	signed, err := state.sign(s.authCfg.stateKey)
+	signed, err := state.sign(s.deployCfg.hmacKey)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -190,8 +196,8 @@ func (s *Server) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 	q.Set("code_challenge", pkceChallenge(codeVerifier))
 	q.Set("code_challenge_method", "S256")
 	q.Set("flow_type", "pkce")
-	q.Set("redirect_to", s.authCfg.publicURL+"/api/auth/callback?state="+state.CSRF)
-	target := s.authCfg.publicURL + "/auth/v1/authorize?" + q.Encode()
+	q.Set("redirect_to", s.deployCfg.publicURL+"/api/auth/callback?state="+state.CSRF)
+	target := s.deployCfg.publicURL + "/auth/v1/authorize?" + q.Encode()
 
 	http.Redirect(w, r, target, http.StatusFound)
 }
@@ -213,7 +219,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing state cookie", http.StatusBadRequest)
 		return
 	}
-	state, err := parseStateCookie(stateCookie.Value, s.authCfg.stateKey)
+	state, err := parseStateCookie(stateCookie.Value, s.deployCfg.hmacKey)
 	if err != nil {
 		log.Printf("[auth] state cookie: %v", err)
 		http.Error(w, "invalid state", http.StatusBadRequest)

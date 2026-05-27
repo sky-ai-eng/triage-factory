@@ -192,7 +192,7 @@ func (r *authRig) postActiveOrg(t *testing.T, sid string, body any) *http.Respon
 	if sid != "" {
 		req.AddCookie(&http.Cookie{Name: r.srv.sidCookieName(), Value: sid})
 	}
-	req.Header.Set("Origin", r.srv.authCfg.publicURL)
+	req.Header.Set("Origin", r.srv.deployCfg.publicURL)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	r.srv.mux.ServeHTTP(rec, req)
@@ -307,7 +307,7 @@ func TestActiveOrg_Update_SentinelClaim_Returns401(t *testing.T) {
 	body := bytes.NewBufferString(`{"org_id":"` + orgID.String() + `"}`)
 	req := httptest.NewRequest("POST", "/api/me/active-org", body)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", r.srv.authCfg.publicURL)
+	req.Header.Set("Origin", r.srv.deployCfg.publicURL)
 	ctx := context.WithValue(req.Context(), ctxKeyClaims, &verify.Claims{Subject: runmode.LocalDefaultUserID})
 	rec := httptest.NewRecorder()
 	r.srv.handleActiveOrgUpdate(rec, req.WithContext(ctx))

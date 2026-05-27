@@ -34,7 +34,7 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 	// therefore after this wrap), so the inline-script hashes only
 	// exist later. We compose the CSP string fresh per request to
 	// pick up that late-bound state.
-	deployHTTPS := s.authCfg != nil && s.authCfg.secureCookies
+	deployHTTPS := s.deployCfg != nil && s.deployCfg.secureCookies
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()

@@ -200,7 +200,7 @@ func postWithSid(t *testing.T, r *authRig, path, sid, jsonBody string) int {
 	t.Helper()
 	req := httptest.NewRequest("POST", path, bytes.NewReader([]byte(jsonBody)))
 	req.AddCookie(&http.Cookie{Name: r.srv.sidCookieName(), Value: sid})
-	req.Header.Set("Origin", r.srv.authCfg.publicURL)
+	req.Header.Set("Origin", r.srv.deployCfg.publicURL)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	r.srv.mux.ServeHTTP(rec, req)

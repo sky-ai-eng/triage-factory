@@ -106,8 +106,8 @@ func TestComputeInlineScriptHashes_NilFS(t *testing.T) {
 // CSP tuning without rewriting the test.
 func TestSecurityHeaders_StandardSet(t *testing.T) {
 	s := &Server{
-		// authCfg with secureCookies=false → no HSTS, exercised below
-		authCfg:            &authConfig{secureCookies: false},
+		// deployCfg with secureCookies=false → no HSTS, exercised below
+		deployCfg:          &deployConfig{secureCookies: false},
 		inlineScriptHashes: []string{"AAAA"}, // fake hash to confirm it's interpolated
 	}
 	handler := s.withSecurityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -168,7 +168,7 @@ func TestSecurityHeaders_HSTSOnlyInHTTPS(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s := &Server{authCfg: &authConfig{secureCookies: tc.secure}}
+			s := &Server{deployCfg: &deployConfig{secureCookies: tc.secure}}
 			handler := s.withSecurityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
@@ -183,11 +183,11 @@ func TestSecurityHeaders_HSTSOnlyInHTTPS(t *testing.T) {
 	}
 }
 
-// TestSecurityHeaders_NilAuthCfg — local mode (TF_MODE=local) never
-// constructs authCfg. The middleware must still emit the universal
-// headers (X-Frame-Options etc.) and just skip HSTS.
-func TestSecurityHeaders_NilAuthCfg(t *testing.T) {
-	s := &Server{} // no authCfg
+// TestSecurityHeaders_NilDeployCfg — edge case where deployCfg is nil.
+// The middleware must still emit the universal headers (X-Frame-Options
+// etc.) and just skip HSTS.
+func TestSecurityHeaders_NilDeployCfg(t *testing.T) {
+	s := &Server{} // no deployCfg
 	handler := s.withSecurityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))

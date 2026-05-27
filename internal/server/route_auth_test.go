@@ -57,7 +57,7 @@ func TestAllProtectedRoutes_RejectUnauthenticated(t *testing.T) {
 	}
 
 	sidName := rig.srv.sidCookieName()
-	publicURL := rig.srv.authCfg.publicURL
+	publicURL := rig.srv.deployCfg.publicURL
 
 	variants := []struct {
 		name   string

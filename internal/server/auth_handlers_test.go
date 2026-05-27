@@ -248,8 +248,8 @@ func (r *authRig) signStateCookie(returnTo, csrf, codeVerifier string) string {
 		ReturnTo: returnTo, CSRF: csrf, CodeVerifier: codeVerifier,
 		ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
 	}
-	cfg := r.srv.authCfg
-	signed, err := state.sign(cfg.stateKey)
+	dc := r.srv.deployCfg
+	signed, err := state.sign(dc.hmacKey)
 	if err != nil {
 		r.t.Fatalf("sign state: %v", err)
 	}
@@ -318,7 +318,7 @@ func (r *authRig) requestWithSid(method, path, sid string) *http.Response {
 	// treats the request as same-origin. httptest.NewRequest sets no
 	// Origin by default, which the middleware also allows (no Origin
 	// = not a browser cross-site request), but explicit is clearer.
-	req.Header.Set("Origin", r.srv.authCfg.publicURL)
+	req.Header.Set("Origin", r.srv.deployCfg.publicURL)
 	rec := httptest.NewRecorder()
 	r.srv.mux.ServeHTTP(rec, req)
 	return rec.Result()
@@ -1056,7 +1056,7 @@ func TestAuthFlow_Callback_RejectsBadState(t *testing.T) {
 func TestSidCookieName_DependsOnPublicURL(t *testing.T) {
 	// We can't easily re-run newAuthRig with a different publicURL
 	// without paying another pgtest boot cost. Instead, construct a
-	// minimal Server + authCfg by hand and probe sidCookieName.
+	// minimal Server + deployCfg by hand and probe sidCookieName.
 	cases := []struct {
 		publicURL string
 		want      string
@@ -1067,7 +1067,7 @@ func TestSidCookieName_DependsOnPublicURL(t *testing.T) {
 	}
 	for _, tc := range cases {
 		s := &Server{
-			authCfg: &authConfig{
+			deployCfg: &deployConfig{
 				publicURL:     tc.publicURL,
 				secureCookies: strings.HasPrefix(tc.publicURL, "https://"),
 			},
@@ -1077,10 +1077,10 @@ func TestSidCookieName_DependsOnPublicURL(t *testing.T) {
 		}
 	}
 
-	// Local mode (authCfg nil) → plain name.
+	// No deployCfg → plain name.
 	bare := &Server{}
 	if got := bare.sidCookieName(); got != "sid" {
-		t.Errorf("nil authCfg: sidCookieName=%q, want sid", got)
+		t.Errorf("nil deployCfg: sidCookieName=%q, want sid", got)
 	}
 }
 
@@ -1089,7 +1089,7 @@ func TestSidCookieName_DependsOnPublicURL(t *testing.T) {
 // over HTTP at the Go layer (e.g. behind a TLS-terminating reverse
 // proxy that doesn't set X-Forwarded-Proto).
 func TestCookieSecure_FromPublicURL(t *testing.T) {
-	s := &Server{authCfg: &authConfig{secureCookies: true}}
+	s := &Server{deployCfg: &deployConfig{secureCookies: true}}
 	r := httptest.NewRequest("GET", "http://internal/auth", nil)
 	if !s.cookieSecure(r) {
 		t.Errorf("https publicURL: cookieSecure(plain-http req) = false, want true")

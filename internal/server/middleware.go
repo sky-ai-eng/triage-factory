@@ -367,15 +367,14 @@ func (s *Server) refreshSessionInline(ctx context.Context, sess *sessions.Sessio
 // gap that SameSite=Lax leaves (which permits top-level cross-site
 // POSTs to the request URL).
 //
-// Local mode (authCfg nil): pass-through. Local mode doesn't expose
-// session-cookie auth, so there's no CSRF surface to defend.
+// deployCfg nil: pass-through (shouldn't happen after boot, but safe).
 //
 // Same-origin requests that omit Origin (rare; some old browsers,
 // fetch() in non-CORS modes) are allowed: a missing Origin can't
 // indicate cross-site since cross-site mutating requests must set it.
 func (s *Server) withCSRFOriginCheck(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.authCfg == nil {
+		if s.deployCfg == nil {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -386,14 +385,10 @@ func (s *Server) withCSRFOriginCheck(next http.Handler) http.Handler {
 		}
 		origin := r.Header.Get("Origin")
 		if origin == "" {
-			// No Origin → not a cross-site browser request. Allow.
-			// (Server-to-server or curl without Origin lands here;
-			// those callers don't have CSRF as an attack vector
-			// since they're not cookie-authed-against-their-will.)
 			next.ServeHTTP(w, r)
 			return
 		}
-		if origin != s.authCfg.publicURL {
+		if origin != s.deployCfg.publicURL {
 			http.Error(w, "cross-origin request rejected", http.StatusForbidden)
 			return
 		}
@@ -407,7 +402,7 @@ func (s *Server) withCSRFOriginCheck(next http.Handler) http.Handler {
 // would have the browser silently drop a __Host- cookie that doesn't
 // also carry Secure.
 func (s *Server) sidCookieName() string {
-	if s.authCfg != nil && s.authCfg.secureCookies {
+	if s.deployCfg != nil && s.deployCfg.secureCookies {
 		return "__Host-sid"
 	}
 	return "sid"
@@ -419,7 +414,7 @@ func (s *Server) sidCookieName() string {
 // proxy deployments where TLS termination happens upstream and the
 // Go server sees plain HTTP — X-Forwarded-Proto = https.
 func (s *Server) cookieSecure(r *http.Request) bool {
-	if s.authCfg != nil && s.authCfg.secureCookies {
+	if s.deployCfg != nil && s.deployCfg.secureCookies {
 		return true
 	}
 	return isHTTPS(r)

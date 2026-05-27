@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -531,6 +532,18 @@ func main() {
 	}
 
 	srv := server.New(database, stores, storedTakeoverDir, storedPort)
+
+	// Local-mode deploy config: publicURL is the local address, HMAC
+	// key is ephemeral (only needs to survive the registration window,
+	// not across restarts). Multi mode populates deployCfg inside
+	// SetAuthDeps below, so this block is local-only.
+	if runmode.Current() == runmode.ModeLocal {
+		var hmacKey [32]byte
+		if _, err := cryptorand.Read(hmacKey[:]); err != nil {
+			log.Fatalf("generate local HMAC key: %v", err)
+		}
+		srv.SetDeployConfig(browserURL, hmacKey)
+	}
 
 	// Multi-mode auth wiring. The verifier blocks on the initial JWKS
 	// fetch (see verify.NewVerifier docstring), so GoTrue must be

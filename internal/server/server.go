@@ -83,6 +83,10 @@ type Server struct {
 	onJiraChanged   func(orgID string) // Jira config changed — restart Jira poller only
 	scorerTrigger   func(orgID string) // invoked after non-poll task creation (e.g. carry-over) to kick the per-org scorer immediately
 
+	// deployCfg holds deployment-identity config (publicURL, HMAC key,
+	// secureCookies) populated in both local and multi mode.
+	deployCfg *deployConfig
+
 	// authDeps groups the multi-mode-only auth stack (JWKS verifier +
 	// session store + gotrue HTTP client). Nil in local mode; checked
 	// by middleware before any session lookup so local-mode boots
