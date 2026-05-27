@@ -344,8 +344,11 @@ func exchangeManifestCode(ctx context.Context, conversionURL string) (*manifestC
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	if out.ClientID == "" || out.PEM == "" {
-		return nil, fmt.Errorf("incomplete response from GitHub (missing client_id or pem)")
+	if strings.TrimSpace(out.ClientID) == "" ||
+		strings.TrimSpace(out.ClientSecret) == "" ||
+		strings.TrimSpace(out.WebhookSecret) == "" ||
+		strings.TrimSpace(out.PEM) == "" {
+		return nil, fmt.Errorf("incomplete response from GitHub (missing client_id, client_secret, webhook_secret, or pem)")
 	}
 	return &out, nil
 }
