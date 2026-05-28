@@ -76,8 +76,9 @@ func (s *gitHubAppsStore) CreateForOrg(ctx context.Context, app domain.OrgGitHub
 }
 
 func (s *gitHubAppsStore) ListInstallationsForOrg(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
+	out := make([]domain.OrgGitHubAppInstallation, 0)
 	if !isValidUUID(orgID) {
-		return nil, nil
+		return out, nil
 	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT installation_id, org_id, account_type, account_login, installed_at
@@ -90,7 +91,6 @@ func (s *gitHubAppsStore) ListInstallationsForOrg(ctx context.Context, orgID str
 	}
 	defer rows.Close()
 
-	var out []domain.OrgGitHubAppInstallation
 	for rows.Next() {
 		var inst domain.OrgGitHubAppInstallation
 		if err := rows.Scan(

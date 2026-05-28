@@ -76,7 +76,7 @@ func (s *gitHubAppsStore) ListInstallationsForOrg(ctx context.Context, orgID str
 	}
 	defer rows.Close()
 
-	var out []domain.OrgGitHubAppInstallation
+	out := make([]domain.OrgGitHubAppInstallation, 0)
 	for rows.Next() {
 		var inst domain.OrgGitHubAppInstallation
 		if err := rows.Scan(

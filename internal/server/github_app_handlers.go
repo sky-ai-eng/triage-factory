@@ -3,6 +3,7 @@ package server
 import (
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -82,7 +83,7 @@ func (s *Server) handleGitHubAppStatus(w http.ResponseWriter, r *http.Request) {
 		resp.App = &githubAppInfo{
 			AppID:                   app.AppID,
 			Slug:                    app.Slug,
-			RegisteredAt:            app.RegisteredAt.Format("2006-01-02T15:04:05Z07:00"),
+			RegisteredAt:            app.RegisteredAt.UTC().Format(time.RFC3339),
 			RegisteredByDisplayName: registeredByName,
 		}
 	}
@@ -91,7 +92,7 @@ func (s *Server) handleGitHubAppStatus(w http.ResponseWriter, r *http.Request) {
 			InstallationID: inst.InstallationID,
 			AccountType:    inst.AccountType,
 			AccountLogin:   inst.AccountLogin,
-			InstalledAt:    inst.InstalledAt.Format("2006-01-02T15:04:05Z07:00"),
+			InstalledAt:    inst.InstalledAt.UTC().Format(time.RFC3339),
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
