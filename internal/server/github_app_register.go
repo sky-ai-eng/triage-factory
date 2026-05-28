@@ -23,10 +23,9 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
-
-const defaultGitHubBaseURL = "https://github.com"
 
 // Sentinel errors returned by buildManifestAndState so callers can map
 // them to the right HTTP status without re-querying.
@@ -35,13 +34,6 @@ var (
 	errOrgNotFound       = errors.New("org not found")
 	errInvalidGitHubBase = errors.New("org github base URL is not a valid http(s) origin")
 )
-
-func resolveGitHubBase(orgBase string) string {
-	if orgBase != "" {
-		return strings.TrimRight(orgBase, "/")
-	}
-	return defaultGitHubBaseURL
-}
 
 // gitHubWebOrigin parses a GitHub web base URL and returns its origin
 // (scheme://host[:port]). The base comes from org settings and is thus
@@ -148,7 +140,7 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 		return "", "", "", errOrgNotFound
 	}
 
-	origin, ok := gitHubWebOrigin(resolveGitHubBase(orgSettings.GitHubBaseURL))
+	origin, ok := gitHubWebOrigin(ghclient.ResolveBaseURL(orgSettings.GitHubBaseURL))
 	if !ok {
 		return "", "", "", errInvalidGitHubBase
 	}
@@ -470,8 +462,8 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 		return
 	}
 
-	ghBase := resolveGitHubBase(orgSettings.GitHubBaseURL)
-	apiBase := githubAPIBase(ghBase)
+	ghBase := ghclient.ResolveBaseURL(orgSettings.GitHubBaseURL)
+	apiBase := ghclient.APIBase(ghBase)
 
 	conversionURL := apiBase + "/app-manifests/" + url.PathEscape(code) + "/conversions"
 	convResp, err := exchangeManifestCode(r.Context(), conversionURL)
@@ -592,18 +584,6 @@ func (s *Server) requireOrgAdmin(w http.ResponseWriter, r *http.Request) (orgID,
 		return
 	}
 	return rawOrgID, userID, true
-}
-
-// --- GitHub API URL derivation ---
-
-// githubAPIBase derives the REST API base from a user-facing GitHub
-// URL. Mirrors internal/github.NewClient's derivation.
-func githubAPIBase(base string) string {
-	base = strings.TrimRight(base, "/")
-	if base == "https://github.com" {
-		return "https://api.github.com"
-	}
-	return base + "/api/v3"
 }
 
 // --- manifest code exchange ---

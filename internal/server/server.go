@@ -76,6 +76,12 @@ type Server struct {
 	curator    *curator.Curator
 	ghClient   *ghclient.Client
 	jiraClient *jira.Client
+	// ghResolver picks the right GitHub credential (org App installation
+	// token → PAT) per request, given the org + target account. Replaces
+	// the raw NewClient(baseURL, pat) construction in the repo/dashboard
+	// handlers. Set once at boot via SetGitHubResolver; never nil in
+	// practice, but handlers guard for the pre-set window.
+	ghResolver ghclient.Resolver
 	// Change callbacks accept the orgID of the tenant whose integration
 	// creds just rotated, so the closure can re-resolve via SecretStore.
 	// Local mode always passes runmode.LocalDefaultOrgID; multi-mode
@@ -637,6 +643,12 @@ func (s *Server) SetScorerTrigger(fn func(orgID string)) {
 // SetGitHubClient sets the GitHub client for review approval submissions.
 func (s *Server) SetGitHubClient(client *ghclient.Client) {
 	s.ghClient = client
+}
+
+// SetGitHubResolver wires the per-request GitHub credential resolver used by
+// the repo + dashboard handlers. Set once at boot in main.go.
+func (s *Server) SetGitHubResolver(r ghclient.Resolver) {
+	s.ghResolver = r
 }
 
 // SetEventBus wires the in-process event bus so the GitHub webhook

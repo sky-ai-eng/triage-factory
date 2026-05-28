@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -117,36 +118,20 @@ func (s *Server) handleDashboardPRStatus(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
-	var (
-		creds  auth.Credentials
-		orgSet domain.OrgSettings
-	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var lerr error
-		creds, lerr = integrations.Load(r.Context(), tx.Secrets, orgID)
-		if lerr != nil {
-			return lerr
+
+	// parts[0] is the repo owner — the GitHub account the resolver uses to
+	// pick the org's App installation (tier 1) when one is installed there,
+	// falling back to the org PAT (tier 3).
+	client, err := s.ghResolver.ClientFor(r.Context(), orgID, parts[0])
+	if err != nil {
+		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub not configured"})
+			return
 		}
-		orgSet, lerr = tx.Orgs.GetSettings(r.Context(), orgID)
-		return lerr
-	}); err != nil {
-		// Real DB/vault/RLS failure — distinct from the "not
-		// configured" case below, which is a normal user state.
-		// internalError redacts in multi-mode + logs detail.
+		// Real DB/vault/RLS failure — internalError redacts in multi-mode + logs detail.
 		internalError(w, "dashboard", err)
 		return
 	}
-	if creds.GitHubPAT == "" {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub not configured"})
-		return
-	}
-	baseURL := orgSet.GitHubBaseURL
-	if baseURL == "" {
-		baseURL = creds.GitHubURL
-	}
-
-	client := ghclient.NewClient(baseURL, creds.GitHubPAT)
 	status, err := client.GetPRStatus(parts[0], parts[1], number)
 	if err != nil {
 		internalError(w, "dashboard", err)
@@ -189,24 +174,17 @@ func (s *Server) handleDashboardPRDraft(w http.ResponseWriter, r *http.Request) 
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
-	var (
-		creds  auth.Credentials
-		orgSet domain.OrgSettings
-	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
-		var lerr error
-		orgSet, lerr = tx.Orgs.GetSettings(r.Context(), orgID)
-		return lerr
-	}); err != nil {
+	// parts[0] is the repo owner — selects the org's App installation
+	// (tier 1) for that account, else the org PAT (tier 3).
+	client, err := s.ghResolver.ClientFor(r.Context(), orgID, parts[0])
+	if err != nil {
+		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub not configured"})
+			return
+		}
 		internalError(w, "dashboard", err)
 		return
 	}
-	baseURL := orgSet.GitHubBaseURL
-	if baseURL == "" {
-		baseURL = creds.GitHubURL
-	}
-	client := ghclient.NewClient(baseURL, creds.GitHubPAT)
 
 	if body.Draft {
 		err = client.ConvertPRToDraft(parts[0], parts[1], number)

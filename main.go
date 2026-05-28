@@ -541,6 +541,16 @@ func main() {
 
 	srv := server.New(database, stores, storedTakeoverDir, storedPort)
 
+	// GitHub credential resolver: per request, picks the org's own App
+	// installation token (tier 1) or its PAT (tier 3) for a target account.
+	// One process-local token cache backs it; the installation.deleted
+	// webhook drops dead entries through SetInstallationRemovedHook.
+	ghTokenCache := ghclient.NewMemoryTokenCache()
+	srv.SetGitHubResolver(ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, ghTokenCache))
+	srv.SetInstallationRemovedHook(func(orgID, installationID string) {
+		ghTokenCache.Invalidate(installationID)
+	})
+
 	// Local-mode deploy config: publicURL is the local address, HMAC
 	// key is ephemeral (only needs to survive the registration window,
 	// not across restarts). Multi mode populates deployCfg inside

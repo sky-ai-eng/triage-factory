@@ -107,6 +107,13 @@ func (s *gitHubAppsStore) ListInstallationsForOrg(ctx context.Context, orgID str
 	return out, rows.Err()
 }
 
+// ListInstallationsForOrgSystem is identical to ListInstallationsForOrg in
+// local mode — single conn, no RLS, no claims — but exists so the
+// credential resolver uses the same interface shape it would in multi mode.
+func (s *gitHubAppsStore) ListInstallationsForOrgSystem(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
+	return s.ListInstallationsForOrg(ctx, orgID)
+}
+
 // UpsertInstallation mirrors one installation, idempotent on installation_id.
 // installed_at is set only on insert (defaulting to CURRENT_TIMESTAMP for a
 // zero InstalledAt) and preserved on conflict; removed_at is cleared so a

@@ -44,13 +44,8 @@ type Client struct {
 // NewClient creates a GitHub API client. baseURL is the user-facing URL
 // (e.g. "https://github.com" or "https://github.example.com").
 func NewClient(baseURL, pat string) *Client {
-	baseURL = strings.TrimRight(baseURL, "/")
-	apiBase := baseURL + "/api/v3"
-	if baseURL == "https://github.com" {
-		apiBase = "https://api.github.com"
-	}
 	return &Client{
-		baseURL: apiBase,
+		baseURL: APIBase(baseURL),
 		pat:     pat,
 		http:    &http.Client{Timeout: 30 * time.Second},
 	}

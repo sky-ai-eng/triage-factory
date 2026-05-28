@@ -48,6 +48,16 @@ type GitHubAppsStore interface {
 	// Empty slice when the org has no App or no live installations.
 	ListInstallationsForOrg(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error)
 
+	// ListInstallationsForOrgSystem mirrors ListInstallationsForOrg but
+	// routes through the admin pool in Postgres — no JWT claims required.
+	// The credential resolver (internal/github) calls this to pick the
+	// right installation for a target account, and it runs from both the
+	// claims-bearing request path and the claims-free poller, so it must
+	// not depend on request.jwt.claims. Same active-only (removed_at IS
+	// NULL) contract and ordering as the app-pool variant. SQLite
+	// collapses to the same query.
+	ListInstallationsForOrgSystem(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error)
+
 	// UpsertInstallation mirrors one installation into
 	// org_github_app_installations. Idempotent on the (org_id,
 	// installation_id) composite key; ON CONFLICT it refreshes the

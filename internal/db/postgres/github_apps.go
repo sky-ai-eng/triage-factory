@@ -99,11 +99,24 @@ func (s *gitHubAppsStore) CreateForOrg(ctx context.Context, app domain.OrgGitHub
 }
 
 func (s *gitHubAppsStore) ListInstallationsForOrg(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
+	return listInstallations(ctx, s.app, orgID)
+}
+
+func (s *gitHubAppsStore) ListInstallationsForOrgSystem(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
+	return listInstallations(ctx, s.admin, orgID)
+}
+
+// listInstallations reads the org's active installations on the given
+// pool. ListInstallationsForOrg passes the app pool (claims-checked
+// request path); ListInstallationsForOrgSystem passes the admin pool
+// (claims-free resolver / poller path). The query is identical — only
+// the RLS identity context differs.
+func listInstallations(ctx context.Context, q queryer, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
 	out := make([]domain.OrgGitHubAppInstallation, 0)
 	if !isValidUUID(orgID) {
 		return out, nil
 	}
-	rows, err := s.app.QueryContext(ctx, `
+	rows, err := q.QueryContext(ctx, `
 		SELECT installation_id, org_id, account_type, account_login, installed_at
 		  FROM org_github_app_installations
 		 WHERE org_id = $1 AND removed_at IS NULL

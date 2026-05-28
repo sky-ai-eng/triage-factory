@@ -9,6 +9,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -128,7 +129,7 @@ func (s *Server) handleGitHubAppInstallURL(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	ghBase := resolveGitHubBase(orgSettings.GitHubBaseURL)
+	ghBase := ghclient.ResolveBaseURL(orgSettings.GitHubBaseURL)
 	writeJSON(w, http.StatusOK, map[string]string{
 		"url": ghBase + "/apps/" + app.Slug + "/installations/new",
 	})

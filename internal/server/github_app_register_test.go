@@ -636,25 +636,6 @@ func TestGitHubAppRegister_Callback_HooklessNoWebhookSecret(t *testing.T) {
 	}
 }
 
-// TestGitHubAPIBase verifies the URL derivation helper.
-func TestGitHubAPIBase(t *testing.T) {
-	tests := []struct {
-		base, want string
-	}{
-		{"https://github.com", "https://api.github.com"},
-		{"https://github.com/", "https://api.github.com"},
-		{"https://github.acme.com", "https://github.acme.com/api/v3"},
-		{"https://github.acme.com/", "https://github.acme.com/api/v3"},
-		{"http://localhost:3000", "http://localhost:3000/api/v3"},
-	}
-	for _, tt := range tests {
-		got := githubAPIBase(tt.base)
-		if got != tt.want {
-			t.Errorf("githubAPIBase(%q) = %q, want %q", tt.base, got, tt.want)
-		}
-	}
-}
-
 // TestSettingsRedirectPath pins the mode-aware post-callback redirect:
 // local mode lands on the flat /settings route, multi mode on the
 // org-scoped one. The #github-app fragment is appended by the caller.
