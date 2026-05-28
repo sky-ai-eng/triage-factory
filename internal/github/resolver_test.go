@@ -232,6 +232,48 @@ func TestResolver_TargetNoMatch_FallsToPAT(t *testing.T) {
 	}
 }
 
+var errVaultDown = errors.New("vault unavailable")
+
+// A secret-store read failure on the PAT (the last tier) must propagate as a
+// real error, not be misreported as ErrNoGitHubCredentials — the dashboard
+// maps the former to 500 and the latter to a "GitHub not configured" 503.
+func TestResolver_PATReadError_Propagates(t *testing.T) {
+	r := NewResolver(
+		&fakeSecrets{err: errVaultDown},
+		&fakeApps{app: nil},
+		&fakeOrgs{base: "https://github.com"}, // base resolves from settings, no secret read
+		&fakeAgents{},
+		nil,
+	)
+	_, err := r.ClientFor(context.Background(), "org-1", "acme")
+	if err == nil || errors.Is(err, ErrNoGitHubCredentials) {
+		t.Fatalf("want a propagated backend error, got %v", err)
+	}
+	if !errors.Is(err, errVaultDown) {
+		t.Errorf("error should wrap the secret-store failure, got %v", err)
+	}
+}
+
+// When org_settings has no base and the github_url secret read fails, the
+// resolver must NOT default to github.com (which would send a possibly-GHES
+// PAT to the wrong host) — it must propagate the error.
+func TestResolver_BaseReadError_Propagates(t *testing.T) {
+	r := NewResolver(
+		&fakeSecrets{err: errVaultDown},
+		&fakeApps{app: nil},
+		&fakeOrgs{base: ""}, // settings empty → resolver reads the github_url secret, which errors
+		&fakeAgents{},
+		nil,
+	)
+	_, err := r.ClientFor(context.Background(), "org-1", "acme")
+	if err == nil || errors.Is(err, ErrNoGitHubCredentials) {
+		t.Fatalf("want a propagated base-resolution error, got %v", err)
+	}
+	if !errors.Is(err, errVaultDown) {
+		t.Errorf("error should wrap the secret-store failure, got %v", err)
+	}
+}
+
 func TestResolver_NoCredentials(t *testing.T) {
 	r := NewResolver(
 		&fakeSecrets{vals: map[string]string{}}, // no PAT

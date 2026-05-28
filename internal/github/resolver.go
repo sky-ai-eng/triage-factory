@@ -62,9 +62,15 @@ func NewResolver(secrets db.SecretStore, apps db.GitHubAppsStore, orgs db.OrgsSt
 }
 
 func (r *resolver) ClientFor(ctx context.Context, orgID, target string) (*Client, error) {
-	base := r.githubBaseFor(ctx, orgID)
+	base, err := r.githubBaseFor(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
 
-	// Tier 1: the org's own GitHub App installation token.
+	// Tier 1: the org's own GitHub App installation token. Best-effort —
+	// any failure here (no App, no matching installation, mint/PEM error)
+	// falls through to PAT rather than propagating, because a working PAT is
+	// a legitimate fallback.
 	if client, ok := r.tier1AppClient(ctx, orgID, target, base); ok {
 		return client, nil
 	}
@@ -72,8 +78,14 @@ func (r *resolver) ClientFor(ctx context.Context, orgID, target string) (*Client
 	// Tier 2 (deployment-default shared App) is deferred to SKY-363; it
 	// slots in here between tier 1 and tier 3 without renumbering.
 
-	// Tier 3: PAT-borrow.
-	if client, ok := r.tier3PATClient(ctx, orgID, base); ok {
+	// Tier 3: PAT-borrow. A backend read error here propagates — there's no
+	// further fallback, so reporting "not configured" would misattribute a
+	// secret-store outage to user misconfiguration.
+	client, err := r.tier3PATClient(ctx, orgID, base)
+	if err != nil {
+		return nil, err
+	}
+	if client != nil {
 		return client, nil
 	}
 
@@ -85,21 +97,35 @@ func (r *resolver) ClientFor(ctx context.Context, orgID, target string) (*Client
 // org_settings.github_base_url first, then the github_url secret, then the
 // public default. The secret fallback is load-bearing for GHES orgs whose
 // base predates the org_settings mirror (common in local mode, where the
-// keychain holds the URL and the settings column can be empty) — without it
-// those orgs would be silently routed to public github.com with a GHES PAT.
-// A settings-read failure degrades to the same fallback chain rather than
-// failing the whole resolution.
-func (r *resolver) githubBaseFor(ctx context.Context, orgID string) string {
-	set, err := r.orgs.GetSettingsSystem(ctx, orgID)
-	if err != nil {
-		log.Printf("[gh-resolver] org=%s: read settings: %v (falling back to secret/default base)", orgID, err)
-	} else if set.GitHubBaseURL != "" {
-		return ResolveBaseURL(set.GitHubBaseURL)
+// keychain holds the URL and the settings column can be empty).
+//
+// Backend read failures propagate rather than getting papered over: if a
+// source that might hold a GHES host can't be read, we must NOT silently
+// default to github.com — pairing a real (possibly GHES) PAT with the public
+// host would route a tenant credential to the wrong server. Only when both
+// sources are definitively readable AND empty do we treat the org as public
+// github.com.
+func (r *resolver) githubBaseFor(ctx context.Context, orgID string) (string, error) {
+	set, setErr := r.orgs.GetSettingsSystem(ctx, orgID)
+	if setErr == nil && set.GitHubBaseURL != "" {
+		return ResolveBaseURL(set.GitHubBaseURL), nil
 	}
-	if secretURL, serr := r.secrets.GetSystem(ctx, orgID, integrations.KeyGitHubURL); serr == nil && secretURL != "" {
-		return ResolveBaseURL(secretURL)
+
+	secretURL, secErr := r.secrets.GetSystem(ctx, orgID, integrations.KeyGitHubURL)
+	if secErr != nil {
+		return "", fmt.Errorf("resolve github base for org %s: read %s secret: %w", orgID, integrations.KeyGitHubURL, secErr)
 	}
-	return DefaultBaseURL
+	if secretURL != "" {
+		return ResolveBaseURL(secretURL), nil
+	}
+
+	// Both sources read cleanly and the secret is empty. If the settings
+	// read itself failed, we can't be sure the org isn't GHES — refuse to
+	// guess github.com.
+	if setErr != nil {
+		return "", fmt.Errorf("resolve github base for org %s: read settings: %w", orgID, setErr)
+	}
+	return DefaultBaseURL, nil
 }
 
 func (r *resolver) tier1AppClient(ctx context.Context, orgID, target, base string) (*Client, bool) {
@@ -201,17 +227,20 @@ func (r *resolver) installationToken(ctx context.Context, orgID string, app *dom
 	return tok, nil
 }
 
-func (r *resolver) tier3PATClient(ctx context.Context, orgID, base string) (*Client, bool) {
+// tier3PATClient builds a PAT-backed client, or (nil, nil) when the org has
+// no PAT configured (a genuine "not configured" → caller surfaces
+// ErrNoGitHubCredentials). A secret-store read error is returned as an error
+// so a transient Vault/DB outage isn't misreported as missing config.
+func (r *resolver) tier3PATClient(ctx context.Context, orgID, base string) (*Client, error) {
 	pat, err := r.secrets.GetSystem(ctx, orgID, integrations.KeyGitHubPAT)
 	if err != nil {
-		log.Printf("[gh-resolver] org=%s: read PAT: %v", orgID, err)
-		return nil, false
+		return nil, fmt.Errorf("resolve github pat for org %s: %w", orgID, err)
 	}
 	if pat == "" {
-		return nil, false
+		return nil, nil
 	}
 	log.Printf("[gh-resolver] org=%s → tier3 PAT user=%s", orgID, r.patBorrowUser(ctx, orgID))
-	return NewClient(base, pat), true
+	return NewClient(base, pat), nil
 }
 
 // patBorrowUser is a human-readable identity for the tier-3 log line — the
