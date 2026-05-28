@@ -203,7 +203,8 @@ type Stores struct {
 	// GitHubApps owns the org_github_apps table — per-org GitHub
 	// App registrations created through the manifest flow. App pool
 	// in Postgres (RLS gates reads by org membership, writes by org
-	// admin). SQLite returns nil/ErrNotApplicableInLocal.
+	// admin). SQLite is also wired in local mode and reads/writes
+	// org_github_apps for the same manifest-flow path.
 	GitHubApps GitHubAppsStore
 
 	// Tx is the transaction runner — handlers that need atomic
