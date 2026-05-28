@@ -61,13 +61,27 @@ func gitHubWebOrigin(base string) (string, bool) {
 	return u.Scheme + "://" + u.Host, true
 }
 
+// nonPublicPrefixes are address ranges that are not reachable over the
+// public Internet but that IsGlobalUnicast / IsPrivate don't already
+// exclude: carrier-grade NAT, documentation/test ranges, benchmarking,
+// and the reserved-for-future block.
+var nonPublicPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("100.64.0.0/10"),   // RFC 6598 carrier-grade NAT / shared
+	netip.MustParsePrefix("192.0.2.0/24"),    // RFC 5737 TEST-NET-1
+	netip.MustParsePrefix("198.51.100.0/24"), // RFC 5737 TEST-NET-2
+	netip.MustParsePrefix("203.0.113.0/24"),  // RFC 5737 TEST-NET-3
+	netip.MustParsePrefix("198.18.0.0/15"),   // RFC 2544 benchmarking
+	netip.MustParsePrefix("240.0.0.0/4"),     // RFC 1112 reserved (future use)
+	netip.MustParsePrefix("2001:db8::/32"),   // RFC 3849 documentation
+}
+
 // isPubliclyReachable reports whether rawURL's host could be reached from
-// GitHub's servers over the public Internet. It returns false for
-// "localhost", loopback (127.0.0.0/8, ::1), the unspecified address
-// (0.0.0.0, ::), RFC 1918 / unique-local private ranges, and link-local
-// addresses; true for a public DNS name or public IP. GitHub validates
-// hook_attributes.url reachability when converting a manifest, so an
-// unreachable host means the manifest must omit the hook block.
+// GitHub's servers over the public Internet. A DNS name is assumed to
+// resolve publicly; an IP literal must be globally-routable unicast and
+// outside the private, carrier-grade-NAT, documentation, benchmark, and
+// reserved ranges. GitHub validates hook_attributes.url reachability when
+// converting a manifest, so an unreachable host means the manifest must
+// omit the hook block.
 func isPubliclyReachable(rawURL string) bool {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
@@ -85,9 +99,16 @@ func isPubliclyReachable(rawURL string) bool {
 		// Not an IP literal — a DNS name we assume resolves publicly.
 		return true
 	}
-	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsPrivate() ||
-		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+	ip = ip.Unmap()
+	// Global unicast rejects loopback, unspecified, multicast, and
+	// link-local in one predicate; IsPrivate adds RFC 1918 / unique-local.
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() {
 		return false
+	}
+	for _, p := range nonPublicPrefixes {
+		if p.Contains(ip) {
+			return false
+		}
 	}
 	return true
 }

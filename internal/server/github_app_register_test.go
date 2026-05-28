@@ -1,8 +1,10 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -147,10 +149,19 @@ func TestIsPubliclyReachable(t *testing.T) {
 		{"http://192.168.1.10", false},
 		{"http://172.16.4.2", false},
 		{"http://169.254.10.1", false},
+		{"http://100.64.0.1:3000", false}, // carrier-grade NAT
+		{"http://192.0.2.5", false},       // TEST-NET-1
+		{"http://198.51.100.7", false},    // TEST-NET-2
+		{"http://203.0.113.9", false},     // TEST-NET-3
+		{"http://198.18.0.1", false},      // benchmarking
+		{"http://240.0.0.1", false},       // reserved
+		{"http://[2001:db8::1]", false},   // IPv6 documentation
+		{"http://[ff02::1]", false},       // IPv6 multicast
 		{"https://app.triagefactory.com", true},
 		{"https://git.corp.example.com", true},
 		{"https://github.acme.com:8443", true},
 		{"https://8.8.8.8", true},
+		{"https://[2606:4700:4700::1111]", true}, // public IPv6
 		{"", false},
 	}
 	for _, tc := range cases {
@@ -163,7 +174,9 @@ func TestIsPubliclyReachable(t *testing.T) {
 // TestGitHubAppRegister_LocalManifest_HooklessAndNoInstallationEvents
 // pins SKY-362's manifest fixes for a non-public (localhost) deployment:
 // no hook_attributes block, and a default_events list free of the
-// App-lifecycle installation events GitHub rejects.
+// App-lifecycle installation events GitHub rejects. Asserts against the
+// decoded manifest JSON rather than the HTML-escaped page body so a
+// reintroduced "installation" event can't slip past the check.
 func TestGitHubAppRegister_LocalManifest_HooklessAndNoInstallationEvents(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -173,22 +186,36 @@ func TestGitHubAppRegister_LocalManifest_HooklessAndNoInstallationEvents(t *test
 	}
 	s.SetDeployConfig("http://localhost:3000", key)
 
-	rec := doJSON(t, s, "GET",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/register/launch?owner_type=user&owner_login=testuser", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("launch status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	_, manifestJSON, _, err := s.buildManifestAndState(context.Background(),
+		runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "user", "testuser")
+	if err != nil {
+		t.Fatalf("buildManifestAndState: %v", err)
 	}
 
-	body := rec.Body.String()
-	if strings.Contains(body, "hook_attributes") {
-		t.Errorf("localhost manifest must omit hook_attributes: %s", body)
+	var m map[string]any
+	if err := json.Unmarshal([]byte(manifestJSON), &m); err != nil {
+		t.Fatalf("unmarshal manifest: %v", err)
 	}
-	if strings.Contains(body, "installation_repositories") || strings.Contains(body, `\"installation\"`) {
-		t.Errorf("manifest must not subscribe to installation events: %s", body)
+
+	if _, ok := m["hook_attributes"]; ok {
+		t.Errorf("localhost manifest must omit hook_attributes: %s", manifestJSON)
 	}
-	// The valid events must still be present.
-	if !strings.Contains(body, "pull_request") || !strings.Contains(body, "check_suite") {
-		t.Errorf("manifest missing expected default_events: %s", body)
+
+	rawEvents, ok := m["default_events"].([]any)
+	if !ok {
+		t.Fatalf("default_events missing or not a list: %s", manifestJSON)
+	}
+	events := make(map[string]bool, len(rawEvents))
+	for _, e := range rawEvents {
+		events[e.(string)] = true
+	}
+	if events["installation"] || events["installation_repositories"] {
+		t.Errorf("manifest must not subscribe to installation events: %v", rawEvents)
+	}
+	for _, want := range []string{"pull_request", "check_suite", "issue_comment"} {
+		if !events[want] {
+			t.Errorf("manifest missing expected default_event %q: %v", want, rawEvents)
+		}
 	}
 }
 
