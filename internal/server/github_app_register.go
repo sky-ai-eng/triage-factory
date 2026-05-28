@@ -11,8 +11,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -20,6 +22,15 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
+
+const defaultGitHubBaseURL = "https://github.com"
+
+func resolveGitHubBase(orgBase string) string {
+	if orgBase != "" {
+		return strings.TrimRight(orgBase, "/")
+	}
+	return defaultGitHubBaseURL
+}
 
 // handleGitHubAppRegisterStart generates the manifest JSON, a signed
 // state token, and the manifest POST URL for the frontend to submit.
@@ -83,11 +94,7 @@ func (s *Server) handleGitHubAppRegisterStart(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	ghBase := orgSettings.GitHubBaseURL
-	if ghBase == "" {
-		ghBase = "https://github.com"
-	}
-	ghBase = strings.TrimRight(ghBase, "/")
+	ghBase := resolveGitHubBase(orgSettings.GitHubBaseURL)
 
 	publicURL := s.deployCfg.publicURL
 
@@ -95,9 +102,8 @@ func (s *Server) handleGitHubAppRegisterStart(w http.ResponseWriter, r *http.Req
 	if org.Name != "" {
 		appName += " (" + org.Name + ")"
 	}
-	// GitHub App names max 34 chars.
-	if len(appName) > 34 {
-		appName = appName[:34]
+	if utf8.RuneCountInString(appName) > 34 {
+		appName = string([]rune(appName)[:34])
 	}
 
 	manifest := map[string]any{
@@ -219,13 +225,10 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 		return
 	}
 
-	ghBase := orgSettings.GitHubBaseURL
-	if ghBase == "" {
-		ghBase = "https://github.com"
-	}
+	ghBase := resolveGitHubBase(orgSettings.GitHubBaseURL)
 	apiBase := githubAPIBase(ghBase)
 
-	conversionURL := apiBase + "/app-manifests/" + code + "/conversions"
+	conversionURL := apiBase + "/app-manifests/" + url.PathEscape(code) + "/conversions"
 	convResp, err := exchangeManifestCode(r.Context(), conversionURL)
 	if err != nil {
 		log.Printf("[github-app] manifest exchange: %v", err)
@@ -237,6 +240,8 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 	clientSecretKey := "github_app_" + appIDStr + "_client_secret"
 	pemKey := "github_app_" + appIDStr + "_pem"
 	webhookSecretKey := "github_app_" + appIDStr + "_webhook_secret"
+
+	secretKeys := []string{clientSecretKey, pemKey, webhookSecretKey}
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		if err := tx.GitHubApps.CreateForOrg(r.Context(), domain.OrgGitHubApp{
@@ -262,6 +267,15 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 		}
 		return nil
 	}); err != nil {
+		// In local mode SecretStore writes go to the OS keychain
+		// outside the SQLite tx. If the tx failed, clean up any
+		// keychain entries that landed before the error so we don't
+		// leave orphan credentials.
+		if runmode.Current() == runmode.ModeLocal {
+			for _, k := range secretKeys {
+				_, _ = s.secrets.Delete(r.Context(), orgID, k)
+			}
+		}
 		var exists *db.ErrGitHubAppExists
 		if errors.As(err, &exists) {
 			writeJSON(w, http.StatusConflict, map[string]string{
