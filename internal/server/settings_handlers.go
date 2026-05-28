@@ -314,14 +314,14 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 
 type orgSettingsUpdate struct {
 	GitHubBaseURL       *string `json:"github_base_url"`
-	GitHubPAT           string  `json:"github_pat,omitempty"`
+	GitHubPAT           *string `json:"github_pat"`
 	GitHubPollInterval  string  `json:"github_poll_interval,omitempty"`
 	GitHubCloneProtocol string  `json:"github_clone_protocol,omitempty"`
 	JiraBaseURL         *string `json:"jira_base_url"`
-	JiraPAT             string  `json:"jira_pat,omitempty"`
+	JiraPAT             *string `json:"jira_pat"`
 	JiraPollInterval    string  `json:"jira_poll_interval,omitempty"`
 	MaxLLMModelTier     string  `json:"max_llm_model_tier,omitempty"`
-	AnthropicAPIKey     string  `json:"anthropic_api_key,omitempty"`
+	AnthropicAPIKey     *string `json:"anthropic_api_key"`
 }
 
 func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
@@ -386,49 +386,57 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 		orgSet.MaxLLMModelTier = req.MaxLLMModelTier
 	}
 
-	// GitHub PAT: validate, persist identity bridge, store credential.
-	if req.GitHubPAT != "" {
-		url := creds.GitHubURL
-		if url == "" {
-			badRequest(w, "GitHub URL is required before setting a PAT")
-			return
-		}
-		ghUser, err := auth.ValidateGitHub(url, req.GitHubPAT)
-		if err != nil {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-				"error": "GitHub: " + err.Error(),
-				"field": "github_pat",
-			})
-			return
-		}
-		creds.GitHubPAT = req.GitHubPAT
-		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-			return tx.Users.SetGitHubUsername(r.Context(), userID, ghUser.Login)
-		}); err != nil {
-			log.Printf("[settings/org] failed to persist users.github_username: %v", err)
+	// GitHub PAT: nil = don't touch, "" = clear, non-empty = validate + set.
+	if req.GitHubPAT != nil {
+		if *req.GitHubPAT == "" {
+			creds.GitHubPAT = ""
+		} else {
+			url := creds.GitHubURL
+			if url == "" {
+				badRequest(w, "GitHub URL is required before setting a PAT")
+				return
+			}
+			ghUser, err := auth.ValidateGitHub(url, *req.GitHubPAT)
+			if err != nil {
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+					"error": "GitHub: " + err.Error(),
+					"field": "github_pat",
+				})
+				return
+			}
+			creds.GitHubPAT = *req.GitHubPAT
+			if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+				return tx.Users.SetGitHubUsername(r.Context(), userID, ghUser.Login)
+			}); err != nil {
+				log.Printf("[settings/org] failed to persist users.github_username: %v", err)
+			}
 		}
 	}
 
-	// Jira PAT: validate, persist identity bridge, store credential.
-	if req.JiraPAT != "" {
-		url := creds.JiraURL
-		if url == "" {
-			badRequest(w, "Jira URL is required before setting a PAT")
-			return
-		}
-		jiraUser, err := auth.ValidateJira(url, req.JiraPAT)
-		if err != nil {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-				"error": "Jira: " + err.Error(),
-				"field": "jira_pat",
-			})
-			return
-		}
-		creds.JiraPAT = req.JiraPAT
-		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-			return tx.Users.SetJiraIdentity(r.Context(), userID, jiraUser.StableID(), jiraUser.DisplayName)
-		}); err != nil {
-			log.Printf("[settings/org] failed to persist users.jira_identity: %v", err)
+	// Jira PAT: nil = don't touch, "" = clear, non-empty = validate + set.
+	if req.JiraPAT != nil {
+		if *req.JiraPAT == "" {
+			creds.JiraPAT = ""
+		} else {
+			url := creds.JiraURL
+			if url == "" {
+				badRequest(w, "Jira URL is required before setting a PAT")
+				return
+			}
+			jiraUser, err := auth.ValidateJira(url, *req.JiraPAT)
+			if err != nil {
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+					"error": "Jira: " + err.Error(),
+					"field": "jira_pat",
+				})
+				return
+			}
+			creds.JiraPAT = *req.JiraPAT
+			if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+				return tx.Users.SetJiraIdentity(r.Context(), userID, jiraUser.StableID(), jiraUser.DisplayName)
+			}); err != nil {
+				log.Printf("[settings/org] failed to persist users.jira_identity: %v", err)
+			}
 		}
 	}
 
@@ -451,27 +459,42 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// Clear SecretStore entries when the caller explicitly empties a
-		// URL. integrations.Save skips empty strings, so a bare Save
-		// after zeroing creds.GitHubURL would leave the old URL in the
-		// store while org_settings.github_base_url is already "".
+		// field. integrations.Save skips empty strings, so zeroing a
+		// creds field without an explicit clear would leave the old
+		// value in the store.
 		if req.GitHubBaseURL != nil && *req.GitHubBaseURL == "" {
 			if err := integrations.ClearGitHub(r.Context(), tx.Secrets, orgID); err != nil {
 				return fmt.Errorf("clear GitHub secrets: %w", err)
+			}
+		} else if req.GitHubPAT != nil && *req.GitHubPAT == "" {
+			if _, err := tx.Secrets.Delete(r.Context(), orgID, integrations.KeyGitHubPAT); err != nil {
+				return fmt.Errorf("clear GitHub PAT: %w", err)
 			}
 		}
 		if req.JiraBaseURL != nil && *req.JiraBaseURL == "" {
 			if err := integrations.ClearJira(r.Context(), tx.Secrets, orgID); err != nil {
 				return fmt.Errorf("clear Jira secrets: %w", err)
 			}
+		} else if req.JiraPAT != nil && *req.JiraPAT == "" {
+			if _, err := tx.Secrets.Delete(r.Context(), orgID, integrations.KeyJiraPAT); err != nil {
+				return fmt.Errorf("clear Jira PAT: %w", err)
+			}
 		}
 		if err := integrations.Save(r.Context(), tx.Secrets, orgID, creds); err != nil {
 			return fmt.Errorf("save credentials: %w", err)
 		}
-		if req.AnthropicAPIKey != "" {
-			if err := tx.Secrets.Put(r.Context(), orgID, "anthropic_api_key", req.AnthropicAPIKey, "Org's Anthropic API key"); err != nil {
-				return fmt.Errorf("save Anthropic key: %w", err)
+		if req.AnthropicAPIKey != nil {
+			if *req.AnthropicAPIKey == "" {
+				if _, err := tx.Secrets.Delete(r.Context(), orgID, "anthropic_api_key"); err != nil {
+					return fmt.Errorf("clear Anthropic key: %w", err)
+				}
+				orgSet.AnthropicAPIKeyRef = ""
+			} else {
+				if err := tx.Secrets.Put(r.Context(), orgID, "anthropic_api_key", *req.AnthropicAPIKey, "Org's Anthropic API key"); err != nil {
+					return fmt.Errorf("save Anthropic key: %w", err)
+				}
+				orgSet.AnthropicAPIKeyRef = "anthropic_api_key"
 			}
-			orgSet.AnthropicAPIKeyRef = "anthropic_api_key"
 		}
 		return tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet)
 	}); err != nil {
@@ -482,11 +505,11 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 	ghChanged := orgSet.GitHubBaseURL != prevOrgSet.GitHubBaseURL ||
 		orgSet.GitHubPollInterval != prevOrgSet.GitHubPollInterval ||
 		orgSet.GitHubCloneProtocol != prevOrgSet.GitHubCloneProtocol ||
-		req.GitHubPAT != ""
+		req.GitHubPAT != nil
 
 	jiraChanged := orgSet.JiraBaseURL != prevOrgSet.JiraBaseURL ||
 		orgSet.JiraPollInterval != prevOrgSet.JiraPollInterval ||
-		req.JiraPAT != ""
+		req.JiraPAT != nil
 
 	if ghChanged && s.onGitHubChanged != nil {
 		s.MarkJiraRestarted()
