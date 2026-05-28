@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"crypto/rand"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -598,15 +598,18 @@ func TestGitHubAppRegister_Callback_HooklessNoWebhookSecret(t *testing.T) {
 	}
 
 	// No Vault entry should exist under the conventional webhook key.
-	var val sql.NullString
-	if err := rig.h.AdminDB.QueryRow(
-		`SELECT public.vault_get_org_secret($1::uuid, $2::text)`,
-		orgA.String(), "github_app_67890_webhook_secret",
-	).Scan(&val); err != nil {
-		t.Fatalf("vault_get: %v", err)
+	// Read through the org-scoped tx so the Vault wrapper sees the org
+	// context its RLS requires; a missing secret comes back as "".
+	var webhookSecret string
+	if err := rig.srv.tx.WithTx(context.Background(), orgA.String(), alice.String(), func(tx db.TxStores) error {
+		var e error
+		webhookSecret, e = tx.Secrets.Get(context.Background(), orgA.String(), "github_app_67890_webhook_secret")
+		return e
+	}); err != nil {
+		t.Fatalf("read webhook secret: %v", err)
 	}
-	if val.Valid {
-		t.Errorf("expected no Vault entry for the webhook secret, got %q", val.String)
+	if webhookSecret != "" {
+		t.Errorf("expected no Vault entry for the webhook secret, got %q", webhookSecret)
 	}
 }
 
