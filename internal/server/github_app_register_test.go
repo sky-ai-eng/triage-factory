@@ -66,6 +66,65 @@ func TestGitHubAppRegister_LocalMode_WithDeployConfig_Works(t *testing.T) {
 	if !strings.Contains(body, `name="manifest"`) {
 		t.Errorf("bounce page missing manifest field: %s", body)
 	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control=%q, want no-store (page carries signed state)", cc)
+	}
+}
+
+// TestGitHubAppRegister_Launch_ErrorPageOnBadInput verifies a launch
+// failure renders a graceful HTML page (with a link back to Settings)
+// rather than a JSON dead-end — important because the user arrives via a
+// top-level navigation, not a fetch.
+func TestGitHubAppRegister_Launch_ErrorPageOnBadInput(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	var key [32]byte
+	if _, err := rand.Read(key[:]); err != nil {
+		t.Fatalf("seed key: %v", err)
+	}
+	s.SetDeployConfig("http://localhost:3000", key)
+
+	// owner_login omitted.
+	rec := doJSON(t, s, "GET",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/register/launch?owner_type=user", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("Content-Type=%q, want an HTML error page", ct)
+	}
+	if !strings.Contains(rec.Body.String(), "Back to Settings") {
+		t.Errorf("error page missing settings link: %s", rec.Body.String())
+	}
+}
+
+// TestGitHubWebOrigin pins the validation/normalization of the
+// admin-controlled GitHub base URL before it's concatenated into a CSP
+// header: only http(s) origins pass, paths/whitespace are stripped, and
+// malformed input is rejected (so it can't distort the CSP).
+func TestGitHubWebOrigin(t *testing.T) {
+	cases := []struct {
+		in     string
+		want   string
+		wantOK bool
+	}{
+		{"https://github.com", "https://github.com", true},
+		{"https://git.corp.example.com", "https://git.corp.example.com", true},
+		{"https://git.corp.example.com:8443", "https://git.corp.example.com:8443", true},
+		{"https://github.com/path/ignored", "https://github.com", true},
+		{"  https://github.com  ", "https://github.com", true},
+		{"http://localhost:3000", "http://localhost:3000", true},
+		{"ftp://github.com", "", false},
+		{"github.com", "", false},
+		{"", "", false},
+		{"https://bad host", "", false},
+	}
+	for _, tc := range cases {
+		got, ok := gitHubWebOrigin(tc.in)
+		if ok != tc.wantOK || got != tc.want {
+			t.Errorf("gitHubWebOrigin(%q) = (%q, %v), want (%q, %v)", tc.in, got, ok, tc.want, tc.wantOK)
+		}
+	}
 }
 
 // TestGitHubAppRegister_StateToken_RoundTrip verifies the HMAC-signed

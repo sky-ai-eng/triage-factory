@@ -30,8 +30,9 @@ const defaultGitHubBaseURL = "https://github.com"
 // Sentinel errors returned by buildManifestAndState so callers can map
 // them to the right HTTP status without re-querying.
 var (
-	errOrgAppExists = errors.New("org already has a GitHub App registered")
-	errOrgNotFound  = errors.New("org not found")
+	errOrgAppExists      = errors.New("org already has a GitHub App registered")
+	errOrgNotFound       = errors.New("org not found")
+	errInvalidGitHubBase = errors.New("org github base URL is not a valid http(s) origin")
 )
 
 func resolveGitHubBase(orgBase string) string {
@@ -41,15 +42,34 @@ func resolveGitHubBase(orgBase string) string {
 	return defaultGitHubBaseURL
 }
 
-// buildManifestAndState assembles the GitHub App manifest JSON, an
-// HMAC-signed state token, and the manifest POST URL (with the state in
-// its query string) for the given org + target owner. It also returns
-// the org's GitHub web host so callers can scope a per-response CSP to
-// it. Org-admin gating is the caller's responsibility.
+// gitHubWebOrigin parses a GitHub web base URL and returns its origin
+// (scheme://host[:port]). The base comes from org settings and is thus
+// admin-controlled, so it's validated before being concatenated into a
+// CSP header / form action: the scheme must be http/https and a host must
+// be present. Stripping to the origin also drops any path, query, or
+// fragment that could distort CSP parsing. Returns (origin, true) on
+// success, ("", false) on a malformed base.
+func gitHubWebOrigin(base string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(base))
+	if err != nil {
+		return "", false
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", false
+	}
+	return u.Scheme + "://" + u.Host, true
+}
+
+// buildManifestAndState assembles the GitHub App manifest JSON and the
+// manifest POST URL (with an HMAC-signed state token in its query string)
+// for the given org + target owner. It also returns the org's validated
+// GitHub web origin so callers can scope a per-response CSP to it.
+// Org-admin gating is the caller's responsibility.
 //
-// Returns errOrgAppExists if the org already has an App registered, or
-// errOrgNotFound if the org row is missing.
-func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, ownerType, ownerLogin string) (manifestPostURL, manifestJSON, state, ghWebHost string, err error) {
+// Returns errOrgAppExists if the org already has an App registered,
+// errOrgNotFound if the org row is missing, or errInvalidGitHubBase if
+// the org's configured GitHub base URL isn't a valid http(s) origin.
+func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, ownerType, ownerLogin string) (manifestPostURL, manifestJSON, ghWebOrigin string, err error) {
 	var existing *domain.OrgGitHubApp
 	var org *domain.Org
 	var orgSettings domain.OrgSettings
@@ -66,16 +86,20 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 		orgSettings, lerr = tx.Orgs.GetSettings(ctx, orgID)
 		return lerr
 	}); err != nil {
-		return "", "", "", "", err
+		return "", "", "", err
 	}
 	if existing != nil {
-		return "", "", "", "", errOrgAppExists
+		return "", "", "", errOrgAppExists
 	}
 	if org == nil {
-		return "", "", "", "", errOrgNotFound
+		return "", "", "", errOrgNotFound
 	}
 
-	ghWebHost = resolveGitHubBase(orgSettings.GitHubBaseURL)
+	origin, ok := gitHubWebOrigin(resolveGitHubBase(orgSettings.GitHubBaseURL))
+	if !ok {
+		return "", "", "", errInvalidGitHubBase
+	}
+	ghWebOrigin = origin
 	publicURL := s.deployCfg.publicURL
 
 	appName := "Triage Factory"
@@ -119,7 +143,7 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 
 	mj, err := json.Marshal(manifest)
 	if err != nil {
-		return "", "", "", "", fmt.Errorf("marshal manifest: %w", err)
+		return "", "", "", fmt.Errorf("marshal manifest: %w", err)
 	}
 
 	st := appRegisterState{
@@ -128,19 +152,19 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 	}
 	signed, err := st.sign(s.deployCfg.hmacKey)
 	if err != nil {
-		return "", "", "", "", fmt.Errorf("sign state: %w", err)
+		return "", "", "", fmt.Errorf("sign state: %w", err)
 	}
 
 	var base string
 	switch ownerType {
 	case "org":
-		base = ghWebHost + "/organizations/" + url.PathEscape(ownerLogin) + "/settings/apps/new"
+		base = origin + "/organizations/" + url.PathEscape(ownerLogin) + "/settings/apps/new"
 	default:
-		base = ghWebHost + "/settings/apps/new"
+		base = origin + "/settings/apps/new"
 	}
 	manifestPostURL = base + "?state=" + url.QueryEscape(signed)
 
-	return manifestPostURL, string(mj), signed, ghWebHost, nil
+	return manifestPostURL, string(mj), ghWebOrigin, nil
 }
 
 // registerLaunchData feeds the bounce-page template. ManifestPostURL is
@@ -206,34 +230,45 @@ func (s *Server) handleGitHubAppRegisterLaunch(w http.ResponseWriter, r *http.Re
 	ownerType := r.URL.Query().Get("owner_type")
 	ownerLogin := r.URL.Query().Get("owner_login")
 	if ownerType == "" || ownerLogin == "" {
-		badRequest(w, "owner_type and owner_login are required")
+		s.renderLaunchError(w, http.StatusBadRequest, orgID,
+			"Choose a GitHub account or organization before continuing.")
 		return
 	}
 	if ownerType != "user" && ownerType != "org" {
-		badRequest(w, "owner_type must be \"user\" or \"org\"")
+		s.renderLaunchError(w, http.StatusBadRequest, orgID, "Invalid GitHub owner type.")
 		return
 	}
 
-	manifestPostURL, manifestJSON, _, ghWebHost, err := s.buildManifestAndState(r.Context(), orgID, userID, ownerType, ownerLogin)
+	manifestPostURL, manifestJSON, ghWebOrigin, err := s.buildManifestAndState(r.Context(), orgID, userID, ownerType, ownerLogin)
 	if err != nil {
 		switch {
 		case errors.Is(err, errOrgAppExists):
-			http.Error(w, "org already has a GitHub App registered; remove it first", http.StatusConflict)
+			s.renderLaunchError(w, http.StatusConflict, orgID,
+				"This workspace already has a GitHub App registered. Remove it before registering another.")
 		case errors.Is(err, errOrgNotFound):
-			notFound(w, "org")
+			s.renderLaunchError(w, http.StatusNotFound, orgID, "Workspace not found.")
+		case errors.Is(err, errInvalidGitHubBase):
+			log.Printf("[github-app] launch: invalid github base url for org %s", orgID)
+			s.renderLaunchError(w, http.StatusInternalServerError, orgID,
+				"The configured GitHub base URL is invalid. Update it in Workspace Settings.")
 		default:
-			internalError(w, "github-app", err)
+			log.Printf("[github-app] launch: %v", err)
+			s.renderLaunchError(w, http.StatusInternalServerError, orgID,
+				"Something went wrong preparing the registration. Please try again.")
 		}
 		return
 	}
 
-	// Per-response CSP scoped to this org's GitHub host. form-action is
-	// the only host the form may submit to; no script-src means no
-	// scripts run; base-uri 'none' blocks <base> injection. style-src
-	// 'unsafe-inline' covers the inline button styling above.
+	// Per-response CSP scoped to this org's GitHub origin. form-action is
+	// the only origin the form may submit to; no script-src means no
+	// scripts run; base-uri 'none' blocks <base> injection; frame-ancestors
+	// 'none' forbids embedding; style-src 'unsafe-inline' covers the inline
+	// button styling. Cache-Control: no-store because the page embeds a
+	// short-lived signed state token.
 	w.Header().Set("Content-Security-Policy",
-		"default-src 'none'; form-action "+ghWebHost+"; style-src 'unsafe-inline'; base-uri 'none'")
+		"default-src 'none'; form-action "+ghWebOrigin+"; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 
 	if err := registerLaunchTemplate.Execute(w, registerLaunchData{
 		ManifestPostURL: manifestPostURL,
@@ -241,6 +276,57 @@ func (s *Server) handleGitHubAppRegisterLaunch(w http.ResponseWriter, r *http.Re
 		OwnerLogin:      ownerLogin,
 	}); err != nil {
 		log.Printf("[github-app] render launch page: %v", err)
+	}
+}
+
+// registerLaunchErrorData feeds the launch-failure page: a human message
+// and a link back to the Settings GitHub panel.
+type registerLaunchErrorData struct {
+	Message     string
+	SettingsURL string
+}
+
+// registerLaunchErrorTemplate renders a small failure page. The launch
+// endpoint is reached via a top-level navigation, so a JSON body would
+// dead-end the tab; this states what went wrong and links back to
+// Settings. No form on the page, so its CSP needs no form-action.
+var registerLaunchErrorTemplate = template.Must(template.New("ghapp-launch-error").Parse(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GitHub App registration</title>
+<style>
+body{font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#e6edf3;margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{max-width:28rem;padding:2rem;text-align:center}
+h1{font-size:1.25rem;margin:0 0 .5rem}
+p{color:#8b949e;line-height:1.5;margin:0 0 1rem}
+a{color:#58a6ff;font-weight:600;text-decoration:none}
+a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>Couldn't start registration</h1>
+<p>{{.Message}}</p>
+<p><a href="{{.SettingsURL}}">&larr; Back to Settings</a></p>
+</div>
+</body>
+</html>`))
+
+// renderLaunchError writes the failure page with a per-response CSP and
+// no-store. It overrides the global CSP the security-headers wrapper set.
+func (s *Server) renderLaunchError(w http.ResponseWriter, status int, orgID, msg string) {
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	if err := registerLaunchErrorTemplate.Execute(w, registerLaunchErrorData{
+		Message:     msg,
+		SettingsURL: settingsRedirectPath(orgID) + "#github-app",
+	}); err != nil {
+		log.Printf("[github-app] render launch error page: %v", err)
 	}
 }
 
