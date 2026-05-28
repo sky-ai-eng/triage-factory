@@ -141,25 +141,17 @@ func TestJiraProjectKeyRe(t *testing.T) {
 	}
 }
 
-// --- Handler tests: POST /api/settings rejects invalid rules ---------------
+// --- Handler tests: POST /api/settings/team/default rejects invalid rules ---
 //
 // These confirm the wire-up — validation errors on any of the three rules
 // propagate to a 400 before any persistence fires. Happy-path round-trip
 // isn't tested here because it'd write to the real keychain;
 // those invariants are covered by the unit tests above.
-//
-// All of these bodies set *_enabled: true with empty URL/PAT so the handler
-// doesn't take the "disabled" branch (which clears credentials via
-// integrations.ClearGitHub / integrations.ClearJira — real keychain writes).
-// Validation short-circuits before any persistence on the rejection path.
 
-// settingsPostBodyWithProject builds a request that exercises validation
-// of a single project's rules. The SKY-272 wire shape collapses Pickup,
-// InProgress, and Done into the per-project array.
-func settingsPostBodyWithProject(key string, pickup, inProgress, done jiraStatusRule) map[string]any {
+// teamPostBodyWithProject builds a request that exercises validation
+// of a single project's rules via the team settings endpoint.
+func teamPostBodyWithProject(key string, pickup, inProgress, done jiraStatusRule) map[string]any {
 	return map[string]any{
-		"github_enabled": true,
-		"jira_enabled":   true,
 		"jira_projects": []map[string]any{
 			{
 				"key":         key,
@@ -183,14 +175,14 @@ func validPickup() jiraStatusRule {
 	return jiraStatusRule{Members: []string{"To Do"}}
 }
 
-func TestSettingsPost_PickupCanonical_Rejected(t *testing.T) {
+func TestTeamSettingsPost_PickupCanonical_Rejected(t *testing.T) {
 	s := newTestServer(t)
-	body := settingsPostBodyWithProject("SKY",
-		jiraStatusRule{Members: []string{"To Do"}, Canonical: "To Do"}, // invalid pickup
+	body := teamPostBodyWithProject("SKY",
+		jiraStatusRule{Members: []string{"To Do"}, Canonical: "To Do"},
 		validInProgress(),
 		validDone(),
 	)
-	rec := doJSON(t, s, "POST", "/api/settings", body)
+	rec := doJSON(t, s, "POST", "/api/settings/team/default", body)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
@@ -204,14 +196,14 @@ func TestSettingsPost_PickupCanonical_Rejected(t *testing.T) {
 	}
 }
 
-func TestSettingsPost_InProgressCanonicalNotInMembers_Rejected(t *testing.T) {
+func TestTeamSettingsPost_InProgressCanonicalNotInMembers_Rejected(t *testing.T) {
 	s := newTestServer(t)
-	body := settingsPostBodyWithProject("SKY",
+	body := teamPostBodyWithProject("SKY",
 		validPickup(),
-		jiraStatusRule{Members: []string{"In Progress"}, Canonical: "Doing"}, // invalid
+		jiraStatusRule{Members: []string{"In Progress"}, Canonical: "Doing"},
 		validDone(),
 	)
-	rec := doJSON(t, s, "POST", "/api/settings", body)
+	rec := doJSON(t, s, "POST", "/api/settings/team/default", body)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
@@ -223,14 +215,14 @@ func TestSettingsPost_InProgressCanonicalNotInMembers_Rejected(t *testing.T) {
 	}
 }
 
-func TestSettingsPost_InProgressMembersWithoutCanonical_Rejected(t *testing.T) {
+func TestTeamSettingsPost_InProgressMembersWithoutCanonical_Rejected(t *testing.T) {
 	s := newTestServer(t)
-	body := settingsPostBodyWithProject("SKY",
+	body := teamPostBodyWithProject("SKY",
 		validPickup(),
-		jiraStatusRule{Members: []string{"In Progress"}}, // invalid: missing canonical
+		jiraStatusRule{Members: []string{"In Progress"}},
 		validDone(),
 	)
-	rec := doJSON(t, s, "POST", "/api/settings", body)
+	rec := doJSON(t, s, "POST", "/api/settings/team/default", body)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
@@ -242,14 +234,14 @@ func TestSettingsPost_InProgressMembersWithoutCanonical_Rejected(t *testing.T) {
 	}
 }
 
-func TestSettingsPost_DoneCanonicalNotInMembers_Rejected(t *testing.T) {
+func TestTeamSettingsPost_DoneCanonicalNotInMembers_Rejected(t *testing.T) {
 	s := newTestServer(t)
-	body := settingsPostBodyWithProject("SKY",
+	body := teamPostBodyWithProject("SKY",
 		validPickup(),
 		validInProgress(),
-		jiraStatusRule{Members: []string{"Resolved", "Verified"}, Canonical: "Done"}, // invalid
+		jiraStatusRule{Members: []string{"Resolved", "Verified"}, Canonical: "Done"},
 	)
-	rec := doJSON(t, s, "POST", "/api/settings", body)
+	rec := doJSON(t, s, "POST", "/api/settings/team/default", body)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
@@ -349,17 +341,15 @@ func TestSettingsPost_PerProjectRules_RoundTrip(t *testing.T) {
 // handler rejects two entries with the same key — the rules table
 // keys on (team_id, project_key) and a duplicate would silently
 // last-write-win.
-func TestSettingsPost_DuplicateProjectKey_Rejected(t *testing.T) {
+func TestTeamSettingsPost_DuplicateProjectKey_Rejected(t *testing.T) {
 	s := newTestServer(t)
 	body := map[string]any{
-		"github_enabled": true,
-		"jira_enabled":   true,
 		"jira_projects": []map[string]any{
 			{"key": "SKY", "pickup": validPickup(), "in_progress": validInProgress(), "done": validDone()},
 			{"key": "SKY", "pickup": validPickup(), "in_progress": validInProgress(), "done": validDone()},
 		},
 	}
-	rec := doJSON(t, s, "POST", "/api/settings", body)
+	rec := doJSON(t, s, "POST", "/api/settings/team/default", body)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 on duplicate project key, got %d: %s", rec.Code, rec.Body.String())
 	}

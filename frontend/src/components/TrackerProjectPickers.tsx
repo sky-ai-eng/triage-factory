@@ -2,13 +2,8 @@ import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { useOrgHref } from '../hooks/useOrgHref'
 
-interface SettingsResponse {
-  jira: {
-    enabled: boolean
-    // SKY-272: per-project objects. Only the key is needed at this
-    // surface — the picker doesn't care about the rules.
-    projects: { key: string }[]
-  }
+interface TeamSettingsResponse {
+  jira_projects: { key: string }[]
 }
 
 interface Props {
@@ -48,20 +43,15 @@ export default function TrackerProjectPickers({
     const controller = new AbortController()
     const load = async () => {
       try {
-        const res = await fetch('/api/settings', { signal: controller.signal })
+        const res = await fetch('/api/settings/team/default', { signal: controller.signal })
         if (controller.signal.aborted) return
         if (!res.ok) {
-          // Don't toast — the picker falls back to disabled-with-
-          // hint, which is the same surface as "Jira not configured."
-          // The user's existing jiraKey (if any) still gets a Clear
-          // path because we always render the picker when jiraKey
-          // is set.
           return
         }
-        const data: SettingsResponse = await res.json()
+        const data: TeamSettingsResponse = await res.json()
         if (controller.signal.aborted) return
-        const keys = (data.jira.projects || []).map((p) => p.key)
-        setJiraEnabled(data.jira.enabled || keys.length > 0)
+        const keys = (data.jira_projects || []).map((p) => p.key)
+        setJiraEnabled(keys.length > 0)
         setJiraProjects(keys)
       } catch (err) {
         // Network failure / abort — quietly fall through to the

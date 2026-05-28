@@ -454,8 +454,12 @@ func (s *Server) routes() {
 	s.api("GET /api/brief", s.handleBrief)
 	s.api("GET /api/preferences", s.handlePreferences)
 
-	s.api("GET /api/settings", s.handleSettingsGet)
-	s.apiMutating("POST /api/settings", s.handleSettingsPost)
+	s.api("GET /api/settings/user", s.handleUserSettingsGet)
+	s.apiMutating("POST /api/settings/user", s.handleUserSettingsPost)
+	s.api("GET /api/settings/team/{team_id}", s.handleTeamSettingsGet)
+	s.apiMutating("POST /api/settings/team/{team_id}", s.handleTeamSettingsPost)
+	s.api("GET /api/settings/org", s.handleOrgSettingsGet)
+	s.apiMutating("POST /api/settings/org", s.handleOrgSettingsPost)
 
 	// SKY-264: team roster for the predicate editor. Fetched fresh on
 	// every consumer mount (the FE dedups concurrent in-flight calls

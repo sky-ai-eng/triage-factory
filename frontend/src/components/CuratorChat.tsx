@@ -114,20 +114,17 @@ export default function CuratorChat({ project, onPatch }: Props) {
 
   // Per-mount fetch of the Jira base URL for the linkifier. Earlier
   // versions cached at module scope, but that turned a transient fetch
-  // failure into a session-permanent one (`null` was indistinguishable
-  // from "not configured" so subsequent mounts skipped the retry) and
-  // also meant a settings save during the same SPA session wouldn't
-  // surface until a full page reload. /api/settings is cheap; per-mount
-  // is fine. AbortController gates the setter against unmount/remount
+  // failure into a session-permanent one. Per-mount is fine.
+  // AbortController gates the setter against unmount/remount
   // so a slow response can't land on a stale view.
   const [jiraBaseURL, setJiraBaseURL] = useState<string | undefined>(undefined)
   useEffect(() => {
     const ac = new AbortController()
-    fetch('/api/settings', { signal: ac.signal })
+    fetch('/api/settings/org', { signal: ac.signal })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (ac.signal.aborted) return
-        setJiraBaseURL(d?.jira?.base_url || undefined)
+        setJiraBaseURL(d?.jira_base_url || undefined)
       })
       .catch(() => {
         // Linkifier degrades gracefully — Jira refs render as plain

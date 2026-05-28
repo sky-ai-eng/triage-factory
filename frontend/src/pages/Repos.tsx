@@ -611,10 +611,10 @@ export default function Repos() {
 
   useEffect(() => {
     fetchData()
-    fetch('/api/settings')
+    fetch('/api/settings/org')
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
-        const url = data?.github?.base_url
+        const url = data?.github_base_url
         if (typeof url === 'string' && url) {
           setWebBaseURL(sanitizeWebRoot(url))
         }

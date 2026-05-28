@@ -239,13 +239,10 @@ export default function Setup() {
           in_progress: jiraForm.in_progress,
           done: jiraForm.done,
         }))
-      const res = await fetch('/api/settings', {
+      const res = await fetch('/api/settings/team/default', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          // Explicitly preserve GitHub so the backend doesn't clear it.
-          github_enabled: true,
-          jira_enabled: true,
           jira_projects: projects,
         }),
       })

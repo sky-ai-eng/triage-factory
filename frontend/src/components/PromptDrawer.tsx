@@ -142,10 +142,11 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
   useEffect(() => {
     if (!open) return
     let cancelled = false
-    fetch('/api/settings')
+    fetch('/api/settings/team/default')
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
-        if (!cancelled && data?.ai?.model) setDefaultModel(data.ai.model)
+        if (!cancelled && data?.team_settings?.DefaultModel)
+          setDefaultModel(data.team_settings.DefaultModel)
       })
       .catch(() => {})
     return () => {

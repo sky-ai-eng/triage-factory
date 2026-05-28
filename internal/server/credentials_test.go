@@ -96,53 +96,6 @@ func TestHandleIntegrationsClear_NoWarningWithoutEnv(t *testing.T) {
 	}
 }
 
-// TestHandleSettingsPost_SurfacesEnvOverlayWarningOnDisconnect pins
-// the parallel UX on the multi-field settings POST: when the request
-// disables an integration whose credentials are env-supplied, the
-// 200 response carries a warning so the FE can render it instead of
-// silently lying that the disconnect succeeded.
-func TestHandleSettingsPost_SurfacesEnvOverlayWarningOnDisconnect(t *testing.T) {
-	keyring.MockInit()
-	s := newTestServer(t)
-	ctx := t.Context()
-	org := runmode.LocalDefaultOrgID
-
-	if err := integrations.Save(ctx, s.secrets, org, auth.Credentials{
-		GitHubURL: "https://github.example.com",
-		GitHubPAT: "ghp-test",
-	}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	t.Setenv("TRIAGE_FACTORY_GITHUB_URL", "https://env.example.com")
-	t.Setenv("TRIAGE_FACTORY_GITHUB_PAT", "env-pat")
-
-	body := map[string]any{
-		"github_enabled": false,
-		"jira_enabled":   false,
-	}
-	rec := doJSON(t, s, http.MethodPost, "/api/settings", body)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status: got=%d want=200, body=%s", rec.Code, rec.Body.String())
-	}
-	var got map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if _, ok := got["warning"]; !ok {
-		t.Errorf("expected warning field on env-overlay disconnect, body=%+v", got)
-	}
-	blocks, _ := got["env_overlay_blocks_disconnect"].([]any)
-	found := false
-	for _, b := range blocks {
-		if b == "github" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("env_overlay_blocks_disconnect should include github, got=%v", got["env_overlay_blocks_disconnect"])
-	}
-}
-
 // TestHandleIntegrationsDeleteJira_SurfacesJiraOnlyWarning pins the
 // targeted Jira clear handler's env-overlay behavior: a GitHub env
 // overlay shouldn't trigger a warning on a Jira-only clear.

@@ -21,6 +21,35 @@ interface JiraProjectConfig {
   done: JiraStatusRuleValue
 }
 
+interface OrgSettingsData {
+  github_base_url: string
+  github_poll_interval: string
+  github_clone_protocol: 'ssh' | 'https'
+  jira_base_url: string
+  jira_poll_interval: string
+  max_llm_model_tier?: string
+  has_anthropic_api_key: boolean
+  has_bedrock_credentials: boolean
+}
+
+interface TeamSettingsData {
+  team_settings: {
+    JiraProjects: string[]
+    AIReprioritizeThreshold: number
+    AIPreferenceUpdateInterval: number
+    DefaultModel: string
+    AutoDelegateEnabled: boolean
+  }
+  jira_projects: JiraProjectConfig[]
+}
+
+interface UserSettingsData {
+  github_username?: string
+  jira_account_id?: string
+  has_github_pat: boolean
+  has_jira_pat: boolean
+}
+
 interface SettingsData {
   github: {
     enabled: boolean
@@ -135,43 +164,72 @@ export default function Settings() {
   }
 
   useEffect(() => {
-    fetch('/api/settings')
-      .then((r) => r.json())
-      .then((d: SettingsData) => {
-        setData(d)
-        const projects = d.jira.projects && d.jira.projects.length > 0 ? d.jira.projects : []
+    Promise.all([
+      fetch('/api/settings/org').then((r) => (r.ok ? r.json() : null)),
+      fetch('/api/settings/team/default').then((r) => (r.ok ? r.json() : null)),
+      fetch('/api/settings/user').then((r) => (r.ok ? r.json() : null)),
+    ]).then(
+      ([org, team, user]: [
+        OrgSettingsData | null,
+        TeamSettingsData | null,
+        UserSettingsData | null,
+      ]) => {
+        if (!org || !team || !user) return
+        const projects =
+          team.jira_projects && team.jira_projects.length > 0 ? team.jira_projects : []
+        const merged: SettingsData = {
+          github: {
+            enabled: user.has_github_pat,
+            base_url: org.github_base_url || '',
+            has_token: user.has_github_pat,
+            poll_interval: org.github_poll_interval,
+            clone_protocol: org.github_clone_protocol === 'https' ? 'https' : 'ssh',
+          },
+          jira: {
+            enabled: user.has_jira_pat,
+            base_url: org.jira_base_url || '',
+            has_token: user.has_jira_pat,
+            poll_interval: org.jira_poll_interval,
+            projects,
+          },
+          server: { port: 3000 },
+          ai: {
+            model: team.team_settings.DefaultModel,
+            reprioritize_threshold: team.team_settings.AIReprioritizeThreshold,
+            preference_update_interval: team.team_settings.AIPreferenceUpdateInterval,
+            auto_delegate_enabled: team.team_settings.AutoDelegateEnabled,
+          },
+        }
+        setData(merged)
         setForm({
           github_enabled: true,
-          github_url: d.github.base_url || '',
+          github_url: merged.github.base_url,
           github_pat: '',
-          jira_enabled: d.jira.enabled,
-          jira_url: d.jira.base_url || '',
+          jira_enabled: merged.jira.enabled,
+          jira_url: merged.jira.base_url,
           jira_pat: '',
-          github_poll_interval: d.github.poll_interval,
-          github_clone_protocol: d.github.clone_protocol === 'https' ? 'https' : 'ssh',
-          jira_poll_interval: d.jira.poll_interval,
+          github_poll_interval: merged.github.poll_interval,
+          github_clone_protocol: merged.github.clone_protocol,
+          jira_poll_interval: merged.jira.poll_interval,
           jira_projects: projects,
-          ai_model: d.ai.model,
-          ai_auto_delegate_enabled: d.ai.auto_delegate_enabled,
-          server_port: d.server.port,
+          ai_model: merged.ai.model,
+          ai_auto_delegate_enabled: merged.ai.auto_delegate_enabled,
+          server_port: merged.server.port,
         })
-        // N=1: expand the only project so existing single-project
-        // users see no UX regression. N>1: collapse all so the page
-        // doesn't render a wall of pickers — the spec's "collapsed
-        // by default" rule.
         const initialExpanded: Record<string, boolean> = {}
         if (projects.length === 1) {
           initialExpanded[projects[0].key] = true
         }
         setExpandedKeys(initialExpanded)
-        if (d.jira.has_token && d.jira.base_url) {
+        if (merged.jira.has_token && merged.jira.base_url) {
           setJiraConnected(true)
           const keys = projects.map((p) => p.key).filter(Boolean)
           if (keys.length > 0) {
             fetchJiraStatuses(keys)
           }
         }
-      })
+      },
+    )
     // fetchJiraStatuses intentionally omitted — this effect is a one-shot
     // mount loader.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -241,19 +299,7 @@ export default function Settings() {
 
   const disconnectJira = async () => {
     try {
-      const res = await fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          github_enabled: form.github_enabled,
-          github_url: form.github_url,
-          github_poll_interval: form.github_poll_interval,
-          jira_enabled: false,
-          ai_model: form.ai_model,
-          ai_auto_delegate_enabled: form.ai_auto_delegate_enabled,
-          server_port: form.server_port,
-        }),
-      })
+      const res = await fetch('/api/integrations/jira', { method: 'DELETE' })
       if (!res.ok) return
     } catch {
       return
@@ -352,31 +398,55 @@ export default function Settings() {
       .filter((p) => p.key !== '')
 
     try {
-      const res = await fetch('/api/settings', {
+      const jsonHeaders = { 'Content-Type': 'application/json' }
+
+      const orgRes = await fetch('/api/settings/org', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: jsonHeaders,
         body: JSON.stringify({
-          github_enabled: form.github_enabled,
-          github_url: form.github_url,
-          github_pat: form.github_pat || undefined,
-          jira_enabled: jiraConnected,
-          jira_url: form.jira_url,
-          jira_pat: form.jira_pat || undefined,
+          github_base_url: form.github_url || undefined,
           github_poll_interval: form.github_poll_interval,
           github_clone_protocol: form.github_clone_protocol,
+          jira_base_url: form.jira_url || undefined,
           jira_poll_interval: form.jira_poll_interval,
-          jira_projects: projects,
-          ai_model: form.ai_model,
-          ai_auto_delegate_enabled: form.ai_auto_delegate_enabled,
-          server_port: form.server_port,
         }),
       })
-      if (!res.ok) {
-        toast.error(await readError(res, 'Failed to save settings'))
-      } else {
-        toast.success('Settings saved')
-        setForm((f) => ({ ...f, github_pat: '', jira_pat: '' }))
+      if (!orgRes.ok) {
+        toast.error(await readError(orgRes, 'Failed to save org settings'))
+        return
       }
+
+      const teamRes = await fetch('/api/settings/team/default', {
+        method: 'POST',
+        headers: jsonHeaders,
+        body: JSON.stringify({
+          ai_model: form.ai_model,
+          ai_auto_delegate_enabled: form.ai_auto_delegate_enabled,
+          jira_projects: projects,
+        }),
+      })
+      if (!teamRes.ok) {
+        toast.error(await readError(teamRes, 'Failed to save team settings'))
+        return
+      }
+
+      if (form.github_pat || form.jira_pat) {
+        const userRes = await fetch('/api/settings/user', {
+          method: 'POST',
+          headers: jsonHeaders,
+          body: JSON.stringify({
+            github_pat: form.github_pat || undefined,
+            jira_pat: form.jira_pat || undefined,
+          }),
+        })
+        if (!userRes.ok) {
+          toast.error(await readError(userRes, 'Failed to save user settings'))
+          return
+        }
+      }
+
+      toast.success('Settings saved')
+      setForm((f) => ({ ...f, github_pat: '', jira_pat: '' }))
     } catch (err) {
       toast.error(`Could not save settings: ${(err as Error).message}`)
     } finally {
