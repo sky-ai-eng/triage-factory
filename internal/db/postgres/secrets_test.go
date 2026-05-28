@@ -184,6 +184,116 @@ func TestSecretStore_Postgres_NonTfAppRoleRefused(t *testing.T) {
 	}
 }
 
+// TestSecretStore_Postgres_GetSystem_NoClaimsRead pins the SKY-364
+// system accessor: a background/system caller with NO request.jwt.claims
+// can read an org's secret via GetSystem (admin pool →
+// vault_get_org_secret_system), while the same claims-less connection
+// hitting the claims-checked vault_get_org_secret is refused. This is
+// the "two distinct doors" proof — explicit-trusted-orgID for system
+// code, claims-checked for request handlers.
+func TestSecretStore_Postgres_GetSystem_NoClaimsRead(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID := seedPgOrgAndUserForSecrets(t, h)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Seed the secret through the claims-checked write path (the only
+	// writer — there is no _put_system).
+	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+		return pgstore.NewForTx(tx).Secrets.Put(ctx, orgID, "github_app_pem", "-----BEGIN PEM----- v1", "App private key")
+	}); err != nil {
+		t.Fatalf("seed secret via Put: %v", err)
+	}
+
+	// GetSystem routes to the admin pool. No WithUser wrap, no claims —
+	// exactly the background-caller condition.
+	stores := pgstore.New(h.AdminDB, h.AppDB)
+	got, err := stores.Secrets.GetSystem(ctx, orgID, "github_app_pem")
+	if err != nil {
+		t.Fatalf("GetSystem (no claims): %v", err)
+	}
+	if got != "-----BEGIN PEM----- v1" {
+		t.Errorf("GetSystem got=%q want the seeded PEM", got)
+	}
+
+	// Absent key: NULL → ("", nil), mirroring Get.
+	got, err = stores.Secrets.GetSystem(ctx, orgID, "nonexistent")
+	if err != nil {
+		t.Fatalf("GetSystem missing: %v", err)
+	}
+	if got != "" {
+		t.Errorf("GetSystem missing got=%q want empty", got)
+	}
+
+	// The other door: the claims-checked vault_get_org_secret on the
+	// same claims-less connection must be refused (current_org_id() is
+	// NULL → "missing org context"). Proves GetSystem isn't just
+	// "Get without the gate" — it's a separate function the claims path
+	// can't satisfy here.
+	var sink sql.NullString
+	err = h.AdminDB.QueryRowContext(ctx,
+		`SELECT public.vault_get_org_secret($1::uuid, $2::text)`, orgID, "github_app_pem",
+	).Scan(&sink)
+	if err == nil {
+		t.Fatalf("claims-checked vault_get_org_secret succeeded with no claims; gate broken")
+	}
+}
+
+// TestSecretStore_Postgres_GetSystem_TfAppDenied is the load-bearing
+// guardrail for SKY-364: the app pool (tf_app) and every standard
+// Supabase role must be unable to EXECUTE vault_get_org_secret_system.
+// The whole security argument — system reads take an explicit trusted
+// orgID, request reads stay claims-checked — rests on the app pool
+// having no door into the unchecked function. This is the inverse of
+// the existing "non-tf_app cannot execute the vault wrappers" test:
+// here it's "tf_app (and friends) cannot execute the *system* wrapper."
+func TestSecretStore_Postgres_GetSystem_TfAppDenied(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID := seedPgOrgAndUserForSecrets(t, h)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Privilege matrix sanity: tf_app LACKS EXECUTE, the admin pool's
+	// role HAS it (supabase_admin owns the function as a superuser).
+	const fn = "public.vault_get_org_secret_system(uuid, text)"
+	var tfAppHas bool
+	if err := h.AdminDB.QueryRow(`SELECT has_function_privilege('tf_app', $1, 'EXECUTE')`, fn).Scan(&tfAppHas); err != nil {
+		t.Fatalf("has_function_privilege(tf_app): %v", err)
+	}
+	if tfAppHas {
+		t.Errorf("tf_app HAS EXECUTE on %s — must not; the system door must stay closed to the app pool", fn)
+	}
+
+	// tf_app + the standard Supabase roles must all be refused at call
+	// time with permission-denied (42501), before the body runs. The
+	// authenticator → tf_app / role-switch path mirrors the existing
+	// vault-wrapper denial test.
+	for _, role := range []string{"tf_app", "anon", "authenticated", "service_role"} {
+		role := role
+		t.Run(role, func(t *testing.T) {
+			tx, err := h.AppDB.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatalf("begin: %v", err)
+			}
+			defer func() { _ = tx.Rollback() }()
+
+			if _, err := tx.ExecContext(ctx, `SET LOCAL ROLE `+role); err != nil {
+				t.Fatalf("set role %s: %v", role, err)
+			}
+			// Claims set so the denial can only come from the GRANT
+			// matrix, not a missing-org check inside the body.
+			claims := fmt.Sprintf(`{"sub":"%s","org_id":"%s"}`, userID, orgID)
+			if _, err := tx.ExecContext(ctx, `SELECT set_config('request.jwt.claims', $1, true)`, claims); err != nil {
+				t.Fatalf("set claims: %v", err)
+			}
+			_, err = tx.ExecContext(ctx, `SELECT public.vault_get_org_secret_system($1::uuid, 'k')`, orgID)
+			pgtest.AssertRLSViolation(t, err)
+		})
+	}
+}
+
 func seedPgOrgAndUserForSecrets(t *testing.T, h *pgtest.Harness) (orgID, userID string) {
 	t.Helper()
 	orgID = uuid.New().String()

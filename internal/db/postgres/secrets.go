@@ -28,9 +28,28 @@ import (
 // D5 will wire it through WithTx for request-driven access plus the
 // startup-time admin pool helpers we don't yet have. For now the
 // surface is honest about the requirement.
-type secretStore struct{ q queryer }
+//
+// # GetSystem's separate door
+//
+// app is the claims-checked path (Put/Get/Delete → vault_*, GRANTed
+// to tf_app, gated on p_org_id = current_org_id()). admin is the
+// system/background path: GetSystem runs vault_get_org_secret_system
+// on the supabase_admin pool, which trusts the explicit orgID and
+// does NO claims check. tf_app has no EXECUTE on that function, so
+// the two doors stay legible — claims-checked for request handlers,
+// explicit-trusted-orgID for system code. Inside WithTx the app half
+// is the claims-set tx while the admin half stays the real admin pool
+// (GetSystem can't run on tf_app); NewForTx, a test door, collapses
+// both onto the tx, so its GetSystem hits tf_app and is denied — tests
+// that exercise GetSystem use New(admin, app) directly.
+type secretStore struct {
+	app   queryer
+	admin queryer
+}
 
-func newSecretStore(q queryer) db.SecretStore { return &secretStore{q: q} }
+func newSecretStore(app, admin queryer) db.SecretStore {
+	return &secretStore{app: app, admin: admin}
+}
 
 var _ db.SecretStore = (*secretStore)(nil)
 
@@ -42,7 +61,7 @@ func (s *secretStore) Put(ctx context.Context, orgID, key, value, description st
 	if description != "" {
 		desc = description
 	}
-	_, err := s.q.ExecContext(ctx,
+	_, err := s.app.ExecContext(ctx,
 		`SELECT public.vault_put_org_secret($1::uuid, $2::text, $3::text, $4)`,
 		orgID, key, value, desc,
 	)
@@ -56,8 +75,27 @@ func (s *secretStore) Get(ctx context.Context, orgID, key string) (string, error
 	// (including sql.ErrNoRows) means the wrapper's shape regressed
 	// or the connection failed; let it propagate so the caller sees
 	// the anomaly instead of an "" that looks like "not configured".
-	if err := s.q.QueryRowContext(ctx,
+	if err := s.app.QueryRowContext(ctx,
 		`SELECT public.vault_get_org_secret($1::uuid, $2::text)`,
+		orgID, key,
+	).Scan(&got); err != nil {
+		return "", err
+	}
+	if !got.Valid {
+		return "", nil
+	}
+	return got.String, nil
+}
+
+// GetSystem reads an org-scoped secret on the supabase_admin pool via
+// vault_get_org_secret_system — no request JWT, no current_org_id()
+// check; the passed orgID is trusted. tf_app has no EXECUTE on the
+// system function, so this path is reachable only from system code
+// holding the admin pool. Mirrors Get's NULL → ("", nil) shape.
+func (s *secretStore) GetSystem(ctx context.Context, orgID, key string) (string, error) {
+	var got sql.NullString
+	if err := s.admin.QueryRowContext(ctx,
+		`SELECT public.vault_get_org_secret_system($1::uuid, $2::text)`,
 		orgID, key,
 	).Scan(&got); err != nil {
 		return "", err
@@ -70,7 +108,7 @@ func (s *secretStore) Get(ctx context.Context, orgID, key string) (string, error
 
 func (s *secretStore) Delete(ctx context.Context, orgID, key string) (bool, error) {
 	var ok sql.NullBool
-	err := s.q.QueryRowContext(ctx,
+	err := s.app.QueryRowContext(ctx,
 		`SELECT public.vault_delete_org_secret($1::uuid, $2::text)`,
 		orgID, key,
 	).Scan(&ok)

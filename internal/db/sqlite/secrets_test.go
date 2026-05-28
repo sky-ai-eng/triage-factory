@@ -89,6 +89,53 @@ func TestSecretStore_SQLite_KeychainRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSecretStore_SQLite_GetSystemEqualsGet pins the local-mode
+// GetSystem contract: it forwards to the same keychain bag as Get and
+// returns identical values. Local mode is single-org with no RLS and
+// no claims, so the system path and the claims-checked path collapse
+// onto the same keychain helper — there's nothing to differentiate.
+// This is the "no regression in local mode" leg of SKY-364's
+// acceptance.
+func TestSecretStore_SQLite_GetSystemEqualsGet(t *testing.T) {
+	keyring.MockInit()
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrg
+
+	if err := stores.Secrets.Put(ctx, org, "github_app_pem", "-----BEGIN-----v1", ""); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	// GetSystem returns the stored value, identically to Get.
+	sysGot, err := stores.Secrets.GetSystem(ctx, org, "github_app_pem")
+	if err != nil {
+		t.Fatalf("GetSystem: %v", err)
+	}
+	plainGot, err := stores.Secrets.Get(ctx, org, "github_app_pem")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if sysGot != "-----BEGIN-----v1" || sysGot != plainGot {
+		t.Errorf("GetSystem=%q Get=%q; want both %q", sysGot, plainGot, "-----BEGIN-----v1")
+	}
+
+	// Missing key: GetSystem returns "" without an error, mirroring Get.
+	got, err := stores.Secrets.GetSystem(ctx, org, "nonexistent")
+	if err != nil {
+		t.Fatalf("GetSystem missing: %v", err)
+	}
+	if got != "" {
+		t.Errorf("GetSystem missing got=%q want empty", got)
+	}
+
+	// A non-local orgID is a caller bug — assertLocalOrg fires here too.
+	const realOrgUUID = "9b3c1f2d-0000-4000-8000-000000000001"
+	if _, err := stores.Secrets.GetSystem(ctx, realOrgUUID, "github_app_pem"); err == nil {
+		t.Errorf("GetSystem with non-local orgID succeeded; want error")
+	}
+}
+
 // TestSecretStore_SQLite_DeleteWithOnlyEnvOverlay pins the Delete
 // contract under the TRIAGE_FACTORY_* env overlay. auth.GetSecret
 // returns the env value even when the keychain row doesn't exist, so

@@ -189,6 +189,39 @@ $$;
 
 
 --
+-- Name: vault_get_org_secret_system(uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- +goose StatementBegin
+CREATE FUNCTION public.vault_get_org_secret_system(p_org_id uuid, p_key text) RETURNS text
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+  v_full_name TEXT := 'org/' || p_org_id::text || '/' || p_key;
+  v_secret    TEXT;
+BEGIN
+  -- System/background read path. No current_org_id() check: p_org_id
+  -- is trusted (the EXECUTE grant restricts this to the admin/system
+  -- pool — tf_app has none, so a request handler can't reach it; those
+  -- use the claims-checked vault_get_org_secret instead). Same
+  -- secret-name convention: 'org/<org_id>/<key>'. A NULL p_org_id is a
+  -- caller bug, not a privilege failure — refuse it explicitly rather
+  -- than silently looking up 'org//<key>'.
+  IF p_org_id IS NULL THEN
+    RAISE EXCEPTION 'system Vault access denied: p_org_id is NULL'
+      USING ERRCODE = '22004';
+  END IF;
+  SELECT decrypted_secret INTO v_secret
+    FROM vault.decrypted_secrets
+   WHERE name = v_full_name;
+  RETURN v_secret;
+END;
+$$;
+-- +goose StatementEnd
+
+
+--
 -- Name: vault_put_org_secret(uuid, text, text, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -4077,6 +4110,21 @@ REVOKE ALL ON FUNCTION public.vault_get_org_secret(p_org_id uuid, p_key text) FR
 REVOKE ALL ON FUNCTION public.vault_get_org_secret(p_org_id uuid, p_key text) FROM anon, authenticated, service_role;
 GRANT ALL ON FUNCTION public.vault_get_org_secret(p_org_id uuid, p_key text) TO postgres;
 GRANT ALL ON FUNCTION public.vault_get_org_secret(p_org_id uuid, p_key text) TO tf_app;
+
+
+--
+-- Name: FUNCTION vault_get_org_secret_system(p_org_id uuid, p_key text); Type: ACL; Schema: public; Owner: -
+--
+
+-- System/admin pool ONLY. Deliberately NOT granted to tf_app: the app
+-- pool must stay on the claims-checked vault_get_org_secret. The admin
+-- pool connects as supabase_admin (superuser, owns this function) and
+-- executes it regardless of grant; postgres is granted to mirror the
+-- sibling vault_* ACLs. tf_app lacking EXECUTE here is the load-bearing
+-- guardrail — pinned by the pgtest "tf_app denied" assertion.
+REVOKE ALL ON FUNCTION public.vault_get_org_secret_system(p_org_id uuid, p_key text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.vault_get_org_secret_system(p_org_id uuid, p_key text) FROM anon, authenticated, service_role;
+GRANT ALL ON FUNCTION public.vault_get_org_secret_system(p_org_id uuid, p_key text) TO postgres;
 
 
 --

@@ -60,7 +60,7 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		}
 	}
 
-	for _, fn := range []string{"vault_put_org_secret", "vault_get_org_secret", "vault_delete_org_secret", "update_project_knowledge"} {
+	for _, fn := range []string{"vault_put_org_secret", "vault_get_org_secret", "vault_get_org_secret_system", "vault_delete_org_secret", "update_project_knowledge"} {
 		var n int
 		if err := h.AdminDB.QueryRow(
 			`SELECT COUNT(*) FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid
@@ -2163,6 +2163,7 @@ func TestSearchPathHardening_AllSensitiveFunctions(t *testing.T) {
 		{"tf", "user_is_org_admin_via_team"},
 		{"public", "vault_put_org_secret"},
 		{"public", "vault_get_org_secret"},
+		{"public", "vault_get_org_secret_system"},
 		{"public", "vault_delete_org_secret"},
 		{"public", "update_project_knowledge"},
 		{"tf", "set_updated_at"},

@@ -48,6 +48,18 @@ func (*secretStore) Get(_ context.Context, orgID, key string) (string, error) {
 	return auth.GetSecret(key)
 }
 
+// GetSystem == Get in local mode. There's a single org and a single
+// keychain bag with no RLS and no claims, so there's nothing to
+// differentiate the system path from the claims-checked one — the
+// distinction only exists in multi mode's Postgres impl. assertLocalOrg
+// still fires so a stray real UUID surfaces as a caller bug.
+func (*secretStore) GetSystem(_ context.Context, orgID, key string) (string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", err
+	}
+	return auth.GetSecret(key)
+}
+
 func (*secretStore) Delete(_ context.Context, orgID, key string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err

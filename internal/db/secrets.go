@@ -39,6 +39,24 @@ type SecretStore interface {
 	// having to sniff sentinel errors).
 	Get(ctx context.Context, orgID, key string) (string, error)
 
+	// GetSystem reads an org-scoped secret WITHOUT a request JWT, for
+	// background/system callers (webhook signature-verify reads, the
+	// App-PEM backfill, multi-mode polling). Takes orgID explicitly:
+	// in multi mode it runs on the system/admin pool via
+	// vault_get_org_secret_system, which trusts the passed orgID and
+	// performs no current_org_id() claims check; local mode forwards
+	// to the keychain (single-org, no RLS, no claims). Mirrors Get's
+	// ("", nil)-on-absent contract.
+	//
+	// System-code-only. Request handlers must use the claims-checked
+	// Get — same discipline as GetForOrgSystem vs GetForOrg. The one
+	// sanctioned unauthenticated-orgID caller is the webhook handler:
+	// its orgID comes from the URL path, but the secret is used only
+	// to verify an incoming signature server-side and never leaves the
+	// process, so a forged delivery for another org simply fails
+	// verification.
+	GetSystem(ctx context.Context, orgID, key string) (string, error)
+
 	// Delete removes a secret. Returns ok=false when no row
 	// matched, matching the pattern of other "did the write land"
 	// helpers on Stores (RequeueTask, MarkAgentRunCancelledIfActive).

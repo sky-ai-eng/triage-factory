@@ -64,11 +64,14 @@ func New(admin, app *sql.DB) db.Stores {
 		Prompts:   newPromptStore(app, admin),
 		Swipes:    newSwipeStore(app),
 		Dashboard: newDashboardStore(app),
-		// Secrets wraps the public.vault_* SECURITY DEFINER functions
-		// — GRANTed to tf_app only. Caller must have set
-		// request.jwt.claims before calling (the wrapper enforces
-		// p_org_id == tf.current_org_id()).
-		Secrets: newSecretStore(app),
+		// Secrets needs both pools. Put/Get/Delete wrap the
+		// public.vault_* SECURITY DEFINER functions GRANTed to tf_app
+		// (app pool) — the caller must have set request.jwt.claims so
+		// the wrapper's p_org_id == tf.current_org_id() gate passes.
+		// GetSystem wraps vault_get_org_secret_system on the admin pool
+		// (supabase_admin) for background/system callers with no JWT;
+		// tf_app has no EXECUTE on that function.
+		Secrets: newSecretStore(app, admin),
 		// EventHandlers needs both pools: Seed writes shipped rows
 		// without JWT claims, but event_handlers_insert /
 		// event_handlers_update RLS policies gate on either
@@ -261,7 +264,7 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		Prompts:       newTxPromptStore(tx),
 		Swipes:        newSwipeStore(tx),
 		Dashboard:     newDashboardStore(tx),
-		Secrets:       newSecretStore(tx),
+		Secrets:       newSecretStore(tx, tx),
 		EventHandlers: newTxEventHandlerStore(tx),
 		Chains:        newChainStore(tx, tx),
 		Agents:        newTxAgentStore(tx),

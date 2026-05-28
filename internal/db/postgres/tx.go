@@ -112,11 +112,15 @@ func (s *Store) runClaimsBoundTx(ctx context.Context, orgID, userID string, fn f
 // even from inside a claims-set tx — see the Create comment).
 func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 	return db.TxStores{
-		Scores:        newScoreStore(tx),
-		Prompts:       newTxPromptStore(tx),
-		Swipes:        newSwipeStore(tx),
-		Dashboard:     newDashboardStore(tx),
-		Secrets:       newSecretStore(tx),
+		Scores:    newScoreStore(tx),
+		Prompts:   newTxPromptStore(tx),
+		Swipes:    newSwipeStore(tx),
+		Dashboard: newDashboardStore(tx),
+		// Secrets: app half is the claims-set tx (Put/Get/Delete →
+		// vault_* on tf_app); admin half stays the real admin pool so
+		// GetSystem can reach vault_get_org_secret_system, which tf_app
+		// has no EXECUTE on. Same pool-routing as Chains above.
+		Secrets:       newSecretStore(tx, s.admin),
 		EventHandlers: newTxEventHandlerStore(tx),
 		// Chains: composed half is tx; admin half stays the real
 		// admin pool so event-triggered CreateRun + the `...System`
