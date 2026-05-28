@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -201,9 +202,14 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// Check for an existing registration BEFORE calling GitHub, so a
-	// stale callback or second tab doesn't create an orphan App on
-	// GitHub that we then discard at the insert constraint.
+	// Serialize per-org so two concurrent callbacks can't both pass
+	// the existence check, both call GitHub's conversion endpoint,
+	// and leave an orphan App. The unique constraint is the durable
+	// fallback; this mutex prevents the common case.
+	regMu, _ := s.githubAppRegMu.LoadOrStore(orgID, &sync.Mutex{})
+	regMu.(*sync.Mutex).Lock()
+	defer regMu.(*sync.Mutex).Unlock()
+
 	var orgSettings domain.OrgSettings
 	var existing *domain.OrgGitHubApp
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {

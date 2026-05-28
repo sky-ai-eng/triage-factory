@@ -129,6 +129,12 @@ type Server struct {
 	// A's contribution is lost. Holding the per-project mutex
 	// across the read+write window closes that hole.
 	projectMutexes sync.Map // map[string]*sync.Mutex
+
+	// githubAppRegMu serializes per-org GitHub App registration so
+	// two concurrent callbacks can't both pass the existence check,
+	// both call GitHub's conversion endpoint, and leave an orphan
+	// App. Same sync.Map pattern as projectMutexes.
+	githubAppRegMu sync.Map // map[orgID]*sync.Mutex
 }
 
 // projectMutex returns the per-project mutex for serializing
