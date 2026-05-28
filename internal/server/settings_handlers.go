@@ -426,6 +426,30 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[settings/org] failed to persist users.github_username: %v", err)
 			}
 		}
+	} else if creds.GitHubPAT != "" {
+		// Backfill: a PAT is already stored but the user row has no
+		// github_username (legacy install, or a PAT saved through a
+		// path that didn't capture the login). Validate the stored PAT
+		// and recapture the login so identity consumers (/api/me,
+		// predicate helpers) stop treating the user as GitHub-less.
+		// Best-effort: a transient read/validate failure just defers
+		// the backfill to the next save.
+		var stored string
+		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+			var e error
+			stored, e = tx.Users.GetGitHubUsername(r.Context(), userID)
+			return e
+		}); err != nil {
+			log.Printf("[settings/org] github_username backfill read failed: %v", err)
+		} else if stored == "" && creds.GitHubURL != "" {
+			if ghUser, err := auth.ValidateGitHub(creds.GitHubURL, creds.GitHubPAT); err == nil {
+				if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+					return tx.Users.SetGitHubUsername(r.Context(), userID, ghUser.Login)
+				}); err != nil {
+					log.Printf("[settings/org] github_username backfill write failed: %v", err)
+				}
+			}
+		}
 	}
 
 	// Jira PAT: nil = don't touch, "" = clear, non-empty = validate + set.

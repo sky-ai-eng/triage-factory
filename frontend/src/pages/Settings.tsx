@@ -390,36 +390,34 @@ export default function Settings() {
       .map((p) => ({ ...p, key: p.key.trim() }))
       .filter((p) => p.key !== '')
 
+    // Org and team are independent permission domains (org-admin vs
+    // team-admin) on separate endpoints, so there's no single
+    // transaction spanning both. We POST only the scope(s) whose fields
+    // actually changed — that way an org-admin-only user saving org
+    // fields never trips the team endpoint's requireTeamAdmin (and vice
+    // versa), and a single-domain edit can't half-commit. For a genuine
+    // dual-domain edit we run team first: its validation is pure
+    // server-side (project rules, dup keys) with no external calls, so
+    // it fails before the org POST's PAT/SSH work commits anything. On
+    // success we fold the saved values into `data` so the next save's
+    // change-detection compares against current state, not the stale
+    // mount snapshot.
+    const teamChanged =
+      form.ai_model !== data?.ai.model ||
+      form.ai_auto_delegate_enabled !== data?.ai.auto_delegate_enabled ||
+      JSON.stringify(projects) !== JSON.stringify(data?.jira.projects ?? [])
+
+    const orgChanged =
+      !!form.github_pat ||
+      !!form.jira_pat ||
+      form.github_url !== (data?.github.base_url ?? '') ||
+      form.github_poll_interval !== data?.github.poll_interval ||
+      form.github_clone_protocol !== data?.github.clone_protocol ||
+      form.jira_url !== (data?.jira.base_url ?? '') ||
+      form.jira_poll_interval !== data?.jira.poll_interval
+
     try {
       const jsonHeaders = { 'Content-Type': 'application/json' }
-
-      const orgRes = await fetch('/api/settings/org', {
-        method: 'POST',
-        headers: jsonHeaders,
-        body: JSON.stringify({
-          github_base_url: form.github_url,
-          github_pat: form.github_pat || undefined,
-          github_poll_interval: form.github_poll_interval,
-          github_clone_protocol: form.github_clone_protocol,
-          jira_base_url: form.jira_url,
-          jira_pat: form.jira_pat || undefined,
-          jira_poll_interval: form.jira_poll_interval,
-        }),
-      })
-      if (!orgRes.ok) {
-        toast.error(await readError(orgRes, 'Failed to save settings'))
-        return
-      }
-
-      // Only POST the team endpoint when team-scoped fields actually
-      // changed. An org admin who isn't also a team admin would otherwise
-      // get a 403 on every org-only save (the team POST always runs and
-      // fails requireTeamAdmin), and the UI would report the whole save
-      // as failed even though the org changes landed.
-      const teamChanged =
-        form.ai_model !== data?.ai.model ||
-        form.ai_auto_delegate_enabled !== data?.ai.auto_delegate_enabled ||
-        JSON.stringify(projects) !== JSON.stringify(data?.jira.projects ?? [])
 
       if (teamChanged) {
         const teamRes = await fetch('/api/settings/team/default', {
@@ -435,6 +433,59 @@ export default function Settings() {
           toast.error(await readError(teamRes, 'Failed to save team settings'))
           return
         }
+        setData((d) =>
+          d
+            ? {
+                ...d,
+                jira: { ...d.jira, projects },
+                ai: {
+                  ...d.ai,
+                  model: form.ai_model,
+                  auto_delegate_enabled: form.ai_auto_delegate_enabled,
+                },
+              }
+            : d,
+        )
+      }
+
+      if (orgChanged) {
+        const orgRes = await fetch('/api/settings/org', {
+          method: 'POST',
+          headers: jsonHeaders,
+          body: JSON.stringify({
+            github_base_url: form.github_url,
+            github_pat: form.github_pat || undefined,
+            github_poll_interval: form.github_poll_interval,
+            github_clone_protocol: form.github_clone_protocol,
+            jira_base_url: form.jira_url,
+            jira_pat: form.jira_pat || undefined,
+            jira_poll_interval: form.jira_poll_interval,
+          }),
+        })
+        if (!orgRes.ok) {
+          toast.error(await readError(orgRes, 'Failed to save settings'))
+          return
+        }
+        setData((d) =>
+          d
+            ? {
+                ...d,
+                github: {
+                  ...d.github,
+                  base_url: form.github_url,
+                  poll_interval: form.github_poll_interval,
+                  clone_protocol: form.github_clone_protocol,
+                  has_token: d.github.has_token || !!form.github_pat,
+                },
+                jira: {
+                  ...d.jira,
+                  base_url: form.jira_url,
+                  poll_interval: form.jira_poll_interval,
+                  has_token: d.jira.has_token || !!form.jira_pat,
+                },
+              }
+            : d,
+        )
       }
 
       toast.success('Settings saved')
