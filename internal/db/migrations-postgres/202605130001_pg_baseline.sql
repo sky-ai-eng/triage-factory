@@ -5011,6 +5011,11 @@ CREATE POLICY org_github_apps_delete ON public.org_github_apps FOR DELETE TO tf_
     USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
 
 
+-- installation_id is unique only within a single GitHub host. Per-org
+-- GHES bases mean two orgs can sit on independent GitHub instances whose
+-- numeric installation IDs overlap, so the PK is composite (org_id,
+-- installation_id): a webhook/backfill for one org can never collide with
+-- or rewrite another org's row.
 CREATE TABLE public.org_github_app_installations (
     installation_id text NOT NULL,
     org_id uuid NOT NULL,
@@ -5023,7 +5028,7 @@ CREATE TABLE public.org_github_app_installations (
 );
 
 ALTER TABLE ONLY public.org_github_app_installations
-    ADD CONSTRAINT org_github_app_installations_pkey PRIMARY KEY (installation_id);
+    ADD CONSTRAINT org_github_app_installations_pkey PRIMARY KEY (org_id, installation_id);
 
 ALTER TABLE ONLY public.org_github_app_installations
     ADD CONSTRAINT org_github_app_installations_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;

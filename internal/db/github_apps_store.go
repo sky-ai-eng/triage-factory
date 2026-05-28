@@ -49,29 +49,36 @@ type GitHubAppsStore interface {
 	ListInstallationsForOrg(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error)
 
 	// UpsertInstallation mirrors one installation into
-	// org_github_app_installations. Idempotent on installation_id; ON
-	// CONFLICT it refreshes the account fields and clears removed_at, so
-	// re-observing (backfill) or reinstalling (webhook) the same
-	// installation_id revives a previously-removed row. installed_at is
-	// set on first insert and preserved across upserts (a zero
-	// InstalledAt defaults to now()). In Postgres this writes on the
-	// admin pool — tf_app is denied all writes to this table by RLS.
+	// org_github_app_installations. Idempotent on the (org_id,
+	// installation_id) composite key; ON CONFLICT it refreshes the
+	// account fields and clears removed_at, so re-observing (backfill) or
+	// reinstalling (webhook) the same installation revives a
+	// previously-removed row. installed_at is set on first insert and
+	// preserved across upserts (a zero InstalledAt defaults to now()). In
+	// Postgres this writes on the admin pool — tf_app is denied all
+	// writes to this table by RLS.
 	UpsertInstallation(ctx context.Context, inst domain.OrgGitHubAppInstallation) error
 
 	// MarkInstallationRemoved soft-deletes one installation by stamping
 	// removed_at = now() (a no-op on an already-removed or absent row).
+	// Scoped by orgID as well as installation_id: installation IDs are
+	// unique only per GitHub host, so the org binding keeps a delete for
+	// one tenant from touching another's same-numbered row.
 	// domain.OrgGitHubAppInstallation has no RemovedAt field — readers
 	// filter removed_at IS NULL, so the domain type stays active-only and
 	// this operates at the SQL level. Admin pool in Postgres.
-	MarkInstallationRemoved(ctx context.Context, installationID string) error
+	MarkInstallationRemoved(ctx context.Context, orgID, installationID string) error
 
 	// BackfillInstallationsFromAPI is the reconcile / system-of-record:
 	// it mints an App JWT from the org's App PEM (read via
-	// SecretStore.GetSystem), calls GET {apiBase}/app/installations, and
-	// upserts every installation returned. v1 is per-org Apps only, so
-	// every returned installation unambiguously belongs to orgID. A no-op
-	// when the org has no registered App. Runs in all modes; the
-	// invocation (poller cycle + UI refresh) is a separate concern.
+	// SecretStore.GetSystem), calls GET {apiBase}/app/installations,
+	// upserts every installation returned, and soft-removes any active
+	// row GitHub no longer reports (so a missed installation.deleted
+	// webhook or an API-only deployment converges). v1 is per-org Apps
+	// only, so every returned installation unambiguously belongs to
+	// orgID. A no-op when the org has no registered App. Runs in all
+	// modes; the invocation (poller cycle + UI refresh) is a separate
+	// concern.
 	BackfillInstallationsFromAPI(ctx context.Context, orgID string) error
 }
 

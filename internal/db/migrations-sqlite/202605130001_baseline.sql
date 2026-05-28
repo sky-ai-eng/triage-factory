@@ -286,13 +286,19 @@ CREATE TABLE org_github_apps (
     active                 INTEGER NOT NULL DEFAULT 1
 );
 
+-- installation_id is unique only within a single GitHub host. Per-org
+-- GHES bases mean two orgs can sit on independent GitHub instances whose
+-- numeric installation IDs overlap, so the PK is composite
+-- (org_id, installation_id): a webhook/backfill for one org can never
+-- collide with or rewrite another org's row.
 CREATE TABLE org_github_app_installations (
-    installation_id  TEXT PRIMARY KEY,
+    installation_id  TEXT NOT NULL,
     org_id           TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     account_type     TEXT NOT NULL CHECK (account_type IN ('Organization','User')),
     account_login    TEXT NOT NULL,
     installed_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    removed_at       TIMESTAMP
+    removed_at       TIMESTAMP,
+    PRIMARY KEY (org_id, installation_id)
 );
 -- Partial unique on active rows only: uninstall + reinstall cycles
 -- stamp removed_at on the old row and insert a new row with a fresh

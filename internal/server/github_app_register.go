@@ -204,20 +204,19 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 	// URL: it validates the host at manifest-creation even with
 	// active:false, and a missing hook_attributes is rejected outright as
 	// "Hook url cannot be blank". So we always emit the block. For
-	// deployments GitHub can reach we point it at our real receiver; for
-	// local / NAT'd deployments we substitute an inert public placeholder
-	// (example.com is IANA-reserved for exactly this) so the manifest
-	// validates, and rely on API backfill for installation discovery.
-	// active stays false either way — activation is owned by the
-	// webhook-handler work, and the placeholder must never receive
-	// deliveries regardless.
+	// deployments GitHub can reach we point it at our real receiver and
+	// activate it so install/content events actually arrive; for local /
+	// NAT'd deployments we substitute an inert public placeholder
+	// (example.com is IANA-reserved for exactly this) and keep it inactive
+	// — it must never receive deliveries, and installation discovery there
+	// runs via API backfill instead.
 	hookURL := publicURL + "/api/webhooks/github/" + orgID
 	if !reachable {
 		hookURL = "https://example.com/triage-factory-webhook-unconfigured"
 	}
 	manifest["hook_attributes"] = map[string]any{
 		"url":    hookURL,
-		"active": false,
+		"active": reachable,
 	}
 
 	mj, err := json.Marshal(manifest)

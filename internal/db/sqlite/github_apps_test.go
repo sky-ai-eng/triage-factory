@@ -24,7 +24,7 @@ func seedSQLiteOrgForApps(t *testing.T, conn *sql.DB, orgID string) {
 	// BootstrapSchemaForTest pre-seeds the LocalDefaultOrgID org, so this
 	// is idempotent for that id and inserts for any other.
 	if _, err := conn.Exec(`INSERT OR IGNORE INTO orgs (id, slug, name) VALUES (?, ?, ?)`,
-		orgID, "app-org-"+orgID[:8], "App Org"); err != nil {
+		orgID, "app-org-"+orgID, "App Org"); err != nil {
 		t.Fatalf("seed orgs: %v", err)
 	}
 }
@@ -70,7 +70,7 @@ func TestGitHubAppsStore_SQLite_InstallationLifecycle(t *testing.T) {
 		t.Error("InstalledAt is zero; want defaulted CURRENT_TIMESTAMP")
 	}
 
-	if err := stores.GitHubApps.MarkInstallationRemoved(ctx, "555"); err != nil {
+	if err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgID, "555"); err != nil {
 		t.Fatalf("MarkInstallationRemoved: %v", err)
 	}
 	got, _ = stores.GitHubApps.ListInstallationsForOrg(ctx, orgID)
@@ -86,6 +86,46 @@ func TestGitHubAppsStore_SQLite_InstallationLifecycle(t *testing.T) {
 	got, _ = stores.GitHubApps.ListInstallationsForOrg(ctx, orgID)
 	if len(got) != 1 || got[0].AccountLogin != "acme-renamed" {
 		t.Fatalf("after revive got %+v, want one acme-renamed row", got)
+	}
+}
+
+// TestGitHubAppsStore_SQLite_InstallationCrossOrg pins the composite
+// (org_id, installation_id) key: the same numeric installation_id under
+// two orgs (legal across distinct GitHub hosts) stays two independent
+// rows, and a delete for one org never touches the other's same-id row.
+func TestGitHubAppsStore_SQLite_InstallationCrossOrg(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	const orgA = "00000000-0000-0000-0000-0000000000aa"
+	const orgB = "00000000-0000-0000-0000-0000000000bb"
+	seedSQLiteOrgForApps(t, conn, orgA)
+	seedSQLiteOrgForApps(t, conn, orgB)
+
+	for _, tc := range []struct{ org, login, typ string }{
+		{orgA, "only-in-a", "User"},
+		{orgB, "only-in-b", "Organization"},
+	} {
+		if err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+			InstallationID: "900", OrgID: tc.org, AccountType: tc.typ, AccountLogin: tc.login,
+		}); err != nil {
+			t.Fatalf("UpsertInstallation %s: %v", tc.org, err)
+		}
+	}
+
+	gotA, _ := stores.GitHubApps.ListInstallationsForOrg(ctx, orgA)
+	if len(gotA) != 1 || gotA[0].AccountLogin != "only-in-a" {
+		t.Errorf("orgA = %+v, want one only-in-a row (orgB's same-id upsert leaked)", gotA)
+	}
+
+	if err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgB, "900"); err != nil {
+		t.Fatalf("MarkInstallationRemoved orgB: %v", err)
+	}
+	if got, _ := stores.GitHubApps.ListInstallationsForOrg(ctx, orgA); len(got) != 1 {
+		t.Errorf("orgA lost its row to orgB's delete: %+v", got)
+	}
+	if got, _ := stores.GitHubApps.ListInstallationsForOrg(ctx, orgB); len(got) != 0 {
+		t.Errorf("orgB still active after its own delete: %+v", got)
 	}
 }
 
@@ -126,6 +166,14 @@ func TestGitHubAppsStore_SQLite_Backfill(t *testing.T) {
 		t.Fatalf("seed pem secret: %v", err)
 	}
 
+	// Pre-seed a stale active installation (33) that the mock GitHub no
+	// longer reports — the reconcile must soft-remove it.
+	if err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+		InstallationID: "33", OrgID: orgID, AccountType: "User", AccountLogin: "departed",
+	}); err != nil {
+		t.Fatalf("seed stale installation: %v", err)
+	}
+
 	if err := stores.GitHubApps.BackfillInstallationsFromAPI(ctx, orgID); err != nil {
 		t.Fatalf("BackfillInstallationsFromAPI: %v", err)
 	}
@@ -135,9 +183,9 @@ func TestGitHubAppsStore_SQLite_Backfill(t *testing.T) {
 		t.Fatalf("ListInstallationsForOrg: %v", err)
 	}
 	if len(got) != 2 {
-		t.Fatalf("backfill upserted %d rows, want 2: %+v", len(got), got)
+		t.Fatalf("backfill left %d active rows, want 2 (stale 33 reconciled away): %+v", len(got), got)
 	}
-	// Ordered by account_login: org-eng, org-mkt.
+	// Ordered by account_login: org-eng (11), org-mkt (22); "departed" gone.
 	if got[0].InstallationID != "11" || got[1].InstallationID != "22" {
 		t.Errorf("installation ids = %q, %q; want 11, 22", got[0].InstallationID, got[1].InstallationID)
 	}

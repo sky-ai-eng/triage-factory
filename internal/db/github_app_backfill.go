@@ -76,3 +76,33 @@ func DiscoverAppInstallations(ctx context.Context, secrets SecretStore, orgID, a
 	}
 	return out, nil
 }
+
+// ReconcileInstallations applies a freshly-listed set of installations to
+// the mirror: upsert every listed row, then soft-remove any previously-
+// active installation GitHub no longer reports. activeIDs is the org's
+// pre-backfill active installation_id set; markRemoved is called for each
+// active ID absent from insts. Shared by both store backends so the
+// set-diff lives in one place; each backend supplies its own pool-bound
+// upsert / mark-removed / active-read.
+func ReconcileInstallations(
+	insts []domain.OrgGitHubAppInstallation,
+	activeIDs []string,
+	upsert func(domain.OrgGitHubAppInstallation) error,
+	markRemoved func(installationID string) error,
+) error {
+	keep := make(map[string]bool, len(insts))
+	for _, inst := range insts {
+		if err := upsert(inst); err != nil {
+			return err
+		}
+		keep[inst.InstallationID] = true
+	}
+	for _, id := range activeIDs {
+		if !keep[id] {
+			if err := markRemoved(id); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}

@@ -143,7 +143,7 @@ func (s *Server) handleInstallationEvent(w http.ResponseWriter, r *http.Request,
 			return
 		}
 	case "deleted":
-		if err := s.githubApps.MarkInstallationRemoved(r.Context(), installationID); err != nil {
+		if err := s.githubApps.MarkInstallationRemoved(r.Context(), orgID, installationID); err != nil {
 			internalError(w, "github-webhook", err)
 			return
 		}

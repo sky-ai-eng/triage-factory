@@ -143,8 +143,7 @@ func (s *gitHubAppsStore) UpsertInstallation(ctx context.Context, inst domain.Or
 		INSERT INTO org_github_app_installations
 			(installation_id, org_id, account_type, account_login, installed_at, removed_at)
 		VALUES ($1, $2, $3, $4, COALESCE($5, now()), NULL)
-		ON CONFLICT (installation_id) DO UPDATE SET
-			org_id        = EXCLUDED.org_id,
+		ON CONFLICT (org_id, installation_id) DO UPDATE SET
 			account_type  = EXCLUDED.account_type,
 			account_login = EXCLUDED.account_login,
 			removed_at    = NULL
@@ -155,16 +154,39 @@ func (s *gitHubAppsStore) UpsertInstallation(ctx context.Context, inst domain.Or
 	return nil
 }
 
-func (s *gitHubAppsStore) MarkInstallationRemoved(ctx context.Context, installationID string) error {
+func (s *gitHubAppsStore) MarkInstallationRemoved(ctx context.Context, orgID, installationID string) error {
 	_, err := s.admin.ExecContext(ctx, `
 		UPDATE org_github_app_installations
 		   SET removed_at = now()
-		 WHERE installation_id = $1 AND removed_at IS NULL
-	`, installationID)
+		 WHERE org_id = $1 AND installation_id = $2 AND removed_at IS NULL
+	`, orgID, installationID)
 	if err != nil {
 		return fmt.Errorf("mark org_github_app_installations removed: %w", err)
 	}
 	return nil
+}
+
+// activeInstallationIDs reads the org's live installation IDs on the admin
+// pool — the system-context counterpart of ListInstallationsForOrg, used by
+// the backfill reconcile (which has no JWT claims).
+func (s *gitHubAppsStore) activeInstallationIDs(ctx context.Context, orgID string) ([]string, error) {
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT installation_id FROM org_github_app_installations
+		 WHERE org_id = $1 AND removed_at IS NULL
+	`, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("read active installations: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }
 
 func (s *gitHubAppsStore) BackfillInstallationsFromAPI(ctx context.Context, orgID string) error {
@@ -189,10 +211,12 @@ func (s *gitHubAppsStore) BackfillInstallationsFromAPI(ctx context.Context, orgI
 	if err != nil {
 		return err
 	}
-	for _, inst := range insts {
-		if err := s.UpsertInstallation(ctx, inst); err != nil {
-			return err
-		}
+	active, err := s.activeInstallationIDs(ctx, orgID)
+	if err != nil {
+		return err
 	}
-	return nil
+	return db.ReconcileInstallations(insts, active,
+		func(i domain.OrgGitHubAppInstallation) error { return s.UpsertInstallation(ctx, i) },
+		func(id string) error { return s.MarkInstallationRemoved(ctx, orgID, id) },
+	)
 }

@@ -242,7 +242,7 @@ func TestGitHubAppsStore_Postgres_InstallationLifecycle(t *testing.T) {
 		t.Error("InstalledAt is zero; want defaulted now()")
 	}
 
-	if err := stores.GitHubApps.MarkInstallationRemoved(ctx, "555"); err != nil {
+	if err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgID, "555"); err != nil {
 		t.Fatalf("MarkInstallationRemoved: %v", err)
 	}
 	if got, _ = stores.GitHubApps.ListInstallationsForOrg(ctx, orgID); len(got) != 0 {
@@ -271,20 +271,35 @@ func TestGitHubAppsStore_Postgres_InstallationCrossOrg(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	// Same numeric installation_id under both orgs — legal across distinct
+	// GitHub hosts. The composite (org_id, installation_id) PK must keep
+	// these as two independent rows, not let one overwrite the other.
 	if err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
-		InstallationID: "900",
-		OrgID:          orgA,
-		AccountType:    "User",
-		AccountLogin:   "only-in-a",
+		InstallationID: "900", OrgID: orgA, AccountType: "User", AccountLogin: "only-in-a",
 	}); err != nil {
 		t.Fatalf("UpsertInstallation orgA: %v", err)
 	}
+	if err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+		InstallationID: "900", OrgID: orgB, AccountType: "Organization", AccountLogin: "only-in-b",
+	}); err != nil {
+		t.Fatalf("UpsertInstallation orgB (same id): %v", err)
+	}
 
-	if got, _ := stores.GitHubApps.ListInstallationsForOrg(ctx, orgB); len(got) != 0 {
-		t.Errorf("orgB sees %d installations, want 0 (orgA's row leaked)", len(got))
+	gotA, _ := stores.GitHubApps.ListInstallationsForOrg(ctx, orgA)
+	if len(gotA) != 1 || gotA[0].AccountLogin != "only-in-a" {
+		t.Errorf("orgA = %+v, want one only-in-a row (orgB's same-id upsert leaked)", gotA)
+	}
+	gotB, _ := stores.GitHubApps.ListInstallationsForOrg(ctx, orgB)
+	if len(gotB) != 1 || gotB[0].AccountLogin != "only-in-b" {
+		t.Errorf("orgB = %+v, want one only-in-b row", gotB)
+	}
+
+	// A delete for orgB's id=900 must not touch orgA's id=900.
+	if err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgB, "900"); err != nil {
+		t.Fatalf("MarkInstallationRemoved orgB: %v", err)
 	}
 	if got, _ := stores.GitHubApps.ListInstallationsForOrg(ctx, orgA); len(got) != 1 {
-		t.Errorf("orgA sees %d installations, want 1", len(got))
+		t.Errorf("orgA lost its row to orgB's delete: %+v", got)
 	}
 }
 
