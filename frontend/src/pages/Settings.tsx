@@ -106,10 +106,12 @@ export default function Settings() {
   // not /api/me, so a future team switch refetches the right scope.
   const auth = useOptionalAuth()
   const isLocal = auth === null
-  // Org-scoped GitHub App endpoints take the id in the path. useActiveOrgId
-  // is null in local mode (OrgContext isn't mounted) — fall back to the
-  // sentinel the local-mode backend expects.
-  const orgId = useActiveOrgId() ?? LOCAL_DEFAULT_ORG_ID
+  // Org-scoped GitHub App endpoints take the id in the path. Local mode has
+  // no OrgContext, so it always uses the sentinel; multi mode uses the
+  // resolved active org and is null until that resolves (don't fall back to
+  // the sentinel there — it would fetch the wrong org's state).
+  const activeOrgId = useActiveOrgId()
+  const orgId = isLocal ? LOCAL_DEFAULT_ORG_ID : activeOrgId
 
   const [data, setData] = useState<SettingsData | null>(null)
   const [orgMemberCount, setOrgMemberCount] = useState(1)
@@ -121,7 +123,13 @@ export default function Settings() {
   const [tab, setTab] = useState<SettingsTab>(() =>
     typeof window !== 'undefined' && window.location.hash === '#github-app' ? 'workspace' : 'team',
   )
-  const [ghApp, setGhApp] = useState<GitHubAppStatus | null>(null)
+  // Discriminated so the panel can tell "still resolving" / "load failed"
+  // apart from "no app registered" — they must render differently (a load
+  // failure must NOT show the registration form).
+  const [ghAppState, setGhAppState] = useState<
+    { kind: 'loading' } | { kind: 'error' } | { kind: 'loaded'; status: GitHubAppStatus }
+  >({ kind: 'loading' })
+  const [ghReloadKey, setGhReloadKey] = useState(0)
   const [ghAppOwnerType, setGhAppOwnerType] = useState<'user' | 'org'>('user')
   const [ghAppOwnerLogin, setGhAppOwnerLogin] = useState('')
   const [ghAppRegistering, setGhAppRegistering] = useState(false)
@@ -279,15 +287,24 @@ export default function Settings() {
   // tab, returning focus to this tab is the cue that a new installation
   // may exist (the webhook lands the row server-side; in local mode behind
   // NAT it arrives via API backfill on the next poll).
+  //
+  // orgId is null in multi mode until the active org resolves — stay in the
+  // loading state rather than fetch the wrong org. The mount call runs once;
+  // the focus listener only fires on subsequent focus events (no double
+  // fetch on mount). A focus-refetch failure keeps any already-loaded data
+  // rather than flipping the panel to an error.
   useEffect(() => {
+    if (!orgId) return
     let cancelled = false
     const load = () => {
       getGitHubAppStatus(orgId)
         .then((s) => {
-          if (!cancelled) setGhApp(s)
+          if (!cancelled) setGhAppState({ kind: 'loaded', status: s })
         })
         .catch(() => {
-          // Non-fatal — the panel renders a load-failed hint instead.
+          if (!cancelled) {
+            setGhAppState((prev) => (prev.kind === 'loaded' ? prev : { kind: 'error' }))
+          }
         })
     }
     load()
@@ -297,7 +314,7 @@ export default function Settings() {
       cancelled = true
       window.removeEventListener('focus', onFocus)
     }
-  }, [orgId])
+  }, [orgId, ghReloadKey])
 
   // fetchJiraStatuses queries the backend for statuses across the
   // given project list. The backend intersects across projects, so
@@ -394,6 +411,7 @@ export default function Settings() {
   // submits an auto-POST form to github.com (top-level navigation, per the
   // manifest flow). Control returns via the callback redirect, not here.
   const registerGitHubApp = async () => {
+    if (!orgId) return
     setGhAppRegistering(true)
     try {
       await startGitHubAppRegistration(orgId, {
@@ -407,6 +425,7 @@ export default function Settings() {
   }
 
   const openInstallOnAccount = async () => {
+    if (!orgId) return
     try {
       const url = await getGitHubAppInstallURL(orgId)
       window.open(url, '_blank', 'noopener,noreferrer')
@@ -763,7 +782,8 @@ export default function Settings() {
   // "register your own"; the hosted-default one-click option lands with the
   // hosted-default backend mechanism.
   const renderGitHubApp = () => {
-    const app = ghApp?.app ?? null
+    const status = ghAppState.kind === 'loaded' ? ghAppState.status : null
+    const app = status?.app ?? null
     return (
       <Section>
         <h2 className="text-[13px] font-medium text-text-secondary mb-1">GitHub access</h2>
@@ -773,107 +793,125 @@ export default function Settings() {
           default; you don&rsquo;t need both.
         </p>
 
-        {app ? (
-          <div className="space-y-3">
-            <div className="flex items-center gap-2 rounded-xl bg-claim/[0.06] border border-claim/15 px-4 py-2.5">
-              <div className="w-1.5 h-1.5 rounded-full bg-claim shrink-0" />
-              <span className="text-[12px] text-claim">
-                Connected to GitHub via your own App ({app.slug})
-              </span>
-            </div>
+        {ghAppState.kind === 'loading' && (
+          <p className="text-[12px] text-text-tertiary italic">Loading GitHub App status…</p>
+        )}
 
-            <div className="text-[11px] text-text-tertiary space-y-0.5">
-              <p>
-                App slug: <span className="text-text-secondary">{app.slug}</span>
-              </p>
-              {app.registered_at && (
-                <p>
-                  Registered:{' '}
-                  <span className="text-text-secondary">
-                    {new Date(app.registered_at).toLocaleDateString()}
-                  </span>
-                  {app.registered_by_display_name ? ` by ${app.registered_by_display_name}` : ''}
-                </p>
-              )}
-              <p>
-                Installations:{' '}
-                <span className="text-text-secondary">{ghApp?.installations.length ?? 0}</span>
-              </p>
-            </div>
-
-            {ghApp && ghApp.installations.length > 0 && (
-              <div className="space-y-1">
-                {ghApp.installations.map((inst) => (
-                  <div
-                    key={inst.installation_id}
-                    className="flex items-center justify-between rounded-xl border border-border-subtle bg-white/40 px-3 py-2"
-                  >
-                    <span className="text-[12px] text-text-primary">{inst.account_login}</span>
-                    <span className="text-[10px] uppercase tracking-wide text-text-tertiary">
-                      {inst.account_type}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-
+        {ghAppState.kind === 'error' && (
+          <div className="flex items-center justify-between gap-2 rounded-xl bg-dismiss/[0.06] border border-dismiss/15 px-4 py-2.5">
+            <span className="text-[12px] text-dismiss">Couldn&rsquo;t load GitHub App status.</span>
             <button
               type="button"
-              onClick={openInstallOnAccount}
-              className="inline-flex items-center gap-1.5 text-[12px] text-accent hover:text-accent/80 border border-accent/20 rounded-xl px-4 py-2 transition-colors"
+              onClick={() => setGhReloadKey((k) => k + 1)}
+              className="shrink-0 text-[11px] text-accent hover:text-accent/80"
             >
-              <ExternalLink size={13} />
-              Install on another GitHub account
+              Retry
             </button>
-            <p className="text-[11px] text-text-tertiary leading-relaxed">
-              GitHub will ask which repositories to grant — pick &ldquo;All&rdquo; for parity with
-              PAT behavior, or pick specific repos for tighter scope. This choice does not inherit
-              from your PAT.
-            </p>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            <Field label="Account type">
-              <div className="inline-flex rounded-lg border border-border-glass bg-black/[0.02] p-0.5">
-                {(['user', 'org'] as const).map((t) => (
-                  <button
-                    key={t}
-                    type="button"
-                    onClick={() => setGhAppOwnerType(t)}
-                    className={`px-3 py-1 text-[12px] font-medium rounded-md transition-colors ${
-                      ghAppOwnerType === t
-                        ? 'bg-white text-text-primary shadow-sm'
-                        : 'text-text-tertiary hover:text-text-secondary'
-                    }`}
-                  >
-                    {t === 'user' ? 'Personal' : 'Organization'}
-                  </button>
-                ))}
-              </div>
-            </Field>
-            <Field label={ghAppOwnerType === 'org' ? 'GitHub organization' : 'GitHub username'}>
-              <input
-                type="text"
-                placeholder={ghAppOwnerType === 'org' ? 'your-org' : 'your-username'}
-                value={ghAppOwnerLogin}
-                onChange={(e) => setGhAppOwnerLogin(e.target.value)}
-                className={inputClass}
-              />
-            </Field>
-            <button
-              type="button"
-              onClick={registerGitHubApp}
-              disabled={ghAppRegistering || !ghAppOwnerLogin.trim()}
-              className="w-full bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
-            >
-              {ghAppRegistering ? 'Redirecting to GitHub…' : 'Register your own GitHub App'}
-            </button>
-            <p className="text-[11px] text-text-tertiary leading-relaxed">
-              You&rsquo;ll be taken to GitHub to confirm the App, then returned here. GitHub will
-              ask which repositories to grant on install.
-            </p>
           </div>
         )}
+
+        {status &&
+          (app ? (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2 rounded-xl bg-claim/[0.06] border border-claim/15 px-4 py-2.5">
+                <div className="w-1.5 h-1.5 rounded-full bg-claim shrink-0" />
+                <span className="text-[12px] text-claim">
+                  Connected to GitHub via your own App ({app.slug})
+                </span>
+              </div>
+
+              <div className="text-[11px] text-text-tertiary space-y-0.5">
+                <p>
+                  App slug: <span className="text-text-secondary">{app.slug}</span>
+                </p>
+                {app.registered_at && (
+                  <p>
+                    Registered:{' '}
+                    <span className="text-text-secondary">
+                      {new Date(app.registered_at).toLocaleDateString()}
+                    </span>
+                    {app.registered_by_display_name ? ` by ${app.registered_by_display_name}` : ''}
+                  </p>
+                )}
+                <p>
+                  Installations:{' '}
+                  <span className="text-text-secondary">{status.installations.length}</span>
+                </p>
+              </div>
+
+              {status.installations.length > 0 && (
+                <div className="space-y-1">
+                  {status.installations.map((inst) => (
+                    <div
+                      key={inst.installation_id}
+                      className="flex items-center justify-between rounded-xl border border-border-subtle bg-white/40 px-3 py-2"
+                    >
+                      <span className="text-[12px] text-text-primary">{inst.account_login}</span>
+                      <span className="text-[10px] uppercase tracking-wide text-text-tertiary">
+                        {inst.account_type}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <button
+                type="button"
+                onClick={openInstallOnAccount}
+                className="inline-flex items-center gap-1.5 text-[12px] text-accent hover:text-accent/80 border border-accent/20 rounded-xl px-4 py-2 transition-colors"
+              >
+                <ExternalLink size={13} />
+                Install on another GitHub account
+              </button>
+              <p className="text-[11px] text-text-tertiary leading-relaxed">
+                GitHub will ask which repositories to grant — pick &ldquo;All&rdquo; for parity with
+                PAT behavior, or pick specific repos for tighter scope. This choice does not inherit
+                from your PAT.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <Field label="Account type">
+                <div className="inline-flex rounded-lg border border-border-glass bg-black/[0.02] p-0.5">
+                  {(['user', 'org'] as const).map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => setGhAppOwnerType(t)}
+                      className={`px-3 py-1 text-[12px] font-medium rounded-md transition-colors ${
+                        ghAppOwnerType === t
+                          ? 'bg-white text-text-primary shadow-sm'
+                          : 'text-text-tertiary hover:text-text-secondary'
+                      }`}
+                    >
+                      {t === 'user' ? 'Personal' : 'Organization'}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+              <Field label={ghAppOwnerType === 'org' ? 'GitHub organization' : 'GitHub username'}>
+                <input
+                  type="text"
+                  placeholder={ghAppOwnerType === 'org' ? 'your-org' : 'your-username'}
+                  value={ghAppOwnerLogin}
+                  onChange={(e) => setGhAppOwnerLogin(e.target.value)}
+                  className={inputClass}
+                />
+              </Field>
+              <button
+                type="button"
+                onClick={registerGitHubApp}
+                disabled={ghAppRegistering || !ghAppOwnerLogin.trim()}
+                className="w-full bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
+              >
+                {ghAppRegistering ? 'Redirecting to GitHub…' : 'Register your own GitHub App'}
+              </button>
+              <p className="text-[11px] text-text-tertiary leading-relaxed">
+                You&rsquo;ll be taken to GitHub to confirm the App, then returned here. GitHub will
+                ask which repositories to grant on install.
+              </p>
+            </div>
+          ))}
       </Section>
     )
   }

@@ -60,7 +60,13 @@ func (s *Server) handleGitHubAppStatus(w http.ResponseWriter, r *http.Request) {
 			return lerr
 		}
 		if app != nil && app.RegisteredByUserID != "" {
-			registeredByName, _ = tx.Users.GetDisplayName(r.Context(), app.RegisteredByUserID)
+			// Best-effort: a missing/failed display-name lookup leaves the
+			// field empty but shouldn't fail the whole status read.
+			name, derr := tx.Users.GetDisplayName(r.Context(), app.RegisteredByUserID)
+			if derr != nil {
+				log.Printf("[github-app] display name for %s: %v", app.RegisteredByUserID, derr)
+			}
+			registeredByName = name
 		}
 		return nil
 	}); err != nil {

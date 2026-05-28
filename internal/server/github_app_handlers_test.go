@@ -74,6 +74,17 @@ func TestGitHubAppStatus_MultiMode(t *testing.T) {
 	respB, _ := rig.driveCallback(bob)
 	sidB := rig.sidFromResp(respB)
 
+	// carol is a non-admin ('member') of orgA — the endpoints are
+	// intentionally member-readable, so she must get 200, not 404.
+	carol := rig.seedUser()
+	if _, err := rig.h.AdminDB.Exec(
+		`INSERT INTO public.org_memberships (user_id, org_id, role) VALUES ($1, $2, 'member')`,
+		carol.String(), orgA.String()); err != nil {
+		t.Fatalf("seed carol membership: %v", err)
+	}
+	respC, _ := rig.driveCallback(carol)
+	sidC := rig.sidFromResp(respC)
+
 	// Seed an org App + one installation directly.
 	if _, err := rig.h.AdminDB.Exec(`
 		INSERT INTO org_github_apps (org_id, app_id, slug, client_id,
@@ -130,6 +141,13 @@ func TestGitHubAppStatus_MultiMode(t *testing.T) {
 		want := "https://github.com/apps/acme-bot/installations/new"
 		if out["url"] != want {
 			t.Errorf("url=%q, want %q", out["url"], want)
+		}
+	})
+
+	t.Run("non_admin_member_sees_app", func(t *testing.T) {
+		rec := get(sidC, "/api/orgs/"+orgA.String()+"/github-app")
+		if rec.Code != http.StatusOK {
+			t.Errorf("non-admin member status=%d body=%s, want 200", rec.Code, rec.Body.String())
 		}
 	})
 

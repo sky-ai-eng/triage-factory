@@ -362,6 +362,24 @@ func TestGitHubAPIBase(t *testing.T) {
 	}
 }
 
+// TestSettingsRedirectPath pins the mode-aware post-callback redirect:
+// local mode lands on the flat /settings route, multi mode on the
+// org-scoped one. The #github-app fragment is appended by the caller.
+func TestSettingsRedirectPath(t *testing.T) {
+	t.Run("local", func(t *testing.T) {
+		runmode.SetForTest(t, runmode.ModeLocal)
+		if got := settingsRedirectPath("org-x"); got != "/settings" {
+			t.Errorf("local redirect = %q, want /settings", got)
+		}
+	})
+	t.Run("multi", func(t *testing.T) {
+		runmode.SetForTest(t, runmode.ModeMulti)
+		if got := settingsRedirectPath("org-x"); got != "/orgs/org-x/settings" {
+			t.Errorf("multi redirect = %q, want /orgs/org-x/settings", got)
+		}
+	})
+}
+
 func jsonBody(b []byte) io.Reader {
 	return bytes.NewReader(b)
 }
