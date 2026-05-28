@@ -1,9 +1,12 @@
 import { useState, useEffect } from 'react'
-import { ChevronDown, ChevronRight, Trash2 } from 'lucide-react'
+import { ChevronDown, ChevronRight, Lock, Trash2 } from 'lucide-react'
 import JiraStatusRule, { type JiraStatusRuleValue } from '../components/JiraStatusRule'
+import SettingsTabs, { type SettingsTab } from '../components/SettingsTabs'
 import { toast } from '../components/Toast/toastStore'
 import { readError } from '../lib/api'
 import { getStoredTheme, setTheme, type ThemeMode } from '../lib/theme'
+import { useOptionalAuth } from '../contexts/AuthContext'
+import { computeAccess } from './settings/access'
 
 interface JiraStatus {
   id: string
@@ -32,6 +35,7 @@ interface OrgSettingsData {
   max_llm_model_tier?: string
   has_anthropic_api_key: boolean
   has_bedrock_credentials: boolean
+  member_count: number
 }
 
 interface TeamSettingsData {
@@ -43,6 +47,8 @@ interface TeamSettingsData {
     AutoDelegateEnabled: boolean
   }
   jira_projects: JiraProjectConfig[]
+  member_count: number
+  role: string
 }
 
 interface SettingsData {
@@ -84,7 +90,19 @@ const projectIsComplete = (p: JiraProjectConfig): boolean =>
   !!p.done.canonical
 
 export default function Settings() {
+  // useOptionalAuth is null in local mode (no AuthProvider mounted), which
+  // is the degenerate single-user world — always N=1. In multi mode it
+  // carries the orgs list + active org used for N=1 detection and role
+  // gating. Member counts + team role come from the scope GET responses,
+  // not /api/me, so a future team switch refetches the right scope.
+  const auth = useOptionalAuth()
+  const isLocal = auth === null
+
   const [data, setData] = useState<SettingsData | null>(null)
+  const [orgMemberCount, setOrgMemberCount] = useState(1)
+  const [teamMemberCount, setTeamMemberCount] = useState(1)
+  const [teamRole, setTeamRole] = useState('')
+  const [tab, setTab] = useState<SettingsTab>('team')
   const [form, setForm] = useState<{
     github_enabled: boolean
     github_url: string
@@ -131,6 +149,16 @@ export default function Settings() {
   const [sshTestState, setSshTestState] = useState<
     { kind: 'idle' } | { kind: 'running' } | { kind: 'ok' } | { kind: 'fail'; stderr: string }
   >({ kind: 'idle' })
+
+  const access = computeAccess({
+    isLocal,
+    orgs: auth?.orgs ?? [],
+    activeOrgId: auth?.serverActiveOrgId ?? null,
+    orgMemberCount,
+    teamMemberCount,
+    teamRole,
+  })
+  const { isN1, isOrgAdmin, isTeamAdmin } = access
 
   // Test SSH preflight on demand. Doesn't save settings — purely
   // diagnostic. Useful for users on the Settings page after they've
@@ -185,6 +213,9 @@ export default function Settings() {
         },
       }
       setData(merged)
+      setOrgMemberCount(org.member_count ?? 1)
+      setTeamMemberCount(team.member_count ?? 1)
+      setTeamRole(team.role ?? '')
       setForm({
         github_enabled: true,
         github_url: merged.github.base_url,
@@ -380,33 +411,113 @@ export default function Settings() {
     return key ? expandedKeys[key] === true : false
   }
 
-  const save = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setSaving(true)
-
-    // Trim project keys before sending. Empty-key entries are
-    // dropped — the user added a section but never typed a key.
+  // saveTeam / saveOrg each POST a single scope and fold the saved values
+  // back into `data` so the next change-detection compares against current
+  // state, not the stale mount snapshot. They're independent permission
+  // domains on separate endpoints — there's no transaction spanning both.
+  const saveTeam = async (): Promise<boolean> => {
     const projects = form.jira_projects
       .map((p) => ({ ...p, key: p.key.trim() }))
       .filter((p) => p.key !== '')
+    const res = await fetch('/api/settings/team/default', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ai_model: form.ai_model,
+        ai_auto_delegate_enabled: form.ai_auto_delegate_enabled,
+        jira_projects: projects,
+      }),
+    })
+    if (!res.ok) {
+      toast.error(await readError(res, 'Failed to save team settings'))
+      return false
+    }
+    setData((d) =>
+      d
+        ? {
+            ...d,
+            jira: { ...d.jira, projects },
+            ai: {
+              ...d.ai,
+              model: form.ai_model,
+              auto_delegate_enabled: form.ai_auto_delegate_enabled,
+            },
+          }
+        : d,
+    )
+    return true
+  }
 
-    // Org and team are independent permission domains (org-admin vs
-    // team-admin) on separate endpoints, so there's no single
-    // transaction spanning both. We POST only the scope(s) whose fields
-    // actually changed — that way an org-admin-only user saving org
-    // fields never trips the team endpoint's requireTeamAdmin (and vice
-    // versa), and a single-domain edit can't half-commit. For a genuine
-    // dual-domain edit we run team first: its validation is pure
-    // server-side (project rules, dup keys) with no external calls, so
-    // it fails before the org POST's PAT/SSH work commits anything. On
-    // success we fold the saved values into `data` so the next save's
-    // change-detection compares against current state, not the stale
-    // mount snapshot.
+  const saveOrg = async (): Promise<boolean> => {
+    const res = await fetch('/api/settings/org', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        github_base_url: form.github_url,
+        github_pat: form.github_pat || undefined,
+        github_poll_interval: form.github_poll_interval,
+        github_clone_protocol: form.github_clone_protocol,
+        jira_base_url: form.jira_url,
+        jira_pat: form.jira_pat || undefined,
+        jira_poll_interval: form.jira_poll_interval,
+      }),
+    })
+    if (!res.ok) {
+      toast.error(await readError(res, 'Failed to save settings'))
+      return false
+    }
+    setData((d) =>
+      d
+        ? {
+            ...d,
+            github: {
+              ...d.github,
+              base_url: form.github_url,
+              poll_interval: form.github_poll_interval,
+              clone_protocol: form.github_clone_protocol,
+              has_token: d.github.has_token || !!form.github_pat,
+            },
+            jira: {
+              ...d.jira,
+              base_url: form.jira_url,
+              poll_interval: form.jira_poll_interval,
+              has_token: d.jira.has_token || !!form.jira_pat,
+            },
+          }
+        : d,
+    )
+    return true
+  }
+
+  // runSave drives the requested scope(s). Team runs first: its validation
+  // is pure server-side (project rules, dup keys) with no external calls,
+  // so it fails before the org POST's PAT/SSH work commits anything.
+  const runSave = async (scopes: SettingsTab[]) => {
+    setSaving(true)
+    try {
+      if (scopes.includes('team') && !(await saveTeam())) return
+      if (scopes.includes('workspace') && !(await saveOrg())) return
+      toast.success('Settings saved')
+      setForm((f) => ({ ...f, github_pat: '', jira_pat: '' }))
+    } catch (err) {
+      toast.error(`Could not save settings: ${(err as Error).message}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  // Flat (N=1) save: POST only the scope(s) whose fields actually changed
+  // against the mount/last-save snapshot, so a single-domain edit can't
+  // half-commit and we skip a no-op round trip.
+  const saveAll = (e: React.FormEvent) => {
+    e.preventDefault()
+    const projects = form.jira_projects
+      .map((p) => ({ ...p, key: p.key.trim() }))
+      .filter((p) => p.key !== '')
     const teamChanged =
       form.ai_model !== data?.ai.model ||
       form.ai_auto_delegate_enabled !== data?.ai.auto_delegate_enabled ||
       JSON.stringify(projects) !== JSON.stringify(data?.jira.projects ?? [])
-
     const orgChanged =
       !!form.github_pat ||
       !!form.jira_pat ||
@@ -415,86 +526,14 @@ export default function Settings() {
       form.github_clone_protocol !== data?.github.clone_protocol ||
       form.jira_url !== (data?.jira.base_url ?? '') ||
       form.jira_poll_interval !== data?.jira.poll_interval
-
-    try {
-      const jsonHeaders = { 'Content-Type': 'application/json' }
-
-      if (teamChanged) {
-        const teamRes = await fetch('/api/settings/team/default', {
-          method: 'POST',
-          headers: jsonHeaders,
-          body: JSON.stringify({
-            ai_model: form.ai_model,
-            ai_auto_delegate_enabled: form.ai_auto_delegate_enabled,
-            jira_projects: projects,
-          }),
-        })
-        if (!teamRes.ok) {
-          toast.error(await readError(teamRes, 'Failed to save team settings'))
-          return
-        }
-        setData((d) =>
-          d
-            ? {
-                ...d,
-                jira: { ...d.jira, projects },
-                ai: {
-                  ...d.ai,
-                  model: form.ai_model,
-                  auto_delegate_enabled: form.ai_auto_delegate_enabled,
-                },
-              }
-            : d,
-        )
-      }
-
-      if (orgChanged) {
-        const orgRes = await fetch('/api/settings/org', {
-          method: 'POST',
-          headers: jsonHeaders,
-          body: JSON.stringify({
-            github_base_url: form.github_url,
-            github_pat: form.github_pat || undefined,
-            github_poll_interval: form.github_poll_interval,
-            github_clone_protocol: form.github_clone_protocol,
-            jira_base_url: form.jira_url,
-            jira_pat: form.jira_pat || undefined,
-            jira_poll_interval: form.jira_poll_interval,
-          }),
-        })
-        if (!orgRes.ok) {
-          toast.error(await readError(orgRes, 'Failed to save settings'))
-          return
-        }
-        setData((d) =>
-          d
-            ? {
-                ...d,
-                github: {
-                  ...d.github,
-                  base_url: form.github_url,
-                  poll_interval: form.github_poll_interval,
-                  clone_protocol: form.github_clone_protocol,
-                  has_token: d.github.has_token || !!form.github_pat,
-                },
-                jira: {
-                  ...d.jira,
-                  base_url: form.jira_url,
-                  poll_interval: form.jira_poll_interval,
-                  has_token: d.jira.has_token || !!form.jira_pat,
-                },
-              }
-            : d,
-        )
-      }
-
-      toast.success('Settings saved')
-      setForm((f) => ({ ...f, github_pat: '', jira_pat: '' }))
-    } catch (err) {
-      toast.error(`Could not save settings: ${(err as Error).message}`)
-    } finally {
-      setSaving(false)
+    const scopes: SettingsTab[] = []
+    if (teamChanged) scopes.push('team')
+    if (orgChanged) scopes.push('workspace')
+    if (scopes.length === 0) {
+      toast.info('No changes to save')
+      return
     }
+    void runSave(scopes)
   }
 
   if (!data) {
@@ -507,453 +546,550 @@ export default function Settings() {
 
   // Save button is disabled when Jira is connected but any tracked
   // project has incomplete rules — same gating as the pre-SKY-272
-  // form, just applied per project.
+  // form, just applied per project. This gates the team scope (projects).
   const incompleteProjects = jiraConnected
     ? form.jira_projects.filter((p) => p.key.trim() !== '' && !projectIsComplete(p)).length
     : 0
   const hasAnyValidProject =
     !jiraConnected || form.jira_projects.some((p) => p.key.trim() !== '' && projectIsComplete(p))
+  const teamSaveBlocked = jiraConnected && (!hasAnyValidProject || incompleteProjects > 0)
 
-  return (
-    <div className="max-w-2xl mx-auto">
-      <h1 className="text-[22px] font-semibold text-text-primary tracking-tight mb-6">Settings</h1>
-      <form onSubmit={save} className="space-y-5">
-        {/* GitHub (always on) */}
-        <Section>
-          <h2 className="text-[13px] font-medium text-text-secondary mb-4">GitHub</h2>
-          <div className="space-y-3">
-            <Field label="Base URL">
-              <input
-                type="url"
-                placeholder="https://github.com"
-                value={form.github_url}
-                onChange={update('github_url')}
-                className={inputClass}
-              />
-            </Field>
-            <Field label={`Token${data.github.has_token ? ' (leave blank to keep current)' : ''}`}>
-              <input
-                type="password"
-                placeholder={data.github.has_token ? '••••••••' : 'GitHub Personal Access Token'}
-                value={form.github_pat}
-                onChange={update('github_pat')}
-                className={inputClass}
-              />
-              <p className="text-[11px] text-text-tertiary mt-1">
-                Requires a{' '}
-                <a
-                  href="https://github.com/settings/tokens/new?scopes=repo,read:org&description=Triage+Factory"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-accent hover:underline"
-                >
-                  classic PAT
-                </a>{' '}
-                with <code className="text-text-secondary">repo</code> and{' '}
-                <code className="text-text-secondary">read:org</code> scopes.{' '}
-                <code className="text-text-secondary">read:org</code> is needed to resolve your team
-                memberships so review requests sent to your teams (e.g. CODEOWNERS) surface as tasks
-                — without it, only PRs that request you individually will show up.
-              </p>
-            </Field>
-            <Field label="Poll interval">
-              <select
-                value={form.github_poll_interval}
-                onChange={update('github_poll_interval')}
-                className={inputClass}
-              >
-                <option value="30s">30 seconds</option>
-                <option value="1m0s">1 minute</option>
-                <option value="2m0s">2 minutes</option>
-                <option value="5m0s">5 minutes</option>
-              </select>
-            </Field>
-            <Field label="Clone protocol">
-              <div className="flex items-center gap-3">
-                <div className="inline-flex rounded-lg border border-border-glass bg-black/[0.02] p-0.5">
-                  {(['ssh', 'https'] as const).map((p) => (
-                    <button
-                      key={p}
-                      type="button"
-                      onClick={() => {
-                        setForm((f) => ({ ...f, github_clone_protocol: p }))
-                        setSshTestState({ kind: 'idle' })
-                      }}
-                      className={`px-3 py-1 text-[12px] font-medium rounded-md transition-colors ${
-                        form.github_clone_protocol === p
-                          ? 'bg-white text-text-primary shadow-sm'
-                          : 'text-text-tertiary hover:text-text-secondary'
-                      }`}
-                    >
-                      {p.toUpperCase()}
-                    </button>
-                  ))}
-                </div>
-                <button
-                  type="button"
-                  onClick={testSSH}
-                  disabled={sshTestState.kind === 'running'}
-                  className="text-[11px] text-accent hover:underline disabled:opacity-50"
-                >
-                  {sshTestState.kind === 'running' ? 'Testing...' : 'Test SSH connection'}
-                </button>
-              </div>
-              <p className="text-[11px] text-text-tertiary mt-1.5 leading-relaxed">
-                Your token is still required for the GitHub API. The protocol only affects how
-                Triage Factory clones repos to your machine. Saving the toggle re-clones bare repos
-                with the new origin URL.
-              </p>
-              {sshTestState.kind === 'ok' && (
-                <p className="text-[11px] text-[var(--color-claim)] mt-1.5">
-                  ✓ SSH preflight succeeded — git@
-                  {(() => {
-                    try {
-                      return new URL(form.github_url).hostname || 'github.com'
-                    } catch {
-                      return 'github.com'
-                    }
-                  })()}{' '}
-                  is reachable with your key.
-                </p>
-              )}
-              {sshTestState.kind === 'fail' && (
-                <pre
-                  className="
-                  mt-1.5 max-h-[120px] overflow-auto rounded
-                  bg-[var(--color-dismiss)]/10 p-2 text-[11px]
-                  text-[var(--color-dismiss)] whitespace-pre-wrap break-words
-                "
-                >
-                  {sshTestState.stderr}
-                </pre>
-              )}
-            </Field>
-          </div>
-        </Section>
+  // ---- Section renderers (closures over current state; no prop drilling).
 
-        {/* Jira */}
-        <Section>
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-[13px] font-medium text-text-secondary">Jira</h2>
-            {jiraConnected && (
-              <button
-                type="button"
-                onClick={disconnectJira}
-                className="text-[11px] text-dismiss hover:text-dismiss/80 transition-colors"
-              >
-                Disconnect
-              </button>
-            )}
-          </div>
-
-          {!jiraConnected ? (
-            /* Stage 1: Connect credentials */
-            <div className="space-y-3">
-              <Field label="Base URL">
-                <input
-                  type="url"
-                  placeholder="https://jira.yourcompany.com"
-                  value={form.jira_url}
-                  onChange={update('jira_url')}
-                  className={inputClass}
-                />
-              </Field>
-              <Field label="Personal Access Token">
-                <input
-                  type="password"
-                  placeholder="Jira Personal Access Token"
-                  value={form.jira_pat}
-                  onChange={update('jira_pat')}
-                  className={inputClass}
-                />
-              </Field>
-              {jiraConnectError && (
-                <div className="rounded-xl px-4 py-2.5 text-[13px] bg-dismiss/[0.08] border border-dismiss/20 text-dismiss">
-                  {jiraConnectError}
-                </div>
-              )}
-              <button
-                type="button"
-                onClick={connectJira}
-                disabled={jiraConnecting || !form.jira_url.trim() || !form.jira_pat.trim()}
-                className="w-full bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
-              >
-                {jiraConnecting ? 'Connecting...' : 'Connect'}
-              </button>
-            </div>
-          ) : (
-            /* Stage 2: Configure projects & statuses (per-project) */
-            <div className="space-y-3">
-              <div className="flex items-center gap-2 rounded-xl bg-claim/[0.06] border border-claim/15 px-4 py-2.5">
-                <div className="w-1.5 h-1.5 rounded-full bg-claim shrink-0" />
-                <span className="text-[12px] text-claim">
-                  Connected to {form.jira_url.replace(/^https?:\/\//, '')}
-                </span>
-              </div>
-              <Field label="Poll interval">
-                <select
-                  value={form.jira_poll_interval}
-                  onChange={update('jira_poll_interval')}
-                  className={inputClass}
-                >
-                  <option value="30s">30 seconds</option>
-                  <option value="1m0s">1 minute</option>
-                  <option value="2m0s">2 minutes</option>
-                  <option value="5m0s">5 minutes</option>
-                </select>
-              </Field>
-
-              {/* Per-project sections. Each carries its own rules. */}
-              <div className="space-y-2">
-                {form.jira_projects.length === 0 && (
-                  <p className="text-[12px] text-text-tertiary italic">
-                    No Jira projects configured. Click &ldquo;Add project&rdquo; to start.
-                  </p>
-                )}
-                {form.jira_projects.map((project, i) => {
-                  const statuses = jiraStatusesByProject[project.key] || []
-                  const complete = projectIsComplete(project)
-                  const expanded = isExpanded(i)
-                  return (
-                    <div key={i} className="rounded-xl border border-border-subtle bg-white/40">
-                      <div className="flex items-center gap-2 px-3 py-2">
-                        <button
-                          type="button"
-                          onClick={() => toggleExpanded(i)}
-                          className="text-text-tertiary hover:text-text-secondary"
-                          aria-label={expanded ? 'Collapse project' : 'Expand project'}
-                        >
-                          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                        </button>
-                        <input
-                          type="text"
-                          placeholder="PROJ"
-                          value={project.key}
-                          onChange={(e) => updateProject(i, { key: e.target.value })}
-                          className="flex-1 bg-transparent border-0 focus:outline-none text-[13px] font-medium text-text-primary placeholder-text-tertiary"
-                        />
-                        {project.key.trim() !== '' && (
-                          <span
-                            className={`text-[10px] uppercase tracking-wide ${
-                              complete ? 'text-claim' : 'text-snooze'
-                            }`}
-                          >
-                            {complete ? 'Ready' : 'Needs rules'}
-                          </span>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => removeProject(i)}
-                          className="text-text-tertiary hover:text-dismiss"
-                          aria-label="Remove project"
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      </div>
-
-                      {expanded && (
-                        <div className="px-4 pb-4 pt-1 space-y-3">
-                          <div className="flex items-center justify-between">
-                            <p className="text-[11px] text-text-tertiary">
-                              {statuses.length > 0
-                                ? `${statuses.length} statuses available`
-                                : 'Click Fetch Statuses to load options'}
-                            </p>
-                            <button
-                              type="button"
-                              onClick={() => fetchJiraStatuses([project.key].filter(Boolean))}
-                              disabled={statusesLoading || !project.key.trim()}
-                              className="shrink-0 text-[11px] text-accent hover:text-accent/80 disabled:opacity-40 border border-accent/20 rounded-xl px-3 py-1 transition-colors"
-                            >
-                              {statusesLoading ? 'Loading...' : 'Fetch Statuses'}
-                            </button>
-                          </div>
-
-                          {statuses.length > 0 && (
-                            <div className="space-y-4 pt-1">
-                              <JiraStatusRule
-                                label="Pickup"
-                                description="Poll for unassigned tickets in these states."
-                                allStatuses={statuses}
-                                value={project.pickup}
-                                onChange={(v) => updateProject(i, { pickup: v })}
-                                requireCanonical={false}
-                              />
-                              <JiraStatusRule
-                                label="In progress"
-                                description="Count as actively being worked on."
-                                allStatuses={statuses}
-                                value={project.in_progress}
-                                onChange={(v) => updateProject(i, { in_progress: v })}
-                                requireCanonical={true}
-                                canonicalPrompt="Claim →"
-                              />
-                              <JiraStatusRule
-                                label="Done"
-                                description="Count as complete (add every variant — e.g. Resolved + Verified)."
-                                allStatuses={statuses}
-                                value={project.done}
-                                onChange={(v) => updateProject(i, { done: v })}
-                                requireCanonical={true}
-                                canonicalPrompt="Complete →"
-                              />
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )
-                })}
-                <button
-                  type="button"
-                  onClick={addProject}
-                  className="w-full text-[12px] text-accent hover:text-accent/80 border border-dashed border-accent/30 rounded-xl px-3 py-2 transition-colors"
-                >
-                  + Add project
-                </button>
-              </div>
-            </div>
-          )}
-        </Section>
-
-        {/* Appearance */}
-        <Section>
-          <h2 className="text-[13px] font-medium text-text-secondary mb-4">Appearance</h2>
-          <Field label="Theme">
+  const renderGitHub = () => (
+    <Section>
+      <h2 className="text-[13px] font-medium text-text-secondary mb-4">GitHub</h2>
+      <div className="space-y-3">
+        <Field label="Base URL">
+          <input
+            type="url"
+            placeholder="https://github.com"
+            value={form.github_url}
+            onChange={update('github_url')}
+            className={inputClass}
+          />
+        </Field>
+        <Field label={`Token${data.github.has_token ? ' (leave blank to keep current)' : ''}`}>
+          <input
+            type="password"
+            placeholder={data.github.has_token ? '••••••••' : 'GitHub Personal Access Token'}
+            value={form.github_pat}
+            onChange={update('github_pat')}
+            className={inputClass}
+          />
+          <p className="text-[11px] text-text-tertiary mt-1">
+            Requires a{' '}
+            <a
+              href="https://github.com/settings/tokens/new?scopes=repo,read:org&description=Triage+Factory"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-accent hover:underline"
+            >
+              classic PAT
+            </a>{' '}
+            with <code className="text-text-secondary">repo</code> and{' '}
+            <code className="text-text-secondary">read:org</code> scopes.{' '}
+            <code className="text-text-secondary">read:org</code> is needed to resolve your team
+            memberships so review requests sent to your teams (e.g. CODEOWNERS) surface as tasks —
+            without it, only PRs that request you individually will show up.
+          </p>
+        </Field>
+        <Field label="Poll interval">
+          <select
+            value={form.github_poll_interval}
+            onChange={update('github_poll_interval')}
+            className={inputClass}
+          >
+            <option value="30s">30 seconds</option>
+            <option value="1m0s">1 minute</option>
+            <option value="2m0s">2 minutes</option>
+            <option value="5m0s">5 minutes</option>
+          </select>
+        </Field>
+        <Field label="Clone protocol">
+          <div className="flex items-center gap-3">
             <div className="inline-flex rounded-lg border border-border-glass bg-black/[0.02] p-0.5">
-              {(['light', 'dark', 'auto'] as const).map((m) => (
+              {(['ssh', 'https'] as const).map((p) => (
                 <button
-                  key={m}
+                  key={p}
                   type="button"
                   onClick={() => {
-                    setThemeState(m)
-                    setTheme(m)
+                    setForm((f) => ({ ...f, github_clone_protocol: p }))
+                    setSshTestState({ kind: 'idle' })
                   }}
-                  className={`px-3 py-1 text-[12px] font-medium rounded-md transition-colors capitalize ${
-                    theme === m
+                  className={`px-3 py-1 text-[12px] font-medium rounded-md transition-colors ${
+                    form.github_clone_protocol === p
                       ? 'bg-white text-text-primary shadow-sm'
                       : 'text-text-tertiary hover:text-text-secondary'
                   }`}
                 >
-                  {m}
+                  {p.toUpperCase()}
                 </button>
               ))}
             </div>
-            <p className="text-[11px] text-text-tertiary mt-1.5">
-              Auto follows your system preference.
-            </p>
-          </Field>
-        </Section>
-
-        {/* AI */}
-        <Section>
-          <h2 className="text-[13px] font-medium text-text-secondary mb-4">AI</h2>
-          <div className="space-y-3">
-            <Field label="Delegation model">
-              <select value={form.ai_model} onChange={update('ai_model')} className={inputClass}>
-                <option value="haiku">Haiku (fast, cheap)</option>
-                <option value="sonnet">Sonnet (balanced)</option>
-                <option value="opus">Opus (most capable)</option>
-              </select>
-            </Field>
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-[13px] text-text-primary">Auto-delegation</p>
-                <p className="text-[11px] text-text-tertiary mt-0.5">
-                  Automatically delegate tasks when matching triggers fire
-                </p>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={form.ai_auto_delegate_enabled}
-                onClick={() =>
-                  setForm((f) => ({ ...f, ai_auto_delegate_enabled: !f.ai_auto_delegate_enabled }))
-                }
-                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-                  form.ai_auto_delegate_enabled ? 'bg-accent' : 'bg-black/[0.08]'
-                }`}
-              >
-                <span
-                  className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-sm transform transition-transform ${
-                    form.ai_auto_delegate_enabled ? 'translate-x-4' : 'translate-x-0'
-                  }`}
-                />
-              </button>
-            </div>
-          </div>
-        </Section>
-
-        <button
-          type="submit"
-          disabled={saving || (jiraConnected && (!hasAnyValidProject || incompleteProjects > 0))}
-          className="w-full bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
-        >
-          {saving ? 'Saving...' : 'Save Settings'}
-        </button>
-
-        {/* Integrations */}
-        <Section>
-          <h2 className="text-[13px] font-medium text-text-primary mb-3">Integrations</h2>
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-[13px] text-text-primary">Import Claude Code Skills</p>
-              <p className="text-[11px] text-text-tertiary mt-0.5">
-                Import SKILL.md files from ~/.claude/skills/ as delegation prompts
-              </p>
-            </div>
             <button
               type="button"
-              onClick={async () => {
-                try {
-                  const res = await fetch('/api/skills/import', { method: 'POST' })
-                  if (!res.ok) {
-                    toast.error(await readError(res, 'Failed to import skills'))
-                    return
-                  }
-                  const data = await res.json()
-                  if (data.imported > 0) {
-                    toast.success(
-                      `Imported ${data.imported} skill${data.imported !== 1 ? 's' : ''} (${data.skipped} already imported)`,
-                    )
-                  } else {
-                    toast.info(
-                      `No new skills found (${data.scanned} scanned, ${data.skipped} already imported)`,
-                    )
-                  }
-                } catch (err) {
-                  toast.error(`Failed to import skills: ${(err as Error).message}`)
-                }
-              }}
-              className="text-[13px] text-accent hover:text-accent/80 border border-accent/20 hover:border-accent/30 rounded-xl px-4 py-2 transition-colors shrink-0"
+              onClick={testSSH}
+              disabled={sshTestState.kind === 'running'}
+              className="text-[11px] text-accent hover:underline disabled:opacity-50"
             >
-              Import Skills
+              {sshTestState.kind === 'running' ? 'Testing...' : 'Test SSH connection'}
             </button>
           </div>
-        </Section>
+          <p className="text-[11px] text-text-tertiary mt-1.5 leading-relaxed">
+            Your token is still required for the GitHub API. The protocol only affects how Triage
+            Factory clones repos to your machine. Saving the toggle re-clones bare repos with the
+            new origin URL.
+          </p>
+          {sshTestState.kind === 'ok' && (
+            <p className="text-[11px] text-[var(--color-claim)] mt-1.5">
+              ✓ SSH preflight succeeded — git@
+              {(() => {
+                try {
+                  return new URL(form.github_url).hostname || 'github.com'
+                } catch {
+                  return 'github.com'
+                }
+              })()}{' '}
+              is reachable with your key.
+            </p>
+          )}
+          {sshTestState.kind === 'fail' && (
+            <pre
+              className="
+              mt-1.5 max-h-[120px] overflow-auto rounded
+              bg-[var(--color-dismiss)]/10 p-2 text-[11px]
+              text-[var(--color-dismiss)] whitespace-pre-wrap break-words
+            "
+            >
+              {sshTestState.stderr}
+            </pre>
+          )}
+        </Field>
+      </div>
+    </Section>
+  )
 
-        {/* Danger zone */}
-        <Section danger>
-          <h2 className="text-[13px] font-medium text-dismiss mb-3">Danger Zone</h2>
+  const renderJiraConnection = () => (
+    <Section>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-[13px] font-medium text-text-secondary">Jira connection</h2>
+        {jiraConnected && (
           <button
             type="button"
-            onClick={async () => {
-              if (!confirm('Clear all stored tokens? You will need to re-authenticate.')) return
-              await fetch('/api/integrations', { method: 'DELETE' })
-              window.location.href = '/setup'
-            }}
-            className="text-[13px] text-dismiss hover:text-dismiss/80 border border-dismiss/20 hover:border-dismiss/30 rounded-xl px-4 py-2 transition-colors"
+            onClick={disconnectJira}
+            className="text-[11px] text-dismiss hover:text-dismiss/80 transition-colors"
           >
-            Clear All Tokens
+            Disconnect
           </button>
-        </Section>
-      </form>
+        )}
+      </div>
+
+      {!jiraConnected ? (
+        /* Stage 1: Connect credentials */
+        <div className="space-y-3">
+          <Field label="Base URL">
+            <input
+              type="url"
+              placeholder="https://jira.yourcompany.com"
+              value={form.jira_url}
+              onChange={update('jira_url')}
+              className={inputClass}
+            />
+          </Field>
+          <Field label="Personal Access Token">
+            <input
+              type="password"
+              placeholder="Jira Personal Access Token"
+              value={form.jira_pat}
+              onChange={update('jira_pat')}
+              className={inputClass}
+            />
+          </Field>
+          {jiraConnectError && (
+            <div className="rounded-xl px-4 py-2.5 text-[13px] bg-dismiss/[0.08] border border-dismiss/20 text-dismiss">
+              {jiraConnectError}
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={connectJira}
+            disabled={jiraConnecting || !form.jira_url.trim() || !form.jira_pat.trim()}
+            className="w-full bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
+          >
+            {jiraConnecting ? 'Connecting...' : 'Connect'}
+          </button>
+        </div>
+      ) : (
+        /* Stage 2: connected — show status + poll interval */
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 rounded-xl bg-claim/[0.06] border border-claim/15 px-4 py-2.5">
+            <div className="w-1.5 h-1.5 rounded-full bg-claim shrink-0" />
+            <span className="text-[12px] text-claim">
+              Connected to {form.jira_url.replace(/^https?:\/\//, '')}
+            </span>
+          </div>
+          <Field label="Poll interval">
+            <select
+              value={form.jira_poll_interval}
+              onChange={update('jira_poll_interval')}
+              className={inputClass}
+            >
+              <option value="30s">30 seconds</option>
+              <option value="1m0s">1 minute</option>
+              <option value="2m0s">2 minutes</option>
+              <option value="5m0s">5 minutes</option>
+            </select>
+          </Field>
+        </div>
+      )}
+    </Section>
+  )
+
+  const renderJiraProjects = () => (
+    <Section>
+      <h2 className="text-[13px] font-medium text-text-secondary mb-4">Jira projects</h2>
+      {!jiraConnected ? (
+        <p className="text-[12px] text-text-tertiary italic">
+          Connect Jira under Workspace settings before configuring tracked projects.
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {form.jira_projects.length === 0 && (
+            <p className="text-[12px] text-text-tertiary italic">
+              No Jira projects configured. Click &ldquo;Add project&rdquo; to start.
+            </p>
+          )}
+          {form.jira_projects.map((project, i) => {
+            const statuses = jiraStatusesByProject[project.key] || []
+            const complete = projectIsComplete(project)
+            const expanded = isExpanded(i)
+            return (
+              <div key={i} className="rounded-xl border border-border-subtle bg-white/40">
+                <div className="flex items-center gap-2 px-3 py-2">
+                  <button
+                    type="button"
+                    onClick={() => toggleExpanded(i)}
+                    className="text-text-tertiary hover:text-text-secondary"
+                    aria-label={expanded ? 'Collapse project' : 'Expand project'}
+                  >
+                    {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                  </button>
+                  <input
+                    type="text"
+                    placeholder="PROJ"
+                    value={project.key}
+                    onChange={(e) => updateProject(i, { key: e.target.value })}
+                    className="flex-1 bg-transparent border-0 focus:outline-none text-[13px] font-medium text-text-primary placeholder-text-tertiary"
+                  />
+                  {project.key.trim() !== '' && (
+                    <span
+                      className={`text-[10px] uppercase tracking-wide ${
+                        complete ? 'text-claim' : 'text-snooze'
+                      }`}
+                    >
+                      {complete ? 'Ready' : 'Needs rules'}
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => removeProject(i)}
+                    className="text-text-tertiary hover:text-dismiss"
+                    aria-label="Remove project"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+
+                {expanded && (
+                  <div className="px-4 pb-4 pt-1 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <p className="text-[11px] text-text-tertiary">
+                        {statuses.length > 0
+                          ? `${statuses.length} statuses available`
+                          : 'Click Fetch Statuses to load options'}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => fetchJiraStatuses([project.key].filter(Boolean))}
+                        disabled={statusesLoading || !project.key.trim()}
+                        className="shrink-0 text-[11px] text-accent hover:text-accent/80 disabled:opacity-40 border border-accent/20 rounded-xl px-3 py-1 transition-colors"
+                      >
+                        {statusesLoading ? 'Loading...' : 'Fetch Statuses'}
+                      </button>
+                    </div>
+
+                    {statuses.length > 0 && (
+                      <div className="space-y-4 pt-1">
+                        <JiraStatusRule
+                          label="Pickup"
+                          description="Poll for unassigned tickets in these states."
+                          allStatuses={statuses}
+                          value={project.pickup}
+                          onChange={(v) => updateProject(i, { pickup: v })}
+                          requireCanonical={false}
+                        />
+                        <JiraStatusRule
+                          label="In progress"
+                          description="Count as actively being worked on."
+                          allStatuses={statuses}
+                          value={project.in_progress}
+                          onChange={(v) => updateProject(i, { in_progress: v })}
+                          requireCanonical={true}
+                          canonicalPrompt="Claim →"
+                        />
+                        <JiraStatusRule
+                          label="Done"
+                          description="Count as complete (add every variant — e.g. Resolved + Verified)."
+                          allStatuses={statuses}
+                          value={project.done}
+                          onChange={(v) => updateProject(i, { done: v })}
+                          requireCanonical={true}
+                          canonicalPrompt="Complete →"
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+          <button
+            type="button"
+            onClick={addProject}
+            className="w-full text-[12px] text-accent hover:text-accent/80 border border-dashed border-accent/30 rounded-xl px-3 py-2 transition-colors"
+          >
+            + Add project
+          </button>
+        </div>
+      )}
+    </Section>
+  )
+
+  const renderAI = () => (
+    <Section>
+      <h2 className="text-[13px] font-medium text-text-secondary mb-4">AI</h2>
+      <div className="space-y-3">
+        <Field label="Delegation model">
+          <select value={form.ai_model} onChange={update('ai_model')} className={inputClass}>
+            <option value="haiku">Haiku (fast, cheap)</option>
+            <option value="sonnet">Sonnet (balanced)</option>
+            <option value="opus">Opus (most capable)</option>
+          </select>
+        </Field>
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-[13px] text-text-primary">Auto-delegation</p>
+            <p className="text-[11px] text-text-tertiary mt-0.5">
+              Automatically delegate tasks when matching triggers fire
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={form.ai_auto_delegate_enabled}
+            onClick={() =>
+              setForm((f) => ({ ...f, ai_auto_delegate_enabled: !f.ai_auto_delegate_enabled }))
+            }
+            className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
+              form.ai_auto_delegate_enabled ? 'bg-accent' : 'bg-black/[0.08]'
+            }`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-sm transform transition-transform ${
+                form.ai_auto_delegate_enabled ? 'translate-x-4' : 'translate-x-0'
+              }`}
+            />
+          </button>
+        </div>
+      </div>
+    </Section>
+  )
+
+  const renderAppearance = () => (
+    <Section>
+      <h2 className="text-[13px] font-medium text-text-secondary mb-4">Appearance</h2>
+      <Field label="Theme">
+        <div className="inline-flex rounded-lg border border-border-glass bg-black/[0.02] p-0.5">
+          {(['light', 'dark', 'auto'] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => {
+                setThemeState(m)
+                setTheme(m)
+              }}
+              className={`px-3 py-1 text-[12px] font-medium rounded-md transition-colors capitalize ${
+                theme === m
+                  ? 'bg-white text-text-primary shadow-sm'
+                  : 'text-text-tertiary hover:text-text-secondary'
+              }`}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
+        <p className="text-[11px] text-text-tertiary mt-1.5">
+          Auto follows your system preference.
+        </p>
+      </Field>
+    </Section>
+  )
+
+  const renderIntegrations = () => (
+    <Section>
+      <h2 className="text-[13px] font-medium text-text-primary mb-3">Integrations</h2>
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-[13px] text-text-primary">Import Claude Code Skills</p>
+          <p className="text-[11px] text-text-tertiary mt-0.5">
+            Import SKILL.md files from ~/.claude/skills/ as delegation prompts
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={async () => {
+            try {
+              const res = await fetch('/api/skills/import', { method: 'POST' })
+              if (!res.ok) {
+                toast.error(await readError(res, 'Failed to import skills'))
+                return
+              }
+              const result = await res.json()
+              if (result.imported > 0) {
+                toast.success(
+                  `Imported ${result.imported} skill${result.imported !== 1 ? 's' : ''} (${result.skipped} already imported)`,
+                )
+              } else {
+                toast.info(
+                  `No new skills found (${result.scanned} scanned, ${result.skipped} already imported)`,
+                )
+              }
+            } catch (err) {
+              toast.error(`Failed to import skills: ${(err as Error).message}`)
+            }
+          }}
+          className="text-[13px] text-accent hover:text-accent/80 border border-accent/20 hover:border-accent/30 rounded-xl px-4 py-2 transition-colors shrink-0"
+        >
+          Import Skills
+        </button>
+      </div>
+    </Section>
+  )
+
+  const renderDanger = () => (
+    <Section danger>
+      <h2 className="text-[13px] font-medium text-dismiss mb-3">Danger Zone</h2>
+      <button
+        type="button"
+        onClick={async () => {
+          if (!confirm('Clear all stored tokens? You will need to re-authenticate.')) return
+          await fetch('/api/integrations', { method: 'DELETE' })
+          window.location.href = '/setup'
+        }}
+        className="text-[13px] text-dismiss hover:text-dismiss/80 border border-dismiss/20 hover:border-dismiss/30 rounded-xl px-4 py-2 transition-colors"
+      >
+        Clear All Tokens
+      </button>
+    </Section>
+  )
+
+  const workspaceSections = (
+    <>
+      {renderGitHub()}
+      {renderJiraConnection()}
+      {renderIntegrations()}
+      {renderDanger()}
+    </>
+  )
+  const teamSections = (
+    <>
+      {renderAI()}
+      {renderJiraProjects()}
+    </>
+  )
+
+  // ---- Flat (N=1) layout: everything on one page, single Save.
+  if (isN1) {
+    return (
+      <div className="max-w-2xl mx-auto">
+        <h1 className="text-[22px] font-semibold text-text-primary tracking-tight mb-6">
+          Settings
+        </h1>
+        <form onSubmit={saveAll} className="space-y-5">
+          {renderGitHub()}
+          {renderJiraConnection()}
+          {renderJiraProjects()}
+          {renderAI()}
+          {renderAppearance()}
+          <button
+            type="submit"
+            disabled={saving || teamSaveBlocked}
+            className="w-full bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
+          >
+            {saving ? 'Saving...' : 'Save Settings'}
+          </button>
+          {renderIntegrations()}
+          {renderDanger()}
+        </form>
+      </div>
+    )
+  }
+
+  // ---- Tabbed (N≥2) layout: Team / Workspace, role-gated.
+  return (
+    <div className="max-w-2xl mx-auto">
+      <h1 className="text-[22px] font-semibold text-text-primary tracking-tight mb-1">Settings</h1>
+      <SettingsTabs tab={tab} onChange={setTab} />
+
+      {tab === 'team' && (
+        <div className="space-y-5">
+          {!isTeamAdmin && <ReadOnlyNotice scope="team" />}
+          <fieldset
+            disabled={!isTeamAdmin}
+            className={`space-y-5 min-w-0 border-0 p-0 m-0 ${isTeamAdmin ? '' : 'opacity-60'}`}
+          >
+            {teamSections}
+          </fieldset>
+          <button
+            type="button"
+            onClick={() => void runSave(['team'])}
+            disabled={saving || !isTeamAdmin || teamSaveBlocked}
+            className="w-full bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
+          >
+            {saving ? 'Saving...' : 'Save team settings'}
+          </button>
+        </div>
+      )}
+
+      {tab === 'workspace' && (
+        <div className="space-y-5">
+          {!isOrgAdmin && <ReadOnlyNotice scope="workspace" />}
+          <fieldset
+            disabled={!isOrgAdmin}
+            className={`space-y-5 min-w-0 border-0 p-0 m-0 ${isOrgAdmin ? '' : 'opacity-60'}`}
+          >
+            {workspaceSections}
+          </fieldset>
+          <button
+            type="button"
+            onClick={() => void runSave(['workspace'])}
+            disabled={saving || !isOrgAdmin}
+            className="w-full bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
+          >
+            {saving ? 'Saving...' : 'Save workspace settings'}
+          </button>
+          {/* Appearance is a personal/device preference — always editable,
+              regardless of org role. Kept outside the gated fieldset. */}
+          {renderAppearance()}
+        </div>
+      )}
     </div>
   )
 }
 
 const inputClass =
-  'w-full bg-white/50 border border-border-subtle rounded-xl px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/40 transition-colors'
+  'w-full bg-white/50 border border-border-subtle rounded-xl px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/40 transition-colors disabled:opacity-60 disabled:cursor-not-allowed'
 
 function Section({ children, danger }: { children: React.ReactNode; danger?: boolean }) {
   return (
@@ -973,5 +1109,20 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span className="text-[11px] text-text-tertiary mb-1.5 block">{label}</span>
       {children}
     </label>
+  )
+}
+
+// ReadOnlyNotice explains why a scope's fields are disabled. Per SKY-358 we
+// disable (not hide) the fields and surface the policy, so a non-admin sees
+// what exists and who can change it rather than a missing tab.
+function ReadOnlyNotice({ scope }: { scope: 'team' | 'workspace' }) {
+  const who = scope === 'team' ? 'team admins' : 'workspace (org) admins'
+  return (
+    <div className="flex items-center gap-2 rounded-xl bg-black/[0.03] border border-border-subtle px-4 py-2.5">
+      <Lock size={13} className="text-text-tertiary shrink-0" />
+      <span className="text-[12px] text-text-tertiary">
+        These settings are read-only for you. Only {who} can change them.
+      </span>
+    </div>
   )
 }

@@ -359,3 +359,43 @@ func TestTeamSettingsPost_DuplicateProjectKey_Rejected(t *testing.T) {
 		t.Errorf("error should mention duplicate, got: %q", resp["error"])
 	}
 }
+
+// TestSettingsGet_MemberCountAndRole verifies the scope GET responses carry
+// the membership signals the frontend's N=1 collapse + role gating read
+// (SKY-358). Local mode is the degenerate single-member world, so the org
+// and team both report one member and the caller is the team admin.
+func TestSettingsGet_MemberCountAndRole(t *testing.T) {
+	s := newTestServer(t)
+
+	orgRec := doJSON(t, s, "GET", "/api/settings/org", nil)
+	if orgRec.Code != http.StatusOK {
+		t.Fatalf("GET /api/settings/org: %d: %s", orgRec.Code, orgRec.Body.String())
+	}
+	var org struct {
+		MemberCount int `json:"member_count"`
+	}
+	if err := json.Unmarshal(orgRec.Body.Bytes(), &org); err != nil {
+		t.Fatalf("decode org: %v", err)
+	}
+	if org.MemberCount != 1 {
+		t.Errorf("org member_count = %d, want 1 (local mode is single-member)", org.MemberCount)
+	}
+
+	teamRec := doJSON(t, s, "GET", "/api/settings/team/default", nil)
+	if teamRec.Code != http.StatusOK {
+		t.Fatalf("GET /api/settings/team/default: %d: %s", teamRec.Code, teamRec.Body.String())
+	}
+	var team struct {
+		MemberCount int    `json:"member_count"`
+		Role        string `json:"role"`
+	}
+	if err := json.Unmarshal(teamRec.Body.Bytes(), &team); err != nil {
+		t.Fatalf("decode team: %v", err)
+	}
+	if team.MemberCount != 1 {
+		t.Errorf("team member_count = %d, want 1", team.MemberCount)
+	}
+	if team.Role != "admin" {
+		t.Errorf("team role = %q, want admin (local sole member)", team.Role)
+	}
+}

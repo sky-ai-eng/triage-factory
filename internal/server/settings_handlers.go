@@ -101,6 +101,14 @@ func (s *Server) handleUserSettingsPost(w http.ResponseWriter, r *http.Request) 
 type teamSettingsResponse struct {
 	TeamSettings domain.TeamSettings   `json:"team_settings"`
 	JiraProjects []jiraProjectSettings `json:"jira_projects"`
+	// MemberCount + Role describe the caller's relationship to this team,
+	// so the frontend can collapse to the flat N=1 layout and gate the
+	// write-side fields without a second round trip. They live on the
+	// team-scope response (not /api/me) because they're properties of the
+	// team, not the user — switching teams refetches this endpoint and
+	// gets the new team's count + the caller's role in it.
+	MemberCount int    `json:"member_count"`
+	Role        string `json:"role"`
 }
 
 func (s *Server) handleTeamSettingsGet(w http.ResponseWriter, r *http.Request) {
@@ -142,6 +150,14 @@ func (s *Server) handleTeamSettingsGet(w http.ResponseWriter, r *http.Request) {
 	if resp.JiraProjects == nil {
 		resp.JiraProjects = []jiraProjectSettings{}
 	}
+
+	count, role, err := s.teamMemberCountAndRole(r.Context(), orgID, userID, teamID)
+	if err != nil {
+		internalError(w, "settings/team", err)
+		return
+	}
+	resp.MemberCount = count
+	resp.Role = role
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -277,6 +293,10 @@ type orgSettingsResponse struct {
 	MaxLLMModelTier     string `json:"max_llm_model_tier,omitempty"`
 	HasAnthropicAPIKey  bool   `json:"has_anthropic_api_key"`
 	HasBedrockCreds     bool   `json:"has_bedrock_credentials"`
+	// MemberCount is the number of members in this org. Feeds the
+	// frontend's N=1 collapse alongside the team member count. A property
+	// of the org, so it rides the org-scope response rather than /api/me.
+	MemberCount int `json:"member_count"`
 }
 
 func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
@@ -313,6 +333,12 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 		jiraBaseURL = creds.JiraURL
 	}
 
+	memberCount, err := s.orgMemberCount(r.Context(), orgID, userID)
+	if err != nil {
+		internalError(w, "settings/org", err)
+		return
+	}
+
 	writeJSON(w, http.StatusOK, orgSettingsResponse{
 		GitHubBaseURL:       ghBaseURL,
 		GitHubPollInterval:  orgSet.GitHubPollInterval.String(),
@@ -324,6 +350,7 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 		MaxLLMModelTier:     orgSet.MaxLLMModelTier,
 		HasAnthropicAPIKey:  orgSet.AnthropicAPIKeyRef != "",
 		HasBedrockCreds:     orgSet.BedrockCredentialsRef != "",
+		MemberCount:         memberCount,
 	})
 }
 
@@ -687,6 +714,59 @@ func (s *Server) requireOrgAdminRole(w http.ResponseWriter, r *http.Request, org
 		return false
 	}
 	return true
+}
+
+// orgMemberCount returns the number of members in the org. Local mode is
+// always single-member (one synthetic user), so it short-circuits to 1
+// without touching Postgres — db.WithTx's set_config is Postgres-only and
+// there are no org_memberships rows in the local SQLite schema anyway.
+func (s *Server) orgMemberCount(ctx context.Context, orgID, userID string) (int, error) {
+	if runmode.Current() == runmode.ModeLocal {
+		return 1, nil
+	}
+	var n int
+	err := db.WithTx(ctx, s.db, db.Claims{Sub: userID, OrgID: orgID},
+		func(tx *sql.Tx) error {
+			return tx.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM org_memberships WHERE org_id = $1::uuid`, orgID,
+			).Scan(&n)
+		},
+	)
+	return n, err
+}
+
+// teamMemberCountAndRole returns the team's member count and the caller's
+// role in it ("admin" / "member", or "" when not a member). Local mode is
+// the degenerate single-member case: one user who is implicitly the admin.
+// The OrgID claim is required — teams/memberships RLS gates on
+// tf.current_org_id(), so a Sub-only claim would only ever see the
+// caller's own membership row and miscount.
+func (s *Server) teamMemberCountAndRole(ctx context.Context, orgID, userID, teamID string) (int, string, error) {
+	if runmode.Current() == runmode.ModeLocal {
+		return 1, "admin", nil
+	}
+	var (
+		n    int
+		role string
+	)
+	err := db.WithTx(ctx, s.db, db.Claims{Sub: userID, OrgID: orgID},
+		func(tx *sql.Tx) error {
+			if e := tx.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM memberships WHERE team_id = $1::uuid`, teamID,
+			).Scan(&n); e != nil {
+				return e
+			}
+			e := tx.QueryRowContext(ctx,
+				`SELECT role FROM memberships
+				  WHERE team_id = $1::uuid AND user_id = tf.current_user_id()`, teamID,
+			).Scan(&role)
+			if errors.Is(e, sql.ErrNoRows) {
+				return nil
+			}
+			return e
+		},
+	)
+	return n, role, err
 }
 
 func writeResolveError(w http.ResponseWriter, scope string, err error) {
