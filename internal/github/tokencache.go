@@ -14,19 +14,30 @@ import (
 // against clock skew between this host and GitHub.
 const tokenExpiryGuard = 5 * time.Minute
 
-// TokenCache stores minted GitHub App installation access tokens keyed by
-// installation ID so resolutions within a token's lifetime reuse it instead
-// of re-minting. Get must treat a token within tokenExpiryGuard of expiry
-// as a miss so callers never receive one that could 401.
+// TokenCache stores minted GitHub App installation access tokens so
+// resolutions within a token's lifetime reuse it instead of re-minting. Get
+// must treat a token within tokenExpiryGuard of expiry as a miss so callers
+// never receive one that could 401.
+//
+// Keyed by (orgID, installationID), not installationID alone: installation
+// IDs are unique only per GitHub host, so two tenants on different GHES
+// appliances can collide on the same numeric ID. Scoping by org keeps one
+// tenant from ever being served another's token.
 type TokenCache interface {
-	Get(installationID string) (githubapp.Token, bool)
-	Set(installationID string, tok githubapp.Token)
+	Get(orgID, installationID string) (githubapp.Token, bool)
+	Set(orgID, installationID string, tok githubapp.Token)
 
-	// Invalidate drops the entry for installationID. Wired to the
+	// Invalidate drops the entry for (orgID, installationID). Wired to the
 	// installation.deleted webhook (via the server's onInstallationRemoved
 	// hook) so a removed installation's token isn't served from cache until
 	// its natural expiry.
-	Invalidate(installationID string)
+	Invalidate(orgID, installationID string)
+}
+
+// cacheKey joins org + installation with a NUL so no orgID/installationID
+// pair can alias another by concatenation.
+func cacheKey(orgID, installationID string) string {
+	return orgID + "\x00" + installationID
 }
 
 // memoryTokenCache is the process-local TokenCache. A single TF process owns
@@ -50,30 +61,31 @@ func (c *memoryTokenCache) timeNow() time.Time {
 	return time.Now()
 }
 
-func (c *memoryTokenCache) Get(installationID string) (githubapp.Token, bool) {
+func (c *memoryTokenCache) Get(orgID, installationID string) (githubapp.Token, bool) {
+	key := cacheKey(orgID, installationID)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	tok, ok := c.tokens[installationID]
+	tok, ok := c.tokens[key]
 	if !ok {
 		return githubapp.Token{}, false
 	}
 	// Expired or inside the guard window: treat as a miss and drop the
 	// stale entry so the map doesn't accumulate dead tokens.
 	if !tok.ExpiresAt.After(c.timeNow().Add(tokenExpiryGuard)) {
-		delete(c.tokens, installationID)
+		delete(c.tokens, key)
 		return githubapp.Token{}, false
 	}
 	return tok, true
 }
 
-func (c *memoryTokenCache) Set(installationID string, tok githubapp.Token) {
+func (c *memoryTokenCache) Set(orgID, installationID string, tok githubapp.Token) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.tokens[installationID] = tok
+	c.tokens[cacheKey(orgID, installationID)] = tok
 }
 
-func (c *memoryTokenCache) Invalidate(installationID string) {
+func (c *memoryTokenCache) Invalidate(orgID, installationID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.tokens, installationID)
+	delete(c.tokens, cacheKey(orgID, installationID))
 }

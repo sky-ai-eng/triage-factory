@@ -246,6 +246,35 @@ func TestResolver_NoCredentials(t *testing.T) {
 	}
 }
 
+// When org_settings.github_base_url is empty, the resolver must still honor
+// a GHES host stored only in the github_url secret (the pre-settings-mirror
+// / local-mode case) rather than defaulting to public github.com.
+func TestResolver_BaseURLFallbackToSecret(t *testing.T) {
+	gh := newGHTestServer(t)
+	r := NewResolver(
+		&fakeSecrets{vals: map[string]string{
+			integrations.KeyGitHubURL: gh.srv.URL, // host lives only in the secret
+			integrations.KeyGitHubPAT: "ghp_test",
+		}},
+		&fakeApps{app: nil},
+		&fakeOrgs{base: ""}, // settings has no base
+		&fakeAgents{},
+		nil,
+	)
+	client, err := r.ClientFor(context.Background(), "org-1", "acme")
+	if err != nil {
+		t.Fatalf("ClientFor: %v", err)
+	}
+	// If the base wrongly defaulted to github.com, this request would never
+	// reach the test server and lastProbe would stay empty.
+	if _, err := client.Get("/probe"); err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if gh.lastProbe != "Bearer ghp_test" {
+		t.Errorf("base did not fall back to the github_url secret; lastProbe=%q", gh.lastProbe)
+	}
+}
+
 // An installation match but a missing/invalid PEM must not hard-fail — the
 // resolver logs and falls through to the PAT.
 func TestResolver_AppMintFails_FallsToPAT(t *testing.T) {

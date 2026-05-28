@@ -81,17 +81,25 @@ func (r *resolver) ClientFor(ctx context.Context, orgID, target string) (*Client
 }
 
 // githubBaseFor resolves the org's user-facing GitHub base URL (github.com
-// or a GHES host). A settings-read failure degrades to the public default
-// rather than failing the whole resolution — GetSettingsSystem already
-// returns defaults on the row-missing case, so a real error here is a rare
-// transient and the public base is the right guess for the common tenant.
+// or a GHES host). Precedence mirrors the pre-resolver dashboard/repos code:
+// org_settings.github_base_url first, then the github_url secret, then the
+// public default. The secret fallback is load-bearing for GHES orgs whose
+// base predates the org_settings mirror (common in local mode, where the
+// keychain holds the URL and the settings column can be empty) — without it
+// those orgs would be silently routed to public github.com with a GHES PAT.
+// A settings-read failure degrades to the same fallback chain rather than
+// failing the whole resolution.
 func (r *resolver) githubBaseFor(ctx context.Context, orgID string) string {
 	set, err := r.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
-		log.Printf("[gh-resolver] org=%s: read settings: %v (defaulting base to %s)", orgID, err, DefaultBaseURL)
-		return DefaultBaseURL
+		log.Printf("[gh-resolver] org=%s: read settings: %v (falling back to secret/default base)", orgID, err)
+	} else if set.GitHubBaseURL != "" {
+		return ResolveBaseURL(set.GitHubBaseURL)
 	}
-	return ResolveBaseURL(set.GitHubBaseURL)
+	if secretURL, serr := r.secrets.GetSystem(ctx, orgID, integrations.KeyGitHubURL); serr == nil && secretURL != "" {
+		return ResolveBaseURL(secretURL)
+	}
+	return DefaultBaseURL
 }
 
 func (r *resolver) tier1AppClient(ctx context.Context, orgID, target, base string) (*Client, bool) {
@@ -154,7 +162,7 @@ func (r *resolver) installationFor(ctx context.Context, orgID, target string) (d
 // mint path is reached only on a cache miss (~once/hour per installation),
 // so re-parsing the PEM each time is acceptable.
 func (r *resolver) installationToken(ctx context.Context, orgID string, app *domain.OrgGitHubApp, inst domain.OrgGitHubAppInstallation, base string) (githubapp.Token, error) {
-	if tok, ok := r.cache.Get(inst.InstallationID); ok {
+	if tok, ok := r.cache.Get(orgID, inst.InstallationID); ok {
 		return tok, nil
 	}
 
@@ -189,7 +197,7 @@ func (r *resolver) installationToken(ctx context.Context, orgID string, app *dom
 	if err != nil {
 		return githubapp.Token{}, err
 	}
-	r.cache.Set(inst.InstallationID, tok)
+	r.cache.Set(orgID, inst.InstallationID, tok)
 	return tok, nil
 }
 
