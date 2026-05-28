@@ -1,14 +1,15 @@
-export type SettingsTab = 'team' | 'workspace'
+export type SettingsTab = 'my' | 'team' | 'workspace'
 
 const TABS: { id: SettingsTab; label: string }[] = [
+  { id: 'my', label: 'My Settings' },
   { id: 'team', label: 'Team' },
   { id: 'workspace', label: 'Workspace' },
 ]
 
 /** Tab navigation for the multi-member Settings layout. Collapsed away in
- *  the N=1 case (the page renders flat). My-scope settings have no tab yet
- *  — user_settings is empty post-cleanup and PATs are org-scoped — so the
- *  split is Team vs Workspace. */
+ *  the N=1 case (the page renders flat). My-scope holds device/personal
+ *  preferences (theme today; user_settings fields later) — server-scoped
+ *  PATs and AI policy live under Workspace and Team respectively. */
 export default function SettingsTabs({
   tab,
   onChange,

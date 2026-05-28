@@ -1042,6 +1042,15 @@ export default function Settings() {
       <h1 className="text-[22px] font-semibold text-text-primary tracking-tight mb-1">Settings</h1>
       <SettingsTabs tab={tab} onChange={setTab} />
 
+      {tab === 'my' && (
+        <div className="space-y-5">
+          {/* My Settings is personal/device scope — always editable, no role
+              gating. Theme persists immediately to localStorage, so there's
+              no Save button. Future user_settings fields land here. */}
+          {renderAppearance()}
+        </div>
+      )}
+
       {tab === 'team' && (
         <div className="space-y-5">
           {!isTeamAdmin && <ReadOnlyNotice scope="team" />}
@@ -1079,9 +1088,6 @@ export default function Settings() {
           >
             {saving ? 'Saving...' : 'Save workspace settings'}
           </button>
-          {/* Appearance is a personal/device preference — always editable,
-              regardless of org role. Kept outside the gated fieldset. */}
-          {renderAppearance()}
         </div>
       )}
     </div>
