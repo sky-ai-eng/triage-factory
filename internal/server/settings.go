@@ -241,7 +241,6 @@ func ruleToProjectConfig(r domain.JiraProjectStatusRules) jiraProjectConfig {
 	}
 }
 
-
 // toJiraProjectSettings converts the persisted view into the wire
 // shape, normalizing nil Members slices to empty slices so the JSON
 // response is friendly to FE consumers (no `members:null`).

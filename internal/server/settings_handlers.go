@@ -102,7 +102,7 @@ func (s *Server) handleUserSettingsPost(w http.ResponseWriter, r *http.Request) 
 // --------------------------------------------------------------------
 
 type teamSettingsResponse struct {
-	TeamSettings domain.TeamSettings  `json:"team_settings"`
+	TeamSettings domain.TeamSettings   `json:"team_settings"`
 	JiraProjects []jiraProjectSettings `json:"jira_projects"`
 }
 
