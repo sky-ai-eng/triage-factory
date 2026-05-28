@@ -233,7 +233,7 @@ func New(admin, app *sql.DB) db.Stores {
 		// (org_id, creator_user_id) pair), admin for the boot-time
 		// CancelOrphanedNonTerminalRequests sweep that runs before
 		// any JWT-claims context exists.
-		Curator:    newCuratorStore(app, admin),
+		Curator: newCuratorStore(app, admin),
 		// GitHubApps: app pool for request-handler reads/writes
 		// (RLS-gated); admin pool for installation-mirror writes (tf_app
 		// is denied all writes to org_github_app_installations) + the
