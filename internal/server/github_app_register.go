@@ -23,7 +23,7 @@ import (
 
 // handleGitHubAppRegisterStart generates the manifest JSON, a signed
 // state token, and the manifest POST URL for the frontend to submit.
-// Multi-mode only; org-admin only.
+// Org-admin only. Works in both local and multi mode.
 //
 // POST /api/orgs/{org_id}/github-app/register/start
 func (s *Server) handleGitHubAppRegisterStart(w http.ResponseWriter, r *http.Request) {
@@ -105,7 +105,7 @@ func (s *Server) handleGitHubAppRegisterStart(w http.ResponseWriter, r *http.Req
 		"url":  publicURL,
 		"hook_attributes": map[string]any{
 			"url":    publicURL + "/api/webhooks/github/" + orgID,
-			"active": true,
+			"active": false,
 		},
 		"redirect_url":  publicURL + "/api/orgs/" + orgID + "/github-app/register/callback",
 		"callback_urls": []string{publicURL + "/api/orgs/" + orgID + "/github-app/register/callback"},

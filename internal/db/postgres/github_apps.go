@@ -25,9 +25,9 @@ func (s *gitHubAppsStore) GetForOrg(ctx context.Context, orgID string) (*domain.
 		return nil, nil
 	}
 	var (
-		a          domain.OrgGitHubApp
-		regBy      sql.NullString
-		registedAt sql.NullTime
+		a            domain.OrgGitHubApp
+		regBy        sql.NullString
+		registeredAt sql.NullTime
 	)
 	err := s.q.QueryRowContext(ctx, `
 		SELECT org_id, app_id, slug, client_id,
@@ -38,7 +38,7 @@ func (s *gitHubAppsStore) GetForOrg(ctx context.Context, orgID string) (*domain.
 	`, orgID).Scan(
 		&a.OrgID, &a.AppID, &a.Slug, &a.ClientID,
 		&a.ClientSecretRef, &a.PEMRef, &a.WebhookSecretRef,
-		&registedAt, &regBy, &a.Active,
+		&registeredAt, &regBy, &a.Active,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -46,8 +46,8 @@ func (s *gitHubAppsStore) GetForOrg(ctx context.Context, orgID string) (*domain.
 	if err != nil {
 		return nil, fmt.Errorf("get org_github_apps: %w", err)
 	}
-	if registedAt.Valid {
-		a.RegisteredAt = registedAt.Time
+	if registeredAt.Valid {
+		a.RegisteredAt = registeredAt.Time
 	}
 	a.RegisteredByUserID = regBy.String
 	return &a, nil

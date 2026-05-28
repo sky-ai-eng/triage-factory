@@ -20,8 +20,9 @@ import (
 //
 // # Local mode (SQLite)
 //
-// The manifest flow is multi-mode only. The SQLite impl returns
-// ErrNotApplicableInLocal on writes; reads return nil / empty.
+// The manifest flow works in both modes. The SQLite impl reads/writes
+// the org_github_apps table directly (the table exists in the SQLite
+// baseline schema from SKY-348).
 type GitHubAppsStore interface {
 	// GetForOrg returns the org's registered GitHub App, or nil if
 	// the org has no App registration (uses the deployment default

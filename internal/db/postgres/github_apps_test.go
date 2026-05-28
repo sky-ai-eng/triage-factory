@@ -3,13 +3,12 @@ package postgres_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-
-	"errors"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
