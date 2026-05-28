@@ -60,7 +60,6 @@ interface SettingsData {
     poll_interval: string
     projects: JiraProjectConfig[]
   }
-  server: { port: number }
   ai: {
     model: string
     reprioritize_threshold: number
@@ -99,7 +98,6 @@ export default function Settings() {
     jira_projects: JiraProjectConfig[]
     ai_model: string
     ai_auto_delegate_enabled: boolean
-    server_port: number
   }>({
     github_enabled: true,
     github_url: '',
@@ -113,7 +111,6 @@ export default function Settings() {
     jira_projects: [],
     ai_model: 'sonnet',
     ai_auto_delegate_enabled: true,
-    server_port: 3000,
   })
   const [saving, setSaving] = useState(false)
   // Statuses keyed by project key so each project's picker pulls from
@@ -180,7 +177,6 @@ export default function Settings() {
           poll_interval: org.jira_poll_interval,
           projects,
         },
-        server: { port: 3000 },
         ai: {
           model: team.team_settings.DefaultModel,
           reprioritize_threshold: team.team_settings.AIReprioritizeThreshold,
@@ -202,7 +198,6 @@ export default function Settings() {
         jira_projects: projects,
         ai_model: merged.ai.model,
         ai_auto_delegate_enabled: merged.ai.auto_delegate_enabled,
-        server_port: merged.server.port,
       })
       const initialExpanded: Record<string, boolean> = {}
       if (projects.length === 1) {

@@ -3,14 +3,16 @@ package server
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	tfdb "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -109,7 +111,7 @@ func (s *Server) handleTeamSettingsGet(w http.ResponseWriter, r *http.Request) {
 	userID := ClaimsFrom(r.Context()).Subject
 	teamID, err := s.resolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
 	if err != nil {
-		notFound(w, "team")
+		writeResolveError(w, "settings/team", err)
 		return
 	}
 
@@ -160,7 +162,7 @@ func (s *Server) handleTeamSettingsPost(w http.ResponseWriter, r *http.Request) 
 	userID := ClaimsFrom(r.Context()).Subject
 	teamID, err := s.resolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
 	if err != nil {
-		notFound(w, "team")
+		writeResolveError(w, "settings/team", err)
 		return
 	}
 
@@ -176,7 +178,10 @@ func (s *Server) handleTeamSettingsPost(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var prevProjects []jiraProjectConfig
+	var (
+		prevProjects    []jiraProjectConfig
+		writtenProjects []jiraProjectConfig
+	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		teamSet, err := tx.Teams.GetSettings(r.Context(), teamID)
 		if err != nil {
@@ -230,6 +235,7 @@ func (s *Server) handleTeamSettingsPost(w http.ResponseWriter, r *http.Request) 
 			projects = next
 		}
 
+		writtenProjects = projects
 		teamSet.JiraProjects = projectKeysFromConfigs(projects)
 		if err := tx.Teams.UpdateSettings(r.Context(), teamID, teamSet); err != nil {
 			return fmt.Errorf("save team settings: %w", err)
@@ -246,24 +252,10 @@ func (s *Server) handleTeamSettingsPost(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if req.JiraProjects != nil {
-		var newProjects []jiraProjectConfig
-		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-			teamSet, err := tx.Teams.GetSettings(r.Context(), teamID)
-			if err != nil {
-				return err
-			}
-			rules, err := tx.JiraStatusRules.ListForTeam(r.Context(), teamID)
-			if err != nil {
-				return err
-			}
-			newProjects = rulesToProjectConfigsOrdered(rules, teamSet.JiraProjects)
-			return nil
-		}); err == nil && !jiraProjectsEqual(newProjects, prevProjects) {
-			if s.onJiraChanged != nil {
-				s.MarkJiraRestarted()
-				go s.onJiraChanged(orgID)
-			}
+	if req.JiraProjects != nil && !jiraProjectsEqual(writtenProjects, prevProjects) {
+		if s.onJiraChanged != nil {
+			s.MarkJiraRestarted()
+			go s.onJiraChanged(orgID)
 		}
 	}
 
@@ -458,6 +450,20 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		// Clear SecretStore entries when the caller explicitly empties a
+		// URL. integrations.Save skips empty strings, so a bare Save
+		// after zeroing creds.GitHubURL would leave the old URL in the
+		// store while org_settings.github_base_url is already "".
+		if req.GitHubBaseURL != nil && *req.GitHubBaseURL == "" {
+			if err := integrations.ClearGitHub(r.Context(), tx.Secrets, orgID); err != nil {
+				return fmt.Errorf("clear GitHub secrets: %w", err)
+			}
+		}
+		if req.JiraBaseURL != nil && *req.JiraBaseURL == "" {
+			if err := integrations.ClearJira(r.Context(), tx.Secrets, orgID); err != nil {
+				return fmt.Errorf("clear Jira secrets: %w", err)
+			}
+		}
 		if err := integrations.Save(r.Context(), tx.Secrets, orgID, creds); err != nil {
 			return fmt.Errorf("save credentials: %w", err)
 		}
@@ -497,11 +503,22 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 // Helpers: team/org role checks, team ID resolution, duration parsing
 // --------------------------------------------------------------------
 
+type resolveError struct {
+	notFound bool
+	err      error
+}
+
+func (e *resolveError) Error() string { return e.err.Error() }
+
 // resolveTeamID converts a raw {team_id} path value to a concrete team
 // UUID. The literal "default" resolves to the org's default team so the
 // frontend can call /api/settings/team/default before team pickers ship.
+// Non-"default" values are validated as UUIDs.
 func (s *Server) resolveTeamID(ctx context.Context, orgID, userID, raw string) (string, error) {
 	if raw != "default" {
+		if _, err := uuid.Parse(raw); err != nil {
+			return "", &resolveError{notFound: true, err: fmt.Errorf("invalid team_id")}
+		}
 		return raw, nil
 	}
 	var teamID string
@@ -511,10 +528,10 @@ func (s *Server) resolveTeamID(ctx context.Context, orgID, userID, raw string) (
 		return e
 	})
 	if err != nil {
-		return "", err
+		return "", &resolveError{notFound: false, err: err}
 	}
 	if teamID == "" {
-		return "", fmt.Errorf("org %s has no default team", orgID)
+		return "", &resolveError{notFound: true, err: fmt.Errorf("org %s has no default team", orgID)}
 	}
 	return teamID, nil
 }
@@ -526,7 +543,7 @@ func (s *Server) verifyTeamInOrg(w http.ResponseWriter, r *http.Request, orgID, 
 		return true
 	}
 	var belongs bool
-	err := tfdb.WithTx(r.Context(), s.db, tfdb.Claims{Sub: userID},
+	err := db.WithTx(r.Context(), s.db, db.Claims{Sub: userID},
 		func(tx *sql.Tx) error {
 			return tx.QueryRowContext(r.Context(),
 				`SELECT tf.team_in_current_org($1::uuid)`, teamID,
@@ -552,7 +569,7 @@ func (s *Server) requireTeamAdmin(w http.ResponseWriter, r *http.Request, orgID,
 		return true
 	}
 	var isAdmin bool
-	err := tfdb.WithTx(r.Context(), s.db, tfdb.Claims{Sub: userID},
+	err := db.WithTx(r.Context(), s.db, db.Claims{Sub: userID},
 		func(tx *sql.Tx) error {
 			return tx.QueryRowContext(r.Context(),
 				`SELECT tf.user_is_team_admin($1::uuid)`, teamID,
@@ -588,6 +605,15 @@ func (s *Server) requireOrgAdminRole(w http.ResponseWriter, r *http.Request, org
 		return false
 	}
 	return true
+}
+
+func writeResolveError(w http.ResponseWriter, scope string, err error) {
+	var re *resolveError
+	if errors.As(err, &re) && re.notFound {
+		notFound(w, "team")
+		return
+	}
+	internalError(w, scope, err)
 }
 
 func parseMinDuration(s string, minSeconds int) (time.Duration, error) {
