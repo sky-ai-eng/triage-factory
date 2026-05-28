@@ -407,21 +407,17 @@ export default function Settings() {
     }))
   }
 
-  // registerGitHubApp leaves the page: it POSTs to the start endpoint then
-  // submits an auto-POST form to github.com (top-level navigation, per the
-  // manifest flow). Control returns via the callback redirect, not here.
-  const registerGitHubApp = async () => {
+  // registerGitHubApp leaves the page: it navigates to the backend launch
+  // bounce page, which renders the manifest form under its own CSP and
+  // POSTs to github.com on confirm. Control returns via the callback
+  // redirect, not here.
+  const registerGitHubApp = () => {
     if (!orgId) return
     setGhAppRegistering(true)
-    try {
-      await startGitHubAppRegistration(orgId, {
-        owner_type: ghAppOwnerType,
-        owner_login: ghAppOwnerLogin.trim(),
-      })
-    } catch (err) {
-      toast.error((err as Error).message)
-      setGhAppRegistering(false)
-    }
+    startGitHubAppRegistration(orgId, {
+      owner_type: ghAppOwnerType,
+      owner_login: ghAppOwnerLogin.trim(),
+    })
   }
 
   const openInstallOnAccount = async () => {

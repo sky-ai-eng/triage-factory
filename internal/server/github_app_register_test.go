@@ -1,13 +1,11 @@
 package server
 
 import (
-	"bytes"
 	"crypto/rand"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,7 +23,7 @@ func TestGitHubAppRegister_LocalMode_NilDeployConfig_Returns404(t *testing.T) {
 	for _, tc := range []struct {
 		method, path string
 	}{
-		{"POST", "/api/orgs/" + runmode.LocalDefaultOrgID + "/github-app/register/start"},
+		{"GET", "/api/orgs/" + runmode.LocalDefaultOrgID + "/github-app/register/launch?owner_type=user&owner_login=testuser"},
 		{"GET", "/api/orgs/" + runmode.LocalDefaultOrgID + "/github-app/register/callback?code=x&state=y"},
 	} {
 		rec := doJSON(t, s, tc.method, tc.path, nil)
@@ -36,7 +34,8 @@ func TestGitHubAppRegister_LocalMode_NilDeployConfig_Returns404(t *testing.T) {
 }
 
 // TestGitHubAppRegister_LocalMode_WithDeployConfig_Works verifies the
-// endpoints are reachable in local mode when deployCfg is wired.
+// launch endpoint serves the bounce page in local mode when deployCfg is
+// wired, with a per-response CSP scoped to GitHub (not 'self').
 func TestGitHubAppRegister_LocalMode_WithDeployConfig_Works(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -46,14 +45,26 @@ func TestGitHubAppRegister_LocalMode_WithDeployConfig_Works(t *testing.T) {
 	}
 	s.SetDeployConfig("http://localhost:3000", key)
 
-	body := map[string]string{
-		"owner_type":  "user",
-		"owner_login": "testuser",
+	rec := doJSON(t, s, "GET",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/register/launch?owner_type=user&owner_login=testuser", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("launch endpoint status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
-	rec := doJSON(t, s, "POST", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/register/start", body)
-	// Should reach the handler (200 with manifest), not 404.
-	if rec.Code == http.StatusNotFound {
-		t.Errorf("start endpoint returned 404 in local mode with deployCfg wired; want reachable")
+
+	csp := rec.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "form-action https://github.com") {
+		t.Errorf("launch CSP missing scoped form-action: %q", csp)
+	}
+	if strings.Contains(csp, "form-action 'self'") {
+		t.Errorf("launch CSP must not use 'self': %q", csp)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `action="https://github.com/settings/apps/new?state=`) {
+		t.Errorf("bounce page form action missing/incorrect: %s", body)
+	}
+	if !strings.Contains(body, `name="manifest"`) {
+		t.Errorf("bounce page missing manifest field: %s", body)
 	}
 }
 
@@ -111,12 +122,14 @@ func TestGitHubAppRegister_StateToken_RoundTrip(t *testing.T) {
 	})
 }
 
-// TestGitHubAppRegister_StartEndpoint_MultiMode exercises the start
-// endpoint with a real Postgres-backed auth rig. Verifies:
-//   - org admin gets 200 with manifest JSON + signed state
+// TestGitHubAppRegister_LaunchEndpoint_MultiMode exercises the launch
+// bounce page with a real Postgres-backed auth rig. Verifies:
+//   - org admin gets a 200 HTML page with the manifest form
+//   - the per-response CSP scopes form-action to the org's GitHub host
+//     (github.com by default), NOT 'self'
 //   - non-member gets 404
-//   - conflict when an app is already registered
-func TestGitHubAppRegister_StartEndpoint_MultiMode(t *testing.T) {
+//   - missing query params get 400
+func TestGitHubAppRegister_LaunchEndpoint_MultiMode(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rig := newAuthRig(t)
 
@@ -130,85 +143,107 @@ func TestGitHubAppRegister_StartEndpoint_MultiMode(t *testing.T) {
 	respB, _ := rig.driveCallback(bob)
 	sidB := rig.sidFromResp(respB)
 
-	body := map[string]string{
-		"owner_type":  "user",
-		"owner_login": "alice",
-	}
-
-	t.Run("admin_gets_200", func(t *testing.T) {
-		bodyJSON, _ := json.Marshal(body)
-		req := httptest.NewRequest("POST", "/api/orgs/"+orgA.String()+"/github-app/register/start",
-			jsonBody(bodyJSON))
-		req.Header.Set("Content-Type", "application/json")
-		req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: sidA})
-		req.Header.Set("Origin", rig.srv.deployCfg.publicURL)
+	launch := func(orgID, sid, query string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET",
+			"/api/orgs/"+orgID+"/github-app/register/launch?"+query, nil)
+		req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: sid})
 		rec := httptest.NewRecorder()
 		rig.srv.mux.ServeHTTP(rec, req)
+		return rec
+	}
 
+	t.Run("admin_gets_html_with_scoped_csp", func(t *testing.T) {
+		rec := launch(orgA.String(), sidA, "owner_type=user&owner_login=alice")
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
 		}
-
-		var out map[string]any
-		if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		if _, ok := out["manifest_post_url"]; !ok {
-			t.Error("response missing manifest_post_url")
-		}
-		if _, ok := out["manifest_json"]; !ok {
-			t.Error("response missing manifest_json")
-		}
-		if _, ok := out["state"]; !ok {
-			t.Error("response missing state")
+		if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+			t.Errorf("Content-Type=%q, want text/html", ct)
 		}
 
-		// Verify manifest JSON is parseable and has expected fields.
-		var manifest map[string]any
-		if err := json.Unmarshal([]byte(out["manifest_json"].(string)), &manifest); err != nil {
-			t.Fatalf("manifest_json not valid JSON: %v", err)
+		csp := rec.Header().Get("Content-Security-Policy")
+		if !strings.Contains(csp, "form-action https://github.com") {
+			t.Errorf("CSP missing scoped form-action: %q", csp)
 		}
-		if name, ok := manifest["name"].(string); !ok || name == "" {
-			t.Error("manifest missing name")
+		if strings.Contains(csp, "form-action 'self'") {
+			t.Errorf("CSP must not use 'self' on the bounce page: %q", csp)
 		}
-		perms, ok := manifest["default_permissions"].(map[string]any)
-		if !ok {
-			t.Fatal("manifest missing default_permissions")
+		if !strings.Contains(csp, "default-src 'none'") {
+			t.Errorf("CSP missing default-src 'none': %q", csp)
 		}
-		if perms["pull_requests"] != "write" {
-			t.Errorf("pull_requests permission = %v, want write", perms["pull_requests"])
+
+		body := rec.Body.String()
+		if !strings.Contains(body, `action="https://github.com/settings/apps/new?state=`) {
+			t.Errorf("form action missing/incorrect: %s", body)
+		}
+		if !strings.Contains(body, `name="manifest"`) {
+			t.Errorf("manifest field missing: %s", body)
+		}
+		// The manifest JSON lands in the hidden input value, HTML-escaped.
+		if !strings.Contains(body, `pull_requests`) {
+			t.Errorf("manifest payload missing from page: %s", body)
 		}
 	})
 
 	t.Run("non_member_gets_404", func(t *testing.T) {
-		bodyJSON, _ := json.Marshal(body)
-		req := httptest.NewRequest("POST", "/api/orgs/"+orgA.String()+"/github-app/register/start",
-			jsonBody(bodyJSON))
-		req.Header.Set("Content-Type", "application/json")
-		req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: sidB})
-		req.Header.Set("Origin", rig.srv.deployCfg.publicURL)
-		rec := httptest.NewRecorder()
-		rig.srv.mux.ServeHTTP(rec, req)
-
+		rec := launch(orgA.String(), sidB, "owner_type=user&owner_login=alice")
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("non-member status=%d, want 404", rec.Code)
 		}
 	})
 
-	t.Run("missing_body_fields", func(t *testing.T) {
-		bodyJSON, _ := json.Marshal(map[string]string{"owner_type": "user"})
-		req := httptest.NewRequest("POST", "/api/orgs/"+orgA.String()+"/github-app/register/start",
-			jsonBody(bodyJSON))
-		req.Header.Set("Content-Type", "application/json")
-		req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: sidA})
-		req.Header.Set("Origin", rig.srv.deployCfg.publicURL)
-		rec := httptest.NewRecorder()
-		rig.srv.mux.ServeHTTP(rec, req)
-
+	t.Run("missing_query_params", func(t *testing.T) {
+		rec := launch(orgA.String(), sidA, "owner_type=user")
 		if rec.Code != http.StatusBadRequest {
-			t.Errorf("missing fields status=%d, want 400", rec.Code)
+			t.Errorf("missing params status=%d, want 400", rec.Code)
 		}
 	})
+}
+
+// TestGitHubAppRegister_LaunchEndpoint_GHES verifies an org whose
+// github_base_url points at a GitHub Enterprise host gets that host in
+// both the form action and the per-response form-action CSP — proving
+// the scoping is per-org, which a single global CSP couldn't express.
+func TestGitHubAppRegister_LaunchEndpoint_GHES(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	rig := newAuthRig(t)
+
+	alice := rig.seedUser()
+	orgA, _ := rig.seedOrg(alice, "ghes-org")
+	resp, _ := rig.driveCallback(alice)
+	sidA := rig.sidFromResp(resp)
+
+	const ghesHost = "https://git.corp.example.com"
+	if _, err := rig.h.AdminDB.Exec(`
+		INSERT INTO org_settings (org_id, github_base_url)
+		VALUES ($1, $2)
+		ON CONFLICT (org_id) DO UPDATE SET github_base_url = $2
+	`, orgA.String(), ghesHost); err != nil {
+		t.Fatalf("seed org_settings: %v", err)
+	}
+
+	req := httptest.NewRequest("GET",
+		"/api/orgs/"+orgA.String()+"/github-app/register/launch?owner_type=org&owner_login=acme-eng", nil)
+	req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: sidA})
+	rec := httptest.NewRecorder()
+	rig.srv.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+
+	csp := rec.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "form-action "+ghesHost) {
+		t.Errorf("CSP form-action not scoped to GHES host: %q", csp)
+	}
+	if strings.Contains(csp, "github.com") {
+		t.Errorf("CSP leaked github.com for a GHES org: %q", csp)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `action="`+ghesHost+`/organizations/acme-eng/settings/apps/new?state=`) {
+		t.Errorf("form action not scoped to GHES host: %s", body)
+	}
 }
 
 // TestGitHubAppRegister_CallbackEndpoint_MultiMode exercises the
@@ -378,8 +413,4 @@ func TestSettingsRedirectPath(t *testing.T) {
 			t.Errorf("multi redirect = %q, want /orgs/org-x/settings", got)
 		}
 	})
-}
-
-func jsonBody(b []byte) io.Reader {
-	return bytes.NewReader(b)
 }

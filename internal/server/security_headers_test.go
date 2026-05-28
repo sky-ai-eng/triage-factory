@@ -153,6 +153,26 @@ func TestSecurityHeaders_StandardSet(t *testing.T) {
 	}
 }
 
+// TestSecurityHeaders_HandlerCanOverrideCSP pins the override-hook
+// contract the GitHub App launch page relies on: the wrapper sets the
+// global CSP, THEN calls next, so a handler that re-Sets
+// Content-Security-Policy on its own response wins. Regression guard for
+// the bounce-page per-response CSP.
+func TestSecurityHeaders_HandlerCanOverrideCSP(t *testing.T) {
+	s := &Server{deployCfg: &deployConfig{}}
+	const override = "default-src 'none'; form-action https://github.com; base-uri 'none'"
+	handler := s.withSecurityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", override)
+		w.WriteHeader(http.StatusOK)
+	}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest("GET", "/api/orgs/x/github-app/register/launch", nil))
+
+	if got := rec.Header().Get("Content-Security-Policy"); got != override {
+		t.Errorf("handler CSP override didn't win:\n got %q\nwant %q", got, override)
+	}
+}
+
 // TestSecurityHeaders_HSTSOnlyInHTTPS — HSTS must not be emitted in
 // local/test deployments (publicURL is http://), otherwise the browser
 // caches "always-HTTPS this host" and breaks neighbor projects on the

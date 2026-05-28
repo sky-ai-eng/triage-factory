@@ -1,7 +1,8 @@
 // Helpers for the Workspace Settings "GitHub access" panel. The
-// registration ceremony is a top-level browser navigation to github.com
-// and back (manifest flow) — see startGitHubAppRegistration. All four
-// endpoints are org-scoped under /api/orgs/{org_id}/github-app.
+// registration ceremony is a top-level browser navigation to a backend
+// bounce page, which then POSTs the manifest to github.com (manifest
+// flow) — see startGitHubAppRegistration. The endpoints are org-scoped
+// under /api/orgs/{org_id}/github-app.
 
 import { readError } from './api'
 
@@ -30,12 +31,6 @@ export interface GitHubAppStatus {
   using_hosted_default: boolean
 }
 
-export interface RegisterStartResponse {
-  manifest_post_url: string
-  manifest_json: string
-  state: string
-}
-
 export async function getGitHubAppStatus(orgId: string): Promise<GitHubAppStatus> {
   const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github-app`)
   if (!res.ok) throw new Error(await readError(res, 'Failed to load GitHub App status'))
@@ -49,41 +44,23 @@ export async function getGitHubAppInstallURL(orgId: string): Promise<string> {
   return body.url
 }
 
-// startGitHubAppRegistration kicks off the manifest flow: it asks the
-// backend for the manifest + signed state, then submits an auto-POST form
-// to GitHub. GitHub requires top-level navigation here — a hidden iframe
-// won't work — so this builds a real <form>, appends it to the document,
-// and submits, taking the whole tab to github.com. On confirm there,
-// GitHub redirects back to the callback, which lands the browser on the
-// Settings page with #github-app.
-export async function startGitHubAppRegistration(
+// startGitHubAppRegistration kicks off the manifest flow with a top-level
+// navigation to the backend launch endpoint. The SPA's global CSP sets
+// `form-action 'self'`, which would block an in-page form POST to
+// github.com — but it does NOT govern top-level navigation. The launch
+// page then renders the manifest form under its own per-response CSP
+// (scoped to the org's GitHub host) and does the cross-origin POST when
+// the user clicks "Continue to GitHub". GitHub redirects back to the
+// callback, landing the browser on Settings with #github-app.
+export function startGitHubAppRegistration(
   orgId: string,
   payload: { owner_type: 'user' | 'org'; owner_login: string },
-): Promise<void> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github-app/register/start`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+): void {
+  const params = new URLSearchParams({
+    owner_type: payload.owner_type,
+    owner_login: payload.owner_login,
   })
-  if (!res.ok) throw new Error(await readError(res, 'Failed to start registration'))
-  const { manifest_post_url, manifest_json, state } = (await res.json()) as RegisterStartResponse
-
-  const form = document.createElement('form')
-  form.method = 'POST'
-  form.action = manifest_post_url
-
-  const manifestField = document.createElement('input')
-  manifestField.type = 'hidden'
-  manifestField.name = 'manifest'
-  manifestField.value = manifest_json
-  form.appendChild(manifestField)
-
-  const stateField = document.createElement('input')
-  stateField.type = 'hidden'
-  stateField.name = 'state'
-  stateField.value = state
-  form.appendChild(stateField)
-
-  document.body.appendChild(form)
-  form.submit()
+  window.location.assign(
+    `/api/orgs/${encodeURIComponent(orgId)}/github-app/register/launch?${params.toString()}`,
+  )
 }

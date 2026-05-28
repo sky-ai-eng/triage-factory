@@ -522,11 +522,13 @@ func (s *Server) routes() {
 	s.api("GET /api/chain-runs/{id}", s.handleChainRunGet)
 	s.apiMutating("POST /api/chain-runs/{id}/cancel", s.handleChainRunCancel)
 
-	// GitHub App manifest registration. The start endpoint generates the
-	// manifest; the callback exchanges the temp code for App credentials.
-	// Both validate org membership + admin role inside the handler via
+	// GitHub App manifest registration. The launch endpoint serves a
+	// script-free bounce page (carrying its own per-response CSP) that
+	// POSTs the manifest cross-origin to the org's GitHub host; the
+	// callback exchanges the temp code for App credentials. Both validate
+	// org membership + admin role inside the handler via
 	// r.PathValue("org_id"). Works in both local and multi mode.
-	s.apiMutating("POST /api/orgs/{org_id}/github-app/register/start", s.handleGitHubAppRegisterStart)
+	s.api("GET /api/orgs/{org_id}/github-app/register/launch", s.handleGitHubAppRegisterLaunch)
 	s.api("GET /api/orgs/{org_id}/github-app/register/callback", s.handleGitHubAppRegisterCallback)
 	// Read-only status + install deep-link for the Workspace Settings panel.
 	// Any org member (read), so requireOrgMember rather than requireOrgAdmin.
