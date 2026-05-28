@@ -133,6 +133,7 @@ export default function Settings() {
   const [ghAppOwnerType, setGhAppOwnerType] = useState<'user' | 'org'>('user')
   const [ghAppOwnerLogin, setGhAppOwnerLogin] = useState('')
   const [ghAppRegistering, setGhAppRegistering] = useState(false)
+  const [ghAppDetailsExpanded, setGhAppDetailsExpanded] = useState(false)
   const [form, setForm] = useState<{
     github_enabled: boolean
     github_url: string
@@ -809,61 +810,96 @@ export default function Settings() {
         {status &&
           (app ? (
             <div className="space-y-3">
-              <div className="flex items-center gap-2 rounded-xl bg-claim/[0.06] border border-claim/15 px-4 py-2.5">
+              <button
+                type="button"
+                onClick={() => setGhAppDetailsExpanded((v) => !v)}
+                aria-expanded={ghAppDetailsExpanded}
+                className="w-full flex items-center gap-2 rounded-xl bg-claim/[0.06] border border-claim/15 px-4 py-2.5 text-left transition-colors hover:bg-claim/[0.1]"
+              >
                 <div className="w-1.5 h-1.5 rounded-full bg-claim shrink-0" />
-                <span className="text-[12px] text-claim">
+                <span className="text-[12px] text-claim flex-1">
                   Connected to GitHub via your own App ({app.slug})
                 </span>
-              </div>
-
-              <div className="text-[11px] text-text-tertiary space-y-0.5">
-                <p>
-                  App slug: <span className="text-text-secondary">{app.slug}</span>
-                </p>
-                {app.registered_at && (
-                  <p>
-                    Registered:{' '}
-                    <span className="text-text-secondary">
-                      {new Date(app.registered_at).toLocaleDateString()}
-                    </span>
-                    {app.registered_by_display_name ? ` by ${app.registered_by_display_name}` : ''}
-                  </p>
+                {ghAppDetailsExpanded ? (
+                  <ChevronDown size={14} className="text-claim/70 shrink-0" />
+                ) : (
+                  <ChevronRight size={14} className="text-claim/70 shrink-0" />
                 )}
-                <p>
-                  Installations:{' '}
-                  <span className="text-text-secondary">{status.installations.length}</span>
-                </p>
-              </div>
+              </button>
 
-              {status.installations.length > 0 && (
-                <div className="space-y-1">
-                  {status.installations.map((inst) => (
-                    <div
-                      key={inst.installation_id}
-                      className="flex items-center justify-between rounded-xl border border-border-subtle bg-white/40 px-3 py-2"
-                    >
-                      <span className="text-[12px] text-text-primary">{inst.account_login}</span>
-                      <span className="text-[10px] uppercase tracking-wide text-text-tertiary">
-                        {inst.account_type}
+              {ghAppDetailsExpanded && (
+                <div className="text-[11px] text-text-tertiary space-y-0.5 px-1">
+                  <p>
+                    App slug: <span className="text-text-secondary">{app.slug}</span>
+                  </p>
+                  {app.registered_at && (
+                    <p>
+                      Registered:{' '}
+                      <span className="text-text-secondary">
+                        {new Date(app.registered_at).toLocaleDateString()}
                       </span>
+                      {app.registered_by_display_name
+                        ? ` by ${app.registered_by_display_name}`
+                        : ''}
+                    </p>
+                  )}
+                  <p>
+                    Installations:{' '}
+                    <span className="text-text-secondary">{status.installations.length}</span>
+                  </p>
+                  {status.installations.length > 0 && (
+                    <div className="space-y-1 pt-2">
+                      {status.installations.map((inst) => (
+                        <div
+                          key={inst.installation_id}
+                          className="flex items-center justify-between rounded-xl border border-border-subtle bg-white/40 px-3 py-2"
+                        >
+                          <span className="text-[12px] text-text-primary">
+                            {inst.account_login}
+                          </span>
+                          <span className="text-[10px] uppercase tracking-wide text-text-tertiary">
+                            {inst.account_type}
+                          </span>
+                        </div>
+                      ))}
                     </div>
-                  ))}
+                  )}
                 </div>
               )}
 
-              <button
-                type="button"
-                onClick={openInstallOnAccount}
-                className="inline-flex items-center gap-1.5 text-[12px] text-accent hover:text-accent/80 border border-accent/20 rounded-xl px-4 py-2 transition-colors"
-              >
-                <ExternalLink size={13} />
-                Install on another GitHub account
-              </button>
-              <p className="text-[11px] text-text-tertiary leading-relaxed">
-                GitHub will ask which repositories to grant — pick &ldquo;All&rdquo; for parity with
-                PAT behavior, or pick specific repos for tighter scope. This choice does not inherit
-                from your PAT.
-              </p>
+              {status.installations.length === 0 ? (
+                <div className="space-y-2">
+                  <button
+                    type="button"
+                    onClick={openInstallOnAccount}
+                    className="inline-flex items-center gap-1.5 text-[12px] text-accent hover:text-accent/80 border border-accent/20 rounded-xl px-4 py-2 transition-colors"
+                  >
+                    <ExternalLink size={13} />
+                    Install the App on your repositories
+                  </button>
+                  <p className="text-[11px] text-text-tertiary leading-relaxed">
+                    Registering created the App, but GitHub doesn&rsquo;t grant repo access until
+                    it&rsquo;s installed. Install it to choose which repositories Triage Factory can
+                    see — pick &ldquo;All&rdquo; for parity with PAT behavior, or specific repos for
+                    tighter scope. This choice does not inherit from your PAT.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <button
+                    type="button"
+                    onClick={openInstallOnAccount}
+                    className="inline-flex items-center gap-1.5 text-[12px] text-accent hover:text-accent/80 border border-accent/20 rounded-xl px-4 py-2 transition-colors"
+                  >
+                    <ExternalLink size={13} />
+                    Install on another GitHub account
+                  </button>
+                  <p className="text-[11px] text-text-tertiary leading-relaxed">
+                    GitHub will ask which repositories to grant. This choice does not inherit from
+                    your PAT.
+                  </p>
+                </div>
+              )}
             </div>
           ) : (
             <div className="space-y-3">

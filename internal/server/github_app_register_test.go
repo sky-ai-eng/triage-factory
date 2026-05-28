@@ -132,8 +132,8 @@ func TestGitHubWebOrigin(t *testing.T) {
 
 // TestIsPubliclyReachable pins which hosts GitHub could reach for a
 // hook_attributes.url: loopback / unspecified / private / link-local
-// hosts are not reachable (manifest must omit the hook), public DNS
-// names and public IPs are.
+// hosts are not reachable (manifest substitutes an inert public
+// placeholder hook), public DNS names and public IPs are.
 func TestIsPubliclyReachable(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -171,13 +171,16 @@ func TestIsPubliclyReachable(t *testing.T) {
 	}
 }
 
-// TestGitHubAppRegister_LocalManifest_HooklessAndNoInstallationEvents
-// pins SKY-362's manifest fixes for a non-public (localhost) deployment:
-// no hook_attributes block, and a default_events list free of the
-// App-lifecycle installation events GitHub rejects. Asserts against the
-// decoded manifest JSON rather than the HTML-escaped page body so a
-// reintroduced "installation" event can't slip past the check.
-func TestGitHubAppRegister_LocalManifest_HooklessAndNoInstallationEvents(t *testing.T) {
+// TestGitHubAppRegister_LocalManifest_PlaceholderHookAndNoInstallationEvents
+// pins the manifest shape for a non-public (localhost) deployment:
+// GitHub rejects both a localhost hook URL and a blank/absent one, so the
+// manifest carries an inert public placeholder hook (active:false, never
+// delivered — local installs are discovered via API backfill). It also
+// keeps a default_events list free of the App-lifecycle installation
+// events GitHub rejects. Asserts against the decoded manifest JSON rather
+// than the HTML-escaped page body so a reintroduced "installation" event
+// can't slip past the check.
+func TestGitHubAppRegister_LocalManifest_PlaceholderHookAndNoInstallationEvents(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 	var key [32]byte
@@ -197,8 +200,25 @@ func TestGitHubAppRegister_LocalManifest_HooklessAndNoInstallationEvents(t *test
 		t.Fatalf("unmarshal manifest: %v", err)
 	}
 
-	if _, ok := m["hook_attributes"]; ok {
-		t.Errorf("localhost manifest must omit hook_attributes: %s", manifestJSON)
+	hook, ok := m["hook_attributes"].(map[string]any)
+	if !ok {
+		t.Fatalf("localhost manifest must include hook_attributes — GitHub rejects a blank/absent hook url: %s", manifestJSON)
+	}
+	if got := hook["url"]; got != "https://example.com/triage-factory-webhook-unconfigured" {
+		t.Errorf("localhost hook url = %v, want the inert example.com placeholder: %s", got, manifestJSON)
+	}
+	if active, _ := hook["active"].(bool); active {
+		t.Errorf("localhost placeholder hook must be inactive (active:false): %s", manifestJSON)
+	}
+
+	// Homepage url is cosmetic; for a non-public deployment it shows the
+	// product homepage rather than a meaningless localhost address.
+	if got := m["url"]; got != "https://www.triagefactory.com" {
+		t.Errorf("localhost manifest url (homepage) = %v, want the product homepage: %s", got, manifestJSON)
+	}
+	// But the functional callback URL must still point at this deployment.
+	if got, _ := m["redirect_url"].(string); !strings.HasPrefix(got, "http://localhost:3000/") {
+		t.Errorf("redirect_url = %v, must point at the local deployment, not the homepage", got)
 	}
 
 	rawEvents, ok := m["default_events"].([]any)
@@ -529,11 +549,14 @@ func TestGitHubAppRegister_CallbackEndpoint_MultiMode(t *testing.T) {
 	})
 }
 
-// TestGitHubAppRegister_Callback_HooklessNoWebhookSecret verifies that
-// when GitHub's manifest conversion returns no webhook_secret (the
-// hookless local/NAT'd App path), the callback still succeeds, stores
-// the App with an empty webhook_secret_ref, and writes no Vault entry
-// for the (nonexistent) secret.
+// TestGitHubAppRegister_Callback_HooklessNoWebhookSecret verifies the
+// callback's defensive tolerance: if GitHub's manifest conversion returns
+// no webhook_secret, the callback still succeeds, stores the App with an
+// empty webhook_secret_ref, and writes no Vault entry for the
+// (nonexistent) secret. NOTE: our manifests now always request a hook
+// (real URL when public, inert example.com placeholder otherwise), so
+// GitHub returns a secret in practice — this exercises the defensive path
+// against a partial response, not the normal local flow.
 func TestGitHubAppRegister_Callback_HooklessNoWebhookSecret(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rig := newAuthRig(t)

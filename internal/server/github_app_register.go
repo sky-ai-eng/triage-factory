@@ -163,9 +163,22 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 		appName = string([]rune(appName)[:34])
 	}
 
+	reachable := isPubliclyReachable(publicURL)
+
+	// The manifest "url" is the App's cosmetic homepage shown on its
+	// GitHub page — purely informational, unlike redirect_url /
+	// callback_urls / hook (which are functional and must point at this
+	// deployment). When we're not publicly reachable (local / NAT),
+	// publicURL is a localhost address that's meaningless on GitHub's App
+	// page, so show the product homepage instead.
+	homepageURL := publicURL
+	if !reachable {
+		homepageURL = "https://www.triagefactory.com"
+	}
+
 	manifest := map[string]any{
 		"name":          appName,
-		"url":           publicURL,
+		"url":           homepageURL,
 		"redirect_url":  publicURL + "/api/orgs/" + orgID + "/github-app/register/callback",
 		"callback_urls": []string{publicURL + "/api/orgs/" + orgID + "/github-app/register/callback"},
 		"public":        false,
@@ -187,17 +200,24 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 			"check_suite",
 		},
 	}
-	// hook_attributes is only valid when the deployment is reachable from
-	// GitHub's servers over the public Internet — GitHub validates the
-	// hook URL at manifest-creation time even with active:false. Local /
-	// NAT'd deployments omit it entirely and discover installations via
-	// API backfill instead. active stays false here; activation is owned
-	// by the webhook-handler work.
-	if isPubliclyReachable(publicURL) {
-		manifest["hook_attributes"] = map[string]any{
-			"url":    publicURL + "/api/webhooks/github/" + orgID,
-			"active": false,
-		}
+	// GitHub's manifest flow requires a non-blank, publicly-reachable hook
+	// URL: it validates the host at manifest-creation even with
+	// active:false, and a missing hook_attributes is rejected outright as
+	// "Hook url cannot be blank". So we always emit the block. For
+	// deployments GitHub can reach we point it at our real receiver; for
+	// local / NAT'd deployments we substitute an inert public placeholder
+	// (example.com is IANA-reserved for exactly this) so the manifest
+	// validates, and rely on API backfill for installation discovery.
+	// active stays false either way — activation is owned by the
+	// webhook-handler work, and the placeholder must never receive
+	// deliveries regardless.
+	hookURL := publicURL + "/api/webhooks/github/" + orgID
+	if !reachable {
+		hookURL = "https://example.com/triage-factory-webhook-unconfigured"
+	}
+	manifest["hook_attributes"] = map[string]any{
+		"url":    hookURL,
+		"active": false,
 	}
 
 	mj, err := json.Marshal(manifest)
