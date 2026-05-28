@@ -196,6 +196,82 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 	}
 }
 
+// TestFactoryReadStore_Postgres_ExcludesUntaskedEntity pins the
+// multi-mode membership semi-join: an entity a team has tasked (over
+// any task status) rides the factory snapshot, while one no team ever
+// tasked is excluded — even when it has events (a station). This is
+// the Postgres-only contract; SQLite (local mode) applies no
+// membership filter. Runs under AdminDB, so the EXISTS reduces to the
+// org-scoped semi-join; the RLS team-scoping it inherits in production
+// is a property of tasks_select, exercised by the RLS suite.
+func TestFactoryReadStore_Postgres_ExcludesUntaskedEntity(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID := seedPgFactoryOrg(t, h)
+	promptID := seedPgFactoryPrompt(t, h, orgID, userID)
+	seed := newPgFactorySeeder(h.AdminDB, orgID, userID, promptID)
+
+	now := time.Now().UTC()
+	// withTask: a rule cared about it — earns membership.
+	withTask := seed.Entity(t, "memb-tasked")
+	ev := seed.Event(t, withTask, "github:pr:opened", "", now, time.Time{})
+	seed.Task(t, withTask, "github:pr:opened", "", ev, "queued", now)
+
+	// noTask: never matched a rule. Give it an event so the only thing
+	// keeping it out is membership, not a missing station.
+	noTask := seed.Entity(t, "memb-untasked")
+	seed.Event(t, noTask, "github:pr:opened", "", now, time.Time{})
+
+	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	rows, err := stores.Factory.Entities(context.Background(), orgID, 100)
+	if err != nil {
+		t.Fatalf("Entities: %v", err)
+	}
+	got := map[string]bool{}
+	for _, r := range rows {
+		got[r.Entity.ID] = true
+	}
+	if !got[withTask] {
+		t.Errorf("tasked entity %s missing — membership semi-join dropped a member", withTask)
+	}
+	if got[noTask] {
+		t.Errorf("untasked entity %s leaked through — membership semi-join not applied", noTask)
+	}
+}
+
+// TestFactoryReadStore_Postgres_KeepsEntityAfterTaskTerminal pins that
+// membership spans all task statuses: an entity whose only task has
+// gone terminal (done) still rides the snapshot. "Has had a task but
+// has none active now" must stay in the factory — membership is
+// monotonic, orthogonal to task lifecycle.
+func TestFactoryReadStore_Postgres_KeepsEntityAfterTaskTerminal(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID := seedPgFactoryOrg(t, h)
+	promptID := seedPgFactoryPrompt(t, h, orgID, userID)
+	seed := newPgFactorySeeder(h.AdminDB, orgID, userID, promptID)
+
+	now := time.Now().UTC()
+	ent := seed.Entity(t, "terminal-task")
+	ev := seed.Event(t, ent, "github:pr:opened", "", now, time.Time{})
+	seed.Task(t, ent, "github:pr:opened", "", ev, "done", now)
+
+	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	rows, err := stores.Factory.Entities(context.Background(), orgID, 100)
+	if err != nil {
+		t.Fatalf("Entities: %v", err)
+	}
+	found := false
+	for _, r := range rows {
+		if r.Entity.ID == ent {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("entity %s with a terminal (done) task dropped — membership must span all task statuses", ent)
+	}
+}
+
 // TestFactoryReadStore_Postgres_CrossOrgLeakage pins the defense-in-
 // depth guarantee: even with the org_id filter as the only line of
 // defense (AdminDB bypasses RLS), org A's queries can't see org B's

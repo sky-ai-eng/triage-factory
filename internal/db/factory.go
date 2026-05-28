@@ -71,16 +71,24 @@ type FactoryReadStore interface {
 	// FactoryClosedGraceLimit) so the chip can finish animating to
 	// its terminal station before disappearing.
 	//
-	// Scoped to the viewer's teams by membership: an entity is
-	// included iff a task for one of the viewer's teams has ever
-	// existed on it (a semi-join through tasks, over all task
-	// statuses). Repos are configured org-wide, so polling produces
-	// org-wide entities; rather than fork the shared entity per team,
-	// the entity↔team relationship is derived through tasks (which
-	// carry team_id). In Postgres the semi-join auto-scopes via tasks
-	// RLS under tf_app — no explicit team_id needed. In local mode
-	// (N=1, one team) it reduces to "has any task." An entity no rule
-	// ever tasked belongs to no team's factory and is excluded.
+	// Multi-mode (Postgres) scopes to the viewer's teams by
+	// membership: an entity is included iff a task for one of the
+	// viewer's teams has ever existed on it (a semi-join through
+	// tasks, over all task statuses). The org-level GitHub App polls
+	// org-wide, so polling produces cross-team entities; rather than
+	// fork the shared entity per team, the entity↔team relationship is
+	// derived through tasks (which carry team_id). The semi-join
+	// auto-scopes via tasks RLS under tf_app — no explicit team_id
+	// needed. An entity no team ever tasked belongs to no team's
+	// factory and is excluded.
+	//
+	// Local mode (SQLite, N=1) applies NO membership filter: the local
+	// tracker already scopes discovery to the user's own involvement
+	// (author / review-requested / reviewed-by), so every entity is
+	// personally relevant by construction. Filtering by task existence
+	// there would hide relevant-but-untriaged PRs the user expects to
+	// see, so the SQLite impl returns the full active set as before —
+	// local mode is unaffected by this scoping.
 	//
 	// The entity's station (latest-event derivation in the SELECT) is
 	// orthogonal to membership and computed from the shared event log,
