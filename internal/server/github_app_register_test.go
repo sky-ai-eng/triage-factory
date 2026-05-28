@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -124,6 +125,70 @@ func TestGitHubWebOrigin(t *testing.T) {
 		if ok != tc.wantOK || got != tc.want {
 			t.Errorf("gitHubWebOrigin(%q) = (%q, %v), want (%q, %v)", tc.in, got, ok, tc.want, tc.wantOK)
 		}
+	}
+}
+
+// TestIsPubliclyReachable pins which hosts GitHub could reach for a
+// hook_attributes.url: loopback / unspecified / private / link-local
+// hosts are not reachable (manifest must omit the hook), public DNS
+// names and public IPs are.
+func TestIsPubliclyReachable(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"http://localhost:3000", false},
+		{"http://127.0.0.1:3000", false},
+		{"http://127.0.0.1", false},
+		{"http://[::1]:3000", false},
+		{"http://0.0.0.0:3000", false},
+		{"http://[::]:3000", false},
+		{"http://10.0.0.5:3000", false},
+		{"http://192.168.1.10", false},
+		{"http://172.16.4.2", false},
+		{"http://169.254.10.1", false},
+		{"https://app.triagefactory.com", true},
+		{"https://git.corp.example.com", true},
+		{"https://github.acme.com:8443", true},
+		{"https://8.8.8.8", true},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := isPubliclyReachable(tc.in); got != tc.want {
+			t.Errorf("isPubliclyReachable(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestGitHubAppRegister_LocalManifest_HooklessAndNoInstallationEvents
+// pins SKY-362's manifest fixes for a non-public (localhost) deployment:
+// no hook_attributes block, and a default_events list free of the
+// App-lifecycle installation events GitHub rejects.
+func TestGitHubAppRegister_LocalManifest_HooklessAndNoInstallationEvents(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	var key [32]byte
+	if _, err := rand.Read(key[:]); err != nil {
+		t.Fatalf("seed key: %v", err)
+	}
+	s.SetDeployConfig("http://localhost:3000", key)
+
+	rec := doJSON(t, s, "GET",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/register/launch?owner_type=user&owner_login=testuser", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("launch status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+
+	body := rec.Body.String()
+	if strings.Contains(body, "hook_attributes") {
+		t.Errorf("localhost manifest must omit hook_attributes: %s", body)
+	}
+	if strings.Contains(body, "installation_repositories") || strings.Contains(body, `\"installation\"`) {
+		t.Errorf("manifest must not subscribe to installation events: %s", body)
+	}
+	// The valid events must still be present.
+	if !strings.Contains(body, "pull_request") || !strings.Contains(body, "check_suite") {
+		t.Errorf("manifest missing expected default_events: %s", body)
 	}
 }
 
@@ -435,6 +500,87 @@ func TestGitHubAppRegister_CallbackEndpoint_MultiMode(t *testing.T) {
 			t.Errorf("wrong org state status=%d, want 401", rec.Code)
 		}
 	})
+}
+
+// TestGitHubAppRegister_Callback_HooklessNoWebhookSecret verifies that
+// when GitHub's manifest conversion returns no webhook_secret (the
+// hookless local/NAT'd App path), the callback still succeeds, stores
+// the App with an empty webhook_secret_ref, and writes no Vault entry
+// for the (nonexistent) secret.
+func TestGitHubAppRegister_Callback_HooklessNoWebhookSecret(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	rig := newAuthRig(t)
+
+	alice := rig.seedUser()
+	orgA, _ := rig.seedOrg(alice, "alice-org")
+	resp, _ := rig.driveCallback(alice)
+	sidA := rig.sidFromResp(resp)
+
+	// Stub conversion response with NO webhook_secret field.
+	ghStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{
+			"id": 67890,
+			"slug": "triage-factory-hookless",
+			"client_id": "Iv1.hookless_client_id",
+			"client_secret": "hookless_client_secret",
+			"pem": "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----"
+		}`)
+	}))
+	t.Cleanup(ghStub.Close)
+
+	if _, err := rig.h.AdminDB.Exec(`
+		INSERT INTO org_settings (org_id, github_base_url)
+		VALUES ($1, $2)
+		ON CONFLICT (org_id) DO UPDATE SET github_base_url = $2
+	`, orgA.String(), ghStub.URL); err != nil {
+		t.Fatalf("seed org_settings: %v", err)
+	}
+
+	state := appRegisterState{
+		OrgID:     orgA.String(),
+		ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
+	}
+	signed, err := state.sign(rig.srv.deployCfg.hmacKey)
+	if err != nil {
+		t.Fatalf("sign state: %v", err)
+	}
+
+	req := httptest.NewRequest("GET",
+		"/api/orgs/"+orgA.String()+"/github-app/register/callback?code=hookless_code&state="+signed, nil)
+	req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: sidA})
+	rec := httptest.NewRecorder()
+	rig.srv.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("callback status=%d body=%s, want 302", rec.Code, rec.Body.String())
+	}
+
+	var appID, webhookRef string
+	if err := rig.h.AdminDB.QueryRow(`
+		SELECT app_id, webhook_secret_ref FROM org_github_apps WHERE org_id = $1
+	`, orgA.String()).Scan(&appID, &webhookRef); err != nil {
+		t.Fatalf("read org_github_apps: %v", err)
+	}
+	if appID != "67890" {
+		t.Errorf("app_id=%q, want 67890", appID)
+	}
+	if webhookRef != "" {
+		t.Errorf("webhook_secret_ref=%q, want empty for a hookless App", webhookRef)
+	}
+
+	// No Vault entry should exist under the conventional webhook key.
+	var val sql.NullString
+	if err := rig.h.AdminDB.QueryRow(
+		`SELECT public.vault_get_org_secret($1::uuid, $2::text)`,
+		orgA.String(), "github_app_67890_webhook_secret",
+	).Scan(&val); err != nil {
+		t.Fatalf("vault_get: %v", err)
+	}
+	if val.Valid {
+		t.Errorf("expected no Vault entry for the webhook secret, got %q", val.String)
+	}
 }
 
 // TestGitHubAPIBase verifies the URL derivation helper.
