@@ -629,6 +629,14 @@ func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneUR
 	// the ref path as a commit-ish and detaches; `git worktree add
 	// <path> <name>` resolves it as a branch and attaches.
 	if err := gitRunCtx(ctx, bareDir, "worktree", "add", wtDir, localBranch); err != nil {
+		// A cancelled/killed add (ctx cancel when the task closes mid-setup)
+		// leaves wtDir half-built and the bare's worktrees/<runID>/locked=
+		// initializing marker behind. Plain `worktree prune` skips locked
+		// entries, so without this the branch stays pinned as "checked out"
+		// and the next run for this PR fails its fetch. We hold lockRepo, so
+		// any initializing marker in this bare is our own dead add — clear it.
+		_ = os.RemoveAll(wtDir)
+		clearInitializingWorktrees(bareDir)
 		return "", fmt.Errorf("worktree add: %w", err)
 	}
 
@@ -1971,11 +1979,16 @@ func CleanupWithOptions(opts CleanupOptions) {
 		log.Printf("[worktree] cleaned up %d orphaned worktrees", count)
 	}
 
-	// Prune all bare repos
+	// Prune all bare repos. Clear half-built `git worktree add` ghosts
+	// first (plain prune skips their locked=initializing marker), then
+	// run the ordinary prune for unlocked stale entries. Safe to force
+	// here: this runs at startup before any poller/spawner can issue a
+	// concurrent add.
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return
 	}
+	clearInitializingWorktreesAll(filepath.Join(home, reposDir))
 	pruneAll(filepath.Join(home, reposDir))
 }
 
@@ -1993,6 +2006,84 @@ func pruneAll(baseDir string) {
 		return nil
 	}); err != nil {
 		log.Printf("[worktree] walk %s: %v", baseDir, err)
+	}
+}
+
+// initializingLockReason is the exact lock-reason text git writes into
+// <bare>/worktrees/<id>/locked at the start of `git worktree add`, and
+// removes when the add completes. A registration still carrying this
+// marker is an add that never finished — the process was killed (ctx
+// cancel, SIGKILL, crash) mid-add. `git worktree prune` skips locked
+// entries by design, so these ghosts pin their branch as "checked out"
+// at a path that no longer exists, and every later run for that branch
+// fails its fetch/add. We match on this exact reason so a worktree a
+// user deliberately locked (any other reason text) is never touched.
+const initializingLockReason = "initializing"
+
+// clearInitializingWorktrees force-removes admin registrations under
+// <bareDir>/worktrees/* whose `locked` file marks them as a half-built
+// `git worktree add` (reason == initializingLockReason). Removing the
+// admin dir is exactly what `git worktree prune` does for an unlocked
+// stale entry; we do it ourselves because prune refuses locked ones.
+// Returns the number of ghosts cleared.
+//
+// CONCURRENCY: callers must guarantee no `git worktree add` is in flight
+// for this bare — a legitimately in-progress add carries the same
+// locked=initializing marker until it finishes, and sweeping it would
+// corrupt a live checkout. The only safe call sites are startup Cleanup
+// (pollers/spawner not started yet) and CreateForPR's failure path,
+// which holds lockRepo(owner,repo) — the sole place that adds worktrees
+// to a given bare, so any marker present there is its own dead add.
+func clearInitializingWorktrees(bareDir string) int {
+	worktreesDir := filepath.Join(bareDir, "worktrees")
+	entries, err := os.ReadDir(worktreesDir)
+	if err != nil {
+		return 0 // no worktrees admin dir → nothing registered
+	}
+	cleared := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(worktreesDir, e.Name(), "locked"))
+		if err != nil {
+			continue // not locked (or unreadable) → leave for plain prune
+		}
+		if strings.TrimSpace(string(data)) != initializingLockReason {
+			continue // locked for some other reason → never touch
+		}
+		adminDir := filepath.Join(worktreesDir, e.Name())
+		if err := os.RemoveAll(adminDir); err != nil {
+			log.Printf("[worktree] clear half-built worktree %s: %v", adminDir, err)
+			continue
+		}
+		log.Printf("[worktree] cleared half-built worktree registration %s", e.Name())
+		cleared++
+	}
+	return cleared
+}
+
+// clearInitializingWorktreesAll sweeps every bare repo under baseDir for
+// half-built `git worktree add` registrations and force-removes them.
+// Startup-only — see clearInitializingWorktrees for the concurrency
+// contract. This is the backstop for ghosts left by ungraceful death
+// (SIGKILL, crash, OOM, power loss) where no in-process cleanup ran.
+func clearInitializingWorktreesAll(baseDir string) {
+	total := 0
+	if err := filepath.Walk(baseDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() && strings.HasSuffix(path, ".git") {
+			total += clearInitializingWorktrees(path)
+			return filepath.SkipDir
+		}
+		return nil
+	}); err != nil {
+		log.Printf("[worktree] walk %s: %v", baseDir, err)
+	}
+	if total > 0 {
+		log.Printf("[worktree] cleared %d half-built worktree registration(s)", total)
 	}
 }
 
