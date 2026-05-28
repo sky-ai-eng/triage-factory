@@ -281,8 +281,19 @@ export default function Settings() {
 
   const disconnectJira = async () => {
     try {
-      const res = await fetch('/api/integrations/jira', { method: 'DELETE' })
-      if (!res.ok) return
+      // DELETE /api/integrations/jira clears the SecretStore entries
+      // (URL + PAT) but leaves org_settings.jira_base_url populated.
+      // Follow with an explicit org POST so the URL column also clears,
+      // otherwise reloading the page would show the stale URL prefilled
+      // with has_jira_pat:false.
+      const credRes = await fetch('/api/integrations/jira', { method: 'DELETE' })
+      if (!credRes.ok) return
+      const orgRes = await fetch('/api/settings/org', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jira_base_url: '' }),
+      })
+      if (!orgRes.ok) return
     } catch {
       return
     }
@@ -400,18 +411,30 @@ export default function Settings() {
         return
       }
 
-      const teamRes = await fetch('/api/settings/team/default', {
-        method: 'POST',
-        headers: jsonHeaders,
-        body: JSON.stringify({
-          ai_model: form.ai_model,
-          ai_auto_delegate_enabled: form.ai_auto_delegate_enabled,
-          jira_projects: projects,
-        }),
-      })
-      if (!teamRes.ok) {
-        toast.error(await readError(teamRes, 'Failed to save team settings'))
-        return
+      // Only POST the team endpoint when team-scoped fields actually
+      // changed. An org admin who isn't also a team admin would otherwise
+      // get a 403 on every org-only save (the team POST always runs and
+      // fails requireTeamAdmin), and the UI would report the whole save
+      // as failed even though the org changes landed.
+      const teamChanged =
+        form.ai_model !== data?.ai.model ||
+        form.ai_auto_delegate_enabled !== data?.ai.auto_delegate_enabled ||
+        JSON.stringify(projects) !== JSON.stringify(data?.jira.projects ?? [])
+
+      if (teamChanged) {
+        const teamRes = await fetch('/api/settings/team/default', {
+          method: 'POST',
+          headers: jsonHeaders,
+          body: JSON.stringify({
+            ai_model: form.ai_model,
+            ai_auto_delegate_enabled: form.ai_auto_delegate_enabled,
+            jira_projects: projects,
+          }),
+        })
+        if (!teamRes.ok) {
+          toast.error(await readError(teamRes, 'Failed to save team settings'))
+          return
+        }
       }
 
       toast.success('Settings saved')

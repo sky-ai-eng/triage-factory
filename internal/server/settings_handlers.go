@@ -301,12 +301,24 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fall back to SecretStore URLs when org_settings is empty — covers
+	// env-overlay/legacy installs where the URL lives only in the
+	// credential bundle.
+	ghBaseURL := orgSet.GitHubBaseURL
+	if ghBaseURL == "" {
+		ghBaseURL = creds.GitHubURL
+	}
+	jiraBaseURL := orgSet.JiraBaseURL
+	if jiraBaseURL == "" {
+		jiraBaseURL = creds.JiraURL
+	}
+
 	writeJSON(w, http.StatusOK, orgSettingsResponse{
-		GitHubBaseURL:       orgSet.GitHubBaseURL,
+		GitHubBaseURL:       ghBaseURL,
 		GitHubPollInterval:  orgSet.GitHubPollInterval.String(),
 		GitHubCloneProtocol: defaultedCloneProtocolView(orgSet.GitHubCloneProtocol),
 		HasGitHubPAT:        creds.GitHubPAT != "",
-		JiraBaseURL:         orgSet.JiraBaseURL,
+		JiraBaseURL:         jiraBaseURL,
 		JiraPollInterval:    orgSet.JiraPollInterval.String(),
 		HasJiraPAT:          creds.JiraPAT != "",
 		MaxLLMModelTier:     orgSet.MaxLLMModelTier,
@@ -465,15 +477,25 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 		// field. integrations.Save skips empty strings, so zeroing a
 		// creds field without an explicit clear would leave the old
 		// value in the store.
+		// On URL clear: nuke creds + identity bridge so the user row
+		// doesn't keep a stale github_username / jira_account_id after
+		// disconnect. The old monolithic handler did this; the split
+		// handler has to reproduce the sweep.
 		if req.GitHubBaseURL != nil && *req.GitHubBaseURL == "" {
 			if err := integrations.ClearGitHub(r.Context(), tx.Secrets, orgID); err != nil {
 				return fmt.Errorf("clear GitHub secrets: %w", err)
 			}
 			creds.GitHubURL = ""
 			creds.GitHubPAT = ""
+			if err := tx.Users.SetGitHubUsername(r.Context(), userID, ""); err != nil {
+				return fmt.Errorf("clear github_username: %w", err)
+			}
 		} else if req.GitHubPAT != nil && *req.GitHubPAT == "" {
 			if _, err := tx.Secrets.Delete(r.Context(), orgID, integrations.KeyGitHubPAT); err != nil {
 				return fmt.Errorf("clear GitHub PAT: %w", err)
+			}
+			if err := tx.Users.SetGitHubUsername(r.Context(), userID, ""); err != nil {
+				return fmt.Errorf("clear github_username: %w", err)
 			}
 		}
 		if req.JiraBaseURL != nil && *req.JiraBaseURL == "" {
@@ -482,9 +504,15 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 			}
 			creds.JiraURL = ""
 			creds.JiraPAT = ""
+			if err := tx.Users.SetJiraIdentity(r.Context(), userID, "", ""); err != nil {
+				return fmt.Errorf("clear jira_identity: %w", err)
+			}
 		} else if req.JiraPAT != nil && *req.JiraPAT == "" {
 			if _, err := tx.Secrets.Delete(r.Context(), orgID, integrations.KeyJiraPAT); err != nil {
 				return fmt.Errorf("clear Jira PAT: %w", err)
+			}
+			if err := tx.Users.SetJiraIdentity(r.Context(), userID, "", ""); err != nil {
+				return fmt.Errorf("clear jira_identity: %w", err)
 			}
 		}
 		if err := integrations.Save(r.Context(), tx.Secrets, orgID, creds); err != nil {
