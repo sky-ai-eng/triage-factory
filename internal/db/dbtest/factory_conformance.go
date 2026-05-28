@@ -310,13 +310,57 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		}
 	})
 
+	// tasked seeds an entity plus the event+task that earns it
+	// membership in the factory (an entity with no task belongs to no
+	// team's factory — see Entities_ExcludesUntaskedEntity for the
+	// converse). Returns the entity ID. The window/limit subtests below
+	// care about close timing and budgets, not membership, so they all
+	// route entity creation through here to satisfy the semi-join.
+	tasked := func(t *testing.T, seed FactorySeeder, suffix string) string {
+		t.Helper()
+		now := time.Now().UTC()
+		ent := seed.Entity(t, suffix)
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened, "", now, time.Time{})
+		seed.Task(t, ent, domain.EventGitHubPROpened, "", ev, "queued", now)
+		return ent
+	}
+
+	t.Run("Entities_ExcludesUntaskedEntity", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		ctx := context.Background()
+
+		// An entity a rule cared about (has a task) rides the snapshot;
+		// one no rule ever matched (no task) belongs to no team's
+		// factory and must be excluded — the membership semi-join.
+		withTask := tasked(t, seed, "memb-tasked")
+		noTask := seed.Entity(t, "memb-untasked")
+		// Give the untasked entity an event so it's not excluded for
+		// lacking a station — only membership should keep it out.
+		seed.Event(t, noTask, domain.EventGitHubPROpened, "", time.Now().UTC(), time.Time{})
+
+		rows, err := store.Entities(ctx, orgID, 100)
+		if err != nil {
+			t.Fatalf("Entities: %v", err)
+		}
+		got := map[string]bool{}
+		for _, r := range rows {
+			got[r.Entity.ID] = true
+		}
+		if !got[withTask] {
+			t.Errorf("tasked entity %s missing — membership semi-join dropped a member", withTask)
+		}
+		if got[noTask] {
+			t.Errorf("untasked entity %s leaked through — membership semi-join not applied", noTask)
+		}
+	})
+
 	t.Run("Entities_ActiveAndClosedGraceWindow", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		ctx := context.Background()
 
-		active := seed.Entity(t, "ent-active")
-		fresh := seed.Entity(t, "ent-fresh")
-		stale := seed.Entity(t, "ent-stale")
+		active := tasked(t, seed, "ent-active")
+		fresh := tasked(t, seed, "ent-fresh")
+		stale := tasked(t, seed, "ent-stale")
 
 		// Inside the grace window — should appear.
 		seed.CloseEntity(t, fresh, time.Now().Add(-10*time.Second))
@@ -346,8 +390,8 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		store, orgID, seed := mk(t)
 		ctx := context.Background()
 
-		a1 := seed.Entity(t, "iso-a1")
-		a2 := seed.Entity(t, "iso-a2")
+		a1 := tasked(t, seed, "iso-a1")
+		a2 := tasked(t, seed, "iso-a2")
 
 		// 10 freshly-closed entities, all inside the grace window.
 		// Far more than the active limit (2) but inside
@@ -355,7 +399,7 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		closedAt := time.Now().Add(-5 * time.Second)
 		closedSet := map[string]bool{}
 		for i := 0; i < 10; i++ {
-			e := seed.Entity(t, "iso-c-"+strconv.Itoa(i))
+			e := tasked(t, seed, "iso-c-"+strconv.Itoa(i))
 			seed.CloseEntity(t, e, closedAt)
 			closedSet[e] = true
 		}
@@ -391,7 +435,7 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		closedAt := time.Now().Add(-5 * time.Second)
 		burst := db.FactoryClosedGraceLimit + 5
 		for i := 0; i < burst; i++ {
-			e := seed.Entity(t, "cap-"+strconv.Itoa(i))
+			e := tasked(t, seed, "cap-"+strconv.Itoa(i))
 			seed.CloseEntity(t, e, closedAt)
 		}
 

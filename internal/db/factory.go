@@ -71,6 +71,21 @@ type FactoryReadStore interface {
 	// FactoryClosedGraceLimit) so the chip can finish animating to
 	// its terminal station before disappearing.
 	//
+	// Scoped to the viewer's teams by membership: an entity is
+	// included iff a task for one of the viewer's teams has ever
+	// existed on it (a semi-join through tasks, over all task
+	// statuses). Repos are configured org-wide, so polling produces
+	// org-wide entities; rather than fork the shared entity per team,
+	// the entity↔team relationship is derived through tasks (which
+	// carry team_id). In Postgres the semi-join auto-scopes via tasks
+	// RLS under tf_app — no explicit team_id needed. In local mode
+	// (N=1, one team) it reduces to "has any task." An entity no rule
+	// ever tasked belongs to no team's factory and is excluded.
+	//
+	// The entity's station (latest-event derivation in the SELECT) is
+	// orthogonal to membership and computed from the shared event log,
+	// unaffected by task lifecycle.
+	//
 	// Implemented as two separate queries in both backends instead of
 	// a single OR'd WHERE: the OR spans two columns and forces a
 	// filtered table scan, and a combined LIMIT lets a closure burst

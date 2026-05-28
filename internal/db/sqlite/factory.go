@@ -331,10 +331,21 @@ func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int
 	// the active set out of the snapshot, silently shrinking the
 	// meaning of `limit` — the active half should always get its
 	// full budget.
+	//
+	// Membership semi-join: an entity belongs in a team's factory iff
+	// a task for that team has *ever* existed on it (over all task
+	// statuses — a long-closed task still counts). Repos are configured
+	// org-wide, so polling produces org-wide entities; the entity↔team
+	// relationship is derived through tasks (which carry team_id) rather
+	// than forked onto the shared entity. Local mode is N=1 (one team),
+	// so the EXISTS is just "has any task." The semi-join hits the
+	// dedup index on tasks(entity_id); membership is monotonic since
+	// tasks terminate to done/dismissed rather than hard-delete.
 	active, err := queryFactoryEntities(ctx, s.q, `
 		SELECT `+sqliteFactoryEntitySelectColumns+`
 		FROM entities e
 		WHERE e.state = 'active'
+		  AND EXISTS (SELECT 1 FROM tasks t WHERE t.entity_id = e.id)
 		ORDER BY e.created_at DESC
 		LIMIT ?
 	`, limit)
@@ -347,6 +358,7 @@ func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int
 		SELECT `+sqliteFactoryEntitySelectColumns+`
 		FROM entities e
 		WHERE e.closed_at IS NOT NULL AND e.closed_at > ?
+		  AND EXISTS (SELECT 1 FROM tasks t WHERE t.entity_id = e.id)
 		ORDER BY e.closed_at DESC
 		LIMIT ?
 	`, graceCutoff, db.FactoryClosedGraceLimit)

@@ -249,11 +249,30 @@ const pgFactoryEntitySelectColumns = `
 	(SELECT created_at FROM events WHERE org_id = e.org_id AND entity_id = e.id ORDER BY created_at DESC LIMIT 1)
 `
 
+// factoryEntityMembershipExists is the semi-join that scopes the
+// factory to the viewer's teams. An entity belongs in a team's factory
+// iff a task for that team has *ever* existed on it (over all task
+// statuses — a long-closed task still counts). Repos are configured
+// org-wide, so polling produces org-wide entities + events; rather than
+// fork the shared entity per team (which would break the snapshot-diff
+// re-emit invariant and the append-only event log), the entity↔team
+// relationship is derived through tasks, which carry team_id.
+//
+// The team scoping itself is free: the factory snapshot runs tx-bound
+// as tf_app with RLS active (TxStores.Factory), and tasks_select RLS
+// already constrains rows to the viewer's org + teams. So the EXISTS
+// auto-scopes to the viewer's teams with no explicit team_id in the
+// query — RLS does it. org_id is bound here too as defense-in-depth,
+// matching the convention every method in this file follows. Membership
+// is monotonic since tasks terminate to done/dismissed, never delete.
+const factoryEntityMembershipExists = `EXISTS (SELECT 1 FROM tasks t WHERE t.entity_id = e.id AND t.org_id = e.org_id)`
+
 func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int) ([]domain.FactoryEntityRow, error) {
 	active, err := queryFactoryEntities(ctx, s.q, `
 		SELECT `+pgFactoryEntitySelectColumns+`
 		FROM entities e
 		WHERE e.org_id = $1 AND e.state = 'active'
+		  AND `+factoryEntityMembershipExists+`
 		ORDER BY e.created_at DESC
 		LIMIT $2
 	`, orgID, limit)
@@ -266,6 +285,7 @@ func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int
 		SELECT `+pgFactoryEntitySelectColumns+`
 		FROM entities e
 		WHERE e.org_id = $1 AND e.closed_at IS NOT NULL AND e.closed_at > $2
+		  AND `+factoryEntityMembershipExists+`
 		ORDER BY e.closed_at DESC
 		LIMIT $3
 	`, orgID, graceCutoff, db.FactoryClosedGraceLimit)
