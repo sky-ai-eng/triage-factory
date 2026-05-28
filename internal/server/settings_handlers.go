@@ -35,8 +35,8 @@ type userSettingsResponse struct {
 }
 
 func (s *Server) handleUserSettingsGet(w http.ResponseWriter, r *http.Request) {
-	orgID := OrgIDFrom(r.Context())
 	userID := ClaimsFrom(r.Context()).Subject
+	orgID := OrgIDFrom(r.Context())
 
 	var resp userSettingsResponse
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -72,10 +72,7 @@ type userSettingsUpdate struct {
 
 func (s *Server) handleUserSettingsPost(w http.ResponseWriter, r *http.Request) {
 	userID := ClaimsFrom(r.Context()).Subject
-	orgID, ok := s.requireOrg(w, r)
-	if !ok {
-		return
-	}
+	orgID := OrgIDFrom(r.Context())
 	var req userSettingsUpdate
 	if !decodeJSON(w, r, &req, "") {
 		return
@@ -107,7 +104,10 @@ type teamSettingsResponse struct {
 }
 
 func (s *Server) handleTeamSettingsGet(w http.ResponseWriter, r *http.Request) {
-	orgID := OrgIDFrom(r.Context())
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
 	userID := ClaimsFrom(r.Context()).Subject
 	teamID, err := s.resolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
 	if err != nil {
@@ -280,7 +280,10 @@ type orgSettingsResponse struct {
 }
 
 func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
-	orgID := OrgIDFrom(r.Context())
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
 	userID := ClaimsFrom(r.Context()).Subject
 
 	var orgSet domain.OrgSettings
@@ -466,6 +469,8 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 			if err := integrations.ClearGitHub(r.Context(), tx.Secrets, orgID); err != nil {
 				return fmt.Errorf("clear GitHub secrets: %w", err)
 			}
+			creds.GitHubURL = ""
+			creds.GitHubPAT = ""
 		} else if req.GitHubPAT != nil && *req.GitHubPAT == "" {
 			if _, err := tx.Secrets.Delete(r.Context(), orgID, integrations.KeyGitHubPAT); err != nil {
 				return fmt.Errorf("clear GitHub PAT: %w", err)
@@ -475,6 +480,8 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 			if err := integrations.ClearJira(r.Context(), tx.Secrets, orgID); err != nil {
 				return fmt.Errorf("clear Jira secrets: %w", err)
 			}
+			creds.JiraURL = ""
+			creds.JiraPAT = ""
 		} else if req.JiraPAT != nil && *req.JiraPAT == "" {
 			if _, err := tx.Secrets.Delete(r.Context(), orgID, integrations.KeyJiraPAT); err != nil {
 				return fmt.Errorf("clear Jira PAT: %w", err)
@@ -566,7 +573,7 @@ func (s *Server) verifyTeamInOrg(w http.ResponseWriter, r *http.Request, orgID, 
 		return true
 	}
 	var belongs bool
-	err := db.WithTx(r.Context(), s.db, db.Claims{Sub: userID},
+	err := db.WithTx(r.Context(), s.db, db.Claims{Sub: userID, OrgID: orgID},
 		func(tx *sql.Tx) error {
 			return tx.QueryRowContext(r.Context(),
 				`SELECT tf.team_in_current_org($1::uuid)`, teamID,
@@ -592,7 +599,7 @@ func (s *Server) requireTeamAdmin(w http.ResponseWriter, r *http.Request, orgID,
 		return true
 	}
 	var isAdmin bool
-	err := db.WithTx(r.Context(), s.db, db.Claims{Sub: userID},
+	err := db.WithTx(r.Context(), s.db, db.Claims{Sub: userID, OrgID: orgID},
 		func(tx *sql.Tx) error {
 			return tx.QueryRowContext(r.Context(),
 				`SELECT tf.user_is_team_admin($1::uuid)`, teamID,

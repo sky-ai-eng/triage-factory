@@ -386,11 +386,11 @@ export default function Settings() {
         method: 'POST',
         headers: jsonHeaders,
         body: JSON.stringify({
-          github_base_url: form.github_url || undefined,
+          github_base_url: form.github_url,
           github_pat: form.github_pat || undefined,
           github_poll_interval: form.github_poll_interval,
           github_clone_protocol: form.github_clone_protocol,
-          jira_base_url: form.jira_url || undefined,
+          jira_base_url: form.jira_url,
           jira_pat: form.jira_pat || undefined,
           jira_poll_interval: form.jira_poll_interval,
         }),
