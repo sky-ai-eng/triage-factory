@@ -27,11 +27,9 @@ var errAbortHandler = fmt.Errorf("handler already responded")
 // --------------------------------------------------------------------
 
 type userSettingsResponse struct {
-	UserSettings  domain.UserSettings `json:"user_settings"`
-	GitHubUsername string             `json:"github_username,omitempty"`
-	JiraAccountID string             `json:"jira_account_id,omitempty"`
-	HasGitHubPAT  bool               `json:"has_github_pat"`
-	HasJiraPAT    bool               `json:"has_jira_pat"`
+	UserSettings   domain.UserSettings `json:"user_settings"`
+	GitHubUsername string              `json:"github_username,omitempty"`
+	JiraAccountID  string              `json:"jira_account_id,omitempty"`
 }
 
 func (s *Server) handleUserSettingsGet(w http.ResponseWriter, r *http.Request) {
@@ -57,10 +55,6 @@ func (s *Server) handleUserSettingsGet(w http.ResponseWriter, r *http.Request) {
 			return fmt.Errorf("jira identity: %w", err)
 		}
 		resp.JiraAccountID = jiraAccountID
-
-		creds, _ := integrations.Load(r.Context(), tx.Secrets, orgID)
-		resp.HasGitHubPAT = creds.GitHubPAT != ""
-		resp.HasJiraPAT = creds.JiraPAT != ""
 		return nil
 	}); err != nil {
 		internalError(w, "settings/user", err)
@@ -72,8 +66,6 @@ func (s *Server) handleUserSettingsGet(w http.ResponseWriter, r *http.Request) {
 
 type userSettingsUpdate struct {
 	UserSettings *domain.UserSettings `json:"user_settings,omitempty"`
-	GitHubPAT    string               `json:"github_pat,omitempty"`
-	JiraPAT      string               `json:"jira_pat,omitempty"`
 }
 
 func (s *Server) handleUserSettingsPost(w http.ResponseWriter, r *http.Request) {
@@ -85,112 +77,6 @@ func (s *Server) handleUserSettingsPost(w http.ResponseWriter, r *http.Request) 
 	var req userSettingsUpdate
 	if !decodeJSON(w, r, &req, "") {
 		return
-	}
-
-	if req.GitHubPAT != "" && req.GitHubPAT != "REMOVE" {
-		var creds auth.Credentials
-		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-			creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
-			return nil
-		}); err != nil {
-			internalError(w, "settings/user", err)
-			return
-		}
-		url := creds.GitHubURL
-		if url == "" {
-			badRequest(w, "GitHub URL must be configured at the org level before setting a PAT")
-			return
-		}
-		ghUser, err := auth.ValidateGitHub(url, req.GitHubPAT)
-		if err != nil {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-				"error": "GitHub: " + err.Error(),
-				"field": "github_pat",
-			})
-			return
-		}
-		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-			if e := tx.Users.SetGitHubUsername(r.Context(), userID, ghUser.Login); e != nil {
-				return e
-			}
-			return integrations.Save(r.Context(), tx.Secrets, orgID, auth.Credentials{GitHubPAT: req.GitHubPAT})
-		}); err != nil {
-			internalError(w, "settings/user", err)
-			return
-		}
-		if s.onGitHubChanged != nil {
-			s.MarkJiraRestarted()
-			go s.onGitHubChanged(orgID)
-		}
-	}
-
-	if req.GitHubPAT == "REMOVE" {
-		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-			if e := tx.Users.SetGitHubUsername(r.Context(), userID, ""); e != nil {
-				return e
-			}
-			return integrations.ClearGitHub(r.Context(), tx.Secrets, orgID)
-		}); err != nil {
-			internalError(w, "settings/user", err)
-			return
-		}
-		if s.onGitHubChanged != nil {
-			s.MarkJiraRestarted()
-			go s.onGitHubChanged(orgID)
-		}
-	}
-
-	if req.JiraPAT != "" && req.JiraPAT != "REMOVE" {
-		var creds auth.Credentials
-		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-			creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
-			return nil
-		}); err != nil {
-			internalError(w, "settings/user", err)
-			return
-		}
-		url := creds.JiraURL
-		if url == "" {
-			badRequest(w, "Jira URL must be configured at the org level before setting a PAT")
-			return
-		}
-		jiraUser, err := auth.ValidateJira(url, req.JiraPAT)
-		if err != nil {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-				"error": "Jira: " + err.Error(),
-				"field": "jira_pat",
-			})
-			return
-		}
-		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-			if e := tx.Users.SetJiraIdentity(r.Context(), userID, jiraUser.StableID(), jiraUser.DisplayName); e != nil {
-				return e
-			}
-			return integrations.Save(r.Context(), tx.Secrets, orgID, auth.Credentials{JiraPAT: req.JiraPAT})
-		}); err != nil {
-			internalError(w, "settings/user", err)
-			return
-		}
-		if s.onJiraChanged != nil {
-			s.MarkJiraRestarted()
-			go s.onJiraChanged(orgID)
-		}
-	}
-
-	if req.JiraPAT == "REMOVE" {
-		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-			if e := tx.Users.SetJiraIdentity(r.Context(), userID, "", ""); e != nil {
-				return e
-			}
-			return integrations.ClearJira(r.Context(), tx.Secrets, orgID)
-		}); err != nil {
-			internalError(w, "settings/user", err)
-			return
-		}
-		if s.onJiraChanged != nil {
-			s.MarkJiraRestarted()
-			go s.onJiraChanged(orgID)
-		}
 	}
 
 	if req.UserSettings != nil {
@@ -392,8 +278,10 @@ type orgSettingsResponse struct {
 	GitHubBaseURL       string `json:"github_base_url"`
 	GitHubPollInterval  string `json:"github_poll_interval"`
 	GitHubCloneProtocol string `json:"github_clone_protocol"`
+	HasGitHubPAT        bool   `json:"has_github_pat"`
 	JiraBaseURL         string `json:"jira_base_url"`
 	JiraPollInterval    string `json:"jira_poll_interval"`
+	HasJiraPAT          bool   `json:"has_jira_pat"`
 	MaxLLMModelTier     string `json:"max_llm_model_tier,omitempty"`
 	HasAnthropicAPIKey  bool   `json:"has_anthropic_api_key"`
 	HasBedrockCreds     bool   `json:"has_bedrock_credentials"`
@@ -404,10 +292,15 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 	userID := ClaimsFrom(r.Context()).Subject
 
 	var orgSet domain.OrgSettings
+	var creds auth.Credentials
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var err error
 		orgSet, err = tx.Orgs.GetSettings(r.Context(), orgID)
-		return err
+		if err != nil {
+			return err
+		}
+		creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
+		return nil
 	}); err != nil {
 		internalError(w, "settings/org", err)
 		return
@@ -417,8 +310,10 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 		GitHubBaseURL:       orgSet.GitHubBaseURL,
 		GitHubPollInterval:  orgSet.GitHubPollInterval.String(),
 		GitHubCloneProtocol: defaultedCloneProtocolView(orgSet.GitHubCloneProtocol),
+		HasGitHubPAT:        creds.GitHubPAT != "",
 		JiraBaseURL:         orgSet.JiraBaseURL,
 		JiraPollInterval:    orgSet.JiraPollInterval.String(),
+		HasJiraPAT:          creds.JiraPAT != "",
 		MaxLLMModelTier:     orgSet.MaxLLMModelTier,
 		HasAnthropicAPIKey:  orgSet.AnthropicAPIKeyRef != "",
 		HasBedrockCreds:     orgSet.BedrockCredentialsRef != "",
@@ -427,9 +322,11 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 
 type orgSettingsUpdate struct {
 	GitHubBaseURL       *string `json:"github_base_url"`
+	GitHubPAT           string  `json:"github_pat,omitempty"`
 	GitHubPollInterval  string  `json:"github_poll_interval,omitempty"`
 	GitHubCloneProtocol string  `json:"github_clone_protocol,omitempty"`
 	JiraBaseURL         *string `json:"jira_base_url"`
+	JiraPAT             string  `json:"jira_pat,omitempty"`
 	JiraPollInterval    string  `json:"jira_poll_interval,omitempty"`
 	MaxLLMModelTier     string  `json:"max_llm_model_tier,omitempty"`
 	AnthropicAPIKey     string  `json:"anthropic_api_key,omitempty"`
@@ -497,6 +394,52 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 		orgSet.MaxLLMModelTier = req.MaxLLMModelTier
 	}
 
+	// GitHub PAT: validate, persist identity bridge, store credential.
+	if req.GitHubPAT != "" {
+		url := creds.GitHubURL
+		if url == "" {
+			badRequest(w, "GitHub URL is required before setting a PAT")
+			return
+		}
+		ghUser, err := auth.ValidateGitHub(url, req.GitHubPAT)
+		if err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+				"error": "GitHub: " + err.Error(),
+				"field": "github_pat",
+			})
+			return
+		}
+		creds.GitHubPAT = req.GitHubPAT
+		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+			return tx.Users.SetGitHubUsername(r.Context(), userID, ghUser.Login)
+		}); err != nil {
+			log.Printf("[settings/org] failed to persist users.github_username: %v", err)
+		}
+	}
+
+	// Jira PAT: validate, persist identity bridge, store credential.
+	if req.JiraPAT != "" {
+		url := creds.JiraURL
+		if url == "" {
+			badRequest(w, "Jira URL is required before setting a PAT")
+			return
+		}
+		jiraUser, err := auth.ValidateJira(url, req.JiraPAT)
+		if err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+				"error": "Jira: " + err.Error(),
+				"field": "jira_pat",
+			})
+			return
+		}
+		creds.JiraPAT = req.JiraPAT
+		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+			return tx.Users.SetJiraIdentity(r.Context(), userID, jiraUser.StableID(), jiraUser.DisplayName)
+		}); err != nil {
+			log.Printf("[settings/org] failed to persist users.jira_identity: %v", err)
+		}
+	}
+
 	// SSH preflight: gate the transition into SSH mode.
 	if orgSet.GitHubCloneProtocol == "ssh" && prevOrgSet.GitHubCloneProtocol != "ssh" {
 		sshHost := worktree.SSHHostFromBaseURL(creds.GitHubURL)
@@ -515,17 +458,8 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if req.GitHubBaseURL != nil || req.JiraBaseURL != nil {
-			urlCreds := auth.Credentials{}
-			if req.GitHubBaseURL != nil {
-				urlCreds.GitHubURL = *req.GitHubBaseURL
-			}
-			if req.JiraBaseURL != nil {
-				urlCreds.JiraURL = *req.JiraBaseURL
-			}
-			if err := integrations.Save(r.Context(), tx.Secrets, orgID, urlCreds); err != nil {
-				return fmt.Errorf("save integration URLs: %w", err)
-			}
+		if err := integrations.Save(r.Context(), tx.Secrets, orgID, creds); err != nil {
+			return fmt.Errorf("save credentials: %w", err)
 		}
 		if req.AnthropicAPIKey != "" {
 			if err := tx.Secrets.Put(r.Context(), orgID, "anthropic_api_key", req.AnthropicAPIKey, "Org's Anthropic API key"); err != nil {
@@ -541,10 +475,12 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 
 	ghChanged := orgSet.GitHubBaseURL != prevOrgSet.GitHubBaseURL ||
 		orgSet.GitHubPollInterval != prevOrgSet.GitHubPollInterval ||
-		orgSet.GitHubCloneProtocol != prevOrgSet.GitHubCloneProtocol
+		orgSet.GitHubCloneProtocol != prevOrgSet.GitHubCloneProtocol ||
+		req.GitHubPAT != ""
 
 	jiraChanged := orgSet.JiraBaseURL != prevOrgSet.JiraBaseURL ||
-		orgSet.JiraPollInterval != prevOrgSet.JiraPollInterval
+		orgSet.JiraPollInterval != prevOrgSet.JiraPollInterval ||
+		req.JiraPAT != ""
 
 	if ghChanged && s.onGitHubChanged != nil {
 		s.MarkJiraRestarted()
