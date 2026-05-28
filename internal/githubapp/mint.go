@@ -91,6 +91,17 @@ type Token struct {
 	ExpiresAt time.Time
 }
 
+// Installation is one App installation discovered via GET /app/installations:
+// a GitHub account (user or org) on which the App is installed. AccountType
+// is GitHub's verbatim "User" / "Organization"; CreatedAt is the installation's
+// created_at (zero if GitHub omitted it).
+type Installation struct {
+	ID           int64
+	AccountLogin string
+	AccountType  string
+	CreatedAt    time.Time
+}
+
 // Minter signs JWTs with a GitHub App's RSA private key and exchanges
 // them for installation access tokens. Safe for concurrent use — each
 // MintInstallationToken call is independent (no shared mutable state
@@ -323,6 +334,97 @@ func (m *Minter) MintInstallationToken(ctx context.Context, installationID int64
 		return Token{}, fmt.Errorf("githubapp: installation token response expires_at is not in the future: %s", expiresAt.Format(time.RFC3339))
 	}
 	return Token{Value: parsed.Token, ExpiresAt: expiresAt}, nil
+}
+
+// installationListItem is the subset of an /app/installations array entry
+// we keep. GitHub returns far more (permissions, events, repository_selection);
+// installation mirroring only needs the id, the account it's installed on,
+// and when it was created.
+type installationListItem struct {
+	ID      int64 `json:"id"`
+	Account struct {
+		Login string `json:"login"`
+		Type  string `json:"type"`
+	} `json:"account"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ListInstallations enumerates every installation of the App via
+// GET /app/installations, authenticated with an app-level JWT. It follows
+// Link-header pagination so an App installed on more than one page of
+// accounts (100/page) is returned in full.
+//
+// This is the read side of the installation mirror: the backfill reconcile
+// upserts whatever this returns. A non-2xx response or malformed JSON
+// surfaces as an error with the HTTP status and a truncated body.
+func (m *Minter) ListInstallations(ctx context.Context) ([]Installation, error) {
+	appJWT, err := m.AppJWT()
+	if err != nil {
+		return nil, err
+	}
+
+	next := m.apiBase + "/app/installations?per_page=100"
+	var out []Installation
+	for next != "" {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, next, nil)
+		if err != nil {
+			return nil, fmt.Errorf("githubapp: build request: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+appJWT)
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+		req.Header.Set("User-Agent", "triage-factory-githubapp")
+
+		resp, err := m.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("githubapp: list installations: %w", err)
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		linkHeader := resp.Header.Get("Link")
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("githubapp: list installations: status %d, body: %s",
+				resp.StatusCode, truncate(string(body), 512))
+		}
+
+		var page []installationListItem
+		if err := json.Unmarshal(body, &page); err != nil {
+			return nil, fmt.Errorf("githubapp: parse installations response: %w", err)
+		}
+		for _, it := range page {
+			out = append(out, Installation{
+				ID:           it.ID,
+				AccountLogin: it.Account.Login,
+				AccountType:  it.Account.Type,
+				CreatedAt:    it.CreatedAt.UTC(),
+			})
+		}
+		next = nextPageURL(linkHeader)
+	}
+	return out, nil
+}
+
+// nextPageURL extracts the rel="next" URL from a GitHub Link header, or ""
+// when there's no next page. The header looks like:
+//
+//	<https://api.github.com/app/installations?page=2>; rel="next", <...>; rel="last"
+func nextPageURL(link string) string {
+	for _, part := range strings.Split(link, ",") {
+		segs := strings.Split(strings.TrimSpace(part), ";")
+		if len(segs) < 2 {
+			continue
+		}
+		urlPart := strings.TrimSpace(segs[0])
+		if !strings.HasPrefix(urlPart, "<") || !strings.HasSuffix(urlPart, ">") {
+			continue
+		}
+		for _, attr := range segs[1:] {
+			if strings.TrimSpace(attr) == `rel="next"` {
+				return urlPart[1 : len(urlPart)-1]
+			}
+		}
+	}
+	return ""
 }
 
 // timeNow returns the current time, honoring the testable now hook.

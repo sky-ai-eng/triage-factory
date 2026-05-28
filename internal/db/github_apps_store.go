@@ -29,6 +29,15 @@ type GitHubAppsStore interface {
 	// or PAT-borrow). sql.ErrNoRows is folded into the nil return.
 	GetForOrg(ctx context.Context, orgID string) (*domain.OrgGitHubApp, error)
 
+	// GetForOrgSystem mirrors GetForOrg but routes through the admin
+	// pool with no JWT-claims dependency, for system/background callers
+	// that have only a trusted orgID — the webhook receiver (org_id from
+	// the URL path) reading WebhookSecretRef, and the backfill loop.
+	// Same nil-on-absent contract as GetForOrg. Same discipline as
+	// GetForOrgSystem vs GetForOrg on AgentStore: request handlers use
+	// the claims-checked GetForOrg.
+	GetForOrgSystem(ctx context.Context, orgID string) (*domain.OrgGitHubApp, error)
+
 	// CreateForOrg inserts a new org_github_apps row. Returns an
 	// error wrapping ErrGitHubAppExists if the org already has a
 	// registration (the PK constraint fires).
@@ -38,6 +47,32 @@ type GitHubAppsStore interface {
 	// installations (removed_at IS NULL), ordered by account_login.
 	// Empty slice when the org has no App or no live installations.
 	ListInstallationsForOrg(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error)
+
+	// UpsertInstallation mirrors one installation into
+	// org_github_app_installations. Idempotent on installation_id; ON
+	// CONFLICT it refreshes the account fields and clears removed_at, so
+	// re-observing (backfill) or reinstalling (webhook) the same
+	// installation_id revives a previously-removed row. installed_at is
+	// set on first insert and preserved across upserts (a zero
+	// InstalledAt defaults to now()). In Postgres this writes on the
+	// admin pool — tf_app is denied all writes to this table by RLS.
+	UpsertInstallation(ctx context.Context, inst domain.OrgGitHubAppInstallation) error
+
+	// MarkInstallationRemoved soft-deletes one installation by stamping
+	// removed_at = now() (a no-op on an already-removed or absent row).
+	// domain.OrgGitHubAppInstallation has no RemovedAt field — readers
+	// filter removed_at IS NULL, so the domain type stays active-only and
+	// this operates at the SQL level. Admin pool in Postgres.
+	MarkInstallationRemoved(ctx context.Context, installationID string) error
+
+	// BackfillInstallationsFromAPI is the reconcile / system-of-record:
+	// it mints an App JWT from the org's App PEM (read via
+	// SecretStore.GetSystem), calls GET {apiBase}/app/installations, and
+	// upserts every installation returned. v1 is per-org Apps only, so
+	// every returned installation unambiguously belongs to orgID. A no-op
+	// when the org has no registered App. Runs in all modes; the
+	// invocation (poller cycle + UI refresh) is a separate concern.
+	BackfillInstallationsFromAPI(ctx context.Context, orgID string) error
 }
 
 // ErrGitHubAppExists is returned by CreateForOrg when the org already

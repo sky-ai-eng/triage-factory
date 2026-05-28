@@ -1,0 +1,195 @@
+package server
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+)
+
+// maxWebhookBody caps the request body we read before signature
+// verification. GitHub documents 25 MiB as the delivery ceiling; a body
+// at the cap still hashes fine, and anything larger is not a legitimate
+// delivery, so we read up to the cap + 1 and reject an over-cap read.
+const maxWebhookBody = 25 << 20
+
+// handleGitHubWebhook receives per-org GitHub App webhooks at
+// POST /api/webhooks/github/{org_id}. It is pre-auth (GitHub has no
+// session) and identifies the tenant solely from the URL path — safe
+// because the HMAC signature is verified against that org's stored
+// webhook secret before any side effect, so a delivery forged for
+// another org simply fails verification.
+//
+// installation.created → UpsertInstallation; installation.deleted →
+// MarkInstallationRemoved + the resolver's token-cache invalidate hook.
+// Every other (verified) event is published to the bus for downstream
+// content processing and acked with 204. Validation failures return 4xx
+// so GitHub doesn't retry a structurally-bad delivery indefinitely.
+func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
+	orgID := r.PathValue("org_id")
+	if _, err := uuid.Parse(orgID); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	eventName := r.Header.Get("X-GitHub-Event")
+	if eventName == "" {
+		badRequest(w, "missing X-GitHub-Event header")
+		return
+	}
+	sigHeader := r.Header.Get("X-Hub-Signature-256")
+	if sigHeader == "" {
+		// No signature to check against — treat as unauthenticated.
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBody+1))
+	if err != nil {
+		badRequest(w, "could not read request body")
+		return
+	}
+	if len(body) > maxWebhookBody {
+		http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	// Resolve the org's webhook secret via the system (claims-free) path —
+	// the handler has only a trusted org_id from the URL, no JWT.
+	app, err := s.githubApps.GetForOrgSystem(r.Context(), orgID)
+	if err != nil {
+		internalError(w, "github-webhook", err)
+		return
+	}
+	if app == nil || app.WebhookSecretRef == "" {
+		// No registered App (or a hookless one) for this org — there's
+		// nothing to verify against, so this endpoint doesn't exist for it.
+		http.NotFound(w, r)
+		return
+	}
+	secret, err := s.secrets.GetSystem(r.Context(), orgID, app.WebhookSecretRef)
+	if err != nil {
+		internalError(w, "github-webhook", err)
+		return
+	}
+	if secret == "" || !validWebhookSignature(secret, body, sigHeader) {
+		// Deliberately no body and no payload logging on a mismatch.
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	// Signature verified past this point.
+	if eventName == "installation" {
+		s.handleInstallationEvent(w, r, orgID, body)
+		return
+	}
+
+	s.publishWebhookEvent(orgID, eventName, r.Header.Get("X-GitHub-Delivery"))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// installationWebhook is the subset of the installation event payload the
+// lifecycle handler needs. The account block mirrors GitHub's verbatim
+// "User" / "Organization" type, which is exactly what the
+// org_github_app_installations CHECK constraint accepts.
+type installationWebhook struct {
+	Action       string `json:"action"`
+	Installation struct {
+		ID      int64 `json:"id"`
+		Account struct {
+			Login string `json:"login"`
+			Type  string `json:"type"`
+		} `json:"account"`
+		CreatedAt time.Time `json:"created_at"`
+	} `json:"installation"`
+}
+
+// handleInstallationEvent applies a verified installation event to the
+// mirror. created upserts, deleted soft-removes + fires the cache
+// invalidate hook; any other action (suspend, new_permissions_accepted,
+// …) is published to the bus and acked — the mirror only tracks
+// existence, not those finer states.
+func (s *Server) handleInstallationEvent(w http.ResponseWriter, r *http.Request, orgID string, body []byte) {
+	var p installationWebhook
+	if err := json.Unmarshal(body, &p); err != nil {
+		badRequest(w, "malformed installation payload")
+		return
+	}
+	if p.Installation.ID == 0 {
+		badRequest(w, "installation payload missing installation id")
+		return
+	}
+	installationID := strconv.FormatInt(p.Installation.ID, 10)
+
+	switch p.Action {
+	case "created":
+		if err := s.githubApps.UpsertInstallation(r.Context(), domain.OrgGitHubAppInstallation{
+			InstallationID: installationID,
+			OrgID:          orgID,
+			AccountType:    p.Installation.Account.Type,
+			AccountLogin:   p.Installation.Account.Login,
+			InstalledAt:    p.Installation.CreatedAt,
+		}); err != nil {
+			internalError(w, "github-webhook", err)
+			return
+		}
+	case "deleted":
+		if err := s.githubApps.MarkInstallationRemoved(r.Context(), installationID); err != nil {
+			internalError(w, "github-webhook", err)
+			return
+		}
+		if s.onInstallationRemoved != nil {
+			s.onInstallationRemoved(orgID, installationID)
+		}
+	default:
+		s.publishWebhookEvent(orgID, "installation", r.Header.Get("X-GitHub-Delivery"))
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// publishWebhookEvent emits a lean signal onto the bus for a verified
+// non-lifecycle delivery. The full-payload routing + content parsing is a
+// downstream concern; this carries just the GitHub event name and delivery
+// GUID so a subscriber can correlate. The "webhook:github:" namespace keeps
+// raw deliveries off the "github:"/"jira:" router path (poller-derived,
+// catalog-registered events) until the content pipeline opts in.
+func (s *Server) publishWebhookEvent(orgID, eventName, deliveryID string) {
+	if s.bus == nil {
+		return
+	}
+	meta, _ := json.Marshal(map[string]string{
+		"event":       eventName,
+		"delivery_id": deliveryID,
+	})
+	s.bus.Publish(domain.Event{
+		OrgID:        orgID,
+		EventType:    "webhook:github:" + eventName,
+		MetadataJSON: string(meta),
+	})
+}
+
+// validWebhookSignature checks the X-Hub-Signature-256 header against an
+// HMAC-SHA256 of the raw body keyed by the org's webhook secret. The
+// comparison is constant-time.
+func validWebhookSignature(secret string, body []byte, header string) bool {
+	const prefix = "sha256="
+	if !strings.HasPrefix(header, prefix) {
+		return false
+	}
+	want, err := hex.DecodeString(strings.TrimPrefix(header, prefix))
+	if err != nil {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	return hmac.Equal(want, mac.Sum(nil))
+}

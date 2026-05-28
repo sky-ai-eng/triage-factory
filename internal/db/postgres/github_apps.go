@@ -12,30 +12,32 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-type gitHubAppsStore struct{ q queryer }
+// gitHubAppsStore holds two pools. app is the claims-checked request-handler
+// path (GetForOrg / CreateForOrg / ListInstallationsForOrg — RLS gates reads
+// by org membership, writes by org admin). admin is the system/background
+// path: installation writes (tf_app is denied all writes to
+// org_github_app_installations by RLS) and the no-claims reads the webhook
+// receiver + backfill need. secrets reads the App PEM for backfill via the
+// claims-free GetSystem door.
+type gitHubAppsStore struct {
+	app     queryer
+	admin   queryer
+	secrets db.SecretStore
+}
 
-func newGitHubAppsStore(q queryer) db.GitHubAppsStore {
-	return &gitHubAppsStore{q: q}
+func newGitHubAppsStore(app, admin queryer, secrets db.SecretStore) db.GitHubAppsStore {
+	return &gitHubAppsStore{app: app, admin: admin, secrets: secrets}
 }
 
 var _ db.GitHubAppsStore = (*gitHubAppsStore)(nil)
 
-func (s *gitHubAppsStore) GetForOrg(ctx context.Context, orgID string) (*domain.OrgGitHubApp, error) {
-	if !isValidUUID(orgID) {
-		return nil, nil
-	}
+func scanGitHubApp(row interface{ Scan(...any) error }) (*domain.OrgGitHubApp, error) {
 	var (
 		a            domain.OrgGitHubApp
 		regBy        sql.NullString
 		registeredAt sql.NullTime
 	)
-	err := s.q.QueryRowContext(ctx, `
-		SELECT org_id, app_id, slug, client_id,
-		       client_secret_ref, pem_ref, webhook_secret_ref,
-		       registered_at, registered_by_user_id, active
-		  FROM org_github_apps
-		 WHERE org_id = $1
-	`, orgID).Scan(
+	err := row.Scan(
 		&a.OrgID, &a.AppID, &a.Slug, &a.ClientID,
 		&a.ClientSecretRef, &a.PEMRef, &a.WebhookSecretRef,
 		&registeredAt, &regBy, &a.Active,
@@ -53,8 +55,29 @@ func (s *gitHubAppsStore) GetForOrg(ctx context.Context, orgID string) (*domain.
 	return &a, nil
 }
 
+const selectGitHubAppCols = `
+	SELECT org_id, app_id, slug, client_id,
+	       client_secret_ref, pem_ref, webhook_secret_ref,
+	       registered_at, registered_by_user_id, active
+	  FROM org_github_apps
+	 WHERE org_id = $1`
+
+func (s *gitHubAppsStore) GetForOrg(ctx context.Context, orgID string) (*domain.OrgGitHubApp, error) {
+	if !isValidUUID(orgID) {
+		return nil, nil
+	}
+	return scanGitHubApp(s.app.QueryRowContext(ctx, selectGitHubAppCols, orgID))
+}
+
+func (s *gitHubAppsStore) GetForOrgSystem(ctx context.Context, orgID string) (*domain.OrgGitHubApp, error) {
+	if !isValidUUID(orgID) {
+		return nil, nil
+	}
+	return scanGitHubApp(s.admin.QueryRowContext(ctx, selectGitHubAppCols, orgID))
+}
+
 func (s *gitHubAppsStore) CreateForOrg(ctx context.Context, app domain.OrgGitHubApp) error {
-	_, err := s.q.ExecContext(ctx, `
+	_, err := s.app.ExecContext(ctx, `
 		INSERT INTO org_github_apps (
 			org_id, app_id, slug, client_id,
 			client_secret_ref, pem_ref, webhook_secret_ref,
@@ -80,7 +103,7 @@ func (s *gitHubAppsStore) ListInstallationsForOrg(ctx context.Context, orgID str
 	if !isValidUUID(orgID) {
 		return out, nil
 	}
-	rows, err := s.q.QueryContext(ctx, `
+	rows, err := s.app.QueryContext(ctx, `
 		SELECT installation_id, org_id, account_type, account_login, installed_at
 		  FROM org_github_app_installations
 		 WHERE org_id = $1 AND removed_at IS NULL
@@ -102,4 +125,74 @@ func (s *gitHubAppsStore) ListInstallationsForOrg(ctx context.Context, orgID str
 		out = append(out, inst)
 	}
 	return out, rows.Err()
+}
+
+// UpsertInstallation writes on the admin pool — the
+// org_github_app_installations RLS policies deny every write to tf_app, so
+// the mirror is maintained exclusively by system code (webhook handler +
+// backfill). installed_at is set only on insert (COALESCE to now() when the
+// caller passes a zero time) and left untouched on conflict so the original
+// install time survives a re-observe; removed_at is cleared so a reinstall
+// revives the row.
+func (s *gitHubAppsStore) UpsertInstallation(ctx context.Context, inst domain.OrgGitHubAppInstallation) error {
+	var installedAt sql.NullTime
+	if !inst.InstalledAt.IsZero() {
+		installedAt = sql.NullTime{Time: inst.InstalledAt, Valid: true}
+	}
+	_, err := s.admin.ExecContext(ctx, `
+		INSERT INTO org_github_app_installations
+			(installation_id, org_id, account_type, account_login, installed_at, removed_at)
+		VALUES ($1, $2, $3, $4, COALESCE($5, now()), NULL)
+		ON CONFLICT (installation_id) DO UPDATE SET
+			org_id        = EXCLUDED.org_id,
+			account_type  = EXCLUDED.account_type,
+			account_login = EXCLUDED.account_login,
+			removed_at    = NULL
+	`, inst.InstallationID, inst.OrgID, inst.AccountType, inst.AccountLogin, installedAt)
+	if err != nil {
+		return fmt.Errorf("upsert org_github_app_installations: %w", err)
+	}
+	return nil
+}
+
+func (s *gitHubAppsStore) MarkInstallationRemoved(ctx context.Context, installationID string) error {
+	_, err := s.admin.ExecContext(ctx, `
+		UPDATE org_github_app_installations
+		   SET removed_at = now()
+		 WHERE installation_id = $1 AND removed_at IS NULL
+	`, installationID)
+	if err != nil {
+		return fmt.Errorf("mark org_github_app_installations removed: %w", err)
+	}
+	return nil
+}
+
+func (s *gitHubAppsStore) BackfillInstallationsFromAPI(ctx context.Context, orgID string) error {
+	if !isValidUUID(orgID) {
+		return nil
+	}
+	var appID, pemRef, baseURL string
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT a.app_id, a.pem_ref, COALESCE(s.github_base_url, '')
+		  FROM org_github_apps a
+		  LEFT JOIN org_settings s ON s.org_id = a.org_id
+		 WHERE a.org_id = $1 AND a.active
+	`, orgID).Scan(&appID, &pemRef, &baseURL)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil // no registered App for this org — nothing to backfill
+	}
+	if err != nil {
+		return fmt.Errorf("read org_github_apps for backfill: %w", err)
+	}
+
+	insts, err := db.DiscoverAppInstallations(ctx, s.secrets, orgID, appID, pemRef, baseURL)
+	if err != nil {
+		return err
+	}
+	for _, inst := range insts {
+		if err := s.UpsertInstallation(ctx, inst); err != nil {
+			return err
+		}
+	}
+	return nil
 }

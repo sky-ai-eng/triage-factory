@@ -19,13 +19,14 @@ import (
 // Keep in sync with the doc-comment block at the top of
 // internal/server/server.go::routes().
 var preAuthAllowlist = []string{
-	"GET /api/auth/oauth/{provider}", // initiates OAuth dance; no session yet
-	"GET /api/auth/callback",         // completes OAuth + creates session
-	"POST /api/auth/logout",          // reads sid cookie directly so stale-session logout works
-	"GET /api/config",                // AuthGate reads deployment_mode pre-login
-	"GET /api/health",                // liveness probe for platform healthchecks (Fly, compose, k8s)
-	"/auth/v1/",                      // GoTrue reverse proxy; auth happens upstream
-	"/",                              // SPA fallback; no identity dependency
+	"GET /api/auth/oauth/{provider}",     // initiates OAuth dance; no session yet
+	"GET /api/auth/callback",             // completes OAuth + creates session
+	"POST /api/auth/logout",              // reads sid cookie directly so stale-session logout works
+	"GET /api/config",                    // AuthGate reads deployment_mode pre-login
+	"GET /api/health",                    // liveness probe for platform healthchecks (Fly, compose, k8s)
+	"POST /api/webhooks/github/{org_id}", // GitHub App webhook receiver; pre-auth, verified by HMAC signature in-handler
+	"/auth/v1/",                          // GoTrue reverse proxy; auth happens upstream
+	"/",                                  // SPA fallback; no identity dependency
 }
 
 // TestRoutesCoverage parses server.go and asserts every /api/* mount

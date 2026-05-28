@@ -55,6 +55,10 @@ type Store struct {
 // against app and rely on WithTx to set per-request JWT claims.
 func New(admin, app *sql.DB) db.Stores {
 	s := &Store{admin: admin, app: app}
+	// Built once and shared: GitHubApps.BackfillInstallationsFromAPI reads
+	// the App PEM via the same SecretStore the bundle exposes (GetSystem,
+	// admin pool).
+	secrets := newSecretStore(app, admin)
 	s.stores = db.Stores{
 		Scores: newScoreStore(admin),
 		// PromptStore needs both pools: SeedOrUpdate writes to
@@ -71,7 +75,7 @@ func New(admin, app *sql.DB) db.Stores {
 		// GetSystem wraps vault_get_org_secret_system on the admin pool
 		// (supabase_admin) for background/system callers with no JWT;
 		// tf_app has no EXECUTE on that function.
-		Secrets: newSecretStore(app, admin),
+		Secrets: secrets,
 		// EventHandlers needs both pools: Seed writes shipped rows
 		// without JWT claims, but event_handlers_insert /
 		// event_handlers_update RLS policies gate on either
@@ -230,7 +234,12 @@ func New(admin, app *sql.DB) db.Stores {
 		// CancelOrphanedNonTerminalRequests sweep that runs before
 		// any JWT-claims context exists.
 		Curator:    newCuratorStore(app, admin),
-		GitHubApps: newGitHubAppsStore(app),
+		// GitHubApps: app pool for request-handler reads/writes
+		// (RLS-gated); admin pool for installation-mirror writes (tf_app
+		// is denied all writes to org_github_app_installations) + the
+		// no-claims reads the webhook receiver + backfill need; secrets
+		// for the backfill's App-PEM GetSystem read.
+		GitHubApps: newGitHubAppsStore(app, admin, secrets),
 		Tx:         s,
 	}
 	return s.stores
@@ -292,6 +301,9 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		Teams:           newTeamsStore(tx, tx),
 		JiraStatusRules: newJiraStatusRulesStore(tx, tx),
 		Curator:         newCuratorStore(tx, tx),
-		GitHubApps:      newGitHubAppsStore(tx),
+		// Both pools collapse to tx (test door). BackfillInstallationsFromAPI's
+		// GetSystem would hit tf_app and be denied here — tests that exercise
+		// it use New(admin, app) directly, same as the SecretStore tests.
+		GitHubApps: newGitHubAppsStore(tx, tx, newSecretStore(tx, tx)),
 	}
 }

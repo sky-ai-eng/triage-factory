@@ -193,7 +193,10 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// SyntheticClaimsWithTx claims via curator_requests_modify /
 		// curator_messages_modify / curator_pending_context_modify
 		// on (org_id, creator_user_id).
-		Curator:    newCuratorStore(tx, s.admin),
-		GitHubApps: newGitHubAppsStore(tx),
+		Curator: newCuratorStore(tx, s.admin),
+		// app half is the claims-set tx (GetForOrg / CreateForOrg);
+		// admin half stays the real admin pool so installation writes +
+		// GetForOrgSystem / backfill route outside the tx.
+		GitHubApps: newGitHubAppsStore(tx, s.admin, newSecretStore(tx, s.admin)),
 	}
 }

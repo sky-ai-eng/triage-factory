@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -83,6 +84,18 @@ type Server struct {
 	onGitHubChanged func(orgID string) // GitHub creds/repos changed — full restart + re-profile
 	onJiraChanged   func(orgID string) // Jira config changed — restart Jira poller only
 	scorerTrigger   func(orgID string) // invoked after non-poll task creation (e.g. carry-over) to kick the per-org scorer immediately
+
+	// bus is the in-process event bus. The GitHub webhook receiver
+	// publishes verified deliveries here; nil until SetEventBus runs
+	// (the receiver no-ops the publish if so). Content-event processing
+	// is a downstream subscriber's concern.
+	bus *eventbus.Bus
+
+	// onInstallationRemoved, when set, fires on a verified
+	// installation.deleted webhook so the credential resolver's
+	// per-installation token cache can drop the now-dead entry. Nil
+	// until the resolver wires it; the receiver skips the call when nil.
+	onInstallationRemoved func(orgID, installationID string)
 
 	// deployCfg holds deployment-identity config (publicURL, HMAC key,
 	// secureCookies) populated in both local and multi mode.
@@ -338,6 +351,9 @@ func (s *Server) routes() {
 	//        checks, compose healthcheck, k8s liveness). Pre-auth so
 	//        the probe doesn't need a session; deliberately doesn't
 	//        consult the DB (see handleHealth).
+	//   POST /api/webhooks/github/{org_id} — GitHub App webhook receiver;
+	//        GitHub has no session, and the handler verifies the HMAC
+	//        signature against the org's stored webhook secret itself.
 	//   /auth/v1/                        — GoTrue reverse proxy; auth
 	//        happens upstream, not in our middleware.
 	//   /                                — SPA fallback; static-file
@@ -535,6 +551,12 @@ func (s *Server) routes() {
 	s.api("GET /api/orgs/{org_id}/github-app", s.handleGitHubAppStatus)
 	s.api("GET /api/orgs/{org_id}/github-app/install-url", s.handleGitHubAppInstallURL)
 
+	// Per-org GitHub App webhook receiver. Pre-auth (GitHub has no
+	// session) and identified by org_id from the path; the handler
+	// verifies the HMAC signature against that org's stored webhook
+	// secret before any side effect, so it's on the preAuthAllowlist.
+	s.mux.Handle("POST /api/webhooks/github/{org_id}", http.HandlerFunc(s.handleGitHubWebhook))
+
 	// Frontend: serve embedded SPA, with fallback to index.html for client-side routing
 	s.mux.HandleFunc("/", s.handleFrontend)
 }
@@ -615,6 +637,20 @@ func (s *Server) SetScorerTrigger(fn func(orgID string)) {
 // SetGitHubClient sets the GitHub client for review approval submissions.
 func (s *Server) SetGitHubClient(client *ghclient.Client) {
 	s.ghClient = client
+}
+
+// SetEventBus wires the in-process event bus so the GitHub webhook
+// receiver can publish verified deliveries. Wired post-construction in
+// main.go after the bus is created.
+func (s *Server) SetEventBus(bus *eventbus.Bus) {
+	s.bus = bus
+}
+
+// SetInstallationRemovedHook registers a callback fired on a verified
+// installation.deleted webhook (the resolver's token-cache invalidate).
+// Optional — left nil until the credential resolver wires it.
+func (s *Server) SetInstallationRemovedHook(fn func(orgID, installationID string)) {
+	s.onInstallationRemoved = fn
 }
 
 // SetJiraClient sets the Jira client used by claim and undo handlers.

@@ -208,6 +208,86 @@ func TestGitHubAppsStore_Postgres_NonAdminWriteDenied(t *testing.T) {
 	pgtest.AssertRLSViolation(t, err)
 }
 
+// TestGitHubAppsStore_Postgres_InstallationLifecycle exercises the
+// admin-pool installation writes (tf_app is denied all writes to
+// org_github_app_installations): Upsert → MarkRemoved → Upsert-revive.
+// Wires both pools to AdminDB (BYPASSRLS) so the test exercises the SQL
+// independent of the auth path.
+func TestGitHubAppsStore_Postgres_InstallationLifecycle(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, _ := seedPgOrgAndUserForGitHubApps(t, h)
+	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	inst := domain.OrgGitHubAppInstallation{
+		InstallationID: "555",
+		OrgID:          orgID,
+		AccountType:    "Organization",
+		AccountLogin:   "acme",
+	}
+	if err := stores.GitHubApps.UpsertInstallation(ctx, inst); err != nil {
+		t.Fatalf("UpsertInstallation: %v", err)
+	}
+
+	got, err := stores.GitHubApps.ListInstallationsForOrg(ctx, orgID)
+	if err != nil {
+		t.Fatalf("ListInstallationsForOrg: %v", err)
+	}
+	if len(got) != 1 || got[0].InstallationID != "555" {
+		t.Fatalf("after upsert got %+v, want one /555 row", got)
+	}
+	if got[0].InstalledAt.IsZero() {
+		t.Error("InstalledAt is zero; want defaulted now()")
+	}
+
+	if err := stores.GitHubApps.MarkInstallationRemoved(ctx, "555"); err != nil {
+		t.Fatalf("MarkInstallationRemoved: %v", err)
+	}
+	if got, _ = stores.GitHubApps.ListInstallationsForOrg(ctx, orgID); len(got) != 0 {
+		t.Fatalf("after remove got %d rows, want 0", len(got))
+	}
+
+	inst.AccountLogin = "acme-renamed"
+	if err := stores.GitHubApps.UpsertInstallation(ctx, inst); err != nil {
+		t.Fatalf("UpsertInstallation (revive): %v", err)
+	}
+	got, _ = stores.GitHubApps.ListInstallationsForOrg(ctx, orgID)
+	if len(got) != 1 || got[0].AccountLogin != "acme-renamed" {
+		t.Fatalf("after revive got %+v, want one acme-renamed row", got)
+	}
+}
+
+// TestGitHubAppsStore_Postgres_InstallationCrossOrg proves an upsert
+// under org A never surfaces under org B — the org_id binding on the
+// row + the read's org_id filter keep tenants isolated.
+func TestGitHubAppsStore_Postgres_InstallationCrossOrg(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgA, _ := seedPgOrgAndUserForGitHubApps(t, h)
+	orgB, _ := seedPgOrgAndUserForGitHubApps(t, h)
+	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+		InstallationID: "900",
+		OrgID:          orgA,
+		AccountType:    "User",
+		AccountLogin:   "only-in-a",
+	}); err != nil {
+		t.Fatalf("UpsertInstallation orgA: %v", err)
+	}
+
+	if got, _ := stores.GitHubApps.ListInstallationsForOrg(ctx, orgB); len(got) != 0 {
+		t.Errorf("orgB sees %d installations, want 0 (orgA's row leaked)", len(got))
+	}
+	if got, _ := stores.GitHubApps.ListInstallationsForOrg(ctx, orgA); len(got) != 1 {
+		t.Errorf("orgA sees %d installations, want 1", len(got))
+	}
+}
+
 func seedPgOrgAndUserForGitHubApps(t *testing.T, h *pgtest.Harness) (orgID, userID string) {
 	t.Helper()
 	orgID = uuid.New().String()

@@ -32,12 +32,13 @@ func New(conn *sql.DB) db.Stores {
 	// route `...System` admin-pool variants distinctly. SQLite has
 	// one connection — both args collapse to conn here.
 	users := newUsersStore(conn, conn)
+	secrets := newSecretStore()
 	s.stores = db.Stores{
 		Scores:         newScoreStore(conn),
 		Prompts:        newPromptStore(conn, conn),
 		Swipes:         newSwipeStore(conn),
 		Dashboard:      newDashboardStore(conn),
-		Secrets:        newSecretStore(),
+		Secrets:        secrets,
 		EventHandlers:  newEventHandlerStore(conn, users),
 		Chains:         newChainStore(conn, conn),
 		Agents:         newAgentStore(conn, conn),
@@ -83,7 +84,7 @@ func New(conn *sql.DB) db.Stores {
 		// for completeness — handler-side helpers stay on the
 		// package-level *sql.DB calls until D9.
 		Curator:    newCuratorStore(conn),
-		GitHubApps: newGitHubAppsStore(conn),
+		GitHubApps: newGitHubAppsStore(conn, secrets),
 		Tx:         s,
 	}
 	return s.stores

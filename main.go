@@ -721,6 +721,8 @@ func main() {
 
 	// Event bus — central pub/sub replacing direct callbacks
 	bus := eventbus.New()
+	// Let the GitHub webhook receiver publish verified deliveries.
+	srv.SetEventBus(bus)
 
 	wsHub := srv.WSHub()
 
