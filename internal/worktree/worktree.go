@@ -2034,36 +2034,52 @@ func removeWorktreeRegFor(bareDir, wtDir string) {
 	}
 }
 
-// worktreeCheckoutExists reports whether the working tree referenced by a
-// bare admin entry still exists on disk. It reads the non-localized
-// `gitdir` file (the path to <worktree>/.git that git records for every
-// linked worktree); a missing/unreadable gitdir or a missing target both
-// mean the working tree is gone. Deliberately avoids the `locked` file's
-// reason text, which git writes through gettext (_("initializing")) and
-// is therefore localized.
-func worktreeCheckoutExists(adminDir string) bool {
+// recordedWorktreePath returns the working-tree directory a bare admin
+// entry points at, read from its non-localized `gitdir` file (the path to
+// <worktree>/.git that git records for every linked worktree). Returns ""
+// if the gitdir file is missing or unreadable. Deliberately avoids the
+// `locked` file's reason text, which git writes through gettext
+// (_("initializing")) and is therefore localized.
+func recordedWorktreePath(adminDir string) string {
 	data, err := os.ReadFile(filepath.Join(adminDir, "gitdir"))
 	if err != nil {
-		return false
+		return ""
 	}
 	gitPath := strings.TrimSpace(string(data))
 	if gitPath == "" {
-		return false
+		return ""
 	}
-	_, err = os.Stat(gitPath)
-	return err == nil
+	return filepath.Dir(gitPath)
+}
+
+// isTFRunWorktreePath reports whether p is one of TF's own ephemeral run
+// worktrees — i.e. a child of the triagefactory-runs temp namespace
+// (runDir = <tmp>/triagefactory-runs/<runID>). Matched on the runsDir
+// path segment rather than the full os.TempDir() prefix because $TMPDIR
+// can differ between the run that created the worktree and this restart;
+// the namespace itself is constant.
+func isTFRunWorktreePath(p string) bool {
+	return p != "" && filepath.Base(filepath.Dir(p)) == runsDir
 }
 
 // clearStaleLockedWorktrees force-removes admin registrations under
-// <bareDir>/worktrees/* that are locked AND whose working tree no longer
-// exists. That pair is precisely the set `git worktree prune` refuses to
-// reclaim (it skips locked entries) but which is safe to drop: a
-// genuinely-in-use locked worktree still has its checkout on disk and is
-// left untouched. Returns the number of ghosts cleared.
+// <bareDir>/worktrees/* that are (1) locked, (2) one of TF's own
+// ephemeral run worktrees, and (3) whose working tree no longer exists.
+// That triple is precisely the set `git worktree prune` refuses to
+// reclaim (it skips locked entries) but which is safe to drop. Returns
+// the number of ghosts cleared.
 //
-// We key on lock-file presence + missing checkout rather than the lock
-// reason string because git localizes that reason via gettext, so the
-// literal "initializing" isn't a stable token across locales.
+// All three conditions matter:
+//   - locked + checkout-missing is what a cancel/kill mid-`git worktree
+//     add` leaves behind. We key on lock-file presence + missing checkout
+//     rather than the lock reason string because git localizes that
+//     reason via gettext, so the literal "initializing" isn't a stable
+//     token across locales.
+//   - The TF-run-namespace gate is what keeps us from violating git's
+//     `worktree lock` contract: a worktree a user deliberately locked
+//     because its checkout lives on a removable/network volume that's
+//     merely unmounted right now also looks "locked + checkout-missing",
+//     but it is NOT under triagefactory-runs, so we leave it alone.
 //
 // CONCURRENCY: startup-only. An in-progress `git worktree add` is briefly
 // locked with its checkout not yet populated, so a concurrent sweep could
@@ -2085,8 +2101,15 @@ func clearStaleLockedWorktrees(bareDir string) int {
 		if _, err := os.Stat(filepath.Join(adminDir, "locked")); err != nil {
 			continue // unlocked → plain prune reclaims it if stale
 		}
-		if worktreeCheckoutExists(adminDir) {
-			continue // locked and live → a real worktree, never touch
+		wtPath := recordedWorktreePath(adminDir)
+		if !isTFRunWorktreePath(wtPath) {
+			// Locked and not one of our ephemeral run worktrees — could be
+			// a user worktree on a currently-unmounted volume. Honor the
+			// lock and leave it for git/the user to manage.
+			continue
+		}
+		if _, err := os.Stat(wtPath); err == nil {
+			continue // checkout still present → live worktree, never touch
 		}
 		if err := os.RemoveAll(adminDir); err != nil {
 			log.Printf("[worktree] clear stale locked worktree %s: %v", adminDir, err)

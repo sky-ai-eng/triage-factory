@@ -896,15 +896,16 @@ func TestCreateForPR_OwnRepoPR_FetchesViaPullRef(t *testing.T) {
 	}
 }
 
-// makeLockedWorktree creates a real worktree on `branch` at a checkout
-// dir named `basename` and locks it with `reason` (git's `worktree lock
-// --reason`). Returns the checkout path. The caller decides whether to
-// delete the checkout afterward (turning it into the production ghost an
-// interrupted `git worktree add` leaves behind) or keep it (a genuine
-// in-use locked worktree).
-func makeLockedWorktree(t *testing.T, bareDir, branch, basename, reason string) string {
+// addLockedWorktree creates a real worktree on `branch` at the full path
+// `checkout` and locks it with `reason` (git's `worktree lock --reason`).
+// Returns the checkout path. The caller controls the location (TF's
+// ephemeral runs namespace via tfRunCheckout vs. an arbitrary
+// user/removable path) and whether to delete the checkout afterward.
+func addLockedWorktree(t *testing.T, bareDir, branch, checkout, reason string) string {
 	t.Helper()
-	checkout := filepath.Join(t.TempDir(), basename)
+	if err := os.MkdirAll(filepath.Dir(checkout), 0o755); err != nil {
+		t.Fatalf("mkdir checkout parent: %v", err)
+	}
 	cmds := [][]string{
 		{"-C", bareDir, "worktree", "add", checkout, branch},
 		{"-C", bareDir, "worktree", "lock", "--reason", reason, checkout},
@@ -917,17 +918,24 @@ func makeLockedWorktree(t *testing.T, bareDir, branch, basename, reason string) 
 	return checkout
 }
 
-// makeGhost is makeLockedWorktree + deleting the checkout: the exact
+// makeGhost is addLockedWorktree + deleting the checkout: the exact
 // on-disk state of a cancel/kill mid-`git worktree add` — admin
 // registration present and locked, working tree gone. `git worktree
 // prune` skips it because it's locked, pinning the branch.
-func makeGhost(t *testing.T, bareDir, branch, basename, reason string) string {
+func makeGhost(t *testing.T, bareDir, branch, checkout, reason string) string {
 	t.Helper()
-	checkout := makeLockedWorktree(t, bareDir, branch, basename, reason)
+	addLockedWorktree(t, bareDir, branch, checkout, reason)
 	if err := os.RemoveAll(checkout); err != nil {
 		t.Fatalf("remove ghost checkout: %v", err)
 	}
 	return checkout
+}
+
+// tfRunCheckout returns a checkout path inside TF's ephemeral run
+// namespace (runDir = <TMPDIR>/triagefactory-runs/<id>) — the only paths
+// the startup ghost sweep is allowed to reclaim.
+func tfRunCheckout(id string) string {
+	return runDir(id)
 }
 
 func assertReAddWedged(t *testing.T, bareDir, branch string) {
@@ -968,8 +976,8 @@ func TestRemoveWorktreeRegFor_UnwedgesAndIsolated(t *testing.T) {
 		t.Fatalf("git branch feature: %v: %s", err, out)
 	}
 
-	ghost := makeGhost(t, bareDir, "main", "ghost-checkout", "initializing")
-	live := makeLockedWorktree(t, bareDir, "feature", "live-checkout", "initializing")
+	ghost := makeGhost(t, bareDir, "main", tfRunCheckout("run-ghost"), "initializing")
+	live := addLockedWorktree(t, bareDir, "feature", tfRunCheckout("run-live"), "initializing")
 
 	assertReAddWedged(t, bareDir, "main")
 
@@ -997,7 +1005,7 @@ func TestClearStaleLockedWorktrees_ReclaimsLocalizedGhost(t *testing.T) {
 		t.Fatalf("EnsureBareClone: %v", err)
 	}
 
-	makeGhost(t, bareDir, "main", "ghost-checkout", "réinitialisation en cours") // non-English lock reason
+	makeGhost(t, bareDir, "main", tfRunCheckout("run-loc"), "réinitialisation en cours") // non-English lock reason
 
 	assertReAddWedged(t, bareDir, "main")
 
@@ -1018,13 +1026,39 @@ func TestClearStaleLockedWorktrees_PreservesLiveLockedWorktree(t *testing.T) {
 		t.Fatalf("EnsureBareClone: %v", err)
 	}
 
-	makeLockedWorktree(t, bareDir, "main", "live-checkout", "held by user for debugging") // checkout kept
+	addLockedWorktree(t, bareDir, "main", tfRunCheckout("run-live"), "held by user for debugging") // checkout kept
 
 	if n := clearStaleLockedWorktrees(bareDir); n != 0 {
 		t.Fatalf("clearStaleLockedWorktrees cleared %d, want 0 (live locked worktree must survive)", n)
 	}
 	if matches, _ := filepath.Glob(filepath.Join(bareDir, "worktrees", "*", "locked")); len(matches) != 1 {
 		t.Fatalf("expected the live locked registration to survive, found %d", len(matches))
+	}
+}
+
+// TestClearStaleLockedWorktrees_PreservesUnmountedUserWorktree is the
+// regression for the lock-contract fix: a worktree a user deliberately
+// locked because its checkout lives on a removable/network volume that's
+// currently unmounted also looks "locked + checkout-missing", but it is
+// NOT under TF's runs namespace, so the sweep must leave it alone.
+func TestClearStaleLockedWorktrees_PreservesUnmountedUserWorktree(t *testing.T) {
+	withTestHome(t)
+	upstream := makeTestUpstream(t)
+	bareDir, err := EnsureBareClone(context.Background(), "owner", "repo", upstream)
+	if err != nil {
+		t.Fatalf("EnsureBareClone: %v", err)
+	}
+
+	// A locked worktree at a non-TF path (stands in for /Volumes/USB/...),
+	// then its checkout is removed to simulate the volume being unmounted.
+	userPath := filepath.Join(t.TempDir(), "removable", "myrepo")
+	makeGhost(t, bareDir, "main", userPath, "on the external SSD")
+
+	if n := clearStaleLockedWorktrees(bareDir); n != 0 {
+		t.Fatalf("clearStaleLockedWorktrees cleared %d, want 0 (user's locked off-volume worktree must survive)", n)
+	}
+	if matches, _ := filepath.Glob(filepath.Join(bareDir, "worktrees", "*", "locked")); len(matches) != 1 {
+		t.Fatalf("expected the user's locked registration to survive, found %d", len(matches))
 	}
 }
 
@@ -1039,10 +1073,15 @@ func TestCleanup_SweepsBareGhostWithoutRunsDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureBareClone: %v", err)
 	}
-	makeGhost(t, bareDir, "main", "ghost-checkout", "initializing")
+	makeGhost(t, bareDir, "main", tfRunCheckout("run-ghost"), "initializing")
 
-	// Precondition: the runs dir does not exist (withTestHome points
-	// TMPDIR at a fresh dir with no triagefactory-runs subdir).
+	// Simulate /tmp being wiped on reboot: remove the whole runs dir so it
+	// is absent, while the bare still records the ghost. The admin entry's
+	// gitdir keeps the (now non-existent) triagefactory-runs path string,
+	// which is what the sweep keys on.
+	if err := os.RemoveAll(filepath.Join(os.TempDir(), runsDir)); err != nil {
+		t.Fatalf("remove runs dir: %v", err)
+	}
 	if _, err := os.Stat(filepath.Join(os.TempDir(), runsDir)); !os.IsNotExist(err) {
 		t.Fatalf("test precondition: runs dir should be absent, stat err = %v", err)
 	}
