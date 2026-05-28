@@ -267,8 +267,9 @@ func TestGitHubAppRegister_CallbackEndpoint_MultiMode(t *testing.T) {
 			t.Fatalf("callback status=%d body=%s, want 302", rec.Code, rec.Body.String())
 		}
 		loc := rec.Header().Get("Location")
-		if loc != "/settings/workspace#github-app" {
-			t.Errorf("redirect location=%q, want /settings/workspace#github-app", loc)
+		wantLoc := "/orgs/" + orgA.String() + "/settings#github-app"
+		if loc != wantLoc {
+			t.Errorf("redirect location=%q, want %q", loc, wantLoc)
 		}
 
 		// Verify the org_github_apps row was written.

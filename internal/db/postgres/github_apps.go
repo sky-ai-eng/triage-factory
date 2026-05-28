@@ -74,3 +74,32 @@ func (s *gitHubAppsStore) CreateForOrg(ctx context.Context, app domain.OrgGitHub
 	}
 	return nil
 }
+
+func (s *gitHubAppsStore) ListInstallationsForOrg(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
+	if !isValidUUID(orgID) {
+		return nil, nil
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT installation_id, org_id, account_type, account_login, installed_at
+		  FROM org_github_app_installations
+		 WHERE org_id = $1 AND removed_at IS NULL
+		 ORDER BY account_login
+	`, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("list org_github_app_installations: %w", err)
+	}
+	defer rows.Close()
+
+	var out []domain.OrgGitHubAppInstallation
+	for rows.Next() {
+		var inst domain.OrgGitHubAppInstallation
+		if err := rows.Scan(
+			&inst.InstallationID, &inst.OrgID, &inst.AccountType,
+			&inst.AccountLogin, &inst.InstalledAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan org_github_app_installations: %w", err)
+		}
+		out = append(out, inst)
+	}
+	return out, rows.Err()
+}

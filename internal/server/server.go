@@ -528,6 +528,10 @@ func (s *Server) routes() {
 	// r.PathValue("org_id"). Works in both local and multi mode.
 	s.apiMutating("POST /api/orgs/{org_id}/github-app/register/start", s.handleGitHubAppRegisterStart)
 	s.api("GET /api/orgs/{org_id}/github-app/register/callback", s.handleGitHubAppRegisterCallback)
+	// Read-only status + install deep-link for the Workspace Settings panel.
+	// Any org member (read), so requireOrgMember rather than requireOrgAdmin.
+	s.api("GET /api/orgs/{org_id}/github-app", s.handleGitHubAppStatus)
+	s.api("GET /api/orgs/{org_id}/github-app/install-url", s.handleGitHubAppInstallURL)
 
 	// Frontend: serve embedded SPA, with fallback to index.html for client-side routing
 	s.mux.HandleFunc("/", s.handleFrontend)

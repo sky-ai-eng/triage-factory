@@ -295,7 +295,18 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 
 	log.Printf("[github-app] registered app_id=%s slug=%s for org=%s", appIDStr, convResp.Slug, orgID)
 
-	http.Redirect(w, r, "/settings/workspace#github-app", http.StatusFound)
+	http.Redirect(w, r, settingsRedirectPath(orgID)+"#github-app", http.StatusFound)
+}
+
+// settingsRedirectPath returns the SPA route for the Settings page in
+// the active mode. Local mode mounts Settings at /settings; multi mode
+// at /orgs/{org_id}/settings. The #github-app fragment tells the
+// Settings page to select the Workspace tab and refetch App status.
+func settingsRedirectPath(orgID string) string {
+	if runmode.Current() == runmode.ModeLocal {
+		return "/settings"
+	}
+	return "/orgs/" + orgID + "/settings"
 }
 
 // requireOrgAdmin validates {org_id} from the URL path and checks the

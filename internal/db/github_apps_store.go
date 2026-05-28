@@ -33,6 +33,11 @@ type GitHubAppsStore interface {
 	// error wrapping ErrGitHubAppExists if the org already has a
 	// registration (the PK constraint fires).
 	CreateForOrg(ctx context.Context, app domain.OrgGitHubApp) error
+
+	// ListInstallationsForOrg returns the org's active App
+	// installations (removed_at IS NULL), ordered by account_login.
+	// Empty slice when the org has no App or no live installations.
+	ListInstallationsForOrg(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error)
 }
 
 // ErrGitHubAppExists is returned by CreateForOrg when the org already
