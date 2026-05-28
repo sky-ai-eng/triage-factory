@@ -99,10 +99,16 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		ent := seed.Entity(t, "ec1")
 
 		// Inside the window.
-		seed.Event(t, ent, domain.EventGitHubPROpened, "", now.Add(-30*time.Minute), time.Time{})
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened, "", now.Add(-30*time.Minute), time.Time{})
 		seed.Event(t, ent, domain.EventGitHubPROpened, "", now.Add(-10*time.Minute), time.Time{})
 		// Outside the window — must not count.
 		seed.Event(t, ent, domain.EventGitHubPRMerged, "", now.Add(-3*time.Hour), time.Time{})
+
+		// Multi-mode scopes event counts to entities the viewer's team
+		// has tasked; give this entity a task so its events count. The
+		// task reuses an existing event as primary_event_id so it adds
+		// no event to the counts. No-op for SQLite (local, unscoped).
+		seed.Task(t, ent, domain.EventGitHubPROpened, "memb", ev, "queued", now)
 
 		counts, err := store.EventCountsSince(ctx, orgID, now.Add(-1*time.Hour))
 		if err != nil {
@@ -125,17 +131,25 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		b := seed.Entity(t, "dec-b")
 		c := seed.Entity(t, "dec-c")
 
-		seed.Event(t, a, domain.EventGitHubPROpened, "", now, time.Time{})
+		evA := seed.Event(t, a, domain.EventGitHubPROpened, "", now, time.Time{})
 		seed.Event(t, a, domain.EventGitHubPRCICheckPassed, "", now, time.Time{})
 		seed.Event(t, a, domain.EventGitHubPRMerged, "", now, time.Time{})
 
-		seed.Event(t, b, domain.EventGitHubPROpened, "", now, time.Time{})
+		evB := seed.Event(t, b, domain.EventGitHubPROpened, "", now, time.Time{})
 		seed.Event(t, b, domain.EventGitHubPRCICheckFailed, "", now, time.Time{})
 		// Re-entry — same entity, same type — must NOT double-count.
 		seed.Event(t, b, domain.EventGitHubPRCICheckFailed, "", now, time.Time{})
 
-		seed.Event(t, c, domain.EventGitHubPROpened, "", now, time.Time{})
+		evC := seed.Event(t, c, domain.EventGitHubPROpened, "", now, time.Time{})
 		seed.Event(t, c, domain.EventGitHubPRMerged, "", now, time.Time{})
+
+		// Membership: multi-mode scopes the lifetime count to tasked
+		// entities. Task each, reusing an existing event as
+		// primary_event_id so no event is added to the distinct counts.
+		// No-op for SQLite (local, unscoped).
+		seed.Task(t, a, domain.EventGitHubPROpened, "memb", evA, "queued", now)
+		seed.Task(t, b, domain.EventGitHubPROpened, "memb", evB, "queued", now)
+		seed.Task(t, c, domain.EventGitHubPROpened, "memb", evC, "queued", now)
 
 		counts, err := store.LifetimeDistinctByEventType(ctx, orgID)
 		if err != nil {
@@ -160,9 +174,14 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		now := time.Now().UTC()
 
 		a := seed.Entity(t, "sys-a")
-		seed.Event(t, a, domain.EventGitHubPROpened, "", now, time.Time{})
+		evA := seed.Event(t, a, domain.EventGitHubPROpened, "", now, time.Time{})
 		// entity_id IS NULL — system-tagged row, must not contribute.
 		seed.EventNullEntity(t, domain.EventGitHubPROpened, now)
+		// Membership: task the entity so its event counts in multi-mode
+		// (reuses evA as primary_event_id — adds no event). The system
+		// row has NULL entity_id and matches no task, so the membership
+		// semi-join excludes it just as the NOT-NULL guard does.
+		seed.Task(t, a, domain.EventGitHubPROpened, "memb", evA, "queued", now)
 
 		counts, err := store.LifetimeDistinctByEventType(ctx, orgID)
 		if err != nil {

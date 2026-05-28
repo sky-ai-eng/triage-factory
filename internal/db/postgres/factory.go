@@ -42,11 +42,21 @@ var pgFactoryActiveRunStatuses = []string{
 }
 
 func (s *factoryReadStore) EventCountsSince(ctx context.Context, orgID string, since time.Time) (map[string]int, error) {
+	// Scoped to the viewer's teams by the same membership semi-join the
+	// entity belt uses (factoryEventMembershipExists). The station
+	// header's other counters — Triggered24h (tasks) and ActiveRuns
+	// (runs) — are already team-scoped because tasks/runs RLS is
+	// team-bound; events RLS is org-wide (events_all keys on org_id
+	// only), so without this an event on another team's untasked PR
+	// would inflate this team's "items at station" count even though
+	// that PR never appears on the belt. The semi-join keeps the four
+	// counters consistent with one another and with the entity set.
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT event_type, COUNT(*)
-		FROM events
-		WHERE org_id = $1 AND created_at > $2
-		GROUP BY event_type
+		SELECT ev.event_type, COUNT(*)
+		FROM events ev
+		WHERE ev.org_id = $1 AND ev.created_at > $2
+		  AND `+factoryEventMembershipExists+`
+		GROUP BY ev.event_type
 	`, orgID, since)
 	if err != nil {
 		return nil, err
@@ -66,11 +76,19 @@ func (s *factoryReadStore) EventCountsSince(ctx context.Context, orgID string, s
 }
 
 func (s *factoryReadStore) LifetimeDistinctByEventType(ctx context.Context, orgID string) (map[string]int, error) {
+	// Team-scoped via the membership semi-join, same as EventCountsSince
+	// and the entity belt — a lifetime distinct-entity count must not
+	// include entities no team of the viewer's ever tasked, or the
+	// station's lifetime readout reports cross-team PRs absent from the
+	// belt. The semi-join inherently drops system events too (NULL
+	// entity_id can't match a task), so the explicit entity_id IS NOT
+	// NULL guard is redundant but kept for clarity / plan stability.
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT event_type, COUNT(DISTINCT entity_id)
-		FROM events
-		WHERE org_id = $1 AND entity_id IS NOT NULL
-		GROUP BY event_type
+		SELECT ev.event_type, COUNT(DISTINCT ev.entity_id)
+		FROM events ev
+		WHERE ev.org_id = $1 AND ev.entity_id IS NOT NULL
+		  AND `+factoryEventMembershipExists+`
+		GROUP BY ev.event_type
 	`, orgID)
 	if err != nil {
 		return nil, err
@@ -266,6 +284,14 @@ const pgFactoryEntitySelectColumns = `
 // matching the convention every method in this file follows. Membership
 // is monotonic since tasks terminate to done/dismissed, never delete.
 const factoryEntityMembershipExists = `EXISTS (SELECT 1 FROM tasks t WHERE t.entity_id = e.id AND t.org_id = e.org_id)`
+
+// factoryEventMembershipExists is the membership semi-join correlated
+// against an events row (alias ev) rather than an entities row. Same
+// shape and same RLS auto-scoping as factoryEntityMembershipExists —
+// used to scope the station-throughput aggregates (EventCountsSince,
+// LifetimeDistinctByEventType) to the viewer's teams so the header
+// counters match the team-scoped entity belt.
+const factoryEventMembershipExists = `EXISTS (SELECT 1 FROM tasks t WHERE t.entity_id = ev.entity_id AND t.org_id = ev.org_id)`
 
 func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int) ([]domain.FactoryEntityRow, error) {
 	active, err := queryFactoryEntities(ctx, s.q, `

@@ -26,11 +26,20 @@ type FactoryReadStore interface {
 	// EventCountsSince counts events per event_type emitted after
 	// `since`. Used to compute station throughput; keys with zero
 	// counts are absent.
+	//
+	// In multi-mode (Postgres) the count is scoped to the viewer's
+	// teams by the same task-membership semi-join the entity belt
+	// uses, so the station header agrees with the belt and doesn't
+	// report another team's activity (events RLS is org-wide, unlike
+	// tasks/runs). Local mode (SQLite) is unscoped — see Entities.
 	EventCountsSince(ctx context.Context, orgID string, since time.Time) (map[string]int, error)
 
 	// LifetimeDistinctByEventType counts the distinct entities that
-	// have ever produced an event of each event_type, scoped to the
-	// given org. Read per snapshot request — the factory endpoint is
+	// have ever produced an event of each event_type. In multi-mode
+	// (Postgres) it is additionally scoped to the viewer's teams via
+	// the task-membership semi-join, matching EventCountsSince and the
+	// entity belt; local mode (SQLite) is org-only. Read per snapshot
+	// request — the factory endpoint is
 	// not a hot path. In Postgres the partial index
 	// idx_events_org_type_entity (org_id, event_type, entity_id) WHERE
 	// entity_id IS NOT NULL is an index-only scan: each org's groups
