@@ -5,11 +5,45 @@ interface Props {
   path: string
   line: number
   body: string
+  severity?: string
   onUpdate: (id: string, body: string) => void
   onDelete: (id: string) => void
 }
 
-export default function ReviewComment({ id, path, line, body, onUpdate, onDelete }: Props) {
+// Native chip styling per severity level — the diff UI renders this
+// instead of the shields.io badge (which is only applied when the review
+// is posted to GitHub). Palette tracks domain.severityBadgeColor:
+// BLOCKER→red, MAJOR→orange, MINOR→amber, CLEAN→blue.
+const SEVERITY_CHIP: Record<string, string> = {
+  BLOCKER: 'bg-red-500/[0.10] text-red-600 border-red-500/20',
+  MAJOR: 'bg-orange-500/[0.10] text-orange-600 border-orange-500/20',
+  MINOR: 'bg-amber-500/[0.12] text-amber-600 border-amber-500/25',
+  CLEAN: 'bg-blue-500/[0.10] text-blue-600 border-blue-500/20',
+}
+
+function SeverityChip({ severity }: { severity?: string }) {
+  if (!severity) return null
+  const level = severity.toUpperCase()
+  const cls = SEVERITY_CHIP[level]
+  if (!cls) return null
+  return (
+    <span
+      className={`inline-flex items-center rounded px-1.5 py-px text-[9px] font-semibold uppercase tracking-wider border ${cls}`}
+    >
+      {level}
+    </span>
+  )
+}
+
+export default function ReviewComment({
+  id,
+  path,
+  line,
+  body,
+  severity,
+  onUpdate,
+  onDelete,
+}: Props) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(body)
 
@@ -72,9 +106,12 @@ export default function ReviewComment({ id, path, line, body, onUpdate, onDelete
       <div className="backdrop-blur-xl bg-surface-raised/80 border border-border-glass rounded-xl shadow-sm shadow-black/[0.03] overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between px-3 py-1.5 border-b border-border-subtle">
-          <span className="text-[10px] text-text-tertiary font-medium">
-            {path}:{line}
-          </span>
+          <div className="flex items-center gap-2 min-w-0">
+            <SeverityChip severity={severity} />
+            <span className="text-[10px] text-text-tertiary font-medium truncate">
+              {path}:{line}
+            </span>
+          </div>
           <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
             {!editing && (
               <>

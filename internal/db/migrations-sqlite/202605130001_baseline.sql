@@ -733,7 +733,8 @@ CREATE TABLE pending_review_comments (
     body          TEXT NOT NULL,
     created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
     original_body TEXT,
-    org_id        TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'
+    org_id        TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
+    severity      TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX idx_pending_review_comments_review_id ON pending_review_comments(review_id);
 

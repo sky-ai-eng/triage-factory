@@ -154,9 +154,9 @@ func (s *reviewStore) AddComment(ctx context.Context, orgID string, c domain.Pen
 		return err
 	}
 	_, err := s.q.ExecContext(ctx,
-		`INSERT INTO pending_review_comments (id, review_id, path, line, start_line, body, original_body)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		c.ID, c.ReviewID, c.Path, c.Line, c.StartLine, c.Body, c.Body,
+		`INSERT INTO pending_review_comments (id, review_id, path, line, start_line, body, original_body, severity)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		c.ID, c.ReviewID, c.Path, c.Line, c.StartLine, c.Body, c.Body, c.Severity,
 	)
 	return err
 }
@@ -197,7 +197,7 @@ func (s *reviewStore) ListComments(ctx context.Context, orgID, reviewID string) 
 	}
 	// original_body NOT COALESCEd — see domain.PendingReviewComment.
 	rows, err := s.q.QueryContext(ctx,
-		`SELECT id, review_id, path, line, start_line, body, original_body
+		`SELECT id, review_id, path, line, start_line, body, original_body, severity
 		 FROM pending_review_comments WHERE review_id = ? ORDER BY rowid`,
 		reviewID,
 	)
@@ -211,7 +211,7 @@ func (s *reviewStore) ListComments(ctx context.Context, orgID, reviewID string) 
 		var c domain.PendingReviewComment
 		var startLine sql.NullInt64
 		var origBody sql.NullString
-		if err := rows.Scan(&c.ID, &c.ReviewID, &c.Path, &c.Line, &startLine, &c.Body, &origBody); err != nil {
+		if err := rows.Scan(&c.ID, &c.ReviewID, &c.Path, &c.Line, &startLine, &c.Body, &origBody, &c.Severity); err != nil {
 			return nil, err
 		}
 		if startLine.Valid {

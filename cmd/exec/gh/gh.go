@@ -35,7 +35,12 @@ PR Creation:
 
 Review Lifecycle (managed locally, submitted atomically):
   gh pr start-review <number> [--repo o/r]                Start a local pending review
-  gh pr add-review-comment <review_id> --file <path> --line <N> --body <text> [--start-line <N>]
+  gh pr add-review-comment <review_id> --file <path> --line <N> --body <text> [--start-line <N>] [--severity <level>]
+                                                          --severity tags the finding's level. Valid
+                                                          values (case-insensitive): BLOCKER, MAJOR,
+                                                          MINOR, CLEAN. Renders as a chip in the human
+                                                          approval UI and a badge on the posted comment.
+                                                          Optional — omit for an un-badged comment.
   gh pr comment-list-pending <review_id>                  List pending review comments
   gh pr submit-review <review_id> --event <approve|comment|request_changes> --body <text>
 

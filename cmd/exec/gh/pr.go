@@ -255,7 +255,7 @@ func prStartReview(client *ghclient.Client, host agenthost.Client, args []string
 
 func prAddReviewComment(host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: gh pr add-review-comment <review_id> --file <path> --line <N> --body <text> [--start-line <N>]")
+		exitErr("usage: gh pr add-review-comment <review_id> --file <path> --line <N> --body <text> [--start-line <N>] [--severity <blocker|major|minor|clean>]")
 	}
 	reviewID := args[0]
 	file := flagVal(args, "--file")
@@ -264,6 +264,15 @@ func prAddReviewComment(host agenthost.Client, args []string) {
 
 	if file == "" || body == "" {
 		exitErr("--file and --body are required")
+	}
+
+	// --severity tags the finding's level; surfaced as a chip in the
+	// human approval UI and a shields.io badge on the posted comment.
+	// Optional and case-insensitive — third-party review skills that
+	// omit it just get an un-badged comment.
+	severity, err := domain.NormalizeSeverity(flagVal(args, "--severity"))
+	if err != nil {
+		exitErr(err.Error())
 	}
 
 	var startLine *int
@@ -346,6 +355,7 @@ func prAddReviewComment(host agenthost.Client, args []string) {
 		Line:      line,
 		StartLine: startLine,
 		Body:      body,
+		Severity:  severity,
 	}
 
 	exitOnErr(host.AddPendingReviewComment(ctx, comment))
@@ -353,6 +363,7 @@ func prAddReviewComment(host agenthost.Client, args []string) {
 	printJSON(map[string]any{
 		"comment_id": commentID,
 		"review_id":  reviewID,
+		"severity":   severity,
 		"status":     "pending_local",
 	})
 }
@@ -393,14 +404,17 @@ func prSubmitReview(client *ghclient.Client, host agenthost.Client, args []strin
 	pendingComments, err := host.ListPendingReviewComments(ctx, reviewID)
 	exitOnErr(err)
 
-	// Convert to GitHub format
+	// Convert to GitHub format. Prepend the severity badge to the body
+	// here, at GitHub-post time — the stored body stays badge-free so
+	// edits don't fight the markdown and the local UI can render a
+	// native chip from the Severity field instead.
 	ghComments := make([]ghclient.SubmitReviewComment, len(pendingComments))
 	for i, c := range pendingComments {
 		ghComments[i] = ghclient.SubmitReviewComment{
 			Path:      c.Path,
 			Line:      c.Line,
 			StartLine: c.StartLine,
-			Body:      c.Body,
+			Body:      domain.SeverityBadgeMarkdown(c.Severity) + c.Body,
 		}
 	}
 
@@ -823,7 +837,7 @@ func firstPositional(args []string) string {
 			skipNext = false
 			continue
 		}
-		if a == "--repo" || a == "--file" || a == "--pr" || a == "--body" || a == "--body-file" || a == "--line" || a == "--start-line" || a == "--event" || a == "--status" {
+		if a == "--repo" || a == "--file" || a == "--pr" || a == "--body" || a == "--body-file" || a == "--line" || a == "--start-line" || a == "--event" || a == "--status" || a == "--severity" {
 			skipNext = true
 			continue
 		}

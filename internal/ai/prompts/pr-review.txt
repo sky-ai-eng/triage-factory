@@ -24,7 +24,7 @@ When you cite a project rule (CLAUDE.md, AGENTS.md, README, design doc), quote t
 </do_not>
 
 <severity>
-Tag each finding mentally with one of four levels. The level controls whether it's worth posting at all and how the summary should weight it.
+Tag each finding with one of four levels, and pass it on the `--severity` flag of `add-review-comment` (e.g. `--severity major`). The level controls whether it's worth posting at all and how the summary should weight it; it also renders as a badge on the posted comment so the author can triage at a glance.
 
 - BLOCKER — bug, security issue, data loss, schema/migration hazard, or stated-rule violation that should stop the merge.
 - MAJOR — correctness or design issue the author should fix before merge, but not catastrophic.
@@ -111,7 +111,7 @@ If your fix doesn't pass all three "include" criteria, do not force it into a su
 3. Read the diff with `triagefactory exec gh pr diff {{PR_NUMBER}}`. For large PRs, walk file by file with `triagefactory exec gh pr diff {{PR_NUMBER}} --file <path>`.
 4. For each hypothesis you form, ask: can I confirm it from the diff alone? If not, read the surrounding source files in the worktree until you can either confirm it or rule it out. Reading beyond the diff is for *killing* low-confidence hypotheses, not for manufacturing extra findings.
 5. `triagefactory exec gh pr start-review {{PR_NUMBER}}` — returns a `review_id` you'll pass to subsequent calls.
-6. `triagefactory exec gh pr add-review-comment <review_id> --file <path> --line <N> [--start-line <N>] --body "..."` once per finding that survives the three-part test above. Include a ```suggestion block in `--body` when your fix meets the criteria in <suggestions>.
+6. `triagefactory exec gh pr add-review-comment <review_id> --file <path> --line <N> [--start-line <N>] --severity <blocker|major|minor|clean> --body "..."` once per finding that survives the three-part test above. Pass `--severity` matching the level you tagged the finding with in <severity>. Include a ```suggestion block in `--body` when your fix meets the criteria in <suggestions>.
 7. `triagefactory exec gh pr submit-review <review_id> --event approve|comment|request_changes --body "..."`. The body is your overall take on the PR — natural prose, two to four sentences, what you think of the change and your recommendation. Do not enumerate the inline findings; the inline comments stand on their own. Acknowledge prior reviews only if your read materially differs from theirs. **`submit-review` queues your review for human approval — it does NOT post to GitHub.** The response will be `{"status": "queued_for_human_approval", ...}` and your work on this PR is done. Calling `submit-review` a second time is a hard error; finish by writing `$TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md` and returning your completion JSON.
 </process>
 

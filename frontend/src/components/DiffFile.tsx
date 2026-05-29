@@ -10,6 +10,7 @@ export interface FileComment {
   line: number
   startLine?: number
   body: string
+  severity?: string
 }
 
 interface Props {
@@ -51,6 +52,7 @@ export default function DiffFile({
                   path={comment.path}
                   line={comment.line}
                   body={comment.body}
+                  severity={comment.severity}
                   onUpdate={onUpdateComment}
                   onDelete={onDeleteComment}
                 />

@@ -1,5 +1,79 @@
 package domain
 
+import (
+	"fmt"
+	"strings"
+)
+
+// Review-finding severity levels. These mirror the four levels the
+// pr-review prompt assigns to every finding (see
+// internal/ai/prompts/pr-review.txt). They are surfaced two ways: as a
+// native chip in the local pre-render diff UI, and as a shields.io badge
+// prepended to the comment body when the review is posted to GitHub.
+//
+// The canonical form is uppercase. NormalizeSeverity accepts any case so
+// third-party review skills calling the gh tooling don't have to match
+// exactly; SeverityBadgeMarkdown / the frontend chip key off the
+// uppercase form.
+const (
+	SeverityBlocker = "BLOCKER"
+	SeverityMajor   = "MAJOR"
+	SeverityMinor   = "MINOR"
+	SeverityClean   = "CLEAN"
+)
+
+// severityBadgeColor maps each level to its shields.io color slug. Kept
+// in sync with the frontend chip palette (DiffFile/ReviewComment).
+var severityBadgeColor = map[string]string{
+	SeverityBlocker: "red",
+	SeverityMajor:   "orange",
+	SeverityMinor:   "yellow",
+	SeverityClean:   "blue",
+}
+
+// ValidSeverities is the ordered canonical set, for help text and error
+// messages. Order is most-to-least severe.
+var ValidSeverities = []string{SeverityBlocker, SeverityMajor, SeverityMinor, SeverityClean}
+
+// NormalizeSeverity upper-cases and validates a severity string. An
+// empty input is valid and returns "" (no badge — backward-compatible
+// with callers that omit it). A non-empty value that isn't one of the
+// four levels is an error so the agent gets a clear correction instead
+// of silently posting an unrecognized label.
+func NormalizeSeverity(s string) (string, error) {
+	if s == "" {
+		return "", nil
+	}
+	up := strings.ToUpper(strings.TrimSpace(s))
+	if _, ok := severityBadgeColor[up]; !ok {
+		return "", fmt.Errorf("invalid severity %q; valid values: %s", s, strings.Join(ValidSeverities, ", "))
+	}
+	return up, nil
+}
+
+// SeverityBadgeMarkdown returns the shields.io badge line to prepend to a
+// review comment body at GitHub-post time. Empty severity → empty string
+// (the body is posted unchanged). The badge is wrapped in nested <sub>
+// tags so it renders as a small inline chip ahead of the diagnosis,
+// matching the convention other review bots (Codex, Copilot) use.
+//
+// This is the GitHub-render path only. The local pre-render UI renders a
+// native chip from the stored Severity field instead — the badge markdown
+// is never written into the stored comment body.
+func SeverityBadgeMarkdown(severity string) string {
+	if severity == "" {
+		return ""
+	}
+	color, ok := severityBadgeColor[severity]
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf(
+		"<sub><sub>![%s](https://img.shields.io/badge/%s-%s?style=flat)</sub></sub>\n\n",
+		severity, severity, color,
+	)
+}
+
 // PendingReview is a locally-managed review that hasn't been submitted to GitHub yet.
 // DiffLines stores a JSON map of file -> line numbers that are valid comment targets.
 // When ReviewEvent is set, the review has been "submitted" locally but is awaiting
@@ -50,4 +124,9 @@ type PendingReviewComment struct {
 	StartLine    *int
 	Body         string
 	OriginalBody *string
+	// Severity is one of the domain.Severity* constants, or "" when the
+	// author (agent or third-party skill) didn't tag the finding. Stored
+	// as data; rendered as a native chip in the diff UI and as a
+	// shields.io badge when posted to GitHub. Never embedded in Body.
+	Severity string
 }

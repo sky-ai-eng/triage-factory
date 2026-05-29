@@ -913,7 +913,8 @@ CREATE TABLE public.pending_review_comments (
     start_line integer,
     body text NOT NULL,
     original_body text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    severity text DEFAULT ''::text NOT NULL
 );
 
 

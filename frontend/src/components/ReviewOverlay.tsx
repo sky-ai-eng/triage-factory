@@ -22,6 +22,7 @@ interface PendingReview {
     line: number
     start_line?: number
     body: string
+    severity?: string
   }[]
 }
 
@@ -167,6 +168,7 @@ export default function ReviewOverlay({ runID, open, onClose }: Props) {
         line: c.line,
         startLine: c.start_line,
         body: c.body,
+        severity: c.severity,
       })
       return acc
     },

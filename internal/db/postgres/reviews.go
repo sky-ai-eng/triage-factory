@@ -209,9 +209,9 @@ func addReviewComment(ctx context.Context, q queryer, orgID string, c domain.Pen
 	// tiebreaker (random UUIDs) would scramble insertion order.
 	// clock_timestamp() advances per row.
 	_, err := q.ExecContext(ctx, `
-		INSERT INTO pending_review_comments (id, org_id, review_id, path, line, start_line, body, original_body, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $7, clock_timestamp())
-	`, c.ID, orgID, c.ReviewID, c.Path, c.Line, startLine, c.Body)
+		INSERT INTO pending_review_comments (id, org_id, review_id, path, line, start_line, body, original_body, created_at, severity)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $7, clock_timestamp(), $8)
+	`, c.ID, orgID, c.ReviewID, c.Path, c.Line, startLine, c.Body, c.Severity)
 	return err
 }
 
@@ -276,7 +276,7 @@ func listReviewComments(ctx context.Context, q queryer, orgID, reviewID string) 
 	// keeps the order deterministic when two rows land in the same
 	// microsecond bucket.
 	rows, err := q.QueryContext(ctx, `
-		SELECT id, review_id, path, line, start_line, body, original_body
+		SELECT id, review_id, path, line, start_line, body, original_body, severity
 		FROM pending_review_comments
 		WHERE org_id = $1 AND review_id = $2
 		ORDER BY created_at ASC, id ASC
@@ -291,7 +291,7 @@ func listReviewComments(ctx context.Context, q queryer, orgID, reviewID string) 
 		var c domain.PendingReviewComment
 		var startLine sql.NullInt64
 		var origBody sql.NullString
-		if err := rows.Scan(&c.ID, &c.ReviewID, &c.Path, &c.Line, &startLine, &c.Body, &origBody); err != nil {
+		if err := rows.Scan(&c.ID, &c.ReviewID, &c.Path, &c.Line, &startLine, &c.Body, &origBody, &c.Severity); err != nil {
 			return nil, err
 		}
 		if startLine.Valid {

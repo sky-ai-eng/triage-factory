@@ -32,6 +32,10 @@ type pendingReviewCommentJSON struct {
 	Line      int    `json:"line"`
 	StartLine *int   `json:"start_line,omitempty"`
 	Body      string `json:"body"`
+	// Severity is the finding level (domain.Severity* or ""); the diff
+	// UI renders it as a native chip. The shields.io badge is added only
+	// when posting to GitHub (handleReviewSubmit), never stored in Body.
+	Severity string `json:"severity,omitempty"`
 }
 
 // handleReviewGet returns a pending review and its comments.
@@ -84,6 +88,7 @@ func (s *Server) handleReviewGet(w http.ResponseWriter, r *http.Request) {
 			Line:      c.Line,
 			StartLine: c.StartLine,
 			Body:      c.Body,
+			Severity:  c.Severity,
 		}
 	}
 
@@ -140,7 +145,10 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 			Path:      c.Path,
 			Line:      c.Line,
 			StartLine: c.StartLine,
-			Body:      c.Body,
+			// Prepend the severity badge at GitHub-post time only. The
+			// stored body stays badge-free (UI edits don't fight the
+			// markdown; the diff UI renders a native chip from Severity).
+			Body: domain.SeverityBadgeMarkdown(c.Severity) + c.Body,
 		}
 	}
 
@@ -299,6 +307,7 @@ func (s *Server) handleRunReview(w http.ResponseWriter, r *http.Request) {
 			Line:      c.Line,
 			StartLine: c.StartLine,
 			Body:      c.Body,
+			Severity:  c.Severity,
 		}
 	}
 
