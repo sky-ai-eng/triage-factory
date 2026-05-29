@@ -194,6 +194,20 @@ func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID, userID string
 				Name:     t.Name,
 			})
 		}
+		// Reconcile only when the fetch returned at least one team. An
+		// empty slice is ambiguous — it can mean "the org genuinely has
+		// no teams" OR "the token can read this repo owner but can't see
+		// any of its (private) teams" OR "the owner is a user account,
+		// not an org." Pruning on an empty set would wipe every mapping
+		// for the owner in the latter two cases just because someone
+		// opened the settings page. Per-team deletions still reconcile:
+		// a non-empty fetch (e.g. ["backend"] after "frontend" was
+		// deleted) prunes the missing slug. Only the all-teams-gone edge
+		// is skipped, which the future team:deleted webhook handles
+		// precisely.
+		if len(slugs) == 0 {
+			continue
+		}
 		if n, err := s.githubGroups.PruneMissingSystem(ctx, orgID, owner, slugs); err != nil {
 			log.Printf("[github-groups] reconcile prune for GitHub org %s: %v", owner, err)
 		} else if n > 0 {

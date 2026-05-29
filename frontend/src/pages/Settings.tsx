@@ -1324,6 +1324,7 @@ export default function Settings() {
         <form onSubmit={saveAll} className="space-y-5">
           {renderGitHub()}
           {renderGitHubApp()}
+          <GitHubGroupsEditor teamId="default" canEdit={isTeamAdmin} />
           {renderJiraConnection()}
           {renderJiraProjects()}
           {renderAI()}
