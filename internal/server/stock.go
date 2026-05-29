@@ -372,15 +372,30 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Batch-fetch the set of Jira entities that already have an active task so
-	// eligibility checks run in O(1) per action. Fail the request if this
-	// fails — otherwise we'd act on tickets without knowing whether they're
-	// already being tracked.
-	var taskedEntityIDs map[string]struct{}
+	// Batch-fetch, for O(1) per-action eligibility checks: (a) the Jira
+	// entities that already have an active task, and (b) the team-scoped Jira
+	// set the viewer is allowed to act on — the *same* ListActiveJiraTeamScoped
+	// read the GET deck uses, so POST eligibility can't diverge from what the
+	// deck surfaced. Fail the request if either read fails.
+	var (
+		taskedEntityIDs map[string]struct{}
+		scopedJiraIDs   map[string]struct{}
+	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		taskedEntityIDs, e = tx.Tasks.EntityIDsWithActiveTasks(r.Context(), orgID, "jira")
-		return e
+		if e != nil {
+			return e
+		}
+		scoped, e := tx.Entities.ListActiveJiraTeamScoped(r.Context(), orgID)
+		if e != nil {
+			return e
+		}
+		scopedJiraIDs = make(map[string]struct{}, len(scoped))
+		for _, ent := range scoped {
+			scopedJiraIDs[ent.ID] = struct{}{}
+		}
+		return nil
 	}); err != nil {
 		internalError(w, "stock", err)
 		return
@@ -417,6 +432,17 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 		}
 		if entity == nil {
 			failed = append(failed, stockFailure{issueKey, a.Action, "entity not found"})
+			continue
+		}
+
+		// Team-scope gate: mirror the GET deck (ListActiveJiraTeamScoped). A
+		// ticket whose project isn't tracked by the viewer's team(s) isn't on
+		// their deck and must not be actionable here — even if it's assigned to
+		// them — which closes the bypass where a user POSTs an off-team issue
+		// key. In local mode the scoped set is the full active Jira set, so this
+		// gate is a no-op there.
+		if _, inScope := scopedJiraIDs[entity.ID]; !inScope {
+			failed = append(failed, stockFailure{a.IssueKey, a.Action, "ticket is outside your team's tracked projects"})
 			continue
 		}
 
