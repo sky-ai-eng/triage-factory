@@ -22,13 +22,17 @@ const (
 	SeverityClean   = "CLEAN"
 )
 
-// severityBadgeColor maps each level to its shields.io color slug. Kept
-// in sync with the frontend chip palette (DiffFile/ReviewComment).
+// severityBadgeColor maps each level to a shields.io color. These are
+// the Tailwind 500 hex values the frontend chip palette uses
+// (ReviewComment.tsx), passed to shields as path-style hex so the GitHub
+// badge tracks the in-app chip hue instead of drifting to shields'
+// differently-shaded named colors (their named "yellow" #dfb317 vs
+// Tailwind amber-500 #f59e0b, etc.).
 var severityBadgeColor = map[string]string{
-	SeverityBlocker: "red",
-	SeverityMajor:   "orange",
-	SeverityMinor:   "yellow",
-	SeverityClean:   "blue",
+	SeverityBlocker: "ef4444", // red-500
+	SeverityMajor:   "f97316", // orange-500
+	SeverityMinor:   "f59e0b", // amber-500
+	SeverityClean:   "3b82f6", // blue-500
 }
 
 // ValidSeverities is the ordered canonical set, for help text and error

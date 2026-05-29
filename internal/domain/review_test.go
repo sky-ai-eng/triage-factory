@@ -60,7 +60,9 @@ func TestSeverityBadgeMarkdown(t *testing.T) {
 		t.Errorf("unknown severity should yield empty badge, got %q", got)
 	}
 	got := SeverityBadgeMarkdown(SeverityMajor)
-	if !strings.Contains(got, "img.shields.io/badge/MAJOR-orange") {
+	// Color is the Tailwind orange-500 hex (matches the in-app chip), not
+	// shields' named "orange".
+	if !strings.Contains(got, "img.shields.io/badge/MAJOR-f97316") {
 		t.Errorf("badge missing shields.io URL with color: %q", got)
 	}
 	if !strings.HasPrefix(got, "<sub><sub>") {
