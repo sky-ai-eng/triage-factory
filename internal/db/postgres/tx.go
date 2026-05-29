@@ -190,6 +190,13 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// half stays pinned to s.admin so the `...System` routing +
 		// reconcile reads inside WithTx route outside the tx.
 		TeamGitHubGroups: newTeamGitHubGroupsStore(tx, s.admin),
+		// TeamGitHubRepos: app-side write (the team-row replace inside
+		// ReplaceForTeam) routes through the tx so it composes with the
+		// surrounding claims tx; admin half stays pinned to s.admin so
+		// the org-wide union read + repo_profiles reconcile (which must
+		// see sibling teams' rows past RLS) route outside the tx, the
+		// same autonomous-commit shape Events / TaskMemory use.
+		TeamGitHubRepos: newTeamGitHubReposStore(tx, s.admin),
 		// Curator: app-side write routes through the tx; admin half
 		// stays pinned to the real admin pool so
 		// CancelOrphanedNonTerminalRequests inside WithTx routes

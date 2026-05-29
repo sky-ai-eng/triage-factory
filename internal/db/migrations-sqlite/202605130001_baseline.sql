@@ -271,6 +271,28 @@ CREATE TABLE team_github_groups (
     CONSTRAINT tgg_team_slug_populated CHECK (github_team_slug <> '')
 );
 
+-- One row per (team, owner, repo): a team declaring "I track this repo."
+-- The GitHub *tracking-scope* twin of jira_project_status_rules and the
+-- source of truth for which repos a team cares about. NOT to be confused
+-- with team_github_groups above, which maps CODEOWNERS review-routing
+-- teams — this table is the tracking selection.
+--
+-- repo_profiles is the org-shared UNION of every team's rows here — a
+-- derived poll/profile/ETag cache, reconciled on every write to this
+-- table and never user-written directly anymore. No org_id column: org
+-- scope rides the teams FK, mirroring jira_project_status_rules. Local
+-- mode (N=1) tracks every configured repo on the single default team, so
+-- the router's team↔repo gate never drops anything there.
+CREATE TABLE team_github_repos (
+    team_id    TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    owner      TEXT NOT NULL,
+    repo       TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (team_id, owner, repo),
+    CONSTRAINT tgr_owner_populated CHECK (owner <> ''),
+    CONSTRAINT tgr_repo_populated CHECK (repo <> '')
+);
+
 -- === Agents ==============================================================
 CREATE TABLE agents (
     id                            TEXT PRIMARY KEY,

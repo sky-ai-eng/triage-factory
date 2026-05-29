@@ -23,7 +23,7 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 	expectedTables := []string{
 		"orgs", "teams", "users", "memberships", "org_memberships", "sessions", "project_knowledge",
 		"org_settings", "team_settings", "user_settings", "jira_project_status_rules",
-		"team_github_groups",
+		"team_github_groups", "team_github_repos",
 		"prompts", "projects", "events_catalog", "entities", "entity_links", "events",
 		"event_handlers", "tasks", "task_events", "runs", "run_artifacts",
 		"run_messages", "run_memory", "pending_firings", "run_worktrees", "pending_prs",
@@ -3045,5 +3045,102 @@ func assertPgCode(t *testing.T, err error, code, what string) {
 	}
 	if pgErr.Code != code {
 		t.Errorf("%s: SQLSTATE = %s (msg %q), want %s", what, pgErr.Code, pgErr.Message, code)
+	}
+}
+
+// TestRLS_TeamGitHubRepos pins the team_github_repos RLS contract
+// (SKY-375): SELECT is gated by team membership, INSERT/DELETE by team
+// admin, and rows are isolated cross-team. The mirror of the
+// jira_project_status_rules policies.
+func TestRLS_TeamGitHubRepos(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := SeedOrgWithUser(t, h, "alice")
+	bob := SeedUser(t, h, "bob")
+	AddOrgMember(t, h, bob, orgA, teamA, "member", "member")
+
+	// A second team in the same org with its own admin (carol). Bob is
+	// NOT a member of teamB, so its rows must stay invisible to him.
+	teamB := SeedTeam(t, h, orgA, "team-b")
+	carol := SeedUser(t, h, "carol")
+	AddOrgMember(t, h, carol, orgA, teamB, "member", "admin")
+
+	// carol (admin of teamB) tracks a repo for teamB.
+	if err := h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
+		_, e := tx.Exec(`INSERT INTO team_github_repos (team_id, owner, repo) VALUES ($1, 'acme', 'b-repo')`, teamB)
+		return e
+	}); err != nil {
+		t.Fatalf("carol INSERT teamB repo: %v", err)
+	}
+
+	// alice (admin of teamA — owner is implicitly team admin) tracks a
+	// repo for teamA.
+	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		_, e := tx.Exec(`INSERT INTO team_github_repos (team_id, owner, repo) VALUES ($1, 'acme', 'a-repo')`, teamA)
+		return e
+	}); err != nil {
+		t.Fatalf("alice INSERT teamA repo: %v", err)
+	}
+
+	// bob (member of teamA only) sees exactly teamA's row — teamB's row
+	// is filtered out by the membership semi-join in the SELECT policy.
+	if err := h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
+		rows, e := tx.Query(`SELECT repo FROM team_github_repos ORDER BY repo`)
+		if e != nil {
+			return e
+		}
+		defer rows.Close()
+		var got []string
+		for rows.Next() {
+			var r string
+			if e := rows.Scan(&r); e != nil {
+				return e
+			}
+			got = append(got, r)
+		}
+		if len(got) != 1 || got[0] != "a-repo" {
+			t.Errorf("bob sees %v; want only [a-repo] (teamB isolated)", got)
+		}
+		return rows.Err()
+	}); err != nil {
+		t.Fatalf("bob SELECT: %v", err)
+	}
+
+	// bob (non-admin) cannot INSERT into teamA — INSERT WITH CHECK is
+	// admin-gated → SQLSTATE 42501.
+	err := h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
+		_, e := tx.Exec(`INSERT INTO team_github_repos (team_id, owner, repo) VALUES ($1, 'acme', 'sneaky')`, teamA)
+		return e
+	})
+	assertPgCode(t, err, "42501", "bob INSERT teamA repo (non-admin)")
+
+	// bob cannot DELETE teamA's row either — DELETE policy admin-gated,
+	// so the row is filtered out and 0 rows are affected (no error).
+	if err := h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
+		res, e := tx.Exec(`DELETE FROM team_github_repos WHERE team_id = $1`, teamA)
+		if e != nil {
+			return e
+		}
+		if n, _ := res.RowsAffected(); n != 0 {
+			t.Errorf("bob DELETE affected %d rows; want 0 (admin-gated)", n)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("bob DELETE attempt: %v", err)
+	}
+
+	// carol cannot see teamA's row (she's not a member of teamA).
+	if err := h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
+		var n int
+		if e := tx.QueryRow(`SELECT count(*) FROM team_github_repos WHERE team_id = $1`, teamA).Scan(&n); e != nil {
+			return e
+		}
+		if n != 0 {
+			t.Errorf("carol sees %d teamA rows; want 0 (cross-team isolation)", n)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("carol cross-team SELECT: %v", err)
 	}
 }

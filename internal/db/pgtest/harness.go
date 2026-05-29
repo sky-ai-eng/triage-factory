@@ -233,7 +233,7 @@ var orgScopedTables = []string{
 	// users + auth.users handled separately (auth.users is image-owned).
 	// Settings:
 	"org_settings", "team_settings", "user_settings", "jira_project_status_rules",
-	"team_github_groups",
+	"team_github_groups", "team_github_repos",
 	"preferences",
 	// TF data:
 	"curator_pending_context", "curator_messages", "curator_requests",

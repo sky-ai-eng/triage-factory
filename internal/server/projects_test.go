@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -533,30 +534,32 @@ func TestValidatePinnedRepoShape_NormalizesWhitespace(t *testing.T) {
 }
 
 // TestValidatePinnedRepos_RejectsUnconfigured pins the existence-check
-// contract: a slug that's well-formed but doesn't have a row in
-// repo_profiles is rejected at the API layer. This is what stops a
-// curl-crafted POST from pinning a repo the user has never set up
+// contract: a slug that's well-formed but isn't tracked by the project's
+// team (team_github_repos) is rejected at the API layer. This is what
+// stops a curl-crafted POST from pinning a repo the team has never set up
 // (no creds, no clone URL, nothing for the Curator to materialize).
 func TestValidatePinnedRepos_RejectsUnconfigured(t *testing.T) {
 	srv := newTestServer(t)
 	seedConfiguredRepo(t, srv, "sky-ai-eng", "configured")
 
 	ctx := t.Context()
+	teamRepos := sqlitestore.New(srv.db).TeamGitHubRepos
+	teamID := runmode.LocalDefaultTeamID
 
-	// All-configured passes.
-	if _, errMsg := validatePinnedRepos(ctx, srv.repos, runmode.LocalDefaultOrgID, []string{"sky-ai-eng/configured"}); errMsg != "" {
-		t.Errorf("configured slug should pass, got %q", errMsg)
+	// All-tracked passes.
+	if _, errMsg := validatePinnedRepos(ctx, teamRepos, teamID, []string{"sky-ai-eng/configured"}); errMsg != "" {
+		t.Errorf("tracked slug should pass, got %q", errMsg)
 	}
 
-	// Mix of configured + unconfigured rejects on the unconfigured one.
-	if _, errMsg := validatePinnedRepos(ctx, srv.repos, runmode.LocalDefaultOrgID, []string{"sky-ai-eng/configured", "stranger/repo"}); errMsg == "" {
-		t.Error("unconfigured slug should reject")
+	// Mix of tracked + untracked rejects on the untracked one.
+	if _, errMsg := validatePinnedRepos(ctx, teamRepos, teamID, []string{"sky-ai-eng/configured", "stranger/repo"}); errMsg == "" {
+		t.Error("untracked slug should reject")
 	} else if !strings.Contains(errMsg, "stranger/repo") {
 		t.Errorf("error should name the offending slug, got %q", errMsg)
 	}
 
-	// Empty input still passes (no profiles needed).
-	if _, errMsg := validatePinnedRepos(ctx, srv.repos, runmode.LocalDefaultOrgID, nil); errMsg != "" {
+	// Empty input still passes (nothing to check).
+	if _, errMsg := validatePinnedRepos(ctx, teamRepos, teamID, nil); errMsg != "" {
 		t.Errorf("nil input should pass, got %q", errMsg)
 	}
 }

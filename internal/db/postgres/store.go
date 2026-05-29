@@ -227,6 +227,12 @@ func New(admin, app *sql.DB) db.Stores {
 		// (router/poller routing + GitHub-team-deletion reconcile
 		// without JWT claims).
 		TeamGitHubGroups: newTeamGitHubGroupsStore(app, admin),
+		// TeamGitHubRepos holds both pools: app for ListForTeam + the
+		// team-row write inside ReplaceForTeam (RLS gates by team admin)
+		// and admin for ListForTeamSystem + ListForOrgSystem +
+		// TracksRepoSystem (router gate, no JWT claims) + the
+		// repo_profiles reconcile (org-wide union, commits autonomously).
+		TeamGitHubRepos: newTeamGitHubReposStore(app, admin),
 		// Curator wires the app pool. The per-project goroutine
 		// wraps each turn's writes in Tx.SyntheticClaimsWithTx
 		// under the requesting user's identity; the tx-bound
@@ -308,6 +314,7 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		Teams:            newTeamsStore(tx, tx),
 		JiraStatusRules:  newJiraStatusRulesStore(tx, tx),
 		TeamGitHubGroups: newTeamGitHubGroupsStore(tx, tx),
+		TeamGitHubRepos:  newTeamGitHubReposStore(tx, tx),
 		Curator:          newCuratorStore(tx, tx),
 		// Both pools collapse to tx (test door). BackfillInstallationsFromAPI's
 		// GetSystem would hit tf_app and be denied here — tests that exercise

@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -184,7 +185,16 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, names)
 }
 
-// handleReposSave updates the configured repos in the DB and triggers re-profiling.
+// handleReposSave is the legacy org-level repo-save path (onboarding
+// step 2 + the current single-team picker). Post-SKY-375, repos are
+// per-team and repo_profiles is the derived org-wide union, so this
+// writes to the org's default team's team_github_repos via
+// ReplaceForTeam — which reconciles repo_profiles. In local mode (N=1)
+// the default team is the only team, so this is identical to the old
+// behavior; in multi mode the per-team picker
+// (PUT /api/settings/team/{id}/repos) is the real entry point and this
+// stays the default-team onboarding writer (the caller must be admin of
+// the default team, enforced by RLS on the write).
 func (s *Server) handleReposSave(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
@@ -200,10 +210,22 @@ func (s *Server) handleReposSave(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "at least one repo is required"})
 		return
 	}
+	repos, err := domain.TeamGitHubReposFromSlugs(req.Repos)
+	if err != nil {
+		badRequest(w, err.Error())
+		return
+	}
 
 	userID := ClaimsFrom(r.Context()).Subject
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.Repos.SetConfigured(r.Context(), orgID, req.Repos)
+		teamID, e := tx.Teams.GetDefaultForOrg(r.Context(), orgID)
+		if e != nil {
+			return e
+		}
+		if teamID == "" {
+			return fmt.Errorf("org %s has no default team", orgID)
+		}
+		return tx.TeamGitHubRepos.ReplaceForTeam(r.Context(), teamID, repos)
 	}); err != nil {
 		internalError(w, "repos", err)
 		return

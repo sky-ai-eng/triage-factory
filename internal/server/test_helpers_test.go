@@ -90,13 +90,22 @@ func doJSON(t *testing.T, s *Server, method, path string, body any) *httptest.Re
 	return rec
 }
 
-// seedConfiguredRepo inserts a minimal repo_profiles row so tests that
-// pin repos pass the validatePinnedRepos existence check. The Curator's
-// repo-materialization eventually wants more (clone_url, default_branch),
-// but for HTTP-handler tests this is the smallest seed that satisfies
-// the validation contract.
+// seedConfiguredRepo tracks owner/repo on the default team so tests that
+// pin repos pass the validatePinnedRepos existence check (which now reads
+// team_github_repos), and upserts the matching repo_profiles row the
+// Curator's repo-materialization eventually wants more of (clone_url,
+// default_branch). Post-SKY-375 the team's tracked set is the source of
+// truth; the team_github_repos insert is accumulative so multiple seed
+// calls don't clobber each other the way ReplaceForTeam would.
 func seedConfiguredRepo(t *testing.T, s *Server, owner, repo string) {
 	t.Helper()
+	if _, err := s.db.ExecContext(context.Background(), `
+		INSERT INTO team_github_repos (team_id, owner, repo)
+		VALUES (?, ?, ?)
+		ON CONFLICT(team_id, owner, repo) DO NOTHING
+	`, runmode.LocalDefaultTeamID, owner, repo); err != nil {
+		t.Fatalf("track repo %s/%s on default team: %v", owner, repo, err)
+	}
 	if err := sqlitestore.New(s.db).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.RepoProfile{
 		ID:            owner + "/" + repo,
 		Owner:         owner,

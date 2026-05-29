@@ -55,15 +55,16 @@ type Router struct {
 	prompts    dbpkg.PromptStore
 	handlers   dbpkg.EventHandlerStore
 	agents     dbpkg.AgentStore
-	teamAgents dbpkg.TeamAgentStore      // SKY-261: read team_agents.enabled before auto-firing triggers
-	users      dbpkg.UsersStore          // SKY-270: read local user's jira_account_id for inline close gates
-	tasks      dbpkg.TaskStore           // SKY-283: task lifecycle, dedup, claims, breaker
-	agentRuns  dbpkg.AgentRunStore       // SKY-285: lookup active runs for the task-close cancel cascade
-	entities   dbpkg.EntityStore         // SKY-284: closed-entity guard + entity-terminating close cascade
-	firings    dbpkg.PendingFiringsStore // SKY-289: per-entity firing queue + active-run gate
-	events     dbpkg.EventStore          // SKY-305: admin-pool RecordSystem + GetMetadataSystem for the background subscriber
-	orgs       dbpkg.OrgsStore           // per-org iteration for the drain sweeper; nil-safe, falls back to N=1 sentinel when unset
-	teams      dbpkg.TeamsStore          // per-team auto_delegate_enabled kill-switch read post-internal/config deletion
+	teamAgents dbpkg.TeamAgentStore       // SKY-261: read team_agents.enabled before auto-firing triggers
+	users      dbpkg.UsersStore           // SKY-270: read local user's jira_account_id for inline close gates
+	tasks      dbpkg.TaskStore            // SKY-283: task lifecycle, dedup, claims, breaker
+	agentRuns  dbpkg.AgentRunStore        // SKY-285: lookup active runs for the task-close cancel cascade
+	entities   dbpkg.EntityStore          // SKY-284: closed-entity guard + entity-terminating close cascade
+	firings    dbpkg.PendingFiringsStore  // SKY-289: per-entity firing queue + active-run gate
+	events     dbpkg.EventStore           // SKY-305: admin-pool RecordSystem + GetMetadataSystem for the background subscriber
+	orgs       dbpkg.OrgsStore            // per-org iteration for the drain sweeper; nil-safe, falls back to N=1 sentinel when unset
+	teams      dbpkg.TeamsStore           // per-team auto_delegate_enabled kill-switch read post-internal/config deletion
+	teamRepos  dbpkg.TeamGitHubReposStore // team↔repo tracking gate (SKY-375); nil-safe — gate is skipped (no filtering) when unset
 	spawner    Delegator
 	scorer     Scorer
 	ws         *websocket.Hub
@@ -92,7 +93,10 @@ type Router struct {
 // which over-closes (acceptable: user can reopen via the next poll).
 // orgs is nil-safe — the drain sweeper collapses to a single-org pass
 // over the local sentinel when missing, matching pre-D9 behavior.
-func NewRouter(prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, agentRuns dbpkg.AgentRunStore, entities dbpkg.EntityStore, firings dbpkg.PendingFiringsStore, events dbpkg.EventStore, orgs dbpkg.OrgsStore, teams dbpkg.TeamsStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+// teamRepos is nil-safe — the SKY-375 team↔repo gate is skipped (no
+// handler is dropped) when missing, matching pre-SKY-375 behavior where
+// repos were org-global and every team implicitly tracked them all.
+func NewRouter(prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, agentRuns dbpkg.AgentRunStore, entities dbpkg.EntityStore, firings dbpkg.PendingFiringsStore, events dbpkg.EventStore, orgs dbpkg.OrgsStore, teams dbpkg.TeamsStore, teamRepos dbpkg.TeamGitHubReposStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
 	return &Router{
 		prompts:    prompts,
 		handlers:   handlers,
@@ -106,6 +110,7 @@ func NewRouter(prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agen
 		events:     events,
 		orgs:       orgs,
 		teams:      teams,
+		teamRepos:  teamRepos,
 		spawner:    spawner,
 		scorer:     scorer,
 		ws:         ws,
@@ -224,6 +229,11 @@ func (r *Router) HandleEvent(evt domain.Event) {
 		matchedRules    []domain.EventHandler
 		matchedTriggers []domain.EventHandler
 	)
+	// scopeCache memoizes the team↔scope (e.g. team↔repo) gate per team
+	// for this one event, so a team with several matching handlers does a
+	// single tracking lookup. Built once here and threaded through every
+	// handlerScopeMatchesEvent call below.
+	scopeCache := map[string]bool{}
 	for _, h := range handlers {
 		predJSON := ""
 		if h.ScopePredicateJSON != nil {
@@ -235,6 +245,16 @@ func (r *Router) HandleEvent(evt domain.Event) {
 			continue
 		}
 		if !matched {
+			continue
+		}
+		// Team↔scope gate (SKY-375): a team's handler only fires for
+		// events whose entity the team tracks. Dropped here — before the
+		// team grouping below — so the team never enters the visibility
+		// set, its triggers never fire, and SKY-368's task_teams excludes
+		// it for free. System/org-union handlers (NULL team_id) skip the
+		// gate. A dropped handler is silently not-matched, same as a
+		// predicate miss.
+		if !r.handlerScopeMatchesEvent(evt, h, scopeCache) {
 			continue
 		}
 		switch h.Kind {
@@ -420,6 +440,70 @@ func (r *Router) HandleEvent(evt domain.Event) {
 // path; we log it once per call but fall back to
 // runmode.LocalDefaultTeamID so the router keeps functioning. In
 // steady state this branch is unreachable.
+// handlerScopeMatchesEvent reports whether handler h's team is allowed
+// to act on evt given the team's tracking scope — the SKY-375 team↔repo
+// gate (and the seam the Jira sibling extends with a team↔project
+// branch). It is the security teeth that keeps a team's handlers from
+// firing on entities the team doesn't track once polling goes org-wide.
+//
+// Three escape hatches return true (no drop):
+//   - System/org-union handlers (NULL team_id) — they're scoped to the
+//     org-wide union by construction; the event's entity is in the union
+//     because *some* team tracks it, so gating them would always pass
+//     anyway.
+//   - teamRepos unwired (nil) — callers from before SKY-375 / tests that
+//     don't exercise the gate; degrades to the pre-ticket behavior where
+//     every team implicitly tracked every org-global repo.
+//   - Non-GitHub events — the Jira team↔project gate is the sibling
+//     ticket; until it lands, only GitHub events are gated here.
+//
+// The per-event result is memoized in cache, keyed by team id, so a team
+// with several matching handlers does one tracking lookup.
+func (r *Router) handlerScopeMatchesEvent(evt domain.Event, h domain.EventHandler, cache map[string]bool) bool {
+	if h.TeamID == "" || r.teamRepos == nil {
+		return true
+	}
+	if !strings.HasPrefix(evt.EventType, "github:") {
+		// Jira (+ any future source) gate is owned by the sibling
+		// ticket; GitHub is the only branch this ticket adds.
+		return true
+	}
+	if allowed, ok := cache[h.TeamID]; ok {
+		return allowed
+	}
+
+	allowed := r.teamTracksEventRepo(evt, h.TeamID)
+	cache[h.TeamID] = allowed
+	return allowed
+}
+
+// teamTracksEventRepo extracts the repo from a GitHub event's metadata
+// and asks the store whether teamID tracks it. Every GitHub PR metadata
+// struct carries a top-level "repo" ("owner/name"), so a minimal
+// unmarshal is enough — no per-type decoding. Fail-open on a missing /
+// malformed repo or a store error: dropping a legitimate task on a
+// transient DB blip or an unexpected metadata shape is worse than the
+// pre-ticket behavior, and the events feeding this path come from TF's
+// own trusted poller.
+func (r *Router) teamTracksEventRepo(evt domain.Event, teamID string) bool {
+	var m struct {
+		Repo string `json:"repo"`
+	}
+	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil || m.Repo == "" {
+		return true
+	}
+	owner, name, ok := strings.Cut(m.Repo, "/")
+	if !ok || owner == "" || name == "" {
+		return true
+	}
+	tracks, err := r.teamRepos.TracksRepoSystem(context.Background(), teamID, owner, name)
+	if err != nil {
+		log.Printf("[router] team↔repo gate lookup failed for team %s repo %s: %v — allowing", teamID, m.Repo, err)
+		return true
+	}
+	return tracks
+}
+
 func handlerTeamID(h domain.EventHandler) string {
 	if h.TeamID != "" {
 		return h.TeamID

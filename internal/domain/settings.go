@@ -165,6 +165,71 @@ func NormalizeTeamGitHubGroups(groups []TeamGitHubGroup) ([]TeamGitHubGroup, err
 	return out, nil
 }
 
+// TeamGitHubRepo is one row of team_github_repos — a single GitHub repo
+// (owner + name) a TF team has declared it tracks. The GitHub
+// tracking-scope twin of JiraProjectStatusRules: the per-team selection
+// that the router's team↔repo gate consults and that repo_profiles is
+// the org-wide UNION of. Distinct from TeamGitHubGroup, which maps
+// CODEOWNERS review-routing teams — this is tracking scope. The Owner is
+// stored as-typed for display fidelity (GitHub logins are
+// case-insensitive); matching against event metadata is done
+// case-insensitively at the gate.
+type TeamGitHubRepo struct {
+	Owner string
+	Repo  string
+}
+
+// Slug returns the canonical "owner/repo" form used as the repo_profiles
+// id and the shape every repo-list caller passes around.
+func (r TeamGitHubRepo) Slug() string { return r.Owner + "/" + r.Repo }
+
+// NormalizeTeamGitHubRepos trims every repo's owner + name, drops entries
+// with an empty field, and de-duplicates on (owner, repo) — the
+// canonical form persisted by ReplaceForTeam. Unlike the github-team
+// normalizer this keeps the original case (a repo slug round-trips into
+// repo_profiles.id and the GitHub clone URL verbatim), so dedup is
+// case-sensitive on the full slug. Returns an error only for a
+// half-specified entry (one field populated, the other empty) — a caller
+// bug rather than a value to silently drop. Splitting "owner/repo" slugs
+// is the caller's job (see TeamGitHubReposFromSlugs); this works on the
+// already-split struct.
+func NormalizeTeamGitHubRepos(repos []TeamGitHubRepo) ([]TeamGitHubRepo, error) {
+	out := make([]TeamGitHubRepo, 0, len(repos))
+	seen := map[TeamGitHubRepo]bool{}
+	for i, r := range repos {
+		owner := strings.TrimSpace(r.Owner)
+		repo := strings.TrimSpace(r.Repo)
+		if owner == "" && repo == "" {
+			continue
+		}
+		if owner == "" || repo == "" {
+			return nil, fmt.Errorf("repos[%d]: github repo needs both owner and name, got %q/%q", i, r.Owner, r.Repo)
+		}
+		n := TeamGitHubRepo{Owner: owner, Repo: repo}
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+// TeamGitHubReposFromSlugs splits "owner/repo" slugs into TeamGitHubRepo
+// structs and normalizes the result. Malformed slugs (no slash, empty
+// half) surface as an error from NormalizeTeamGitHubRepos so the HTTP
+// layer can 400 rather than silently drop. The split is on the first
+// slash only — repo names can't contain slashes, so the remainder is the
+// name.
+func TeamGitHubReposFromSlugs(slugs []string) ([]TeamGitHubRepo, error) {
+	repos := make([]TeamGitHubRepo, 0, len(slugs))
+	for _, s := range slugs {
+		owner, repo, _ := strings.Cut(strings.TrimSpace(s), "/")
+		repos = append(repos, TeamGitHubRepo{Owner: owner, Repo: repo})
+	}
+	return NormalizeTeamGitHubRepos(repos)
+}
+
 // NormalizeGitHubTeamSlugs lowercase-trims a list of GitHub team slugs
 // and drops blanks — the form PruneMissingSystem compares the stored
 // rows against.

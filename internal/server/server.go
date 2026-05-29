@@ -492,6 +492,8 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/settings/team/{team_id}", s.handleTeamSettingsPost)
 	s.api("GET /api/settings/team/{team_id}/github-groups", s.handleTeamGitHubGroupsGet)
 	s.apiMutating("PUT /api/settings/team/{team_id}/github-groups", s.handleTeamGitHubGroupsPut)
+	s.api("GET /api/settings/team/{team_id}/repos", s.handleTeamReposGet)
+	s.apiMutating("PUT /api/settings/team/{team_id}/repos", s.handleTeamReposPut)
 	s.api("GET /api/settings/org", s.handleOrgSettingsGet)
 	s.apiMutating("POST /api/settings/org", s.handleOrgSettingsPost)
 

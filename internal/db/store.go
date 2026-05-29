@@ -200,6 +200,17 @@ type Stores struct {
 	// without JWT claims. Replace-set semantics on SetForTeam.
 	TeamGitHubGroups TeamGitHubGroupsStore
 
+	// TeamGitHubRepos owns the team_github_repos table — the per-team
+	// GitHub repo *tracking* selection and source of truth for which
+	// repos a team cares about (the tracking-scope twin of
+	// jira_project_status_rules, distinct from TeamGitHubGroups which is
+	// review routing). App pool in Postgres for the request-handler
+	// reads/writes (RLS gates by team membership / team admin); admin
+	// pool for the `...System` router-gate reads + the repo_profiles
+	// reconcile that ReplaceForTeam runs (repo_profiles is now the
+	// org-wide UNION of every team's rows, a derived cache).
+	TeamGitHubRepos TeamGitHubReposStore
+
 	// Curator owns the curator-runtime tables (curator_requests,
 	// curator_messages, curator_pending_context). App pool in
 	// Postgres — the per-project goroutine wraps each turn's
@@ -255,6 +266,7 @@ type TxStores struct {
 	Teams            TeamsStore
 	JiraStatusRules  JiraStatusRulesStore
 	TeamGitHubGroups TeamGitHubGroupsStore
+	TeamGitHubRepos  TeamGitHubReposStore
 	Curator          CuratorStore
 	GitHubApps       GitHubAppsStore
 }

@@ -25,6 +25,7 @@ type SettingsStores struct {
 	Users            db.UsersStore
 	JiraStatusRules  db.JiraStatusRulesStore
 	TeamGitHubGroups db.TeamGitHubGroupsStore
+	TeamGitHubRepos  db.TeamGitHubReposStore
 }
 
 // SettingsIDs are the tenancy keys the factory pre-seeded.
@@ -527,6 +528,115 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if len(got) != 0 {
 			t.Errorf("ListForTeamSystem on empty team = %+v; want empty slice", got)
 		}
+	})
+
+	t.Run("TeamGitHubRepos_ReplaceForTeam_RoundTripsAndPrunes", func(t *testing.T) {
+		stores, ids := factory(t)
+		input := []domain.TeamGitHubRepo{
+			{Owner: "acme", Repo: "api"},
+			{Owner: "acme", Repo: "web"},
+		}
+		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.TeamID, input); err != nil {
+			t.Fatalf("ReplaceForTeam: %v", err)
+		}
+		got, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("ListForTeamSystem: %v", err)
+		}
+		sortRepos(got)
+		sortRepos(input)
+		if !reflect.DeepEqual(got, input) {
+			t.Errorf("after ReplaceForTeam, got=%+v; want %+v", got, input)
+		}
+
+		// Replace-set prunes the missing one.
+		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.TeamID, input[:1]); err != nil {
+			t.Fatalf("replace ReplaceForTeam: %v", err)
+		}
+		got, err = stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("ListForTeamSystem: %v", err)
+		}
+		if len(got) != 1 || got[0].Repo != "api" {
+			t.Errorf("after replace-set, got=%+v; want one row repo=api", got)
+		}
+
+		// Empty clears all.
+		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.TeamID, nil); err != nil {
+			t.Fatalf("clear ReplaceForTeam: %v", err)
+		}
+		got, err = stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("ListForTeamSystem: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("after clear, got=%+v; want empty", got)
+		}
+	})
+
+	t.Run("TeamGitHubRepos_TracksRepoSystem_OwnerCaseInsensitive", func(t *testing.T) {
+		stores, ids := factory(t)
+		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.TeamID, []domain.TeamGitHubRepo{
+			{Owner: "Acme", Repo: "api"},
+		}); err != nil {
+			t.Fatalf("ReplaceForTeam: %v", err)
+		}
+		for _, c := range []struct {
+			owner, repo string
+			want        bool
+		}{
+			{"Acme", "api", true},
+			{"acme", "api", true},
+			{"acme", "web", false},
+			{"other", "api", false},
+		} {
+			got, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, ids.TeamID, c.owner, c.repo)
+			if err != nil {
+				t.Fatalf("TracksRepoSystem(%s/%s): %v", c.owner, c.repo, err)
+			}
+			if got != c.want {
+				t.Errorf("TracksRepoSystem(%s/%s) = %v; want %v", c.owner, c.repo, got, c.want)
+			}
+		}
+	})
+
+	t.Run("TeamGitHubRepos_ListForOrgSystem_Union", func(t *testing.T) {
+		stores, ids := factory(t)
+		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.TeamID, []domain.TeamGitHubRepo{
+			{Owner: "acme", Repo: "api"},
+			{Owner: "acme", Repo: "web"},
+		}); err != nil {
+			t.Fatalf("ReplaceForTeam: %v", err)
+		}
+		union, err := stores.TeamGitHubRepos.ListForOrgSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("ListForOrgSystem: %v", err)
+		}
+		sortRepos(union)
+		want := []domain.TeamGitHubRepo{{Owner: "acme", Repo: "api"}, {Owner: "acme", Repo: "web"}}
+		if !reflect.DeepEqual(union, want) {
+			t.Errorf("ListForOrgSystem = %+v; want %+v", union, want)
+		}
+	})
+
+	t.Run("TeamGitHubRepos_EmptyTeam_ReturnsEmptySlice", func(t *testing.T) {
+		stores, ids := factory(t)
+		got, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("ListForTeamSystem: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("ListForTeamSystem on empty team = %+v; want empty slice", got)
+		}
+	})
+}
+
+func sortRepos(repos []domain.TeamGitHubRepo) {
+	sort.Slice(repos, func(i, j int) bool {
+		if repos[i].Owner != repos[j].Owner {
+			return repos[i].Owner < repos[j].Owner
+		}
+		return repos[i].Repo < repos[j].Repo
 	})
 }
 

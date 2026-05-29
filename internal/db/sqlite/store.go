@@ -81,6 +81,10 @@ func New(conn *sql.DB) db.Stores {
 		// to the one connection. Replace-set semantics on SetForTeam;
 		// the `...System` variants forward to the non-System bodies.
 		TeamGitHubGroups: newTeamGitHubGroupsStore(conn, conn),
+		// TeamGitHubRepos is dual-pool in Postgres; SQLite collapses to
+		// the one connection. ReplaceForTeam's repo_profiles reconcile
+		// runs in the same tx as the team-row write here.
+		TeamGitHubRepos: newTeamGitHubReposStore(conn, conn),
 		// Curator: the goroutine wraps each turn in
 		// Stores.Tx.SyntheticClaimsWithTx so the tx-bound variant
 		// (composed inside the tx.go runTx body) is what handles
