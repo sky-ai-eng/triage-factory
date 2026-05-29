@@ -337,8 +337,8 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 	})
 
 	t.Run("PullsPollState_round_trips", func(t *testing.T) {
-		// SKY-353: the GitHub poller stores a per-repo ETag + last-poll
-		// time for conditional open-PR discovery. Unset reads as ("", nil);
+		// The GitHub poller stores a per-repo ETag + last-poll time for
+		// conditional open-PR discovery. Unset reads as ("", nil);
 		// a Set persists both; a re-Set overwrites.
 		s, orgID := mk(t)
 		if err := s.SetConfigured(ctx, orgID, []string{"octo/widget"}); err != nil {

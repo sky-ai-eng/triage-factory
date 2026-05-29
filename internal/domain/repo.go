@@ -22,8 +22,8 @@ type RepoProfile struct {
 	CloneErrorKind string // "ssh" | "other" | ""
 
 	// PullsETag / PullsPolledAt back the GitHub poller's conditional
-	// open-PR discovery (SKY-353). PullsETag is the last ETag GitHub
-	// returned for the repo's GET /pulls?state=open listing; PullsPolledAt
+	// open-PR discovery. PullsETag is the last ETag GitHub returned for
+	// the repo's GET /pulls?state=open listing; PullsPolledAt
 	// is the last successful list (200 or 304). Populated/consumed only by
 	// the dedicated *PullsPollState* store methods — the general List/Get
 	// projections leave them zero-valued.

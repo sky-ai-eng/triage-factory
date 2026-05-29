@@ -36,8 +36,8 @@ type Manager struct {
 	teams     db.TeamsStore           // resolve each org's default team for per-team Jira project rules
 	jiraRules db.JiraStatusRulesStore // per-team Jira project rules (replaces deleted config.Jira.Projects)
 	secrets   db.SecretStore          // integration creds via SecretStore (keychain in local, vault in multi)
-	apps      db.GitHubAppsStore      // SKY-353: per-org App installations + local-NAT backfill for per-installation polling
-	resolver  ghclient.Resolver       // SKY-353: per-cycle, per-installation GitHub client resolution (App installation token → PAT)
+	apps      db.GitHubAppsStore      // per-org App installations + local-NAT backfill for per-installation polling
+	resolver  ghclient.Resolver       // per-cycle, per-installation GitHub client resolution (App installation token → PAT)
 
 	// OnError fires when a poll cycle returns an error. Source is "github"
 	// or "jira"; orgID identifies the tenant whose cycle errored (empty
@@ -219,7 +219,7 @@ func (m *Manager) stopAll() {
 // sentinel org). Bounded per-org concurrency is a future optimization —
 // sequential is fine given the poll period (≥1 minute baseline).
 //
-// Runs in both modes (SKY-353 lifted the local-only gate): multi-mode
+// Runs in both modes (the local-only gate is lifted): multi-mode
 // GitHub polling is the per-org App path; local mode keeps the PAT default
 // and also supports a locally-registered App via API backfill (webhooks
 // don't reach local-NAT).

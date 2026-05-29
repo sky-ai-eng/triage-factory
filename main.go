@@ -917,7 +917,7 @@ func main() {
 	)
 	// GitHub credential resolver for the poller — resolves an App
 	// installation token (tier 1) or the org PAT (tier 3) per cycle, per
-	// installation (SKY-353). Its own token cache: installation tokens
+	// installation. Its own token cache: installation tokens
 	// carry a TTL and the cache treats a token inside the expiry guard as a
 	// miss, so the poller re-mints on its own schedule without sharing the
 	// server's cache.

@@ -104,8 +104,8 @@ type RepoStore interface {
 	UpsertSystem(ctx context.Context, orgID string, p domain.RepoProfile) error
 
 	// GetPullsPollStateSystem returns the stored conditional-request
-	// state for a repo's open-PR listing (SKY-353): the last ETag and
-	// the last successful poll time. Both are zero values ("" / nil)
+	// state for a repo's open-PR listing: the last ETag and the last
+	// successful poll time. Both are zero values ("" / nil)
 	// when the repo has never been listed. System (claims-free) variant
 	// — the poller goroutine has no JWT claims, same convention as
 	// ListConfiguredNamesSystem. No-ops to ("", nil, nil) when the repo

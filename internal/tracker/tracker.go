@@ -42,7 +42,7 @@ type Tracker struct {
 	bus      *eventbus.Bus
 	tasks    db.TaskStore   // SKY-283: tracker creates review_requested tasks during discovery + reconciles stale ones
 	entities db.EntityStore // SKY-284: entity lifecycle (find/create, snapshot, title/description, close/reactivate)
-	repos    db.RepoStore   // SKY-353: per-repo conditional-request (ETag) state for GitHub open-PR discovery
+	repos    db.RepoStore   // per-repo conditional-request (ETag) state for GitHub open-PR discovery
 	// orgID is the tenant this tracker emits events and reads/writes
 	// entities for. Set at construction and stable for the Tracker's
 	// lifetime; the poller's per-org loop constructs a fresh Tracker

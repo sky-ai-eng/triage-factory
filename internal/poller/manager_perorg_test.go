@@ -86,8 +86,8 @@ func TestManager_RunGitHubCycle_OrgsStoreErrorAbortsCycle(t *testing.T) {
 	}
 }
 
-// TestManager_StartGitHub_StartsInMultiMode pins that SKY-353 lifted the
-// old local-only gate: multi-mode GitHub polling is now the per-org App
+// TestManager_StartGitHub_StartsInMultiMode pins that the old local-only
+// gate is lifted: multi-mode GitHub polling is now the per-org App
 // path, so startGitHub spawns the poll goroutine (ghStop != nil) in multi
 // mode too. The initial poll fans out per active org; with an empty
 // active-org list the cycle does nothing, so this test asserts only the
