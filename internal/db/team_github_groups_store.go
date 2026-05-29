@@ -65,18 +65,21 @@ type TeamGitHubGroupsStore interface {
 
 	// PruneMissingSystem removes, across every team in the org, the
 	// mapping rows for github_org_login whose github_team_slug is not in
-	// presentSlugs — the GitHub-team-deletion reconcile. A deleted GitHub
-	// team is absent from presentSlugs, so its mapping rows are dropped
-	// (the TF team itself is never touched); an empty presentSlugs drops
-	// every mapping for the org login.
+	// presentSlugs — the GitHub-team-deletion reconcile floor. Callers
+	// pass the live set of slugs from GET /orgs/{org}/teams; a deleted
+	// GitHub team is absent from that set and its mapping rows are dropped
+	// (the TF team itself is never touched).
 	//
-	// presentSlugs MUST be an authoritative, complete list of the org's
-	// GitHub teams — the webhook-driven team graph (team:deleted event),
-	// not the result of GET /orgs/{org}/teams, which is visibility-scoped
-	// to the token and can return a partial subset. Pruning against a
-	// partial list would delete live mappings. The read-path editor
-	// therefore does NOT call this; it surfaces unknown mappings to the
-	// admin for manual removal instead.
+	// presentSlugs is taken as the authoritative team set for the org
+	// login. That holds because the only caller fetches it via the
+	// org-level credential (App installation token or org PAT) — a single
+	// deterministic identity, not a per-user token — and the editor only
+	// ever creates mappings for teams that identity can see, so a present
+	// team can't be wrongly pruned. The caller must skip the empty case
+	// (a zero-length fetch is ambiguous) and never call this on a fetch
+	// error; this method itself treats an empty presentSlugs as "the org
+	// has no teams" and drops every mapping for the login. The team:deleted
+	// webhook is the optional real-time layer on top of this floor.
 	//
 	// Returns the number of rows removed. Admin pool in Postgres: the
 	// prune spans teams the triggering caller may not belong to, so it
