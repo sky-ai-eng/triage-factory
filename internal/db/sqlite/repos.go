@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -256,6 +257,39 @@ func (s *repoStore) GetSystem(ctx context.Context, orgID, repoID string) (*domai
 
 func (s *repoStore) UpsertSystem(ctx context.Context, orgID string, p domain.RepoProfile) error {
 	return s.Upsert(ctx, orgID, p)
+}
+
+func (s *repoStore) GetPullsPollStateSystem(ctx context.Context, orgID, repoID string) (string, *time.Time, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", nil, err
+	}
+	var etag sql.NullString
+	var polledAt sql.NullTime
+	err := s.q.QueryRowContext(ctx,
+		`SELECT pulls_etag, pulls_polled_at FROM repo_profiles WHERE id = ?`, repoID,
+	).Scan(&etag, &polledAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil, nil
+	}
+	if err != nil {
+		return "", nil, err
+	}
+	var out *time.Time
+	if polledAt.Valid {
+		out = &polledAt.Time
+	}
+	return etag.String, out, nil
+}
+
+func (s *repoStore) SetPullsPollStateSystem(ctx context.Context, orgID, repoID, etag string, polledAt time.Time) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx,
+		`UPDATE repo_profiles SET pulls_etag = ?, pulls_polled_at = ? WHERE id = ?`,
+		nullIfEmpty(etag), polledAt, repoID,
+	)
+	return err
 }
 
 // rowScanner is the common Scan surface of *sql.Row and *sql.Rows.

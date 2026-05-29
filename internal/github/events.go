@@ -43,6 +43,42 @@ func (c *Client) ListUserRepos() ([]UserRepo, error) {
 	return all, nil
 }
 
+// ListInstallationRepos returns every repository a GitHub App installation
+// can reach, via GET /installation/repositories. This endpoint requires an
+// installation access token — a PAT gets 403 ("You must authenticate with an
+// installation access token…"), so only call it on an App-issued client. The
+// poller uses the result to map each configured repo onto the installation
+// whose token can reach it. Paginates until all repos are fetched.
+func (c *Client) ListInstallationRepos() ([]UserRepo, error) {
+	var all []UserRepo
+
+	for page := 1; ; page++ {
+		path := fmt.Sprintf("/installation/repositories?per_page=100&page=%d", page)
+		data, err := c.Get(path)
+		if err != nil {
+			return nil, fmt.Errorf("fetch installation repositories page %d: %w", page, err)
+		}
+
+		var resp struct {
+			TotalCount   int        `json:"total_count"`
+			Repositories []UserRepo `json:"repositories"`
+		}
+		if err := json.Unmarshal(data, &resp); err != nil {
+			return nil, fmt.Errorf("parse installation repositories page %d: %w", page, err)
+		}
+
+		if len(resp.Repositories) == 0 {
+			break
+		}
+		all = append(all, resp.Repositories...)
+		if len(all) >= resp.TotalCount {
+			break
+		}
+	}
+
+	return all, nil
+}
+
 // RepoMeta is a subset of the GitHub repo object.
 type RepoMeta struct {
 	DefaultBranch string `json:"default_branch"`

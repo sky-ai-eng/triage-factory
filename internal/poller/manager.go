@@ -3,11 +3,12 @@ package poller
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
@@ -35,6 +36,8 @@ type Manager struct {
 	teams     db.TeamsStore           // resolve each org's default team for per-team Jira project rules
 	jiraRules db.JiraStatusRulesStore // per-team Jira project rules (replaces deleted config.Jira.Projects)
 	secrets   db.SecretStore          // integration creds via SecretStore (keychain in local, vault in multi)
+	apps      db.GitHubAppsStore      // per-org App installations + local-NAT backfill for per-installation polling
+	resolver  ghclient.Resolver       // per-cycle, per-installation GitHub client resolution (App installation token → PAT)
 
 	// OnError fires when a poll cycle returns an error. Source is "github"
 	// or "jira"; orgID identifies the tenant whose cycle errored (empty
@@ -49,7 +52,7 @@ type Manager struct {
 	jiraStop chan struct{}
 }
 
-func NewManager(database *sql.DB, bus *eventbus.Bus, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore, orgs db.OrgsStore, teams db.TeamsStore, jiraRules db.JiraStatusRulesStore, secrets db.SecretStore) *Manager {
+func NewManager(database *sql.DB, bus *eventbus.Bus, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore, orgs db.OrgsStore, teams db.TeamsStore, jiraRules db.JiraStatusRulesStore, secrets db.SecretStore, apps db.GitHubAppsStore, resolver ghclient.Resolver) *Manager {
 	return &Manager{
 		database:  database,
 		bus:       bus,
@@ -61,6 +64,8 @@ func NewManager(database *sql.DB, bus *eventbus.Bus, users db.UsersStore, tasks 
 		teams:     teams,
 		jiraRules: jiraRules,
 		secrets:   secrets,
+		apps:      apps,
+		resolver:  resolver,
 	}
 }
 
@@ -71,7 +76,7 @@ func NewManager(database *sql.DB, bus *eventbus.Bus, users db.UsersStore, tasks 
 // (struct of method holders + store references) so per-cycle
 // allocation is fine.
 func (m *Manager) trackerForOrg(orgID string) *tracker.Tracker {
-	return tracker.New(m.database, m.bus, m.tasks, m.entities, orgID)
+	return tracker.New(m.database, m.bus, m.tasks, m.entities, m.repos, orgID)
 }
 
 // reportError invokes the OnError callback if set. Centralized so adding
@@ -97,9 +102,12 @@ func (m *Manager) RestartAll(ctx context.Context, orgID string) {
 	m.stopAll()
 
 	orgSet := m.loadOrgSettings(ctx, orgID)
-	creds, _ := integrations.Load(ctx, m.secrets, orgID)
 
-	m.startGitHub(orgSet, creds)
+	// GitHub polling resolves per-org credentials per cycle, per
+	// installation inside runGitHubCycle (App installation token → PAT),
+	// so the only thing startGitHub needs from the trigger org is the tick
+	// interval — orgSet.GitHubPollInterval is the process-global cadence.
+	m.startGitHub(orgSet.GitHubPollInterval)
 	// Jira polling resolves per-org settings/creds/rules inside each
 	// cycle, so the only thing startJira needs from the trigger org
 	// is the tick interval — orgSet.JiraPollInterval is the process-
@@ -118,8 +126,7 @@ func (m *Manager) RestartGitHub(ctx context.Context, orgID string) {
 	m.mu.Unlock()
 
 	orgSet := m.loadOrgSettings(ctx, orgID)
-	creds, _ := integrations.Load(ctx, m.secrets, orgID)
-	m.startGitHub(orgSet, creds)
+	m.startGitHub(orgSet.GitHubPollInterval)
 }
 
 // RestartJira stops and restarts only the Jira polling loop.
@@ -204,81 +211,52 @@ func (m *Manager) stopAll() {
 }
 
 // startGitHub launches the GitHub tracking loop. Each tick iterates
-// active orgs and dispatches a per-org RefreshGitHub. Per-org repo
-// lists and per-org user identities are resolved inside the loop so a
-// new org added between ticks picks up on the next cycle without a
-// poller restart. Local mode collapses to N=1 (the synthetic sentinel
-// org). Bounded per-org concurrency is a future optimization —
+// active orgs and, within each org, every active App installation (with a
+// PAT-borrow fallback), resolving a fresh client per installation per cycle.
+// Per-org repo lists and per-org credentials are resolved inside the loop so
+// a new org/installation added between ticks picks up on the next cycle
+// without a poller restart. Local mode collapses to N=1 (the synthetic
+// sentinel org). Bounded per-org concurrency is a future optimization —
 // sequential is fine given the poll period (≥1 minute baseline).
-func (m *Manager) startGitHub(orgSet domain.OrgSettings, creds auth.Credentials) {
-	// The GitHub poll loop reads a single users.github_username
-	// keyed by the local synthetic user — in multi mode that row
-	// has no FK target and every per-org iteration would silently
-	// skip. Per-org GitHub App polling (D11) is the multi-mode
-	// path; until then, this loop has no useful work to do outside
-	// local mode. Gating at the outer Start boundary keeps the
-	// no-op loop out of multi-mode logs entirely.
-	if runmode.Current() != runmode.ModeLocal {
-		return
-	}
-	if creds.GitHubPAT == "" || creds.GitHubURL == "" {
-		log.Println("[github] credentials not configured, skipping tracker")
-		return
-	}
-
-	interval := orgSet.GitHubPollInterval
+//
+// Runs in both modes (the local-only gate is lifted): multi-mode
+// GitHub polling is the per-org App path; local mode keeps the PAT default
+// and also supports a locally-registered App via API backfill (webhooks
+// don't reach local-NAT).
+func (m *Manager) startGitHub(interval time.Duration) {
 	if interval < 10*time.Second {
 		interval = time.Minute
 	}
 
-	client := ghclient.NewClient(creds.GitHubURL, creds.GitHubPAT)
 	stop := make(chan struct{})
-
 	m.mu.Lock()
 	m.ghStop = stop
 	m.mu.Unlock()
 
-	// Resolve the user's team memberships once per GitHub start. Teams
-	// rarely change mid-session, and every GitHub config change (creds,
-	// repos) already triggers a RestartGitHub which re-enters this path —
-	// so picking up new memberships is a question of when the user next
-	// reconnects, not of refresh cadence. An empty list on failure means
-	// team-based review requests won't surface until next restart; that's
-	// a degraded-but-honest state and the error is logged.
-	//
-	// Team resolution stays out of the per-org loop because the
-	// credential set (cfg.GitHub PAT) is process-global today —
-	// per-org credential resolution is deferred (out of D9c scope).
-	userTeams, err := client.ListMyTeams()
-	if err != nil {
-		log.Printf("[github] failed to list teams: %v (team-based review requests will be missed until next restart)", err)
-		userTeams = nil
-	}
-
 	go func() {
 		// Initial poll
-		m.runGitHubCycle(client, userTeams)
+		m.runGitHubCycle()
 
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				m.runGitHubCycle(client, userTeams)
+				m.runGitHubCycle()
 			case <-stop:
 				return
 			}
 		}
 	}()
 
-	log.Printf("[github] tracker started (interval: %s, teams: %d)", interval, len(userTeams))
+	log.Printf("[github] tracker started (interval: %s, per-installation resolution per cycle)", interval)
 }
 
-// runGitHubCycle enumerates active orgs and dispatches a per-org
-// RefreshGitHub. Per-org failures are logged and reported via
-// OnError but do not abort the remaining orgs in the cycle — a
-// transient failure on org A shouldn't starve orgs B..N of polls.
-func (m *Manager) runGitHubCycle(client *ghclient.Client, userTeams []string) {
+// runGitHubCycle enumerates active orgs and dispatches per-org GitHub
+// polling. Per-org failures are logged and reported via OnError but do not
+// abort the remaining orgs in the cycle — a transient failure on org A
+// shouldn't starve orgs B..N of polls.
+func (m *Manager) runGitHubCycle() {
 	ctx := context.Background()
 	orgIDs, err := m.orgs.ListActiveSystem(ctx)
 	if err != nil {
@@ -287,39 +265,186 @@ func (m *Manager) runGitHubCycle(client *ghclient.Client, userTeams []string) {
 		return
 	}
 	for _, orgID := range orgIDs {
-		repos, err := m.repos.ListConfiguredNamesSystem(ctx, orgID)
+		m.runGitHubCycleForOrg(ctx, orgID)
+	}
+}
+
+// runGitHubCycleForOrg polls one org. It resolves a GitHub client PER
+// INSTALLATION (App installation tokens expire ~1h, so the client must not be
+// hoisted across cycles — Sharp edge 1), maps the org's configured repo set
+// onto the installation that can reach each repo, and dispatches a
+// per-installation RefreshGitHub over that intersection. With no live
+// installation it falls back to the org's PAT (tier 3) over the full
+// configured set.
+func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
+	repos, err := m.repos.ListConfiguredNamesSystem(ctx, orgID)
+	if err != nil {
+		log.Printf("[github] org %s: load configured repos: %v", orgID, err)
+		return
+	}
+	if len(repos) == 0 {
+		return
+	}
+
+	isLocal := runmode.Current() == runmode.ModeLocal
+
+	var installs []domain.OrgGitHubAppInstallation
+	if m.apps != nil {
+		installs, err = m.apps.ListInstallationsForOrgSystem(ctx, orgID)
 		if err != nil {
-			log.Printf("[github] org %s: load configured repos: %v", orgID, err)
-			continue
+			log.Printf("[github] org %s: list installations: %v", orgID, err)
 		}
-		if len(repos) == 0 {
-			continue
-		}
-		// NULL/empty github_username means identity hasn't been
-		// captured yet (fresh install before first Settings save)
-		// — skip this org without surfacing as an error.
-		//
-		// Local-mode bridge: the poller acts as the lone local user,
-		// so we read their github_username to drive predicates like
-		// "PR review requested from me". This whole loop is gated
-		// to local mode at startGitHub, so the LocalDefaultUserID
-		// sentinel here resolves to that one user — multi-mode
-		// per-org GitHub App polling (D11) will replace the
-		// username read with a GitHubClientFor(ctx, orgID) call
-		// against the App's installation identity.
-		username, err := m.users.GetGitHubUsernameSystem(ctx, runmode.LocalDefaultUserID)
-		if err != nil {
-			log.Printf("[github] org %s: read users.github_username: %v", orgID, err)
-			continue
-		}
-		if username == "" {
-			continue
-		}
-		if _, err := m.trackerForOrg(orgID).RefreshGitHub(client, username, userTeams, repos); err != nil {
-			log.Printf("[github] org %s: tracker error: %v", orgID, err)
-			m.reportError("github", orgID, err)
+
+		// Local-NAT bonus: webhooks don't reach a local instance, so the
+		// installation mirror can't be kept fresh by the webhook receiver.
+		// When the org has a registered App, backfill installations from the
+		// API on the cycle and re-read. No-op when there's no App.
+		if isLocal && m.orgHasRegisteredApp(ctx, orgID) {
+			if berr := m.apps.BackfillInstallationsFromAPI(ctx, orgID); berr != nil {
+				log.Printf("[github] org %s: installation backfill: %v", orgID, berr)
+			} else if installs, err = m.apps.ListInstallationsForOrgSystem(ctx, orgID); err != nil {
+				log.Printf("[github] org %s: re-list installations after backfill: %v", orgID, err)
+			}
 		}
 	}
+
+	if len(installs) == 0 {
+		m.pollGitHubPAT(ctx, orgID, repos, isLocal)
+		return
+	}
+
+	// App path: poll each installation over the intersection of the
+	// configured set with that installation's repo grant. Token errors are
+	// isolated per installation — a failed mint on A must not starve B/C.
+	//
+	// anyFunctional tracks whether at least one installation yielded a usable
+	// installation token. ListInstallationRepos is installation-token-only,
+	// so a successful call proves we hold one; a failure can mean the
+	// resolver fell back to a PAT client (mint failed but a PAT is
+	// configured), which 403s on this endpoint. If NO installation is
+	// functional we'd otherwise leave the org unpolled despite an available
+	// PAT — so fall through to the PAT path in that case.
+	covered := make(map[string]bool, len(repos))
+	anyFunctional := false
+	for _, inst := range installs {
+		client, cerr := m.resolver.ClientFor(ctx, orgID, inst.AccountLogin)
+		if cerr != nil {
+			log.Printf("[github] org %s: resolve client for installation %s (%s): %v", orgID, inst.InstallationID, inst.AccountLogin, cerr)
+			m.reportError("github", orgID, cerr)
+			continue
+		}
+		grant, gerr := client.ListInstallationRepos()
+		if gerr != nil {
+			log.Printf("[github] org %s: list installation repos for %s: %v", orgID, inst.AccountLogin, gerr)
+			m.reportError("github", orgID, gerr)
+			continue
+		}
+		anyFunctional = true
+		scoped := intersectConfigured(repos, grant, covered)
+		if len(scoped) == 0 {
+			continue
+		}
+		// App tokens have no "me" — drop the username axis for discovery
+		// (Sharp edge 2). Predicates still match per-PR fields downstream.
+		if _, rerr := m.trackerForOrg(orgID).RefreshGitHub(client, "", nil, scoped); rerr != nil {
+			log.Printf("[github] org %s installation %s: tracker error: %v", orgID, inst.AccountLogin, rerr)
+			m.reportError("github", orgID, rerr)
+		}
+	}
+
+	// No installation produced a usable installation token (every mint/list
+	// failed). The resolver may have a working PAT behind those failures —
+	// poll the configured set through it rather than leaving the org dark.
+	// ErrNoGitHubCredentials inside pollGitHubPAT means there's genuinely no
+	// fallback, and it skips silently.
+	if !anyFunctional {
+		m.pollGitHubPAT(ctx, orgID, repos, isLocal)
+		return
+	}
+
+	// Configured repos that no functional installation grants — the App isn't
+	// installed on them. Log once so the gap is visible without being an
+	// error. (Skipped when we fell back to PAT above, which polls them all.)
+	for _, r := range repos {
+		if !covered[r] {
+			log.Printf("[github] org %s: configured repo %s not in any App installation grant — skipping", orgID, r)
+		}
+	}
+}
+
+// pollGitHubPAT runs the tier-3 PAT-borrow path for an org with no live App
+// installation. The resolver returns the org's PAT client; ErrNoGitHubCredentials
+// means the org simply isn't configured for GitHub and is skipped silently.
+//
+// In local mode the poller acts as the lone local user, so it reads their
+// github_username + team memberships to drive the user-perspective dashboard
+// backfill and team-based review-request detection. Multi-mode PAT fallback
+// has no local sentinel user, so it passes no username (org-wide REST
+// discovery doesn't need one; dashboard history is local/PAT-only).
+func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []string, isLocal bool) {
+	client, err := m.resolver.ClientFor(ctx, orgID, "")
+	if err != nil {
+		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+			return // not configured for GitHub — silent skip
+		}
+		log.Printf("[github] org %s: resolve PAT client: %v", orgID, err)
+		m.reportError("github", orgID, err)
+		return
+	}
+
+	var username string
+	var userTeams []string
+	if isLocal {
+		username, err = m.users.GetGitHubUsernameSystem(ctx, runmode.LocalDefaultUserID)
+		if err != nil {
+			log.Printf("[github] org %s: read users.github_username: %v", orgID, err)
+			return
+		}
+		if teams, terr := client.ListMyTeams(); terr != nil {
+			log.Printf("[github] org %s: list teams: %v (team-based review requests will be missed this cycle)", orgID, terr)
+		} else {
+			userTeams = teams
+		}
+	}
+
+	if _, err := m.trackerForOrg(orgID).RefreshGitHub(client, username, userTeams, repos); err != nil {
+		log.Printf("[github] org %s: tracker error: %v", orgID, err)
+		m.reportError("github", orgID, err)
+	}
+}
+
+// orgHasRegisteredApp reports whether the org has an active GitHub App
+// registration. Used to gate the local-NAT installation backfill so orgs
+// without an App don't pay a no-op API round-trip each cycle.
+func (m *Manager) orgHasRegisteredApp(ctx context.Context, orgID string) bool {
+	if m.apps == nil {
+		return false
+	}
+	app, err := m.apps.GetForOrgSystem(ctx, orgID)
+	if err != nil {
+		log.Printf("[github] org %s: read App registration: %v", orgID, err)
+		return false
+	}
+	return app != nil && app.Active
+}
+
+// intersectConfigured returns the configured repos reachable through one
+// installation's grant, marking each in covered so the caller can report
+// configured repos that no installation grants. Matching is case-insensitive
+// on the "owner/repo" slug (GitHub logins are case-insensitive).
+func intersectConfigured(configured []string, grant []ghclient.UserRepo, covered map[string]bool) []string {
+	granted := make(map[string]bool, len(grant))
+	for _, g := range grant {
+		granted[strings.ToLower(g.FullName)] = true
+	}
+	var out []string
+	for _, r := range configured {
+		if granted[strings.ToLower(r)] {
+			out = append(out, r)
+			covered[r] = true
+		}
+	}
+	return out
 }
 
 // startJira launches the Jira tracking loop. The outer goroutine

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -101,4 +102,20 @@ type RepoStore interface {
 	CountConfiguredSystem(ctx context.Context, orgID string) (int, error)
 	GetSystem(ctx context.Context, orgID, repoID string) (*domain.RepoProfile, error)
 	UpsertSystem(ctx context.Context, orgID string, p domain.RepoProfile) error
+
+	// GetPullsPollStateSystem returns the stored conditional-request
+	// state for a repo's open-PR listing: the last ETag and the last
+	// successful poll time. Both are zero values ("" / nil)
+	// when the repo has never been listed. System (claims-free) variant
+	// — the poller goroutine has no JWT claims, same convention as
+	// ListConfiguredNamesSystem. No-ops to ("", nil, nil) when the repo
+	// isn't in repo_profiles.
+	GetPullsPollStateSystem(ctx context.Context, orgID, repoID string) (etag string, polledAt *time.Time, err error)
+
+	// SetPullsPollStateSystem records the conditional-request state after
+	// a successful open-PR list. On a 304 the caller passes the stored
+	// etag back unchanged (only polledAt advances); on a 200 it passes
+	// the fresh etag. No-ops silently when the repo isn't in
+	// repo_profiles (configured-repos-only invariant). System variant.
+	SetPullsPollStateSystem(ctx context.Context, orgID, repoID, etag string, polledAt time.Time) error
 }

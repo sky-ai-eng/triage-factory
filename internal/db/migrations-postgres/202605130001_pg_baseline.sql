@@ -1079,7 +1079,9 @@ CREATE TABLE public.repo_profiles (
     clone_error text,
     clone_error_kind text,
     profiled_at timestamp with time zone,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    pulls_etag text,
+    pulls_polled_at timestamp with time zone
 );
 
 

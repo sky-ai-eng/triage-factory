@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -41,6 +42,7 @@ type Tracker struct {
 	bus      *eventbus.Bus
 	tasks    db.TaskStore   // SKY-283: tracker creates review_requested tasks during discovery + reconciles stale ones
 	entities db.EntityStore // SKY-284: entity lifecycle (find/create, snapshot, title/description, close/reactivate)
+	repos    db.RepoStore   // per-repo conditional-request (ETag) state for GitHub open-PR discovery
 	// orgID is the tenant this tracker emits events and reads/writes
 	// entities for. Set at construction and stable for the Tracker's
 	// lifetime; the poller's per-org loop constructs a fresh Tracker
@@ -58,8 +60,8 @@ type Tracker struct {
 // loop calls this once per active org per cycle; the resulting
 // Tracker handles all event-emission for that org and stamps every
 // published event with the tenant via publish() below.
-func New(database *sql.DB, bus *eventbus.Bus, tasks db.TaskStore, entities db.EntityStore, orgID string) *Tracker {
-	return &Tracker{database: database, bus: bus, tasks: tasks, entities: entities, orgID: orgID}
+func New(database *sql.DB, bus *eventbus.Bus, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore, orgID string) *Tracker {
+	return &Tracker{database: database, bus: bus, tasks: tasks, entities: entities, repos: repos, orgID: orgID}
 }
 
 // publish stamps evt.OrgID with the tracker's configured tenant before
@@ -89,7 +91,10 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 	orgID := t.orgID
 	startedAt := time.Now()
 	// Phase 1: Discovery — find new PRs and register as entities.
-	discovered, err := t.discoverGitHub(client, username, repos)
+	// quietRepos is the set of "owner/repo" whose open-PR listing returned
+	// 304 (unchanged) this cycle; their tracked entities can keep their
+	// stored snapshot through the Phase-2 gate without a refresh.
+	discovered, quietRepos, err := t.discoverGitHub(client, username, repos)
 	if err != nil {
 		log.Printf("[tracker] GitHub discovery error: %v", err)
 	}
@@ -211,7 +216,17 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 		} else {
 			age = 24 * time.Hour
 		}
-		if fresh, ok := discoveredBySourceID[e.SourceID]; ok && shouldSkipRefresh(snap, fresh, age) {
+		// Gate against discovery's fresh snapshot when we have one. A repo
+		// that 304'd this cycle has no fresh snapshot, but a 304 means its
+		// open-PR listing (including each PR's updated_at + head sha) is
+		// byte-identical to last cycle — so the stored snapshot IS the fresh
+		// state for gate purposes. Feed it back as `fresh` so quiet repos
+		// keep the skip optimization the REST conditional request earns.
+		fresh, ok := discoveredBySourceID[e.SourceID]
+		if !ok && quietRepos[snap.Repo] {
+			fresh, ok = snap, true
+		}
+		if ok && shouldSkipRefresh(snap, fresh, age) {
 			// Skipped entities won't be diffed, so reconcile stale
 			// review_requested tasks here. Entities proceeding to
 			// DiffPRSnapshots emit their own review_request_removed events.
@@ -325,37 +340,69 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 // maxSearchQueryLen is GitHub's limit for the q= search parameter.
 const maxSearchQueryLen = 256
 
-// discoverGitHub runs search queries to find new PRs.
-func (t *Tracker) discoverGitHub(client *ghclient.Client, username string, repos []string) ([]ghclient.DiscoveredPR, error) {
-	since := time.Now().AddDate(0, 0, -30).Format("2006-01-02")
-	bases := []string{
-		// Active / actionable
-		fmt.Sprintf("is:pr is:open review-requested:%s", username),
-		fmt.Sprintf("is:pr is:open author:%s", username),
-		fmt.Sprintf("is:pr is:open mentions:%s", username),
-		// Active PRs you've reviewed (may still need attention)
-		fmt.Sprintf("is:pr is:open reviewed-by:%s", username),
-		// Backfill for dashboard — merged/closed in last 30 days
-		fmt.Sprintf("is:pr is:merged author:%s merged:>=%s", username, since),
-		fmt.Sprintf("is:pr is:merged reviewed-by:%s merged:>=%s", username, since),
-		fmt.Sprintf("is:pr is:closed is:unmerged author:%s closed:>=%s", username, since),
-		fmt.Sprintf("is:pr is:closed is:unmerged reviewed-by:%s closed:>=%s", username, since),
-	}
-
-	var queries []string
-	for _, base := range bases {
-		queries = append(queries, scopedQueries(base, repos)...)
-	}
-
+// discoverGitHub finds open PRs in the configured repo set by enumeration:
+// for each repo it lists open PRs via REST (GET /pulls?state=open) with a
+// conditional request keyed on the stored ETag. This gives PAT and App
+// installation tokens parity of mechanism — they differ only in which repos
+// the token can reach — and moves discovery onto the roomier core REST budget
+// (conditional 304s are free on the primary rate limit).
+//
+// Returns the discovered PRs and the set of "owner/repo" that returned 304
+// (unchanged open set this cycle). A 304 repo's tracked entities can keep
+// their stored snapshot through the Phase-2 gate.
+//
+// When username is non-empty (the local/PAT perspective — App tokens have no
+// "me"), it additionally runs the merged/closed 30-day dashboard backfill via
+// GraphQL search to seed recent-history entities the dashboard reads. That
+// backfill is inherently user-perspective and stays local/PAT-only;
+// multi-mode dashboard history is out of scope.
+func (t *Tracker) discoverGitHub(client *ghclient.Client, username string, repos []string) ([]ghclient.DiscoveredPR, map[string]bool, error) {
 	seen := map[string]bool{}
 	var all []ghclient.DiscoveredPR
+	quiet := map[string]bool{}
 
-	for _, q := range queries {
-		prs, err := client.DiscoverPRs(q, 50)
-		if err != nil {
-			log.Printf("[tracker] discovery query failed: %v (query: %s)", err, q)
+	ctx := context.Background()
+
+	// Phase 1a: per-repo conditional open-PR enumeration. Sequential — the
+	// per-repo sweep is paced to respect GitHub's secondary (concurrency /
+	// burst) limits, which a parallel fan-out would trip even though the
+	// conditional 304s are free on the primary limit.
+	for _, repoFull := range repos {
+		owner, name := splitOwnerRepo(repoFull)
+		if owner == "" || name == "" {
 			continue
 		}
+
+		etag := ""
+		if t.repos != nil {
+			if stored, _, err := t.repos.GetPullsPollStateSystem(ctx, t.orgID, repoFull); err != nil {
+				log.Printf("[tracker] read pulls poll state for %s: %v", repoFull, err)
+			} else {
+				etag = stored
+			}
+		}
+
+		prs, newEtag, notModified, err := client.ListOpenPRs(owner, name, etag)
+		if err != nil {
+			// 403/404 means the token can't reach this configured repo (a
+			// PAT user without access, or an App not installed on it) — skip
+			// and log rather than aborting the whole sweep.
+			var he *ghclient.HTTPError
+			if errors.As(err, &he) && (he.StatusCode == 403 || he.StatusCode == 404) {
+				log.Printf("[tracker] discovery: %s unreachable (HTTP %d) — skipping", repoFull, he.StatusCode)
+				continue
+			}
+			log.Printf("[tracker] discovery: list open PRs for %s failed: %v", repoFull, err)
+			continue
+		}
+
+		if notModified {
+			quiet[repoFull] = true
+			t.recordPullsPoll(ctx, repoFull, etag) // advance polled_at, keep etag
+			continue
+		}
+
+		t.recordPullsPoll(ctx, repoFull, newEtag)
 		for _, pr := range prs {
 			sid := ghSourceID(pr.Snapshot.Repo, pr.Snapshot.Number)
 			if !seen[sid] {
@@ -365,7 +412,61 @@ func (t *Tracker) discoverGitHub(client *ghclient.Client, username string, repos
 		}
 	}
 
-	return all, nil
+	// Phase 1b: merged/closed dashboard backfill (local/PAT-only). Seeds
+	// recent-history entities via user-perspective GraphQL search. App tokens
+	// have no "me", so this is skipped when username is empty.
+	if username != "" {
+		since := time.Now().AddDate(0, 0, -30).Format("2006-01-02")
+		bases := []string{
+			fmt.Sprintf("is:pr is:merged author:%s merged:>=%s", username, since),
+			fmt.Sprintf("is:pr is:merged reviewed-by:%s merged:>=%s", username, since),
+			fmt.Sprintf("is:pr is:closed is:unmerged author:%s closed:>=%s", username, since),
+			fmt.Sprintf("is:pr is:closed is:unmerged reviewed-by:%s closed:>=%s", username, since),
+		}
+		var queries []string
+		for _, base := range bases {
+			queries = append(queries, scopedQueries(base, repos)...)
+		}
+		for _, q := range queries {
+			prs, err := client.DiscoverPRs(q, 50)
+			if err != nil {
+				log.Printf("[tracker] dashboard backfill query failed: %v (query: %s)", err, q)
+				continue
+			}
+			for _, pr := range prs {
+				sid := ghSourceID(pr.Snapshot.Repo, pr.Snapshot.Number)
+				if !seen[sid] {
+					seen[sid] = true
+					all = append(all, pr)
+				}
+			}
+		}
+	}
+
+	return all, quiet, nil
+}
+
+// recordPullsPoll persists the conditional-request state for a repo after a
+// successful list (200 or 304). Best-effort — a write failure just means the
+// next cycle re-lists unconditionally, costing one primary-limit request.
+func (t *Tracker) recordPullsPoll(ctx context.Context, repoFull, etag string) {
+	if t.repos == nil {
+		return
+	}
+	if err := t.repos.SetPullsPollStateSystem(ctx, t.orgID, repoFull, etag, time.Now()); err != nil {
+		log.Printf("[tracker] write pulls poll state for %s: %v", repoFull, err)
+	}
+}
+
+// splitOwnerRepo splits an "owner/repo" slug at the first slash. Returns
+// empty halves for a malformed entry (no slash), which the caller skips.
+func splitOwnerRepo(s string) (owner, repo string) {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '/' {
+			return s[:i], s[i+1:]
+		}
+	}
+	return s, ""
 }
 
 // backfillReviewRequested publishes a synthesized pr:review_requested
