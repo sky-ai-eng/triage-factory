@@ -35,23 +35,22 @@ type Server struct {
 	teamAgents    db.TeamAgentStore // SKY-261 D-Claims: re-checks team_agents.enabled on swipe-delegate / factory-delegate
 	users         db.UsersStore     // SKY-264: github_username + display_name on the synthetic local user row
 	chains        db.ChainStore
-	tasks         db.TaskStore             // SKY-283: task lifecycle, claim, queue + factory snapshot reads
-	factory       db.FactoryReadStore      // SKY-292: factory snapshot reads
-	agentRuns     db.AgentRunStore         // SKY-285: agent run lifecycle + transcript + yields
-	entities      db.EntityStore           // SKY-284: entity reads/writes for dashboard, factory_handler, stock, backfill, project_entities
-	reviews       db.ReviewStore           // SKY-286: pending_reviews CRUD for reviews handler, swipe-discard, agent status payload
-	pendingPRs    db.PendingPRStore        // SKY-287: pending_prs CRUD for pending_prs handler, agent status payload, drag-back-to-queue cleanup
-	repos         db.RepoStore             // SKY-288: repo_profiles CRUD for repos/settings/projects handlers and curator pinned-repo materialization
-	projects      db.ProjectStore          // SKY-290: projects CRUD for projects/curator/backfill/project_entities handlers
-	curatorStore  db.CuratorStore          // curator-runtime CRUD (curator_requests / curator_messages / curator_pending_context) — handler-side writes go through here so Postgres mode honors RLS and uses the right placeholder syntax
-	events        db.EventStore            // SKY-305: events audit log Record/Latest for stock carry-over + factory drag-to-delegate
-	taskMemory    db.TaskMemoryStore       // run_memory writes (human verdict capture on review/PR submit, swipe-discard cleanup)
-	secrets       db.SecretStore           // canonical credential read/write path — local-mode keychain, multi-mode vault
-	teams         db.TeamsStore            // resolves the request org's default team for handlers that synthesize team-scoped rows (tasks, projects, prompts)
-	orgs          db.OrgsStore             // per-org settings (GitHub/Jira base URLs, poll intervals, clone protocol) post-internal/config deletion
-	jiraRules     db.JiraStatusRulesStore  // per-team Jira status rules (replaces the deleted config.Jira.Projects view)
-	githubGroups  db.TeamGitHubGroupsStore // per-team GitHub-team → TF-team review-request routing mappings (+ deletion-reconcile prune)
-	githubApps    db.GitHubAppsStore       // per-org GitHub App registrations (manifest flow)
+	tasks         db.TaskStore            // SKY-283: task lifecycle, claim, queue + factory snapshot reads
+	factory       db.FactoryReadStore     // SKY-292: factory snapshot reads
+	agentRuns     db.AgentRunStore        // SKY-285: agent run lifecycle + transcript + yields
+	entities      db.EntityStore          // SKY-284: entity reads/writes for dashboard, factory_handler, stock, backfill, project_entities
+	reviews       db.ReviewStore          // SKY-286: pending_reviews CRUD for reviews handler, swipe-discard, agent status payload
+	pendingPRs    db.PendingPRStore       // SKY-287: pending_prs CRUD for pending_prs handler, agent status payload, drag-back-to-queue cleanup
+	repos         db.RepoStore            // SKY-288: repo_profiles CRUD for repos/settings/projects handlers and curator pinned-repo materialization
+	projects      db.ProjectStore         // SKY-290: projects CRUD for projects/curator/backfill/project_entities handlers
+	curatorStore  db.CuratorStore         // curator-runtime CRUD (curator_requests / curator_messages / curator_pending_context) — handler-side writes go through here so Postgres mode honors RLS and uses the right placeholder syntax
+	events        db.EventStore           // SKY-305: events audit log Record/Latest for stock carry-over + factory drag-to-delegate
+	taskMemory    db.TaskMemoryStore      // run_memory writes (human verdict capture on review/PR submit, swipe-discard cleanup)
+	secrets       db.SecretStore          // canonical credential read/write path — local-mode keychain, multi-mode vault
+	teams         db.TeamsStore           // resolves the request org's default team for handlers that synthesize team-scoped rows (tasks, projects, prompts)
+	orgs          db.OrgsStore            // per-org settings (GitHub/Jira base URLs, poll intervals, clone protocol) post-internal/config deletion
+	jiraRules     db.JiraStatusRulesStore // per-team Jira status rules (replaces the deleted config.Jira.Projects view)
+	githubApps    db.GitHubAppsStore      // per-org GitHub App registrations (manifest flow)
 	// takeoverDir is the raw instance_config.server_takeover_dir
 	// value read once at boot — may be empty, "~/..." or an
 	// absolute path. Call sites (handleAgentTakeover, Spawner's
@@ -294,7 +293,6 @@ func New(database *sql.DB, stores db.Stores, takeoverDir string, serverPort int)
 		teams:         stores.Teams,
 		orgs:          stores.Orgs,
 		jiraRules:     stores.JiraStatusRules,
-		githubGroups:  stores.TeamGitHubGroups,
 		githubApps:    stores.GitHubApps,
 		tx:            stores.Tx,
 		takeoverDir:   takeoverDir,

@@ -28,16 +28,17 @@ type Manager struct {
 	// because each poll cycle constructs one Tracker per active org —
 	// orgID is a per-tracker construction parameter, not a per-call
 	// argument. See the per-org loops in runGitHubCycle / runJiraCycle.
-	tasks     db.TaskStore
-	entities  db.EntityStore
-	users     db.UsersStore           // source of the session user's github_username
-	repos     db.RepoStore            // configured-repo names for GitHub poller startup
-	orgs      db.OrgsStore            // enumerate active orgs at each poll tick + per-org settings (GitHub/Jira base URLs, poll intervals)
-	teams     db.TeamsStore           // resolve each org's default team for per-team Jira project rules
-	jiraRules db.JiraStatusRulesStore // per-team Jira project rules (replaces deleted config.Jira.Projects)
-	secrets   db.SecretStore          // integration creds via SecretStore (keychain in local, vault in multi)
-	apps      db.GitHubAppsStore      // per-org App installations + local-NAT backfill for per-installation polling
-	resolver  ghclient.Resolver       // per-cycle, per-installation GitHub client resolution (App installation token → PAT)
+	tasks        db.TaskStore
+	entities     db.EntityStore
+	users        db.UsersStore            // source of the session user's github_username
+	repos        db.RepoStore             // configured-repo names for GitHub poller startup
+	orgs         db.OrgsStore             // enumerate active orgs at each poll tick + per-org settings (GitHub/Jira base URLs, poll intervals)
+	teams        db.TeamsStore            // resolve each org's default team for per-team Jira project rules
+	jiraRules    db.JiraStatusRulesStore  // per-team Jira project rules (replaces deleted config.Jira.Projects)
+	githubGroups db.TeamGitHubGroupsStore // GitHub-team → TF-team mappings; reconciled (stale-team prune) each GitHub cycle
+	secrets      db.SecretStore           // integration creds via SecretStore (keychain in local, vault in multi)
+	apps         db.GitHubAppsStore       // per-org App installations + local-NAT backfill for per-installation polling
+	resolver     ghclient.Resolver        // per-cycle, per-installation GitHub client resolution (App installation token → PAT)
 
 	// OnError fires when a poll cycle returns an error. Source is "github"
 	// or "jira"; orgID identifies the tenant whose cycle errored (empty
@@ -52,20 +53,21 @@ type Manager struct {
 	jiraStop chan struct{}
 }
 
-func NewManager(database *sql.DB, bus *eventbus.Bus, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore, orgs db.OrgsStore, teams db.TeamsStore, jiraRules db.JiraStatusRulesStore, secrets db.SecretStore, apps db.GitHubAppsStore, resolver ghclient.Resolver) *Manager {
+func NewManager(database *sql.DB, bus *eventbus.Bus, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore, orgs db.OrgsStore, teams db.TeamsStore, jiraRules db.JiraStatusRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, resolver ghclient.Resolver) *Manager {
 	return &Manager{
-		database:  database,
-		bus:       bus,
-		tasks:     tasks,
-		entities:  entities,
-		users:     users,
-		repos:     repos,
-		orgs:      orgs,
-		teams:     teams,
-		jiraRules: jiraRules,
-		secrets:   secrets,
-		apps:      apps,
-		resolver:  resolver,
+		database:     database,
+		bus:          bus,
+		tasks:        tasks,
+		entities:     entities,
+		users:        users,
+		repos:        repos,
+		orgs:         orgs,
+		teams:        teams,
+		jiraRules:    jiraRules,
+		githubGroups: githubGroups,
+		secrets:      secrets,
+		apps:         apps,
+		resolver:     resolver,
 	}
 }
 
@@ -286,6 +288,12 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		return
 	}
 
+	// Reconcile the GitHub-team mappings against the live team set — the
+	// deletion floor's "periodic refresh" trigger, independent of the
+	// poll-dispatch path below so it runs whether the org polls via App
+	// or PAT.
+	m.reconcileGitHubGroups(ctx, orgID, repos)
+
 	isLocal := runmode.Current() == runmode.ModeLocal
 
 	var installs []domain.OrgGitHubAppInstallation
@@ -368,6 +376,64 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	for _, r := range repos {
 		if !covered[r] {
 			log.Printf("[github] org %s: configured repo %s not in any App installation grant — skipping", orgID, r)
+		}
+	}
+}
+
+// reconcileGitHubGroups is the GitHub-team-deletion reconcile floor — the
+// "periodic refresh" trigger the SKY-369 lifecycle describes, run every
+// GitHub poll cycle so team_github_groups stays fresh for the routing layer
+// without depending on someone opening the settings page. For each distinct
+// GitHub org behind the configured repos it fetches the live team set and
+// prunes mapping rows pointing at teams that no longer exist.
+//
+// Credentials resolve through the same per-owner resolver the poll dispatch
+// uses (App installation token → org PAT), so it's always the single
+// org-level identity — the editor can only create a mapping for a team that
+// identity can see, so a present team is never wrongly pruned. Non-destructive
+// on uncertainty: owners with no credential or an unreadable org are skipped,
+// a fetch error never prunes, and an empty team list is skipped (an empty
+// result is ambiguous — a user account or zero visibility — where "delete
+// everything for this org" would be wrong). A non-empty list is the org
+// credential's authoritative view, so a missing slug is a real deletion.
+func (m *Manager) reconcileGitHubGroups(ctx context.Context, orgID string, repos []string) {
+	if m.githubGroups == nil {
+		return
+	}
+	seen := map[string]bool{}
+	for _, full := range repos {
+		owner, _, ok := strings.Cut(full, "/")
+		owner = strings.ToLower(strings.TrimSpace(owner))
+		if !ok || owner == "" || seen[owner] {
+			continue
+		}
+		seen[owner] = true
+
+		client, err := m.resolver.ClientFor(ctx, orgID, owner)
+		if err != nil {
+			if !errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+				log.Printf("[github-groups] org %s: resolve client for %s: %v", orgID, owner, err)
+			}
+			continue
+		}
+		teams, err := client.ListOrgTeams(owner)
+		if err != nil {
+			log.Printf("[github-groups] org %s: list teams for %s: %v", orgID, owner, err)
+			continue
+		}
+		slugs := make([]string, 0, len(teams))
+		for _, t := range teams {
+			if t.Slug != "" {
+				slugs = append(slugs, t.Slug)
+			}
+		}
+		if len(slugs) == 0 {
+			continue
+		}
+		if n, err := m.githubGroups.PruneMissingSystem(ctx, orgID, owner, slugs); err != nil {
+			log.Printf("[github-groups] org %s: reconcile prune for %s: %v", orgID, owner, err)
+		} else if n > 0 {
+			log.Printf("[github-groups] org %s: pruned %d stale mapping(s) for deleted GitHub teams under %s", orgID, n, owner)
 		}
 	}
 }
