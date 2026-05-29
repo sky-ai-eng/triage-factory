@@ -59,11 +59,27 @@ func (s *Server) handleTeamGitHubGroupsGet(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Resolve the caller's role first: candidates are fetched with the
+	// org-level GitHub credential, NOT through RLS, so a non-member of
+	// this team would otherwise enumerate the org's GitHub team names
+	// through it even though the stored mappings (ListForTeam, below) are
+	// RLS-empty for them. Gate the fetch on membership — role=="" means
+	// the caller isn't on this team, so they get no candidates (and we
+	// skip the GitHub API round-trip).
+	_, role, err := s.teamMemberCountAndRole(r.Context(), orgID, userID, teamID)
+	if err != nil {
+		internalError(w, "settings/team/github-groups", err)
+		return
+	}
+
 	// Import-and-choose: fetch the org's live GitHub teams as candidates
 	// (read-only). The deletion-reconcile prune runs in the GitHub poll
 	// cycle, not here, so this GET never mutates — stale mappings just
 	// show flagged "not found" until the next cycle prunes them.
-	candidates := s.gitHubGroupCandidates(r.Context(), orgID, userID)
+	candidates := []gitHubGroupCandidateJSON{}
+	if role != "" {
+		candidates = s.gitHubGroupCandidates(r.Context(), orgID, userID)
+	}
 
 	var groups []domain.TeamGitHubGroup
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -71,12 +87,6 @@ func (s *Server) handleTeamGitHubGroupsGet(w http.ResponseWriter, r *http.Reques
 		groups, e = tx.TeamGitHubGroups.ListForTeam(r.Context(), teamID)
 		return e
 	}); err != nil {
-		internalError(w, "settings/team/github-groups", err)
-		return
-	}
-
-	_, role, err := s.teamMemberCountAndRole(r.Context(), orgID, userID, teamID)
-	if err != nil {
 		internalError(w, "settings/team/github-groups", err)
 		return
 	}

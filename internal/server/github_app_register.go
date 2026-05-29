@@ -181,6 +181,13 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 			"metadata":      "read",
 			"checks":        "read",
 			"actions":       "read",
+			// members:read is required for GET /orgs/{org}/teams under an
+			// App installation token — without it the team-mapping import
+			// (settings/team/.../github-groups) and the poller's
+			// deletion-reconcile both 403 and silently see zero teams in
+			// App-only orgs (no PAT fallback). Read-only: TF lists teams,
+			// never edits membership.
+			"members": "read",
 		},
 		"default_events": []string{
 			"pull_request",
