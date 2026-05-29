@@ -377,7 +377,16 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	// rest no-op). The per-team kill switch is checked per firing team.
 	// Triggers with min_autonomy_suitability > 0 still defer to
 	// post-scoring re-derive.
-	for teamID, triggers := range teamTriggers {
+	//
+	// Iterate the sorted visibleTeams (not the map) so the firing order
+	// is deterministic: the first acting team's claim consolidates the
+	// owner, and identical deliveries must pick the same one rather than
+	// depending on Go's randomized map iteration.
+	for _, teamID := range visibleTeams {
+		triggers := teamTriggers[teamID]
+		if len(triggers) == 0 {
+			continue
+		}
 		if !r.autoDelegateEnabledForTeam(context.Background(), teamID) {
 			continue
 		}
@@ -1008,15 +1017,36 @@ func (r *Router) reDeriveTask(orgID, taskID string) {
 		return
 	}
 
+	// The task's recorded visibility set — the teams whose handlers
+	// matched the original event. Re-derive re-queries every enabled
+	// trigger for the event type, so without this gate a trigger whose
+	// team was never part of the situation (enabled after the fact, or
+	// otherwise absent from the match) could match the stored metadata,
+	// fire, and consolidate ownership onto a task that team can't see.
+	// The owner team_id always grants visibility, so it qualifies too.
+	visibleTeams, err := r.tasks.VisibilityTeamsSystem(context.Background(), orgID, taskID)
+	if err != nil {
+		log.Printf("[router] re-derive: failed to fetch visibility teams for task %s: %v", taskID, err)
+		return
+	}
+	visibleSet := map[string]struct{}{task.TeamID: {}}
+	for _, vt := range visibleTeams {
+		visibleSet[vt] = struct{}{}
+	}
+
 	for _, trigger := range handlers {
 		if trigger.Kind != domain.EventHandlerKindTrigger {
 			continue
 		}
 		// Each matched team's deferred trigger fires against the single
-		// task; the claim CAS resolves contention. Gate on the firing
-		// team's own auto_delegate kill switch — not the task's owner —
-		// so a team with the switch off can't ride another team's task.
+		// task; the claim CAS resolves contention. Gate first on the
+		// task's recorded visibility set so a team that wasn't part of
+		// the original match can't ride (and claim) a task it can't see,
+		// then on the firing team's own auto_delegate kill switch.
 		firingTeam := handlerTeamID(trigger)
+		if _, visible := visibleSet[firingTeam]; !visible {
+			continue
+		}
 		if !r.autoDelegateEnabledForTeam(context.Background(), firingTeam) {
 			continue
 		}

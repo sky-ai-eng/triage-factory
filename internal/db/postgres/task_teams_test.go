@@ -86,6 +86,49 @@ func TestTaskTeams_VisibilityAndClaimConsolidation(t *testing.T) {
 	}
 }
 
+// TestTaskTeams_ClaimPrefersOwnerWhenAmbiguous pins the acting-team
+// derivation for a claimer who belongs to more than one team in the
+// visibility set: the existing owner team is kept (not arbitrarily
+// reassigned to the lowest id), honoring the "keep owner when
+// ambiguous" contract. The chosen team is still always one the claimer
+// belongs to, which the RLS update check requires.
+func TestTaskTeams_ClaimPrefersOwnerWhenAmbiguous(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+
+	// alice owns teamA (via SeedOrgWithUser) and is also added to teamB.
+	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
+	teamB := pgtest.SeedTeam(t, h, orgA, "teamb")
+	pgtest.MustExec(t, h.AdminDB,
+		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, alice, teamB)
+
+	// Owner is teamA; visibility set is {teamA, teamB} and alice is in
+	// both — the ambiguous case.
+	taskID := seedSharedTask(t, h, orgA, alice, teamA, []string{teamA, teamB})
+
+	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		ok, e := pgstore.NewForTx(tx).Tasks.ClaimQueuedForUser(ctx, orgA, taskID, alice)
+		if e != nil {
+			return e
+		}
+		if !ok {
+			t.Error("alice's claim returned ok=false on an unclaimed task")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("alice claim path: %v", err)
+	}
+
+	var ownerTeam string
+	if err := h.AdminDB.QueryRow(`SELECT team_id FROM tasks WHERE id = $1`, taskID).Scan(&ownerTeam); err != nil {
+		t.Fatalf("read task post-claim: %v", err)
+	}
+	if ownerTeam != teamA {
+		t.Errorf("owner team_id = %q post-claim, want teamA %q (owner kept when claimer is a member and choice is ambiguous)", ownerTeam, teamA)
+	}
+}
+
 // assertVisible checks whether a user can read a task through the app
 // pool under their own JWT claims (RLS active).
 func assertVisible(t *testing.T, h *pgtest.Harness, userID, orgID, taskID string, want bool, msg string) {

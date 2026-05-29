@@ -388,6 +388,93 @@ func TestReDeriveAfterScoring_CrossTeamTrigger_Skips(t *testing.T) {
 	}
 }
 
+// TestReDeriveAfterScoring_TeamNotInVisibilitySet_Skips pins the leak
+// the visibility gate closes: a team with auto-delegation fully enabled
+// (team_settings + team_agents) and a deferred trigger matching the
+// stored event must NOT fire against — and consolidate ownership of — a
+// task whose visibility set doesn't include it. Unlike the kill-switch
+// path, here every other gate is open, so only the task_teams
+// membership check can stop the fire.
+func TestReDeriveAfterScoring_TeamNotInVisibilitySet_Skips(t *testing.T) {
+	database := newTestDB(t)
+	stores := sqlitestore.New(database)
+
+	// Entity + event + task owned by the local-default team. The task
+	// has NO task_teams rows, so its visibility set is just the owner.
+	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#novis", "pr", "No-vis PR", "https://example.com/novis")
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+	meta := events.GitHubPRCICheckFailedMetadata{Author: "aidan", CheckName: "build", Repo: "owner/repo"}
+	metaJSON, _ := json.Marshal(meta)
+	eventID, err := stores.Events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
+		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID,
+		DedupKey: "build", MetadataJSON: string(metaJSON),
+	})
+	if err != nil {
+		t.Fatalf("record event: %v", err)
+	}
+	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	// Team B: fully opted into auto-delegation, with a deferred trigger
+	// that matches the same event — but team B is NOT in the task's
+	// visibility set.
+	teamB := "00000000-0000-0000-0000-0000000000bb"
+	if _, err := database.Exec(`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, 'team-b-novis', 'Team B No-Vis')`, teamB, runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("seed team B: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO team_settings (team_id, auto_delegate_enabled) VALUES (?, 1)`, teamB); err != nil {
+		t.Fatalf("seed team B settings: %v", err)
+	}
+	if _, err := database.Exec(`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`, runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("seed agent: %v", err)
+	}
+	if err := stores.TeamAgents.AddForTeam(t.Context(), runmode.LocalDefaultOrg, teamB, runmode.LocalDefaultAgentID); err != nil {
+		t.Fatalf("add agent to team B: %v", err)
+	}
+	createTestPrompt(t, database, domain.Prompt{ID: "p-novis", Name: "No-vis", Body: "x", Source: "user"})
+	if _, err := database.Exec(`
+		INSERT INTO event_handlers
+			(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
+			 scope_predicate_json, enabled, source,
+			 prompt_id, breaker_threshold, min_autonomy_suitability,
+			 created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'team', 'trigger', ?,
+		        NULL, 1, 'user',
+		        ?, 4, 0.6,
+		        datetime('now'), datetime('now'))
+	`, "trigger-novis", runmode.LocalDefaultOrg, teamB, runmode.LocalDefaultUserID,
+		domain.EventGitHubPRCICheckFailed, "p-novis"); err != nil {
+		t.Fatalf("seed team B trigger: %v", err)
+	}
+
+	// Score above the threshold so the only thing standing between team
+	// B's trigger and a fire is the visibility gate.
+	if err := updateScores(t, database, []domain.TaskScoreUpdate{{
+		ID: task.ID, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "test",
+	}}); err != nil {
+		t.Fatalf("update scores: %v", err)
+	}
+
+	stub := &stubDelegator{db: database}
+	router := NewRouter(testPromptStore(database), testEventHandlerStore(database), stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, stub, noopScorer{}, websocket.NewHub())
+	router.ReDeriveAfterScoring(runmode.LocalDefaultOrg, []string{task.ID})
+
+	if stub.calls != 0 {
+		t.Errorf("team B trigger delegated (%d calls) despite team B not being in the task's visibility set", stub.calls)
+	}
+	got, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrg, task.ID)
+	if got.ClaimedByAgentID != "" {
+		t.Errorf("task claimed by agent (%q); a team outside the visibility set must not consolidate ownership", got.ClaimedByAgentID)
+	}
+	if got.TeamID != runmode.LocalDefaultTeamID {
+		t.Errorf("owner team_id = %q, want unchanged %q (no cross-team consolidation)", got.TeamID, runmode.LocalDefaultTeamID)
+	}
+}
+
 func TestReDeriveAfterScoring_ZeroThresholdTrigger_SkippedByReDerive(t *testing.T) {
 	database := newTestDB(t)
 

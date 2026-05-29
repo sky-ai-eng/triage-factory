@@ -215,6 +215,10 @@ func (s *taskStore) SetVisibilityTeamsSystem(ctx context.Context, orgID, taskID 
 	return s.SetVisibilityTeams(ctx, orgID, taskID, teamIDs)
 }
 
+func (s *taskStore) VisibilityTeamsSystem(ctx context.Context, orgID, taskID string) ([]string, error) {
+	return s.VisibilityTeams(ctx, orgID, taskID)
+}
+
 func (s *taskStore) BumpSystem(ctx context.Context, orgID, taskID, eventID string) error {
 	return s.Bump(ctx, orgID, taskID, eventID)
 }
@@ -532,18 +536,20 @@ func (s *taskStore) VisibilityTeams(ctx context.Context, orgID, taskID string) (
 }
 
 // sqliteActingTeamExpr derives the owning team for a user-initiated
-// claim: the claimer's team that is in the task's visibility set
-// (task_teams ∩ the user's memberships). It picks the lowest team id
-// deterministically when several qualify, and falls back to the
-// task's current owning team_id when the intersection is empty — the
-// stable default until the acting-team picker lands. Bind order is
-// (taskID, userID).
+// claim: a team in the task's visibility set (task_teams) that the
+// claimer belongs to. It prefers the current owner team when the
+// claimer is a member of it — honoring "keep the owner when the choice
+// is ambiguous" — and otherwise picks the lowest-id qualifying team so
+// the result is deterministic. The existing owner team_id is kept only
+// when the intersection is empty. The result is always a team the
+// claimer belongs to, which the RLS update check requires. Bind order
+// is (taskID, userID).
 const sqliteActingTeamExpr = `COALESCE(
 		(SELECT tt.team_id
 		   FROM task_teams tt
 		   JOIN memberships m ON m.team_id = tt.team_id
 		  WHERE tt.task_id = ? AND m.user_id = ?
-		  ORDER BY tt.team_id ASC
+		  ORDER BY (tt.team_id = tasks.team_id) DESC, tt.team_id ASC
 		  LIMIT 1),
 		team_id)`
 

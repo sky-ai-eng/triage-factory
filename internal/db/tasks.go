@@ -226,10 +226,11 @@ type TaskStore interface {
 	// false means another claimant won or the task is closed.
 	//
 	// On success the owning team_id consolidates to the acting team:
-	// the claimer's team that is in the task's visibility set
-	// (task_teams). With exactly one such team it is used; with none
-	// or several the existing owner team_id is kept (the
-	// deterministic fallback until the acting-team picker lands).
+	// the claimer's team in the task's visibility set (task_teams),
+	// preferring the current owner team when the claimer belongs to it
+	// and otherwise the lowest-id such team. The existing owner is kept
+	// only when the intersection is empty. The result is always a team
+	// the claimer is a member of, which the RLS update check requires.
 	ClaimQueuedForUser(ctx context.Context, orgID, taskID, userID string) (bool, error)
 
 	// --- Breaker ---
@@ -261,6 +262,7 @@ type TaskStore interface {
 	FindActiveByEntitySystem(ctx context.Context, orgID, entityID string) ([]domain.Task, error)
 	FindOrCreateAtSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error)
 	SetVisibilityTeamsSystem(ctx context.Context, orgID, taskID string, teamIDs []string) error
+	VisibilityTeamsSystem(ctx context.Context, orgID, taskID string) ([]string, error)
 	BumpSystem(ctx context.Context, orgID, taskID, eventID string) error
 	CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error
 	CloseAllForEntitySystem(ctx context.Context, orgID, entityID, closeReason string) (int, error)

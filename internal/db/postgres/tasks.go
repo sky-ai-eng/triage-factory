@@ -308,7 +308,15 @@ func setVisibilityTeams(ctx context.Context, q queryer, orgID, taskID string, te
 }
 
 func (s *taskStore) VisibilityTeams(ctx context.Context, orgID, taskID string) ([]string, error) {
-	rows, err := s.q.QueryContext(ctx, `SELECT team_id FROM task_teams WHERE task_id = $1::uuid`, taskID)
+	return visibilityTeams(ctx, s.q, taskID)
+}
+
+func (s *taskStore) VisibilityTeamsSystem(ctx context.Context, orgID, taskID string) ([]string, error) {
+	return visibilityTeams(ctx, s.admin, taskID)
+}
+
+func visibilityTeams(ctx context.Context, q queryer, taskID string) ([]string, error) {
+	rows, err := q.QueryContext(ctx, `SELECT team_id FROM task_teams WHERE task_id = $1::uuid`, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -621,7 +629,7 @@ func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentI
 		           (SELECT tt.team_id FROM task_teams tt
 		              JOIN memberships m ON m.team_id = tt.team_id
 		             WHERE tt.task_id = $3 AND m.user_id = $4
-		             ORDER BY tt.team_id ASC LIMIT 1),
+		             ORDER BY (tt.team_id = tasks.team_id) DESC, tt.team_id ASC LIMIT 1),
 		           team_id),
 		       snooze_until = NULL,
 		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
@@ -676,7 +684,7 @@ func (s *taskStore) TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, u
 		           (SELECT tt.team_id FROM task_teams tt
 		              JOIN memberships m ON m.team_id = tt.team_id
 		             WHERE tt.task_id = $3 AND m.user_id = $1
-		             ORDER BY tt.team_id ASC LIMIT 1),
+		             ORDER BY (tt.team_id = tasks.team_id) DESC, tt.team_id ASC LIMIT 1),
 		           team_id),
 		       snooze_until = NULL,
 		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
@@ -706,7 +714,7 @@ func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userI
 		           (SELECT tt.team_id FROM task_teams tt
 		              JOIN memberships m ON m.team_id = tt.team_id
 		             WHERE tt.task_id = $3 AND m.user_id = $1
-		             ORDER BY tt.team_id ASC LIMIT 1),
+		             ORDER BY (tt.team_id = tasks.team_id) DESC, tt.team_id ASC LIMIT 1),
 		           team_id),
 		       snooze_until = NULL,
 		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
