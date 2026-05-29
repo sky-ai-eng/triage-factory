@@ -211,6 +211,10 @@ func (s *taskStore) FindOrCreateAtSystem(ctx context.Context, orgID, teamID, ent
 	return s.FindOrCreateAt(ctx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt)
 }
 
+func (s *taskStore) SetVisibilityTeamsSystem(ctx context.Context, orgID, taskID string, teamIDs []string) error {
+	return s.SetVisibilityTeams(ctx, orgID, taskID, teamIDs)
+}
+
 func (s *taskStore) BumpSystem(ctx context.Context, orgID, taskID, eventID string) error {
 	return s.Bump(ctx, orgID, taskID, eventID)
 }
@@ -235,8 +239,8 @@ func (s *taskStore) CountConsecutiveFailedRunsSystem(ctx context.Context, orgID,
 	return s.CountConsecutiveFailedRuns(ctx, orgID, entityID, promptID)
 }
 
-func (s *taskStore) StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID string) (bool, error) {
-	return s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID)
+func (s *taskStore) StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error) {
+	return s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID, actingTeamID)
 }
 
 func (s *taskStore) FindActiveByEntity(ctx context.Context, orgID, entityID string) ([]domain.Task, error) {
@@ -341,20 +345,21 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID,
 		return nil, false, err
 	}
 	if teamID == "" {
-		return nil, false, fmt.Errorf("sqlite task store: team_id required (SKY-295: dedup is per-team; caller must thread the matched event_handler's team or runmode.LocalDefaultTeamID)")
+		return nil, false, fmt.Errorf("sqlite task store: team_id required (it stamps the owning team on a newly created task; caller must thread the matched event_handler's team or runmode.LocalDefaultTeamID)")
 	}
-	// Try to find an existing active task first. Dedup is per-team
-	// (SKY-295) — same (entity, event_type, dedup_key) in another
-	// team gets its own task.
+	// Try to find an existing active task first. Identity is
+	// (entity, event_type, dedup_key) — team is not part of it, so a
+	// situation already tasked by another team's rule returns that
+	// task here rather than spawning a duplicate.
 	var existing domain.Task
 	err := scanTaskFromRow(s.q.QueryRowContext(ctx, `
 		SELECT `+sqliteTaskColumnsWithEntity+`
 		FROM tasks t
 		JOIN entities e ON t.entity_id = e.id
-		WHERE t.entity_id = ? AND t.event_type = ? AND t.dedup_key = ? AND t.team_id = ?
+		WHERE t.entity_id = ? AND t.event_type = ? AND t.dedup_key = ?
 			AND t.status NOT IN ('done', 'dismissed')
 		LIMIT 1
-	`, entityID, eventType, dedupKey, teamID), &existing)
+	`, entityID, eventType, dedupKey), &existing)
 	if err == nil {
 		return &existing, false, nil
 	}
@@ -363,14 +368,14 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID,
 	}
 
 	// Create new task. The partial unique index on
-	// (entity_id, event_type, dedup_key, team_id) WHERE status NOT IN
+	// (entity_id, event_type, dedup_key) WHERE status NOT IN
 	// ('done', 'dismissed') is the race backstop: a concurrent
 	// goroutine that races past the SELECT will get rejected on
 	// INSERT, and we re-read to return the winner's row.
 	id := uuid.New().String()
-	// team_id + visibility populated explicitly per SKY-262: post-
-	// migration the team-scoped queue derived filter requires team_id
-	// on every task, and 'team' is the canonical visibility.
+	// team_id is the owning/attributed team; 'team' is the canonical
+	// visibility. The broader visibility set is written separately via
+	// SetVisibilityTeams.
 	_, err = s.q.ExecContext(ctx, `
 		INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id,
 		                   status, priority_score, scoring_status, created_at,
@@ -383,10 +388,10 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID,
 			SELECT `+sqliteTaskColumnsWithEntity+`
 			FROM tasks t
 			JOIN entities e ON t.entity_id = e.id
-			WHERE t.entity_id = ? AND t.event_type = ? AND t.dedup_key = ? AND t.team_id = ?
+			WHERE t.entity_id = ? AND t.event_type = ? AND t.dedup_key = ?
 				AND t.status NOT IN ('done', 'dismissed')
 			LIMIT 1
-		`, entityID, eventType, dedupKey, teamID), &raced)
+		`, entityID, eventType, dedupKey), &raced)
 		if err2 == nil {
 			return &raced, false, nil
 		}
@@ -489,6 +494,59 @@ func (s *taskStore) RecordEvent(ctx context.Context, orgID, taskID, eventID, kin
 	return err
 }
 
+func (s *taskStore) SetVisibilityTeams(ctx context.Context, orgID, taskID string, teamIDs []string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	for _, teamID := range teamIDs {
+		if teamID == "" {
+			continue
+		}
+		if _, err := s.q.ExecContext(ctx, `
+			INSERT OR IGNORE INTO task_teams (task_id, team_id) VALUES (?, ?)
+		`, taskID, teamID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *taskStore) VisibilityTeams(ctx context.Context, orgID, taskID string) ([]string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `SELECT team_id FROM task_teams WHERE task_id = ?`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// sqliteActingTeamExpr derives the owning team for a user-initiated
+// claim: the claimer's team that is in the task's visibility set
+// (task_teams ∩ the user's memberships). It picks the lowest team id
+// deterministically when several qualify, and falls back to the
+// task's current owning team_id when the intersection is empty — the
+// stable default until the acting-team picker lands. Bind order is
+// (taskID, userID).
+const sqliteActingTeamExpr = `COALESCE(
+		(SELECT tt.team_id
+		   FROM task_teams tt
+		   JOIN memberships m ON m.team_id = tt.team_id
+		  WHERE tt.task_id = ? AND m.user_id = ?
+		  ORDER BY tt.team_id ASC
+		  LIMIT 1),
+		team_id)`
+
 // --- Claim mutations ---
 
 func (s *taskStore) SetClaimedByAgent(ctx context.Context, orgID, taskID, agentID string) error {
@@ -527,23 +585,27 @@ func (s *taskStore) SetClaimedByUser(ctx context.Context, orgID, taskID, userID 
 	return err
 }
 
-func (s *taskStore) StampAgentClaimIfUnclaimed(ctx context.Context, orgID, taskID, agentID string) (bool, error) {
+func (s *taskStore) StampAgentClaimIfUnclaimed(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
 	if agentID == "" {
 		return false, fmt.Errorf("StampAgentClaimIfUnclaimed: empty agentID")
 	}
+	// actingTeamID is the firing trigger's team; on a successful claim
+	// it consolidates the card to that owning team. Empty leaves
+	// team_id unchanged.
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE tasks
 		   SET claimed_by_agent_id = ?,
+		       team_id = COALESCE(NULLIF(?, ''), team_id),
 		       snooze_until = NULL,
 		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
 		 WHERE id = ?
 		   AND claimed_by_user_id IS NULL
 		   AND (claimed_by_agent_id IS NULL OR claimed_by_agent_id != ?)
 		   AND status NOT IN ('done', 'dismissed')
-	`, agentID, taskID, agentID)
+	`, agentID, actingTeamID, taskID, agentID)
 	if err != nil {
 		return false, err
 	}
@@ -568,13 +630,14 @@ func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentI
 		UPDATE tasks
 		   SET claimed_by_agent_id = ?,
 		       claimed_by_user_id  = NULL,
+		       team_id = `+sqliteActingTeamExpr+`,
 		       snooze_until = NULL,
 		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
 		 WHERE id = ?
 		   AND (claimed_by_user_id  IS NULL OR claimed_by_user_id  = ?)
 		   AND (claimed_by_agent_id IS NULL OR claimed_by_agent_id != ?)
 		   AND status NOT IN ('done', 'dismissed')
-	`, agentID, taskID, userID, agentID)
+	`, agentID, taskID, userID, taskID, userID, agentID)
 	if err != nil {
 		return db.HandoffRefused, err
 	}
@@ -621,13 +684,14 @@ func (s *taskStore) TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, u
 		UPDATE tasks
 		   SET claimed_by_user_id  = ?,
 		       claimed_by_agent_id = NULL,
+		       team_id = `+sqliteActingTeamExpr+`,
 		       snooze_until = NULL,
 		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
 		 WHERE id = ?
 		   AND claimed_by_agent_id IS NOT NULL
 		   AND claimed_by_user_id  IS NULL
 		   AND status NOT IN ('done', 'dismissed')
-	`, userID, taskID)
+	`, userID, taskID, userID, taskID)
 	if err != nil {
 		return false, err
 	}
@@ -648,13 +712,14 @@ func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userI
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE tasks
 		   SET claimed_by_user_id = ?,
+		       team_id = `+sqliteActingTeamExpr+`,
 		       snooze_until = NULL,
 		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
 		 WHERE id = ?
 		   AND status IN ('queued', 'snoozed')
 		   AND claimed_by_user_id  IS NULL
 		   AND claimed_by_agent_id IS NULL
-	`, userID, taskID)
+	`, userID, taskID, userID, taskID)
 	if err != nil {
 		return false, err
 	}

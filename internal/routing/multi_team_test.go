@@ -3,6 +3,7 @@ package routing
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"testing"
 	"time"
 
@@ -15,12 +16,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// TestHandleEvent_MultipleTeams_FansOut pins the SKY-295 invariant:
-// when one event matches rules belonging to N different teams, the
-// router creates N tasks — one per team — instead of collapsing them
-// onto a single (entity, event_type, dedup_key) row keyed off the
-// arbitrary "oldest team in org" fallback the pre-SKY-295 SQL had.
-func TestHandleEvent_MultipleTeams_FansOut(t *testing.T) {
+// TestHandleEvent_MultipleTeams_OneTask pins the core of the task-model
+// reversal: when one event matches rules belonging to N different
+// teams, the router creates ONE task — not N. The teams are recorded
+// as a visibility set (task_teams), and the owning team_id is the
+// deterministic pick among them.
+func TestHandleEvent_MultipleTeams_OneTask(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
 
@@ -40,10 +41,9 @@ func TestHandleEvent_MultipleTeams_FansOut(t *testing.T) {
 	}
 
 	// Two user-source rules on the same event, one per team. Both
-	// match the metadata (empty predicate = match all), so the
-	// router's per-team fanout should create one task per team.
-	for i, teamID := range []string{teamA, teamB} {
-		_ = i
+	// match (empty predicate = match all), so the router records both
+	// teams in the visibility set of the single task.
+	for _, teamID := range []string{teamA, teamB} {
 		ruleID := uuid.New().String()
 		if _, err := database.Exec(`
 			INSERT INTO event_handlers
@@ -84,22 +84,36 @@ func TestHandleEvent_MultipleTeams_FansOut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list active tasks: %v", err)
 	}
-	if len(active) != 2 {
-		t.Fatalf("expected 2 active tasks (one per team), got %d", len(active))
+	if len(active) != 1 {
+		t.Fatalf("expected exactly 1 task for the situation (team is visibility, not count), got %d", len(active))
 	}
-	// IDs must be distinct (the whole point of the per-team index change).
-	if active[0].ID == active[1].ID {
-		t.Errorf("expected distinct task IDs across teams; got duplicates")
+
+	// Owner is the deterministic pick — lowest team id on a priority
+	// tie. teamA (LocalDefaultTeamID, all-zero prefix) sorts below the
+	// random teamB.
+	if active[0].TeamID != teamA {
+		t.Errorf("owner team_id = %q, want teamA %q (lowest-id tie-break)", active[0].TeamID, teamA)
+	}
+
+	// Both teams are in the visibility set.
+	vis, err := testTaskStore(database).VisibilityTeams(t.Context(), runmode.LocalDefaultOrg, active[0].ID)
+	if err != nil {
+		t.Fatalf("VisibilityTeams: %v", err)
+	}
+	sort.Strings(vis)
+	want := []string{teamA, teamB}
+	sort.Strings(want)
+	if len(vis) != 2 || vis[0] != want[0] || vis[1] != want[1] {
+		t.Errorf("visibility set = %v, want both teams %v", vis, want)
 	}
 }
 
-// TestHandleEvent_BackfillCreatedAt_PreservesOccurredAt pins SKY-295
-// (P1.2): when an event arrives with a non-zero OccurredAt (e.g. the
-// tracker's review-requested backfill stamped with the PR's
-// CreatedAt), the task's created_at should reflect when the event
-// happened, not when the router processed it. Without this the queue
-// ordering would treat a week-old review request as "just discovered"
-// and surface it above genuinely new work.
+// TestHandleEvent_BackfillCreatedAt_PreservesOccurredAt pins that when
+// an event arrives with a non-zero OccurredAt (e.g. the tracker's
+// review-requested backfill stamped with the PR's CreatedAt), the
+// task's created_at reflects when the event happened, not when the
+// router processed it. Without this the queue ordering would treat a
+// week-old review request as "just discovered."
 func TestHandleEvent_BackfillCreatedAt_PreservesOccurredAt(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
@@ -187,12 +201,12 @@ func TestHandleEvent_NoOccurredAt_FallsBackToNow(t *testing.T) {
 	}
 }
 
-// TestHandleEvent_BecameAtomic_PerTeam pins SKY-295 (P1.4): when team
-// A has an active task on a Jira entity and team B's rule also
-// matches a later jira:issue:became_atomic event, team B must still
-// get its task. The pre-SKY-295 guard's "any active task on the
-// entity → bail" check over-suppressed across teams.
-func TestHandleEvent_BecameAtomic_PerTeam(t *testing.T) {
+// TestHandleEvent_BecameAtomic_Suppressed pins that became_atomic does
+// not create a duplicate card when the entity already has an active
+// task. With one task per situation the suppression is per-task: any
+// active task on the entity blocks the belated became_atomic card,
+// regardless of which team's rule matched.
+func TestHandleEvent_BecameAtomic_Suppressed(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
 
@@ -210,7 +224,7 @@ func TestHandleEvent_BecameAtomic_PerTeam(t *testing.T) {
 		t.Fatalf("create entity: %v", err)
 	}
 
-	// Pre-seed: team A already has an assigned task on this entity.
+	// Pre-seed: an assigned task already exists on this entity.
 	priorEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
 		EventType:    domain.EventJiraIssueAssigned,
 		EntityID:     &entity.ID,
@@ -220,7 +234,7 @@ func TestHandleEvent_BecameAtomic_PerTeam(t *testing.T) {
 		t.Fatalf("record prior event: %v", err)
 	}
 	if _, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, teamA, entity.ID, domain.EventJiraIssueAssigned, "", priorEventID, 0.5); err != nil {
-		t.Fatalf("create teamA prior task: %v", err)
+		t.Fatalf("create prior assigned task: %v", err)
 	}
 
 	// Both teams have a rule matching became_atomic.
@@ -261,35 +275,25 @@ func TestHandleEvent_BecameAtomic_PerTeam(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list active tasks: %v", err)
 	}
-	// Expect 2 tasks: team A's pre-existing assigned task (kept, not
-	// duplicated by became_atomic), and team B's new became_atomic
-	// task (the per-team fanout did its job).
-	if len(active) != 2 {
-		t.Fatalf("expected 2 active tasks (teamA assigned + teamB became_atomic), got %d", len(active))
+	// Still exactly the pre-existing assigned task: became_atomic is
+	// suppressed because an active task already exists.
+	if len(active) != 1 {
+		t.Fatalf("expected 1 active task (assigned kept, became_atomic suppressed), got %d", len(active))
 	}
-	teamCount := map[string]int{}
-	for _, a := range active {
-		teamCount[a.TeamID]++
-	}
-	if teamCount[teamA] != 1 {
-		t.Errorf("team A active task count = %d, want 1 (assigned task preserved, became_atomic suppressed for team A)", teamCount[teamA])
-	}
-	if teamCount[teamB] != 1 {
-		t.Errorf("team B active task count = %d, want 1 (became_atomic should fire for team B even though team A had an active task)", teamCount[teamB])
+	if active[0].EventType != domain.EventJiraIssueAssigned {
+		t.Errorf("surviving task event_type = %q, want %q", active[0].EventType, domain.EventJiraIssueAssigned)
 	}
 }
 
-// TestTryAutoDelegate_PerTeamBotGate pins the SKY-295 P1 reviewer
-// catch: tryAutoDelegate's team_agents gate must read THIS task's
-// team's row, not the local sentinel. Pre-fix the lookup was
-// hardcoded to runmode.LocalDefaultTeamID, so in a two-team org
-// where team B disabled the bot, team B's task would still
-// auto-delegate by reading team A's flag (and vice-versa).
+// TestTryAutoDelegate_PerTeamBotGate pins that tryAutoDelegate's
+// team_agents gate reads the FIRING team's row — the team whose
+// trigger routed the bot here — not the task's owner team. In a
+// two-team org where team B disabled the bot, firing the trigger as
+// team A delegates while firing it as team B is blocked, even though
+// both act on the same single task.
 func TestTryAutoDelegate_PerTeamBotGate(t *testing.T) {
 	database := newTestDB(t)
 
-	// Seed two teams. teamA = LocalDefaultTeamID is already in the
-	// schema; teamB is added explicitly.
 	teamA := runmode.LocalDefaultTeamID
 	teamB := uuid.New().String()
 	if _, err := database.Exec(
@@ -299,9 +303,6 @@ func TestTryAutoDelegate_PerTeamBotGate(t *testing.T) {
 		t.Fatalf("seed team B: %v", err)
 	}
 
-	// Seed agent + per-team enabled flags: team A enabled, team B
-	// disabled. The reviewer's bug would read team A's flag (enabled)
-	// for both teams, so team B's task would slip through the gate.
 	stores := sqlitestore.New(database)
 	if _, err := database.Exec(
 		`INSERT INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
@@ -319,7 +320,7 @@ func TestTryAutoDelegate_PerTeamBotGate(t *testing.T) {
 		t.Fatalf("disable agent for team B: %v", err)
 	}
 
-	// Entity, event, two tasks (one per team), prompt, trigger per team.
+	// One entity, one event, ONE task — shared across both teams.
 	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#gate", "pr", "Gate PR", "https://example.com/gate")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
@@ -334,13 +335,9 @@ func TestTryAutoDelegate_PerTeamBotGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record event: %v", err)
 	}
-	taskA, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, teamA, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
+	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, teamA, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
 	if err != nil {
-		t.Fatalf("create team A task: %v", err)
-	}
-	taskB, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, teamB, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
-	if err != nil {
-		t.Fatalf("create team B task: %v", err)
+		t.Fatalf("create task: %v", err)
 	}
 
 	trigger := domain.EventHandler{
@@ -358,35 +355,29 @@ func TestTryAutoDelegate_PerTeamBotGate(t *testing.T) {
 	stub := &stubDelegator{db: database}
 	router := NewRouter(testPromptStore(database), testEventHandlerStore(database), stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, stub, noopScorer{}, websocket.NewHub())
 
-	// Direct calls bypass the (config-gated) HandleEvent step 9 to
-	// keep the assertion focused on tryAutoDelegate's gate. The
-	// HandleEvent step-9 wrapper just iterates and dispatches; the
-	// gate logic itself is what we need to pin.
-	router.tryAutoDelegate(runmode.LocalDefaultOrg, taskA, trigger, entity.ID, eventID)
-	router.tryAutoDelegate(runmode.LocalDefaultOrg, taskB, trigger, entity.ID, eventID)
+	// Fire the trigger as team B (bot disabled) — must be blocked — and
+	// as team A (bot enabled) — must delegate. Order doesn't matter:
+	// team B's gate returns before the entity gate.
+	router.tryAutoDelegate(runmode.LocalDefaultOrg, task, trigger, entity.ID, eventID, teamB)
+	router.tryAutoDelegate(runmode.LocalDefaultOrg, task, trigger, entity.ID, eventID, teamA)
 
-	// Team A's task should have been delegated; team B's task should
-	// have been blocked by the bot-disabled-for-team gate. With the
-	// reviewer's bug both would have fired (gate hardcoded to team A's
-	// flag = enabled) or both would have been blocked (depending on
-	// which team's row LocalDefaultTeamID happens to be).
 	if stub.calls != 1 {
 		t.Fatalf("expected exactly 1 Delegate call (team A only); got %d", stub.calls)
 	}
-	gotA, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrg, taskA.ID)
-	gotB, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrg, taskB.ID)
-	if gotA.ClaimedByAgentID == "" {
-		t.Errorf("team A task: ClaimedByAgentID empty; expected agent claim after successful fire")
+	got, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrg, task.ID)
+	if got.ClaimedByAgentID == "" {
+		t.Errorf("task: ClaimedByAgentID empty; expected agent claim after team A's successful fire")
 	}
-	if gotB.ClaimedByAgentID != "" {
-		t.Errorf("team B task: ClaimedByAgentID = %q; expected empty (bot-disabled gate should have blocked the fire)", gotB.ClaimedByAgentID)
+	// The claim consolidated the owning team to the acting (firing)
+	// team A.
+	if got.TeamID != teamA {
+		t.Errorf("owner team_id = %q after team A claim, want %q", got.TeamID, teamA)
 	}
 }
 
 // TestHandleEvent_SingleTeam_OneTask is the regression baseline: with
-// only one matching rule, exactly one task gets created. Pins that the
-// SKY-295 fanout doesn't accidentally spawn multiples on the
-// single-team-rule path that local-mode + most multi-mode setups use.
+// only one matching rule, exactly one task gets created — the
+// local-mode + single-team-rule path.
 func TestHandleEvent_SingleTeam_OneTask(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)

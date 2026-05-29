@@ -276,23 +276,84 @@ func (s *taskStore) FindOrCreateAtSystem(ctx context.Context, orgID, teamID, ent
 	return findOrCreateTaskAt(ctx, s.admin, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt)
 }
 
+func (s *taskStore) SetVisibilityTeams(ctx context.Context, orgID, taskID string, teamIDs []string) error {
+	return setVisibilityTeams(ctx, s.q, orgID, taskID, teamIDs)
+}
+
+func (s *taskStore) SetVisibilityTeamsSystem(ctx context.Context, orgID, taskID string, teamIDs []string) error {
+	return setVisibilityTeams(ctx, s.admin, orgID, taskID, teamIDs)
+}
+
+func setVisibilityTeams(ctx context.Context, q queryer, orgID, taskID string, teamIDs []string) error {
+	for _, teamID := range teamIDs {
+		if teamID == "" {
+			continue
+		}
+		// Org-visible handlers route the LocalDefaultTeamID sentinel
+		// through here; resolve it to the org's canonical team so the
+		// task_teams FK to teams(id) holds, mirroring findOrCreateTaskAt.
+		teamBind, err := resolveTeamBind(ctx, q, orgID, teamID)
+		if err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `
+			INSERT INTO task_teams (task_id, team_id)
+			VALUES ($1::uuid, $2::uuid)
+			ON CONFLICT DO NOTHING
+		`, taskID, teamBind); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *taskStore) VisibilityTeams(ctx context.Context, orgID, taskID string) ([]string, error) {
+	rows, err := s.q.QueryContext(ctx, `SELECT team_id FROM task_teams WHERE task_id = $1::uuid`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// resolveTeamBind maps the LocalDefaultTeamID sentinel (carried by
+// org-visible handlers via handlerTeamID) to the org's canonical team —
+// the oldest by created_at. Real team UUIDs pass through unchanged. An
+// empty teamID stays empty so callers can apply their own required-team
+// guard.
+func resolveTeamBind(ctx context.Context, q queryer, orgID, teamID string) (string, error) {
+	if teamID != runmode.LocalDefaultTeamID {
+		return teamID, nil
+	}
+	var canonical string
+	if err := q.QueryRowContext(ctx,
+		`SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1`,
+		orgID,
+	).Scan(&canonical); err != nil {
+		return "", fmt.Errorf("task store: resolve canonical team for org %s: %w", orgID, err)
+	}
+	return canonical, nil
+}
+
 func findOrCreateTaskAt(ctx context.Context, q queryer, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
-	// SKY-295: team_id is caller-supplied. User-source handlers carry a
-	// real team UUID. Org-visible handlers (visibility='org', team_id NULL)
+	// team_id is the owning/attributed team stamped on a newly created
+	// row — caller-supplied. User-source handlers carry a real team
+	// UUID. Org-visible handlers (visibility='org', team_id NULL)
 	// collapse to runmode.LocalDefaultTeamID in handlerTeamID(); resolve
 	// that sentinel to the org's canonical team (oldest by created_at) so
 	// shipped system rules create tasks in Postgres mode. A truly-empty
 	// teamBind (caller passed "") still trips the guard below.
-	teamBind := teamID
-	if teamBind == runmode.LocalDefaultTeamID {
-		var canonical string
-		if err := q.QueryRowContext(ctx,
-			`SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1`,
-			orgID,
-		).Scan(&canonical); err != nil {
-			return nil, false, fmt.Errorf("task store: resolve canonical team for org %s: %w", orgID, err)
-		}
-		teamBind = canonical
+	teamBind, err := resolveTeamBind(ctx, q, orgID, teamID)
+	if err != nil {
+		return nil, false, err
 	}
 	if teamBind == "" {
 		return nil, false, fmt.Errorf("task store: team_id required for Postgres FindOrCreate (router must thread the user-selected team from the matched event_handler)")
@@ -300,20 +361,19 @@ func findOrCreateTaskAt(ctx context.Context, q queryer, orgID, teamID, entityID,
 
 	// SELECT first so the common path (task already exists) stays a
 	// single round-trip. The partial unique index on
-	// (org_id, entity_id, event_type, dedup_key, team_id) WHERE
-	// status NOT IN ('done', 'dismissed') is the race backstop on
-	// INSERT — SKY-295 made it per-team so the same event matching
-	// N teams' rules fans out to N tasks.
+	// (org_id, entity_id, event_type, dedup_key) WHERE status NOT IN
+	// ('done', 'dismissed') is the race backstop on INSERT — one task
+	// per real situation, independent of team, so a situation already
+	// tasked by another team's rule is returned here.
 	var existing domain.Task
-	err := scanTaskFromRow(q.QueryRowContext(ctx, `
+	err = scanTaskFromRow(q.QueryRowContext(ctx, `
 		SELECT `+pgTaskColumnsWithEntity+`
 		FROM tasks t
 		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
 		WHERE t.org_id = $1 AND t.entity_id = $2 AND t.event_type = $3 AND t.dedup_key = $4
-			AND t.team_id = $5::uuid
 			AND t.status NOT IN ('done', 'dismissed')
 		LIMIT 1
-	`, orgID, entityID, eventType, dedupKey, teamBind), &existing)
+	`, orgID, entityID, eventType, dedupKey), &existing)
 	if err == nil {
 		return &existing, false, nil
 	}
@@ -349,10 +409,9 @@ func findOrCreateTaskAt(ctx context.Context, q queryer, orgID, teamID, entityID,
 			FROM tasks t
 			JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
 			WHERE t.org_id = $1 AND t.entity_id = $2 AND t.event_type = $3 AND t.dedup_key = $4
-				AND t.team_id = $5::uuid
 				AND t.status NOT IN ('done', 'dismissed')
 			LIMIT 1
-		`, orgID, entityID, eventType, dedupKey, teamBind), &raced)
+		`, orgID, entityID, eventType, dedupKey), &raced)
 		if err2 != nil {
 			return nil, false, fmt.Errorf("findorcreate: race reread: %w", err2)
 		}
@@ -511,28 +570,32 @@ func (s *taskStore) SetClaimedByUser(ctx context.Context, orgID, taskID, userID 
 	return err
 }
 
-func (s *taskStore) StampAgentClaimIfUnclaimed(ctx context.Context, orgID, taskID, agentID string) (bool, error) {
-	return stampAgentClaimIfUnclaimed(ctx, s.q, orgID, taskID, agentID)
+func (s *taskStore) StampAgentClaimIfUnclaimed(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error) {
+	return stampAgentClaimIfUnclaimed(ctx, s.q, orgID, taskID, agentID, actingTeamID)
 }
 
-func (s *taskStore) StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID string) (bool, error) {
-	return stampAgentClaimIfUnclaimed(ctx, s.admin, orgID, taskID, agentID)
+func (s *taskStore) StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error) {
+	return stampAgentClaimIfUnclaimed(ctx, s.admin, orgID, taskID, agentID, actingTeamID)
 }
 
-func stampAgentClaimIfUnclaimed(ctx context.Context, q queryer, orgID, taskID, agentID string) (bool, error) {
+func stampAgentClaimIfUnclaimed(ctx context.Context, q queryer, orgID, taskID, agentID, actingTeamID string) (bool, error) {
 	if agentID == "" {
 		return false, errors.New("StampAgentClaimIfUnclaimed: empty agentID")
 	}
+	// actingTeamID is the firing trigger's team; on a successful claim
+	// it consolidates the card to that owning team. Empty leaves
+	// team_id unchanged.
 	res, err := q.ExecContext(ctx, `
 		UPDATE tasks
 		   SET claimed_by_agent_id = $1,
+		       team_id = COALESCE(NULLIF($4, '')::uuid, team_id),
 		       snooze_until = NULL,
 		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
 		 WHERE org_id = $2 AND id = $3
 		   AND claimed_by_user_id IS NULL
 		   AND (claimed_by_agent_id IS NULL OR claimed_by_agent_id != $1)
 		   AND status NOT IN ('done', 'dismissed')
-	`, agentID, orgID, taskID)
+	`, agentID, orgID, taskID, actingTeamID)
 	if err != nil {
 		return false, err
 	}
@@ -554,6 +617,12 @@ func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentI
 		UPDATE tasks
 		   SET claimed_by_agent_id = $1,
 		       claimed_by_user_id  = NULL,
+		       team_id = COALESCE(
+		           (SELECT tt.team_id FROM task_teams tt
+		              JOIN memberships m ON m.team_id = tt.team_id
+		             WHERE tt.task_id = $3 AND m.user_id = $4
+		             ORDER BY tt.team_id ASC LIMIT 1),
+		           team_id),
 		       snooze_until = NULL,
 		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
 		 WHERE org_id = $2 AND id = $3
@@ -603,6 +672,12 @@ func (s *taskStore) TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, u
 		UPDATE tasks
 		   SET claimed_by_user_id  = $1,
 		       claimed_by_agent_id = NULL,
+		       team_id = COALESCE(
+		           (SELECT tt.team_id FROM task_teams tt
+		              JOIN memberships m ON m.team_id = tt.team_id
+		             WHERE tt.task_id = $3 AND m.user_id = $1
+		             ORDER BY tt.team_id ASC LIMIT 1),
+		           team_id),
 		       snooze_until = NULL,
 		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
 		 WHERE org_id = $2 AND id = $3
@@ -627,6 +702,12 @@ func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userI
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE tasks
 		   SET claimed_by_user_id = $1,
+		       team_id = COALESCE(
+		           (SELECT tt.team_id FROM task_teams tt
+		              JOIN memberships m ON m.team_id = tt.team_id
+		             WHERE tt.task_id = $3 AND m.user_id = $1
+		             ORDER BY tt.team_id ASC LIMIT 1),
+		           team_id),
 		       snooze_until = NULL,
 		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
 		 WHERE org_id = $2 AND id = $3

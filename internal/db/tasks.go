@@ -26,9 +26,12 @@ import (
 //     pre-D2 raw functions did.
 //   - FindOrCreate returns (task, created, err). The dedup path
 //     keys off the partial unique index on tasks
-//     (entity_id, event_type, dedup_key, team_id) WHERE status NOT IN
-//     ('done', 'dismissed') — SKY-295: per-team dedup so the same
-//     event matching N teams' rules fans out to N tasks.
+//     (entity_id, event_type, dedup_key) WHERE status NOT IN
+//     ('done', 'dismissed') — one task per real situation, regardless
+//     of how many teams' rules matched. The teams an event is relevant
+//     to are recorded as a visibility set via SetVisibilityTeams; the
+//     caller-supplied teamID is the owning/attributed team stamped on a
+//     newly created row.
 //   - Claim mutations return ok=true when the row actually changed.
 //     False means a guard tripped (caller doesn't broadcast,
 //     usually surfaces 409). HandoffAgentClaim returns the
@@ -99,19 +102,21 @@ type TaskStore interface {
 	// --- Lifecycle ---
 
 	// FindOrCreate implements the dedup logic via the partial unique
-	// index (entity_id, event_type, dedup_key, team_id) WHERE status
-	// NOT IN ('done', 'dismissed'). teamID is caller-supplied — the
-	// store does not synthesize one (SKY-295). Local mode passes
-	// runmode.LocalDefaultTeamID; the SQLite impl accepts that
-	// directly. Multi mode passes the user-selected team from the
-	// router's matched event_handler; the Postgres impl refuses the
-	// LocalDefaultTeamID sentinel with a clear error.
+	// index (entity_id, event_type, dedup_key) WHERE status NOT IN
+	// ('done', 'dismissed'). teamID is the owning/attributed team
+	// stamped on a newly created row — caller-supplied, the store does
+	// not synthesize one. Local mode passes runmode.LocalDefaultTeamID;
+	// the SQLite impl accepts that directly. Multi mode passes the
+	// router's deterministic owner pick among the matched teams; the
+	// Postgres impl resolves the LocalDefaultTeamID sentinel to the
+	// org's canonical team.
 	//
 	// If an active task exists for the (entity, event_type,
-	// dedup_key, team) tuple, returns it with created=false;
-	// otherwise creates a fresh queued row with created=true.
-	// Concurrent callers race on the index — the loser re-reads the
-	// winner's row.
+	// dedup_key) tuple, returns it with created=false regardless of
+	// which team it is owned by; otherwise creates a fresh queued row
+	// with created=true. Concurrent callers race on the index — the
+	// loser re-reads the winner's row. The full set of matched teams
+	// is recorded separately via SetVisibilityTeams.
 	FindOrCreate(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64) (*domain.Task, bool, error)
 
 	// FindOrCreateAt is FindOrCreate with a caller-supplied
@@ -119,6 +124,20 @@ type TaskStore interface {
 	// where the activity is older than "now" (e.g. a pending review
 	// request observed on a 2-week-old PR).
 	FindOrCreateAt(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error)
+
+	// SetVisibilityTeams records the visibility set for a task — the
+	// teams whose handlers matched the spawning event. Inserts one
+	// task_teams row per teamID, idempotent on (task_id, team_id).
+	// teamIDs is additive: existing rows survive, so a re-arrival that
+	// matches additional teams widens visibility without clearing the
+	// originals. An empty slice is a no-op. The owning team_id stamped
+	// on the task by FindOrCreate need not be included — it grants
+	// visibility on its own — but passing it is harmless.
+	SetVisibilityTeams(ctx context.Context, orgID, taskID string, teamIDs []string) error
+
+	// VisibilityTeams returns the team IDs in a task's visibility set.
+	// Order is unspecified.
+	VisibilityTeams(ctx context.Context, orgID, taskID string) ([]string, error)
 
 	// Bump records a new matching event on an existing task — if
 	// the task is snoozed, un-snoozes it (wake-on-bump). Does NOT
@@ -176,24 +195,41 @@ type TaskStore interface {
 	// for the auto-trigger path. Guards on (a) no user claim,
 	// (b) not already same-agent, (c) row not terminal. Atomically
 	// wakes a snoozed task. Returns ok=true when the claim moved.
-	StampAgentClaimIfUnclaimed(ctx context.Context, orgID, taskID, agentID string) (bool, error)
+	//
+	// actingTeamID is the team the bot acted for — the firing
+	// trigger's team. On a successful claim it becomes the task's
+	// owning team_id, consolidating the card to that team. Empty
+	// leaves team_id unchanged (test/back-compat paths).
+	StampAgentClaimIfUnclaimed(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error)
 
 	// HandoffAgentClaim is the race-safe "user delegates to bot"
 	// helper — accepts unclaimed→bot, same-user→bot, idempotent
 	// same-agent→bot; refuses on a different-user claim. See
-	// HandoffResult for the discriminator the caller maps.
+	// HandoffResult for the discriminator the caller maps. On a
+	// changed claim the owning team_id consolidates to the acting
+	// team derived from the delegating user (their team in the task's
+	// visibility set; the existing owner when that is empty or
+	// ambiguous).
 	HandoffAgentClaim(ctx context.Context, orgID, taskID, agentID, userID string) (HandoffResult, error)
 
 	// TakeoverClaimFromAgent atomically flips a bot-claimed task
 	// to a user claim. Race-safe: guards on the bot still holding
 	// the claim AND no other user owning it. Returns ok=true on
 	// success; false means the race was lost (caller surfaces 409).
+	// On success the owning team_id consolidates to the acting team
+	// derived from userID (see ClaimQueuedForUser).
 	TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, userID string) (bool, error)
 
 	// ClaimQueuedForUser is the user-claim handler's atomic "take
 	// this task off the queue" — succeeds only on (queued|snoozed)
 	// + both claim cols NULL. Returns ok=true when the claim landed;
 	// false means another claimant won or the task is closed.
+	//
+	// On success the owning team_id consolidates to the acting team:
+	// the claimer's team that is in the task's visibility set
+	// (task_teams). With exactly one such team it is used; with none
+	// or several the existing owner team_id is kept (the
+	// deterministic fallback until the acting-team picker lands).
 	ClaimQueuedForUser(ctx context.Context, orgID, taskID, userID string) (bool, error)
 
 	// --- Breaker ---
@@ -224,13 +260,14 @@ type TaskStore interface {
 	GetSystem(ctx context.Context, orgID, taskID string) (*domain.Task, error)
 	FindActiveByEntitySystem(ctx context.Context, orgID, entityID string) ([]domain.Task, error)
 	FindOrCreateAtSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error)
+	SetVisibilityTeamsSystem(ctx context.Context, orgID, taskID string, teamIDs []string) error
 	BumpSystem(ctx context.Context, orgID, taskID, eventID string) error
 	CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error
 	CloseAllForEntitySystem(ctx context.Context, orgID, entityID, closeReason string) (int, error)
 	SetStatusSystem(ctx context.Context, orgID, taskID, status string) error
 	RecordEventSystem(ctx context.Context, orgID, taskID, eventID, kind string) error
 	CountConsecutiveFailedRunsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error)
-	StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID string) (bool, error)
+	StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error)
 }
 
 // HandoffResult discriminates the three outcomes HandoffAgentClaim

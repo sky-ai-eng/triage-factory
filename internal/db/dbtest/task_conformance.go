@@ -194,7 +194,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	t.Run("ByStatus_claimed_includes_bot_claimed_queued", func(t *testing.T) {
 		s, orgID, _, agentID, _, seed, _ := mk(t)
 		_, _, taskID := seed(t, "bs-claimed-bot")
-		if _, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID); err != nil {
+		if _, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID, ""); err != nil {
 			t.Fatalf("stamp agent: %v", err)
 		}
 
@@ -240,11 +240,11 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 	})
 
-	// --- SKY-295: per-team task fanout + dedup ---
+	// --- One task per situation; team is visibility, not count ---
 
 	t.Run("FindOrCreate_single_team_one_task", func(t *testing.T) {
-		// Regression baseline: in a single-team scenario the
-		// per-team dedup index collapses repeat calls to one task.
+		// Regression baseline: in a single-team scenario the dedup
+		// index collapses repeat calls to one task.
 		s, orgID, teamID, _, _, seed, _ := mk(t)
 		entityID, eventID, _ := seed(t, "single-team")
 		task, created, err := s.FindOrCreate(ctx, orgID, teamID, entityID, domain.EventGitHubPRCICheckPassed, "build", eventID, 0.5)
@@ -259,17 +259,18 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 	})
 
-	t.Run("FindOrCreate_per_team_fans_out", func(t *testing.T) {
-		// Same (entity, event_type, dedup_key) in two teams → two
-		// distinct tasks. This is the load-bearing change in SKY-295:
-		// the dedup index now includes team_id, so cross-team dedup
-		// must NOT collapse.
+	t.Run("FindOrCreate_cross_team_collapses_to_one", func(t *testing.T) {
+		// Same (entity, event_type, dedup_key) in two teams → ONE
+		// task. Identity dropped team_id: a situation already tasked
+		// by another team's rule is returned (created=false), not
+		// duplicated. The second team is recorded via the visibility
+		// set instead (see SetVisibilityTeams).
 		s, orgID, teamA, _, _, seed, seedTeam := mk(t)
 		if seedTeam == nil {
 			t.Skip("backend factory did not provide a TeamSeeder; multi-team test skipped")
 		}
-		teamB := seedTeam(t, "fanout")
-		entityID, eventID, _ := seed(t, "per-team-fanout")
+		teamB := seedTeam(t, "collapse")
+		entityID, eventID, _ := seed(t, "cross-team-collapse")
 
 		taskA, createdA, err := s.FindOrCreate(ctx, orgID, teamA, entityID, domain.EventGitHubPRCICheckPassed, "build", eventID, 0.5)
 		if err != nil {
@@ -283,18 +284,17 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		if err != nil {
 			t.Fatalf("FindOrCreate(teamB): %v", err)
 		}
-		if !createdB {
-			t.Error("teamB FindOrCreate should create a SECOND task (cross-team dedup must not collapse)")
+		if createdB {
+			t.Error("teamB FindOrCreate should find the existing task (created=false), not create a second")
 		}
-		if taskA.ID == taskB.ID {
-			t.Errorf("expected distinct task IDs across teams; got %q == %q", taskA.ID, taskB.ID)
+		if taskA.ID != taskB.ID {
+			t.Errorf("expected the SAME task id across teams; got %q vs %q", taskA.ID, taskB.ID)
 		}
 	})
 
 	t.Run("FindOrCreate_same_team_dedup_collapses", func(t *testing.T) {
-		// Within one team, repeat calls on the same key still
-		// collapse to one task. Pins that the per-team change to the
-		// dedup index didn't accidentally loosen intra-team dedup.
+		// Within one team, repeat calls on the same key collapse to
+		// one task — the basic dedup invariant.
 		s, orgID, teamID, _, _, seed, _ := mk(t)
 		entityID, eventID, _ := seed(t, "same-team-dedup")
 
@@ -314,6 +314,38 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 		if task1.ID != task2.ID {
 			t.Errorf("same-team second call returned different ID %q (want %q)", task2.ID, task1.ID)
+		}
+	})
+
+	t.Run("SetVisibilityTeams_records_and_reads_back", func(t *testing.T) {
+		s, orgID, teamA, _, _, seed, seedTeam := mk(t)
+		if seedTeam == nil {
+			t.Skip("backend factory did not provide a TeamSeeder; multi-team test skipped")
+		}
+		teamB := seedTeam(t, "vis")
+		entityID, eventID, _ := seed(t, "vis-set")
+		task, _, err := s.FindOrCreate(ctx, orgID, teamA, entityID, domain.EventGitHubPRCICheckPassed, "vis", eventID, 0.5)
+		if err != nil {
+			t.Fatalf("FindOrCreate: %v", err)
+		}
+		if err := s.SetVisibilityTeams(ctx, orgID, task.ID, []string{teamA, teamB}); err != nil {
+			t.Fatalf("SetVisibilityTeams: %v", err)
+		}
+		// Idempotent: re-applying the same set must not error or
+		// duplicate (composite PK + INSERT OR IGNORE / ON CONFLICT).
+		if err := s.SetVisibilityTeams(ctx, orgID, task.ID, []string{teamA, teamB}); err != nil {
+			t.Fatalf("SetVisibilityTeams (repeat): %v", err)
+		}
+		vis, err := s.VisibilityTeams(ctx, orgID, task.ID)
+		if err != nil {
+			t.Fatalf("VisibilityTeams: %v", err)
+		}
+		got := map[string]bool{}
+		for _, v := range vis {
+			got[v] = true
+		}
+		if len(vis) != 2 || !got[teamA] || !got[teamB] {
+			t.Errorf("visibility set = %v, want both %q and %q", vis, teamA, teamB)
 		}
 	})
 
@@ -483,7 +515,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	t.Run("StampAgentClaimIfUnclaimed_lands_then_skips_same_agent", func(t *testing.T) {
 		s, orgID, _, agentID, _, seed, _ := mk(t)
 		_, _, taskID := seed(t, "stamp")
-		ok, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID)
+		ok, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID, "")
 		if err != nil {
 			t.Fatalf("first stamp: %v", err)
 		}
@@ -491,7 +523,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			t.Fatal("first stamp returned ok=false")
 		}
 		// Same agent again — should no-op (ok=false).
-		ok, err = s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID)
+		ok, err = s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID, "")
 		if err != nil {
 			t.Fatalf("second stamp: %v", err)
 		}
@@ -506,7 +538,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		if err := s.Close(ctx, orgID, taskID, "test", ""); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
-		ok, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID)
+		ok, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID, "")
 		if err != nil {
 			t.Fatalf("StampAgentClaimIfUnclaimed on terminal: %v", err)
 		}
@@ -551,7 +583,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		s, orgID, _, agentID, userID, seed, _ := mk(t)
 		_, _, taskID := seed(t, "takeover")
 		// Set up bot claim first.
-		if _, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID); err != nil {
+		if _, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID, ""); err != nil {
 			t.Fatalf("stamp: %v", err)
 		}
 		ok, err := s.TakeoverClaimFromAgent(ctx, orgID, taskID, userID)
@@ -604,7 +636,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	t.Run("AdvanceStatusForUser_refuses_bot_claim", func(t *testing.T) {
 		s, orgID, _, agentID, userID, seed, _ := mk(t)
 		_, _, taskID := seed(t, "adv-bot")
-		if _, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID); err != nil {
+		if _, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID, ""); err != nil {
 			t.Fatalf("stamp agent: %v", err)
 		}
 		ok, err := s.AdvanceStatusForUser(ctx, orgID, taskID, userID, "in_progress")

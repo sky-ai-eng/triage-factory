@@ -1302,6 +1302,20 @@ CREATE TABLE public.tasks (
 
 
 --
+-- Name: task_teams; Type: TABLE; Schema: public; Owner: -
+--
+
+-- task_teams is the visibility set: the teams whose handlers matched
+-- the event that spawned the task. A team sees an unclaimed task iff it
+-- is in task_teams (or it is the owning team_id); once claimed the card
+-- consolidates to the owning team_id.
+CREATE TABLE public.task_teams (
+    task_id uuid NOT NULL,
+    team_id uuid NOT NULL
+);
+
+
+--
 -- Name: team_agents; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1827,6 +1841,14 @@ ALTER TABLE ONLY public.tasks
 
 
 --
+-- Name: task_teams task_teams_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_teams
+    ADD CONSTRAINT task_teams_pkey PRIMARY KEY (task_id, team_id);
+
+
+--
 -- Name: team_agents team_agents_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2157,10 +2179,18 @@ CREATE INDEX idx_task_events_task ON public.task_events USING btree (task_id);
 -- Name: idx_tasks_active_entity_event_dedup; Type: INDEX; Schema: public; Owner: -
 --
 
--- SKY-295: dedup is per-team. Same (entity, event_type, dedup_key) in
--- two different teams must create two distinct tasks so each team's
--- queue surfaces the work independently.
-CREATE UNIQUE INDEX idx_tasks_active_entity_event_dedup ON public.tasks USING btree (entity_id, event_type, dedup_key, team_id) WHERE (status <> ALL (ARRAY['done'::text, 'dismissed'::text]));
+-- One task per real situation: identity is (entity, event_type,
+-- dedup_key), independent of team. The teams an event is relevant to
+-- are visibility (task_teams), never count — one event matching N
+-- teams' rules yields one task, not N.
+CREATE UNIQUE INDEX idx_tasks_active_entity_event_dedup ON public.tasks USING btree (entity_id, event_type, dedup_key) WHERE (status <> ALL (ARRAY['done'::text, 'dismissed'::text]));
+
+
+--
+-- Name: idx_task_teams_team; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_task_teams_team ON public.task_teams USING btree (team_id);
 
 
 --
@@ -3103,6 +3133,22 @@ ALTER TABLE ONLY public.tasks
 
 
 --
+-- Name: task_teams task_teams_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_teams
+    ADD CONSTRAINT task_teams_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.tasks(id) ON DELETE CASCADE;
+
+
+--
+-- Name: task_teams task_teams_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.task_teams
+    ADD CONSTRAINT task_teams_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE CASCADE;
+
+
+--
 -- Name: team_agents team_agents_agent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3878,6 +3924,22 @@ CREATE POLICY task_events_all ON public.task_events USING ((EXISTS ( SELECT 1
 
 
 --
+-- Name: task_teams; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.task_teams ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: task_teams task_teams_select; Type: POLICY; Schema: public; Owner: -
+--
+
+-- A user may read the visibility-set rows for any team they belong to.
+-- Writes happen only on the system/admin path (router-created), which
+-- bypasses RLS — no INSERT/UPDATE/DELETE policy is intentional.
+CREATE POLICY task_teams_select ON public.task_teams FOR SELECT USING (tf.user_in_team(team_id));
+
+
+--
 -- Name: tasks; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -3887,7 +3949,7 @@ ALTER TABLE public.tasks ENABLE ROW LEVEL SECURITY;
 -- Name: tasks tasks_delete; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY tasks_delete ON public.tasks FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND tf.user_in_team(team_id)))));
+CREATE POLICY tasks_delete ON public.tasks FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (((claimed_by_agent_id IS NULL) AND (claimed_by_user_id IS NULL) AND (EXISTS ( SELECT 1 FROM public.task_teams tt WHERE ((tt.task_id = tasks.id) AND tf.user_in_team(tt.team_id))))) OR tf.user_in_team(team_id))))));
 
 
 --
@@ -3901,14 +3963,14 @@ CREATE POLICY tasks_insert ON public.tasks FOR INSERT WITH CHECK (((org_id = tf.
 -- Name: tasks tasks_select; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY tasks_select ON public.tasks FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND tf.user_in_team(team_id)) OR (visibility = 'org'::text))));
+CREATE POLICY tasks_select ON public.tasks FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (((claimed_by_agent_id IS NULL) AND (claimed_by_user_id IS NULL) AND (EXISTS ( SELECT 1 FROM public.task_teams tt WHERE ((tt.task_id = tasks.id) AND tf.user_in_team(tt.team_id))))) OR tf.user_in_team(team_id))) OR (visibility = 'org'::text))));
 
 
 --
 -- Name: tasks tasks_update; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY tasks_update ON public.tasks FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND tf.user_in_team(team_id)) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id))))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND tf.user_in_team(team_id)) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id)))));
+CREATE POLICY tasks_update ON public.tasks FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (((claimed_by_agent_id IS NULL) AND (claimed_by_user_id IS NULL) AND (EXISTS ( SELECT 1 FROM public.task_teams tt WHERE ((tt.task_id = tasks.id) AND tf.user_in_team(tt.team_id))))) OR tf.user_in_team(team_id))) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id))))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (((claimed_by_agent_id IS NULL) AND (claimed_by_user_id IS NULL) AND (EXISTS ( SELECT 1 FROM public.task_teams tt WHERE ((tt.task_id = tasks.id) AND tf.user_in_team(tt.team_id))))) OR tf.user_in_team(team_id))) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id)))));
 
 
 --
@@ -4636,6 +4698,17 @@ GRANT ALL ON TABLE public.tasks TO anon;
 GRANT ALL ON TABLE public.tasks TO authenticated;
 GRANT ALL ON TABLE public.tasks TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.tasks TO tf_app;
+
+
+--
+-- Name: TABLE task_teams; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.task_teams TO postgres;
+GRANT ALL ON TABLE public.task_teams TO anon;
+GRANT ALL ON TABLE public.task_teams TO authenticated;
+GRANT ALL ON TABLE public.task_teams TO service_role;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.task_teams TO tf_app;
 
 
 --

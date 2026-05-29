@@ -496,11 +496,12 @@ CREATE TABLE tasks (
         visibility <> 'team' OR team_id IS NOT NULL
     )
 );
--- SKY-295: dedup is per-team. Same (entity, event_type, dedup_key) in
--- two different teams must create two distinct tasks so each team's
--- queue surfaces the work independently.
+-- One task per real situation: identity is (entity, event_type,
+-- dedup_key), independent of team. The set of teams an event is
+-- relevant to is visibility (task_teams), never count — one event
+-- matching N teams' rules yields one task, not N.
 CREATE UNIQUE INDEX idx_tasks_active_entity_event_dedup
-    ON tasks(entity_id, event_type, dedup_key, team_id)
+    ON tasks(entity_id, event_type, dedup_key)
     WHERE status NOT IN ('done', 'dismissed');
 CREATE INDEX        idx_tasks_status          ON tasks(status);
 CREATE INDEX        idx_tasks_entity          ON tasks(entity_id);
@@ -508,6 +509,18 @@ CREATE INDEX        idx_tasks_status_priority ON tasks(status, priority_score DE
 CREATE UNIQUE INDEX tasks_id_org_unique       ON tasks (id, org_id);
 CREATE INDEX        tasks_claimed_agent_idx   ON tasks(claimed_by_agent_id) WHERE claimed_by_agent_id IS NOT NULL;
 CREATE INDEX        tasks_claimed_user_idx    ON tasks(claimed_by_user_id)  WHERE claimed_by_user_id  IS NOT NULL;
+
+-- task_teams is the visibility set: the teams whose handlers matched the
+-- event that spawned the task. A team sees an unclaimed task iff it is
+-- in task_teams (or it is the owning team_id); once claimed the card
+-- consolidates to the owning team_id. Local mode (N=1) carries a single
+-- row per task for the one team.
+CREATE TABLE task_teams (
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    PRIMARY KEY (task_id, team_id)
+);
+CREATE INDEX        idx_task_teams_team       ON task_teams(team_id);
 
 CREATE TABLE runs (
     id              TEXT PRIMARY KEY,

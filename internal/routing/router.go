@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -210,36 +211,6 @@ func (r *Router) HandleEvent(evt domain.Event) {
 		r.ws.Broadcast(websocket.Event{Type: "tasks_updated", OrgID: orgID, Data: map[string]any{}})
 	}
 
-	// became_atomic is the belated-discovery path for parents whose
-	// subtasks just closed. Only create a task when none exists for
-	// the target team on the entity — otherwise an atomic ticket that
-	// gained and then lost subtasks would end up with two cards in
-	// the same team's queue. The dedup index doesn't catch this
-	// because the existing task's event_type is jira:issue:assigned
-	// while the new one would be jira:issue:became_atomic.
-	//
-	// SKY-295: the suppression is per-team. Pre-SKY-295 a single
-	// FindActiveByEntity check sat above the handler-match loop, so
-	// if any team had an active task on the entity, no team got a
-	// new one. With per-team fanout that over-suppresses: team B's
-	// rule on the same entity must still fire even when team A
-	// already has an active task. We compute the set of teams that
-	// already have an active task here and let the per-team loop
-	// below skip just those teams. Event is still recorded (audit
-	// trail stays honest); only task creation in suppressed teams
-	// is skipped.
-	teamsToSkip := map[string]struct{}{}
-	if evt.EventType == domain.EventJiraIssueBecameAtomic {
-		active, err := r.tasks.FindActiveByEntitySystem(context.Background(), orgID, entityID)
-		if err != nil {
-			log.Printf("[router] became_atomic: failed to check active tasks on entity %s: %v", entityID, err)
-			return
-		}
-		for _, a := range active {
-			teamsToSkip[a.TeamID] = struct{}{}
-		}
-	}
-
 	// Step 5: Match event_handlers (rules + triggers, unified) for this
 	// event type. One query, kind-discriminated locally — preserves the
 	// pre-SKY-259 rules-before-triggers order via the store's kind-ASC
@@ -279,15 +250,15 @@ func (r *Router) HandleEvent(evt domain.Event) {
 		return
 	}
 
-	// Step 7: Find or create one task per matching team (SKY-295).
-	// Group matched rules + triggers by team_id so the same event
-	// matching N teams' rules fans out to N tasks, one per team.
-	// Org-visibility handlers (system-shipped rules with team_id NULL)
-	// route to LocalDefaultTeamID — the single team in local mode.
-	// In multi-mode they'd need a per-team broadcast that hasn't
-	// landed yet (SKY-294's UX territory); for now they collapse onto
-	// LocalDefaultTeamID and the Postgres impl's sentinel filter
-	// surfaces this as a clear error.
+	// Step 7: Find or create ONE task for this (entity, event_type,
+	// dedup_key). The teams whose handlers matched are the visibility
+	// set, not a count — one situation, one task, many teams can see
+	// it. Group matched handlers by team so step 9 can fire each
+	// team's triggers against the single task, and so the owner pick +
+	// visibility set can be computed. Org-visibility handlers (system-
+	// shipped rules with team_id NULL) route to LocalDefaultTeamID via
+	// handlerTeamID; the Postgres store resolves that sentinel to the
+	// org's canonical team.
 	teamRules := map[string][]domain.EventHandler{}
 	teamTriggers := map[string][]domain.EventHandler{}
 	for _, h := range matchedRules {
@@ -297,77 +268,101 @@ func (r *Router) HandleEvent(evt domain.Event) {
 		teamTriggers[handlerTeamID(h)] = append(teamTriggers[handlerTeamID(h)], h)
 	}
 
-	// Union of teams that had any matching handler — drives the
-	// per-team task-creation loop. A team with only triggers (no
-	// rules) still gets a task with the trigger-fallback priority.
-	teamSet := map[string]struct{}{}
+	// The visibility set: every team that had any matching handler.
+	// Sorted so the owner tie-break (lowest team id) and the
+	// task_teams writes are deterministic.
+	visibleTeams := make([]string, 0, len(teamRules)+len(teamTriggers))
+	seen := map[string]struct{}{}
 	for t := range teamRules {
-		teamSet[t] = struct{}{}
+		if _, ok := seen[t]; !ok {
+			seen[t] = struct{}{}
+			visibleTeams = append(visibleTeams, t)
+		}
 	}
 	for t := range teamTriggers {
-		teamSet[t] = struct{}{}
-	}
-
-	// Track which tasks got created/bumped per team so the
-	// auto-delegate step (step 9) can fire each team's matched
-	// triggers against that team's task.
-	tasksByTeam := make(map[string]*domain.Task, len(teamSet))
-
-	for teamID := range teamSet {
-		// SKY-295: skip teams that already have an active task on
-		// this entity in the became_atomic case (see teamsToSkip
-		// computation above). Per-team suppression preserves the
-		// "no duplicate card for one team" intent without blocking
-		// sibling teams whose rules matched the same event.
-		if _, suppressed := teamsToSkip[teamID]; suppressed {
-			log.Printf("[router] became_atomic: team %s already has an active task on entity %s, skipping duplicate creation", teamID, entityID)
-			continue
+		if _, ok := seen[t]; !ok {
+			seen[t] = struct{}{}
+			visibleTeams = append(visibleTeams, t)
 		}
-		// Use the highest-priority matching rule's default_priority
-		// within this team, or 0.5 if only triggers matched.
-		defaultPriority := 0.5
+	}
+	sort.Strings(visibleTeams)
+
+	// Owner pick: the matched team with the highest per-team rule
+	// priority, ties broken by lowest team id (visibleTeams is sorted
+	// ascending and the comparison is strict, so the first team at the
+	// max wins). A team with only triggers contributes the 0.5
+	// trigger-fallback priority. The task's own priority is the
+	// owner's (== the global max), since the owner is the argmax.
+	ownerTeam := visibleTeams[0]
+	taskPriority := 0.5
+	for _, teamID := range visibleTeams {
+		teamScore := 0.5
 		for _, rule := range teamRules[teamID] {
-			if rule.DefaultPriority != nil && *rule.DefaultPriority > defaultPriority {
-				defaultPriority = *rule.DefaultPriority
+			if rule.DefaultPriority != nil && *rule.DefaultPriority > teamScore {
+				teamScore = *rule.DefaultPriority
 			}
 		}
-
-		// SKY-295 (P1.2): task createdAt = OccurredAt when the source
-		// reported a time, falling back to time.Now(). The router used
-		// to call FindOrCreate (→ time.Now()) for every event, which
-		// regressed the backfill path's "stamp the task with the PR's
-		// CreatedAt for week-old review requests" semantic.
-		// OccurredAt-when-set is the right rule across the board:
-		// the queue ordering reflects when the world said the event
-		// happened, not when we noticed.
-		createdAt := time.Now()
-		if !evt.OccurredAt.IsZero() {
-			createdAt = evt.OccurredAt
+		if teamScore > taskPriority {
+			taskPriority = teamScore
+			ownerTeam = teamID
 		}
-		task, created, err := r.tasks.FindOrCreateAtSystem(context.Background(), orgID, teamID, entityID, evt.EventType, evt.DedupKey, evt.ID, defaultPriority, createdAt)
-		if err != nil {
-			log.Printf("[router] failed to find/create task for %s on entity %s (team %s): %v", evt.EventType, entityID, teamID, err)
-			continue
-		}
-
-		if created {
-			if err := r.tasks.RecordEventSystem(context.Background(), orgID, task.ID, evt.ID, "spawned"); err != nil {
-				log.Printf("[router] failed to record spawned task_event: %v", err)
-			}
-			log.Printf("[router] created task %s (%s) on entity %s (team %s)", task.ID, evt.EventType, entityID, teamID)
-		} else {
-			if err := r.tasks.BumpSystem(context.Background(), orgID, task.ID, evt.ID); err != nil {
-				log.Printf("[router] failed to bump task %s: %v", task.ID, err)
-			}
-			if err := r.tasks.RecordEventSystem(context.Background(), orgID, task.ID, evt.ID, "bumped"); err != nil {
-				log.Printf("[router] failed to record bumped task_event: %v", err)
-			}
-		}
-		tasksByTeam[teamID] = task
 	}
 
-	if len(tasksByTeam) == 0 {
+	// became_atomic is the belated-discovery path for parents whose
+	// subtasks just closed. Suppress the new card if any active task
+	// already exists on the entity — otherwise an atomic ticket that
+	// gained and then lost subtasks ends up with two cards. The dedup
+	// index can't catch this because the existing task's event_type is
+	// jira:issue:assigned while the new one is jira:issue:became_atomic.
+	// The event is still recorded (step 1); only task creation is
+	// skipped.
+	if evt.EventType == domain.EventJiraIssueBecameAtomic {
+		active, err := r.tasks.FindActiveByEntitySystem(context.Background(), orgID, entityID)
+		if err != nil {
+			log.Printf("[router] became_atomic: failed to check active tasks on entity %s: %v", entityID, err)
+			return
+		}
+		if len(active) > 0 {
+			log.Printf("[router] became_atomic: entity %s already has an active task, skipping duplicate creation", entityID)
+			return
+		}
+	}
+
+	// Task createdAt = OccurredAt when the source reported a time,
+	// falling back to time.Now(). This keeps the backfill path's
+	// "stamp the task with the PR's CreatedAt for week-old review
+	// requests" semantic — queue ordering reflects when the world said
+	// the event happened, not when we noticed.
+	createdAt := time.Now()
+	if !evt.OccurredAt.IsZero() {
+		createdAt = evt.OccurredAt
+	}
+	task, created, err := r.tasks.FindOrCreateAtSystem(context.Background(), orgID, ownerTeam, entityID, evt.EventType, evt.DedupKey, evt.ID, taskPriority, createdAt)
+	if err != nil {
+		log.Printf("[router] failed to find/create task for %s on entity %s: %v", evt.EventType, entityID, err)
 		return
+	}
+
+	// Record the visibility set transactionally with the task. Additive:
+	// a re-arrival matching new teams widens visibility. Failure here is
+	// logged but not fatal — the owning team_id still grants the owner
+	// visibility; a follow-up event re-attempts the wider set.
+	if err := r.tasks.SetVisibilityTeamsSystem(context.Background(), orgID, task.ID, visibleTeams); err != nil {
+		log.Printf("[router] failed to set visibility teams for task %s: %v", task.ID, err)
+	}
+
+	if created {
+		if err := r.tasks.RecordEventSystem(context.Background(), orgID, task.ID, evt.ID, "spawned"); err != nil {
+			log.Printf("[router] failed to record spawned task_event: %v", err)
+		}
+		log.Printf("[router] created task %s (%s) on entity %s (owner team %s, %d visible teams)", task.ID, evt.EventType, entityID, ownerTeam, len(visibleTeams))
+	} else {
+		if err := r.tasks.BumpSystem(context.Background(), orgID, task.ID, evt.ID); err != nil {
+			log.Printf("[router] failed to bump task %s: %v", task.ID, err)
+		}
+		if err := r.tasks.RecordEventSystem(context.Background(), orgID, task.ID, evt.ID, "bumped"); err != nil {
+			log.Printf("[router] failed to record bumped task_event: %v", err)
+		}
 	}
 
 	// Step 8: Enqueue AI scoring (always — produces UI metadata regardless).
@@ -376,18 +371,13 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	// Broadcast task update to frontend.
 	r.ws.Broadcast(websocket.Event{Type: "tasks_updated", OrgID: orgID, Data: map[string]any{}})
 
-	// Step 9: Auto-delegate for matching triggers.
-	// Gate: global kill switch — if auto-delegation is disabled, skip all triggers.
-	// Create vs bump no longer branches differently here: the per-entity
-	// queue handles bursts via its dedup index, and cooldown was removed
-	// in SKY-189 (collapse on (task_id, trigger_id) covers the same case
-	// the cooldown was protecting against). Triggers with
-	// min_autonomy_suitability > 0 still defer to post-scoring re-derive.
+	// Step 9: Auto-delegate for matching triggers. Each matched team's
+	// triggers fire against the single task; the exclusive claim CAS
+	// resolves contention (first claimer — human or bot — wins, the
+	// rest no-op). The per-team kill switch is checked per firing team.
+	// Triggers with min_autonomy_suitability > 0 still defer to
+	// post-scoring re-derive.
 	for teamID, triggers := range teamTriggers {
-		task, ok := tasksByTeam[teamID]
-		if !ok {
-			continue // FindOrCreate failed for this team
-		}
 		if !r.autoDelegateEnabledForTeam(context.Background(), teamID) {
 			continue
 		}
@@ -395,7 +385,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 			if trigger.MinAutonomySuitability != nil && *trigger.MinAutonomySuitability > 0 {
 				continue // deferred to post-scoring handler
 			}
-			r.tryAutoDelegate(orgID, task, trigger, entityID, evt.ID)
+			r.tryAutoDelegate(orgID, task, trigger, entityID, evt.ID, teamID)
 		}
 	}
 
@@ -431,7 +421,7 @@ func handlerTeamID(h domain.EventHandler) string {
 // the gate is closed (active auto run, or older firings already queued
 // for FIFO fairness), the firing enqueues onto pending_firings instead of
 // being dropped silently.
-func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain.EventHandler, entityID string, triggeringEventID string) {
+func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain.EventHandler, entityID string, triggeringEventID string, actingTeamID string) {
 	// SKY-261 bot-disabled-team gate. If the task's team has the bot
 	// turned off in team_agents.enabled, the auto-trigger is a no-op
 	// — the task is already in the team queue (created by HandleEvent
@@ -457,18 +447,17 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 			log.Printf("[router] auto-trigger skipped on task %s: no agent bootstrapped", task.ID)
 			return
 		}
-		// SKY-295: read the bot-enabled flag for THIS task's team, not
-		// the local sentinel. The pre-SKY-295 single-team router could
-		// hardcode LocalDefaultTeamID here because every task lived in
-		// that team; with per-team fanout the caller passes the task
-		// for each matched team and the gate must read each team's
-		// own team_agents row. A two-team org with team B's bot
-		// disabled would otherwise auto-fire on team B by reading
-		// team A's flag (or vice-versa). Fall back to LocalDefaultTeamID
-		// only when task.TeamID is empty — pre-SKY-295 fixtures and
-		// the handlerTeamID warn-path; in steady state every task
-		// carries a real team_id.
-		teamID := task.TeamID
+		// Read the bot-enabled flag for the FIRING team — the team
+		// whose trigger routed the bot here — not the task's owner
+		// team. One task is now visible to many teams; the gate must
+		// read the acting team's own team_agents row so a two-team org
+		// where team B disabled the bot doesn't auto-fire on team B by
+		// reading team A's flag. Fall back to the task's owner team,
+		// then the local sentinel, when the caller didn't supply one.
+		teamID := actingTeamID
+		if teamID == "" {
+			teamID = task.TeamID
+		}
 		if teamID == "" {
 			teamID = runmode.LocalDefaultTeamID
 		}
@@ -549,7 +538,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 			// task. !inserted means a duplicate firing already in the
 			// queue — the original enqueue already stamped, no re-
 			// stamp needed.
-			r.stampAgentClaim(orgID, task)
+			r.stampAgentClaim(orgID, task, actingTeamID)
 		} else {
 			log.Printf("[router] firing collapsed on entity %s (task %s, trigger %s) — duplicate already queued",
 				entityID, task.ID, trigger.ID)
@@ -566,7 +555,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 	// so a fireDelegate that fails + reverts to status='queued'
 	// doesn't leave a phantom bot claim on a task that's back in the
 	// human-triage queue.
-	r.stampAgentClaim(orgID, task)
+	r.stampAgentClaim(orgID, task, actingTeamID)
 }
 
 // stampAgentClaim writes claimed_by_agent_id on a task using the org's
@@ -588,7 +577,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 // the human said "I'll handle this." Same-agent rewrites also
 // short-circuit here, avoiding redundant task_claimed broadcasts on
 // flows that call stampAgentClaim twice in quick succession.
-func (r *Router) stampAgentClaim(orgID string, task *domain.Task) {
+func (r *Router) stampAgentClaim(orgID string, task *domain.Task, actingTeamID string) {
 	if r.agents == nil {
 		return
 	}
@@ -600,7 +589,7 @@ func (r *Router) stampAgentClaim(orgID string, task *domain.Task) {
 	if a == nil {
 		return
 	}
-	ok, err := r.tasks.StampAgentClaimIfUnclaimedSystem(context.Background(), orgID, task.ID, a.ID)
+	ok, err := r.tasks.StampAgentClaimIfUnclaimedSystem(context.Background(), orgID, task.ID, a.ID, actingTeamID)
 	if err != nil {
 		log.Printf("[router] failed to stamp agent claim on task %s: %v", task.ID, err)
 		return
@@ -621,6 +610,11 @@ func (r *Router) stampAgentClaim(orgID string, task *domain.Task) {
 		return
 	}
 	task.ClaimedByAgentID = a.ID
+	if actingTeamID != "" {
+		// Mirror the store's owner-consolidation so the shared task
+		// object reflects the new owning team for later iterations.
+		task.TeamID = actingTeamID
+	}
 	r.ws.Broadcast(websocket.Event{
 		Type:  "task_claimed",
 		OrgID: orgID,
@@ -971,10 +965,10 @@ func (r *Router) reDeriveTask(orgID, taskID string) {
 		return
 	}
 
-	// Per-team auto_delegate kill switch.
-	if !r.autoDelegateEnabledForTeam(context.Background(), task.TeamID) {
-		return
-	}
+	// The per-team auto_delegate kill switch is checked per firing team
+	// inside the trigger loop below — one task is now visible to many
+	// teams, so a single owner-team gate here would wrongly suppress (or
+	// admit) other teams' deferred triggers.
 
 	// Re-derive must not promote a task that's already claimed. After
 	// SKY-261 B+ the responsibility axis lives on the claim cols, not
@@ -1018,16 +1012,12 @@ func (r *Router) reDeriveTask(orgID, taskID string) {
 		if trigger.Kind != domain.EventHandlerKindTrigger {
 			continue
 		}
-		// SKY-295: re-derive only fires triggers that belong to this
-		// task's team. Without this guard a team B deferred trigger
-		// could match the same primary event and fire against team
-		// A's task — leaking work across team boundaries the
-		// HandleEvent fanout took care to keep separate. handlerTeamID
-		// applies the same org-rule → LocalDefaultTeamID fallback the
-		// upstream fanout uses; once shipped rules are team-
-		// materialised in steady state, this comparison is just
-		// trigger.TeamID == task.TeamID.
-		if handlerTeamID(trigger) != task.TeamID {
+		// Each matched team's deferred trigger fires against the single
+		// task; the claim CAS resolves contention. Gate on the firing
+		// team's own auto_delegate kill switch — not the task's owner —
+		// so a team with the switch off can't ride another team's task.
+		firingTeam := handlerTeamID(trigger)
+		if !r.autoDelegateEnabledForTeam(context.Background(), firingTeam) {
 			continue
 		}
 		minAutonomy := derefFloatDefault(trigger.MinAutonomySuitability, 0)
@@ -1063,7 +1053,7 @@ func (r *Router) reDeriveTask(orgID, taskID string) {
 		// event — that's the one whose match scored autonomously above
 		// threshold. Real-event provenance keeps the audit trail honest
 		// when a re-derived firing ends up enqueued.
-		r.tryAutoDelegate(orgID, task, trigger, task.EntityID, task.PrimaryEventID)
+		r.tryAutoDelegate(orgID, task, trigger, task.EntityID, task.PrimaryEventID, firingTeam)
 	}
 }
 
