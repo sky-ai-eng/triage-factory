@@ -177,6 +177,159 @@ func TestEntityStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	})
 }
 
+// seedPgJiraRule inserts a fully-configured jira_project_status_rules
+// row attaching projectKey to teamID. The members/canonical fields
+// satisfy the jpsr_*_populated CHECK constraints; the test only cares
+// that the row exists so the membership semi-join can match on
+// project_key.
+func seedPgJiraRule(t *testing.T, h *pgtest.Harness, teamID, projectKey string) {
+	t.Helper()
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO jira_project_status_rules
+			(team_id, project_key, pickup_members, in_progress_members, in_progress_canonical, done_members, done_canonical)
+		VALUES ($1, $2, ARRAY['To Do'], ARRAY['In Progress'], 'In Progress', ARRAY['Done'], 'Done')
+	`, teamID, projectKey); err != nil {
+		t.Fatalf("seed jira rule %s for team %s: %v", projectKey, teamID, err)
+	}
+}
+
+// TestEntityStore_Postgres_ListActiveJiraTeamScoped pins the multi-mode
+// discovery-read scope under the admin pool: an active Jira entity rides
+// the deck iff some team in its org has attached its project (a
+// jira_project_status_rules row for the project key exists). Entities
+// whose project no team configured are excluded, GitHub entities never
+// appear, and a same-key rule in *another* org doesn't pull the entity
+// in (the teams-join org binding holds even with RLS bypassed). The
+// per-team RLS narrowing is exercised separately in the _RLS test.
+func TestEntityStore_Postgres_ListActiveJiraTeamScoped(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	ctx := context.Background()
+
+	orgID, ownerID := seedPgEntityOrg(t, h)
+	teamA := firstTeamForOrg(t, h, orgID)
+	bob := seedPgMember(t, h, orgID, "bob", "member")
+	teamB := seedPgDefaultTeam(t, h, orgID, bob)
+
+	// teamA tracks AAA, teamB tracks BBB; CCC is attached by no team.
+	seedPgJiraRule(t, h, teamA, "AAA")
+	seedPgJiraRule(t, h, teamB, "BBB")
+
+	// A different org tracks CCC — must not leak CCC-3 into orgID's deck.
+	otherOrg, otherOwner := seedPgEntityOrg(t, h)
+	otherTeam := firstTeamForOrg(t, h, otherOrg)
+	_ = otherOwner
+	seedPgJiraRule(t, h, otherTeam, "CCC")
+
+	inA, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "jira", "AAA-1", "issue", "A", "")
+	if err != nil {
+		t.Fatalf("seed AAA-1: %v", err)
+	}
+	inB, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "jira", "BBB-2", "issue", "B", "")
+	if err != nil {
+		t.Fatalf("seed BBB-2: %v", err)
+	}
+	unattached, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "jira", "CCC-3", "issue", "C", "")
+	if err != nil {
+		t.Fatalf("seed CCC-3: %v", err)
+	}
+	// GitHub entity whose "project key" prefix could coincidentally match
+	// — the source='jira' filter must keep it out regardless.
+	if _, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "github", "AAA/repo#9", "pr", "GH", ""); err != nil {
+		t.Fatalf("seed github: %v", err)
+	}
+	_ = ownerID
+
+	got, err := stores.Entities.ListActiveJiraTeamScoped(ctx, orgID)
+	if err != nil {
+		t.Fatalf("ListActiveJiraTeamScoped: %v", err)
+	}
+	ids := map[string]bool{}
+	for _, e := range got {
+		if e.Source != "jira" {
+			t.Errorf("non-jira entity %s leaked into jira deck", e.ID)
+		}
+		ids[e.ID] = true
+	}
+	if !ids[inA.ID] {
+		t.Errorf("AAA-1 missing — teamA attached AAA, it should ride the deck")
+	}
+	if !ids[inB.ID] {
+		t.Errorf("BBB-2 missing — teamB attached BBB, it should ride the deck")
+	}
+	if ids[unattached.ID] {
+		t.Errorf("CCC-3 leaked — no team in this org attached CCC (another org's rule must not count)")
+	}
+}
+
+// TestEntityStore_Postgres_ListActiveJiraTeamScoped_RLS proves the
+// per-team narrowing the production app pool gets for free: a viewer
+// only sees Jira entities for projects attached to teams they belong
+// to. Where the admin-pool test above proves the org-scoped semi-join,
+// this drives the read through tf_app with real JWT claims so the
+// jira_rules_select policy (team-membership-gated) does the team
+// scoping. alice (teamA only) sees AAA but not BBB; bob (teamB only)
+// sees the mirror.
+func TestEntityStore_Postgres_ListActiveJiraTeamScoped_RLS(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+
+	orgID, alice := seedPgEntityOrg(t, h)
+	teamA := firstTeamForOrg(t, h, orgID)
+	bob := seedPgMember(t, h, orgID, "bob", "member")
+	teamB := seedPgDefaultTeam(t, h, orgID, bob)
+
+	seedPgJiraRule(t, h, teamA, "AAA")
+	seedPgJiraRule(t, h, teamB, "BBB")
+
+	admin := pgstore.New(h.AdminDB, h.AdminDB)
+	entA, _, err := admin.Entities.FindOrCreateSystem(ctx, orgID, "jira", "AAA-1", "issue", "A", "")
+	if err != nil {
+		t.Fatalf("seed AAA-1: %v", err)
+	}
+	entB, _, err := admin.Entities.FindOrCreateSystem(ctx, orgID, "jira", "BBB-2", "issue", "B", "")
+	if err != nil {
+		t.Fatalf("seed BBB-2: %v", err)
+	}
+
+	scopedFor := func(t *testing.T, userID string) map[string]bool {
+		t.Helper()
+		ids := map[string]bool{}
+		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+			rows, e := pgstore.NewForTx(tx).Entities.ListActiveJiraTeamScoped(ctx, orgID)
+			if e != nil {
+				return e
+			}
+			for _, r := range rows {
+				ids[r.ID] = true
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("scoped read for %s: %v", userID, err)
+		}
+		return ids
+	}
+
+	aliceSees := scopedFor(t, alice)
+	if !aliceSees[entA.ID] {
+		t.Errorf("alice (teamA) can't see AAA-1 — her own team's project is hidden")
+	}
+	if aliceSees[entB.ID] {
+		t.Errorf("alice (teamA) saw BBB-2 — teamB's Jira project leaked across the team boundary")
+	}
+
+	bobSees := scopedFor(t, bob)
+	if !bobSees[entB.ID] {
+		t.Errorf("bob (teamB) can't see BBB-2 — his own team's project is hidden")
+	}
+	if bobSees[entA.ID] {
+		t.Errorf("bob (teamB) saw AAA-1 — teamA's Jira project leaked across the team boundary")
+	}
+}
+
 func seedPgEntityOrg(t *testing.T, h *pgtest.Harness) (orgID, userID string) {
 	t.Helper()
 	orgID = uuid.New().String()

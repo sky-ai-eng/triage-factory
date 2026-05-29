@@ -75,6 +75,15 @@ type EntityStore interface {
 	// including below-threshold — classified_at is set and the
 	// entity stops surfacing here. Reassignment via the backfill
 	// popup also sets classified_at.
+	//
+	// Intentionally org-wide (no team scoping) in both backends: the
+	// project classifier (internal/projectclassify) is a system job
+	// that must see *every* unclassified entity in the org to assign
+	// it a project — narrowing this to a viewer's teams would leave
+	// entities permanently unclassified. It runs through the admin
+	// pool (ListUnclassifiedSystem) outside any user's identity, so
+	// there is no viewer to scope to. Do NOT add a task-membership or
+	// team gate here.
 	ListUnclassified(ctx context.Context, orgID string) ([]domain.Entity, error)
 
 	// ListActive returns every state='active' entity for the given
@@ -82,6 +91,34 @@ type EntityStore interface {
 	// the freshest items rotate out of the head of the list each
 	// poll cycle.
 	ListActive(ctx context.Context, orgID, source string) ([]domain.Entity, error)
+
+	// ListActiveJiraTeamScoped is the discovery-read variant of
+	// ListActive(orgID, "jira") that backs the Jira stock / carry-over
+	// swipe deck (internal/server/stock.go). It surfaces *untasked*
+	// entities, so the SKY-366 task-membership semi-join can't scope
+	// it — by definition the deck shows tickets before any task
+	// exists. Instead it scopes by the Jira projects attached to the
+	// viewer's teams.
+	//
+	// Multi-mode (Postgres): returns only active Jira entities whose
+	// project key (the prefix of source_id, e.g. "SKY" in "SKY-123")
+	// matches a jira_project_status_rules row — the table a team
+	// populates to declare which Jira projects it tracks. That table's
+	// RLS (jira_rules_select) is team-membership-scoped, so under the
+	// app pool (tf_app) the semi-join auto-scopes to the projects
+	// attached to the viewer's teams with no explicit team_id in the
+	// query — the same RLS-does-the-scoping trick as the factory belt.
+	// An org-wide poller produces Jira entities across every team's
+	// projects; this keeps a user from swiping another team's
+	// untriaged backlog.
+	//
+	// Local mode (SQLite, N=1): returns the full active Jira set,
+	// identical to ListActive(orgID, "jira"). There is one user and
+	// one team, the Jira poller only discovers the configured
+	// projects, and gating here would just hide the deck's own
+	// contents — so the local impl applies no scoping, mirroring the
+	// FactoryReadStore.Entities asymmetry.
+	ListActiveJiraTeamScoped(ctx context.Context, orgID string) ([]domain.Entity, error)
 
 	// ListProjectPanel returns the trimmed-column projection used
 	// by the Projects panel: id, source, source_id, kind, title,

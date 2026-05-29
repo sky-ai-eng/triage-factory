@@ -172,6 +172,68 @@ func TestProjectStore_Postgres_CreateRefusesTeamSentinel(t *testing.T) {
 	}
 }
 
+// TestProjectStore_Postgres_CrossTeamRLSHidesProject is the SKY-367
+// regression guard for the projects-panel and backfill-candidates
+// handlers. Both list entities by project_id but gate the listing on
+// Projects.Get returning a non-nil project first (project == nil →
+// early return, no entities). Entities are org-wide, so that gate is
+// the *only* thing stopping a user from listing another team's
+// project entities once org-wide polling lands. This pins that a
+// team-visibility project owned by a team the viewer doesn't belong to
+// is invisible to Projects.Get under RLS — so the handler's gate holds.
+func TestProjectStore_Postgres_CrossTeamRLSHidesProject(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+
+	// One org, two teams. alice is on teamA only; bob owns teamB's project.
+	orgID, alice, _ := seedPgProjectOrg(t, h)
+	teamA := firstTeamForOrg(t, h, orgID)
+	_ = teamA
+	bob := seedPgMember(t, h, orgID, "bob", "member")
+	teamB := seedPgDefaultTeam(t, h, orgID, bob)
+
+	// Seed a team-visibility project owned by teamB, created by bob, via
+	// the admin pool (bypassing RLS for the seed). alice is neither the
+	// creator nor a teamB member, so projects_select must hide it from her.
+	projB := uuid.New().String()
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO projects (id, org_id, creator_user_id, team_id, visibility, name, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 'team', 'TeamB Secret', now(), now())
+	`, projB, orgID, bob, teamB); err != nil {
+		t.Fatalf("seed teamB project: %v", err)
+	}
+
+	// alice (teamA) — the panel/backfill gate must see nil and bail.
+	if err := h.WithUser(t, alice, orgID, func(tx *sql.Tx) error {
+		got, e := pgstore.NewForTx(tx).Projects.Get(ctx, orgID, projB)
+		if e != nil {
+			return e
+		}
+		if got != nil {
+			t.Errorf("alice Get(teamB project) = %+v; RLS leaked another team's project, so the entity listing gate would open", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("alice path: %v", err)
+	}
+
+	// bob (teamB) — same-team owner still sees it, so the gate doesn't
+	// over-restrict the legitimate viewer.
+	if err := h.WithUser(t, bob, orgID, func(tx *sql.Tx) error {
+		got, e := pgstore.NewForTx(tx).Projects.Get(ctx, orgID, projB)
+		if e != nil {
+			return e
+		}
+		if got == nil {
+			t.Errorf("bob Get(teamB project) = nil; RLS wrongly hid the project from its own team member")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("bob path: %v", err)
+	}
+}
+
 func seedPgProjectOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, agentID string) {
 	t.Helper()
 	orgID = uuid.New().String()

@@ -123,7 +123,13 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 	var taskedEntityIDs map[string]struct{}
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		entities, e = tx.Entities.ListActive(r.Context(), orgID, "jira")
+		// Team-scoped discovery read: in multi-mode this returns only
+		// Jira entities whose project is attached to one of the viewer's
+		// teams (via the jira_project_status_rules RLS semi-join), so an
+		// org-wide poller can't surface another team's untriaged backlog
+		// on this user's swipe deck. Local mode (SQLite) returns the full
+		// active set — N=1, nothing to scope away.
+		entities, e = tx.Entities.ListActiveJiraTeamScoped(r.Context(), orgID)
 		if e != nil {
 			return e
 		}

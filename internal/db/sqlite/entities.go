@@ -171,6 +171,15 @@ func (s *entityStore) ListActive(ctx context.Context, orgID, source string) ([]d
 	return out, rows.Err()
 }
 
+// ListActiveJiraTeamScoped returns the full active Jira set in local
+// mode — N=1, so there is no other team to scope away. The Postgres
+// impl applies the jira_project_status_rules team semi-join; SQLite
+// deliberately does not (see the interface doc on EntityStore for the
+// asymmetry rationale, which mirrors FactoryReadStore.Entities).
+func (s *entityStore) ListActiveJiraTeamScoped(ctx context.Context, orgID string) ([]domain.Entity, error) {
+	return s.ListActive(ctx, orgID, "jira")
+}
+
 func (s *entityStore) ListProjectPanel(ctx context.Context, orgID, projectID string) ([]domain.ProjectPanelEntity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

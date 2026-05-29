@@ -43,6 +43,50 @@ func TestEntityStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	}
 }
 
+// TestEntityStore_SQLite_ListActiveJiraTeamScoped pins the local-mode
+// contract for the discovery-read variant: SQLite applies NO team
+// scoping (N=1) and returns the full active Jira set, identical to
+// ListActive(orgID, "jira"). The Postgres impl scopes to the viewer's
+// team-attached Jira projects; local mode deliberately does not.
+func TestEntityStore_SQLite_ListActiveJiraTeamScoped(t *testing.T) {
+	conn := newSQLiteForEntityTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := t.Context()
+	org := runmode.LocalDefaultOrgID
+
+	// Two Jira entities (no jira_project_status_rules rows configured at
+	// all) plus a GitHub entity that must never appear in a Jira read.
+	jira1, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "AAA-1", "issue", "One", "")
+	if err != nil {
+		t.Fatalf("seed jira1: %v", err)
+	}
+	jira2, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "BBB-2", "issue", "Two", "")
+	if err != nil {
+		t.Fatalf("seed jira2: %v", err)
+	}
+	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "owner/repo#1", "pr", "PR", ""); err != nil {
+		t.Fatalf("seed github: %v", err)
+	}
+
+	got, err := stores.Entities.ListActiveJiraTeamScoped(ctx, org)
+	if err != nil {
+		t.Fatalf("ListActiveJiraTeamScoped: %v", err)
+	}
+	ids := map[string]bool{}
+	for _, e := range got {
+		if e.Source != "jira" {
+			t.Errorf("non-jira entity %s (%s) leaked into jira deck", e.ID, e.Source)
+		}
+		ids[e.ID] = true
+	}
+	// Both Jira entities surface despite no rules configured — local mode
+	// is unscoped. If this started excluding untasked/unconfigured Jira
+	// tickets, the deck would hide its own contents.
+	if !ids[jira1.ID] || !ids[jira2.ID] {
+		t.Errorf("local ListActiveJiraTeamScoped should return all active jira; got %v, want %s and %s", ids, jira1.ID, jira2.ID)
+	}
+}
+
 func newSQLiteForEntityTest(t *testing.T) *sql.DB {
 	t.Helper()
 	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
