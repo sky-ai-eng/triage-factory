@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -28,7 +27,7 @@ func TestManager_RunGitHubCycle_IteratesActiveOrgs(t *testing.T) {
 	users := &emptyUsersStore{} // GetGitHubUsernameSystem unused — repo path exits first
 
 	m := &Manager{orgs: orgs, repos: repos, users: users}
-	m.runGitHubCycle(nil, nil)
+	m.runGitHubCycle()
 
 	if orgs.calls != 1 {
 		t.Errorf("ListActiveSystem called %d times; want 1 per cycle", orgs.calls)
@@ -78,7 +77,7 @@ func TestManager_RunGitHubCycle_OrgsStoreErrorAbortsCycle(t *testing.T) {
 	orgs := &fakeOrgsStore{err: errOrgsDown}
 	repos := &recordingRepoStore{}
 	m := &Manager{orgs: orgs, repos: repos}
-	m.runGitHubCycle(nil, nil)
+	m.runGitHubCycle()
 
 	repos.mu.Lock()
 	defer repos.mu.Unlock()
@@ -87,29 +86,25 @@ func TestManager_RunGitHubCycle_OrgsStoreErrorAbortsCycle(t *testing.T) {
 	}
 }
 
-// TestManager_StartGitHub_MultiModeGatesOut pins the multi-mode gate
-// on startGitHub: in multi mode the GitHub poll loop is a no-op (the
-// users.github_username read is keyed by a sentinel user that has no
-// real-tenant analog; per-org GitHub App polling (D11) is the
-// multi-mode path). The contract is "no goroutine spawned, no ghStop
-// channel set" — if the gate regresses, m.ghStop would be non-nil
-// after startGitHub returns with a valid config.
-func TestManager_StartGitHub_MultiModeGatesOut(t *testing.T) {
+// TestManager_StartGitHub_StartsInMultiMode pins that SKY-353 lifted the
+// old local-only gate: multi-mode GitHub polling is now the per-org App
+// path, so startGitHub spawns the poll goroutine (ghStop != nil) in multi
+// mode too. The initial poll fans out per active org; with an empty
+// active-org list the cycle does nothing, so this test asserts only the
+// lifecycle contract (goroutine spawned, then cleanly stopped).
+func TestManager_StartGitHub_StartsInMultiMode(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
-	m := &Manager{}
-	orgSet := domain.OrgSettings{
-		GitHubBaseURL:      "https://github.example.com",
-		GitHubPollInterval: time.Minute,
-	}
-	creds := auth.Credentials{GitHubPAT: "ghp_test", GitHubURL: "https://github.example.com"}
+	m := &Manager{orgs: &fakeOrgsStore{}}
 
-	m.startGitHub(orgSet, creds)
+	m.startGitHub(time.Minute)
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.ghStop != nil {
-		t.Errorf("multi-mode startGitHub spawned a poll goroutine (ghStop != nil); want no-op")
+	started := m.ghStop != nil
+	m.mu.Unlock()
+	if !started {
+		t.Errorf("multi-mode startGitHub did not spawn a poll goroutine (ghStop == nil); want the per-org App path to run")
 	}
+	m.StopAll()
 }
 
 // --- test doubles ---

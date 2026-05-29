@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/url"
 	"strings"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // PRView is the compact PR details returned by `gh pr view`.
@@ -615,6 +617,163 @@ func (c *Client) DeleteComment(owner, repo string, commentID int) error {
 	}
 	_, err = c.Delete(fmt.Sprintf("/repos/%s/%s/pulls/comments/%d", owner, repo, commentID))
 	return err
+}
+
+// restPR is the subset of the REST pull-request object (GET
+// /repos/{o}/{r}/pulls) the poller's discovery path consumes. The REST
+// object carries node_id, which composes directly with the GraphQL Phase-2
+// refresh (RefreshPRs takes node IDs). Fields mirror what
+// prDiscoveryFragment produces so both discovery paths feed the same
+// snapshot shape into the gate (updated_at + head.sha) and entity seeding.
+type restPR struct {
+	Number    int    `json:"number"`
+	NodeID    string `json:"node_id"`
+	Title     string `json:"title"`
+	State     string `json:"state"`
+	Draft     bool   `json:"draft"`
+	HTMLURL   string `json:"html_url"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+	User      struct {
+		Login string `json:"login"`
+	} `json:"user"`
+	Head struct {
+		SHA  string `json:"sha"`
+		Ref  string `json:"ref"`
+		Repo *struct {
+			FullName string `json:"full_name"`
+		} `json:"repo"`
+	} `json:"head"`
+	Base struct {
+		Ref  string `json:"ref"`
+		Repo *struct {
+			FullName string `json:"full_name"`
+		} `json:"repo"`
+	} `json:"base"`
+	RequestedReviewers []struct {
+		Login string `json:"login"`
+	} `json:"requested_reviewers"`
+	RequestedTeams []struct {
+		Slug string `json:"slug"`
+	} `json:"requested_teams"`
+	Labels []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+}
+
+// ListOpenPRs lists a repo's open PRs via REST with a conditional request,
+// returning them as DiscoveredPRs (node ID + discovery snapshot) ready to
+// feed the existing two-phase tracker (Phase-2 GraphQL refresh keys on the
+// node IDs). It is the App/PAT-parity replacement for user-perspective
+// GraphQL search discovery: reach differs by what the token can see, the
+// mechanism is identical.
+//
+// etag is the caller's stored ETag for this repo's open-PR listing.
+//   - 304 → (nil, "", true, nil): the open set is unchanged; the caller
+//     skips discovery for this repo this cycle (free on the primary limit).
+//   - 200 → (prs, newEtag, false, nil): the caller stores newEtag and
+//     processes the listing.
+//
+// The ETag fast-path is single-page: page 1 carries the conditional header
+// (default sort created desc, so a newly opened PR always changes page 1),
+// and on a 200 any further pages are listed unconditionally. >100 open PRs
+// therefore re-list fully on each change; the Phase-2 refresh remains the
+// correctness backstop for state changes on already-tracked entities.
+func (c *Client) ListOpenPRs(owner, repo, etag string) ([]DiscoveredPR, string, bool, error) {
+	first := fmt.Sprintf("/repos/%s/%s/pulls?state=open&per_page=100&page=1", owner, repo)
+	body, newEtag, notModified, err := c.GetConditional(first, etag)
+	if err != nil {
+		return nil, "", false, err
+	}
+	if notModified {
+		return nil, "", true, nil
+	}
+
+	var out []DiscoveredPR
+	page1, err := parseOpenPRs(owner, repo, body)
+	if err != nil {
+		return nil, "", false, err
+	}
+	out = append(out, page1...)
+
+	// Single-page fast path: fewer than a full page means no more pages.
+	for page := 2; len(out) > 0 && len(out)%100 == 0; page++ {
+		data, perr := c.Get(fmt.Sprintf("/repos/%s/%s/pulls?state=open&per_page=100&page=%d", owner, repo, page))
+		if perr != nil {
+			return nil, "", false, perr
+		}
+		more, perr := parseOpenPRs(owner, repo, data)
+		if perr != nil {
+			return nil, "", false, perr
+		}
+		if len(more) == 0 {
+			break
+		}
+		out = append(out, more...)
+	}
+
+	return out, newEtag, false, nil
+}
+
+// parseOpenPRs decodes a REST pulls listing page into DiscoveredPRs.
+func parseOpenPRs(owner, repo string, data []byte) ([]DiscoveredPR, error) {
+	var raw []restPR
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parse open PRs for %s/%s: %w", owner, repo, err)
+	}
+	out := make([]DiscoveredPR, 0, len(raw))
+	for _, pr := range raw {
+		if pr.Number == 0 {
+			continue
+		}
+		out = append(out, DiscoveredPR{
+			NodeID:   pr.NodeID,
+			Snapshot: pr.toDiscoverySnapshot(owner, repo),
+		})
+	}
+	return out, nil
+}
+
+// toDiscoverySnapshot maps a REST PR object to a discovery snapshot. Mirrors
+// gqlPR.toDiscoverySnapshot: CheckRuns stays nil ("unknown prior state") so
+// the diff layer skips CI evaluation until the Phase-2 refresh fills it in.
+// Review-request team reviewers are emitted as "owner/slug" — a repo's
+// requested team always belongs to the repo's owning org, so owner is the
+// org login, matching the "org/slug" form GraphQL discovery and
+// GET /user/teams produce.
+func (pr restPR) toDiscoverySnapshot(owner, repo string) domain.PRSnapshot {
+	snap := domain.PRSnapshot{
+		NodeID:    pr.NodeID,
+		Number:    pr.Number,
+		Title:     pr.Title,
+		Author:    pr.User.Login,
+		Repo:      owner + "/" + repo,
+		URL:       pr.HTMLURL,
+		State:     strings.ToUpper(pr.State), // REST "open" → "OPEN" (GraphQL form)
+		IsDraft:   pr.Draft,
+		HeadRef:   pr.Head.Ref,
+		BaseRef:   pr.Base.Ref,
+		HeadSHA:   pr.Head.SHA,
+		CreatedAt: pr.CreatedAt,
+		UpdatedAt: pr.UpdatedAt,
+	}
+	if pr.Head.Repo != nil {
+		snap.HeadRepo = pr.Head.Repo.FullName
+	}
+	for _, rr := range pr.RequestedReviewers {
+		if rr.Login != "" {
+			snap.ReviewRequests = append(snap.ReviewRequests, rr.Login)
+		}
+	}
+	for _, tm := range pr.RequestedTeams {
+		if tm.Slug != "" {
+			snap.ReviewRequests = append(snap.ReviewRequests, owner+"/"+tm.Slug)
+		}
+	}
+	for _, l := range pr.Labels {
+		snap.Labels = append(snap.Labels, l.Name)
+	}
+	return snap
 }
 
 // SearchReviewRequested searches for open PRs requesting the user's review.

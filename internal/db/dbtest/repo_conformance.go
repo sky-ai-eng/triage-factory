@@ -335,6 +335,63 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 			t.Errorf("UpdateCloneStatus on absent repo should be a no-op, got %v", err)
 		}
 	})
+
+	t.Run("PullsPollState_round_trips", func(t *testing.T) {
+		// SKY-353: the GitHub poller stores a per-repo ETag + last-poll
+		// time for conditional open-PR discovery. Unset reads as ("", nil);
+		// a Set persists both; a re-Set overwrites.
+		s, orgID := mk(t)
+		if err := s.SetConfigured(ctx, orgID, []string{"octo/widget"}); err != nil {
+			t.Fatalf("SetConfigured: %v", err)
+		}
+
+		etag, polledAt, err := s.GetPullsPollStateSystem(ctx, orgID, "octo/widget")
+		if err != nil {
+			t.Fatalf("GetPullsPollStateSystem (unset): %v", err)
+		}
+		if etag != "" || polledAt != nil {
+			t.Errorf("unset poll state = (%q, %v); want (\"\", nil)", etag, polledAt)
+		}
+
+		now := time.Now().UTC().Truncate(time.Second)
+		if err := s.SetPullsPollStateSystem(ctx, orgID, "octo/widget", `"etag-v1"`, now); err != nil {
+			t.Fatalf("SetPullsPollStateSystem: %v", err)
+		}
+		etag, polledAt, err = s.GetPullsPollStateSystem(ctx, orgID, "octo/widget")
+		if err != nil {
+			t.Fatalf("GetPullsPollStateSystem: %v", err)
+		}
+		if etag != `"etag-v1"` {
+			t.Errorf("etag = %q; want %q", etag, `"etag-v1"`)
+		}
+		if polledAt == nil || !polledAt.UTC().Equal(now) {
+			t.Errorf("polledAt = %v; want %v", polledAt, now)
+		}
+
+		later := now.Add(time.Hour)
+		if err := s.SetPullsPollStateSystem(ctx, orgID, "octo/widget", `"etag-v2"`, later); err != nil {
+			t.Fatalf("re-Set: %v", err)
+		}
+		etag, _, _ = s.GetPullsPollStateSystem(ctx, orgID, "octo/widget")
+		if etag != `"etag-v2"` {
+			t.Errorf("etag after re-Set = %q; want %q", etag, `"etag-v2"`)
+		}
+	})
+
+	t.Run("PullsPollState_no_op_when_repo_absent", func(t *testing.T) {
+		// Configured-repos-only invariant, same as UpdateCloneStatus.
+		s, orgID := mk(t)
+		if err := s.SetPullsPollStateSystem(ctx, orgID, "ghost/repo", `"x"`, time.Now()); err != nil {
+			t.Errorf("Set on absent repo should be a no-op, got %v", err)
+		}
+		etag, polledAt, err := s.GetPullsPollStateSystem(ctx, orgID, "ghost/repo")
+		if err != nil {
+			t.Errorf("Get on absent repo should be (\"\", nil, nil), got err %v", err)
+		}
+		if etag != "" || polledAt != nil {
+			t.Errorf("absent repo poll state = (%q, %v); want empty", etag, polledAt)
+		}
+	})
 }
 
 func projectIDs(profiles []domain.RepoProfile) []string {

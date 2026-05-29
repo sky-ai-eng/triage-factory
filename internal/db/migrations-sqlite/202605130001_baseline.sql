@@ -792,6 +792,13 @@ CREATE TABLE repo_profiles (
     clone_error     TEXT,
     clone_error_kind TEXT,
     org_id          TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
+    -- pulls_etag / pulls_polled_at back the GitHub poller's conditional
+    -- open-PR discovery (SKY-353): pulls_etag is the last ETag GitHub
+    -- returned for GET /repos/{o}/{r}/pulls?state=open; pulls_polled_at is
+    -- the last successful list (200 or 304). A 304 against the stored ETag
+    -- means the open-PR set is unchanged and discovery skips the repo.
+    pulls_etag      TEXT,
+    pulls_polled_at DATETIME,
     UNIQUE(owner, repo)
 );
 CREATE INDEX idx_repo_profiles_owner_repo ON repo_profiles(owner, repo);

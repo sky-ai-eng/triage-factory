@@ -56,6 +56,57 @@ func (c *Client) Get(path string) ([]byte, error) {
 	return c.do("GET", path, nil)
 }
 
+// GetConditional performs an authenticated GET that sends an If-None-Match
+// header when etag is non-empty. It surfaces the conditional-request outcome
+// the plain Get hides:
+//
+//   - 304 Not Modified → (nil, "", true, nil). Conditional requests that
+//     resolve to 304 do NOT increment the primary rate-limit counter
+//     (x-ratelimit-used), so a quiet resource is free to re-poll.
+//   - 200 OK → (body, <response ETag>, false, nil). The returned ETag should
+//     be stored and replayed on the next call.
+//   - other non-2xx → (nil, "", false, *HTTPError).
+//
+// Kept separate from Get so existing callers don't have to thread ETags they
+// don't use.
+func (c *Client) GetConditional(path, etag string) (body []byte, newEtag string, notModified bool, err error) {
+	url := c.baseURL + path
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, "", false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.pat)
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, "", false, fmt.Errorf("request %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotModified {
+		// Drain so the connection can be reused.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil, "", true, nil
+	}
+
+	data, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return nil, "", false, fmt.Errorf("read response body: %w", readErr)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, "", false, &HTTPError{
+			StatusCode: resp.StatusCode,
+			Body:       string(data),
+			msg:        fmt.Sprintf("GET %s returned %d: %s", path, resp.StatusCode, string(data)),
+		}
+	}
+	return data, resp.Header.Get("ETag"), false, nil
+}
+
 // Post performs an authenticated POST request with a JSON body.
 func (c *Client) Post(path string, body any) ([]byte, error) {
 	return c.do("POST", path, body)

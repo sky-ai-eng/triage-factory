@@ -915,7 +915,14 @@ func main() {
 		errorThrottleMu sync.Mutex
 		lastErrorToast  = map[string]time.Time{}
 	)
-	pollerMgr := poller.NewManager(database, bus, stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.Orgs, stores.Teams, stores.JiraStatusRules, stores.Secrets)
+	// GitHub credential resolver for the poller — resolves an App
+	// installation token (tier 1) or the org PAT (tier 3) per cycle, per
+	// installation (SKY-353). Its own token cache: installation tokens
+	// carry a TTL and the cache treats a token inside the expiry guard as a
+	// miss, so the poller re-mints on its own schedule without sharing the
+	// server's cache.
+	pollerGHResolver := ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil)
+	pollerMgr := poller.NewManager(database, bus, stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.Orgs, stores.Teams, stores.JiraStatusRules, stores.Secrets, stores.GitHubApps, pollerGHResolver)
 	pollerMgr.OnError = func(source, orgID string, err error) {
 		// Throttle key includes orgID so a chronic failure on one tenant
 		// doesn't suppress a fresh failure on another. Process-level

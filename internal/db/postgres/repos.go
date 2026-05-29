@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -321,6 +322,44 @@ func updateRepoCloneStatus(ctx context.Context, q queryer, orgID, owner, repo, s
 		   SET clone_status = $1, clone_error = NULLIF($2, ''), clone_error_kind = NULLIF($3, '')
 		 WHERE org_id = $4 AND owner = $5 AND repo = $6
 	`, status, errMsg, errKind, orgID, owner, repo)
+	return err
+}
+
+func (s *repoStore) GetPullsPollStateSystem(ctx context.Context, orgID, repoID string) (string, *time.Time, error) {
+	owner, repo := splitRepoSlug(repoID)
+	if owner == "" || repo == "" {
+		return "", nil, nil
+	}
+	var etag sql.NullString
+	var polledAt sql.NullTime
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT pulls_etag, pulls_polled_at
+		  FROM repo_profiles
+		 WHERE org_id = $1 AND owner = $2 AND repo = $3
+	`, orgID, owner, repo).Scan(&etag, &polledAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil, nil
+	}
+	if err != nil {
+		return "", nil, err
+	}
+	var out *time.Time
+	if polledAt.Valid {
+		out = &polledAt.Time
+	}
+	return etag.String, out, nil
+}
+
+func (s *repoStore) SetPullsPollStateSystem(ctx context.Context, orgID, repoID, etag string, polledAt time.Time) error {
+	owner, repo := splitRepoSlug(repoID)
+	if owner == "" || repo == "" {
+		return nil
+	}
+	_, err := s.admin.ExecContext(ctx, `
+		UPDATE repo_profiles
+		   SET pulls_etag = NULLIF($1, ''), pulls_polled_at = $2
+		 WHERE org_id = $3 AND owner = $4 AND repo = $5
+	`, etag, polledAt, orgID, owner, repo)
 	return err
 }
 
