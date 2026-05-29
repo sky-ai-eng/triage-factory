@@ -470,6 +470,107 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 	}
 }
 
+// TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam pins that
+// when the highest-priority owner team has auto-delegation disabled and
+// a lower-priority team fires the bot, the owner is consolidated to the
+// acting team BEFORE the run is created — so the run (which inherits
+// runs.team_id from tasks.team_id) is attributed to the team that
+// acted, not the stale owner. The stub records the task's owner team at
+// Delegate time.
+func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
+	database := newTestDB(t)
+	seedHandlerFKTargets(t, database)
+	stores := sqlitestore.New(database)
+
+	teamA := runmode.LocalDefaultTeamID
+	teamB := "00000000-0000-0000-0000-0000000000c1"
+	if _, err := database.Exec(`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, 'team-b-attr', 'Team B Attr')`, teamB, runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("seed team B: %v", err)
+	}
+	// Owner team A's bot is DISABLED; team B's is enabled.
+	if _, err := database.Exec(`INSERT OR REPLACE INTO team_settings (team_id, auto_delegate_enabled) VALUES (?, 0)`, teamA); err != nil {
+		t.Fatalf("disable team A auto-delegate: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO team_settings (team_id, auto_delegate_enabled) VALUES (?, 1)`, teamB); err != nil {
+		t.Fatalf("enable team B auto-delegate: %v", err)
+	}
+	if _, err := database.Exec(`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`, runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("seed agent: %v", err)
+	}
+	if err := stores.TeamAgents.AddForTeam(t.Context(), runmode.LocalDefaultOrg, teamA, runmode.LocalDefaultAgentID); err != nil {
+		t.Fatalf("add agent to team A: %v", err)
+	}
+	if err := stores.TeamAgents.AddForTeam(t.Context(), runmode.LocalDefaultOrg, teamB, runmode.LocalDefaultAgentID); err != nil {
+		t.Fatalf("add agent to team B: %v", err)
+	}
+
+	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#attr", "pr", "Attr PR", "https://example.com/attr")
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+	createTestPrompt(t, database, domain.Prompt{ID: "p-attr", Name: "Attr", Body: "x", Source: "user"})
+
+	// Team A is the owner via a high-priority rule, and also has a
+	// trigger (which is skipped because team A's bot is disabled).
+	if _, err := database.Exec(`
+		INSERT INTO event_handlers
+			(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
+			 scope_predicate_json, enabled, source, name, default_priority, sort_order, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'team', 'rule', ?, NULL, 1, 'user', 'A rule', 0.9, 100, datetime('now'), datetime('now'))
+	`, "rule-A-attr", runmode.LocalDefaultOrg, teamA, runmode.LocalDefaultUserID, domain.EventGitHubPRCICheckFailed); err != nil {
+		t.Fatalf("seed team A rule: %v", err)
+	}
+	createTriggerForTestRouting(t, database, domain.EventHandler{
+		ID: "trigger-A-attr", Kind: domain.EventHandlerKindTrigger,
+		PromptID: "p-attr", TriggerType: domain.TriggerTypeEvent,
+		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4),
+		MinAutonomySuitability: floatPtr(0), Enabled: true,
+	})
+	// Team B (lower priority) also has a trigger and IS enabled.
+	if _, err := database.Exec(`
+		INSERT INTO event_handlers
+			(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
+			 scope_predicate_json, enabled, source, prompt_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'team', 'trigger', ?, NULL, 1, 'user', ?, 4, 0, datetime('now'), datetime('now'))
+	`, "trigger-B-attr", runmode.LocalDefaultOrg, teamB, runmode.LocalDefaultUserID,
+		domain.EventGitHubPRCICheckFailed, "p-attr"); err != nil {
+		t.Fatalf("seed team B trigger: %v", err)
+	}
+
+	meta := events.GitHubPRCICheckFailedMetadata{Author: "aidan", CheckName: "build", Repo: "owner/repo"}
+	metaJSON, _ := json.Marshal(meta)
+
+	stub := &stubDelegator{db: database}
+	router := NewRouter(testPromptStore(database), testEventHandlerStore(database), stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, stub, noopScorer{}, websocket.NewHub())
+
+	router.HandleEvent(domain.Event{
+		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID,
+		DedupKey: "build", MetadataJSON: string(metaJSON), OrgID: runmode.LocalDefaultOrg,
+	})
+
+	if stub.calls != 1 {
+		t.Fatalf("expected exactly 1 bot run (team B only; team A disabled), got %d", stub.calls)
+	}
+	// The owner must have been consolidated to team B BEFORE the run was
+	// created — the run inherits its team from the task at insert time.
+	stub.mu.Lock()
+	fired := stub.lastTaskTeamID
+	stub.mu.Unlock()
+	if fired != teamB {
+		t.Errorf("run fired with task owner team %q, want teamB %q (owner must consolidate before the run is created)", fired, teamB)
+	}
+	active, _ := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrg, entity.ID)
+	if len(active) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(active))
+	}
+	if active[0].TeamID != teamB {
+		t.Errorf("final owner team_id = %q, want teamB %q", active[0].TeamID, teamB)
+	}
+	if active[0].ClaimedByAgentID == "" {
+		t.Error("task should be bot-claimed by the acting team")
+	}
+}
+
 // TestHandleEvent_SingleTeam_OneTask is the regression baseline: with
 // only one matching rule, exactly one task gets created — the
 // local-mode + single-team-rule path.

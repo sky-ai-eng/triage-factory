@@ -219,6 +219,10 @@ func (s *taskStore) VisibilityTeamsSystem(ctx context.Context, orgID, taskID str
 	return s.VisibilityTeams(ctx, orgID, taskID)
 }
 
+func (s *taskStore) SetOwnerTeamSystem(ctx context.Context, orgID, taskID, teamID string) error {
+	return s.SetOwnerTeam(ctx, orgID, taskID, teamID)
+}
+
 func (s *taskStore) BumpSystem(ctx context.Context, orgID, taskID, eventID string) error {
 	return s.Bump(ctx, orgID, taskID, eventID)
 }
@@ -552,6 +556,17 @@ const sqliteActingTeamExpr = `COALESCE(
 		  ORDER BY (tt.team_id = tasks.team_id) DESC, tt.team_id ASC
 		  LIMIT 1),
 		team_id)`
+
+func (s *taskStore) SetOwnerTeam(ctx context.Context, orgID, taskID, teamID string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	if teamID == "" {
+		return nil
+	}
+	_, err := s.q.ExecContext(ctx, `UPDATE tasks SET team_id = ? WHERE id = ?`, teamID, taskID)
+	return err
+}
 
 // --- Claim mutations ---
 

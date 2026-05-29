@@ -395,14 +395,17 @@ func (r *Router) HandleEvent(evt domain.Event) {
 		if len(triggers) == 0 {
 			continue
 		}
-		if !r.autoDelegateEnabledForTeam(context.Background(), teamID) {
+		// Normalize the org-visible sentinel to the resolved owner team
+		// so the kill-switch / team_agents / claim all read a real team.
+		acting := effectiveActingTeam(teamID, task.TeamID)
+		if !r.autoDelegateEnabledForTeam(context.Background(), acting) {
 			continue
 		}
 		for _, trigger := range triggers {
 			if trigger.MinAutonomySuitability != nil && *trigger.MinAutonomySuitability > 0 {
 				continue // deferred to post-scoring handler
 			}
-			r.tryAutoDelegate(orgID, task, trigger, entityID, evt.ID, teamID)
+			r.tryAutoDelegate(orgID, task, trigger, entityID, evt.ID, acting)
 		}
 	}
 
@@ -423,6 +426,23 @@ func handlerTeamID(h domain.EventHandler) string {
 	}
 	log.Printf("[router] WARNING handler %s (%s) has no team_id — falling back to LocalDefaultTeamID; check that EventHandlerStore.Seed was called with a real teamID", h.ID, h.Kind)
 	return runmode.LocalDefaultTeamID
+}
+
+// effectiveActingTeam normalizes a handler's acting team for the
+// auto-delegate gates and the bot claim. An org-visible handler routes
+// the LocalDefaultTeamID sentinel through handlerTeamID, but in
+// multi-mode that sentinel has no teams / team_agents / team_settings
+// row of its own — the store resolves it to the org's canonical team
+// for the task's owner and visibility rows. The task's owner team_id
+// already carries that resolution, so fall back to it. In local mode
+// the sentinel IS the real team and task.TeamID equals it, so this is a
+// no-op. Without this, multi-mode org-visible auto-delegation reads the
+// sentinel's (missing) team_agents row and is wrongly skipped.
+func effectiveActingTeam(actingTeamID, taskTeamID string) string {
+	if actingTeamID == "" || actingTeamID == runmode.LocalDefaultTeamID {
+		return taskTeamID
+	}
+	return actingTeamID
 }
 
 // tryAutoDelegate decides whether a matched (task, trigger) fires now or
@@ -574,6 +594,24 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 		return
 	}
 
+	// Consolidate the owner team to the acting team BEFORE firing. An
+	// auto-fired run inherits runs.team_id from tasks.team_id at insert,
+	// and the claim (which also consolidates the owner) lands only after
+	// the fire succeeds — so without this, a run fired by a team other
+	// than the creation-time owner (e.g. the owner had auto-delegation
+	// disabled and a lower-priority team is firing) would be attributed
+	// to the stale owner. Owner-only update, no claim touch: if the fire
+	// fails the task is owned by the team that tried, unclaimed — not a
+	// phantom claim. Skipped when the acting team already is the owner
+	// (the common path, and same-team multi-prompt where an active run
+	// may exist).
+	if actingTeamID != "" && actingTeamID != task.TeamID {
+		if err := r.tasks.SetOwnerTeamSystem(context.Background(), orgID, task.ID, actingTeamID); err != nil {
+			log.Printf("[router] failed to consolidate owner team on task %s before fire: %v", task.ID, err)
+		} else {
+			task.TeamID = actingTeamID
+		}
+	}
 	if _, err := r.fireDelegate(orgID, task, trigger); err != nil {
 		log.Printf("[router] fire failed for task %s (trigger %s): %v", task.ID, trigger.ID, err)
 		return
@@ -1061,8 +1099,10 @@ func (r *Router) reDeriveTask(orgID, taskID string) {
 		// task; the claim CAS resolves contention. Gate first on the
 		// task's recorded visibility set so a team that wasn't part of
 		// the original match can't ride (and claim) a task it can't see,
-		// then on the firing team's own auto_delegate kill switch.
-		firingTeam := handlerTeamID(trigger)
+		// then on the firing team's own auto_delegate kill switch. The
+		// org-visible sentinel normalizes to the resolved owner team so
+		// it matches the (resolved) visibility-set entries.
+		firingTeam := effectiveActingTeam(handlerTeamID(trigger), task.TeamID)
 		if _, visible := visibleSet[firingTeam]; !visible {
 			continue
 		}

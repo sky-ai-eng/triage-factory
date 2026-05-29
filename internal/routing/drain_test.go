@@ -22,10 +22,19 @@ import (
 type stubDelegator struct {
 	db    *sql.DB
 	calls int64
+
+	// mu guards lastTaskTeamID, the task's owner team_id observed at the
+	// most recent Delegate call. Tests use it to assert the owner was
+	// consolidated to the acting team before the run was created.
+	mu             sync.Mutex
+	lastTaskTeamID string
 }
 
 func (s *stubDelegator) Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error) {
 	atomic.AddInt64(&s.calls, 1)
+	s.mu.Lock()
+	s.lastTaskTeamID = task.TeamID
+	s.mu.Unlock()
 	runID := fmt.Sprintf("stub-run-%d", time.Now().UnixNano())
 	if err := sqlitestore.New(s.db).AgentRuns.Create(context.Background(), runmode.LocalDefaultOrg, domain.AgentRun{
 		ID:            runID,
