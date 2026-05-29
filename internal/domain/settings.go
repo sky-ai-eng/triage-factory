@@ -1,7 +1,9 @@
 package domain
 
 import (
+	"fmt"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -118,6 +120,63 @@ type JiraProjectStatusRules struct {
 	InProgressCanonical string
 	DoneMembers         []string
 	DoneCanonical       string
+}
+
+// TeamGitHubGroup is one row of team_github_groups — a fully-qualified
+// GitHub team (org login + team slug) mapped to a TF team for routing
+// human GitHub-team review requests to the right board. Dumb string
+// labels only: no membership resolution, no nested-team traversal, no
+// sync of GitHub's team graph. Fully-qualified with the org login so
+// @acme/frontend and @beta/frontend don't collide. Many of these can
+// sit under one TF team (the "funnel" direction).
+type TeamGitHubGroup struct {
+	OrgLogin string
+	TeamSlug string
+}
+
+// NormalizeTeamGitHubGroups lowercase-trims every group's org login +
+// team slug, drops entries with an empty field, and de-duplicates —
+// the canonical form persisted by SetForTeam and matched by routing
+// lookups. GitHub team slugs are already lowercase and org logins are
+// case-insensitive, so normalizing on the way in keeps routing matches
+// reliable regardless of how the admin typed them. Returns an error
+// only if an entry has one field populated and the other empty (a
+// half-specified group, which is a caller bug rather than a value to
+// silently drop).
+func NormalizeTeamGitHubGroups(groups []TeamGitHubGroup) ([]TeamGitHubGroup, error) {
+	out := make([]TeamGitHubGroup, 0, len(groups))
+	seen := map[TeamGitHubGroup]bool{}
+	for i, g := range groups {
+		login := strings.ToLower(strings.TrimSpace(g.OrgLogin))
+		slug := strings.ToLower(strings.TrimSpace(g.TeamSlug))
+		if login == "" && slug == "" {
+			continue
+		}
+		if login == "" || slug == "" {
+			return nil, fmt.Errorf("groups[%d]: github group needs both org login and team slug, got %q/%q", i, g.OrgLogin, g.TeamSlug)
+		}
+		n := TeamGitHubGroup{OrgLogin: login, TeamSlug: slug}
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+// NormalizeGitHubTeamSlugs lowercase-trims a list of GitHub team slugs
+// and drops blanks — the form PruneMissingSystem compares the stored
+// rows against.
+func NormalizeGitHubTeamSlugs(slugs []string) []string {
+	out := make([]string, 0, len(slugs))
+	for _, s := range slugs {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // PickupContains reports whether status is a member of the Pickup rule.

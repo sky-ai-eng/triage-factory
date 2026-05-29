@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { ChevronDown, ChevronRight, ExternalLink, Lock, Trash2 } from 'lucide-react'
+import GitHubGroupsEditor from '../components/GitHubGroupsEditor'
 import JiraStatusRule, { type JiraStatusRuleValue } from '../components/JiraStatusRule'
 import SettingsTabs, { type SettingsTab } from '../components/SettingsTabs'
 import { toast } from '../components/Toast/toastStore'
@@ -1366,6 +1367,7 @@ export default function Settings() {
           >
             {teamSections}
           </fieldset>
+          <GitHubGroupsEditor teamId="default" canEdit={isTeamAdmin} />
           <button
             type="button"
             onClick={() => void runSave(['team'])}

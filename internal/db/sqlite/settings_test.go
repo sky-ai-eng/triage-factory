@@ -32,10 +32,11 @@ func TestSettingsStores_SQLite(t *testing.T) {
 		}
 		stores := sqlitestore.New(conn)
 		return dbtest.SettingsStores{
-				Orgs:            stores.Orgs,
-				Teams:           stores.Teams,
-				Users:           stores.Users,
-				JiraStatusRules: stores.JiraStatusRules,
+				Orgs:             stores.Orgs,
+				Teams:            stores.Teams,
+				Users:            stores.Users,
+				JiraStatusRules:  stores.JiraStatusRules,
+				TeamGitHubGroups: stores.TeamGitHubGroups,
 			}, dbtest.SettingsIDs{
 				OrgID:  runmode.LocalDefaultOrgID,
 				TeamID: runmode.LocalDefaultTeamID,

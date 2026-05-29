@@ -185,6 +185,11 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// admin half stays pinned to s.admin so ListForTeamSystem
 		// inside WithTx routes outside the tx.
 		JiraStatusRules: newJiraStatusRulesStore(tx, s.admin),
+		// TeamGitHubGroups: app-side writes (SetForTeam) route through
+		// the tx so they compose with the surrounding claims tx; admin
+		// half stays pinned to s.admin so the `...System` routing +
+		// reconcile reads inside WithTx route outside the tx.
+		TeamGitHubGroups: newTeamGitHubGroupsStore(tx, s.admin),
 		// Curator: app-side write routes through the tx; admin half
 		// stays pinned to the real admin pool so
 		// CancelOrphanedNonTerminalRequests inside WithTx routes

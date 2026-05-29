@@ -251,6 +251,26 @@ CREATE TABLE jira_project_status_rules (
     )
 );
 
+-- One row per (team, github_org_login, github_team_slug). The GitHub
+-- twin of jira_project_status_rules: a team declaring "route this
+-- GitHub team's review requests to me." Dumb string labels for routing
+-- only — no membership resolution, no nested-team traversal, no sync of
+-- GitHub's team graph. Fully-qualified with the org login so
+-- @acme/frontend and @beta/frontend don't collide. Many GitHub teams
+-- can sit under one TF team (the primary "funnel" direction); the
+-- reverse (one GitHub team under many TF teams, a shared backlog) stays
+-- permitted. Rows are pure key tuples, so edits are replace-sets, never
+-- in-place updates. Local mode (N=1) self-maps the single team.
+CREATE TABLE team_github_groups (
+    team_id          TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    github_org_login TEXT NOT NULL,
+    github_team_slug TEXT NOT NULL,
+    created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (team_id, github_org_login, github_team_slug),
+    CONSTRAINT tgg_org_login_populated CHECK (github_org_login <> ''),
+    CONSTRAINT tgg_team_slug_populated CHECK (github_team_slug <> '')
+);
+
 -- === Agents ==============================================================
 CREATE TABLE agents (
     id                            TEXT PRIMARY KEY,

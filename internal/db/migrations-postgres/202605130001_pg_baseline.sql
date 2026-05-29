@@ -757,6 +757,30 @@ CREATE TABLE public.jira_project_status_rules (
 
 
 --
+-- Name: team_github_groups; Type: TABLE; Schema: public; Owner: -
+--
+
+-- The GitHub twin of jira_project_status_rules: one row per
+-- (team, github_org_login, github_team_slug), a team declaring "route
+-- this GitHub team's review requests to me." Dumb string labels for
+-- routing only — no membership resolution, no nested-team traversal,
+-- no sync of GitHub's team graph. Fully-qualified with the org login so
+-- @acme/frontend and @beta/frontend don't collide. Many GitHub teams
+-- can sit under one TF team (the primary "funnel" direction); the
+-- reverse (one GitHub team under many TF teams) stays permitted. Rows
+-- are pure key tuples, so edits are replace-sets, never in-place
+-- updates — hence no UPDATE policy below.
+CREATE TABLE public.team_github_groups (
+    team_id uuid NOT NULL,
+    github_org_login text NOT NULL,
+    github_team_slug text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tgg_org_login_populated CHECK (github_org_login <> ''),
+    CONSTRAINT tgg_team_slug_populated CHECK (github_team_slug <> '')
+);
+
+
+--
 -- Name: memberships; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1567,6 +1591,14 @@ ALTER TABLE ONLY public.events
 
 ALTER TABLE ONLY public.jira_project_status_rules
     ADD CONSTRAINT jira_project_status_rules_pkey PRIMARY KEY (team_id, project_key);
+
+
+--
+-- Name: team_github_groups team_github_groups_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.team_github_groups
+    ADD CONSTRAINT team_github_groups_pkey PRIMARY KEY (team_id, github_org_login, github_team_slug);
 
 
 --
@@ -2585,6 +2617,14 @@ ALTER TABLE ONLY public.jira_project_status_rules
 
 
 --
+-- Name: team_github_groups team_github_groups_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.team_github_groups
+    ADD CONSTRAINT team_github_groups_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE CASCADE;
+
+
+--
 -- Name: memberships memberships_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3420,6 +3460,35 @@ CREATE POLICY jira_rules_select ON public.jira_project_status_rules FOR SELECT U
 --
 
 CREATE POLICY jira_rules_update ON public.jira_project_status_rules FOR UPDATE USING ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id))) WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
+
+
+--
+-- Name: team_github_groups; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.team_github_groups ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: team_github_groups team_github_groups_select; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY team_github_groups_select ON public.team_github_groups FOR SELECT USING ((tf.team_in_current_org(team_id) AND (EXISTS ( SELECT 1
+   FROM public.memberships m
+  WHERE ((m.team_id = team_github_groups.team_id) AND (m.user_id = tf.current_user_id()))))));
+
+
+--
+-- Name: team_github_groups team_github_groups_insert; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY team_github_groups_insert ON public.team_github_groups FOR INSERT WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
+
+
+--
+-- Name: team_github_groups team_github_groups_delete; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY team_github_groups_delete ON public.team_github_groups FOR DELETE USING ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
 
 
 --
@@ -4402,6 +4471,17 @@ GRANT ALL ON TABLE public.jira_project_status_rules TO anon;
 GRANT ALL ON TABLE public.jira_project_status_rules TO authenticated;
 GRANT ALL ON TABLE public.jira_project_status_rules TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.jira_project_status_rules TO tf_app;
+
+
+--
+-- Name: TABLE team_github_groups; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.team_github_groups TO postgres;
+GRANT ALL ON TABLE public.team_github_groups TO anon;
+GRANT ALL ON TABLE public.team_github_groups TO authenticated;
+GRANT ALL ON TABLE public.team_github_groups TO service_role;
+GRANT SELECT,INSERT,DELETE ON TABLE public.team_github_groups TO tf_app;
 
 
 --

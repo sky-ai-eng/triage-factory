@@ -220,6 +220,13 @@ func New(admin, app *sql.DB) db.Stores {
 		// (poller manager + scorer reads at boot/poll-tick without
 		// JWT claims).
 		JiraStatusRules: newJiraStatusRulesStore(app, admin),
+		// TeamGitHubGroups holds both pools: app for ListForTeam +
+		// SetForTeam + TeamsForGroup (request-handler reads/writes gated
+		// by team_github_groups_* RLS policies) and admin for
+		// ListForTeamSystem + TeamsForGroupSystem + PruneMissingSystem
+		// (router/poller routing + GitHub-team-deletion reconcile
+		// without JWT claims).
+		TeamGitHubGroups: newTeamGitHubGroupsStore(app, admin),
 		// Curator wires the app pool. The per-project goroutine
 		// wraps each turn's writes in Tx.SyntheticClaimsWithTx
 		// under the requesting user's identity; the tx-bound
@@ -287,20 +294,21 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		// SKY-296 `...System` methods that bypass RLS in
 		// production) need the production WithTx wiring instead,
 		// which gets the real admin pool via Store.admin.
-		AgentRuns:       newAgentRunStore(tx, tx),
-		Entities:        newEntityStore(tx, tx),
-		Repos:           newRepoStore(tx, tx),
-		Reviews:         newReviewStore(tx, tx),
-		PendingPRs:      newPendingPRStore(tx, tx),
-		PendingFirings:  newPendingFiringsStore(tx),
-		Projects:        newProjectStore(tx, tx),
-		Events:          newEventStore(tx, tx),
-		TaskMemory:      newTaskMemoryStore(tx, tx),
-		RunWorktrees:    newRunWorktreeStore(tx, tx),
-		Orgs:            newOrgsStore(tx, tx),
-		Teams:           newTeamsStore(tx, tx),
-		JiraStatusRules: newJiraStatusRulesStore(tx, tx),
-		Curator:         newCuratorStore(tx, tx),
+		AgentRuns:        newAgentRunStore(tx, tx),
+		Entities:         newEntityStore(tx, tx),
+		Repos:            newRepoStore(tx, tx),
+		Reviews:          newReviewStore(tx, tx),
+		PendingPRs:       newPendingPRStore(tx, tx),
+		PendingFirings:   newPendingFiringsStore(tx),
+		Projects:         newProjectStore(tx, tx),
+		Events:           newEventStore(tx, tx),
+		TaskMemory:       newTaskMemoryStore(tx, tx),
+		RunWorktrees:     newRunWorktreeStore(tx, tx),
+		Orgs:             newOrgsStore(tx, tx),
+		Teams:            newTeamsStore(tx, tx),
+		JiraStatusRules:  newJiraStatusRulesStore(tx, tx),
+		TeamGitHubGroups: newTeamGitHubGroupsStore(tx, tx),
+		Curator:          newCuratorStore(tx, tx),
 		// Both pools collapse to tx (test door). BackfillInstallationsFromAPI's
 		// GetSystem would hit tf_app and be denied here — tests that exercise
 		// it use New(admin, app) directly, same as the SecretStore tests.

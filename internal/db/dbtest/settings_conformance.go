@@ -20,10 +20,11 @@ type SettingsStoresFactory func(t *testing.T) (stores SettingsStores, ids Settin
 
 // SettingsStores is the slice of stores the conformance suite exercises.
 type SettingsStores struct {
-	Orgs            db.OrgsStore
-	Teams           db.TeamsStore
-	Users           db.UsersStore
-	JiraStatusRules db.JiraStatusRulesStore
+	Orgs             db.OrgsStore
+	Teams            db.TeamsStore
+	Users            db.UsersStore
+	JiraStatusRules  db.JiraStatusRulesStore
+	TeamGitHubGroups db.TeamGitHubGroupsStore
 }
 
 // SettingsIDs are the tenancy keys the factory pre-seeded.
@@ -387,6 +388,154 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if len(got) != 0 {
 			t.Errorf("ListForTeamSystem on empty team = %+v; want empty slice", got)
 		}
+	})
+
+	t.Run("TeamGitHubGroups_SetForTeam_RoundTrips", func(t *testing.T) {
+		stores, ids := factory(t)
+		input := []domain.TeamGitHubGroup{
+			{OrgLogin: "acme", TeamSlug: "backend"},
+			{OrgLogin: "acme", TeamSlug: "frontend"},
+		}
+		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, input); err != nil {
+			t.Fatalf("SetForTeam: %v", err)
+		}
+		got, err := stores.TeamGitHubGroups.ListForTeamSystem(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("ListForTeamSystem: %v", err)
+		}
+		sortGroups(got)
+		sortGroups(input)
+		if !reflect.DeepEqual(got, input) {
+			t.Errorf("after SetForTeam, ListForTeamSystem = %+v; want %+v", got, input)
+		}
+	})
+
+	t.Run("TeamGitHubGroups_SetForTeam_NormalizesAndDedups", func(t *testing.T) {
+		// Mixed case + duplicate + surrounding whitespace all collapse to
+		// one lowercase row, so routing lookups match regardless of input.
+		stores, ids := factory(t)
+		input := []domain.TeamGitHubGroup{
+			{OrgLogin: "Acme", TeamSlug: "Backend"},
+			{OrgLogin: " acme ", TeamSlug: " backend "},
+		}
+		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, input); err != nil {
+			t.Fatalf("SetForTeam: %v", err)
+		}
+		got, err := stores.TeamGitHubGroups.ListForTeamSystem(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("ListForTeamSystem: %v", err)
+		}
+		want := []domain.TeamGitHubGroup{{OrgLogin: "acme", TeamSlug: "backend"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("normalized groups = %+v; want %+v", got, want)
+		}
+		// Case-insensitive routing lookup resolves the team.
+		teams, err := stores.TeamGitHubGroups.TeamsForGroupSystem(ctx, ids.OrgID, "ACME", "BACKEND")
+		if err != nil {
+			t.Fatalf("TeamsForGroupSystem: %v", err)
+		}
+		if len(teams) != 1 || teams[0] != ids.TeamID {
+			t.Errorf("TeamsForGroupSystem = %v; want [%s]", teams, ids.TeamID)
+		}
+	})
+
+	t.Run("TeamGitHubGroups_SetForTeam_ReplaceSetPrunes", func(t *testing.T) {
+		stores, ids := factory(t)
+		two := []domain.TeamGitHubGroup{
+			{OrgLogin: "acme", TeamSlug: "backend"},
+			{OrgLogin: "acme", TeamSlug: "frontend"},
+		}
+		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, two); err != nil {
+			t.Fatalf("seed SetForTeam: %v", err)
+		}
+		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, two[:1]); err != nil {
+			t.Fatalf("replace SetForTeam: %v", err)
+		}
+		got, err := stores.TeamGitHubGroups.ListForTeamSystem(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("ListForTeamSystem: %v", err)
+		}
+		if len(got) != 1 || got[0].TeamSlug != "backend" {
+			t.Errorf("after replace-set, got=%+v; want one row slug=backend", got)
+		}
+		// Empty clears all.
+		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, nil); err != nil {
+			t.Fatalf("clear SetForTeam: %v", err)
+		}
+		got, err = stores.TeamGitHubGroups.ListForTeamSystem(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("ListForTeamSystem: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("after clear, got=%+v; want empty", got)
+		}
+	})
+
+	t.Run("TeamGitHubGroups_PruneMissingSystem_DropsDeletedSlugs", func(t *testing.T) {
+		stores, ids := factory(t)
+		seed := []domain.TeamGitHubGroup{
+			{OrgLogin: "acme", TeamSlug: "backend"},
+			{OrgLogin: "acme", TeamSlug: "frontend"},
+			{OrgLogin: "beta", TeamSlug: "platform"},
+		}
+		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, seed); err != nil {
+			t.Fatalf("seed SetForTeam: %v", err)
+		}
+		// "frontend" was deleted on GitHub — only "backend" remains under
+		// acme. The prune is scoped to the acme login, so beta/platform
+		// is untouched.
+		n, err := stores.TeamGitHubGroups.PruneMissingSystem(ctx, ids.OrgID, "acme", []string{"backend"})
+		if err != nil {
+			t.Fatalf("PruneMissingSystem: %v", err)
+		}
+		if n != 1 {
+			t.Errorf("PruneMissingSystem removed %d rows; want 1", n)
+		}
+		got, err := stores.TeamGitHubGroups.ListForTeamSystem(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("ListForTeamSystem: %v", err)
+		}
+		want := []domain.TeamGitHubGroup{
+			{OrgLogin: "acme", TeamSlug: "backend"},
+			{OrgLogin: "beta", TeamSlug: "platform"},
+		}
+		sortGroups(got)
+		sortGroups(want)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("after prune, groups=%+v; want %+v", got, want)
+		}
+		// Empty present-set clears every acme mapping (org has no acme
+		// teams left); beta survives.
+		if _, err := stores.TeamGitHubGroups.PruneMissingSystem(ctx, ids.OrgID, "acme", nil); err != nil {
+			t.Fatalf("PruneMissingSystem (clear): %v", err)
+		}
+		got, err = stores.TeamGitHubGroups.ListForTeamSystem(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("ListForTeamSystem: %v", err)
+		}
+		if len(got) != 1 || got[0].OrgLogin != "beta" {
+			t.Errorf("after clear-acme prune, groups=%+v; want only beta/platform", got)
+		}
+	})
+
+	t.Run("TeamGitHubGroups_EmptyTeam_ReturnsEmptySlice", func(t *testing.T) {
+		stores, ids := factory(t)
+		got, err := stores.TeamGitHubGroups.ListForTeamSystem(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("ListForTeamSystem: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("ListForTeamSystem on empty team = %+v; want empty slice", got)
+		}
+	})
+}
+
+func sortGroups(groups []domain.TeamGitHubGroup) {
+	sort.Slice(groups, func(i, j int) bool {
+		if groups[i].OrgLogin != groups[j].OrgLogin {
+			return groups[i].OrgLogin < groups[j].OrgLogin
+		}
+		return groups[i].TeamSlug < groups[j].TeamSlug
 	})
 }
 
