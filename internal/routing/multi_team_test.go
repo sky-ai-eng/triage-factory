@@ -375,6 +375,101 @@ func TestTryAutoDelegate_PerTeamBotGate(t *testing.T) {
 	}
 }
 
+// TestHandleEvent_MultipleTeams_OneBotRun pins the exclusive-claim
+// contention fix: when two teams both have auto-delegation fully
+// enabled and an immediate trigger on the same event, the single shared
+// task gets exactly ONE bot run (the first team in priority/id order
+// wins the claim and becomes the owner), and the losing team does NOT
+// leave a queued firing behind that would drain into a duplicate run.
+func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
+	database := newTestDB(t)
+	seedHandlerFKTargets(t, database)
+	stores := sqlitestore.New(database)
+
+	teamA := runmode.LocalDefaultTeamID
+	teamB := "00000000-0000-0000-0000-0000000000b1"
+	if _, err := database.Exec(`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, 'team-b-onerun', 'Team B One-Run')`, teamB, runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("seed team B: %v", err)
+	}
+	// Both teams opt fully into auto-delegation.
+	if _, err := database.Exec(`INSERT OR IGNORE INTO team_settings (team_id, auto_delegate_enabled) VALUES (?, 1)`, teamA); err != nil {
+		t.Fatalf("seed team A settings: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO team_settings (team_id, auto_delegate_enabled) VALUES (?, 1)`, teamB); err != nil {
+		t.Fatalf("seed team B settings: %v", err)
+	}
+	if _, err := database.Exec(`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`, runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("seed agent: %v", err)
+	}
+	if err := stores.TeamAgents.AddForTeam(t.Context(), runmode.LocalDefaultOrg, teamA, runmode.LocalDefaultAgentID); err != nil {
+		t.Fatalf("add agent to team A: %v", err)
+	}
+	if err := stores.TeamAgents.AddForTeam(t.Context(), runmode.LocalDefaultOrg, teamB, runmode.LocalDefaultAgentID); err != nil {
+		t.Fatalf("add agent to team B: %v", err)
+	}
+
+	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#onerun", "pr", "One-run PR", "https://example.com/onerun")
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+	createTestPrompt(t, database, domain.Prompt{ID: "p-onerun", Name: "One-run", Body: "x", Source: "user"})
+
+	// teamA's immediate trigger (createTriggerForTestRouting hard-codes
+	// LocalDefaultTeamID = teamA).
+	createTriggerForTestRouting(t, database, domain.EventHandler{
+		ID: "trigger-A-onerun", Kind: domain.EventHandlerKindTrigger,
+		PromptID: "p-onerun", TriggerType: domain.TriggerTypeEvent,
+		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4),
+		MinAutonomySuitability: floatPtr(0), Enabled: true,
+	})
+	// teamB's immediate trigger (raw insert for the second team).
+	if _, err := database.Exec(`
+		INSERT INTO event_handlers
+			(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
+			 scope_predicate_json, enabled, source,
+			 prompt_id, breaker_threshold, min_autonomy_suitability,
+			 created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'team', 'trigger', ?, NULL, 1, 'user', ?, 4, 0, datetime('now'), datetime('now'))
+	`, "trigger-B-onerun", runmode.LocalDefaultOrg, teamB, runmode.LocalDefaultUserID,
+		domain.EventGitHubPRCICheckFailed, "p-onerun"); err != nil {
+		t.Fatalf("seed team B trigger: %v", err)
+	}
+
+	meta := events.GitHubPRCICheckFailedMetadata{Author: "aidan", CheckName: "build", Repo: "owner/repo"}
+	metaJSON, _ := json.Marshal(meta)
+
+	stub := &stubDelegator{db: database}
+	router := NewRouter(testPromptStore(database), testEventHandlerStore(database), stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, stub, noopScorer{}, websocket.NewHub())
+
+	router.HandleEvent(domain.Event{
+		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID,
+		DedupKey: "build", MetadataJSON: string(metaJSON), OrgID: runmode.LocalDefaultOrg,
+	})
+
+	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrg, entity.ID)
+	if err != nil || len(active) != 1 {
+		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
+	}
+	if stub.calls != 1 {
+		t.Errorf("expected exactly 1 bot run (exclusive claim), got %d", stub.calls)
+	}
+	if active[0].ClaimedByAgentID == "" {
+		t.Error("task should be bot-claimed after the winning team fired")
+	}
+	if active[0].TeamID != teamA {
+		t.Errorf("owner team_id = %q, want teamA %q (first in priority/id order wins the claim)", active[0].TeamID, teamA)
+	}
+	// The losing team (B) must not have left a queued firing that would
+	// later drain into a duplicate run.
+	firings, err := stores.PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrg, entity.ID)
+	if err != nil {
+		t.Fatalf("list firings: %v", err)
+	}
+	if len(firings) != 0 {
+		t.Errorf("team B left %d queued firing(s) on the bot-claimed task; want 0 (would drain into a duplicate run)", len(firings))
+	}
+}
+
 // TestHandleEvent_SingleTeam_OneTask is the regression baseline: with
 // only one matching rule, exactly one task gets created — the
 // local-mode + single-team-rule path.

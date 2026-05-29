@@ -592,7 +592,17 @@ func stampAgentClaimIfUnclaimed(ctx context.Context, q queryer, orgID, taskID, a
 	}
 	// actingTeamID is the firing trigger's team; on a successful claim
 	// it consolidates the card to that owning team. Empty leaves
-	// team_id unchanged.
+	// team_id unchanged. Resolve the LocalDefaultTeamID sentinel
+	// (carried by org-visible handlers via handlerTeamID) to the org's
+	// canonical team first, mirroring FindOrCreate/SetVisibilityTeams —
+	// otherwise the sentinel uuid would be written straight into
+	// tasks.team_id and trip the teams(id) FK in multi-mode.
+	if actingTeamID != "" {
+		var err error
+		if actingTeamID, err = resolveTeamBind(ctx, q, orgID, actingTeamID); err != nil {
+			return false, err
+		}
+	}
 	res, err := q.ExecContext(ctx, `
 		UPDATE tasks
 		   SET claimed_by_agent_id = $1,

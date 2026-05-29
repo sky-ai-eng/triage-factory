@@ -269,8 +269,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	}
 
 	// The visibility set: every team that had any matching handler.
-	// Sorted so the owner tie-break (lowest team id) and the
-	// task_teams writes are deterministic.
+	// Sorted so the task_teams writes are deterministic.
 	visibleTeams := make([]string, 0, len(teamRules)+len(teamTriggers))
 	seen := map[string]struct{}{}
 	for t := range teamRules {
@@ -287,26 +286,33 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	}
 	sort.Strings(visibleTeams)
 
-	// Owner pick: the matched team with the highest per-team rule
-	// priority, ties broken by lowest team id (visibleTeams is sorted
-	// ascending and the comparison is strict, so the first team at the
-	// max wins). A team with only triggers contributes the 0.5
-	// trigger-fallback priority. The task's own priority is the
-	// owner's (== the global max), since the owner is the argmax.
-	ownerTeam := visibleTeams[0]
-	taskPriority := 0.5
-	for _, teamID := range visibleTeams {
-		teamScore := 0.5
+	// orderedTeams ranks the matched teams by per-team rule priority
+	// (desc), ties broken by lowest team id. The owner is the first —
+	// the highest-priority matched team — and step 9 fires triggers in
+	// this same order, so the team that wins the exclusive claim (and
+	// thus becomes the consolidated owner) is deterministic and matches
+	// the creation-time owner pick. A team with only triggers
+	// contributes the 0.5 trigger-fallback priority.
+	orderedTeams := make([]string, len(visibleTeams))
+	copy(orderedTeams, visibleTeams)
+	teamScore := func(teamID string) float64 {
+		s := 0.5
 		for _, rule := range teamRules[teamID] {
-			if rule.DefaultPriority != nil && *rule.DefaultPriority > teamScore {
-				teamScore = *rule.DefaultPriority
+			if rule.DefaultPriority != nil && *rule.DefaultPriority > s {
+				s = *rule.DefaultPriority
 			}
 		}
-		if teamScore > taskPriority {
-			taskPriority = teamScore
-			ownerTeam = teamID
-		}
+		return s
 	}
+	sort.SliceStable(orderedTeams, func(i, j int) bool {
+		si, sj := teamScore(orderedTeams[i]), teamScore(orderedTeams[j])
+		if si != sj {
+			return si > sj
+		}
+		return orderedTeams[i] < orderedTeams[j]
+	})
+	ownerTeam := orderedTeams[0]
+	taskPriority := teamScore(ownerTeam)
 
 	// became_atomic is the belated-discovery path for parents whose
 	// subtasks just closed. Suppress the new card if any active task
@@ -378,11 +384,13 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	// Triggers with min_autonomy_suitability > 0 still defer to
 	// post-scoring re-derive.
 	//
-	// Iterate the sorted visibleTeams (not the map) so the firing order
-	// is deterministic: the first acting team's claim consolidates the
-	// owner, and identical deliveries must pick the same one rather than
-	// depending on Go's randomized map iteration.
-	for _, teamID := range visibleTeams {
+	// Iterate orderedTeams (not the map) so the firing order is
+	// deterministic and the first team to claim — which consolidates
+	// the owner — is the highest-priority matched team, matching the
+	// creation-time owner pick. The exclusive claim means only the
+	// first team's trigger actually runs; later teams' triggers find
+	// the task already claimed and skip inside tryAutoDelegate.
+	for _, teamID := range orderedTeams {
 		triggers := teamTriggers[teamID]
 		if len(triggers) == 0 {
 			continue
@@ -431,6 +439,17 @@ func handlerTeamID(h domain.EventHandler) string {
 // for FIFO fairness), the firing enqueues onto pending_firings instead of
 // being dropped silently.
 func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain.EventHandler, entityID string, triggeringEventID string, actingTeamID string) {
+	// Exclusive claim: one task, one owner. If the bot has already
+	// claimed this task on behalf of a different team (an earlier
+	// matched team won the CAS), this team's trigger must not pile on a
+	// second run against the same situation — that is the cross-team
+	// duplication the one-task model exists to prevent. A trigger whose
+	// acting team IS the current owner still proceeds, so multiple
+	// prompts one team configured on the same event all run.
+	if task.ClaimedByAgentID != "" && actingTeamID != "" && task.TeamID != actingTeamID {
+		log.Printf("[router] auto-trigger skipped on task %s: already claimed by the bot for team %s (acting team %s lost the claim)", task.ID, task.TeamID, actingTeamID)
+		return
+	}
 	// SKY-261 bot-disabled-team gate. If the task's team has the bot
 	// turned off in team_agents.enabled, the auto-trigger is a no-op
 	// — the task is already in the team queue (created by HandleEvent
