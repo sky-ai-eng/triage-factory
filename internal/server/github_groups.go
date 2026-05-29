@@ -2,15 +2,14 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
-	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 )
 
 // --------------------------------------------------------------------
@@ -60,11 +59,17 @@ func (s *Server) handleTeamGitHubGroupsGet(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Import-and-choose: fetch the org's live GitHub teams and reconcile
-	// deleted ones out of the mapping table before reading current rows,
-	// so the editor never shows or persists a mapping to a team GitHub
-	// no longer reports. Best-effort — a GitHub outage leaves the editor
-	// working off the stored mappings with an empty candidate list.
+	// Import-and-choose: fetch the org's live GitHub teams as candidates.
+	// This is intentionally non-destructive — GitHub's list-teams endpoint
+	// is visibility-scoped to the token, so it can return a *subset* of an
+	// org's teams (private teams the token can't see are omitted). Pruning
+	// stored mappings against a possibly-partial list would wipe live
+	// mappings, and a GET is the wrong place for a destructive write
+	// anyway (read-only route, no CSRF wrapper). Instead the editor flags
+	// any stored mapping missing from the candidates as "not found" and
+	// lets a team admin remove it via the admin-gated PUT. Authoritative
+	// reconcile (the team:deleted webhook → PruneMissingSystem) is the
+	// future automatic path; see the store's PruneMissingSystem doc.
 	candidates := s.gitHubGroupCandidates(r.Context(), orgID, userID)
 
 	var groups []domain.TeamGitHubGroup
@@ -139,79 +144,58 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 }
 
 // gitHubGroupCandidates fetches the org's live GitHub teams (one
-// GET /orgs/{org}/teams per distinct configured-repo owner) and, for
-// each org login it successfully reads, prunes mapping rows pointing at
-// GitHub teams that no longer exist — the deletion-reconcile floor.
-// Returns the flat candidate list. Never prunes an org login whose fetch
-// failed (a transient error must not be read as "all its teams were
-// deleted"). Returns nil (empty candidates) when GitHub isn't configured
-// or context loading fails — the editor degrades to "edit existing
+// GET /orgs/{org}/teams per distinct configured-repo owner) and returns
+// them as the flat candidate list the editor presents. Read-only: it
+// never mutates the mapping table — see the GET handler's comment on why
+// reconcile can't run off a visibility-scoped read.
+//
+// Credentials resolve through s.ghResolver.ClientFor, which mints an App
+// installation token for the owner when one is installed (tier 1) and
+// falls back to the org PAT (tier 3) — so App-only workspaces (no PAT)
+// can still import their teams. Owners with no resolvable credential, or
+// that the token can't read (a user account, a private org the token
+// isn't in), are skipped. Returns nil when nothing is configured / the
+// repo list can't be read — the editor degrades to "edit existing
 // mappings only."
 func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID, userID string) []gitHubGroupCandidateJSON {
-	var (
-		creds  auth.Credentials
-		orgSet domain.OrgSettings
-		repos  []domain.RepoProfile
-	)
+	var repos []domain.RepoProfile
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		creds, _ = integrations.Load(ctx, tx.Secrets, orgID)
-		orgSet, _ = tx.Orgs.GetSettings(ctx, orgID)
 		var e error
 		repos, e = tx.Repos.List(ctx, orgID)
 		return e
 	}); err != nil {
-		log.Printf("[github-groups] load candidate context: %v", err)
+		log.Printf("[github-groups] load configured repos: %v", err)
 		return nil
 	}
-	if creds.GitHubPAT == "" || creds.GitHubURL == "" {
-		return nil
-	}
-	baseURL := orgSet.GitHubBaseURL
-	if baseURL == "" {
-		baseURL = creds.GitHubURL
-	}
-	client := ghclient.NewClient(baseURL, creds.GitHubPAT)
 
 	out := []gitHubGroupCandidateJSON{}
 	for _, owner := range distinctRepoOwners(repos) {
+		client, err := s.ghResolver.ClientFor(ctx, orgID, owner)
+		if err != nil {
+			// ErrNoGitHubCredentials just means this owner has no App
+			// install and the org has no PAT — expected, skip quietly.
+			if !errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+				log.Printf("[github-groups] resolve GitHub client for %s: %v", owner, err)
+			}
+			continue
+		}
 		teams, err := client.ListOrgTeams(owner)
 		if err != nil {
-			// Skip — the owner may be a user account (no teams) or one
-			// the token can't read. Crucially, do NOT prune its mappings.
+			// The owner may be a user account (no teams) or one the token
+			// can't read. Skip — candidates only, nothing destructive.
 			log.Printf("[github-groups] list teams for GitHub org %s: %v", owner, err)
 			continue
 		}
 		login := strings.ToLower(owner)
-		slugs := make([]string, 0, len(teams))
 		for _, t := range teams {
 			if t.Slug == "" {
 				continue
 			}
-			slugs = append(slugs, t.Slug)
 			out = append(out, gitHubGroupCandidateJSON{
 				OrgLogin: login,
 				TeamSlug: strings.ToLower(t.Slug),
 				Name:     t.Name,
 			})
-		}
-		// Reconcile only when the fetch returned at least one team. An
-		// empty slice is ambiguous — it can mean "the org genuinely has
-		// no teams" OR "the token can read this repo owner but can't see
-		// any of its (private) teams" OR "the owner is a user account,
-		// not an org." Pruning on an empty set would wipe every mapping
-		// for the owner in the latter two cases just because someone
-		// opened the settings page. Per-team deletions still reconcile:
-		// a non-empty fetch (e.g. ["backend"] after "frontend" was
-		// deleted) prunes the missing slug. Only the all-teams-gone edge
-		// is skipped, which the future team:deleted webhook handles
-		// precisely.
-		if len(slugs) == 0 {
-			continue
-		}
-		if n, err := s.githubGroups.PruneMissingSystem(ctx, orgID, owner, slugs); err != nil {
-			log.Printf("[github-groups] reconcile prune for GitHub org %s: %v", owner, err)
-		} else if n > 0 {
-			log.Printf("[github-groups] reconcile: pruned %d stale mapping(s) for deleted GitHub teams under %s", n, owner)
 		}
 	}
 	return out

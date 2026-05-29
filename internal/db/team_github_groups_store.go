@@ -65,13 +65,19 @@ type TeamGitHubGroupsStore interface {
 
 	// PruneMissingSystem removes, across every team in the org, the
 	// mapping rows for github_org_login whose github_team_slug is not in
-	// presentSlugs — the GitHub-team-deletion reconcile floor. Callers
-	// pass the live set of slugs returned by GET /orgs/{org}/teams; a
-	// GitHub team that has been deleted is simply absent from the live
-	// set and its mapping rows are dropped (the TF team itself is never
-	// touched). An empty presentSlugs means the org genuinely has no
-	// GitHub teams, so every mapping for that org login is stale — only
-	// call this after a successful fetch, never on a fetch error.
+	// presentSlugs — the GitHub-team-deletion reconcile. A deleted GitHub
+	// team is absent from presentSlugs, so its mapping rows are dropped
+	// (the TF team itself is never touched); an empty presentSlugs drops
+	// every mapping for the org login.
+	//
+	// presentSlugs MUST be an authoritative, complete list of the org's
+	// GitHub teams — the webhook-driven team graph (team:deleted event),
+	// not the result of GET /orgs/{org}/teams, which is visibility-scoped
+	// to the token and can return a partial subset. Pruning against a
+	// partial list would delete live mappings. The read-path editor
+	// therefore does NOT call this; it surfaces unknown mappings to the
+	// admin for manual removal instead.
+	//
 	// Returns the number of rows removed. Admin pool in Postgres: the
 	// prune spans teams the triggering caller may not belong to, so it
 	// runs claims-free.
