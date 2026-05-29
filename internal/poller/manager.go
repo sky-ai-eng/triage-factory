@@ -316,7 +316,16 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// App path: poll each installation over the intersection of the
 	// configured set with that installation's repo grant. Token errors are
 	// isolated per installation — a failed mint on A must not starve B/C.
+	//
+	// anyFunctional tracks whether at least one installation yielded a usable
+	// installation token. ListInstallationRepos is installation-token-only,
+	// so a successful call proves we hold one; a failure can mean the
+	// resolver fell back to a PAT client (mint failed but a PAT is
+	// configured), which 403s on this endpoint. If NO installation is
+	// functional we'd otherwise leave the org unpolled despite an available
+	// PAT — so fall through to the PAT path in that case.
 	covered := make(map[string]bool, len(repos))
+	anyFunctional := false
 	for _, inst := range installs {
 		client, cerr := m.resolver.ClientFor(ctx, orgID, inst.AccountLogin)
 		if cerr != nil {
@@ -330,6 +339,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 			m.reportError("github", orgID, gerr)
 			continue
 		}
+		anyFunctional = true
 		scoped := intersectConfigured(repos, grant, covered)
 		if len(scoped) == 0 {
 			continue
@@ -342,8 +352,19 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		}
 	}
 
-	// Configured repos that no installation grants — the App isn't installed
-	// on them. Log once so the gap is visible without being an error.
+	// No installation produced a usable installation token (every mint/list
+	// failed). The resolver may have a working PAT behind those failures —
+	// poll the configured set through it rather than leaving the org dark.
+	// ErrNoGitHubCredentials inside pollGitHubPAT means there's genuinely no
+	// fallback, and it skips silently.
+	if !anyFunctional {
+		m.pollGitHubPAT(ctx, orgID, repos, isLocal)
+		return
+	}
+
+	// Configured repos that no functional installation grants — the App isn't
+	// installed on them. Log once so the gap is visible without being an
+	// error. (Skipped when we fell back to PAT above, which polls them all.)
 	for _, r := range repos {
 		if !covered[r] {
 			log.Printf("[github] org %s: configured repo %s not in any App installation grant — skipping", orgID, r)
