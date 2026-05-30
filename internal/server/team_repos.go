@@ -108,7 +108,7 @@ func (s *Server) handleTeamReposPut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.TeamGitHubRepos.ReplaceForTeam(r.Context(), teamID, repos)
+		return tx.TeamGitHubRepos.ReplaceForTeam(r.Context(), orgID, teamID, repos)
 	}); err != nil {
 		internalError(w, "settings/team/repos", err)
 		return

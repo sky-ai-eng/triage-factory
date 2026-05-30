@@ -195,7 +195,12 @@ func (r TeamGitHubRepo) Slug() string { return r.Owner + "/" + r.Repo }
 // already-split struct.
 func NormalizeTeamGitHubRepos(repos []TeamGitHubRepo) ([]TeamGitHubRepo, error) {
 	out := make([]TeamGitHubRepo, 0, len(repos))
-	seen := map[TeamGitHubRepo]bool{}
+	// Key on the case-folded "owner/repo" — GitHub owners and repo names
+	// are case-insensitive, so Acme/API and acme/api are the same repo.
+	// Storing both would double the row in team_github_repos and, via the
+	// reconcile, in repo_profiles (a double-polled repo). First-seen
+	// casing is kept for display.
+	seen := map[string]bool{}
 	for i, r := range repos {
 		owner := strings.TrimSpace(r.Owner)
 		repo := strings.TrimSpace(r.Repo)
@@ -205,22 +210,31 @@ func NormalizeTeamGitHubRepos(repos []TeamGitHubRepo) ([]TeamGitHubRepo, error) 
 		if owner == "" || repo == "" {
 			return nil, fmt.Errorf("repos[%d]: github repo needs both owner and name, got %q/%q", i, r.Owner, r.Repo)
 		}
-		n := TeamGitHubRepo{Owner: owner, Repo: repo}
-		if seen[n] {
+		// Reject extra path segments. A GitHub owner or repo name never
+		// contains a slash, so "owner/repo/extra" (which TeamGitHubReposFromSlugs
+		// would split into owner + "repo/extra") is an impossible repo
+		// that would be polled forever. Same exact-shape contract the
+		// pinned-repo validator enforces.
+		if strings.ContainsRune(owner, '/') || strings.ContainsRune(repo, '/') {
+			return nil, fmt.Errorf("repos[%d]: github repo must be exactly owner/repo, got %q/%q", i, owner, repo)
+		}
+		key := strings.ToLower(owner) + "/" + strings.ToLower(repo)
+		if seen[key] {
 			continue
 		}
-		seen[n] = true
-		out = append(out, n)
+		seen[key] = true
+		out = append(out, TeamGitHubRepo{Owner: owner, Repo: repo})
 	}
 	return out, nil
 }
 
 // TeamGitHubReposFromSlugs splits "owner/repo" slugs into TeamGitHubRepo
-// structs and normalizes the result. Malformed slugs (no slash, empty
-// half) surface as an error from NormalizeTeamGitHubRepos so the HTTP
-// layer can 400 rather than silently drop. The split is on the first
-// slash only — repo names can't contain slashes, so the remainder is the
-// name.
+// structs and normalizes the result. Malformed slugs (no slash → empty
+// half; extra segments → a slash inside the name) surface as an error
+// from NormalizeTeamGitHubRepos so the HTTP layer can 400 rather than
+// silently persist an impossible repo. The split is on the first slash;
+// any remaining slash is caught by NormalizeTeamGitHubRepos's exact
+// owner/repo shape check.
 func TeamGitHubReposFromSlugs(slugs []string) ([]TeamGitHubRepo, error) {
 	repos := make([]TeamGitHubRepo, 0, len(slugs))
 	for _, s := range slugs {

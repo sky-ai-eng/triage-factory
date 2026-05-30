@@ -94,10 +94,10 @@ func TestGate_DisjointRepos_DropsUntrackingTeam(t *testing.T) {
 	teamA := runmode.LocalDefaultTeamID
 	teamB := seedGateTeam(t, dbh, "team-b")
 
-	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, teamA, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo-a"}}); err != nil {
+	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrg, teamA, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo-a"}}); err != nil {
 		t.Fatalf("teamA track: %v", err)
 	}
-	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, teamB, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo-b"}}); err != nil {
+	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrg, teamB, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo-b"}}); err != nil {
 		t.Fatalf("teamB track: %v", err)
 	}
 
@@ -140,10 +140,10 @@ func TestGate_SharedRepo_VisibleToBoth(t *testing.T) {
 	teamA := runmode.LocalDefaultTeamID
 	teamB := seedGateTeam(t, dbh, "team-b")
 	shared := []domain.TeamGitHubRepo{{Owner: "owner", Repo: "shared"}}
-	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, teamA, shared); err != nil {
+	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrg, teamA, shared); err != nil {
 		t.Fatalf("teamA track: %v", err)
 	}
-	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, teamB, shared); err != nil {
+	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrg, teamB, shared); err != nil {
 		t.Fatalf("teamB track: %v", err)
 	}
 	seedMatchAllCIRule(t, dbh, teamA)
@@ -219,7 +219,7 @@ func TestGate_LocalN1_NoOp(t *testing.T) {
 	ctx := context.Background()
 
 	teamA := runmode.LocalDefaultTeamID
-	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, teamA, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo"}}); err != nil {
+	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrg, teamA, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo"}}); err != nil {
 		t.Fatalf("teamA track: %v", err)
 	}
 	seedMatchAllCIRule(t, dbh, teamA)

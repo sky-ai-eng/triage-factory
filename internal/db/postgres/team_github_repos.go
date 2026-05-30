@@ -14,14 +14,13 @@ import (
 // Holds both pools — see the TeamGitHubReposStore interface comment for
 // the pool-split rationale.
 //
-//   - admin: ListForTeamSystem, ListForOrgSystem, TracksRepoSystem, and
-//     the repo_profiles reconcile inside ReplaceForTeam. The union read
-//     must see every team's rows org-wide, which RLS on the app pool
-//     would hide; the reconcile write commits autonomously from the
-//     surrounding tx (same shape EventStore.RecordSystem uses).
-//   - app: ListForTeam + the team-row write inside ReplaceForTeam.
-//     Request-handler reads/writes gated by team_github_repos_select /
-//     _insert / _update / _delete (team membership / team admin).
+//   - app: ListForTeam + the whole of ReplaceForTeam (team-row write +
+//     repo_profiles reconcile, atomic in the caller's claims tx, org-
+//     serialized by an advisory lock). RLS gates the team-row write by
+//     team admin; the cross-team union read inside it goes through the
+//     tf.org_tracked_repos() SECURITY DEFINER helper.
+//   - admin: ListForTeamSystem, ListForOrgSystem, TracksRepoSystem —
+//     claims-free reads for the router gate / poll callers.
 type teamGitHubReposStore struct {
 	app   queryer
 	admin queryer
@@ -64,30 +63,7 @@ func listTeamGitHubRepos(ctx context.Context, q queryer, teamID string) ([]domai
 }
 
 func (s *teamGitHubReposStore) ListForOrgSystem(ctx context.Context, orgID string) ([]domain.TeamGitHubRepo, error) {
-	return scanRepoRows(s.admin.QueryContext(ctx, `
-		SELECT DISTINCT g.owner, g.repo
-		FROM team_github_repos g
-		JOIN teams t ON t.id = g.team_id
-		WHERE t.org_id = $1
-		ORDER BY g.owner ASC, g.repo ASC
-	`, orgID))
-}
-
-// listSiblingTeamRepos returns the DISTINCT (owner, repo) union across
-// the org's teams *excluding* excludeTeamID. Used by the reconcile to
-// read the committed state of sibling teams and merge the mutating
-// team's new desired set in memory (the mutating team's rows are still
-// in the uncommitted outer tx, invisible to this admin-pool read). org
-// scope rides the teams join — team_github_repos carries no org_id.
-func listSiblingTeamRepos(ctx context.Context, q queryer, orgID, excludeTeamID string) ([]domain.TeamGitHubRepo, error) {
-	return scanRepoRows(q.QueryContext(ctx, `
-		SELECT DISTINCT g.owner, g.repo
-		FROM team_github_repos g
-		JOIN teams t ON t.id = g.team_id
-		WHERE t.org_id = $1
-		  AND g.team_id <> $2
-		ORDER BY g.owner ASC, g.repo ASC
-	`, orgID, excludeTeamID))
+	return listTeamGitHubReposForOrg(ctx, s.admin, orgID)
 }
 
 func scanRepoRows(rows *sql.Rows, err error) ([]domain.TeamGitHubRepo, error) {
@@ -106,15 +82,22 @@ func scanRepoRows(rows *sql.Rows, err error) ([]domain.TeamGitHubRepo, error) {
 	return out, rows.Err()
 }
 
-func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, teamID string, repos []domain.TeamGitHubRepo) error {
+func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID string, repos []domain.TeamGitHubRepo) error {
 	norm, err := domain.NormalizeTeamGitHubRepos(repos)
 	if err != nil {
 		return err
 	}
 
-	// Phase 1: replace the team's rows on the app pool (RLS gates by
-	// team admin), composed in the surrounding claims tx.
-	if err := inTx(ctx, s.app, func(tx queryer) error {
+	// Everything runs in the caller's app-pool tx (RLS gates the team-row
+	// write by team admin) so the team-row mutation and the repo_profiles
+	// reconcile are atomic. A per-org transaction advisory lock serializes
+	// concurrent same-org saves so the union recompute can't race a
+	// sibling team's write into an inconsistent repo_profiles.
+	return inTx(ctx, s.app, func(tx queryer) error {
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, orgID); err != nil {
+			return fmt.Errorf("lock org for repo reconcile: %w", err)
+		}
+
 		for _, r := range norm {
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO team_github_repos (team_id, owner, repo)
@@ -132,43 +115,43 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, teamID string
 			); err != nil {
 				return fmt.Errorf("clear team_github_repos: %w", err)
 			}
-			return nil
+		} else {
+			owners, names := splitRepoColumns(norm)
+			if _, err := tx.ExecContext(ctx, `
+				DELETE FROM team_github_repos
+				WHERE team_id = $1
+				  AND (owner, repo) NOT IN (
+				      SELECT * FROM unnest($2::text[], $3::text[])
+				  )
+			`, teamID, owners, names); err != nil {
+				return fmt.Errorf("prune team_github_repos: %w", err)
+			}
 		}
-		owners, names := splitRepoColumns(norm)
-		if _, err := tx.ExecContext(ctx, `
-			DELETE FROM team_github_repos
-			WHERE team_id = $1
-			  AND (owner, repo) NOT IN (
-			      SELECT * FROM unnest($2::text[], $3::text[])
-			  )
-		`, teamID, owners, names); err != nil {
-			return fmt.Errorf("prune team_github_repos: %w", err)
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
 
-	// Phase 2: reconcile repo_profiles to the org-wide union on the admin
-	// pool (must see sibling teams' rows; commits autonomously from the
-	// outer tx). The mutating team's new rows are still uncommitted, so
-	// compute the post-state union as committed-sibling-teams ∪ norm.
-	var orgID string
-	if err := s.admin.QueryRowContext(ctx,
-		`SELECT org_id FROM teams WHERE id = $1`, teamID,
-	).Scan(&orgID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("reconcile repo_profiles: team %s not found", teamID)
+		// Read the org-wide union via the SECURITY DEFINER helper so it sees
+		// every team's rows (RLS on the app pool would hide siblings) plus
+		// this tx's just-written rows. The helper is org-scoped to the
+		// caller's claims when present, so the org boundary holds.
+		union, err := scanRepoRows(tx.QueryContext(ctx,
+			`SELECT owner, repo FROM tf.org_tracked_repos($1)`, orgID))
+		if err != nil {
+			return err
 		}
-		return fmt.Errorf("reconcile repo_profiles: resolve org for team %s: %w", teamID, err)
-	}
+		return reconcileRepoProfilesFromUnion(ctx, tx, orgID, union)
+	})
+}
 
-	siblings, err := listSiblingTeamRepos(ctx, s.admin, orgID, teamID)
-	if err != nil {
-		return err
-	}
-	union := unionRepos(siblings, norm)
-	return reconcileRepoProfilesFromUnion(ctx, s.admin, orgID, union)
+// listTeamGitHubReposForOrg reads the DISTINCT (owner, repo) union across
+// the org's teams (committed state on whatever queryer is passed). org
+// scope rides the teams join — team_github_repos carries no org_id.
+func listTeamGitHubReposForOrg(ctx context.Context, q queryer, orgID string) ([]domain.TeamGitHubRepo, error) {
+	return scanRepoRows(q.QueryContext(ctx, `
+		SELECT DISTINCT g.owner, g.repo
+		FROM team_github_repos g
+		JOIN teams t ON t.id = g.team_id
+		WHERE t.org_id = $1
+		ORDER BY g.owner ASC, g.repo ASC
+	`, orgID))
 }
 
 // reconcileRepoProfilesFromUnion makes repo_profiles (for orgID) match
@@ -176,8 +159,14 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, teamID string
 // anymore and upserts skeleton rows for newly-tracked repos (preserving
 // any cached profile on surviving rows). Mirrors RepoStore.SetConfigured's
 // delete-removed / upsert-skeleton logic — repo_profiles is now a derived
-// cache of team_github_repos.
-func reconcileRepoProfilesFromUnion(ctx context.Context, q queryer, orgID string, union []domain.TeamGitHubRepo) error {
+// cache of team_github_repos. The union is case-folded to one canonical
+// row per logical repo (NormalizeTeamGitHubRepos) so two teams tracking
+// the same repo with different casing don't yield two repo_profiles rows.
+func reconcileRepoProfilesFromUnion(ctx context.Context, q queryer, orgID string, rawUnion []domain.TeamGitHubRepo) error {
+	union, err := domain.NormalizeTeamGitHubRepos(rawUnion)
+	if err != nil {
+		return fmt.Errorf("normalize repo union: %w", err)
+	}
 	owners, names := splitRepoColumns(union)
 	// Delete repos no team tracks anymore. An empty union deletes every
 	// repo_profiles row for the org (unnest of empty arrays is empty, so
@@ -207,7 +196,7 @@ func (s *teamGitHubReposStore) TracksRepoSystem(ctx context.Context, teamID, own
 	var n int
 	err := s.admin.QueryRowContext(ctx, `
 		SELECT 1 FROM team_github_repos
-		WHERE team_id = $1 AND lower(owner) = lower($2) AND repo = $3
+		WHERE team_id = $1 AND lower(owner) = lower($2) AND lower(repo) = lower($3)
 		LIMIT 1
 	`, teamID, owner, repo).Scan(&n)
 	if err != nil {
@@ -230,20 +219,4 @@ func splitRepoColumns(repos []domain.TeamGitHubRepo) (owners, names []string) {
 		names = append(names, r.Repo)
 	}
 	return owners, names
-}
-
-// unionRepos merges two repo slices, de-duplicating on (owner, repo)
-// with first-seen order. Used to compose the post-mutation org union
-// from committed sibling-team rows plus the mutating team's new set.
-func unionRepos(a, b []domain.TeamGitHubRepo) []domain.TeamGitHubRepo {
-	seen := map[domain.TeamGitHubRepo]bool{}
-	out := make([]domain.TeamGitHubRepo, 0, len(a)+len(b))
-	for _, r := range append(append([]domain.TeamGitHubRepo{}, a...), b...) {
-		if seen[r] {
-			continue
-		}
-		seen[r] = true
-		out = append(out, r)
-	}
-	return out
 }

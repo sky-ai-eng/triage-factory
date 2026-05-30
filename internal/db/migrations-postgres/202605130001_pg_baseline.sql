@@ -408,6 +408,40 @@ $$;
 
 
 --
+-- Name: org_tracked_repos(uuid); Type: FUNCTION; Schema: tf; Owner: -
+--
+
+-- The cross-team union read behind team_github_repos -> repo_profiles
+-- reconciliation (SKY-375). repo_profiles is the org-wide UNION of every
+-- team's tracked repos, but the team_github_repos SELECT policy is
+-- team-membership-scoped, so a team admin's app-pool tx can't see sibling
+-- teams' rows. This SECURITY DEFINER helper bypasses that per-team SELECT
+-- RLS — a within-org, non-security boundary — to return the full org
+-- union, while preserving the ORG boundary: with request claims it
+-- requires p_org_id to equal the caller's org; with no claims
+-- (admin-pool / system / test) the guard is skipped, mirroring the
+-- vault_*_system split. The pinned search_path blocks definer hijacking.
+-- +goose StatementBegin
+CREATE FUNCTION tf.org_tracked_repos(p_org_id uuid) RETURNS TABLE(owner text, repo text)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+  IF tf.current_org_id() IS NOT NULL AND p_org_id <> tf.current_org_id() THEN
+    RAISE EXCEPTION 'org_tracked_repos: requested org % does not match caller org %', p_org_id, tf.current_org_id();
+  END IF;
+  RETURN QUERY
+    SELECT DISTINCT g.owner, g.repo
+    FROM team_github_repos g
+    JOIN teams t ON t.id = g.team_id
+    WHERE t.org_id = p_org_id
+    ORDER BY g.owner, g.repo;
+END;
+$$;
+-- +goose StatementEnd
+
+
+--
 -- Name: user_in_team(uuid); Type: FUNCTION; Schema: tf; Owner: -
 --
 
@@ -4377,6 +4411,14 @@ GRANT ALL ON FUNCTION tf.team_in_current_org(target_team uuid) TO tf_app;
 
 REVOKE ALL ON FUNCTION tf.user_has_org_access(target_org uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION tf.user_has_org_access(target_org uuid) TO tf_app;
+
+
+--
+-- Name: FUNCTION org_tracked_repos(p_org_id uuid); Type: ACL; Schema: tf; Owner: -
+--
+
+REVOKE ALL ON FUNCTION tf.org_tracked_repos(p_org_id uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION tf.org_tracked_repos(p_org_id uuid) TO tf_app;
 
 
 --

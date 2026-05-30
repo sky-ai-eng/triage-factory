@@ -87,7 +87,10 @@ func listTeamGitHubReposUnion(ctx context.Context, q queryer) ([]domain.TeamGitH
 	return out, rows.Err()
 }
 
-func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, teamID string, repos []domain.TeamGitHubRepo) error {
+func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID string, repos []domain.TeamGitHubRepo) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
 	norm, err := domain.NormalizeTeamGitHubRepos(repos)
 	if err != nil {
 		return err
@@ -131,9 +134,11 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, teamID string
 			}
 		}
 
-		// Reconcile repo_profiles to the org-wide union. Single
-		// connection, same tx — the union read sees the rows just
-		// written above.
+		// Reconcile repo_profiles to the new org-wide union, in the same tx
+		// (atomic with the team-row write). SQLite is single-connection and
+		// serializes writers, so the union read sees the rows just written
+		// above and no advisory lock is needed — the Postgres impl's per-org
+		// lock has no analogue here.
 		union, err := listTeamGitHubReposUnion(ctx, tx)
 		if err != nil {
 			return err
@@ -149,9 +154,17 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, teamID string
 // delete-removed / upsert-skeleton logic — repo_profiles is now a
 // derived cache of team_github_repos.
 func reconcileRepoProfilesFromUnion(ctx context.Context, tx queryer, union []domain.TeamGitHubRepo) error {
-	desired := make(map[string]bool, len(union))
-	for _, r := range union {
-		desired[r.Slug()] = true
+	// Case-fold the union to one canonical row per logical repo so two
+	// teams tracking the same repo with different casing don't produce
+	// two repo_profiles rows. The union arrives owner/repo-ASC, so
+	// NormalizeTeamGitHubRepos's first-seen pick is deterministic.
+	desired, err := domain.NormalizeTeamGitHubRepos(union)
+	if err != nil {
+		return fmt.Errorf("normalize repo union: %w", err)
+	}
+	wanted := make(map[string]bool, len(desired))
+	for _, r := range desired {
+		wanted[r.Slug()] = true
 	}
 
 	existing, err := listRepoIDsInTx(ctx, tx)
@@ -159,13 +172,13 @@ func reconcileRepoProfilesFromUnion(ctx context.Context, tx queryer, union []dom
 		return err
 	}
 	for _, id := range existing {
-		if !desired[id] {
+		if !wanted[id] {
 			if _, err := tx.ExecContext(ctx, `DELETE FROM repo_profiles WHERE id = ?`, id); err != nil {
 				return fmt.Errorf("gc repo_profiles[%s]: %w", id, err)
 			}
 		}
 	}
-	for _, r := range union {
+	for _, r := range desired {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO repo_profiles (id, owner, repo, updated_at)
 			VALUES (?, ?, ?, datetime('now'))
@@ -181,7 +194,7 @@ func (s *teamGitHubReposStore) TracksRepoSystem(ctx context.Context, teamID, own
 	var n int
 	err := s.q.QueryRowContext(ctx, `
 		SELECT 1 FROM team_github_repos
-		WHERE team_id = ? AND LOWER(owner) = LOWER(?) AND repo = ?
+		WHERE team_id = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
 		LIMIT 1
 	`, teamID, owner, repo).Scan(&n)
 	if err != nil {

@@ -536,7 +536,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			{Owner: "acme", Repo: "api"},
 			{Owner: "acme", Repo: "web"},
 		}
-		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.TeamID, input); err != nil {
+		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, input); err != nil {
 			t.Fatalf("ReplaceForTeam: %v", err)
 		}
 		got, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID)
@@ -550,7 +550,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 
 		// Replace-set prunes the missing one.
-		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.TeamID, input[:1]); err != nil {
+		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, input[:1]); err != nil {
 			t.Fatalf("replace ReplaceForTeam: %v", err)
 		}
 		got, err = stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID)
@@ -562,7 +562,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 
 		// Empty clears all.
-		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.TeamID, nil); err != nil {
+		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, nil); err != nil {
 			t.Fatalf("clear ReplaceForTeam: %v", err)
 		}
 		got, err = stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID)
@@ -576,7 +576,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 
 	t.Run("TeamGitHubRepos_TracksRepoSystem_OwnerCaseInsensitive", func(t *testing.T) {
 		stores, ids := factory(t)
-		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.TeamID, []domain.TeamGitHubRepo{
+		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, []domain.TeamGitHubRepo{
 			{Owner: "Acme", Repo: "api"},
 		}); err != nil {
 			t.Fatalf("ReplaceForTeam: %v", err)
@@ -602,7 +602,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 
 	t.Run("TeamGitHubRepos_ListForOrgSystem_Union", func(t *testing.T) {
 		stores, ids := factory(t)
-		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.TeamID, []domain.TeamGitHubRepo{
+		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, []domain.TeamGitHubRepo{
 			{Owner: "acme", Repo: "api"},
 			{Owner: "acme", Repo: "web"},
 		}); err != nil {

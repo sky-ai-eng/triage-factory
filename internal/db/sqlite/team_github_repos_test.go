@@ -34,7 +34,7 @@ func TestTeamGitHubRepos_SQLite_ReconcilesRepoProfiles(t *testing.T) {
 	}
 
 	// Team A tracks two repos → both materialize in repo_profiles.
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, teamA, []domain.TeamGitHubRepo{
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, []domain.TeamGitHubRepo{
 		{Owner: "acme", Repo: "api"},
 		{Owner: "acme", Repo: "web"},
 	}); err != nil {
@@ -45,7 +45,7 @@ func TestTeamGitHubRepos_SQLite_ReconcilesRepoProfiles(t *testing.T) {
 	}
 
 	// Team B also tracks acme/web (shared) plus acme/infra.
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, teamB, []domain.TeamGitHubRepo{
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamB, []domain.TeamGitHubRepo{
 		{Owner: "acme", Repo: "web"},
 		{Owner: "acme", Repo: "infra"},
 	}); err != nil {
@@ -57,7 +57,7 @@ func TestTeamGitHubRepos_SQLite_ReconcilesRepoProfiles(t *testing.T) {
 
 	// Team A drops acme/api (no other team tracks it → GC'd) and keeps
 	// acme/web (team B still tracks it → survives).
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, teamA, []domain.TeamGitHubRepo{
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, []domain.TeamGitHubRepo{
 		{Owner: "acme", Repo: "web"},
 	}); err != nil {
 		t.Fatalf("teamA shrink: %v", err)
@@ -68,7 +68,7 @@ func TestTeamGitHubRepos_SQLite_ReconcilesRepoProfiles(t *testing.T) {
 
 	// Team B clears everything → only acme/web (still on team A) survives;
 	// acme/infra was last-tracked by B and is GC'd.
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, teamB, nil); err != nil {
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamB, nil); err != nil {
 		t.Fatalf("teamB clear: %v", err)
 	}
 	if got, want := profiles(), []string{"acme/web"}; !equalSlugs(got, want) {
@@ -93,7 +93,7 @@ func TestTeamGitHubRepos_SQLite_TracksRepo(t *testing.T) {
 	ctx := context.Background()
 	teamA := runmode.LocalDefaultTeamID
 
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, teamA, []domain.TeamGitHubRepo{
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, []domain.TeamGitHubRepo{
 		{Owner: "Acme", Repo: "api"},
 	}); err != nil {
 		t.Fatalf("replace: %v", err)
