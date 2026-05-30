@@ -170,12 +170,38 @@ func (s *Server) projectMutex(id string) *sync.Mutex {
 	return v.(*sync.Mutex)
 }
 
-// agentEnabledForOrg returns the resolved agent and whether the
-// team_agents.enabled flag is true for it. Wraps the two-step lookup
-// (Agents.GetForOrg → TeamAgents.GetForTeam) so swipe-delegate and
-// factory-delegate share one code path for the SKY-261 acceptance
-// rule "swipe-to-delegate re-checks team_agents.enabled at swipe
-// time."
+// agentEnabledForOrg returns the resolved agent and whether the bot is
+// enabled for the org's *default* team. Use only where there is no
+// specific acting team in play — the team-members roster hint
+// (config_handler) that just wants "is a bot generally available to
+// show in the picker." Delegation paths must use agentEnabledForTeam
+// with the actual acting team, or a non-default team's bot setting is
+// read off the default team (the SKY-378 multi-team bug).
+func (s *Server) agentEnabledForOrg(ctx context.Context, orgID, userID string) (*domain.Agent, bool, error) {
+	var (
+		a      *domain.Agent
+		teamID string
+	)
+	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		var e error
+		teamID, e = tx.Teams.GetDefaultForOrg(ctx, orgID)
+		return e
+	}); err != nil {
+		return nil, false, fmt.Errorf("default team lookup: %w", err)
+	}
+	// Empty teamID (teamless org) flows through agentEnabledForTeam,
+	// which treats it as "team missing → disabled" — same posture as
+	// before.
+	a, enabled, err := s.agentEnabledForTeam(ctx, orgID, userID, teamID)
+	return a, enabled, err
+}
+
+// agentEnabledForTeam returns the resolved agent and whether the
+// team_agents.enabled flag is true for it *on the given team*. This is
+// the SKY-261 acceptance rule "swipe-to-delegate re-checks
+// team_agents.enabled at delegate time," now correctly scoped to the
+// acting team (SKY-378) rather than always the org default — so a
+// multi-team user delegating for team B is gated on B's bot setting.
 //
 // Three outcomes the caller maps:
 //   - (a, true, nil)  — proceed with the delegate.
@@ -183,17 +209,10 @@ func (s *Server) projectMutex(id string) *sync.Mutex {
 //   - (_, _, err)     — store error; refuse with 500.
 //
 // Nil agent (no bootstrap) returns err so the caller surfaces a
-// distinguishable 500 message rather than a misleading "disabled"
-// 409. Bootstrap is fatal at startup post-D-Claims so this is
-// belt-and-suspenders for tests / degraded states.
-//
-// Team-agent lookup resolves the team_id by the requesting org's
-// default team via TeamsStore — single-team-per-org today, derived
-// from the oldest teams row. In local mode this collapses to the
-// seeded "default" team; in multi mode it picks the right team for
-// the requesting tenant so the team_agents read FK-matches a real
-// row.
-func (s *Server) agentEnabledForOrg(ctx context.Context, orgID, userID string) (*domain.Agent, bool, error) {
+// distinguishable 500 message rather than a misleading "disabled" 409.
+// An empty teamID (teamless org — a bootstrap bug) resolves to
+// disabled, never to a guessed team.
+func (s *Server) agentEnabledForTeam(ctx context.Context, orgID, userID, teamID string) (*domain.Agent, bool, error) {
 	if s.agents == nil {
 		return nil, false, fmt.Errorf("agent store not configured")
 	}
@@ -222,16 +241,11 @@ func (s *Server) agentEnabledForOrg(ctx context.Context, orgID, userID string) (
 			enabled = true
 			return nil
 		}
-		teamID, e := tx.Teams.GetDefaultForOrg(ctx, orgID)
-		if e != nil {
-			return fmt.Errorf("default team lookup: %w", e)
-		}
 		if teamID == "" {
-			// No team in the org. Production installs always have
-			// the default team (multi-mode org provisioning; local-
-			// mode v1.11.0 baseline migration), so this is a
-			// bootstrap bug — surface as disabled rather than minting
-			// a wrong-team row.
+			// No team supplied (teamless org). Production installs always
+			// have a team (multi-mode org provisioning; local-mode
+			// v1.11.0 baseline migration), so this is a bootstrap bug —
+			// surface as disabled rather than minting a wrong-team row.
 			teamMissing = true
 			return nil
 		}
@@ -241,8 +255,9 @@ func (s *Server) agentEnabledForOrg(ctx context.Context, orgID, userID string) (
 		}
 		if ta == nil {
 			// team_agents row missing — treat as disabled. Production
-			// installs always have the row via BootstrapLocalAgent; a
-			// missing row at runtime means something went sideways.
+			// installs always have the row via BootstrapLocalAgent /
+			// team-create bootstrap; a missing row at runtime means
+			// something went sideways.
 			teamMissing = true
 			return nil
 		}

@@ -195,6 +195,78 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		}
 	})
 
+	t.Run("forged_team_id_cannot_leak_via_other_team", func(t *testing.T) {
+		// A task visible to the founder's team A AND to an outside team C
+		// the founder is NOT a member of. RLS admits the row (via A), but
+		// a forged ?team_id=C narrow must NOT match it — the filter is
+		// bounded to the viewer's teams via tf.user_in_team. (Codex P2)
+		teamC := pgtest.SeedTeam(t, h, orgID, "gamma-outside") // founder NOT enrolled
+		shared := seedMultiTeamTask(t, h, orgID, userID, teamA, "shared-ac")
+		pgtest.MustExec(t, h.AdminDB,
+			`INSERT INTO task_teams (task_id, team_id) VALUES ($1, $2)`, shared, teamC)
+
+		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+			store := pgstore.NewForTx(tx).Tasks
+			// Sanity: visible in the union (via A).
+			all, e := store.Queued(ctx, orgID, nil)
+			if e != nil {
+				return e
+			}
+			if !containsTask(all, shared) {
+				t.Errorf("union Queued missing the A/C task %s", shared)
+			}
+			// Forged narrow to C (founder isn't in C) must NOT surface it.
+			forged, e := store.Queued(ctx, orgID, []string{teamC})
+			if e != nil {
+				return e
+			}
+			if containsTask(forged, shared) {
+				t.Errorf("Queued(team C) leaked task %s; the caller isn't a member of C", shared)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("forged filter: %v", err)
+		}
+	})
+
+	t.Run("claimed_task_matches_only_owning_team", func(t *testing.T) {
+		// A task owned by team A but carrying a stale task_teams
+		// visibility row for team B, then claimed by the user. Claim
+		// consolidates to team_id=A without draining the B visibility row;
+		// filtering to B must NOT show it, because task_teams only widens
+		// visibility while unclaimed. (Codex P2)
+		claimed := seedMultiTeamTask(t, h, orgID, userID, teamA, "claimed-a")
+		pgtest.MustExec(t, h.AdminDB,
+			`INSERT INTO task_teams (task_id, team_id) VALUES ($1, $2)`, claimed, teamB)
+		pgtest.MustExec(t, h.AdminDB,
+			`UPDATE tasks SET claimed_by_user_id = $2 WHERE id = $1`, claimed, userID)
+
+		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+			store := pgstore.NewForTx(tx).Tasks
+			// Owning team A still matches.
+			onA, e := store.ByStatus(ctx, orgID, "claimed", []string{teamA})
+			if e != nil {
+				return e
+			}
+			if !containsTask(onA, claimed) {
+				t.Errorf("ByStatus(claimed, team A) missing the A-owned task %s", claimed)
+			}
+			// Stale visibility team B must NOT match a claimed task.
+			onB, e := store.ByStatus(ctx, orgID, "claimed", []string{teamB})
+			if e != nil {
+				return e
+			}
+			if containsTask(onB, claimed) {
+				t.Errorf("ByStatus(claimed, team B) matched task %s via a stale task_teams row; claimed tasks consolidate to team_id", claimed)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("claimed scoping: %v", err)
+		}
+	})
+
 	t.Run("create_enrolls_creator", func(t *testing.T) {
 		var newTeamID string
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {

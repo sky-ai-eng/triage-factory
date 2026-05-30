@@ -147,18 +147,24 @@ export function useTeams(): UseTeams {
   }
 }
 
-// useTeamFilter is the shared per-page read-filter state — a *multi-team*
-// view scope. The empty set means "all my teams" (the union); a non-empty
-// set narrows the page to those teams. It is device-local view state
+// useTeamFilter is the per-page read-filter state — a *multi-team* view
+// scope. The empty set means "all my teams" (the union); a non-empty set
+// narrows the page to those teams. It is device-local view state
 // (persisted in localStorage), deliberately NOT seeded from the write
-// default: reads and writes are decoupled, so the board opening on "all"
-// is independent of which team you last wrote to. Pages thread the value
+// default: reads and writes are decoupled, so a page opening on "all" is
+// independent of which team you last wrote to. Pages thread the value
 // into their reads as repeated ?team_id params and bind <TeamScopeSelect>.
-const TEAM_FILTER_KEY = 'tf.teamFilter'
+//
+// pageKey namespaces the persistence per page (e.g. 'board', 'cards',
+// 'factory'). Each page is its own lens — the board narrowed to team A
+// must NOT silently hide other teams' work when you later open Cards or
+// the Factory (Codex review on PR #263). The page-specific key keeps
+// those scopes independent.
+const TEAM_FILTER_KEY_PREFIX = 'tf.teamFilter.'
 
-function readStoredFilter(): string[] {
+function readStoredFilter(pageKey: string): string[] {
   try {
-    const raw = localStorage.getItem(TEAM_FILTER_KEY)
+    const raw = localStorage.getItem(TEAM_FILTER_KEY_PREFIX + pageKey)
     if (!raw) return []
     const parsed = JSON.parse(raw)
     return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
@@ -175,13 +181,13 @@ export function teamFilterQuery(teamIds: string[]): string {
   return teamIds.map((id) => `team_id=${encodeURIComponent(id)}`).join('&')
 }
 
-export function useTeamFilter(): [string[], (next: string[]) => void] {
+export function useTeamFilter(pageKey: string): [string[], (next: string[]) => void] {
   const { teams, loaded } = useTeams()
-  const [filter, setFilterState] = useState<string[]>(() => readStoredFilter())
+  const [filter, setFilterState] = useState<string[]>(() => readStoredFilter(pageKey))
 
   // Once the teams load, drop any stored ids that aren't current teams
   // (team deleted, or left over from another org). Validating against the
-  // live set keeps a stale selection from silently emptying the board.
+  // live set keeps a stale selection from silently emptying the page.
   useEffect(() => {
     if (!loaded) return
     const ids = new Set(teams.map((t) => t.id))
@@ -192,15 +198,18 @@ export function useTeamFilter(): [string[], (next: string[]) => void] {
     }
   }, [loaded, teams, filter])
 
-  const setFilter = useCallback((next: string[]) => {
-    setFilterState(next)
-    try {
-      localStorage.setItem(TEAM_FILTER_KEY, JSON.stringify(next))
-    } catch {
-      // localStorage unavailable — the filter still works for this
-      // session; it just won't persist across reloads.
-    }
-  }, [])
+  const setFilter = useCallback(
+    (next: string[]) => {
+      setFilterState(next)
+      try {
+        localStorage.setItem(TEAM_FILTER_KEY_PREFIX + pageKey, JSON.stringify(next))
+      } catch {
+        // localStorage unavailable — the filter still works for this
+        // session; it just won't persist across reloads.
+      }
+    },
+    [pageKey],
+  )
 
   return [filter, setFilter]
 }

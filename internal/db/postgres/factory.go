@@ -289,14 +289,23 @@ const factoryEntityMembershipExists = `EXISTS (SELECT 1 FROM tasks t WHERE t.ent
 // factoryEntityMembershipForTeams is the team-narrowed variant of
 // factoryEntityMembershipExists used by the per-page read filter: the
 // correlated task must additionally be owned by one of the teams
-// (t.team_id) or make the entity visible to one (a task_teams row).
-// placeholders is the comma-joined placeholder list (e.g. "$3, $4")
-// bound to the team ids and referenced twice. Tasks RLS still scopes the
-// semi-join to the viewer, so teams the caller isn't in yield nothing.
+// (t.team_id) or make the entity visible to one while unclaimed (a
+// task_teams row). placeholders is the comma-joined placeholder list
+// (e.g. "$3, $4") bound to the team ids and referenced twice.
+//
+// The team test mirrors the tasks_select RLS policy (see
+// pgTaskTeamFilter for the full rationale): each branch is
+// tf.user_in_team-gated so a forged team id can't pull an entity in via
+// a team the caller isn't on, and the task_teams (visibility) branch is
+// limited to UNCLAIMED tasks because a claim consolidates to team_id
+// without draining the stale visibility rows. The correlated task t is
+// itself RLS-scoped to the viewer.
 func factoryEntityMembershipForTeams(placeholders string) string {
 	return `EXISTS (SELECT 1 FROM tasks t WHERE t.entity_id = e.id AND t.org_id = e.org_id` +
-		` AND (t.team_id IN (` + placeholders +
-		`) OR EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = t.id AND tt.team_id IN (` + placeholders + `))))`
+		` AND ((t.team_id IN (` + placeholders + `) AND tf.user_in_team(t.team_id))` +
+		` OR (t.claimed_by_agent_id IS NULL AND t.claimed_by_user_id IS NULL` +
+		` AND EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = t.id` +
+		` AND tt.team_id IN (` + placeholders + `) AND tf.user_in_team(tt.team_id)))))`
 }
 
 // factoryEventMembershipExists is the membership semi-join correlated

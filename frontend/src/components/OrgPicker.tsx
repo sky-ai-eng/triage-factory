@@ -47,9 +47,6 @@ export default function OrgPicker() {
     setOpen(false)
     if (newOrgId === activeOrgId) return
     setActiveOrgId(newOrgId)
-    // The teams list is scoped to the active org, so drop the cached
-    // /api/teams response — the new org has its own teams.
-    invalidateTeams()
 
     // Persist the choice on the session row so the server's
     // withSession picks up the new active org for every subsequent
@@ -65,6 +62,12 @@ export default function OrgPicker() {
         body: JSON.stringify({ org_id: newOrgId }),
       })
       if (resp.ok) {
+        // Drop the cached /api/teams response only AFTER the active org
+        // is persisted server-side. /api/teams is session-org-scoped, so
+        // invalidating before the POST commits would race and refetch the
+        // OLD org's teams; doing it here guarantees the reload reads the
+        // new org's set. (Codex review on PR #263.)
+        invalidateTeams()
         // Force the WS to re-handshake so the hub's per-(user, org)
         // Broadcast filter routes events for the just-switched
         // tenant rather than the previous one. Without this the

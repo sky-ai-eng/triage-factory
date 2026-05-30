@@ -222,8 +222,12 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// SKY-261 acceptance: re-check team_agents.enabled at gesture
 	// time. Factory drag-to-bot is the same semantic as swipe-up
 	// "delegate to bot" — both refuse with 409 when the bot is off
-	// for this team.
-	a, enabled, err := s.agentEnabledForOrg(r.Context(), orgID, userID)
+	// for this team. Gate on the *task's* team (task.TeamID), not the
+	// org default: a multi-team user can delegate a task owned by team
+	// B, and B's bot setting — not A's — governs (SKY-378). On the find
+	// path the task may already belong to another team, so its own
+	// team_id is the team the claim actually lands on.
+	a, enabled, err := s.agentEnabledForTeam(r.Context(), orgID, userID, task.TeamID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: " + err.Error()})
 		return

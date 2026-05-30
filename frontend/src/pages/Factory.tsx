@@ -72,7 +72,7 @@ export default function Factory() {
   // drag-to-station delegate stamps onto the synthesized task. Both
   // render their selectors only at ≥2 teams.
   const { teams, preferredTeamId } = useTeams()
-  const [teamFilter, setTeamFilter] = useTeamFilter()
+  const [teamFilter, setTeamFilter] = useTeamFilter('factory')
   const teamFilterRef = useRef(teamFilter)
   useEffect(() => {
     teamFilterRef.current = teamFilter

@@ -369,25 +369,6 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	case "delegate":
-		// SKY-261 acceptance: swipe-delegate re-checks
-		// team_agents.enabled at swipe time. A team admin can
-		// toggle the bot off; trigger-spawned tasks landed
-		// unclaimed (router's auto-fire skipped), and the user
-		// can't manually delegate to a disabled bot either.
-		// Refuse with 409 — clear error the FE can surface as
-		// "bot is off; enable it in team settings."
-		a, enabled, err := s.agentEnabledForOrg(r.Context(), orgID, userID)
-		if err != nil {
-			log.Printf("[swipe] delegate aborted on task %s: %v", id, err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: " + err.Error()})
-			return
-		}
-		if !enabled {
-			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "bot is disabled for this team; enable it in team settings to delegate",
-			})
-			return
-		}
 		// HandoffAgentClaim covers three legitimate user→bot
 		// transitions (unclaimed → bot; user-claimed-by-me → bot
 		// transfer; bot-already-owns idempotent no-op) and three
@@ -397,6 +378,11 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 		// for the response — 404 for missing, 409 + closed-task
 		// message for terminal, 409 + theft message for different
 		// user. Matches the claim path's load-and-branch shape.
+		//
+		// Loaded BEFORE the bot-enablement check so that check gates on
+		// the task's own team (task.TeamID), not the org default — a
+		// multi-team user delegating a team-B task is governed by B's
+		// bot setting (SKY-378).
 		var task *domain.Task
 		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 			var e error
@@ -413,6 +399,25 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 		if task.Status == "done" || task.Status == "dismissed" {
 			writeJSON(w, http.StatusConflict, map[string]string{
 				"error": "task is closed; delegate transitions aren't allowed past close",
+			})
+			return
+		}
+		// SKY-261 acceptance: swipe-delegate re-checks
+		// team_agents.enabled at swipe time. A team admin can
+		// toggle the bot off; trigger-spawned tasks landed
+		// unclaimed (router's auto-fire skipped), and the user
+		// can't manually delegate to a disabled bot either.
+		// Refuse with 409 — clear error the FE can surface as
+		// "bot is off; enable it in team settings."
+		a, enabled, err := s.agentEnabledForTeam(r.Context(), orgID, userID, task.TeamID)
+		if err != nil {
+			log.Printf("[swipe] delegate aborted on task %s: %v", id, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: " + err.Error()})
+			return
+		}
+		if !enabled {
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "bot is disabled for this team; enable it in team settings to delegate",
 			})
 			return
 		}

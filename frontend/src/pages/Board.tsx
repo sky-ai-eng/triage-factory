@@ -127,7 +127,7 @@ export default function Board() {
   // color-coding. Both render their UI only at ≥2 teams. teamFilterRef
   // keeps fetchTasks's identity stable while always reading the latest.
   const { teams } = useTeams()
-  const [teamFilter, setTeamFilter] = useTeamFilter()
+  const [teamFilter, setTeamFilter] = useTeamFilter('board')
   const teamFilterRef = useRef(teamFilter)
   useEffect(() => {
     teamFilterRef.current = teamFilter

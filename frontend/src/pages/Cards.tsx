@@ -33,7 +33,7 @@ export default function Cards() {
   // Per-page team read filter. '' = all my teams; a team id
   // narrows the queue. teamFilterRef keeps fetchQueue's identity stable
   // (it's a WS-callback dep) while always reading the latest value.
-  const [teamFilter, setTeamFilter] = useTeamFilter()
+  const [teamFilter, setTeamFilter] = useTeamFilter('cards')
   const teamFilterRef = useRef(teamFilter)
   useEffect(() => {
     teamFilterRef.current = teamFilter
