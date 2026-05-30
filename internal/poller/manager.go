@@ -610,16 +610,21 @@ func (m *Manager) runJiraCycle() {
 }
 
 // toTrackerJiraRules collapses the org-wide rule union into the
-// tracker-local per-project view. When several teams track the same
-// project_key with divergent member sets, the members are MERGED
-// (set-union, first-seen order preserved): the most-permissive
-// interpretation for discovery + terminal detection, which matches the
-// org-shared-entity invariant (one entity per Jira issue regardless of
-// how many teams track its project). Team-specific scoping lives
-// downstream in the router gate, not in discovery. Kept narrow on
-// purpose — the tracker only needs pickup/done members, not the
-// canonicals. Input arrives ordered by (project_key, team_id), so the
-// merged output is deterministic.
+// tracker-local per-project view — one entry per distinct project_key, so
+// a project two teams both track is polled once (entities are org-shared:
+// one row per Jira issue regardless of how many teams track its project).
+//
+// PickupMembers / DoneMembers are Jira *workflow status names* ("To Do",
+// "Backlog", "Done"), NOT people or teams — they drive the discovery JQL
+// (which statuses count as available-for-pickup vs terminal). When several
+// teams track the same project_key with divergent status sets, those sets
+// are MERGED (set-union, first-seen order preserved): the most-permissive
+// interpretation for discovery + terminal detection, so no team's
+// pickup-able issue is missed and any team's notion of "done" closes the
+// shared entity. Team-specific scoping lives downstream in the router
+// gate, not in discovery. Kept narrow on purpose — the tracker only needs
+// pickup/done statuses, not the canonicals. Input arrives ordered by
+// (project_key, team_id), so the merged output is deterministic.
 func toTrackerJiraRules(rules []domain.JiraProjectStatusRules) tracker.JiraRules {
 	type merged struct {
 		pickup, done         []string
