@@ -13,7 +13,10 @@ import (
 // site so the multi-team selector work can layer the real selection on
 // top in one place instead of N.
 //
-// Resolution order:
+// Resolution order — note that today only step 3 executes; steps 1 and 2
+// are the design the multi-team selector (SKY-294) will fill in, listed
+// here so the intended contract is on the page before PR2 implements it.
+// The body below is just the GetDefaultForOrg call (step 3):
 //
 //  1. The requesting user's sticky default team, if set. The backing
 //     column doesn't exist yet, so this step is inert today — there is

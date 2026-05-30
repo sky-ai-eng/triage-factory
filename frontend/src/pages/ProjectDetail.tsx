@@ -605,6 +605,15 @@ function PinnedReposInline({
   const loadRepos = useCallback(
     async (signal: AbortSignal) => {
       setLoadError(null)
+      // team_id is non-optional on Project and the create handler enforces
+      // it, so an empty value here means a malformed row (e.g. a future
+      // migration bug). Guard explicitly: fetching `/api/settings/team//repos`
+      // would 404 and bury the real cause behind a generic load error.
+      if (!teamId) {
+        setLoadError('This project has no team set — reload, and contact support if it persists.')
+        setLoading(false)
+        return
+      }
       try {
         const res = await fetch(`/api/settings/team/${teamId}/repos`, { signal })
         if (signal.aborted) return

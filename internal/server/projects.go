@@ -76,22 +76,26 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 	jiraKey := strings.TrimSpace(req.JiraProjectKey)
 	linearKey := strings.TrimSpace(req.LinearProjectKey)
 
-	// Resolve team first, then validate pinned repos against that team's
-	// tracked set + (lazily) jira rules — all inside one WithTx so
-	// teams_select, team_github_repos_select, and jira_rules_select RLS
-	// gates fire under the user's claims. Mirrors the PATCH path's
-	// lazy-load policy: only read jira rules when the Jira side needs
-	// validation.
-	//
-	// The acting team owns the new project — resolveActingTeam centralizes
-	// the team choice (today: the org's sole/default team). UPDATE instead
+	// Resolve the acting team, validate pinned repos + tracker keys
+	// against that team, then create — all in ONE WithTx so the team the
+	// row is written under is the same team validation ran against (no
+	// resolve-then-write window where the team could change underneath
+	// us) and so teams_select / team_github_repos_select / jira_rules_select
+	// RLS gates all fire under the user's claims. Jira rules are loaded
+	// lazily — only when the Jira side needs validation. The two
+	// user-facing validation failures (bad pinned repo, unknown tracker
+	// key) short-circuit the closure with a nil error and surface their
+	// captured message as a 400 after the tx; nothing is written on those
+	// paths. The acting team owns the new project; UPDATE instead
 	// validates against the project's own existing.TeamID, so only this
 	// create path resolves a team.
 	var (
 		teamID        string
 		pinned        []string
 		pinnedErrMsg  string
+		trackerErrMsg string
 		teamJiraRules []domain.JiraProjectStatusRules
+		created       *domain.Project
 	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -100,39 +104,29 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 			return e
 		}
 		pinned, pinnedErrMsg = validatePinnedRepos(r.Context(), tx.TeamGitHubRepos, teamID, req.PinnedRepos)
+		if pinnedErrMsg != "" {
+			return nil // surfaced as 400 below; nothing written
+		}
 		if jiraKey != "" {
 			teamJiraRules, e = tx.JiraStatusRules.ListForTeam(r.Context(), teamID)
 			if e != nil {
 				return fmt.Errorf("list jira rules: %w", e)
 			}
 		}
-		return nil
-	}); err != nil {
-		log.Printf("handleProjectCreate: %v", err)
-		internalError(w, "projects", err)
-		return
-	}
-	if pinnedErrMsg != "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": pinnedErrMsg})
-		return
-	}
-	if jiraKey != "" || linearKey != "" {
-		var errMsg string
-		jiraKey, linearKey, errMsg = validateTrackerKeys(teamJiraRules, jiraKey, linearKey)
-		if errMsg != "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
-			return
+		if jiraKey != "" || linearKey != "" {
+			jiraKey, linearKey, trackerErrMsg = validateTrackerKeys(teamJiraRules, jiraKey, linearKey)
+			if trackerErrMsg != "" {
+				return nil // surfaced as 400 below; nothing written
+			}
 		}
-	}
 
-	// Default the spec-authorship skill to the seeded system prompt
-	// when it exists. Doing this at the API layer (not in db.CreateProject)
-	// keeps the DB layer free of any "system prompt must exist" coupling
-	// — tests that don't seed prompts get NULL on insert and the curator
-	// runtime falls back to the same default at dispatch time anyway.
-	specPromptID := ""
-	var created *domain.Project
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		// Validation passed — default the spec-authorship skill to the
+		// seeded system prompt when it exists. Doing this at the API layer
+		// (not in db.CreateProject) keeps the DB layer free of any "system
+		// prompt must exist" coupling — tests that don't seed prompts get
+		// NULL on insert and the curator runtime falls back to the same
+		// default at dispatch time anyway.
+		specPromptID := ""
 		def, defErr := tx.Prompts.Get(r.Context(), orgID, domain.SystemTicketSpecPromptID)
 		if defErr != nil {
 			log.Printf("handleProjectCreate: failed to load default spec-authorship prompt %q: %v", domain.SystemTicketSpecPromptID, defErr)
@@ -155,7 +149,16 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		created, getErr = tx.Projects.Get(r.Context(), orgID, id)
 		return getErr
 	}); err != nil {
+		log.Printf("handleProjectCreate: %v", err)
 		internalError(w, "projects", err)
+		return
+	}
+	if pinnedErrMsg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": pinnedErrMsg})
+		return
+	}
+	if trackerErrMsg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": trackerErrMsg})
 		return
 	}
 	writeJSON(w, http.StatusCreated, created)
