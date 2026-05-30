@@ -98,6 +98,30 @@ func taskToJSON(t domain.Task) taskJSON {
 	}
 }
 
+// teamFilterParam extracts the per-page multi-team read filter from the
+// request — the set of non-empty, deduped ?team_id= values (a repeated
+// query param). Returns nil when none are present, which the stores treat
+// as "the union of the viewer's teams."
+func teamFilterParam(r *http.Request) []string {
+	raw := r.URL.Query()["team_id"]
+	if len(raw) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if v == "" {
+			continue
+		}
+		if _, dup := seen[v]; dup {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
+}
+
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
@@ -110,13 +134,13 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	// stays the canonical "pickable right now" projection for the
 	// Cards triage view.
 	includeSnoozed := r.URL.Query().Get("include_snoozed") == "true"
-	// Optional per-page team filter. Empty = the union of the
-	// viewer's teams (the RLS-scoped default); a team id narrows to that
-	// team's owned/visible tasks. A team the caller isn't in yields an
-	// empty result under RLS rather than leaking, so no extra validation
-	// is needed here — the narrow is additive on top of the visibility
-	// scope.
-	teamFilter := r.URL.Query().Get("team_id")
+	// Optional per-page team filter — a multi-team view scope, supplied as
+	// repeated ?team_id= params. Empty = the union of the viewer's teams
+	// (the RLS-scoped default); a non-empty set narrows to those teams'
+	// owned/visible tasks. Teams the caller isn't in yield nothing under
+	// RLS rather than leaking, so no extra validation is needed here — the
+	// narrow is additive on top of the visibility scope.
+	teamFilter := teamFilterParam(r)
 	var tasks []domain.Task
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -145,7 +169,7 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 	userID := ClaimsFrom(r.Context()).Subject
 	status := r.URL.Query().Get("status")
 	// Optional per-page team filter — see handleQueue.
-	teamFilter := r.URL.Query().Get("team_id")
+	teamFilter := teamFilterParam(r)
 	var tasks []domain.Task
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error

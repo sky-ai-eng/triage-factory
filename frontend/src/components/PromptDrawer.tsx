@@ -5,7 +5,7 @@ import { readError } from '../lib/api'
 import type { ChainStep, PromptKind } from '../types'
 import ChainStepEditor, { type ChainStepDraft } from './ChainStepEditor'
 import TeamPicker from './TeamPicker'
-import { useTeams, pickerDefault, writeRecentTeam } from '../hooks/useTeams'
+import { useTeams, pickerDefault, noteWrittenTeam } from '../hooks/useTeams'
 
 interface Props {
   promptId: string | null
@@ -297,7 +297,7 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
         toast.error(await readError(res, `Failed to ${isNew ? 'create' : 'save'} prompt`))
         return
       }
-      if (isNew && team) writeRecentTeam(team)
+      if (isNew && team) noteWrittenTeam(team)
 
       // For chain prompts, persist the step list immediately after the
       // prompt itself. We use the id from the response so it works for

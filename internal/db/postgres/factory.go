@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -285,17 +286,17 @@ const pgFactoryEntitySelectColumns = `
 // is monotonic since tasks terminate to done/dismissed, never delete.
 const factoryEntityMembershipExists = `EXISTS (SELECT 1 FROM tasks t WHERE t.entity_id = e.id AND t.org_id = e.org_id)`
 
-// factoryEntityMembershipForTeam is the team-narrowed variant of
+// factoryEntityMembershipForTeams is the team-narrowed variant of
 // factoryEntityMembershipExists used by the per-page read filter: the
-// correlated task must additionally be owned by the team
-// (t.team_id) or make the entity visible to it (a task_teams row). The
-// placeholder ($N) binds the team id and is referenced twice. Tasks RLS
-// still scopes the semi-join to the viewer, so a team the caller isn't
-// in yields an empty belt rather than leaking.
-func factoryEntityMembershipForTeam(placeholder string) string {
+// correlated task must additionally be owned by one of the teams
+// (t.team_id) or make the entity visible to one (a task_teams row).
+// placeholders is the comma-joined placeholder list (e.g. "$3, $4")
+// bound to the team ids and referenced twice. Tasks RLS still scopes the
+// semi-join to the viewer, so teams the caller isn't in yield nothing.
+func factoryEntityMembershipForTeams(placeholders string) string {
 	return `EXISTS (SELECT 1 FROM tasks t WHERE t.entity_id = e.id AND t.org_id = e.org_id` +
-		` AND (t.team_id = ` + placeholder +
-		` OR EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = t.id AND tt.team_id = ` + placeholder + `)))`
+		` AND (t.team_id IN (` + placeholders +
+		`) OR EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = t.id AND tt.team_id IN (` + placeholders + `))))`
 }
 
 // factoryEventMembershipExists is the membership semi-join correlated
@@ -306,22 +307,31 @@ func factoryEntityMembershipForTeam(placeholder string) string {
 // counters match the team-scoped entity belt.
 const factoryEventMembershipExists = `EXISTS (SELECT 1 FROM tasks t WHERE t.entity_id = ev.entity_id AND t.org_id = ev.org_id)`
 
-func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int, teamID string) ([]domain.FactoryEntityRow, error) {
+func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int, teamIDs []string) ([]domain.FactoryEntityRow, error) {
 	// The membership semi-join scopes the belt to the viewer's teams
 	// (via tasks RLS). The optional per-page filter narrows it further to
-	// a single team by tightening that same semi-join's correlated task
-	// to one the team owns or can see. $3 carries teamID when set; the
-	// placeholder appears before LIMIT in the text but binds by number,
-	// which Postgres resolves regardless of order.
+	// a set of teams by tightening that same semi-join's correlated task
+	// to one any selected team owns or can see. The team placeholders
+	// appear before LIMIT in the text but bind by number, which Postgres
+	// resolves regardless of order — active args start the teams at $3
+	// (after orgID, limit), closed at $4 (after orgID, cutoff, limit).
 	activeMembership := factoryEntityMembershipExists
 	closedMembership := factoryEntityMembershipExists
 	activeArgs := []any{orgID, limit}
 	closedArgs := []any{orgID, time.Now().Add(-db.FactoryClosedGracePeriod), db.FactoryClosedGraceLimit}
-	if teamID != "" {
-		activeMembership = factoryEntityMembershipForTeam("$3")
-		activeArgs = append(activeArgs, teamID)
-		closedMembership = factoryEntityMembershipForTeam("$4")
-		closedArgs = append(closedArgs, teamID)
+	if len(teamIDs) > 0 {
+		activePH := make([]string, len(teamIDs))
+		for i, id := range teamIDs {
+			activePH[i] = fmt.Sprintf("$%d", 3+i)
+			activeArgs = append(activeArgs, id)
+		}
+		activeMembership = factoryEntityMembershipForTeams(strings.Join(activePH, ", "))
+		closedPH := make([]string, len(teamIDs))
+		for i, id := range teamIDs {
+			closedPH[i] = fmt.Sprintf("$%d", 4+i)
+			closedArgs = append(closedArgs, id)
+		}
+		closedMembership = factoryEntityMembershipForTeams(strings.Join(closedPH, ", "))
 	}
 
 	active, err := queryFactoryEntities(ctx, s.q, `

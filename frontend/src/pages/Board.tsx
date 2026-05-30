@@ -256,11 +256,11 @@ export default function Board() {
       const tf = teamFilterRef.current
       const queueParams = new URLSearchParams()
       if (showSnoozed) queueParams.set('include_snoozed', 'true')
-      if (tf) queueParams.set('team_id', tf)
+      for (const id of tf) queueParams.append('team_id', id)
       const queueURL = '/api/queue' + (queueParams.toString() ? `?${queueParams.toString()}` : '')
       const tasksURL = (status: string) => {
         const p = new URLSearchParams({ status })
-        if (tf) p.set('team_id', tf)
+        for (const id of tf) p.append('team_id', id)
         return `/api/tasks?${p.toString()}`
       }
       const [queuedRes, claimedRes, inProgressRes, inReviewRes, doneRes] = await Promise.all([

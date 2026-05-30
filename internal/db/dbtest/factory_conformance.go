@@ -361,7 +361,7 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		// Past the grace window — should be excluded.
 		seed.CloseEntity(t, stale, time.Now().Add(-db.FactoryClosedGracePeriod-30*time.Second))
 
-		rows, err := store.Entities(ctx, orgID, 100, "")
+		rows, err := store.Entities(ctx, orgID, 100, nil)
 		if err != nil {
 			t.Fatalf("Entities: %v", err)
 		}
@@ -400,7 +400,7 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 
 		// limit=2 — same as the active count. The closed burst must
 		// not crowd active out.
-		rows, err := store.Entities(ctx, orgID, 2, "")
+		rows, err := store.Entities(ctx, orgID, 2, nil)
 		if err != nil {
 			t.Fatalf("Entities: %v", err)
 		}
@@ -433,7 +433,7 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 			seed.CloseEntity(t, e, closedAt)
 		}
 
-		rows, err := store.Entities(ctx, orgID, 100, "")
+		rows, err := store.Entities(ctx, orgID, 100, nil)
 		if err != nil {
 			t.Fatalf("Entities: %v", err)
 		}

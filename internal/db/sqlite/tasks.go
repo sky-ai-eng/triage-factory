@@ -54,28 +54,34 @@ func (s *taskStore) Get(ctx context.Context, orgID, taskID string) (*domain.Task
 }
 
 // sqliteTaskTeamFilter mirrors pgTaskTeamFilter: it narrows a tasks
-// query (alias t) to a single team — owning team_id OR a task_teams
-// visibility row — appending teamID twice (SQLite binds ? positionally,
-// so each reference needs its own arg). Empty teamID is a no-op. The
-// fragment is always emitted last in the WHERE (before ORDER BY), so
-// appending the args keeps them in placeholder order. Local mode is
-// N=1 (one team) so this is effectively inert, but it keeps the SQLite
+// query (alias t) to a *set* of teams — owning team_id OR a task_teams
+// visibility row — appending the ids twice (SQLite binds ? positionally,
+// so the two IN-lists each need their own copy). Empty teamIDs is a
+// no-op. The fragment is always emitted last in the WHERE (before ORDER
+// BY), so appending the args keeps them in placeholder order. Local mode
+// is N=1 (one team) so this is effectively inert, but it keeps the SQLite
 // store conformant with the interface contract.
-func sqliteTaskTeamFilter(teamID string, args []any) (string, []any) {
-	if teamID == "" {
+func sqliteTaskTeamFilter(teamIDs []string, args []any) (string, []any) {
+	if len(teamIDs) == 0 {
 		return "", args
 	}
-	args = append(args, teamID, teamID)
-	return " AND (t.team_id = ? OR EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = t.id AND tt.team_id = ?))", args
+	ph := strings.TrimRight(strings.Repeat("?, ", len(teamIDs)), ", ")
+	for _, id := range teamIDs { // first IN (t.team_id)
+		args = append(args, id)
+	}
+	for _, id := range teamIDs { // second IN (task_teams)
+		args = append(args, id)
+	}
+	return fmt.Sprintf(" AND (t.team_id IN (%s) OR EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = t.id AND tt.team_id IN (%s)))", ph, ph), args
 }
 
-func (s *taskStore) Queued(ctx context.Context, orgID, teamID string) ([]domain.Task, error) {
+func (s *taskStore) Queued(ctx context.Context, orgID string, teamIDs []string) ([]domain.Task, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
 	// SKY-261 B+ derived filter: queue = status='queued' + both claim
 	// cols NULL + not future-snoozed.
-	teamClause, args := sqliteTaskTeamFilter(teamID, nil)
+	teamClause, args := sqliteTaskTeamFilter(teamIDs, nil)
 	return queryTasksCtx(ctx, s.q, `
 		SELECT `+sqliteTaskColumnsWithEntity+`
 		FROM tasks t
@@ -94,7 +100,7 @@ func (s *taskStore) Queued(ctx context.Context, orgID, teamID string) ([]domain.
 	`, args...)
 }
 
-func (s *taskStore) QueuedIncludingSnoozed(ctx context.Context, orgID, teamID string) ([]domain.Task, error) {
+func (s *taskStore) QueuedIncludingSnoozed(ctx context.Context, orgID string, teamIDs []string) ([]domain.Task, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -108,7 +114,7 @@ func (s *taskStore) QueuedIncludingSnoozed(ctx context.Context, orgID, teamID st
 	// deferred entry doesn't jump above live queued work. SQLite
 	// treats the boolean expression as 0/1 — false (live) sorts
 	// before true (snoozed).
-	teamClause, args := sqliteTaskTeamFilter(teamID, nil)
+	teamClause, args := sqliteTaskTeamFilter(teamIDs, nil)
 	return queryTasksCtx(ctx, s.q, `
 		SELECT `+sqliteTaskColumnsWithEntity+`
 		FROM tasks t
@@ -128,7 +134,7 @@ func (s *taskStore) QueuedIncludingSnoozed(ctx context.Context, orgID, teamID st
 	`, args...)
 }
 
-func (s *taskStore) ByStatus(ctx context.Context, orgID, status, teamID string) ([]domain.Task, error) {
+func (s *taskStore) ByStatus(ctx context.Context, orgID, status string, teamIDs []string) ([]domain.Task, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -144,7 +150,7 @@ func (s *taskStore) ByStatus(ctx context.Context, orgID, status, teamID string) 
 	// rows that stay claimed-queued indefinitely until retry.
 	switch status {
 	case "claimed":
-		teamClause, args := sqliteTaskTeamFilter(teamID, nil)
+		teamClause, args := sqliteTaskTeamFilter(teamIDs, nil)
 		return queryTasksCtx(ctx, s.q, `
 			SELECT `+sqliteTaskColumnsWithEntity+`
 			FROM tasks t
@@ -154,7 +160,7 @@ func (s *taskStore) ByStatus(ctx context.Context, orgID, status, teamID string) 
 			ORDER BY COALESCE(t.priority_score, 0.5) DESC
 		`, args...)
 	case "delegated":
-		teamClause, args := sqliteTaskTeamFilter(teamID, nil)
+		teamClause, args := sqliteTaskTeamFilter(teamIDs, nil)
 		return queryTasksCtx(ctx, s.q, `
 			SELECT `+sqliteTaskColumnsWithEntity+`
 			FROM tasks t
@@ -172,7 +178,7 @@ func (s *taskStore) ByStatus(ctx context.Context, orgID, status, teamID string) 
 		// surface as bugs (column empty) rather than accumulating
 		// silently. Legacy pre-330 rows with NULL closed_at fall
 		// out of the cap; they're old enough to be excluded anyway.
-		teamClause, args := sqliteTaskTeamFilter(teamID, []any{status})
+		teamClause, args := sqliteTaskTeamFilter(teamIDs, []any{status})
 		return queryTasksCtx(ctx, s.q, `
 			SELECT `+sqliteTaskColumnsWithEntity+`
 			FROM tasks t
@@ -183,7 +189,7 @@ func (s *taskStore) ByStatus(ctx context.Context, orgID, status, teamID string) 
 			ORDER BY t.closed_at DESC, COALESCE(t.priority_score, 0.5) DESC
 		`, args...)
 	}
-	teamClause, args := sqliteTaskTeamFilter(teamID, []any{status})
+	teamClause, args := sqliteTaskTeamFilter(teamIDs, []any{status})
 	return queryTasksCtx(ctx, s.q, `
 		SELECT `+sqliteTaskColumnsWithEntity+`
 		FROM tasks t

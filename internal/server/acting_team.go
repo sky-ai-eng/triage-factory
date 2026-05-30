@@ -43,9 +43,40 @@ func writeIfActingTeamError(w http.ResponseWriter, err error) bool {
 }
 
 // resolveActingTeam returns the team a write should be attributed to for
-// the current request — "the acting team." It centralizes the team
-// selection that the multi-team UX layers on top of every
-// write site, so the resolution order lives in one place instead of N.
+// the current request — "the acting team" — and records it as the
+// caller's last-written team so the write pickers seed there next time.
+// It centralizes the team selection that the multi-team UX layers on top
+// of every write site, so the resolution order lives in one place.
+//
+// Reads and writes are deliberately decoupled: a read is a multi-team
+// *view scope* (the board can show many teams at once), while a write is
+// always a single-team *ownership stamp*. So this resolver never consults
+// the read filter, and the read filter never consults this — they share
+// no primitive.
+//
+// Resolution order (see resolveActingTeamID); on success the resolved
+// team is stamped onto users.preferred_team_id as the durable last-used
+// write default. The stamp is best-effort — a preference-write failure
+// must not fail the actual write — and runs under the caller's claims
+// (users_modify RLS gates id = current_user_id()). Call this inside the
+// request's WithTx.
+func resolveActingTeam(ctx context.Context, teams db.TeamsStore, users db.UsersStore, orgID, userID, picked string) (string, error) {
+	resolved, err := resolveActingTeamID(ctx, teams, users, orgID, userID, picked)
+	if err != nil {
+		return "", err
+	}
+	if resolved != "" {
+		// Best-effort: remember the team this write landed on as the
+		// user's last-used default. Ignore the error — the write itself
+		// has already been decided and must not fail on a preference miss
+		// (e.g. a missing user row in a thin fixture).
+		_ = users.SetPreferredTeam(ctx, userID, resolved)
+	}
+	return resolved, nil
+}
+
+// resolveActingTeamID is the pure resolution (no side effects), kept
+// separate so the contract is unit-testable without the last-used stamp.
 //
 // Resolution order:
 //
@@ -56,12 +87,13 @@ func writeIfActingTeamError(w http.ResponseWriter, err error) bool {
 //     for a team they don't belong to is rejected (errActingTeamForbidden)
 //     rather than silently honored.
 //
-//  2. Sticky default — users.preferred_team_id, when set and still one
-//     of the caller's current-org teams. This is the per-user "home
-//     team" the selectors seed to; it only applies when no explicit pick
-//     arrived (a ≤1-team caller, whose picker is hidden, or a non-UI
-//     client). A stale default (team deleted, or in another org) fails
-//     the membership re-check and falls through.
+//  2. Last-written default — users.preferred_team_id, when set and still
+//     one of the caller's current-org teams. This is the team the
+//     caller's previous write landed on (stamped by resolveActingTeam);
+//     it only applies when no explicit pick arrived (a ≤1-team caller,
+//     whose picker is hidden, or a non-UI client). A stale value (team
+//     deleted, or in another org) fails the membership re-check and
+//     falls through.
 //
 //  3. Sole team — when the caller has exactly one team, that team. This
 //     is the only path a solo (local or hosted-1-team) caller ever
@@ -69,7 +101,7 @@ func writeIfActingTeamError(w http.ResponseWriter, err error) bool {
 //     ListForUser orders oldest-first, and a 1-team org's only team is
 //     its default team.
 //
-//  4. Ambiguous (≥2 teams, no pick, no usable sticky) → errActingTeamRequired.
+//  4. Ambiguous (≥2 teams, no pick, no usable default) → errActingTeamRequired.
 //     The UI cannot reach this (the picker is required), so it only
 //     fires for a malformed non-UI write; failing loudly beats guessing
 //     a team that could misattribute shared work.
@@ -78,10 +110,7 @@ func writeIfActingTeamError(w http.ResponseWriter, err error) bool {
 //     that shouldn't occur in practice) → fall back to the org's default
 //     team, preserving PR1's never-block posture; a truly teamless org
 //     still errors.
-//
-// Call this inside the request's WithTx so ListForUser, GetPreferredTeam,
-// and the default-team lookup all run under the caller's claims (RLS).
-func resolveActingTeam(ctx context.Context, teams db.TeamsStore, users db.UsersStore, orgID, userID, picked string) (string, error) {
+func resolveActingTeamID(ctx context.Context, teams db.TeamsStore, users db.UsersStore, orgID, userID, picked string) (string, error) {
 	myTeams, err := teams.ListForUser(ctx, orgID)
 	if err != nil {
 		return "", fmt.Errorf("acting team: list teams: %w", err)
@@ -99,7 +128,7 @@ func resolveActingTeam(ctx context.Context, teams db.TeamsStore, users db.UsersS
 		return "", errActingTeamForbidden
 	}
 
-	// 2. Sticky default (only when still a member).
+	// 2. Last-written default (only when still a member).
 	preferred, err := users.GetPreferredTeam(ctx, userID)
 	if err != nil {
 		return "", fmt.Errorf("acting team: preferred team: %w", err)
@@ -131,13 +160,14 @@ func resolveActingTeam(ctx context.Context, teams db.TeamsStore, users db.UsersS
 }
 
 // resolveReadTeam picks the single team a single-team-oriented *read*
-// should target, given an optional explicit pick from the per-page
-// filter. The Jira stock/discovery deck is the consumer: it scopes to
-// one team's Jira projects at a time, and the filter switches between
-// them.
+// should target, given an optional explicit pick from the caller. The
+// Jira stock/discovery deck is the only consumer: it scopes to one
+// team's Jira projects at a time (and the same team owns the claim), so
+// it is single-team by construction — unlike the board/queue/factory
+// reads, which are multi-team and use the IN-list narrow instead.
 //
 // Unlike resolveActingTeam this never errors on a multi-team caller —
-// a read defaults rather than blocks. Order: valid pick → sticky
+// a read defaults rather than blocks. Order: valid pick → last-written
 // default (still a member) → first (oldest) team. Returns "" with a nil
 // error only when the caller has no teams (the handler degrades to its
 // "not configured" branch). An explicit pick the caller isn't a member

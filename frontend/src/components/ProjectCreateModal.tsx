@@ -6,7 +6,7 @@ import { toast } from './Toast/toastStore'
 import RepoMultiSelect from './RepoMultiSelect'
 import TrackerProjectPickers from './TrackerProjectPickers'
 import TeamPicker from './TeamPicker'
-import { useTeams, pickerDefault, writeRecentTeam } from '../hooks/useTeams'
+import { useTeams, pickerDefault, noteWrittenTeam } from '../hooks/useTeams'
 
 // ProjectCreateModal is the only way to create a project from the UI.
 // Required: name. Optional: description, pinned repos, tracker
@@ -102,8 +102,9 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
           return
         }
         const created: Project = await res.json()
-        // Remember the team for the next write picker's default seed.
-        if (team) writeRecentTeam(team)
+        // Sync the cache to the team this write landed on (the backend
+        // resolver has already persisted it as the last-written default).
+        if (team) noteWrittenTeam(team)
         toast.success(`Created project "${created.name}"`)
         onCreated(created)
       } catch (err) {

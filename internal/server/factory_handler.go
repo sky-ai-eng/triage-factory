@@ -199,7 +199,7 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 	// Only the belt narrows here — the throughput counters stay at the
 	// viewer-union (a deliberate scope line; the belt is what "hides
 	// cross-team rows" refers to on the factory).
-	teamFilter := r.URL.Query().Get("team_id")
+	teamFilter := teamFilterParam(r)
 
 	// Session user's GitHub login drives the "mine" flag. Identity lives on
 	// users.github_username (SKY-264). Missing identity (fresh install, no

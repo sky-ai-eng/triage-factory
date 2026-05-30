@@ -101,7 +101,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 			store := pgstore.NewForTx(tx).Tasks
 
 			// No filter → the union of the viewer's teams (both tasks).
-			all, e := store.Queued(ctx, orgID, "")
+			all, e := store.Queued(ctx, orgID, nil)
 			if e != nil {
 				return fmt.Errorf("Queued(union): %w", e)
 			}
@@ -110,7 +110,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 			}
 
 			// Filter to A → only A's task; B's row is hidden.
-			onlyA, e := store.Queued(ctx, orgID, teamA)
+			onlyA, e := store.Queued(ctx, orgID, []string{teamA})
 			if e != nil {
 				return fmt.Errorf("Queued(A): %w", e)
 			}
@@ -119,7 +119,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 			}
 
 			// Filter to B → only B's task.
-			onlyB, e := store.Queued(ctx, orgID, teamB)
+			onlyB, e := store.Queued(ctx, orgID, []string{teamB})
 			if e != nil {
 				return fmt.Errorf("Queued(B): %w", e)
 			}

@@ -3,7 +3,7 @@ import { ExternalLink, RotateCw } from 'lucide-react'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
 import TeamPicker from './TeamPicker'
-import { useTeams, pickerDefault, writeRecentTeam } from '../hooks/useTeams'
+import { useTeams, pickerDefault, noteWrittenTeam } from '../hooks/useTeams'
 
 type Action = 'queue' | 'claim' | 'done'
 type Bucket = 'assigned' | 'available'
@@ -195,7 +195,7 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
         toast.error(await readError(res, 'Failed to save carry-over selections'))
         return
       }
-      if (team) writeRecentTeam(team)
+      if (team) noteWrittenTeam(team)
       const body = (await res.json()) as {
         applied: number
         failed?: { issue_key: string; action: string; error: string }[]

@@ -16,7 +16,13 @@ import TeamScopeSelect from '../components/TeamScopeSelect'
 import { toast } from '../components/Toast/toastStore'
 import { createIsoScene, type ClickedStationInfo, type IsoSceneHandle } from '../factory/iso-scene'
 import { useWebSocket } from '../hooks/useWebSocket'
-import { useTeams, useTeamFilter, pickerDefault, writeRecentTeam } from '../hooks/useTeams'
+import {
+  useTeams,
+  useTeamFilter,
+  pickerDefault,
+  noteWrittenTeam,
+  teamFilterQuery,
+} from '../hooks/useTeams'
 import type { AgentRun, FactoryEntity, FactorySnapshot, Task } from '../types'
 
 // Production factory page — Babylon scene driven by /api/factory/snapshot.
@@ -105,8 +111,8 @@ export default function Factory() {
     let pending: ReturnType<typeof setTimeout> | null = null
 
     const load = () => {
-      const tf = teamFilterRef.current
-      fetch('/api/factory/snapshot' + (tf ? `?team_id=${encodeURIComponent(tf)}` : ''))
+      const q = teamFilterQuery(teamFilterRef.current)
+      fetch('/api/factory/snapshot' + (q ? `?${q}` : ''))
         .then((r) => {
           if (!r.ok) throw new Error(`Failed to load factory snapshot (${r.status})`)
           return r.json() as Promise<FactorySnapshot>
@@ -273,7 +279,7 @@ export default function Factory() {
         toast.error(`Delegate ${label}: ${detail}`, 'Delegation failed')
         return
       }
-      if (delegateTeam) writeRecentTeam(delegateTeam)
+      if (delegateTeam) noteWrittenTeam(delegateTeam)
       const refetch = (window as unknown as { __factoryRefetch?: () => void }).__factoryRefetch
       refetch?.()
       if (partialFailure) {

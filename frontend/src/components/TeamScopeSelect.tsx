@@ -1,26 +1,23 @@
 import { useState, useRef, useEffect } from 'react'
-import { Check, ChevronDown, Pin, Users } from 'lucide-react'
+import { Check, ChevronDown, Users } from 'lucide-react'
 import { useTeams } from '../hooks/useTeams'
-import { toast } from './Toast/toastStore'
 
 interface Props {
-  /** The selected team id, or '' for "all my teams". */
-  value: string
-  onChange: (teamId: string) => void
+  /** The selected team ids. Empty = "all my teams" (the union). */
+  value: string[]
+  onChange: (teamIds: string[]) => void
   className?: string
 }
 
-// TeamScopeSelect is the per-page read filter. It renders
-// nothing unless the viewer belongs to ≥2 teams — the same count gate
-// that covers local + hosted-solo with no mode branch. Optional by
-// design: "All my teams" (value '') is the union, selecting one narrows
-// the view (the chosen id rides every read as ?team_id=).
-//
-// The pin toggles the viewer's sticky default: pinning a team persists it
-// as the per-user default that seeds both this filter and the write
-// picker on the next visit; pinning while on "All my teams" clears it.
+// TeamScopeSelect is the per-page read filter — a *multi-team* view
+// scope. It renders nothing unless the viewer belongs to ≥2 teams (the
+// same count gate that covers local + hosted-solo with no mode branch).
+// Optional by design: the empty set is "all my teams" (the union);
+// checking teams narrows the page to their union. The board can show
+// {A}, {A,B}, all, or none — there's no single-team coupling, which is
+// why the write picker (a single-team choice) is a separate control.
 export default function TeamScopeSelect({ value, onChange, className = '' }: Props) {
-  const { teams, multi, preferredTeamId, setPreferred } = useTeams()
+  const { teams, multi } = useTeams()
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
 
@@ -35,23 +32,28 @@ export default function TeamScopeSelect({ value, onChange, className = '' }: Pro
 
   if (!multi) return null
 
-  const selected = teams.find((t) => t.id === value)
-  const label = selected ? selected.name : 'All my teams'
+  const selected = new Set(value)
+  const chosen = teams.filter((t) => selected.has(t.id))
+  const label =
+    chosen.length === 0
+      ? 'All my teams'
+      : chosen.length === 1
+        ? chosen[0].name
+        : `${chosen.length} teams`
 
-  const pinDefault = async () => {
-    try {
-      // Pin the current selection as the sticky default; "all" clears it.
-      await setPreferred(value)
-      toast.success(
-        value ? `Default team set to ${selected?.name ?? 'team'}` : 'Default team cleared',
-      )
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to set default team')
+  const toggle = (id: string) => {
+    const next = new Set(value)
+    if (next.has(id)) {
+      next.delete(id)
+    } else {
+      next.add(id)
     }
+    // Preserve the teams' canonical order for a stable request shape.
+    onChange(teams.filter((t) => next.has(t.id)).map((t) => t.id))
   }
 
   return (
-    <div ref={ref} className={`relative inline-flex items-center gap-1 ${className}`}>
+    <div ref={ref} className={`relative inline-flex items-center ${className}`}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -66,22 +68,6 @@ export default function TeamScopeSelect({ value, onChange, className = '' }: Pro
         <span className="max-w-[12rem] truncate">{label}</span>
         <ChevronDown size={13} className="text-text-tertiary" />
       </button>
-      <button
-        type="button"
-        onClick={pinDefault}
-        className={`rounded-md p-1 transition-colors hover:bg-black/[0.04] ${
-          value && value === preferredTeamId ? 'text-accent' : 'text-text-tertiary'
-        }`}
-        title={
-          value === preferredTeamId && value
-            ? 'This is your default team'
-            : value
-              ? 'Set as your default team'
-              : 'Clear your default team'
-        }
-      >
-        <Pin size={13} className={value && value === preferredTeamId ? 'fill-current' : ''} />
-      </button>
 
       {open && (
         <div
@@ -90,56 +76,47 @@ export default function TeamScopeSelect({ value, onChange, className = '' }: Pro
             bg-white shadow-lg py-1
           "
         >
-          <Row
-            label="All my teams"
-            sublabel="union of every team you're on"
-            active={value === ''}
+          <button
+            type="button"
             onClick={() => {
-              onChange('')
+              onChange([])
               setOpen(false)
             }}
-          />
+            className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-[12px] hover:bg-black/[0.03]"
+          >
+            <span className="flex flex-col">
+              <span className="text-text-primary">All my teams</span>
+              <span className="text-[10px] text-text-tertiary">
+                union of every team you&rsquo;re on
+              </span>
+            </span>
+            {value.length === 0 && <Check size={13} className="shrink-0 text-accent" />}
+          </button>
           <div className="my-1 h-px bg-border-subtle" />
-          {teams.map((t) => (
-            <Row
-              key={t.id}
-              label={t.name}
-              sublabel={t.id === preferredTeamId ? 'your default' : undefined}
-              active={value === t.id}
-              onClick={() => {
-                onChange(t.id)
-                setOpen(false)
-              }}
-            />
-          ))}
+          {teams.map((t) => {
+            const isOn = selected.has(t.id)
+            return (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => toggle(t.id)}
+                className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-[12px] hover:bg-black/[0.03]"
+              >
+                <span className="flex items-center gap-2">
+                  <span
+                    className={`flex h-3.5 w-3.5 items-center justify-center rounded border ${
+                      isOn ? 'border-accent bg-accent text-white' : 'border-border-subtle'
+                    }`}
+                  >
+                    {isOn && <Check size={10} />}
+                  </span>
+                  <span className="text-text-primary truncate">{t.name}</span>
+                </span>
+              </button>
+            )
+          })}
         </div>
       )}
     </div>
-  )
-}
-
-function Row({
-  label,
-  sublabel,
-  active,
-  onClick,
-}: {
-  label: string
-  sublabel?: string
-  active: boolean
-  onClick: () => void
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-[12px] hover:bg-black/[0.03]"
-    >
-      <span className="flex flex-col">
-        <span className="text-text-primary truncate">{label}</span>
-        {sublabel && <span className="text-[10px] text-text-tertiary">{sublabel}</span>}
-      </span>
-      {active && <Check size={13} className="shrink-0 text-accent" />}
-    </button>
   )
 }

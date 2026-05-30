@@ -2,12 +2,19 @@ import { useSyncExternalStore, useCallback, useEffect, useRef, useState } from '
 import type { TeamsResponse, TeamSummary } from '../types'
 import { readError } from '../lib/api'
 
-// Shared store for GET /api/teams — the data source for both multi-team
-// selectors (the per-page read filter and the write-time picker) plus
-// the org-admin "add team" control. A single module-level cache
-// means every selector across pages and modals shares one round-trip, and
-// a mutation (set sticky default, create a team) propagates to all
-// mounted selectors at once.
+// Shared store for GET /api/teams — the data source for the multi-team
+// selectors (the per-page read filter and the write-time picker) plus the
+// org-admin "add team" control. A single module-level cache means every
+// selector across pages and modals shares one round-trip, and a mutation
+// (create a team, record a write) propagates to all mounted selectors.
+//
+// Reads and writes are deliberately decoupled. A read is a *multi-team
+// view scope* (the board can show many teams at once); a write is always
+// a *single-team ownership stamp*. They share no primitive: the read
+// filter is device-local view state (localStorage, see useTeamFilter),
+// while the write default is preferred_team_id — the last team the user
+// wrote to, maintained server-side by the acting-team resolver and only
+// *read* here to seed the picker.
 //
 // The endpoint is session-org-scoped (the backend reads the active org
 // from the session), so switching orgs must invalidate the cache —
@@ -74,15 +81,23 @@ export function invalidateTeams(): void {
   if (listeners.size > 0) {
     void load()
   } else {
-    // No subscribers right now; emit so any future getSnapshot sees the
-    // reset, and let the next subscribe() trigger the reload.
     for (const l of listeners) l()
   }
 }
 
+/** Record that a write just landed on teamId. The backend's acting-team
+ *  resolver has already persisted it as the user's last-written default;
+ *  this keeps the shared cache in sync so the next write picker (or the
+ *  modal still open) seeds to it without a refetch. */
+export function noteWrittenTeam(teamId: string): void {
+  if (!teamId || teamId === state.preferredTeamId) return
+  setState({ preferredTeamId: teamId })
+}
+
 export interface UseTeams {
   teams: TeamSummary[]
-  /** The sticky default, or '' when unset / no longer a member team. */
+  /** The last-written team (write-default seed), or '' when unset / no
+   *  longer a member team. Read-only here — it's maintained server-side. */
   preferredTeamId: string
   /** True when the viewer belongs to ≥2 teams — the gate that decides
    *  whether any team control renders at all. */
@@ -90,9 +105,6 @@ export interface UseTeams {
   loading: boolean
   error: string | null
   refresh: () => Promise<void>
-  /** Persist the sticky default (empty clears it). Optimistically updates
-   *  the shared store so seeded selectors react immediately. */
-  setPreferred: (teamId: string) => Promise<void>
   /** Org-admin "add team". Resolves to the created team after the store
    *  has been refreshed (so the new team is in `teams`). */
   createTeam: (name: string) => Promise<TeamSummary>
@@ -104,17 +116,6 @@ export function useTeams(): UseTeams {
   const refresh = useCallback(() => {
     state = { ...state, loaded: false }
     return load()
-  }, [])
-
-  const setPreferred = useCallback(async (teamId: string) => {
-    const res = await fetch('/api/me/preferred-team', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ team_id: teamId }),
-    })
-    if (!res.ok) throw new Error(await readError(res, 'Failed to save default team'))
-    setState({ preferredTeamId: teamId })
   }, [])
 
   const createTeam = useCallback(async (name: string): Promise<TeamSummary> => {
@@ -138,70 +139,76 @@ export function useTeams(): UseTeams {
     loading: snap.loading,
     error: snap.error,
     refresh,
-    setPreferred,
     createTeam,
   }
 }
 
-// useTeamFilter is the shared per-page read-filter state: '' means "all
-// my teams" (the union), a team id narrows the page. It seeds once from
-// the sticky default when the teams load (the issue's "sticky default
-// seeds the filter"), then stays under user control — re-selecting "all"
-// is honored and never re-seeded. Pages thread the value into their read
-// requests as ?team_id and render <TeamScopeSelect> bound to it.
-export function useTeamFilter(): [string, (v: string) => void] {
-  const { preferredTeamId, loading } = useTeams()
-  const [filter, setFilter] = useState('')
-  const seeded = useRef(false)
+// useTeamFilter is the shared per-page read-filter state — a *multi-team*
+// view scope. The empty set means "all my teams" (the union); a non-empty
+// set narrows the page to those teams. It is device-local view state
+// (persisted in localStorage), deliberately NOT seeded from the write
+// default: reads and writes are decoupled, so the board opening on "all"
+// is independent of which team you last wrote to. Pages thread the value
+// into their reads as repeated ?team_id params and bind <TeamScopeSelect>.
+const TEAM_FILTER_KEY = 'tf.teamFilter'
+
+function readStoredFilter(): string[] {
+  try {
+    const raw = localStorage.getItem(TEAM_FILTER_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+// teamFilterQuery renders a multi-team read filter as repeated team_id
+// query params ("team_id=A&team_id=B"), or "" for the empty (all-teams)
+// set. Callers prefix it with "?" or "&" as appropriate.
+export function teamFilterQuery(teamIds: string[]): string {
+  if (!teamIds || teamIds.length === 0) return ''
+  return teamIds.map((id) => `team_id=${encodeURIComponent(id)}`).join('&')
+}
+
+export function useTeamFilter(): [string[], (next: string[]) => void] {
+  const { teams, loaded } = useTeams()
+  const [filter, setFilterState] = useState<string[]>(() => readStoredFilter())
+
+  // Once the teams load, drop any stored ids that aren't current teams
+  // (team deleted, or left over from another org). Validating against the
+  // live set keeps a stale selection from silently emptying the board.
   useEffect(() => {
-    if (seeded.current || loading) return
-    seeded.current = true
-    // Seed-once from async-loaded sticky default — the canonical
-    // "sync state from an external system after it loads" effect.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (preferredTeamId) setFilter(preferredTeamId)
-  }, [loading, preferredTeamId])
+    if (!loaded) return
+    const ids = new Set(teams.map((t) => t.id))
+    const pruned = filter.filter((id) => ids.has(id))
+    if (pruned.length !== filter.length) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setFilterState(pruned)
+    }
+  }, [loaded, teams, filter])
+
+  const setFilter = useCallback((next: string[]) => {
+    setFilterState(next)
+    try {
+      localStorage.setItem(TEAM_FILTER_KEY, JSON.stringify(next))
+    } catch {
+      // localStorage unavailable — the filter still works for this
+      // session; it just won't persist across reloads.
+    }
+  }, [])
+
   return [filter, setFilter]
 }
 
-// readRecentTeam/writeRecentTeam track the most-recently-written team in
-// localStorage — the soft fallback the write picker seeds to when there's
-// no sticky default (the issue's "sticky default → else most-recently-
-// written team"). Device-local by design: the durable cross-device
-// default is the server-side sticky preference; most-recent is just a
-// convenience so a picker reopens on the team you last wrote to. A single
-// key is fine across orgs because pickerDefault re-validates the value
-// against the current org's teams and discards a stale id.
-const RECENT_TEAM_KEY = 'tf.recentTeam'
-
-export function readRecentTeam(): string {
-  try {
-    return localStorage.getItem(RECENT_TEAM_KEY) ?? ''
-  } catch {
-    return ''
-  }
-}
-
-export function writeRecentTeam(teamId: string): void {
-  if (!teamId) return
-  try {
-    localStorage.setItem(RECENT_TEAM_KEY, teamId)
-  } catch {
-    // localStorage unavailable (private mode quota, etc.) — most-recent
-    // is a best-effort convenience, so a write failure is non-fatal.
-  }
-}
-
-// pickerDefault computes the write picker's seed selection: sticky
-// default → most-recently-written → first (oldest) team. Each candidate
-// is validated against the current team set so a stale sticky/recent id
-// (team deleted, or from another org) falls through. Returns '' only when
-// the viewer has no teams.
+// pickerDefault computes the write picker's seed selection: the last-
+// written team (preferred_team_id, server-maintained) → else the first
+// (oldest) team. The candidate is validated against the current team set
+// so a stale id (team deleted, or from another org) falls through.
+// Returns '' only when the viewer has no teams.
 export function pickerDefault(teams: TeamSummary[], preferredTeamId: string): string {
   if (teams.length === 0) return ''
   const ids = new Set(teams.map((t) => t.id))
   if (preferredTeamId && ids.has(preferredTeamId)) return preferredTeamId
-  const recent = readRecentTeam()
-  if (recent && ids.has(recent)) return recent
   return teams[0].id
 }

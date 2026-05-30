@@ -7,7 +7,7 @@ import Slider from './Slider'
 import TeamPicker from './TeamPicker'
 import type { RuleHandler, EventType } from '../types'
 import { toast } from './Toast/toastStore'
-import { useTeams, pickerDefault, writeRecentTeam } from '../hooks/useTeams'
+import { useTeams, pickerDefault, noteWrittenTeam } from '../hooks/useTeams'
 
 interface TaskRuleEditorProps {
   open: boolean
@@ -182,7 +182,7 @@ export default function TaskRuleEditor({
           const err = await res.json()
           throw new Error(err.error || 'Failed to create rule')
         }
-        if (team) writeRecentTeam(team)
+        if (team) noteWrittenTeam(team)
       }
 
       onSaved()

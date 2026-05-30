@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -73,29 +74,33 @@ func getTask(ctx context.Context, q queryer, orgID, taskID string) (*domain.Task
 }
 
 // pgTaskTeamFilter returns the SQL fragment that narrows a tasks query
-// (alias t) to a single team — the task's owning team_id OR a team in
-// its task_teams visibility set — and the args extended with teamID.
-// Empty teamID is a no-op (the union-of-the-viewer's-teams default).
-// The fragment reuses one freshly-numbered placeholder for both
-// references, so it appends teamID exactly once.
-func pgTaskTeamFilter(teamID string, args []any) (string, []any) {
-	if teamID == "" {
+// (alias t) to a *set* of teams — tasks any of them owns (team_id) or can
+// see (a task_teams visibility row) — and the args extended with the team
+// ids. Empty teamIDs is a no-op (the union-of-the-viewer's-teams
+// default). Both IN-lists reference the same placeholders, so the ids are
+// appended once even though they appear twice in the SQL.
+func pgTaskTeamFilter(teamIDs []string, args []any) (string, []any) {
+	if len(teamIDs) == 0 {
 		return "", args
 	}
-	n := len(args) + 1
-	args = append(args, teamID)
+	ph := make([]string, len(teamIDs))
+	for i, id := range teamIDs {
+		ph[i] = fmt.Sprintf("$%d", len(args)+1+i)
+		args = append(args, id)
+	}
+	list := strings.Join(ph, ", ")
 	return fmt.Sprintf(
-		" AND (t.team_id = $%d OR EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = t.id AND tt.team_id = $%d))",
-		n, n,
+		" AND (t.team_id IN (%s) OR EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = t.id AND tt.team_id IN (%s)))",
+		list, list,
 	), args
 }
 
-func (s *taskStore) Queued(ctx context.Context, orgID, teamID string) ([]domain.Task, error) {
+func (s *taskStore) Queued(ctx context.Context, orgID string, teamIDs []string) ([]domain.Task, error) {
 	// SKY-261 B+ derived filter mirrors SQLite. The event_handlers
 	// derived table is org-scoped so rules in another org can't
 	// influence ordering — load-bearing in multi mode.
 	args := []any{orgID}
-	teamClause, args := pgTaskTeamFilter(teamID, args)
+	teamClause, args := pgTaskTeamFilter(teamIDs, args)
 	return queryTasksCtx(ctx, s.q, `
 		SELECT `+pgTaskColumnsWithEntity+`
 		FROM tasks t
@@ -115,13 +120,13 @@ func (s *taskStore) Queued(ctx context.Context, orgID, teamID string) ([]domain.
 	`, args...)
 }
 
-func (s *taskStore) QueuedIncludingSnoozed(ctx context.Context, orgID, teamID string) ([]domain.Task, error) {
+func (s *taskStore) QueuedIncludingSnoozed(ctx context.Context, orgID string, teamIDs []string) ([]domain.Task, error) {
 	// SKY-330: snoozed rows render at the tail regardless of
 	// priority so deferred entries don't jump above live queued
 	// work. Postgres sorts false before true on the boolean
 	// expression (matches the SQLite mirror's 0/1 ordering).
 	args := []any{orgID}
-	teamClause, args := pgTaskTeamFilter(teamID, args)
+	teamClause, args := pgTaskTeamFilter(teamIDs, args)
 	return queryTasksCtx(ctx, s.q, `
 		SELECT `+pgTaskColumnsWithEntity+`
 		FROM tasks t
@@ -142,7 +147,7 @@ func (s *taskStore) QueuedIncludingSnoozed(ctx context.Context, orgID, teamID st
 	`, args...)
 }
 
-func (s *taskStore) ByStatus(ctx context.Context, orgID, status, teamID string) ([]domain.Task, error) {
+func (s *taskStore) ByStatus(ctx context.Context, orgID, status string, teamIDs []string) ([]domain.Task, error) {
 	switch status {
 	case "claimed":
 		// SKY-330: "claimed" = any claim (user or bot) at
@@ -151,7 +156,7 @@ func (s *taskStore) ByStatus(ctx context.Context, orgID, status, teamID string) 
 		// status='queued' filter and including bot claims to
 		// surface the delegate-spawn-failure retry case.
 		args := []any{orgID}
-		teamClause, args := pgTaskTeamFilter(teamID, args)
+		teamClause, args := pgTaskTeamFilter(teamIDs, args)
 		return queryTasksCtx(ctx, s.q, `
 			SELECT `+pgTaskColumnsWithEntity+`
 			FROM tasks t
@@ -163,7 +168,7 @@ func (s *taskStore) ByStatus(ctx context.Context, orgID, status, teamID string) 
 		`, args...)
 	case "delegated":
 		args := []any{orgID}
-		teamClause, args := pgTaskTeamFilter(teamID, args)
+		teamClause, args := pgTaskTeamFilter(teamIDs, args)
 		return queryTasksCtx(ctx, s.q, `
 			SELECT `+pgTaskColumnsWithEntity+`
 			FROM tasks t
@@ -179,7 +184,7 @@ func (s *taskStore) ByStatus(ctx context.Context, orgID, status, teamID string) 
 		// closed_at, so the NOT NULL guard turns missing values into
 		// surfacable bugs rather than letting them accumulate.
 		args := []any{orgID, status}
-		teamClause, args := pgTaskTeamFilter(teamID, args)
+		teamClause, args := pgTaskTeamFilter(teamIDs, args)
 		return queryTasksCtx(ctx, s.q, `
 			SELECT `+pgTaskColumnsWithEntity+`
 			FROM tasks t
@@ -192,7 +197,7 @@ func (s *taskStore) ByStatus(ctx context.Context, orgID, status, teamID string) 
 		`, args...)
 	}
 	args := []any{orgID, status}
-	teamClause, args := pgTaskTeamFilter(teamID, args)
+	teamClause, args := pgTaskTeamFilter(teamIDs, args)
 	return queryTasksCtx(ctx, s.q, `
 		SELECT `+pgTaskColumnsWithEntity+`
 		FROM tasks t

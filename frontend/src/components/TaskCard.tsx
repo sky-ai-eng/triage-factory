@@ -2,8 +2,6 @@ import { forwardRef } from 'react'
 import type { Task } from '../types'
 import EventBadge from './EventBadge'
 import SourceBadge from './SourceBadge'
-import TeamTag from './TeamTag'
-import { useTeams } from '../hooks/useTeams'
 
 interface Props {
   task: Task
@@ -67,7 +65,6 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
           <div className="flex items-center gap-2 min-w-0">
             <SourceBadge task={task} />
             <EventBadge eventType={task.event_type} compact />
-            {team && <TeamTag id={team.id} name={team.name} />}
             {subtaskCount > 0 && <SubtaskHint count={subtaskCount} />}
             {isSnoozed && <SnoozedBadge until={snoozedUntil} />}
             {delegateFailed && <DelegateFailedBadge message={delegateFailed.message} />}

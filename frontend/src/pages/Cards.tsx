@@ -6,7 +6,7 @@ import { useNavigate } from 'react-router-dom'
 import type { Task, WSEvent } from '../types'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useOrgHref } from '../hooks/useOrgHref'
-import { useTeamFilter } from '../hooks/useTeams'
+import { useTeamFilter, teamFilterQuery } from '../hooks/useTeams'
 import { SlidersHorizontal } from 'lucide-react'
 import EventBadge from '../components/EventBadge'
 import SourceBadge from '../components/SourceBadge'
@@ -40,8 +40,8 @@ export default function Cards() {
   }, [teamFilter])
 
   const fetchQueue = useCallback(async (preserveCurrent = false) => {
-    const tf = teamFilterRef.current
-    const res = await fetch('/api/queue' + (tf ? `?team_id=${encodeURIComponent(tf)}` : ''))
+    const q = teamFilterQuery(teamFilterRef.current)
+    const res = await fetch('/api/queue' + (q ? `?${q}` : ''))
     if (res.ok) {
       const data: Task[] = await res.json()
       setTasks((prev) => {

@@ -49,31 +49,31 @@ type TaskStore interface {
 	// Queue membership is the post-SKY-261 B+ derived filter:
 	// status='queued' AND both claim cols NULL AND not future-snoozed.
 	//
-	// teamID is the optional per-page read filter. Empty =
-	// the union of the viewer's teams (the RLS-scoped default). When
-	// set, the result is narrowed to tasks the team owns (team_id) or
-	// can see (its task_teams visibility row) — the "narrowing to one
-	// team hides cross-team rows" contract. The viewer's membership is
-	// still RLS-enforced underneath, so a team the caller isn't in
-	// yields nothing rather than leaking.
-	Queued(ctx context.Context, orgID, teamID string) ([]domain.Task, error)
+	// teamIDs is the optional per-page read filter — a *multi-team* view
+	// scope. Empty/nil = the union of the viewer's teams (the RLS-scoped
+	// default). When non-empty, the result narrows to tasks any of those
+	// teams owns (team_id) or can see (a task_teams visibility row) — the
+	// "show A and B together, hide the rest" board contract. The viewer's
+	// membership is still RLS-enforced underneath, so teams the caller
+	// isn't in contribute nothing rather than leaking.
+	Queued(ctx context.Context, orgID string, teamIDs []string) ([]domain.Task, error)
 
 	// QueuedIncludingSnoozed mirrors Queued but drops the snooze-
 	// window filter so future-snoozed rows surface too. SKY-330's
 	// Board Queued column uses this when the user toggles "show
 	// snoozed"; the default Queued() stays the canonical "what's
-	// actually pickable right now" projection. teamID is the same
-	// optional per-page read filter as Queued.
-	QueuedIncludingSnoozed(ctx context.Context, orgID, teamID string) ([]domain.Task, error)
+	// actually pickable right now" projection. teamIDs is the same
+	// optional multi-team read filter as Queued.
+	QueuedIncludingSnoozed(ctx context.Context, orgID string, teamIDs []string) ([]domain.Task, error)
 
 	// ByStatus returns tasks with the given lifecycle status,
 	// ordered by priority. Two pseudo-values are mapped to claim-
 	// axis queries for API back-compat (SKY-261 B+):
 	//   "claimed"   → claimed_by_user_id IS NOT NULL + active
 	//   "delegated" → claimed_by_agent_id IS NOT NULL + active
-	// Other status values are passed through literally. teamID is the
-	// same optional per-page read filter as Queued.
-	ByStatus(ctx context.Context, orgID, status, teamID string) ([]domain.Task, error)
+	// Other status values are passed through literally. teamIDs is the
+	// same optional multi-team read filter as Queued.
+	ByStatus(ctx context.Context, orgID, status string, teamIDs []string) ([]domain.Task, error)
 
 	// FindActiveByEntityAndType returns non-terminal tasks for an
 	// entity matching the given event type. Used by inline close
