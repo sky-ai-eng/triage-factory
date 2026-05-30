@@ -82,6 +82,14 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 	// gates fire under the user's claims. Mirrors the PATCH path's
 	// lazy-load policy: only read jira rules when the Jira side needs
 	// validation.
+	//
+	// TODO(SKY-294): new projects are created under the org's default team
+	// because there is no write-time team picker yet. This is correct while
+	// every org has a single default team; when the picker lands, take the
+	// acting team from the request body instead of GetDefaultForOrg (the
+	// frontend RepoMultiSelect hardcodes the matching default-team path).
+	// Note UPDATE already validates against the project's own
+	// existing.TeamID — only this create path assumes default.
 	var (
 		teamID        string
 		pinned        []string
