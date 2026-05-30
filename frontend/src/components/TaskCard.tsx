@@ -40,11 +40,6 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
     // move it back to status='queued'.
     const snoozedUntil = parseFutureSnooze(task.snooze_until)
     const isSnoozed = snoozedUntil !== null
-    // : tag the row with its owning team, but only when the viewer
-    // is on ≥2 teams (the same count gate as the selectors). useTeams is
-    // a shared cached store, so this adds no per-card fetch.
-    const { teams, multi } = useTeams()
-    const team = multi && task.team_id ? teams.find((t) => t.id === task.team_id) : undefined
 
     return (
       <div

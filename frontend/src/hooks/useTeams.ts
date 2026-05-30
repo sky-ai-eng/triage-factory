@@ -1,4 +1,4 @@
-import { useSyncExternalStore, useCallback, useEffect, useRef, useState } from 'react'
+import { useSyncExternalStore, useCallback, useEffect, useState } from 'react'
 import type { TeamsResponse, TeamSummary } from '../types'
 import { readError } from '../lib/api'
 
@@ -103,6 +103,9 @@ export interface UseTeams {
    *  whether any team control renders at all. */
   multi: boolean
   loading: boolean
+  /** True once the first /api/teams fetch has resolved — useTeamFilter
+   *  uses it to prune stale ids only after the real team set is known. */
+  loaded: boolean
   error: string | null
   refresh: () => Promise<void>
   /** Org-admin "add team". Resolves to the created team after the store
@@ -137,6 +140,7 @@ export function useTeams(): UseTeams {
     preferredTeamId: snap.preferredTeamId,
     multi: snap.teams.length >= 2,
     loading: snap.loading,
+    loaded: snap.loaded,
     error: snap.error,
     refresh,
     createTeam,
