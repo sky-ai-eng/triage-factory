@@ -149,10 +149,16 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID
 
 // reconcileRepoProfilesFromUnion makes repo_profiles match the union of
 // tracked repos: it deletes rows for repos no team tracks anymore and
-// upserts skeleton rows for newly-tracked repos (preserving any cached
-// profile on rows that survive). Mirrors RepoStore.SetConfigured's
-// delete-removed / upsert-skeleton logic — repo_profiles is now a
-// derived cache of team_github_repos.
+// inserts skeleton rows for newly-tracked repos. Mirrors
+// RepoStore.SetConfigured's delete-removed / insert-skeleton logic —
+// repo_profiles is now a derived cache of team_github_repos.
+//
+// Matching is case-INSENSITIVE on both axes (GitHub identifiers are): a
+// repo still tracked under different casing keeps its existing row rather
+// than being deleted + reinserted, so the cached profile_text /
+// base_branch / clone status / etag survive a mere casing change. Casing
+// is therefore sticky — repo_profiles keeps the first casing it was
+// created with (case-equivalent to whatever team_github_repos now holds).
 func reconcileRepoProfilesFromUnion(ctx context.Context, tx queryer, union []domain.TeamGitHubRepo) error {
 	// Case-fold the union to one canonical row per logical repo so two
 	// teams tracking the same repo with different casing don't produce
@@ -162,29 +168,36 @@ func reconcileRepoProfilesFromUnion(ctx context.Context, tx queryer, union []dom
 	if err != nil {
 		return fmt.Errorf("normalize repo union: %w", err)
 	}
-	wanted := make(map[string]bool, len(desired))
+	wantedLower := make(map[string]bool, len(desired))
 	for _, r := range desired {
-		wanted[r.Slug()] = true
+		wantedLower[strings.ToLower(r.Slug())] = true
 	}
 
 	existing, err := listRepoIDsInTx(ctx, tx)
 	if err != nil {
 		return err
 	}
+	existingLower := make(map[string]bool, len(existing))
 	for _, id := range existing {
-		if !wanted[id] {
+		existingLower[strings.ToLower(id)] = true
+		if !wantedLower[strings.ToLower(id)] {
 			if _, err := tx.ExecContext(ctx, `DELETE FROM repo_profiles WHERE id = ?`, id); err != nil {
 				return fmt.Errorf("gc repo_profiles[%s]: %w", id, err)
 			}
 		}
 	}
+	// Insert a skeleton only for genuinely-new repos (not already present
+	// case-insensitively); existing rows keep their casing + cached columns.
 	for _, r := range desired {
+		if existingLower[strings.ToLower(r.Slug())] {
+			continue
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO repo_profiles (id, owner, repo, updated_at)
 			VALUES (?, ?, ?, datetime('now'))
-			ON CONFLICT(id) DO UPDATE SET updated_at = datetime('now')
+			ON CONFLICT(id) DO NOTHING
 		`, r.Slug(), r.Owner, r.Repo); err != nil {
-			return fmt.Errorf("upsert repo_profiles skeleton[%s]: %w", r.Slug(), err)
+			return fmt.Errorf("insert repo_profiles skeleton[%s]: %w", r.Slug(), err)
 		}
 	}
 	return nil

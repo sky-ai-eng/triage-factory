@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -158,37 +159,53 @@ func listTeamGitHubReposForOrg(ctx context.Context, q queryer, orgID string) ([]
 
 // reconcileRepoProfilesFromUnion makes repo_profiles (for orgID) match
 // the union of tracked repos: deletes rows for repos no team tracks
-// anymore and upserts skeleton rows for newly-tracked repos (preserving
-// any cached profile on surviving rows). Mirrors RepoStore.SetConfigured's
-// delete-removed / upsert-skeleton logic — repo_profiles is now a derived
-// cache of team_github_repos. The union is case-folded to one canonical
-// row per logical repo (NormalizeTeamGitHubRepos) so two teams tracking
-// the same repo with different casing don't yield two repo_profiles rows.
+// anymore and inserts skeleton rows for newly-tracked repos. Mirrors
+// RepoStore.SetConfigured's delete-removed / insert-skeleton logic —
+// repo_profiles is now a derived cache of team_github_repos. The union is
+// case-folded to one canonical row per logical repo
+// (NormalizeTeamGitHubRepos).
+//
+// Matching is case-INSENSITIVE on both axes (GitHub identifiers are): a
+// repo still tracked under different casing keeps its existing row rather
+// than being deleted + reinserted, so the cached profile_text /
+// base_branch / clone status / etag survive a mere casing change. Casing
+// is therefore sticky — repo_profiles keeps the first casing it was
+// created with (case-equivalent to whatever team_github_repos now holds).
 func reconcileRepoProfilesFromUnion(ctx context.Context, q queryer, orgID string, rawUnion []domain.TeamGitHubRepo) error {
-	union, err := domain.NormalizeTeamGitHubRepos(rawUnion)
+	desired, err := domain.NormalizeTeamGitHubRepos(rawUnion)
 	if err != nil {
 		return fmt.Errorf("normalize repo union: %w", err)
 	}
-	owners, names := splitRepoColumns(union)
-	// Delete repos no team tracks anymore. An empty union deletes every
+	// Case-folded keys for the GC match. An empty union deletes every
 	// repo_profiles row for the org (unnest of empty arrays is empty, so
 	// NOT IN (empty) keeps nothing).
+	lowOwners := make([]string, len(desired))
+	lowNames := make([]string, len(desired))
+	for i, r := range desired {
+		lowOwners[i] = strings.ToLower(r.Owner)
+		lowNames[i] = strings.ToLower(r.Repo)
+	}
 	if _, err := q.ExecContext(ctx, `
 		DELETE FROM repo_profiles
 		WHERE org_id = $1
-		  AND (owner, repo) NOT IN (
+		  AND (lower(owner), lower(repo)) NOT IN (
 		      SELECT * FROM unnest($2::text[], $3::text[])
 		  )
-	`, orgID, owners, names); err != nil {
+	`, orgID, lowOwners, lowNames); err != nil {
 		return fmt.Errorf("gc repo_profiles: %w", err)
 	}
-	for _, r := range union {
+	// Insert a skeleton only for repos not already present case-insensitively;
+	// existing rows keep their casing + cached columns (sticky casing).
+	for _, r := range desired {
 		if _, err := q.ExecContext(ctx, `
 			INSERT INTO repo_profiles (org_id, owner, repo)
-			VALUES ($1, $2, $3)
-			ON CONFLICT (org_id, owner, repo) DO UPDATE SET updated_at = now()
+			SELECT $1, $2, $3
+			WHERE NOT EXISTS (
+			    SELECT 1 FROM repo_profiles
+			    WHERE org_id = $1 AND lower(owner) = lower($2) AND lower(repo) = lower($3)
+			)
 		`, orgID, r.Owner, r.Repo); err != nil {
-			return fmt.Errorf("upsert repo_profiles skeleton[%s]: %w", r.Slug(), err)
+			return fmt.Errorf("insert repo_profiles skeleton[%s]: %w", r.Slug(), err)
 		}
 	}
 	return nil

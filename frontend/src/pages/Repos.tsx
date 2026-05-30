@@ -11,7 +11,12 @@ import { readError } from '../lib/api'
 // Repo tracking is per-team (SKY-375); writes go to the team's repos
 // endpoint. This page is pre-team-context, so it targets the org's
 // default team — SKY-294 will thread the selected team here.
-const TEAM_REPOS_WRITE_PATH = '/api/settings/team/default/repos'
+// The default team's repo *tracking* set — read to seed the selection and
+// written on Save/Re-profile. This must NOT be sourced from GET /api/repos
+// (the org-wide repo_profiles union): in a multi-team org that union
+// includes sibling teams' repos, and writing it back here would pull them
+// into the default team's tracked set and past the router gate.
+const TEAM_REPOS_PATH = '/api/settings/team/default/repos'
 
 interface RepoProfile {
   id: string
@@ -601,11 +606,21 @@ export default function Repos() {
 
   const fetchData = async () => {
     try {
-      const res = await fetch('/api/repos')
-      if (res.ok) {
-        const data: RepoProfile[] = await res.json()
+      // Two distinct lists: the cards show the org-wide repo_profiles union
+      // (GET /api/repos), but the *selection* — what Save/Re-profile writes
+      // back to the default team — must come from the default team's own
+      // tracked set, never the union (see TEAM_REPOS_PATH).
+      const [profilesRes, teamRes] = await Promise.all([
+        fetch('/api/repos'),
+        fetch(TEAM_REPOS_PATH),
+      ])
+      if (profilesRes.ok) {
+        const data: RepoProfile[] = await profilesRes.json()
         setProfiles(data)
-        setSelectedRepos(data.map((p) => p.id))
+      }
+      if (teamRes.ok) {
+        const team: { repos?: string[] } = await teamRes.json()
+        setSelectedRepos(team.repos ?? [])
       }
     } catch {
       // non-critical
@@ -682,7 +697,7 @@ export default function Repos() {
   const handleSaveRepos = async (repos: string[]) => {
     setSaving(true)
     try {
-      const res = await fetch(TEAM_REPOS_WRITE_PATH, {
+      const res = await fetch(TEAM_REPOS_PATH, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ repos }),
@@ -705,7 +720,7 @@ export default function Repos() {
   const handleReprofile = async () => {
     setSaving(true)
     try {
-      const res = await fetch(TEAM_REPOS_WRITE_PATH, {
+      const res = await fetch(TEAM_REPOS_PATH, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ repos: selectedRepos }),
