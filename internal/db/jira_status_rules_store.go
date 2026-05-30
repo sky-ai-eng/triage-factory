@@ -21,12 +21,16 @@ import (
 //     jira_rules_delete RLS policies gate reads by team membership
 //     and writes by team admin; the request-handler caller has set
 //     the JWT claims via the TxRunner.
-//   - ListForTeamSystem runs on the admin pool. The poller manager
-//     and scorer read team rules at boot/poll-tick without a JWT-
-//     claims context.
+//   - ListForTeamSystem, ListForOrgSystem, TracksProjectSystem run on
+//     the admin pool. The poller manager / scorer / router gate read
+//     rules at boot/poll-tick without a JWT-claims context.
 //
 // SQLite collapses the pool split to one connection; the `...System`
 // variant delegates to its non-System counterpart.
+//
+// Every List* method populates domain.JiraProjectStatusRules.TeamID (the
+// PK's first column) so the poller's per-project merge and the router's
+// team↔project gate can attribute each row to its team.
 type JiraStatusRulesStore interface {
 	// ListForTeam returns the team's per-project rules in
 	// project_key ascending order. Empty slice with nil error when
@@ -37,6 +41,23 @@ type JiraStatusRulesStore interface {
 	// ListForTeamSystem mirrors ListForTeam but routes through the
 	// admin pool in Postgres for callers without a JWT-claims context.
 	ListForTeamSystem(ctx context.Context, teamID string) ([]domain.JiraProjectStatusRules, error)
+
+	// ListForOrgSystem returns every team's per-project rules across the
+	// org — the UNION the poller discovers, so a non-default team's Jira
+	// config is polled too. One row per (team_id, project_key); the
+	// caller (toTrackerJiraRules) merges members per project_key. Ordered
+	// by (project_key, team_id) for a deterministic merge. Admin pool in
+	// Postgres: the union spans teams via the teams.org_id join
+	// (jira_project_status_rules has no org_id column). Mirrors
+	// TeamGitHubReposStore.ListForOrgSystem.
+	ListForOrgSystem(ctx context.Context, orgID string) ([]domain.JiraProjectStatusRules, error)
+
+	// TracksProjectSystem reports whether the team has a
+	// jira_project_status_rules row for projectKey. This is the router
+	// team↔project gate lookup. Admin pool in Postgres: the router
+	// goroutine has no JWT claims. Mirrors
+	// TeamGitHubReposStore.TracksRepoSystem.
+	TracksProjectSystem(ctx context.Context, teamID, projectKey string) (bool, error)
 
 	// ReplaceForTeam upserts one row per entry in rules and deletes
 	// rows whose project_key is no longer in the input — matches the

@@ -33,8 +33,7 @@ type Manager struct {
 	users        db.UsersStore            // source of the session user's github_username
 	repos        db.RepoStore             // configured-repo names for GitHub poller startup
 	orgs         db.OrgsStore             // enumerate active orgs at each poll tick + per-org settings (GitHub/Jira base URLs, poll intervals)
-	teams        db.TeamsStore            // resolve each org's default team for per-team Jira project rules
-	jiraRules    db.JiraStatusRulesStore  // per-team Jira project rules (replaces deleted config.Jira.Projects)
+	jiraRules    db.JiraStatusRulesStore  // per-team Jira project rules; discovery polls the org-wide union (every team's rules)
 	githubGroups db.TeamGitHubGroupsStore // GitHub-team → TF-team mappings; reconciled (stale-team prune) each GitHub cycle
 	secrets      db.SecretStore           // integration creds via SecretStore (keychain in local, vault in multi)
 	apps         db.GitHubAppsStore       // per-org App installations + local-NAT backfill for per-installation polling
@@ -53,7 +52,7 @@ type Manager struct {
 	jiraStop chan struct{}
 }
 
-func NewManager(database *sql.DB, bus *eventbus.Bus, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore, orgs db.OrgsStore, teams db.TeamsStore, jiraRules db.JiraStatusRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, resolver ghclient.Resolver) *Manager {
+func NewManager(database *sql.DB, bus *eventbus.Bus, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, resolver ghclient.Resolver) *Manager {
 	return &Manager{
 		database:     database,
 		bus:          bus,
@@ -62,7 +61,6 @@ func NewManager(database *sql.DB, bus *eventbus.Bus, users db.UsersStore, tasks 
 		users:        users,
 		repos:        repos,
 		orgs:         orgs,
-		teams:        teams,
 		jiraRules:    jiraRules,
 		githubGroups: githubGroups,
 		secrets:      secrets,
@@ -163,24 +161,19 @@ func (m *Manager) loadOrgSettings(ctx context.Context, orgID string) domain.OrgS
 	return orgSet
 }
 
-// loadJiraRules pulls the per-team Jira status rules for the org's
-// default team. Local mode collapses to N=1 (the synthetic sentinel
-// team); multi-mode per-org Jira project configuration is a future
-// concern that follows the same per-team grain. Empty list on error.
+// loadJiraRules pulls the UNION of every team's per-project Jira status
+// rules across the org (not just the default team's), so a non-default
+// team's Jira config is discovered and polled too. toTrackerJiraRules
+// then merges the rows per project_key. Local mode collapses to N=1 (the
+// single default team), where the union equals what the poller read
+// before. Empty list on error.
 func (m *Manager) loadJiraRules(ctx context.Context, orgID string) []domain.JiraProjectStatusRules {
-	if m.teams == nil || m.jiraRules == nil {
+	if m.jiraRules == nil {
 		return nil
 	}
-	teamID, err := m.teams.GetDefaultForOrgSystem(ctx, orgID)
-	if err != nil || teamID == "" {
-		if err != nil {
-			log.Printf("[poller] org %s: resolve default team: %v", orgID, err)
-		}
-		return nil
-	}
-	rules, err := m.jiraRules.ListForTeamSystem(ctx, teamID)
+	rules, err := m.jiraRules.ListForOrgSystem(ctx, orgID)
 	if err != nil {
-		log.Printf("[poller] org %s team %s: list jira rules: %v", orgID, teamID, err)
+		log.Printf("[poller] org %s: list jira rules (org union): %v", orgID, err)
 		return nil
 	}
 	return rules
@@ -616,16 +609,50 @@ func (m *Manager) runJiraCycle() {
 	}
 }
 
-// toTrackerJiraRules converts the domain per-project rule slice into
-// the tracker-local view. Kept narrow on purpose — the tracker package
-// only needs pickup/done members, not the canonicals.
+// toTrackerJiraRules collapses the org-wide rule union into the
+// tracker-local per-project view. When several teams track the same
+// project_key with divergent member sets, the members are MERGED
+// (set-union, first-seen order preserved): the most-permissive
+// interpretation for discovery + terminal detection, which matches the
+// org-shared-entity invariant (one entity per Jira issue regardless of
+// how many teams track its project). Team-specific scoping lives
+// downstream in the router gate, not in discovery. Kept narrow on
+// purpose — the tracker only needs pickup/done members, not the
+// canonicals. Input arrives ordered by (project_key, team_id), so the
+// merged output is deterministic.
 func toTrackerJiraRules(rules []domain.JiraProjectStatusRules) tracker.JiraRules {
-	out := make(tracker.JiraRules, 0, len(rules))
+	type merged struct {
+		pickup, done         []string
+		pickupSeen, doneSeen map[string]bool
+	}
+	byKey := map[string]*merged{}
+	order := make([]string, 0, len(rules))
+	addUnique := func(dst []string, seen map[string]bool, src []string) []string {
+		for _, s := range src {
+			if !seen[s] {
+				seen[s] = true
+				dst = append(dst, s)
+			}
+		}
+		return dst
+	}
 	for _, p := range rules {
+		m := byKey[p.ProjectKey]
+		if m == nil {
+			m = &merged{pickupSeen: map[string]bool{}, doneSeen: map[string]bool{}}
+			byKey[p.ProjectKey] = m
+			order = append(order, p.ProjectKey)
+		}
+		m.pickup = addUnique(m.pickup, m.pickupSeen, p.PickupMembers)
+		m.done = addUnique(m.done, m.doneSeen, p.DoneMembers)
+	}
+	out := make(tracker.JiraRules, 0, len(order))
+	for _, key := range order {
+		m := byKey[key]
 		out = append(out, tracker.JiraProjectRules{
-			Key:           p.ProjectKey,
-			PickupMembers: p.PickupMembers,
-			DoneMembers:   p.DoneMembers,
+			Key:           key,
+			PickupMembers: m.pickup,
+			DoneMembers:   m.done,
 		})
 	}
 	return out

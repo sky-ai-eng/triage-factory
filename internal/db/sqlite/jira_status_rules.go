@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -32,15 +33,52 @@ func (s *jiraStatusRulesStore) ListForTeamSystem(ctx context.Context, teamID str
 	return listJiraStatusRules(ctx, s.q, teamID)
 }
 
+func (s *jiraStatusRulesStore) ListForOrgSystem(ctx context.Context, orgID string) ([]domain.JiraProjectStatusRules, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	// SQLite is single-org, so the union is every row. team_id rides each
+	// row (no teams join needed) and is scanned into TeamID for the
+	// poller's per-project merge tie-break.
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT team_id, project_key,
+		       pickup_members, in_progress_members, in_progress_canonical,
+		       done_members, done_canonical
+		FROM jira_project_status_rules
+		ORDER BY project_key ASC, team_id ASC
+	`)
+	return scanJiraStatusRules(rows, err)
+}
+
+func (s *jiraStatusRulesStore) TracksProjectSystem(ctx context.Context, teamID, projectKey string) (bool, error) {
+	var n int
+	err := s.q.QueryRowContext(ctx, `
+		SELECT 1 FROM jira_project_status_rules
+		WHERE team_id = ? AND project_key = ?
+		LIMIT 1
+	`, teamID, projectKey).Scan(&n)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("tracks project: %w", err)
+	}
+	return true, nil
+}
+
 func listJiraStatusRules(ctx context.Context, q queryer, teamID string) ([]domain.JiraProjectStatusRules, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT project_key,
+		SELECT team_id, project_key,
 		       pickup_members, in_progress_members, in_progress_canonical,
 		       done_members, done_canonical
 		FROM jira_project_status_rules
 		WHERE team_id = ?
 		ORDER BY project_key ASC
 	`, teamID)
+	return scanJiraStatusRules(rows, err)
+}
+
+func scanJiraStatusRules(rows *sql.Rows, err error) ([]domain.JiraProjectStatusRules, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read jira_project_status_rules: %w", err)
 	}
@@ -52,7 +90,7 @@ func listJiraStatusRules(ctx context.Context, q queryer, teamID string) ([]domai
 			pickupJSON, inProgressJSON, doneJSON string
 			inProgressCanon, doneCanon           sql.NullString
 		)
-		if err := rows.Scan(&r.ProjectKey, &pickupJSON, &inProgressJSON, &inProgressCanon, &doneJSON, &doneCanon); err != nil {
+		if err := rows.Scan(&r.TeamID, &r.ProjectKey, &pickupJSON, &inProgressJSON, &inProgressCanon, &doneJSON, &doneCanon); err != nil {
 			return nil, fmt.Errorf("scan jira_project_status_rules: %w", err)
 		}
 		pickup, err := unmarshalStringSlice(pickupJSON)

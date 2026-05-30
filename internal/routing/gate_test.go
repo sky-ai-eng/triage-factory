@@ -78,7 +78,7 @@ func gateRouter(database *sql.DB) *Router {
 	st := sqlitestore.New(database)
 	return NewRouter(testPromptStore(database), testEventHandlerStore(database), nil, nil, nil,
 		testTaskStore(database), st.AgentRuns, st.Entities, st.PendingFirings, st.Events,
-		st.Orgs, st.Teams, st.TeamGitHubRepos, nil, noopScorer{}, websocket.NewHub())
+		st.Orgs, st.Teams, st.TeamGitHubRepos, st.JiraStatusRules, nil, noopScorer{}, websocket.NewHub())
 }
 
 // TestGate_DisjointRepos_DropsUntrackingTeam is acceptance #1: two teams
@@ -192,21 +192,126 @@ func TestGate_EscapeHatches(t *testing.T) {
 		t.Error("empty-team (system) handler should skip the gate")
 	}
 
-	// (2) teamRepos unwired (nil) → pre-ticket behavior, never drops.
-	rNil := NewRouter(nil, nil, nil, nil, nil, nil, st.AgentRuns, st.Entities, st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, noopScorer{}, nil)
-	if !rNil.handlerScopeMatchesEvent(githubEvt, domain.EventHandler{TeamID: "some-real-team"}, map[string]bool{}) {
-		t.Error("nil teamRepos store should skip the gate")
-	}
-
-	// (3) Non-GitHub event → Jira gate is the sibling ticket; not dropped
-	// here even with a real team that tracks nothing.
 	jiraEvt := domain.Event{
 		EventType:    domain.EventJiraIssueAssigned,
-		MetadataJSON: `{"project_key":"SKY"}`,
+		MetadataJSON: `{"project":"SKY"}`,
 		OrgID:        runmode.LocalDefaultOrg,
 	}
-	if !r.handlerScopeMatchesEvent(jiraEvt, domain.EventHandler{TeamID: "some-real-team"}, map[string]bool{}) {
-		t.Error("non-GitHub event should skip the GitHub repo gate")
+
+	// (2) teamRepos + jiraRules unwired (nil) → pre-ticket behavior, never
+	// drops, for either source.
+	rNil := NewRouter(nil, nil, nil, nil, nil, nil, st.AgentRuns, st.Entities, st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, noopScorer{}, nil)
+	if !rNil.handlerScopeMatchesEvent(githubEvt, domain.EventHandler{TeamID: "some-real-team"}, map[string]bool{}) {
+		t.Error("nil teamRepos store should skip the GitHub gate")
+	}
+	if !rNil.handlerScopeMatchesEvent(jiraEvt, domain.EventHandler{TeamID: "some-real-team"}, map[string]bool{}) {
+		t.Error("nil jiraRules store should skip the Jira gate")
+	}
+
+	// (3) Unknown source → ungated even with a gate-active router + a real
+	// team that tracks nothing.
+	otherEvt := domain.Event{EventType: "system:poll:done", MetadataJSON: `{}`, OrgID: runmode.LocalDefaultOrg}
+	if !r.handlerScopeMatchesEvent(otherEvt, domain.EventHandler{TeamID: "some-real-team"}, map[string]bool{}) {
+		t.Error("non-github/jira event should skip the scope gate")
+	}
+
+	// (4) Malformed/empty project metadata on a gate-active router →
+	// fail-open (no drop), same policy as the GitHub branch.
+	emptyProjEvt := domain.Event{EventType: domain.EventJiraIssueAssigned, MetadataJSON: `{}`, OrgID: runmode.LocalDefaultOrg}
+	if !r.handlerScopeMatchesEvent(emptyProjEvt, domain.EventHandler{TeamID: "some-real-team"}, map[string]bool{}) {
+		t.Error("jira event with no project should fail open (skip the gate)")
+	}
+}
+
+// TestJiraGate_DisjointProjects_DropsUntrackingTeam is the SKY-376
+// router-gate acceptance: a jira:issue:assigned event on project "SKY" →
+// team A (tracks SKY via jira_project_status_rules) fires; team B (tracks
+// a different project) is dropped from the task's visibility.
+func TestJiraGate_DisjointProjects_DropsUntrackingTeam(t *testing.T) {
+	dbh := newGateDB(t)
+	st := sqlitestore.New(dbh)
+	ctx := context.Background()
+
+	teamA := runmode.LocalDefaultTeamID
+	teamB := seedGateTeam(t, dbh, "team-b")
+
+	skyRule := []domain.JiraProjectStatusRules{{
+		ProjectKey: "SKY", PickupMembers: []string{"To Do"},
+		InProgressMembers: []string{"In Progress"}, InProgressCanonical: "In Progress",
+		DoneMembers: []string{"Done"}, DoneCanonical: "Done",
+	}}
+	opsRule := []domain.JiraProjectStatusRules{{
+		ProjectKey: "OPS", PickupMembers: []string{"To Do"},
+		InProgressMembers: []string{"In Progress"}, InProgressCanonical: "In Progress",
+		DoneMembers: []string{"Done"}, DoneCanonical: "Done",
+	}}
+	if err := st.JiraStatusRules.ReplaceForTeam(ctx, teamA, skyRule); err != nil {
+		t.Fatalf("teamA track SKY: %v", err)
+	}
+	if err := st.JiraStatusRules.ReplaceForTeam(ctx, teamB, opsRule); err != nil {
+		t.Fatalf("teamB track OPS: %v", err)
+	}
+
+	seedMatchAllJiraAssignedRule(t, dbh, teamA)
+	seedMatchAllJiraAssignedRule(t, dbh, teamB)
+
+	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "jira", "SKY-1", "issue", "An issue", "https://example.com/SKY-1")
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+
+	gateRouter(dbh).HandleEvent(jiraAssignedEvent(t, entity.ID, "SKY"))
+
+	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrg, entity.ID)
+	if err != nil {
+		t.Fatalf("list active: %v", err)
+	}
+	if len(active) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(active))
+	}
+	vis, err := testTaskStore(dbh).VisibilityTeams(ctx, runmode.LocalDefaultOrg, active[0].ID)
+	if err != nil {
+		t.Fatalf("VisibilityTeams: %v", err)
+	}
+	if len(vis) != 1 || vis[0] != teamA {
+		t.Fatalf("visibility = %v, want only teamA %q (teamB gated out)", vis, teamA)
+	}
+	if active[0].TeamID != teamA {
+		t.Errorf("owner = %q, want teamA %q", active[0].TeamID, teamA)
+	}
+}
+
+// seedMatchAllJiraAssignedRule inserts a user-source match-all
+// jira:issue:assigned rule for the team (empty predicate = matches every
+// assignment regardless of project). Without the team↔project gate this
+// would fire on any project's events — the leak the gate closes.
+func seedMatchAllJiraAssignedRule(t *testing.T, database *sql.DB, teamID string) {
+	t.Helper()
+	ruleID := uuid.New().String()
+	if _, err := database.Exec(`
+		INSERT INTO event_handlers
+			(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
+			 scope_predicate_json, enabled, source, name, default_priority, sort_order,
+			 created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'team', 'rule', ?, NULL, 1, 'user', ?, 0.7, 100, ?, ?)
+	`, ruleID, runmode.LocalDefaultOrg, teamID, runmode.LocalDefaultUserID,
+		domain.EventJiraIssueAssigned, "Jira rule "+teamID[:8], time.Now(), time.Now()); err != nil {
+		t.Fatalf("seed jira rule for team %s: %v", teamID, err)
+	}
+}
+
+func jiraAssignedEvent(t *testing.T, entityID, project string) domain.Event {
+	t.Helper()
+	meta := events.JiraIssueAssignedMetadata{
+		Assignee: "aidan", IssueKey: project + "-1", Project: project, Status: "To Do",
+	}
+	metaJSON, _ := json.Marshal(meta)
+	return domain.Event{
+		EventType:    domain.EventJiraIssueAssigned,
+		EntityID:     &entityID,
+		MetadataJSON: string(metaJSON),
+		CreatedAt:    time.Now(),
+		OrgID:        runmode.LocalDefaultOrg,
 	}
 }
 

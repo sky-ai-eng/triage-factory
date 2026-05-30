@@ -114,6 +114,12 @@ type UserSettings struct{}
 // on the table guarantee any persisted row carries a non-empty pickup
 // set + members + canonical for both write-target rules.
 type JiraProjectStatusRules struct {
+	// TeamID is the owning team (the PK's first column). The List* store
+	// methods populate it; ReplaceForTeam ignores it (the team is a
+	// parameter). Needed by the poller's per-project member merge (to
+	// break canonical ties by lowest team_id) and the router's team↔project
+	// gate (to look up the handler's team).
+	TeamID              string
 	ProjectKey          string
 	PickupMembers       []string
 	InProgressMembers   []string

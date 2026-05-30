@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -39,21 +40,58 @@ func (s *jiraStatusRulesStore) ListForTeamSystem(ctx context.Context, teamID str
 	return listJiraStatusRules(ctx, s.admin, teamID)
 }
 
+// jiraRuleCols is the SELECT list every reader shares — team_id first so
+// TeamID is populated, then the array_to_json(...)::text round-trip that
+// renders text[] as a JSON literal (database/sql + pgx stdlib has no
+// scanner for *[]string).
+const jiraRuleCols = `team_id, project_key,
+	       array_to_json(pickup_members)::text,
+	       array_to_json(in_progress_members)::text,
+	       in_progress_canonical,
+	       array_to_json(done_members)::text,
+	       done_canonical`
+
+func (s *jiraStatusRulesStore) ListForOrgSystem(ctx context.Context, orgID string) ([]domain.JiraProjectStatusRules, error) {
+	// Admin pool — the union spans teams the caller may not belong to.
+	// Org scope rides the teams join; jira_project_status_rules carries no
+	// org_id column (consistent with the table's org-via-team-FK scoping).
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT `+jiraRuleCols+`
+		FROM jira_project_status_rules r
+		JOIN teams t ON t.id = r.team_id
+		WHERE t.org_id = $1
+		ORDER BY r.project_key ASC, r.team_id ASC
+	`, orgID)
+	return scanJiraStatusRules(rows, err)
+}
+
+func (s *jiraStatusRulesStore) TracksProjectSystem(ctx context.Context, teamID, projectKey string) (bool, error) {
+	var n int
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT 1 FROM jira_project_status_rules
+		WHERE team_id = $1 AND project_key = $2
+		LIMIT 1
+	`, teamID, projectKey).Scan(&n)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("tracks project: %w", err)
+	}
+	return true, nil
+}
+
 func listJiraStatusRules(ctx context.Context, q queryer, teamID string) ([]domain.JiraProjectStatusRules, error) {
-	// array_to_json(...)::text round-trips text[] as a JSON literal.
-	// database/sql + pgx stdlib doesn't ship a scanner for *[]string,
-	// so the JSON detour is the portable shape.
 	rows, err := q.QueryContext(ctx, `
-		SELECT project_key,
-		       array_to_json(pickup_members)::text,
-		       array_to_json(in_progress_members)::text,
-		       in_progress_canonical,
-		       array_to_json(done_members)::text,
-		       done_canonical
-		FROM jira_project_status_rules
+		SELECT `+jiraRuleCols+`
+		FROM jira_project_status_rules r
 		WHERE team_id = $1
 		ORDER BY project_key ASC
 	`, teamID)
+	return scanJiraStatusRules(rows, err)
+}
+
+func scanJiraStatusRules(rows *sql.Rows, err error) ([]domain.JiraProjectStatusRules, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read jira_project_status_rules: %w", err)
 	}
@@ -65,7 +103,7 @@ func listJiraStatusRules(ctx context.Context, q queryer, teamID string) ([]domai
 			pickupJSON, inProgressJSON, doneJSON string
 			inProgressCanon, doneCanon           sql.NullString
 		)
-		if err := rows.Scan(&r.ProjectKey, &pickupJSON, &inProgressJSON, &inProgressCanon, &doneJSON, &doneCanon); err != nil {
+		if err := rows.Scan(&r.TeamID, &r.ProjectKey, &pickupJSON, &inProgressJSON, &inProgressCanon, &doneJSON, &doneCanon); err != nil {
 			return nil, fmt.Errorf("scan jira_project_status_rules: %w", err)
 		}
 		pickup, err := unmarshalJSONStringSlice(pickupJSON)

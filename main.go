@@ -922,7 +922,7 @@ func main() {
 	// miss, so the poller re-mints on its own schedule without sharing the
 	// server's cache.
 	pollerGHResolver := ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil)
-	pollerMgr := poller.NewManager(database, bus, stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.Orgs, stores.Teams, stores.JiraStatusRules, stores.TeamGitHubGroups, stores.Secrets, stores.GitHubApps, pollerGHResolver)
+	pollerMgr := poller.NewManager(database, bus, stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.Orgs, stores.JiraStatusRules, stores.TeamGitHubGroups, stores.Secrets, stores.GitHubApps, pollerGHResolver)
 	pollerMgr.OnError = func(source, orgID string, err error) {
 		// Throttle key includes orgID so a chronic failure on one tenant
 		// doesn't suppress a fresh failure on another. Process-level
@@ -1024,7 +1024,7 @@ func main() {
 	// Event router — records events, creates/bumps tasks, auto-delegates on
 	// matching triggers, runs inline close checks. Also handles post-scoring
 	// re-derive via the scorer callback wired above.
-	eventRouter = routing.NewRouter(stores.Prompts, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users, stores.Tasks, stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, stores.TeamGitHubRepos, spawner, scorer, wsHub)
+	eventRouter = routing.NewRouter(stores.Prompts, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users, stores.Tasks, stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, stores.TeamGitHubRepos, stores.JiraStatusRules, spawner, scorer, wsHub)
 	// System-service profile (D9a): the router branches on evt.OrgID
 	// itself when persisting and fanning out — every event flows here
 	// regardless of tenant. Multi-mode handlers thread the orgID into

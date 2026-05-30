@@ -65,6 +65,7 @@ type Router struct {
 	orgs       dbpkg.OrgsStore            // per-org iteration for the drain sweeper; nil-safe, falls back to N=1 sentinel when unset
 	teams      dbpkg.TeamsStore           // per-team auto_delegate_enabled kill-switch read post-internal/config deletion
 	teamRepos  dbpkg.TeamGitHubReposStore // team↔repo tracking gate (SKY-375); nil-safe — gate is skipped (no filtering) when unset
+	jiraRules  dbpkg.JiraStatusRulesStore // team↔project tracking gate (SKY-376); nil-safe — Jira gate skipped when unset
 	spawner    Delegator
 	scorer     Scorer
 	ws         *websocket.Hub
@@ -96,7 +97,9 @@ type Router struct {
 // teamRepos is nil-safe — the SKY-375 team↔repo gate is skipped (no
 // handler is dropped) when missing, matching pre-SKY-375 behavior where
 // repos were org-global and every team implicitly tracked them all.
-func NewRouter(prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, agentRuns dbpkg.AgentRunStore, entities dbpkg.EntityStore, firings dbpkg.PendingFiringsStore, events dbpkg.EventStore, orgs dbpkg.OrgsStore, teams dbpkg.TeamsStore, teamRepos dbpkg.TeamGitHubReposStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+// jiraRules is nil-safe the same way — the SKY-376 team↔project gate is
+// skipped when missing.
+func NewRouter(prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, agentRuns dbpkg.AgentRunStore, entities dbpkg.EntityStore, firings dbpkg.PendingFiringsStore, events dbpkg.EventStore, orgs dbpkg.OrgsStore, teams dbpkg.TeamsStore, teamRepos dbpkg.TeamGitHubReposStore, jiraRules dbpkg.JiraStatusRulesStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
 	return &Router{
 		prompts:    prompts,
 		handlers:   handlers,
@@ -111,6 +114,7 @@ func NewRouter(prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agen
 		orgs:       orgs,
 		teams:      teams,
 		teamRepos:  teamRepos,
+		jiraRules:  jiraRules,
 		spawner:    spawner,
 		scorer:     scorer,
 		ws:         ws,
@@ -247,8 +251,9 @@ func (r *Router) HandleEvent(evt domain.Event) {
 		if !matched {
 			continue
 		}
-		// Team↔scope gate (SKY-375): a team's handler only fires for
-		// events whose entity the team tracks. Dropped here — before the
+		// Team↔scope gate (SKY-375 repos / SKY-376 Jira projects): a
+		// team's handler only fires for events whose entity the team
+		// tracks. Dropped here — before the
 		// team grouping below — so the team never enters the visibility
 		// set, its triggers never fire, and SKY-368's task_teams excludes
 		// it for free. System/org-union handlers (NULL team_id) skip the
@@ -441,40 +446,56 @@ func (r *Router) HandleEvent(evt domain.Event) {
 // runmode.LocalDefaultTeamID so the router keeps functioning. In
 // steady state this branch is unreachable.
 // handlerScopeMatchesEvent reports whether handler h's team is allowed
-// to act on evt given the team's tracking scope — the SKY-375 team↔repo
-// gate (and the seam the Jira sibling extends with a team↔project
-// branch). It is the security teeth that keeps a team's handlers from
-// firing on entities the team doesn't track once polling goes org-wide.
+// to act on evt given the team's tracking scope — the team↔repo gate
+// (SKY-375, GitHub) and team↔project gate (SKY-376, Jira). It is the
+// security teeth that keeps a team's handlers from firing on entities the
+// team doesn't track once polling goes org-wide.
 //
-// Three escape hatches return true (no drop):
+// Escape hatches return true (no drop):
 //   - System/org-union handlers (NULL team_id) — they're scoped to the
 //     org-wide union by construction; the event's entity is in the union
 //     because *some* team tracks it, so gating them would always pass
 //     anyway.
-//   - teamRepos unwired (nil) — callers from before SKY-375 / tests that
-//     don't exercise the gate; degrades to the pre-ticket behavior where
-//     every team implicitly tracked every org-global repo.
-//   - Non-GitHub events — the Jira team↔project gate is the sibling
-//     ticket; until it lands, only GitHub events are gated here.
+//   - The relevant tracking store unwired (nil) — callers from before the
+//     gate / tests that don't exercise it; degrades to the pre-ticket
+//     behavior where every team implicitly tracked every org-global
+//     entity. Handled per-source in teamTracksEventScope.
+//   - Any source other than github:/jira: — ungated (no tracking concept).
 //
-// The per-event result is memoized in cache, keyed by team id, so a team
-// with several matching handlers does one tracking lookup.
+// The per-event result is memoized in cache, keyed by team id. A single
+// event has one source/entity, so the repo and project lookups for a
+// given team collapse to one cache entry.
 func (r *Router) handlerScopeMatchesEvent(evt domain.Event, h domain.EventHandler, cache map[string]bool) bool {
-	if h.TeamID == "" || r.teamRepos == nil {
-		return true
-	}
-	if !strings.HasPrefix(evt.EventType, "github:") {
-		// Jira (+ any future source) gate is owned by the sibling
-		// ticket; GitHub is the only branch this ticket adds.
+	if h.TeamID == "" {
 		return true
 	}
 	if allowed, ok := cache[h.TeamID]; ok {
 		return allowed
 	}
-
-	allowed := r.teamTracksEventRepo(evt, h.TeamID)
+	allowed := r.teamTracksEventScope(evt, h.TeamID)
 	cache[h.TeamID] = allowed
 	return allowed
+}
+
+// teamTracksEventScope dispatches the tracking lookup on the event's
+// source: github: → team↔repo (SKY-375), jira: → team↔project (SKY-376).
+// Each branch fails open when its store is unwired so the gate degrades
+// to "no drop" in pre-ticket / test wiring; any other source is ungated.
+func (r *Router) teamTracksEventScope(evt domain.Event, teamID string) bool {
+	switch {
+	case strings.HasPrefix(evt.EventType, "github:"):
+		if r.teamRepos == nil {
+			return true
+		}
+		return r.teamTracksEventRepo(evt, teamID)
+	case strings.HasPrefix(evt.EventType, "jira:"):
+		if r.jiraRules == nil {
+			return true
+		}
+		return r.teamTracksEventProject(evt, teamID)
+	default:
+		return true
+	}
 }
 
 // teamTracksEventRepo extracts the repo from a GitHub event's metadata
@@ -499,6 +520,29 @@ func (r *Router) teamTracksEventRepo(evt domain.Event, teamID string) bool {
 	tracks, err := r.teamRepos.TracksRepoSystem(context.Background(), teamID, owner, name)
 	if err != nil {
 		log.Printf("[router] team↔repo gate lookup failed for team %s repo %s: %v — allowing", teamID, m.Repo, err)
+		return true
+	}
+	return tracks
+}
+
+// teamTracksEventProject extracts the Jira project key from an event's
+// metadata and asks the store whether teamID tracks it (SKY-376). Every
+// Jira issue metadata struct carries a top-level "project" (the project
+// key, e.g. "SKY" — see internal/domain/events/jira.go), so a minimal
+// unmarshal is enough. Fail-open on a missing / malformed project or a
+// store error: dropping a legitimate task on a transient DB blip or an
+// unexpected metadata shape is worse than the pre-ticket behavior, and
+// the events feeding this path come from TF's own trusted poller.
+func (r *Router) teamTracksEventProject(evt domain.Event, teamID string) bool {
+	var m struct {
+		Project string `json:"project"`
+	}
+	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil || m.Project == "" {
+		return true
+	}
+	tracks, err := r.jiraRules.TracksProjectSystem(context.Background(), teamID, m.Project)
+	if err != nil {
+		log.Printf("[router] team↔project gate lookup failed for team %s project %s: %v — allowing", teamID, m.Project, err)
 		return true
 	}
 	return tracks

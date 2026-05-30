@@ -282,10 +282,72 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if err != nil {
 			t.Fatalf("ListForTeamSystem: %v", err)
 		}
+		// List* reads populate TeamID (the PK's first column, SKY-376);
+		// ReplaceForTeam takes the team as a parameter and ignores the
+		// struct field, so set the expected TeamID before the round-trip
+		// compare.
+		want := make([]domain.JiraProjectStatusRules, len(input))
+		copy(want, input)
+		for i := range want {
+			want[i].TeamID = ids.TeamID
+		}
 		sortRulesByKey(got)
-		sortRulesByKey(input)
-		if !reflect.DeepEqual(got, input) {
-			t.Errorf("after ReplaceForTeam, ListForTeam = %+v; want %+v", got, input)
+		sortRulesByKey(want)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("after ReplaceForTeam, ListForTeam = %+v; want %+v", got, want)
+		}
+	})
+
+	t.Run("JiraStatusRules_TeamID_And_OrgUnion_RoundTrip", func(t *testing.T) {
+		// SKY-376: TeamID populates on every List* read, ListForOrgSystem
+		// returns the org-wide union (every team's rows), and
+		// TracksProjectSystem answers the router gate.
+		stores, ids := factory(t)
+		input := []domain.JiraProjectStatusRules{{
+			ProjectKey: "SKY", PickupMembers: []string{"To Do"},
+			InProgressMembers: []string{"In Progress"}, InProgressCanonical: "In Progress",
+			DoneMembers: []string{"Done"}, DoneCanonical: "Done",
+		}}
+		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, input); err != nil {
+			t.Fatalf("ReplaceForTeam: %v", err)
+		}
+
+		// ListForTeam[System] populate TeamID.
+		for _, got := range [][]domain.JiraProjectStatusRules{
+			mustListJira(t, func() ([]domain.JiraProjectStatusRules, error) {
+				return stores.JiraStatusRules.ListForTeam(ctx, ids.TeamID)
+			}),
+			mustListJira(t, func() ([]domain.JiraProjectStatusRules, error) {
+				return stores.JiraStatusRules.ListForTeamSystem(ctx, ids.TeamID)
+			}),
+		} {
+			if len(got) != 1 || got[0].TeamID != ids.TeamID {
+				t.Errorf("List* TeamID = %+v; want one row with TeamID=%q", got, ids.TeamID)
+			}
+		}
+
+		// ListForOrgSystem returns the union (here, the single team's row)
+		// with TeamID set.
+		union, err := stores.JiraStatusRules.ListForOrgSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("ListForOrgSystem: %v", err)
+		}
+		if len(union) != 1 || union[0].ProjectKey != "SKY" || union[0].TeamID != ids.TeamID {
+			t.Errorf("ListForOrgSystem = %+v; want one SKY row with TeamID=%q", union, ids.TeamID)
+		}
+
+		// TracksProjectSystem: tracked vs untracked.
+		for _, c := range []struct {
+			project string
+			want    bool
+		}{{"SKY", true}, {"OPS", false}} {
+			got, err := stores.JiraStatusRules.TracksProjectSystem(ctx, ids.TeamID, c.project)
+			if err != nil {
+				t.Fatalf("TracksProjectSystem(%s): %v", c.project, err)
+			}
+			if got != c.want {
+				t.Errorf("TracksProjectSystem(%s) = %v; want %v", c.project, got, c.want)
+			}
 		}
 	})
 
@@ -651,4 +713,13 @@ func sortGroups(groups []domain.TeamGitHubGroup) {
 
 func sortRulesByKey(rules []domain.JiraProjectStatusRules) {
 	sort.Slice(rules, func(i, j int) bool { return rules[i].ProjectKey < rules[j].ProjectKey })
+}
+
+func mustListJira(t *testing.T, fn func() ([]domain.JiraProjectStatusRules, error)) []domain.JiraProjectStatusRules {
+	t.Helper()
+	got, err := fn()
+	if err != nil {
+		t.Fatalf("list jira rules: %v", err)
+	}
+	return got
 }
