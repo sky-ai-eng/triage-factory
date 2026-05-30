@@ -597,6 +597,11 @@ export default function Repos() {
   const [loading, setLoading] = useState(true)
   const [pickerOpen, setPickerOpen] = useState(false)
   const [selectedRepos, setSelectedRepos] = useState<string[]>([])
+  // True when the default team's tracked-set fetch failed. selectedRepos
+  // stays [] on failure, which is indistinguishable from "genuinely tracks
+  // nothing" — without this flag a transient failure would let Re-profile
+  // PUT an empty array and wipe the team's repos (+ GC repo_profiles).
+  const [teamLoadFailed, setTeamLoadFailed] = useState(false)
   const [saving, setSaving] = useState(false)
   // Starts unset — we don't know the right host until settings load. Doc
   // chips render as non-clickable text until this populates. Better than
@@ -621,9 +626,15 @@ export default function Repos() {
       if (teamRes.ok) {
         const team: { repos?: string[] } = await teamRes.json()
         setSelectedRepos(team.repos ?? [])
+        setTeamLoadFailed(false)
+      } else {
+        // Don't leave a stale-or-empty selection that a write could
+        // clobber the team with — mark the load as failed so destructive
+        // actions stay disabled until a successful refetch.
+        setTeamLoadFailed(true)
       }
     } catch {
-      // non-critical
+      setTeamLoadFailed(true)
     } finally {
       setLoading(false)
     }
@@ -718,6 +729,13 @@ export default function Repos() {
   }
 
   const handleReprofile = async () => {
+    // Re-profile re-PUTs the current selection. Never do that when the
+    // selection is empty or its load failed — that would clear the team's
+    // tracked repos. The button is also disabled in these states; this is
+    // the defense-in-depth guard.
+    if (teamLoadFailed || selectedRepos.length === 0) {
+      return
+    }
     setSaving(true)
     try {
       const res = await fetch(TEAM_REPOS_PATH, {
@@ -791,18 +809,38 @@ export default function Repos() {
             Watched repos surface in your triage queue and anchor Jira-to-code matching for
             delegation.
           </p>
+          {teamLoadFailed && (
+            <p className="mt-1 text-[13px] text-amber-600">
+              Couldn&rsquo;t load your repo selection — editing and re-profiling are paused to avoid
+              overwriting it.{' '}
+              <button
+                type="button"
+                onClick={() => fetchData()}
+                className="underline hover:text-amber-700"
+              >
+                Retry
+              </button>
+            </p>
+          )}
         </div>
         <div className="flex shrink-0 items-center gap-1">
           <ActionButton
             icon={<RotateCw size={12} />}
             label={saving ? 'Working…' : 'Re-profile'}
             onClick={handleReprofile}
-            disabled={saving || profiles.length === 0}
+            // Gate on the *selection* (what gets PUT), not the profile
+            // cards: an empty selection re-PUTs nothing meaningful, and a
+            // failed selection-load must not be written back as empty.
+            disabled={saving || teamLoadFailed || selectedRepos.length === 0}
           />
           <ActionButton
             icon={<Plus size={12} />}
             label="Edit selection"
             onClick={() => setPickerOpen(true)}
+            // Disabled while the selection failed to load: the picker would
+            // open showing an empty selection, and saving could drop repos
+            // the team actually tracks. Retry first.
+            disabled={teamLoadFailed}
             accent
           />
         </div>
