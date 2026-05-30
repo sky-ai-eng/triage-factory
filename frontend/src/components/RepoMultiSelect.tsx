@@ -8,34 +8,30 @@ import { toast } from './Toast/toastStore'
 interface Props {
   value: string[]
   onChange: (next: string[]) => void
+  // The team whose tracked repos the picker offers. Empty falls back to
+  // the org's default team (the "default" alias the repos endpoint
+  // resolves) — the solo case where no write-time picker renders. When
+  // the create modal's TeamPicker is shown (≥2 teams), it threads the
+  // chosen team here so the offered repos match the team the project is
+  // created under, and server-side validatePinnedRepos agrees.
+  teamId?: string
 }
 
-// The default team's tracked repos — the create modal builds projects
-// under the default team, and pinned_repos is validated server-side
-// against that team's team_github_repos. Sourcing the picker from the
-// org-wide union (GET /api/repos) instead would offer sibling-team repos
-// the default team doesn't track, so submitting would 400.
-//
-// TODO(SKY-294): deferred to PR2 (the write-time team picker). "default"
-// is hardcoded because the create modal has no team selector yet — every
-// project is created under the org's single default team, which the
-// create handler resolves via the acting-team resolver, so the picker and
-// the handler agree *today*. PR2 adds the selector here and threads the
-// chosen team into both this fetch and the create request body. The
-// server-side create path is already resolver-driven (no default-team
-// fallback remains there); only this last picker keeps the sentinel.
-const TEAM_REPOS_PATH = '/api/settings/team/default/repos'
-
 // RepoMultiSelect is the project create modal's pinned-repos picker. It
-// reads the default team's tracked repos and exposes those slugs as
+// reads the acting team's tracked repos and exposes those slugs as
 // toggleable chips. Mirroring the server-side validation contract: the
 // user can only pick from the team's tracked set, so the chip strip
 // already enforces exactly what validatePinnedRepos enforces server-side.
+// Sourcing from the org-wide union (GET /api/repos) instead would offer
+// sibling-team repos the team doesn't track, so submitting would 400.
 //
 // Chosen slugs render up top; the popover below holds the remaining
 // tracked options + a search filter. Empty tracked list shows a hint
 // pointing at /repos rather than an awkward empty popover.
-export default function RepoMultiSelect({ value, onChange }: Props) {
+export default function RepoMultiSelect({ value, onChange, teamId }: Props) {
+  // "default" is the alias resolveTeamID maps to the org's default team;
+  // a real team id is used verbatim once the picker supplies one.
+  const teamReposPath = `/api/settings/team/${teamId || 'default'}/repos`
   const [available, setAvailable] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -47,31 +43,37 @@ export default function RepoMultiSelect({ value, onChange }: Props) {
   // (which leaves available=[]) renders the "No repos configured"
   // hint, telling users to go set up something they may already
   // have configured.
-  const loadRepos = useCallback(async (signal: AbortSignal) => {
-    try {
-      setError(null)
-      const res = await fetch(TEAM_REPOS_PATH, { signal })
-      if (signal.aborted) return
-      if (!res.ok) {
-        const msg = await readError(res, 'Failed to load repos')
+  const loadRepos = useCallback(
+    async (signal: AbortSignal) => {
+      try {
+        setError(null)
+        const res = await fetch(teamReposPath, { signal })
+        if (signal.aborted) return
+        if (!res.ok) {
+          const msg = await readError(res, 'Failed to load repos')
+          setError(msg)
+          toast.error(msg)
+          return
+        }
+        const data: { repos?: string[] } = await res.json()
+        if (signal.aborted) return
+        setAvailable(data.repos ?? [])
+      } catch (err) {
+        if (signal.aborted) return
+        const msg = `Failed to load repos: ${err instanceof Error ? err.message : String(err)}`
         setError(msg)
         toast.error(msg)
-        return
+      } finally {
+        if (!signal.aborted) setLoading(false)
       }
-      const data: { repos?: string[] } = await res.json()
-      if (signal.aborted) return
-      setAvailable(data.repos ?? [])
-    } catch (err) {
-      if (signal.aborted) return
-      const msg = `Failed to load repos: ${err instanceof Error ? err.message : String(err)}`
-      setError(msg)
-      toast.error(msg)
-    } finally {
-      if (!signal.aborted) setLoading(false)
-    }
-  }, [])
+    },
+    [teamReposPath],
+  )
 
   useEffect(() => {
+    // Refetch when the acting team changes (the picker switched teams):
+    // the offered repo set is the new team's tracked repos.
+    setLoading(true)
     const controller = new AbortController()
     loadRepos(controller.signal)
     return () => controller.abort()

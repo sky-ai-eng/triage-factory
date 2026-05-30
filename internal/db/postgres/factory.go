@@ -285,6 +285,19 @@ const pgFactoryEntitySelectColumns = `
 // is monotonic since tasks terminate to done/dismissed, never delete.
 const factoryEntityMembershipExists = `EXISTS (SELECT 1 FROM tasks t WHERE t.entity_id = e.id AND t.org_id = e.org_id)`
 
+// factoryEntityMembershipForTeam is the team-narrowed variant of
+// factoryEntityMembershipExists used by the per-page read filter: the
+// correlated task must additionally be owned by the team
+// (t.team_id) or make the entity visible to it (a task_teams row). The
+// placeholder ($N) binds the team id and is referenced twice. Tasks RLS
+// still scopes the semi-join to the viewer, so a team the caller isn't
+// in yields an empty belt rather than leaking.
+func factoryEntityMembershipForTeam(placeholder string) string {
+	return `EXISTS (SELECT 1 FROM tasks t WHERE t.entity_id = e.id AND t.org_id = e.org_id` +
+		` AND (t.team_id = ` + placeholder +
+		` OR EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = t.id AND tt.team_id = ` + placeholder + `)))`
+}
+
 // factoryEventMembershipExists is the membership semi-join correlated
 // against an events row (alias ev) rather than an entities row. Same
 // shape and same RLS auto-scoping as factoryEntityMembershipExists —
@@ -293,28 +306,44 @@ const factoryEntityMembershipExists = `EXISTS (SELECT 1 FROM tasks t WHERE t.ent
 // counters match the team-scoped entity belt.
 const factoryEventMembershipExists = `EXISTS (SELECT 1 FROM tasks t WHERE t.entity_id = ev.entity_id AND t.org_id = ev.org_id)`
 
-func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int) ([]domain.FactoryEntityRow, error) {
+func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int, teamID string) ([]domain.FactoryEntityRow, error) {
+	// The membership semi-join scopes the belt to the viewer's teams
+	// (via tasks RLS). The optional per-page filter narrows it further to
+	// a single team by tightening that same semi-join's correlated task
+	// to one the team owns or can see. $3 carries teamID when set; the
+	// placeholder appears before LIMIT in the text but binds by number,
+	// which Postgres resolves regardless of order.
+	activeMembership := factoryEntityMembershipExists
+	closedMembership := factoryEntityMembershipExists
+	activeArgs := []any{orgID, limit}
+	closedArgs := []any{orgID, time.Now().Add(-db.FactoryClosedGracePeriod), db.FactoryClosedGraceLimit}
+	if teamID != "" {
+		activeMembership = factoryEntityMembershipForTeam("$3")
+		activeArgs = append(activeArgs, teamID)
+		closedMembership = factoryEntityMembershipForTeam("$4")
+		closedArgs = append(closedArgs, teamID)
+	}
+
 	active, err := queryFactoryEntities(ctx, s.q, `
 		SELECT `+pgFactoryEntitySelectColumns+`
 		FROM entities e
 		WHERE e.org_id = $1 AND e.state = 'active'
-		  AND `+factoryEntityMembershipExists+`
+		  AND `+activeMembership+`
 		ORDER BY e.created_at DESC
 		LIMIT $2
-	`, orgID, limit)
+	`, activeArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("factory entities active: %w", err)
 	}
 
-	graceCutoff := time.Now().Add(-db.FactoryClosedGracePeriod)
 	closed, err := queryFactoryEntities(ctx, s.q, `
 		SELECT `+pgFactoryEntitySelectColumns+`
 		FROM entities e
 		WHERE e.org_id = $1 AND e.closed_at IS NOT NULL AND e.closed_at > $2
-		  AND `+factoryEntityMembershipExists+`
+		  AND `+closedMembership+`
 		ORDER BY e.closed_at DESC
 		LIMIT $3
-	`, orgID, graceCutoff, db.FactoryClosedGraceLimit)
+	`, closedArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("factory entities closed-grace: %w", err)
 	}

@@ -9,6 +9,8 @@ import type {
   TeamBot,
 } from '../types'
 import { useWebSocket } from '../hooks/useWebSocket'
+import { useTeams, useTeamFilter } from '../hooks/useTeams'
+import TeamScopeSelect from '../components/TeamScopeSelect'
 import AgentCard from '../components/AgentCard'
 import HeldTakeoversBanner from '../components/HeldTakeoversBanner'
 import TaskCard from '../components/TaskCard'
@@ -119,6 +121,17 @@ export default function Board() {
   const [members, setMembers] = useState<TeamMember[]>([])
   const [bot, setBot] = useState<TeamBot | null>(null)
   const [currentUserID, setCurrentUserID] = useState<string>('')
+
+  // multi-team. teamFilter is the per-page read scope (threaded
+  // into all five column fetches as team_id); `teams` backs the row
+  // color-coding. Both render their UI only at ≥2 teams. teamFilterRef
+  // keeps fetchTasks's identity stable while always reading the latest.
+  const { teams } = useTeams()
+  const [teamFilter, setTeamFilter] = useTeamFilter()
+  const teamFilterRef = useRef(teamFilter)
+  useEffect(() => {
+    teamFilterRef.current = teamFilter
+  }, [teamFilter])
 
   // Per-column filter state. Persisted to localStorage under a key
   // namespaced by the current user's id so a re-login (different user
@@ -238,16 +251,27 @@ export default function Board() {
   // by status. The done query is backend-capped at 7 days.
   const fetchTasks = useCallback(async () => {
     try {
-      const includeSnoozed = showSnoozed ? '?include_snoozed=true' : ''
+      // Thread the per-page team filter into every column
+      // fetch. Empty = the union of the viewer's teams (the default).
+      const tf = teamFilterRef.current
+      const queueParams = new URLSearchParams()
+      if (showSnoozed) queueParams.set('include_snoozed', 'true')
+      if (tf) queueParams.set('team_id', tf)
+      const queueURL = '/api/queue' + (queueParams.toString() ? `?${queueParams.toString()}` : '')
+      const tasksURL = (status: string) => {
+        const p = new URLSearchParams({ status })
+        if (tf) p.set('team_id', tf)
+        return `/api/tasks?${p.toString()}`
+      }
       const [queuedRes, claimedRes, inProgressRes, inReviewRes, doneRes] = await Promise.all([
-        fetch(`/api/queue${includeSnoozed}`).then((r) => (r.ok ? r.json() : [])),
+        fetch(queueURL).then((r) => (r.ok ? r.json() : [])),
         // "claimed" stays a derived pseudo-status (status=queued + a
         // claim col set) — the backend's ByStatus(claimed) branch
         // already handles this for back-compat.
-        fetch('/api/tasks?status=claimed').then((r) => (r.ok ? r.json() : [])),
-        fetch('/api/tasks?status=in_progress').then((r) => (r.ok ? r.json() : [])),
-        fetch('/api/tasks?status=in_review').then((r) => (r.ok ? r.json() : [])),
-        fetch('/api/tasks?status=done').then((r) => (r.ok ? r.json() : [])),
+        fetch(tasksURL('claimed')).then((r) => (r.ok ? r.json() : [])),
+        fetch(tasksURL('in_progress')).then((r) => (r.ok ? r.json() : [])),
+        fetch(tasksURL('in_review')).then((r) => (r.ok ? r.json() : [])),
+        fetch(tasksURL('done')).then((r) => (r.ok ? r.json() : [])),
       ])
       setQueued(queuedRes)
       setClaimed(claimedRes)
@@ -311,6 +335,17 @@ export default function Board() {
   useEffect(() => {
     fetchTasks()
   }, [fetchTasks])
+
+  // Re-fetch all columns when the team filter changes — fetchTasks reads
+  // the latest filter via its ref, so this picks up the new scope.
+  const teamFilterDidMount = useRef(false)
+  useEffect(() => {
+    if (!teamFilterDidMount.current) {
+      teamFilterDidMount.current = true
+      return
+    }
+    fetchTasks()
+  }, [teamFilter, fetchTasks])
 
   // WS listener — covers agent_run_update (the existing path) and the
   // new task_updated / task_claimed events that SKY-330 fires from
@@ -775,6 +810,13 @@ export default function Board() {
       onDragEnd={handleDragEnd}
     >
       <HeldTakeoversBanner />
+
+      {/* Per-page team filter. Renders nothing at ≤1 team. */}
+      {teams.length >= 2 && (
+        <div className="flex items-center justify-end px-1 pb-3">
+          <TeamScopeSelect value={teamFilter} onChange={setTeamFilter} />
+        </div>
+      )}
 
       {/* SKY-330: horizontal-scroll container for 5 columns. Default
           scroll position (set on mount) shows Claimed → In Review;

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import type { Prompt } from '../types'
+import TeamPicker from './TeamPicker'
 
 interface Props {
   open: boolean
@@ -22,6 +23,13 @@ interface Props {
    *  context — e.g. the chain step editor passes a filter that hides
    *  chain-kind prompts (no nested chains) and the chain itself. */
   filter?: (p: Prompt) => boolean
+  /** : when the picker drives a *create* delegate (the factory
+   *  drag-to-station flow synthesizes a task), wiring onTeamChange renders
+   *  a required team picker in the header so the caller can stamp the
+   *  acting team. The swipe-delegate callers (claiming an existing task,
+   *  whose team is derived from the claim) leave it undefined → no picker. */
+  teamValue?: string
+  onTeamChange?: (teamId: string) => void
 }
 
 export default function PromptPicker({
@@ -33,6 +41,8 @@ export default function PromptPicker({
   subtitle = 'Select a delegation strategy for this task',
   selectedId,
   filter,
+  teamValue,
+  onTeamChange,
 }: Props) {
   const [prompts, setPrompts] = useState<Prompt[]>([])
   const [fetchFailed, setFetchFailed] = useState(false)
@@ -90,12 +100,22 @@ export default function PromptPicker({
                   <h2 className="text-[15px] font-semibold text-text-primary">{title}</h2>
                   <p className="text-[12px] text-text-tertiary mt-0.5">{subtitle}</p>
                 </div>
-                <button
-                  onClick={onClose}
-                  className="text-text-tertiary hover:text-text-secondary transition-colors text-lg leading-none px-1"
-                >
-                  &times;
-                </button>
+                <div className="flex items-center gap-2">
+                  {onTeamChange && (
+                    <TeamPicker
+                      value={teamValue ?? ''}
+                      onChange={onTeamChange}
+                      label="Team"
+                      className="w-40"
+                    />
+                  )}
+                  <button
+                    onClick={onClose}
+                    className="text-text-tertiary hover:text-text-secondary transition-colors text-lg leading-none px-1"
+                  >
+                    &times;
+                  </button>
+                </div>
               </div>
 
               {/* Tiles grid — scrollable */}

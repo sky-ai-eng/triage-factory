@@ -1,0 +1,124 @@
+package server
+
+import (
+	"encoding/json"
+	"net/http"
+	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+)
+
+// TestTeamsList_LocalReturnsSoleTeam: in local mode (N=1) GET /api/teams
+// returns the single local team and no sticky default — the frontend's
+// ≥2 gate keeps every selector hidden off this one-team response.
+func TestTeamsList_LocalReturnsSoleTeam(t *testing.T) {
+	s := newTestServer(t)
+
+	rec := doJSON(t, s, http.MethodGet, "/api/teams", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp teamsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Teams) != 1 {
+		t.Fatalf("teams = %d, want 1", len(resp.Teams))
+	}
+	if resp.Teams[0].ID != runmode.LocalDefaultTeamID {
+		t.Errorf("team id = %q, want %q", resp.Teams[0].ID, runmode.LocalDefaultTeamID)
+	}
+	if resp.PreferredTeamID != "" {
+		t.Errorf("preferred = %q, want empty (unset)", resp.PreferredTeamID)
+	}
+}
+
+// TestTeamsList_TwoTeams: with a second team seeded into the local org,
+// GET /api/teams surfaces both (the SQLite store returns every org team
+// as the single user's set), which is what flips the frontend into
+// rendering the selectors.
+func TestTeamsList_TwoTeams(t *testing.T) {
+	s := newTestServer(t)
+	second := seedTeam(t, s, runmode.LocalDefaultOrgID, "second")
+
+	rec := doJSON(t, s, http.MethodGet, "/api/teams", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var resp teamsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Teams) != 2 {
+		t.Fatalf("teams = %d, want 2", len(resp.Teams))
+	}
+	got := map[string]bool{}
+	for _, tm := range resp.Teams {
+		got[tm.ID] = true
+	}
+	if !got[runmode.LocalDefaultTeamID] || !got[second] {
+		t.Errorf("teams = %+v; want both default and %s", resp.Teams, second)
+	}
+}
+
+// TestPreferredTeam_SetGetClear: the sticky default round-trips through
+// PUT /api/me/preferred-team and surfaces back on GET /api/teams; an
+// empty body clears it.
+func TestPreferredTeam_SetGetClear(t *testing.T) {
+	s := newTestServer(t)
+
+	rec := doJSON(t, s, http.MethodPut, "/api/me/preferred-team",
+		map[string]string{"team_id": runmode.LocalDefaultTeamID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, s, http.MethodGet, "/api/teams", nil)
+	var resp teamsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.PreferredTeamID != runmode.LocalDefaultTeamID {
+		t.Errorf("preferred = %q, want %q", resp.PreferredTeamID, runmode.LocalDefaultTeamID)
+	}
+
+	// Clear.
+	rec = doJSON(t, s, http.MethodPut, "/api/me/preferred-team", map[string]string{"team_id": ""})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear status = %d, want 200", rec.Code)
+	}
+	rec = doJSON(t, s, http.MethodGet, "/api/teams", nil)
+	// Fresh struct: preferred_team_id is omitempty, so a cleared default
+	// is absent from the JSON and would leave a reused struct's field
+	// stale.
+	var afterClear teamsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &afterClear); err != nil {
+		t.Fatalf("decode after clear: %v", err)
+	}
+	if afterClear.PreferredTeamID != "" {
+		t.Errorf("preferred after clear = %q, want empty", afterClear.PreferredTeamID)
+	}
+}
+
+// TestPreferredTeam_ForeignTeamRejected: pinning a team the caller isn't
+// a member of is a 400, not a silent write.
+func TestPreferredTeam_ForeignTeamRejected(t *testing.T) {
+	s := newTestServer(t)
+
+	rec := doJSON(t, s, http.MethodPut, "/api/me/preferred-team",
+		map[string]string{"team_id": "00000000-0000-0000-0000-0000000000ff"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestTeamCreate_LocalIsNotFound: "add team" is hosted-only; in local
+// mode POST /api/teams is 404 (the feature is absent at N=1).
+func TestTeamCreate_LocalIsNotFound(t *testing.T) {
+	s := newTestServer(t)
+
+	rec := doJSON(t, s, http.MethodPost, "/api/teams", map[string]string{"name": "Platform"})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (hosted-only); body=%s", rec.Code, rec.Body.String())
+	}
+}

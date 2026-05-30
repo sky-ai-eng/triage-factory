@@ -6,11 +6,13 @@ import { useNavigate } from 'react-router-dom'
 import type { Task, WSEvent } from '../types'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useOrgHref } from '../hooks/useOrgHref'
+import { useTeamFilter } from '../hooks/useTeams'
 import { SlidersHorizontal } from 'lucide-react'
 import EventBadge from '../components/EventBadge'
 import SourceBadge from '../components/SourceBadge'
 import PromptPicker from '../components/PromptPicker'
 import TaskRulesPanel from '../components/TaskRulesPanel'
+import TeamScopeSelect from '../components/TeamScopeSelect'
 
 type SwipeAction = 'claim' | 'dismiss' | 'snooze' | 'delegate'
 type LoadState = 'loading' | 'empty' | 'ready'
@@ -28,9 +30,18 @@ export default function Cards() {
   const hasFetched = useRef(false)
   const navigate = useNavigate()
   const orgHref = useOrgHref()
+  // Per-page team read filter. '' = all my teams; a team id
+  // narrows the queue. teamFilterRef keeps fetchQueue's identity stable
+  // (it's a WS-callback dep) while always reading the latest value.
+  const [teamFilter, setTeamFilter] = useTeamFilter()
+  const teamFilterRef = useRef(teamFilter)
+  useEffect(() => {
+    teamFilterRef.current = teamFilter
+  }, [teamFilter])
 
   const fetchQueue = useCallback(async (preserveCurrent = false) => {
-    const res = await fetch('/api/queue')
+    const tf = teamFilterRef.current
+    const res = await fetch('/api/queue' + (tf ? `?team_id=${encodeURIComponent(tf)}` : ''))
     if (res.ok) {
       const data: Task[] = await res.json()
       setTasks((prev) => {
@@ -56,6 +67,14 @@ export default function Cards() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchQueue()
   }, [fetchQueue])
+
+  // Re-fetch when the team filter changes. fetchQueue reads the latest
+  // filter via its ref, so the call here picks up the new scope.
+  useEffect(() => {
+    if (!hasFetched.current) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    fetchQueue()
+  }, [teamFilter, fetchQueue])
 
   // Handle WS events for live triage pipeline updates
   useWebSocket(
@@ -172,6 +191,7 @@ export default function Cards() {
         </div>
         <p className="text-text-secondary text-sm">All clear. Nothing to triage.</p>
         <div className="flex items-center gap-2 relative">
+          <TeamScopeSelect value={teamFilter} onChange={setTeamFilter} />
           <button
             onClick={() => setRulesOpen((o) => !o)}
             className={`flex items-center gap-1.5 text-[12px] font-medium px-3 py-1.5 rounded-full border transition-colors ${
@@ -198,6 +218,7 @@ export default function Cards() {
           <p className="text-[13px] text-text-tertiary font-medium tracking-wide">
             {tasks.length} item{tasks.length !== 1 ? 's' : ''} in queue
           </p>
+          <TeamScopeSelect value={teamFilter} onChange={setTeamFilter} />
           <button
             onClick={() => setRulesOpen((o) => !o)}
             className={`flex items-center gap-1.5 text-[12px] font-medium px-3 py-1.5 rounded-full border transition-colors ${

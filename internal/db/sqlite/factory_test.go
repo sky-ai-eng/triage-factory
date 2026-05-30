@@ -213,7 +213,7 @@ func TestFactoryReadStore_SQLite_ShowsUntaskedEntities(t *testing.T) {
 	}
 
 	store := sqlitestore.New(conn).Factory
-	rows, err := store.Entities(t.Context(), runmode.LocalDefaultOrg, 100)
+	rows, err := store.Entities(t.Context(), runmode.LocalDefaultOrg, 100, "")
 	if err != nil {
 		t.Fatalf("Entities: %v", err)
 	}

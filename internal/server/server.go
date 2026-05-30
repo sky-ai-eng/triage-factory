@@ -422,6 +422,14 @@ func (s *Server) routes() {
 	s.api("GET /api/me", s.handleMe)
 	// Switch the session's active org.
 	s.apiMutating("POST /api/me/active-org", s.handleActiveOrgUpdate)
+	// multi-team selectors. GET /api/teams is the data source
+	// for the per-page read filter + write-time picker (count-gated to
+	// ≥2 teams in the frontend). PUT preferred-team persists the sticky
+	// default. POST /api/teams is the org-admin "add team" affordance
+	// (hosted-only; 404 in local).
+	s.api("GET /api/teams", s.handleTeamsList)
+	s.apiMutating("POST /api/teams", s.handleTeamCreate)
+	s.apiMutating("PUT /api/me/preferred-team", s.handlePreferredTeamUpdate)
 
 	s.api("GET /api/queue", s.handleQueue)
 	s.api("GET /api/tasks", s.handleTasks)

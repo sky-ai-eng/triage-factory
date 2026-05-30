@@ -4,8 +4,10 @@ import * as Tooltip from '@radix-ui/react-tooltip'
 import { X } from 'lucide-react'
 import PredicateEditor from './PredicateEditor'
 import Slider from './Slider'
+import TeamPicker from './TeamPicker'
 import type { RuleHandler, EventType } from '../types'
 import { toast } from './Toast/toastStore'
+import { useTeams, pickerDefault, writeRecentTeam } from '../hooks/useTeams'
 
 interface TaskRuleEditorProps {
   open: boolean
@@ -41,6 +43,16 @@ export default function TaskRuleEditor({
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState('')
+
+  // Acting team — create mode only; a rule's team is immutable.
+  // TeamPicker renders only at ≥2 teams; below that `team` stays '' and
+  // the server resolves the sole team. Seeded once when the panel opens.
+  const { teams, preferredTeamId } = useTeams()
+  const [team, setTeam] = useState('')
+  useEffect(() => {
+    if (!open || isEdit) return
+    setTeam(pickerDefault(teams, preferredTeamId))
+  }, [open, isEdit, teams, preferredTeamId])
 
   // Track original predicate JSON for PATCH diff.
   const [originalPredicateJSON, setOriginalPredicateJSON] = useState<string | null>(null)
@@ -155,6 +167,7 @@ export default function TaskRuleEditor({
           default_priority: priority,
           sort_order: sortOrder,
           enabled,
+          team_id: team,
         }
         if (predicateJSON) {
           body.scope_predicate_json = predicateJSON
@@ -169,6 +182,7 @@ export default function TaskRuleEditor({
           const err = await res.json()
           throw new Error(err.error || 'Failed to create rule')
         }
+        if (team) writeRecentTeam(team)
       }
 
       onSaved()
@@ -186,6 +200,7 @@ export default function TaskRuleEditor({
     priority,
     sortOrder,
     enabled,
+    team,
     isEdit,
     rule,
     originalPredicateJSON,
@@ -253,6 +268,8 @@ export default function TaskRuleEditor({
 
                 {/* Body — scrollable */}
                 <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5 min-h-0">
+                  {/* Team (create mode only — a rule's team is immutable) */}
+                  {!isEdit && <TeamPicker value={team} onChange={setTeam} label="Team" />}
                   {/* Event type */}
                   <div>
                     <label className="block text-[12px] font-medium text-text-secondary mb-1.5">

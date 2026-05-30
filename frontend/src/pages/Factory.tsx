@@ -12,9 +12,11 @@ import {
 } from '@dnd-kit/core'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import PromptPicker from '../components/PromptPicker'
+import TeamScopeSelect from '../components/TeamScopeSelect'
 import { toast } from '../components/Toast/toastStore'
 import { createIsoScene, type ClickedStationInfo, type IsoSceneHandle } from '../factory/iso-scene'
 import { useWebSocket } from '../hooks/useWebSocket'
+import { useTeams, useTeamFilter, pickerDefault, writeRecentTeam } from '../hooks/useTeams'
 import type { AgentRun, FactoryEntity, FactorySnapshot, Task } from '../types'
 
 // Production factory page — Babylon scene driven by /api/factory/snapshot.
@@ -59,6 +61,21 @@ export default function Factory() {
   const [pendingDelegate, setPendingDelegate] = useState<PendingDelegate | null>(null)
   const [draggingEntity, setDraggingEntity] = useState<FactoryEntity | null>(null)
 
+  // multi-team. teamFilter is the per-page read scope (narrows the
+  // entity belt via ?team_id); delegateTeam is the acting team the
+  // drag-to-station delegate stamps onto the synthesized task. Both
+  // render their selectors only at ≥2 teams.
+  const { teams, preferredTeamId } = useTeams()
+  const [teamFilter, setTeamFilter] = useTeamFilter()
+  const teamFilterRef = useRef(teamFilter)
+  useEffect(() => {
+    teamFilterRef.current = teamFilter
+  }, [teamFilter])
+  const [delegateTeam, setDelegateTeam] = useState('')
+  useEffect(() => {
+    setDelegateTeam(pickerDefault(teams, preferredTeamId))
+  }, [teams, preferredTeamId])
+
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
@@ -88,7 +105,8 @@ export default function Factory() {
     let pending: ReturnType<typeof setTimeout> | null = null
 
     const load = () => {
-      fetch('/api/factory/snapshot')
+      const tf = teamFilterRef.current
+      fetch('/api/factory/snapshot' + (tf ? `?team_id=${encodeURIComponent(tf)}` : ''))
         .then((r) => {
           if (!r.ok) throw new Error(`Failed to load factory snapshot (${r.status})`)
           return r.json() as Promise<FactorySnapshot>
@@ -132,6 +150,13 @@ export default function Factory() {
       refetch?.()
     }
   })
+
+  // Re-snapshot when the team filter changes — load() reads the latest
+  // filter via its ref, so the scheduled refetch picks up the new scope.
+  useEffect(() => {
+    const refetch = (window as unknown as { __factoryRefetch?: () => void }).__factoryRefetch
+    refetch?.()
+  }, [teamFilter])
 
   // Esc closes the drawer — common video-game-y dismiss gesture.
   useEffect(() => {
@@ -221,6 +246,7 @@ export default function Factory() {
             event_type: pd.eventType,
             dedup_key: pd.dedupKey,
             prompt_id: promptId,
+            team_id: delegateTeam,
           }),
         })
         if (!res.ok) {
@@ -247,6 +273,7 @@ export default function Factory() {
         toast.error(`Delegate ${label}: ${detail}`, 'Delegation failed')
         return
       }
+      if (delegateTeam) writeRecentTeam(delegateTeam)
       const refetch = (window as unknown as { __factoryRefetch?: () => void }).__factoryRefetch
       refetch?.()
       if (partialFailure) {
@@ -256,7 +283,7 @@ export default function Factory() {
         )
       }
     },
-    [pendingDelegate],
+    [pendingDelegate, delegateTeam],
   )
 
   return (
@@ -267,6 +294,13 @@ export default function Factory() {
           className="relative w-full overflow-hidden"
           style={{ height: 'calc(100vh - 69px)' }}
         />
+        {/* Per-page team filter — narrows the entity belt.
+            Gated on ≥2 teams so solo users get no empty overlay box. */}
+        {teams.length >= 2 && (
+          <div className="absolute top-4 left-4 rounded-md bg-white/92 px-1 py-0.5 shadow">
+            <TeamScopeSelect value={teamFilter} onChange={setTeamFilter} />
+          </div>
+        )}
         <button
           type="button"
           onClick={() => sceneRef.current?.resetView()}
@@ -298,6 +332,8 @@ export default function Factory() {
           setPendingDelegate(null)
           window.location.href = '/prompts'
         }}
+        teamValue={delegateTeam}
+        onTeamChange={setDelegateTeam}
       />
     </DndContext>
   )

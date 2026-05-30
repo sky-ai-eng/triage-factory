@@ -72,10 +72,30 @@ func getTask(ctx context.Context, q queryer, orgID, taskID string) (*domain.Task
 	return &t, nil
 }
 
-func (s *taskStore) Queued(ctx context.Context, orgID string) ([]domain.Task, error) {
+// pgTaskTeamFilter returns the SQL fragment that narrows a tasks query
+// (alias t) to a single team — the task's owning team_id OR a team in
+// its task_teams visibility set — and the args extended with teamID.
+// Empty teamID is a no-op (the union-of-the-viewer's-teams default).
+// The fragment reuses one freshly-numbered placeholder for both
+// references, so it appends teamID exactly once.
+func pgTaskTeamFilter(teamID string, args []any) (string, []any) {
+	if teamID == "" {
+		return "", args
+	}
+	n := len(args) + 1
+	args = append(args, teamID)
+	return fmt.Sprintf(
+		" AND (t.team_id = $%d OR EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = t.id AND tt.team_id = $%d))",
+		n, n,
+	), args
+}
+
+func (s *taskStore) Queued(ctx context.Context, orgID, teamID string) ([]domain.Task, error) {
 	// SKY-261 B+ derived filter mirrors SQLite. The event_handlers
 	// derived table is org-scoped so rules in another org can't
 	// influence ordering — load-bearing in multi mode.
+	args := []any{orgID}
+	teamClause, args := pgTaskTeamFilter(teamID, args)
 	return queryTasksCtx(ctx, s.q, `
 		SELECT `+pgTaskColumnsWithEntity+`
 		FROM tasks t
@@ -90,16 +110,18 @@ func (s *taskStore) Queued(ctx context.Context, orgID string) ([]domain.Task, er
 			AND t.status = 'queued'
 			AND t.claimed_by_agent_id IS NULL
 			AND t.claimed_by_user_id  IS NULL
-			AND (t.snooze_until IS NULL OR t.snooze_until <= NOW())
+			AND (t.snooze_until IS NULL OR t.snooze_until <= NOW())`+teamClause+`
 		ORDER BY COALESCE(tr.sort_order, 999) ASC, COALESCE(t.priority_score, 0.5) DESC
-	`, orgID)
+	`, args...)
 }
 
-func (s *taskStore) QueuedIncludingSnoozed(ctx context.Context, orgID string) ([]domain.Task, error) {
+func (s *taskStore) QueuedIncludingSnoozed(ctx context.Context, orgID, teamID string) ([]domain.Task, error) {
 	// SKY-330: snoozed rows render at the tail regardless of
 	// priority so deferred entries don't jump above live queued
 	// work. Postgres sorts false before true on the boolean
 	// expression (matches the SQLite mirror's 0/1 ordering).
+	args := []any{orgID}
+	teamClause, args := pgTaskTeamFilter(teamID, args)
 	return queryTasksCtx(ctx, s.q, `
 		SELECT `+pgTaskColumnsWithEntity+`
 		FROM tasks t
@@ -113,14 +135,14 @@ func (s *taskStore) QueuedIncludingSnoozed(ctx context.Context, orgID string) ([
 		WHERE t.org_id = $1
 			AND t.status IN ('queued', 'snoozed')
 			AND t.claimed_by_agent_id IS NULL
-			AND t.claimed_by_user_id  IS NULL
+			AND t.claimed_by_user_id  IS NULL`+teamClause+`
 		ORDER BY (t.status = 'snoozed') ASC,
 		         COALESCE(tr.sort_order, 999) ASC,
 		         COALESCE(t.priority_score, 0.5) DESC
-	`, orgID)
+	`, args...)
 }
 
-func (s *taskStore) ByStatus(ctx context.Context, orgID, status string) ([]domain.Task, error) {
+func (s *taskStore) ByStatus(ctx context.Context, orgID, status, teamID string) ([]domain.Task, error) {
 	switch status {
 	case "claimed":
 		// SKY-330: "claimed" = any claim (user or bot) at
@@ -128,30 +150,36 @@ func (s *taskStore) ByStatus(ctx context.Context, orgID, status string) ([]domai
 		// file's comment for the full rationale around the
 		// status='queued' filter and including bot claims to
 		// surface the delegate-spawn-failure retry case.
+		args := []any{orgID}
+		teamClause, args := pgTaskTeamFilter(teamID, args)
 		return queryTasksCtx(ctx, s.q, `
 			SELECT `+pgTaskColumnsWithEntity+`
 			FROM tasks t
 			JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
 			WHERE t.org_id = $1
 				AND (t.claimed_by_user_id IS NOT NULL OR t.claimed_by_agent_id IS NOT NULL)
-				AND t.status = 'queued'
+				AND t.status = 'queued'`+teamClause+`
 			ORDER BY COALESCE(t.priority_score, 0.5) DESC
-		`, orgID)
+		`, args...)
 	case "delegated":
+		args := []any{orgID}
+		teamClause, args := pgTaskTeamFilter(teamID, args)
 		return queryTasksCtx(ctx, s.q, `
 			SELECT `+pgTaskColumnsWithEntity+`
 			FROM tasks t
 			JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
 			WHERE t.org_id = $1
 				AND t.claimed_by_agent_id IS NOT NULL
-				AND t.status NOT IN ('done', 'dismissed')
+				AND t.status NOT IN ('done', 'dismissed')`+teamClause+`
 			ORDER BY COALESCE(t.priority_score, 0.5) DESC
-		`, orgID)
+		`, args...)
 	case "done", "dismissed":
 		// SKY-330: cap the Done column at the last 7 days. Mirrors
 		// the SQLite branch — every close path now populates
 		// closed_at, so the NOT NULL guard turns missing values into
 		// surfacable bugs rather than letting them accumulate.
+		args := []any{orgID, status}
+		teamClause, args := pgTaskTeamFilter(teamID, args)
 		return queryTasksCtx(ctx, s.q, `
 			SELECT `+pgTaskColumnsWithEntity+`
 			FROM tasks t
@@ -159,17 +187,19 @@ func (s *taskStore) ByStatus(ctx context.Context, orgID, status string) ([]domai
 			WHERE t.org_id = $1
 				AND t.status = $2
 				AND t.closed_at IS NOT NULL
-				AND t.closed_at >= NOW() - INTERVAL '7 days'
+				AND t.closed_at >= NOW() - INTERVAL '7 days'`+teamClause+`
 			ORDER BY t.closed_at DESC, COALESCE(t.priority_score, 0.5) DESC
-		`, orgID, status)
+		`, args...)
 	}
+	args := []any{orgID, status}
+	teamClause, args := pgTaskTeamFilter(teamID, args)
 	return queryTasksCtx(ctx, s.q, `
 		SELECT `+pgTaskColumnsWithEntity+`
 		FROM tasks t
 		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
-		WHERE t.org_id = $1 AND t.status = $2
+		WHERE t.org_id = $1 AND t.status = $2`+teamClause+`
 		ORDER BY COALESCE(t.priority_score, 0.5) DESC
-	`, orgID, status)
+	`, args...)
 }
 
 func (s *taskStore) FindActiveByEntityAndType(ctx context.Context, orgID, entityID, eventType string) ([]domain.Task, error) {

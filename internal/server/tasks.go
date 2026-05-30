@@ -59,6 +59,10 @@ type taskJSON struct {
 	// omitempty keeps the wire shape clean for the unclaimed-queue case.
 	ClaimedByAgentID string `json:"claimed_by_agent_id,omitempty"`
 	ClaimedByUserID  string `json:"claimed_by_user_id,omitempty"`
+	// TeamID is the task's owning team. Exposed so the multi-team board
+	// can color-code / tag rows by team. Always set; the
+	// frontend only surfaces it when the viewer belongs to ≥2 teams.
+	TeamID string `json:"team_id,omitempty"`
 }
 
 func taskToJSON(t domain.Task) taskJSON {
@@ -90,6 +94,7 @@ func taskToJSON(t domain.Task) taskJSON {
 		OpenSubtaskCount:    t.OpenSubtaskCount,
 		ClaimedByAgentID:    t.ClaimedByAgentID,
 		ClaimedByUserID:     t.ClaimedByUserID,
+		TeamID:              t.TeamID,
 	}
 }
 
@@ -105,13 +110,20 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	// stays the canonical "pickable right now" projection for the
 	// Cards triage view.
 	includeSnoozed := r.URL.Query().Get("include_snoozed") == "true"
+	// Optional per-page team filter. Empty = the union of the
+	// viewer's teams (the RLS-scoped default); a team id narrows to that
+	// team's owned/visible tasks. A team the caller isn't in yields an
+	// empty result under RLS rather than leaking, so no extra validation
+	// is needed here — the narrow is additive on top of the visibility
+	// scope.
+	teamFilter := r.URL.Query().Get("team_id")
 	var tasks []domain.Task
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		if includeSnoozed {
-			tasks, e = tx.Tasks.QueuedIncludingSnoozed(r.Context(), orgID)
+			tasks, e = tx.Tasks.QueuedIncludingSnoozed(r.Context(), orgID, teamFilter)
 		} else {
-			tasks, e = tx.Tasks.Queued(r.Context(), orgID)
+			tasks, e = tx.Tasks.Queued(r.Context(), orgID, teamFilter)
 		}
 		return e
 	}); err != nil {
@@ -132,13 +144,15 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	status := r.URL.Query().Get("status")
+	// Optional per-page team filter — see handleQueue.
+	teamFilter := r.URL.Query().Get("team_id")
 	var tasks []domain.Task
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		if status != "" {
-			tasks, e = tx.Tasks.ByStatus(r.Context(), orgID, status)
+			tasks, e = tx.Tasks.ByStatus(r.Context(), orgID, status, teamFilter)
 		} else {
-			tasks, e = tx.Tasks.Queued(r.Context(), orgID)
+			tasks, e = tx.Tasks.Queued(r.Context(), orgID, teamFilter)
 		}
 		return e
 	}); err != nil {

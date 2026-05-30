@@ -91,7 +91,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		s, orgID, _, _, _, seed, _ := mk(t)
 		seed(t, "q1")
 		seed(t, "q2")
-		out, err := s.Queued(ctx, orgID)
+		out, err := s.Queued(ctx, orgID, "")
 		if err != nil {
 			t.Fatalf("Queued: %v", err)
 		}
@@ -112,7 +112,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		s, orgID, _, _, _, seed, _ := mk(t)
 		_, _, taskID := seed(t, "bs-done")
 		// Active task should not appear in done list.
-		done, err := s.ByStatus(ctx, orgID, "done")
+		done, err := s.ByStatus(ctx, orgID, "done", "")
 		if err != nil {
 			t.Fatalf("ByStatus done: %v", err)
 		}
@@ -125,7 +125,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		if err := s.Close(ctx, orgID, taskID, "test", ""); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
-		done, err = s.ByStatus(ctx, orgID, "done")
+		done, err = s.ByStatus(ctx, orgID, "done", "")
 		if err != nil {
 			t.Fatalf("ByStatus done (post-close): %v", err)
 		}
@@ -166,7 +166,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			t.Fatalf("advance ir: ok=%v err=%v", ok, err)
 		}
 
-		claimed, err := s.ByStatus(ctx, orgID, "claimed")
+		claimed, err := s.ByStatus(ctx, orgID, "claimed", "")
 		if err != nil {
 			t.Fatalf("ByStatus claimed: %v", err)
 		}
@@ -198,7 +198,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			t.Fatalf("stamp agent: %v", err)
 		}
 
-		claimed, err := s.ByStatus(ctx, orgID, "claimed")
+		claimed, err := s.ByStatus(ctx, orgID, "claimed", "")
 		if err != nil {
 			t.Fatalf("ByStatus claimed: %v", err)
 		}
@@ -718,7 +718,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			t.Fatalf("SetStatus snoozed: %v", err)
 		}
 
-		live, err := s.Queued(ctx, orgID)
+		live, err := s.Queued(ctx, orgID, "")
 		if err != nil {
 			t.Fatalf("Queued: %v", err)
 		}
@@ -738,7 +738,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			t.Error("Queued() returned a snoozed task; should exclude")
 		}
 
-		all, err := s.QueuedIncludingSnoozed(ctx, orgID)
+		all, err := s.QueuedIncludingSnoozed(ctx, orgID, "")
 		if err != nil {
 			t.Fatalf("QueuedIncludingSnoozed: %v", err)
 		}
@@ -765,7 +765,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID); err != nil || !ok {
 			t.Fatalf("claim: ok=%v err=%v", ok, err)
 		}
-		out, err := s.QueuedIncludingSnoozed(ctx, orgID)
+		out, err := s.QueuedIncludingSnoozed(ctx, orgID, "")
 		if err != nil {
 			t.Fatalf("QueuedIncludingSnoozed: %v", err)
 		}
@@ -782,7 +782,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		s, orgID, _, _, _, _, _ := mk(t)
 		cancelled, cancel := context.WithCancel(ctx)
 		cancel()
-		if _, err := s.Queued(cancelled, orgID); err == nil {
+		if _, err := s.Queued(cancelled, orgID, ""); err == nil {
 			t.Errorf("Queued with cancelled ctx: want error, got nil")
 		}
 	})

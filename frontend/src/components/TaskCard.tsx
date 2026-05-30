@@ -2,6 +2,8 @@ import { forwardRef } from 'react'
 import type { Task } from '../types'
 import EventBadge from './EventBadge'
 import SourceBadge from './SourceBadge'
+import TeamTag from './TeamTag'
+import { useTeams } from '../hooks/useTeams'
 
 interface Props {
   task: Task
@@ -40,6 +42,11 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
     // move it back to status='queued'.
     const snoozedUntil = parseFutureSnooze(task.snooze_until)
     const isSnoozed = snoozedUntil !== null
+    // : tag the row with its owning team, but only when the viewer
+    // is on ≥2 teams (the same count gate as the selectors). useTeams is
+    // a shared cached store, so this adds no per-card fetch.
+    const { teams, multi } = useTeams()
+    const team = multi && task.team_id ? teams.find((t) => t.id === task.team_id) : undefined
 
     return (
       <div
@@ -60,6 +67,7 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
           <div className="flex items-center gap-2 min-w-0">
             <SourceBadge task={task} />
             <EventBadge eventType={task.event_type} compact />
+            {team && <TeamTag id={team.id} name={team.name} />}
             {subtaskCount > 0 && <SubtaskHint count={subtaskCount} />}
             {isSnoozed && <SnoozedBadge until={snoozedUntil} />}
             {delegateFailed && <DelegateFailedBadge message={delegateFailed.message} />}

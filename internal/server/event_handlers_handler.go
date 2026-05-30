@@ -91,6 +91,11 @@ type createEventHandlerRequest struct {
 	PromptID               string   `json:"prompt_id"`
 	BreakerThreshold       *int     `json:"breaker_threshold"`
 	MinAutonomySuitability *float64 `json:"min_autonomy_suitability"`
+
+	// TeamID is the acting team the write picker supplied — the team
+	// this rule/trigger is created under. Required in the UI when the
+	// caller belongs to ≥2 teams; empty (sole-team fallback) otherwise.
+	TeamID string `json:"team_id"`
 }
 
 func (s *Server) handleEventHandlerCreate(w http.ResponseWriter, r *http.Request) {
@@ -209,7 +214,7 @@ func (s *Server) handleEventHandlerCreate(w http.ResponseWriter, r *http.Request
 
 	var fresh *domain.EventHandler
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		teamID, e := resolveActingTeam(r.Context(), tx.Teams, orgID)
+		teamID, e := resolveActingTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
 		}
@@ -220,6 +225,9 @@ func (s *Server) handleEventHandlerCreate(w http.ResponseWriter, r *http.Request
 		fresh, ge = tx.EventHandlers.Get(r.Context(), orgID, h.ID)
 		return ge
 	}); err != nil {
+		if writeIfActingTeamError(w, err) {
+			return
+		}
 		// Driver-specific error strings ("UNIQUE constraint failed: ..." on
 		// SQLite, "duplicate key value violates unique constraint ..." on
 		// Postgres) leak schema names + index identifiers to clients.

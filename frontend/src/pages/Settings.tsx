@@ -16,6 +16,7 @@ import {
 import { useOptionalAuth } from '../contexts/AuthContext'
 import { useActiveOrgId } from '../contexts/OrgContext'
 import { computeAccess } from './settings/access'
+import TeamManagementSection from '../components/TeamManagementSection'
 
 interface JiraStatus {
   id: string
@@ -1297,12 +1298,22 @@ export default function Settings() {
     </Section>
   )
 
+  // "Add team" (org admin, hosted-only). Org-scope settings; hidden in
+  // local mode and for non-admins. The entry point a solo hosted user
+  // uses to create a 2nd team, which then flips the count-gated selectors
+  // on across the app.
+  const renderTeams = () => {
+    if (isLocal || !isOrgAdmin) return null
+    return <TeamManagementSection />
+  }
+
   const workspaceSections = (
     <>
       {renderGitHub()}
       {renderGitHubApp()}
       {renderJiraConnection()}
       {renderModelCap()}
+      {renderTeams()}
       {renderIntegrations()}
       {renderDanger()}
     </>
@@ -1337,6 +1348,8 @@ export default function Settings() {
           >
             {saving ? 'Saving...' : 'Save Settings'}
           </button>
+          {/* Hosted solo (N=1) admins can still grow past one team. */}
+          {renderTeams()}
           {renderIntegrations()}
           {renderDanger()}
         </form>

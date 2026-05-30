@@ -1474,6 +1474,7 @@ CREATE TABLE public.users (
     avatar_url text,
     timezone text DEFAULT 'UTC'::text NOT NULL,
     default_org_id uuid,
+    preferred_team_id uuid,
     github_username text,
     jira_account_id text,
     jira_display_name text,

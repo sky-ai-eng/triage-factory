@@ -4,6 +4,8 @@ import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
 import type { ChainStep, PromptKind } from '../types'
 import ChainStepEditor, { type ChainStepDraft } from './ChainStepEditor'
+import TeamPicker from './TeamPicker'
+import { useTeams, pickerDefault, writeRecentTeam } from '../hooks/useTeams'
 
 interface Props {
   promptId: string | null
@@ -123,6 +125,11 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
   const [body, setBody] = useState('')
   const [source, setSource] = useState('user')
   const [kind, setKind] = useState<PromptKind>('leaf')
+  // Acting team — create mode only; a prompt's team is fixed
+  // after creation. TeamPicker renders only at ≥2 teams; below that
+  // `team` stays '' and the server resolves the sole team.
+  const { teams, preferredTeamId } = useTeams()
+  const [team, setTeam] = useState('')
   const [chainDraft, setChainDraft] = useState<ChainStepDraft[]>([])
   const [model, setModel] = useState('')
   const [defaultModel, setDefaultModel] = useState('')
@@ -214,6 +221,14 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
     }
   }, [promptId, isNew])
 
+  // Seed the acting team for create mode once the teams load. Kept in its
+  // own effect (not the form-reset above) so a late teams fetch reseeds
+  // without re-running the whole reset and clobbering user input.
+  useEffect(() => {
+    if (!isNew) return
+    setTeam(pickerDefault(teams, preferredTeamId))
+  }, [isNew, open, teams, preferredTeamId])
+
   // Resize drag handlers
   const onMouseDown = useCallback(
     (e: React.MouseEvent) => {
@@ -271,7 +286,7 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
         ? await fetch('/api/prompts', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, body, kind, model }),
+            body: JSON.stringify({ name, body, kind, model, team_id: team }),
           })
         : await fetch(`/api/prompts/${promptId}`, {
             method: 'PUT',
@@ -282,6 +297,7 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
         toast.error(await readError(res, `Failed to ${isNew ? 'create' : 'save'} prompt`))
         return
       }
+      if (isNew && team) writeRecentTeam(team)
 
       // For chain prompts, persist the step list immediately after the
       // prompt itself. We use the id from the response so it works for
@@ -392,6 +408,8 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
 
             {/* Body — scrollable */}
             <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+              {/* Team (create mode only — a prompt's team is fixed after creation) */}
+              {isNew && <TeamPicker value={team} onChange={setTeam} label="Team" />}
               {/* Name */}
               <div>
                 <label className="block text-[12px] font-medium text-text-secondary mb-1.5">

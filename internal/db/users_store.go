@@ -75,6 +75,24 @@ type UsersStore interface {
 	// goroutine, which has no JWT-claims context.
 	GetJiraIdentitySystem(ctx context.Context, userID string) (accountID, displayName string, err error)
 
+	// GetPreferredTeam returns users.preferred_team_id — the user's
+	// sticky default team — or "" if unset (NULL) or the row is missing.
+	// The acting-team resolver consults it (after an explicit pick,
+	// before the sole-team fallback), and the selector endpoint surfaces
+	// it so the per-page filter and write picker seed to it. The returned
+	// id is not membership-validated here; the resolver re-checks it
+	// against the caller's current-org teams, so a stale id (team since
+	// deleted, or in another org) is simply ignored downstream.
+	GetPreferredTeam(ctx context.Context, userID string) (string, error)
+
+	// SetPreferredTeam writes users.preferred_team_id for an existing
+	// user row. Passing "" clears it (NULL). Returns an error when the
+	// row does not exist — bootstrap owns row creation; this store only
+	// mutates. The caller validates team membership before persisting
+	// (you can only pin a team you belong to). Postgres routes through
+	// the app pool (users_modify RLS gates id = current_user_id()).
+	SetPreferredTeam(ctx context.Context, userID, teamID string) error
+
 	// GetSettings returns the user's settings row. Empty for v1
 	// post-SKY-354 cleanup — the AI model + auto-delegate toggle
 	// moved to team_settings. The store call exists so future

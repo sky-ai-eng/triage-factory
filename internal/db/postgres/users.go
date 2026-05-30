@@ -138,6 +138,43 @@ func (s *usersStore) SetJiraIdentity(ctx context.Context, userID, accountID, dis
 	return nil
 }
 
+func (s *usersStore) GetPreferredTeam(ctx context.Context, userID string) (string, error) {
+	var teamID sql.NullString
+	err := s.q.QueryRowContext(ctx,
+		`SELECT preferred_team_id::text FROM users WHERE id = $1`,
+		userID,
+	).Scan(&teamID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read users.preferred_team_id: %w", err)
+	}
+	return teamID.String, nil
+}
+
+func (s *usersStore) SetPreferredTeam(ctx context.Context, userID, teamID string) error {
+	var val any
+	if teamID != "" {
+		val = teamID
+	} // else val stays nil → NULL
+	result, err := s.q.ExecContext(ctx,
+		`UPDATE users SET preferred_team_id = $1, updated_at = NOW() WHERE id = $2`,
+		val, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("update users.preferred_team_id: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read users.preferred_team_id update result: %w", err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("update users.preferred_team_id: user %q not found", userID)
+	}
+	return nil
+}
+
 func (s *usersStore) GetSettings(ctx context.Context, userID string) (domain.UserSettings, error) {
 	// user_settings is empty post-SKY-354: just user_id + updated_at.
 	// The probe stays so callers can detect "row exists" vs "first

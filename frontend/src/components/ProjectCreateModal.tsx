@@ -5,6 +5,8 @@ import { readError } from '../lib/api'
 import { toast } from './Toast/toastStore'
 import RepoMultiSelect from './RepoMultiSelect'
 import TrackerProjectPickers from './TrackerProjectPickers'
+import TeamPicker from './TeamPicker'
+import { useTeams, pickerDefault, writeRecentTeam } from '../hooks/useTeams'
 
 // ProjectCreateModal is the only way to create a project from the UI.
 // Required: name. Optional: description, pinned repos, tracker
@@ -23,6 +25,26 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
   const [jiraKey, setJiraKey] = useState('')
   const [linearKey, setLinearKey] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  // Acting team. The TeamPicker renders only at ≥2 teams; below
+  // that `team` stays '' and the server resolves the sole team. Seeded
+  // from the sticky default → most-recent → first team once teams load.
+  const { teams, preferredTeamId } = useTeams()
+  const [team, setTeam] = useState('')
+  const teamSeeded = useRef(false)
+  useEffect(() => {
+    if (teamSeeded.current || teams.length === 0) return
+    teamSeeded.current = true
+    setTeam(pickerDefault(teams, preferredTeamId))
+  }, [teams, preferredTeamId])
+
+  // Switching teams invalidates the pinned-repo selection: repos are
+  // team-scoped (validatePinnedRepos checks the acting team's tracked
+  // set), so a repo picked under team A would 400 when submitting under
+  // team B. Reset to empty and let the user re-pick from the new team.
+  const onTeamChange = useCallback((next: string) => {
+    setTeam(next)
+    setPinnedRepos([])
+  }, [])
   // Holds the in-flight POST's AbortController so the close path
   // can cancel it. Without this, clicking the backdrop / hitting
   // Escape after submit would dismiss the dialog while leaving the
@@ -71,6 +93,7 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
             pinned_repos: pinnedRepos,
             jira_project_key: jiraKey,
             linear_project_key: linearKey,
+            team_id: team,
           }),
           signal: controller.signal,
         })
@@ -79,6 +102,8 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
           return
         }
         const created: Project = await res.json()
+        // Remember the team for the next write picker's default seed.
+        if (team) writeRecentTeam(team)
         toast.success(`Created project "${created.name}"`)
         onCreated(created)
       } catch (err) {
@@ -91,7 +116,7 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
         setSubmitting(false)
       }
     },
-    [name, description, pinnedRepos, jiraKey, linearKey, onCreated],
+    [name, description, pinnedRepos, jiraKey, linearKey, team, onCreated],
   )
 
   // Backdrop click closes only when no submit is in flight. If a
@@ -152,6 +177,8 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
         </header>
 
         <form onSubmit={handleSubmit} className="space-y-4">
+          <TeamPicker value={team} onChange={onTeamChange} label="Team" />
+
           <Field label="Name" required>
             <input
               type="text"
@@ -185,7 +212,7 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
           </Field>
 
           <Field label="Pinned repos">
-            <RepoMultiSelect value={pinnedRepos} onChange={setPinnedRepos} />
+            <RepoMultiSelect value={pinnedRepos} onChange={setPinnedRepos} teamId={team} />
           </Field>
 
           <Field label="Tracker projects">

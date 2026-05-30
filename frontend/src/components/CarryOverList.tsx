@@ -2,6 +2,8 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { ExternalLink, RotateCw } from 'lucide-react'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
+import TeamPicker from './TeamPicker'
+import { useTeams, pickerDefault, writeRecentTeam } from '../hooks/useTeams'
 
 type Action = 'queue' | 'claim' | 'done'
 type Bucket = 'assigned' | 'available'
@@ -45,6 +47,24 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
   // selection on that row so stale errors don't linger after a retry attempt.
   const [failures, setFailures] = useState<Record<string, string>>({})
 
+  // Acting team. The Jira stock deck is single-team by
+  // construction, so the picker doubles as the read scope (which team's
+  // backlog to triage) AND the claim team. teamRef keeps fetchStock's
+  // identity stable (it's a polling-recursion + WS dep). Renders only at
+  // ≥2 teams; below that team='' and the server resolves the sole team.
+  const { teams, preferredTeamId } = useTeams()
+  const [team, setTeam] = useState('')
+  const teamRef = useRef('')
+  useEffect(() => {
+    teamRef.current = team
+  }, [team])
+  const teamSeeded = useRef(false)
+  useEffect(() => {
+    if (teamSeeded.current || teams.length === 0) return
+    teamSeeded.current = true
+    setTeam(pickerDefault(teams, preferredTeamId))
+  }, [teams, preferredTeamId])
+
   // Keep refs for component lifecycle and polling so retry timers don't
   // continue firing after unmount.
   const mountedRef = useRef(true)
@@ -62,7 +82,8 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
 
   const fetchStock = useCallback(async () => {
     try {
-      const res = await fetch('/api/jira/stock')
+      const tf = teamRef.current
+      const res = await fetch('/api/jira/stock' + (tf ? `?team_id=${encodeURIComponent(tf)}` : ''))
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
         console.error('carry-over fetch failed:', data.error || `HTTP ${res.status}`)
@@ -118,6 +139,22 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
     fetchStock()
   }, [fetchStock])
 
+  // Switching teams reloads the deck for the new team's Jira backlog.
+  // Update the ref synchronously so the immediate fetchStock sees it.
+  const onTeamChange = useCallback(
+    (next: string) => {
+      setTeam(next)
+      teamRef.current = next
+      setAssigned(null)
+      setAvailable(null)
+      setSelections({})
+      setFailures({})
+      setPolling(true)
+      fetchStock()
+    },
+    [fetchStock],
+  )
+
   const toggle = (issueKey: string, action: Action) => {
     setSelections((prev) => {
       const next = { ...prev }
@@ -152,12 +189,13 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
       const res = await fetch('/api/jira/stock', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ actions }),
+        body: JSON.stringify({ actions, team_id: team }),
       })
       if (!res.ok) {
         toast.error(await readError(res, 'Failed to save carry-over selections'))
         return
       }
+      if (team) writeRecentTeam(team)
       const body = (await res.json()) as {
         applied: number
         failed?: { issue_key: string; action: string; error: string }[]
@@ -203,7 +241,12 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
     <div className="w-full max-w-2xl backdrop-blur-xl bg-surface-raised border border-border-glass rounded-2xl shadow-lg shadow-black/[0.04] overflow-hidden flex flex-col max-h-[85vh]">
       {/* Header */}
       <div className="px-6 pt-6 pb-4">
-        <h2 className="text-[18px] font-semibold text-text-primary tracking-tight">Carry over</h2>
+        <div className="flex items-start justify-between gap-3">
+          <h2 className="text-[18px] font-semibold text-text-primary tracking-tight">Carry over</h2>
+          {/* The deck is single-team; the picker selects which team's Jira
+              backlog to triage, and claims land on it. */}
+          <TeamPicker value={team} onChange={onTeamChange} label="Team" className="w-44 shrink-0" />
+        </div>
         <p className="text-[13px] text-text-tertiary mt-1 leading-relaxed">
           Queue your assigned work, or grab available tickets to get started. We&rsquo;ve
           pre-selected what usually makes sense — review, adjust, and skip anything you don&rsquo;t

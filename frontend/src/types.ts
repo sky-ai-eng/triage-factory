@@ -37,6 +37,27 @@ export interface Task {
   // unclaimed. The XOR is enforced server-side.
   claimed_by_agent_id?: string
   claimed_by_user_id?: string
+  // : the task's owning team. Surfaced so the multi-team board
+  // can color-code / tag rows by team. The frontend only renders the
+  // tag when the viewer belongs to ≥2 teams.
+  team_id?: string
+}
+
+// TeamSummary is one entry of GET /api/teams — the identity row the
+// multi-team selectors enumerate. The team count drives
+// whether a team control renders at all (the ≥2 gate).
+export interface TeamSummary {
+  id: string
+  name: string
+  slug: string
+}
+
+// TeamsResponse is GET /api/teams: the viewer's teams in the active org
+// plus their sticky default (preferred_team_id), present only when it is
+// still one of those teams.
+export interface TeamsResponse {
+  teams: TeamSummary[]
+  preferred_team_id?: string
 }
 
 // TeamBot mirrors the bot half of /api/team/members (SKY-330). Null

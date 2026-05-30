@@ -320,10 +320,14 @@ const sqliteFactoryEntitySelectColumns = `
 	(SELECT created_at FROM events WHERE entity_id = e.id ORDER BY created_at DESC LIMIT 1)
 `
 
-func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int) ([]domain.FactoryEntityRow, error) {
+func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int, _ string) ([]domain.FactoryEntityRow, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
+	// teamID (the last param) is ignored: SQLite is the local-mode
+	// backend (N=1, one team), so the per-page team filter has nothing
+	// to narrow — the frontend never renders the selector at one team.
+	//
 	// Two separate queries instead of a single OR'd WHERE: the OR
 	// spans two columns and prevents SQLite from choosing a
 	// single-index plan, forcing a filtered table scan on big entity

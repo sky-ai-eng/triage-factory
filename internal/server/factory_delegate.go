@@ -19,6 +19,11 @@ type factoryDelegateRequest struct {
 	EventType string `json:"event_type"`
 	DedupKey  string `json:"dedup_key"`
 	PromptID  string `json:"prompt_id"`
+	// TeamID is the acting team the write picker supplied — the team the
+	// synthesized task is created (and bot-claimed) under. Required in the
+	// UI when the caller belongs to ≥2 teams; empty (sole-team fallback)
+	// otherwise.
+	TeamID string `json:"team_id"`
 }
 
 // factoryDelegateResponse mirrors the /api/tasks/{id}/swipe delegate
@@ -168,7 +173,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	var task *domain.Task
 	var created bool
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		teamID, e := resolveActingTeam(r.Context(), tx.Teams, orgID)
+		teamID, e := resolveActingTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
 		}
@@ -195,6 +200,9 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	}); err != nil {
+		if writeIfActingTeamError(w, err) {
+			return
+		}
 		internalError(w, "factory", err)
 		return
 	}

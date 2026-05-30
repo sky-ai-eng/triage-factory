@@ -77,4 +77,29 @@ type TeamsStore interface {
 	// config.Save() flow does both). Postgres routes through the app
 	// pool (team_settings_update RLS gates by team admin).
 	UpdateSettings(ctx context.Context, teamID string, updates domain.TeamSettings) error
+
+	// ListForUser returns the requesting user's teams in the org,
+	// ordered oldest-first (the same created_at tiebreak the default-
+	// team pick uses, so teams[0] is the org's default team). This is
+	// the data source for the multi-team selectors: the frontend
+	// renders a team control only when the count is ≥2.
+	//
+	// Postgres joins memberships under the caller's claims — teams_select
+	// RLS alone returns *every* team in the org (it gates on org access,
+	// not team membership), so the membership join is what narrows the
+	// result to the teams the user actually belongs to. SQLite is N=1
+	// (single synthetic user) and returns every team in the org, which
+	// is the same set. Routes through the app pool in Postgres.
+	ListForUser(ctx context.Context, orgID string) ([]domain.Team, error)
+
+	// Create inserts a new team in the org and enrolls the creator as a
+	// team admin in the same transaction, returning the new row. The
+	// org-admin "add team" affordance is how a solo hosted user grows
+	// past one team (at which point the count-gated selectors begin
+	// rendering). Postgres routes through the app pool: teams_insert RLS
+	// gates org-admin, and the sibling memberships insert is permitted
+	// because the creator is an org admin (user_is_org_admin_via_team).
+	// Callers must have already confirmed org-admin privilege; the RLS
+	// check is the backstop, not the primary gate.
+	Create(ctx context.Context, orgID, name, slug, creatorUserID string) (domain.Team, error)
 }

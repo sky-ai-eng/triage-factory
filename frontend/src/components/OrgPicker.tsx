@@ -4,6 +4,7 @@ import { ChevronDown, Check } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 import { useOrgContext } from '../contexts/OrgContext'
 import { reconnectWebSocket } from '../hooks/useWebSocket'
+import { invalidateTeams } from '../hooks/useTeams'
 
 /**
  * Topbar dropdown for switching between orgs the user belongs to.
@@ -46,6 +47,9 @@ export default function OrgPicker() {
     setOpen(false)
     if (newOrgId === activeOrgId) return
     setActiveOrgId(newOrgId)
+    // The teams list is scoped to the active org, so drop the cached
+    // /api/teams response — the new org has its own teams.
+    invalidateTeams()
 
     // Persist the choice on the session row so the server's
     // withSession picks up the new active org for every subsequent

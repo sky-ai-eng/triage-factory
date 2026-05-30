@@ -223,7 +223,7 @@ func TestFactoryReadStore_Postgres_ExcludesUntaskedEntity(t *testing.T) {
 	seed.Event(t, noTask, "github:pr:opened", "", now, time.Time{})
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB)
-	rows, err := stores.Factory.Entities(context.Background(), orgID, 100)
+	rows, err := stores.Factory.Entities(context.Background(), orgID, 100, "")
 	if err != nil {
 		t.Fatalf("Entities: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestFactoryReadStore_Postgres_KeepsEntityAfterTaskTerminal(t *testing.T) {
 	seed.Task(t, ent, "github:pr:opened", "", ev, "done", now)
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB)
-	rows, err := stores.Factory.Entities(context.Background(), orgID, 100)
+	rows, err := stores.Factory.Entities(context.Background(), orgID, 100, "")
 	if err != nil {
 		t.Fatalf("Entities: %v", err)
 	}
@@ -383,7 +383,7 @@ func TestFactoryReadStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	}
 
 	// Entities is the other broad read — pin it too.
-	entsA, err := stores.Factory.Entities(ctx, orgA, 100)
+	entsA, err := stores.Factory.Entities(ctx, orgA, 100, "")
 	if err != nil {
 		t.Fatalf("Entities orgA: %v", err)
 	}

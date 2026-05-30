@@ -108,7 +108,14 @@ type FactoryReadStore interface {
 	// filtered table scan, and a combined LIMIT lets a closure burst
 	// crowd the active set out of the snapshot — the active half
 	// should always get its full budget regardless of close pressure.
-	Entities(ctx context.Context, orgID string, limit int) ([]domain.FactoryEntityRow, error)
+	//
+	// teamID is the optional per-page read filter. Empty = the
+	// union of the viewer's teams (the existing membership-from-task
+	// semi-join). When set, the belt narrows to entities some task of
+	// that team owns or makes visible — "narrowing to one team hides
+	// cross-team rows" for the factory. Postgres-only effect; SQLite is
+	// N=1 and ignores it.
+	Entities(ctx context.Context, orgID string, limit int, teamID string) ([]domain.FactoryEntityRow, error)
 }
 
 // FactoryClosedGracePeriod is the window during which a freshly-closed

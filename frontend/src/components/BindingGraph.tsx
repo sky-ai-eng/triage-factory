@@ -16,6 +16,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import type { Prompt, TriggerHandler } from '../types'
+import { useTeams, pickerDefault } from '../hooks/useTeams'
 
 interface EventType {
   id: string
@@ -199,6 +200,12 @@ function saveLayout(layout: SavedLayout) {
 // --- Inner Graph ---
 
 function BindingGraphInner({ onPromptClick, onTriggerClick, onTriggerDeleted }: GraphProps) {
+  // The connect-drag trigger create stamps the acting team. A
+  // ≥2-team user has no sole-team fallback, so an omitted team_id would
+  // 400; the user's default acting team (sticky → recent → first) is the
+  // sensible no-modal choice for this quick gesture. Solo → '' → server
+  // resolves the sole team.
+  const { teams, preferredTeamId } = useTeams()
   const [eventTypes, setEventTypes] = useState<EventType[]>([])
   const [prompts, setPrompts] = useState<Prompt[]>([])
   const [triggers, setTriggers] = useState<TriggerHandler[]>([])
@@ -391,14 +398,19 @@ function BindingGraphInner({ onPromptClick, onTriggerClick, onTriggerDeleted }: 
         await fetch('/api/event-handlers', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ kind: 'trigger', prompt_id: promptId, event_type: eventType }),
+          body: JSON.stringify({
+            kind: 'trigger',
+            prompt_id: promptId,
+            event_type: eventType,
+            team_id: pickerDefault(teams, preferredTeamId),
+          }),
         })
         fetchAll()
       } catch {
         // ignore
       }
     },
-    [fetchAll],
+    [fetchAll, teams, preferredTeamId],
   )
 
   const doDeleteTrigger = useCallback(

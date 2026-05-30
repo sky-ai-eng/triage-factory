@@ -106,6 +106,59 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 	}, nil
 }
 
+func (s *teamsStore) ListForUser(ctx context.Context, orgID string) ([]domain.Team, error) {
+	// teams_select RLS gates on org access, not team membership, so it
+	// returns every team in the org. The memberships join is what
+	// narrows to the caller's own teams — memberships_select lets a user
+	// read their own rows (user_id = current_user_id()), so the join is
+	// RLS-safe and self-scoping without an explicit user_id parameter.
+	rows, err := s.app.QueryContext(ctx, `
+		SELECT t.id::text, t.org_id::text, t.slug, t.name, t.created_at
+		FROM teams t
+		JOIN memberships m ON m.team_id = t.id AND m.user_id = tf.current_user_id()
+		WHERE t.org_id = $1
+		ORDER BY t.created_at ASC, t.id ASC
+	`, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("list teams for user: %w", err)
+	}
+	defer rows.Close()
+	return scanTeams(rows)
+}
+
+func (s *teamsStore) Create(ctx context.Context, orgID, name, slug, creatorUserID string) (domain.Team, error) {
+	var t domain.Team
+	err := s.app.QueryRowContext(ctx, `
+		INSERT INTO teams (org_id, slug, name)
+		VALUES ($1, $2, $3)
+		RETURNING id::text, org_id::text, slug, name, created_at
+	`, orgID, slug, name).Scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.CreatedAt)
+	if err != nil {
+		return domain.Team{}, fmt.Errorf("insert team: %w", err)
+	}
+	// Enroll the creator so the new team shows up in their ListForUser
+	// set (and so they can write to it). Admin role mirrors the founder
+	// role org provisioning grants on the default team.
+	if _, err := s.app.ExecContext(ctx, `
+		INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'admin')
+	`, creatorUserID, t.ID); err != nil {
+		return domain.Team{}, fmt.Errorf("enroll team creator: %w", err)
+	}
+	return t, nil
+}
+
+func scanTeams(rows *sql.Rows) ([]domain.Team, error) {
+	out := []domain.Team{}
+	for rows.Next() {
+		var t domain.Team
+		if err := rows.Scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan team: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain.TeamSettings) error {
 	projects := u.JiraProjects
 	if projects == nil {

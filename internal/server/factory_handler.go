@@ -194,6 +194,12 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	since := time.Now().Add(-24 * time.Hour)
+	// Optional per-page team filter. Empty = the union of the
+	// viewer's teams; a team id narrows the entity belt to that team.
+	// Only the belt narrows here — the throughput counters stay at the
+	// viewer-union (a deliberate scope line; the belt is what "hides
+	// cross-team rows" refers to on the factory).
+	teamFilter := r.URL.Query().Get("team_id")
 
 	// Session user's GitHub login drives the "mine" flag. Identity lives on
 	// users.github_username (SKY-264). Missing identity (fresh install, no
@@ -248,7 +254,7 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// --- Active entities ------------------------------------------
-		entityRows, e = tx.Factory.Entities(r.Context(), orgID, factoryEntityLimit)
+		entityRows, e = tx.Factory.Entities(r.Context(), orgID, factoryEntityLimit, teamFilter)
 		if e != nil {
 			return e
 		}

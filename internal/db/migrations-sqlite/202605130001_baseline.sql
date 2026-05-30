@@ -121,6 +121,13 @@ CREATE TABLE users (
     avatar_url        TEXT,
     timezone          TEXT NOT NULL DEFAULT 'UTC',
     default_org_id    TEXT,
+    -- preferred_team_id is the user's sticky default team — the team the
+    -- per-page filter and the write-time picker seed to when ≥2 teams are
+    -- visible. Soft reference (no FK), mirroring default_org_id above: a
+    -- deleted team leaves a dangling id that the acting-team resolver
+    -- simply ignores (membership re-validation drops it), so no cascade
+    -- is needed and the column stays declaration-order-independent.
+    preferred_team_id TEXT,
     github_username   TEXT,
     -- jira_account_id is the Atlassian-side stable identifier
     -- (Cloud: accountId; Server/DC: legacy key). Used by the

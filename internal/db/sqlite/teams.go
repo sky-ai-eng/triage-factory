@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -96,6 +98,56 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 		DefaultModel:               defaultModel,
 		AutoDelegateEnabled:        autoDelegate,
 	}, nil
+}
+
+func (s *teamsStore) ListForUser(ctx context.Context, orgID string) ([]domain.Team, error) {
+	// SQLite is N=1: one synthetic user, so "the user's teams" is just
+	// "every team in the org" — no memberships join needed (and the
+	// local sentinel user isn't enrolled via memberships). The ordering
+	// matches GetDefaultForOrg so teams[0] is the default team.
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT id, org_id, slug, name, created_at
+		FROM teams
+		WHERE org_id = ?
+		ORDER BY created_at ASC, id ASC
+	`, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("list teams for user: %w", err)
+	}
+	defer rows.Close()
+	out := []domain.Team{}
+	for rows.Next() {
+		var t domain.Team
+		if err := rows.Scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan team: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (s *teamsStore) Create(ctx context.Context, orgID, name, slug, creatorUserID string) (domain.Team, error) {
+	// Local mode never calls this in practice (the "add team" handler is
+	// multi-mode-gated), but the impl exists for store-conformance parity.
+	// SQLite teams.id has no DEFAULT, so generate it app-side.
+	id := uuid.New().String()
+	if _, err := s.q.ExecContext(ctx, `
+		INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, ?, ?)
+	`, id, orgID, slug, name); err != nil {
+		return domain.Team{}, fmt.Errorf("insert team: %w", err)
+	}
+	if _, err := s.q.ExecContext(ctx, `
+		INSERT INTO memberships (user_id, team_id, role) VALUES (?, ?, 'admin')
+	`, creatorUserID, id); err != nil {
+		return domain.Team{}, fmt.Errorf("enroll team creator: %w", err)
+	}
+	var t domain.Team
+	if err := s.q.QueryRowContext(ctx, `
+		SELECT id, org_id, slug, name, created_at FROM teams WHERE id = ?
+	`, id).Scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.CreatedAt); err != nil {
+		return domain.Team{}, fmt.Errorf("read created team: %w", err)
+	}
+	return t, nil
 }
 
 func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain.TeamSettings) error {
