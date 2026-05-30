@@ -217,6 +217,10 @@ func (s *Server) handleReposSave(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userID := ClaimsFrom(r.Context()).Subject
+	if slug, reject := s.rejectUnreachableRepo(r.Context(), orgID, userID, repos); reject {
+		badRequest(w, "repo "+slug+" is not reachable by this org's GitHub credentials — install the GitHub App on it or grant the PAT access first")
+		return
+	}
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		teamID, e := tx.Teams.GetDefaultForOrg(r.Context(), orgID)
 		if e != nil {
