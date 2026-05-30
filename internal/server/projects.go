@@ -805,12 +805,17 @@ func validatePinnedRepos(ctx context.Context, teamRepos db.TeamGitHubReposStore,
 	if err != nil {
 		return nil, "failed to load tracked repos: " + err.Error()
 	}
+	// Key both sides case-insensitively: GitHub owner/repo names are
+	// case-insensitive and the rest of SKY-375 folds case (TracksRepoSystem,
+	// newlyAddedRepos, the reconcile). A repo re-saved into team_github_repos
+	// with different capitalization than the incoming pin is the same repo,
+	// so an exact-string match would wrongly reject an otherwise-valid pin.
 	known := make(map[string]struct{}, len(tracked))
 	for _, t := range tracked {
-		known[t.Slug()] = struct{}{}
+		known[strings.ToLower(t.Slug())] = struct{}{}
 	}
 	for _, slug := range out {
-		if _, ok := known[slug]; !ok {
+		if _, ok := known[strings.ToLower(slug)]; !ok {
 			return nil, "pinned_repos: " + slug + " is not a repo this team tracks (add it on the GitHub config page first)"
 		}
 	}

@@ -562,6 +562,14 @@ func TestValidatePinnedRepos_RejectsUnconfigured(t *testing.T) {
 	if _, errMsg := validatePinnedRepos(ctx, teamRepos, teamID, nil); errMsg != "" {
 		t.Errorf("nil input should pass, got %q", errMsg)
 	}
+
+	// Casing mismatch still passes: GitHub owner/repo names are
+	// case-insensitive and the rest of SKY-375 folds case, so a pin whose
+	// capitalization differs from the tracked row (e.g. after the repo was
+	// re-saved with different casing) is the same repo, not an untracked one.
+	if _, errMsg := validatePinnedRepos(ctx, teamRepos, teamID, []string{"Sky-AI-Eng/Configured"}); errMsg != "" {
+		t.Errorf("case-variant of a tracked slug should pass, got %q", errMsg)
+	}
 }
 
 // TestProjectCreate_PaddedSlugsStoredTrimmed is the end-to-end
