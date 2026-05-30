@@ -5,28 +5,29 @@ import { readError } from '../lib/api'
 import { useOrgHref } from '../hooks/useOrgHref'
 import { toast } from './Toast/toastStore'
 
-interface RepoProfile {
-  id: string
-  owner: string
-  repo: string
-}
-
 interface Props {
   value: string[]
   onChange: (next: string[]) => void
 }
 
-// RepoMultiSelect is the project page's pinned-repos picker. It reads
-// from /api/repos (configured-repos list) and exposes those slugs as
-// toggleable chips. Mirroring the server-side validation contract:
-// the user can only pick from the configured set, so the chip strip
-// already enforces what validatePinnedRepos enforces server-side.
+// The default team's tracked repos — the create modal builds projects
+// under the default team, and pinned_repos is validated server-side
+// against that team's team_github_repos. Sourcing the picker from the
+// org-wide union (GET /api/repos) instead would offer sibling-team repos
+// the default team doesn't track, so submitting would 400.
+const TEAM_REPOS_PATH = '/api/settings/team/default/repos'
+
+// RepoMultiSelect is the project create modal's pinned-repos picker. It
+// reads the default team's tracked repos and exposes those slugs as
+// toggleable chips. Mirroring the server-side validation contract: the
+// user can only pick from the team's tracked set, so the chip strip
+// already enforces exactly what validatePinnedRepos enforces server-side.
 //
 // Chosen slugs render up top; the popover below holds the remaining
-// configured options + a search filter. Empty configured list shows
-// a hint pointing at /repos rather than an awkward empty popover.
+// tracked options + a search filter. Empty tracked list shows a hint
+// pointing at /repos rather than an awkward empty popover.
 export default function RepoMultiSelect({ value, onChange }: Props) {
-  const [available, setAvailable] = useState<RepoProfile[]>([])
+  const [available, setAvailable] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
@@ -40,7 +41,7 @@ export default function RepoMultiSelect({ value, onChange }: Props) {
   const loadRepos = useCallback(async (signal: AbortSignal) => {
     try {
       setError(null)
-      const res = await fetch('/api/repos', { signal })
+      const res = await fetch(TEAM_REPOS_PATH, { signal })
       if (signal.aborted) return
       if (!res.ok) {
         const msg = await readError(res, 'Failed to load repos')
@@ -48,9 +49,9 @@ export default function RepoMultiSelect({ value, onChange }: Props) {
         toast.error(msg)
         return
       }
-      const data: RepoProfile[] = await res.json()
+      const data: { repos?: string[] } = await res.json()
       if (signal.aborted) return
-      setAvailable(data)
+      setAvailable(data.repos ?? [])
     } catch (err) {
       if (signal.aborted) return
       const msg = `Failed to load repos: ${err instanceof Error ? err.message : String(err)}`
@@ -71,7 +72,7 @@ export default function RepoMultiSelect({ value, onChange }: Props) {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
     if (!q) return available
-    return available.filter((r) => r.id.toLowerCase().includes(q))
+    return available.filter((slug) => slug.toLowerCase().includes(q))
   }, [available, search])
 
   const toggle = useCallback(
@@ -164,20 +165,20 @@ export default function RepoMultiSelect({ value, onChange }: Props) {
         {filtered.length === 0 ? (
           <div className="text-[12px] text-text-tertiary py-2 px-3">No matches.</div>
         ) : (
-          filtered.map((repo) => {
-            const isSelected = selected.has(repo.id)
+          filtered.map((slug) => {
+            const isSelected = selected.has(slug)
             return (
               <button
-                key={repo.id}
+                key={slug}
                 type="button"
-                onClick={() => toggle(repo.id)}
+                onClick={() => toggle(slug)}
                 className="
                   w-full flex items-center justify-between gap-2
                   px-3 py-1.5 text-[12px] text-left
                   hover:bg-black/[0.03] transition-colors
                 "
               >
-                <span className="text-text-primary truncate">{repo.id}</span>
+                <span className="text-text-primary truncate">{slug}</span>
                 {isSelected && <Check size={12} className="shrink-0 text-accent" />}
               </button>
             )

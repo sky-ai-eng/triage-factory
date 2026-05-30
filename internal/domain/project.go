@@ -20,6 +20,13 @@ type Project struct {
 	Description      string   `json:"description"`
 	CuratorSessionID string   `json:"curator_session_id,omitempty"`
 	PinnedRepos      []string `json:"pinned_repos"`
+	// TeamID is the project's owning team — the tenancy key validation
+	// must scope against. pinned_repos / Jira-rule checks on update run
+	// against *this* team's tracked set, not the org default (a non-default
+	// team's project would otherwise validate against the wrong team). The
+	// stores populate it on read; Create sets it from the chosen team.
+	// Empty only on never-persisted structs.
+	TeamID string `json:"team_id"`
 	// JiraProjectKey is the Jira project key (e.g. "SKY") this
 	// project is linked to, or empty if not linked. Validation at the
 	// API layer requires a non-empty value to be present in

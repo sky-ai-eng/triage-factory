@@ -464,17 +464,18 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		updated.Description = *req.Description
 	}
 	if req.PinnedRepos != nil {
+		// Validate against the project's OWN team, not the org default — a
+		// non-default-team project's pins must be tracked by that team.
+		// existing.TeamID is populated by Projects.Get; the store preserves
+		// team_id on update.
+		if existing.TeamID == "" {
+			internalError(w, "projects", fmt.Errorf("project %s has no team_id", existing.ID))
+			return
+		}
 		var pinned []string
 		var errMsg string
 		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-			teamID, terr := tx.Teams.GetDefaultForOrg(r.Context(), orgID)
-			if terr != nil {
-				return fmt.Errorf("default team lookup: %w", terr)
-			}
-			if teamID == "" {
-				return fmt.Errorf("org %s has no default team", orgID)
-			}
-			pinned, errMsg = validatePinnedRepos(r.Context(), tx.TeamGitHubRepos, teamID, *req.PinnedRepos)
+			pinned, errMsg = validatePinnedRepos(r.Context(), tx.TeamGitHubRepos, existing.TeamID, *req.PinnedRepos)
 			return nil
 		}); err != nil {
 			internalError(w, "projects", err)
@@ -506,20 +507,18 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		if jiraInput == "" {
 			updated.JiraProjectKey = ""
 		} else {
-			// Default-team + rule lookup inside WithTx so the rule
-			// read goes through tx.JiraStatusRules.ListForTeam (app
-			// pool, jira_rules_select RLS gates by team membership).
+			// Rule lookup against the project's OWN team (not the org
+			// default), inside WithTx so the read goes through
+			// tx.JiraStatusRules.ListForTeam (app pool, jira_rules_select
+			// RLS gates by team membership).
+			if existing.TeamID == "" {
+				internalError(w, "projects", fmt.Errorf("project %s has no team_id", existing.ID))
+				return
+			}
 			var teamRules []domain.JiraProjectStatusRules
 			if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-				teamID, terr := tx.Teams.GetDefaultForOrg(r.Context(), orgID)
-				if terr != nil {
-					return fmt.Errorf("default team lookup: %w", terr)
-				}
-				if teamID == "" {
-					return fmt.Errorf("org %s has no default team", orgID)
-				}
 				var rerr error
-				teamRules, rerr = tx.JiraStatusRules.ListForTeam(r.Context(), teamID)
+				teamRules, rerr = tx.JiraStatusRules.ListForTeam(r.Context(), existing.TeamID)
 				return rerr
 			}); err != nil {
 				log.Printf("[projects] patch: jira rules load: %v", err)

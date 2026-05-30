@@ -109,6 +109,12 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 		if got.JiraProjectKey != "SKY" || got.LinearProjectKey != "LIN" {
 			t.Errorf("project keys mismatch: jira=%q linear=%q", got.JiraProjectKey, got.LinearProjectKey)
 		}
+		// TeamID must round-trip — the per-project pinned-repos / Jira-rule
+		// validation scopes against the project's own team, so Get/List have
+		// to surface it (not leave it empty and force a default-team fallback).
+		if got.TeamID != teamID {
+			t.Errorf("TeamID = %q, want %q (the team the project was created under)", got.TeamID, teamID)
+		}
 		if got.SpecAuthorshipPromptID != "" {
 			t.Errorf("SpecAuthorshipPromptID = %q, want empty (no prompt fixture seeded)", got.SpecAuthorshipPromptID)
 		}

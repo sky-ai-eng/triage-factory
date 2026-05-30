@@ -79,7 +79,7 @@ func (s *projectStore) Get(ctx context.Context, orgID, id string) (*domain.Proje
 	row := s.q.QueryRowContext(ctx, `
 		SELECT id, name, description, curator_session_id, pinned_repos,
 		       jira_project_key, linear_project_key, spec_authorship_prompt_id,
-		       created_at, updated_at
+		       team_id, created_at, updated_at
 		FROM projects WHERE id = ?
 	`, id)
 	return scanSqliteProjectRow(row)
@@ -92,7 +92,7 @@ func (s *projectStore) List(ctx context.Context, orgID string) ([]domain.Project
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT id, name, description, curator_session_id, pinned_repos,
 		       jira_project_key, linear_project_key, spec_authorship_prompt_id,
-		       created_at, updated_at
+		       team_id, created_at, updated_at
 		FROM projects ORDER BY LOWER(name) ASC
 	`)
 	if err != nil {
@@ -230,6 +230,7 @@ func scanSqliteProjectRow(row interface {
 		jiraKey      sql.NullString
 		linearKey    sql.NullString
 		specPromptID sql.NullString
+		teamID       sql.NullString
 		pinnedJSON   string
 		createdAt    time.Time
 		updatedAt    time.Time
@@ -237,7 +238,7 @@ func scanSqliteProjectRow(row interface {
 	err := row.Scan(
 		&p.ID, &p.Name, &p.Description, &sessionID, &pinnedJSON,
 		&jiraKey, &linearKey, &specPromptID,
-		&createdAt, &updatedAt,
+		&teamID, &createdAt, &updatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -249,6 +250,7 @@ func scanSqliteProjectRow(row interface {
 	p.JiraProjectKey = jiraKey.String
 	p.LinearProjectKey = linearKey.String
 	p.SpecAuthorshipPromptID = specPromptID.String
+	p.TeamID = teamID.String
 	p.CreatedAt = createdAt
 	p.UpdatedAt = updatedAt
 	if pinnedJSON == "" {

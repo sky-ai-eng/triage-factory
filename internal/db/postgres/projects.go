@@ -108,7 +108,7 @@ func (s *projectStore) Get(ctx context.Context, orgID, id string) (*domain.Proje
 	row := s.q.QueryRowContext(ctx, `
 		SELECT id, name, description, curator_session_id, pinned_repos,
 		       jira_project_key, linear_project_key, spec_authorship_prompt_id,
-		       created_at, updated_at
+		       team_id, created_at, updated_at
 		FROM projects
 		WHERE org_id = $1 AND id = $2
 	`, orgID, id)
@@ -155,7 +155,7 @@ func listProjects(ctx context.Context, q queryer, orgID string) ([]domain.Projec
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, name, description, curator_session_id, pinned_repos,
 		       jira_project_key, linear_project_key, spec_authorship_prompt_id,
-		       created_at, updated_at
+		       team_id, created_at, updated_at
 		FROM projects
 		WHERE org_id = $1
 		ORDER BY LOWER(name) ASC
@@ -259,12 +259,13 @@ func scanProjectRow(row interface {
 		jiraKey      sql.NullString
 		linearKey    sql.NullString
 		specPromptID sql.NullString
+		teamID       sql.NullString
 		pinnedJSON   []byte
 	)
 	err := row.Scan(
 		&p.ID, &p.Name, &p.Description, &sessionID, &pinnedJSON,
 		&jiraKey, &linearKey, &specPromptID,
-		&p.CreatedAt, &p.UpdatedAt,
+		&teamID, &p.CreatedAt, &p.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -276,6 +277,7 @@ func scanProjectRow(row interface {
 	p.JiraProjectKey = jiraKey.String
 	p.LinearProjectKey = linearKey.String
 	p.SpecAuthorshipPromptID = specPromptID.String
+	p.TeamID = teamID.String
 	if len(pinnedJSON) == 0 {
 		p.PinnedRepos = []string{}
 	} else if err := json.Unmarshal(pinnedJSON, &p.PinnedRepos); err != nil {

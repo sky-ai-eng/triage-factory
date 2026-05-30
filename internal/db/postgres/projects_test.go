@@ -269,3 +269,57 @@ func seedPgProjectOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, agentID s
 	}
 	return orgID, userID, agentID
 }
+
+// TestProjectStore_Postgres_GetPopulatesTeamID pins the plumbing the
+// per-project pinned-repos / Jira-rule validation depends on: a project
+// created under a specific (non-default) team must round-trip its team_id
+// back through Get and List. Without this, the PATCH handler can't scope
+// validation to the project's own team and falls back to the org default
+// — pinning repos against the wrong team's tracked set.
+func TestProjectStore_Postgres_GetPopulatesTeamID(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	ctx := context.Background()
+
+	orgA, _, _ := seedPgProjectOrg(t, h)
+	// A second, non-default team in the same org.
+	teamB := pgtest.SeedTeam(t, h, orgA, "team-b")
+
+	id, err := stores.Projects.Create(ctx, orgA, teamB, domain.Project{Name: "B's project"})
+	if err != nil {
+		t.Fatalf("Create under teamB: %v", err)
+	}
+
+	got, err := stores.Projects.Get(ctx, orgA, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got == nil || got.TeamID != teamB {
+		t.Fatalf("Get().TeamID = %q, want teamB %q", teamID(got), teamB)
+	}
+
+	list, err := stores.Projects.List(ctx, orgA)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	var found bool
+	for _, p := range list {
+		if p.ID == id {
+			found = true
+			if p.TeamID != teamB {
+				t.Errorf("List row TeamID = %q, want teamB %q", p.TeamID, teamB)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("List did not return the created project %s", id)
+	}
+}
+
+func teamID(p *domain.Project) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return p.TeamID
+}
