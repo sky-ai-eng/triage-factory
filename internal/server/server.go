@@ -508,7 +508,6 @@ func (s *Server) routes() {
 	s.api("GET /api/github/repos", s.handleGitHubRepos)
 	s.apiMutating("POST /api/github/preflight-ssh", s.handleGitHubPreflightSSH)
 	s.api("GET /api/repos", s.handleRepoProfiles)
-	s.apiMutating("POST /api/repos", s.handleReposSave)
 	s.apiMutating("PATCH /api/repos/{owner}/{repo}", s.handleRepoUpdate)
 	s.api("GET /api/repos/{owner}/{repo}/branches", s.handleRepoBranches)
 	s.apiMutating("POST /api/jira/connect", s.handleJiraConnect)

@@ -8,6 +8,11 @@ import { useWebSocket } from '../hooks/useWebSocket'
 import { toast } from '../components/Toast/toastStore'
 import { readError } from '../lib/api'
 
+// Repo tracking is per-team (SKY-375); writes go to the team's repos
+// endpoint. This page is pre-team-context, so it targets the org's
+// default team — SKY-294 will thread the selected team here.
+const TEAM_REPOS_WRITE_PATH = '/api/settings/team/default/repos'
+
 interface RepoProfile {
   id: string
   owner: string
@@ -677,8 +682,8 @@ export default function Repos() {
   const handleSaveRepos = async (repos: string[]) => {
     setSaving(true)
     try {
-      const res = await fetch('/api/repos', {
-        method: 'POST',
+      const res = await fetch(TEAM_REPOS_WRITE_PATH, {
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ repos }),
       })
@@ -700,8 +705,8 @@ export default function Repos() {
   const handleReprofile = async () => {
     setSaving(true)
     try {
-      const res = await fetch('/api/repos', {
-        method: 'POST',
+      const res = await fetch(TEAM_REPOS_WRITE_PATH, {
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ repos: selectedRepos }),
       })

@@ -118,8 +118,10 @@ export default function Setup() {
     setLoading(true)
     setError('')
     try {
-      const res = await fetch('/api/repos', {
-        method: 'POST',
+      // Repo tracking is per-team (SKY-375). Onboarding writes the org's
+      // default team; SKY-294 will thread the actual team being set up.
+      const res = await fetch('/api/settings/team/default/repos', {
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ repos }),
       })
