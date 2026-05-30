@@ -164,6 +164,37 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		}
 	})
 
+	t.Run("write_lands_on_picked_team", func(t *testing.T) {
+		// The acceptance "a write lands on the picked team": a team-stamped
+		// create (here a prompt) under the app pool persists the supplied
+		// team, not the org default. Postgres binds team_id directly (the
+		// SQLite store pins the sole local team, so this is multi-mode
+		// behavior). The resolver that *chooses* teamB is unit-tested in the
+		// server package; here we pin that the store honors it.
+		promptID := "p_pick_" + uuid.New().String()
+		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+			return pgstore.NewForTx(tx).Prompts.Create(ctx, orgID, teamB, domain.Prompt{
+				ID:     promptID,
+				Name:   "Scoped",
+				Body:   "do the thing",
+				Source: "user",
+				Kind:   "leaf",
+			})
+		})
+		if err != nil {
+			t.Fatalf("create prompt on team B: %v", err)
+		}
+		var landed string
+		if err := h.AdminDB.QueryRow(
+			`SELECT team_id::text FROM prompts WHERE id = $1`, promptID,
+		).Scan(&landed); err != nil {
+			t.Fatalf("read prompt team: %v", err)
+		}
+		if landed != teamB {
+			t.Errorf("prompt landed on team %q; want the picked team %q (B)", landed, teamB)
+		}
+	})
+
 	t.Run("create_enrolls_creator", func(t *testing.T) {
 		var newTeamID string
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {

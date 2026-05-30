@@ -122,3 +122,22 @@ func TestTeamCreate_LocalIsNotFound(t *testing.T) {
 		t.Fatalf("status = %d, want 404 (hosted-only); body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestPromptCreate_AmbiguousTeamIs400: with two teams visible and no
+// team_id supplied, the create is refused (400) rather than silently
+// guessing — the server-side mirror of the required picker. (The
+// positive "a write lands on the picked team" assertion is a pgtest:
+// the SQLite store pins the sole local team by design, so honoring an
+// explicit pick is a Postgres/multi-mode behavior.)
+func TestPromptCreate_AmbiguousTeamIs400(t *testing.T) {
+	s := newTestServer(t)
+	seedTeam(t, s, runmode.LocalDefaultOrgID, "second")
+
+	rec := doJSON(t, s, http.MethodPost, "/api/prompts", map[string]string{
+		"name": "Unscoped prompt",
+		"body": "do the thing",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (ambiguous team); body=%s", rec.Code, rec.Body.String())
+	}
+}
