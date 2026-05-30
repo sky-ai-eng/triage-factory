@@ -297,10 +297,13 @@ func (s *taskStore) FindActiveByEntity(ctx context.Context, orgID, entityID stri
 // uses.
 const listActiveRefsChunkSize = 500
 
-func (s *taskStore) ListActiveRefsForEntities(ctx context.Context, orgID string, entityIDs []string) ([]domain.PendingTaskRef, error) {
+func (s *taskStore) ListActiveRefsForEntities(ctx context.Context, orgID string, entityIDs []string, _ []string) ([]domain.PendingTaskRef, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
+	// teamIDs ignored: N=1 local mode has one team, so the factory's team
+	// filter has nothing to narrow here (the frontend never renders it
+	// below 2 teams). Mirrors the Queued/Entities asymmetry.
 	if len(entityIDs) == 0 {
 		return nil, nil
 	}
@@ -720,6 +723,35 @@ func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentI
 		return db.HandoffNoOp, nil
 	}
 	return db.HandoffRefused, nil
+}
+
+func (s *taskStore) ResolveClaimTeam(ctx context.Context, orgID, taskID, userID string) (string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", err
+	}
+	// N=1: the local user isn't enrolled via memberships, so the
+	// visibility-set subquery is empty and this collapses to the task's
+	// current team_id — the sole local team in practice. Mirrors the
+	// Postgres derivation shape for interface parity.
+	var team string
+	err := s.q.QueryRowContext(ctx, `
+		SELECT COALESCE(
+		         (SELECT tt.team_id
+		            FROM task_teams tt
+		            JOIN memberships m ON m.team_id = tt.team_id
+		           WHERE tt.task_id = ? AND m.user_id = ?
+		           ORDER BY (tt.team_id = t.team_id) DESC, tt.team_id ASC LIMIT 1),
+		         t.team_id)
+		  FROM tasks t
+		 WHERE t.id = ?
+	`, taskID, userID, taskID).Scan(&team)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve claim team: %w", err)
+	}
+	return team, nil
 }
 
 func (s *taskStore) TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, userID string) (bool, error) {

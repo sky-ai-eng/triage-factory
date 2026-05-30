@@ -420,7 +420,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 
 	t.Run("ListActiveRefsForEntities_empty_input", func(t *testing.T) {
 		s, orgID, _, _, _, _, _ := mk(t)
-		refs, err := s.ListActiveRefsForEntities(ctx, orgID, nil)
+		refs, err := s.ListActiveRefsForEntities(ctx, orgID, nil, nil)
 		if err != nil {
 			t.Fatalf("ListActiveRefsForEntities(nil): %v", err)
 		}
@@ -437,7 +437,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		if err := s.Close(ctx, orgID, taskB, "test", ""); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
-		refs, err := s.ListActiveRefsForEntities(ctx, orgID, []string{entityA, entityB})
+		refs, err := s.ListActiveRefsForEntities(ctx, orgID, []string{entityA, entityB}, nil)
 		if err != nil {
 			t.Fatalf("ListActiveRefsForEntities: %v", err)
 		}
@@ -789,7 +789,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 
 	t.Run("ListActiveRefs_empty_orgID_check_does_not_panic", func(t *testing.T) {
 		s, orgID, _, _, _, _, _ := mk(t)
-		refs, err := s.ListActiveRefsForEntities(ctx, orgID, []string{})
+		refs, err := s.ListActiveRefsForEntities(ctx, orgID, []string{}, nil)
 		if err != nil {
 			t.Fatalf("empty slice: %v", err)
 		}

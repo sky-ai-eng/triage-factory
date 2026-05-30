@@ -268,7 +268,7 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 			return e
 		}
 
-		pendingTasks, e = tx.Tasks.ListActiveRefsForEntities(r.Context(), orgID, entityIDs)
+		pendingTasks, e = tx.Tasks.ListActiveRefsForEntities(r.Context(), orgID, entityIDs, teamFilter)
 		if e != nil {
 			return e
 		}

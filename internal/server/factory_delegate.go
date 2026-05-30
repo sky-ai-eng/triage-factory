@@ -172,12 +172,21 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 
 	var task *domain.Task
 	var created bool
+	var claimTeamID string
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		teamID, e := resolveActingTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
 		}
 		task, created, e = tx.Tasks.FindOrCreate(r.Context(), orgID, teamID, req.EntityID, req.EventType, req.DedupKey, primaryEvent.ID, defaultPriority)
+		if e != nil {
+			return e
+		}
+		// The bot-enablement gate (below) must check the team the handoff
+		// will consolidate onto, which for a found multi-team task can
+		// differ from task.TeamID (the latter may be a team the caller
+		// isn't in). Resolve it here in the same tx.
+		claimTeamID, e = tx.Tasks.ResolveClaimTeam(r.Context(), orgID, task.ID, userID)
 		if e != nil {
 			return e
 		}
@@ -221,13 +230,13 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// invalidate the assignment.
 	// SKY-261 acceptance: re-check team_agents.enabled at gesture
 	// time. Factory drag-to-bot is the same semantic as swipe-up
-	// "delegate to bot" — both refuse with 409 when the bot is off
-	// for this team. Gate on the *task's* team (task.TeamID), not the
-	// org default: a multi-team user can delegate a task owned by team
-	// B, and B's bot setting — not A's — governs (SKY-378). On the find
-	// path the task may already belong to another team, so its own
-	// team_id is the team the claim actually lands on.
-	a, enabled, err := s.agentEnabledForTeam(r.Context(), orgID, userID, task.TeamID)
+	// "delegate to bot" — both refuse with 409 when the bot is off for
+	// this team. Gate on claimTeamID — the team HandoffAgentClaim will
+	// consolidate the task onto — not the org default and not the
+	// pre-handoff task.TeamID (which for a found multi-team task can be a
+	// team the caller isn't in, whose team_agents row RLS would hide,
+	// wrongly reporting the bot disabled).
+	a, enabled, err := s.agentEnabledForTeam(r.Context(), orgID, userID, claimTeamID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: " + err.Error()})
 		return

@@ -201,14 +201,40 @@ const jiraTeamProjectMembershipExists = `EXISTS (
 	  AND tm.org_id = $1
 )`
 
-func (s *entityStore) ListActiveJiraTeamScoped(ctx context.Context, orgID string) ([]domain.Entity, error) {
+// jiraTeamProjectMembershipForTeam is the single-team variant of
+// jiraTeamProjectMembershipExists used by the carry-over deck's team
+// filter: the project must be tracked by the specific team in $2 (still
+// org-bound, still under jira_rules_select RLS so $2 must be one of the
+// viewer's teams). Mirrors the unfiltered fragment's defense-in-depth
+// org bind.
+const jiraTeamProjectMembershipForTeam = `EXISTS (
+	SELECT 1 FROM jira_project_status_rules jr
+	JOIN teams tm ON tm.id = jr.team_id
+	WHERE jr.project_key = split_part(e.source_id, '-', 1)
+	  AND tm.org_id = $1
+	  AND jr.team_id = $2
+)`
+
+func (s *entityStore) ListActiveJiraTeamScoped(ctx context.Context, orgID, teamID string) ([]domain.Entity, error) {
+	// jira_rules_select RLS already scopes the project semi-join to the
+	// viewer's teams. The optional teamID narrows it further to a single
+	// team's tracked projects — load-bearing for the carry-over deck's
+	// team filter (otherwise a deck switched to team B still surfaces
+	// team A's tickets, and a claim then stamps a task on B for a project
+	// B doesn't track). $2 is referenced only when teamID is set.
+	membership := jiraTeamProjectMembershipExists
+	args := []any{orgID}
+	if teamID != "" {
+		membership = jiraTeamProjectMembershipForTeam
+		args = append(args, teamID)
+	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgEntitySelectCols+`
 		FROM entities e
 		WHERE e.org_id = $1 AND e.source = 'jira' AND e.state = 'active'
-		  AND `+jiraTeamProjectMembershipExists+`
+		  AND `+membership+`
 		ORDER BY e.last_polled_at ASC
-	`, orgID)
+	`, args...)
 	if err != nil {
 		return nil, err
 	}

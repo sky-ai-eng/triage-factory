@@ -131,7 +131,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		// org-wide poller can't surface another team's untriaged backlog
 		// on this user's swipe deck. Local mode (SQLite) returns the full
 		// active set — N=1, nothing to scope away.
-		entities, e = tx.Entities.ListActiveJiraTeamScoped(r.Context(), orgID)
+		entities, e = tx.Entities.ListActiveJiraTeamScoped(r.Context(), orgID, teamID)
 		if e != nil {
 			return e
 		}
@@ -395,7 +395,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 		if e != nil {
 			return e
 		}
-		scoped, e := tx.Entities.ListActiveJiraTeamScoped(r.Context(), orgID)
+		scoped, e := tx.Entities.ListActiveJiraTeamScoped(r.Context(), orgID, teamID)
 		if e != nil {
 			return e
 		}

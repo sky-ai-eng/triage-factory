@@ -268,21 +268,27 @@ func findActiveTasksByEntity(ctx context.Context, q queryer, orgID, entityID str
 	`, orgID, entityID)
 }
 
-func (s *taskStore) ListActiveRefsForEntities(ctx context.Context, orgID string, entityIDs []string) ([]domain.PendingTaskRef, error) {
+func (s *taskStore) ListActiveRefsForEntities(ctx context.Context, orgID string, entityIDs []string, teamIDs []string) ([]domain.PendingTaskRef, error) {
 	if len(entityIDs) == 0 {
 		return nil, nil
 	}
 	// Postgres has no comparable variable-bind cap to SQLite's 999/500;
 	// the array bind via lib/pq keeps the whole list in a single
-	// placeholder regardless of size, so no chunking is needed.
+	// placeholder regardless of size, so no chunking is needed. The
+	// table is aliased t so the shared team-filter fragment (same
+	// RLS-mirroring predicate as Queued) applies — narrowing the refs to
+	// the selected teams keeps the station drawer in sync with a
+	// team-filtered entity belt.
+	args := []any{orgID, entityIDs}
+	teamClause, args := pgTaskTeamFilter(teamIDs, args)
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT id, entity_id, event_type, dedup_key
-		FROM tasks
-		WHERE org_id = $1
-			AND entity_id = ANY($2)
-			AND status NOT IN ('done', 'dismissed')
-		ORDER BY entity_id, event_type, created_at DESC
-	`, orgID, entityIDs)
+		SELECT t.id, t.entity_id, t.event_type, t.dedup_key
+		FROM tasks t
+		WHERE t.org_id = $1
+			AND t.entity_id = ANY($2)
+			AND t.status NOT IN ('done', 'dismissed')`+teamClause+`
+		ORDER BY t.entity_id, t.event_type, t.created_at DESC
+	`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -764,6 +770,31 @@ func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentI
 		return db.HandoffNoOp, nil
 	}
 	return db.HandoffRefused, nil
+}
+
+func (s *taskStore) ResolveClaimTeam(ctx context.Context, orgID, taskID, userID string) (string, error) {
+	// Mirrors HandoffAgentClaim's team_id COALESCE: the caller's team in
+	// the task's visibility set (preferring the current owner on a tie),
+	// else the current owner. Read-only; under the app pool tasks_select
+	// RLS scopes the row to the viewer.
+	var team string
+	err := s.q.QueryRowContext(ctx, `
+		SELECT COALESCE(
+		         (SELECT tt.team_id::text FROM task_teams tt
+		            JOIN memberships m ON m.team_id = tt.team_id
+		           WHERE tt.task_id = $2 AND m.user_id = $3
+		           ORDER BY (tt.team_id = t.team_id) DESC, tt.team_id ASC LIMIT 1),
+		         t.team_id::text)
+		  FROM tasks t
+		 WHERE t.org_id = $1 AND t.id = $2
+	`, orgID, taskID, userID).Scan(&team)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve claim team: %w", err)
+	}
+	return team, nil
 }
 
 func (s *taskStore) TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, userID string) (bool, error) {

@@ -409,7 +409,23 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 		// can't manually delegate to a disabled bot either.
 		// Refuse with 409 — clear error the FE can surface as
 		// "bot is off; enable it in team settings."
-		a, enabled, err := s.agentEnabledForTeam(r.Context(), orgID, userID, task.TeamID)
+		//
+		// Gate on the team HandoffAgentClaim will consolidate onto, not
+		// the pre-handoff task.TeamID: for an unclaimed task visible to
+		// several teams the latter can be a team the caller isn't in,
+		// whose team_agents row RLS hides — wrongly reporting the bot
+		// disabled and rejecting a legitimate delegate.
+		var claimTeamID string
+		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+			var e error
+			claimTeamID, e = tx.Tasks.ResolveClaimTeam(r.Context(), orgID, id, userID)
+			return e
+		}); err != nil {
+			log.Printf("[swipe] delegate aborted on task %s: %v", id, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: " + err.Error()})
+			return
+		}
+		a, enabled, err := s.agentEnabledForTeam(r.Context(), orgID, userID, claimTeamID)
 		if err != nil {
 			log.Printf("[swipe] delegate aborted on task %s: %v", id, err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: " + err.Error()})

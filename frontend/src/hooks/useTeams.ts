@@ -1,4 +1,4 @@
-import { useSyncExternalStore, useCallback, useEffect, useState } from 'react'
+import { useSyncExternalStore, useCallback, useEffect, useRef, useState } from 'react'
 import type { TeamsResponse, TeamSummary } from '../types'
 import { readError } from '../lib/api'
 
@@ -224,4 +224,41 @@ export function pickerDefault(teams: TeamSummary[], preferredTeamId: string): st
   const ids = new Set(teams.map((t) => t.id))
   if (preferredTeamId && ids.has(preferredTeamId)) return preferredTeamId
   return teams[0].id
+}
+
+export interface WriteTeam {
+  /** The acting team to submit. '' when the picker is hidden (≤1 team,
+   *  resolved server-side to the sole team) — only meaningful once
+   *  `ready`. */
+  team: string
+  setTeam: (id: string) => void
+  /** Whether to render the <TeamPicker> (≥2 teams). */
+  multi: boolean
+  /** False until /api/teams has resolved. Create modals MUST disable
+   *  their submit while !ready: before the teams list loads `multi` is
+   *  false and the picker is hidden, so a multi-team user could otherwise
+   *  submit team_id:'' in the cold-load window — landing the write on the
+   *  wrong team (last-preferred) or 400-ing (ambiguous) purely because
+   *  the teams request was slow. Once ready, the picker is shown for
+   *  multi-team users and the normal required-selection flow applies. */
+  ready: boolean
+}
+
+// useWriteTeam is the write-picker contract for create modals: it seeds
+// the acting team from the last-written default once teams load, exposes
+// whether the picker should render, and — critically — a `ready` flag the
+// modal gates its submit on so the cold-load window can't submit an
+// unresolved team. Pair with <TeamPicker value={team} onChange={setTeam}/>
+// and `disabled={!ready || …}` on the submit button.
+export function useWriteTeam(): WriteTeam {
+  const { teams, preferredTeamId, multi, loaded } = useTeams()
+  const [team, setTeam] = useState('')
+  const seeded = useRef(false)
+  useEffect(() => {
+    if (seeded.current || !loaded) return
+    seeded.current = true
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setTeam(pickerDefault(teams, preferredTeamId))
+  }, [loaded, teams, preferredTeamId])
+  return { team, setTeam, multi, ready: loaded }
 }

@@ -68,7 +68,7 @@ func TestEntityStore_SQLite_ListActiveJiraTeamScoped(t *testing.T) {
 		t.Fatalf("seed github: %v", err)
 	}
 
-	got, err := stores.Entities.ListActiveJiraTeamScoped(ctx, org)
+	got, err := stores.Entities.ListActiveJiraTeamScoped(ctx, org, "")
 	if err != nil {
 		t.Fatalf("ListActiveJiraTeamScoped: %v", err)
 	}

@@ -112,13 +112,21 @@ type EntityStore interface {
 	// projects; this keeps a user from swiping another team's
 	// untriaged backlog.
 	//
+	// teamID is the optional per-page read filter (the carry-over deck's
+	// team selector). Empty = the union of the viewer's teams' projects
+	// (the RLS-scoped default above). When set, the deck narrows to the
+	// projects THAT team tracks — without it, switching the deck to team
+	// B would still surface team A's tickets (and a claim would then
+	// stamp a task on B for a project B doesn't track). Postgres-only
+	// effect; SQLite is N=1 and ignores it.
+	//
 	// Local mode (SQLite, N=1): returns the full active Jira set,
 	// identical to ListActive(orgID, "jira"). There is one user and
 	// one team, the Jira poller only discovers the configured
 	// projects, and gating here would just hide the deck's own
 	// contents — so the local impl applies no scoping, mirroring the
 	// FactoryReadStore.Entities asymmetry.
-	ListActiveJiraTeamScoped(ctx context.Context, orgID string) ([]domain.Entity, error)
+	ListActiveJiraTeamScoped(ctx context.Context, orgID, teamID string) ([]domain.Entity, error)
 
 	// ListProjectPanel returns the trimmed-column projection used
 	// by the Projects panel: id, source, source_id, kind, title,

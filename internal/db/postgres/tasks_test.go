@@ -178,14 +178,14 @@ func TestTaskStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	// ListActiveRefsForEntities scoped to orgA, looking at entA, should
 	// see exactly one row. Asking the same with orgB and entA must
 	// return zero (entA isn't visible from orgB).
-	refs, err := stores.Tasks.ListActiveRefsForEntities(ctx, orgA, []string{entA})
+	refs, err := stores.Tasks.ListActiveRefsForEntities(ctx, orgA, []string{entA}, nil)
 	if err != nil {
 		t.Fatalf("ListActiveRefsForEntities orgA: %v", err)
 	}
 	if len(refs) != 1 || refs[0].ID != taskA {
 		t.Errorf("orgA refs = %+v, want exactly taskA", refs)
 	}
-	refs, err = stores.Tasks.ListActiveRefsForEntities(ctx, orgB, []string{entA})
+	refs, err = stores.Tasks.ListActiveRefsForEntities(ctx, orgB, []string{entA}, nil)
 	if err != nil {
 		t.Fatalf("ListActiveRefsForEntities orgB→entA: %v", err)
 	}

@@ -133,6 +133,43 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		}
 	})
 
+	t.Run("pending_refs_respect_team_filter", func(t *testing.T) {
+		// The factory station drawer attaches pending task refs per
+		// entity; that read must honor the same team filter as the entity
+		// belt, or a drawer for a team-A-filtered entity would still
+		// surface (and let you delegate) team B's task refs. (Codex P2 ⑤)
+		var entA, entB string
+		if err := h.AdminDB.QueryRow(`SELECT entity_id::text FROM tasks WHERE id = $1`, taskA).Scan(&entA); err != nil {
+			t.Fatalf("entity for taskA: %v", err)
+		}
+		if err := h.AdminDB.QueryRow(`SELECT entity_id::text FROM tasks WHERE id = $1`, taskB).Scan(&entB); err != nil {
+			t.Fatalf("entity for taskB: %v", err)
+		}
+		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+			store := pgstore.NewForTx(tx).Tasks
+			// Unfiltered: refs for both entities surface.
+			all, e := store.ListActiveRefsForEntities(ctx, orgID, []string{entA, entB}, nil)
+			if e != nil {
+				return e
+			}
+			if !hasRef(all, taskA) || !hasRef(all, taskB) {
+				t.Errorf("unfiltered refs missing one: %+v", all)
+			}
+			// Filtered to A: only taskA's ref, even though entB was asked for.
+			onlyA, e := store.ListActiveRefsForEntities(ctx, orgID, []string{entA, entB}, []string{teamA})
+			if e != nil {
+				return e
+			}
+			if !hasRef(onlyA, taskA) || hasRef(onlyA, taskB) {
+				t.Errorf("filter=teamA refs = %+v; want only taskA's ref", onlyA)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("pending refs filter: %v", err)
+		}
+	})
+
 	t.Run("sticky_default_round_trips", func(t *testing.T) {
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 			users := pgstore.NewForTx(tx).Users
@@ -292,11 +329,48 @@ func TestMultiTeam_Postgres(t *testing.T) {
 			t.Fatal("create returned an empty team id")
 		}
 	})
+
+	t.Run("resolve_claim_team_for_visible_nonowner", func(t *testing.T) {
+		// The ① regression case: an unclaimed task OWNED by a team the
+		// caller is NOT in (teamD), but VISIBLE to the caller's team B via
+		// a task_teams row. HandoffAgentClaim would consolidate the claim
+		// onto B, so the bot-enablement gate must check B — not the owner
+		// teamD, whose team_agents row RLS hides from the caller (which
+		// would wrongly report the bot disabled and reject the delegate).
+		// ResolveClaimTeam is what the handlers consult for that gate.
+		teamD := pgtest.SeedTeam(t, h, orgID, "delta-owner") // founder NOT in D
+		task := seedMultiTeamTask(t, h, orgID, userID, teamD, "owned-by-d")
+		pgtest.MustExec(t, h.AdminDB,
+			`INSERT INTO task_teams (task_id, team_id) VALUES ($1, $2)`, task, teamB)
+
+		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+			got, e := pgstore.NewForTx(tx).Tasks.ResolveClaimTeam(ctx, orgID, task, userID)
+			if e != nil {
+				return e
+			}
+			if got != teamB {
+				t.Errorf("ResolveClaimTeam = %q; want the caller's visible team B %q (not owner D %q)", got, teamB, teamD)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("resolve claim team: %v", err)
+		}
+	})
 }
 
 func containsTask(tasks []domain.Task, id string) bool {
 	for _, t := range tasks {
 		if t.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func hasRef(refs []domain.PendingTaskRef, taskID string) bool {
+	for _, r := range refs {
+		if r.ID == taskID {
 			return true
 		}
 	}

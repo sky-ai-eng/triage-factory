@@ -241,7 +241,7 @@ func TestEntityStore_Postgres_ListActiveJiraTeamScoped(t *testing.T) {
 	}
 	_ = ownerID
 
-	got, err := stores.Entities.ListActiveJiraTeamScoped(ctx, orgID)
+	got, err := stores.Entities.ListActiveJiraTeamScoped(ctx, orgID, "")
 	if err != nil {
 		t.Fatalf("ListActiveJiraTeamScoped: %v", err)
 	}
@@ -260,6 +260,25 @@ func TestEntityStore_Postgres_ListActiveJiraTeamScoped(t *testing.T) {
 	}
 	if ids[unattached.ID] {
 		t.Errorf("CCC-3 leaked — no team in this org attached CCC (another org's rule must not count)")
+	}
+
+	// Per-page team filter (the carry-over deck's selector): narrowing to
+	// teamA returns only teamA's tracked projects (AAA-1), not teamB's
+	// (BBB-2). Without this the deck switched to one team would still
+	// surface — and let you claim — another team's tickets. (Codex P2)
+	onlyA, err := stores.Entities.ListActiveJiraTeamScoped(ctx, orgID, teamA)
+	if err != nil {
+		t.Fatalf("ListActiveJiraTeamScoped(teamA): %v", err)
+	}
+	aIDs := map[string]bool{}
+	for _, e := range onlyA {
+		aIDs[e.ID] = true
+	}
+	if !aIDs[inA.ID] {
+		t.Errorf("filter=teamA dropped AAA-1, which teamA tracks")
+	}
+	if aIDs[inB.ID] {
+		t.Errorf("filter=teamA leaked BBB-2 (teamB's project); the deck filter must narrow to the selected team")
 	}
 }
 
@@ -298,7 +317,7 @@ func TestEntityStore_Postgres_ListActiveJiraTeamScoped_RLS(t *testing.T) {
 		t.Helper()
 		ids := map[string]bool{}
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-			rows, e := pgstore.NewForTx(tx).Entities.ListActiveJiraTeamScoped(ctx, orgID)
+			rows, e := pgstore.NewForTx(tx).Entities.ListActiveJiraTeamScoped(ctx, orgID, "")
 			if e != nil {
 				return e
 			}

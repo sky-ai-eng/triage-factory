@@ -127,8 +127,10 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
   const [kind, setKind] = useState<PromptKind>('leaf')
   // Acting team — create mode only; a prompt's team is fixed
   // after creation. TeamPicker renders only at ≥2 teams; below that
-  // `team` stays '' and the server resolves the sole team.
-  const { teams, preferredTeamId } = useTeams()
+  // `team` stays '' and the server resolves the sole team. teamsLoaded
+  // gates the create submit so a multi-team user can't submit team_id:''
+  // in the cold-load window before /api/teams resolves.
+  const { teams, preferredTeamId, loaded: teamsLoaded } = useTeams()
   const [team, setTeam] = useState('')
   const [chainDraft, setChainDraft] = useState<ChainStepDraft[]>([])
   const [model, setModel] = useState('')
@@ -223,11 +225,13 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
 
   // Seed the acting team for create mode once the teams load. Kept in its
   // own effect (not the form-reset above) so a late teams fetch reseeds
-  // without re-running the whole reset and clobbering user input.
+  // without re-running the whole reset and clobbering user input. Gated
+  // on teamsLoaded so the seed reflects the real team set, not the empty
+  // pre-fetch state.
   useEffect(() => {
-    if (!isNew) return
+    if (!isNew || !teamsLoaded) return
     setTeam(pickerDefault(teams, preferredTeamId))
-  }, [isNew, open, teams, preferredTeamId])
+  }, [isNew, open, teamsLoaded, teams, preferredTeamId])
 
   // Resize drag handlers
   const onMouseDown = useCallback(
@@ -622,7 +626,7 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
                 </button>
                 <button
                   onClick={save}
-                  disabled={saving}
+                  disabled={saving || (isNew && !teamsLoaded)}
                   className="text-[12px] font-semibold text-white bg-accent hover:bg-accent/90 px-4 py-1.5 rounded-full transition-colors disabled:opacity-50"
                 >
                   {saving ? 'Saving...' : isNew ? 'Create' : 'Save'}

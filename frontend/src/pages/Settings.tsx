@@ -1348,11 +1348,19 @@ export default function Settings() {
           >
             {saving ? 'Saving...' : 'Save Settings'}
           </button>
+        </form>
+        {/* These sit OUTSIDE the settings <form>: TeamManagementSection
+            renders its own <form> (Add team), and nesting forms is
+            invalid HTML — the inner submit would bubble as the outer
+            Save Settings. renderIntegrations / renderDanger are
+            self-contained sections with their own actions too, so they
+            belong outside the save form regardless. */}
+        <div className="space-y-5 mt-5">
           {/* Hosted solo (N=1) admins can still grow past one team. */}
           {renderTeams()}
           {renderIntegrations()}
           {renderDanger()}
-        </form>
+        </div>
       </div>
     )
   }

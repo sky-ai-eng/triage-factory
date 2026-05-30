@@ -52,7 +52,7 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
   // backlog to triage) AND the claim team. teamRef keeps fetchStock's
   // identity stable (it's a polling-recursion + WS dep). Renders only at
   // ≥2 teams; below that team='' and the server resolves the sole team.
-  const { teams, preferredTeamId } = useTeams()
+  const { teams, preferredTeamId, loaded: teamsLoaded } = useTeams()
   const [team, setTeam] = useState('')
   const teamRef = useRef('')
   useEffect(() => {
@@ -60,10 +60,10 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
   }, [team])
   const teamSeeded = useRef(false)
   useEffect(() => {
-    if (teamSeeded.current || teams.length === 0) return
+    if (teamSeeded.current || !teamsLoaded) return
     teamSeeded.current = true
     setTeam(pickerDefault(teams, preferredTeamId))
-  }, [teams, preferredTeamId])
+  }, [teamsLoaded, teams, preferredTeamId])
 
   // Keep refs for component lifecycle and polling so retry timers don't
   // continue firing after unmount.
@@ -362,7 +362,7 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
           <button
             type="button"
             onClick={handleSave}
-            disabled={selectionCount === 0 || saving}
+            disabled={selectionCount === 0 || saving || !teamsLoaded}
             className="bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-5 py-2 text-[13px] transition-colors"
           >
             {saving ? 'Saving…' : 'Save'}

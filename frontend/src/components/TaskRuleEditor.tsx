@@ -46,13 +46,15 @@ export default function TaskRuleEditor({
 
   // Acting team — create mode only; a rule's team is immutable.
   // TeamPicker renders only at ≥2 teams; below that `team` stays '' and
-  // the server resolves the sole team. Seeded once when the panel opens.
-  const { teams, preferredTeamId } = useTeams()
+  // the server resolves the sole team. Seeded when the panel opens, once
+  // teams have loaded; teamsLoaded also gates the create submit so a
+  // multi-team user can't submit team_id:'' in the cold-load window.
+  const { teams, preferredTeamId, loaded: teamsLoaded } = useTeams()
   const [team, setTeam] = useState('')
   useEffect(() => {
-    if (!open || isEdit) return
+    if (!open || isEdit || !teamsLoaded) return
     setTeam(pickerDefault(teams, preferredTeamId))
-  }, [open, isEdit, teams, preferredTeamId])
+  }, [open, isEdit, teamsLoaded, teams, preferredTeamId])
 
   // Track original predicate JSON for PATCH diff.
   const [originalPredicateJSON, setOriginalPredicateJSON] = useState<string | null>(null)
@@ -377,7 +379,7 @@ export default function TaskRuleEditor({
                     </button>
                     <button
                       onClick={handleSave}
-                      disabled={saving || !eventType || !name.trim()}
+                      disabled={saving || !eventType || !name.trim() || (!isEdit && !teamsLoaded)}
                       className="text-[13px] font-semibold text-white bg-accent hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed px-5 py-2 rounded-full transition-colors"
                     >
                       {saving ? 'Saving…' : isEdit ? 'Save' : 'Create'}

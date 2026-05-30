@@ -101,7 +101,14 @@ type TaskStore interface {
 	// tasks per entity in a single round-trip — no entity JOIN,
 	// no priority columns. Chunks internally on SQLite's
 	// variable-bind limit.
-	ListActiveRefsForEntities(ctx context.Context, orgID string, entityIDs []string) ([]domain.PendingTaskRef, error)
+	//
+	// teamIDs is the factory's per-page team filter (same shape as
+	// Queued): empty = the viewer's union, non-empty narrows the refs to
+	// those teams via the same RLS-mirroring predicate as Queued. Without
+	// it the station drawer would surface (and let you delegate) task
+	// refs outside the selected team scope even when the entity belt was
+	// filtered. Postgres-only effect; SQLite is N=1 and ignores it.
+	ListActiveRefsForEntities(ctx context.Context, orgID string, entityIDs []string, teamIDs []string) ([]domain.PendingTaskRef, error)
 
 	// EntityIDsWithActiveTasks returns the set of entity IDs with
 	// at least one non-terminal task, scoped to the given entity
@@ -232,6 +239,20 @@ type TaskStore interface {
 	// visibility set; the existing owner when that is empty or
 	// ambiguous).
 	HandoffAgentClaim(ctx context.Context, orgID, taskID, agentID, userID string) (HandoffResult, error)
+
+	// ResolveClaimTeam returns the team a user→bot handoff WOULD
+	// consolidate the task onto, without mutating anything — the same
+	// derivation HandoffAgentClaim applies: the caller's team in the
+	// task's task_teams visibility set (preferring the current owner on a
+	// tie), falling back to the task's current team_id. Returns "" when
+	// the task doesn't exist (or RLS hides it).
+	//
+	// The delegate handlers call this BEFORE the bot-enablement gate so
+	// the gate checks team_agents for the team the claim will actually
+	// land on — not the pre-handoff team_id, which for a multi-team
+	// unclaimed task can be a team the caller doesn't belong to (whose
+	// team_agents row RLS then hides, wrongly reporting the bot disabled).
+	ResolveClaimTeam(ctx context.Context, orgID, taskID, userID string) (string, error)
 
 	// TakeoverClaimFromAgent atomically flips a bot-claimed task
 	// to a user claim. Race-safe: guards on the bot still holding

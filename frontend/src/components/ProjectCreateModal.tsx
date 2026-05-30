@@ -6,7 +6,7 @@ import { toast } from './Toast/toastStore'
 import RepoMultiSelect from './RepoMultiSelect'
 import TrackerProjectPickers from './TrackerProjectPickers'
 import TeamPicker from './TeamPicker'
-import { useTeams, pickerDefault, noteWrittenTeam } from '../hooks/useTeams'
+import { useWriteTeam, noteWrittenTeam } from '../hooks/useTeams'
 
 // ProjectCreateModal is the only way to create a project from the UI.
 // Required: name. Optional: description, pinned repos, tracker
@@ -25,26 +25,23 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
   const [jiraKey, setJiraKey] = useState('')
   const [linearKey, setLinearKey] = useState('')
   const [submitting, setSubmitting] = useState(false)
-  // Acting team. The TeamPicker renders only at ≥2 teams; below
-  // that `team` stays '' and the server resolves the sole team. Seeded
-  // from the sticky default → most-recent → first team once teams load.
-  const { teams, preferredTeamId } = useTeams()
-  const [team, setTeam] = useState('')
-  const teamSeeded = useRef(false)
-  useEffect(() => {
-    if (teamSeeded.current || teams.length === 0) return
-    teamSeeded.current = true
-    setTeam(pickerDefault(teams, preferredTeamId))
-  }, [teams, preferredTeamId])
+  // Acting team. The TeamPicker renders only at ≥2 teams; below that
+  // `team` stays '' and the server resolves the sole team. `ready` is
+  // false until /api/teams resolves — the submit button gates on it so a
+  // multi-team user can't submit team_id:'' in the cold-load window.
+  const { team, setTeam, ready: teamReady } = useWriteTeam()
 
   // Switching teams invalidates the pinned-repo selection: repos are
   // team-scoped (validatePinnedRepos checks the acting team's tracked
   // set), so a repo picked under team A would 400 when submitting under
   // team B. Reset to empty and let the user re-pick from the new team.
-  const onTeamChange = useCallback((next: string) => {
-    setTeam(next)
-    setPinnedRepos([])
-  }, [])
+  const onTeamChange = useCallback(
+    (next: string) => {
+      setTeam(next)
+      setPinnedRepos([])
+    },
+    [setTeam],
+  )
   // Holds the in-flight POST's AbortController so the close path
   // can cancel it. Without this, clicking the backdrop / hitting
   // Escape after submit would dismiss the dialog while leaving the
@@ -240,7 +237,7 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
             </button>
             <button
               type="submit"
-              disabled={submitting || !name.trim()}
+              disabled={submitting || !name.trim() || !teamReady}
               className="
                 rounded-full px-4 py-2 text-[13px] font-medium
                 bg-accent text-white hover:opacity-90
