@@ -92,9 +92,11 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID
 	// write by team admin) so the team-row mutation and the repo_profiles
 	// reconcile are atomic. A per-org transaction advisory lock serializes
 	// concurrent same-org saves so the union recompute can't race a
-	// sibling team's write into an inconsistent repo_profiles.
+	// sibling team's write into an inconsistent repo_profiles. The key is
+	// hashtextextended (64-bit) so distinct orgs don't collide onto the
+	// same lock and serialize against each other.
 	return inTx(ctx, s.app, func(tx queryer) error {
-		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, orgID); err != nil {
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, orgID); err != nil {
 			return fmt.Errorf("lock org for repo reconcile: %w", err)
 		}
 
@@ -135,7 +137,7 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID
 		union, err := scanRepoRows(tx.QueryContext(ctx,
 			`SELECT owner, repo FROM tf.org_tracked_repos($1)`, orgID))
 		if err != nil {
-			return err
+			return fmt.Errorf("read org %s tracked-repo union: %w", orgID, err)
 		}
 		return reconcileRepoProfilesFromUnion(ctx, tx, orgID, union)
 	})
