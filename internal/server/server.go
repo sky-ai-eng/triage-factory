@@ -68,7 +68,12 @@ type Server struct {
 	// context. Each cleanup wraps in `s.tx.WithTx(cleanupCtx, orgID,
 	// userID, fn)` so multi-mode RLS sees the user's identity. Local
 	// mode SQLite ignores userID.
-	tx         db.TxRunner
+	tx db.TxRunner
+	// allStores is the full bundle, retained so post-commit bootstrap
+	// helpers (db.BootstrapNewOrg / db.BootstrapNewTeam) — which take a
+	// db.Stores and must run outside WithTx on the admin pool — can be
+	// invoked from handlers without re-threading every individual store.
+	allStores  db.Stores
 	mux        *http.ServeMux
 	static     fs.FS
 	ws         *websocket.Hub
@@ -310,6 +315,7 @@ func New(database *sql.DB, stores db.Stores, takeoverDir string, serverPort int)
 		jiraRules:     stores.JiraStatusRules,
 		githubApps:    stores.GitHubApps,
 		tx:            stores.Tx,
+		allStores:     stores,
 		takeoverDir:   takeoverDir,
 		serverPort:    serverPort,
 		mux:           http.NewServeMux(),

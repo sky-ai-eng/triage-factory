@@ -6,7 +6,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -47,39 +46,10 @@ func seedDefaultPrompts(prompts db.PromptStore, handlers db.EventHandlerStore) {
 	type orgTeam struct{ orgID, teamID string }
 	orgs := []orgTeam{{runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID}}
 
-	shipped := []domain.Prompt{
-		// Default PR review prompt — manual only. The user picks when
-		// to review a PR; no automation makes sense for reviewing
-		// (including reviewing one's own draft — that's just running
-		// this prompt by hand).
-		{ID: "system-pr-review", Name: "PR Code Review", Body: ai.PRReviewPromptTemplate, Source: "system"},
-
-		// Merge conflict resolution prompt — auto-fired on merge
-		// conflicts on the user's own PRs via the matching trigger
-		// below.
-		{ID: "system-conflict-resolution", Name: "Merge Conflict Resolution", Body: ai.ConflictResolutionPromptTemplate, Source: "system"},
-
-		// CI fix prompt — auto-fired on CI failures via prompt_trigger.
-		{ID: "system-ci-fix", Name: "CI Fix", Body: ai.CIFixPromptTemplate, Source: "system"},
-
-		// Jira implementation prompt — auto-fired on issues assigned
-		// to the user via the matching trigger below.
-		{ID: "system-jira-implement", Name: "Jira Issue Implementation", Body: ai.JiraImplementPromptTemplate, Source: "system"},
-
-		// Fix review feedback — fires on reviews landed on the user's
-		// PRs. Same action regardless of whether the reviewer is the
-		// user (self-review loop) or someone else (normal code
-		// review): read the review, fix what's right, push back on
-		// what isn't, push to branch.
-		{ID: "system-fix-review-feedback", Name: "Fix Review Feedback", Body: ai.FixReviewFeedbackPromptTemplate, Source: "system"},
-
-		// Default Curator spec-authorship skill (SKY-221). The Curator
-		// materializes whichever prompt a project points at as a
-		// literal Claude Code skill on each dispatch; new projects
-		// start pointing at this one. Users override per-project via
-		// the Projects page.
-		{ID: domain.SystemTicketSpecPromptID, Name: "Curator: Ticket as a Spec", Body: ai.TicketSpecPromptTemplate, Source: "system"},
-	}
+	// Shipped system prompts live in ai.ShippedPrompts() — the single
+	// source of truth shared with the multi-mode org-create bootstrap
+	// (db.BootstrapNewOrg) so the two seed paths can't drift.
+	shipped := ai.ShippedPrompts()
 
 	for _, ot := range orgs {
 		for _, p := range shipped {

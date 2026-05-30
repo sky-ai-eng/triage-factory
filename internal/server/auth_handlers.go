@@ -22,6 +22,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	tfdb "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -292,6 +293,26 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defaultOrg := provResult.activeOrgID
+
+	// Seed the shipped defaults (agent + prompts + handlers + team_agents)
+	// for a freshly-created org. Runs AFTER provisionUserOrgs has committed
+	// its transaction: the seeders route through the admin pool and refuse
+	// to run inside a WithTx, so they can't join the provisioning tx.
+	// Idempotent + log-and-continue — a signed-in user with an un-seeded
+	// org is usable (auto-delegation just won't fire until a bootstrap
+	// re-run repairs it), whereas failing the callback here would strand a
+	// user who already has a committed org + membership. (SKY-378 — D7/D14
+	// org-create bootstrap follow-through.)
+	if provResult.bootstrapOrgID.Valid && provResult.bootstrapTeamID.Valid {
+		if berr := tfdb.BootstrapNewOrg(r.Context(), s.allStores,
+			provResult.bootstrapOrgID.UUID.String(),
+			provResult.bootstrapTeamID.UUID.String(),
+			ai.ShippedPrompts(),
+		); berr != nil {
+			log.Printf("[auth] org %s provisioned but bootstrap failed (shipped prompts/rules/bot may be missing): %v",
+				provResult.bootstrapOrgID.UUID, berr)
+		}
+	}
 
 	// Trust the JWT's exp claim. The exchange response also carries
 	// expires_in, but the signed claim is authoritative and the

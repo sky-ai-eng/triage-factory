@@ -88,3 +88,70 @@ func BootstrapTeamAgent(ctx context.Context, stores Stores, orgID, teamID string
 	}
 	return nil
 }
+
+// BootstrapNewTeam materializes the shipped defaults for a *new team in
+// an existing org* (SKY-378): the team's default-enabled bot membership
+// (team_agents) plus the shipped event handlers (rules + triggers)
+// scoped to that team. The org's agents row and shipped prompts already
+// exist (they were seeded at org-create), so this does not re-seed
+// prompts — the handler trigger rows FK into the org's existing
+// prompt rows.
+//
+// Must run OUTSIDE any caller WithTx: EventHandlers.Seed and
+// TeamAgents.AddForTeam both route through the Postgres admin pool
+// (system rows have NULL creator_user_id; the modify policies gate on
+// tf.current_user_id() which the boot/bootstrap path doesn't set) and
+// guard against being called inside an app-pool tx. Idempotent — re-runs
+// no-op via ON CONFLICT, and never flip a team's bot back to enabled if
+// the team disabled it.
+//
+// Errors are returned, not swallowed; the team-create handler logs and
+// continues (a team that exists without seeded defaults is degraded, not
+// broken — re-running bootstrap repairs it — and failing the create
+// after the row committed would be worse).
+func BootstrapNewTeam(ctx context.Context, stores Stores, orgID, teamID string) error {
+	if err := BootstrapTeamAgent(ctx, stores, orgID, teamID); err != nil {
+		return err
+	}
+	if err := stores.EventHandlers.Seed(ctx, orgID, teamID); err != nil {
+		return fmt.Errorf("bootstrap new team: seed event handlers: %w", err)
+	}
+	return nil
+}
+
+// BootstrapNewOrg materializes the shipped defaults for a brand-new org
+// + its default team (the multi-mode founder-signup path, SKY-378 /
+// SKY-251 D7): the org's single agents row, the shipped system prompts,
+// the shipped event handlers scoped to the default team, and the team's
+// default-enabled bot membership. shippedPrompts is passed in (rather
+// than read from internal/ai) so internal/db stays free of the ai
+// dependency — main / server supply ai.ShippedPrompts().
+//
+// Order is load-bearing: agent → prompts → handlers → team_agents. The
+// trigger rows in EventHandlers.Seed FK into the prompts (composite
+// (prompt_id, org_id)), so prompts must land first; the team_agents row
+// needs the agent created in step 1.
+//
+// Like BootstrapNewTeam this must run OUTSIDE any WithTx (admin-pool
+// seeders) and is fully idempotent. The org-provisioning caller runs it
+// AFTER the tenant-row transaction commits, and logs-and-continues on
+// error: a provisioned org with un-seeded defaults is usable (the user
+// is signed in with an org + team) and a later bootstrap re-run repairs
+// auto-delegation, whereas failing the signup callback strands the user.
+func BootstrapNewOrg(ctx context.Context, stores Stores, orgID, teamID string, shippedPrompts []domain.Prompt) error {
+	if _, err := BootstrapAgentForOrg(ctx, stores, orgID); err != nil {
+		return err
+	}
+	for _, p := range shippedPrompts {
+		if err := stores.Prompts.SeedOrUpdate(ctx, orgID, p); err != nil {
+			return fmt.Errorf("bootstrap new org: seed prompt %s: %w", p.ID, err)
+		}
+	}
+	if err := stores.EventHandlers.Seed(ctx, orgID, teamID); err != nil {
+		return fmt.Errorf("bootstrap new org: seed event handlers: %w", err)
+	}
+	if err := BootstrapTeamAgent(ctx, stores, orgID, teamID); err != nil {
+		return err
+	}
+	return nil
+}

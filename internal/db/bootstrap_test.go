@@ -7,6 +7,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -124,6 +125,120 @@ func TestBootstrapTeamAgent_ErrorsWhenOrgHasNoAgent(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no agent") {
 		t.Errorf("error %q does not mention the missing-agent sequencing bug", err.Error())
+	}
+}
+
+// TestBootstrapNewTeam_SeedsAgentAndHandlers pins SKY-378's team-create
+// bootstrap: a new team in an existing org gets a default-enabled
+// team_agents row AND the shipped event handlers scoped to it, so a
+// freshly-created team's auto-delegation works out of the box rather
+// than starting dead. Uses the local org/team graph from the baseline +
+// BootstrapLocalAgent for the org agent, then seeds the org's prompts
+// (the shipped trigger rows FK into them) before adding the new team.
+func TestBootstrapNewTeam_SeedsAgentAndHandlers(t *testing.T) {
+	conn := openInMemorySQLite(t)
+	stores := sqlitestore.New(conn)
+	ctx := t.Context()
+
+	// Org agent + the org's shipped prompts must exist first (the
+	// shipped triggers FK into prompts).
+	if err := db.BootstrapLocalAgent(ctx, stores); err != nil {
+		t.Fatalf("BootstrapLocalAgent: %v", err)
+	}
+	for _, p := range ai.ShippedPrompts() {
+		if err := stores.Prompts.SeedOrUpdate(ctx, runmode.LocalDefaultOrg, p); err != nil {
+			t.Fatalf("seed prompt %s: %v", p.ID, err)
+		}
+	}
+
+	// A second team in the same org (the "add team" outcome).
+	const newTeamID = "00000000-0000-0000-0000-0000000000b2"
+	if _, err := conn.ExecContext(ctx,
+		`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, 'beta', 'Beta')`,
+		newTeamID, runmode.LocalDefaultOrg,
+	); err != nil {
+		t.Fatalf("insert second team: %v", err)
+	}
+
+	if err := db.BootstrapNewTeam(ctx, stores, runmode.LocalDefaultOrg, newTeamID); err != nil {
+		t.Fatalf("BootstrapNewTeam: %v", err)
+	}
+
+	// team_agents row, default-enabled.
+	agent, err := stores.Agents.GetForOrg(ctx, runmode.LocalDefaultOrg)
+	if err != nil {
+		t.Fatalf("GetForOrg: %v", err)
+	}
+	ta, err := stores.TeamAgents.GetForTeam(ctx, runmode.LocalDefaultOrg, newTeamID, agent.ID)
+	if err != nil {
+		t.Fatalf("GetForTeam: %v", err)
+	}
+	if ta == nil || !ta.Enabled {
+		t.Errorf("new team has no default-enabled team_agents row: %+v", ta)
+	}
+
+	// Shipped handlers landed on the new team.
+	var n int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM event_handlers WHERE org_id = ? AND team_id = ? AND source = 'system'`,
+		runmode.LocalDefaultOrg, newTeamID,
+	).Scan(&n); err != nil {
+		t.Fatalf("count handlers: %v", err)
+	}
+	if n == 0 {
+		t.Error("new team got no shipped event handlers; auto-delegation would be dead for it")
+	}
+}
+
+// TestBootstrapNewOrg_SeedsFullStack pins SKY-378's org-create
+// bootstrap: a brand-new org + default team gets the agent, the shipped
+// prompts, the shipped handlers, and the team's enabled bot membership —
+// the founder-signup path that previously created only the tenant rows.
+// Runs against the local sentinel org/team as a stand-in for a freshly
+// provisioned multi-mode org (same store contracts).
+func TestBootstrapNewOrg_SeedsFullStack(t *testing.T) {
+	conn := openInMemorySQLite(t)
+	stores := sqlitestore.New(conn)
+	ctx := t.Context()
+
+	if err := db.BootstrapNewOrg(ctx, stores,
+		runmode.LocalDefaultOrg, db.LocalDefaultTeamID, ai.ShippedPrompts(),
+	); err != nil {
+		t.Fatalf("BootstrapNewOrg: %v", err)
+	}
+
+	// Agent + enabled team membership.
+	agent, err := stores.Agents.GetForOrg(ctx, runmode.LocalDefaultOrg)
+	if err != nil || agent == nil {
+		t.Fatalf("GetForOrg: agent=%v err=%v", agent, err)
+	}
+	ta, err := stores.TeamAgents.GetForTeam(ctx, runmode.LocalDefaultOrg, db.LocalDefaultTeamID, agent.ID)
+	if err != nil {
+		t.Fatalf("GetForTeam: %v", err)
+	}
+	if ta == nil || !ta.Enabled {
+		t.Errorf("default team has no enabled team_agents row: %+v", ta)
+	}
+
+	// Prompts seeded.
+	got, err := stores.Prompts.Get(ctx, runmode.LocalDefaultOrg, "system-pr-review")
+	if err != nil {
+		t.Fatalf("Get prompt: %v", err)
+	}
+	if got == nil {
+		t.Error("shipped prompt system-pr-review missing after BootstrapNewOrg")
+	}
+
+	// Handlers seeded on the default team.
+	var n int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM event_handlers WHERE org_id = ? AND source = 'system'`,
+		runmode.LocalDefaultOrg,
+	).Scan(&n); err != nil {
+		t.Fatalf("count handlers: %v", err)
+	}
+	if n == 0 {
+		t.Error("no shipped event handlers after BootstrapNewOrg")
 	}
 }
 

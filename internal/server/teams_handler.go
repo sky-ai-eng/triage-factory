@@ -1,6 +1,7 @@
 package server
 
 import (
+	"log"
 	"net/http"
 	"strings"
 
@@ -191,5 +192,19 @@ func (s *Server) handleTeamCreate(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "teams", err)
 		return
 	}
+
+	// Materialize the shipped defaults for the new team — its
+	// default-enabled bot membership + the shipped event handlers
+	// (rules + triggers) scoped to it. Runs AFTER the team row commits
+	// because the seeders route through the admin pool and refuse to run
+	// inside the request's WithTx. Idempotent. Log-and-continue on
+	// failure: the team exists and is usable; a missing-defaults team is
+	// degraded (auto-delegation won't fire) but repairable by re-running
+	// bootstrap, whereas failing the create after the row committed would
+	// orphan it. (SKY-378 — D7 team-create bootstrap follow-through.)
+	if err := db.BootstrapNewTeam(r.Context(), s.allStores, orgID, created.ID); err != nil {
+		log.Printf("[teams] new team %s/%s created but bootstrap failed (shipped rules/bot may be missing): %v", orgID, created.ID, err)
+	}
+
 	writeJSON(w, http.StatusCreated, teamJSON{ID: created.ID, Name: created.Name, Slug: created.Slug})
 }
