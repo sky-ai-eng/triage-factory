@@ -591,42 +591,42 @@ function PinnedReposInline({
     }
   }, [pinned])
 
-  // loadRepos populates `available` with the *project team's* tracked
-  // repos — not the org-wide /api/repos union. The PATCH validator only
-  // accepts repos this project's team tracks, so offering the union would
-  // let a user pick a sibling team's repo that then 400s on save.
+  // loadRepos populates `available` from the configured-repos API.
   // Tracks loadError separately so a transient failure surfaces as
   // a "couldn't load — try again" hint in the popover instead of
   // the misleading "No repos configured" empty state, which would
   // route the user to a setup page they may have already completed.
-  const loadRepos = useCallback(
-    async (signal: AbortSignal) => {
-      setLoadError(null)
-      try {
-        const res = await fetch(`/api/settings/team/${encodeURIComponent(teamId)}/repos`, {
-          signal,
-        })
-        if (signal.aborted) return
-        if (!res.ok) {
-          const message = await readError(res, 'load repos')
-          setLoadError(message)
-          toast.error(message)
-          return
-        }
-        const data: { repos?: string[] } = await res.json()
-        if (signal.aborted) return
-        setAvailable(data.repos ?? [])
-      } catch (err) {
-        if (signal.aborted) return
-        const message = err instanceof Error ? err.message : 'Failed to load repos'
+  //
+  // TODO(SKY-294): this offers the org-wide /api/repos union, but the
+  // PATCH validator only accepts repos the project's OWN team tracks. In
+  // N=1 the two sets are identical (repo_profiles is the single default
+  // team's tracked set), so every offered repo validates. Once multi-team
+  // exists, source this from /api/settings/team/{team_id}/repos and thread
+  // the project's team_id in (the Project type needs to expose it) — same
+  // deferred multi-team frontend gap as RepoMultiSelect.
+  const loadRepos = useCallback(async (signal: AbortSignal) => {
+    setLoadError(null)
+    try {
+      const res = await fetch('/api/repos', { signal })
+      if (signal.aborted) return
+      if (!res.ok) {
+        const message = await readError(res, 'load repos')
         setLoadError(message)
         toast.error(message)
-      } finally {
-        if (!signal.aborted) setLoading(false)
+        return
       }
-    },
-    [teamId],
-  )
+      const data: Array<{ id: string }> = await res.json()
+      if (signal.aborted) return
+      setAvailable(data.map((r) => r.id))
+    } catch (err) {
+      if (signal.aborted) return
+      const message = err instanceof Error ? err.message : 'Failed to load repos'
+      setLoadError(message)
+      toast.error(message)
+    } finally {
+      if (!signal.aborted) setLoading(false)
+    }
+  }, [])
 
   useEffect(() => {
     const controller = new AbortController()

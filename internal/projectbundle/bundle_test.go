@@ -326,6 +326,23 @@ func TestImport_RoundTripSessionTreeAndCompactions(t *testing.T) {
 	if pending[0].CuratorSessionID != imported.CuratorSessionID {
 		t.Fatalf("pending context session id = %q, want %q", pending[0].CuratorSessionID, imported.CuratorSessionID)
 	}
+
+	// The imported pin must be tracked for the importing team, not just
+	// upserted into repo_profiles. repo_profiles is a derived cache of
+	// team_github_repos, and the router team↔repo gate keys off the
+	// tracking table — without this row the team's handlers are dropped
+	// for the repo and polled events create no tasks until the user
+	// re-saves the selection.
+	var tracked int
+	if err := targetDB.QueryRow(
+		`SELECT count(*) FROM team_github_repos WHERE team_id = ? AND owner = ? AND repo = ?`,
+		runmode.LocalDefaultTeamID, "sky-ai-eng", "triage-factory",
+	).Scan(&tracked); err != nil {
+		t.Fatalf("team_github_repos lookup: %v", err)
+	}
+	if tracked != 1 {
+		t.Fatalf("imported pin not tracked for team: team_github_repos rows = %d, want 1", tracked)
+	}
 }
 
 func TestImport_MissingReposAbortsWithoutWrites(t *testing.T) {
