@@ -53,7 +53,7 @@ func seedRun(t *testing.T, stores db.Stores, runID, triggerType string) {
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}
-	if err := stores.Prompts.Create(ctx, runmode.LocalDefaultOrg, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
+	if err := stores.Prompts.Create(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
 	if err := stores.AgentRuns.Create(ctx, runmode.LocalDefaultOrg, domain.AgentRun{

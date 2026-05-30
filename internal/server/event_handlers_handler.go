@@ -209,7 +209,11 @@ func (s *Server) handleEventHandlerCreate(w http.ResponseWriter, r *http.Request
 
 	var fresh *domain.EventHandler
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if e := tx.EventHandlers.Create(r.Context(), orgID, h); e != nil {
+		teamID, e := resolveActingTeam(r.Context(), tx.Teams, orgID)
+		if e != nil {
+			return e
+		}
+		if e := tx.EventHandlers.Create(r.Context(), orgID, teamID, h); e != nil {
 			return e
 		}
 		var ge error

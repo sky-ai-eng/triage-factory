@@ -83,13 +83,10 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 	// lazy-load policy: only read jira rules when the Jira side needs
 	// validation.
 	//
-	// TODO(SKY-294): new projects are created under the org's default team
-	// because there is no write-time team picker yet. This is correct while
-	// every org has a single default team; when the picker lands, take the
-	// acting team from the request body instead of GetDefaultForOrg (the
-	// frontend RepoMultiSelect hardcodes the matching default-team path).
-	// Note UPDATE already validates against the project's own
-	// existing.TeamID — only this create path assumes default.
+	// The acting team owns the new project — resolveActingTeam centralizes
+	// the team choice (today: the org's sole/default team). UPDATE instead
+	// validates against the project's own existing.TeamID, so only this
+	// create path resolves a team.
 	var (
 		teamID        string
 		pinned        []string
@@ -98,12 +95,9 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		teamID, e = tx.Teams.GetDefaultForOrg(r.Context(), orgID)
+		teamID, e = resolveActingTeam(r.Context(), tx.Teams, orgID)
 		if e != nil {
-			return fmt.Errorf("default team lookup: %w", e)
-		}
-		if teamID == "" {
-			return fmt.Errorf("org %s has no default team", orgID)
+			return e
 		}
 		pinned, pinnedErrMsg = validatePinnedRepos(r.Context(), tx.TeamGitHubRepos, teamID, req.PinnedRepos)
 		if jiraKey != "" {
@@ -330,22 +324,17 @@ func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userID := ClaimsFrom(r.Context()).Subject
-	// Resolve the default team inside WithTx so teams_select RLS
-	// gates the lookup under the user's claims. The downstream
-	// projectbundle.Import does its own DB work; we don't include
-	// it in this tx to keep import latency from holding a claims-
-	// bound connection.
+	// Resolve the acting team inside WithTx so teams_select RLS gates the
+	// lookup under the user's claims. The downstream projectbundle.Import
+	// does its own DB work; we don't include it in this tx to keep import
+	// latency from holding a claims-bound connection. (Import is local-
+	// mode-only — gated above — so the acting team is always the sole
+	// team; resolveActingTeam keeps the choice centralized regardless.)
 	var teamID string
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		teamID, e = tx.Teams.GetDefaultForOrg(r.Context(), orgID)
-		if e != nil {
-			return fmt.Errorf("default team lookup: %w", e)
-		}
-		if teamID == "" {
-			return fmt.Errorf("org %s has no default team", orgID)
-		}
-		return nil
+		teamID, e = resolveActingTeam(r.Context(), tx.Teams, orgID)
+		return e
 	}); err != nil {
 		internalError(w, "projects", err)
 		return

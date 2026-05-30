@@ -218,21 +218,23 @@ func (s *eventHandlerStore) ListForPrompt(ctx context.Context, orgID, promptID s
 	return collectEventHandlersSQLite(rows)
 }
 
-func (s *eventHandlerStore) Create(ctx context.Context, orgID string, h domain.EventHandler) error {
+func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h domain.EventHandler) error {
 	if err := db.ValidateEventHandlerForCreate(&h); err != nil {
 		return err
 	}
+	_ = teamID // local mode is single-team; rows pin LocalDefaultTeamID below
 	var pred any
 	if h.ScopePredicateJSON != nil {
 		pred = *h.ScopePredicateJSON
 	}
 	now := time.Now().UTC()
 
-	// Post-SKY-262, user-source rows are team-scoped with team_id =
-	// LocalDefaultTeamID + visibility='team'. SQLite has one team in
-	// local mode (sentinel from SKY-269) so the lookup is trivial.
-	// creator_user_id is required for source='user' rows by the
-	// event_handlers_system_has_no_creator CHECK.
+	// user-source rows are team-scoped with team_id = LocalDefaultTeamID
+	// + visibility='team'. SQLite has one team in local mode (the
+	// sentinel) so the acting team is always that team — the teamID the
+	// handler threads is ignored here. creator_user_id is required for
+	// source='user' rows by the event_handlers_system_has_no_creator
+	// CHECK.
 	switch h.Kind {
 	case domain.EventHandlerKindRule:
 		_, err := s.q.ExecContext(ctx, `

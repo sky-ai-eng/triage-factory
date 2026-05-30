@@ -51,7 +51,7 @@ func createTriggerForTestRouting(t *testing.T, database *sql.DB, trig domain.Eve
 	if trig.TriggerType == "" {
 		trig.TriggerType = domain.TriggerTypeEvent
 	}
-	if err := testEventHandlerStore(database).Create(context.Background(), runmode.LocalDefaultOrg, trig); err != nil {
+	if err := testEventHandlerStore(database).Create(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, trig); err != nil {
 		t.Fatalf("createTriggerForTestRouting %s: %v", trig.ID, err)
 	}
 }
@@ -69,7 +69,7 @@ func setTriggerEnabledForTestRouting(t *testing.T, database *sql.DB, id string, 
 func createTestPrompt(t *testing.T, database *sql.DB, p domain.Prompt) {
 	t.Helper()
 	store := testPromptStore(database)
-	if err := store.Create(context.Background(), runmode.LocalDefaultOrg, p); err != nil {
+	if err := store.Create(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, p); err != nil {
 		t.Fatalf("createTestPrompt %s: %v", p.ID, err)
 	}
 }

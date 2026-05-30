@@ -367,6 +367,10 @@ export interface Project {
   id: string
   name: string
   description: string
+  /** The team that owns this project (domain.Project.TeamID). The
+   *  pinned-repos editor sources its options from this team's tracked
+   *  set, since the PATCH validator only accepts repos this team tracks. */
+  team_id: string
   curator_session_id?: string
   pinned_repos: string[]
   jira_project_key: string

@@ -60,7 +60,7 @@ func seedFooterRun(t *testing.T, database *sql.DB, fix runFooterFixture) {
 	prompts := sqlitestore.New(database).Prompts
 	ctx := t.Context()
 	if existing, _ := prompts.Get(ctx, runmode.LocalDefaultOrg, "footer-test-prompt"); existing == nil {
-		if err := prompts.Create(ctx, runmode.LocalDefaultOrg, domain.Prompt{ID: "footer-test-prompt", Name: "T", Body: "x", Source: "user"}); err != nil {
+		if err := prompts.Create(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Prompt{ID: "footer-test-prompt", Name: "T", Body: "x", Source: "user"}); err != nil {
 			t.Fatalf("prompt: %v", err)
 		}
 	}

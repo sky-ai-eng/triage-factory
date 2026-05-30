@@ -172,7 +172,7 @@ func importSkillFile(ctx context.Context, database *sql.DB, prompts db.PromptSto
 		AllowedTools: meta.AllowedTools,
 	}
 
-	if err := prompts.Create(ctx, runmode.LocalDefaultOrg, prompt); err != nil {
+	if err := prompts.Create(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, prompt); err != nil {
 		return err
 	}
 

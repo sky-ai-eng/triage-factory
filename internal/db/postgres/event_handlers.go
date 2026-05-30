@@ -221,7 +221,7 @@ func (s *eventHandlerStore) ListForPrompt(ctx context.Context, orgID, promptID s
 	return collectEventHandlers(rows)
 }
 
-func (s *eventHandlerStore) Create(ctx context.Context, orgID string, h domain.EventHandler) error {
+func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h domain.EventHandler) error {
 	if err := db.ValidateEventHandlerForCreate(&h); err != nil {
 		return err
 	}
@@ -230,13 +230,18 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID string, h domain.E
 		pred = *h.ScopePredicateJSON
 	}
 
-	// Post-SKY-262, user-source event_handlers default to visibility=
-	// 'team' and the team_visibility_requires_team CHECK forces team_id
-	// IS NOT NULL whenever visibility='team'. event_handlers.team_id
-	// itself stays nullable at the column level so shipped system rows
-	// (creator_user_id NULL + visibility='org' + team_id NULL) remain
-	// valid. team_id below is derived from the caller's primary team
-	// membership; admin/test fallback picks any team in the org.
+	// team_id is the acting team the handler resolved for this request —
+	// no "first/any team in org" fallback. user-source rows default to
+	// visibility='team', and the team_visibility_requires_team CHECK
+	// forces team_id non-NULL whenever visibility='team'; a real team
+	// here keeps both the CHECK and the event_handlers_insert RLS
+	// (tf.user_in_team) satisfied. (The column itself stays nullable so
+	// shipped system rows — creator NULL + visibility='org' + team_id
+	// NULL, written by Seed — remain valid.) Empty is a handler bug, so
+	// reject it rather than write an invalid row.
+	if teamID == "" {
+		return fmt.Errorf("postgres event_handlers Create: team_id required (handler must thread the resolved acting team from request context)")
+	}
 	switch h.Kind {
 	case domain.EventHandlerKindRule:
 		_, err := s.app.ExecContext(ctx, `
@@ -248,20 +253,14 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID string, h domain.E
 			VALUES (
 				$1, $2,
 				COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
-				COALESCE(
-					(SELECT m.team_id FROM memberships m
-					   JOIN teams t ON t.id = m.team_id
-					  WHERE m.user_id = tf.current_user_id() AND t.org_id = $2
-					  ORDER BY m.created_at ASC LIMIT 1),
-					(SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1)
-				),
+				$3::uuid,
 				'team',
-				'rule', $3,
-				$4::jsonb, $5, 'user',
-				$6, $7, $8,
+				'rule', $4,
+				$5::jsonb, $6, 'user',
+				$7, $8, $9,
 				now(), now()
 			)
-		`, h.ID, orgID, h.EventType, pred, h.Enabled,
+		`, h.ID, orgID, teamID, h.EventType, pred, h.Enabled,
 			h.Name, derefFloat(h.DefaultPriority), derefInt(h.SortOrder))
 		return err
 
@@ -275,20 +274,14 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID string, h domain.E
 			VALUES (
 				$1, $2,
 				COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
-				COALESCE(
-					(SELECT m.team_id FROM memberships m
-					   JOIN teams t ON t.id = m.team_id
-					  WHERE m.user_id = tf.current_user_id() AND t.org_id = $2
-					  ORDER BY m.created_at ASC LIMIT 1),
-					(SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1)
-				),
+				$3::uuid,
 				'team',
-				'trigger', $3,
-				$4::jsonb, $5, 'user',
-				$6, $7, $8,
+				'trigger', $4,
+				$5::jsonb, $6, 'user',
+				$7, $8, $9,
 				now(), now()
 			)
-		`, h.ID, orgID, h.EventType, pred, h.Enabled,
+		`, h.ID, orgID, teamID, h.EventType, pred, h.Enabled,
 			h.PromptID, derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability))
 		return err
 	}

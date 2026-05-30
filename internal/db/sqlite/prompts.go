@@ -218,10 +218,11 @@ func (s *promptStore) GetSystem(ctx context.Context, orgID string, id string) (*
 // those three call paths converging on a single Create rather than
 // adding a per-source variant or forcing the handler to wire team_id
 // + visibility from outside.
-func (s *promptStore) Create(ctx context.Context, orgID string, p domain.Prompt) error {
+func (s *promptStore) Create(ctx context.Context, orgID, teamID string, p domain.Prompt) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
+	_ = teamID // local mode is single-team; the row pins LocalDefaultTeamID below
 	now := time.Now().UTC()
 	var creatorUserID any = runmode.LocalDefaultUserID
 	visibility := "team"

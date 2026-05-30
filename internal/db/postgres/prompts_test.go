@@ -41,10 +41,14 @@ import (
 func TestPromptStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 
-	dbtest.RunPromptStoreConformance(t, func(t *testing.T) (db.PromptStore, string, dbtest.RunSeederForStats) {
+	dbtest.RunPromptStoreConformance(t, func(t *testing.T) (db.PromptStore, string, string, dbtest.RunSeederForStats) {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID := seedPgOrgAndUserForPrompts(t, h)
+		// seedPgOrgAndUserForPrompts stages the org's default team; the
+		// conformance Create attributes prompts to it (it satisfies the
+		// team-visibility CHECK + RLS).
+		teamID := firstTeamForOrg(t, h, orgID)
 
 		// Wire BOTH "app" and "admin" to AdminDB. This intentionally
 		// collapses the two pools for testing — the production wiring
@@ -60,7 +64,7 @@ func TestPromptStore_Postgres(t *testing.T) {
 			t.Helper()
 			return seedPgRunsForStats(t, h.AdminDB, orgID, userID, promptID, statusByOffset)
 		}
-		return stores.Prompts, orgID, seeder
+		return stores.Prompts, orgID, teamID, seeder
 	})
 }
 
@@ -185,7 +189,7 @@ func TestPromptStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// org_id = tf.current_org_id(), so 42501 is the expected
 		// outcome.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			return pgstore.NewForTx(tx).Prompts.Create(ctx, orgA, domain.Prompt{
+			return pgstore.NewForTx(tx).Prompts.Create(ctx, orgA, teamA, domain.Prompt{
 				ID: "p-rls-write-" + orgA[:8], Name: "x-write", Body: "x", Source: "user",
 			})
 		})

@@ -230,7 +230,7 @@ func getPrompt(ctx context.Context, q queryer, orgID, id string) (*domain.Prompt
 	return &p, nil
 }
 
-func (s *promptStore) Create(ctx context.Context, orgID string, p domain.Prompt) error {
+func (s *promptStore) Create(ctx context.Context, orgID, teamID string, p domain.Prompt) error {
 	// creator_user_id is NOT NULL. Two execution contexts:
 	//   - Production request path: WithTx has set request.jwt.claims,
 	//     so tf.current_user_id() returns the caller's UUID. That's
@@ -252,24 +252,23 @@ func (s *promptStore) Create(ctx context.Context, orgID string, p domain.Prompt)
 	// prompts_system_has_no_creator, which neither branch above
 	// supports. Don't read this fallback as a deploy-time path.
 	//
-	// team_id is derived from the caller's primary team membership;
-	// fallback to any team in the org for admin/test contexts. Post-
-	// SKY-262 the team_visibility_requires_team CHECK requires team_id
-	// whenever visibility='team' (the new default).
+	// team_id is the acting team the handler resolved for this request —
+	// no "first/any team in org" fallback. visibility defaults to 'team',
+	// so the team_visibility_requires_team CHECK forces team_id non-NULL;
+	// a real team here keeps both the CHECK and the prompts_insert RLS
+	// (tf.user_in_team) satisfied. Empty is a handler bug (it must thread
+	// the resolved team), so reject it rather than write an invalid row.
+	if teamID == "" {
+		return fmt.Errorf("postgres prompts Create: team_id required (handler must thread the resolved acting team from request context)")
+	}
 	_, err := s.app.ExecContext(ctx, `
 		INSERT INTO prompts (id, org_id, creator_user_id, team_id, visibility, name, body, source, allowed_tools, model, usage_count, created_at, updated_at)
 		VALUES ($1, $2,
 			COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
-			COALESCE(
-				(SELECT m.team_id FROM memberships m
-				   JOIN teams t ON t.id = m.team_id
-				  WHERE m.user_id = tf.current_user_id() AND t.org_id = $2
-				  ORDER BY m.created_at ASC LIMIT 1),
-				(SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1)
-			),
+			$3::uuid,
 			'team',
-			$3, $4, $5, $6, $7, 0, now(), now())
-	`, p.ID, orgID, p.Name, p.Body, p.Source, p.AllowedTools, p.Model)
+			$4, $5, $6, $7, $8, 0, now(), now())
+	`, p.ID, orgID, teamID, p.Name, p.Body, p.Source, p.AllowedTools, p.Model)
 	return err
 }
 

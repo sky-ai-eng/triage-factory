@@ -59,9 +59,13 @@ type PromptStore interface {
 	// (nil, nil) if not found.
 	Get(ctx context.Context, orgID string, id string) (*domain.Prompt, error)
 
-	// Create inserts a new prompt (user or imported source).
-	// Caller-provided ID — the handler generates UUIDs upstream.
-	Create(ctx context.Context, orgID string, p domain.Prompt) error
+	// Create inserts a new prompt (user or imported source) owned by
+	// teamID — the acting team the handler resolved for the request.
+	// Caller-provided ID — the handler generates UUIDs upstream. The
+	// Postgres impl binds teamID directly (it satisfies the team-
+	// visibility CHECK + RLS); the SQLite impl ignores it (local mode is
+	// single-team and pins the sentinel).
+	Create(ctx context.Context, orgID, teamID string, p domain.Prompt) error
 
 	// Update changes name + body + kind + model and stamps user_modified=true.
 	// The flag tells SeedOrUpdate to leave the row alone on subsequent

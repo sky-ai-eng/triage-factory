@@ -1,7 +1,6 @@
 package server
 
 import (
-	"fmt"
 	"log"
 	"net/http"
 
@@ -169,12 +168,9 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	var task *domain.Task
 	var created bool
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		teamID, e := tx.Teams.GetDefaultForOrg(r.Context(), orgID)
+		teamID, e := resolveActingTeam(r.Context(), tx.Teams, orgID)
 		if e != nil {
-			return fmt.Errorf("default team lookup: %w", e)
-		}
-		if teamID == "" {
-			return fmt.Errorf("org %s has no default team", orgID)
+			return e
 		}
 		task, created, e = tx.Tasks.FindOrCreate(r.Context(), orgID, teamID, req.EntityID, req.EventType, req.DedupKey, primaryEvent.ID, defaultPriority)
 		if e != nil {

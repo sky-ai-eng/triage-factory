@@ -16,13 +16,14 @@ interface Props {
 // org-wide union (GET /api/repos) instead would offer sibling-team repos
 // the default team doesn't track, so submitting would 400.
 //
-// TODO(SKY-294): "default" is hardcoded because there is no team
-// creation/selection UX yet — every project is created under the org's
-// single default team, so this is correct *today*. When the write-time
-// team picker lands, thread the acting team in as a prop here (and have
-// the create handler stamp it) instead of assuming default. One of
-// several call sites that hardcode the default team; the server-side
-// create handlers carry the matching fallback.
+// TODO(SKY-294): deferred to PR2 (the write-time team picker). "default"
+// is hardcoded because the create modal has no team selector yet — every
+// project is created under the org's single default team, which the
+// create handler resolves via the acting-team resolver, so the picker and
+// the handler agree *today*. PR2 adds the selector here and threads the
+// chosen team into both this fetch and the create request body. The
+// server-side create path is already resolver-driven (no default-team
+// fallback remains there); only this last picker keeps the sentinel.
 const TEAM_REPOS_PATH = '/api/settings/team/default/repos'
 
 // RepoMultiSelect is the project create modal's pinned-repos picker. It

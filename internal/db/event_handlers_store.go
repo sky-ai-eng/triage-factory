@@ -76,11 +76,14 @@ type EventHandlerStore interface {
 	// kind='trigger' rows.
 	ListForPrompt(ctx context.Context, orgID string, promptID string) ([]domain.EventHandler, error)
 
-	// Create inserts a new user-source handler. Caller supplies ID,
-	// kind, event_type, and the per-kind fields appropriate to the
+	// Create inserts a new user-source handler owned by teamID — the
+	// acting team the handler resolved for the request. Caller supplies
+	// ID, kind, event_type, and the per-kind fields appropriate to the
 	// kind. Source is forced to "user"; timestamps are stamped
-	// server-side.
-	Create(ctx context.Context, orgID string, h domain.EventHandler) error
+	// server-side. The Postgres impl binds teamID directly (it satisfies
+	// the team-visibility CHECK + RLS); the SQLite impl ignores it (local
+	// mode is single-team and pins the sentinel).
+	Create(ctx context.Context, orgID, teamID string, h domain.EventHandler) error
 
 	// Update changes a handler's mutable fields. ID, kind, source,
 	// event_type, and created_at are immutable. For triggers,

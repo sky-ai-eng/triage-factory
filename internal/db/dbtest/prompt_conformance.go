@@ -14,13 +14,16 @@ import (
 //   - the wired PromptStore impl
 //   - the orgID to pass to every method (sqlite returns
 //     runmode.LocalDefaultOrg, postgres returns a fresh org UUID)
+//   - the teamID Create should attribute prompts to (Postgres binds it
+//     to satisfy the team-visibility CHECK + RLS; SQLite ignores it and
+//     pins the local sentinel). Mirrors EventHandlerStoreFactory.
 //   - a RunSeeder hook that lets the harness create runs rows the
 //     Stats subtests need. The harness doesn't know how to create
 //     runs directly (RunStore lands in wave 3b); the backend test
 //     owns that wiring against its own connection. Each backend
 //     translates a logical fixture (promptID + N runs at given
 //     timestamps) into its own schema's INSERT shape.
-type PromptStoreFactory func(t *testing.T) (store db.PromptStore, orgID string, seedRuns RunSeederForStats)
+type PromptStoreFactory func(t *testing.T) (store db.PromptStore, orgID, teamID string, seedRuns RunSeederForStats)
 
 // RunSeederForStats is a callback the harness invokes to populate
 // rows in the runs table for Stats assertions. statusByOffset maps
@@ -52,7 +55,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 	t.Helper()
 
 	t.Run("SeedOrUpdate_FreshInsert", func(t *testing.T) {
-		store, orgID, _ := factory(t)
+		store, orgID, _, _ := factory(t)
 		ctx := context.Background()
 		p := domain.Prompt{ID: "system-x", Name: "X", Body: "v1", Source: "system"}
 		if err := store.SeedOrUpdate(ctx, orgID, p); err != nil {
@@ -68,7 +71,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 	})
 
 	t.Run("SeedOrUpdate_UpdatesUntouchedPrompt", func(t *testing.T) {
-		store, orgID, _ := factory(t)
+		store, orgID, _, _ := factory(t)
 		ctx := context.Background()
 		if err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{ID: "system-x", Name: "X", Body: "v1", Source: "system"}); err != nil {
 			t.Fatalf("seed v1: %v", err)
@@ -86,7 +89,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 	})
 
 	t.Run("SeedOrUpdate_PreservesUserModified", func(t *testing.T) {
-		store, orgID, _ := factory(t)
+		store, orgID, _, _ := factory(t)
 		ctx := context.Background()
 		if err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{ID: "system-y", Name: "Y", Body: "v1", Source: "system"}); err != nil {
 			t.Fatalf("seed v1: %v", err)
@@ -106,7 +109,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 	})
 
 	t.Run("SeedOrUpdate_NoChurnOnIdenticalReseed", func(t *testing.T) {
-		store, orgID, _ := factory(t)
+		store, orgID, _, _ := factory(t)
 		ctx := context.Background()
 		if err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{ID: "system-q", Name: "Q", Body: "v1", Source: "system"}); err != nil {
 			t.Fatalf("seed: %v", err)
@@ -128,7 +131,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		// The hash covers (name, body, source) so renaming alone must
 		// trip an update — even with body unchanged. Ensures
 		// shipped-rename ships.
-		store, orgID, _ := factory(t)
+		store, orgID, _, _ := factory(t)
 		ctx := context.Background()
 		if err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{ID: "system-m", Name: "Old Name", Body: "same body", Source: "system"}); err != nil {
 			t.Fatalf("seed: %v", err)
@@ -143,11 +146,11 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 	})
 
 	t.Run("CRUD_Roundtrip", func(t *testing.T) {
-		store, orgID, _ := factory(t)
+		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
 		// Create
 		p := domain.Prompt{ID: "user-1", Name: "Mine", Body: "body", Source: "user", AllowedTools: "Read,Write"}
-		if err := store.Create(ctx, orgID, p); err != nil {
+		if err := store.Create(ctx, orgID, teamID, p); err != nil {
 			t.Fatalf("create: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, "user-1")
@@ -193,9 +196,9 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		// re-imports cleanly). The user_modified flag is internal and
 		// not observable through the interface; the contract we CAN
 		// pin from the outside is that the three fields round-trip.
-		store, orgID, _ := factory(t)
+		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
-		if err := store.Create(ctx, orgID, domain.Prompt{
+		if err := store.Create(ctx, orgID, teamID, domain.Prompt{
 			ID: "imp-1", Name: "Imported", Body: "v1", Source: "imported", AllowedTools: "Read",
 		}); err != nil {
 			t.Fatalf("create: %v", err)
@@ -214,7 +217,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		// sources are rejected so a misuse can't accidentally land
 		// version-sidecar rows on user/imported prompts (where a
 		// later re-seed could silently overwrite them).
-		store, orgID, _ := factory(t)
+		store, orgID, _, _ := factory(t)
 		ctx := context.Background()
 		for _, src := range []string{"user", "imported", "garbage"} {
 			err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{
@@ -227,12 +230,12 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 	})
 
 	t.Run("Hide_Unhide_FiltersList", func(t *testing.T) {
-		store, orgID, _ := factory(t)
+		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
-		if err := store.Create(ctx, orgID, domain.Prompt{ID: "u-visible", Name: "V", Body: "x", Source: "user"}); err != nil {
+		if err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: "u-visible", Name: "V", Body: "x", Source: "user"}); err != nil {
 			t.Fatalf("create visible: %v", err)
 		}
-		if err := store.Create(ctx, orgID, domain.Prompt{ID: "u-hidden", Name: "H", Body: "x", Source: "user"}); err != nil {
+		if err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: "u-hidden", Name: "H", Body: "x", Source: "user"}); err != nil {
 			t.Fatalf("create hidden: %v", err)
 		}
 		if err := store.Hide(ctx, orgID, "u-hidden"); err != nil {
@@ -266,7 +269,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 	})
 
 	t.Run("Stats_AggregatesRuns", func(t *testing.T) {
-		store, orgID, seedRuns := factory(t)
+		store, orgID, _, seedRuns := factory(t)
 		ctx := context.Background()
 		// Set up: a prompt + 5 runs (3 completed, 1 failed, 1 running).
 		if err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{ID: "stats-p", Name: "S", Body: "x", Source: "system"}); err != nil {
@@ -295,7 +298,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 	})
 
 	t.Run("Stats_NoRuns_ReturnsZeros", func(t *testing.T) {
-		store, orgID, _ := factory(t)
+		store, orgID, _, _ := factory(t)
 		ctx := context.Background()
 		if err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{ID: "unused-p", Name: "U", Body: "x", Source: "system"}); err != nil {
 			t.Fatalf("seed: %v", err)
@@ -318,7 +321,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 	t.Run("Get_Missing_ReturnsNilNoError", func(t *testing.T) {
 		// Pre-D2 prompts.go convention: Get for a non-existent ID
 		// returns (nil, nil), not an error. Handlers depend on it.
-		store, orgID, _ := factory(t)
+		store, orgID, _, _ := factory(t)
 		got, err := store.Get(context.Background(), orgID, "does-not-exist")
 		if err != nil {
 			t.Fatalf("Get for missing returned err: %v", err)
@@ -329,7 +332,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 	})
 
 	t.Run("CtxCancellation_FailsFast", func(t *testing.T) {
-		store, orgID, _ := factory(t)
+		store, orgID, _, _ := factory(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		if err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{ID: "ctxtest", Name: "C", Body: "x", Source: "system"}); err == nil {

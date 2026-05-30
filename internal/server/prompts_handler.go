@@ -136,7 +136,11 @@ func (s *Server) handlePromptCreate(w http.ResponseWriter, r *http.Request) {
 	userID := ClaimsFrom(r.Context()).Subject
 	var created *domain.Prompt
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if e := tx.Prompts.Create(r.Context(), orgID, prompt); e != nil {
+		teamID, e := resolveActingTeam(r.Context(), tx.Teams, orgID)
+		if e != nil {
+			return e
+		}
+		if e := tx.Prompts.Create(r.Context(), orgID, teamID, prompt); e != nil {
 			return e
 		}
 		var ge error

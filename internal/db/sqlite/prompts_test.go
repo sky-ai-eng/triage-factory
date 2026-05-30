@@ -20,7 +20,7 @@ import (
 // against the SQLite impl. Each subtest opens a fresh in-memory DB so
 // state doesn't leak between assertions.
 func TestPromptStore_SQLite(t *testing.T) {
-	dbtest.RunPromptStoreConformance(t, func(t *testing.T) (db.PromptStore, string, dbtest.RunSeederForStats) {
+	dbtest.RunPromptStoreConformance(t, func(t *testing.T) (db.PromptStore, string, string, dbtest.RunSeederForStats) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
@@ -28,7 +28,7 @@ func TestPromptStore_SQLite(t *testing.T) {
 			t.Helper()
 			return seedSQLiteRunsForStats(t, conn, promptID, statusByOffset)
 		}
-		return stores.Prompts, runmode.LocalDefaultOrg, seeder
+		return stores.Prompts, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, seeder
 	})
 }
 

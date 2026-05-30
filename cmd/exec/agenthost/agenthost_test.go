@@ -51,7 +51,7 @@ func seedAgentRun(t *testing.T, stores db.Stores, runID, creator, trigger string
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
-	if err := stores.Prompts.Create(ctx, orgID, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
+	if err := stores.Prompts.Create(ctx, orgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}
 	evtID, err := stores.Events.Record(ctx, orgID, domain.Event{

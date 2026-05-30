@@ -39,7 +39,7 @@ func createTriggerForTestSkills(t *testing.T, database *sql.DB, trig domain.Even
 	if trig.TriggerType == "" {
 		trig.TriggerType = domain.TriggerTypeEvent
 	}
-	if err := testEventHandlerStore(database).Create(context.Background(), runmode.LocalDefaultOrg, trig); err != nil {
+	if err := testEventHandlerStore(database).Create(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, trig); err != nil {
 		t.Fatalf("createTriggerForTestSkills %s: %v", trig.ID, err)
 	}
 }

@@ -28,7 +28,7 @@ func seedYieldedRun(t *testing.T, s *Server, req *domain.YieldRequest) string {
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}
-	if err := s.prompts.Create(t.Context(), runmode.LocalDefaultOrg, domain.Prompt{ID: "p", Name: "T", Body: "x", Source: "user"}); err != nil {
+	if err := s.prompts.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p", Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
 	runID := "run-yielded"

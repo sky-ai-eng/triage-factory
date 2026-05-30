@@ -99,7 +99,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Create_Rule_RoundTrip", func(t *testing.T) {
-		store, orgID, _, _ := factory(t)
+		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
 		priority := 0.75
 		sortOrder := 3
@@ -112,7 +112,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			DefaultPriority: &priority,
 			SortOrder:       &sortOrder,
 		}
-		if err := store.Create(ctx, orgID, h); err != nil {
+		if err := store.Create(ctx, orgID, teamID, h); err != nil {
 			t.Fatalf("Create rule: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, h.ID)
@@ -134,7 +134,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Create_Trigger_RoundTrip", func(t *testing.T) {
-		store, orgID, _, seedPrompts := factory(t)
+		store, orgID, teamID, seedPrompts := factory(t)
 		ctx := context.Background()
 		seedPrompts(t, "p-trigger-test")
 		breaker := 2
@@ -148,7 +148,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			BreakerThreshold:       &breaker,
 			MinAutonomySuitability: &minAutonomy,
 		}
-		if err := store.Create(ctx, orgID, h); err != nil {
+		if err := store.Create(ctx, orgID, teamID, h); err != nil {
 			t.Fatalf("Create trigger: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, h.ID)
@@ -170,7 +170,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Create_RejectsRuleWithTriggerFields", func(t *testing.T) {
-		store, orgID, _, _ := factory(t)
+		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
 		priority := 0.5
 		sortOrder := 0
@@ -184,13 +184,13 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			SortOrder:        &sortOrder,
 			BreakerThreshold: &breaker, // illegal: trigger-only field on a rule
 		}
-		if err := store.Create(ctx, orgID, h); err == nil {
+		if err := store.Create(ctx, orgID, teamID, h); err == nil {
 			t.Error("Create accepted a rule with trigger-only fields populated; want error")
 		}
 	})
 
 	t.Run("Create_RejectsTriggerWithoutPromptID", func(t *testing.T) {
-		store, orgID, _, _ := factory(t)
+		store, orgID, teamID, _ := factory(t)
 		breaker := 4
 		minAutonomy := 0.0
 		h := domain.EventHandler{
@@ -201,7 +201,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			MinAutonomySuitability: &minAutonomy,
 			// PromptID intentionally empty.
 		}
-		if err := store.Create(context.Background(), orgID, h); err == nil {
+		if err := store.Create(context.Background(), orgID, teamID, h); err == nil {
 			t.Error("Create accepted a trigger with empty prompt_id; want error")
 		}
 	})
@@ -211,7 +211,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		// kind='trigger' with a non-NULL name. validateForCreate
 		// rejects the same shape earlier so the user gets a clearer
 		// error than the SQL integrity-violation surface.
-		store, orgID, _, seedPrompts := factory(t)
+		store, orgID, teamID, seedPrompts := factory(t)
 		seedPrompts(t, "p-name-on-trigger")
 		breaker := 4
 		minAutonomy := 0.0
@@ -224,13 +224,13 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			MinAutonomySuitability: &minAutonomy,
 			Name:                   "shouldn't be here", // illegal on a trigger
 		}
-		if err := store.Create(context.Background(), orgID, h); err == nil {
+		if err := store.Create(context.Background(), orgID, teamID, h); err == nil {
 			t.Error("Create accepted a trigger with a non-empty name; want error")
 		}
 	})
 
 	t.Run("List_KindFilter", func(t *testing.T) {
-		store, orgID, _, seedPrompts := factory(t)
+		store, orgID, teamID, seedPrompts := factory(t)
 		ctx := context.Background()
 		seedPrompts(t, "p-list-trigger")
 
@@ -251,10 +251,10 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			BreakerThreshold:       &breaker,
 			MinAutonomySuitability: &minAutonomy, Enabled: true,
 		}
-		if err := store.Create(ctx, orgID, rule); err != nil {
+		if err := store.Create(ctx, orgID, teamID, rule); err != nil {
 			t.Fatalf("Create rule: %v", err)
 		}
-		if err := store.Create(ctx, orgID, trig); err != nil {
+		if err := store.Create(ctx, orgID, teamID, trig); err != nil {
 			t.Fatalf("Create trig: %v", err)
 		}
 
@@ -283,7 +283,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("GetEnabledForEvent_OrdersRulesBeforeTriggers", func(t *testing.T) {
-		store, orgID, _, seedPrompts := factory(t)
+		store, orgID, teamID, seedPrompts := factory(t)
 		ctx := context.Background()
 		seedPrompts(t, "p-order-test")
 
@@ -305,8 +305,8 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			BreakerThreshold:       &breaker,
 			MinAutonomySuitability: &minAutonomy, Enabled: true,
 		}
-		_ = store.Create(ctx, orgID, trig) // trigger first to prove ordering isn't insert-order
-		_ = store.Create(ctx, orgID, rule)
+		_ = store.Create(ctx, orgID, teamID, trig) // trigger first to prove ordering isn't insert-order
+		_ = store.Create(ctx, orgID, teamID, rule)
 
 		got, err := store.GetEnabledForEvent(ctx, orgID, eventType)
 		if err != nil {
@@ -334,7 +334,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("SetEnabled_Toggles", func(t *testing.T) {
-		store, orgID, _, _ := factory(t)
+		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
 		priority, sortOrder := 0.5, 0
 		h := domain.EventHandler{
@@ -342,7 +342,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			EventType: domain.EventGitHubPRCICheckFailed,
 			Name:      "toggle-me", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
 		}
-		if err := store.Create(ctx, orgID, h); err != nil {
+		if err := store.Create(ctx, orgID, teamID, h); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
 		if err := store.SetEnabled(ctx, orgID, h.ID, false); err != nil {
@@ -355,7 +355,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Delete_RemovesRow", func(t *testing.T) {
-		store, orgID, _, _ := factory(t)
+		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
 		priority, sortOrder := 0.5, 0
 		h := domain.EventHandler{
@@ -363,7 +363,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			EventType: domain.EventGitHubPRCICheckFailed,
 			Name:      "delete-me", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
 		}
-		if err := store.Create(ctx, orgID, h); err != nil {
+		if err := store.Create(ctx, orgID, teamID, h); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
 		if err := store.Delete(ctx, orgID, h.ID); err != nil {
@@ -376,13 +376,13 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Promote_RuleToTrigger", func(t *testing.T) {
-		store, orgID, _, seedPrompts := factory(t)
+		store, orgID, teamID, seedPrompts := factory(t)
 		ctx := context.Background()
 		seedPrompts(t, "p-promote-target")
 
 		priority, sortOrder := 0.5, 0
 		ruleID := uuid.New().String()
-		if err := store.Create(ctx, orgID, domain.EventHandler{
+		if err := store.Create(ctx, orgID, teamID, domain.EventHandler{
 			ID: ruleID, Kind: domain.EventHandlerKindRule,
 			EventType: domain.EventGitHubPRCICheckFailed,
 			Name:      "promote-me", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
@@ -417,14 +417,14 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Promote_RejectsTriggerSource", func(t *testing.T) {
-		store, orgID, _, seedPrompts := factory(t)
+		store, orgID, teamID, seedPrompts := factory(t)
 		ctx := context.Background()
 		seedPrompts(t, "p-already-trigger")
 
 		breaker := 4
 		minAutonomy := 0.0
 		trigID := uuid.New().String()
-		if err := store.Create(ctx, orgID, domain.EventHandler{
+		if err := store.Create(ctx, orgID, teamID, domain.EventHandler{
 			ID:                     trigID,
 			Kind:                   domain.EventHandlerKindTrigger,
 			PromptID:               "p-already-trigger",

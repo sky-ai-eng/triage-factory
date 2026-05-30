@@ -87,12 +87,9 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		if e != nil {
 			return fmt.Errorf("load org settings: %w", e)
 		}
-		teamID, e = tx.Teams.GetDefaultForOrg(r.Context(), orgID)
+		teamID, e = resolveActingTeam(r.Context(), tx.Teams, orgID)
 		if e != nil {
-			return fmt.Errorf("default team lookup: %w", e)
-		}
-		if teamID == "" {
-			return fmt.Errorf("org %s has no default team", orgID)
+			return e
 		}
 		jiraRules, e = tx.JiraStatusRules.ListForTeam(r.Context(), teamID)
 		if e != nil {
@@ -350,12 +347,9 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
 		var e error
-		teamID, e = tx.Teams.GetDefaultForOrg(r.Context(), orgID)
+		teamID, e = resolveActingTeam(r.Context(), tx.Teams, orgID)
 		if e != nil {
-			return fmt.Errorf("default team lookup: %w", e)
-		}
-		if teamID == "" {
-			return fmt.Errorf("org %s has no default team", orgID)
+			return e
 		}
 		jiraRules, e = tx.JiraStatusRules.ListForTeam(r.Context(), teamID)
 		if e != nil {

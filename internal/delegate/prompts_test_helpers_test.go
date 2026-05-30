@@ -61,7 +61,7 @@ func ensureTestPrompt(t *testing.T, database *sql.DB, p domain.Prompt) {
 	if existing != nil {
 		return
 	}
-	if err := store.Create(ctx, runmode.LocalDefaultOrg, p); err != nil {
+	if err := store.Create(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, p); err != nil {
 		t.Fatalf("ensureTestPrompt %s: %v", p.ID, err)
 	}
 }
