@@ -591,34 +591,42 @@ function PinnedReposInline({
     }
   }, [pinned])
 
-  // loadRepos populates `available` from the configured-repos API.
+  // loadRepos populates `available` with the *project team's* tracked
+  // repos — not the org-wide /api/repos union. The PATCH validator only
+  // accepts repos this project's team tracks, so offering the union would
+  // let a user pick a sibling team's repo that then 400s on save.
   // Tracks loadError separately so a transient failure surfaces as
   // a "couldn't load — try again" hint in the popover instead of
   // the misleading "No repos configured" empty state, which would
   // route the user to a setup page they may have already completed.
-  const loadRepos = useCallback(async (signal: AbortSignal) => {
-    setLoadError(null)
-    try {
-      const res = await fetch('/api/repos', { signal })
-      if (signal.aborted) return
-      if (!res.ok) {
-        const message = await readError(res, 'load repos')
+  const loadRepos = useCallback(
+    async (signal: AbortSignal) => {
+      setLoadError(null)
+      try {
+        const res = await fetch(`/api/settings/team/${encodeURIComponent(teamId)}/repos`, {
+          signal,
+        })
+        if (signal.aborted) return
+        if (!res.ok) {
+          const message = await readError(res, 'load repos')
+          setLoadError(message)
+          toast.error(message)
+          return
+        }
+        const data: { repos?: string[] } = await res.json()
+        if (signal.aborted) return
+        setAvailable(data.repos ?? [])
+      } catch (err) {
+        if (signal.aborted) return
+        const message = err instanceof Error ? err.message : 'Failed to load repos'
         setLoadError(message)
         toast.error(message)
-        return
+      } finally {
+        if (!signal.aborted) setLoading(false)
       }
-      const data: Array<{ id: string }> = await res.json()
-      if (signal.aborted) return
-      setAvailable(data.map((r) => r.id))
-    } catch (err) {
-      if (signal.aborted) return
-      const message = err instanceof Error ? err.message : 'Failed to load repos'
-      setLoadError(message)
-      toast.error(message)
-    } finally {
-      if (!signal.aborted) setLoading(false)
-    }
-  }, [])
+    },
+    [teamId],
+  )
 
   useEffect(() => {
     const controller = new AbortController()

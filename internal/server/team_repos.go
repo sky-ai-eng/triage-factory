@@ -102,7 +102,25 @@ func (s *Server) handleTeamReposPut(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, err.Error())
 		return
 	}
-	if slug, reject := s.rejectUnreachableRepo(r.Context(), orgID, userID, repos); reject {
+
+	// Reachability is only checked for repos the team isn't already
+	// tracking. A repo that became unreachable *after* being tracked
+	// (creds revoked, App uninstalled) must stay removable — rejecting it
+	// here would wedge the picker: the stale repo isn't in the reachable
+	// option list to uncheck, yet every Save re-submits it, so the user
+	// could never save a corrected set. Only *newly added* unreachable
+	// repos are a user error worth blocking.
+	var existing []domain.TeamGitHubRepo
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		existing, e = tx.TeamGitHubRepos.ListForTeam(r.Context(), teamID)
+		return e
+	}); err != nil {
+		internalError(w, "settings/team/repos", err)
+		return
+	}
+	added := newlyAddedRepos(existing, repos)
+	if slug, reject := s.rejectUnreachableRepo(r.Context(), orgID, userID, added); reject {
 		badRequest(w, "repo "+slug+" is not reachable by this org's GitHub credentials — install the GitHub App on it or grant the PAT access first")
 		return
 	}
@@ -151,6 +169,24 @@ func repoSlugs(repos []domain.TeamGitHubRepo) []string {
 func (s *Server) rejectUnreachableRepo(ctx context.Context, orgID, userID string, repos []domain.TeamGitHubRepo) (string, bool) {
 	reachable, checked := s.reachableRepoSet(ctx, orgID, userID)
 	return firstUnreachableRepo(reachable, checked, repos)
+}
+
+// newlyAddedRepos returns the entries of desired that are not already in
+// existing, matched case-insensitively (GitHub owner/repo identifiers are
+// case-insensitive, matching the gate's lower() comparison). These are the
+// only repos the reachability guard validates — see handleTeamReposPut.
+func newlyAddedRepos(existing, desired []domain.TeamGitHubRepo) []domain.TeamGitHubRepo {
+	have := make(map[string]struct{}, len(existing))
+	for _, r := range existing {
+		have[strings.ToLower(r.Slug())] = struct{}{}
+	}
+	added := make([]domain.TeamGitHubRepo, 0, len(desired))
+	for _, r := range desired {
+		if _, ok := have[strings.ToLower(r.Slug())]; !ok {
+			added = append(added, r)
+		}
+	}
+	return added
 }
 
 // firstUnreachableRepo is the pure policy: given the reachable set and

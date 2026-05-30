@@ -178,7 +178,7 @@ func Import(
 	if err := importPendingContext(tx, newProjectID, newSessionID, requestIDMap, entries[curatorPendingContextPath]); err != nil {
 		return nil, nil, err
 	}
-	if err := ensureRepoProfiles(tx, manifest.Project.PinnedRepos, cloneURLs); err != nil {
+	if err := ensureRepoProfiles(tx, teamID, manifest.Project.PinnedRepos, cloneURLs); err != nil {
 		return nil, nil, err
 	}
 
@@ -513,11 +513,37 @@ func importPendingContext(
 	return nil
 }
 
-func ensureRepoProfiles(tx *sql.Tx, pinned []string, cloneURLs map[string]string) error {
+// ensureRepoProfiles materializes the imported project's pinned repos.
+// It writes two rows per repo:
+//
+//   - team_github_repos — the per-team tracking selection that is the
+//     source of truth. Without this the router team↔repo gate
+//     (TracksRepoSystem) drops the importing team's handlers for the
+//     repo, so polled events from it never create tasks until the user
+//     re-saves the repo selection. repo_profiles is a *derived cache* of
+//     this table, so the tracking row must exist for the import to behave
+//     like a normal repo-selection save.
+//   - repo_profiles — the org-wide polled set (the cache), pre-seeded
+//     here with the clone_url discovered during preflight so the import's
+//     clone step + first poll don't have to re-resolve it.
+//
+// Import is SQLite-only (N=1, single default team), so teamID is the org
+// default team and no cross-team union reconcile is needed — the union is
+// trivially this team's rows.
+func ensureRepoProfiles(tx *sql.Tx, teamID string, pinned []string, cloneURLs map[string]string) error {
 	for _, slug := range pinned {
 		owner, repo, ok := splitOwnerRepo(slug)
 		if !ok {
 			return fmt.Errorf("invalid pinned repo slug %q", slug)
+		}
+		// Track the repo for the importing team (the gate's source of
+		// truth). All pinned repos passed preflight, so they're all real.
+		if _, err := tx.Exec(`
+			INSERT INTO team_github_repos (team_id, owner, repo)
+			VALUES (?, ?, ?)
+			ON CONFLICT(team_id, owner, repo) DO NOTHING
+		`, teamID, owner, repo); err != nil {
+			return fmt.Errorf("track imported repo %s: %w", slug, err)
 		}
 		cloneURL := cloneURLs[slug]
 		if cloneURL == "" {
