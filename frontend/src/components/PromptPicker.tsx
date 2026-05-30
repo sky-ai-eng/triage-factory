@@ -30,6 +30,11 @@ interface Props {
    *  whose team is derived from the claim) leave it undefined → no picker. */
   teamValue?: string
   onTeamChange?: (teamId: string) => void
+  /** When true, prompt tiles are non-interactive and dimmed. The factory
+   *  create-delegate caller sets this until /api/teams has loaded so a
+   *  selection in the cold-load window can't post a blank/unresolved
+   *  acting team. */
+  selectionDisabled?: boolean
 }
 
 export default function PromptPicker({
@@ -43,6 +48,7 @@ export default function PromptPicker({
   filter,
   teamValue,
   onTeamChange,
+  selectionDisabled,
 }: Props) {
   const [prompts, setPrompts] = useState<Prompt[]>([])
   const [fetchFailed, setFetchFailed] = useState(false)
@@ -127,11 +133,15 @@ export default function PromptPicker({
                     ))}
                   </div>
                 ) : (
-                  <div className="grid grid-cols-2 gap-3">
+                  <div
+                    className={`grid grid-cols-2 gap-3 ${selectionDisabled ? 'opacity-50 pointer-events-none' : ''}`}
+                    aria-busy={selectionDisabled}
+                  >
                     {(filter ? prompts.filter(filter) : prompts).map((prompt) => (
                       <button
                         key={prompt.id}
                         onClick={() => onSelect(prompt.id)}
+                        disabled={selectionDisabled}
                         className={`group text-left p-4 rounded-xl border hover:shadow-sm transition-all duration-150 ${
                           selectedId === prompt.id
                             ? 'border-accent/60 bg-accent/[0.06] ring-1 ring-accent/20'

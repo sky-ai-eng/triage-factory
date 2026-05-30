@@ -128,27 +128,20 @@ func TestBootstrapTeamAgent_ErrorsWhenOrgHasNoAgent(t *testing.T) {
 	}
 }
 
-// TestBootstrapNewTeam_SeedsAgentAndHandlers pins SKY-378's team-create
-// bootstrap: a new team in an existing org gets a default-enabled
-// team_agents row AND the shipped event handlers scoped to it, so a
-// freshly-created team's auto-delegation works out of the box rather
-// than starting dead. Uses the local org/team graph from the baseline +
-// BootstrapLocalAgent for the org agent, then seeds the org's prompts
-// (the shipped trigger rows FK into them) before adding the new team.
-func TestBootstrapNewTeam_SeedsAgentAndHandlers(t *testing.T) {
+// TestBootstrapNewTeam_SeedsBotOnly pins SKY-378's team-create bootstrap:
+// a new 2nd+ team in an existing org gets a default-enabled team_agents
+// row (so manual delegation works immediately) but NO system event
+// handlers — a new team is a blank slate the org admin configures, and
+// the shipped-handler UUID is team-independent so per-team seeding could
+// never materialize distinct rows anyway. Uses the local org/team graph +
+// BootstrapLocalAgent for the org agent.
+func TestBootstrapNewTeam_SeedsBotOnly(t *testing.T) {
 	conn := openInMemorySQLite(t)
 	stores := sqlitestore.New(conn)
 	ctx := t.Context()
 
-	// Org agent + the org's shipped prompts must exist first (the
-	// shipped triggers FK into prompts).
 	if err := db.BootstrapLocalAgent(ctx, stores); err != nil {
 		t.Fatalf("BootstrapLocalAgent: %v", err)
-	}
-	for _, p := range ai.ShippedPrompts() {
-		if err := stores.Prompts.SeedOrUpdate(ctx, runmode.LocalDefaultOrg, p); err != nil {
-			t.Fatalf("seed prompt %s: %v", p.ID, err)
-		}
 	}
 
 	// A second team in the same org (the "add team" outcome).
@@ -164,7 +157,7 @@ func TestBootstrapNewTeam_SeedsAgentAndHandlers(t *testing.T) {
 		t.Fatalf("BootstrapNewTeam: %v", err)
 	}
 
-	// team_agents row, default-enabled.
+	// team_agents row, default-enabled — manual delegation works.
 	agent, err := stores.Agents.GetForOrg(ctx, runmode.LocalDefaultOrg)
 	if err != nil {
 		t.Fatalf("GetForOrg: %v", err)
@@ -177,7 +170,7 @@ func TestBootstrapNewTeam_SeedsAgentAndHandlers(t *testing.T) {
 		t.Errorf("new team has no default-enabled team_agents row: %+v", ta)
 	}
 
-	// Shipped handlers landed on the new team.
+	// No system handlers — the new team starts blank by design.
 	var n int
 	if err := conn.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM event_handlers WHERE org_id = ? AND team_id = ? AND source = 'system'`,
@@ -185,8 +178,8 @@ func TestBootstrapNewTeam_SeedsAgentAndHandlers(t *testing.T) {
 	).Scan(&n); err != nil {
 		t.Fatalf("count handlers: %v", err)
 	}
-	if n == 0 {
-		t.Error("new team got no shipped event handlers; auto-delegation would be dead for it")
+	if n != 0 {
+		t.Errorf("new team got %d system handlers; want 0 (blank slate by design)", n)
 	}
 }
 

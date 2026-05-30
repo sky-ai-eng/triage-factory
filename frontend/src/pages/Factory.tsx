@@ -71,16 +71,22 @@ export default function Factory() {
   // entity belt via ?team_id); delegateTeam is the acting team the
   // drag-to-station delegate stamps onto the synthesized task. Both
   // render their selectors only at ≥2 teams.
-  const { teams, preferredTeamId } = useTeams()
+  const { teams, preferredTeamId, loaded: teamsLoaded } = useTeams()
   const [teamFilter, setTeamFilter] = useTeamFilter('factory')
   const teamFilterRef = useRef(teamFilter)
   useEffect(() => {
     teamFilterRef.current = teamFilter
   }, [teamFilter])
   const [delegateTeam, setDelegateTeam] = useState('')
+  // Seed the acting team only once /api/teams has loaded — until then the
+  // picker is hidden (multi=false) and delegateTeam='' would post a blank
+  // team_id in the cold-load window. The PromptPicker's own loading prop
+  // (below) keeps tiles unclickable until this resolves.
   useEffect(() => {
+    if (!teamsLoaded) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setDelegateTeam(pickerDefault(teams, preferredTeamId))
-  }, [teams, preferredTeamId])
+  }, [teamsLoaded, teams, preferredTeamId])
 
   useEffect(() => {
     const container = containerRef.current
@@ -340,6 +346,7 @@ export default function Factory() {
         }}
         teamValue={delegateTeam}
         onTeamChange={setDelegateTeam}
+        selectionDisabled={!teamsLoaded}
       />
     </DndContext>
   )

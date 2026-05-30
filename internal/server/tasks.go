@@ -99,9 +99,17 @@ func taskToJSON(t domain.Task) taskJSON {
 }
 
 // teamFilterParam extracts the per-page multi-team read filter from the
-// request — the set of non-empty, deduped ?team_id= values (a repeated
-// query param). Returns nil when none are present, which the stores treat
-// as "the union of the viewer's teams."
+// request — the set of non-empty, deduped, *valid-UUID* ?team_id= values
+// (a repeated query param). Returns nil when none are present, which the
+// stores treat as "the union of the viewer's teams."
+//
+// Malformed values are dropped, not errored: these params are
+// user-controlled and also come from possibly-stale/corrupt localStorage
+// (the device-local read filter), so a junk id should degrade to "no
+// narrow for that value" rather than 500 the queue/board/factory when the
+// raw string hits a Postgres ::uuid cast. A team the caller isn't in is
+// already filtered out downstream by the RLS-mirroring predicate, so the
+// only validation needed here is well-formedness.
 func teamFilterParam(r *http.Request) []string {
 	raw := r.URL.Query()["team_id"]
 	if len(raw) == 0 {
@@ -112,6 +120,9 @@ func teamFilterParam(r *http.Request) []string {
 	for _, v := range raw {
 		if v == "" {
 			continue
+		}
+		if _, err := uuid.Parse(v); err != nil {
+			continue // drop malformed ids (stale localStorage, hand-edited URL)
 		}
 		if _, dup := seen[v]; dup {
 			continue

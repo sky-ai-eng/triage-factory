@@ -89,32 +89,36 @@ func BootstrapTeamAgent(ctx context.Context, stores Stores, orgID, teamID string
 	return nil
 }
 
-// BootstrapNewTeam materializes the shipped defaults for a *new team in
-// an existing org* (SKY-378): the team's default-enabled bot membership
-// (team_agents) plus the shipped event handlers (rules + triggers)
-// scoped to that team. The org's agents row and shipped prompts already
-// exist (they were seeded at org-create), so this does not re-seed
-// prompts — the handler trigger rows FK into the org's existing
-// prompt rows.
+// BootstrapNewTeam materializes the structural defaults for a *new team
+// in an existing org* (SKY-378): the team's default-enabled bot
+// membership (team_agents). It deliberately does NOT seed event handlers
+// (system rules/triggers).
 //
-// Must run OUTSIDE any caller WithTx: EventHandlers.Seed and
-// TeamAgents.AddForTeam both route through the Postgres admin pool
-// (system rows have NULL creator_user_id; the modify policies gate on
-// tf.current_user_id() which the boot/bootstrap path doesn't set) and
-// guard against being called inside an app-pool tx. Idempotent — re-runs
-// no-op via ON CONFLICT, and never flip a team's bot back to enabled if
-// the team disabled it.
+// Why bot-only — two reasons converge:
 //
-// Errors are returned, not swallowed; the team-create handler logs and
-// continues (a team that exists without seeded defaults is degraded, not
-// broken — re-running bootstrap repairs it — and failing the create
-// after the row committed would be worse).
+//   - Correctness: the shipped-handler row id is UUIDFor(handler.ID,
+//     orgID) — team-independent — under PK (org_id, id). Seeding a 2nd+
+//     team's handlers would collide with the org's first team's rows and
+//     ON CONFLICT-skip them all, so the seed never actually materialized
+//     per-team rows anyway (Codex review on PR #263).
+//
+//   - Product direction: a newly-created team is a blank slate the org
+//     admin configures, not a place to re-stamp TF's opinionated
+//     defaults. Org-defined default templates that new teams inherit are
+//     their own ticket; until then a 2nd+ team starts with no system
+//     handlers and the admin adds rules (the org's *first* team still
+//     gets the full defaults via BootstrapNewOrg).
+//
+// The bot row is enabled, so manual delegation (swipe / factory drag) to
+// the new team works immediately; only auto-delegation waits on rules.
+//
+// Must run OUTSIDE any caller WithTx: TeamAgents.AddForTeam routes
+// through the Postgres admin pool and guards against being called inside
+// an app-pool tx. Idempotent — re-runs no-op via ON CONFLICT, and never
+// flip a team's bot back to enabled if the team disabled it.
 func BootstrapNewTeam(ctx context.Context, stores Stores, orgID, teamID string) error {
 	if err := BootstrapTeamAgent(ctx, stores, orgID, teamID); err != nil {
 		return err
-	}
-	if err := stores.EventHandlers.Seed(ctx, orgID, teamID); err != nil {
-		return fmt.Errorf("bootstrap new team: seed event handlers: %w", err)
 	}
 	return nil
 }

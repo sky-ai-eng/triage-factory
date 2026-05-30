@@ -126,58 +126,69 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Default priority — mirrors internal/routing/router.go:210-215,
-	// including the predicate-match filter. Iterating *all* enabled
-	// rules for the event type would inflate priority whenever a
-	// high-priority rule's scope_predicate doesn't actually match
-	// this event's metadata (e.g., a 0.9-priority rule scoped to a
-	// specific repo would lift priority for every event of that type
-	// even on unrelated entities). Empty predJSON always matches per
-	// the events package contract.
-	defaultPriority := 0.5
 	schema, schemaOK := events.Get(req.EventType)
-	var handlers []domain.EventHandler
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		handlers, e = tx.EventHandlers.GetEnabledForEvent(r.Context(), orgID, req.EventType)
-		return e
-	}); err != nil {
-		internalError(w, "factory", err)
-		return
-	}
-	for _, h := range handlers {
-		if h.Kind != domain.EventHandlerKindRule || h.DefaultPriority == nil {
-			// Trigger rows have no DefaultPriority; skip.
-			continue
-		}
-		if !schemaOK {
-			// No registered schema → predicate can't be evaluated.
-			// Mirrors matchPredicate's quietly-permissive behavior:
-			// the rule is skipped, falling back to 0.5.
-			continue
-		}
-		predJSON := ""
-		if h.ScopePredicateJSON != nil {
-			predJSON = *h.ScopePredicateJSON
-		}
-		matched, err := schema.Match(predJSON, primaryEvent.MetadataJSON)
-		if err != nil {
-			log.Printf("[factory] event_handler %s predicate error: %v", h.ID, err)
-			continue
-		}
-		if matched && *h.DefaultPriority > defaultPriority {
-			defaultPriority = *h.DefaultPriority
-		}
-	}
 
 	var task *domain.Task
 	var created bool
 	var claimTeamID string
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		// Resolve the acting team FIRST, so the priority scan below can
+		// limit itself to that team's rules. Scanning before resolving
+		// let a sibling team's high-priority rule inflate a task created
+		// for a different team (Codex review on PR #263).
 		teamID, e := resolveActingTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
 		}
+
+		// Default priority — mirrors internal/routing/router.go's
+		// predicate-match filter. Only rules belonging to the acting team
+		// (or org-visible system rules with no team) count: a rule owned
+		// by another team must not lift the priority of a task created
+		// for this team. Iterating *all* enabled rules would also inflate
+		// priority whenever a high-priority rule's scope_predicate doesn't
+		// match this event's metadata, so the predicate gate stays too.
+		// Empty predJSON always matches per the events package contract.
+		defaultPriority := 0.5
+		handlers, e := tx.EventHandlers.GetEnabledForEvent(r.Context(), orgID, req.EventType)
+		if e != nil {
+			return e
+		}
+		for _, h := range handlers {
+			if h.Kind != domain.EventHandlerKindRule || h.DefaultPriority == nil {
+				// Trigger rows have no DefaultPriority; skip.
+				continue
+			}
+			// Team scope: count a rule only if it belongs to the acting
+			// team or is genuinely org-visible (empty TeamID). A sibling
+			// team's rule (non-empty TeamID that isn't the acting team)
+			// must not lift the priority of a task we're stamping for
+			// teamID. Note multi-mode system rules are seeded per-team
+			// (visibility='team', real team_id), so this correctly counts
+			// the acting team's own shipped rules and excludes siblings'.
+			if h.TeamID != "" && h.TeamID != teamID {
+				continue
+			}
+			if !schemaOK {
+				// No registered schema → predicate can't be evaluated.
+				// Mirrors matchPredicate's quietly-permissive behavior:
+				// the rule is skipped, falling back to 0.5.
+				continue
+			}
+			predJSON := ""
+			if h.ScopePredicateJSON != nil {
+				predJSON = *h.ScopePredicateJSON
+			}
+			matched, merr := schema.Match(predJSON, primaryEvent.MetadataJSON)
+			if merr != nil {
+				log.Printf("[factory] event_handler %s predicate error: %v", h.ID, merr)
+				continue
+			}
+			if matched && *h.DefaultPriority > defaultPriority {
+				defaultPriority = *h.DefaultPriority
+			}
+		}
+
 		task, created, e = tx.Tasks.FindOrCreate(r.Context(), orgID, teamID, req.EntityID, req.EventType, req.DedupKey, primaryEvent.ID, defaultPriority)
 		if e != nil {
 			return e
