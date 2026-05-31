@@ -328,9 +328,11 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		return nil, fmt.Errorf("resume: missing cwd")
 	}
 
-	s.mu.Lock()
-	model := s.model
-	s.mu.Unlock()
+	// Per-org default model (SKY-389): falls back to the constructor
+	// model when no resolver is wired. opts.Model — the model captured at
+	// the original run's start — still wins so a resume never silently
+	// switches models mid-run.
+	model := s.resolveModel(ctx, orgID)
 	if opts.Model != "" {
 		model = opts.Model
 	}
@@ -397,6 +399,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		ExtraEnv:       extraEnv,
 		TraceID:        runID,
 		OrgID:          orgID,
+		Secrets:        s.getRunSecrets(),
 		StartAgentHost: startAgentHost,
 	}, newRunSink(s, orgID, runID, triggerType, creatorUserID))
 

@@ -5,6 +5,7 @@ import (
 	"log"
 	"sync"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
@@ -17,18 +18,20 @@ import (
 type Runner struct {
 	entities db.EntityStore
 	projects db.ProjectStore
-	orgs     db.OrgsStore // enumerate active orgs per cycle
+	orgs     db.OrgsStore            // enumerate active orgs per cycle
+	secrets  agentproc.SecretsReader // per-org LLM-credential reader threaded into Classify → Haiku (nil in local; system-door in multi). SKY-389.
 	trigger  chan struct{}
 	stop     chan struct{}
 	mu       sync.Mutex
 	running  bool
 }
 
-func NewRunner(entities db.EntityStore, projects db.ProjectStore, orgs db.OrgsStore) *Runner {
+func NewRunner(entities db.EntityStore, projects db.ProjectStore, orgs db.OrgsStore, secrets agentproc.SecretsReader) *Runner {
 	return &Runner{
 		entities: entities,
 		projects: projects,
 		orgs:     orgs,
+		secrets:  secrets,
 		trigger:  make(chan struct{}, 1),
 		stop:     make(chan struct{}),
 	}
@@ -133,7 +136,7 @@ func (r *Runner) runOrg(ctx context.Context, orgID string) {
 	assigned := 0
 	skipped := 0
 	for _, e := range entities {
-		winner, votes := Classify(ctx, orgID, projects, e)
+		winner, votes := Classify(ctx, orgID, r.secrets, projects, e)
 		// All votes errored — leave classified_at NULL so the entity
 		// resurfaces next cycle. Stamping it here would permanently
 		// freeze the entity at unassigned even if the underlying

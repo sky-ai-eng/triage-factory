@@ -8,6 +8,7 @@ import (
 	"log"
 	"sync"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -27,8 +28,14 @@ type Curator struct {
 	stores   db.Stores
 	wsHub    *websocket.Hub
 
-	mu       sync.Mutex
-	model    string
+	mu    sync.Mutex
+	model string
+	// SKY-389 per-org run-credential seam, wired once at startup via
+	// SetRunCredentialResolvers. modelFor supersedes the process-global
+	// model above; secrets feeds RunOptions.Secrets. Tests leave both nil
+	// and fall back to model / the ambient-subscription path.
+	secrets  agentproc.SecretsReader
+	modelFor func(context.Context, string) string
 	sessions map[string]*projectSession // projectID → goroutine handle
 
 	// closed is set during Shutdown; SendMessage rejects after this.
@@ -57,13 +64,43 @@ func New(database *sql.DB, stores db.Stores, wsHub *websocket.Hub, model string)
 	}
 }
 
-// UpdateCredentials hot-swaps the model used for new requests. Mirrors
-// delegate.Spawner.UpdateCredentials so a config change applies
-// without restarting the binary.
-func (c *Curator) UpdateCredentials(model string) {
+// SetRunCredentialResolvers wires the per-org run-credential seam
+// (SKY-389): the per-org LLM-credential reader (nil in local → ambient
+// subscription; system-door reader in multi) and the per-org default-model
+// resolver. Both modes resolve through these so credential resolution
+// stops branching on mode. Set once at startup, post-New. Either may be
+// nil; resolveModel falls back to the constructor-supplied model and a nil
+// secrets reader yields the local ambient-subscription fallback.
+func (c *Curator) SetRunCredentialResolvers(secrets agentproc.SecretsReader, modelFor func(context.Context, string) string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.model = model
+	c.secrets = secrets
+	c.modelFor = modelFor
+}
+
+// resolveModel resolves the project-owning org's default model via the
+// SKY-389 resolver, falling back to the constructor-supplied model when no
+// resolver is wired (tests) or the resolver returns empty.
+func (c *Curator) resolveModel(ctx context.Context, orgID string) string {
+	c.mu.Lock()
+	fn := c.modelFor
+	fallback := c.model
+	c.mu.Unlock()
+	if fn != nil {
+		if m := fn(ctx, orgID); m != "" {
+			return m
+		}
+	}
+	return fallback
+}
+
+// getSecrets returns the per-org LLM-credential reader threaded into
+// RunOptions.Secrets: nil in local (ambient subscription), the system-door
+// reader in multi. SKY-389.
+func (c *Curator) getSecrets() agentproc.SecretsReader {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.secrets
 }
 
 // queueItem carries everything the per-project goroutine needs to

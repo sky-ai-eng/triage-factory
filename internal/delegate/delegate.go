@@ -119,12 +119,16 @@ type DelegateOpts struct {
 // Delegate kicks off an async agent run for any task type.
 // Routes to the appropriate worktree setup based on task source.
 func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) {
-	s.mu.Lock()
-	ghClient := s.ghClient
-	defaultModel := s.model
-	s.mu.Unlock()
-
 	orgID := opts.OrgID
+
+	// Resolve this run's GitHub client + default model per (org, owner).
+	// Both modes go through the same seam (SKY-389): the resolver mints an
+	// App-installation token in multi or borrows the keychain PAT in local;
+	// modelFor reads the org's team default. owner is parsed from the task
+	// (empty for Jira runs). context.Background — Delegate has no request
+	// ctx and the resolve is a bounded token-mint / DB read; the run's own
+	// cancellable ctx is created further down for the agent subprocess.
+	ghClient, defaultModel := s.resolveRunCredentials(context.Background(), orgID, ownerForTask(task))
 
 	// Compute trigger type + creator user up front so resolvePrompt
 	// can route by them (manual delegations must honor prompts_select
@@ -295,6 +299,24 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	}()
 
 	return runID, nil
+}
+
+// ownerForTask extracts the GitHub account a task targets, for the
+// per-(org, owner) credential resolution at Delegate entry (SKY-389).
+// GitHub PR tasks carry "owner/repo#N" in EntitySourceID; Jira (and any
+// non-github source) has no single owner, so the resolver receives "" and
+// resolves the org's sole App installation, falling through to PAT when
+// ambiguous.
+func ownerForTask(task domain.Task) string {
+	if task.EntitySource != "github" {
+		return ""
+	}
+	repoStr := task.EntitySourceID
+	if idx := strings.LastIndex(repoStr, "#"); idx >= 0 {
+		repoStr = repoStr[:idx]
+	}
+	owner, _ := parseOwnerRepo(repoStr)
+	return owner
 }
 
 // setupGitHub prepares a worktree for a GitHub PR task.

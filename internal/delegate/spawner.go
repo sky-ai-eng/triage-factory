@@ -13,6 +13,7 @@ import (
 	"log"
 	"sync"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -86,9 +87,17 @@ type Spawner struct {
 	tx    db.TxRunner
 	wsHub *websocket.Hub
 
-	mu                    sync.Mutex
-	ghClient              *ghclient.Client
-	model                 string
+	mu       sync.Mutex
+	ghClient *ghclient.Client
+	model    string
+	// SKY-389 per-org run-credential seam, wired once at startup via
+	// SetRunCredentialResolvers. When set (both modes in production) these
+	// supersede the process-global ghClient/model above; tests leave them
+	// nil and the resolver helpers fall back to ghClient/model.
+	ghResolver ghclient.Resolver                    // per-(org, owner) GitHub client source (App token in multi, keychain PAT in local)
+	runSecrets agentproc.SecretsReader              // per-org LLM-credential reader (nil in local → ambient subscription; system-door reader in multi)
+	modelFor   func(context.Context, string) string // per-org default-model resolver (prompt.Model still overrides per delegation)
+
 	cancels               map[string]context.CancelFunc                     // runID → cancel the entire run
 	drainer               QueueDrainer                                      // nil-safe; set post-construction via SetQueueDrainer
 	takenOver             map[string]bool                                   // runIDs claimed by Takeover. Sticky-on for the rest of the goroutine's lifetime even after rollback — clearing the entry would let late-firing goroutine gates race the takeover/abort lifecycle. Suppresses every cleanup path in runAgent so Takeover/abortTakeover own the row's terminal state.
@@ -263,13 +272,85 @@ func (s *Spawner) notifyDrainer(orgID, triggerType, entityID string) {
 	go d.DrainEntity(orgID, entityID)
 }
 
-// UpdateCredentials hot-swaps the GitHub client and model without
-// disrupting in-flight runs.
-func (s *Spawner) UpdateCredentials(ghClient *ghclient.Client, model string) {
+// SetRunCredentialResolvers wires the per-org run-credential seam
+// (SKY-389): both modes resolve a run's GitHub client + LLM key + default
+// model through these, so credential resolution stops branching on mode.
+//
+//   - resolver: per-(org, owner) GitHub client — App-installation token in
+//     multi, keychain PAT in local. Replaces the process-global ghClient
+//     the retired UpdateCredentials used to hot-swap from main's local block.
+//   - secrets: per-org LLM-credential reader. nil in local → the agent
+//     inherits the host's ambient Claude subscription; the system-door
+//     reader in multi.
+//   - modelFor: per-org default model (the org's team default, capped). The
+//     prompt's own Model still overrides this per delegation.
+//
+// Set once at startup, post-NewSpawner. Any of the three may be nil; the
+// resolver helpers fall back to the constructor-supplied ghClient/model
+// (the test / no-seam path).
+func (s *Spawner) SetRunCredentialResolvers(resolver ghclient.Resolver, secrets agentproc.SecretsReader, modelFor func(context.Context, string) string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.ghClient = ghClient
-	s.model = model
+	s.ghResolver = resolver
+	s.runSecrets = secrets
+	s.modelFor = modelFor
+}
+
+// resolveRunCredentials resolves the per-(org, owner) GitHub client and
+// the org's default model for a run. Both modes call this identically;
+// mode-awareness lives inside the resolver (App token vs PAT) and the
+// secrets reader (system door vs nil), not at the call site. owner is the
+// GitHub account the run targets — empty for Jira runs, which don't
+// pre-clone.
+func (s *Spawner) resolveRunCredentials(ctx context.Context, orgID, owner string) (*ghclient.Client, string) {
+	return s.resolveGHClient(ctx, orgID, owner), s.resolveModel(ctx, orgID)
+}
+
+// resolveGHClient resolves the per-(org, owner) GitHub client via the
+// SKY-389 resolver, falling back to the constructor-supplied client when
+// no resolver is wired (test fixtures). A resolve failure returns nil:
+// setupGitHub surfaces "GitHub credentials not configured" for GitHub
+// tasks, and Jira runs don't need a client. The error is logged so a real
+// backend failure (e.g. vault outage) isn't silent.
+func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner string) *ghclient.Client {
+	s.mu.Lock()
+	resolver := s.ghResolver
+	fallback := s.ghClient
+	s.mu.Unlock()
+	if resolver == nil {
+		return fallback
+	}
+	client, err := resolver.ClientFor(ctx, orgID, owner)
+	if err != nil {
+		log.Printf("[delegate] resolve GitHub client for org %s target %q: %v", orgID, owner, err)
+		return nil
+	}
+	return client
+}
+
+// resolveModel resolves the org's default model via the SKY-389 resolver,
+// falling back to the constructor-supplied model when no resolver is wired
+// (test fixtures) or the resolver returns empty.
+func (s *Spawner) resolveModel(ctx context.Context, orgID string) string {
+	s.mu.Lock()
+	fn := s.modelFor
+	fallback := s.model
+	s.mu.Unlock()
+	if fn != nil {
+		if m := fn(ctx, orgID); m != "" {
+			return m
+		}
+	}
+	return fallback
+}
+
+// getRunSecrets returns the per-org LLM-credential reader threaded into
+// RunOptions.Secrets: nil in local (ambient subscription fallback), the
+// system-door reader in multi. SKY-389.
+func (s *Spawner) getRunSecrets() agentproc.SecretsReader {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.runSecrets
 }
 
 func (s *Spawner) updateStatus(orgID, runID, status string) {

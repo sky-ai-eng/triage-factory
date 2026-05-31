@@ -216,6 +216,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		TraceID:        runID,
 		SystemPrompt:   cfg.appendSysPrompt,
 		OrgID:          orgID,
+		Secrets:        s.getRunSecrets(),
 		StartAgentHost: startAgentHost,
 	}, newRunSink(s, orgID, runID, triggerType, creatorUserID))
 

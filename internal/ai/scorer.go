@@ -90,7 +90,7 @@ const scoringModel = "haiku"
 // the count, and so the number stays correct if batchSize changes.
 // Failures are non-fatal: the function still returns whatever scores
 // succeeded, and the caller surfaces skippedTasks as a warning toast.
-func ScoreTasks(ctx context.Context, database *sql.DB, entities db.EntityStore, orgID string, tasks []domain.Task) (scores []TaskScore, skippedTasks int, err error) {
+func ScoreTasks(ctx context.Context, database *sql.DB, entities db.EntityStore, orgID string, tasks []domain.Task, secrets agentproc.SecretsReader) (scores []TaskScore, skippedTasks int, err error) {
 	if len(tasks) == 0 {
 		return nil, 0, nil
 	}
@@ -157,7 +157,7 @@ func ScoreTasks(ctx context.Context, database *sql.DB, entities db.EntityStore, 
 		wg.Add(1)
 		go func(idx int, b []TaskInput) {
 			defer wg.Done()
-			scores, err := scoreBatch(ctx, b)
+			scores, err := scoreBatch(ctx, b, orgID, secrets)
 			results[idx] = batchResult{scores, err}
 		}(i, batch)
 	}
@@ -181,7 +181,7 @@ func ScoreTasks(ctx context.Context, database *sql.DB, entities db.EntityStore, 
 	return allScores, skipped, nil
 }
 
-func scoreBatch(ctx context.Context, tasks []TaskInput) ([]TaskScore, error) {
+func scoreBatch(ctx context.Context, tasks []TaskInput, orgID string, secrets agentproc.SecretsReader) ([]TaskScore, error) {
 	tasksJSON, err := json.Marshal(tasks)
 	if err != nil {
 		return nil, fmt.Errorf("marshal tasks: %w", err)
@@ -201,6 +201,8 @@ func scoreBatch(ctx context.Context, tasks []TaskInput) ([]TaskScore, error) {
 		Model:   scoringModel,
 		Message: prompt,
 		TraceID: "scorer-batch",
+		OrgID:   orgID,
+		Secrets: secrets,
 	}, agentproc.NoopSink{})
 	if err != nil {
 		stderr := ""

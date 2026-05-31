@@ -113,13 +113,15 @@ type Vote struct {
 // orgID scopes the per-org credentials agentproc.Run resolves for
 // each Haiku invocation. The Runner's per-org loop supplies this
 // from ListActiveSystem; passing the wrong org would bill the wrong
-// tenant in multi-mode.
-func Classify(ctx context.Context, orgID string, projects []domain.Project, entity domain.Entity) (*string, []Vote) {
+// tenant in multi-mode. secrets is the per-org LLM-credential reader
+// threaded alongside orgID (nil in local → ambient subscription;
+// system-door reader in multi). SKY-389.
+func Classify(ctx context.Context, orgID string, secrets agentproc.SecretsReader, projects []domain.Project, entity domain.Entity) (*string, []Vote) {
 	if len(projects) == 0 {
 		return nil, nil
 	}
 
-	stage1 := runVotes(ctx, orgID, projects, entity, voteStage1)
+	stage1 := runVotes(ctx, orgID, secrets, projects, entity, voteStage1)
 
 	if winner := pickWinner(stage1); winner != nil {
 		return winner, stage1
@@ -146,7 +148,7 @@ func Classify(ctx context.Context, orgID string, projects []domain.Project, enti
 	}
 
 	log.Printf("[classify] entity %s: escalating %d borderline+truncated project(s) to Stage 2", entity.ID, len(escalated))
-	stage2 := runVotes(ctx, orgID, escalated, entity, voteStage2)
+	stage2 := runVotes(ctx, orgID, secrets, escalated, entity, voteStage2)
 
 	merged := mergeStages(stage1, stage2)
 	return pickWinner(merged), merged
@@ -155,7 +157,7 @@ func Classify(ctx context.Context, orgID string, projects []domain.Project, enti
 // runVotes fans out one Haiku call per project using the provided
 // vote function (Stage 1 or Stage 2). Concurrency is capped at
 // maxConcurrentVotes.
-func runVotes(ctx context.Context, orgID string, projects []domain.Project, entity domain.Entity, vote func(context.Context, string, domain.Project, domain.Entity) Vote) []Vote {
+func runVotes(ctx context.Context, orgID string, secrets agentproc.SecretsReader, projects []domain.Project, entity domain.Entity, vote func(context.Context, string, agentproc.SecretsReader, domain.Project, domain.Entity) Vote) []Vote {
 	sem := make(chan struct{}, maxConcurrentVotes)
 	votes := make([]Vote, len(projects))
 	var wg sync.WaitGroup
@@ -165,7 +167,7 @@ func runVotes(ctx context.Context, orgID string, projects []domain.Project, enti
 		go func(idx int, project domain.Project) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			votes[idx] = vote(ctx, orgID, project, entity)
+			votes[idx] = vote(ctx, orgID, secrets, project, entity)
 		}(i, p)
 	}
 	wg.Wait()
@@ -221,7 +223,7 @@ func pickWinner(votes []Vote) *string {
 // voteStage1 is the broad-pass single-shot Haiku call. KB inlined
 // up to kbInlineMaxBytes; flag KBTruncated when the cap was hit so
 // the orchestrator knows whether Stage 2 might help.
-func voteStage1(ctx context.Context, orgID string, project domain.Project, entity domain.Entity) Vote {
+func voteStage1(ctx context.Context, orgID string, secrets agentproc.SecretsReader, project domain.Project, entity domain.Entity) Vote {
 	v := Vote{ProjectID: project.ID, Stage: 1}
 
 	kb, truncated, err := readProjectKB(project.ID)
@@ -243,7 +245,7 @@ func voteStage1(ctx context.Context, orgID string, project domain.Project, entit
 		truncateDescription(entity.Description),
 	)
 
-	score, rationale, err := runStage1Haiku(ctx, orgID, prompt)
+	score, rationale, err := runStage1Haiku(ctx, orgID, prompt, secrets)
 	if err != nil {
 		v.Err = err
 		return v
@@ -256,7 +258,7 @@ func voteStage1(ctx context.Context, orgID string, project domain.Project, entit
 // voteStage2 is the agent-mode call: Haiku in the project's working
 // directory, free to Read/Glob/Grep `./knowledge-base/` selectively.
 // Used only for borderline+truncated projects from Stage 1.
-func voteStage2(ctx context.Context, orgID string, project domain.Project, entity domain.Entity) Vote {
+func voteStage2(ctx context.Context, orgID string, secrets agentproc.SecretsReader, project domain.Project, entity domain.Entity) Vote {
 	v := Vote{ProjectID: project.ID, Stage: 2}
 
 	kbRoot, err := curator.KnowledgeDir(project.ID)
@@ -280,7 +282,7 @@ func voteStage2(ctx context.Context, orgID string, project domain.Project, entit
 		truncateDescription(entity.Description),
 	)
 
-	score, rationale, err := runStage2Haiku(ctx, orgID, prompt, kbRoot)
+	score, rationale, err := runStage2Haiku(ctx, orgID, prompt, kbRoot, secrets)
 	if err != nil {
 		v.Err = err
 		return v
@@ -369,12 +371,13 @@ func readProjectKB(projectID string) (string, bool, error) {
 // stub.
 var runStage1Haiku = realRunStage1Haiku
 
-func realRunStage1Haiku(ctx context.Context, orgID, prompt string) (int, string, error) {
+func realRunStage1Haiku(ctx context.Context, orgID, prompt string, secrets agentproc.SecretsReader) (int, string, error) {
 	return runHaiku(ctx, agentproc.RunOptions{
 		Model:   classifyModel,
 		Message: prompt,
 		TraceID: "classify-stage1",
 		OrgID:   orgID,
+		Secrets: secrets,
 	})
 }
 
@@ -384,7 +387,7 @@ func realRunStage1Haiku(ctx context.Context, orgID, prompt string) (int, string,
 // can stub.
 var runStage2Haiku = realRunStage2Haiku
 
-func realRunStage2Haiku(ctx context.Context, orgID, prompt, cwd string) (int, string, error) {
+func realRunStage2Haiku(ctx context.Context, orgID, prompt, cwd string, secrets agentproc.SecretsReader) (int, string, error) {
 	return runHaiku(ctx, agentproc.RunOptions{
 		Cwd:      cwd,
 		Model:    classifyModel,
@@ -392,6 +395,7 @@ func realRunStage2Haiku(ctx context.Context, orgID, prompt, cwd string) (int, st
 		MaxTurns: stage2MaxTurns,
 		TraceID:  "classify-stage2",
 		OrgID:    orgID,
+		Secrets:  secrets,
 	})
 }
 

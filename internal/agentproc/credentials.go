@@ -22,6 +22,34 @@ type SecretsReader interface {
 	Get(ctx context.Context, orgID, key string) (string, error)
 }
 
+// SystemSecretGetter is the claims-free secret read door agentproc needs
+// to build a SecretsReader without importing internal/db (the same
+// no-import discipline SecretsReader documents above). db.SecretStore's
+// GetSystem method satisfies this shape structurally.
+type SystemSecretGetter interface {
+	GetSystem(ctx context.Context, orgID, key string) (string, error)
+}
+
+// NewSystemSecretsReader adapts a store's claims-free GetSystem door to
+// the SecretsReader.Get shape so background run paths (delegation,
+// resume, scorer, classifier, profiler, curator) can resolve per-org LLM
+// credentials without a request JWT. These run claims-free, so they MUST
+// use the system door, not the RLS-checked Get — otherwise the multi-mode
+// nil-Secrets error just trades for an RLS denial (SKY-385/SKY-389).
+//
+// Invariant (SKY-389): the orgID passed to Get always originates from the
+// run / entity / task, never user input — so the unauthenticated GetSystem
+// read is safe.
+func NewSystemSecretsReader(g SystemSecretGetter) SecretsReader {
+	return systemSecretsReader{getter: g}
+}
+
+type systemSecretsReader struct{ getter SystemSecretGetter }
+
+func (s systemSecretsReader) Get(ctx context.Context, orgID, key string) (string, error) {
+	return s.getter.GetSystem(ctx, orgID, key)
+}
+
 // ErrNoCredentialsConfigured surfaces when multi-mode invokes Run
 // against an org with no Anthropic / Bedrock secret in vault. Typed
 // so the caller (delegate spawner, scorer, etc.) can decide whether

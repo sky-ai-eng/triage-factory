@@ -225,9 +225,10 @@ func (s *projectSession) dispatch(item queueItem) {
 		return
 	}
 
-	s.curator.mu.Lock()
-	model := s.curator.model
-	s.curator.mu.Unlock()
+	// Per-org default model (SKY-389). WithoutCancel so a cancel mid-
+	// dispatch doesn't break the model read; resolveAIModelForOrg has its
+	// own fallback-on-error.
+	model := s.curator.resolveModel(context.WithoutCancel(msgCtx), item.orgID)
 
 	// Pre-flight model check before we spawn claude. The Curator
 	// constructor takes "" until config loads (mirroring Spawner),
@@ -328,6 +329,7 @@ func (s *projectSession) dispatch(item queueItem) {
 		},
 		TraceID: requestID,
 		OrgID:   item.orgID,
+		Secrets: s.curator.getSecrets(),
 	}, newRequestSink(s.curator, s.projectID, requestID, item.orgID, item.creatorUserID))
 
 	// Cancellation observed → terminal cancelled status. Distinguish

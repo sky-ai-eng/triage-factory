@@ -25,7 +25,7 @@ func TestRunner_IteratesActiveOrgs(t *testing.T) {
 	orgs := &fakeOrgsStore{ids: []string{"org-a", "org-b", "org-c"}}
 	entities := &recordingEntityStore{}
 
-	r := NewRunner(entities, nilProjectStore{}, orgs)
+	r := NewRunner(entities, nilProjectStore{}, orgs, nil)
 	r.run(context.Background())
 
 	if orgs.calls != 1 {
@@ -52,7 +52,7 @@ func TestRunner_OrgsStoreErrorAbortsCycle(t *testing.T) {
 	orgs := &fakeOrgsStore{err: errOrgsDown}
 	entities := &recordingEntityStore{}
 
-	r := NewRunner(entities, nilProjectStore{}, orgs)
+	r := NewRunner(entities, nilProjectStore{}, orgs, nil)
 	r.run(context.Background())
 
 	entities.mu.Lock()

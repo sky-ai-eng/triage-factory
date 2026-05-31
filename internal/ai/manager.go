@@ -5,6 +5,7 @@ import (
 	"log"
 	"sync"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
@@ -27,6 +28,7 @@ type Manager struct {
 	database  *sql.DB
 	scores    db.ScoreStore
 	entities  db.EntityStore
+	secrets   agentproc.SecretsReader // per-org LLM-credential reader (nil in local → ambient subscription; system-door reader in multi). SKY-389.
 	callbacks RunnerCallbacks
 
 	mu      sync.Mutex
@@ -34,11 +36,12 @@ type Manager struct {
 	stopped bool
 }
 
-func NewManager(database *sql.DB, scores db.ScoreStore, entities db.EntityStore, callbacks RunnerCallbacks) *Manager {
+func NewManager(database *sql.DB, scores db.ScoreStore, entities db.EntityStore, secrets agentproc.SecretsReader, callbacks RunnerCallbacks) *Manager {
 	return &Manager{
 		database:  database,
 		scores:    scores,
 		entities:  entities,
+		secrets:   secrets,
 		callbacks: callbacks,
 		runners:   make(map[string]*Runner),
 	}
@@ -65,7 +68,7 @@ func (m *Manager) Trigger(orgID string) {
 	}
 	r, ok := m.runners[orgID]
 	if !ok {
-		r = NewRunner(m.database, m.scores, m.entities, orgID, m.callbacks)
+		r = NewRunner(m.database, m.scores, m.entities, orgID, m.secrets, m.callbacks)
 		r.Start()
 		m.runners[orgID] = r
 	}

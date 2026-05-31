@@ -27,17 +27,20 @@ const (
 
 // Profiler builds and persists AI-generated profiles for GitHub repositories.
 type Profiler struct {
-	gh       *github.Client
+	resolver github.Resolver         // per-(org, owner) GitHub client source — App-installation token in multi, keychain PAT in local. SKY-389.
+	secrets  agentproc.SecretsReader // per-org LLM-credential reader for the profiling Haiku calls (nil in local → ambient subscription; system-door reader in multi). SKY-389.
 	database *sql.DB
 	repos    db.RepoStore // profile reads + upserts go through the store
 	orgs     db.OrgsStore // iterate active orgs at the top of each profile run
 	ws       *websocket.Hub
 }
 
-// NewProfiler creates a Profiler with the given GitHub client, DB handle,
-// repo store, orgs store, and WS hub.
-func NewProfiler(gh *github.Client, database *sql.DB, repos db.RepoStore, orgs db.OrgsStore, ws *websocket.Hub) *Profiler {
-	return &Profiler{gh: gh, database: database, repos: repos, orgs: orgs, ws: ws}
+// NewProfiler creates a Profiler with the given GitHub resolver, per-org
+// secrets reader, DB handle, repo store, orgs store, and WS hub. The
+// resolver is consulted per (org, owner) inside the profiling loop so the
+// same code path serves both local (keychain PAT) and multi (App token).
+func NewProfiler(resolver github.Resolver, secrets agentproc.SecretsReader, database *sql.DB, repos db.RepoStore, orgs db.OrgsStore, ws *websocket.Hub) *Profiler {
+	return &Profiler{resolver: resolver, secrets: secrets, database: database, repos: repos, orgs: orgs, ws: ws}
 }
 
 // repoWithDocs groups a repo profile with the documentation text to send to the LLM.
@@ -140,17 +143,25 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			}
 		}
 
-		readme, err := p.gh.GetFileContent(owner, repo, "README.md")
+		// Resolve the per-(org, owner) GitHub client. Done after the TTL
+		// skip so we don't mint a token for a repo we're about to skip.
+		client, cerr := p.resolver.ClientFor(ctx, orgID, owner)
+		if cerr != nil {
+			log.Printf("[repoprofile] %s: resolve GitHub client: %v (skipping)", name, cerr)
+			continue
+		}
+
+		readme, err := client.GetFileContent(owner, repo, "README.md")
 		if err != nil {
 			log.Printf("[repoprofile] %s: get README.md: %v", name, err)
 		}
 
-		claudeMd, err := p.gh.GetFileContent(owner, repo, "CLAUDE.md")
+		claudeMd, err := client.GetFileContent(owner, repo, "CLAUDE.md")
 		if err != nil {
 			log.Printf("[repoprofile] %s: get CLAUDE.md: %v", name, err)
 		}
 
-		agentsMd, err := p.gh.GetFileContent(owner, repo, "AGENTS.md")
+		agentsMd, err := client.GetFileContent(owner, repo, "AGENTS.md")
 		if err != nil {
 			log.Printf("[repoprofile] %s: get AGENTS.md: %v", name, err)
 		}
@@ -162,7 +173,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		// surfaced) falls back to HTTPS so we always have *some* URL
 		// on the row.
 		var defaultBranch, cloneURL string
-		if meta, err := p.gh.GetRepoMeta(owner, repo); err != nil {
+		if meta, err := client.GetRepoMeta(owner, repo); err != nil {
 			log.Printf("[repoprofile] %s: get repo meta: %v", name, err)
 		} else {
 			defaultBranch = meta.DefaultBranch
@@ -223,7 +234,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		}
 		batch := withDocs[i:end]
 
-		results, err := profileBatch(ctx, orgID, batch)
+		results, err := profileBatch(ctx, orgID, batch, p.secrets)
 		if err != nil {
 			log.Printf("[repoprofile] batch %d failed: %v", i/profileBatchSize+1, err)
 			repoNames := make([]string, len(batch))
@@ -288,7 +299,7 @@ type repoProfileResult struct {
 	Profile string `json:"profile"`
 }
 
-func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs) ([]repoProfileResult, error) {
+func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs, secrets agentproc.SecretsReader) ([]repoProfileResult, error) {
 	inputs := make([]repoProfileInput, len(batch))
 	for i, d := range batch {
 		inputs[i] = repoProfileInput{
@@ -313,6 +324,7 @@ func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs) ([]re
 		Message: prompt,
 		TraceID: "repoprofile-batch",
 		OrgID:   orgID,
+		Secrets: secrets,
 	}, agentproc.NoopSink{})
 	if err != nil {
 		stderr := ""

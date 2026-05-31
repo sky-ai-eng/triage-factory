@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
@@ -838,7 +839,29 @@ func main() {
 	// Actual initialization happens below after the spawner is created.
 	var eventRouter *routing.Router
 
-	scorer := ai.NewManager(database, stores.Scores, stores.Entities, ai.RunnerCallbacks{
+	// SKY-389: the per-org run-credential seam shared by every AI feature.
+	// Both modes resolve a run's LLM key + default model through these, so
+	// the event → router → task → delegation chain stops branching on mode.
+	//
+	//   - runSecrets is the per-org LLM-credential reader threaded into
+	//     RunOptions.Secrets. Multi mode uses the system/admin door
+	//     (GetSystem): these run claims-free in the background, so the
+	//     RLS-checked Get would just trade the nil-Secrets error for an
+	//     RLS denial. The orgID always originates from the run/entity/task,
+	//     never user input, so the unauthenticated read is safe. Local mode
+	//     keeps it nil → the agent runs unsandboxed and inherits the host's
+	//     ambient Claude subscription (the supported zero-config setup).
+	//   - modelFor resolves the org's default model (team default, capped).
+	//     A prompt's own Model still overrides this per delegation.
+	var runSecrets agentproc.SecretsReader
+	if runmode.Current() == runmode.ModeMulti {
+		runSecrets = agentproc.NewSystemSecretsReader(stores.Secrets)
+	}
+	modelFor := func(ctx context.Context, orgID string) string {
+		return resolveAIModelForOrg(ctx, stores, orgID)
+	}
+
+	scorer := ai.NewManager(database, stores.Scores, stores.Entities, runSecrets, ai.RunnerCallbacks{
 		OnScoringStarted: func(orgID string, taskIDs []string) {
 			wsHub.Broadcast(websocket.Event{
 				Type:  "scoring_started",
@@ -886,7 +909,7 @@ func main() {
 	// discovered entities against existing projects via per-project
 	// Haiku quorum vote. Sticky — only fires on entities with
 	// classified_at IS NULL, so re-polls don't re-classify.
-	classifier := projectclassify.NewRunner(stores.Entities, stores.Projects, stores.Orgs)
+	classifier := projectclassify.NewRunner(stores.Entities, stores.Projects, stores.Orgs, runSecrets)
 	classifier.Start()
 	log.Println("[classify] project classifier started (model: haiku)")
 	// System-service profile (D9a): kicked by any tenant's poll
@@ -911,14 +934,15 @@ func main() {
 		errorThrottleMu sync.Mutex
 		lastErrorToast  = map[string]time.Time{}
 	)
-	// GitHub credential resolver for the poller — resolves an App
-	// installation token (tier 1) or the org PAT (tier 3) per cycle, per
-	// installation. Its own token cache: installation tokens
-	// carry a TTL and the cache treats a token inside the expiry guard as a
-	// miss, so the poller re-mints on its own schedule without sharing the
-	// server's cache.
-	pollerGHResolver := ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil)
-	pollerMgr := poller.NewManager(database, bus, stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.Orgs, stores.JiraStatusRules, stores.TeamGitHubGroups, stores.Secrets, stores.GitHubApps, pollerGHResolver)
+	// Shared per-org GitHub credential resolver: App-installation token
+	// (tier 1) → org PAT (tier 3) per (org, target). Consumed by the
+	// poller (per cycle), the delegation spawner, and the repo profiler —
+	// the unified per-org GitHub source for both modes (SKY-389). Its own
+	// token cache: installation tokens carry a TTL and the cache treats a
+	// token inside the expiry guard as a miss, so consumers re-mint on
+	// their own schedule without sharing the server handler's cache.
+	ghResolver := ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil)
+	pollerMgr := poller.NewManager(database, bus, stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.Orgs, stores.JiraStatusRules, stores.TeamGitHubGroups, stores.Secrets, stores.GitHubApps, ghResolver)
 	pollerMgr.OnError = func(source, orgID string, err error) {
 		// Throttle key includes orgID so a chronic failure on one tenant
 		// doesn't suppress a fresh failure on another. Process-level
@@ -941,8 +965,16 @@ func main() {
 		toast.ErrorTitled(wsHub, orgID, label, fmt.Sprintf("Poll failed: %v", err))
 	}
 
-	// Create spawner once — credentials are hot-swapped in place
+	// Create spawner once. Per-run credentials resolve through the SKY-389
+	// seam wired just below, not a process-global hot-swap.
 	spawner := delegate.NewSpawner(database, stores, nil, wsHub, "", storedTakeoverDir)
+	// SKY-389: wire the per-org run-credential seam. Both modes resolve a
+	// run's GitHub client (App token in multi, keychain PAT in local) via
+	// ghResolver, its LLM key via runSecrets (system door in multi, nil →
+	// ambient subscription in local), and its default model via modelFor.
+	// This replaces the retired per-process UpdateCredentials path that
+	// only ran from main's local-mode block.
+	spawner.SetRunCredentialResolvers(ghResolver, runSecrets, modelFor)
 	// Hand the full Stores bundle so the sandbox-branch agenthost
 	// daemon can serve every routing-sensitive RPC the agent's
 	// `triagefactory exec` invocations send. Local-mode + non-sandbox
@@ -970,14 +1002,18 @@ func main() {
 	// sharding would let us scope this per-pod, but pod sharding
 	// doesn't exist (single-pod multi-mode in v1).
 	//
-	// The model arg below is empty until config loads;
-	// curator.UpdateCredentials hot-swaps the same way Spawner does.
+	// The model arg below is empty; the curator resolves its per-org
+	// default model through the SKY-389 seam wired just below.
 	if n, err := stores.Curator.CancelOrphanedNonTerminalRequests(context.Background()); err != nil {
 		log.Printf("[curator] sweep stranded turns: %v", err)
 	} else if n > 0 {
 		log.Printf("[curator] cancelled %d stranded turn(s) from prior process", n)
 	}
 	curatorRuntime := curator.New(database, stores, wsHub, "")
+	// SKY-389: same per-org run-credential seam as the spawner. The curator
+	// resolves each turn's LLM key via runSecrets and its default model via
+	// modelFor, scoped to the project-owning org.
+	curatorRuntime.SetRunCredentialResolvers(runSecrets, modelFor)
 	srv.SetCurator(curatorRuntime)
 
 	// Knowledge-base file watcher — fires `project_knowledge_updated`
@@ -1108,24 +1144,28 @@ func main() {
 			return
 		}
 
-		// Local mode: stop, swap the process-global GitHub identity
-		// (spawner/profiler/clone bootstrap read the sentinel org), then
-		// re-profile and restart. N=1, so there's no fleet to stampede.
+		// Local mode: stop, refresh the server request-handler GitHub
+		// client, then re-profile and restart. N=1, so there's no fleet to
+		// stampede. The spawner + curator + profiler no longer take a
+		// process-global client here — they resolve per-(org, owner)
+		// through the SKY-389 seam (ghResolver reads the sentinel org's
+		// keychain PAT via tier-3), so a config change is picked up on the
+		// next run without a hot-swap.
 		pollerMgr.StopAll()
 
 		ctx := context.Background()
 		creds, _ := integrations.Load(ctx, stores.Secrets, orgID)
-		model := resolveAIModelForOrg(ctx, stores, orgID)
 
 		if creds.GitHubPAT != "" && creds.GitHubURL != "" {
-			ghClient := ghclient.NewClient(creds.GitHubURL, creds.GitHubPAT)
-			spawner.UpdateCredentials(ghClient, model)
-			curatorRuntime.UpdateCredentials(model)
-			srv.SetGitHubClient(ghClient)
+			// Server request-handler path only (SetGitHubClient → reviews /
+			// dashboard / pending-PRs). Separate from the run-credential
+			// seam by design — those handlers run with JWT claims. Tracked
+			// apart from SKY-389.
+			srv.SetGitHubClient(ghclient.NewClient(creds.GitHubURL, creds.GitHubPAT))
 
 			// Re-profile, then restart all pollers and trigger scoring.
 			go func() {
-				profiler := repoprofile.NewProfiler(ghClient, database, stores.Repos, stores.Orgs, wsHub)
+				profiler := repoprofile.NewProfiler(ghResolver, runSecrets, database, stores.Repos, stores.Orgs, wsHub)
 				if err := profiler.Run(context.Background(), true); err != nil {
 					log.Printf("[repoprofile] profiling failed: %v", err)
 				}
@@ -1147,8 +1187,6 @@ func main() {
 				}
 			}()
 		} else {
-			spawner.UpdateCredentials(nil, "")
-			curatorRuntime.UpdateCredentials("")
 			srv.SetGitHubClient(nil)
 			pollerMgr.RestartAll()
 			pollerMgr.PollSoon("github", orgID)
@@ -1257,18 +1295,18 @@ func main() {
 		orgID := runmode.LocalDefaultOrgID
 		creds, _ := integrations.Load(ctx, stores.Secrets, orgID)
 		repoCount, _ := stores.Repos.CountConfiguredSystem(ctx, orgID)
-		model := resolveAIModelForOrg(ctx, stores, orgID)
 
 		if creds.GitHubPAT != "" && creds.GitHubURL != "" && repoCount > 0 {
-			ghClient := ghclient.NewClient(creds.GitHubURL, creds.GitHubPAT)
-			spawner.UpdateCredentials(ghClient, model)
-			curatorRuntime.UpdateCredentials(model)
-			srv.SetGitHubClient(ghClient)
+			// Server request-handler client only — the spawner, curator,
+			// and profiler resolve per-(org, owner) through the SKY-389
+			// seam (ghResolver reads the sentinel org's keychain PAT via
+			// tier-3), so no process-global hot-swap is needed here.
+			srv.SetGitHubClient(ghclient.NewClient(creds.GitHubURL, creds.GitHubPAT))
 			log.Printf("[delegate] spawner ready (%d repos configured)", repoCount)
 
 			// Profile repos, then start pollers and trigger scoring.
 			go func() {
-				profiler := repoprofile.NewProfiler(ghClient, database, stores.Repos, stores.Orgs, wsHub)
+				profiler := repoprofile.NewProfiler(ghResolver, runSecrets, database, stores.Repos, stores.Orgs, wsHub)
 				if err := profiler.Run(context.Background(), false); err != nil {
 					log.Printf("[repoprofile] initial profiling failed: %v", err)
 				}
