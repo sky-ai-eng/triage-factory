@@ -187,6 +187,14 @@ func (s *Server) handleEventHandlerCreate(w http.ResponseWriter, r *http.Request
 			notFound(w, "prompt")
 			return
 		}
+		// TODO(SKY-380): once prompts expose team_id + visibility, validate
+		// here that the resolved acting team may bind this prompt (prompt is
+		// org-visible OR prompt.team == acting team) and reject otherwise.
+		// The trigger→prompt FK is only (prompt_id, org_id), so this is the
+		// authoritative cross-team guard. The single-team prompts page keeps
+		// the UI from presenting the footgun (only the active team's prompts
+		// are on the canvas), but a hand-crafted API call still can until
+		// this server-side check lands.
 		h.PromptID = req.PromptID
 		h.TriggerType = domain.TriggerTypeEvent
 		threshold := 4
