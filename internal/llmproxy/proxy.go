@@ -128,16 +128,19 @@ type Config struct {
 	Upstream string
 
 	// AllowNonLoopback opts into binding Start on a non-loopback
-	// address. The proxy is unauthenticated on the local hop — the
-	// security boundary is "only the agent subprocess can reach it"
-	// enforced by network isolation. An accidental "0.0.0.0:NNNN"
-	// bind would expose a credentialed proxy to the LAN; loopback-
-	// only by default prevents that footgun.
+	// address. The security boundary on the local hop is per-run token
+	// auth (IncomingToken; see the package-level trust model) backed by
+	// the network-isolation allowlist — not "loopback-only", which by
+	// itself never authenticated the caller. An accidental "0.0.0.0:NNNN"
+	// bind would still expose the proxy to the LAN (where the token is
+	// the only thing standing between a LAN attacker and the org's key),
+	// so loopback-only-by-default remains the safety default and this
+	// flag is the conscious opt-out.
 	//
-	// Future sandbox integration (the host-side veth IP for the
-	// gVisor netns) is the legitimate non-loopback use case. Set
-	// this true when binding to the veth gateway IP so the caller
-	// has consciously acknowledged the bind is not loopback.
+	// The sandbox integration (the host-side veth IP for the gVisor
+	// netns) is the legitimate non-loopback use case. Set this true when
+	// binding to the veth gateway IP so the caller has consciously
+	// acknowledged the bind is not loopback.
 	AllowNonLoopback bool
 
 	// IncomingToken, when non-empty, is the per-run secret every
@@ -349,10 +352,11 @@ func (s *Server) Handler() http.Handler { return s.handler }
 // env var.
 //
 // Defaults to 127.0.0.1:0 (random loopback port) when addr is "". A
-// non-loopback bind requires Config.AllowNonLoopback=true — the proxy
-// is unauthenticated on the local hop, so an accidental "0.0.0.0:NNNN"
-// would expose a credentialed proxy to the LAN. The future sandbox
-// case (binding to the host-side veth IP, e.g. 192.168.99.1) is the
+// non-loopback bind requires Config.AllowNonLoopback=true — an
+// accidental "0.0.0.0:NNNN" would expose the proxy to the LAN, where
+// (when IncomingToken is set) the per-run token is the only barrier to
+// the org's key, and (when it isn't) there is none. The sandbox case
+// (binding to the host-side veth IP, e.g. 10.42.<idx>.1) is the
 // legitimate non-loopback use case and opts in via the Config flag.
 func (s *Server) Start(addr string) (string, error) {
 	if s.httpSrv != nil {

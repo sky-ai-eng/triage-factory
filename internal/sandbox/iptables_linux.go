@@ -220,7 +220,10 @@ func runIptablesInNetns(ctx context.Context, netnsName string, args ...string) e
 func reapEgressForSubnet(ctx context.Context, idx uint8) {
 	gw := hostIP(idx)
 	for _, chain := range []string{"INPUT", "FORWARD"} {
-		out, err := exec.CommandContext(ctx, "iptables", "-S", chain).Output()
+		// "-t filter" is explicit even though it's the default, to match
+		// every other iptables call in this file and make clear we're
+		// listing the same table applyEgressPolicy installed into.
+		out, err := exec.CommandContext(ctx, "iptables", "-t", "filter", "-S", chain).Output()
 		if err != nil {
 			continue
 		}
@@ -229,6 +232,11 @@ func reapEgressForSubnet(ctx context.Context, idx uint8) {
 				continue
 			}
 			delRule := strings.Replace(line, "-A "+chain, "-D "+chain, 1)
+			// strings.Fields splits the negated match into separate "!"
+			// and "-d" tokens, which is exactly what iptables wants as
+			// distinct argv elements (the shell-escaping headache around
+			// "!" only bites when going through a shell — we exec argv
+			// directly, so no quoting is involved).
 			args := append([]string{"-t", "filter"}, strings.Fields(delRule)...)
 			_ = exec.CommandContext(ctx, "iptables", args...).Run()
 		}

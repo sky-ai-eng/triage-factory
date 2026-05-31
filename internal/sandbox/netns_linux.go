@@ -91,6 +91,27 @@ func setupNetwork(ctx context.Context, runID string, subnetIdx uint8) (*netState
 		}
 	}
 
+	// Defense-in-depth (SKY-395): disable IPv6 inside the netns so the
+	// Part B egress allowlist — which is IPv4-only (iptables, not
+	// ip6tables; the runner image bundles only iptables) — can't be
+	// flanked over v6. Today this is belt-and-suspenders, not an open
+	// hole: the LLM proxy binds an IPv4 literal (10.42.<idx>.1), so a
+	// sibling run has no v6 listener to reach, and the netns is given no
+	// v6 address or route above, so there's no v6 path off-link anyway.
+	// But that safety is implicit; pinning disable_ipv6 makes it safe by
+	// construction, so a future dual-stack proxy or a host that
+	// autoconfigures v6 on the veth can't silently reopen the
+	// cross-tenant reach below the v4 filter.
+	//
+	// Best-effort by design (runIPNoErr swallows failure): if `sysctl`
+	// is absent on some image, a hard failure here would break every
+	// sandbox run for no security gain (v6 is unreachable regardless),
+	// so we proceed rather than fail the run. Writing 1 to `all`
+	// disables v6 on every interface in the netns (existing + future),
+	// flushing any link-local the veth or lo may have picked up.
+	_ = runIPNoErr(ctx, "netns", "exec", netnsName,
+		"sysctl", "-wq", "net.ipv6.conf.all.disable_ipv6=1")
+
 	return state, nil
 }
 

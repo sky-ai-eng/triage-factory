@@ -58,8 +58,14 @@ func TestIntegration_CrossTenantEgressBlocked(t *testing.T) {
 	// A stand-in for "another run's gateway/proxy": a local host IP on a
 	// dummy interface, NOT equal to the sandbox's own gateway. Faithful to
 	// the real condition — a sibling proxy binds to a local 10.42.<M>.1 the
-	// weak-host model would otherwise deliver. 250 won't collide with the
-	// allocator (starts at 0).
+	// weak-host model would otherwise deliver.
+	//
+	// Index 250: the allocator is a [0,256) pool that hands out indices
+	// ascending from 0 (subnet.go), and this test does a single Wrap, so
+	// the run's own gateway lands at a low index — idx 250 is only reached
+	// with 250+ concurrent live sandboxes, far beyond any integration
+	// host. The sb.HostIP != sibIP guard below turns even that remote
+	// collision into a clean skip rather than a confusing false pass.
 	const sibIP = "10.42.250.1"
 	const port = "9999"
 	mustRun(t, "ip", "link", "add", "tfsib0", "type", "dummy")
@@ -91,6 +97,15 @@ func TestIntegration_CrossTenantEgressBlocked(t *testing.T) {
 		t.Fatalf("Wrap: %v", err)
 	}
 	defer sb.Close()
+
+	// Guard the documented assumption: if the allocator ever handed this
+	// run the same idx our sibling stand-in occupies (only possible at
+	// 250+ concurrent sandboxes), sibIP would BE the own gateway and the
+	// "blocked sibling" assertion would be testing nonsense. Skip rather
+	// than report a misleading pass/fail.
+	if sb.HostIP == sibIP {
+		t.Skipf("run gateway %s collided with sibling stand-in %s; rerun with fewer concurrent sandboxes", sb.HostIP, sibIP)
+	}
 
 	// Now that the run's gateway IP is known, (a) tell the payload what it is
 	// and (b) stand up a listener there so the own-gateway control can succeed.
