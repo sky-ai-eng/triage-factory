@@ -501,6 +501,7 @@ export default function PromptDrawer({
                   steps={chainDraft}
                   onChange={setChainDraft}
                   busy={saving}
+                  lockedTeamId={effectiveTeam}
                 />
               )}
 

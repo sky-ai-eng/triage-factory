@@ -911,6 +911,7 @@ function IntegrationsPanel({
         linearKey={project.linear_project_key}
         onJiraChange={handleJiraChange}
         onLinearChange={handleLinearChange}
+        teamId={project.team_id}
       />
     </Card>
   )

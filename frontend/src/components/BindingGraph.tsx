@@ -247,6 +247,20 @@ function BindingGraphInner({
   onTriggerDeletedRef.current = onTriggerDeleted
 
   const fetchAll = useCallback(async () => {
+    // Hold in the loading state until the active team resolves. For a
+    // multi-team user before /api/teams loads, teamId is unvalidated (''
+    // or a stale stored id) and fetching now would pull every visible
+    // team's prompts + triggers onto the canvas — letting the user open or
+    // delete a sibling team's trigger before the scoped refetch replaces
+    // it. teamReady flips true once the active team is a validated id, and
+    // because it's in this callback's deps the effect re-runs the real
+    // (scoped) fetch then. Re-assert loading so a ready→not-ready transition
+    // (an org switch resets useActiveTeam) clears the prior team's canvas
+    // rather than leaving it interactive during the swap.
+    if (!teamReady) {
+      setLoading(true)
+      return
+    }
     const parseOrThrow = async (r: Response, label: string) => {
       if (!r.ok) throw new Error(`${label}: HTTP ${r.status}`)
       return r.json()
@@ -281,7 +295,7 @@ function BindingGraphInner({
     } finally {
       setLoading(false)
     }
-  }, [teamId])
+  }, [teamId, teamReady])
 
   useEffect(() => {
     fetchAll()

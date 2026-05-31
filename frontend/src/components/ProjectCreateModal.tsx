@@ -38,12 +38,16 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
   // team is known (solo → '' is already resolved → ready immediately).
   const repoPickerReady = teamReady && (!multi || team !== '')
 
-  // Repos are team-scoped (validatePinnedRepos checks the acting team's
-  // tracked set), so any team change — a manual pick OR the automatic seed
-  // / org-switch reseed — invalidates the current selection. Clear it so a
-  // repo chosen under one team can't be submitted under another.
+  // Repos AND the Jira project are team-scoped (the create POST validates
+  // both against the acting team — pinned repos via validatePinnedRepos,
+  // jira_project_key against the team's jira_project_status_rules), so any
+  // team change — a manual pick OR the automatic seed / org-switch reseed —
+  // invalidates both selections. Clear them so a choice made under one team
+  // can't be submitted under another (the Jira picker also refetches its
+  // options for the new team from its own teamId-keyed effect).
   useEffect(() => {
     setPinnedRepos([])
+    setJiraKey('')
   }, [team])
   // Holds the in-flight POST's AbortController so the close path
   // can cancel it. Without this, clicking the backdrop / hitting
@@ -227,6 +231,7 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
               linearKey={linearKey}
               onJiraChange={setJiraKey}
               onLinearChange={setLinearKey}
+              teamId={team}
             />
           </Field>
 

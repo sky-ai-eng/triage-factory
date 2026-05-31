@@ -15,6 +15,14 @@ interface Props {
   // True when the parent is currently saving — disables drag/drop and
   // the picker so the working state can't change mid-PUT.
   busy?: boolean
+  // The active team on the single-team prompts page. Scopes both the
+  // name-lookup fetch and the step picker so a chain on team A can only
+  // reference team A's (and org-visible) leaf prompts — otherwise a
+  // multi-team user could add a team-B step to a team-A chain, and the
+  // chain would run another team's prompt. '' for solo/local (the server
+  // resolves the sole team); the chain prompt itself is stamped to this
+  // same team by PromptDrawer, so the steps must match.
+  lockedTeamId?: string
 }
 
 export interface ChainStepDraft {
@@ -22,17 +30,26 @@ export interface ChainStepDraft {
   brief: string
 }
 
-export default function ChainStepEditor({ chainPromptId, steps, onChange, busy }: Props) {
+export default function ChainStepEditor({
+  chainPromptId,
+  steps,
+  onChange,
+  busy,
+  lockedTeamId,
+}: Props) {
   const [allPrompts, setAllPrompts] = useState<Prompt[]>([])
   const [pickerOpen, setPickerOpen] = useState(false)
   const [dragIndex, setDragIndex] = useState<number | null>(null)
 
   // Cache the prompts list so we can show step names. The picker
   // re-fetches on its own (already a low-volume call), so this fetch
-  // is purely for the per-step name lookup.
+  // is purely for the per-step name lookup. Scoped to the locked team so
+  // a step's name resolves only within the chain's own team set (matches
+  // the picker's options); refetches if the team changes.
   useEffect(() => {
     let cancelled = false
-    fetch('/api/prompts')
+    const q = lockedTeamId ? `?team_id=${encodeURIComponent(lockedTeamId)}` : ''
+    fetch(`/api/prompts${q}`)
       .then((res) => res.json())
       .then((data: Prompt[]) => {
         if (!cancelled) setAllPrompts(data)
@@ -41,7 +58,7 @@ export default function ChainStepEditor({ chainPromptId, steps, onChange, busy }
     return () => {
       cancelled = true
     }
-  }, [pickerOpen])
+  }, [pickerOpen, lockedTeamId])
 
   const update = (next: ChainStepDraft[]) => onChange(next)
 
@@ -145,6 +162,10 @@ export default function ChainStepEditor({ chainPromptId, steps, onChange, busy }
         title="Add a chain step"
         subtitle="Pick a leaf prompt to run as the next step in this chain"
         filter={(p) => p.kind !== 'chain' && p.id !== chainPromptId}
+        // Scope the picker's options to the chain's team. teamValue without
+        // onTeamChange scopes the fetch without rendering a header team
+        // picker — the team is fixed by the page, not chosen here.
+        teamValue={lockedTeamId}
       />
     </div>
   )
