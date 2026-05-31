@@ -188,6 +188,84 @@ func TestManager_RunGitHubCycle_RepollsAfterSlotElapses(t *testing.T) {
 	}
 }
 
+// TestManager_PollSoon_ReduesOnlyTargetOrg is the load-safety regression for
+// the multi-mode GitHub-config-change path: a config change on ONE org must
+// re-due only that org, never the whole fleet. Two orgs are polled and put on
+// their (long, default) cadence; PollSoon on org-a alone must make the next
+// cycle re-poll org-a but NOT org-b — otherwise one tenant saving a setting
+// would stampede every tenant's poll against shared GHES/GHEC API budgets.
+func TestManager_PollSoon_ReduesOnlyTargetOrg(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	orgs := &fakeOrgsStore{ids: []string{"org-a", "org-b"}}
+	repos := &recordingRepoStore{}
+	m := &Manager{orgs: orgs, repos: repos, users: &emptyUsersStore{}}
+
+	m.runGitHubCycle() // both due → polled once each, both scheduled ~5m out
+	m.PollSoon("github", "org-a")
+	m.runGitHubCycle() // org-a re-due; org-b still on cadence → skipped
+
+	repos.mu.Lock()
+	defer repos.mu.Unlock()
+	got := map[string]int{}
+	for _, v := range repos.visited {
+		got[v]++
+	}
+	if got["org-a"] != 2 {
+		t.Errorf("org-a polled %d times; want 2 (initial + PollSoon re-due). visited=%v", got["org-a"], repos.visited)
+	}
+	if got["org-b"] != 1 {
+		t.Errorf("org-b polled %d times; want 1 (PollSoon('org-a') must NOT re-due org-b — fleet stampede). visited=%v", got["org-b"], repos.visited)
+	}
+}
+
+// TestManager_StartGitHub_DoesNotRepollScheduledOrg pins that a restart is
+// schedule-neutral: an org already on its cadence is not re-polled just because
+// the loop bounced. (resetSchedule used to clear all slots on start, which —
+// since multi restarts the process-global loop — re-polled the whole fleet on
+// any one org's config change. That primitive is gone; PollSoon replaces it.)
+func TestManager_StartGitHub_DoesNotRepollScheduledOrg(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	orgs := &fakeOrgsStore{ids: []string{"org-a"}}
+	repos := &recordingRepoStore{}
+	m := &Manager{orgs: orgs, repos: repos, users: &emptyUsersStore{}}
+
+	m.runGitHubCycle() // org-a polled, scheduled ~5m out
+
+	// Simulate the post-restart initial cycle directly (startGitHub's goroutine
+	// runs exactly this); the org's existing slot must still gate it.
+	m.runGitHubCycle()
+
+	repos.mu.Lock()
+	defer repos.mu.Unlock()
+	if len(repos.visited) != 1 {
+		t.Fatalf("org polled %d times; want 1 (a restart must not re-poll an org still on its cadence). visited=%v", len(repos.visited), repos.visited)
+	}
+}
+
+// TestManager_PollSoon_AppliesConfigChangeImmediately pins the local-mode
+// config-change latency fix: a restart is schedule-neutral, so applying a
+// config change immediately depends on the caller PollSoon-ing the org. Models
+// the local SetOnGitHubChanged path: poll (org on cadence) → restart (no-op for
+// the slot) → PollSoon → next cycle re-polls. Without the PollSoon a local user
+// would wait out the interval before their saved setting took effect.
+func TestManager_PollSoon_AppliesConfigChangeImmediately(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	orgs := &fakeOrgsStore{ids: []string{runmode.LocalDefaultOrgID}}
+	repos := &recordingRepoStore{}
+	m := &Manager{orgs: orgs, repos: repos, users: &emptyUsersStore{}}
+
+	m.runGitHubCycle() // polled, scheduled ~5m out
+	m.runGitHubCycle() // still on cadence → skipped (proves the slot gates)
+	m.PollSoon("github", runmode.LocalDefaultOrgID)
+	m.runGitHubCycle() // PollSoon cleared the slot → re-polled now
+
+	repos.mu.Lock()
+	defer repos.mu.Unlock()
+	if len(repos.visited) != 2 {
+		t.Fatalf("org polled %d times; want 2 (initial + post-PollSoon, with the middle cadence-gated cycle skipped). visited=%v", len(repos.visited), repos.visited)
+	}
+}
+
 // --- test doubles ---
 
 type fakeOrgsStore struct {

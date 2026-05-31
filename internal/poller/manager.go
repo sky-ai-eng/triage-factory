@@ -105,25 +105,14 @@ func (m *Manager) reportError(source, orgID string, err error) {
 // org at its own configured cadence (see runGitHubCycle's due gate), so this
 // is mode-agnostic — local mode is N=1 (the sentinel org), multi mode is N
 // active tenants. The lifecycle is neither per-org nor per-interval; start*
-// just spins up the shared base-tick loop (and resets the scheduler so the
-// immediate post-restart cycle polls everyone).
+// just spins up the shared base-tick loop. It is SCHEDULE-NEUTRAL: orgs
+// already on a cadence keep their slots, so a restart doesn't re-poll the
+// fleet. Callers that want a changed org polled now use PollSoon to re-due
+// that org specifically — never a fleet-wide reset (the GHES/GHEC stampede).
 func (m *Manager) RestartAll() {
 	m.stopAll()
 	m.startGitHub()
 	m.startJira()
-}
-
-// RestartGitHub stops and restarts only the GitHub polling loop.
-func (m *Manager) RestartGitHub() {
-	m.mu.Lock()
-	if m.ghStop != nil {
-		close(m.ghStop)
-		m.ghStop = nil
-		log.Println("[github] tracker stopped")
-	}
-	m.mu.Unlock()
-
-	m.startGitHub()
 }
 
 // RestartJira stops and restarts only the Jira polling loop. Multi-mode
@@ -178,15 +167,25 @@ func clampPollInterval(d time.Duration) time.Duration {
 }
 
 // pollDue reports whether orgID is eligible for a poll of source at now. An
-// org with no recorded slot (never polled, or pruned) is always due. The
-// caller reserves the next slot via schedulePoll BEFORE polling, so an
-// old/new goroutine pair overlapping during a Restart doesn't double-poll.
+// org with no recorded slot (never polled, pruned, or PollSoon'd) is due.
+//
+// pollDue + schedulePoll are check-then-act under two separate dueMu
+// acquisitions, not an atomic CAS. The only place two cyclers run concurrently
+// is a LOCAL restart bounce (multi never restarts the loop — see PollSoon);
+// there N=1, and the worst case is the sentinel polled twice in quick
+// succession, which the tracker's snapshot-diff dedups to zero duplicate
+// events. Nothing resets the schedule mid-restart, so an org is never skipped.
 func (m *Manager) pollDue(source, orgID string, now time.Time) bool {
 	m.dueMu.Lock()
 	defer m.dueMu.Unlock()
-	next, ok := m.nextPoll[source+"/"+orgID]
+	next, ok := m.nextPoll[pollKey(source, orgID)]
 	return !ok || !now.Before(next)
 }
+
+// pollKey is the nextPoll map key for a (source, org) pair. The separator is
+// NUL, which can't appear in a source name ("github"/"jira") or a UUID orgID,
+// so the key is unambiguous and prunePoll's prefix split is exact.
+func pollKey(source, orgID string) string { return source + "\x00" + orgID }
 
 // schedulePoll records the earliest time orgID is next eligible for a poll of
 // source.
@@ -196,7 +195,7 @@ func (m *Manager) schedulePoll(source, orgID string, at time.Time) {
 	if m.nextPoll == nil {
 		m.nextPoll = make(map[string]time.Time)
 	}
-	m.nextPoll[source+"/"+orgID] = at
+	m.nextPoll[pollKey(source, orgID)] = at
 }
 
 // prunePoll drops scheduler slots for orgs no longer in the active set, so
@@ -208,7 +207,7 @@ func (m *Manager) prunePoll(source string, activeOrgIDs []string) {
 	for _, id := range activeOrgIDs {
 		active[id] = true
 	}
-	prefix := source + "/"
+	prefix := source + "\x00"
 	m.dueMu.Lock()
 	defer m.dueMu.Unlock()
 	for key := range m.nextPoll {
@@ -218,19 +217,18 @@ func (m *Manager) prunePoll(source string, activeOrgIDs []string) {
 	}
 }
 
-// resetSchedule clears every slot for source so the next cycle treats all
-// orgs as due. Called on (re)start so the immediate post-Restart cycle polls
-// everyone — applying a config change now rather than after each org's
-// already-reserved interval.
-func (m *Manager) resetSchedule(source string) {
-	prefix := source + "/"
+// PollSoon makes orgID immediately eligible for the next poll of source by
+// dropping its scheduler slot — and ONLY its slot. The running loop picks it
+// up on its next wake (≤ basePollInterval). This is the targeted, load-safe
+// alternative to restarting the process-global loop on a config change:
+// clearing every slot would re-poll every tenant at once, stampeding shared
+// GHES/GHEC API budgets — the exact thing per-org intervals exist to prevent.
+// Deleting a missing key (or from a nil map) is a no-op, so this is safe
+// before the first poll and harmless if the loop isn't running yet.
+func (m *Manager) PollSoon(source, orgID string) {
 	m.dueMu.Lock()
 	defer m.dueMu.Unlock()
-	for key := range m.nextPoll {
-		if strings.HasPrefix(key, prefix) {
-			delete(m.nextPoll, key)
-		}
-	}
+	delete(m.nextPoll, pollKey(source, orgID))
 }
 
 // loadJiraRules pulls the UNION of every team's per-project Jira status
@@ -291,15 +289,15 @@ func (m *Manager) stopAll() {
 // and also supports a locally-registered App via API backfill (webhooks
 // don't reach local-NAT).
 func (m *Manager) startGitHub() {
-	m.resetSchedule("github")
-
 	stop := make(chan struct{})
 	m.mu.Lock()
 	m.ghStop = stop
 	m.mu.Unlock()
 
 	go func() {
-		// Initial poll — resetSchedule above makes every org due.
+		// Initial poll. Orgs with no slot yet (cold boot: all of them) are due
+		// and polled once; orgs already on a cadence keep it, so a restart
+		// doesn't re-poll the fleet. PollSoon re-dues a single org on demand.
 		m.runGitHubCycle()
 
 		ticker := time.NewTicker(basePollInterval)
@@ -609,15 +607,13 @@ func (m *Manager) startJira() {
 		return
 	}
 
-	m.resetSchedule("jira")
-
 	stop := make(chan struct{})
 	m.mu.Lock()
 	m.jiraStop = stop
 	m.mu.Unlock()
 
 	go func() {
-		// Initial poll — resetSchedule above makes every org due.
+		// Initial poll. Same cold-boot-vs-cadence semantics as startGitHub.
 		m.runJiraCycle()
 
 		ticker := time.NewTicker(basePollInterval)
@@ -660,8 +656,14 @@ func (m *Manager) runJiraCycle() {
 		if oerr != nil {
 			log.Printf("[jira] org %s: load settings: %v", orgID, oerr)
 			m.reportError("jira", orgID, oerr)
-			continue // leave unscheduled → retry next wake
+			continue // leave unscheduled → retry next base tick (interval unknown)
 		}
+		// Reserve the next slot from the freshly-read interval BEFORE loading
+		// creds/rules below. The asymmetry is deliberate: a settings-read
+		// failure (above) leaves the org unscheduled so it retries at the next
+		// base tick (we don't know its interval); a creds/rules failure (below)
+		// keeps this slot, so a likely-persistent auth failure backs off to the
+		// org's own cadence instead of hammering every base tick.
 		m.schedulePoll("jira", orgID, now.Add(clampPollInterval(orgSet.JiraPollInterval)))
 		creds, lerr := integrations.Load(ctx, m.secrets, orgID)
 		if lerr != nil {

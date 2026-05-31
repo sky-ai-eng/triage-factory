@@ -1091,19 +1091,27 @@ func main() {
 		setAnnouncePending("github")
 		setAnnouncePending("jira")
 
-		pollerMgr.StopAll()
-
 		if runmode.Current() != runmode.ModeLocal {
 			// Per-tenant GitHub creds (spawner/profiler/clone bootstrap) are
 			// resolved in the request handlers and per cycle inside the poller,
-			// not here. But the process-global poller must keep running so the
-			// per-org fan-out picks up the changed config on the next cycle —
-			// the StopAll above would otherwise leave multi-mode polling dead
-			// until the next process restart.
-			log.Println("[server] GitHub changed: multi-mode restarts poller only (per-tenant creds handled in request handlers)")
-			pollerMgr.RestartGitHub()
+			// not here. The process-global loop is already running and re-reads
+			// every org's config each wake, so it must NOT be stopped/restarted:
+			// restarting would re-poll the changed org RIGHT NOW, but because the
+			// loop is process-global it can't selectively restart for one tenant
+			// — every org would be re-evaluated, and a fleet-wide poll against
+			// shared GHES/GHEC API budgets is exactly what per-org intervals
+			// exist to prevent. Instead, leave the loop running and re-due ONLY
+			// this org so the next wake (≤ basePollInterval) picks up its change.
+			// (No StopAll here — that's the local path's credential-swap dance.)
+			log.Printf("[server] GitHub changed for org %s: multi-mode re-dues that org only (no fleet restart)", orgID)
+			pollerMgr.PollSoon("github", orgID)
 			return
 		}
+
+		// Local mode: stop, swap the process-global GitHub identity
+		// (spawner/profiler/clone bootstrap read the sentinel org), then
+		// re-profile and restart. N=1, so there's no fleet to stampede.
+		pollerMgr.StopAll()
 
 		ctx := context.Background()
 		creds, _ := integrations.Load(ctx, stores.Secrets, orgID)
@@ -1122,6 +1130,12 @@ func main() {
 					log.Printf("[repoprofile] profiling failed: %v", err)
 				}
 				pollerMgr.RestartAll()
+				// Apply the change now: the restarted loop would otherwise see
+				// the sentinel's existing future slot and defer the re-poll up to
+				// a full interval. N=1 in local, so re-duing "everyone" is just
+				// the one org — no fleet stampede (the multi concern).
+				pollerMgr.PollSoon("github", orgID)
+				pollerMgr.PollSoon("jira", orgID)
 				scorer.Trigger(orgID)
 				// Bare-clone bootstrap is best-effort and local-mode-shaped:
 				// it reads repos under the synthetic sentinel org, which
@@ -1137,6 +1151,8 @@ func main() {
 			curatorRuntime.UpdateCredentials("")
 			srv.SetGitHubClient(nil)
 			pollerMgr.RestartAll()
+			pollerMgr.PollSoon("github", orgID)
+			pollerMgr.PollSoon("jira", orgID)
 		}
 
 		// Also refresh Jira client in case it's configured
@@ -1164,6 +1180,7 @@ func main() {
 		creds, _ := integrations.Load(ctx, stores.Secrets, orgID)
 
 		pollerMgr.RestartJira()
+		pollerMgr.PollSoon("jira", orgID) // apply now, don't wait out the interval
 
 		if creds.JiraPAT != "" && creds.JiraURL != "" {
 			srv.SetJiraClient(jira.NewClient(creds.JiraURL, creds.JiraPAT))
