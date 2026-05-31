@@ -700,8 +700,7 @@ CREATE TABLE public.event_handlers (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
     creator_user_id uuid,
-    team_id uuid,
-    visibility text DEFAULT 'team'::text NOT NULL,
+    team_id uuid NOT NULL,
     kind text NOT NULL,
     event_type text NOT NULL,
     scope_predicate_json jsonb,
@@ -720,9 +719,7 @@ CREATE TABLE public.event_handlers (
     CONSTRAINT event_handlers_rule_shape CHECK (((kind <> 'rule'::text) OR ((prompt_id IS NULL) AND (breaker_threshold IS NULL) AND (min_autonomy_suitability IS NULL) AND (name IS NOT NULL) AND (default_priority IS NOT NULL) AND (sort_order IS NOT NULL)))),
     CONSTRAINT event_handlers_source_check CHECK ((source = ANY (ARRAY['system'::text, 'user'::text]))),
     CONSTRAINT event_handlers_system_has_no_creator CHECK ((((source = 'system'::text) AND (creator_user_id IS NULL)) OR ((source = 'user'::text) AND (creator_user_id IS NOT NULL)))),
-    CONSTRAINT event_handlers_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
-    CONSTRAINT event_handlers_trigger_shape CHECK (((kind <> 'trigger'::text) OR ((prompt_id IS NOT NULL) AND (breaker_threshold IS NOT NULL) AND (min_autonomy_suitability IS NOT NULL) AND (default_priority IS NULL) AND (sort_order IS NULL) AND (name IS NULL)))),
-    CONSTRAINT event_handlers_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text])))
+    CONSTRAINT event_handlers_trigger_shape CHECK (((kind <> 'trigger'::text) OR ((prompt_id IS NOT NULL) AND (breaker_threshold IS NOT NULL) AND (min_autonomy_suitability IS NOT NULL) AND (default_priority IS NULL) AND (sort_order IS NULL) AND (name IS NULL))))
 );
 
 
