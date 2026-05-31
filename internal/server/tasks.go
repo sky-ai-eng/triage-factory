@@ -62,6 +62,7 @@ type taskJSON struct {
 	// TeamID is the task's owning team. Exposed so the multi-team board
 	// can color-code / tag rows by team. Always set; the
 	// frontend only surfaces it when the viewer belongs to ≥2 teams.
+	// TODO(SKY-379): board row color-coding consumes this.
 	TeamID string `json:"team_id,omitempty"`
 }
 

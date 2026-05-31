@@ -13,6 +13,10 @@ import { toast } from './Toast/toastStore'
 // end-to-end (the issue defers richer team creation/management to its own
 // ticket). It lists the org's teams (so the admin sees what exists) and
 // takes a name to create another.
+//
+// TODO(SKY-381): the org's default-team template (the handlers + prompts
+// a new team inherits) is edited from org-admin settings — this section
+// is the natural home for that template editor once it lands.
 export default function TeamManagementSection() {
   const { teams, createTeam } = useTeams()
   const [name, setName] = useState('')

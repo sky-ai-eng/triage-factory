@@ -109,6 +109,11 @@ func BootstrapTeamAgent(ctx context.Context, stores Stores, orgID, teamID string
 //     handlers and the admin adds rules (the org's *first* team still
 //     gets the full defaults via BootstrapNewOrg).
 //
+//     TODO(SKY-381): copy the org's default-team template into the new
+//     team here (handlers + prompts, forward-only) instead of seeding
+//     bot-only — replaces this blank-slate behavior once org templates
+//     land.
+//
 // The bot row is enabled, so manual delegation (swipe / factory drag) to
 // the new team works immediately; only auto-delegation waits on rules.
 //
@@ -135,6 +140,14 @@ func BootstrapNewTeam(ctx context.Context, stores Stores, orgID, teamID string) 
 // trigger rows in EventHandlers.Seed FK into the prompts (composite
 // (prompt_id, org_id)), so prompts must land first; the team_agents row
 // needs the agent created in step 1.
+//
+// TODO(SKY-380): when prompts go team-scoped the prompt seed here becomes
+// team-owned copies (keyed by system_slug) and the trigger→prompt FK
+// becomes same-team; the org-wide visibility='org' prompt rows go away.
+// TODO(SKY-381): the org's first team's defaults will be sourced from the
+// org template (itself seeded from Shipped* at org-create) rather than
+// directly from the TF-shipped lists, so org admins can shape what new
+// orgs/teams start with.
 //
 // Like BootstrapNewTeam this must run OUTSIDE any WithTx (admin-pool
 // seeders) and is fully idempotent. The org-provisioning caller runs it

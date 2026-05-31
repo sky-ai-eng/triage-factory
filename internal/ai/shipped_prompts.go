@@ -13,6 +13,12 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // trigger rows whose prompt_id FKs into these — so any seed flow must
 // seed prompts before handlers. The IDs here must stay in sync with the
 // PromptID references in db.ShippedEventHandlers.
+//
+// TODO(SKY-380): once prompts are team-scoped (team_id NOT NULL,
+// visibility {private,team}) these seed as one team-owned copy per team
+// keyed by system_slug rather than one org-wide visibility='org' row, and
+// the trigger→prompt FK becomes same-team. This stays the content source;
+// the seed writer changes.
 func ShippedPrompts() []domain.Prompt {
 	return []domain.Prompt{
 		// Default PR review prompt — manual only. The user picks when

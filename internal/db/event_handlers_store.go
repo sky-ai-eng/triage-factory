@@ -162,6 +162,14 @@ var (
 // identical to what task_rules and prompt_triggers produced before the
 // unification — the backfill copies IDs verbatim, and re-seeding on an
 // upgraded install lands on the same row.
+//
+// TODO(SKY-381): this id is per-(handler, org) — team-independent — so it
+// cannot materialize distinct rows for a second team in the same org
+// (PK (org_id, id) → ON CONFLICT skip). That's why BootstrapNewTeam seeds
+// no handlers today. The org-template copy path needs a per-team identity
+// (fold teamID into the derived id, or a real-UUID PK + system_slug, the
+// same scheme SKY-380 adopts for prompts) before new teams can carry
+// their own copies of shipped/templated handlers.
 func (h ShippedEventHandler) UUIDFor(orgID string) string {
 	ns := shippedRuleNamespace
 	if h.Kind == domain.EventHandlerKindTrigger {

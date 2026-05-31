@@ -37,9 +37,10 @@ export interface Task {
   // unclaimed. The XOR is enforced server-side.
   claimed_by_agent_id?: string
   claimed_by_user_id?: string
-  // : the task's owning team. Surfaced so the multi-team board
-  // can color-code / tag rows by team. The frontend only renders the
-  // tag when the viewer belongs to ≥2 teams.
+  // The task's owning team. Surfaced so the multi-team board can
+  // color-code / tag rows by team. The frontend only renders the tag
+  // when the viewer belongs to ≥2 teams.
+  // TODO(SKY-379): board row color-coding consumes this.
   team_id?: string
 }
 
