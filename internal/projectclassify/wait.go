@@ -2,6 +2,7 @@ package projectclassify
 
 import (
 	"context"
+	"errors"
 	"log"
 	"time"
 
@@ -43,7 +44,7 @@ const pollInterval = 1 * time.Second
 // Intended call site: spawner setup, just before reading
 // entity.project_id to inject project knowledge into the worktree.
 func WaitFor(ctx context.Context, runner *Runner, orgID, entityID string, timeout time.Duration) {
-	if entityID == "" || runner == nil || runner.entities == nil {
+	if entityID == "" || runner == nil {
 		return
 	}
 	done, gone := classificationState(ctx, runner.entities, orgID, entityID)
@@ -97,11 +98,16 @@ func WaitFor(ctx context.Context, runner *Runner, orgID, entityID string, timeou
 // A transient read error returns (false, false) and is logged, so the
 // caller keeps polling rather than short-circuiting the wait on a DB
 // blip — preserving the pre-SKY-392 behavior where any error was treated
-// as "still pending."
+// as "still pending." Context cancellation/deadline is the one error we
+// don't log: it's a deliberate shutdown signal (the loop's <-ctx.Done()
+// arm handles the return), not a DB blip, so logging it as "transient"
+// would be misleading.
 func classificationState(ctx context.Context, entities db.EntityStore, orgID, entityID string) (done, gone bool) {
 	classified, exists, err := entities.ClassificationStatusSystem(ctx, orgID, entityID)
 	if err != nil {
-		log.Printf("[classify] WaitFor: transient read error for entity %s: %v", entityID, err)
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			log.Printf("[classify] WaitFor: transient read error for entity %s: %v", entityID, err)
+		}
 		return false, false
 	}
 	if !exists {

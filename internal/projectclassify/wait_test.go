@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -154,8 +156,11 @@ func TestWaitFor_ReturnsEarlyOnMissingEntity(t *testing.T) {
 	database := newTestDB(t)
 	runner := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, sqlitestore.New(database).Orgs)
 
+	// UUID-shaped id so this mirrors the cross-backend convention
+	// (entity_conformance.go binds missing ids as UUIDs for the Postgres
+	// uuid column); the row simply doesn't exist.
 	start := time.Now()
-	WaitFor(context.Background(), runner, runmode.LocalDefaultOrgID, "nonexistent-entity-id", 5*time.Second)
+	WaitFor(context.Background(), runner, runmode.LocalDefaultOrgID, uuid.NewString(), 5*time.Second)
 	elapsed := time.Since(start)
 
 	if elapsed > 100*time.Millisecond {
