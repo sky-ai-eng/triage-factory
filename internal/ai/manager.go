@@ -24,11 +24,10 @@ import (
 // runmode.LocalDefaultOrgID sentinel — behavior is functionally
 // identical to a single-runner build, just routed through the map.
 type Manager struct {
-	database     *sql.DB
-	scores       db.ScoreStore
-	entities     db.EntityStore
-	callbacks    RunnerCallbacks
-	profileReady func() bool
+	database  *sql.DB
+	scores    db.ScoreStore
+	entities  db.EntityStore
+	callbacks RunnerCallbacks
 
 	mu      sync.Mutex
 	runners map[string]*Runner
@@ -43,16 +42,6 @@ func NewManager(database *sql.DB, scores db.ScoreStore, entities db.EntityStore,
 		callbacks: callbacks,
 		runners:   make(map[string]*Runner),
 	}
-}
-
-// SetProfileGate registers a readiness check applied to every per-org
-// Runner. Wire before the first Trigger; runners created after this
-// point pick up the gate, runners created before do not (set it at
-// boot, before bus subscribers can fire).
-func (m *Manager) SetProfileGate(fn func() bool) {
-	m.mu.Lock()
-	m.profileReady = fn
-	m.mu.Unlock()
 }
 
 // Trigger signals the scoring runner for the given org. If no runner
@@ -77,9 +66,6 @@ func (m *Manager) Trigger(orgID string) {
 	r, ok := m.runners[orgID]
 	if !ok {
 		r = NewRunner(m.database, m.scores, m.entities, orgID, m.callbacks)
-		if m.profileReady != nil {
-			r.SetProfileGate(m.profileReady)
-		}
 		r.Start()
 		m.runners[orgID] = r
 	}

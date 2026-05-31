@@ -833,10 +833,7 @@ func main() {
 		},
 	})
 
-	// Start AI scoring runner
-	// Profile gate — scorer waits for this before running
-	profileGate := repoprofile.NewProfileGate(database)
-
+	// Start AI scoring runner.
 	// Declare eventRouter early so the scorer callback can reference it.
 	// Actual initialization happens below after the spawner is created.
 	var eventRouter *routing.Router
@@ -870,7 +867,6 @@ func main() {
 			toast.Error(wsHub, orgID, fmt.Sprintf("AI scoring cycle aborted: %v", err))
 		},
 	})
-	scorer.SetProfileGate(profileGate.Ready)
 	srv.SetScorerTrigger(scorer.Trigger)
 	log.Println("[ai] scorer manager ready (per-org runners, model: haiku)")
 
@@ -1095,11 +1091,6 @@ func main() {
 		setAnnouncePending("github")
 		setAnnouncePending("jira")
 
-		// Don't Invalidate the profile gate. Scoring no longer reads
-		// repo profiles (LLM repo-match was removed when lazy Jira
-		// worktrees landed), so the gate has no consumer; flipping it
-		// back to false in the GitHub-disabled branch — which doesn't
-		// Signal again — would silently freeze scoring forever.
 		pollerMgr.StopAll()
 
 		if runmode.Current() != runmode.ModeLocal {
@@ -1124,13 +1115,12 @@ func main() {
 			curatorRuntime.UpdateCredentials(model)
 			srv.SetGitHubClient(ghClient)
 
-			// Re-profile, then signal ready and restart all pollers
+			// Re-profile, then restart all pollers and trigger scoring.
 			go func() {
 				profiler := repoprofile.NewProfiler(ghClient, database, stores.Repos, stores.Orgs, wsHub)
 				if err := profiler.Run(context.Background(), true); err != nil {
 					log.Printf("[repoprofile] profiling failed: %v", err)
 				}
-				profileGate.Signal()
 				pollerMgr.RestartAll()
 				scorer.Trigger(orgID)
 				// Bare-clone bootstrap is best-effort and local-mode-shaped:
@@ -1259,13 +1249,12 @@ func main() {
 			srv.SetGitHubClient(ghClient)
 			log.Printf("[delegate] spawner ready (%d repos configured)", repoCount)
 
-			// Profile repos, then signal ready, start pollers, and trigger scoring
+			// Profile repos, then start pollers and trigger scoring.
 			go func() {
 				profiler := repoprofile.NewProfiler(ghClient, database, stores.Repos, stores.Orgs, wsHub)
 				if err := profiler.Run(context.Background(), false); err != nil {
 					log.Printf("[repoprofile] initial profiling failed: %v", err)
 				}
-				profileGate.Signal()
 				pollerMgr.RestartAll()
 				scorer.Trigger(orgID)
 				bootstrapBareClones(database, stores.Repos)
@@ -1284,16 +1273,9 @@ func main() {
 		// ListActiveSystem each wake and polls each org at its own cadence,
 		// so orgs/installations/repos added via the admin UI are picked up
 		// without a restart. (Jira self-gates off in multi until per-org
-		// system creds land — see startJira.)
-		//
-		// Signal the (consumer-less) profile gate too: local mode flips it
-		// after profiling, but multi profiles lazily per tenant and scoring
-		// no longer reads profiles, so the gate is vestigial — yet the per-org
-		// scorers still check it, so leaving it unsignaled would freeze
-		// scoring. The poll-complete sentinels the cycle emits then drive
-		// scorer.Trigger per org (the "scorer" subscriber), so no explicit
-		// kick is needed here.
-		profileGate.Signal()
+		// system creds land — see startJira.) The poll-complete sentinels
+		// the cycle emits drive scorer.Trigger per org (the "scorer"
+		// subscriber), so no explicit scoring kick is needed here.
 		pollerMgr.RestartAll()
 	}
 
