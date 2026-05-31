@@ -226,40 +226,53 @@ func (s *orgTemplateStore) MaterializeIntoTeam(ctx context.Context, orgID, teamI
 
 	// Phase 2: handlers. Re-point a trigger's prompt_id to the team's copy and
 	// preserve enabled + source verbatim. Idempotent on (org, team, slug).
+	// Buffer the rows first: the INSERTs below run on the same tx connection,
+	// so they can't be issued while hrows is still streaming.
 	hrows, err := tx.QueryContext(ctx, `
-		SELECT id, system_slug, kind, event_type, scope_predicate_json::text, enabled, source,
+		SELECT system_slug, kind, event_type, scope_predicate_json::text, enabled, source,
 		       name, default_priority, sort_order, prompt_id, breaker_threshold, min_autonomy_suitability
 		FROM org_template_handlers WHERE org_id = $1
 	`, orgID)
 	if err != nil {
 		return fmt.Errorf("org_template materialize: list handlers: %w", err)
 	}
-	defer hrows.Close()
+	type tmplHandler struct {
+		slug, kind, eventType, source string
+		pred, name, promptID          sql.NullString
+		enabled                       bool
+		defPriority, minAutonomy      sql.NullFloat64
+		sortOrder, breaker            sql.NullInt64
+	}
+	var thandlers []tmplHandler
 	for hrows.Next() {
-		var (
-			id, slug, kind, eventType, source string
-			pred, name, promptID              sql.NullString
-			enabled                           bool
-			defPriority, minAutonomy          sql.NullFloat64
-			sortOrder, breaker                sql.NullInt64
-		)
-		if err := hrows.Scan(&id, &slug, &kind, &eventType, &pred, &enabled, &source,
-			&name, &defPriority, &sortOrder, &promptID, &breaker, &minAutonomy); err != nil {
+		var h tmplHandler
+		if err := hrows.Scan(&h.slug, &h.kind, &h.eventType, &h.pred, &h.enabled, &h.source,
+			&h.name, &h.defPriority, &h.sortOrder, &h.promptID, &h.breaker, &h.minAutonomy); err != nil {
+			_ = hrows.Close()
 			return fmt.Errorf("org_template materialize: scan handler: %w", err)
 		}
+		thandlers = append(thandlers, h)
+	}
+	if err := hrows.Err(); err != nil {
+		_ = hrows.Close()
+		return err
+	}
+	_ = hrows.Close()
+
+	for _, h := range thandlers {
 		var creator any
-		if source != domain.EventHandlerSourceSystem {
+		if h.source != domain.EventHandlerSourceSystem {
 			if !owner.Valid {
-				return fmt.Errorf("org_template materialize: user-source template handler %s but org %s has no owner", slug, orgID)
+				return fmt.Errorf("org_template materialize: user-source template handler %s but org %s has no owner", h.slug, orgID)
 			}
 			creator = owner.String
 		}
 		var predArg any
-		if pred.Valid {
-			predArg = pred.String
+		if h.pred.Valid {
+			predArg = h.pred.String
 		}
 		newID := uuid.New().String()
-		switch kind {
+		switch h.kind {
 		case domain.EventHandlerKindRule:
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO event_handlers
@@ -267,14 +280,14 @@ func (s *orgTemplateStore) MaterializeIntoTeam(ctx context.Context, orgID, teamI
 					 scope_predicate_json, enabled, source, name, default_priority, sort_order, created_at, updated_at)
 				VALUES ($1, $2, $3::uuid, $4, 'rule', $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $13)
 				ON CONFLICT (org_id, team_id, system_slug) DO NOTHING
-			`, newID, orgID, teamID, creator, eventType, slug, predArg, enabled, source,
-				name.String, defPriority.Float64, sortOrder.Int64, now); err != nil {
-				return fmt.Errorf("org_template materialize: insert rule %s: %w", slug, err)
+			`, newID, orgID, teamID, creator, h.eventType, h.slug, predArg, h.enabled, h.source,
+				h.name.String, h.defPriority.Float64, h.sortOrder.Int64, now); err != nil {
+				return fmt.Errorf("org_template materialize: insert rule %s: %w", h.slug, err)
 			}
 		case domain.EventHandlerKindTrigger:
-			teamPromptID, ok := teamPromptIDByTemplateID[promptID.String]
+			teamPromptID, ok := teamPromptIDByTemplateID[h.promptID.String]
 			if !ok || teamPromptID == "" {
-				return fmt.Errorf("org_template materialize: trigger %s references template prompt %q with no team copy", slug, promptID.String)
+				return fmt.Errorf("org_template materialize: trigger %s references template prompt %q with no team copy", h.slug, h.promptID.String)
 			}
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO event_handlers
@@ -282,16 +295,13 @@ func (s *orgTemplateStore) MaterializeIntoTeam(ctx context.Context, orgID, teamI
 					 scope_predicate_json, enabled, source, prompt_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
 				VALUES ($1, $2, $3::uuid, $4, 'trigger', $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $13)
 				ON CONFLICT (org_id, team_id, system_slug) DO NOTHING
-			`, newID, orgID, teamID, creator, eventType, slug, predArg, enabled, source,
-				teamPromptID, breaker.Int64, minAutonomy.Float64, now); err != nil {
-				return fmt.Errorf("org_template materialize: insert trigger %s: %w", slug, err)
+			`, newID, orgID, teamID, creator, h.eventType, h.slug, predArg, h.enabled, h.source,
+				teamPromptID, h.breaker.Int64, h.minAutonomy.Float64, now); err != nil {
+				return fmt.Errorf("org_template materialize: insert trigger %s: %w", h.slug, err)
 			}
 		default:
-			return fmt.Errorf("org_template materialize: handler %s unknown kind %q", slug, kind)
+			return fmt.Errorf("org_template materialize: handler %s unknown kind %q", h.slug, h.kind)
 		}
-	}
-	if err := hrows.Err(); err != nil {
-		return err
 	}
 	return tx.Commit()
 }
