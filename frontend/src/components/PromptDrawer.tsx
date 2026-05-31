@@ -165,10 +165,15 @@ export default function PromptDrawer({
 
   // Refreshes when the drawer (re)opens so a Settings change is
   // reflected in the "Default" option's label without a page reload.
+  // Scoped to the prompt's own team (effectiveTeam) so the "Default"
+  // label shows the model that team's setting resolves to — the prompt
+  // is created under this team, and per-team DefaultModel can differ.
+  // '' (solo/local) falls back to the "default" alias the backend accepts.
   useEffect(() => {
     if (!open) return
     let cancelled = false
-    fetch('/api/settings/team/default')
+    const settingsTeam = effectiveTeam || 'default'
+    fetch(`/api/settings/team/${encodeURIComponent(settingsTeam)}`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (!cancelled && data?.team_settings?.DefaultModel)
@@ -178,7 +183,7 @@ export default function PromptDrawer({
     return () => {
       cancelled = true
     }
-  }, [open])
+  }, [open, effectiveTeam])
 
   useEffect(() => {
     if (isNew) {

@@ -62,10 +62,18 @@ export default function CuratorChat({ project, onPatch }: Props) {
   // fetch — module-scope caching here would freeze the resolved
   // active-name metadata past edits made on the /prompts page.
   const [prompts, setPrompts] = useState<Prompt[]>([])
+  // Scope to the project's team. The curator runs the spec prompt under
+  // this project's team, and the PATCH validation only checks org
+  // membership (projects.go), so an unscoped list would let a team-A
+  // project attach (and then run) a team-B prompt. The system spec prompt
+  // is visibility='org', so it stays in a team-scoped list. '' (legacy /
+  // solo) falls back to unscoped, matching the prior behavior.
+  const promptTeamId = project.team_id
   const refetchPrompts = useMemo(
     () => () => {
       const ac = new AbortController()
-      fetch('/api/prompts', { signal: ac.signal })
+      const q = promptTeamId ? `?team_id=${encodeURIComponent(promptTeamId)}` : ''
+      fetch(`/api/prompts${q}`, { signal: ac.signal })
         .then((r) => (r.ok ? r.json() : null))
         .then((d: Prompt[] | null) => {
           if (ac.signal.aborted) return
@@ -76,7 +84,7 @@ export default function CuratorChat({ project, onPatch }: Props) {
         })
       return () => ac.abort()
     },
-    [],
+    [promptTeamId],
   )
   useEffect(() => refetchPrompts(), [refetchPrompts])
 
@@ -266,6 +274,10 @@ export default function CuratorChat({ project, onPatch }: Props) {
         onSelect={handleSpecSelect}
         onClose={() => setPickerOpen(false)}
         onEditPrompts={() => navigate(orgHref('/prompts'))}
+        // Scope the picker's options to the project's team (teamValue
+        // without onTeamChange scopes the fetch without a header picker —
+        // the team is fixed by the project, not chosen here).
+        teamValue={project.team_id}
       />
     </section>
   )
