@@ -225,10 +225,12 @@ func (s *projectSession) dispatch(item queueItem) {
 		return
 	}
 
-	// Per-org default model (SKY-389). WithoutCancel so a cancel mid-
-	// dispatch doesn't break the model read; resolveAIModelForOrg has its
-	// own fallback-on-error.
-	model := s.curator.resolveModel(context.WithoutCancel(msgCtx), item.orgID)
+	// Per-(org, team) default model (SKY-389). project.TeamID scopes the
+	// model to the project's owning team so a multi-team org honors each
+	// team's choice; project is loaded + nil-checked just above. WithoutCancel
+	// so a cancel mid-dispatch doesn't break the model read; the resolver has
+	// its own fallback-on-error.
+	model := s.curator.resolveModel(context.WithoutCancel(msgCtx), item.orgID, project.TeamID)
 
 	// Pre-flight model check before we spawn claude. The Curator
 	// constructor takes "" until config loads (mirroring Spawner),

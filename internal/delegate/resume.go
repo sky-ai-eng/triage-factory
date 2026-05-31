@@ -328,11 +328,15 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		return nil, fmt.Errorf("resume: missing cwd")
 	}
 
-	// Per-org default model (SKY-389): falls back to the constructor
-	// model when no resolver is wired. opts.Model — the model captured at
-	// the original run's start — still wins so a resume never silently
-	// switches models mid-run.
-	model := s.resolveModel(ctx, orgID)
+	// Per-team default model (SKY-389): falls back to the constructor model
+	// when no resolver is wired. Empty teamID → the resolver's org-default-
+	// team fallback; that's acceptable here because opts.Model — the model
+	// captured at the original run's start (already team-resolved at Delegate
+	// time) — always wins for both real callers (ResumeAfterYield passes
+	// run.Model, the memory gate passes the captured model), so this
+	// resolveModel result is a never-hit defensive default rather than a
+	// live per-team lookup.
+	model := s.resolveModel(ctx, orgID, "")
 	if opts.Model != "" {
 		model = opts.Model
 	}

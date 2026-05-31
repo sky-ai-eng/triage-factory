@@ -120,8 +120,17 @@ func applyPGPoolDefaults(db *sql.DB) {
 	db.SetConnMaxLifetime(5 * time.Minute)
 }
 
-// resolveAIModelForOrg looks up the model the org's default team uses for
+// resolveAIModelForTeam looks up the model a specific team uses for
 // delegation, clamped by the org's max-tier cap (domain.EffectiveModel).
+//
+// teamID is the run's owning team — task.TeamID for delegations,
+// project.TeamID for curator turns. A multi-team org can have teams with
+// different DefaultModel settings, so resolving from the run's own team
+// (not the org default) is what keeps each team's model choice honored
+// (SKY-389 review #2). An empty teamID falls back to the org's default
+// team — the pre-seam behavior, kept for callers without a team in scope
+// (resume's never-hit fallback) and N=1 local mode.
+//
 // Falls back to domain.DefaultTeamSettings().DefaultModel on any error so a
 // transient DB hiccup doesn't silently clear the spawner+curator
 // credentials. The store's GetSettingsSystem already returns
@@ -129,14 +138,17 @@ func applyPGPoolDefaults(db *sql.DB) {
 // the other failure modes (team-lookup error, settings-read error, no
 // default team at all). A failed org-settings read just means no cap is
 // applied — the team default stands.
-func resolveAIModelForOrg(ctx context.Context, stores db.Stores, orgID string) string {
+func resolveAIModelForTeam(ctx context.Context, stores db.Stores, orgID, teamID string) string {
 	fallback := domain.DefaultTeamSettings().DefaultModel
-	teamID, err := stores.Teams.GetDefaultForOrgSystem(ctx, orgID)
-	if err != nil || teamID == "" {
-		if err != nil {
-			log.Printf("[main] resolve default team for org %s: %v (using default model %q)", orgID, err, fallback)
+	if teamID == "" {
+		var err error
+		teamID, err = stores.Teams.GetDefaultForOrgSystem(ctx, orgID)
+		if err != nil || teamID == "" {
+			if err != nil {
+				log.Printf("[main] resolve default team for org %s: %v (using default model %q)", orgID, err, fallback)
+			}
+			return fallback
 		}
-		return fallback
 	}
 	teamSet, err := stores.Teams.GetSettingsSystem(ctx, teamID)
 	if err != nil {
@@ -851,14 +863,15 @@ func main() {
 	//     never user input, so the unauthenticated read is safe. Local mode
 	//     keeps it nil → the agent runs unsandboxed and inherits the host's
 	//     ambient Claude subscription (the supported zero-config setup).
-	//   - modelFor resolves the org's default model (team default, capped).
-	//     A prompt's own Model still overrides this per delegation.
+	//   - modelFor resolves the run's team default model (per-(org, team),
+	//     capped by the org max tier). A prompt's own Model still overrides
+	//     this per delegation.
 	var runSecrets agentproc.SecretsReader
 	if runmode.Current() == runmode.ModeMulti {
 		runSecrets = agentproc.NewSystemSecretsReader(stores.Secrets)
 	}
-	modelFor := func(ctx context.Context, orgID string) string {
-		return resolveAIModelForOrg(ctx, stores, orgID)
+	modelFor := func(ctx context.Context, orgID, teamID string) string {
+		return resolveAIModelForTeam(ctx, stores, orgID, teamID)
 	}
 
 	scorer := ai.NewManager(database, stores.Scores, stores.Entities, runSecrets, ai.RunnerCallbacks{

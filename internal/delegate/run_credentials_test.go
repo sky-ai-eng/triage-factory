@@ -50,6 +50,7 @@ var _ agentproc.SecretsReader = recordingSecrets{}
 func TestResolveRunCredentials_MultiSeam(t *testing.T) {
 	const orgID = "11111111-2222-3333-4444-555555555555"
 	const owner = "acme"
+	const teamID = "team-abc"
 
 	wantClient := ghclient.NewClient("https://github.example.com", "tok-from-resolver")
 	resolver := &fakeResolver{client: wantClient}
@@ -58,14 +59,19 @@ func TestResolveRunCredentials_MultiSeam(t *testing.T) {
 	// Constructor client/model are deliberately distinct sentinels so a
 	// pass can only come from the resolver/modelFor, never the fallback.
 	s := NewSpawner(nil, db.Stores{}, ghclient.NewClient("https://fallback", "fallback-tok"), nil, "fallback-model", "")
-	s.SetRunCredentialResolvers(resolver, secrets, func(_ context.Context, gotOrg string) string {
+	s.SetRunCredentialResolvers(resolver, secrets, func(_ context.Context, gotOrg, gotTeam string) string {
 		if gotOrg != orgID {
 			t.Errorf("modelFor got org %q; want %q", gotOrg, orgID)
+		}
+		// SKY-389 review #2: the task's team must reach modelFor so a
+		// multi-team org resolves the run's own team model, not the org default.
+		if gotTeam != teamID {
+			t.Errorf("modelFor got team %q; want %q", gotTeam, teamID)
 		}
 		return "claude-resolved-model"
 	})
 
-	gotClient, gotModel := s.resolveRunCredentials(context.Background(), orgID, owner)
+	gotClient, gotModel := s.resolveRunCredentials(context.Background(), orgID, owner, teamID)
 
 	if gotClient != wantClient {
 		t.Errorf("resolveRunCredentials returned the wrong GitHub client (got the fallback, not the resolver's per-org client)")
@@ -97,7 +103,7 @@ func TestResolveRunCredentials_FallbackWithoutSeam(t *testing.T) {
 	fallbackClient := ghclient.NewClient("https://fallback", "fallback-tok")
 	s := NewSpawner(nil, db.Stores{}, fallbackClient, nil, "fallback-model", "")
 
-	gotClient, gotModel := s.resolveRunCredentials(context.Background(), "org", "owner")
+	gotClient, gotModel := s.resolveRunCredentials(context.Background(), "org", "owner", "team")
 	if gotClient != fallbackClient {
 		t.Errorf("without a resolver, expected the constructor client")
 	}

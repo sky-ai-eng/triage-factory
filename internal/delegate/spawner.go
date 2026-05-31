@@ -94,9 +94,9 @@ type Spawner struct {
 	// SetRunCredentialResolvers. When set (both modes in production) these
 	// supersede the process-global ghClient/model above; tests leave them
 	// nil and the resolver helpers fall back to ghClient/model.
-	ghResolver ghclient.Resolver                    // per-(org, owner) GitHub client source (App token in multi, keychain PAT in local)
-	runSecrets agentproc.SecretsReader              // per-org LLM-credential reader (nil in local → ambient subscription; system-door reader in multi)
-	modelFor   func(context.Context, string) string // per-org default-model resolver (prompt.Model still overrides per delegation)
+	ghResolver ghclient.Resolver                            // per-(org, owner) GitHub client source (App token in multi, keychain PAT in local)
+	runSecrets agentproc.SecretsReader                      // per-org LLM-credential reader (nil in local → ambient subscription; system-door reader in multi)
+	modelFor   func(context.Context, string, string) string // per-(org, team) default-model resolver (prompt.Model still overrides per delegation)
 
 	cancels               map[string]context.CancelFunc                     // runID → cancel the entire run
 	drainer               QueueDrainer                                      // nil-safe; set post-construction via SetQueueDrainer
@@ -282,13 +282,14 @@ func (s *Spawner) notifyDrainer(orgID, triggerType, entityID string) {
 //   - secrets: per-org LLM-credential reader. nil in local → the agent
 //     inherits the host's ambient Claude subscription; the system-door
 //     reader in multi.
-//   - modelFor: per-org default model (the org's team default, capped). The
-//     prompt's own Model still overrides this per delegation.
+//   - modelFor: per-(org, team) default model (the run's team default,
+//     capped by the org max tier). The prompt's own Model still overrides
+//     this per delegation.
 //
 // Set once at startup, post-NewSpawner. Any of the three may be nil; the
 // resolver helpers fall back to the constructor-supplied ghClient/model
 // (the test / no-seam path).
-func (s *Spawner) SetRunCredentialResolvers(resolver ghclient.Resolver, secrets agentproc.SecretsReader, modelFor func(context.Context, string) string) {
+func (s *Spawner) SetRunCredentialResolvers(resolver ghclient.Resolver, secrets agentproc.SecretsReader, modelFor func(context.Context, string, string) string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ghResolver = resolver
@@ -297,13 +298,15 @@ func (s *Spawner) SetRunCredentialResolvers(resolver ghclient.Resolver, secrets 
 }
 
 // resolveRunCredentials resolves the per-(org, owner) GitHub client and
-// the org's default model for a run. Both modes call this identically;
+// the run's team default model. Both modes call this identically;
 // mode-awareness lives inside the resolver (App token vs PAT) and the
 // secrets reader (system door vs nil), not at the call site. owner is the
 // GitHub account the run targets — empty for Jira runs, which don't
-// pre-clone.
-func (s *Spawner) resolveRunCredentials(ctx context.Context, orgID, owner string) (*ghclient.Client, string) {
-	return s.resolveGHClient(ctx, orgID, owner), s.resolveModel(ctx, orgID)
+// pre-clone. teamID is the task's owning team, so a multi-team org honors
+// each team's model choice (SKY-389 review #2); empty falls back to the
+// org default team.
+func (s *Spawner) resolveRunCredentials(ctx context.Context, orgID, owner, teamID string) (*ghclient.Client, string) {
+	return s.resolveGHClient(ctx, orgID, owner), s.resolveModel(ctx, orgID, teamID)
 }
 
 // resolveGHClient resolves the per-(org, owner) GitHub client via the
@@ -328,16 +331,18 @@ func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner string) *ghc
 	return client
 }
 
-// resolveModel resolves the org's default model via the SKY-389 resolver,
-// falling back to the constructor-supplied model when no resolver is wired
-// (test fixtures) or the resolver returns empty.
-func (s *Spawner) resolveModel(ctx context.Context, orgID string) string {
+// resolveModel resolves the run's team default model via the SKY-389
+// resolver, falling back to the constructor-supplied model when no resolver
+// is wired (test fixtures) or the resolver returns empty. teamID is the
+// run's owning team; empty falls back to the org default team inside the
+// resolver.
+func (s *Spawner) resolveModel(ctx context.Context, orgID, teamID string) string {
 	s.mu.Lock()
 	fn := s.modelFor
 	fallback := s.model
 	s.mu.Unlock()
 	if fn != nil {
-		if m := fn(ctx, orgID); m != "" {
+		if m := fn(ctx, orgID, teamID); m != "" {
 			return m
 		}
 	}

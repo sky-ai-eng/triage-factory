@@ -35,7 +35,7 @@ type Curator struct {
 	// model above; secrets feeds RunOptions.Secrets. Tests leave both nil
 	// and fall back to model / the ambient-subscription path.
 	secrets  agentproc.SecretsReader
-	modelFor func(context.Context, string) string
+	modelFor func(context.Context, string, string) string
 	sessions map[string]*projectSession // projectID → goroutine handle
 
 	// closed is set during Shutdown; SendMessage rejects after this.
@@ -66,28 +66,31 @@ func New(database *sql.DB, stores db.Stores, wsHub *websocket.Hub, model string)
 
 // SetRunCredentialResolvers wires the per-org run-credential seam
 // (SKY-389): the per-org LLM-credential reader (nil in local → ambient
-// subscription; system-door reader in multi) and the per-org default-model
-// resolver. Both modes resolve through these so credential resolution
-// stops branching on mode. Set once at startup, post-New. Either may be
-// nil; resolveModel falls back to the constructor-supplied model and a nil
-// secrets reader yields the local ambient-subscription fallback.
-func (c *Curator) SetRunCredentialResolvers(secrets agentproc.SecretsReader, modelFor func(context.Context, string) string) {
+// subscription; system-door reader in multi) and the per-(org, team)
+// default-model resolver. Both modes resolve through these so credential
+// resolution stops branching on mode. Set once at startup, post-New. Either
+// may be nil; resolveModel falls back to the constructor-supplied model and
+// a nil secrets reader yields the local ambient-subscription fallback.
+func (c *Curator) SetRunCredentialResolvers(secrets agentproc.SecretsReader, modelFor func(context.Context, string, string) string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.secrets = secrets
 	c.modelFor = modelFor
 }
 
-// resolveModel resolves the project-owning org's default model via the
+// resolveModel resolves the project-owning team's default model via the
 // SKY-389 resolver, falling back to the constructor-supplied model when no
-// resolver is wired (tests) or the resolver returns empty.
-func (c *Curator) resolveModel(ctx context.Context, orgID string) string {
+// resolver is wired (tests) or the resolver returns empty. teamID is the
+// project's owning team (a project belongs to exactly one team), so a
+// multi-team org honors each team's model choice; empty falls back to the
+// org default team inside the resolver.
+func (c *Curator) resolveModel(ctx context.Context, orgID, teamID string) string {
 	c.mu.Lock()
 	fn := c.modelFor
 	fallback := c.model
 	c.mu.Unlock()
 	if fn != nil {
-		if m := fn(ctx, orgID); m != "" {
+		if m := fn(ctx, orgID, teamID); m != "" {
 			return m
 		}
 	}
