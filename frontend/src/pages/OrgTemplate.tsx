@@ -18,7 +18,7 @@ import type { TriggerHandler, RuleHandler } from '../types'
 // header + a persistent forward-only banner + an accent frame on the canvas.
 export default function OrgTemplate() {
   const orgHref = useOrgHref()
-  const { available, ready } = useTemplateScope()
+  const { available, ready, loading } = useTemplateScope()
 
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [isNew, setIsNew] = useState(false)
@@ -78,8 +78,10 @@ export default function OrgTemplate() {
 
   // Non-admins (and local mode) can't reach the template — redirect to the
   // org root. Gate server-side too (requireOrgTemplate); this is the UI half.
-  // Wait until auth resolves so an admin isn't bounced during the cold load.
-  if (!available && !ready) {
+  // Only redirect once auth has confirmed the viewer isn't an admin — while
+  // loading, hold so an admin isn't bounced during the cold load. (AuthGate
+  // already blocks rendering until authed, so this is belt-and-suspenders.)
+  if (!loading && !available) {
     return <Navigate to={orgHref('/')} replace />
   }
 

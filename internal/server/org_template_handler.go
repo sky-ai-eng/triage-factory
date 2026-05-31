@@ -488,6 +488,12 @@ func (s *Server) handleOrgTemplateHandlerUpdate(w http.ResponseWriter, r *http.R
 		internalError(w, "org_template", err)
 		return
 	}
+	// fresh is nil only if the row was deleted between the fetch above and
+	// this update (the UPDATE then no-ops on 0 rows) — 404 rather than 200 null.
+	if fresh == nil {
+		notFound(w, "template handler")
+		return
+	}
 	writeJSON(w, http.StatusOK, fresh)
 }
 

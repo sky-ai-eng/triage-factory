@@ -14,6 +14,11 @@ export interface TemplateScopeState {
   // ready is BindingGraph's scopeReady gate for { kind: 'template' }: the
   // editor can fetch once auth has resolved and the admin check passes.
   ready: boolean
+  // loading is true while auth is still resolving (multi mode). The page's
+  // redirect guard waits on this so an admin isn't bounced before their role
+  // is known — distinct from "confirmed non-admin" (loading false, available
+  // false). False in local mode (no auth to resolve).
+  loading: boolean
 }
 
 // useTemplateScope is the org-template parallel to useActiveTeam — no switcher,
@@ -26,7 +31,7 @@ export function useTemplateScope(): TemplateScopeState {
   const activeOrgId = useActiveOrgId()
 
   if (!auth) {
-    return { available: false, ready: false }
+    return { available: false, ready: false, loading: false }
   }
   const activeOrg = activeOrgId
     ? auth.orgs.find((o) => o.id === activeOrgId)
@@ -34,5 +39,9 @@ export function useTemplateScope(): TemplateScopeState {
       ? auth.orgs[0]
       : undefined
   const isAdmin = !!activeOrg && ORG_ADMIN_ROLES.has(activeOrg.role)
-  return { available: isAdmin, ready: auth.status === 'authed' && isAdmin }
+  return {
+    available: isAdmin,
+    ready: auth.status === 'authed' && isAdmin,
+    loading: auth.status === 'loading',
+  }
 }
