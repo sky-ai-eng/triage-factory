@@ -25,7 +25,7 @@ type teamJSON struct {
 // when it is still one of those teams (a stale default is omitted so the
 // frontend never seeds to a team that isn't offered).
 type teamsResponse struct {
-	Teams           []teamJSON `json:"teams"`
+	Teams            []teamJSON `json:"teams"`
 	LastActingTeamID string     `json:"last_acting_team_id,omitempty"`
 }
 
@@ -44,7 +44,7 @@ func (s *Server) handleTeamsList(w http.ResponseWriter, r *http.Request) {
 	userID := ClaimsFrom(r.Context()).Subject
 
 	var (
-		teams     []domain.Team
+		teams      []domain.Team
 		lastActing string
 	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {

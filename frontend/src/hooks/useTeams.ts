@@ -288,7 +288,7 @@ export function useWriteTeam(): WriteTeam {
 // doesn't exist when only one team is ever in view.
 //
 // Device-local sticky per pageKey (localStorage), seeded from the write
-// default (preferred → first team) and validated against the live set.
+// default (last-acting team → first team) and validated against the live set.
 // Count-gated: `multi` is false for solo/local users, where teamId stays
 // '' (the server resolves the sole team) and no switcher renders.
 const ACTIVE_TEAM_KEY_PREFIX = 'tf.activeTeam.'
