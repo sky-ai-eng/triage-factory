@@ -100,14 +100,24 @@ FROM alpine:3.20 AS runtime
 # - tini: PID 1 reaper so signal handling (Ctrl-C in interactive runs,
 #   compose stop) propagates cleanly to the Go binary.
 # - tzdata: timestamps in logs render in operator-local time when TZ is set.
-# - curl: healthcheck probes in compose/fly.
+# - curl: healthcheck probes in compose/fly + the runsc fetch above.
+# - git: host-side worktree prep. The TF process shells out to git
+#   (worktree.EnsureBareClone bare-clone cache + `git worktree add`
+#   per run — internal/worktree) to stage a tree before bind-mounting
+#   it into the gVisor sandbox. A hard runtime dependency of the host
+#   process in multi-mode, distinct from (and mirroring) the in-sandbox
+#   git that internal/sandbox/rootfs.go installs for the jailed agent.
+# - openssh-client: the worktree layer has an SSH path
+#   (internal/worktree/ssh.go) used for SSH clone URLs / GHE remotes.
 RUN apk add --no-cache \
     iptables \
     iproute2 \
     ca-certificates \
     tini \
     tzdata \
-    curl
+    curl \
+    git \
+    openssh-client
 
 # Pull the per-arch runsc binary from a pinned gVisor release.
 #
