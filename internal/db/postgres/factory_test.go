@@ -85,8 +85,8 @@ func seedPgFactoryPrompt(t *testing.T, h *pgtest.Harness, orgID, userID string) 
 	promptID := "p_factory_" + uuid.New().String()
 	teamID := firstTeamForOrg(t, h, orgID)
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, kind, allowed_tools, visibility, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, 'Factory Test', 'body', 'user', 'leaf', '', 'team', now(), now())
+		INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, kind, allowed_tools, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 'Factory Test', 'body', 'user', 'leaf', '', now(), now())
 	`, promptID, orgID, userID, teamID); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}

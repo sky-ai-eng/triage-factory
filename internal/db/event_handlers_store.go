@@ -52,10 +52,10 @@ type EventHandlerStore interface {
 	// A trigger whose prompt slug is absent from the map is a seeding bug
 	// and returns an error rather than writing a dangling row.
 	//
-	// System rows are team-scoped (visibility='team', team_id=teamID). The
-	// router routes matched handlers to team-scoped tasks; carrying team_id
-	// on the handler row itself lets every handler answer "which team does
-	// this fire for?" In local mode the caller passes
+	// System rows are team-scoped (team_id=teamID; no visibility column).
+	// The router routes matched handlers to team-scoped tasks; carrying
+	// team_id on the handler row itself lets every handler answer "which
+	// team does this fire for?" In local mode the caller passes
 	// runmode.LocalDefaultTeamID; in multi mode each new team calls Seed at
 	// creation time to inherit the shipped defaults.
 	Seed(ctx context.Context, orgID, teamID string, promptIDsBySlug map[string]string) error
@@ -66,9 +66,9 @@ type EventHandlerStore interface {
 	// kind="" returns all. kind="rule" or kind="trigger" filters.
 	// teamID="" returns all (solo/local, or unfiltered). A non-empty
 	// teamID — the multi-team prompts page narrowed to one team — scopes
-	// to that team's handlers plus org-visible ones (team_id IS NULL),
-	// mirroring the delegation visibility gate (handler.TeamID == "" ||
-	// == teamID). The SQLite impl ignores it (local mode is single-team).
+	// to that team's handlers. Every handler is team-owned (team_id NOT
+	// NULL, no org-visible tier post-SKY-380), so this is a plain team
+	// filter. The SQLite impl ignores it (local mode is single-team).
 	List(ctx context.Context, orgID string, kind string, teamID string) ([]domain.EventHandler, error)
 
 	// Get returns one handler by id, or (nil, nil) if not found.
@@ -91,8 +91,8 @@ type EventHandlerStore interface {
 	// ID, kind, event_type, and the per-kind fields appropriate to the
 	// kind. Source is forced to "user"; timestamps are stamped
 	// server-side. The Postgres impl binds teamID directly (it satisfies
-	// the team-visibility CHECK + RLS); the SQLite impl ignores it (local
-	// mode is single-team and pins the sentinel).
+	// the team-membership RLS); the SQLite impl ignores it (local mode is
+	// single-team and pins the sentinel).
 	Create(ctx context.Context, orgID, teamID string, h domain.EventHandler) error
 
 	// Update changes a handler's mutable fields. ID, kind, source,

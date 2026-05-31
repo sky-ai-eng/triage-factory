@@ -85,8 +85,8 @@ func createTestPrompt(t *testing.T, database *sql.DB, p domain.Prompt) {
 func insertPromptForTeam(t *testing.T, database *sql.DB, id, teamID string) {
 	t.Helper()
 	if _, err := database.Exec(`
-		INSERT INTO prompts (id, org_id, team_id, creator_user_id, visibility, source, kind, name, body, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'team', 'user', 'leaf', ?, 'x', datetime('now'), datetime('now'))
+		INSERT INTO prompts (id, org_id, team_id, creator_user_id, source, kind, name, body, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'user', 'leaf', ?, 'x', datetime('now'), datetime('now'))
 	`, id, runmode.LocalDefaultOrg, teamID, runmode.LocalDefaultUserID, id); err != nil {
 		t.Fatalf("insertPromptForTeam %s (team %s): %v", id, teamID, err)
 	}

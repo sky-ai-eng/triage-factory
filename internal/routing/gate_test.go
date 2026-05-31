@@ -48,10 +48,10 @@ func seedMatchAllCIRule(t *testing.T, database *sql.DB, teamID string) {
 	ruleID := uuid.New().String()
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
-			(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
+			(id, org_id, team_id, creator_user_id, kind, event_type,
 			 scope_predicate_json, enabled, source, name, default_priority, sort_order,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'team', 'rule', ?, NULL, 1, 'user', ?, 0.7, 100, ?, ?)
+		VALUES (?, ?, ?, ?, 'rule', ?, NULL, 1, 'user', ?, 0.7, 100, ?, ?)
 	`, ruleID, runmode.LocalDefaultOrg, teamID, runmode.LocalDefaultUserID,
 		domain.EventGitHubPRCICheckFailed, "CI rule "+teamID[:8], time.Now(), time.Now()); err != nil {
 		t.Fatalf("seed rule for team %s: %v", teamID, err)
@@ -290,10 +290,10 @@ func seedMatchAllJiraAssignedRule(t *testing.T, database *sql.DB, teamID string)
 	ruleID := uuid.New().String()
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
-			(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
+			(id, org_id, team_id, creator_user_id, kind, event_type,
 			 scope_predicate_json, enabled, source, name, default_priority, sort_order,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'team', 'rule', ?, NULL, 1, 'user', ?, 0.7, 100, ?, ?)
+		VALUES (?, ?, ?, ?, 'rule', ?, NULL, 1, 'user', ?, 0.7, 100, ?, ?)
 	`, ruleID, runmode.LocalDefaultOrg, teamID, runmode.LocalDefaultUserID,
 		domain.EventJiraIssueAssigned, "Jira rule "+teamID[:8], time.Now(), time.Now()); err != nil {
 		t.Fatalf("seed jira rule for team %s: %v", teamID, err)

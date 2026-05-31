@@ -46,16 +46,15 @@ CREATE TABLE prompts (
     -- creator_user_id is nullable: source='system' rows have NULL (no human author),
     -- source='user' rows must have a value. Enforced by prompts_system_has_no_creator.
     creator_user_id TEXT,
-    -- visibility is {private, team} — every prompt belongs to exactly one
-    -- team. The old 'org' value (org-visible system prompts) is gone:
-    -- shipped prompts now seed one team-owned copy per team (SKY-380).
-    visibility      TEXT NOT NULL DEFAULT 'team'
-        CHECK (visibility IN ('private','team')),
     -- system_slug is the stable shipped identifier ("system-ci-fix", …) for
     -- source='system' rows; NULL for user/imported prompts. The id is a
     -- random UUID per team copy, so re-seed idempotency and slug→id lookups
     -- key on (org_id, team_id, system_slug) instead of the id (SKY-380).
     system_slug     TEXT,
+    -- There is no visibility column: every prompt is team-owned (team_id NOT
+    -- NULL) and visible to its team. A per-user 'private' tier was never
+    -- reachable and org-wide sharing is the marketplace's copy-on-publish
+    -- concern, so a discriminator column would only ever hold one value.
     -- Uses source<>'system' (not source='user') because prompts.source
     -- has three valid values (system|user|imported) — both non-system
     -- variants require a creator. event_handlers, whose enum is just
@@ -63,9 +62,6 @@ CREATE TABLE prompts (
     CONSTRAINT prompts_system_has_no_creator CHECK (
         (source = 'system' AND creator_user_id IS NULL)
         OR (source <> 'system' AND creator_user_id IS NOT NULL)
-    ),
-    CONSTRAINT prompts_team_visibility_requires_team CHECK (
-        visibility <> 'team' OR team_id IS NOT NULL
     ),
     -- Per-team re-seed idempotency key: each team gets exactly one copy of
     -- each shipped prompt (same system_slug, distinct team_id). NULLs are
@@ -464,15 +460,12 @@ CREATE TABLE event_handlers (
     id              TEXT PRIMARY KEY,
     org_id          TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
     creator_user_id TEXT,
-    -- team_id ships with the LocalDefaultTeamID sentinel as DEFAULT to
-    -- match tasks/runs. With visibility='team' as the default, any
-    -- direct INSERT that omitted team_id would otherwise trip
-    -- event_handlers_team_visibility_requires_team. System-source
-    -- shipped rows (visibility='org') tolerate any team_id value;
-    -- the sentinel is consistent across them.
+    -- team_id is NOT NULL: every handler is team-owned (SKY-380 made shipped
+    -- rows per-team copies, so the old org-visible / team_id-NULL tier is
+    -- gone). The LocalDefaultTeamID sentinel is the DEFAULT so local-mode
+    -- inserts and direct INSERTs that omit it land on the sole team. There
+    -- is no visibility column — team_id is the sole scoping signal.
     team_id         TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000010',
-    visibility      TEXT NOT NULL DEFAULT 'team'
-                       CHECK (visibility IN ('private','team','org')),
 
     kind            TEXT NOT NULL CHECK (kind IN ('rule','trigger')),
 
@@ -527,9 +520,6 @@ CREATE TABLE event_handlers (
     CONSTRAINT event_handlers_system_has_no_creator CHECK (
         (source = 'system' AND creator_user_id IS NULL)
         OR (source = 'user' AND creator_user_id IS NOT NULL)
-    ),
-    CONSTRAINT event_handlers_team_visibility_requires_team CHECK (
-        visibility <> 'team' OR team_id IS NOT NULL
     ),
     -- Per-team re-seed idempotency key: each team gets one copy of each
     -- shipped handler (same system_slug, distinct team_id). NULLs distinct,

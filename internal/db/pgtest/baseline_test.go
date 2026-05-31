@@ -1024,8 +1024,8 @@ func TestRLS_TeamVisibilityIsTeamScoped(t *testing.T) {
 	var teamPromptID, teamProjectID, teamRuleID, teamTriggerID string
 
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO prompts (org_id, creator_user_id, team_id, visibility, name, body)
-		VALUES ($1, $2, $3, 'team', 'team-prompt', '') RETURNING id
+		INSERT INTO prompts (org_id, creator_user_id, team_id, name, body)
+		VALUES ($1, $2, $3, 'team-prompt', '') RETURNING id
 	`, orgA, alice, teamA).Scan(&teamPromptID); err != nil {
 		t.Fatalf("seed team prompt: %v", err)
 	}
@@ -1036,14 +1036,14 @@ func TestRLS_TeamVisibilityIsTeamScoped(t *testing.T) {
 		t.Fatalf("seed team project: %v", err)
 	}
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO event_handlers (org_id, creator_user_id, team_id, visibility, kind, event_type, name, default_priority, sort_order)
-		VALUES ($1, $2, $3, 'team', 'rule', 'github:pr:opened', 'team-rule', 0.5, 0) RETURNING id
+		INSERT INTO event_handlers (org_id, creator_user_id, team_id, kind, event_type, name, default_priority, sort_order)
+		VALUES ($1, $2, $3, 'rule', 'github:pr:opened', 'team-rule', 0.5, 0) RETURNING id
 	`, orgA, alice, teamA).Scan(&teamRuleID); err != nil {
 		t.Fatalf("seed team rule: %v", err)
 	}
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO event_handlers (org_id, creator_user_id, team_id, visibility, kind, prompt_id, event_type, breaker_threshold, min_autonomy_suitability)
-		VALUES ($1, $2, $3, 'team', 'trigger', $4, 'github:pr:opened', 4, 0.0) RETURNING id
+		INSERT INTO event_handlers (org_id, creator_user_id, team_id, kind, prompt_id, event_type, breaker_threshold, min_autonomy_suitability)
+		VALUES ($1, $2, $3, 'trigger', $4, 'github:pr:opened', 4, 0.0) RETURNING id
 	`, orgA, alice, teamA, prompt).Scan(&teamTriggerID); err != nil {
 		t.Fatalf("seed team trigger: %v", err)
 	}
@@ -1810,30 +1810,33 @@ func TestOrgOwnership_OnlyOwnerCanTransfer(t *testing.T) {
 	}
 }
 
-// TestVisibilityCheck_TeamRequiresTeamID — visibility='team' with a
-// NULL team_id is an invalid state. The CHECK constraint refuses.
-func TestVisibilityCheck_TeamRequiresTeamID(t *testing.T) {
+// TestPrompts_TeamIDRequired — every prompt is team-owned (SKY-380
+// dropped the visibility column; team_id is the sole scoping signal).
+// A prompt with a NULL team_id is an invalid state the NOT NULL
+// constraint refuses (SQLSTATE 23502), replacing the old
+// prompts_team_visibility_requires_team CHECK.
+func TestPrompts_TeamIDRequired(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
 
 	orgA, alice, _ := SeedOrgWithUser(t, h, "alice")
 
 	_, err := h.AdminDB.Exec(`
-		INSERT INTO prompts (org_id, creator_user_id, visibility, name, body)
-		VALUES ($1, $2, 'team', 'orphan-team-prompt', '')
+		INSERT INTO prompts (org_id, creator_user_id, name, body)
+		VALUES ($1, $2, 'orphan-prompt', '')
 	`, orgA, alice)
 	if err == nil {
-		t.Fatalf("prompts INSERT with visibility=team AND team_id=NULL succeeded — CHECK constraint missing")
+		t.Fatalf("prompts INSERT with team_id=NULL succeeded — NOT NULL constraint missing")
 	}
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {
 		t.Fatalf("expected PostgreSQL error, got: %T %v", err, err)
 	}
-	if pgErr.Code != "23514" {
-		t.Fatalf("expected SQLSTATE 23514 (check_violation), got %q: %v", pgErr.Code, err)
+	if pgErr.Code != "23502" {
+		t.Fatalf("expected SQLSTATE 23502 (not_null_violation), got %q: %v", pgErr.Code, err)
 	}
-	if pgErr.ConstraintName != "prompts_team_visibility_requires_team" {
-		t.Errorf("expected constraint prompts_team_visibility_requires_team, got %q", pgErr.ConstraintName)
+	if pgErr.ColumnName != "team_id" {
+		t.Errorf("expected not-null violation on column team_id, got %q", pgErr.ColumnName)
 	}
 }
 
@@ -2016,16 +2019,15 @@ func TestPrompts_SemanticIDsAccepted(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
 
-	orgA, alice, _ := SeedOrgWithUser(t, h, "alice")
+	orgA, alice, teamA := SeedOrgWithUser(t, h, "alice")
 
-	// System prompt with a semantic ID. creator_user_id is NULL +
-	// visibility='org' per the prompts_system_has_no_creator CHECK
-	// constraint added in 202605110001 — shipped rows have no human
-	// author and are org-visible by default.
+	// System prompt with a semantic ID. creator_user_id is NULL per the
+	// prompts_system_has_no_creator CHECK — shipped rows have no human
+	// author. team_id required (NOT NULL, no visibility column post-SKY-380).
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO prompts (id, org_id, creator_user_id, source, visibility, name, body)
-		VALUES ('system-pr-review', $1, NULL, 'system', 'org', 'PR Review', '...')
-	`, orgA); err != nil {
+		INSERT INTO prompts (id, org_id, creator_user_id, team_id, source, name, body)
+		VALUES ('system-pr-review', $1, NULL, $2, 'system', 'PR Review', '...')
+	`, orgA, teamA); err != nil {
 		t.Fatalf("system prompt INSERT with semantic id: %v", err)
 	}
 	_ = alice // user prompt INSERT below still uses alice as creator
@@ -2075,16 +2077,16 @@ func TestSystemPromptSeeding_DeployActorOnly(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
 
-	orgA, alice, _ := SeedOrgWithUser(t, h, "alice")
+	orgA, alice, teamA := SeedOrgWithUser(t, h, "alice")
 
 	// Deploy actor (AdminDB) can INSERT both prompts and
 	// system_prompt_versions. System rows ship with creator_user_id
-	// NULL + visibility='org' per the constraint added in
-	// 202605110001 — there's no human author for shipped content.
+	// NULL per prompts_system_has_no_creator — there's no human author
+	// for shipped content. team_id required (NOT NULL, no visibility column).
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO prompts (id, org_id, creator_user_id, source, visibility, name, body)
-		VALUES ('system-pr-review', $1, NULL, 'system', 'org', 'PR Review', 'v1 body')
-	`, orgA); err != nil {
+		INSERT INTO prompts (id, org_id, creator_user_id, team_id, source, name, body)
+		VALUES ('system-pr-review', $1, NULL, $2, 'system', 'PR Review', 'v1 body')
+	`, orgA, teamA); err != nil {
 		t.Fatalf("AdminDB system prompt INSERT: %v", err)
 	}
 	if _, err := h.AdminDB.Exec(`
@@ -2693,8 +2695,8 @@ func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 	}
 	var ehID string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO event_handlers (org_id, creator_user_id, team_id, visibility, kind, event_type, name, default_priority, sort_order)
-		VALUES ($1, $2, $3, 'team', 'rule', 'github:pr:opened', 'r1', 0.5, 0) RETURNING id
+		INSERT INTO event_handlers (org_id, creator_user_id, team_id, kind, event_type, name, default_priority, sort_order)
+		VALUES ($1, $2, $3, 'rule', 'github:pr:opened', 'r1', 0.5, 0) RETURNING id
 	`, orgA, alice, teamA).Scan(&ehID); err != nil {
 		t.Fatalf("seed event_handler: %v", err)
 	}
@@ -2854,12 +2856,6 @@ func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
 				VALUES ($1, $2, 'org', 'evil-org-project')`,
 			args: []any{orgA, carol},
 		},
-		{
-			label: "event_handlers",
-			stmt: `INSERT INTO event_handlers (org_id, creator_user_id, visibility, kind, event_type, name, default_priority, sort_order)
-				VALUES ($1, $2, 'org', 'rule', 'github:pr:opened', 'evil-org-rule', 0.5, 0)`,
-			args: []any{orgA, carol},
-		},
 	}
 
 	err := h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
@@ -2880,12 +2876,13 @@ func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
 			}
 		}
 
-		// Sanity: team-visibility INSERT still succeeds for carol
-		// (she's on the team) — defense doesn't over-deny the
-		// legitimate path.
+		// Sanity: a team-owned prompt INSERT still succeeds for carol
+		// (she's on the team) — the dropped per-table org gate doesn't
+		// over-deny the legitimate team path. prompts has no visibility
+		// column post-SKY-380; team membership alone governs it.
 		if _, err := tx.Exec(`
-			INSERT INTO prompts (org_id, creator_user_id, team_id, visibility, name, body)
-			VALUES ($1, $2, $3, 'team', 'carol-team-prompt', '')
+			INSERT INTO prompts (org_id, creator_user_id, team_id, name, body)
+			VALUES ($1, $2, $3, 'carol-team-prompt', '')
 		`, orgA, carol, teamA); err != nil {
 			t.Errorf("non-admin carol team INSERT denied — defense over-broad: %v", err)
 		}

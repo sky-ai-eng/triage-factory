@@ -98,11 +98,11 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, prom
 		case domain.EventHandlerKindRule:
 			res, err := s.q.ExecContext(ctx, `
 				INSERT OR IGNORE INTO event_handlers
-					(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
+					(id, org_id, team_id, creator_user_id, kind, event_type,
 					 system_slug, scope_predicate_json, enabled, source,
 					 name, default_priority, sort_order,
 					 created_at, updated_at)
-				VALUES (?, ?, ?, NULL, 'team', 'rule', ?,
+				VALUES (?, ?, ?, NULL, 'rule', ?,
 				        ?, ?, 1, 'system',
 				        ?, ?, ?,
 				        ?, ?)
@@ -132,11 +132,11 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, prom
 			// users opt in or replace).
 			res, err := s.q.ExecContext(ctx, `
 				INSERT OR IGNORE INTO event_handlers
-					(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
+					(id, org_id, team_id, creator_user_id, kind, event_type,
 					 system_slug, scope_predicate_json, enabled, source,
 					 prompt_id, breaker_threshold, min_autonomy_suitability,
 					 created_at, updated_at)
-				VALUES (?, ?, ?, NULL, 'team', 'trigger', ?,
+				VALUES (?, ?, ?, NULL, 'trigger', ?,
 				        ?, ?, 0, 'system',
 				        ?, ?, ?,
 				        ?, ?)
@@ -242,21 +242,20 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 	}
 	now := time.Now().UTC()
 
-	// user-source rows are team-scoped with team_id = LocalDefaultTeamID
-	// + visibility='team'. SQLite has one team in local mode (the
-	// sentinel) so the acting team is always that team — the teamID the
-	// handler threads is ignored here. creator_user_id is required for
-	// source='user' rows by the event_handlers_system_has_no_creator
-	// CHECK.
+	// user-source rows are team-scoped with team_id = LocalDefaultTeamID.
+	// SQLite has one team in local mode (the sentinel) so the acting team
+	// is always that team — the teamID the handler threads is ignored
+	// here. creator_user_id is required for source='user' rows by the
+	// event_handlers_system_has_no_creator CHECK.
 	switch h.Kind {
 	case domain.EventHandlerKindRule:
 		_, err := s.q.ExecContext(ctx, `
 			INSERT INTO event_handlers
-				(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
+				(id, org_id, team_id, creator_user_id, kind, event_type,
 				 scope_predicate_json, enabled, source,
 				 name, default_priority, sort_order,
 				 created_at, updated_at)
-			VALUES (?, ?, ?, ?, 'team', 'rule', ?,
+			VALUES (?, ?, ?, ?, 'rule', ?,
 			        ?, ?, 'user',
 			        ?, ?, ?,
 			        ?, ?)
@@ -269,11 +268,11 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 	case domain.EventHandlerKindTrigger:
 		_, err := s.q.ExecContext(ctx, `
 			INSERT INTO event_handlers
-				(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
+				(id, org_id, team_id, creator_user_id, kind, event_type,
 				 scope_predicate_json, enabled, source,
 				 prompt_id, breaker_threshold, min_autonomy_suitability,
 				 created_at, updated_at)
-			VALUES (?, ?, ?, ?, 'team', 'trigger', ?,
+			VALUES (?, ?, ?, ?, 'trigger', ?,
 			        ?, ?, 'user',
 			        ?, ?, ?,
 			        ?, ?)

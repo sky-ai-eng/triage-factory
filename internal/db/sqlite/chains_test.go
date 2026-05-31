@@ -23,8 +23,8 @@ func insertPromptForChainTest(t *testing.T, conn *sql.DB, p domain.Prompt) {
 	}
 	now := time.Now().UTC()
 	if _, err := conn.Exec(`
-		INSERT INTO prompts (id, name, body, source, kind, allowed_tools, usage_count, team_id, creator_user_id, visibility, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, '[]', 0, ?, ?, 'team', ?, ?)
+		INSERT INTO prompts (id, name, body, source, kind, allowed_tools, usage_count, team_id, creator_user_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, '[]', 0, ?, ?, ?, ?)
 	`, p.ID, p.Name, p.Body, p.Source, string(p.Kind), runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, now, now); err != nil {
 		t.Fatalf("seed prompt %s: %v", p.ID, err)
 	}

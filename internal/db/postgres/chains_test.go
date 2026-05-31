@@ -568,8 +568,8 @@ func seedPgPrompt(t *testing.T, h *pgtest.Harness, orgID, userID, id, kind strin
 	t.Helper()
 	teamID := ensurePgTeamForOrg(t, h, orgID, userID)
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO prompts (id, org_id, team_id, creator_user_id, name, body, source, kind, allowed_tools, visibility, created_at, updated_at)
-		VALUES ($1, $2, $3::uuid, $4, $5, 'body', 'user', $6, '[]'::jsonb, 'team', now(), now())
+		INSERT INTO prompts (id, org_id, team_id, creator_user_id, name, body, source, kind, allowed_tools, created_at, updated_at)
+		VALUES ($1, $2, $3::uuid, $4, $5, 'body', 'user', $6, '[]'::jsonb, now(), now())
 	`, id, orgID, teamID, userID, id, kind); err != nil {
 		t.Fatalf("seed prompt %s: %v", id, err)
 	}

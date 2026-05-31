@@ -85,8 +85,8 @@ func (s *promptStore) SeedOrUpdate(ctx context.Context, orgID, teamID string, p 
 			// Fresh insert — mint a random UUID for this team's copy.
 			newID := uuid.New().String()
 			if _, err := q.ExecContext(ctx, `
-				INSERT INTO prompts (id, org_id, team_id, system_slug, name, body, source, visibility, usage_count, user_modified, created_at, updated_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, 'team', 0, 0, ?, ?)
+				INSERT INTO prompts (id, org_id, team_id, system_slug, name, body, source, usage_count, user_modified, created_at, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
 			`, newID, orgID, teamID, p.SystemSlug, p.Name, p.Body, p.Source, now, now); err != nil {
 				return err
 			}
@@ -253,15 +253,13 @@ func (s *promptStore) GetBySystemSlug(ctx context.Context, orgID, teamID, system
 }
 
 // Create inserts a prompt row scoped to the local sentinel team. The
-// visibility + creator_user_id pair is derived from p.Source rather
-// than taken from the caller, which is a deliberate divergence from
-// the Postgres impl:
+// creator_user_id is derived from p.Source rather than taken from the
+// caller, which is a deliberate divergence from the Postgres impl:
 //
-//   - Postgres Create hardcodes visibility='team' and derives
-//     creator_user_id from tf.current_user_id() (request context).
-//     System prompts there go through SeedOrUpdate only — the
-//     prompts_system_has_no_creator CHECK rejects source='system'
-//     rows that come through this path.
+//   - Postgres Create derives creator_user_id from tf.current_user_id()
+//     (request context). System prompts there go through SeedOrUpdate
+//     only — the prompts_system_has_no_creator CHECK rejects
+//     source='system' rows that come through this path.
 //   - SQLite Create handles both source='system' (system tests +
 //     curator skill seeds) and source∈('user','imported') in one
 //     entry point because local mode has no request context to
@@ -272,7 +270,7 @@ func (s *promptStore) GetBySystemSlug(ctx context.Context, orgID, teamID, system
 // source='system' row also use this method. The override keeps
 // those three call paths converging on a single Create rather than
 // adding a per-source variant or forcing the handler to wire team_id
-// + visibility from outside.
+// from outside. Every prompt is team-owned (no visibility column).
 func (s *promptStore) Create(ctx context.Context, orgID, teamID string, p domain.Prompt) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
@@ -280,10 +278,6 @@ func (s *promptStore) Create(ctx context.Context, orgID, teamID string, p domain
 	_ = teamID // local mode is single-team; the row pins LocalDefaultTeamID below
 	now := time.Now().UTC()
 	var creatorUserID any = runmode.LocalDefaultUserID
-	// Every prompt is team-scoped post-SKY-380 (visibility ∈ {private, team};
-	// 'org' is gone). source='system' rows created through this path (test
-	// fixtures) still drop the creator but stay team-visible.
-	visibility := "team"
 	if p.Source == "system" {
 		creatorUserID = nil
 	}
@@ -292,9 +286,9 @@ func (s *promptStore) Create(ctx context.Context, orgID, teamID string, p domain
 		kind = domain.PromptKindLeaf
 	}
 	_, err := s.q.ExecContext(ctx, `
-		INSERT INTO prompts (id, name, body, source, kind, allowed_tools, model, usage_count, team_id, creator_user_id, visibility, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
-	`, p.ID, p.Name, p.Body, p.Source, kind, p.AllowedTools, p.Model, runmode.LocalDefaultTeamID, creatorUserID, visibility, now, now)
+		INSERT INTO prompts (id, name, body, source, kind, allowed_tools, model, usage_count, team_id, creator_user_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+	`, p.ID, p.Name, p.Body, p.Source, kind, p.AllowedTools, p.Model, runmode.LocalDefaultTeamID, creatorUserID, now, now)
 	return err
 }
 

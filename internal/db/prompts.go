@@ -86,7 +86,7 @@ type PromptStore interface {
 	// teamID — the acting team the handler resolved for the request.
 	// Caller-provided ID — the handler generates UUIDs upstream. The
 	// Postgres impl binds teamID directly (it satisfies the team-
-	// visibility CHECK + RLS); the SQLite impl ignores it (local mode is
+	// membership RLS); the SQLite impl ignores it (local mode is
 	// single-team and pins the sentinel).
 	Create(ctx context.Context, orgID, teamID string, p domain.Prompt) error
 

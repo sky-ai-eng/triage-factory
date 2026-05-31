@@ -37,7 +37,7 @@ import (
 //
 // org_id is threaded through every WHERE for defense in depth; RLS
 // enforces the creator predicate on chain_runs and prompt_chain_steps
-// RLS gates on the parent prompt's visibility.
+// RLS gates on the parent prompt's team membership.
 //
 // Reads against UUID-typed columns (chain_runs.id, runs.id, …) guard
 // inputs with isValidUUID and treat non-UUID strings as not-found —

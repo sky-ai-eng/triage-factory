@@ -205,8 +205,8 @@ func newPgPendingFiringsSeeder(h *pgtest.Harness, orgID, userID string) dbtest.P
 			t.Fatalf("seed entity: %v", err)
 		}
 		if _, err := conn.Exec(`
-			INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, kind, allowed_tools, visibility, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, 'PendingFirings Test', 'body', 'user', 'leaf', '', 'team', now(), now())
+			INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, kind, allowed_tools, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, 'PendingFirings Test', 'body', 'user', 'leaf', '', now(), now())
 		`, promptID, orgID, userID, teamID); err != nil {
 			t.Fatalf("seed prompt: %v", err)
 		}
@@ -223,8 +223,8 @@ func newPgPendingFiringsSeeder(h *pgtest.Harness, orgID, userID string) dbtest.P
 			t.Fatalf("seed task: %v", err)
 		}
 		if _, err := conn.Exec(`
-			INSERT INTO event_handlers (id, org_id, creator_user_id, team_id, visibility, kind, event_type, source, prompt_id, breaker_threshold, min_autonomy_suitability, enabled, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, 'team', 'trigger', 'github:pr:ci_check_failed', 'user', $5, 4, 0, true, now(), now())
+			INSERT INTO event_handlers (id, org_id, creator_user_id, team_id, kind, event_type, source, prompt_id, breaker_threshold, min_autonomy_suitability, enabled, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, 'trigger', 'github:pr:ci_check_failed', 'user', $5, 4, 0, true, now(), now())
 		`, triggerID, orgID, userID, teamID, promptID); err != nil {
 			t.Fatalf("seed trigger: %v", err)
 		}
@@ -247,8 +247,8 @@ func newPgPendingFiringsSeeder(h *pgtest.Harness, orgID, userID string) dbtest.P
 		runID := uuid.New().String()
 		promptID := uuid.New().String()
 		if _, err := conn.Exec(`
-			INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, kind, allowed_tools, visibility, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, 'Run Prompt', 'x', 'user', 'leaf', '', 'team', now(), now())
+			INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, kind, allowed_tools, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, 'Run Prompt', 'x', 'user', 'leaf', '', now(), now())
 		`, promptID, orgID, userID, teamID); err != nil {
 			t.Fatalf("seed run prompt: %v", err)
 		}

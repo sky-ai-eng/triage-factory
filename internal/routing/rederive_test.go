@@ -349,11 +349,11 @@ func TestReDeriveAfterScoring_CrossTeamTrigger_Skips(t *testing.T) {
 	insertPromptForTeam(t, database, "p-teamB", teamB)
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
-			(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
+			(id, org_id, team_id, creator_user_id, kind, event_type,
 			 scope_predicate_json, enabled, source,
 			 prompt_id, breaker_threshold, min_autonomy_suitability,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'team', 'trigger', ?,
+		VALUES (?, ?, ?, ?, 'trigger', ?,
 		        NULL, 1, 'user',
 		        ?, 4, 0.6,
 		        datetime('now'), datetime('now'))
@@ -441,11 +441,11 @@ func TestReDeriveAfterScoring_TeamNotInVisibilitySet_Skips(t *testing.T) {
 	insertPromptForTeam(t, database, "p-novis", teamB)
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
-			(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
+			(id, org_id, team_id, creator_user_id, kind, event_type,
 			 scope_predicate_json, enabled, source,
 			 prompt_id, breaker_threshold, min_autonomy_suitability,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'team', 'trigger', ?,
+		VALUES (?, ?, ?, ?, 'trigger', ?,
 		        NULL, 1, 'user',
 		        ?, 4, 0.6,
 		        datetime('now'), datetime('now'))

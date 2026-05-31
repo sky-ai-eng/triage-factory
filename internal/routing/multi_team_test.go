@@ -47,11 +47,11 @@ func TestHandleEvent_MultipleTeams_OneTask(t *testing.T) {
 		ruleID := uuid.New().String()
 		if _, err := database.Exec(`
 			INSERT INTO event_handlers
-				(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
+				(id, org_id, team_id, creator_user_id, kind, event_type,
 				 scope_predicate_json, enabled, source,
 				 name, default_priority, sort_order,
 				 created_at, updated_at)
-			VALUES (?, ?, ?, ?, 'team', 'rule', ?,
+			VALUES (?, ?, ?, ?, 'rule', ?,
 			        NULL, 1, 'user',
 			        ?, 0.7, 100,
 			        ?, ?)
@@ -242,11 +242,11 @@ func TestHandleEvent_BecameAtomic_Suppressed(t *testing.T) {
 		ruleID := uuid.New().String()
 		if _, err := database.Exec(`
 			INSERT INTO event_handlers
-				(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
+				(id, org_id, team_id, creator_user_id, kind, event_type,
 				 scope_predicate_json, enabled, source,
 				 name, default_priority, sort_order,
 				 created_at, updated_at)
-			VALUES (?, ?, ?, ?, 'team', 'rule', ?,
+			VALUES (?, ?, ?, ?, 'rule', ?,
 			        NULL, 1, 'user',
 			        ?, 0.7, 100, ?, ?)
 		`, ruleID, runmode.LocalDefaultOrg, teamID, runmode.LocalDefaultUserID, domain.EventJiraIssueBecameAtomic,
@@ -429,11 +429,11 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 	// team B's own prompt copy.
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
-			(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
+			(id, org_id, team_id, creator_user_id, kind, event_type,
 			 scope_predicate_json, enabled, source,
 			 prompt_id, breaker_threshold, min_autonomy_suitability,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'team', 'trigger', ?, NULL, 1, 'user', ?, 4, 0, datetime('now'), datetime('now'))
+		VALUES (?, ?, ?, ?, 'trigger', ?, NULL, 1, 'user', ?, 4, 0, datetime('now'), datetime('now'))
 	`, "trigger-B-onerun", runmode.LocalDefaultOrg, teamB, runmode.LocalDefaultUserID,
 		domain.EventGitHubPRCICheckFailed, "p-onerun-b"); err != nil {
 		t.Fatalf("seed team B trigger: %v", err)
@@ -520,9 +520,9 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 	// trigger (which is skipped because team A's bot is disabled).
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
-			(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
+			(id, org_id, team_id, creator_user_id, kind, event_type,
 			 scope_predicate_json, enabled, source, name, default_priority, sort_order, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'team', 'rule', ?, NULL, 1, 'user', 'A rule', 0.9, 100, datetime('now'), datetime('now'))
+		VALUES (?, ?, ?, ?, 'rule', ?, NULL, 1, 'user', 'A rule', 0.9, 100, datetime('now'), datetime('now'))
 	`, "rule-A-attr", runmode.LocalDefaultOrg, teamA, runmode.LocalDefaultUserID, domain.EventGitHubPRCICheckFailed); err != nil {
 		t.Fatalf("seed team A rule: %v", err)
 	}
@@ -535,9 +535,9 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 	// Team B (lower priority) also has a trigger and IS enabled.
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
-			(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
+			(id, org_id, team_id, creator_user_id, kind, event_type,
 			 scope_predicate_json, enabled, source, prompt_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'team', 'trigger', ?, NULL, 1, 'user', ?, 4, 0, datetime('now'), datetime('now'))
+		VALUES (?, ?, ?, ?, 'trigger', ?, NULL, 1, 'user', ?, 4, 0, datetime('now'), datetime('now'))
 	`, "trigger-B-attr", runmode.LocalDefaultOrg, teamB, runmode.LocalDefaultUserID,
 		domain.EventGitHubPRCICheckFailed, "p-attr-b"); err != nil {
 		t.Fatalf("seed team B trigger: %v", err)

@@ -114,12 +114,12 @@ func (s *promptStore) SeedOrUpdate(ctx context.Context, orgID, teamID string, p 
 	case errors.Is(err, sql.ErrNoRows):
 		// Fresh insert — mint a random UUID for this team's copy. Shipped
 		// system prompts have no human author (prompts_system_has_no_creator
-		// pins source='system' ↔ creator_user_id NULL); they materialize
-		// team-visible.
+		// pins source='system' ↔ creator_user_id NULL); they're team-owned
+		// like every prompt (no visibility column).
 		newID := uuid.New().String()
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO prompts (id, org_id, team_id, system_slug, creator_user_id, name, body, source, visibility, usage_count, user_modified, created_at, updated_at)
-			VALUES ($1, $2, $3::uuid, $4, NULL, $5, $6, $7, 'team', 0, FALSE, $8, $8)
+			INSERT INTO prompts (id, org_id, team_id, system_slug, creator_user_id, name, body, source, usage_count, user_modified, created_at, updated_at)
+			VALUES ($1, $2, $3::uuid, $4, NULL, $5, $6, $7, 0, FALSE, $8, $8)
 		`, newID, orgID, teamID, p.SystemSlug, p.Name, p.Body, p.Source, now); err != nil {
 			return "", fmt.Errorf("insert prompt: %w", err)
 		}
@@ -314,11 +314,10 @@ func (s *promptStore) Create(ctx context.Context, orgID, teamID string, p domain
 		return fmt.Errorf("postgres prompts Create: team_id required (handler must thread the resolved acting team from request context)")
 	}
 	_, err := s.app.ExecContext(ctx, `
-		INSERT INTO prompts (id, org_id, creator_user_id, team_id, visibility, name, body, source, allowed_tools, model, usage_count, created_at, updated_at)
+		INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, allowed_tools, model, usage_count, created_at, updated_at)
 		VALUES ($1, $2,
 			COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
 			$3::uuid,
-			'team',
 			$4, $5, $6, $7, $8, 0, now(), now())
 	`, p.ID, orgID, teamID, p.Name, p.Body, p.Source, p.AllowedTools, p.Model)
 	return err

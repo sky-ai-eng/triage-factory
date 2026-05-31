@@ -1098,7 +1098,6 @@ CREATE TABLE public.prompts (
     org_id uuid NOT NULL,
     creator_user_id uuid,
     team_id uuid NOT NULL,
-    visibility text DEFAULT 'team'::text NOT NULL,
     name text NOT NULL,
     body text NOT NULL,
     source text DEFAULT 'user'::text NOT NULL,
@@ -1112,9 +1111,7 @@ CREATE TABLE public.prompts (
     model text DEFAULT ''::text NOT NULL,
     system_slug text,
     CONSTRAINT prompts_source_check CHECK ((source = ANY (ARRAY['system'::text, 'user'::text, 'imported'::text]))),
-    CONSTRAINT prompts_system_has_no_creator CHECK ((((source = 'system'::text) AND (creator_user_id IS NULL)) OR ((source <> 'system'::text) AND (creator_user_id IS NOT NULL)))),
-    CONSTRAINT prompts_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
-    CONSTRAINT prompts_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text])))
+    CONSTRAINT prompts_system_has_no_creator CHECK ((((source = 'system'::text) AND (creator_user_id IS NULL)) OR ((source <> 'system'::text) AND (creator_user_id IS NOT NULL))))
 );
 
 
@@ -3512,30 +3509,30 @@ ALTER TABLE public.event_handlers ENABLE ROW LEVEL SECURITY;
 -- Name: event_handlers event_handlers_delete; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY event_handlers_delete ON public.event_handlers FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND tf.user_in_team(team_id)))));
+CREATE POLICY event_handlers_delete ON public.event_handlers FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)));
 
 
 --
 -- Name: event_handlers event_handlers_insert; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY event_handlers_insert ON public.event_handlers FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND ((visibility <> 'team'::text) OR ((team_id IS NOT NULL) AND tf.user_in_team(team_id))) AND ((visibility <> 'org'::text) OR tf.user_is_org_admin(org_id))));
+CREATE POLICY event_handlers_insert ON public.event_handlers FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_in_team(team_id)));
 
 
 --
 -- Name: event_handlers event_handlers_select; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY event_handlers_select ON public.event_handlers FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND ((creator_user_id = tf.current_user_id()) OR ((visibility = 'team'::text) AND (team_id IS NOT NULL) AND (EXISTS ( SELECT 1
+CREATE POLICY event_handlers_select ON public.event_handlers FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND ((creator_user_id = tf.current_user_id()) OR (EXISTS ( SELECT 1
    FROM public.memberships m
-  WHERE ((m.user_id = tf.current_user_id()) AND (m.team_id = event_handlers.team_id))))) OR (visibility = 'org'::text))));
+  WHERE ((m.user_id = tf.current_user_id()) AND (m.team_id = event_handlers.team_id)))))));
 
 
 --
 -- Name: event_handlers event_handlers_update; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY event_handlers_update ON public.event_handlers FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND ((creator_user_id = tf.current_user_id()) OR ((visibility = 'team'::text) AND tf.user_in_team(team_id)) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id))))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND ((creator_user_id = tf.current_user_id()) OR ((visibility = 'team'::text) AND tf.user_in_team(team_id)) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id)))));
+CREATE POLICY event_handlers_update ON public.event_handlers FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)));
 
 
 --
@@ -3943,30 +3940,30 @@ ALTER TABLE public.prompts ENABLE ROW LEVEL SECURITY;
 -- Name: prompts prompts_delete; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY prompts_delete ON public.prompts FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (team_id IS NOT NULL) AND tf.user_in_team(team_id)))));
+CREATE POLICY prompts_delete ON public.prompts FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)));
 
 
 --
 -- Name: prompts prompts_insert; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY prompts_insert ON public.prompts FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND ((visibility <> 'team'::text) OR ((team_id IS NOT NULL) AND tf.user_in_team(team_id))) AND ((visibility <> 'org'::text) OR tf.user_is_org_admin(org_id))));
+CREATE POLICY prompts_insert ON public.prompts FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_in_team(team_id)));
 
 
 --
 -- Name: prompts prompts_select; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY prompts_select ON public.prompts FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND ((creator_user_id = tf.current_user_id()) OR ((visibility = 'team'::text) AND (team_id IS NOT NULL) AND (EXISTS ( SELECT 1
+CREATE POLICY prompts_select ON public.prompts FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND ((creator_user_id = tf.current_user_id()) OR (EXISTS ( SELECT 1
    FROM public.memberships m
-  WHERE ((m.user_id = tf.current_user_id()) AND (m.team_id = prompts.team_id))))) OR (visibility = 'org'::text))));
+  WHERE ((m.user_id = tf.current_user_id()) AND (m.team_id = prompts.team_id)))))));
 
 
 --
 -- Name: prompts prompts_update; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY prompts_update ON public.prompts FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (team_id IS NOT NULL) AND tf.user_in_team(team_id)) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id))))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (team_id IS NOT NULL) AND tf.user_in_team(team_id)) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id)))));
+CREATE POLICY prompts_update ON public.prompts FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)));
 
 
 --
