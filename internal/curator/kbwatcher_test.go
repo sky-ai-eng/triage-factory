@@ -148,17 +148,25 @@ func TestKnowledgeWatcher_FiresOnDelete(t *testing.T) {
 }
 
 func TestKnowledgeWatcher_DebouncesBurstOfWrites(t *testing.T) {
-	// A single agent Write often produces Create + Write + Chmod in
-	// quick succession. We don't want three broadcasts. The debounce
-	// window collapses them — the test fires four writes inside the
-	// window and expects exactly one event.
+	// A single agent Write often lands as Create + Write + Chmod in
+	// quick succession; the per-project debounce must collapse that
+	// burst into one broadcast, not one per fs event.
+	//
+	// We drive the debounce directly — fire() is the funnel every fs
+	// event reaches — rather than writing files and waiting on fsnotify.
+	// Going through the filesystem made this timing-sensitive: under a
+	// busy scheduler (a full `go test ./...` run with -race) the gap
+	// between two *delivered* fsnotify events could exceed
+	// knowledgeDebounce, so the burst straddled the window and emitted
+	// two events (SKY-384). That coupling — a wall-clock debounce vs.
+	// OS-paced event delivery — is what made it flake, and it's
+	// orthogonal to the coalescing this test exists to verify. The
+	// fs -> handle -> fire path is already covered by
+	// TestKnowledgeWatcher_FiresOnFileWriteInExistingKB; a tight
+	// synchronous burst of fire() calls leaves exactly one live timer
+	// (each call stops the prior), so it collapses to a single broadcast
+	// regardless of machine load.
 	root := t.TempDir()
-	projectID := "debounce"
-	kbDir := filepath.Join(root, projectID, "knowledge-base")
-	if err := os.MkdirAll(kbDir, 0o755); err != nil {
-		t.Fatalf("mkdir kb: %v", err)
-	}
-
 	rec := &recordingHub{}
 	w, err := NewKnowledgeWatcher(rec, root, nil)
 	if err != nil {
@@ -166,24 +174,16 @@ func TestKnowledgeWatcher_DebouncesBurstOfWrites(t *testing.T) {
 	}
 	defer w.Close()
 
-	for i := 0; i < 4; i++ {
-		path := filepath.Join(kbDir, "note.md")
-		if err := os.WriteFile(path, []byte("v"), 0o644); err != nil {
-			t.Fatalf("write %d: %v", i, err)
-		}
+	projectID := "debounce"
+	for range 4 {
+		w.fire(projectID)
 	}
 
-	// Wait past the debounce window plus a margin.
-	time.Sleep(knowledgeDebounce + 200*time.Millisecond)
-
-	events := []websocket.Event{}
-	for _, e := range rec.snapshot() {
-		if e.Type == "project_knowledge_updated" && e.ProjectID == projectID {
-			events = append(events, e)
-		}
-	}
+	// Wait for the lone trailing timer to land, then confirm the burst
+	// produced exactly that one broadcast.
+	events := waitForEvent(t, rec, projectID, 1)
 	if len(events) != 1 {
-		t.Errorf("expected exactly 1 debounced event, got %d: %+v", len(events), events)
+		t.Errorf("expected the burst to debounce into exactly 1 event, got %d: %+v", len(events), events)
 	}
 }
 
