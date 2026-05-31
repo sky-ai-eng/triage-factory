@@ -29,8 +29,8 @@ func TestManager_RunGitHubCycle_IteratesActiveOrgs(t *testing.T) {
 	m := &Manager{orgs: orgs, repos: repos, users: users}
 	m.runGitHubCycle()
 
-	if orgs.calls != 1 {
-		t.Errorf("ListActiveSystem called %d times; want 1 per cycle", orgs.calls)
+	if got := orgs.callCount(); got != 1 {
+		t.Errorf("ListActiveSystem called %d times; want 1 per cycle", got)
 	}
 	repos.mu.Lock()
 	defer repos.mu.Unlock()
@@ -63,8 +63,8 @@ func TestManager_RunJiraCycle_OrgsStoreError(t *testing.T) {
 	m := &Manager{orgs: orgs}
 	m.runJiraCycle()
 
-	if orgs.calls != 1 {
-		t.Errorf("ListActiveSystem called %d times; want 1 even on error", orgs.calls)
+	if got := orgs.callCount(); got != 1 {
+		t.Errorf("ListActiveSystem called %d times; want 1 even on error", got)
 	}
 }
 
@@ -194,15 +194,29 @@ type fakeOrgsStore struct {
 	db.OrgsStore // embed nil — every method except ListActiveSystem panics if reached
 	ids          []string
 	err          error
-	calls        int
+
+	// mu guards calls. RestartAll starts the GitHub and Jira loops as two
+	// goroutines that each run an initial cycle calling ListActiveSystem
+	// concurrently, so the counter must be safe under -race even though the
+	// single-cycle tests invoke it serially.
+	mu    sync.Mutex
+	calls int
 }
 
 func (f *fakeOrgsStore) ListActiveSystem(ctx context.Context) ([]string, error) {
+	f.mu.Lock()
 	f.calls++
+	f.mu.Unlock()
 	if f.err != nil {
 		return nil, f.err
 	}
 	return append([]string(nil), f.ids...), nil
+}
+
+func (f *fakeOrgsStore) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
 }
 
 // GetSettingsSystem feeds the cycle's per-org interval read. Returns defaults
