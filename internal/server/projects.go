@@ -572,16 +572,43 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		// up front keeps the contract crisp.
 		trimmed := strings.TrimSpace(*req.SpecAuthorshipPromptID)
 		if trimmed != "" {
-			var prompt *domain.Prompt
+			// Validate against the project's OWN team, not just the org:
+			// the curator runs this prompt under existing.TeamID, so a
+			// cross-team prompt would let a team-A project run a team-B
+			// prompt. Mirror the picker's list predicate — Prompts.List
+			// (visibility='org' OR team_id=existing.TeamID) — so a chosen
+			// prompt is accepted iff it's org-visible (system) or owned by
+			// this project's team. (Prompts.Get is org-scoped only and the
+			// domain.Prompt struct doesn't expose team_id/visibility yet —
+			// SKY-380 — so a same-team-list membership check is the
+			// available way to enforce this without the schema reshape.)
+			// SQLite ignores teamID (local is single-team), so this is a
+			// no-op there and only constrains multi-mode.
+			if existing.TeamID == "" {
+				internalError(w, "projects", fmt.Errorf("project %s has no team_id", existing.ID))
+				return
+			}
+			var visible []domain.Prompt
 			if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 				var e error
-				prompt, e = tx.Prompts.Get(r.Context(), orgID, trimmed)
+				visible, e = tx.Prompts.List(r.Context(), orgID, existing.TeamID)
 				return e
 			}); err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "load prompt: " + err.Error()})
 				return
 			}
-			if prompt == nil {
+			found := false
+			for i := range visible {
+				if visible[i].ID == trimmed {
+					found = true
+					break
+				}
+			}
+			if !found {
+				// Same 400 for "unknown" and "other team's" — the client
+				// shouldn't be able to distinguish a prompt that exists but
+				// isn't theirs from one that doesn't exist (don't leak the
+				// existence of another team's prompt by id).
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "spec_authorship_prompt_id references unknown prompt"})
 				return
 			}
