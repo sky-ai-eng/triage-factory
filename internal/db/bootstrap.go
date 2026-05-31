@@ -75,8 +75,16 @@ func BootstrapAgentForOrg(ctx context.Context, stores Stores, orgID string) (str
 // has no agent row yet — calling team-bootstrap before org-bootstrap
 // is a sequencing bug in the caller and silent-skip would leave teams
 // with no bot membership, which is surprising to debug after the fact.
+//
+// The agent lookup uses the System (admin-pool) variant to match the
+// rest of the bootstrap chain — Agents.Create, prompt/handler seeding,
+// and TeamAgents.AddForTeam all route through the admin pool. Bootstrap
+// runs outside any WithTx with no JWT claims, so the app pool (a bare
+// authenticator connection until SET ROLE tf_app + claims inside a
+// request tx) has no table grant and the app-pool GetForOrg would fail
+// with "permission denied for table agents".
 func BootstrapTeamAgent(ctx context.Context, stores Stores, orgID, teamID string) error {
-	agent, err := stores.Agents.GetForOrg(ctx, orgID)
+	agent, err := stores.Agents.GetForOrgSystem(ctx, orgID)
 	if err != nil {
 		return fmt.Errorf("bootstrap team_agents: lookup agent for org %s: %w", orgID, err)
 	}

@@ -83,10 +83,13 @@ type AgentStore interface {
 	SetGitHubPATUser(ctx context.Context, orgID, agentID, userID string) error
 
 	// GetForOrgSystem mirrors GetForOrg but routes through the admin
-	// pool in Postgres. The single consumer is the startup
-	// BootstrapLocalAgent path, which materializes the org's agent
-	// row before any JWT-claims context could exist. Same SKY-296
-	// admin/app split convention as the other stores in this wave.
+	// pool in Postgres. Used by system / claims-free callers that have
+	// no request JWT to drive RLS — e.g. the bootstrap chain
+	// (BootstrapTeamAgent), the event router's auto-trigger gate +
+	// agent-claim stamping (internal/routing), the delegate spawner's
+	// actor stamping, and the credential resolver's PAT-borrow lookup.
+	// Same SKY-296 admin/app split convention as the other stores in
+	// this wave.
 	GetForOrgSystem(ctx context.Context, orgID string) (*domain.Agent, error)
 }
 

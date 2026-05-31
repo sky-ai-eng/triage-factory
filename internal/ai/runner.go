@@ -50,16 +50,15 @@ type RunnerCallbacks struct {
 // LLM-driven scorer in scorer.go) does its own multi-store reads
 // against the connection — that path migrates in a later D2 wave.
 type Runner struct {
-	database     *sql.DB
-	scores       db.ScoreStore
-	entities     db.EntityStore // SKY-284: scorer bulk-loads entity descriptions for prompt context
-	orgID        string         // scoring context org — runmode.LocalDefaultOrg in local mode
-	callbacks    RunnerCallbacks
-	profileReady func() bool // returns true when repo profiles are available
-	trigger      chan struct{}
-	stop         chan struct{}
-	mu           sync.Mutex
-	running      bool
+	database  *sql.DB
+	scores    db.ScoreStore
+	entities  db.EntityStore // SKY-284: scorer bulk-loads entity descriptions for prompt context
+	orgID     string         // scoring context org — runmode.LocalDefaultOrg in local mode
+	callbacks RunnerCallbacks
+	trigger   chan struct{}
+	stop      chan struct{}
+	mu        sync.Mutex
+	running   bool
 }
 
 func NewRunner(database *sql.DB, scores db.ScoreStore, entities db.EntityStore, orgID string, callbacks RunnerCallbacks) *Runner {
@@ -72,12 +71,6 @@ func NewRunner(database *sql.DB, scores db.ScoreStore, entities db.EntityStore, 
 		trigger:   make(chan struct{}, 1),
 		stop:      make(chan struct{}),
 	}
-}
-
-// SetProfileGate sets the function used to check if repo profiles are ready.
-// If not set, scoring proceeds without gating.
-func (r *Runner) SetProfileGate(fn func() bool) {
-	r.profileReady = fn
 }
 
 // Trigger signals the runner to check for unscored tasks.
@@ -138,13 +131,6 @@ func (r *Runner) run(ctx context.Context) {
 		r.running = false
 		r.mu.Unlock()
 	}()
-
-	// Wait for repo profiles before scoring — stale or missing profiles
-	// lead to incorrect repo matches that would need re-scoring anyway.
-	if r.profileReady != nil && !r.profileReady() {
-		log.Println("[ai] skipping scoring cycle: repo profiles not ready")
-		return
-	}
 
 	tasks, err := r.scores.UnscoredTasks(ctx, r.orgID)
 	if err != nil {

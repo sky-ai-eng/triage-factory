@@ -833,10 +833,7 @@ func main() {
 		},
 	})
 
-	// Start AI scoring runner
-	// Profile gate — scorer waits for this before running
-	profileGate := repoprofile.NewProfileGate(database)
-
+	// Start AI scoring runner.
 	// Declare eventRouter early so the scorer callback can reference it.
 	// Actual initialization happens below after the spawner is created.
 	var eventRouter *routing.Router
@@ -870,7 +867,6 @@ func main() {
 			toast.Error(wsHub, orgID, fmt.Sprintf("AI scoring cycle aborted: %v", err))
 		},
 	})
-	scorer.SetProfileGate(profileGate.Ready)
 	srv.SetScorerTrigger(scorer.Trigger)
 	log.Println("[ai] scorer manager ready (per-org runners, model: haiku)")
 
@@ -1095,17 +1091,27 @@ func main() {
 		setAnnouncePending("github")
 		setAnnouncePending("jira")
 
-		// Don't Invalidate the profile gate. Scoring no longer reads
-		// repo profiles (LLM repo-match was removed when lazy Jira
-		// worktrees landed), so the gate has no consumer; flipping it
-		// back to false in the GitHub-disabled branch — which doesn't
-		// Signal again — would silently freeze scoring forever.
-		pollerMgr.StopAll()
-
 		if runmode.Current() != runmode.ModeLocal {
-			log.Println("[server] GitHub changed: multi-mode skips process-global refresh (per-tenant work happens in request handlers)")
+			// Per-tenant GitHub creds (spawner/profiler/clone bootstrap) are
+			// resolved in the request handlers and per cycle inside the poller,
+			// not here. The process-global loop is already running and re-reads
+			// every org's config each wake, so it must NOT be stopped/restarted:
+			// restarting would re-poll the changed org RIGHT NOW, but because the
+			// loop is process-global it can't selectively restart for one tenant
+			// — every org would be re-evaluated, and a fleet-wide poll against
+			// shared GHES/GHEC API budgets is exactly what per-org intervals
+			// exist to prevent. Instead, leave the loop running and re-due ONLY
+			// this org so the next wake (≤ basePollInterval) picks up its change.
+			// (No StopAll here — that's the local path's credential-swap dance.)
+			log.Printf("[server] GitHub changed for org %s: multi-mode re-dues that org only (no fleet restart)", orgID)
+			pollerMgr.PollSoon("github", orgID)
 			return
 		}
+
+		// Local mode: stop, swap the process-global GitHub identity
+		// (spawner/profiler/clone bootstrap read the sentinel org), then
+		// re-profile and restart. N=1, so there's no fleet to stampede.
+		pollerMgr.StopAll()
 
 		ctx := context.Background()
 		creds, _ := integrations.Load(ctx, stores.Secrets, orgID)
@@ -1117,14 +1123,19 @@ func main() {
 			curatorRuntime.UpdateCredentials(model)
 			srv.SetGitHubClient(ghClient)
 
-			// Re-profile, then signal ready and restart all pollers
+			// Re-profile, then restart all pollers and trigger scoring.
 			go func() {
 				profiler := repoprofile.NewProfiler(ghClient, database, stores.Repos, stores.Orgs, wsHub)
 				if err := profiler.Run(context.Background(), true); err != nil {
 					log.Printf("[repoprofile] profiling failed: %v", err)
 				}
-				profileGate.Signal()
-				pollerMgr.RestartAll(context.Background(), orgID)
+				pollerMgr.RestartAll()
+				// Apply the change now: the restarted loop would otherwise see
+				// the sentinel's existing future slot and defer the re-poll up to
+				// a full interval. N=1 in local, so re-duing "everyone" is just
+				// the one org — no fleet stampede (the multi concern).
+				pollerMgr.PollSoon("github", orgID)
+				pollerMgr.PollSoon("jira", orgID)
 				scorer.Trigger(orgID)
 				// Bare-clone bootstrap is best-effort and local-mode-shaped:
 				// it reads repos under the synthetic sentinel org, which
@@ -1139,7 +1150,9 @@ func main() {
 			spawner.UpdateCredentials(nil, "")
 			curatorRuntime.UpdateCredentials("")
 			srv.SetGitHubClient(nil)
-			pollerMgr.RestartAll(ctx, orgID)
+			pollerMgr.RestartAll()
+			pollerMgr.PollSoon("github", orgID)
+			pollerMgr.PollSoon("jira", orgID)
 		}
 
 		// Also refresh Jira client in case it's configured
@@ -1150,9 +1163,10 @@ func main() {
 		}
 	})
 
-	// Jira changed: restart only the Jira poller. Same local-mode
-	// gate as onGitHubChanged — process-global Jira client + the
-	// SecretStore claims requirement make this a local-only path.
+	// Jira changed: restart only the Jira poller. Local-only: multi-mode
+	// Jira polling needs per-org system creds (the SecretStore claims
+	// requirement — see startJira's gate), and the process-global Jira
+	// client wired below is itself a local-mode construct.
 	srv.SetOnJiraChanged(func(orgID string) {
 		log.Println("[server] Jira config changed, restarting Jira poller...")
 		setAnnouncePending("jira")
@@ -1165,7 +1179,8 @@ func main() {
 		ctx := context.Background()
 		creds, _ := integrations.Load(ctx, stores.Secrets, orgID)
 
-		pollerMgr.RestartJira(ctx, orgID)
+		pollerMgr.RestartJira()
+		pollerMgr.PollSoon("jira", orgID) // apply now, don't wait out the interval
 
 		if creds.JiraPAT != "" && creds.JiraURL != "" {
 			srv.SetJiraClient(jira.NewClient(creds.JiraURL, creds.JiraPAT))
@@ -1226,13 +1241,17 @@ func main() {
 		},
 	})
 
-	// Initial start with current credentials. Local mode by design — multi-mode
-	// users get GitHub identity per-org via the D14 admin UI, not via this
-	// keychain-driven boot path. Hard-gating on the runmode lets us keep using
-	// the local sentinel here without it leaking into multi-mode startup:
-	// reading the synthetic sentinel org's secrets in multi mode would
-	// return zero values and we'd hand an unauthenticated GitHub client to
-	// every downstream subsystem, then quietly log per-cycle 401s.
+	// Initial poller start. The poll cycle fans out over every active org
+	// (runGitHubCycle → ListActiveSystem) and polls each at its own cadence,
+	// so starting the process-global poller is mode-agnostic — local is N=1
+	// (the sentinel org), multi is N active tenants.
+	//
+	// Local mode additionally wires the process-global GitHub identity
+	// (spawner, repo profiler, bare-clone bootstrap) from the keychain
+	// sentinel org here; reading those secrets in multi mode would return
+	// zero values, so that wiring stays gated to local. Multi mode resolves
+	// GitHub identity per tenant in the request handlers and per cycle inside
+	// the poller, so it only needs to start the loop (the else branch below).
 	if runmode.Current() == runmode.ModeLocal {
 		ctx := context.Background()
 		orgID := runmode.LocalDefaultOrgID
@@ -1247,25 +1266,34 @@ func main() {
 			srv.SetGitHubClient(ghClient)
 			log.Printf("[delegate] spawner ready (%d repos configured)", repoCount)
 
-			// Profile repos, then signal ready, start pollers, and trigger scoring
+			// Profile repos, then start pollers and trigger scoring.
 			go func() {
 				profiler := repoprofile.NewProfiler(ghClient, database, stores.Repos, stores.Orgs, wsHub)
 				if err := profiler.Run(context.Background(), false); err != nil {
 					log.Printf("[repoprofile] initial profiling failed: %v", err)
 				}
-				profileGate.Signal()
-				pollerMgr.RestartAll(context.Background(), orgID)
+				pollerMgr.RestartAll()
 				scorer.Trigger(orgID)
 				bootstrapBareClones(database, stores.Repos)
 			}()
 		} else {
 			// Not fully configured — start pollers immediately (may be empty)
-			pollerMgr.RestartAll(ctx, orgID)
+			pollerMgr.RestartAll()
 		}
 
 		if creds.JiraPAT != "" && creds.JiraURL != "" {
 			srv.SetJiraClient(jira.NewClient(creds.JiraURL, creds.JiraPAT))
 		}
+	} else {
+		// Multi mode: start the process-global poller so per-org discovery
+		// begins for every active tenant. runGitHubCycle fans out over
+		// ListActiveSystem each wake and polls each org at its own cadence,
+		// so orgs/installations/repos added via the admin UI are picked up
+		// without a restart. (Jira self-gates off in multi until per-org
+		// system creds land — see startJira.) The poll-complete sentinels
+		// the cycle emits drive scorer.Trigger per org (the "scorer"
+		// subscriber), so no explicit scoring kick is needed here.
+		pollerMgr.RestartAll()
 	}
 
 	if err := srv.ListenAndServe(addr); err != nil {
