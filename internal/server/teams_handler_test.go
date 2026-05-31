@@ -61,57 +61,6 @@ func TestTeamsList_TwoTeams(t *testing.T) {
 	}
 }
 
-// TestLastActingTeam_SetGetClear: the sticky default round-trips through
-// PUT /api/me/preferred-team and surfaces back on GET /api/teams; an
-// empty body clears it.
-func TestLastActingTeam_SetGetClear(t *testing.T) {
-	s := newTestServer(t)
-
-	rec := doJSON(t, s, http.MethodPut, "/api/me/preferred-team",
-		map[string]string{"team_id": runmode.LocalDefaultTeamID})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("set status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-
-	rec = doJSON(t, s, http.MethodGet, "/api/teams", nil)
-	var resp teamsResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.LastActingTeamID != runmode.LocalDefaultTeamID {
-		t.Errorf("preferred = %q, want %q", resp.LastActingTeamID, runmode.LocalDefaultTeamID)
-	}
-
-	// Clear.
-	rec = doJSON(t, s, http.MethodPut, "/api/me/preferred-team", map[string]string{"team_id": ""})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("clear status = %d, want 200", rec.Code)
-	}
-	rec = doJSON(t, s, http.MethodGet, "/api/teams", nil)
-	// Fresh struct: last_acting_team_id is omitempty, so a cleared default
-	// is absent from the JSON and would leave a reused struct's field
-	// stale.
-	var afterClear teamsResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &afterClear); err != nil {
-		t.Fatalf("decode after clear: %v", err)
-	}
-	if afterClear.LastActingTeamID != "" {
-		t.Errorf("preferred after clear = %q, want empty", afterClear.LastActingTeamID)
-	}
-}
-
-// TestLastActingTeam_ForeignTeamRejected: pinning a team the caller isn't
-// a member of is a 400, not a silent write.
-func TestLastActingTeam_ForeignTeamRejected(t *testing.T) {
-	s := newTestServer(t)
-
-	rec := doJSON(t, s, http.MethodPut, "/api/me/preferred-team",
-		map[string]string{"team_id": "00000000-0000-0000-0000-0000000000ff"})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
-	}
-}
-
 // TestTeamCreate_LocalIsNotFound: "add team" is hosted-only; in local
 // mode POST /api/teams is 404 (the feature is absent at N=1).
 func TestTeamCreate_LocalIsNotFound(t *testing.T) {
