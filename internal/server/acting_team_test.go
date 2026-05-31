@@ -114,7 +114,7 @@ func TestResolveActingTeam_StickyDefaultSeedsAmbiguous(t *testing.T) {
 	s := newTestServer(t)
 	second := seedTeam(t, s, runmode.LocalDefaultOrgID, "second")
 	if err := s.users.SetLastActingTeam(t.Context(), runmode.LocalDefaultUserID, second); err != nil {
-		t.Fatalf("set preferred team: %v", err)
+		t.Fatalf("set last-acting team: %v", err)
 	}
 
 	got, err := resolveActingTeam(t.Context(), s.teams, s.users, runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, "")

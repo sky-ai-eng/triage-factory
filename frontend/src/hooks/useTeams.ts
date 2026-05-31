@@ -237,7 +237,7 @@ export interface WriteTeam {
    *  their submit while !ready: before the teams list loads `multi` is
    *  false and the picker is hidden, so a multi-team user could otherwise
    *  submit team_id:'' in the cold-load window — landing the write on the
-   *  wrong team (last-preferred) or 400-ing (ambiguous) purely because
+   *  wrong team (the stale last-acting team) or 400-ing (ambiguous) purely because
    *  the teams request was slow. Once ready, the picker is shown for
    *  multi-team users and the normal required-selection flow applies. */
   ready: boolean

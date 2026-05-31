@@ -29,7 +29,7 @@ func TestTeamsList_LocalReturnsSoleTeam(t *testing.T) {
 		t.Errorf("team id = %q, want %q", resp.Teams[0].ID, runmode.LocalDefaultTeamID)
 	}
 	if resp.LastActingTeamID != "" {
-		t.Errorf("preferred = %q, want empty (unset)", resp.LastActingTeamID)
+		t.Errorf("last_acting_team_id = %q, want empty (unset)", resp.LastActingTeamID)
 	}
 }
 

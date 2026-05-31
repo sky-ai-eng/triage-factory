@@ -45,7 +45,7 @@ func (s *Server) handleTeamsList(w http.ResponseWriter, r *http.Request) {
 
 	var (
 		teams     []domain.Team
-		preferred string
+		lastActing string
 	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -53,7 +53,7 @@ func (s *Server) handleTeamsList(w http.ResponseWriter, r *http.Request) {
 		if e != nil {
 			return e
 		}
-		preferred, e = tx.Users.GetLastActingTeam(r.Context(), userID)
+		lastActing, e = tx.Users.GetLastActingTeam(r.Context(), userID)
 		return e
 	}); err != nil {
 		internalError(w, "teams", err)
@@ -61,14 +61,14 @@ func (s *Server) handleTeamsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	out := make([]teamJSON, len(teams))
-	validPreferred := ""
+	validLastActing := ""
 	for i, t := range teams {
 		out[i] = teamJSON{ID: t.ID, Name: t.Name, Slug: t.Slug}
-		if t.ID == preferred {
-			validPreferred = preferred
+		if t.ID == lastActing {
+			validLastActing = lastActing
 		}
 	}
-	writeJSON(w, http.StatusOK, teamsResponse{Teams: out, LastActingTeamID: validPreferred})
+	writeJSON(w, http.StatusOK, teamsResponse{Teams: out, LastActingTeamID: validLastActing})
 }
 
 // handleTeamCreate is the org-admin "add team" affordance — the hosted-

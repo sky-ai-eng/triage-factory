@@ -181,7 +181,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 				return fmt.Errorf("get: %w", e)
 			}
 			if got != teamB {
-				t.Errorf("preferred team = %q; want %q", got, teamB)
+				t.Errorf("last-acting team = %q; want %q", got, teamB)
 			}
 			// Clearing resets to NULL.
 			if e := users.SetLastActingTeam(ctx, userID, ""); e != nil {
@@ -192,7 +192,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 				return fmt.Errorf("get after clear: %w", e)
 			}
 			if got != "" {
-				t.Errorf("preferred team after clear = %q; want empty", got)
+				t.Errorf("last-acting team after clear = %q; want empty", got)
 			}
 			return nil
 		})

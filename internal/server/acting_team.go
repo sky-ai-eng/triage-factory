@@ -131,7 +131,7 @@ func resolveActingTeamID(ctx context.Context, teams db.TeamsStore, users db.User
 	// 2. Last-written default (only when still a member).
 	lastActing, err := users.GetLastActingTeam(ctx, userID)
 	if err != nil {
-		return "", fmt.Errorf("acting team: lastActing team: %w", err)
+		return "", fmt.Errorf("acting team: get last-acting team: %w", err)
 	}
 	if lastActing != "" {
 		if _, ok := member[lastActing]; ok {
@@ -189,7 +189,7 @@ func resolveReadTeam(ctx context.Context, teams db.TeamsStore, users db.UsersSto
 	}
 	lastActing, err := users.GetLastActingTeam(ctx, userID)
 	if err != nil {
-		return "", fmt.Errorf("read team: lastActing team: %w", err)
+		return "", fmt.Errorf("read team: get last-acting team: %w", err)
 	}
 	if lastActing != "" {
 		if _, ok := member[lastActing]; ok {
