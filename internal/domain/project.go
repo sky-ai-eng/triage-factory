@@ -49,16 +49,20 @@ type Project struct {
 	UpdatedAt              time.Time `json:"updated_at"`
 }
 
-// SystemTicketSpecPromptID is the deterministic ID of the seeded
-// default spec-authorship prompt. Three sites consume it:
+// SystemTicketSpecPromptID is the stable system_slug of the seeded
+// default spec-authorship prompt (post-SKY-380 the prompt's id is a
+// random UUID per team copy; this constant identifies it by slug).
+// Three sites consume it:
 //
-//   - the seed step in main.go (writes the row).
-//   - the project-create HTTP handler, which auto-points new projects
-//     at this ID when the prompt exists. The DB layer itself stores
-//     whatever it's handed (NULL when the field is empty); defaulting
-//     lives at the API layer to keep the schema free of any "system
-//     prompt must exist" coupling that would break tests.
-//   - the curator dispatch path, which falls back to this ID at skill
-//     materialization time when a project's SpecAuthorshipPromptID is
-//     empty (covers projects created before the seed landed).
+//   - the seed step in main.go (writes the team's copy via SeedOrUpdate,
+//     which stores this as the row's system_slug).
+//   - the project-create HTTP handler, which resolves the team's copy via
+//     GetBySystemSlug and auto-points new projects at its id when present.
+//     The DB layer itself stores whatever it's handed (NULL when the field
+//     is empty); defaulting lives at the API layer to keep the schema free
+//     of any "system prompt must exist" coupling that would break tests.
+//   - the curator dispatch path, which falls back to the team's copy
+//     (resolved via GetBySystemSlug) at skill materialization time when a
+//     project's SpecAuthorshipPromptID is empty (covers projects created
+//     before the seed landed).
 const SystemTicketSpecPromptID = "system-ticket-spec"

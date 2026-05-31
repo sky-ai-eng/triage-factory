@@ -5218,9 +5218,9 @@ ALTER TABLE ONLY public.runs
 ALTER TABLE public.prompt_chain_steps ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.chain_runs         ENABLE ROW LEVEL SECURITY;
 
--- prompt_chain_steps inherits the chain prompt's visibility — if the
+-- prompt_chain_steps inherits the chain prompt's access — if the
 -- caller can't see the parent prompt, they can't see its step list.
--- prompts RLS already applies creator + team/org visibility rules.
+-- prompts RLS already applies creator + team-membership rules.
 -- The EXISTS subquery joins on p.org_id = prompt_chain_steps.org_id
 -- because prompts.id is text and can collide across orgs.
 CREATE POLICY prompt_chain_steps_all ON public.prompt_chain_steps FOR ALL
