@@ -83,6 +83,15 @@ func (s *chainStore) ReplaceSteps(ctx context.Context, orgID, chainPromptID stri
 			if i < len(briefs) {
 				brief = briefs[i]
 			}
+			// team_id is intentionally omitted: the schema column is
+			// NOT NULL DEFAULT LocalDefaultTeamID, and SQLite is N=1 local
+			// mode where every prompt pins that same sentinel team. The
+			// same-team FK ((chain_prompt_id, team_id) → prompts(id, team_id))
+			// is satisfied because the chain prompt's team_id is the sentinel
+			// too. The Postgres impl can't lean on a DEFAULT — it's
+			// multi-team — so it derives team_id from the chain prompt in-SQL
+			// via a subquery. If SQLite ever ran multi-team this would need
+			// the same explicit derivation.
 			if _, err := q.ExecContext(ctx, `
 				INSERT INTO prompt_chain_steps (chain_prompt_id, step_index, step_prompt_id, brief, created_at)
 				VALUES (?, ?, ?, ?, ?)

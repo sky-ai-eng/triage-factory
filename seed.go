@@ -12,7 +12,7 @@ import (
 // seedDefaultPrompts seeds the local team's own copies of the shipped
 // system prompts AND the shipped system rules + triggers via the shared
 // two-phase helper (db.SeedTeamDefaults). Post-SKY-380 prompts are
-// team-scoped (team_id NOT NULL, visibility ∈ {private, team}); each is a
+// team-scoped (team_id NOT NULL; no visibility column); each is a
 // team-owned copy keyed by system_slug, and shipped triggers wire to the
 // team's own prompt copies via the slug→id resolve. Local mode is the single
 // synthetic (org, team); multi-mode org/team creation runs the same helper

@@ -2692,7 +2692,7 @@ ALTER TABLE ONLY public.event_handlers
 --
 
 ALTER TABLE ONLY public.event_handlers
-    ADD CONSTRAINT event_handlers_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE SET NULL;
+    ADD CONSTRAINT event_handlers_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE CASCADE;
 
 
 --

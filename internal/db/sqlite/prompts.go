@@ -229,15 +229,17 @@ func (s *promptStore) GetSystem(ctx context.Context, orgID string, id string) (*
 
 // GetBySystemSlug resolves a shipped prompt by slug. SQLite is single-team
 // in production, so the slug alone is unique; a non-empty teamID further
-// scopes it (used by the per-team-divergence conformance path).
+// scopes it (used by the per-team-divergence conformance path). org_id is
+// in the WHERE for consistency with the store's other reads (assertLocalOrg
+// already gates it).
 func (s *promptStore) GetBySystemSlug(ctx context.Context, orgID, teamID, systemSlug string) (*domain.Prompt, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
 	q := `
 		SELECT id, name, body, source, kind, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
-		FROM prompts WHERE system_slug = ?`
-	args := []any{systemSlug}
+		FROM prompts WHERE org_id = ? AND system_slug = ?`
+	args := []any{orgID, systemSlug}
 	if teamID != "" {
 		q += ` AND team_id = ?`
 		args = append(args, teamID)
