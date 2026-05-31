@@ -84,7 +84,10 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 	// Jira projects (the per-page selector). The deck is single-team by
 	// construction; resolveReadTeam defaults to the sticky/first team
 	// when no filter is set rather than blocking a multi-team caller.
-	filterTeam := r.URL.Query().Get("team_id")
+	// singleTeamParam drops a malformed id to "" — same validation the
+	// prompts / event-handlers read paths use, so a junk value can't reach
+	// a future ::uuid cast.
+	filterTeam := singleTeamParam(r)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
 		var e error
