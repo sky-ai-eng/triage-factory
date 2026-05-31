@@ -29,19 +29,22 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
   // `team` stays '' and the server resolves the sole team. `ready` is
   // false until /api/teams resolves — the submit button gates on it so a
   // multi-team user can't submit team_id:'' in the cold-load window.
-  const { team, setTeam, ready: teamReady } = useWriteTeam()
+  const { team, setTeam, multi, ready: teamReady } = useWriteTeam()
 
-  // Switching teams invalidates the pinned-repo selection: repos are
-  // team-scoped (validatePinnedRepos checks the acting team's tracked
-  // set), so a repo picked under team A would 400 when submitting under
-  // team B. Reset to empty and let the user re-pick from the new team.
-  const onTeamChange = useCallback(
-    (next: string) => {
-      setTeam(next)
-      setPinnedRepos([])
-    },
-    [setTeam],
-  )
+  // The pinned-repo picker offers the acting team's tracked repos, so it
+  // must wait until the team resolves: for a multi-team user the seed lands
+  // after /api/teams, and picking the *default* team's repos beforehand
+  // would 400 when the team resolves to a different one. Disabled until the
+  // team is known (solo → '' is already resolved → ready immediately).
+  const repoPickerReady = teamReady && (!multi || team !== '')
+
+  // Repos are team-scoped (validatePinnedRepos checks the acting team's
+  // tracked set), so any team change — a manual pick OR the automatic seed
+  // / org-switch reseed — invalidates the current selection. Clear it so a
+  // repo chosen under one team can't be submitted under another.
+  useEffect(() => {
+    setPinnedRepos([])
+  }, [team])
   // Holds the in-flight POST's AbortController so the close path
   // can cancel it. Without this, clicking the backdrop / hitting
   // Escape after submit would dismiss the dialog while leaving the
@@ -175,7 +178,7 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
         </header>
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          <TeamPicker value={team} onChange={onTeamChange} label="Team" />
+          <TeamPicker value={team} onChange={setTeam} label="Team" />
 
           <Field label="Name" required>
             <input
@@ -210,7 +213,12 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
           </Field>
 
           <Field label="Pinned repos">
-            <RepoMultiSelect value={pinnedRepos} onChange={setPinnedRepos} teamId={team} />
+            <RepoMultiSelect
+              value={pinnedRepos}
+              onChange={setPinnedRepos}
+              teamId={team}
+              disabled={!repoPickerReady}
+            />
           </Field>
 
           <Field label="Tracker projects">

@@ -232,6 +232,126 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		}
 	})
 
+	t.Run("prompts_list_scoped_to_active_team", func(t *testing.T) {
+		// The single-team prompts page narrows List to one team. The founder
+		// is a member of A and B, so the union shows both, but List(teamA)
+		// must show only team A's prompts plus org-visible (system) ones —
+		// never team B's. This is what closes the cross-team trigger→prompt
+		// hole structurally: team B's prompts simply aren't on team A's canvas.
+		mkPrompt := func(team, name string) string {
+			id := "p_scope_" + uuid.New().String()
+			if e := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+				return pgstore.NewForTx(tx).Prompts.Create(ctx, orgID, team, domain.Prompt{
+					ID: id, Name: name, Body: "b", Source: "user", Kind: "leaf",
+				})
+			}); e != nil {
+				t.Fatalf("create prompt %s: %v", name, e)
+			}
+			return id
+		}
+		pA := mkPrompt(teamA, "alpha-only")
+		pB := mkPrompt(teamB, "beta-only")
+		// An org-visible (system) prompt is visible to every team's view.
+		pOrg := "p_org_" + uuid.New().String()
+		pgtest.MustExec(t, h.AdminDB, `
+			INSERT INTO prompts (id, org_id, creator_user_id, name, body, source, visibility, usage_count, user_modified, created_at, updated_at)
+			VALUES ($1, $2, NULL, 'shared', 'b', 'system', 'org', 0, false, now(), now())`, pOrg, orgID)
+
+		promptIDs := func(ps []domain.Prompt) map[string]bool {
+			m := make(map[string]bool, len(ps))
+			for _, p := range ps {
+				m[p.ID] = true
+			}
+			return m
+		}
+		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+			store := pgstore.NewForTx(tx).Prompts
+			a, e := store.List(ctx, orgID, teamA)
+			if e != nil {
+				return e
+			}
+			if ga := promptIDs(a); !ga[pA] || !ga[pOrg] || ga[pB] {
+				t.Errorf("List(teamA): want {A, org} without B; got A=%v org=%v B=%v", ga[pA], ga[pOrg], ga[pB])
+			}
+			b, e := store.List(ctx, orgID, teamB)
+			if e != nil {
+				return e
+			}
+			if gb := promptIDs(b); !gb[pB] || !gb[pOrg] || gb[pA] {
+				t.Errorf("List(teamB): want {B, org} without A; got B=%v org=%v A=%v", gb[pB], gb[pOrg], gb[pA])
+			}
+			all, e := store.List(ctx, orgID, "")
+			if e != nil {
+				return e
+			}
+			if gall := promptIDs(all); !gall[pA] || !gall[pB] || !gall[pOrg] {
+				t.Errorf("List(unfiltered): want all three; got A=%v B=%v org=%v", gall[pA], gall[pB], gall[pOrg])
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("prompts list scope: %v", err)
+		}
+	})
+
+	t.Run("event_handlers_list_scoped_to_active_team", func(t *testing.T) {
+		// Mirror of the prompts narrowing for the binding graph's handlers
+		// (exercised with rules — same team_id predicate, no prompt FK
+		// needed). List(teamA) shows team A's handlers (plus org-visible
+		// team_id-NULL ones), never team B's.
+		priority := 0.5
+		sortOrder := 0
+		mkRule := func(team, name string) string {
+			id := uuid.New().String()
+			if e := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+				return pgstore.NewForTx(tx).EventHandlers.Create(ctx, orgID, team, domain.EventHandler{
+					ID:              id,
+					Kind:            domain.EventHandlerKindRule,
+					EventType:       domain.EventGitHubPRCICheckFailed,
+					Name:            name,
+					DefaultPriority: &priority,
+					SortOrder:       &sortOrder,
+					Enabled:         true,
+					Source:          domain.EventHandlerSourceUser,
+				})
+			}); e != nil {
+				t.Fatalf("create rule %s: %v", name, e)
+			}
+			return id
+		}
+		rA := mkRule(teamA, "rule-alpha")
+		rB := mkRule(teamB, "rule-beta")
+
+		handlerIDs := func(hs []domain.EventHandler) map[string]bool {
+			m := make(map[string]bool, len(hs))
+			for _, x := range hs {
+				m[x.ID] = true
+			}
+			return m
+		}
+		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+			store := pgstore.NewForTx(tx).EventHandlers
+			a, e := store.List(ctx, orgID, domain.EventHandlerKindRule, teamA)
+			if e != nil {
+				return e
+			}
+			if ga := handlerIDs(a); !ga[rA] || ga[rB] {
+				t.Errorf("List(rule, teamA): want A without B; got A=%v B=%v", ga[rA], ga[rB])
+			}
+			b, e := store.List(ctx, orgID, domain.EventHandlerKindRule, teamB)
+			if e != nil {
+				return e
+			}
+			if gb := handlerIDs(b); !gb[rB] || gb[rA] {
+				t.Errorf("List(rule, teamB): want B without A; got B=%v A=%v", gb[rB], gb[rA])
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("event handlers list scope: %v", err)
+		}
+	})
+
 	t.Run("forged_team_id_cannot_leak_via_other_team", func(t *testing.T) {
 		// A task visible to the founder's team A AND to an outside team C
 		// the founder is NOT a member of. RLS admits the row (via A), but

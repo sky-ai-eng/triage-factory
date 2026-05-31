@@ -241,7 +241,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		if err := store.Hide(ctx, orgID, "u-hidden"); err != nil {
 			t.Fatalf("hide: %v", err)
 		}
-		list, err := store.List(ctx, orgID)
+		list, err := store.List(ctx, orgID, "")
 		if err != nil {
 			t.Fatalf("list: %v", err)
 		}
@@ -262,7 +262,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		if err := store.Unhide(ctx, orgID, "u-hidden"); err != nil {
 			t.Fatalf("unhide: %v", err)
 		}
-		list2, _ := store.List(ctx, orgID)
+		list2, _ := store.List(ctx, orgID, "")
 		if !containsPromptID(list2, "u-hidden") {
 			t.Fatalf("after Unhide, row still missing from List: %v", promptIDs(list2))
 		}

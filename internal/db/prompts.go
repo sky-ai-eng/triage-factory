@@ -52,8 +52,13 @@ type PromptStore interface {
 	// shouldn't) choose.
 	SeedOrUpdate(ctx context.Context, orgID string, p domain.Prompt) error
 
-	// List returns all non-hidden prompts ordered by updated_at DESC.
-	List(ctx context.Context, orgID string) ([]domain.Prompt, error)
+	// List returns non-hidden prompts ordered by updated_at DESC. When
+	// teamID is non-empty — the multi-team prompts page narrowed to one
+	// team — the result is scoped to that team's prompts plus org-visible
+	// (system) prompts: (visibility='org' OR team_id=teamID). Empty teamID
+	// returns everything visible (solo/local, or an unfiltered view). The
+	// SQLite impl ignores teamID (local mode is single-team).
+	List(ctx context.Context, orgID string, teamID string) ([]domain.Prompt, error)
 
 	// Get returns one prompt by id (regardless of hidden state) or
 	// (nil, nil) if not found.

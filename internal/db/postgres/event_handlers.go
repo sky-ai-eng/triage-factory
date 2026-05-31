@@ -146,8 +146,8 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string) erro
 	return nil
 }
 
-func (s *eventHandlerStore) List(ctx context.Context, orgID string, kind string) ([]domain.EventHandler, error) {
-	query, args := s.buildListQuery(orgID, kind, "")
+func (s *eventHandlerStore) List(ctx context.Context, orgID string, kind string, teamID string) ([]domain.EventHandler, error) {
+	query, args := s.buildListQuery(orgID, kind, teamID)
 	return s.scanList(ctx, query, args)
 }
 
@@ -410,14 +410,22 @@ func (s *eventHandlerStore) Promote(ctx context.Context, orgID string, id string
 
 // buildListQuery composes the WHERE for List, with optional kind filter.
 // kind="" returns both kinds.
-func (s *eventHandlerStore) buildListQuery(orgID, kind, _ string) (string, []any) {
+func (s *eventHandlerStore) buildListQuery(orgID, kind, teamID string) (string, []any) {
 	args := []any{orgID}
 	q := `SELECT ` + pgEventHandlerColumns + `
 	      FROM event_handlers
 	      WHERE org_id = $1`
 	if kind != "" {
-		q += " AND kind = $2"
 		args = append(args, kind)
+		q += fmt.Sprintf(" AND kind = $%d", len(args))
+	}
+	if teamID != "" {
+		// Prompts page narrowed to one team: that team's handlers plus
+		// org-visible ones (team_id NULL). Mirrors the delegation
+		// visibility gate (handler.TeamID == "" || == teamID). RLS still
+		// gates the row set; this narrows within it.
+		args = append(args, teamID)
+		q += fmt.Sprintf(" AND (team_id IS NULL OR team_id = $%d)", len(args))
 	}
 	// Order: rules first (sort_order ASC, name ASC), then triggers
 	// (created_at DESC). Same shape as the predecessor stores' List

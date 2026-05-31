@@ -150,7 +150,9 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string) erro
 	return nil
 }
 
-func (s *eventHandlerStore) List(ctx context.Context, orgID string, kind string) ([]domain.EventHandler, error) {
+// List ignores teamID: local mode is single-team, so the multi-team
+// narrowing the param expresses is a no-op here.
+func (s *eventHandlerStore) List(ctx context.Context, orgID string, kind string, _ string) ([]domain.EventHandler, error) {
 	q := `SELECT ` + sqliteEventHandlerColumns + ` FROM event_handlers WHERE org_id = ?`
 	args := []any{orgID}
 	if kind != "" {

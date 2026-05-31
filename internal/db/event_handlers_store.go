@@ -59,7 +59,12 @@ type EventHandlerStore interface {
 	//   rules first by sort_order ASC, then name ASC,
 	//   then triggers by created_at DESC.
 	// kind="" returns all. kind="rule" or kind="trigger" filters.
-	List(ctx context.Context, orgID string, kind string) ([]domain.EventHandler, error)
+	// teamID="" returns all (solo/local, or unfiltered). A non-empty
+	// teamID — the multi-team prompts page narrowed to one team — scopes
+	// to that team's handlers plus org-visible ones (team_id IS NULL),
+	// mirroring the delegation visibility gate (handler.TeamID == "" ||
+	// == teamID). The SQLite impl ignores it (local mode is single-team).
+	List(ctx context.Context, orgID string, kind string, teamID string) ([]domain.EventHandler, error)
 
 	// Get returns one handler by id, or (nil, nil) if not found.
 	Get(ctx context.Context, orgID string, id string) (*domain.EventHandler, error)

@@ -151,7 +151,10 @@ func upsertSystemPromptVersionSQLite(ctx context.Context, q queryer, promptID, h
 
 // --- CRUD ----------------------------------------------------------
 
-func (s *promptStore) List(ctx context.Context, orgID string) ([]domain.Prompt, error) {
+// List ignores teamID: local mode is single-team, so every prompt
+// already belongs to the sole team and the multi-team narrowing the
+// param expresses is a no-op here.
+func (s *promptStore) List(ctx context.Context, orgID string, _ string) ([]domain.Prompt, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}

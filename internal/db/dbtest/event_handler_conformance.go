@@ -58,7 +58,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		if err := store.Seed(context.Background(), orgID, teamID); err != nil {
 			t.Fatalf("Seed: %v", err)
 		}
-		all, err := store.List(context.Background(), orgID, "")
+		all, err := store.List(context.Background(), orgID, "", "")
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -88,11 +88,11 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		if err := store.Seed(context.Background(), orgID, teamID); err != nil {
 			t.Fatalf("Seed #1: %v", err)
 		}
-		first, _ := store.List(context.Background(), orgID, "")
+		first, _ := store.List(context.Background(), orgID, "", "")
 		if err := store.Seed(context.Background(), orgID, teamID); err != nil {
 			t.Fatalf("Seed #2: %v", err)
 		}
-		second, _ := store.List(context.Background(), orgID, "")
+		second, _ := store.List(context.Background(), orgID, "", "")
 		if len(first) != len(second) {
 			t.Errorf("re-seed changed row count: first=%d second=%d", len(first), len(second))
 		}
@@ -258,7 +258,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			t.Fatalf("Create trig: %v", err)
 		}
 
-		rules, err := store.List(ctx, orgID, domain.EventHandlerKindRule)
+		rules, err := store.List(ctx, orgID, domain.EventHandlerKindRule, "")
 		if err != nil {
 			t.Fatalf("List(rule): %v", err)
 		}
@@ -267,7 +267,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 				t.Errorf("List(kind=rule) returned a %q row", h.Kind)
 			}
 		}
-		triggers, err := store.List(ctx, orgID, domain.EventHandlerKindTrigger)
+		triggers, err := store.List(ctx, orgID, domain.EventHandlerKindTrigger, "")
 		if err != nil {
 			t.Fatalf("List(trigger): %v", err)
 		}
@@ -276,7 +276,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 				t.Errorf("List(kind=trigger) returned a %q row", h.Kind)
 			}
 		}
-		all, _ := store.List(ctx, orgID, "")
+		all, _ := store.List(ctx, orgID, "", "")
 		if len(all) < len(rules)+len(triggers) {
 			t.Errorf("List(\"\") returned %d rows; expected at least %d", len(all), len(rules)+len(triggers))
 		}

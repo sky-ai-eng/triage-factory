@@ -15,6 +15,12 @@ interface Props {
   // chosen team here so the offered repos match the team the project is
   // created under, and server-side validatePinnedRepos agrees.
   teamId?: string
+  // When true the picker waits — no fetch, no interaction — until the
+  // acting team resolves. The create modal sets this so a multi-team user
+  // can't pick the *default* team's repos in the cold-load window before
+  // the real acting team is known; those repos would 400 on submit against
+  // the resolved team.
+  disabled?: boolean
 }
 
 // RepoMultiSelect is the project create modal's pinned-repos picker. It
@@ -28,7 +34,7 @@ interface Props {
 // Chosen slugs render up top; the popover below holds the remaining
 // tracked options + a search filter. Empty tracked list shows a hint
 // pointing at /repos rather than an awkward empty popover.
-export default function RepoMultiSelect({ value, onChange, teamId }: Props) {
+export default function RepoMultiSelect({ value, onChange, teamId, disabled = false }: Props) {
   // "default" is the alias resolveTeamID maps to the org's default team;
   // a real team id is used verbatim once the picker supplies one.
   const teamReposPath = `/api/settings/team/${teamId || 'default'}/repos`
@@ -71,13 +77,16 @@ export default function RepoMultiSelect({ value, onChange, teamId }: Props) {
   )
 
   useEffect(() => {
+    // Wait until the acting team resolves — fetching now would load the
+    // default team's repos and offer them under the wrong team.
+    if (disabled) return
     // Refetch when the acting team changes (the picker switched teams):
     // the offered repo set is the new team's tracked repos.
     setLoading(true)
     const controller = new AbortController()
     loadRepos(controller.signal)
     return () => controller.abort()
-  }, [loadRepos])
+  }, [loadRepos, disabled])
 
   const selected = useMemo(() => new Set(value), [value])
   const filtered = useMemo(() => {
@@ -98,6 +107,14 @@ export default function RepoMultiSelect({ value, onChange, teamId }: Props) {
     },
     [value, onChange],
   )
+
+  // Waiting on the acting team — shown before the team resolves so the
+  // user doesn't pick repos that won't match the team they submit under.
+  if (disabled) {
+    return (
+      <div className="text-[12px] text-text-tertiary py-2">Select a team to choose its repos.</div>
+    )
+  }
 
   if (loading) {
     return <div className="text-[12px] text-text-tertiary py-2">Loading repos…</div>

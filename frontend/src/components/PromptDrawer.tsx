@@ -10,6 +10,11 @@ import { useTeams, pickerDefault, noteWrittenTeam } from '../hooks/useTeams'
 interface Props {
   promptId: string | null
   isNew?: boolean
+  // When set (the single-team prompts page), a new prompt is created under
+  // this team and the per-modal TeamPicker is replaced by a read-only
+  // label — the page's active team is the single source of truth. Empty /
+  // undefined keeps the modal's own write picker (standalone / solo use).
+  lockedTeamId?: string
   onClose: () => void
   onSaved: () => void
   onDeleted?: () => void
@@ -120,7 +125,14 @@ function loadWidth(): number {
   return 520
 }
 
-export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDeleted }: Props) {
+export default function PromptDrawer({
+  promptId,
+  isNew,
+  lockedTeamId,
+  onClose,
+  onSaved,
+  onDeleted,
+}: Props) {
   const [name, setName] = useState('')
   const [body, setBody] = useState('')
   const [source, setSource] = useState('user')
@@ -132,6 +144,11 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
   // in the cold-load window before /api/teams resolves.
   const { teams, preferredTeamId, loaded: teamsLoaded } = useTeams()
   const [team, setTeam] = useState('')
+  // When the page locks the team (single-team prompts page), create uses it
+  // directly and the picker is hidden; otherwise the modal's own write
+  // picker applies. lockedTeamId is non-empty only for a ≥2-team user on the
+  // prompts page — by then teams are loaded, so no cold-load gate is needed.
+  const effectiveTeam = lockedTeamId || team
   const [chainDraft, setChainDraft] = useState<ChainStepDraft[]>([])
   const [model, setModel] = useState('')
   const [defaultModel, setDefaultModel] = useState('')
@@ -290,7 +307,7 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
         ? await fetch('/api/prompts', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, body, kind, model, team_id: team }),
+            body: JSON.stringify({ name, body, kind, model, team_id: effectiveTeam }),
           })
         : await fetch(`/api/prompts/${promptId}`, {
             method: 'PUT',
@@ -301,7 +318,7 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
         toast.error(await readError(res, `Failed to ${isNew ? 'create' : 'save'} prompt`))
         return
       }
-      if (isNew && team) noteWrittenTeam(team)
+      if (isNew && effectiveTeam) noteWrittenTeam(effectiveTeam)
 
       // For chain prompts, persist the step list immediately after the
       // prompt itself. We use the id from the response so it works for
@@ -412,8 +429,20 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
 
             {/* Body — scrollable */}
             <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
-              {/* Team (create mode only — a prompt's team is fixed after creation) */}
-              {isNew && <TeamPicker value={team} onChange={setTeam} label="Team" />}
+              {/* Team (create mode only — a prompt's team is fixed after creation).
+                  Locked to the page's active team on the single-team prompts page;
+                  otherwise the modal's own write picker (≥2 teams). */}
+              {isNew &&
+                (lockedTeamId ? (
+                  <div className="text-[12px] text-text-tertiary">
+                    Team:{' '}
+                    <span className="font-medium text-text-secondary">
+                      {teams.find((t) => t.id === lockedTeamId)?.name ?? 'current team'}
+                    </span>
+                  </div>
+                ) : (
+                  <TeamPicker value={team} onChange={setTeam} label="Team" />
+                ))}
               {/* Name */}
               <div>
                 <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
@@ -626,7 +655,7 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
                 </button>
                 <button
                   onClick={save}
-                  disabled={saving || (isNew && !teamsLoaded)}
+                  disabled={saving || (isNew && !lockedTeamId && !teamsLoaded)}
                   className="text-[12px] font-semibold text-white bg-accent hover:bg-accent/90 px-4 py-1.5 rounded-full transition-colors disabled:opacity-50"
                 >
                   {saving ? 'Saving...' : isNew ? 'Create' : 'Save'}

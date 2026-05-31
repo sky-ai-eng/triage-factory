@@ -29,10 +29,13 @@ func (s *Server) handlePromptsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
+	// ?team_id= narrows to one team's prompts (+ org-visible) on the
+	// multi-team prompts page; absent/solo returns everything visible.
+	teamID := singleTeamParam(r)
 	var prompts []domain.Prompt
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		prompts, e = tx.Prompts.List(r.Context(), orgID)
+		prompts, e = tx.Prompts.List(r.Context(), orgID, teamID)
 		return e
 	}); err != nil {
 		internalError(w, "prompts", err)

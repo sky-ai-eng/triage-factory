@@ -186,11 +186,20 @@ func upsertSystemPromptVersionPG(ctx context.Context, q queryer, orgID, promptID
 
 // --- CRUD ----------------------------------------------------------
 
-func (s *promptStore) List(ctx context.Context, orgID string) ([]domain.Prompt, error) {
-	rows, err := s.app.QueryContext(ctx, `
-		SELECT id, name, body, source, allowed_tools, model, usage_count, created_at, updated_at
-		FROM prompts WHERE org_id = $1 AND hidden = FALSE ORDER BY updated_at DESC
-	`, orgID)
+func (s *promptStore) List(ctx context.Context, orgID string, teamID string) ([]domain.Prompt, error) {
+	args := []any{orgID}
+	q := `SELECT id, name, body, source, allowed_tools, model, usage_count, created_at, updated_at
+		FROM prompts WHERE org_id = $1 AND hidden = FALSE`
+	if teamID != "" {
+		// Prompts page narrowed to one team: show that team's prompts plus
+		// org-visible (system) prompts. RLS still gates what the caller may
+		// see at all; this narrows within it, mirroring the prompts
+		// visibility model (org always, team when a member).
+		args = append(args, teamID)
+		q += fmt.Sprintf(" AND (visibility = 'org' OR team_id = $%d)", len(args))
+	}
+	q += ` ORDER BY updated_at DESC`
+	rows, err := s.app.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}

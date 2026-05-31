@@ -255,10 +255,105 @@ export function useWriteTeam(): WriteTeam {
   const [team, setTeam] = useState('')
   const seeded = useRef(false)
   useEffect(() => {
-    if (seeded.current || !loaded) return
+    // Cache invalidated (org switch via invalidateTeams, or a refresh in
+    // flight): forget the prior seed and drop the now-stale team so a slow
+    // reload can't leave another org's id selected. `ready` is false
+    // meanwhile, so the modal's submit stays gated through the window.
+    if (!loaded) {
+      seeded.current = false
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setTeam((t) => (t === '' ? t : ''))
+      return
+    }
+    // First seed after load, or re-seed when the held team is no longer a
+    // member team — e.g. the org switched out from under a still-mounted
+    // create modal. Submitting the stale id would 400 server-side
+    // (invalid team selection), so fall back to the default.
+    const stillMember = team !== '' && teams.some((t) => t.id === team)
+    if (seeded.current && stillMember) return
     seeded.current = true
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+     
     setTeam(pickerDefault(teams, preferredTeamId))
-  }, [loaded, teams, preferredTeamId])
+  }, [loaded, teams, preferredTeamId, team])
   return { team, setTeam, multi, ready: loaded }
+}
+
+// useActiveTeam is the *single-team* page scope for the write/config
+// surfaces that show exactly one team at a time — today the prompts page,
+// which doubles as the auto-delegation binding graph. Unlike useTeamFilter
+// (a multi-team read scope for dashboards like the board), this is one
+// team: the page's reads (its prompts + its triggers) and its writes (a
+// new prompt / trigger / rule) all belong to it. Reads and writes coincide
+// here precisely because the surface is single-team, so there's nothing to
+// decouple — the ambiguity that forces the read/write split on dashboards
+// doesn't exist when only one team is ever in view.
+//
+// Device-local sticky per pageKey (localStorage), seeded from the write
+// default (preferred → first team) and validated against the live set.
+// Count-gated: `multi` is false for solo/local users, where teamId stays
+// '' (the server resolves the sole team) and no switcher renders.
+const ACTIVE_TEAM_KEY_PREFIX = 'tf.activeTeam.'
+
+function readStoredActiveTeam(pageKey: string): string {
+  try {
+    return localStorage.getItem(ACTIVE_TEAM_KEY_PREFIX + pageKey) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+export interface ActiveTeam {
+  /** The single active team. '' for solo/local or before resolution — the
+   *  server resolves the sole team. A concrete id once a multi-team user's
+   *  selection resolves. */
+  teamId: string
+  setTeamId: (id: string) => void
+  /** ≥2 teams — gates whether the <TeamSwitch> renders at all. */
+  multi: boolean
+  /** False until /api/teams resolves and (for multi-team users) the active
+   *  team is a concrete id. Read surfaces gate their first fetch on it so
+   *  the cold-load window can't fetch an unresolved/other-org team, and
+   *  the trigger-create gesture can't post team_id:'' (→ 400). */
+  ready: boolean
+  teams: TeamSummary[]
+}
+
+export function useActiveTeam(pageKey: string): ActiveTeam {
+  const { teams, preferredTeamId, multi, loaded } = useTeams()
+  const [teamId, setTeamIdState] = useState<string>(() => readStoredActiveTeam(pageKey))
+
+  useEffect(() => {
+    if (!loaded) return
+    if (!multi) {
+      // Solo/local: no switcher; '' lets the server resolve the sole team.
+      if (teamId !== '') {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setTeamIdState('')
+      }
+      return
+    }
+    // Multi-team: seed from the write default, and re-seed when the stored
+    // id isn't a current team (deleted, or left over from another org after
+    // an org switch). Mirrors useTeamFilter's stale-id pruning.
+    const ids = new Set(teams.map((t) => t.id))
+    if (teamId === '' || !ids.has(teamId)) {
+       
+      setTeamIdState(pickerDefault(teams, preferredTeamId))
+    }
+  }, [loaded, multi, teams, preferredTeamId, teamId])
+
+  const setTeamId = useCallback(
+    (id: string) => {
+      setTeamIdState(id)
+      try {
+        localStorage.setItem(ACTIVE_TEAM_KEY_PREFIX + pageKey, id)
+      } catch {
+        // localStorage unavailable — the selection still works this
+        // session; it just won't persist across reloads.
+      }
+    },
+    [pageKey],
+  )
+
+  return { teamId, setTeamId, multi, ready: loaded && (!multi || teamId !== ''), teams }
 }

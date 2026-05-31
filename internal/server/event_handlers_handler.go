@@ -47,10 +47,13 @@ func (s *Server) handleEventHandlersList(w http.ResponseWriter, r *http.Request)
 		})
 		return
 	}
+	// ?team_id= narrows to one team's handlers (+ org-visible) on the
+	// multi-team prompts page; absent/solo returns everything visible.
+	teamID := singleTeamParam(r)
 	var handlers []domain.EventHandler
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		handlers, e = tx.EventHandlers.List(r.Context(), orgID, kind)
+		handlers, e = tx.EventHandlers.List(r.Context(), orgID, kind, teamID)
 		return e
 	}); err != nil {
 		internalError(w, "event_handlers", err)

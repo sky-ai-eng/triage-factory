@@ -134,6 +134,23 @@ func teamFilterParam(r *http.Request) []string {
 	return out
 }
 
+// singleTeamParam reads a single ?team_id= value for the single-team read
+// surfaces (the prompts page narrowed to one team). Like teamFilterParam
+// it drops a malformed id rather than erroring — the value is device-local
+// view state (possibly stale localStorage) and junk should degrade to
+// "unfiltered", not 500 the page. Returns "" when absent or malformed; the
+// stores treat "" as no team narrow.
+func singleTeamParam(r *http.Request) string {
+	v := r.URL.Query().Get("team_id")
+	if v == "" {
+		return ""
+	}
+	if _, err := uuid.Parse(v); err != nil {
+		return "" // drop malformed (stale localStorage, hand-edited URL)
+	}
+	return v
+}
+
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
