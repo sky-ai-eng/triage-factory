@@ -47,6 +47,15 @@ func WaitFor(ctx context.Context, runner *Runner, orgID, entityID string, timeou
 	if entityID == "" || runner == nil {
 		return
 	}
+	// Respect an already-cancelled context at entry: skip the doomed
+	// classification probe and the spurious runner.Trigger() kick that
+	// would otherwise fire before the loop's <-ctx.Done() arm returns.
+	// (The kick is idempotent and harmless, but waking the classifier on
+	// a shutdown path is pointless work.) Mid-wait cancellation is still
+	// handled by the loop below.
+	if ctx.Err() != nil {
+		return
+	}
 	done, gone := classificationState(ctx, runner.entities, orgID, entityID)
 	if gone {
 		log.Printf("[classify] WaitFor: entity %s not found — returning early", entityID)

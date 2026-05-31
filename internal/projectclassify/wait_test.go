@@ -198,6 +198,40 @@ func TestWaitFor_ReturnsOnContextCancel(t *testing.T) {
 	}
 }
 
+// TestWaitFor_PreCancelledCtxReturnsWithoutTrigger guards the entry-time
+// cancellation guard: a WaitFor entered with an already-cancelled context
+// must return immediately AND must not kick the classifier — waking the
+// runner on a shutdown path is pointless work. Intentionally no drainer
+// goroutine on runner.trigger; we assert the channel is empty afterward.
+func TestWaitFor_PreCancelledCtxReturnsWithoutTrigger(t *testing.T) {
+	database := newTestDB(t)
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#6", "pr", "T", "https://x/6")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runner := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, sqlitestore.New(database).Orgs)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelled before entry
+
+	start := time.Now()
+	WaitFor(ctx, runner, runmode.LocalDefaultOrgID, entity.ID, 5*time.Second)
+	elapsed := time.Since(start)
+
+	if elapsed > 100*time.Millisecond {
+		t.Errorf("WaitFor took %s for a pre-cancelled ctx — should have returned immediately", elapsed)
+	}
+
+	// The entry guard returns before runner.Trigger(), so the buffered
+	// trigger channel must still be empty.
+	select {
+	case <-runner.trigger:
+		t.Errorf("WaitFor kicked the classifier on a pre-cancelled ctx — the entry guard should skip Trigger()")
+	default:
+	}
+}
+
 // silence unused-import warning when domain is not directly used in
 // trivial paths above.
 var _ = domain.Entity{}
