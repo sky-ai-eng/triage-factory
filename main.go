@@ -1084,7 +1084,8 @@ func main() {
 	// auto-run terminal so queued firings progress without their own
 	// trigger event. Has to be set post-construction because router and
 	// spawner reference each other (spawner.Delegate ← router; router.
-	// DrainEntity ← spawner). Same pattern UpdateCredentials uses.
+	// DrainEntity ← spawner). Same post-construction injection pattern as
+	// SetRunCredentialResolvers.
 	spawner.SetQueueDrainer(eventRouter)
 
 	// Periodic drain sweeper — safety net for queues stuck on transient
