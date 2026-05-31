@@ -75,6 +75,13 @@ func (s *Spawner) ResumeAfterYield(orgID, runID, agentMessage, userID string) er
 	if run.WorktreePath == "" {
 		return fmt.Errorf("run has no worktree path; cannot resume")
 	}
+	// A resume must reuse the model the run started with. run.Model is set
+	// at Delegate time (always non-empty for a real run); guard here so the
+	// yield path fails with a clear message rather than tripping
+	// ResumeWithMessage's required-model check downstream. SKY-389 review #1.
+	if run.Model == "" {
+		return fmt.Errorf("run has no model; cannot resume")
+	}
 	task, err := s.tasks.GetSystem(context.Background(), orgID, run.TaskID)
 	if err != nil {
 		return fmt.Errorf("load task: %w", err)
@@ -251,22 +258,19 @@ func (s *Spawner) ResumeAfterYield(orgID, runID, agentMessage, userID string) er
 	return nil
 }
 
-// ResumeOptions configures a ResumeWithMessage invocation. Callers that
-// care about consistency with an earlier invocation should populate these
-// explicitly — the fallbacks read live Spawner state and will race with
-// UpdateCredentials if the user rotates auth mid-run.
+// ResumeOptions configures a ResumeWithMessage invocation. Callers
+// populate these from the values they captured at the original run's
+// start, so a resume reuses the exact model / repo / tool context the run
+// began with rather than re-resolving live state mid-run.
 type ResumeOptions struct {
-	// Model overrides the live spawner model. **Always pass this** when
-	// resuming within a single logical run (e.g. the memory-gate retry
-	// loop) — read from the value you captured at run start, not from
-	// s.model at resume time. If UpdateCredentials runs between the
-	// initial invocation and a resume, the live spawner model may point
-	// at a different model than the initial invocation ran under, which
-	// would silently switch models mid-run.
-	//
-	// Empty falls back to the live spawner model, which is only the
-	// right choice for callers that genuinely want "current spawner
-	// state" (none exist today, but the door's open).
+	// Model is the model the run started with. **Required** — a resume
+	// must reuse the model captured at run start (run.Model for the
+	// yield path, the gate's captured model for the memory-gate retry),
+	// never a freshly-resolved one, or a config change between the
+	// initial invocation and the resume would silently switch models
+	// mid-run. ResumeWithMessage rejects an empty Model with an error
+	// rather than falling back to a live per-(org, team) resolve, which
+	// would reintroduce exactly that mid-run drift (SKY-389 review #1).
 	Model string
 
 	// RepoEnv, if non-empty, is passed to the resumed subprocess as
@@ -327,19 +331,17 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	if cwd == "" {
 		return nil, fmt.Errorf("resume: missing cwd")
 	}
-
-	// Per-team default model (SKY-389): falls back to the constructor model
-	// when no resolver is wired. Empty teamID → the resolver's org-default-
-	// team fallback; that's acceptable here because opts.Model — the model
-	// captured at the original run's start (already team-resolved at Delegate
-	// time) — always wins for both real callers (ResumeAfterYield passes
-	// run.Model, the memory gate passes the captured model), so this
-	// resolveModel result is a never-hit defensive default rather than a
-	// live per-team lookup.
-	model := s.resolveModel(ctx, orgID, "")
-	if opts.Model != "" {
-		model = opts.Model
+	// A resume MUST reuse the model the run started with (SKY-389 review
+	// #1). Requiring it here — rather than falling back to a live per-(org,
+	// team) resolve — is what closes the mid-run model-drift gap: a config
+	// change between the initial invocation and this resume must never
+	// switch models underneath a single logical run. Both real callers
+	// capture and pass it (ResumeAfterYield → run.Model, runMemoryGate →
+	// the captured model); an empty value is a wiring bug, surfaced loudly.
+	if opts.Model == "" {
+		return nil, fmt.Errorf("resume: missing model (caller must pass the model captured at run start)")
 	}
+	model := opts.Model
 
 	selfBin, err := os.Executable()
 	if err != nil {

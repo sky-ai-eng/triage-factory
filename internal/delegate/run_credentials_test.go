@@ -3,6 +3,7 @@ package delegate
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -126,6 +127,25 @@ func TestResolveGHClient_ResolveErrorReturnsNil(t *testing.T) {
 
 	if got := s.resolveGHClient(context.Background(), "org", "owner"); got != nil {
 		t.Errorf("resolveGHClient on resolver error = %v; want nil", got)
+	}
+}
+
+// TestResumeWithMessage_RequiresModel pins SKY-389 review #1: a resume must
+// reuse the model captured at run start, so ResumeWithMessage rejects an
+// empty opts.Model with an error rather than falling back to a live
+// per-(org, team) resolve that could switch models mid-run. The guard sits
+// before any subprocess work (after the sessionID/cwd checks), so a bare
+// spawner with no stores is sufficient to exercise it.
+func TestResumeWithMessage_RequiresModel(t *testing.T) {
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "fallback-model", "")
+	// Even with a constructor fallback model set, an empty opts.Model must
+	// NOT silently borrow it — the resume has to carry the run's own model.
+	_, err := s.ResumeWithMessage(context.Background(), "org", "run-1", "sess-1", "/tmp/wt", "hi", ResumeOptions{}, "manual", "user-1")
+	if err == nil {
+		t.Fatal("ResumeWithMessage with empty opts.Model returned nil error; want a missing-model error")
+	}
+	if !strings.Contains(err.Error(), "missing model") {
+		t.Errorf("error = %q; want it to mention the missing model", err)
 	}
 }
 
