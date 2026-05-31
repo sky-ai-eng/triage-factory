@@ -50,14 +50,16 @@ type provisionResult struct {
 	// call; uuid.Nil when invite-only didn't auto-join anywhere.
 	activeOrgID uuid.NullUUID
 
-	// bootstrapOrgID / bootstrapTeamID name the org + default team that
-	// THIS call freshly created (personal-org or auto-join-default's
-	// first-signup branch), so the caller can seed the shipped defaults
-	// (agent + prompts + handlers + team_agents) AFTER the provisioning
-	// transaction commits — those seeders run on the admin pool and
-	// refuse to run inside a WithTx. Both Valid only on a fresh create;
-	// the repeat-login fast path and auto-join into a pre-existing org
-	// leave them invalid (nothing new to seed).
+	// bootstrapOrgID / bootstrapTeamID name the org + default team the
+	// caller must seed AFTER the provisioning transaction commits — the
+	// shipped defaults (agent + prompts + handlers + team_agents) run on
+	// the admin pool and refuse to run inside a WithTx. Set when THIS call
+	// freshly created an org+team (personal-org, or auto-join-default's
+	// first-signup branch) OR recovered a teamless Default org by
+	// backfilling its team (BootstrapNewOrg is idempotent on the existing
+	// org; the load-bearing effect there is the new team's bot row). Left
+	// invalid on the repeat-login fast path and on auto-join into an
+	// already-seeded org (nothing new to seed).
 	bootstrapOrgID  uuid.NullUUID
 	bootstrapTeamID uuid.NullUUID
 }
@@ -344,6 +346,7 @@ func provisionAutoJoinDefault(ctx context.Context, tx *sql.Tx, userID uuid.UUID)
 	// Default org exists — find its default team (oldest by
 	// created_at, with id-asc tiebreak) and add the user as a
 	// member.
+	var backfilledTeam bool
 	if err := tx.QueryRowContext(ctx, `
 		SELECT id
 		  FROM public.teams
@@ -374,6 +377,18 @@ func provisionAutoJoinDefault(ctx context.Context, tx *sql.Tx, userID uuid.UUID)
 			if err := seedSettingsRows(ctx, tx, defaultOrgID, teamID); err != nil {
 				return uuid.Nil, uuid.Nil, false, err
 			}
+			// Mark a fresh create so the caller bootstraps this team
+			// post-commit. Without it the recovered team has no team_agents
+			// bot row and auto-delegation stays dead until an operator
+			// re-runs bootstrap. BootstrapNewOrg (the path created=true
+			// drives) runs on the admin pool outside this tx and is
+			// idempotent on the already-seeded org — agent/prompts skip via
+			// ON CONFLICT; its load-bearing effect here is the new team's
+			// bot row + restoring the Default org's shipped handlers. Full
+			// (not bot-only) seeding is correct because the Default team is
+			// the shared auto-join target — it must carry the shipped
+			// rules/triggers, unlike a user-created blank team.
+			backfilledTeam = true
 		} else {
 			return uuid.Nil, uuid.Nil, false, fmt.Errorf("read default team: %w", err)
 		}
@@ -393,9 +408,11 @@ func provisionAutoJoinDefault(ctx context.Context, tx *sql.Tx, userID uuid.UUID)
 	}
 
 	log.Printf("[auth] auto-join-default: added user=%s to Default org team=%s", userID, teamID)
-	// created=false: the user joined the pre-existing (already-seeded)
-	// Default org, so the caller must NOT re-bootstrap it.
-	return defaultOrgID, teamID, false, nil
+	// created reflects whether we had to backfill a missing default team
+	// above: false on the normal join (the pre-existing, already-seeded
+	// Default org — caller must NOT re-bootstrap), true when we recovered a
+	// teamless org so the caller bootstraps the new team post-commit.
+	return defaultOrgID, teamID, backfilledTeam, nil
 }
 
 // seedSettingsRows inserts the org_settings + team_settings rows that

@@ -78,11 +78,10 @@ function getSnapshot(): State {
  *  active-org switch (the teams list is org-scoped) — OrgPicker does. */
 export function invalidateTeams(): void {
   state = { teams: [], preferredTeamId: '', loaded: false, loading: false, error: null }
-  if (listeners.size > 0) {
-    void load()
-  } else {
-    for (const l of listeners) l()
-  }
+  // Reload for any mounted subscriber — load() re-notifies via setState.
+  // With no subscribers there's nothing to notify: the reset above already
+  // flips loaded=false, so the next subscribe() kicks a fresh load.
+  if (listeners.size > 0) void load()
 }
 
 /** Record that a write just landed on teamId. The backend's acting-team

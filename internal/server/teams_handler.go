@@ -182,10 +182,12 @@ func (s *Server) handleTeamCreate(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		// UNIQUE (org_id, slug) collision → 409 with a generic message
 		// (don't echo the index name). SQLite: "UNIQUE constraint";
-		// Postgres: "duplicate key".
+		// Postgres: "duplicate key". The constraint is on the *slug*, not
+		// the name, so two distinct names can collide ("Engineering" and
+		// "Engineering!" both slugify to "engineering") — say so.
 		if strings.Contains(err.Error(), "UNIQUE constraint") || strings.Contains(err.Error(), "duplicate key") {
 			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "a team with that name already exists",
+				"error": "a team with that name or slug already exists",
 			})
 			return
 		}
