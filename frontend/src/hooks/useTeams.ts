@@ -272,7 +272,7 @@ export function useWriteTeam(): WriteTeam {
     const stillMember = team !== '' && teams.some((t) => t.id === team)
     if (seeded.current && stillMember) return
     seeded.current = true
-     
+
     setTeam(pickerDefault(teams, preferredTeamId))
   }, [loaded, teams, preferredTeamId, team])
   return { team, setTeam, multi, ready: loaded }
@@ -337,7 +337,6 @@ export function useActiveTeam(pageKey: string): ActiveTeam {
     // an org switch). Mirrors useTeamFilter's stale-id pruning.
     const ids = new Set(teams.map((t) => t.id))
     if (teamId === '' || !ids.has(teamId)) {
-       
       setTeamIdState(pickerDefault(teams, preferredTeamId))
     }
   }, [loaded, multi, teams, preferredTeamId, teamId])
