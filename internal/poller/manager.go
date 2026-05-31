@@ -50,6 +50,15 @@ type Manager struct {
 	mu       sync.Mutex
 	ghStop   chan struct{}
 	jiraStop chan struct{}
+
+	// dueMu guards nextPoll, the scheduler clock. Each source runs ONE
+	// base-tick loop (every basePollInterval) that polls an org only once
+	// its own configured interval has elapsed, so orgs keep individual
+	// cadences without a goroutine each. Key is "source/orgID"; value is
+	// the earliest time that org is next eligible. Guarded because a
+	// Restart can briefly overlap an old and a new poll goroutine.
+	dueMu    sync.Mutex
+	nextPoll map[string]time.Time
 }
 
 func NewManager(database *sql.DB, bus *eventbus.Bus, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, resolver ghclient.Resolver) *Manager {
@@ -90,33 +99,22 @@ func (m *Manager) reportError(source, orgID string, err error) {
 	}
 }
 
-// RestartAll stops all polling loops and restarts any that are fully
-// configured. orgID identifies the tenant whose credentials drive the
-// restart — in local mode that's runmode.LocalDefaultOrgID; in multi
-// mode this signature lets a future per-org Manager loop call Restart
-// per active org. The poller cycles themselves still iterate active
-// orgs internally for the per-org tracker dispatch — orgID here is
-// the credential-resolution scope (whose PAT do we boot the client
-// with), not the polling scope.
-func (m *Manager) RestartAll(ctx context.Context, orgID string) {
+// RestartAll stops all polling loops and restarts them. There are no
+// parameters: the poll cycles fan out over every active org internally
+// (runGitHubCycle / runJiraCycle → OrgsStore.ListActiveSystem) and poll each
+// org at its own configured cadence (see runGitHubCycle's due gate), so this
+// is mode-agnostic — local mode is N=1 (the sentinel org), multi mode is N
+// active tenants. The lifecycle is neither per-org nor per-interval; start*
+// just spins up the shared base-tick loop (and resets the scheduler so the
+// immediate post-restart cycle polls everyone).
+func (m *Manager) RestartAll() {
 	m.stopAll()
-
-	orgSet := m.loadOrgSettings(ctx, orgID)
-
-	// GitHub polling resolves per-org credentials per cycle, per
-	// installation inside runGitHubCycle (App installation token → PAT),
-	// so the only thing startGitHub needs from the trigger org is the tick
-	// interval — orgSet.GitHubPollInterval is the process-global cadence.
-	m.startGitHub(orgSet.GitHubPollInterval)
-	// Jira polling resolves per-org settings/creds/rules inside each
-	// cycle, so the only thing startJira needs from the trigger org
-	// is the tick interval — orgSet.JiraPollInterval is the process-
-	// global cadence (per-org poll cadence is future work).
-	m.startJira(orgSet.JiraPollInterval)
+	m.startGitHub()
+	m.startJira()
 }
 
 // RestartGitHub stops and restarts only the GitHub polling loop.
-func (m *Manager) RestartGitHub(ctx context.Context, orgID string) {
+func (m *Manager) RestartGitHub() {
 	m.mu.Lock()
 	if m.ghStop != nil {
 		close(m.ghStop)
@@ -125,12 +123,13 @@ func (m *Manager) RestartGitHub(ctx context.Context, orgID string) {
 	}
 	m.mu.Unlock()
 
-	orgSet := m.loadOrgSettings(ctx, orgID)
-	m.startGitHub(orgSet.GitHubPollInterval)
+	m.startGitHub()
 }
 
-// RestartJira stops and restarts only the Jira polling loop.
-func (m *Manager) RestartJira(ctx context.Context, orgID string) {
+// RestartJira stops and restarts only the Jira polling loop. Multi-mode
+// Jira polling is gated off inside startJira until per-org system creds
+// land, so the restart is a no-op past the stop in multi mode.
+func (m *Manager) RestartJira() {
 	m.mu.Lock()
 	if m.jiraStop != nil {
 		close(m.jiraStop)
@@ -139,8 +138,7 @@ func (m *Manager) RestartJira(ctx context.Context, orgID string) {
 	}
 	m.mu.Unlock()
 
-	orgSet := m.loadOrgSettings(ctx, orgID)
-	m.startJira(orgSet.JiraPollInterval)
+	m.startJira()
 }
 
 // loadOrgSettings reads the org's settings or falls back to
@@ -148,10 +146,10 @@ func (m *Manager) RestartJira(ctx context.Context, orgID string) {
 // returns DefaultOrgSettings() on sql.ErrNoRows; this wrapper covers
 // real read errors (transient DB hiccup, RLS in unexpected contexts)
 // that would otherwise silently leave orgSet as the Go zero value —
-// PollInterval=0 would then trip the `< 10s → 1m` clamp inside start*
-// and quietly change the poll cadence to a different value than the
-// schema default. Logging + explicit fallback makes the failure
-// observable and the behavior deterministic.
+// PollInterval=0 would then be floored to basePollInterval by
+// clampPollInterval, quietly changing the cadence away from the schema
+// default. Logging + explicit fallback makes the failure observable and
+// the behavior deterministic.
 func (m *Manager) loadOrgSettings(ctx context.Context, orgID string) domain.OrgSettings {
 	orgSet, err := m.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
@@ -159,6 +157,80 @@ func (m *Manager) loadOrgSettings(ctx context.Context, orgID string) domain.OrgS
 		return domain.DefaultOrgSettings()
 	}
 	return orgSet
+}
+
+// basePollInterval is the scheduler's wake granularity and the floor for any
+// per-org interval. Each source runs ONE loop that wakes this often and polls
+// the orgs whose own configured interval has elapsed — so per-org cadence is
+// honored at this resolution without a goroutine per org. Every active org is
+// re-listed each wake, so this is also the minimum org-roster refresh.
+const basePollInterval = 30 * time.Second
+
+// clampPollInterval floors a configured interval at basePollInterval: a
+// cadence finer than the base tick can't be honored (the loop never wakes
+// that often), and a zero value (unset / read error) must not collapse to
+// "poll every tick".
+func clampPollInterval(d time.Duration) time.Duration {
+	if d < basePollInterval {
+		return basePollInterval
+	}
+	return d
+}
+
+// pollDue reports whether orgID is eligible for a poll of source at now. An
+// org with no recorded slot (never polled, or pruned) is always due. The
+// caller reserves the next slot via schedulePoll BEFORE polling, so an
+// old/new goroutine pair overlapping during a Restart doesn't double-poll.
+func (m *Manager) pollDue(source, orgID string, now time.Time) bool {
+	m.dueMu.Lock()
+	defer m.dueMu.Unlock()
+	next, ok := m.nextPoll[source+"/"+orgID]
+	return !ok || !now.Before(next)
+}
+
+// schedulePoll records the earliest time orgID is next eligible for a poll of
+// source.
+func (m *Manager) schedulePoll(source, orgID string, at time.Time) {
+	m.dueMu.Lock()
+	defer m.dueMu.Unlock()
+	if m.nextPoll == nil {
+		m.nextPoll = make(map[string]time.Time)
+	}
+	m.nextPoll[source+"/"+orgID] = at
+}
+
+// prunePoll drops scheduler slots for orgs no longer in the active set, so
+// the map doesn't grow unbounded as orgs churn and a deactivated→reactivated
+// org isn't held back by a stale future slot. Called once per cycle with the
+// freshly-listed active orgs.
+func (m *Manager) prunePoll(source string, activeOrgIDs []string) {
+	active := make(map[string]bool, len(activeOrgIDs))
+	for _, id := range activeOrgIDs {
+		active[id] = true
+	}
+	prefix := source + "/"
+	m.dueMu.Lock()
+	defer m.dueMu.Unlock()
+	for key := range m.nextPoll {
+		if strings.HasPrefix(key, prefix) && !active[strings.TrimPrefix(key, prefix)] {
+			delete(m.nextPoll, key)
+		}
+	}
+}
+
+// resetSchedule clears every slot for source so the next cycle treats all
+// orgs as due. Called on (re)start so the immediate post-Restart cycle polls
+// everyone — applying a config change now rather than after each org's
+// already-reserved interval.
+func (m *Manager) resetSchedule(source string) {
+	prefix := source + "/"
+	m.dueMu.Lock()
+	defer m.dueMu.Unlock()
+	for key := range m.nextPoll {
+		if strings.HasPrefix(key, prefix) {
+			delete(m.nextPoll, key)
+		}
+	}
 }
 
 // loadJiraRules pulls the UNION of every team's per-project Jira status
@@ -185,8 +257,8 @@ func (m *Manager) StopAll() {
 }
 
 // Restart is a convenience alias for RestartAll.
-func (m *Manager) Restart(ctx context.Context, orgID string) {
-	m.RestartAll(ctx, orgID)
+func (m *Manager) Restart() {
+	m.RestartAll()
 }
 
 func (m *Manager) stopAll() {
@@ -205,23 +277,21 @@ func (m *Manager) stopAll() {
 	}
 }
 
-// startGitHub launches the GitHub tracking loop. Each tick iterates
-// active orgs and, within each org, every active App installation (with a
-// PAT-borrow fallback), resolving a fresh client per installation per cycle.
-// Per-org repo lists and per-org credentials are resolved inside the loop so
-// a new org/installation added between ticks picks up on the next cycle
+// startGitHub launches the GitHub tracking loop: ONE goroutine that wakes
+// every basePollInterval and, each wake, polls the active orgs whose own
+// configured interval has elapsed (runGitHubCycle's due gate). Per-org repo
+// lists, credentials, and intervals are resolved inside the loop, so a new
+// org/installation/interval added between wakes picks up on the next wake
 // without a poller restart. Local mode collapses to N=1 (the synthetic
 // sentinel org). Bounded per-org concurrency is a future optimization —
-// sequential is fine given the poll period (≥1 minute baseline).
+// sequential is fine at this cadence.
 //
 // Runs in both modes (the local-only gate is lifted): multi-mode
 // GitHub polling is the per-org App path; local mode keeps the PAT default
 // and also supports a locally-registered App via API backfill (webhooks
 // don't reach local-NAT).
-func (m *Manager) startGitHub(interval time.Duration) {
-	if interval < 10*time.Second {
-		interval = time.Minute
-	}
+func (m *Manager) startGitHub() {
+	m.resetSchedule("github")
 
 	stop := make(chan struct{})
 	m.mu.Lock()
@@ -229,10 +299,10 @@ func (m *Manager) startGitHub(interval time.Duration) {
 	m.mu.Unlock()
 
 	go func() {
-		// Initial poll
+		// Initial poll — resetSchedule above makes every org due.
 		m.runGitHubCycle()
 
-		ticker := time.NewTicker(interval)
+		ticker := time.NewTicker(basePollInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -244,15 +314,19 @@ func (m *Manager) startGitHub(interval time.Duration) {
 		}
 	}()
 
-	log.Printf("[github] tracker started (interval: %s, per-installation resolution per cycle)", interval)
+	log.Printf("[github] tracker started (base tick %s, per-org cadence resolved each wake)", basePollInterval)
 }
 
-// runGitHubCycle enumerates active orgs and dispatches per-org GitHub
-// polling. Per-org failures are logged and reported via OnError but do not
-// abort the remaining orgs in the cycle — a transient failure on org A
-// shouldn't starve orgs B..N of polls.
+// runGitHubCycle enumerates active orgs and dispatches per-org GitHub polling
+// for the orgs whose configured interval has elapsed (others are skipped this
+// wake). Each polled org's next slot is reserved before the poll using its
+// freshly-read, clamped interval, so an interval change applies from the next
+// poll without a restart. Per-org failures are logged and reported via
+// OnError but do not abort the remaining orgs in the cycle — a transient
+// failure on org A shouldn't starve orgs B..N of polls.
 func (m *Manager) runGitHubCycle() {
 	ctx := context.Background()
+	now := time.Now()
 	orgIDs, err := m.orgs.ListActiveSystem(ctx)
 	if err != nil {
 		log.Printf("[github] list active orgs: %v", err)
@@ -260,8 +334,14 @@ func (m *Manager) runGitHubCycle() {
 		return
 	}
 	for _, orgID := range orgIDs {
+		if !m.pollDue("github", orgID, now) {
+			continue
+		}
+		interval := clampPollInterval(m.loadOrgSettings(ctx, orgID).GitHubPollInterval)
+		m.schedulePoll("github", orgID, now.Add(interval))
 		m.runGitHubCycleForOrg(ctx, orgID)
 	}
+	m.prunePoll("github", orgIDs)
 }
 
 // runGitHubCycleForOrg polls one org. It resolves a GitHub client PER
@@ -506,37 +586,30 @@ func intersectConfigured(configured []string, grant []ghclient.UserRepo, covered
 	return out
 }
 
-// startJira launches the Jira tracking loop. The outer goroutine
-// just drives the tick; runJiraCycle resolves per-org Jira creds +
-// project rules + base URL inside the per-org loop so each tenant
-// is polled with its own configuration. Orgs without a connected
-// Jira integration (no PAT, no URL, no rules) are silently skipped
-// each cycle so adding/removing tenants doesn't need a poller
-// restart.
+// startJira launches the Jira tracking loop: ONE goroutine that wakes every
+// basePollInterval; runJiraCycle then polls the active orgs whose interval
+// has elapsed, resolving each tenant's Jira creds + project rules + base URL
+// + interval inside the loop. Orgs without a connected Jira integration (no
+// PAT, no URL, no rules) are silently skipped each cycle, so adding/removing
+// a tenant's Jira config doesn't need a poller restart.
 //
-// Gated to local mode (matching startGitHub). The per-org loop
-// shape is correct but SecretStore.Get in Postgres requires
-// request.jwt.claims (vault_* enforces org_id ==
-// tf.current_org_id()), and the poller goroutine has no claims
-// context. Multi-mode Jira polling needs either a SystemGet-style
-// SecretStore variant or per-org SyntheticClaimsWithTx routing.
-// Until then, multi-mode tenants don't get background polling;
-// their data refreshes on the next interactive flow.
-//
-// interval is process-global (per-org cadence is future work); in
-// local mode N=1 so the triggering org's interval IS the global
-// interval.
+// Gated to local mode (the gate startGitHub used to share). The per-org loop
+// shape is correct, but SecretStore.Get in Postgres requires
+// request.jwt.claims (vault_* enforces org_id == tf.current_org_id()), and
+// the poller goroutine has no claims context. Multi-mode Jira polling needs
+// either a SystemGet-style SecretStore variant or per-org
+// SyntheticClaimsWithTx routing. Until then, multi-mode tenants don't get
+// background Jira polling; their data refreshes on the next interactive flow.
 //
 // TODO: multi-mode Jira polling — add system-mode SecretStore
 // access path (SKY-347 / D11 follow-up) then drop the gate below.
-func (m *Manager) startJira(interval time.Duration) {
+func (m *Manager) startJira() {
 	if runmode.Current() != runmode.ModeLocal {
 		log.Println("[jira] tracker not started — multi-mode Jira polling requires per-org system credentials (see TODO in startJira)")
 		return
 	}
-	if interval < 10*time.Second {
-		interval = time.Minute
-	}
+
+	m.resetSchedule("jira")
 
 	stop := make(chan struct{})
 	m.mu.Lock()
@@ -544,10 +617,10 @@ func (m *Manager) startJira(interval time.Duration) {
 	m.mu.Unlock()
 
 	go func() {
-		// Initial poll
+		// Initial poll — resetSchedule above makes every org due.
 		m.runJiraCycle()
 
-		ticker := time.NewTicker(interval)
+		ticker := time.NewTicker(basePollInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -559,17 +632,20 @@ func (m *Manager) startJira(interval time.Duration) {
 		}
 	}()
 
-	log.Printf("[jira] tracker started (interval: %s, per-org config resolved each cycle)", interval)
+	log.Printf("[jira] tracker started (base tick %s, per-org cadence resolved each wake)", basePollInterval)
 }
 
-// runJiraCycle enumerates active orgs and dispatches a per-org
-// RefreshJira. Each org's creds + rules + base URL are resolved
-// inside the loop so two tenants with different Jira PATs / project
-// configurations don't share state. Orgs not configured for Jira
-// are skipped silently; per-org failures are logged + reported via
-// OnError but do not abort the remaining orgs in the cycle.
+// runJiraCycle enumerates active orgs and dispatches a per-org RefreshJira for
+// the orgs whose configured interval has elapsed (others are skipped this
+// wake). Each org's creds + rules + base URL + interval are resolved inside
+// the loop so two tenants with different Jira PATs / project configurations
+// don't share state; the next slot is reserved from the freshly-read interval
+// once settings load. Orgs not configured for Jira are skipped silently;
+// per-org failures are logged + reported via OnError but do not abort the
+// remaining orgs in the cycle.
 func (m *Manager) runJiraCycle() {
 	ctx := context.Background()
+	now := time.Now()
 	orgIDs, err := m.orgs.ListActiveSystem(ctx)
 	if err != nil {
 		log.Printf("[jira] list active orgs: %v", err)
@@ -577,12 +653,16 @@ func (m *Manager) runJiraCycle() {
 		return
 	}
 	for _, orgID := range orgIDs {
+		if !m.pollDue("jira", orgID, now) {
+			continue
+		}
 		orgSet, oerr := m.orgs.GetSettingsSystem(ctx, orgID)
 		if oerr != nil {
 			log.Printf("[jira] org %s: load settings: %v", orgID, oerr)
 			m.reportError("jira", orgID, oerr)
-			continue
+			continue // leave unscheduled → retry next wake
 		}
+		m.schedulePoll("jira", orgID, now.Add(clampPollInterval(orgSet.JiraPollInterval)))
 		creds, lerr := integrations.Load(ctx, m.secrets, orgID)
 		if lerr != nil {
 			log.Printf("[jira] org %s: load creds: %v", orgID, lerr)
@@ -607,6 +687,7 @@ func (m *Manager) runJiraCycle() {
 			m.reportError("jira", orgID, err)
 		}
 	}
+	m.prunePoll("jira", orgIDs)
 }
 
 // toTrackerJiraRules collapses the org-wide rule union into the

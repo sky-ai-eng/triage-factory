@@ -96,7 +96,7 @@ func TestManager_StartGitHub_StartsInMultiMode(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	m := &Manager{orgs: &fakeOrgsStore{}}
 
-	m.startGitHub(time.Minute)
+	m.startGitHub()
 
 	m.mu.Lock()
 	started := m.ghStop != nil
@@ -105,6 +105,87 @@ func TestManager_StartGitHub_StartsInMultiMode(t *testing.T) {
 		t.Errorf("multi-mode startGitHub did not spawn a poll goroutine (ghStop == nil); want the per-org App path to run")
 	}
 	m.StopAll()
+}
+
+// TestManager_RestartAll_StartsGitHubNotJiraInMultiMode pins the boot/config-
+// change entry point main.go uses: RestartAll must start the process-global
+// GitHub poller in multi mode (SKY-386 — nothing ever started a poll loop in
+// multi, so no entities were discovered). Jira stays gated off until per-org
+// system creds land, so RestartAll must NOT start the Jira loop in multi.
+func TestManager_RestartAll_StartsGitHubNotJiraInMultiMode(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	m := &Manager{orgs: &fakeOrgsStore{}}
+
+	m.RestartAll()
+	defer m.StopAll()
+
+	m.mu.Lock()
+	gh, jira := m.ghStop != nil, m.jiraStop != nil
+	m.mu.Unlock()
+	if !gh {
+		t.Errorf("RestartAll in multi mode did not start the GitHub poller (ghStop == nil) — SKY-386 regression")
+	}
+	if jira {
+		t.Errorf("RestartAll in multi mode started the Jira poller (jiraStop != nil); want it gated off until per-org system creds land")
+	}
+}
+
+// TestManager_RestartAll_StartsBothInLocalMode pins that the lifecycle is
+// behavior-preserving in local mode: RestartAll starts both loops.
+func TestManager_RestartAll_StartsBothInLocalMode(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	m := &Manager{orgs: &fakeOrgsStore{}}
+
+	m.RestartAll()
+	defer m.StopAll()
+
+	m.mu.Lock()
+	gh, jira := m.ghStop != nil, m.jiraStop != nil
+	m.mu.Unlock()
+	if !gh || !jira {
+		t.Errorf("RestartAll in local mode: ghStop!=nil=%v jiraStop!=nil=%v; want both started", gh, jira)
+	}
+}
+
+// TestManager_RunGitHubCycle_SkipsOrgNotYetDue pins the per-org cadence gate:
+// once an org is polled, a second cycle fired before its interval elapses must
+// skip it. (DefaultOrgSettings is 5m, far longer than the gap between the two
+// synchronous cycles here.)
+func TestManager_RunGitHubCycle_SkipsOrgNotYetDue(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	orgs := &fakeOrgsStore{ids: []string{"org-a"}}
+	repos := &recordingRepoStore{}
+	m := &Manager{orgs: orgs, repos: repos, users: &emptyUsersStore{}}
+
+	m.runGitHubCycle() // org-a due → polled, scheduled ~5m out
+	m.runGitHubCycle() // immediately again → not due → skipped
+
+	repos.mu.Lock()
+	defer repos.mu.Unlock()
+	if len(repos.visited) != 1 {
+		t.Fatalf("org polled %d times across two back-to-back cycles; want 1 (second cycle must skip a not-yet-due org). visited=%v", len(repos.visited), repos.visited)
+	}
+}
+
+// TestManager_RunGitHubCycle_RepollsAfterSlotElapses pins the other half of
+// the gate: once an org's reserved slot is in the past, the next cycle polls
+// it again. Backdating via schedulePoll keeps the test deterministic (no
+// sleep, no real interval wait).
+func TestManager_RunGitHubCycle_RepollsAfterSlotElapses(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	orgs := &fakeOrgsStore{ids: []string{"org-a"}}
+	repos := &recordingRepoStore{}
+	m := &Manager{orgs: orgs, repos: repos, users: &emptyUsersStore{}}
+
+	m.runGitHubCycle()
+	m.schedulePoll("github", "org-a", time.Now().Add(-time.Second)) // pretend the interval elapsed
+	m.runGitHubCycle()
+
+	repos.mu.Lock()
+	defer repos.mu.Unlock()
+	if len(repos.visited) != 2 {
+		t.Fatalf("org polled %d times; want 2 (re-poll once its slot elapsed). visited=%v", len(repos.visited), repos.visited)
+	}
 }
 
 // --- test doubles ---
@@ -122,6 +203,13 @@ func (f *fakeOrgsStore) ListActiveSystem(ctx context.Context) ([]string, error) 
 		return nil, f.err
 	}
 	return append([]string(nil), f.ids...), nil
+}
+
+// GetSettingsSystem feeds the cycle's per-org interval read. Returns defaults
+// — the scheduler tests assert cadence via the nextPoll clock, not the exact
+// interval value.
+func (f *fakeOrgsStore) GetSettingsSystem(ctx context.Context, orgID string) (domain.OrgSettings, error) {
+	return domain.DefaultOrgSettings(), nil
 }
 
 // recordingRepoStore embeds db.RepoStore as nil and overrides only the
