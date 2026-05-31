@@ -6,6 +6,7 @@ import type { ChainStep, PromptKind } from '../types'
 import ChainStepEditor, { type ChainStepDraft } from './ChainStepEditor'
 import TeamPicker from './TeamPicker'
 import { useTeams, pickerDefault, noteWrittenTeam } from '../hooks/useTeams'
+import { promptsBase } from '../lib/scope'
 
 interface Props {
   promptId: string | null
@@ -15,6 +16,11 @@ interface Props {
   // label — the page's active team is the single source of truth. Empty /
   // undefined keeps the modal's own write picker (standalone / solo use).
   lockedTeamId?: string
+  // When true (the org-template editor, SKY-381), CRUD targets the
+  // /api/org-template/prompts family instead of /api/prompts: org-scoped,
+  // no team picker, leaf-only (templates don't carry chain steps or run
+  // stats). Mutually exclusive with lockedTeamId.
+  templateScope?: boolean
   onClose: () => void
   onSaved: () => void
   onDeleted?: () => void
@@ -129,10 +135,13 @@ export default function PromptDrawer({
   promptId,
   isNew,
   lockedTeamId,
+  templateScope = false,
   onClose,
   onSaved,
   onDeleted,
 }: Props) {
+  // REST root for this scope — /api/prompts (team) or /api/org-template/prompts.
+  const base = promptsBase(templateScope)
   const [name, setName] = useState('')
   const [body, setBody] = useState('')
   const [source, setSource] = useState('user')
@@ -170,7 +179,10 @@ export default function PromptDrawer({
   // is created under this team, and per-team DefaultModel can differ.
   // '' (solo/local) falls back to the "default" alias the backend accepts.
   useEffect(() => {
-    if (!open) return
+    // Template scope has no team, so no per-team DefaultModel to resolve — the
+    // "Default" option just reads "Default" (the org/global model applies at
+    // dispatch, per the team that copies the template).
+    if (!open || templateScope) return
     let cancelled = false
     const settingsTeam = effectiveTeam || 'default'
     fetch(`/api/settings/team/${encodeURIComponent(settingsTeam)}`)
@@ -183,7 +195,7 @@ export default function PromptDrawer({
     return () => {
       cancelled = true
     }
-  }, [open, effectiveTeam])
+  }, [open, effectiveTeam, templateScope])
 
   useEffect(() => {
     if (isNew) {
@@ -199,7 +211,7 @@ export default function PromptDrawer({
     }
     if (!promptId) return
     let cancelled = false
-    fetch(`/api/prompts/${promptId}`)
+    fetch(`${base}/${promptId}`)
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         return res.json()
@@ -217,33 +229,35 @@ export default function PromptDrawer({
         if (!cancelled) setError('Failed to load prompt')
       })
 
-    // Always fetch chain steps too — for leaf prompts the response is
-    // an empty array, which keeps the toggle from chain → leaf safe
-    // (clicking back to chain shows zero steps as expected).
-    fetch(`/api/prompts/${promptId}/chain-steps`)
-      .then((res) => (res.ok ? res.json() : []))
-      .then((data: ChainStep[]) => {
-        if (cancelled) return
-        setChainDraft(data.map((s) => ({ step_prompt_id: s.step_prompt_id, brief: s.brief })))
-      })
-      .catch(() => {})
+    // Chain steps + run stats are team-prompt concerns — the org template is
+    // leaf-only and has no run history, so skip both fetches there (the
+    // endpoints don't exist at template scope).
+    if (!templateScope) {
+      fetch(`${base}/${promptId}/chain-steps`)
+        .then((res) => (res.ok ? res.json() : []))
+        .then((data: ChainStep[]) => {
+          if (cancelled) return
+          setChainDraft(data.map((s) => ({ step_prompt_id: s.step_prompt_id, brief: s.brief })))
+        })
+        .catch(() => {})
 
-    fetch(`/api/prompts/${promptId}/stats`)
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        return res.json()
-      })
-      .then((data) => {
-        if (!cancelled) setStats(data)
-      })
-      .catch(() => {
-        if (!cancelled) setStats(null)
-      })
+      fetch(`${base}/${promptId}/stats`)
+        .then((res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`)
+          return res.json()
+        })
+        .then((data) => {
+          if (!cancelled) setStats(data)
+        })
+        .catch(() => {
+          if (!cancelled) setStats(null)
+        })
+    }
 
     return () => {
       cancelled = true
     }
-  }, [promptId, isNew])
+  }, [promptId, isNew, templateScope, base])
 
   // Seed the acting team for create mode once the teams load. Kept in its
   // own effect (not the form-reset above) so a late teams fetch reseeds
@@ -308,13 +322,18 @@ export default function PromptDrawer({
     setError('')
 
     try {
+      // Template scope is org-scoped — no team_id (the server ignores it
+      // anyway, but we keep the body clean).
+      const createBody = templateScope
+        ? { name, body, kind, model }
+        : { name, body, kind, model, team_id: effectiveTeam }
       const res = isNew
-        ? await fetch('/api/prompts', {
+        ? await fetch(base, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, body, kind, model, team_id: effectiveTeam }),
+            body: JSON.stringify(createBody),
           })
-        : await fetch(`/api/prompts/${promptId}`, {
+        : await fetch(`${base}/${promptId}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name, body, kind, model }),
@@ -323,14 +342,14 @@ export default function PromptDrawer({
         toast.error(await readError(res, `Failed to ${isNew ? 'create' : 'save'} prompt`))
         return
       }
-      if (isNew && effectiveTeam) noteWrittenTeam(effectiveTeam)
+      if (!templateScope && isNew && effectiveTeam) noteWrittenTeam(effectiveTeam)
 
       // For chain prompts, persist the step list immediately after the
-      // prompt itself. We use the id from the response so it works for
-      // both create (server-assigned id) and update flows.
-      if (kind === 'chain') {
+      // prompt itself. Template prompts are leaf-only (no chain endpoint), so
+      // this never runs there.
+      if (kind === 'chain' && !templateScope) {
         const created = (await res.json()) as { id: string }
-        const stepsRes = await fetch(`/api/prompts/${created.id}/chain-steps`, {
+        const stepsRes = await fetch(`${base}/${created.id}/chain-steps`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ steps: chainDraft }),
@@ -352,7 +371,7 @@ export default function PromptDrawer({
     if (!promptId) return
     setDeleting(true)
     try {
-      const res = await fetch(`/api/prompts/${promptId}`, { method: 'DELETE' })
+      const res = await fetch(`${base}/${promptId}`, { method: 'DELETE' })
       if (!res.ok) {
         toast.error(
           await readError(res, `Failed to ${source === 'user' ? 'delete' : 'hide'} prompt`),
@@ -401,7 +420,12 @@ export default function PromptDrawer({
                 <h2 className="text-[15px] font-semibold text-text-primary">
                   {isNew ? 'New Prompt' : 'Edit Prompt'}
                 </h2>
-                <div className="inline-flex rounded-md border border-border-subtle overflow-hidden text-[11px]">
+                {/* Leaf/Chain toggle — team prompts only. The org template is
+                    leaf-only (no chain-steps table backs it). */}
+                <div
+                  className="inline-flex rounded-md border border-border-subtle overflow-hidden text-[11px]"
+                  hidden={templateScope}
+                >
                   <button
                     onClick={() => setKind('leaf')}
                     className={`px-2.5 py-1 transition-colors ${
@@ -434,10 +458,16 @@ export default function PromptDrawer({
 
             {/* Body — scrollable */}
             <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
-              {/* Team (create mode only — a prompt's team is fixed after creation).
-                  Locked to the page's active team on the single-team prompts page;
-                  otherwise the modal's own write picker (≥2 teams). */}
-              {isNew &&
+              {/* Template scope is org-scoped — no team. */}
+              {templateScope ? (
+                <div className="text-[12px] text-text-tertiary">
+                  Scope: <span className="font-medium text-text-secondary">Org template</span>
+                </div>
+              ) : (
+                /* Team (create mode only — a prompt's team is fixed after creation).
+                   Locked to the page's active team on the single-team prompts page;
+                   otherwise the modal's own write picker (≥2 teams). */
+                isNew &&
                 (lockedTeamId ? (
                   <div className="text-[12px] text-text-tertiary">
                     Team:{' '}
@@ -447,7 +477,8 @@ export default function PromptDrawer({
                   </div>
                 ) : (
                   <TeamPicker value={team} onChange={setTeam} label="Team" />
-                ))}
+                ))
+              )}
               {/* Name */}
               <div>
                 <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
@@ -661,7 +692,7 @@ export default function PromptDrawer({
                 </button>
                 <button
                   onClick={save}
-                  disabled={saving || (isNew && !lockedTeamId && !teamsLoaded)}
+                  disabled={saving || (isNew && !templateScope && !lockedTeamId && !teamsLoaded)}
                   className="text-[12px] font-semibold text-white bg-accent hover:bg-accent/90 px-4 py-1.5 rounded-full transition-colors disabled:opacity-50"
                 >
                   {saving ? 'Saving...' : isNew ? 'Create' : 'Save'}

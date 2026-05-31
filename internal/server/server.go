@@ -51,6 +51,7 @@ type Server struct {
 	orgs          db.OrgsStore            // per-org settings (GitHub/Jira base URLs, poll intervals, clone protocol) post-internal/config deletion
 	jiraRules     db.JiraStatusRulesStore // per-team Jira status rules (replaces the deleted config.Jira.Projects view)
 	githubApps    db.GitHubAppsStore      // per-org GitHub App registrations (manifest flow)
+	orgTemplate   db.OrgTemplateStore     // SKY-381: org-admin-editable template new teams are seeded from
 	// takeoverDir is the raw instance_config.server_takeover_dir
 	// value read once at boot — may be empty, "~/..." or an
 	// absolute path. Call sites (handleAgentTakeover, Spawner's
@@ -314,6 +315,7 @@ func New(database *sql.DB, stores db.Stores, takeoverDir string, serverPort int)
 		orgs:          stores.Orgs,
 		jiraRules:     stores.JiraStatusRules,
 		githubApps:    stores.GitHubApps,
+		orgTemplate:   stores.OrgTemplate,
 		tx:            stores.Tx,
 		allStores:     stores,
 		takeoverDir:   takeoverDir,
@@ -586,6 +588,23 @@ func (s *Server) routes() {
 	s.apiMutating("PUT /api/prompts/{id}/chain-steps", s.handleChainStepsPut)
 	s.api("GET /api/chain-runs/{id}", s.handleChainRunGet)
 	s.apiMutating("POST /api/chain-runs/{id}/cancel", s.handleChainRunCancel)
+
+	// Org template editor (SKY-381) — org-admin-gated, multi-mode only.
+	// Mirrors the /api/prompts + /api/event-handlers families at org-template
+	// scope (no team_id); each handler gates via requireOrgTemplate.
+	s.api("GET /api/org-template/prompts", s.handleOrgTemplatePromptsList)
+	s.apiMutating("POST /api/org-template/prompts", s.handleOrgTemplatePromptCreate)
+	s.api("GET /api/org-template/prompts/{id}", s.handleOrgTemplatePromptGet)
+	s.apiMutating("PUT /api/org-template/prompts/{id}", s.handleOrgTemplatePromptPut)
+	s.apiMutating("DELETE /api/org-template/prompts/{id}", s.handleOrgTemplatePromptDelete)
+	s.api("GET /api/org-template/event-handlers", s.handleOrgTemplateHandlersList)
+	s.apiMutating("POST /api/org-template/event-handlers", s.handleOrgTemplateHandlerCreate)
+	s.apiMutating("PUT /api/org-template/event-handlers/reorder", s.handleOrgTemplateHandlerReorder)
+	s.apiMutating("PATCH /api/org-template/event-handlers/{id}", s.handleOrgTemplateHandlerUpdate)
+	s.apiMutating("PUT /api/org-template/event-handlers/{id}", s.handleOrgTemplateHandlerUpdate)
+	s.apiMutating("DELETE /api/org-template/event-handlers/{id}", s.handleOrgTemplateHandlerDelete)
+	s.apiMutating("POST /api/org-template/event-handlers/{id}/toggle", s.handleOrgTemplateHandlerToggle)
+	s.apiMutating("POST /api/org-template/event-handlers/{id}/promote", s.handleOrgTemplateHandlerPromote)
 
 	// GitHub App manifest registration. The launch endpoint serves a
 	// script-free bounce page (carrying its own per-response CSP) that

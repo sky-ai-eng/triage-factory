@@ -117,8 +117,8 @@ export default function Prompts() {
       <div className="flex-1 min-h-0">
         <BindingGraph
           key={graphKey}
-          teamId={activeTeam.teamId}
-          teamReady={activeTeam.ready}
+          scope={{ kind: 'team', teamId: activeTeam.teamId }}
+          scopeReady={activeTeam.ready}
           onPromptClick={openEdit}
           onTriggerClick={setEditingTrigger}
           onTriggerDeleted={handleTriggerDeleted}

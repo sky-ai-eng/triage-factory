@@ -5414,5 +5414,105 @@ GRANT ALL ON TABLE public.org_github_app_installations TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_github_app_installations TO tf_app;
 
 
+-- === Org default templates (SKY-381) ====================================
+-- The org-level template a new team's prompts + handlers are copied from at
+-- team creation. Org-scoped (no team_id): the template is the *source*, not a
+-- team-owned set — BootstrapNewTeam materializes a per-team copy of it. Mirrors
+-- the prompts / event_handlers content columns so the copy reproduces them
+-- byte-for-byte. system_slug is NOT NULL and stable (the real shipped slug for
+-- source='system' rows, a generated tmpl-<uuid> for admin-authored rows), so the
+-- per-team copy dedupes on (org_id, team_id, system_slug) like the shipped seed.
+-- All four CRUD verbs are org-admin-gated (tf.user_is_org_admin) — the editor is
+-- an org-admin surface; the bootstrap seed + per-team materialize run on the
+-- admin pool (BYPASSRLS). Self-contained block appended at the end of Up: every
+-- FK target (orgs, teams, users, events_catalog) already exists.
+
+CREATE TABLE public.org_template_prompts (
+    id text DEFAULT (gen_random_uuid())::text NOT NULL,
+    org_id uuid NOT NULL,
+    system_slug text NOT NULL,
+    name text NOT NULL,
+    body text NOT NULL,
+    source text DEFAULT 'user'::text NOT NULL,
+    kind text DEFAULT 'leaf'::text NOT NULL,
+    allowed_tools text DEFAULT ''::text NOT NULL,
+    model text DEFAULT ''::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT org_template_prompts_source_check CHECK ((source = ANY (ARRAY['system'::text, 'user'::text])))
+);
+
+CREATE TABLE public.org_template_handlers (
+    id text DEFAULT (gen_random_uuid())::text NOT NULL,
+    org_id uuid NOT NULL,
+    system_slug text NOT NULL,
+    kind text NOT NULL,
+    event_type text NOT NULL,
+    scope_predicate_json jsonb,
+    enabled boolean DEFAULT true NOT NULL,
+    source text DEFAULT 'user'::text NOT NULL,
+    name text,
+    default_priority real,
+    sort_order integer,
+    prompt_id text,
+    breaker_threshold integer,
+    min_autonomy_suitability real,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT org_template_handlers_kind_check CHECK ((kind = ANY (ARRAY['rule'::text, 'trigger'::text]))),
+    CONSTRAINT org_template_handlers_source_check CHECK ((source = ANY (ARRAY['system'::text, 'user'::text]))),
+    CONSTRAINT org_template_handlers_rule_shape CHECK (((kind <> 'rule'::text) OR ((prompt_id IS NULL) AND (breaker_threshold IS NULL) AND (min_autonomy_suitability IS NULL) AND (name IS NOT NULL) AND (default_priority IS NOT NULL) AND (sort_order IS NOT NULL)))),
+    CONSTRAINT org_template_handlers_trigger_shape CHECK (((kind <> 'trigger'::text) OR ((prompt_id IS NOT NULL) AND (breaker_threshold IS NOT NULL) AND (min_autonomy_suitability IS NOT NULL) AND (default_priority IS NULL) AND (sort_order IS NULL) AND (name IS NULL))))
+);
+
+ALTER TABLE ONLY public.org_template_prompts
+    ADD CONSTRAINT org_template_prompts_pkey PRIMARY KEY (org_id, id);
+ALTER TABLE ONLY public.org_template_prompts
+    ADD CONSTRAINT org_template_prompts_id_org_id_key UNIQUE (id, org_id);
+ALTER TABLE ONLY public.org_template_prompts
+    ADD CONSTRAINT org_template_prompts_org_slug_key UNIQUE (org_id, system_slug);
+
+ALTER TABLE ONLY public.org_template_handlers
+    ADD CONSTRAINT org_template_handlers_pkey PRIMARY KEY (org_id, id);
+ALTER TABLE ONLY public.org_template_handlers
+    ADD CONSTRAINT org_template_handlers_org_slug_key UNIQUE (org_id, system_slug);
+
+CREATE INDEX idx_org_template_handlers_kind ON public.org_template_handlers USING btree (org_id, kind);
+
+ALTER TABLE ONLY public.org_template_prompts
+    ADD CONSTRAINT org_template_prompts_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.org_template_handlers
+    ADD CONSTRAINT org_template_handlers_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.org_template_handlers
+    ADD CONSTRAINT org_template_handlers_event_type_fkey FOREIGN KEY (event_type) REFERENCES public.events_catalog(id) ON DELETE RESTRICT;
+-- A template trigger may only bind a template prompt in the same org; deleting
+-- a template prompt cascades its triggers (mirrors the team-table CASCADE).
+ALTER TABLE ONLY public.org_template_handlers
+    ADD CONSTRAINT org_template_handlers_prompt_id_org_id_fkey FOREIGN KEY (prompt_id, org_id) REFERENCES public.org_template_prompts(id, org_id) ON DELETE CASCADE;
+
+ALTER TABLE public.org_template_prompts ENABLE ROW LEVEL SECURITY;
+CREATE POLICY org_template_prompts_all ON public.org_template_prompts
+    USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)))
+    WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+
+ALTER TABLE public.org_template_handlers ENABLE ROW LEVEL SECURITY;
+CREATE POLICY org_template_handlers_all ON public.org_template_handlers
+    USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)))
+    WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+
+GRANT ALL ON TABLE public.org_template_prompts TO postgres;
+GRANT ALL ON TABLE public.org_template_prompts TO anon;
+GRANT ALL ON TABLE public.org_template_prompts TO authenticated;
+GRANT ALL ON TABLE public.org_template_prompts TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_template_prompts TO tf_app;
+
+GRANT ALL ON TABLE public.org_template_handlers TO postgres;
+GRANT ALL ON TABLE public.org_template_handlers TO anon;
+GRANT ALL ON TABLE public.org_template_handlers TO authenticated;
+GRANT ALL ON TABLE public.org_template_handlers TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_template_handlers TO tf_app;
+
+
 -- +goose Down
 SELECT 'down not supported';

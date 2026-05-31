@@ -227,6 +227,16 @@ type Stores struct {
 	// org_github_apps for the same manifest-flow path.
 	GitHubApps GitHubAppsStore
 
+	// OrgTemplate owns org_template_prompts + org_template_handlers — the
+	// per-org, org-admin-editable template BootstrapNewOrg/NewTeam copy into
+	// each new team's prompts + event_handlers (SKY-381). App pool for the
+	// editor CRUD (org_template_*_all RLS gates on tf.user_is_org_admin);
+	// admin pool for SeedFromShipped (org-create seed) + MaterializeIntoTeam
+	// (per-team copy, which also writes the team's prompts/event_handlers/
+	// system_prompt_versions). Multi-mode only; the SQLite impl exists so the
+	// bootstrap tests can run without Postgres.
+	OrgTemplate OrgTemplateStore
+
 	// Tx is the transaction runner — handlers that need atomic
 	// multi-store writes call Tx.WithTx and receive a TxStores with
 	// every field tx-bound. Postgres impl also sets the JWT claims
@@ -269,6 +279,7 @@ type TxStores struct {
 	TeamGitHubRepos  TeamGitHubReposStore
 	Curator          CuratorStore
 	GitHubApps       GitHubAppsStore
+	OrgTemplate      OrgTemplateStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres

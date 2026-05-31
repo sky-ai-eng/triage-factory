@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -128,22 +129,26 @@ func TestBootstrapTeamAgent_ErrorsWhenOrgHasNoAgent(t *testing.T) {
 	}
 }
 
-// TestBootstrapNewTeam_SeedsPerTeamDefaults pins SKY-380's team-create
-// bootstrap: a new 2nd+ team in an existing org gets a default-enabled
-// team_agents row (so manual delegation works immediately) AND its own
-// copies of the shipped prompts + event handlers. Per-team seeding is now
-// correct — random-UUID id + system_slug, deduped on (org, team, slug) —
-// so the second team materializes its own distinct rows instead of
-// ON CONFLICT-vanishing against the org's first team (the old UUIDFor
-// scheme was org-keyed, which is why this used to seed bot-only). Uses the
-// local org/team graph + BootstrapLocalAgent for the org agent.
+// TestBootstrapNewTeam_SeedsPerTeamDefaults pins the team-create bootstrap:
+// a new 2nd+ team in an existing org gets a default-enabled team_agents row
+// (so manual delegation works immediately) AND its own copies of the prompts
+// + event handlers. Per-team seeding is correct (SKY-380) — random-UUID id +
+// system_slug, deduped on (org, team, slug) — so the second team materializes
+// its own distinct rows. Post-SKY-381 the *source* of those copies is the org
+// template (seeded from the shipped lists at org-create by BootstrapNewOrg),
+// not the shipped Go slices directly — so this seeds the org first, then adds
+// a 2nd team.
 func TestBootstrapNewTeam_SeedsPerTeamDefaults(t *testing.T) {
 	conn := openInMemorySQLite(t)
 	stores := sqlitestore.New(conn)
 	ctx := t.Context()
 
-	if err := db.BootstrapLocalAgent(ctx, stores); err != nil {
-		t.Fatalf("BootstrapLocalAgent: %v", err)
+	// Org-create seeds the agent + the org template + the founder's (sentinel)
+	// team. The 2nd team then copies the same template.
+	if err := db.BootstrapNewOrg(ctx, stores,
+		runmode.LocalDefaultOrg, db.LocalDefaultTeamID, ai.ShippedPrompts(),
+	); err != nil {
+		t.Fatalf("BootstrapNewOrg: %v", err)
 	}
 
 	// A second team in the same org (the "add team" outcome).
@@ -155,7 +160,7 @@ func TestBootstrapNewTeam_SeedsPerTeamDefaults(t *testing.T) {
 		t.Fatalf("insert second team: %v", err)
 	}
 
-	if err := db.BootstrapNewTeam(ctx, stores, runmode.LocalDefaultOrg, newTeamID, ai.ShippedPrompts()); err != nil {
+	if err := db.BootstrapNewTeam(ctx, stores, runmode.LocalDefaultOrg, newTeamID); err != nil {
 		t.Fatalf("BootstrapNewTeam: %v", err)
 	}
 
@@ -246,6 +251,91 @@ func TestBootstrapNewOrg_SeedsFullStack(t *testing.T) {
 	}
 	if n == 0 {
 		t.Error("no shipped event handlers after BootstrapNewOrg")
+	}
+}
+
+// TestOrgTemplate_ForwardOnly pins SKY-381's load-bearing invariant: editing
+// the org template affects FUTURE team creations only. An admin who adds a
+// prompt and enables a trigger in the template AFTER the founder's team exists
+// sees those edits in the next new team but NOT in the team that already
+// existed. It also pins that the enabled state flows (an org enables a shipped
+// trigger once in the template; new teams get it enabled — the value prop).
+func TestOrgTemplate_ForwardOnly(t *testing.T) {
+	conn := openInMemorySQLite(t)
+	stores := sqlitestore.New(conn)
+	ctx := t.Context()
+	org := runmode.LocalDefaultOrg
+
+	// Org-create: agent + template + founder's (sentinel) team materialized
+	// from the template-as-shipped.
+	if err := db.BootstrapNewOrg(ctx, stores, org, db.LocalDefaultTeamID, ai.ShippedPrompts()); err != nil {
+		t.Fatalf("BootstrapNewOrg: %v", err)
+	}
+
+	// --- Edit the template (after the founder's team already exists) ---
+	// (1) Add an admin-authored prompt.
+	const customSlug = "tmpl-custom-1"
+	if err := stores.OrgTemplate.CreatePrompt(ctx, org, domain.Prompt{
+		ID: "custom-prompt-id", SystemSlug: customSlug, Name: "Org Custom Prompt", Body: "house rules", Source: "user",
+	}); err != nil {
+		t.Fatalf("CreatePrompt: %v", err)
+	}
+	// (2) Enable a shipped trigger in the template (they ship disabled).
+	triggers, err := stores.OrgTemplate.ListHandlers(ctx, org, domain.EventHandlerKindTrigger)
+	if err != nil || len(triggers) == 0 {
+		t.Fatalf("ListHandlers(trigger): err=%v n=%d", err, len(triggers))
+	}
+	enabledSlug := triggers[0].SystemSlug
+	if err := stores.OrgTemplate.SetHandlerEnabled(ctx, org, triggers[0].ID, true); err != nil {
+		t.Fatalf("SetHandlerEnabled: %v", err)
+	}
+
+	// --- Create a 2nd team AFTER the edits ---
+	const newTeamID = "00000000-0000-0000-0000-0000000000c3"
+	if _, err := conn.ExecContext(ctx,
+		`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, 'gamma', 'Gamma')`, newTeamID, org,
+	); err != nil {
+		t.Fatalf("insert team: %v", err)
+	}
+	if err := db.BootstrapNewTeam(ctx, stores, org, newTeamID); err != nil {
+		t.Fatalf("BootstrapNewTeam: %v", err)
+	}
+
+	count := func(team, slug string) int {
+		t.Helper()
+		var n int
+		if err := conn.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM prompts WHERE org_id = ? AND team_id = ? AND system_slug = ?`, org, team, slug,
+		).Scan(&n); err != nil {
+			t.Fatalf("count prompt %s/%s: %v", team, slug, err)
+		}
+		return n
+	}
+	triggerEnabled := func(team, slug string) bool {
+		t.Helper()
+		var enabled bool
+		if err := conn.QueryRowContext(ctx,
+			`SELECT enabled FROM event_handlers WHERE org_id = ? AND team_id = ? AND system_slug = ?`, org, team, slug,
+		).Scan(&enabled); err != nil {
+			t.Fatalf("read trigger %s/%s: %v", team, slug, err)
+		}
+		return enabled
+	}
+
+	// The NEW team carries the edits.
+	if got := count(newTeamID, customSlug); got != 1 {
+		t.Errorf("new team has %d copies of the template-added prompt; want 1 (edit should flow forward)", got)
+	}
+	if !triggerEnabled(newTeamID, enabledSlug) {
+		t.Errorf("new team's copy of the template-enabled trigger is disabled; want enabled (enabled state should flow)")
+	}
+
+	// The EXISTING team is untouched (forward-only).
+	if got := count(db.LocalDefaultTeamID, customSlug); got != 0 {
+		t.Errorf("existing team gained %d copies of a prompt added to the template after it was created; want 0 (forward-only)", got)
+	}
+	if triggerEnabled(db.LocalDefaultTeamID, enabledSlug) {
+		t.Errorf("existing team's trigger became enabled after a template edit; want still-disabled (forward-only)")
 	}
 }
 

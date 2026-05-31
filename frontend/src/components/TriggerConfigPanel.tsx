@@ -9,10 +9,14 @@ import PredicateEditor from './PredicateEditor'
 import Slider from './Slider'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
+import { promptsBase, handlersBase } from '../lib/scope'
 
 interface TriggerConfigPanelProps {
   open: boolean
   trigger: TriggerHandler | null
+  // When true (the org-template editor, SKY-381), reads/writes target the
+  // /api/org-template/* families instead of /api/event-handlers + /api/prompts.
+  templateScope?: boolean
   onClose: () => void
   onSaved: () => void
   onDeleted: () => void
@@ -22,11 +26,13 @@ interface TriggerConfigPanelProps {
 export default function TriggerConfigPanel({
   open,
   trigger,
+  templateScope = false,
   onClose,
   onSaved,
   onDeleted,
   onRefresh,
 }: TriggerConfigPanelProps) {
+  const handlerBase = handlersBase(templateScope)
   const [predicate, setPredicate] = useState<Record<string, unknown>>({})
   const [minAutonomy, setMinAutonomy] = useState(0)
   const [breakerThreshold, setBreakerThreshold] = useState(4)
@@ -47,7 +53,7 @@ export default function TriggerConfigPanel({
     setConfirmDelete(false)
     setPromptName('')
 
-    fetch(`/api/prompts/${encodeURIComponent(trigger.prompt_id)}`)
+    fetch(`${promptsBase(templateScope)}/${encodeURIComponent(trigger.prompt_id)}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((p) => {
         if (!cancelled && p) setPromptName(p.name)
@@ -57,13 +63,13 @@ export default function TriggerConfigPanel({
     return () => {
       cancelled = true
     }
-  }, [trigger])
+  }, [trigger, templateScope])
 
   const handleToggle = async (checked: boolean) => {
     if (!trigger) return
     setEnabled(checked)
     try {
-      const res = await fetch(`/api/event-handlers/${encodeURIComponent(trigger.id)}/toggle`, {
+      const res = await fetch(`${handlerBase}/${encodeURIComponent(trigger.id)}/toggle`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: checked }),
@@ -89,7 +95,7 @@ export default function TriggerConfigPanel({
         breaker_threshold: breakerThreshold,
         min_autonomy_suitability: minAutonomy,
       }
-      const res = await fetch(`/api/event-handlers/${encodeURIComponent(trigger.id)}`, {
+      const res = await fetch(`${handlerBase}/${encodeURIComponent(trigger.id)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -109,7 +115,7 @@ export default function TriggerConfigPanel({
   const handleDelete = async () => {
     if (!trigger) return
     try {
-      const res = await fetch(`/api/event-handlers/${encodeURIComponent(trigger.id)}`, {
+      const res = await fetch(`${handlerBase}/${encodeURIComponent(trigger.id)}`, {
         method: 'DELETE',
       })
       if (res.ok) {

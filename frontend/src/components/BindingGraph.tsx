@@ -18,6 +18,7 @@ import '@xyflow/react/dist/style.css'
 import type { Prompt, TriggerHandler } from '../types'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
+import { type BindingScope, isTemplateScope, promptsBase, handlersBase } from '../lib/scope'
 
 interface EventType {
   id: string
@@ -28,14 +29,15 @@ interface EventType {
 }
 
 interface GraphProps {
-  // The page's single active team (see useActiveTeam). Scopes the graph's
-  // reads (prompts + triggers) and stamps new triggers. '' for solo/local
-  // (the server resolves the sole team).
-  teamId: string
-  // False until the active team resolves. The connect gesture no-ops while
-  // false so a multi-team user can't post team_id:'' in the cold-load
-  // window (→ 400).
-  teamReady: boolean
+  // The editor scope (SKY-381): a single team's prompts+triggers, or the org
+  // template. Picks the endpoint set; everything downstream is identical. For
+  // team scope, teamId '' means solo/local (the server resolves the sole team).
+  scope: BindingScope
+  // False until the scope resolves. For team scope this gates on the active
+  // team being a concrete id (a multi-team user can't post team_id:'' in the
+  // cold-load window → 400); for template scope it gates on org-admin + multi
+  // confirming. The connect gesture no-ops while false.
+  scopeReady: boolean
   onPromptClick?: (promptId: string) => void
   onTriggerClick?: (trigger: TriggerHandler) => void
   onTriggerDeleted?: (eventType: string, predicate?: string | null) => void
@@ -209,19 +211,21 @@ function saveLayout(layout: SavedLayout) {
 // --- Inner Graph ---
 
 function BindingGraphInner({
-  teamId,
-  teamReady,
+  scope,
+  scopeReady,
   onPromptClick,
   onTriggerClick,
   onTriggerDeleted,
 }: GraphProps) {
-  // The graph is scoped to one team — the prompts page is single-team. It
-  // shows that team's prompts + triggers (plus org-visible system prompts)
-  // and stamps new triggers with it. Because only the active team's prompts
-  // are ever on the canvas, a connect can't bind another team's prompt: the
-  // trigger's team always matches the prompt's, which is what closes the
-  // cross-team trigger→prompt hole by construction. Solo/local → teamId ''
-  // → the server resolves the sole team.
+  // The graph is scoped to one team OR the org template (SKY-381). For team
+  // scope it shows that team's prompts + triggers and stamps new triggers with
+  // it; because only the active team's prompts are ever on the canvas, a
+  // connect can't bind another team's prompt (the trigger's team always
+  // matches the prompt's, closing the cross-team hole by construction).
+  // Template scope is org-scoped — no team_id is sent. Solo/local team scope →
+  // teamId '' → the server resolves the sole team.
+  const template = isTemplateScope(scope)
+  const teamId = scope.kind === 'team' ? scope.teamId : ''
   const [eventTypes, setEventTypes] = useState<EventType[]>([])
   const [prompts, setPrompts] = useState<Prompt[]>([])
   const [triggers, setTriggers] = useState<TriggerHandler[]>([])
@@ -247,17 +251,15 @@ function BindingGraphInner({
   onTriggerDeletedRef.current = onTriggerDeleted
 
   const fetchAll = useCallback(async () => {
-    // Hold in the loading state until the active team resolves. For a
-    // multi-team user before /api/teams loads, teamId is unvalidated (''
-    // or a stale stored id) and fetching now would pull every visible
-    // team's prompts + triggers onto the canvas — letting the user open or
-    // delete a sibling team's trigger before the scoped refetch replaces
-    // it. teamReady flips true once the active team is a validated id, and
-    // because it's in this callback's deps the effect re-runs the real
-    // (scoped) fetch then. Re-assert loading so a ready→not-ready transition
-    // (an org switch resets useActiveTeam) clears the prior team's canvas
-    // rather than leaving it interactive during the swap.
-    if (!teamReady) {
+    // Hold in the loading state until the scope resolves. For team scope, a
+    // multi-team user before /api/teams loads has an unvalidated teamId (''
+    // or a stale stored id) and fetching now would pull every visible team's
+    // prompts + triggers onto the canvas; for template scope, scopeReady gates
+    // on org-admin + multi confirming. scopeReady is in this callback's deps so
+    // the effect re-runs the real (scoped) fetch once it flips true. Re-assert
+    // loading so a ready→not-ready transition (an org switch) clears the prior
+    // canvas rather than leaving it interactive during the swap.
+    if (!scopeReady) {
       setLoading(true)
       return
     }
@@ -265,18 +267,17 @@ function BindingGraphInner({
       if (!r.ok) throw new Error(`${label}: HTTP ${r.status}`)
       return r.json()
     }
-    // Scope prompts + triggers to the active team (empty = unfiltered, the
-    // solo/local case). event-types is a system registry — never team-scoped.
-    const teamQuery = teamId ? `team_id=${encodeURIComponent(teamId)}` : ''
+    // Team scope narrows prompts + triggers to the active team (empty =
+    // unfiltered, the solo/local case); template scope is org-scoped (no
+    // team_id). event-types is a system registry — never scoped.
+    const teamQuery = !template && teamId ? `team_id=${encodeURIComponent(teamId)}` : ''
+    const promptsURL = `${promptsBase(template)}${teamQuery ? `?${teamQuery}` : ''}`
+    const triggersURL = `${handlersBase(template)}?kind=trigger${teamQuery ? `&${teamQuery}` : ''}`
     try {
       const [etRes, pRes, tRes] = await Promise.all([
         fetch('/api/event-types').then((r) => parseOrThrow(r, 'event-types')),
-        fetch(`/api/prompts${teamQuery ? `?${teamQuery}` : ''}`).then((r) =>
-          parseOrThrow(r, 'prompts'),
-        ),
-        fetch(`/api/event-handlers?kind=trigger${teamQuery ? `&${teamQuery}` : ''}`).then((r) =>
-          parseOrThrow(r, 'triggers'),
-        ),
+        fetch(promptsURL).then((r) => parseOrThrow(r, 'prompts')),
+        fetch(triggersURL).then((r) => parseOrThrow(r, 'triggers')),
       ])
       setEventTypes(etRes)
       setPrompts(pRes)
@@ -295,7 +296,7 @@ function BindingGraphInner({
     } finally {
       setLoading(false)
     }
-  }, [teamId, teamReady])
+  }, [template, teamId, scopeReady])
 
   useEffect(() => {
     fetchAll()
@@ -307,7 +308,7 @@ function BindingGraphInner({
       const toDelete = triggersRef.current.filter((t) => t.event_type === eventTypeId)
       Promise.all(
         toDelete.map((t) =>
-          fetch(`/api/event-handlers/${encodeURIComponent(t.id)}`, { method: 'DELETE' }),
+          fetch(`${handlersBase(template)}/${encodeURIComponent(t.id)}`, { method: 'DELETE' }),
         ),
       ).then(() => {
         setActiveEventIds((prev) => {
@@ -321,7 +322,7 @@ function BindingGraphInner({
         fetchAll()
       })
     },
-    [fetchAll],
+    [fetchAll, template],
   )
 
   // Rebuild nodes when data changes
@@ -430,22 +431,28 @@ function BindingGraphInner({
       const eventType = connection.source?.replace('et:', '')
       const promptId = connection.target?.replace('p:', '')
       if (!eventType || !promptId) return
-      // Wait for the active team to resolve. For a multi-team user before
-      // /api/teams loads, teamId is '' and posting it would 400
-      // (ambiguous); the gesture no-ops rather than failing silently, and
-      // the edge simply doesn't stick (edges are derived from triggers).
-      if (!teamReady) return
+      // Wait for the scope to resolve. For team scope before /api/teams loads,
+      // teamId is '' and posting it would 400 (ambiguous); for template scope,
+      // scopeReady gates on org-admin + multi. The gesture no-ops rather than
+      // failing silently — the edge simply doesn't stick (edges derive from
+      // triggers).
+      if (!scopeReady) return
 
+      // Team scope stamps the acting team; template scope is org-scoped (no
+      // team_id — the row lands on the org template).
+      const body: Record<string, unknown> = {
+        kind: 'trigger',
+        prompt_id: promptId,
+        event_type: eventType,
+      }
+      if (!template) {
+        body.team_id = teamId
+      }
       try {
-        const res = await fetch('/api/event-handlers', {
+        const res = await fetch(handlersBase(template), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            kind: 'trigger',
-            prompt_id: promptId,
-            event_type: eventType,
-            team_id: teamId,
-          }),
+          body: JSON.stringify(body),
         })
         if (!res.ok) {
           // Surface the rejection instead of swallowing it — otherwise the
@@ -458,7 +465,7 @@ function BindingGraphInner({
         toast.error(`Failed to create trigger: ${err instanceof Error ? err.message : String(err)}`)
       }
     },
-    [fetchAll, teamId, teamReady],
+    [fetchAll, template, teamId, scopeReady],
   )
 
   const doDeleteTrigger = useCallback(
@@ -466,7 +473,9 @@ function BindingGraphInner({
       // Capture trigger info before deletion for the forgiving banner callback.
       const deleted = triggersRef.current.find((t) => t.id === triggerId)
       try {
-        await fetch(`/api/event-handlers/${encodeURIComponent(triggerId)}`, { method: 'DELETE' })
+        await fetch(`${handlersBase(template)}/${encodeURIComponent(triggerId)}`, {
+          method: 'DELETE',
+        })
         await fetchAll()
         // Notify parent so it can check coverage and show the forgiving banner.
         if (deleted) {
@@ -476,7 +485,7 @@ function BindingGraphInner({
         // ignore
       }
     },
-    [fetchAll],
+    [fetchAll, template],
   )
 
   // Click edge to open config panel; shift-click to open delete confirmation

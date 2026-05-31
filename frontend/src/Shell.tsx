@@ -2,6 +2,7 @@ import { NavLink, Outlet } from 'react-router-dom'
 import { Settings } from 'lucide-react'
 import { useOrgHref } from './hooks/useOrgHref'
 import { useOptionalAuth } from './contexts/AuthContext'
+import { useTemplateScope } from './hooks/useTemplateScope'
 import OrgPicker from './components/OrgPicker'
 import UserMenu from './components/UserMenu'
 
@@ -23,6 +24,10 @@ export default function Shell() {
   // local mode hides them.
   const auth = useOptionalAuth()
   const isMulti = auth !== null
+  // The org-template editor (SKY-381) is an org-admin surface; its nav entry
+  // renders only for owners/admins in multi mode (useTemplateScope is false in
+  // local mode). It is deliberately a distinct entry — never the TeamSwitch.
+  const { available: templateAvailable } = useTemplateScope()
 
   return (
     <div className="min-h-screen bg-surface text-text-primary">
@@ -48,6 +53,20 @@ export default function Shell() {
               {item.label}
             </NavLink>
           ))}
+          {templateAvailable && (
+            <NavLink
+              to={orgHref('/org-template')}
+              className={({ isActive }) =>
+                `text-[13px] font-medium px-4 py-1.5 rounded-full transition-all duration-200 ${
+                  isActive
+                    ? 'bg-accent-soft text-accent'
+                    : 'text-text-tertiary hover:text-text-secondary hover:bg-black/[0.03]'
+                }`
+              }
+            >
+              Org template
+            </NavLink>
+          )}
         </div>
         <NavLink
           to={orgHref('/settings')}

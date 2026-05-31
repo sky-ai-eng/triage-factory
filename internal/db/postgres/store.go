@@ -253,7 +253,14 @@ func New(admin, app *sql.DB) db.Stores {
 		// no-claims reads the webhook receiver + backfill need; secrets
 		// for the backfill's App-PEM GetSystem read.
 		GitHubApps: newGitHubAppsStore(app, admin, secrets),
-		Tx:         s,
+		// OrgTemplate needs both pools: the editor CRUD runs on app
+		// (org_template_*_all RLS gates on tf.user_is_org_admin), while
+		// SeedFromShipped + MaterializeIntoTeam run on admin (claims-less
+		// bootstrap; MaterializeIntoTeam also writes the team's
+		// prompts/event_handlers/system_prompt_versions). The impl picks
+		// per-method internally — same split as PromptStore.
+		OrgTemplate: newOrgTemplateStore(app, admin),
+		Tx:          s,
 	}
 	return s.stores
 }
@@ -319,6 +326,7 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		// Both pools collapse to tx (test door). BackfillInstallationsFromAPI's
 		// GetSystem would hit tf_app and be denied here — tests that exercise
 		// it use New(admin, app) directly, same as the SecretStore tests.
-		GitHubApps: newGitHubAppsStore(tx, tx, newSecretStore(tx, tx)),
+		GitHubApps:  newGitHubAppsStore(tx, tx, newSecretStore(tx, tx)),
+		OrgTemplate: newTxOrgTemplateStore(tx),
 	}
 }

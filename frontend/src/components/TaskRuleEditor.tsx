@@ -8,6 +8,7 @@ import TeamPicker from './TeamPicker'
 import type { RuleHandler, EventType } from '../types'
 import { toast } from './Toast/toastStore'
 import { useTeams, pickerDefault, noteWrittenTeam } from '../hooks/useTeams'
+import { handlersBase } from '../lib/scope'
 
 interface TaskRuleEditorProps {
   open: boolean
@@ -20,6 +21,10 @@ interface TaskRuleEditorProps {
   // standalone path (TaskRulesPanel on Cards) passes nothing and is
   // unchanged.
   lockedTeamId?: string
+  // When true (the org-template editor, SKY-381), CRUD targets
+  // /api/org-template/event-handlers instead of /api/event-handlers:
+  // org-scoped, no team picker. Mutually exclusive with lockedTeamId.
+  templateScope?: boolean
   onClose: () => void
   onSaved: () => void
   onDeleted?: () => void
@@ -31,11 +36,14 @@ export default function TaskRuleEditor({
   prefillEventType,
   prefillPredicate,
   lockedTeamId,
+  templateScope = false,
   onClose,
   onSaved,
   onDeleted,
 }: TaskRuleEditorProps) {
   const isEdit = rule !== null
+  // REST root for this scope.
+  const base = handlersBase(templateScope)
 
   // Form state
   const [eventType, setEventType] = useState('')
@@ -161,7 +169,7 @@ export default function TaskRuleEditor({
         }
 
         if (Object.keys(body).length > 0) {
-          const res = await fetch(`/api/event-handlers/${encodeURIComponent(rule.id)}`, {
+          const res = await fetch(`${base}/${encodeURIComponent(rule.id)}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
@@ -181,13 +189,16 @@ export default function TaskRuleEditor({
           default_priority: priority,
           sort_order: sortOrder,
           enabled,
-          team_id: effectiveTeam,
+        }
+        // Team scope stamps the acting team; template scope is org-scoped.
+        if (!templateScope) {
+          body.team_id = effectiveTeam
         }
         if (predicateJSON) {
           body.scope_predicate_json = predicateJSON
         }
 
-        const res = await fetch('/api/event-handlers', {
+        const res = await fetch(base, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -196,7 +207,7 @@ export default function TaskRuleEditor({
           const err = await res.json()
           throw new Error(err.error || 'Failed to create rule')
         }
-        if (effectiveTeam) noteWrittenTeam(effectiveTeam)
+        if (!templateScope && effectiveTeam) noteWrittenTeam(effectiveTeam)
       }
 
       onSaved()
@@ -215,6 +226,8 @@ export default function TaskRuleEditor({
     sortOrder,
     enabled,
     effectiveTeam,
+    templateScope,
+    base,
     isEdit,
     rule,
     originalPredicateJSON,
@@ -226,7 +239,7 @@ export default function TaskRuleEditor({
     setDeleting(true)
     setError('')
     try {
-      const res = await fetch(`/api/event-handlers/${encodeURIComponent(rule.id)}`, {
+      const res = await fetch(`${base}/${encodeURIComponent(rule.id)}`, {
         method: 'DELETE',
       })
       if (!res.ok) {
@@ -242,7 +255,7 @@ export default function TaskRuleEditor({
     } finally {
       setDeleting(false)
     }
-  }, [rule, onDeleted, onClose])
+  }, [rule, base, onDeleted, onClose])
 
   return (
     <AnimatePresence>
@@ -282,10 +295,16 @@ export default function TaskRuleEditor({
 
                 {/* Body — scrollable */}
                 <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5 min-h-0">
-                  {/* Team (create mode only — a rule's team is immutable).
-                      Locked to the page's active team on the single-team
-                      prompts page; otherwise the modal's own write picker. */}
-                  {!isEdit &&
+                  {/* Template scope is org-scoped — no team. */}
+                  {templateScope ? (
+                    <div className="text-[12px] text-text-tertiary">
+                      Scope: <span className="font-medium text-text-secondary">Org template</span>
+                    </div>
+                  ) : (
+                    /* Team (create mode only — a rule's team is immutable).
+                       Locked to the page's active team on the single-team
+                       prompts page; otherwise the modal's own write picker. */
+                    !isEdit &&
                     (lockedTeamId ? (
                       <div className="text-[12px] text-text-tertiary">
                         Team:{' '}
@@ -295,7 +314,8 @@ export default function TaskRuleEditor({
                       </div>
                     ) : (
                       <TeamPicker value={team} onChange={setTeam} label="Team" />
-                    ))}
+                    ))
+                  )}
                   {/* Event type */}
                   <div>
                     <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
@@ -407,7 +427,7 @@ export default function TaskRuleEditor({
                         saving ||
                         !eventType ||
                         !name.trim() ||
-                        (!isEdit && !lockedTeamId && !teamsLoaded)
+                        (!isEdit && !templateScope && !lockedTeamId && !teamsLoaded)
                       }
                       className="text-[13px] font-semibold text-white bg-accent hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed px-5 py-2 rounded-full transition-colors"
                     >

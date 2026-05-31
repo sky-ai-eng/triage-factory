@@ -81,6 +81,7 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		TeamGitHubRepos:  newTeamGitHubReposStore(tx, tx),
 		Curator:          newCuratorStore(tx),
 		GitHubApps:       newGitHubAppsStore(tx, newSecretStore()),
+		OrgTemplate:      newOrgTemplateStore(tx),
 	}
 	if err := fn(txStores); err != nil {
 		return err

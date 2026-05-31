@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -147,17 +146,18 @@ func (s *Server) handleTeamCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Materialize the shipped defaults for the new team — its
-	// default-enabled bot membership + its own copies of the shipped
-	// prompts and event handlers (rules + triggers), scoped to it (SKY-380).
-	// Runs AFTER the team row commits because the seeders route through the
-	// admin pool and refuse to run inside the request's WithTx. Idempotent.
-	// Log-and-continue on failure: the team exists and is usable; a
-	// missing-defaults team is degraded (auto-delegation won't fire) but
-	// repairable by re-running bootstrap, whereas failing the create after
-	// the row committed would orphan it.
-	if err := db.BootstrapNewTeam(r.Context(), s.allStores, orgID, created.ID, ai.ShippedPrompts()); err != nil {
-		log.Printf("[teams] new team %s/%s created but bootstrap failed (shipped prompts/rules/bot may be missing): %v", orgID, created.ID, err)
+	// Materialize the defaults for the new team — its default-enabled bot
+	// membership + its own copies of the prompts and event handlers (rules +
+	// triggers), copied from the *org template* (SKY-381) so the team inherits
+	// the org's house rules, not just the TF-shipped set. Runs AFTER the team
+	// row commits because the seeders route through the admin pool and refuse
+	// to run inside the request's WithTx. Idempotent. Log-and-continue on
+	// failure: the team exists and is usable; a missing-defaults team is
+	// degraded (auto-delegation won't fire) but repairable by re-running
+	// bootstrap, whereas failing the create after the row committed would
+	// orphan it.
+	if err := db.BootstrapNewTeam(r.Context(), s.allStores, orgID, created.ID); err != nil {
+		log.Printf("[teams] new team %s/%s created but bootstrap failed (prompts/rules/bot may be missing): %v", orgID, created.ID, err)
 	}
 
 	writeJSON(w, http.StatusCreated, teamJSON{ID: created.ID, Name: created.Name, Slug: created.Slug})

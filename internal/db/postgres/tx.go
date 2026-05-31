@@ -210,5 +210,10 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// admin half stays the real admin pool so installation writes +
 		// GetForOrgSystem / backfill route outside the tx.
 		GitHubApps: newGitHubAppsStore(tx, s.admin, newSecretStore(tx, s.admin)),
+		// OrgTemplate: tx-bound so the editor CRUD composes with the
+		// surrounding claims tx. SeedFromShipped + MaterializeIntoTeam refuse
+		// to run inside WithTx (admin-pool bootstrap work) — the bootstrap
+		// path reaches them through the non-tx stores.OrgTemplate instead.
+		OrgTemplate: newTxOrgTemplateStore(tx),
 	}
 }

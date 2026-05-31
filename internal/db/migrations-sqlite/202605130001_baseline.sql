@@ -531,6 +531,84 @@ CREATE INDEX        idx_event_handlers_event_type_enabled ON event_handlers(org_
 CREATE INDEX        idx_event_handlers_kind               ON event_handlers(org_id, kind);
 CREATE INDEX        idx_event_handlers_prompt             ON event_handlers(org_id, prompt_id) WHERE prompt_id IS NOT NULL;
 
+-- === Org default templates (SKY-381) =====================================
+-- The org-level template a new team's prompts + handlers are copied from at
+-- team creation. Org-scoped (no team_id): the template is the *source*, not a
+-- team-owned set — BootstrapNewTeam materializes a per-team copy of it. Mirrors
+-- the prompts / event_handlers content columns so the copy reproduces them
+-- byte-for-byte. system_slug is NOT NULL and stable: the real shipped slug for
+-- source='system' rows, a generated tmpl-<uuid> for admin-authored rows, so the
+-- per-team copy dedupes on (org_id, team_id, system_slug) the same way the
+-- shipped seed does. Local mode (N=1) never populates these — the template is a
+-- multi-mode concept; seedDefaultPrompts still seeds the sole team from the
+-- shipped lists directly.
+CREATE TABLE org_template_prompts (
+    id            TEXT PRIMARY KEY,
+    org_id        TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
+    -- Stable identifier the per-team copy keys on. Shipped rows carry the real
+    -- slug ("system-ci-fix"); admin-authored rows get a generated tmpl-<uuid>.
+    system_slug   TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    body          TEXT NOT NULL,
+    -- source drives the per-team copy's source (and the editor's delete-vs-keep
+    -- affordance): 'system' rows copy as system (creator NULL); 'user' rows are
+    -- admin-authored org defaults and copy as team-owned user prompts.
+    source        TEXT NOT NULL DEFAULT 'user' CHECK (source IN ('system', 'user')),
+    kind          TEXT NOT NULL DEFAULT 'leaf',
+    allowed_tools TEXT NOT NULL DEFAULT '',
+    model         TEXT NOT NULL DEFAULT '',
+    created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- Idempotency key for the org-create seed (ON CONFLICT) and the parent of
+    -- the handler→prompt composite FK below.
+    CONSTRAINT org_template_prompts_org_slug_unique UNIQUE (org_id, system_slug)
+);
+CREATE UNIQUE INDEX org_template_prompts_id_org_unique ON org_template_prompts (id, org_id);
+
+CREATE TABLE org_template_handlers (
+    id              TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
+    system_slug     TEXT NOT NULL,
+    kind            TEXT NOT NULL CHECK (kind IN ('rule','trigger')),
+    event_type      TEXT NOT NULL REFERENCES events_catalog(id) ON DELETE RESTRICT,
+    scope_predicate_json TEXT,
+    -- enabled flows to the per-team copy verbatim: an org admin enabling a
+    -- trigger in the template makes every new team get it enabled (the value
+    -- prop — shipped triggers ship disabled, but the org opts in once here).
+    enabled         BOOLEAN NOT NULL DEFAULT 1,
+    source          TEXT NOT NULL DEFAULT 'user' CHECK (source IN ('system','user')),
+    name             TEXT,
+    default_priority REAL,
+    sort_order       INTEGER,
+    prompt_id        TEXT,
+    breaker_threshold INTEGER,
+    min_autonomy_suitability REAL,
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- A template trigger may only bind a template prompt in the same org;
+    -- deleting a template prompt cascades its triggers (mirrors the team-table
+    -- prompt→trigger CASCADE). NULL prompt_id (rules) skips the FK.
+    FOREIGN KEY (prompt_id, org_id) REFERENCES org_template_prompts (id, org_id) ON DELETE CASCADE,
+    CHECK (kind <> 'rule' OR (
+        prompt_id IS NULL
+        AND breaker_threshold IS NULL
+        AND min_autonomy_suitability IS NULL
+        AND name IS NOT NULL
+        AND default_priority IS NOT NULL
+        AND sort_order IS NOT NULL
+    )),
+    CHECK (kind <> 'trigger' OR (
+        prompt_id IS NOT NULL
+        AND breaker_threshold IS NOT NULL
+        AND min_autonomy_suitability IS NOT NULL
+        AND default_priority IS NULL
+        AND sort_order IS NULL
+        AND name IS NULL
+    )),
+    CONSTRAINT org_template_handlers_org_slug_unique UNIQUE (org_id, system_slug)
+);
+CREATE INDEX idx_org_template_handlers_kind ON org_template_handlers(org_id, kind);
+
 -- === Tasks + runs ========================================================
 CREATE TABLE tasks (
     id                   TEXT PRIMARY KEY,

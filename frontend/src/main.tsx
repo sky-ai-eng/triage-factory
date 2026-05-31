@@ -19,6 +19,7 @@ import PRDashboard from './pages/PRDashboard'
 import Brief from './pages/Brief'
 import Settings from './pages/Settings'
 import Prompts from './pages/Prompts'
+import OrgTemplate from './pages/OrgTemplate'
 import Repos from './pages/Repos'
 import Factory from './pages/Factory'
 import Projects from './pages/Projects'
@@ -120,6 +121,10 @@ function MultiRoutes() {
             <Route path="board/runs/:runID" element={<RunDetail />} />
             <Route path="prs" element={<PRDashboard />} />
             <Route path="prompts" element={<Prompts />} />
+            {/* Org-template editor (SKY-381) — multi-mode only; the page
+                itself redirects non-admins. No local-mode route (N=1 has no
+                template); LocalRoutes' catch-all sends /org-template → /. */}
+            <Route path="org-template" element={<OrgTemplate />} />
             <Route path="repos" element={<Repos />} />
             <Route path="projects" element={<Projects />} />
             <Route path="projects/:id" element={<ProjectDetail />} />

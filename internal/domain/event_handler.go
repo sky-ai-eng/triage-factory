@@ -27,9 +27,18 @@ type EventHandler struct {
 	// (SKY-380 dropped the visibility column; every handler is
 	// team-owned). The router reads this to route tasks created off
 	// matched rules to the correct team's queue.
-	TeamID    string    `json:"team_id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	TeamID string `json:"team_id"`
+	// SystemSlug is the stable identifier for shipped handlers
+	// ("system-rule-ci-check-failed", "system-trigger-ci-fix") and for the
+	// org-template handlers SKY-381 adds (a generated tmpl-<uuid> for
+	// admin-authored rows). Empty for user-authored team handlers — the team
+	// event_handlers scanners don't surface it (it's a seed/idempotency key,
+	// not request data); the org_template store populates it because the
+	// per-team copy keys on (org_id, team_id, system_slug). omitempty so it
+	// stays absent from team-handler responses that never set it.
+	SystemSlug string    `json:"system_slug,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 
 	// Rule-only (nil for triggers).
 	Name            string   `json:"name"`             // required for rules

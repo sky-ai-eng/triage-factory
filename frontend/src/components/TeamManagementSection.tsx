@@ -14,9 +14,10 @@ import { toast } from './Toast/toastStore'
 // ticket). It lists the org's teams (so the admin sees what exists) and
 // takes a name to create another.
 //
-// TODO(SKY-381): the org's default-team template (the handlers + prompts
-// a new team inherits) is edited from org-admin settings — this section
-// is the natural home for that template editor once it lands.
+// The defaults a new team inherits (prompts + handlers) are edited from the
+// dedicated "Org template" route — its own org-admin nav entry, not this
+// section (SKY-381 pinned a distinct surface so the template never reads as
+// just another team). See pages/OrgTemplate.tsx.
 export default function TeamManagementSection() {
   const { teams, createTeam } = useTeams()
   const [name, setName] = useState('')
