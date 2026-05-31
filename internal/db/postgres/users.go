@@ -5,10 +5,19 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// normalizeGitHubHost trims a trailing slash so the (user_id,
+// github_base_url) key matches regardless of whether a caller passes
+// "https://github.com" or "https://github.com/". Reads and writes both
+// normalize, so they agree by construction even when org_settings stored
+// the raw form. Kept minimal (no lowercasing) — GHES path-based hosts are
+// case-sensitive below the authority.
+func normalizeGitHubHost(host string) string { return strings.TrimRight(host, "/") }
 
 // usersStore is the Postgres impl of db.UsersStore. Holds two pools
 // (SKY-296):
@@ -17,7 +26,7 @@ import (
 //     consumer hits this side. RLS policies gate by user_id
 //     identity once they land (SKY-251 territory).
 //   - admin: admin pool (BYPASSRLS). The single consumer is the
-//     poller bootstrap's GetGitHubUsernameSystem read at startup,
+//     poller bootstrap's GetGitHubLoginSystem read at startup,
 //     before any JWT claims context can exist.
 type usersStore struct {
 	q     queryer
@@ -30,47 +39,55 @@ func newUsersStore(q, admin queryer) db.UsersStore {
 
 var _ db.UsersStore = (*usersStore)(nil)
 
-func (s *usersStore) GetGitHubUsername(ctx context.Context, userID string) (string, error) {
-	return getGitHubUsername(ctx, s.q, userID)
+func (s *usersStore) GetGitHubLogin(ctx context.Context, userID, githubBaseURL string) (string, error) {
+	return getGitHubLogin(ctx, s.q, userID, githubBaseURL)
 }
 
-func (s *usersStore) GetGitHubUsernameSystem(ctx context.Context, userID string) (string, error) {
-	return getGitHubUsername(ctx, s.admin, userID)
+func (s *usersStore) GetGitHubLoginSystem(ctx context.Context, userID, githubBaseURL string) (string, error) {
+	return getGitHubLogin(ctx, s.admin, userID, githubBaseURL)
 }
 
-func getGitHubUsername(ctx context.Context, q queryer, userID string) (string, error) {
-	var login sql.NullString
+func getGitHubLogin(ctx context.Context, q queryer, userID, githubBaseURL string) (string, error) {
+	var login string
 	err := q.QueryRowContext(ctx,
-		`SELECT github_username FROM users WHERE id = $1`,
-		userID,
+		`SELECT login FROM user_github_identities WHERE user_id = $1 AND github_base_url = $2`,
+		userID, normalizeGitHubHost(githubBaseURL),
 	).Scan(&login)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("read users.github_username: %w", err)
+		return "", fmt.Errorf("read user_github_identities.login: %w", err)
 	}
-	return login.String, nil
+	return login, nil
 }
 
-func (s *usersStore) SetGitHubUsername(ctx context.Context, userID, login string) error {
-	var val any
-	if login != "" {
-		val = login
-	} // else val stays nil → NULL
-	result, err := s.q.ExecContext(ctx,
-		`UPDATE users SET github_username = $1, updated_at = NOW() WHERE id = $2`,
-		val, userID,
-	)
+func (s *usersStore) UpsertGitHubIdentity(ctx context.Context, userID, githubBaseURL, login, source string) error {
+	// FK on user_id enforces the row-exists contract: a missing user
+	// surfaces as a foreign_key_violation, matching the old
+	// SetGitHubUsername "user not found" guard.
+	_, err := s.q.ExecContext(ctx, `
+		INSERT INTO user_github_identities
+			(user_id, github_base_url, login, source, verified_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, now(), now(), now())
+		ON CONFLICT (user_id, github_base_url) DO UPDATE SET
+			login       = EXCLUDED.login,
+			source      = EXCLUDED.source,
+			verified_at = EXCLUDED.verified_at,
+			updated_at  = now()
+	`, userID, normalizeGitHubHost(githubBaseURL), login, source)
 	if err != nil {
-		return fmt.Errorf("update users.github_username: %w", err)
+		return fmt.Errorf("upsert user_github_identities: %w", err)
 	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("read users.github_username update result: %w", err)
-	}
-	if rows == 0 {
-		return fmt.Errorf("update users.github_username: user %q not found", userID)
+	return nil
+}
+
+func (s *usersStore) ClearGitHubIdentity(ctx context.Context, userID, githubBaseURL string) error {
+	if _, err := s.q.ExecContext(ctx,
+		`DELETE FROM user_github_identities WHERE user_id = $1 AND github_base_url = $2`,
+		userID, normalizeGitHubHost(githubBaseURL),
+	); err != nil {
+		return fmt.Errorf("delete user_github_identities: %w", err)
 	}
 	return nil
 }

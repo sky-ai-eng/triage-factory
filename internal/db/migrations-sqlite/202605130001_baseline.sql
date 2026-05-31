@@ -140,7 +140,6 @@ CREATE TABLE users (
     -- simply ignores (membership re-validation drops it), so no cascade
     -- is needed and the column stays declaration-order-independent.
     last_acting_team_id TEXT,
-    github_username   TEXT,
     -- jira_account_id is the Atlassian-side stable identifier
     -- (Cloud: accountId; Server/DC: legacy key). Used by the
     -- assignee_in / reporter_in / commenter_in predicate matchers.
@@ -152,6 +151,33 @@ CREATE TABLE users (
     jira_display_name TEXT,
     created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- user_github_identities — host-scoped GitHub identity bindings (SKY-396).
+-- Replaces the single users.github_username column: one human can hold a
+-- different login on each GitHub host (github.com for one org, a corp GHES
+-- for another), so the natural key is (user_id, github_base_url), not a lone
+-- column. For the first self-deploy (one org, one host) this is exactly one
+-- row per user — the column behaviour, with a future-proof key.
+--
+-- source records HOW the binding was captured ('pat' | 'connect_oauth' |
+-- 'scim' | 'login_claim') — load-bearing for SKY-271's "verified against the
+-- org's host, never typed-unverified" integrity rule and for trusting /
+-- distrusting a row later. verified_at timestamps the last authenticated
+-- /user (or SCIM / login-claim) confirmation against the host — the hook for
+-- future drift re-checks (rename / left-the-org). An absent row is a durable,
+-- supported state: the NULL-degrades-gracefully contract from SKY-264 carries
+-- over unchanged.
+CREATE TABLE user_github_identities (
+    user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    github_base_url TEXT NOT NULL,
+    login           TEXT NOT NULL,
+    source          TEXT NOT NULL
+                        CHECK (source IN ('pat', 'connect_oauth', 'scim', 'login_claim')),
+    verified_at     TIMESTAMP,
+    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, github_base_url)
 );
 
 CREATE TABLE org_memberships (

@@ -21,7 +21,7 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 	h.Reset(t)
 
 	expectedTables := []string{
-		"orgs", "teams", "users", "memberships", "org_memberships", "sessions", "project_knowledge",
+		"orgs", "teams", "users", "user_github_identities", "memberships", "org_memberships", "sessions", "project_knowledge",
 		"org_settings", "team_settings", "user_settings", "jira_project_status_rules",
 		"team_github_groups", "team_github_repos",
 		"prompts", "projects", "events_catalog", "entities", "entity_links", "events",
@@ -2961,8 +2961,9 @@ func TestRLS_TasksClaimXorRejection(t *testing.T) {
 // tf.current_org_id() — pre-org users (multi-mode signups before
 // active_org_id is set on the session) need this path to work so
 // integrations setup, Jira connect, and settings updates can persist
-// per-user identity (github_username, jira_account_id) before the
-// user has joined an org.
+// per-user identity (display_name, jira_account_id, plus the host-scoped
+// GitHub binding in user_github_identities — see
+// TestRLS_UserGitHubIdentitySelfAccess) before the user has joined an org.
 //
 // The settings.go / credentials.go handlers extract orgID via
 // OrgIDFrom(r.Context()) and pass it through to s.tx.WithTx; in the
@@ -2983,8 +2984,8 @@ func TestRLS_UserSelfWriteWithoutOrgClaim(t *testing.T) {
 	// USING/WITH CHECK both gate only on id = tf.current_user_id()).
 	if err := h.WithUser(t, userID, "", func(tx *sql.Tx) error {
 		_, e := tx.ExecContext(context.Background(),
-			`UPDATE public.users SET github_username = $1 WHERE id = $2`,
-			"test-login", userID)
+			`UPDATE public.users SET display_name = $1 WHERE id = $2`,
+			"test-name", userID)
 		return e
 	}); err != nil {
 		t.Fatalf("self-write with empty org claim should succeed under users_modify; got: %v", err)
@@ -2993,12 +2994,12 @@ func TestRLS_UserSelfWriteWithoutOrgClaim(t *testing.T) {
 	// Confirm the write landed.
 	var landed sql.NullString
 	if err := h.AdminDB.QueryRow(
-		`SELECT github_username FROM public.users WHERE id = $1`, userID,
+		`SELECT display_name FROM public.users WHERE id = $1`, userID,
 	).Scan(&landed); err != nil {
 		t.Fatalf("read-back: %v", err)
 	}
-	if landed.String != "test-login" {
-		t.Errorf("github_username = %q after self-write, want %q", landed.String, "test-login")
+	if landed.String != "test-name" {
+		t.Errorf("display_name = %q after self-write, want %q", landed.String, "test-name")
 	}
 
 	// Negative half: same empty-org claim must NOT let userA touch
@@ -3010,7 +3011,7 @@ func TestRLS_UserSelfWriteWithoutOrgClaim(t *testing.T) {
 	otherUser := SeedUser(t, h, "other-user")
 	if err := h.WithUser(t, userID, "", func(tx *sql.Tx) error {
 		res, e := tx.ExecContext(context.Background(),
-			`UPDATE public.users SET github_username = $1 WHERE id = $2`,
+			`UPDATE public.users SET display_name = $1 WHERE id = $2`,
 			"spoofed", otherUser)
 		if e != nil {
 			return e
@@ -3022,6 +3023,78 @@ func TestRLS_UserSelfWriteWithoutOrgClaim(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("cross-user write under empty org claim should silently no-op, not error: %v", err)
+	}
+}
+
+// TestRLS_UserGitHubIdentitySelfAccess pins the SKY-396 acceptance
+// criterion: a user can read/write only their own user_github_identities
+// rows. The policies (user_github_identities_modify /
+// _select) gate purely on (user_id = tf.current_user_id()) with no org
+// leg, so a pre-org signup can bind a PAT-derived / login-claim identity
+// before joining an org — the same empty-org-claim path the users table
+// test above guards. Two halves: self insert+read succeeds under an empty
+// org claim; a cross-user insert is refused by the WITH CHECK.
+func TestRLS_UserGitHubIdentitySelfAccess(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	userID := SeedUser(t, h, "ident-self")
+	otherUser := SeedUser(t, h, "ident-other")
+
+	// Self write under empty org claim must succeed.
+	if err := h.WithUser(t, userID, "", func(tx *sql.Tx) error {
+		_, e := tx.ExecContext(context.Background(), `
+			INSERT INTO public.user_github_identities
+				(user_id, github_base_url, login, source, verified_at)
+			VALUES ($1, 'https://github.com', $2, 'pat', now())
+		`, userID, "self-login")
+		return e
+	}); err != nil {
+		t.Fatalf("self identity write under empty org claim should succeed; got: %v", err)
+	}
+
+	// Self read returns the row under the same claim.
+	if err := h.WithUser(t, userID, "", func(tx *sql.Tx) error {
+		var login string
+		if e := tx.QueryRowContext(context.Background(),
+			`SELECT login FROM public.user_github_identities WHERE user_id = $1 AND github_base_url = 'https://github.com'`,
+			userID,
+		).Scan(&login); e != nil {
+			return e
+		}
+		if login != "self-login" {
+			t.Errorf("self identity read = %q, want %q", login, "self-login")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("self identity read under empty org claim should succeed; got: %v", err)
+	}
+
+	// Cross-user insert must be refused by user_github_identities_modify's
+	// WITH CHECK (user_id != current_user_id() → policy violation, SQLSTATE
+	// 42501).
+	if err := h.WithUser(t, userID, "", func(tx *sql.Tx) error {
+		_, e := tx.ExecContext(context.Background(), `
+			INSERT INTO public.user_github_identities
+				(user_id, github_base_url, login, source, verified_at)
+			VALUES ($1, 'https://github.com', $2, 'pat', now())
+		`, otherUser, "spoofed")
+		return e
+	}); err == nil {
+		t.Fatal("cross-user identity insert should violate WITH CHECK, but succeeded")
+	} else {
+		assertPgCode(t, err, "42501", "cross-user identity insert")
+	}
+
+	// And the spoofed row must not exist.
+	var n int
+	if err := h.AdminDB.QueryRow(
+		`SELECT count(*) FROM public.user_github_identities WHERE user_id = $1`, otherUser,
+	).Scan(&n); err != nil {
+		t.Fatalf("read-back count: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("otherUser identity rows = %d, want 0", n)
 	}
 }
 

@@ -26,9 +26,9 @@ import (
 // pair at the DB level; this store branches on Kind where the SQL
 // diverges (Create / Update / Seed write different column sets per
 // kind).
-// users is plumbed in so Seed can read users.github_username through the
-// canonical store (gets any forward-compat behavior added there for
-// free) rather than duplicating the SELECT here.
+// users is plumbed in so Seed can read the local user's host-scoped
+// GitHub login through the canonical store (gets any forward-compat
+// behavior added there for free) rather than duplicating the SELECT here.
 type eventHandlerStore struct {
 	q     queryer
 	users db.UsersStore
@@ -69,8 +69,14 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, prom
 	// match-all default. User can edit the rule once they connect.
 	// Best-effort: a missing row (fresh install pre-bootstrap) returns
 	// empty and substituteLocalGitHubIdentity degrades to leaving the
-	// placeholder allowlist empty.
-	localGitHubUsername, _ := s.users.GetGitHubUsername(ctx, runmode.LocalDefaultUserID)
+	// placeholder allowlist empty. Identity is host-scoped (SKY-396):
+	// resolve the org's GitHub host from org_settings, then read the
+	// local user's login for that (user, host) pair.
+	var ghHost sql.NullString
+	_ = s.q.QueryRowContext(ctx,
+		`SELECT github_base_url FROM org_settings WHERE org_id = ?`, orgID,
+	).Scan(&ghHost)
+	localGitHubUsername, _ := s.users.GetGitHubLogin(ctx, runmode.LocalDefaultUserID, ghHost.String)
 
 	// SKY-270: same shape for Jira. The shipped jira-assigned and
 	// jira-became-atomic rules ship with `assignee_in: []` placeholders;

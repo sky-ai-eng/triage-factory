@@ -35,7 +35,10 @@ func (s *Server) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 		if lerr != nil || creds.GitHubPAT == "" {
 			return nil
 		}
-		username, _ = tx.Users.GetGitHubUsername(r.Context(), userID)
+		// Identity is host-scoped (SKY-396): the relevant login is the
+		// one bound to the org's GitHub host (creds.GitHubURL, which
+		// mirrors org_settings.github_base_url).
+		username, _ = tx.Users.GetGitHubLogin(r.Context(), userID, creds.GitHubURL)
 		if username == "" {
 			return nil
 		}
@@ -72,7 +75,10 @@ func (s *Server) handleDashboardPRs(w http.ResponseWriter, r *http.Request) {
 		if lerr != nil || creds.GitHubPAT == "" {
 			return nil
 		}
-		username, _ = tx.Users.GetGitHubUsername(r.Context(), userID)
+		// Identity is host-scoped (SKY-396): the relevant login is the
+		// one bound to the org's GitHub host (creds.GitHubURL, which
+		// mirrors org_settings.github_base_url).
+		username, _ = tx.Users.GetGitHubLogin(r.Context(), userID, creds.GitHubURL)
 		if username == "" {
 			return nil
 		}

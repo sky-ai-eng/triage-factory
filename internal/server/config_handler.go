@@ -90,7 +90,10 @@ func (s *Server) handleTeamMembers(w http.ResponseWriter, r *http.Request) {
 	orgID := OrgIDFrom(r.Context())
 	var username, displayName, jiraAccount string
 	_ = s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		username, _ = tx.Users.GetGitHubUsername(r.Context(), userID)
+		// Identity is host-scoped (SKY-396): resolve the org's GitHub
+		// host from org_settings, then look up the login for (user, host).
+		orgSet, _ := tx.Orgs.GetSettings(r.Context(), orgID)
+		username, _ = tx.Users.GetGitHubLogin(r.Context(), userID, orgSet.GitHubBaseURL)
 		displayName, _ = tx.Users.GetDisplayName(r.Context(), userID)
 		jiraAccount, _, _ = tx.Users.GetJiraIdentity(r.Context(), userID)
 		return nil

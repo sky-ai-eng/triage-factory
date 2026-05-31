@@ -65,10 +65,11 @@ type Stores struct {
 	TeamAgents TeamAgentStore
 
 	// Users owns the users table — non-secret identity facts like
-	// display_name and github_username. The keychain holds the PAT;
-	// the row holds everything else. See SKY-264 for the
-	// github_username column that backs the predicate-matcher
-	// allowlists.
+	// display_name and the Jira binding — plus the host-scoped GitHub
+	// identity bindings in user_github_identities (SKY-396, which
+	// replaced the SKY-264 users.github_username column). The keychain
+	// holds the PAT; the rows hold everything else. The GitHub login
+	// backs the predicate-matcher allowlists, keyed on (user, host).
 	Users UsersStore
 
 	// Tasks owns the tasks table — lifecycle, claims, dedup,

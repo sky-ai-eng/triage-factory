@@ -24,7 +24,7 @@ import (
 func TestManager_RunGitHubCycle_IteratesActiveOrgs(t *testing.T) {
 	orgs := &fakeOrgsStore{ids: []string{"org-a", "org-b", "org-c"}}
 	repos := &recordingRepoStore{}
-	users := &emptyUsersStore{} // GetGitHubUsernameSystem unused — repo path exits first
+	users := &emptyUsersStore{} // GetGitHubLoginSystem unused — repo path exits first
 
 	m := &Manager{orgs: orgs, repos: repos, users: users}
 	m.runGitHubCycle()
@@ -325,7 +325,7 @@ func (r *recordingRepoStore) ListConfiguredNamesSystem(ctx context.Context, orgI
 
 type emptyUsersStore struct{ db.UsersStore }
 
-func (emptyUsersStore) GetGitHubUsernameSystem(ctx context.Context, userID string) (string, error) {
+func (emptyUsersStore) GetGitHubLoginSystem(ctx context.Context, userID, githubBaseURL string) (string, error) {
 	return "", nil
 }
 

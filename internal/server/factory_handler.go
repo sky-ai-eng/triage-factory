@@ -201,11 +201,12 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 	// cross-team rows" refers to on the factory).
 	teamFilter := teamFilterParam(r)
 
-	// Session user's GitHub login drives the "mine" flag. Identity lives on
-	// users.github_username (SKY-264). Missing identity (fresh install, no
-	// GitHub configured) degrades to everyone-is-other rather than failing
-	// the whole endpoint — the factory should still render for a user who's
-	// only set up Jira.
+	// Session user's GitHub login drives the "mine" flag. Identity lives in
+	// user_github_identities, host-scoped (SKY-396) — resolve the org's
+	// GitHub host from org_settings, then look up (user, host). Missing
+	// identity (fresh install, no GitHub configured) degrades to
+	// everyone-is-other rather than failing the whole endpoint — the
+	// factory should still render for a user who's only set up Jira.
 	var ghUsername string
 	var eventCounts, taskCounts, lifetimeCounts map[string]int
 	var activeRuns []domain.FactoryActiveRun
@@ -215,7 +216,8 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 	var awaitingByEntity map[string]struct{}
 	runAuthors := map[string]string{}
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		ghUsername, _ = tx.Users.GetGitHubUsername(r.Context(), userID)
+		orgSet, _ := tx.Orgs.GetSettings(r.Context(), orgID)
+		ghUsername, _ = tx.Users.GetGitHubLogin(r.Context(), userID, orgSet.GitHubBaseURL)
 
 		// --- Throughput counters --------------------------------------
 		var e error

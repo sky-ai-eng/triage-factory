@@ -102,7 +102,7 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 
 	// One WithTx for the full persist: SecretStore (Postgres vault
 	// writes need claims), org_settings (org_settings_update RLS),
-	// and users.github_username (users_update RLS) all share the
+	// and user_github_identities (its own user-scoped RLS) all share the
 	// same claims tx so they either all commit or all roll back.
 	// Local mode collapses to one SQLite tx with the same shape.
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -120,8 +120,12 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 		// — the dashboard / poller short-circuit on empty username and
 		// Settings can re-capture later.
 		if resp.GitHub != nil && resp.GitHub.Login != "" {
-			if err := tx.Users.SetGitHubUsername(r.Context(), userID, resp.GitHub.Login); err != nil {
-				return fmt.Errorf("persist users.github_username: %w", err)
+			// Bind the identity to the org's host explicitly — the host
+			// the PAT just validated against (req.GitHubURL), which is the
+			// same value we persist to org_settings.github_base_url below,
+			// so reads keyed on (user, host) find this row.
+			if err := tx.Users.UpsertGitHubIdentity(r.Context(), userID, req.GitHubURL, resp.GitHub.Login, "pat"); err != nil {
+				return fmt.Errorf("persist github identity: %w", err)
 			}
 		}
 

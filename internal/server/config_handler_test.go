@@ -32,8 +32,11 @@ func TestHandleConfig_LocalDefaults(t *testing.T) {
 // local user) with is_current_user=true.
 func TestHandleTeamMembers_LocalSingleEntry(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.users.SetGitHubUsername(t.Context(), runmode.LocalDefaultUserID, "AidanAllchin"); err != nil {
-		t.Fatalf("seed github_username: %v", err)
+	// Seed the host-scoped identity (SKY-396) at the empty host — the test
+	// server's org_settings has no github_base_url configured, so the
+	// handler resolves host="" and looks up (user, "").
+	if err := s.users.UpsertGitHubIdentity(t.Context(), runmode.LocalDefaultUserID, "", "AidanAllchin", "pat"); err != nil {
+		t.Fatalf("seed github identity: %v", err)
 	}
 
 	rec := doJSON(t, s, http.MethodGet, "/api/team/members", nil)

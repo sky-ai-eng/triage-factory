@@ -24,7 +24,7 @@ import (
 // has the SELECT grants, authenticator doesn't) and a claims-set
 // helper (RLS policies gate on tf.current_user_id() / current_org_id())
 // would fail at either layer if the helper skipped one of them. The
-// smoke test here exercises both axes by calling UsersStore.GetGitHubUsername
+// smoke test here exercises both axes by calling UsersStore.GetGitHubLogin
 // inside fn — the SELECT runs through the tx, which means it must
 // pass role + RLS to return without error.
 func TestSyntheticClaimsWithTx_Postgres_RunsFn_UnderClaimsAndRole(t *testing.T) {
@@ -37,8 +37,8 @@ func TestSyntheticClaimsWithTx_Postgres_RunsFn_UnderClaimsAndRole(t *testing.T) 
 	called := false
 	if err := stores.Tx.SyntheticClaimsWithTx(context.Background(), orgID, userID, func(tx db.TxStores) error {
 		called = true
-		if _, err := tx.Users.GetGitHubUsername(context.Background(), userID); err != nil {
-			return fmt.Errorf("GetGitHubUsername under synthetic claims: %w", err)
+		if _, err := tx.Users.GetGitHubLogin(context.Background(), userID, "https://github.com"); err != nil {
+			return fmt.Errorf("GetGitHubLogin under synthetic claims: %w", err)
 		}
 		return nil
 	}); err != nil {

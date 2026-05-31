@@ -197,17 +197,18 @@ func bootstrapBareClones(database *sql.DB, repos db.RepoStore) {
 	worktree.BootstrapBareClones(context.Background(), targets)
 }
 
-// bootstrapLocalGitHubIdentity populates users.github_username on the
-// local synthetic user row by deriving the login from the configured
-// PAT+URL. Runs at startup before seedDefaultPrompts so the SQLite
-// Seed substitution sees the populated value when it wires
+// bootstrapLocalGitHubIdentity populates the local synthetic user's
+// host-scoped GitHub identity row (user_github_identities, SKY-396) by
+// deriving the login from the configured PAT+URL, bound to the org's host.
+// Runs at startup before seedDefaultPrompts so the SQLite Seed
+// substitution sees the populated value when it wires
 // author_in/reviewer_in/commenter_in allowlists into shipped event
 // handler predicates.
 //
-// No-op when (a) the column already has a value, (b) credentials are
-// absent (Settings UI capture is the alternate write path), or
-// (c) ValidateGitHub fails (PAT invalid / GitHub down — the user
-// can recapture via Settings, or the next boot retries).
+// No-op when (a) an identity row already exists for the host, (b)
+// credentials are absent (Settings UI capture is the alternate write
+// path), or (c) ValidateGitHub fails (PAT invalid / GitHub down — the
+// user can recapture via Settings, or the next boot retries).
 func bootstrapLocalGitHubIdentity(users db.UsersStore, secrets db.SecretStore) error {
 	if runmode.Current() != runmode.ModeLocal {
 		return nil
@@ -218,22 +219,22 @@ func bootstrapLocalGitHubIdentity(users db.UsersStore, secrets db.SecretStore) e
 	if creds.GitHubPAT == "" || creds.GitHubURL == "" {
 		return nil
 	}
-	existing, err := users.GetGitHubUsername(ctx, runmode.LocalDefaultUserID)
+	existing, err := users.GetGitHubLogin(ctx, runmode.LocalDefaultUserID, creds.GitHubURL)
 	if err != nil {
-		return fmt.Errorf("read users.github_username: %w", err)
+		return fmt.Errorf("read github identity: %w", err)
 	}
 	if existing != "" {
 		return nil
 	}
 	ghUser, err := auth.ValidateGitHub(creds.GitHubURL, creds.GitHubPAT)
 	if err != nil {
-		log.Printf("[bootstrap] derive users.github_username from PAT: %v (continuing — Settings will capture next save)", err)
+		log.Printf("[bootstrap] derive github identity from PAT: %v (continuing — Settings will capture next save)", err)
 		return nil
 	}
-	if err := users.SetGitHubUsername(ctx, runmode.LocalDefaultUserID, ghUser.Login); err != nil {
-		return fmt.Errorf("persist users.github_username: %w", err)
+	if err := users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, creds.GitHubURL, ghUser.Login, "pat"); err != nil {
+		return fmt.Errorf("persist github identity: %w", err)
 	}
-	log.Printf("[bootstrap] users.github_username: derived %q from credentials", ghUser.Login)
+	log.Printf("[bootstrap] github identity: derived %q from credentials", ghUser.Login)
 	return nil
 }
 
@@ -676,11 +677,11 @@ func main() {
 	// before EventHandlers.Seed runs so the FK from event_handlers.prompt_id
 	// → prompts.id resolves on the trigger rows.
 	//
-	// Populate users.github_username before seeding event handlers so the
-	// SQLite Seed substitution sees the local user's login when it wires
-	// allowlist placeholders on shipped predicates.
+	// Populate the local user's GitHub identity before seeding event
+	// handlers so the SQLite Seed substitution sees the local user's login
+	// when it wires allowlist placeholders on shipped predicates.
 	if err := bootstrapLocalGitHubIdentity(stores.Users, stores.Secrets); err != nil {
-		log.Printf("[bootstrap] users.github_username: %v (continuing — Settings will capture on next save)", err)
+		log.Printf("[bootstrap] github identity: %v (continuing — Settings will capture on next save)", err)
 	}
 	if err := bootstrapLocalJiraIdentity(stores.Users, stores.Secrets); err != nil {
 		log.Printf("[bootstrap] users.jira_identity: %v (continuing — Settings will capture on next save)", err)

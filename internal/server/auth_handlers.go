@@ -594,7 +594,16 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		// rig still works while production calls (always wired)
 		// populate identity from the users row.
 		if s.users != nil {
-			resp.GitHubUsername, _ = s.users.GetGitHubUsername(r.Context(), runmode.LocalDefaultUserID)
+			// Identity is host-scoped (SKY-396): resolve the local org's
+			// GitHub host, then look up the login for (user, host). s.orgs
+			// is wired by New(); guard like s.users for the bare-rig test.
+			var ghHost string
+			if s.orgs != nil {
+				if orgSet, err := s.orgs.GetSettings(r.Context(), runmode.LocalDefaultOrgID); err == nil {
+					ghHost = orgSet.GitHubBaseURL
+				}
+			}
+			resp.GitHubUsername, _ = s.users.GetGitHubLogin(r.Context(), runmode.LocalDefaultUserID, ghHost)
 			resp.JiraAccountID, resp.JiraDisplayName, _ = s.users.GetJiraIdentity(r.Context(), runmode.LocalDefaultUserID)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -618,18 +627,36 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	// that user's row — not "whatever ID the caller passes." Once
 	// D9 introduces the app pool with RLS enforcement, the same
 	// queries become RLS-defended end-to-end without further edits.
+	// Pass the session's active org as the org claim too (not just sub) so
+	// the host-scoped GitHub identity lookup below can prefer the row bound
+	// to the active org's GitHub host (SKY-396). A stale/empty active org
+	// is harmless: org_settings RLS filters it out and the lookup falls
+	// back to the most-recently-verified identity row.
 	err := tfdb.WithTx(r.Context(), s.db,
-		tfdb.Claims{Sub: claims.Subject},
+		tfdb.Claims{Sub: claims.Subject, OrgID: resp.ActiveOrgID},
 		func(tx *sql.Tx) error {
+			// Identity is host-scoped: prefer the login bound to the active
+			// org's GitHub host, else the most recently verified row. An
+			// absent row scans to "" exactly as the old NULL column did.
 			if err := tx.QueryRowContext(r.Context(), `
-				SELECT id::text,
-				       COALESCE(display_name, ''),
-				       COALESCE(avatar_url, ''),
-				       COALESCE(github_username, ''),
-				       COALESCE(jira_account_id, ''),
-				       COALESCE(jira_display_name, '')
-				  FROM public.users
-				 WHERE id = tf.current_user_id()
+				SELECT u.id::text,
+				       COALESCE(u.display_name, ''),
+				       COALESCE(u.avatar_url, ''),
+				       COALESCE((
+				           SELECT i.login
+				             FROM user_github_identities i
+				            WHERE i.user_id = u.id
+				            ORDER BY (i.github_base_url = (
+				                        SELECT os.github_base_url FROM org_settings os
+				                         WHERE os.org_id = tf.current_org_id()
+				                      )) DESC NULLS LAST,
+				                     i.verified_at DESC NULLS LAST
+				            LIMIT 1
+				       ), ''),
+				       COALESCE(u.jira_account_id, ''),
+				       COALESCE(u.jira_display_name, '')
+				  FROM public.users u
+				 WHERE u.id = tf.current_user_id()
 			`).Scan(&resp.ID, &resp.DisplayName, &resp.AvatarURL, &resp.GitHubUsername, &resp.JiraAccountID, &resp.JiraDisplayName); err != nil {
 				return fmt.Errorf("user lookup: %w", err)
 			}
@@ -700,16 +727,39 @@ func upsertUserFromClaims(ctx context.Context, db *sql.DB, userID uuid.UUID, cla
 			ghUsername, _ = claims.UserMetadata["preferred_username"].(string)
 		}
 	}
-	_, err := db.ExecContext(ctx, `
-		INSERT INTO public.users (id, display_name, avatar_url, github_username, created_at, updated_at)
-		VALUES ($1, NULLIF($2, ''), NULLIF($3, ''), NULLIF($4, ''), now(), now())
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO public.users (id, display_name, avatar_url, created_at, updated_at)
+		VALUES ($1, NULLIF($2, ''), NULLIF($3, ''), now(), now())
 		ON CONFLICT (id) DO UPDATE
-		   SET display_name    = COALESCE(EXCLUDED.display_name,    public.users.display_name),
-		       avatar_url      = COALESCE(EXCLUDED.avatar_url,      public.users.avatar_url),
-		       github_username = COALESCE(EXCLUDED.github_username, public.users.github_username),
-		       updated_at      = now()
-	`, userID, displayName, avatarURL, ghUsername)
-	return err
+		   SET display_name = COALESCE(EXCLUDED.display_name, public.users.display_name),
+		       avatar_url   = COALESCE(EXCLUDED.avatar_url,   public.users.avatar_url),
+		       updated_at   = now()
+	`, userID, displayName, avatarURL); err != nil {
+		return err
+	}
+
+	// GitHub-login claim → host-scoped identity row (SKY-396). The GoTrue
+	// GitHub social provider is hardwired to github.com, so this binding is
+	// always against github.com with source='login_claim' — the landmine
+	// SKY-271 demotes behind a capture seam (it silently NULLs the day login
+	// becomes Entra SAML). Skip when the claim carries no username
+	// (non-GitHub login provider): the row stays absent, preserving any
+	// previously-captured identity and honoring the NULL-degrades contract.
+	if ghUsername != "" {
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO public.user_github_identities
+				(user_id, github_base_url, login, source, verified_at, created_at, updated_at)
+			VALUES ($1, 'https://github.com', $2, 'login_claim', now(), now(), now())
+			ON CONFLICT (user_id, github_base_url) DO UPDATE
+			   SET login       = EXCLUDED.login,
+			       source      = EXCLUDED.source,
+			       verified_at = EXCLUDED.verified_at,
+			       updated_at  = now()
+		`, userID, ghUsername); err != nil {
+			return fmt.Errorf("upsert github identity from login claim: %w", err)
+		}
+	}
+	return nil
 }
 
 // gotrueRefreshFunc — POST /token?grant_type=refresh_token.

@@ -1471,11 +1471,38 @@ CREATE TABLE public.users (
     timezone text DEFAULT 'UTC'::text NOT NULL,
     default_org_id uuid,
     last_acting_team_id uuid,
-    github_username text,
     jira_account_id text,
     jira_display_name text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: user_github_identities; Type: TABLE; Schema: public; Owner: -
+--
+
+-- Host-scoped GitHub identity bindings (SKY-396). Replaces the single
+-- users.github_username column: one human can hold a different login on each
+-- GitHub host (github.com for one org, a corp GHES for another), so the
+-- natural key is (user_id, github_base_url), not a lone column. For the first
+-- self-deploy (one org, one host) this is exactly one row per user.
+--
+-- source records HOW the binding was captured ('pat' | 'connect_oauth' |
+-- 'scim' | 'login_claim') — load-bearing for SKY-271's "verified against the
+-- org's host, never typed-unverified" integrity rule. verified_at timestamps
+-- the last authenticated /user (or SCIM / login-claim) confirmation against
+-- the host — the hook for future drift re-checks. An absent row is a durable,
+-- supported state (the NULL-degrades-gracefully contract from SKY-264).
+CREATE TABLE public.user_github_identities (
+    user_id uuid NOT NULL,
+    github_base_url text NOT NULL,
+    login text NOT NULL,
+    source text NOT NULL,
+    verified_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT user_github_identities_source_check CHECK ((source = ANY (ARRAY['pat'::text, 'connect_oauth'::text, 'scim'::text, 'login_claim'::text])))
 );
 
 
@@ -2012,6 +2039,14 @@ ALTER TABLE ONLY public.teams
 
 
 --
+-- Name: user_github_identities user_github_identities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_github_identities
+    ADD CONSTRAINT user_github_identities_pkey PRIMARY KEY (user_id, github_base_url);
+
+
+--
 -- Name: user_settings user_settings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2490,6 +2525,13 @@ CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.team_settings FOR EACH ROW
 --
 
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.teams FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+
+
+--
+-- Name: user_github_identities set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.user_github_identities FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
 
 
 --
@@ -3346,6 +3388,14 @@ ALTER TABLE ONLY public.teams
 
 ALTER TABLE ONLY public.teams
     ADD CONSTRAINT teams_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: user_github_identities user_github_identities_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_github_identities
+    ADD CONSTRAINT user_github_identities_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -4307,6 +4357,30 @@ CREATE POLICY teams_update ON public.teams FOR UPDATE USING (((org_id = tf.curre
 
 
 --
+-- Name: user_github_identities; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.user_github_identities ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: user_github_identities user_github_identities_modify; Type: POLICY; Schema: public; Owner: -
+--
+
+-- A user can read/write only their own identity rows. No org_id leg: a
+-- pre-org multi-mode signup (active_org_id not yet set) must still be able to
+-- bind a PAT-derived / login-claim identity, mirroring users_modify. Any
+-- future team-roster read goes through an explicit membership join, never a
+-- blanket org read of this table.
+CREATE POLICY user_github_identities_modify ON public.user_github_identities USING ((user_id = tf.current_user_id())) WITH CHECK ((user_id = tf.current_user_id()));
+
+--
+-- Name: user_github_identities user_github_identities_select; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_github_identities_select ON public.user_github_identities FOR SELECT USING ((user_id = tf.current_user_id()));
+
+
+--
 -- Name: user_settings; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -4997,6 +5071,17 @@ GRANT ALL ON TABLE public.teams TO anon;
 GRANT ALL ON TABLE public.teams TO authenticated;
 GRANT ALL ON TABLE public.teams TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.teams TO tf_app;
+
+
+--
+-- Name: TABLE user_github_identities; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.user_github_identities TO postgres;
+GRANT ALL ON TABLE public.user_github_identities TO anon;
+GRANT ALL ON TABLE public.user_github_identities TO authenticated;
+GRANT ALL ON TABLE public.user_github_identities TO service_role;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.user_github_identities TO tf_app;
 
 
 --

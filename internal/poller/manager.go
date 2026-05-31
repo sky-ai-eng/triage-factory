@@ -30,7 +30,7 @@ type Manager struct {
 	// argument. See the per-org loops in runGitHubCycle / runJiraCycle.
 	tasks        db.TaskStore
 	entities     db.EntityStore
-	users        db.UsersStore            // source of the session user's github_username
+	users        db.UsersStore            // source of the local user's host-scoped GitHub identity (SKY-396)
 	repos        db.RepoStore             // configured-repo names for GitHub poller startup
 	orgs         db.OrgsStore             // enumerate active orgs at each poll tick + per-org settings (GitHub/Jira base URLs, poll intervals)
 	jiraRules    db.JiraStatusRulesStore  // per-team Jira project rules; discovery polls the org-wide union (every team's rules)
@@ -514,7 +514,7 @@ func (m *Manager) reconcileGitHubGroups(ctx context.Context, orgID string, repos
 // means the org simply isn't configured for GitHub and is skipped silently.
 //
 // In local mode the poller acts as the lone local user, so it reads their
-// github_username + team memberships to drive the user-perspective dashboard
+// host-scoped GitHub login + team memberships to drive the user-perspective dashboard
 // backfill and team-based review-request detection. Multi-mode PAT fallback
 // has no local sentinel user, so it passes no username (org-wide REST
 // discovery doesn't need one; dashboard history is local/PAT-only).
@@ -532,9 +532,18 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 	var username string
 	var userTeams []string
 	if isLocal {
-		username, err = m.users.GetGitHubUsernameSystem(ctx, runmode.LocalDefaultUserID)
+		// Identity is host-scoped (SKY-396): resolve the org's GitHub host
+		// from org_settings, then read the local user's login for that
+		// (user, host) pair. Boot-time goroutine with no JWT claims → the
+		// `...System` admin-pool variants.
+		orgSet, serr := m.orgs.GetSettingsSystem(ctx, orgID)
+		if serr != nil {
+			log.Printf("[github] org %s: read org settings: %v", orgID, serr)
+			return
+		}
+		username, err = m.users.GetGitHubLoginSystem(ctx, runmode.LocalDefaultUserID, orgSet.GitHubBaseURL)
 		if err != nil {
-			log.Printf("[github] org %s: read users.github_username: %v", orgID, err)
+			log.Printf("[github] org %s: read github identity: %v", orgID, err)
 			return
 		}
 		if teams, terr := client.ListMyTeams(); terr != nil {

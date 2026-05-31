@@ -33,7 +33,7 @@ type Server struct {
 	eventHandlers db.EventHandlerStore
 	agents        db.AgentStore     // SKY-261 D-Claims: resolves the org's agent for claim stamps
 	teamAgents    db.TeamAgentStore // SKY-261 D-Claims: re-checks team_agents.enabled on swipe-delegate / factory-delegate
-	users         db.UsersStore     // SKY-264: github_username + display_name on the synthetic local user row
+	users         db.UsersStore     // display_name + Jira binding on the user row; host-scoped GitHub identity via user_github_identities (SKY-396)
 	chains        db.ChainStore
 	tasks         db.TaskStore            // SKY-283: task lifecycle, claim, queue + factory snapshot reads
 	factory       db.FactoryReadStore     // SKY-292: factory snapshot reads

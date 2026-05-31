@@ -105,7 +105,7 @@ func New(admin, app *sql.DB) db.Stores {
 		// Users wires both pools (SKY-296): app for request-equivalent
 		// reads/writes (RLS gated by tf.user_can_read_user() /
 		// tf.user_can_update_user()), admin for the poller bootstrap's
-		// GetGitHubUsernameSystem read at startup. Row creation is an
+		// GetGitHubLoginSystem read at startup. Row creation is an
 		// auth-flow concern owned by SKY-251.
 		Users: newUsersStore(app, admin),
 		// Tasks wires both pools (SKY-297): app for request-equivalent
