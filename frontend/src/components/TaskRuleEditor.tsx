@@ -56,12 +56,12 @@ export default function TaskRuleEditor({
   // the server resolves the sole team. Seeded when the panel opens, once
   // teams have loaded; teamsLoaded also gates the create submit so a
   // multi-team user can't submit team_id:'' in the cold-load window.
-  const { teams, preferredTeamId, loaded: teamsLoaded } = useTeams()
+  const { teams, lastActingTeamId, loaded: teamsLoaded } = useTeams()
   const [team, setTeam] = useState('')
   useEffect(() => {
     if (!open || isEdit || !teamsLoaded) return
-    setTeam(pickerDefault(teams, preferredTeamId))
-  }, [open, isEdit, teamsLoaded, teams, preferredTeamId])
+    setTeam(pickerDefault(teams, lastActingTeamId))
+  }, [open, isEdit, teamsLoaded, teams, lastActingTeamId])
   // When the page locks the team (single-team prompts page), create uses it
   // directly and the picker is hidden; otherwise the modal's own write
   // picker applies. lockedTeamId is non-empty only for a ≥2-team user, by

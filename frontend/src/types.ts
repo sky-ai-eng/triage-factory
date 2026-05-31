@@ -54,11 +54,11 @@ export interface TeamSummary {
 }
 
 // TeamsResponse is GET /api/teams: the viewer's teams in the active org
-// plus their sticky default (preferred_team_id), present only when it is
+// plus their sticky default (last_acting_team_id), present only when it is
 // still one of those teams.
 export interface TeamsResponse {
   teams: TeamSummary[]
-  preferred_team_id?: string
+  last_acting_team_id?: string
 }
 
 // TeamBot mirrors the bot half of /api/team/members (SKY-330). Null

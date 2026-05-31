@@ -52,7 +52,7 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
   // backlog to triage) AND the claim team. teamRef keeps fetchStock's
   // identity stable (it's a polling-recursion + WS dep). Renders only at
   // ≥2 teams; below that team='' and the server resolves the sole team.
-  const { teams, preferredTeamId, loaded: teamsLoaded } = useTeams()
+  const { teams, lastActingTeamId, loaded: teamsLoaded } = useTeams()
   const [team, setTeam] = useState('')
   const teamRef = useRef('')
   useEffect(() => {
@@ -62,8 +62,8 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
   useEffect(() => {
     if (teamSeeded.current || !teamsLoaded) return
     teamSeeded.current = true
-    setTeam(pickerDefault(teams, preferredTeamId))
-  }, [teamsLoaded, teams, preferredTeamId])
+    setTeam(pickerDefault(teams, lastActingTeamId))
+  }, [teamsLoaded, teams, lastActingTeamId])
 
   // Keep refs for component lifecycle and polling so retry timers don't
   // continue firing after unmount.

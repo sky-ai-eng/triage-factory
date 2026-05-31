@@ -21,12 +21,12 @@ type teamJSON struct {
 
 // teamsResponse is GET /api/teams. Teams is the caller's teams in the
 // active org (the count drives whether the frontend renders any team
-// control — the ≥2 gate). PreferredTeamID is the caller's sticky default
+// control — the ≥2 gate). LastActingTeamID is the caller's sticky default
 // when it is still one of those teams (a stale default is omitted so the
 // frontend never seeds to a team that isn't offered).
 type teamsResponse struct {
 	Teams           []teamJSON `json:"teams"`
-	PreferredTeamID string     `json:"preferred_team_id,omitempty"`
+	LastActingTeamID string     `json:"last_acting_team_id,omitempty"`
 }
 
 // handleTeamsList returns the caller's teams in the active org plus their
@@ -53,7 +53,7 @@ func (s *Server) handleTeamsList(w http.ResponseWriter, r *http.Request) {
 		if e != nil {
 			return e
 		}
-		preferred, e = tx.Users.GetPreferredTeam(r.Context(), userID)
+		preferred, e = tx.Users.GetLastActingTeam(r.Context(), userID)
 		return e
 	}); err != nil {
 		internalError(w, "teams", err)
@@ -68,56 +68,7 @@ func (s *Server) handleTeamsList(w http.ResponseWriter, r *http.Request) {
 			validPreferred = preferred
 		}
 	}
-	writeJSON(w, http.StatusOK, teamsResponse{Teams: out, PreferredTeamID: validPreferred})
-}
-
-// handlePreferredTeamUpdate sets (or clears) the caller's sticky default
-// team. An empty team_id clears it; a non-empty value must be one of the
-// caller's current-org teams — you can only pin a team you belong to.
-// users_modify RLS gates the write to the caller's own row.
-//
-// PUT /api/me/preferred-team  body: { "team_id": "<uuid>"|"" }
-func (s *Server) handlePreferredTeamUpdate(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
-	if !ok {
-		return
-	}
-	userID := ClaimsFrom(r.Context()).Subject
-
-	var body struct {
-		TeamID string `json:"team_id"`
-	}
-	if !decodeJSON(w, r, &body, "") {
-		return
-	}
-	teamID := strings.TrimSpace(body.TeamID)
-
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if teamID != "" {
-			teams, e := tx.Teams.ListForUser(r.Context(), orgID)
-			if e != nil {
-				return e
-			}
-			member := false
-			for _, t := range teams {
-				if t.ID == teamID {
-					member = true
-					break
-				}
-			}
-			if !member {
-				return errActingTeamForbidden
-			}
-		}
-		return tx.Users.SetPreferredTeam(r.Context(), userID, teamID)
-	}); err != nil {
-		if writeIfActingTeamError(w, err) {
-			return
-		}
-		internalError(w, "preferred team", err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"preferred_team_id": teamID})
+	writeJSON(w, http.StatusOK, teamsResponse{Teams: out, LastActingTeamID: validPreferred})
 }
 
 // handleTeamCreate is the org-admin "add team" affordance — the hosted-

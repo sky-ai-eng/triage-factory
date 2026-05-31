@@ -142,7 +142,7 @@ export default function PromptDrawer({
   // `team` stays '' and the server resolves the sole team. teamsLoaded
   // gates the create submit so a multi-team user can't submit team_id:''
   // in the cold-load window before /api/teams resolves.
-  const { teams, preferredTeamId, loaded: teamsLoaded } = useTeams()
+  const { teams, lastActingTeamId, loaded: teamsLoaded } = useTeams()
   const [team, setTeam] = useState('')
   // When the page locks the team (single-team prompts page), create uses it
   // directly and the picker is hidden; otherwise the modal's own write
@@ -247,8 +247,8 @@ export default function PromptDrawer({
   // pre-fetch state.
   useEffect(() => {
     if (!isNew || !teamsLoaded) return
-    setTeam(pickerDefault(teams, preferredTeamId))
-  }, [isNew, open, teamsLoaded, teams, preferredTeamId])
+    setTeam(pickerDefault(teams, lastActingTeamId))
+  }, [isNew, open, teamsLoaded, teams, lastActingTeamId])
 
   // Resize drag handlers
   const onMouseDown = useCallback(

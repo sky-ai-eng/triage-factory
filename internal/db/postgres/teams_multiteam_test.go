@@ -173,10 +173,10 @@ func TestMultiTeam_Postgres(t *testing.T) {
 	t.Run("sticky_default_round_trips", func(t *testing.T) {
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 			users := pgstore.NewForTx(tx).Users
-			if e := users.SetPreferredTeam(ctx, userID, teamB); e != nil {
+			if e := users.SetLastActingTeam(ctx, userID, teamB); e != nil {
 				return fmt.Errorf("set: %w", e)
 			}
-			got, e := users.GetPreferredTeam(ctx, userID)
+			got, e := users.GetLastActingTeam(ctx, userID)
 			if e != nil {
 				return fmt.Errorf("get: %w", e)
 			}
@@ -184,10 +184,10 @@ func TestMultiTeam_Postgres(t *testing.T) {
 				t.Errorf("preferred team = %q; want %q", got, teamB)
 			}
 			// Clearing resets to NULL.
-			if e := users.SetPreferredTeam(ctx, userID, ""); e != nil {
+			if e := users.SetLastActingTeam(ctx, userID, ""); e != nil {
 				return fmt.Errorf("clear: %w", e)
 			}
-			got, e = users.GetPreferredTeam(ctx, userID)
+			got, e = users.GetLastActingTeam(ctx, userID)
 			if e != nil {
 				return fmt.Errorf("get after clear: %w", e)
 			}

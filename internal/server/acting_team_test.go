@@ -113,7 +113,7 @@ func TestResolveActingTeam_PickForeignTeamRejected(t *testing.T) {
 func TestResolveActingTeam_StickyDefaultSeedsAmbiguous(t *testing.T) {
 	s := newTestServer(t)
 	second := seedTeam(t, s, runmode.LocalDefaultOrgID, "second")
-	if err := s.users.SetPreferredTeam(t.Context(), runmode.LocalDefaultUserID, second); err != nil {
+	if err := s.users.SetLastActingTeam(t.Context(), runmode.LocalDefaultUserID, second); err != nil {
 		t.Fatalf("set preferred team: %v", err)
 	}
 

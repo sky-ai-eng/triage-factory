@@ -55,7 +55,7 @@ func writeIfActingTeamError(w http.ResponseWriter, err error) bool {
 // no primitive.
 //
 // Resolution order (see resolveActingTeamID); on success the resolved
-// team is stamped onto users.preferred_team_id as the durable last-used
+// team is stamped onto users.last_acting_team_id as the durable last-used
 // write default. The stamp is best-effort — a preference-write failure
 // must not fail the actual write — and runs under the caller's claims
 // (users_modify RLS gates id = current_user_id()). Call this inside the
@@ -70,7 +70,7 @@ func resolveActingTeam(ctx context.Context, teams db.TeamsStore, users db.UsersS
 		// user's last-used default. Ignore the error — the write itself
 		// has already been decided and must not fail on a preference miss
 		// (e.g. a missing user row in a thin fixture).
-		_ = users.SetPreferredTeam(ctx, userID, resolved)
+		_ = users.SetLastActingTeam(ctx, userID, resolved)
 	}
 	return resolved, nil
 }
@@ -87,7 +87,7 @@ func resolveActingTeam(ctx context.Context, teams db.TeamsStore, users db.UsersS
 //     for a team they don't belong to is rejected (errActingTeamForbidden)
 //     rather than silently honored.
 //
-//  2. Last-written default — users.preferred_team_id, when set and still
+//  2. Last-written default — users.last_acting_team_id, when set and still
 //     one of the caller's current-org teams. This is the team the
 //     caller's previous write landed on (stamped by resolveActingTeam);
 //     it only applies when no explicit pick arrived (a ≤1-team caller,
@@ -129,13 +129,13 @@ func resolveActingTeamID(ctx context.Context, teams db.TeamsStore, users db.User
 	}
 
 	// 2. Last-written default (only when still a member).
-	preferred, err := users.GetPreferredTeam(ctx, userID)
+	lastActing, err := users.GetLastActingTeam(ctx, userID)
 	if err != nil {
-		return "", fmt.Errorf("acting team: preferred team: %w", err)
+		return "", fmt.Errorf("acting team: lastActing team: %w", err)
 	}
-	if preferred != "" {
-		if _, ok := member[preferred]; ok {
-			return preferred, nil
+	if lastActing != "" {
+		if _, ok := member[lastActing]; ok {
+			return lastActing, nil
 		}
 	}
 
@@ -187,13 +187,13 @@ func resolveReadTeam(ctx context.Context, teams db.TeamsStore, users db.UsersSto
 			return picked, nil
 		}
 	}
-	preferred, err := users.GetPreferredTeam(ctx, userID)
+	lastActing, err := users.GetLastActingTeam(ctx, userID)
 	if err != nil {
-		return "", fmt.Errorf("read team: preferred team: %w", err)
+		return "", fmt.Errorf("read team: lastActing team: %w", err)
 	}
-	if preferred != "" {
-		if _, ok := member[preferred]; ok {
-			return preferred, nil
+	if lastActing != "" {
+		if _, ok := member[lastActing]; ok {
+			return lastActing, nil
 		}
 	}
 	if len(myTeams) > 0 {

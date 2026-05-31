@@ -28,8 +28,8 @@ func TestTeamsList_LocalReturnsSoleTeam(t *testing.T) {
 	if resp.Teams[0].ID != runmode.LocalDefaultTeamID {
 		t.Errorf("team id = %q, want %q", resp.Teams[0].ID, runmode.LocalDefaultTeamID)
 	}
-	if resp.PreferredTeamID != "" {
-		t.Errorf("preferred = %q, want empty (unset)", resp.PreferredTeamID)
+	if resp.LastActingTeamID != "" {
+		t.Errorf("preferred = %q, want empty (unset)", resp.LastActingTeamID)
 	}
 }
 
@@ -61,10 +61,10 @@ func TestTeamsList_TwoTeams(t *testing.T) {
 	}
 }
 
-// TestPreferredTeam_SetGetClear: the sticky default round-trips through
+// TestLastActingTeam_SetGetClear: the sticky default round-trips through
 // PUT /api/me/preferred-team and surfaces back on GET /api/teams; an
 // empty body clears it.
-func TestPreferredTeam_SetGetClear(t *testing.T) {
+func TestLastActingTeam_SetGetClear(t *testing.T) {
 	s := newTestServer(t)
 
 	rec := doJSON(t, s, http.MethodPut, "/api/me/preferred-team",
@@ -78,8 +78,8 @@ func TestPreferredTeam_SetGetClear(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp.PreferredTeamID != runmode.LocalDefaultTeamID {
-		t.Errorf("preferred = %q, want %q", resp.PreferredTeamID, runmode.LocalDefaultTeamID)
+	if resp.LastActingTeamID != runmode.LocalDefaultTeamID {
+		t.Errorf("preferred = %q, want %q", resp.LastActingTeamID, runmode.LocalDefaultTeamID)
 	}
 
 	// Clear.
@@ -88,21 +88,21 @@ func TestPreferredTeam_SetGetClear(t *testing.T) {
 		t.Fatalf("clear status = %d, want 200", rec.Code)
 	}
 	rec = doJSON(t, s, http.MethodGet, "/api/teams", nil)
-	// Fresh struct: preferred_team_id is omitempty, so a cleared default
+	// Fresh struct: last_acting_team_id is omitempty, so a cleared default
 	// is absent from the JSON and would leave a reused struct's field
 	// stale.
 	var afterClear teamsResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &afterClear); err != nil {
 		t.Fatalf("decode after clear: %v", err)
 	}
-	if afterClear.PreferredTeamID != "" {
-		t.Errorf("preferred after clear = %q, want empty", afterClear.PreferredTeamID)
+	if afterClear.LastActingTeamID != "" {
+		t.Errorf("preferred after clear = %q, want empty", afterClear.LastActingTeamID)
 	}
 }
 
-// TestPreferredTeam_ForeignTeamRejected: pinning a team the caller isn't
+// TestLastActingTeam_ForeignTeamRejected: pinning a team the caller isn't
 // a member of is a 400, not a silent write.
-func TestPreferredTeam_ForeignTeamRejected(t *testing.T) {
+func TestLastActingTeam_ForeignTeamRejected(t *testing.T) {
 	s := newTestServer(t)
 
 	rec := doJSON(t, s, http.MethodPut, "/api/me/preferred-team",

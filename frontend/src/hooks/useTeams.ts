@@ -12,7 +12,7 @@ import { readError } from '../lib/api'
 // view scope* (the board can show many teams at once); a write is always
 // a *single-team ownership stamp*. They share no primitive: the read
 // filter is device-local view state (localStorage, see useTeamFilter),
-// while the write default is preferred_team_id — the last team the user
+// while the write default is last_acting_team_id — the last team the user
 // wrote to, maintained server-side by the acting-team resolver and only
 // *read* here to seed the picker.
 //
@@ -22,13 +22,13 @@ import { readError } from '../lib/api'
 
 type State = {
   teams: TeamSummary[]
-  preferredTeamId: string
+  lastActingTeamId: string
   loaded: boolean
   loading: boolean
   error: string | null
 }
 
-let state: State = { teams: [], preferredTeamId: '', loaded: false, loading: false, error: null }
+let state: State = { teams: [], lastActingTeamId: '', loaded: false, loading: false, error: null }
 const listeners = new Set<() => void>()
 let inFlight: Promise<void> | null = null
 
@@ -46,7 +46,7 @@ function load(): Promise<void> {
       const data = (await r.json()) as TeamsResponse
       setState({
         teams: data.teams ?? [],
-        preferredTeamId: data.preferred_team_id ?? '',
+        lastActingTeamId: data.last_acting_team_id ?? '',
         loaded: true,
         loading: false,
         error: null,
@@ -77,7 +77,7 @@ function getSnapshot(): State {
 /** Drop the cached teams and reload for any mounted subscriber. Call on
  *  active-org switch (the teams list is org-scoped) — OrgPicker does. */
 export function invalidateTeams(): void {
-  state = { teams: [], preferredTeamId: '', loaded: false, loading: false, error: null }
+  state = { teams: [], lastActingTeamId: '', loaded: false, loading: false, error: null }
   // Reload for any mounted subscriber — load() re-notifies via setState.
   // With no subscribers there's nothing to notify: the reset above already
   // flips loaded=false, so the next subscribe() kicks a fresh load.
@@ -89,15 +89,15 @@ export function invalidateTeams(): void {
  *  this keeps the shared cache in sync so the next write picker (or the
  *  modal still open) seeds to it without a refetch. */
 export function noteWrittenTeam(teamId: string): void {
-  if (!teamId || teamId === state.preferredTeamId) return
-  setState({ preferredTeamId: teamId })
+  if (!teamId || teamId === state.lastActingTeamId) return
+  setState({ lastActingTeamId: teamId })
 }
 
 export interface UseTeams {
   teams: TeamSummary[]
   /** The last-written team (write-default seed), or '' when unset / no
    *  longer a member team. Read-only here — it's maintained server-side. */
-  preferredTeamId: string
+  lastActingTeamId: string
   /** True when the viewer belongs to ≥2 teams — the gate that decides
    *  whether any team control renders at all. */
   multi: boolean
@@ -136,7 +136,7 @@ export function useTeams(): UseTeams {
 
   return {
     teams: snap.teams,
-    preferredTeamId: snap.preferredTeamId,
+    lastActingTeamId: snap.lastActingTeamId,
     multi: snap.teams.length >= 2,
     loading: snap.loading,
     loaded: snap.loaded,
@@ -214,14 +214,14 @@ export function useTeamFilter(pageKey: string): [string[], (next: string[]) => v
 }
 
 // pickerDefault computes the write picker's seed selection: the last-
-// written team (preferred_team_id, server-maintained) → else the first
+// written team (last_acting_team_id, server-maintained) → else the first
 // (oldest) team. The candidate is validated against the current team set
 // so a stale id (team deleted, or from another org) falls through.
 // Returns '' only when the viewer has no teams.
-export function pickerDefault(teams: TeamSummary[], preferredTeamId: string): string {
+export function pickerDefault(teams: TeamSummary[], lastActingTeamId: string): string {
   if (teams.length === 0) return ''
   const ids = new Set(teams.map((t) => t.id))
-  if (preferredTeamId && ids.has(preferredTeamId)) return preferredTeamId
+  if (lastActingTeamId && ids.has(lastActingTeamId)) return lastActingTeamId
   return teams[0].id
 }
 
@@ -250,7 +250,7 @@ export interface WriteTeam {
 // unresolved team. Pair with <TeamPicker value={team} onChange={setTeam}/>
 // and `disabled={!ready || …}` on the submit button.
 export function useWriteTeam(): WriteTeam {
-  const { teams, preferredTeamId, multi, loaded } = useTeams()
+  const { teams, lastActingTeamId, multi, loaded } = useTeams()
   const [team, setTeam] = useState('')
   const seeded = useRef(false)
   useEffect(() => {
@@ -272,8 +272,8 @@ export function useWriteTeam(): WriteTeam {
     if (seeded.current && stillMember) return
     seeded.current = true
 
-    setTeam(pickerDefault(teams, preferredTeamId))
-  }, [loaded, teams, preferredTeamId, team])
+    setTeam(pickerDefault(teams, lastActingTeamId))
+  }, [loaded, teams, lastActingTeamId, team])
   return { team, setTeam, multi, ready: loaded }
 }
 
@@ -318,7 +318,7 @@ export interface ActiveTeam {
 }
 
 export function useActiveTeam(pageKey: string): ActiveTeam {
-  const { teams, preferredTeamId, multi, loaded } = useTeams()
+  const { teams, lastActingTeamId, multi, loaded } = useTeams()
   const [teamId, setTeamIdState] = useState<string>(() => readStoredActiveTeam(pageKey))
 
   useEffect(() => {
@@ -336,9 +336,9 @@ export function useActiveTeam(pageKey: string): ActiveTeam {
     // an org switch). Mirrors useTeamFilter's stale-id pruning.
     const ids = new Set(teams.map((t) => t.id))
     if (teamId === '' || !ids.has(teamId)) {
-      setTeamIdState(pickerDefault(teams, preferredTeamId))
+      setTeamIdState(pickerDefault(teams, lastActingTeamId))
     }
-  }, [loaded, multi, teams, preferredTeamId, teamId])
+  }, [loaded, multi, teams, lastActingTeamId, teamId])
 
   const setTeamId = useCallback(
     (id: string) => {

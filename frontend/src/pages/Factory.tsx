@@ -71,7 +71,7 @@ export default function Factory() {
   // entity belt via ?team_id); delegateTeam is the acting team the
   // drag-to-station delegate stamps onto the synthesized task. Both
   // render their selectors only at ≥2 teams.
-  const { teams, preferredTeamId, loaded: teamsLoaded } = useTeams()
+  const { teams, lastActingTeamId, loaded: teamsLoaded } = useTeams()
   const [teamFilter, setTeamFilter] = useTeamFilter('factory')
   const teamFilterRef = useRef(teamFilter)
   useEffect(() => {
@@ -85,8 +85,8 @@ export default function Factory() {
   useEffect(() => {
     if (!teamsLoaded) return
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setDelegateTeam(pickerDefault(teams, preferredTeamId))
-  }, [teamsLoaded, teams, preferredTeamId])
+    setDelegateTeam(pickerDefault(teams, lastActingTeamId))
+  }, [teamsLoaded, teams, lastActingTeamId])
 
   useEffect(() => {
     const container = containerRef.current
