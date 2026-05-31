@@ -31,19 +31,37 @@ type State = {
 let state: State = { teams: [], lastActingTeamId: '', loaded: false, loading: false, error: null }
 const listeners = new Set<() => void>()
 let inFlight: Promise<void> | null = null
+// Bumped whenever the cache is replaced wholesale (org-switch invalidate,
+// refresh, post-create reload). A fetch captures the generation at dispatch
+// and discards its result if a newer supersede has since bumped it — so a
+// slow request for the *previous* org can't repopulate the cache after the
+// active org changed (which would surface other-org team ids in the
+// pickers and 400 on submit until a later refresh).
+let generation = 0
 
 function setState(next: Partial<State>) {
   state = { ...state, ...next }
   for (const l of listeners) l()
 }
 
+// supersedeInFlight invalidates any request currently in flight: it bumps
+// the generation (so that request's response is dropped when it resolves)
+// and clears inFlight so the next load() dispatches a genuinely new fetch
+// instead of handing back the stale promise.
+function supersedeInFlight() {
+  generation++
+  inFlight = null
+}
+
 function load(): Promise<void> {
   if (inFlight) return inFlight
+  const gen = generation
   setState({ loading: true, error: null })
   inFlight = fetch('/api/teams')
     .then(async (r) => {
       if (!r.ok) throw new Error(await readError(r, 'Failed to load teams'))
       const data = (await r.json()) as TeamsResponse
+      if (gen !== generation) return // superseded — a newer invalidation won
       setState({
         teams: data.teams ?? [],
         lastActingTeamId: data.last_acting_team_id ?? '',
@@ -53,10 +71,13 @@ function load(): Promise<void> {
       })
     })
     .catch((err) => {
+      if (gen !== generation) return
       setState({ loading: false, error: err instanceof Error ? err.message : String(err) })
     })
     .finally(() => {
-      inFlight = null
+      // Only clear if it's still ours — supersedeInFlight may have already
+      // nulled it and a newer load() installed its own promise.
+      if (gen === generation) inFlight = null
     })
   return inFlight
 }
@@ -77,6 +98,10 @@ function getSnapshot(): State {
 /** Drop the cached teams and reload for any mounted subscriber. Call on
  *  active-org switch (the teams list is org-scoped) — OrgPicker does. */
 export function invalidateTeams(): void {
+  // Supersede first so a still-pending prior-org request can't repopulate
+  // the cache after we reset it (and so load() below actually dispatches a
+  // new fetch rather than returning the stale inFlight promise).
+  supersedeInFlight()
   state = { teams: [], lastActingTeamId: '', loaded: false, loading: false, error: null }
   // Reload for any mounted subscriber — load() re-notifies via setState.
   // With no subscribers there's nothing to notify: the reset above already
@@ -116,6 +141,9 @@ export function useTeams(): UseTeams {
   const snap = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
 
   const refresh = useCallback(() => {
+    // Supersede any in-flight fetch so a stale response can't land after
+    // the caller explicitly asked for fresh data.
+    supersedeInFlight()
     state = { ...state, loaded: false }
     return load()
   }, [])
@@ -129,6 +157,9 @@ export function useTeams(): UseTeams {
     })
     if (!res.ok) throw new Error(await readError(res, 'Failed to create team'))
     const created = (await res.json()) as TeamSummary
+    // Supersede so the reload reflects the just-created team rather than a
+    // pre-create fetch that may still be in flight.
+    supersedeInFlight()
     state = { ...state, loaded: false }
     await load()
     return created

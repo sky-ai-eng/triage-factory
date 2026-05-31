@@ -23,11 +23,13 @@ interface Props {
    *  context — e.g. the chain step editor passes a filter that hides
    *  chain-kind prompts (no nested chains) and the chain itself. */
   filter?: (p: Prompt) => boolean
-  /** : when the picker drives a *create* delegate (the factory
+  /** When the picker drives a *create* delegate (the factory
    *  drag-to-station flow synthesizes a task), wiring onTeamChange renders
    *  a required team picker in the header so the caller can stamp the
-   *  acting team. The swipe-delegate callers (claiming an existing task,
-   *  whose team is derived from the claim) leave it undefined → no picker. */
+   *  acting team, and teamValue scopes the prompt list to that team. The
+   *  swipe-delegate callers (claiming an existing task, whose team is
+   *  derived from the claim) leave both undefined → no picker, unscoped
+   *  list. */
   teamValue?: string
   onTeamChange?: (teamId: string) => void
   /** When true, prompt tiles are non-interactive and dimmed. The factory
@@ -62,7 +64,22 @@ export default function PromptPicker({
   useEffect(() => {
     if (!open) return
     let cancelled = false
-    fetch('/api/prompts')
+    // Scope the prompt list to the acting team when the caller drives one
+    // (the factory create-delegate picker passes teamValue + onTeamChange).
+    // Empty/absent teamValue → unscoped: a solo user's sole team, or the
+    // swipe / chain / curator callers that don't scope by team. Refetching
+    // on teamValue keeps the tiles matched to the header's team so a user
+    // can't select another team's prompt for a task stamped to this team.
+    const q = teamValue ? `?team_id=${encodeURIComponent(teamValue)}` : ''
+    // On a team switch, drop the prior team's tiles so the skeleton shows
+    // during the refetch and a stale cross-team prompt can't be clicked.
+    // Only when team-scoped — unscoped callers keep their across-opens cache
+    // (prompts render instantly on reopen), so behavior there is unchanged.
+    if (teamValue !== undefined) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setPrompts([])
+    }
+    fetch(`/api/prompts${q}`)
       .then((res) => res.json())
       .then((data: Prompt[]) => {
         if (!cancelled) {
@@ -76,7 +93,7 @@ export default function PromptPicker({
     return () => {
       cancelled = true
     }
-  }, [open])
+  }, [open, teamValue])
 
   return (
     <AnimatePresence>

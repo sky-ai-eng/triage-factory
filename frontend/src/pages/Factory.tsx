@@ -346,7 +346,7 @@ export default function Factory() {
         }}
         teamValue={delegateTeam}
         onTeamChange={setDelegateTeam}
-        selectionDisabled={!teamsLoaded}
+        selectionDisabled={!teamsLoaded || (teamsForFactory.multi && delegateTeam === '')}
       />
     </DndContext>
   )
