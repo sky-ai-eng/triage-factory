@@ -103,8 +103,13 @@ type OrgTemplateStore interface {
 	CreateHandler(ctx context.Context, orgID string, h domain.EventHandler) error
 	// UpdateHandler edits a template handler's mutable fields (predicate +
 	// enabled + the per-kind fields). kind, event_type, and a trigger's
-	// prompt_id are immutable.
-	UpdateHandler(ctx context.Context, orgID string, h domain.EventHandler) error
+	// prompt_id are immutable. The UPDATE pins the row's kind in its WHERE, so
+	// it returns matched=false (rather than silently no-op'ing) when the row
+	// was deleted or promoted (rule→trigger) since the caller read it — the
+	// handler maps that to 404/409 instead of a misleading 200. Correct under
+	// READ COMMITTED on both dialects (a single conditional UPDATE re-checks
+	// its WHERE under a row lock); no isolation bump or retry loop needed.
+	UpdateHandler(ctx context.Context, orgID string, h domain.EventHandler) (matched bool, err error)
 	// SetHandlerEnabled flips just the enabled bit.
 	SetHandlerEnabled(ctx context.Context, orgID, id string, enabled bool) error
 	// DeleteHandler hard-deletes a template handler (no soft-disable: the

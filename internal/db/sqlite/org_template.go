@@ -409,32 +409,45 @@ func (s *orgTemplateStore) CreateHandler(ctx context.Context, orgID string, h do
 	return fmt.Errorf("sqlite org_template CreateHandler: unknown kind %q", h.Kind)
 }
 
-func (s *orgTemplateStore) UpdateHandler(ctx context.Context, orgID string, h domain.EventHandler) error {
+func (s *orgTemplateStore) UpdateHandler(ctx context.Context, orgID string, h domain.EventHandler) (bool, error) {
 	if err := db.ValidateEventHandlerForCreate(&h); err != nil {
-		return err
+		return false, err
 	}
 	var pred any
 	if h.ScopePredicateJSON != nil {
 		pred = *h.ScopePredicateJSON
 	}
 	now := time.Now().UTC()
+	// The WHERE pins the row's kind, so a concurrent promote (rule→trigger)
+	// between the caller's read and this write makes the UPDATE match 0 rows
+	// rather than silently clobbering — the bool surfaces that so the handler
+	// can 409 instead of reporting a misleading success.
+	var res sql.Result
+	var err error
 	switch h.Kind {
 	case domain.EventHandlerKindRule:
-		_, err := s.q.ExecContext(ctx, `
+		res, err = s.q.ExecContext(ctx, `
 			UPDATE org_template_handlers
 			SET scope_predicate_json = ?, enabled = ?, name = ?, default_priority = ?, sort_order = ?, updated_at = ?
 			WHERE org_id = ? AND id = ? AND kind = 'rule'
 		`, pred, h.Enabled, h.Name, derefFloat(h.DefaultPriority), derefInt(h.SortOrder), now, orgID, h.ID)
-		return err
 	case domain.EventHandlerKindTrigger:
-		_, err := s.q.ExecContext(ctx, `
+		res, err = s.q.ExecContext(ctx, `
 			UPDATE org_template_handlers
 			SET scope_predicate_json = ?, enabled = ?, breaker_threshold = ?, min_autonomy_suitability = ?, updated_at = ?
 			WHERE org_id = ? AND id = ? AND kind = 'trigger'
 		`, pred, h.Enabled, derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability), now, orgID, h.ID)
-		return err
+	default:
+		return false, fmt.Errorf("sqlite org_template UpdateHandler: unknown kind %q", h.Kind)
 	}
-	return fmt.Errorf("sqlite org_template UpdateHandler: unknown kind %q", h.Kind)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 func (s *orgTemplateStore) SetHandlerEnabled(ctx context.Context, orgID, id string, enabled bool) error {

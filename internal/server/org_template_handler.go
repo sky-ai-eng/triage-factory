@@ -476,22 +476,32 @@ func (s *Server) handleOrgTemplateHandlerUpdate(w http.ResponseWriter, r *http.R
 		}
 	}
 
+	var matched bool
 	var fresh *domain.EventHandler
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if e := tx.OrgTemplate.UpdateHandler(r.Context(), orgID, updated); e != nil {
+		var e error
+		matched, e = tx.OrgTemplate.UpdateHandler(r.Context(), orgID, updated)
+		if e != nil {
 			return e
 		}
-		var ge error
-		fresh, ge = tx.OrgTemplate.GetHandler(r.Context(), orgID, id)
-		return ge
+		fresh, e = tx.OrgTemplate.GetHandler(r.Context(), orgID, id)
+		return e
 	}); err != nil {
 		internalError(w, "org_template", err)
 		return
 	}
-	// fresh is nil only if the row was deleted between the fetch above and
-	// this update (the UPDATE then no-ops on 0 rows) — 404 rather than 200 null.
-	if fresh == nil {
-		notFound(w, "template handler")
+	// matched=false means our kind-pinned UPDATE hit 0 rows — the handler was
+	// deleted (fresh nil → 404) or promoted out from under us (fresh non-nil
+	// with a changed kind → 409) between the read and the write. Either way the
+	// PATCH didn't apply, so don't report a misleading 200.
+	if !matched {
+		if fresh == nil {
+			notFound(w, "template handler")
+			return
+		}
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "handler changed concurrently (kind no longer matches); reload and retry",
+		})
 		return
 	}
 	writeJSON(w, http.StatusOK, fresh)
