@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"time"
 
@@ -419,6 +420,28 @@ func (s *entityStore) ReactivateSystem(ctx context.Context, orgID, id string) (b
 
 func (s *entityStore) DescriptionsSystem(ctx context.Context, orgID string, ids []string) (map[string]string, error) {
 	return s.Descriptions(ctx, orgID, ids)
+}
+
+// ClassificationStatusSystem reads classified_at for one entity. There is
+// no non-System counterpart (the only caller, projectclassify.WaitFor, is
+// a claims-free background job), so the read is inlined here rather than
+// delegating. SQLite has one connection and no auth concept, so the
+// assertLocalOrg gate is the whole "scope to the right tenant" story. A
+// missing row is (false, false, nil) — definitive, not an error — so the
+// wait can stop polling a deleted entity.
+func (s *entityStore) ClassificationStatusSystem(ctx context.Context, orgID, id string) (classified, exists bool, err error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, false, err
+	}
+	var ts sql.NullTime
+	err = s.q.QueryRowContext(ctx, `SELECT classified_at FROM entities WHERE id = ?`, id).Scan(&ts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	return ts.Valid, true, nil
 }
 
 // scanEntityRow / scanEntityFromRows return a fresh domain.Entity per

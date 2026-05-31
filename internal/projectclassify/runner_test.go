@@ -36,7 +36,7 @@ func TestRunner_AllErroredLeavesEntityForRetry(t *testing.T) {
 		return 0, "", errors.New("simulated CLI down")
 	}
 
-	r := NewRunner(database, sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, sqlitestore.New(database).Orgs)
+	r := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, sqlitestore.New(database).Orgs)
 	r.run(context.Background()) // synchronous one cycle
 
 	post, err := sqlitestore.New(database).Entities.ListUnclassified(context.Background(), runmode.LocalDefaultOrgID)
@@ -83,7 +83,7 @@ func TestRunner_PartialErrorStillStamps(t *testing.T) {
 		return 30, "stub for Good", nil
 	}
 
-	r := NewRunner(database, sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, sqlitestore.New(database).Orgs)
+	r := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, sqlitestore.New(database).Orgs)
 	r.run(context.Background())
 
 	post, err := sqlitestore.New(database).Entities.ListUnclassified(context.Background(), runmode.LocalDefaultOrgID)

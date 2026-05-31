@@ -12,29 +12,33 @@ import (
 // Tests and pre-classifier configurations leave the hook unset.
 func TestAwaitClassification_NilSafe(t *testing.T) {
 	s := &Spawner{}
-	s.awaitClassification(context.Background(), "entity-1") // must not panic
+	s.awaitClassification(context.Background(), "org-1", "entity-1") // must not panic
 }
 
 // TestAwaitClassification_InvokesHookWithEntityID verifies the hook
-// is called with exactly the entityID the spawner passes through, so
-// the projectclassify.WaitFor wired in main.go can poll the right
-// row.
+// is called with exactly the orgID + entityID the spawner passes
+// through, so the projectclassify.WaitFor wired in main.go can poll
+// the right row in the right tenant (SKY-392).
 func TestAwaitClassification_InvokesHookWithEntityID(t *testing.T) {
 	s := &Spawner{}
-	var got atomic.Value
+	var gotOrg, gotEntity atomic.Value
 	var calls atomic.Int32
-	s.SetWaitForClassification(func(_ context.Context, entityID string) {
-		got.Store(entityID)
+	s.SetWaitForClassification(func(_ context.Context, orgID, entityID string) {
+		gotOrg.Store(orgID)
+		gotEntity.Store(entityID)
 		calls.Add(1)
 	})
 
-	s.awaitClassification(context.Background(), "entity-42")
+	s.awaitClassification(context.Background(), "org-99", "entity-42")
 
 	if calls.Load() != 1 {
 		t.Errorf("hook calls = %d, want 1", calls.Load())
 	}
-	if v, _ := got.Load().(string); v != "entity-42" {
-		t.Errorf("hook called with %q, want entity-42", v)
+	if v, _ := gotEntity.Load().(string); v != "entity-42" {
+		t.Errorf("hook called with entityID %q, want entity-42", v)
+	}
+	if v, _ := gotOrg.Load().(string); v != "org-99" {
+		t.Errorf("hook called with orgID %q, want org-99", v)
 	}
 }
 
@@ -44,14 +48,14 @@ func TestAwaitClassification_InvokesHookWithEntityID(t *testing.T) {
 func TestAwaitClassification_ForwardsCtx(t *testing.T) {
 	s := &Spawner{}
 	var sawCancel atomic.Bool
-	s.SetWaitForClassification(func(ctx context.Context, _ string) {
+	s.SetWaitForClassification(func(ctx context.Context, _, _ string) {
 		<-ctx.Done()
 		sawCancel.Store(true)
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	s.awaitClassification(ctx, "entity-7")
+	s.awaitClassification(ctx, "org-1", "entity-7")
 
 	if !sawCancel.Load() {
 		t.Errorf("hook did not observe ctx cancellation")

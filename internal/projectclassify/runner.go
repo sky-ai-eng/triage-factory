@@ -2,7 +2,6 @@ package projectclassify
 
 import (
 	"context"
-	"database/sql"
 	"log"
 	"sync"
 
@@ -16,7 +15,6 @@ import (
 // in main.go) and the runner picks up any newly-discovered entities
 // that haven't been classified yet.
 type Runner struct {
-	database *sql.DB
 	entities db.EntityStore
 	projects db.ProjectStore
 	orgs     db.OrgsStore // enumerate active orgs per cycle
@@ -26,9 +24,8 @@ type Runner struct {
 	running  bool
 }
 
-func NewRunner(database *sql.DB, entities db.EntityStore, projects db.ProjectStore, orgs db.OrgsStore) *Runner {
+func NewRunner(entities db.EntityStore, projects db.ProjectStore, orgs db.OrgsStore) *Runner {
 	return &Runner{
-		database: database,
 		entities: entities,
 		projects: projects,
 		orgs:     orgs,

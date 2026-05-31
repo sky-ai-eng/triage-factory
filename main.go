@@ -886,7 +886,7 @@ func main() {
 	// discovered entities against existing projects via per-project
 	// Haiku quorum vote. Sticky — only fires on entities with
 	// classified_at IS NULL, so re-polls don't re-classify.
-	classifier := projectclassify.NewRunner(database, stores.Entities, stores.Projects, stores.Orgs)
+	classifier := projectclassify.NewRunner(stores.Entities, stores.Projects, stores.Orgs)
 	classifier.Start()
 	log.Println("[classify] project classifier started (model: haiku)")
 	// System-service profile (D9a): kicked by any tenant's poll
@@ -955,8 +955,8 @@ func main() {
 	// blocks until classified_at is set (or DefaultWaitTimeout elapses).
 	// projectclassify.WaitFor triggers the runner on entry to wake it up
 	// even if no post-poll cycle has fired for this entity yet.
-	spawner.SetWaitForClassification(func(ctx context.Context, entityID string) {
-		projectclassify.WaitFor(ctx, database, classifier, entityID, projectclassify.DefaultWaitTimeout)
+	spawner.SetWaitForClassification(func(ctx context.Context, orgID, entityID string) {
+		projectclassify.WaitFor(ctx, classifier, orgID, entityID, projectclassify.DefaultWaitTimeout)
 	})
 
 	// Curator runtime (SKY-216) — per-project chat sessions. Sweep

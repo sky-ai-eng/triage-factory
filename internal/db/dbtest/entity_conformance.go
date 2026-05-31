@@ -48,6 +48,9 @@ type EntitySeeder struct {
 //     documented predicates.
 //   - Descriptions dedupes the input id list and only returns ids
 //     whose description is non-empty.
+//   - ClassificationStatusSystem reports (classified, exists) keyed on
+//     classified_at (not project_id), with a missing row as (false,
+//     false, nil).
 func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -333,6 +336,81 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		// column can bind.
 		if err := s.AssignProject(ctx, orgID, uuid.New().String(), &pid, ""); !errors.Is(err, sql.ErrNoRows) {
 			t.Errorf("AssignProject on missing entity: err = %v, want sql.ErrNoRows", err)
+		}
+	})
+
+	t.Run("ClassificationStatusSystem_keys_on_classified_at", func(t *testing.T) {
+		// SKY-392: the delegation wait reads classification state through
+		// this dialect-aware store method (not a raw `?`-placeholder
+		// query). Pins both the (classified, exists) contract and the
+		// load-bearing detail that it keys on classified_at, NOT
+		// project_id — so a below-threshold entity (stamped, but no
+		// project) still reports classified and the wait can release.
+		s, orgID, seed := mk(t)
+
+		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#cs", "pr", "T", "")
+		if err != nil {
+			t.Fatalf("seed entity: %v", err)
+		}
+
+		// Freshly discovered: classified_at IS NULL → not classified, but
+		// the row exists.
+		classified, exists, err := s.ClassificationStatusSystem(ctx, orgID, ent.ID)
+		if err != nil {
+			t.Fatalf("ClassificationStatusSystem(fresh): %v", err)
+		}
+		if classified {
+			t.Errorf("fresh entity reported classified; classified_at should be NULL")
+		}
+		if !exists {
+			t.Errorf("fresh entity reported missing; the row exists")
+		}
+
+		// Below-threshold classification: AssignProject(nil) stamps
+		// classified_at while leaving project_id NULL. The wait keys on
+		// classified_at, so this MUST report classified.
+		if err := s.AssignProject(ctx, orgID, ent.ID, nil, ""); err != nil {
+			t.Fatalf("AssignProject(nil): %v", err)
+		}
+		classified, exists, err = s.ClassificationStatusSystem(ctx, orgID, ent.ID)
+		if err != nil {
+			t.Fatalf("ClassificationStatusSystem(below-threshold): %v", err)
+		}
+		if !classified {
+			t.Errorf("entity with classified_at set but project_id NULL reported unclassified; the wait keys on classified_at, not project_id")
+		}
+		if !exists {
+			t.Errorf("classified entity reported missing")
+		}
+
+		// Above-threshold classification (real project FK) also reports
+		// classified — sanity that the project_id path isn't special.
+		pid := seed.Project(t, "CS")
+		other, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#cs2", "pr", "T2", "")
+		if err != nil {
+			t.Fatalf("seed entity 2: %v", err)
+		}
+		if err := s.AssignProject(ctx, orgID, other.ID, &pid, "winner"); err != nil {
+			t.Fatalf("AssignProject(pid): %v", err)
+		}
+		classified, _, err = s.ClassificationStatusSystem(ctx, orgID, other.ID)
+		if err != nil {
+			t.Fatalf("ClassificationStatusSystem(assigned): %v", err)
+		}
+		if !classified {
+			t.Errorf("project-assigned entity reported unclassified")
+		}
+
+		// Unknown id is definitively (false, false, nil) — not an error —
+		// so WaitFor stops polling a deleted/never-seen entity instead of
+		// burning the full timeout. UUID-shape id so Postgres's uuid
+		// column can bind.
+		classified, exists, err = s.ClassificationStatusSystem(ctx, orgID, uuid.New().String())
+		if err != nil {
+			t.Fatalf("ClassificationStatusSystem(missing): %v", err)
+		}
+		if classified || exists {
+			t.Errorf("missing entity: classified=%v exists=%v, want false/false", classified, exists)
 		}
 	})
 

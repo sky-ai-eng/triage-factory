@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"time"
 
@@ -69,6 +70,24 @@ func (s *entityStore) GetSystem(ctx context.Context, orgID, id string) (*domain.
 func getEntity(ctx context.Context, q queryer, orgID, id string) (*domain.Entity, error) {
 	row := q.QueryRowContext(ctx, `SELECT `+pgEntitySelectCols+` FROM entities WHERE org_id = $1 AND id = $2`, orgID, id)
 	return scanEntityRow(row)
+}
+
+// ClassificationStatusSystem reads classified_at for one entity through
+// the admin pool. System-only: its sole caller, projectclassify.WaitFor,
+// runs in the background spawner with no request JWT claims, so the
+// app pool (tf_app) would RLS-deny the read (current_org_id() is NULL).
+// org_id stays in the WHERE clause as defense in depth. A missing row is
+// (false, false, nil) so the wait stops polling a deleted entity.
+func (s *entityStore) ClassificationStatusSystem(ctx context.Context, orgID, id string) (classified, exists bool, err error) {
+	var ts sql.NullTime
+	err = s.admin.QueryRowContext(ctx, `SELECT classified_at FROM entities WHERE org_id = $1 AND id = $2`, orgID, id).Scan(&ts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	return ts.Valid, true, nil
 }
 
 func (s *entityStore) GetBySource(ctx context.Context, orgID, source, sourceID string) (*domain.Entity, error) {

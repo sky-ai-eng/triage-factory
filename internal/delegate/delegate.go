@@ -385,7 +385,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID string, task dom
 	// runner) can decide this entity before we read project_id for KB
 	// injection. Nil-safe — tests and pre-classifier configurations
 	// skip the wait.
-	s.awaitClassification(ctx, task.EntityID)
+	s.awaitClassification(ctx, orgID, task.EntityID)
 
 	return runConfig{
 		orgID:     orgID,
@@ -432,7 +432,7 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, runID string, task domai
 
 	// SKY-220: block briefly so the project classifier can decide this
 	// entity before we read project_id for KB injection. Nil-safe.
-	s.awaitClassification(ctx, task.EntityID)
+	s.awaitClassification(ctx, orgID, task.EntityID)
 
 	return runConfig{
 		orgID:     orgID,

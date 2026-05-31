@@ -236,4 +236,27 @@ type EntityStore interface {
 	// every scored task to title-only context, materially changing
 	// prioritization; the System variant prevents that.
 	DescriptionsSystem(ctx context.Context, orgID string, ids []string) (map[string]string, error)
+
+	// ClassificationStatusSystem reports whether the entity has been
+	// project-classified yet — (classified, exists, err). It backs the
+	// delegation spawner's pre-run wait (internal/projectclassify
+	// WaitFor), which blocks until the classifier has decided an entity
+	// before reading project_id for knowledge-base injection.
+	//
+	//   - classified is true iff classified_at IS NOT NULL. The wait
+	//     deliberately keys on classified_at, NOT project_id: a
+	//     below-threshold entity is "classified" (classified_at stamped)
+	//     with project_id still NULL, and the wait must release for it.
+	//     That's why this can't reuse Get/GetSystem — domain.Entity does
+	//     not carry classified_at.
+	//   - exists is false (with err nil) when no row matches — a deleted
+	//     or never-seen entity will never be classified, so the caller
+	//     stops polling rather than burning the full timeout.
+	//
+	// System-only (admin pool) by design: WaitFor runs in the background
+	// spawner with no request JWT claims, so routing through the app pool
+	// would be RLS-denied (current_org_id() is NULL). There is no app-pool
+	// variant because there is no claims-bearing caller. org_id is still
+	// filtered in the WHERE clause as defense in depth.
+	ClassificationStatusSystem(ctx context.Context, orgID, id string) (classified, exists bool, err error)
 }

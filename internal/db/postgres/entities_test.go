@@ -349,6 +349,74 @@ func TestEntityStore_Postgres_ListActiveJiraTeamScoped_RLS(t *testing.T) {
 	}
 }
 
+// TestEntityStore_Postgres_ClassificationStatusSystem_NoClaims pins the
+// SKY-392 fix end-to-end against Postgres. The classification WaitFor
+// runs in the background spawner with NO request.jwt.claims, so its read
+// must route through the admin pool (the System variant) — the app pool
+// (tf_app) would RLS-deny it (current_org_id() is NULL). This drives
+// ClassificationStatusSystem with no WithUser wrap (the claims-free
+// background-caller condition) and asserts:
+//
+//   - the read reaches the row at all (the original bug's `?` placeholder
+//     would raise 42601 here, and a "fix" that re-routed onto the app
+//     pool would be RLS-filtered into a phantom miss);
+//   - it keys on classified_at, so a below-threshold entity (classified,
+//     no project) reports classified;
+//   - org_id defense-in-depth: a different org never observes the row.
+//
+// The SQLite-only wait_test.go cannot catch either failure mode — `?` is
+// valid there and local mode has no RLS.
+func TestEntityStore_Postgres_ClassificationStatusSystem_NoClaims(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, _ := seedPgEntityOrg(t, h)
+	ctx := context.Background()
+
+	// q = admin pool, app = app pool — exactly the production spawner
+	// wiring (System reads hit admin). No WithUser wrap anywhere below =
+	// the claims-free background caller the bug report describes.
+	stores := pgstore.New(h.AdminDB, h.AppDB)
+
+	ent, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "github", "owner/repo#cs", "pr", "T", "")
+	if err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+
+	// Fresh: classified_at NULL → not classified, exists. A `?`-placeholder
+	// regression would error here instead of returning cleanly.
+	classified, exists, err := stores.Entities.ClassificationStatusSystem(ctx, orgID, ent.ID)
+	if err != nil {
+		t.Fatalf("ClassificationStatusSystem(fresh, no claims): %v", err)
+	}
+	if classified || !exists {
+		t.Errorf("fresh entity: classified=%v exists=%v, want false/true", classified, exists)
+	}
+
+	// Below-threshold classify: project_id stays NULL, classified_at set.
+	if err := stores.Entities.AssignProjectSystem(ctx, orgID, ent.ID, nil, ""); err != nil {
+		t.Fatalf("AssignProjectSystem(nil): %v", err)
+	}
+	classified, exists, err = stores.Entities.ClassificationStatusSystem(ctx, orgID, ent.ID)
+	if err != nil {
+		t.Fatalf("ClassificationStatusSystem(classified, no claims): %v", err)
+	}
+	if !classified || !exists {
+		t.Errorf("classified entity: classified=%v exists=%v, want true/true (keys on classified_at, not project_id)", classified, exists)
+	}
+
+	// Cross-org isolation: a different org must not observe this row, even
+	// through the BYPASSRLS admin pool — the org_id WHERE filter is the
+	// defense-in-depth backstop.
+	otherOrg, _ := seedPgEntityOrg(t, h)
+	classified, exists, err = stores.Entities.ClassificationStatusSystem(ctx, otherOrg, ent.ID)
+	if err != nil {
+		t.Fatalf("ClassificationStatusSystem(cross-org): %v", err)
+	}
+	if classified || exists {
+		t.Errorf("cross-org read: classified=%v exists=%v, want false/false", classified, exists)
+	}
+}
+
 func seedPgEntityOrg(t *testing.T, h *pgtest.Harness) (orgID, userID string) {
 	t.Helper()
 	orgID = uuid.New().String()

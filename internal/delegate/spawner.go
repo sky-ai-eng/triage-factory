@@ -89,11 +89,11 @@ type Spawner struct {
 	mu                    sync.Mutex
 	ghClient              *ghclient.Client
 	model                 string
-	cancels               map[string]context.CancelFunc              // runID → cancel the entire run
-	drainer               QueueDrainer                               // nil-safe; set post-construction via SetQueueDrainer
-	takenOver             map[string]bool                            // runIDs claimed by Takeover. Sticky-on for the rest of the goroutine's lifetime even after rollback — clearing the entry would let late-firing goroutine gates race the takeover/abort lifecycle. Suppresses every cleanup path in runAgent so Takeover/abortTakeover own the row's terminal state.
-	chainRunIDs           map[string]bool                            // chain_run IDs whose setup phase reuses the per-run status helpers but is not backed by a runs row. broadcastRunUpdate skips wsHub emission for these so clients don't fetch /api/runs/{id} and 404.
-	waitForClassification func(ctx context.Context, entityID string) // SKY-220 hook: blocks until the project classifier has decided this entity, or a timeout/ctx-cancel elapses. Nil-safe (test setups skip it). Wired in main.go via SetWaitForClassification — keeps internal/delegate from importing internal/projectclassify.
+	cancels               map[string]context.CancelFunc                     // runID → cancel the entire run
+	drainer               QueueDrainer                                      // nil-safe; set post-construction via SetQueueDrainer
+	takenOver             map[string]bool                                   // runIDs claimed by Takeover. Sticky-on for the rest of the goroutine's lifetime even after rollback — clearing the entry would let late-firing goroutine gates race the takeover/abort lifecycle. Suppresses every cleanup path in runAgent so Takeover/abortTakeover own the row's terminal state.
+	chainRunIDs           map[string]bool                                   // chain_run IDs whose setup phase reuses the per-run status helpers but is not backed by a runs row. broadcastRunUpdate skips wsHub emission for these so clients don't fetch /api/runs/{id} and 404.
+	waitForClassification func(ctx context.Context, orgID, entityID string) // SKY-220 hook: blocks until the project classifier has decided this entity, or a timeout/ctx-cancel elapses. orgID scopes the classification read to the run's tenant (SKY-392 — the read goes through the org-scoped admin-pool store, not a raw query). Nil-safe (test setups skip it). Wired in main.go via SetWaitForClassification — keeps internal/delegate from importing internal/projectclassify.
 
 	agentToolsOnce  sync.Once
 	agentToolsCache string
@@ -225,7 +225,7 @@ func (s *Spawner) SetQueueDrainer(d QueueDrainer) {
 // the timeout / ctx fires). main.go provides the implementation so
 // this package doesn't import projectclassify. Nil-safe — tests and
 // any configuration without a classifier skip the wait entirely.
-func (s *Spawner) SetWaitForClassification(fn func(ctx context.Context, entityID string)) {
+func (s *Spawner) SetWaitForClassification(fn func(ctx context.Context, orgID, entityID string)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.waitForClassification = fn
@@ -234,13 +234,14 @@ func (s *Spawner) SetWaitForClassification(fn func(ctx context.Context, entityID
 // awaitClassification calls the wait hook if one is configured. ctx
 // is forwarded so the spawner's run cancellation / shutdown path
 // breaks out of the wait early instead of blocking the full
-// classifier timeout.
-func (s *Spawner) awaitClassification(ctx context.Context, entityID string) {
+// classifier timeout. orgID scopes the classification read to the
+// run's tenant (SKY-392).
+func (s *Spawner) awaitClassification(ctx context.Context, orgID, entityID string) {
 	s.mu.Lock()
 	fn := s.waitForClassification
 	s.mu.Unlock()
 	if fn != nil {
-		fn(ctx, entityID)
+		fn(ctx, orgID, entityID)
 	}
 }
 
