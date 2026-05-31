@@ -43,24 +43,51 @@
 //
 // # Trust model on the local hop
 //
-// Phase 1 listens on a localhost TCP port. The agent and the proxy
-// share the same host (TF binary spawns Node as a child); the security
-// boundary is "the agent's network access" (which in pre-sandbox is
-// trusted-by-trust-of-user, and post-sandbox is the gVisor egress
-// allowlist — the sandbox can only reach this proxy, not the wider
-// internet). There is no auth on the proxy→upstream→proxy hop; the
-// agent doesn't need a token to talk to the proxy because reaching the
-// proxy at all means it's running under our control.
+// In multi mode the proxy binds to the host-side veth IP of one run's
+// sandbox (10.42.<N>.1). That address lives in the host/container root
+// netns — the shared default gateway every concurrent sandbox routes
+// through — so it is physically reachable from a *sibling* run's
+// sandbox, not just its own. A compromised agent in run B can send
+// packets at run A's proxy. We must NOT assume "reaching the proxy
+// means it's our own run": that assumption (the original Phase 1
+// rationale) was false the moment two tenants' sandboxes shared the
+// host namespace, and it is the cross-tenant credential-abuse hole
+// SKY-395 closes.
+//
+// So the proxy authenticates the caller with a per-run secret. Config
+// carries IncomingToken — a fresh random value the caller generates per
+// run and also injects into that run's sandbox as the credential the
+// SDK sends (x-api-key for Anthropic, "Authorization: Bearer" for
+// Bedrock). Every request is checked, constant-time, against that token
+// before anything is forwarded upstream; a missing or wrong token gets
+// 401 and never reaches the real provider. A sibling run holds a
+// *different* token, so even though it can reach this proxy on the
+// network it cannot spend this run's credential.
+//
+// This does not weaken Property B. The per-run token is a capability
+// scoped to one run's own proxy — generated fresh, destroyed at
+// teardown, authorizing only what that run is already allowed to do. It
+// is not a durable, reusable, or cross-scope credential. The real
+// provider key still lives only in the proxy (injected upstream by the
+// rewrite hook) and never enters any sandbox.
+//
+// Defense-in-depth: the network layer (per-sandbox egress allowlist,
+// SKY-395 Part B) aims to make a sibling proxy unreachable in the first
+// place; this token makes it useless even if a packet gets through.
+// Empty IncomingToken disables the check — the loopback/test path and
+// any single-tenant direct usage where the local hop is already trusted.
 package llmproxy
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -112,15 +139,39 @@ type Config struct {
 	// this true when binding to the veth gateway IP so the caller
 	// has consciously acknowledged the bind is not loopback.
 	AllowNonLoopback bool
+
+	// IncomingToken, when non-empty, is the per-run secret every
+	// request must present before the proxy forwards it upstream. The
+	// caller (internal/agentproc) generates a fresh random token per
+	// run, sets it here, and injects the same value into that run's
+	// sandbox as the credential the SDK sends — x-api-key for Anthropic,
+	// "Authorization: Bearer" for Bedrock. The proxy compares the
+	// presented value constant-time and returns 401 on mismatch (see
+	// the package doc's trust-model section).
+	//
+	// This is the fail-closed half of cross-tenant isolation (SKY-395):
+	// a sibling run that reaches this proxy over the shared host
+	// namespace holds a *different* token, so it cannot spend this run's
+	// credential. It is NOT a durable credential and does not violate
+	// Property B — the real provider key still lives only in APIKey and
+	// never enters any sandbox.
+	//
+	// Empty disables the check (loopback/test usage, or single-tenant
+	// direct paths where the local hop is already trusted).
+	IncomingToken string
 }
 
 // Server is a single per-run proxy instance. Not safe to share
 // across runs — the credential it holds is org-scoped, and the
 // request counter is request-scoped.
 type Server struct {
-	cfg          Config
-	upstreamURL  *url.URL
-	proxy        *httputil.ReverseProxy
+	cfg         Config
+	upstreamURL *url.URL
+	proxy       *httputil.ReverseProxy
+	// handler is what the http.Server actually serves: the bare
+	// reverse proxy when IncomingToken is empty, or the token-gated
+	// wrapper (tokenGate) when a per-run secret is configured.
+	handler      http.Handler
 	requestCount atomic.Int64
 
 	// listener is owned once Start has been called. nil until then.
@@ -192,7 +243,54 @@ func New(cfg Config) (*Server, error) {
 		// Default ErrorHandler logs to stderr and 502s. That's fine
 		// for Phase 1; upgrade observability comes later.
 	}
+	// When a per-run token is configured, gate every request on it
+	// before the reverse proxy runs (SKY-395 Part A). Empty token =
+	// no gate (the loopback/test path).
+	if cfg.IncomingToken != "" {
+		s.handler = s.tokenGate(s.proxy)
+	} else {
+		s.handler = s.proxy
+	}
 	return s, nil
+}
+
+// tokenGate wraps next with per-run caller authentication. Every
+// request must present Config.IncomingToken on the provider's
+// credential header (x-api-key for Anthropic, "Authorization: Bearer"
+// for Bedrock); a missing or mismatched token gets 401 and is never
+// forwarded upstream. This is the fail-closed guarantee of SKY-395
+// Part A: even if network isolation fails and a sibling sandbox reaches
+// this proxy, it can't spend the org's key without this run's secret.
+func (s *Server) tokenGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.callerAuthorized(r) {
+			// 401 without a WWW-Authenticate challenge: the caller is
+			// our own SDK, not a browser, so there's no interactive auth
+			// to negotiate. Terse body; the real signal is the status.
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// callerAuthorized reports whether the request presents the per-run
+// token on the provider-appropriate credential header. Constant-time
+// compare so a hostile caller can't time-probe the token byte by byte;
+// ConstantTimeCompare also returns 0 on a length mismatch, which covers
+// the missing-header (empty string) case.
+func (s *Server) callerAuthorized(r *http.Request) bool {
+	var presented string
+	switch s.cfg.Provider {
+	case ProviderAnthropic:
+		presented = r.Header.Get("x-api-key")
+	case ProviderBedrockBearer:
+		// The SDK sends "Bearer <token>"; strip the scheme prefix before
+		// comparing. A header without the prefix won't match (TrimPrefix
+		// returns it unchanged, which then fails the compare).
+		presented = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	}
+	return subtle.ConstantTimeCompare([]byte(presented), []byte(s.cfg.IncomingToken)) == 1
 }
 
 // rewrite is the Go 1.20+ ReverseProxy hook (replacing Director). It
@@ -241,8 +339,10 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 
 // Handler exposes the proxy as a standard http.Handler. Useful for
 // tests that want to drive the proxy via httptest.NewServer instead
-// of the production Start path.
-func (s *Server) Handler() http.Handler { return s.proxy }
+// of the production Start path. Returns the token-gated handler when
+// IncomingToken is set, so tests exercise the same auth path as
+// production.
+func (s *Server) Handler() http.Handler { return s.handler }
 
 // Start binds a TCP port and serves until Shutdown is called. Returns
 // the bound address so the caller can construct the agent's BASE_URL
@@ -273,7 +373,7 @@ func (s *Server) Start(addr string) (string, error) {
 	s.listener = ln
 	s.serveErr = make(chan error, 1)
 	s.httpSrv = &http.Server{
-		Handler: s.proxy,
+		Handler: s.handler,
 		// Conservative timeouts. The SDK uses long-lived streaming
 		// connections for tool-use loops; ReadHeaderTimeout limits the
 		// time to receive the request headers, not the body, so 30s is

@@ -20,7 +20,12 @@ type teardownState struct {
 	hostVethName    string
 	sandboxVethName string
 	iptablesRule    iptablesRule
-	bundleDir       string
+	// egressRules are the host-side SKY-395 Part B egress-allowlist
+	// rules (filter/INPUT + filter/FORWARD DROPs on the run's veth).
+	// The in-netns OUTPUT rules vanish with the netns and aren't
+	// tracked here.
+	egressRules []iptablesRule
+	bundleDir   string
 }
 
 // iptablesRule names a single MASQUERADE rule so teardown can
@@ -93,11 +98,17 @@ func wrap(ctx context.Context, cfg Config) (*exec.Cmd, *Sandbox, error) {
 	}
 	td.iptablesRule = rule
 
-	// Step 9: egress allowlist (no-op in SKY-254 — SKY-335 wires
-	// proxy IPs into this call).
-	if err := applyEgressPolicy(ctx, netSt.subnet, nil); err != nil {
+	// Step 9: egress allowlist (SKY-395 Part B). Restrict the sandbox
+	// to its own gateway IP only — closes the cross-tenant
+	// sibling-proxy reach and the direct-internet exfil path. Must run
+	// after the netns + veth exist (it installs both in-netns and
+	// host-side veth rules) and before the proxies bind in step 9.5, so
+	// the allowlist is in force the moment the sandbox can send packets.
+	egressRules, err := applyEgressPolicy(ctx, netSt.netnsName, netSt.vethHost, sb.HostIP)
+	if err != nil {
 		return nil, nil, fmt.Errorf("sandbox: egress policy: %w", err)
 	}
+	td.egressRules = egressRules
 
 	// Step 9.5: invoke the proxy-configuration callback (SKY-335) so
 	// the caller can bind per-run LLM / git proxies on sb.HostIP and
@@ -186,6 +197,14 @@ func (s *Sandbox) Close() error {
 	if err := teardownIptables(ctx, t.iptablesRule); err != nil {
 		// Best-effort; log via stderr.
 		fmt.Fprintf(os.Stderr, "sandbox: teardown iptables: %v\n", err)
+	}
+	// Host-side egress-allowlist rules (SKY-395 Part B). The in-netns
+	// OUTPUT rules go away with the netns delete below, so only the
+	// host-side ones need explicit removal.
+	for _, r := range t.egressRules {
+		if err := teardownIptables(ctx, r); err != nil {
+			fmt.Fprintf(os.Stderr, "sandbox: teardown egress rule: %v\n", err)
+		}
 	}
 	netSt := &netState{
 		netnsName:   netnsNameFromPath(t.netnsPath),

@@ -2,6 +2,8 @@ package agentproc
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -11,23 +13,39 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/llmproxy"
 )
 
-// proxyPlaceholderAPIKey is the dummy value the sandboxed agent sees
-// in ANTHROPIC_API_KEY. The agent SDK requires *some* non-empty value
-// to construct an authenticated request; the real key never enters
-// the sandbox env. The proxy rewrites the x-api-key header before
-// forwarding upstream, so the placeholder is discarded on the host
-// side and the upstream receives the real credential. The shape
-// (sk-ant-... prefix) matches Anthropic's published format so any
-// in-SDK shape check passes; the body of the value is "PROXY-
-// PLACEHOLDER-DO-NOT-USE" so logs / debug dumps make the substitution
-// obvious to anyone grepping for a leak.
-const proxyPlaceholderAPIKey = "sk-ant-PROXY-PLACEHOLDER-DO-NOT-USE"
+// proxyTokenAnthropicPrefix shapes the per-run Anthropic token like a
+// real key (sk-ant-…) so the agent SDK's client-side key-format check
+// passes — the SDK requires a plausibly-shaped ANTHROPIC_API_KEY to
+// construct a request at all. The body is fresh random per run; it is
+// NOT a real key. See newSandboxProxyToken and the llmproxy package
+// doc's trust-model section for why injecting a per-run token (rather
+// than a constant placeholder) is what closes the SKY-395 cross-tenant
+// hole: the proxy now authenticates the caller against this exact value.
+const proxyTokenAnthropicPrefix = "sk-ant-"
 
-// proxyPlaceholderBedrockBearer mirrors the Anthropic placeholder for
-// the Bedrock-bearer path. AWS_BEARER_TOKEN_BEDROCK is the env var the
-// SDK reads; the proxy injects the real bearer in Authorization
-// before forwarding to bedrock-runtime.<region>.amazonaws.com.
-const proxyPlaceholderBedrockBearer = "PROXY-PLACEHOLDER-BEDROCK-BEARER"
+// newSandboxProxyToken mints the fresh per-run secret that both
+// authenticates the sandbox to its own proxy (set as
+// llmproxy.Config.IncomingToken) and is injected into the sandbox as
+// the credential the SDK sends. 32 bytes of crypto/rand, hex-encoded.
+// For Anthropic it carries the sk-ant- prefix so the SDK's key-shape
+// check passes; the Bedrock bearer path has no such shape requirement.
+//
+// This is a per-run capability, not a durable credential: generated
+// fresh here and destroyed when the proxy is torn down at run end. It
+// does not violate Property B — the real provider key stays in the
+// proxy (injected upstream by the rewrite hook) and never enters the
+// sandbox.
+func newSandboxProxyToken(kind llmproxy.Provider) (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("agentproc: generate per-run proxy token: %w", err)
+	}
+	tok := hex.EncodeToString(raw)
+	if kind == llmproxy.ProviderAnthropic {
+		return proxyTokenAnthropicPrefix + tok, nil
+	}
+	return tok, nil
+}
 
 // runProxies bundles the per-run proxy handles for shutdown. Only
 // the LLM proxy is wired in SKY-335; the git proxy slot is reserved
@@ -93,6 +111,18 @@ func startProxiesForSandbox(hostVethIP string, resolvedCreds map[string]string) 
 		return nil, nil, err
 	}
 
+	// Mint the per-run token that authenticates this sandbox to its own
+	// proxy (SKY-395 Part A). It's both the value the proxy checks
+	// (IncomingToken) and the credential we inject into the sandbox
+	// below, so a sibling run — which holds a different token — cannot
+	// spend this run's key even if it reaches this proxy over the
+	// shared host namespace.
+	token, err := newSandboxProxyToken(cfg.providerKind)
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg.llm.IncomingToken = token
+
 	bundle := &runProxies{}
 
 	llm, err := llmproxy.New(cfg.llm)
@@ -120,7 +150,7 @@ func startProxiesForSandbox(hostVethIP string, resolvedCreds map[string]string) 
 	// placeholder is what the agent sends, not the real key).
 	llmURL := "http://" + addr
 
-	env := buildSandboxProxyEnv(cfg, llmURL)
+	env := buildSandboxProxyEnv(cfg, llmURL, token)
 
 	// Git proxy slot: the sibling ticket (per SKY-335's body) will
 	// spawn a second proxy on a different port of hostVethIP and
@@ -218,24 +248,28 @@ func proxyConfigFromCreds(creds map[string]string) (sandboxProxyConfig, error) {
 }
 
 // buildSandboxProxyEnv constructs the env entries the sandbox sees:
-// proxy URLs + placeholder credentials. Provider-shaped so the agent
-// SDK reads the right vars — ANTHROPIC_BASE_URL for direct,
-// ANTHROPIC_BEDROCK_BASE_URL + CLAUDE_CODE_USE_BEDROCK for Bedrock.
+// proxy URLs + the per-run proxy token as the credential value.
+// Provider-shaped so the agent SDK reads the right vars —
+// ANTHROPIC_BASE_URL for direct, ANTHROPIC_BEDROCK_BASE_URL +
+// CLAUDE_CODE_USE_BEDROCK for Bedrock. incomingToken is the value the
+// SDK forwards as x-api-key / "Authorization: Bearer", which the proxy
+// authenticates against (SKY-395 Part A).
 //
-// Property B invariant: every value here is a URL, a placeholder, or
-// a provider-selection toggle. No real secret material crosses into
-// the sandbox env.
-func buildSandboxProxyEnv(cfg sandboxProxyConfig, llmURL string) []string {
+// Property B invariant: every value here is a URL, a provider-selection
+// toggle, or the per-run token — a capability scoped to this run's own
+// proxy, not a real provider credential. No real secret material
+// crosses into the sandbox env; the real key lives only in the proxy.
+func buildSandboxProxyEnv(cfg sandboxProxyConfig, llmURL, incomingToken string) []string {
 	switch cfg.providerKind {
 	case llmproxy.ProviderAnthropic:
 		return []string{
 			"ANTHROPIC_BASE_URL=" + llmURL,
-			"ANTHROPIC_API_KEY=" + proxyPlaceholderAPIKey,
+			"ANTHROPIC_API_KEY=" + incomingToken,
 		}
 	case llmproxy.ProviderBedrockBearer:
 		return []string{
 			"ANTHROPIC_BEDROCK_BASE_URL=" + llmURL,
-			"AWS_BEARER_TOKEN_BEDROCK=" + proxyPlaceholderBedrockBearer,
+			"AWS_BEARER_TOKEN_BEDROCK=" + incomingToken,
 			"CLAUDE_CODE_USE_BEDROCK=1",
 		}
 	}

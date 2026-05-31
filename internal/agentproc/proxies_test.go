@@ -154,16 +154,14 @@ func TestProxyConfigFromCreds_AnthropicWinsOverBedrock(t *testing.T) {
 // ANTHROPIC_API_KEY is the placeholder (NEVER the real key).
 func TestBuildSandboxProxyEnv_Anthropic(t *testing.T) {
 	cfg := sandboxProxyConfig{providerKind: llmproxy.ProviderAnthropic}
-	env := buildSandboxProxyEnv(cfg, "http://10.42.7.1:53312")
+	const token = "sk-ant-per-run-token-abc123"
+	env := buildSandboxProxyEnv(cfg, "http://10.42.7.1:53312", token)
 
 	if got := envValue(env, "ANTHROPIC_BASE_URL"); got != "http://10.42.7.1:53312" {
 		t.Errorf("ANTHROPIC_BASE_URL = %q, want proxy URL", got)
 	}
-	if got := envValue(env, "ANTHROPIC_API_KEY"); got != proxyPlaceholderAPIKey {
-		t.Errorf("ANTHROPIC_API_KEY = %q, want placeholder", got)
-	}
-	if !strings.Contains(envValue(env, "ANTHROPIC_API_KEY"), "PROXY-PLACEHOLDER") {
-		t.Errorf("placeholder must be greppable as a non-real key: %q", envValue(env, "ANTHROPIC_API_KEY"))
+	if got := envValue(env, "ANTHROPIC_API_KEY"); got != token {
+		t.Errorf("ANTHROPIC_API_KEY = %q, want the per-run token the proxy authenticates against", got)
 	}
 }
 
@@ -173,13 +171,14 @@ func TestBuildSandboxProxyEnv_Anthropic(t *testing.T) {
 // keeps the SDK routing through the Bedrock client.
 func TestBuildSandboxProxyEnv_BedrockBearer(t *testing.T) {
 	cfg := sandboxProxyConfig{providerKind: llmproxy.ProviderBedrockBearer}
-	env := buildSandboxProxyEnv(cfg, "http://10.42.7.1:53312")
+	const token = "per-run-bedrock-token-xyz"
+	env := buildSandboxProxyEnv(cfg, "http://10.42.7.1:53312", token)
 
 	if got := envValue(env, "ANTHROPIC_BEDROCK_BASE_URL"); got != "http://10.42.7.1:53312" {
 		t.Errorf("ANTHROPIC_BEDROCK_BASE_URL = %q, want proxy URL", got)
 	}
-	if got := envValue(env, "AWS_BEARER_TOKEN_BEDROCK"); got != proxyPlaceholderBedrockBearer {
-		t.Errorf("AWS_BEARER_TOKEN_BEDROCK = %q, want placeholder", got)
+	if got := envValue(env, "AWS_BEARER_TOKEN_BEDROCK"); got != token {
+		t.Errorf("AWS_BEARER_TOKEN_BEDROCK = %q, want the per-run token", got)
 	}
 	if got := envValue(env, "CLAUDE_CODE_USE_BEDROCK"); got != "1" {
 		t.Errorf("CLAUDE_CODE_USE_BEDROCK = %q, want 1", got)
@@ -204,7 +203,13 @@ func TestBuildSandboxProxyEnv_NoRealCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("proxyConfigFromCreds: %v", err)
 	}
-	env := buildSandboxProxyEnv(cfg, "http://10.42.7.1:53312")
+	// The per-run token is what the sandbox actually sees; it is a
+	// capability scoped to this run's proxy, NOT the real key.
+	token, err := newSandboxProxyToken(cfg.providerKind)
+	if err != nil {
+		t.Fatalf("newSandboxProxyToken: %v", err)
+	}
+	env := buildSandboxProxyEnv(cfg, "http://10.42.7.1:53312", token)
 
 	for _, e := range env {
 		if strings.Contains(e, realKey) {
@@ -257,27 +262,142 @@ func TestStartProxiesForSandbox_AnthropicEndToEnd(t *testing.T) {
 		_ = bundle.Shutdown(ctx)
 	})
 
-	// Pull the proxy URL out of the sandbox-env response and drive a
-	// request through it.
+	// Pull the proxy URL + the per-run token out of the sandbox-env
+	// response and drive a request through it.
 	proxyURL := envValue(env, "ANTHROPIC_BASE_URL")
 	if proxyURL == "" {
 		t.Fatalf("ANTHROPIC_BASE_URL missing from sandbox env: %v", env)
 	}
-	if envValue(env, "ANTHROPIC_API_KEY") != proxyPlaceholderAPIKey {
-		t.Errorf("sandbox env ANTHROPIC_API_KEY = %q, want placeholder", envValue(env, "ANTHROPIC_API_KEY"))
+	sdkKey := envValue(env, "ANTHROPIC_API_KEY")
+	if sdkKey == realKey {
+		t.Fatalf("PROPERTY B VIOLATED: sandbox env ANTHROPIC_API_KEY is the real key")
+	}
+	if !strings.HasPrefix(sdkKey, "sk-ant-") {
+		t.Errorf("sandbox env ANTHROPIC_API_KEY = %q, want sk-ant- shaped per-run token", sdkKey)
 	}
 
 	req, _ := http.NewRequest("POST", proxyURL+"/v1/messages", strings.NewReader(`{}`))
-	req.Header.Set("x-api-key", proxyPlaceholderAPIKey) // what the SDK would send
+	req.Header.Set("x-api-key", sdkKey) // what the SDK forwards (the per-run token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("proxy roundtrip: %v", err)
 	}
 	_ = resp.Body.Close()
 
+	if resp.StatusCode != 200 {
+		t.Fatalf("proxy returned %d for the correct per-run token; want 200 (token gate must accept the injected credential)", resp.StatusCode)
+	}
 	if observedAPIKey != realKey {
-		t.Errorf("upstream observed x-api-key = %q, want real key %q (proxy must rewrite the placeholder with the real key)",
+		t.Errorf("upstream observed x-api-key = %q, want real key %q (proxy must rewrite the per-run token with the real key)",
 			observedAPIKey, realKey)
+	}
+}
+
+// TestStartProxiesForSandbox_TokenAuthEnforced pins SKY-395 Part A from
+// agentproc's perspective: the proxy started for a run rejects a request
+// bearing some *other* value (what a sibling run, or the old constant
+// placeholder, would send) with 401, but accepts the exact token that
+// was injected into this run's sandbox env. The upstream is only ever
+// reached by the authorized request.
+func TestStartProxiesForSandbox_TokenAuthEnforced(t *testing.T) {
+	const realKey = "sk-ant-real-enforced"
+	var hits int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	bundle, env, err := startProxiesForSandbox("127.0.0.1", map[string]string{
+		"ANTHROPIC_API_KEY":  realKey,
+		"ANTHROPIC_BASE_URL": upstream.URL,
+	})
+	if err != nil {
+		t.Fatalf("startProxiesForSandbox: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = bundle.Shutdown(ctx)
+	})
+
+	proxyURL := envValue(env, "ANTHROPIC_BASE_URL")
+	sdkKey := envValue(env, "ANTHROPIC_API_KEY")
+
+	// A sibling run would present its own (different) token; an attacker
+	// might guess the pre-SKY-395 constant placeholder. Both must 401,
+	// as must a missing header.
+	for _, wrong := range []string{
+		"sk-ant-PROXY-PLACEHOLDER-DO-NOT-USE", // the pre-SKY-395 constant
+		"sk-ant-some-other-runs-token",
+		"", // missing
+	} {
+		req, _ := http.NewRequest("POST", proxyURL+"/v1/messages", strings.NewReader("{}"))
+		if wrong != "" {
+			req.Header.Set("x-api-key", wrong)
+		}
+		resp, derr := http.DefaultClient.Do(req)
+		if derr != nil {
+			t.Fatalf("wrong-token roundtrip (%q): %v", wrong, derr)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("x-api-key=%q: status = %d, want 401", wrong, resp.StatusCode)
+		}
+	}
+	if hits != 0 {
+		t.Fatalf("upstream reached %d time(s) by unauthorized requests; want 0", hits)
+	}
+
+	// The exact injected token is accepted and forwarded.
+	req, _ := http.NewRequest("POST", proxyURL+"/v1/messages", strings.NewReader("{}"))
+	req.Header.Set("x-api-key", sdkKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("good-token roundtrip: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("injected token: status = %d, want 200", resp.StatusCode)
+	}
+	if hits != 1 {
+		t.Errorf("upstream hits = %d, want 1", hits)
+	}
+}
+
+// TestStartProxiesForSandbox_TokensArePerRun pins that two runs get
+// distinct tokens — the property that makes the auth cross-tenant-safe.
+// If runs shared a token, a sibling could replay it against this run's
+// proxy.
+func TestStartProxiesForSandbox_TokensArePerRun(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	creds := map[string]string{
+		"ANTHROPIC_API_KEY":  "k",
+		"ANTHROPIC_BASE_URL": upstream.URL,
+	}
+
+	b1, env1, err := startProxiesForSandbox("127.0.0.1", creds)
+	if err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	t.Cleanup(func() { _ = b1.Shutdown(context.Background()) })
+	b2, env2, err := startProxiesForSandbox("127.0.0.1", creds)
+	if err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	t.Cleanup(func() { _ = b2.Shutdown(context.Background()) })
+
+	tok1 := envValue(env1, "ANTHROPIC_API_KEY")
+	tok2 := envValue(env2, "ANTHROPIC_API_KEY")
+	if tok1 == "" || tok2 == "" {
+		t.Fatalf("empty token(s): %q / %q", tok1, tok2)
+	}
+	if tok1 == tok2 {
+		t.Errorf("two runs got the same proxy token %q; tokens must be per-run so a sibling can't replay", tok1)
 	}
 }
 

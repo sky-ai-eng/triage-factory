@@ -504,3 +504,169 @@ func TestProxyErrChannelCleanOnShutdown(t *testing.T) {
 		t.Error("Err() channel not closed within 1s after Shutdown")
 	}
 }
+
+// TestProxyTokenGateAnthropic pins SKY-395 Part A for the Anthropic
+// path: with IncomingToken set, only a request presenting that exact
+// token on x-api-key is forwarded; a wrong or missing token gets 401
+// and never reaches the upstream. This is the fail-closed guarantee
+// that a sibling run (which holds a different token) can't spend this
+// run's credential even if it reaches the proxy over the shared host
+// namespace.
+func TestProxyTokenGateAnthropic(t *testing.T) {
+	rec := &upstreamRecord{}
+	upstream := fakeUpstream(rec, false)
+	defer upstream.Close()
+
+	const token = "sk-ant-the-only-valid-token"
+	srv, err := llmproxy.New(llmproxy.Config{
+		Provider:      llmproxy.ProviderAnthropic,
+		APIKey:        "sk-ant-REAL-KEY",
+		Upstream:      upstream.URL,
+		IncomingToken: token,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	addr, err := srv.Start("")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	})
+	proxyURL := "http://" + addr
+
+	// Wrong token → 401.
+	reqBad, _ := http.NewRequest("POST", proxyURL+"/v1/messages", strings.NewReader("{}"))
+	reqBad.Header.Set("x-api-key", "sk-ant-some-OTHER-runs-token")
+	respBad, err := http.DefaultClient.Do(reqBad)
+	if err != nil {
+		t.Fatalf("bad-token roundtrip: %v", err)
+	}
+	_ = respBad.Body.Close()
+	if respBad.StatusCode != http.StatusUnauthorized {
+		t.Errorf("wrong token: status = %d, want 401", respBad.StatusCode)
+	}
+
+	// Missing token → 401 too.
+	reqMissing, _ := http.NewRequest("POST", proxyURL+"/v1/messages", strings.NewReader("{}"))
+	respMissing, err := http.DefaultClient.Do(reqMissing)
+	if err != nil {
+		t.Fatalf("missing-token roundtrip: %v", err)
+	}
+	_ = respMissing.Body.Close()
+	if respMissing.StatusCode != http.StatusUnauthorized {
+		t.Errorf("missing token: status = %d, want 401", respMissing.StatusCode)
+	}
+
+	if rec.hits.Load() != 0 {
+		t.Fatalf("upstream was hit %d time(s) by unauthorized requests; want 0 (proxy must not forward before auth)", rec.hits.Load())
+	}
+
+	// Correct token → forwarded, upstream sees the rewritten real key.
+	reqOK, _ := http.NewRequest("POST", proxyURL+"/v1/messages", strings.NewReader("{}"))
+	reqOK.Header.Set("x-api-key", token)
+	respOK, err := http.DefaultClient.Do(reqOK)
+	if err != nil {
+		t.Fatalf("good-token roundtrip: %v", err)
+	}
+	_ = respOK.Body.Close()
+	if respOK.StatusCode != 200 {
+		t.Errorf("correct token: status = %d, want 200", respOK.StatusCode)
+	}
+	if rec.hits.Load() != 1 {
+		t.Errorf("upstream hits = %d, want 1 (only the authorized request forwarded)", rec.hits.Load())
+	}
+	if rec.xAPIKey != "sk-ant-REAL-KEY" {
+		t.Errorf("upstream x-api-key = %q, want the real key (rewrite still swaps the token for the real key)", rec.xAPIKey)
+	}
+}
+
+// TestProxyTokenGateBedrock mirrors the Anthropic gate test for the
+// Bedrock bearer path: the token rides "Authorization: Bearer <token>"
+// and a wrong/missing bearer gets 401 with the upstream untouched.
+func TestProxyTokenGateBedrock(t *testing.T) {
+	rec := &upstreamRecord{}
+	upstream := fakeUpstream(rec, false)
+	defer upstream.Close()
+
+	const token = "bedrock-run-token"
+	srv, err := llmproxy.New(llmproxy.Config{
+		Provider:      llmproxy.ProviderBedrockBearer,
+		APIKey:        "bdrk-REAL-BEARER",
+		Upstream:      upstream.URL,
+		IncomingToken: token,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	addr, err := srv.Start("")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	})
+	proxyURL := "http://" + addr
+
+	// Wrong bearer → 401, upstream untouched.
+	reqBad, _ := http.NewRequest("POST", proxyURL+"/model/x/invoke", strings.NewReader("{}"))
+	reqBad.Header.Set("Authorization", "Bearer wrong-token")
+	respBad, err := http.DefaultClient.Do(reqBad)
+	if err != nil {
+		t.Fatalf("bad-bearer roundtrip: %v", err)
+	}
+	_ = respBad.Body.Close()
+	if respBad.StatusCode != http.StatusUnauthorized {
+		t.Errorf("wrong bearer: status = %d, want 401", respBad.StatusCode)
+	}
+	if rec.hits.Load() != 0 {
+		t.Fatalf("upstream hit by unauthorized bearer; want 0")
+	}
+
+	// Correct bearer → forwarded, real bearer injected upstream.
+	reqOK, _ := http.NewRequest("POST", proxyURL+"/model/x/invoke", strings.NewReader("{}"))
+	reqOK.Header.Set("Authorization", "Bearer "+token)
+	respOK, err := http.DefaultClient.Do(reqOK)
+	if err != nil {
+		t.Fatalf("good-bearer roundtrip: %v", err)
+	}
+	_ = respOK.Body.Close()
+	if respOK.StatusCode != 200 {
+		t.Errorf("correct bearer: status = %d, want 200", respOK.StatusCode)
+	}
+	if rec.authHeader != "Bearer bdrk-REAL-BEARER" {
+		t.Errorf("upstream Authorization = %q, want \"Bearer bdrk-REAL-BEARER\"", rec.authHeader)
+	}
+}
+
+// TestProxyNoTokenDisablesGate pins the opt-out: an empty IncomingToken
+// leaves the proxy unauthenticated (the loopback/test + single-tenant
+// direct path), so a request with no credential header is still
+// forwarded. This is what keeps the pre-SKY-395 loopback usage working.
+func TestProxyNoTokenDisablesGate(t *testing.T) {
+	rec := &upstreamRecord{}
+	upstream := fakeUpstream(rec, false)
+	defer upstream.Close()
+
+	// startProxyWithAddr constructs Config without IncomingToken.
+	_, proxyURL := startProxyWithAddr(t, llmproxy.ProviderAnthropic, "sk-ant-REAL", upstream.URL)
+
+	req, _ := http.NewRequest("POST", proxyURL+"/v1/messages", strings.NewReader("{}"))
+	// Deliberately no x-api-key.
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("roundtrip: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200 (empty IncomingToken disables the gate)", resp.StatusCode)
+	}
+	if rec.hits.Load() != 1 {
+		t.Errorf("upstream hits = %d, want 1", rec.hits.Load())
+	}
+}
