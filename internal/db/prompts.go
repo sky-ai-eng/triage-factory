@@ -27,42 +27,60 @@ import (
 // app pool. SQLite has no role concept; both pools collapse to one
 // connection and assertLocalOrg pins orgID to LocalDefaultOrg.
 type PromptStore interface {
-	// SeedOrUpdate inserts a shipped system prompt if missing or
-	// updates it when the shipped (name, body, source) hash changed
-	// since the last seed, skipping user-modified rows so local
-	// customizations survive a re-seed. Recorded in
-	// system_prompt_versions so identical re-seeds are no-ops (no
-	// churn to prompts.updated_at — the UI orders by it).
+	// SeedOrUpdate inserts a shipped system prompt as the team's own copy
+	// if missing, or updates it when the shipped (name, body, source) hash
+	// changed since the last seed, skipping user-modified rows so local
+	// customizations survive a re-seed. Identity is per-team: the row is
+	// keyed by (org_id, team_id, system_slug) — p.SystemSlug carries the
+	// shipped slug ("system-ci-fix", …) and the id is a random UUID minted
+	// per team copy. Recorded in system_prompt_versions so identical
+	// re-seeds are no-ops (no churn to prompts.updated_at — the UI orders
+	// by it).
+	//
+	// Returns the team copy's prompt id (existing or freshly inserted) so
+	// callers can resolve slug→id for the trigger seed's same-team FK
+	// (SKY-380 two-phase seed).
 	//
 	// Atomic: prompts insert/update + system_prompt_versions upsert
 	// happen in one transaction so the version row never races ahead
 	// of the prompt row.
 	//
 	// Source contract: p.Source must be "" (defaulted to "system") or
-	// "system". Non-system sources are rejected — SeedOrUpdate is the
-	// shipped-content seeder; anything else (user prompts via the
-	// HTTP handler, imported skills via the file importer) goes
-	// through Create / UpdateImported. The version-sidecar would
-	// otherwise track non-system rows and re-seeds could silently
+	// "system" and p.SystemSlug must be non-empty. Non-system sources are
+	// rejected — SeedOrUpdate is the shipped-content seeder; anything else
+	// (user prompts via the HTTP handler, imported skills via the file
+	// importer) goes through Create / UpdateImported. The version-sidecar
+	// would otherwise track non-system rows and re-seeds could silently
 	// overwrite them.
 	//
 	// Postgres-only: must run on the admin connection because
 	// system_prompt_versions writes are REVOKE'd from tf_app. The
 	// impl picks the right pool internally — callers don't (and
 	// shouldn't) choose.
-	SeedOrUpdate(ctx context.Context, orgID string, p domain.Prompt) error
+	SeedOrUpdate(ctx context.Context, orgID, teamID string, p domain.Prompt) (string, error)
 
 	// List returns non-hidden prompts ordered by updated_at DESC. When
 	// teamID is non-empty — the multi-team prompts page narrowed to one
-	// team — the result is scoped to that team's prompts plus org-visible
-	// (system) prompts: (visibility='org' OR team_id=teamID). Empty teamID
-	// returns everything visible (solo/local, or an unfiltered view). The
-	// SQLite impl ignores teamID (local mode is single-team).
+	// team — the result is scoped to that team's prompts (team_id=teamID).
+	// Every prompt is team-scoped post-SKY-380, so there is no org-visible
+	// tier to union in. Empty teamID returns everything visible (solo/local,
+	// or an unfiltered view). The SQLite impl ignores teamID (local mode is
+	// single-team).
 	List(ctx context.Context, orgID string, teamID string) ([]domain.Prompt, error)
 
 	// Get returns one prompt by id (regardless of hidden state) or
 	// (nil, nil) if not found.
 	Get(ctx context.Context, orgID string, id string) (*domain.Prompt, error)
+
+	// GetBySystemSlug resolves a team's copy of a shipped prompt by its
+	// stable system_slug (e.g. domain.SystemTicketSpecPromptID). Returns
+	// (nil, nil) when the team has no copy. The id moved to a random UUID
+	// per team copy (SKY-380), so callers that used to Get(slug) — the
+	// curator spec fallback, the project-create default — resolve through
+	// this instead. The Postgres impl filters org+team and runs on the app
+	// pool (RLS-gated); the SQLite impl filters by slug only (single team)
+	// but honors a non-empty teamID when supplied.
+	GetBySystemSlug(ctx context.Context, orgID, teamID, systemSlug string) (*domain.Prompt, error)
 
 	// Create inserts a new prompt (user or imported source) owned by
 	// teamID — the acting team the handler resolved for the request.

@@ -30,6 +30,23 @@ func seedTestPrompt(t *testing.T, database *sql.DB, p domain.Prompt) {
 	t.Helper()
 	store := testPromptStore(database)
 	ctx := context.Background()
+	// System prompts seed through SeedOrUpdate so they carry a system_slug
+	// (the curator's default-spec fallback resolves them by slug, not id,
+	// post-SKY-380 — the row's id is a random UUID). The fixture's ID field
+	// is reinterpreted as the slug. User/imported prompts keep their explicit
+	// id via Create (the project-override path resolves those by id).
+	if p.Source == "system" {
+		if p.SystemSlug == "" {
+			p.SystemSlug = p.ID
+		}
+		if existing, _ := store.GetBySystemSlug(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, p.SystemSlug); existing != nil {
+			return
+		}
+		if _, err := store.SeedOrUpdate(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, p); err != nil {
+			t.Fatalf("seedTestPrompt %s: %v", p.SystemSlug, err)
+		}
+		return
+	}
 	existing, _ := store.Get(ctx, runmode.LocalDefaultOrg, p.ID)
 	if existing != nil {
 		return

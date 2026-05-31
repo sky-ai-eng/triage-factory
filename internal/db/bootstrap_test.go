@@ -128,14 +128,16 @@ func TestBootstrapTeamAgent_ErrorsWhenOrgHasNoAgent(t *testing.T) {
 	}
 }
 
-// TestBootstrapNewTeam_SeedsBotOnly pins SKY-378's team-create bootstrap:
-// a new 2nd+ team in an existing org gets a default-enabled team_agents
-// row (so manual delegation works immediately) but NO system event
-// handlers — a new team is a blank slate the org admin configures, and
-// the shipped-handler UUID is team-independent so per-team seeding could
-// never materialize distinct rows anyway. Uses the local org/team graph +
-// BootstrapLocalAgent for the org agent.
-func TestBootstrapNewTeam_SeedsBotOnly(t *testing.T) {
+// TestBootstrapNewTeam_SeedsPerTeamDefaults pins SKY-380's team-create
+// bootstrap: a new 2nd+ team in an existing org gets a default-enabled
+// team_agents row (so manual delegation works immediately) AND its own
+// copies of the shipped prompts + event handlers. Per-team seeding is now
+// correct — random-UUID id + system_slug, deduped on (org, team, slug) —
+// so the second team materializes its own distinct rows instead of
+// ON CONFLICT-vanishing against the org's first team (the old UUIDFor
+// scheme was org-keyed, which is why this used to seed bot-only). Uses the
+// local org/team graph + BootstrapLocalAgent for the org agent.
+func TestBootstrapNewTeam_SeedsPerTeamDefaults(t *testing.T) {
 	conn := openInMemorySQLite(t)
 	stores := sqlitestore.New(conn)
 	ctx := t.Context()
@@ -153,7 +155,7 @@ func TestBootstrapNewTeam_SeedsBotOnly(t *testing.T) {
 		t.Fatalf("insert second team: %v", err)
 	}
 
-	if err := db.BootstrapNewTeam(ctx, stores, runmode.LocalDefaultOrg, newTeamID); err != nil {
+	if err := db.BootstrapNewTeam(ctx, stores, runmode.LocalDefaultOrg, newTeamID, ai.ShippedPrompts()); err != nil {
 		t.Fatalf("BootstrapNewTeam: %v", err)
 	}
 
@@ -170,7 +172,7 @@ func TestBootstrapNewTeam_SeedsBotOnly(t *testing.T) {
 		t.Errorf("new team has no default-enabled team_agents row: %+v", ta)
 	}
 
-	// No system handlers — the new team starts blank by design.
+	// The new team got its own per-team system handler copies.
 	var n int
 	if err := conn.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM event_handlers WHERE org_id = ? AND team_id = ? AND source = 'system'`,
@@ -178,8 +180,19 @@ func TestBootstrapNewTeam_SeedsBotOnly(t *testing.T) {
 	).Scan(&n); err != nil {
 		t.Fatalf("count handlers: %v", err)
 	}
-	if n != 0 {
-		t.Errorf("new team got %d system handlers; want 0 (blank slate by design)", n)
+	if n == 0 {
+		t.Errorf("new team got 0 system handlers; want its own per-team copies")
+	}
+	// And its own per-team system prompt copies.
+	var np int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM prompts WHERE org_id = ? AND team_id = ? AND source = 'system'`,
+		runmode.LocalDefaultOrg, newTeamID,
+	).Scan(&np); err != nil {
+		t.Fatalf("count prompts: %v", err)
+	}
+	if np == 0 {
+		t.Errorf("new team got 0 system prompts; want its own per-team copies")
 	}
 }
 
@@ -213,8 +226,9 @@ func TestBootstrapNewOrg_SeedsFullStack(t *testing.T) {
 		t.Errorf("default team has no enabled team_agents row: %+v", ta)
 	}
 
-	// Prompts seeded.
-	got, err := stores.Prompts.Get(ctx, runmode.LocalDefaultOrg, "system-pr-review")
+	// Prompts seeded. The id is a random UUID per team copy now (SKY-380),
+	// so resolve by system_slug rather than by id.
+	got, err := stores.Prompts.GetBySystemSlug(ctx, runmode.LocalDefaultOrg, db.LocalDefaultTeamID, "system-pr-review")
 	if err != nil {
 		t.Fatalf("Get prompt: %v", err)
 	}

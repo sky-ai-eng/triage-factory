@@ -22,7 +22,7 @@ import (
 func TestHandleEvent_BecameAtomic_ExistingTask_NoDuplicate(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
-	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID); err != nil {
+	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 
@@ -104,7 +104,7 @@ func TestHandleEvent_BecameAtomic_NoExistingTask_CreatesTask(t *testing.T) {
 	// flow.
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
-	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID); err != nil {
+	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 

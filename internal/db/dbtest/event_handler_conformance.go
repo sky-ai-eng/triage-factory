@@ -12,24 +12,29 @@ import (
 
 // EventHandlerStoreFactory is what a per-backend test file hands to
 // RunEventHandlerStoreConformance. The factory returns the wired
-// store + the orgID + the teamID Seed should materialize into
-// (SKY-295: shipped rules are team-scoped, no longer org-visible) +
-// a seedPrompts hook the harness invokes before any test that creates
-// trigger rows (triggers FK to prompts on (prompt_id, org_id); each
-// backend wires its own prompt-seeding shape against its connection).
+// store + the orgID + the teamID Seed/Create should materialize into
+// (shipped handlers are team-scoped) + a seedPrompts hook the harness
+// invokes before any test that creates trigger rows. Triggers FK to
+// prompts on both (prompt_id, org_id) AND the same-team (prompt_id,
+// team_id), so the seeded prompts must live on the factory's teamID; each
+// backend wires its own prompt-seeding shape against its connection.
 type EventHandlerStoreFactory func(t *testing.T) (store db.EventHandlerStore, orgID, teamID string, seedPrompts PromptSeeder)
 
-// PromptSeeder inserts prompts into the harness DB at known IDs so
-// trigger rows can reference them. Returns the inserted prompt IDs in
-// stable order so the test can pick one when building a kind='trigger'
-// fixture.
-type PromptSeeder func(t *testing.T, ids ...string)
+// PromptSeeder seeds prompts into the harness DB at the given slugs so
+// trigger rows can reference them, and returns a slug→prompt-id map. The
+// id is a random UUID per copy post-SKY-380; callers resolve a trigger's
+// prompt slug to the seeded id through this map (mirroring the two-phase
+// seed: PromptStore.SeedOrUpdate → EventHandlerStore.Seed). Backends may
+// seed the id equal to the slug for test convenience, but callers must use
+// the returned map rather than assuming so.
+type PromptSeeder func(t *testing.T, slugs ...string) map[string]string
 
 // RunEventHandlerStoreConformance runs the shared assertion suite for
 // the unified rule + trigger store (SKY-259). What it covers:
 //
-//   - Seed inserts both rule and trigger ShippedEventHandlers rows;
-//     re-seed is idempotent (per-row INSERT-OR-IGNORE / ON CONFLICT).
+//   - Seed inserts both rule and trigger ShippedEventHandlers rows,
+//     resolving each trigger's prompt slug through the seeded map;
+//     re-seed is idempotent (ON CONFLICT on (org_id, team_id, system_slug)).
 //   - Create rejects mis-shaped writes per kind (rule with prompt_id,
 //     trigger missing prompt_id, etc.) — validateForCreate catches
 //     before the CHECK constraint does.
@@ -48,14 +53,14 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	t.Run("Seed_InsertsBothKinds", func(t *testing.T) {
 		store, orgID, teamID, seedPrompts := factory(t)
 		// Trigger rows in ShippedEventHandlers reference these prompts.
-		seedPrompts(t,
+		ids := seedPrompts(t,
 			"system-pr-review",
 			"system-conflict-resolution",
 			"system-ci-fix",
 			"system-jira-implement",
 			"system-fix-review-feedback",
 		)
-		if err := store.Seed(context.Background(), orgID, teamID); err != nil {
+		if err := store.Seed(context.Background(), orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed: %v", err)
 		}
 		all, err := store.List(context.Background(), orgID, "", "")
@@ -81,15 +86,15 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 
 	t.Run("Seed_IsIdempotent", func(t *testing.T) {
 		store, orgID, teamID, seedPrompts := factory(t)
-		seedPrompts(t,
+		ids := seedPrompts(t,
 			"system-pr-review", "system-conflict-resolution", "system-ci-fix",
 			"system-jira-implement", "system-fix-review-feedback",
 		)
-		if err := store.Seed(context.Background(), orgID, teamID); err != nil {
+		if err := store.Seed(context.Background(), orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed #1: %v", err)
 		}
 		first, _ := store.List(context.Background(), orgID, "", "")
-		if err := store.Seed(context.Background(), orgID, teamID); err != nil {
+		if err := store.Seed(context.Background(), orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed #2: %v", err)
 		}
 		second, _ := store.List(context.Background(), orgID, "", "")
@@ -136,13 +141,14 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	t.Run("Create_Trigger_RoundTrip", func(t *testing.T) {
 		store, orgID, teamID, seedPrompts := factory(t)
 		ctx := context.Background()
-		seedPrompts(t, "p-trigger-test")
+		ids := seedPrompts(t, "p-trigger-test")
+		promptID := ids["p-trigger-test"]
 		breaker := 2
 		minAutonomy := 0.5
 		h := domain.EventHandler{
 			ID:                     uuid.New().String(),
 			Kind:                   domain.EventHandlerKindTrigger,
-			PromptID:               "p-trigger-test",
+			PromptID:               promptID,
 			EventType:              domain.EventGitHubPRCICheckFailed,
 			Enabled:                true,
 			BreakerThreshold:       &breaker,
@@ -158,8 +164,8 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		if got.Kind != domain.EventHandlerKindTrigger {
 			t.Errorf("Kind=%q want trigger", got.Kind)
 		}
-		if got.PromptID != "p-trigger-test" {
-			t.Errorf("PromptID=%q", got.PromptID)
+		if got.PromptID != promptID {
+			t.Errorf("PromptID=%q want %q", got.PromptID, promptID)
 		}
 		if got.BreakerThreshold == nil || *got.BreakerThreshold != 2 {
 			t.Errorf("BreakerThreshold=%v want 2", got.BreakerThreshold)
@@ -212,13 +218,13 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		// rejects the same shape earlier so the user gets a clearer
 		// error than the SQL integrity-violation surface.
 		store, orgID, teamID, seedPrompts := factory(t)
-		seedPrompts(t, "p-name-on-trigger")
+		ids := seedPrompts(t, "p-name-on-trigger")
 		breaker := 4
 		minAutonomy := 0.0
 		h := domain.EventHandler{
 			ID:                     uuid.New().String(),
 			Kind:                   domain.EventHandlerKindTrigger,
-			PromptID:               "p-name-on-trigger",
+			PromptID:               ids["p-name-on-trigger"],
 			EventType:              domain.EventGitHubPRCICheckFailed,
 			BreakerThreshold:       &breaker,
 			MinAutonomySuitability: &minAutonomy,
@@ -232,7 +238,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	t.Run("List_KindFilter", func(t *testing.T) {
 		store, orgID, teamID, seedPrompts := factory(t)
 		ctx := context.Background()
-		seedPrompts(t, "p-list-trigger")
+		ids := seedPrompts(t, "p-list-trigger")
 
 		priority := 0.5
 		sortOrder := 0
@@ -246,7 +252,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}
 		trig := domain.EventHandler{
 			ID: uuid.New().String(), Kind: domain.EventHandlerKindTrigger,
-			PromptID:               "p-list-trigger",
+			PromptID:               ids["p-list-trigger"],
 			EventType:              domain.EventGitHubPRCICheckFailed,
 			BreakerThreshold:       &breaker,
 			MinAutonomySuitability: &minAutonomy, Enabled: true,
@@ -285,7 +291,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	t.Run("GetEnabledForEvent_OrdersRulesBeforeTriggers", func(t *testing.T) {
 		store, orgID, teamID, seedPrompts := factory(t)
 		ctx := context.Background()
-		seedPrompts(t, "p-order-test")
+		ids := seedPrompts(t, "p-order-test")
 
 		priority := 0.5
 		sortOrder := 0
@@ -300,7 +306,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}
 		trig := domain.EventHandler{
 			ID: uuid.New().String(), Kind: domain.EventHandlerKindTrigger,
-			PromptID:               "p-order-test",
+			PromptID:               ids["p-order-test"],
 			EventType:              eventType,
 			BreakerThreshold:       &breaker,
 			MinAutonomySuitability: &minAutonomy, Enabled: true,
@@ -378,7 +384,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	t.Run("Promote_RuleToTrigger", func(t *testing.T) {
 		store, orgID, teamID, seedPrompts := factory(t)
 		ctx := context.Background()
-		seedPrompts(t, "p-promote-target")
+		ids := seedPrompts(t, "p-promote-target")
 
 		priority, sortOrder := 0.5, 0
 		ruleID := uuid.New().String()
@@ -392,9 +398,10 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 
 		breaker := 3
 		minAutonomy := 0.0
+		promoteTarget := ids["p-promote-target"]
 		err := store.Promote(ctx, orgID, ruleID, domain.EventHandler{
 			Kind:                   domain.EventHandlerKindTrigger,
-			PromptID:               "p-promote-target",
+			PromptID:               promoteTarget,
 			BreakerThreshold:       &breaker,
 			MinAutonomySuitability: &minAutonomy,
 		})
@@ -405,7 +412,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		if got == nil || got.Kind != domain.EventHandlerKindTrigger {
 			t.Fatalf("Promote did not flip kind: got=%v", got)
 		}
-		if got.PromptID != "p-promote-target" {
+		if got.PromptID != promoteTarget {
 			t.Errorf("PromptID=%q after promote", got.PromptID)
 		}
 		if got.Name != "" {
@@ -419,7 +426,8 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	t.Run("Promote_RejectsTriggerSource", func(t *testing.T) {
 		store, orgID, teamID, seedPrompts := factory(t)
 		ctx := context.Background()
-		seedPrompts(t, "p-already-trigger")
+		ids := seedPrompts(t, "p-already-trigger")
+		promptID := ids["p-already-trigger"]
 
 		breaker := 4
 		minAutonomy := 0.0
@@ -427,7 +435,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		if err := store.Create(ctx, orgID, teamID, domain.EventHandler{
 			ID:                     trigID,
 			Kind:                   domain.EventHandlerKindTrigger,
-			PromptID:               "p-already-trigger",
+			PromptID:               promptID,
 			EventType:              domain.EventGitHubPRCICheckFailed,
 			BreakerThreshold:       &breaker,
 			MinAutonomySuitability: &minAutonomy, Enabled: true,
@@ -436,7 +444,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}
 		err := store.Promote(ctx, orgID, trigID, domain.EventHandler{
 			Kind:             domain.EventHandlerKindTrigger,
-			PromptID:         "p-already-trigger",
+			PromptID:         promptID,
 			BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy,
 		})
 		if err == nil {

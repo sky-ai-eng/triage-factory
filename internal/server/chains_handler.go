@@ -142,6 +142,14 @@ func (s *Server) handleChainStepsPut(w http.ResponseWriter, r *http.Request) {
 				validationStatus = http.StatusUnprocessableEntity
 				return nil
 			}
+			// Same-team guard (SKY-380): a chain may only step through prompts
+			// its own team owns. The DB enforces this via the (step_prompt_id,
+			// team_id) composite FK on ReplaceSteps; pre-check for a clean 422.
+			if prompt.TeamID != "" && stepPrompt.TeamID != "" && stepPrompt.TeamID != prompt.TeamID {
+				validationErr = "step " + strconv.Itoa(i) + " references a prompt owned by another team"
+				validationStatus = http.StatusUnprocessableEntity
+				return nil
+			}
 		}
 		if validationErr != "" {
 			return nil

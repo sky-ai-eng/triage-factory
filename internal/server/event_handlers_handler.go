@@ -174,12 +174,33 @@ func (s *Server) handleEventHandlerCreate(w http.ResponseWriter, r *http.Request
 		}
 		// Verify the prompt exists for clearer 404 than the downstream FK
 		// integrity error.
+		// Verify the prompt exists (clearer 404 than the downstream FK
+		// integrity error) AND that the acting team owns it. A trigger may
+		// only bind a prompt its own team owns (SKY-380): the DB enforces
+		// this via the (prompt_id, team_id) composite FK, but we resolve the
+		// acting team here and pre-check for a clean 400 instead of a generic
+		// constraint error. Both lookups share one tx so the prompt's team
+		// and the resolved acting team are read under the same claims.
 		var prompt *domain.Prompt
+		var crossTeamPrompt bool
 		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 			var e error
 			prompt, e = tx.Prompts.Get(r.Context(), orgID, req.PromptID)
-			return e
+			if e != nil || prompt == nil {
+				return e
+			}
+			teamID, e := resolveActingTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+			if e != nil {
+				return e
+			}
+			if prompt.TeamID != "" && prompt.TeamID != teamID {
+				crossTeamPrompt = true
+			}
+			return nil
 		}); err != nil {
+			if writeIfActingTeamError(w, err) {
+				return
+			}
 			internalError(w, "event_handlers", err)
 			return
 		}
@@ -187,14 +208,10 @@ func (s *Server) handleEventHandlerCreate(w http.ResponseWriter, r *http.Request
 			notFound(w, "prompt")
 			return
 		}
-		// TODO(SKY-380): once prompts expose team_id + visibility, validate
-		// here that the resolved acting team may bind this prompt (prompt is
-		// org-visible OR prompt.team == acting team) and reject otherwise.
-		// The trigger→prompt FK is only (prompt_id, org_id), so this is the
-		// authoritative cross-team guard. The single-team prompts page keeps
-		// the UI from presenting the footgun (only the active team's prompts
-		// are on the canvas), but a hand-crafted API call still can until
-		// this server-side check lands.
+		if crossTeamPrompt {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "prompt_id references a prompt owned by another team"})
+			return
+		}
 		h.PromptID = req.PromptID
 		h.TriggerType = domain.TriggerTypeEvent
 		threshold := 4
@@ -554,6 +571,13 @@ func (s *Server) handleEventHandlerPromote(w http.ResponseWriter, r *http.Reques
 	}
 	if prompt == nil {
 		notFound(w, "prompt")
+		return
+	}
+	// Same-team guard (SKY-380): a promoted trigger may only bind a prompt
+	// the rule's own team owns. The DB enforces this via the (prompt_id,
+	// team_id) composite FK on the Promote UPDATE; pre-check for a clean 400.
+	if existing.TeamID != "" && prompt.TeamID != "" && prompt.TeamID != existing.TeamID {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "prompt_id references a prompt owned by another team"})
 		return
 	}
 

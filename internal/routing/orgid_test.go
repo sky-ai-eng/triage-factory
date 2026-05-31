@@ -29,7 +29,7 @@ import (
 func TestHandleEvent_EmptyOrgID_Dropped(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
-	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID); err != nil {
+	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 
@@ -95,7 +95,7 @@ func TestHandleEvent_EmptyOrgID_Dropped(t *testing.T) {
 func TestHandleEvent_OrgIDThreaded(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
-	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID); err != nil {
+	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 

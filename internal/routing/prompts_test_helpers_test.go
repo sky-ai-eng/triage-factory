@@ -65,12 +65,30 @@ func setTriggerEnabledForTestRouting(t *testing.T, database *sql.DB, id string, 
 
 // createTestPrompt is the replacement for the deleted db.CreatePrompt
 // free-function. Routes through the store so test fixtures and
-// production share the same insert SQL.
+// production share the same insert SQL. The SQLite store pins
+// LocalDefaultTeamID (team A), so this owns the row to team A — for a
+// prompt a second team's trigger/chain must reference, use
+// insertPromptForTeam.
 func createTestPrompt(t *testing.T, database *sql.DB, p domain.Prompt) {
 	t.Helper()
 	store := testPromptStore(database)
 	if err := store.Create(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, p); err != nil {
 		t.Fatalf("createTestPrompt %s: %v", p.ID, err)
+	}
+}
+
+// insertPromptForTeam seeds a user prompt owned by a specific team via a
+// raw INSERT. createTestPrompt routes through PromptStore.Create which pins
+// LocalDefaultTeamID (team A); a team-B trigger or chain step can only bind
+// a prompt its own team owns under the same-team composite FK (SKY-380), so
+// team-B fixtures seed their prompt here with the matching team_id.
+func insertPromptForTeam(t *testing.T, database *sql.DB, id, teamID string) {
+	t.Helper()
+	if _, err := database.Exec(`
+		INSERT INTO prompts (id, org_id, team_id, creator_user_id, visibility, source, kind, name, body, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'team', 'user', 'leaf', ?, 'x', datetime('now'), datetime('now'))
+	`, id, runmode.LocalDefaultOrg, teamID, runmode.LocalDefaultUserID, id); err != nil {
+		t.Fatalf("insertPromptForTeam %s (team %s): %v", id, teamID, err)
 	}
 }
 
@@ -84,20 +102,26 @@ func floatPtr(v float64) *float64 { return &v }
 // seedHandlerFKTargets seeds the prompts that shipped triggers reference
 // so EventHandlerStore.Seed's trigger rows resolve their FK to prompts.
 // Production calls seedDefaultPrompts which seeds prompts THEN handlers in
-// the same loop; tests that call Seed directly need to replicate that
-// ordering manually.
-func seedHandlerFKTargets(t *testing.T, database *sql.DB) {
+// the same loop; tests that call Seed directly replicate that ordering
+// manually. Returns the system_slug → prompt-id map the caller threads into
+// Seed (the id is a random UUID per team copy post-SKY-380; the two-phase
+// seed resolves a trigger's prompt slug through this map).
+func seedHandlerFKTargets(t *testing.T, database *sql.DB) map[string]string {
 	t.Helper()
 	store := testPromptStore(database)
+	out := map[string]string{}
 	for _, p := range []domain.Prompt{
-		{ID: "system-pr-review", Name: "PR Review", Body: "x", Source: "system"},
-		{ID: "system-conflict-resolution", Name: "Conflicts", Body: "x", Source: "system"},
-		{ID: "system-ci-fix", Name: "CI Fix", Body: "x", Source: "system"},
-		{ID: "system-jira-implement", Name: "Jira Implement", Body: "x", Source: "system"},
-		{ID: "system-fix-review-feedback", Name: "Fix Review", Body: "x", Source: "system"},
+		{SystemSlug: "system-pr-review", Name: "PR Review", Body: "x", Source: "system"},
+		{SystemSlug: "system-conflict-resolution", Name: "Conflicts", Body: "x", Source: "system"},
+		{SystemSlug: "system-ci-fix", Name: "CI Fix", Body: "x", Source: "system"},
+		{SystemSlug: "system-jira-implement", Name: "Jira Implement", Body: "x", Source: "system"},
+		{SystemSlug: "system-fix-review-feedback", Name: "Fix Review", Body: "x", Source: "system"},
 	} {
-		if err := store.SeedOrUpdate(context.Background(), runmode.LocalDefaultOrg, p); err != nil {
-			t.Fatalf("seed prompt %s: %v", p.ID, err)
+		id, err := store.SeedOrUpdate(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, p)
+		if err != nil {
+			t.Fatalf("seed prompt %s: %v", p.SystemSlug, err)
 		}
+		out[p.SystemSlug] = id
 	}
+	return out
 }

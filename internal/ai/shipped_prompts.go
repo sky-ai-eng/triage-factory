@@ -11,45 +11,44 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // Order is not significant for prompts (each upserts independently), but
 // note the shipped event handlers (db.ShippedEventHandlers) carry
 // trigger rows whose prompt_id FKs into these — so any seed flow must
-// seed prompts before handlers. The IDs here must stay in sync with the
-// PromptID references in db.ShippedEventHandlers.
+// seed prompts before handlers. The SystemSlug values here must stay in
+// sync with the PromptID (prompt-slug) references in db.ShippedEventHandlers.
 //
-// TODO(SKY-380): once prompts are team-scoped (team_id NOT NULL,
-// visibility {private,team}) these seed as one team-owned copy per team
-// keyed by system_slug rather than one org-wide visibility='org' row, and
-// the trigger→prompt FK becomes same-team. This stays the content source;
-// the seed writer changes.
+// SKY-380: prompts are team-scoped. Each entry carries a SystemSlug (the
+// stable shipped identifier) rather than a literal id — the seeder mints a
+// random UUID per team copy and dedupes on (org_id, team_id, system_slug).
+// This stays the content source; only the seed writer changed.
 func ShippedPrompts() []domain.Prompt {
 	return []domain.Prompt{
 		// Default PR review prompt — manual only. The user picks when
 		// to review a PR; no automation makes sense for reviewing
 		// (including reviewing one's own draft — that's just running
 		// this prompt by hand).
-		{ID: "system-pr-review", Name: "PR Code Review", Body: PRReviewPromptTemplate, Source: "system"},
+		{SystemSlug: "system-pr-review", Name: "PR Code Review", Body: PRReviewPromptTemplate, Source: "system"},
 
 		// Merge conflict resolution prompt — auto-fired on merge
 		// conflicts on the user's own PRs via the matching trigger.
-		{ID: "system-conflict-resolution", Name: "Merge Conflict Resolution", Body: ConflictResolutionPromptTemplate, Source: "system"},
+		{SystemSlug: "system-conflict-resolution", Name: "Merge Conflict Resolution", Body: ConflictResolutionPromptTemplate, Source: "system"},
 
 		// CI fix prompt — auto-fired on CI failures via prompt_trigger.
-		{ID: "system-ci-fix", Name: "CI Fix", Body: CIFixPromptTemplate, Source: "system"},
+		{SystemSlug: "system-ci-fix", Name: "CI Fix", Body: CIFixPromptTemplate, Source: "system"},
 
 		// Jira implementation prompt — auto-fired on issues assigned
 		// to the user via the matching trigger.
-		{ID: "system-jira-implement", Name: "Jira Issue Implementation", Body: JiraImplementPromptTemplate, Source: "system"},
+		{SystemSlug: "system-jira-implement", Name: "Jira Issue Implementation", Body: JiraImplementPromptTemplate, Source: "system"},
 
 		// Fix review feedback — fires on reviews landed on the user's
 		// PRs. Same action regardless of whether the reviewer is the
 		// user (self-review loop) or someone else (normal code review):
 		// read the review, fix what's right, push back on what isn't,
 		// push to branch.
-		{ID: "system-fix-review-feedback", Name: "Fix Review Feedback", Body: FixReviewFeedbackPromptTemplate, Source: "system"},
+		{SystemSlug: "system-fix-review-feedback", Name: "Fix Review Feedback", Body: FixReviewFeedbackPromptTemplate, Source: "system"},
 
 		// Default Curator spec-authorship skill (SKY-221). The Curator
 		// materializes whichever prompt a project points at as a
 		// literal Claude Code skill on each dispatch; new projects start
 		// pointing at this one. Users override per-project via the
 		// Projects page.
-		{ID: domain.SystemTicketSpecPromptID, Name: "Curator: Ticket as a Spec", Body: TicketSpecPromptTemplate, Source: "system"},
+		{SystemSlug: domain.SystemTicketSpecPromptID, Name: "Curator: Ticket as a Spec", Body: TicketSpecPromptTemplate, Source: "system"},
 	}
 }

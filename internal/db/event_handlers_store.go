@@ -3,8 +3,6 @@ package db
 import (
 	"context"
 
-	"github.com/google/uuid"
-
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -35,25 +33,32 @@ import (
 //
 // SQLite: one connection; orgID is the local sentinel for local mode.
 type EventHandlerStore interface {
-	// Seed materializes every row in ShippedEventHandlers into the
-	// given team if it isn't already present, leaving existing rows
+	// Seed materializes every row in ShippedEventHandlers as the given
+	// team's own copy if it isn't already present, leaving existing rows
 	// untouched so user customizations (renames, disables, predicate
-	// edits, re-enables) survive across restarts. INSERT-OR-IGNORE
-	// semantics. Shipped trigger rows ship with Enabled=false per
-	// project convention (system triggers are reference examples —
-	// users opt in).
+	// edits, re-enables) survive across restarts. Idempotency keys on
+	// (org_id, team_id, system_slug) via ON CONFLICT DO NOTHING (SKY-380):
+	// the id is a random UUID per copy and the shipped slug lives in
+	// system_slug, so a second team gets its own distinct rows (same slug,
+	// different team_id) and a re-seed is a no-op. Shipped trigger rows
+	// ship with Enabled=false per project convention (system triggers are
+	// reference examples — users opt in).
 	//
-	// Post-SKY-295 system rows are team-scoped (visibility='team',
-	// team_id=teamID) rather than org-visible. The router routes
-	// matched handlers to team-scoped tasks; carrying team_id on the
-	// handler row itself lets every handler answer "which team does
-	// this fire for?" without falling back to a sentinel. In local
-	// mode the caller passes runmode.LocalDefaultTeamID. In multi
-	// mode new teams should call Seed at team creation time to
-	// inherit the shipped defaults; future shipped rules added in a
-	// later release auto-appear on next boot via the same INSERT OR
-	// IGNORE.
-	Seed(ctx context.Context, orgID, teamID string) error
+	// promptIDsBySlug resolves each shipped trigger's prompt slug
+	// (ShippedEventHandler.PromptID) to the team's prompt-copy UUID — the
+	// caller seeds the team's prompts first (phase 1) and threads the
+	// resulting slug→id map here (phase 2) so the trigger→prompt
+	// same-team FK ((prompt_id, team_id) → prompts(id, team_id)) resolves.
+	// A trigger whose prompt slug is absent from the map is a seeding bug
+	// and returns an error rather than writing a dangling row.
+	//
+	// System rows are team-scoped (visibility='team', team_id=teamID). The
+	// router routes matched handlers to team-scoped tasks; carrying team_id
+	// on the handler row itself lets every handler answer "which team does
+	// this fire for?" In local mode the caller passes
+	// runmode.LocalDefaultTeamID; in multi mode each new team calls Seed at
+	// creation time to inherit the shipped defaults.
+	Seed(ctx context.Context, orgID, teamID string, promptIDsBySlug map[string]string) error
 
 	// List returns handlers in the order:
 	//   rules first by sort_order ASC, then name ASC,
@@ -129,9 +134,14 @@ type EventHandlerStore interface {
 }
 
 // ShippedEventHandler is the tabular shape of one shipped system handler.
-// Kind selects which set of per-kind fields are populated. ID is a
-// human-readable slug ("system-rule-ci-check-failed" / "system-trigger-ci-fix");
-// SQLite stores it verbatim while Postgres stores UUIDFor(orgID).
+// Kind selects which set of per-kind fields are populated.
+//
+// ID is the stable system_slug ("system-rule-ci-check-failed" /
+// "system-trigger-ci-fix") — both dialects mint a random UUID for the row
+// id and store this slug in event_handlers.system_slug, deduping re-seeds
+// on (org_id, team_id, system_slug) (SKY-380). For triggers, PromptID is
+// the prompt's system_slug ("system-ci-fix"), resolved to the team's
+// prompt-copy UUID via the promptIDsBySlug map passed to Seed.
 type ShippedEventHandler struct {
 	ID        string
 	Kind      string // "rule" | "trigger"
@@ -143,44 +153,10 @@ type ShippedEventHandler struct {
 	DefaultPriority float64
 	SortOrder       int
 
-	// Trigger-only.
+	// Trigger-only. PromptID is the referenced prompt's system_slug.
 	PromptID               string
 	BreakerThreshold       int
 	MinAutonomySuitability float64
-}
-
-// shippedEventHandlerNamespaces preserves the SKY-259 invariant that
-// the deterministic UUIDs for shipped rules and shipped triggers remain
-// stable across the unification. Rules use the former
-// shippedTaskRuleNamespace; triggers use the former
-// shippedPromptTriggerNamespace. Same (slug, orgID, kind) → same UUID
-// before and after this PR, so the backfill is row-stable and no
-// downstream FK reference (runs.trigger_id, pending_firings.trigger_id)
-// has to be updated.
-var (
-	shippedRuleNamespace    = uuid.MustParse("a9b6f3c1-7e58-4d1f-8c02-1e6f8c4a9b3e")
-	shippedTriggerNamespace = uuid.MustParse("c4f2e9b8-1a3d-4e7f-9c5b-2d8e6f4a1b3c")
-)
-
-// UUIDFor returns the deterministic per-org UUID for this shipped
-// handler. Rule and trigger namespaces stay distinct so the UUIDs are
-// identical to what task_rules and prompt_triggers produced before the
-// unification — the backfill copies IDs verbatim, and re-seeding on an
-// upgraded install lands on the same row.
-//
-// TODO(SKY-381): this id is per-(handler, org) — team-independent — so it
-// cannot materialize distinct rows for a second team in the same org
-// (PK (org_id, id) → ON CONFLICT skip). That's why BootstrapNewTeam seeds
-// no handlers today. The org-template copy path needs a per-team identity
-// (fold teamID into the derived id, or a real-UUID PK + system_slug, the
-// same scheme SKY-380 adopts for prompts) before new teams can carry
-// their own copies of shipped/templated handlers.
-func (h ShippedEventHandler) UUIDFor(orgID string) string {
-	ns := shippedRuleNamespace
-	if h.Kind == domain.EventHandlerKindTrigger {
-		ns = shippedTriggerNamespace
-	}
-	return uuid.NewSHA1(ns, []byte(h.ID+"/"+orgID)).String()
 }
 
 // ShippedEventHandlers is the v1 default set, combining the formerly

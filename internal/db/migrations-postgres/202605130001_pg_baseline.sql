@@ -707,6 +707,7 @@ CREATE TABLE public.event_handlers (
     scope_predicate_json jsonb,
     enabled boolean DEFAULT true NOT NULL,
     source text DEFAULT 'user'::text NOT NULL,
+    system_slug text,
     name text,
     default_priority real,
     sort_order integer,
@@ -1096,7 +1097,7 @@ CREATE TABLE public.prompts (
     id text DEFAULT (gen_random_uuid())::text NOT NULL,
     org_id uuid NOT NULL,
     creator_user_id uuid,
-    team_id uuid,
+    team_id uuid NOT NULL,
     visibility text DEFAULT 'team'::text NOT NULL,
     name text NOT NULL,
     body text NOT NULL,
@@ -1109,10 +1110,11 @@ CREATE TABLE public.prompts (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     model text DEFAULT ''::text NOT NULL,
+    system_slug text,
     CONSTRAINT prompts_source_check CHECK ((source = ANY (ARRAY['system'::text, 'user'::text, 'imported'::text]))),
     CONSTRAINT prompts_system_has_no_creator CHECK ((((source = 'system'::text) AND (creator_user_id IS NULL)) OR ((source <> 'system'::text) AND (creator_user_id IS NOT NULL)))),
     CONSTRAINT prompts_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
-    CONSTRAINT prompts_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text])))
+    CONSTRAINT prompts_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text])))
 );
 
 
@@ -1623,6 +1625,17 @@ ALTER TABLE ONLY public.event_handlers
 
 
 --
+-- Name: event_handlers event_handlers_org_team_slug_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+-- Per-team re-seed idempotency key: one copy of each shipped handler per team
+-- (same system_slug, distinct team_id); NULLs distinct so user handlers never
+-- collide (SKY-380).
+ALTER TABLE ONLY public.event_handlers
+    ADD CONSTRAINT event_handlers_org_team_slug_key UNIQUE (org_id, team_id, system_slug);
+
+
+--
 -- Name: events_catalog events_catalog_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1812,6 +1825,28 @@ ALTER TABLE ONLY public.projects
 
 ALTER TABLE ONLY public.prompts
     ADD CONSTRAINT prompts_id_org_id_key UNIQUE (id, org_id);
+
+
+--
+-- Name: prompts prompts_id_team_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+-- Parent key for the same-team composite FKs (event_handlers.prompt_id,
+-- prompt_chain_steps.chain_prompt_id / step_prompt_id) so a trigger / chain
+-- step can only bind a prompt its own team owns (SKY-380).
+ALTER TABLE ONLY public.prompts
+    ADD CONSTRAINT prompts_id_team_id_key UNIQUE (id, team_id);
+
+
+--
+-- Name: prompts prompts_org_team_slug_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+-- Per-team re-seed idempotency key: one copy of each shipped prompt per team
+-- (same system_slug, distinct team_id); NULLs distinct so user prompts never
+-- collide (SKY-380).
+ALTER TABLE ONLY public.prompts
+    ADD CONSTRAINT prompts_org_team_slug_key UNIQUE (org_id, team_id, system_slug);
 
 
 --
@@ -2646,6 +2681,19 @@ ALTER TABLE ONLY public.event_handlers
 
 
 --
+-- Name: event_handlers event_handlers_prompt_id_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+-- Same-team guard (SKY-380): a trigger may only bind a prompt its own team
+-- owns. (prompt_id, team_id) -> prompts(id, team_id) refuses a handler whose
+-- team_id doesn't match the referenced prompt's team. NULL prompt_id (rules)
+-- skips the FK. CASCADE mirrors the org FK so a prompt delete still removes
+-- its triggers.
+ALTER TABLE ONLY public.event_handlers
+    ADD CONSTRAINT event_handlers_prompt_id_team_id_fkey FOREIGN KEY (prompt_id, team_id) REFERENCES public.prompts(id, team_id) ON DELETE CASCADE;
+
+
+--
 -- Name: event_handlers event_handlers_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2954,7 +3002,7 @@ ALTER TABLE ONLY public.prompts
 --
 
 ALTER TABLE ONLY public.prompts
-    ADD CONSTRAINT prompts_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE SET NULL;
+    ADD CONSTRAINT prompts_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE CASCADE;
 
 
 --
@@ -5098,6 +5146,7 @@ INSERT INTO events_catalog (id, source, category, label, description) VALUES
 
 CREATE TABLE public.prompt_chain_steps (
     org_id uuid NOT NULL,
+    team_id uuid NOT NULL,
     chain_prompt_id text NOT NULL,
     step_index integer NOT NULL,
     step_prompt_id text NOT NULL,
@@ -5149,6 +5198,14 @@ ALTER TABLE ONLY public.prompt_chain_steps
     ADD CONSTRAINT prompt_chain_steps_chain_prompt_fkey FOREIGN KEY (chain_prompt_id, org_id) REFERENCES public.prompts(id, org_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.prompt_chain_steps
     ADD CONSTRAINT prompt_chain_steps_step_prompt_fkey  FOREIGN KEY (step_prompt_id,  org_id) REFERENCES public.prompts(id, org_id) ON DELETE RESTRICT;
+-- Same-team guards (SKY-380): both the chain prompt and every step resolve
+-- against prompts(id, team_id), so a chain can only step through prompts its
+-- own team owns. The writer derives team_id from the chain prompt, making the
+-- chain FK a tautology and the step FK the real cross-team refusal.
+ALTER TABLE ONLY public.prompt_chain_steps
+    ADD CONSTRAINT prompt_chain_steps_chain_prompt_team_fkey FOREIGN KEY (chain_prompt_id, team_id) REFERENCES public.prompts(id, team_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.prompt_chain_steps
+    ADD CONSTRAINT prompt_chain_steps_step_prompt_team_fkey  FOREIGN KEY (step_prompt_id,  team_id) REFERENCES public.prompts(id, team_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.chain_runs
     ADD CONSTRAINT chain_runs_org_id_fkey          FOREIGN KEY (org_id)          REFERENCES public.orgs(id) ON DELETE CASCADE;

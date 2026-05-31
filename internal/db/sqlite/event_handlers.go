@@ -9,6 +9,8 @@ import (
 	"log"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -47,9 +49,9 @@ const sqliteEventHandlerColumns = `id, kind, event_type, scope_predicate_json, e
        prompt_id, breaker_threshold, min_autonomy_suitability,
        created_at, updated_at`
 
-func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string) error {
+func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, promptIDsBySlug map[string]string) error {
 	if teamID == "" {
-		return fmt.Errorf("sqlite event_handlers Seed: teamID required (SKY-295: shipped rules are team-scoped; local mode passes runmode.LocalDefaultTeamID)")
+		return fmt.Errorf("sqlite event_handlers Seed: teamID required (shipped handlers are team-scoped; local mode passes runmode.LocalDefaultTeamID)")
 	}
 	now := time.Now().UTC()
 	var inserted int64
@@ -86,25 +88,26 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string) erro
 			pred = predStr
 		}
 
-		// SKY-295: system rows materialize as visibility='team' with
-		// team_id=teamID. The event_handlers_system_has_no_creator
-		// CHECK still allows creator_user_id NULL when source='system',
-		// and team_visibility_requires_team is satisfied because team_id
-		// is non-NULL.
+		// System rows materialize as visibility='team' with team_id=teamID.
+		// The event_handlers_system_has_no_creator CHECK allows
+		// creator_user_id NULL when source='system'. The id is a random
+		// UUID per team copy and h.ID is the system_slug; re-seed dedupes on
+		// the (org_id, team_id, system_slug) unique index via INSERT OR
+		// IGNORE (SKY-380).
 		switch h.Kind {
 		case domain.EventHandlerKindRule:
 			res, err := s.q.ExecContext(ctx, `
 				INSERT OR IGNORE INTO event_handlers
 					(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
-					 scope_predicate_json, enabled, source,
+					 system_slug, scope_predicate_json, enabled, source,
 					 name, default_priority, sort_order,
 					 created_at, updated_at)
 				VALUES (?, ?, ?, NULL, 'team', 'rule', ?,
-				        ?, 1, 'system',
+				        ?, ?, 1, 'system',
 				        ?, ?, ?,
 				        ?, ?)
-			`, h.ID, orgID, teamID, h.EventType,
-				pred,
+			`, uuid.New().String(), orgID, teamID, h.EventType,
+				h.ID, pred,
 				h.Name, h.DefaultPriority, h.SortOrder,
 				now, now)
 			if err != nil {
@@ -117,21 +120,29 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string) erro
 			inserted += n
 
 		case domain.EventHandlerKindTrigger:
+			// Resolve the trigger's prompt slug to this team's prompt-copy
+			// UUID (phase-2 of the two-phase seed). A missing entry means
+			// the caller didn't seed the prompts first — fail loudly rather
+			// than write a dangling reference.
+			promptID, ok := promptIDsBySlug[h.PromptID]
+			if !ok || promptID == "" {
+				return fmt.Errorf("seed event_handler trigger %s: prompt slug %q not found in promptIDsBySlug (seed prompts before handlers)", h.ID, h.PromptID)
+			}
 			// Shipped triggers ship disabled (project convention —
 			// users opt in or replace).
 			res, err := s.q.ExecContext(ctx, `
 				INSERT OR IGNORE INTO event_handlers
 					(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
-					 scope_predicate_json, enabled, source,
+					 system_slug, scope_predicate_json, enabled, source,
 					 prompt_id, breaker_threshold, min_autonomy_suitability,
 					 created_at, updated_at)
 				VALUES (?, ?, ?, NULL, 'team', 'trigger', ?,
-				        ?, 0, 'system',
+				        ?, ?, 0, 'system',
 				        ?, ?, ?,
 				        ?, ?)
-			`, h.ID, orgID, teamID, h.EventType,
-				pred,
-				h.PromptID, h.BreakerThreshold, h.MinAutonomySuitability,
+			`, uuid.New().String(), orgID, teamID, h.EventType,
+				h.ID, pred,
+				promptID, h.BreakerThreshold, h.MinAutonomySuitability,
 				now, now)
 			if err != nil {
 				return fmt.Errorf("seed event_handler trigger %s: %w", h.ID, err)

@@ -26,15 +26,19 @@ func TestEventHandlerStore_SQLite(t *testing.T) {
 		// Postgres factory (which gets a per-test UUID) and keeps the
 		// harness wiring consistent: whatever org the store is exercised
 		// against is the org prompts get seeded into.
-		seed := func(t *testing.T, ids ...string) {
+		seed := func(t *testing.T, slugs ...string) map[string]string {
 			t.Helper()
-			for _, id := range ids {
-				if err := stores.Prompts.SeedOrUpdate(t.Context(), orgID, domain.Prompt{
-					ID: id, Name: id, Body: "test body", Source: "system",
-				}); err != nil {
-					t.Fatalf("seed prompt %s: %v", id, err)
+			out := make(map[string]string, len(slugs))
+			for _, slug := range slugs {
+				id, err := stores.Prompts.SeedOrUpdate(t.Context(), orgID, teamID, domain.Prompt{
+					SystemSlug: slug, Name: slug, Body: "test body", Source: "system",
+				})
+				if err != nil {
+					t.Fatalf("seed prompt %s: %v", slug, err)
 				}
+				out[slug] = id
 			}
+			return out
 		}
 		return stores.EventHandlers, orgID, teamID, seed
 	})

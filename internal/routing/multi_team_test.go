@@ -117,7 +117,7 @@ func TestHandleEvent_MultipleTeams_OneTask(t *testing.T) {
 func TestHandleEvent_BackfillCreatedAt_PreservesOccurredAt(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
-	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID); err != nil {
+	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 
@@ -164,7 +164,7 @@ func TestHandleEvent_BackfillCreatedAt_PreservesOccurredAt(t *testing.T) {
 func TestHandleEvent_NoOccurredAt_FallsBackToNow(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
-	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID); err != nil {
+	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 
@@ -413,6 +413,9 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 		t.Fatalf("create entity: %v", err)
 	}
 	createTestPrompt(t, database, domain.Prompt{ID: "p-onerun", Name: "One-run", Body: "x", Source: "user"})
+	// Team B needs its OWN prompt copy — the same-team trigger→prompt FK
+	// forbids team B's trigger from binding team A's p-onerun (SKY-380).
+	insertPromptForTeam(t, database, "p-onerun-b", teamB)
 
 	// teamA's immediate trigger (createTriggerForTestRouting hard-codes
 	// LocalDefaultTeamID = teamA).
@@ -422,7 +425,8 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4),
 		MinAutonomySuitability: floatPtr(0), Enabled: true,
 	})
-	// teamB's immediate trigger (raw insert for the second team).
+	// teamB's immediate trigger (raw insert for the second team), bound to
+	// team B's own prompt copy.
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
 			(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
@@ -431,7 +435,7 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 			 created_at, updated_at)
 		VALUES (?, ?, ?, ?, 'team', 'trigger', ?, NULL, 1, 'user', ?, 4, 0, datetime('now'), datetime('now'))
 	`, "trigger-B-onerun", runmode.LocalDefaultOrg, teamB, runmode.LocalDefaultUserID,
-		domain.EventGitHubPRCICheckFailed, "p-onerun"); err != nil {
+		domain.EventGitHubPRCICheckFailed, "p-onerun-b"); err != nil {
 		t.Fatalf("seed team B trigger: %v", err)
 	}
 
@@ -509,6 +513,8 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 		t.Fatalf("create entity: %v", err)
 	}
 	createTestPrompt(t, database, domain.Prompt{ID: "p-attr", Name: "Attr", Body: "x", Source: "user"})
+	// Team B's own prompt copy for its trigger (same-team FK, SKY-380).
+	insertPromptForTeam(t, database, "p-attr-b", teamB)
 
 	// Team A is the owner via a high-priority rule, and also has a
 	// trigger (which is skipped because team A's bot is disabled).
@@ -533,7 +539,7 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 			 scope_predicate_json, enabled, source, prompt_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
 		VALUES (?, ?, ?, ?, 'team', 'trigger', ?, NULL, 1, 'user', ?, 4, 0, datetime('now'), datetime('now'))
 	`, "trigger-B-attr", runmode.LocalDefaultOrg, teamB, runmode.LocalDefaultUserID,
-		domain.EventGitHubPRCICheckFailed, "p-attr"); err != nil {
+		domain.EventGitHubPRCICheckFailed, "p-attr-b"); err != nil {
 		t.Fatalf("seed team B trigger: %v", err)
 	}
 
@@ -577,7 +583,7 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 func TestHandleEvent_SingleTeam_OneTask(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
-	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID); err != nil {
+	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 

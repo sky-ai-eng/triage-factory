@@ -14,9 +14,9 @@ import (
 //   - the wired PromptStore impl
 //   - the orgID to pass to every method (sqlite returns
 //     runmode.LocalDefaultOrg, postgres returns a fresh org UUID)
-//   - the teamID Create should attribute prompts to (Postgres binds it
-//     to satisfy the team-visibility CHECK + RLS; SQLite ignores it and
-//     pins the local sentinel). Mirrors EventHandlerStoreFactory.
+//   - the teamID Create/SeedOrUpdate should attribute prompts to. Every
+//     prompt is team-scoped post-SKY-380, so the seeder threads it; SQLite
+//     pins the local sentinel, Postgres binds the test team.
 //   - a RunSeeder hook that lets the harness create runs rows the
 //     Stats subtests need. The harness doesn't know how to create
 //     runs directly (RunStore lands in wave 3b); the backend test
@@ -31,19 +31,29 @@ type PromptStoreFactory func(t *testing.T) (store db.PromptStore, orgID, teamID 
 // etc.); the seeder generates one run per entry, with started_at
 // staggered across days so the per-day grouping has signal. Returns
 // the inserted run IDs in case the harness wants to clean them up
-// (it doesn't today — the per-test DB reset handles it).
+// (it doesn't today — the per-test DB reset handles it). promptID is
+// the prompt's id (a random UUID post-SKY-380 — the harness passes the
+// id SeedOrUpdate returned, not the slug).
 type RunSeederForStats func(t *testing.T, promptID string, statusByOffset []string) []string
 
 // RunPromptStoreConformance runs the shared assertion suite against
 // any db.PromptStore impl. Each subtest gets a fresh store via
 // factory() so test bodies don't have to coordinate state.
 //
+// SKY-380 note: prompts are team-scoped and identified by a random UUID;
+// the shipped slug lives in system_slug. SeedOrUpdate dedupes on
+// (org_id, team_id, system_slug) and returns the team copy's id, so the
+// suite seeds by SystemSlug and reads back by the returned id. The
+// per-team-divergence case (two teams, same slug, one user-modified)
+// needs a real second team, so it lives in the Postgres package
+// (TestPromptStore_Postgres_PerTeamDivergence) — SQLite is N=1 and the
+// divergence is vacuous there.
+//
 // What this covers (and why):
 //
-//   - Seed/identical-reseed/metadata-change/user-modified-guard/
-//     legacy-row paths — these are the load-bearing invariants the
-//     pre-D2 prompts_test.go validated, ported here so both backends
-//     prove them.
+//   - Seed/identical-reseed/metadata-change/user-modified-guard paths —
+//     these are the load-bearing invariants the pre-D2 prompts_test.go
+//     validated, ported here so both backends prove them.
 //   - CRUD round-trips — minimal "the SQL parses + behaves" checks
 //     for every method that isn't covered by the Seed paths.
 //   - Hidden filtering — List omits hidden rows, Get returns them.
@@ -55,31 +65,43 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 	t.Helper()
 
 	t.Run("SeedOrUpdate_FreshInsert", func(t *testing.T) {
-		store, orgID, _, _ := factory(t)
+		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
-		p := domain.Prompt{ID: "system-x", Name: "X", Body: "v1", Source: "system"}
-		if err := store.SeedOrUpdate(ctx, orgID, p); err != nil {
+		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Prompt{SystemSlug: "system-x", Name: "X", Body: "v1", Source: "system"})
+		if err != nil {
 			t.Fatalf("seed: %v", err)
 		}
-		got, err := store.Get(ctx, orgID, "system-x")
+		got, err := store.Get(ctx, orgID, id)
 		if err != nil {
 			t.Fatalf("get: %v", err)
 		}
 		if got == nil || got.Body != "v1" || got.Name != "X" {
 			t.Fatalf("after fresh seed: got=%+v want body=v1 name=X", got)
 		}
+		if got.SystemSlug != "system-x" {
+			t.Fatalf("system_slug=%q want system-x", got.SystemSlug)
+		}
+		if got.TeamID != teamID {
+			t.Fatalf("team_id=%q want %q", got.TeamID, teamID)
+		}
 	})
 
 	t.Run("SeedOrUpdate_UpdatesUntouchedPrompt", func(t *testing.T) {
-		store, orgID, _, _ := factory(t)
+		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
-		if err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{ID: "system-x", Name: "X", Body: "v1", Source: "system"}); err != nil {
+		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Prompt{SystemSlug: "system-x", Name: "X", Body: "v1", Source: "system"})
+		if err != nil {
 			t.Fatalf("seed v1: %v", err)
 		}
-		if err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{ID: "system-x", Name: "X2", Body: "v2", Source: "system"}); err != nil {
+		// Re-seed the same (team, slug) — must resolve the same row id.
+		id2, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Prompt{SystemSlug: "system-x", Name: "X2", Body: "v2", Source: "system"})
+		if err != nil {
 			t.Fatalf("seed v2: %v", err)
 		}
-		got, err := store.Get(ctx, orgID, "system-x")
+		if id2 != id {
+			t.Fatalf("re-seed minted a new id (%s) instead of resolving the existing copy (%s)", id2, id)
+		}
+		got, err := store.Get(ctx, orgID, id)
 		if err != nil {
 			t.Fatalf("get: %v", err)
 		}
@@ -89,39 +111,41 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 	})
 
 	t.Run("SeedOrUpdate_PreservesUserModified", func(t *testing.T) {
-		store, orgID, _, _ := factory(t)
+		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
-		if err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{ID: "system-y", Name: "Y", Body: "v1", Source: "system"}); err != nil {
+		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Prompt{SystemSlug: "system-y", Name: "Y", Body: "v1", Source: "system"})
+		if err != nil {
 			t.Fatalf("seed v1: %v", err)
 		}
-		if err := store.Update(ctx, orgID, "system-y", "Custom", "custom body", "leaf", ""); err != nil {
+		if err := store.Update(ctx, orgID, id, "Custom", "custom body", "leaf", ""); err != nil {
 			t.Fatalf("user update: %v", err)
 		}
 		// Re-seed with new shipped content — must NOT overwrite the
 		// user's edit.
-		if err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{ID: "system-y", Name: "Y", Body: "v2", Source: "system"}); err != nil {
+		if _, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Prompt{SystemSlug: "system-y", Name: "Y", Body: "v2", Source: "system"}); err != nil {
 			t.Fatalf("seed v2: %v", err)
 		}
-		got, _ := store.Get(ctx, orgID, "system-y")
+		got, _ := store.Get(ctx, orgID, id)
 		if got.Body != "custom body" || got.Name != "Custom" {
 			t.Fatalf("user-modified prompt was overwritten: got name=%q body=%q", got.Name, got.Body)
 		}
 	})
 
 	t.Run("SeedOrUpdate_NoChurnOnIdenticalReseed", func(t *testing.T) {
-		store, orgID, _, _ := factory(t)
+		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
-		if err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{ID: "system-q", Name: "Q", Body: "v1", Source: "system"}); err != nil {
+		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Prompt{SystemSlug: "system-q", Name: "Q", Body: "v1", Source: "system"})
+		if err != nil {
 			t.Fatalf("seed: %v", err)
 		}
-		first, _ := store.Get(ctx, orgID, "system-q")
+		first, _ := store.Get(ctx, orgID, id)
 		updatedBefore := first.UpdatedAt
 		// Sleep so any churn would produce a strictly-greater timestamp.
 		time.Sleep(15 * time.Millisecond)
-		if err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{ID: "system-q", Name: "Q", Body: "v1", Source: "system"}); err != nil {
+		if _, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Prompt{SystemSlug: "system-q", Name: "Q", Body: "v1", Source: "system"}); err != nil {
 			t.Fatalf("reseed: %v", err)
 		}
-		second, _ := store.Get(ctx, orgID, "system-q")
+		second, _ := store.Get(ctx, orgID, id)
 		if !second.UpdatedAt.Equal(updatedBefore) {
 			t.Fatalf("prompts.updated_at churned on identical reseed: before=%s after=%s", updatedBefore, second.UpdatedAt)
 		}
@@ -131,15 +155,16 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		// The hash covers (name, body, source) so renaming alone must
 		// trip an update — even with body unchanged. Ensures
 		// shipped-rename ships.
-		store, orgID, _, _ := factory(t)
+		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
-		if err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{ID: "system-m", Name: "Old Name", Body: "same body", Source: "system"}); err != nil {
+		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Prompt{SystemSlug: "system-m", Name: "Old Name", Body: "same body", Source: "system"})
+		if err != nil {
 			t.Fatalf("seed: %v", err)
 		}
-		if err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{ID: "system-m", Name: "New Name", Body: "same body", Source: "system"}); err != nil {
+		if _, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Prompt{SystemSlug: "system-m", Name: "New Name", Body: "same body", Source: "system"}); err != nil {
 			t.Fatalf("seed rename: %v", err)
 		}
-		got, _ := store.Get(ctx, orgID, "system-m")
+		got, _ := store.Get(ctx, orgID, id)
 		if got.Name != "New Name" {
 			t.Fatalf("name=%q want New Name; metadata-only change should apply", got.Name)
 		}
@@ -217,11 +242,11 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		// sources are rejected so a misuse can't accidentally land
 		// version-sidecar rows on user/imported prompts (where a
 		// later re-seed could silently overwrite them).
-		store, orgID, _, _ := factory(t)
+		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
 		for _, src := range []string{"user", "imported", "garbage"} {
-			err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{
-				ID: "bad-" + src, Name: "X", Body: "x", Source: src,
+			_, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Prompt{
+				SystemSlug: "bad-" + src, Name: "X", Body: "x", Source: src,
 			})
 			if err == nil {
 				t.Fatalf("SeedOrUpdate accepted Source=%q; should reject", src)
@@ -269,14 +294,15 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 	})
 
 	t.Run("Stats_AggregatesRuns", func(t *testing.T) {
-		store, orgID, _, seedRuns := factory(t)
+		store, orgID, teamID, seedRuns := factory(t)
 		ctx := context.Background()
 		// Set up: a prompt + 5 runs (3 completed, 1 failed, 1 running).
-		if err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{ID: "stats-p", Name: "S", Body: "x", Source: "system"}); err != nil {
+		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Prompt{SystemSlug: "stats-p", Name: "S", Body: "x", Source: "system"})
+		if err != nil {
 			t.Fatalf("seed stats prompt: %v", err)
 		}
-		seedRuns(t, "stats-p", []string{"completed", "completed", "completed", "failed", "running"})
-		stats, err := store.Stats(ctx, orgID, "stats-p")
+		seedRuns(t, id, []string{"completed", "completed", "completed", "failed", "running"})
+		stats, err := store.Stats(ctx, orgID, id)
 		if err != nil {
 			t.Fatalf("stats: %v", err)
 		}
@@ -298,12 +324,13 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 	})
 
 	t.Run("Stats_NoRuns_ReturnsZeros", func(t *testing.T) {
-		store, orgID, _, _ := factory(t)
+		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
-		if err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{ID: "unused-p", Name: "U", Body: "x", Source: "system"}); err != nil {
+		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Prompt{SystemSlug: "unused-p", Name: "U", Body: "x", Source: "system"})
+		if err != nil {
 			t.Fatalf("seed: %v", err)
 		}
-		stats, err := store.Stats(ctx, orgID, "unused-p")
+		stats, err := store.Stats(ctx, orgID, id)
 		if err != nil {
 			t.Fatalf("stats: %v", err)
 		}
@@ -331,11 +358,37 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		}
 	})
 
+	t.Run("GetBySystemSlug_ResolvesSeededCopy", func(t *testing.T) {
+		// The shipped-prompt id is a random UUID per team copy (SKY-380);
+		// callers resolve by slug. GetBySystemSlug must return the same row
+		// SeedOrUpdate created, and (nil, nil) for an unknown slug.
+		store, orgID, teamID, _ := factory(t)
+		ctx := context.Background()
+		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Prompt{SystemSlug: "system-slug-lookup", Name: "L", Body: "x", Source: "system"})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		got, err := store.GetBySystemSlug(ctx, orgID, teamID, "system-slug-lookup")
+		if err != nil {
+			t.Fatalf("GetBySystemSlug: %v", err)
+		}
+		if got == nil || got.ID != id {
+			t.Fatalf("GetBySystemSlug returned %+v; want id=%s", got, id)
+		}
+		missing, err := store.GetBySystemSlug(ctx, orgID, teamID, "no-such-slug")
+		if err != nil {
+			t.Fatalf("GetBySystemSlug(missing): %v", err)
+		}
+		if missing != nil {
+			t.Fatalf("GetBySystemSlug(missing) = %+v; want nil", missing)
+		}
+	})
+
 	t.Run("CtxCancellation_FailsFast", func(t *testing.T) {
-		store, orgID, _, _ := factory(t)
+		store, orgID, teamID, _ := factory(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{ID: "ctxtest", Name: "C", Body: "x", Source: "system"}); err == nil {
+		if _, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Prompt{SystemSlug: "ctxtest", Name: "C", Body: "x", Source: "system"}); err == nil {
 			t.Fatalf("SeedOrUpdate with cancelled ctx returned nil error")
 		}
 	})

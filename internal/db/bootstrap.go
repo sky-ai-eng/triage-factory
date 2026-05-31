@@ -89,41 +89,69 @@ func BootstrapTeamAgent(ctx context.Context, stores Stores, orgID, teamID string
 	return nil
 }
 
+// SeedTeamDefaults seeds a team's own copies of the shipped prompts and
+// shipped event handlers in two phases (SKY-380):
+//
+//	(1) seed each prompt copy, capturing system_slug → the team's
+//	    prompt-copy UUID;
+//	(2) seed the handlers, resolving each trigger's prompt slug to that map
+//	    so the trigger→prompt same-team FK ((prompt_id, team_id) →
+//	    prompts(id, team_id)) is satisfied.
+//
+// Idempotent: re-runs no-op via the (org_id, team_id, system_slug) unique
+// keys on prompts + event_handlers. shippedPrompts is passed in (rather than
+// imported from internal/ai) so internal/db stays free of the ai dependency —
+// callers supply ai.ShippedPrompts().
+//
+// Must run OUTSIDE any caller WithTx: SeedOrUpdate + EventHandlers.Seed route
+// through the Postgres admin pool (the system_prompt_versions sidecar +
+// claims-less system rows) and refuse to run inside an app-pool tx.
+func SeedTeamDefaults(ctx context.Context, prompts PromptStore, handlers EventHandlerStore, orgID, teamID string, shippedPrompts []domain.Prompt) error {
+	promptIDsBySlug := make(map[string]string, len(shippedPrompts))
+	for _, p := range shippedPrompts {
+		id, err := prompts.SeedOrUpdate(ctx, orgID, teamID, p)
+		if err != nil {
+			return fmt.Errorf("seed team defaults: prompt %s: %w", p.SystemSlug, err)
+		}
+		if p.SystemSlug != "" {
+			promptIDsBySlug[p.SystemSlug] = id
+		}
+	}
+	if err := handlers.Seed(ctx, orgID, teamID, promptIDsBySlug); err != nil {
+		return fmt.Errorf("seed team defaults: event handlers: %w", err)
+	}
+	return nil
+}
+
 // BootstrapNewTeam materializes the structural defaults for a *new team
 // in an existing org* (SKY-378): the team's default-enabled bot
-// membership (team_agents). It deliberately does NOT seed event handlers
-// (system rules/triggers).
+// membership (team_agents) plus its own copies of the shipped prompts +
+// event handlers (rules/triggers).
 //
-// Why bot-only — two reasons converge:
+// Per-team seeding is now correct (SKY-380): handler + prompt rows carry a
+// random-UUID id and a system_slug, deduped on (org_id, team_id,
+// system_slug), so a 2nd+ team materializes its own distinct copies instead
+// of ON CONFLICT-vanishing against the org's first team (the old UUIDFor
+// scheme was org-keyed, which is why this used to seed bot-only). The org's
+// first team still gets the same set via BootstrapNewOrg.
 //
-//   - Correctness: the shipped-handler row id is UUIDFor(handler.ID,
-//     orgID) — team-independent — under PK (org_id, id). Seeding a 2nd+
-//     team's handlers would collide with the org's first team's rows and
-//     ON CONFLICT-skip them all, so the seed never actually materialized
-//     per-team rows anyway (Codex review on PR #263).
-//
-//   - Product direction: a newly-created team is a blank slate the org
-//     admin configures, not a place to re-stamp TF's opinionated
-//     defaults. Org-defined default templates that new teams inherit are
-//     their own ticket; until then a 2nd+ team starts with no system
-//     handlers and the admin adds rules (the org's *first* team still
-//     gets the full defaults via BootstrapNewOrg).
-//
-//     TODO(SKY-381): copy the org's default-team template into the new
-//     team here (handlers + prompts, forward-only) instead of seeding
-//     bot-only — replaces this blank-slate behavior once org templates
-//     land.
+// shippedPrompts is passed in so internal/db stays free of the internal/ai
+// dependency — callers supply ai.ShippedPrompts(). (SKY-381 will swap the
+// source from the TF-shipped lists to an org-configurable template.)
 //
 // The bot row is enabled, so manual delegation (swipe / factory drag) to
-// the new team works immediately; only auto-delegation waits on rules.
+// the new team works immediately; triggers ship disabled (opt-in).
 //
-// Must run OUTSIDE any caller WithTx: TeamAgents.AddForTeam routes
-// through the Postgres admin pool and guards against being called inside
-// an app-pool tx. Idempotent — re-runs no-op via ON CONFLICT, and never
-// flip a team's bot back to enabled if the team disabled it.
-func BootstrapNewTeam(ctx context.Context, stores Stores, orgID, teamID string) error {
+// Must run OUTSIDE any caller WithTx: TeamAgents.AddForTeam + the seeders
+// route through the Postgres admin pool and guard against being called
+// inside an app-pool tx. Idempotent — re-runs no-op via ON CONFLICT, and
+// never flips a team's bot back to enabled if the team disabled it.
+func BootstrapNewTeam(ctx context.Context, stores Stores, orgID, teamID string, shippedPrompts []domain.Prompt) error {
 	if err := BootstrapTeamAgent(ctx, stores, orgID, teamID); err != nil {
 		return err
+	}
+	if err := SeedTeamDefaults(ctx, stores.Prompts, stores.EventHandlers, orgID, teamID, shippedPrompts); err != nil {
+		return fmt.Errorf("bootstrap new team: %w", err)
 	}
 	return nil
 }
@@ -138,12 +166,10 @@ func BootstrapNewTeam(ctx context.Context, stores Stores, orgID, teamID string) 
 //
 // Order is load-bearing: agent → prompts → handlers → team_agents. The
 // trigger rows in EventHandlers.Seed FK into the prompts (composite
-// (prompt_id, org_id)), so prompts must land first; the team_agents row
-// needs the agent created in step 1.
+// (prompt_id, org_id) AND the same-team (prompt_id, team_id)), so prompts
+// must land first; the team_agents row needs the agent created in step 1.
+// SeedTeamDefaults owns the prompt→handler two-phase resolve (SKY-380).
 //
-// TODO(SKY-380): when prompts go team-scoped the prompt seed here becomes
-// team-owned copies (keyed by system_slug) and the trigger→prompt FK
-// becomes same-team; the org-wide visibility='org' prompt rows go away.
 // TODO(SKY-381): the org's first team's defaults will be sourced from the
 // org template (itself seeded from Shipped* at org-create) rather than
 // directly from the TF-shipped lists, so org admins can shape what new
@@ -159,13 +185,8 @@ func BootstrapNewOrg(ctx context.Context, stores Stores, orgID, teamID string, s
 	if _, err := BootstrapAgentForOrg(ctx, stores, orgID); err != nil {
 		return err
 	}
-	for _, p := range shippedPrompts {
-		if err := stores.Prompts.SeedOrUpdate(ctx, orgID, p); err != nil {
-			return fmt.Errorf("bootstrap new org: seed prompt %s: %w", p.ID, err)
-		}
-	}
-	if err := stores.EventHandlers.Seed(ctx, orgID, teamID); err != nil {
-		return fmt.Errorf("bootstrap new org: seed event handlers: %w", err)
+	if err := SeedTeamDefaults(ctx, stores.Prompts, stores.EventHandlers, orgID, teamID, shippedPrompts); err != nil {
+		return fmt.Errorf("bootstrap new org: %w", err)
 	}
 	if err := BootstrapTeamAgent(ctx, stores, orgID, teamID); err != nil {
 		return err

@@ -16,7 +16,17 @@ import (
 // lookup, whichever fires first).
 func seedSystemPromptForTrigger(t *testing.T, s *Server, id string) {
 	t.Helper()
-	if err := s.prompts.SeedOrUpdate(t.Context(), runmode.LocalDefaultOrg, domain.Prompt{
+	// Seed via Create with an explicit id so trigger fixtures keep
+	// referencing the prompt by that literal id. SeedOrUpdate now mints a
+	// random UUID per team copy and keys on system_slug (SKY-380); the
+	// trigger→prompt same-team FK only needs the row to exist on the local
+	// team, which Create satisfies. Existence-guarded so a test that seeds
+	// the same id twice is a no-op (Create is not idempotent on its own).
+	ctx := t.Context()
+	if existing, _ := s.prompts.Get(ctx, runmode.LocalDefaultOrg, id); existing != nil {
+		return
+	}
+	if err := s.prompts.Create(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Prompt{
 		ID: id, Name: id, Body: "test body", Source: "system",
 	}); err != nil {
 		t.Fatalf("seed prompt %s: %v", id, err)

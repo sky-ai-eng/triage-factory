@@ -64,6 +64,7 @@ func TestPromptStore_Postgres(t *testing.T) {
 			t.Helper()
 			return seedPgRunsForStats(t, h.AdminDB, orgID, userID, promptID, statusByOffset)
 		}
+		_ = userID
 		return stores.Prompts, orgID, teamID, seeder
 	})
 }
@@ -87,9 +88,11 @@ func TestPromptStore_Postgres_SeedOrUpdate_AdminOnly(t *testing.T) {
 
 	// Admin-pool store — must succeed.
 	adminStores := pgstore.New(h.AdminDB, h.AdminDB)
-	if err := adminStores.Prompts.SeedOrUpdate(ctx, orgID, domain.Prompt{
-		ID: "sys-admin-ok", Name: "OK", Body: "x", Source: "system",
-	}); err != nil {
+	teamID := firstTeamForOrg(t, h, orgID)
+	seededID, err := adminStores.Prompts.SeedOrUpdate(ctx, orgID, teamID, domain.Prompt{
+		SystemSlug: "sys-admin-ok", Name: "OK", Body: "x", Source: "system",
+	})
+	if err != nil {
 		t.Fatalf("admin-pool SeedOrUpdate should succeed, got: %v", err)
 	}
 
@@ -104,7 +107,7 @@ func TestPromptStore_Postgres_SeedOrUpdate_AdminOnly(t *testing.T) {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO system_prompt_versions (org_id, prompt_id, content_hash, applied_at)
 			VALUES ($1, $2, $3, now())
-		`, orgID, "sys-admin-ok", "deadbeef")
+		`, orgID, seededID, "deadbeef")
 		if err == nil {
 			t.Fatalf("tf_app INSERT on system_prompt_versions should fail with privilege error")
 		}
@@ -145,7 +148,7 @@ func TestPromptStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	teamA := firstTeamForOrg(t, h, orgA)
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, kind, allowed_tools, visibility, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, 'RLS Prompt', 'body', 'user', 'leaf', '', 'team', now(), now())
+		VALUES ($1, $2, $3, $4::uuid, 'RLS Prompt', 'body', 'user', 'leaf', '', 'team', now(), now())
 	`, promptA, orgA, alice, teamA); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}

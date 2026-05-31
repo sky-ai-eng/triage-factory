@@ -23,6 +23,20 @@ type Prompt struct {
 	AllowedTools string     `json:"allowed_tools"` // comma-separated extra tools parsed from SKILL.md/agent frontmatter
 	Model        string     `json:"model"`         // per-prompt model override; "" = inherit settings.AI.Model at dispatch
 	UsageCount   int        `json:"usage_count"`   // how many agent runs have used this prompt
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	// TeamID is the owning team. Every prompt is team-scoped (SKY-380):
+	// team_id is NOT NULL and visibility ∈ {private, team}. Handlers read
+	// this to enforce same-team references (a trigger / chain step may only
+	// bind a prompt its own team owns). Stores populate it on read; Create
+	// stamps it from the resolved acting team. In SQLite (N=1) it is always
+	// the local sentinel team.
+	TeamID string `json:"team_id"`
+	// SystemSlug is the stable identifier for a shipped (source='system')
+	// prompt — e.g. "system-ci-fix" or domain.SystemTicketSpecPromptID. NULL
+	// (empty) for user/imported prompts. The id is a random UUID per team
+	// copy, so seed/idempotency and slug→id resolution key on this column
+	// instead. ShippedPrompts() sets it; the seeder dedupes on
+	// (org_id, team_id, system_slug).
+	SystemSlug string    `json:"system_slug,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }

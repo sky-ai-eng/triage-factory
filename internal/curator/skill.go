@@ -118,7 +118,10 @@ func resolveSpecPrompt(ctx context.Context, stores db.Stores, orgID, creatorUser
 			log.Printf("[curator] project %s references missing spec prompt %s; falling back to system default",
 				project.ID, project.SpecAuthorshipPromptID)
 		}
-		p, err := ts.Prompts.Get(ctx, orgID, domain.SystemTicketSpecPromptID)
+		// The shipped spec prompt is a per-team copy keyed by system_slug
+		// (its id is a random UUID post-SKY-380), so resolve it through the
+		// calling project's team rather than a by-id Get.
+		p, err := ts.Prompts.GetBySystemSlug(ctx, orgID, project.TeamID, domain.SystemTicketSpecPromptID)
 		if err != nil {
 			return fmt.Errorf("load default spec prompt: %w", err)
 		}

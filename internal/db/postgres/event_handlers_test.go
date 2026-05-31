@@ -7,6 +7,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // TestEventHandlerStore_Postgres runs the shared conformance suite
@@ -15,9 +16,11 @@ import (
 // claims) both work without per-subtest plumbing — same shape the
 // other Postgres conformance tests use.
 //
-// The PromptSeeder inserts a system-source prompt per requested id;
-// event_handlers.prompt_id has a composite FK to prompts(id, org_id),
-// so trigger fixtures need real prompt rows to point at.
+// The PromptSeeder inserts a system-source prompt per requested slug;
+// event_handlers.prompt_id has composite FKs to prompts(id, org_id) AND
+// the same-team prompts(id, team_id) (SKY-380), so trigger fixtures need
+// real prompt rows owned by the factory's team, and the seeder returns the
+// slug→prompt-id map the harness threads into Seed / Create.
 func TestEventHandlerStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 
@@ -25,27 +28,29 @@ func TestEventHandlerStore_Postgres(t *testing.T) {
 		t.Helper()
 		h.Reset(t)
 		orgID := seedPgOrgForAgents(t, h)
-		// SKY-295: Seed now requires a team. seedPgOrgForAgents
-		// already stages the org's default team (via
-		// seedPgDefaultTeam); firstTeamForOrg picks it up by the same
-		// created_at ordering production used to do implicitly.
+		// Seed requires a team. seedPgOrgForAgents already stages the org's
+		// default team (via seedPgDefaultTeam); firstTeamForOrg picks it up
+		// by the same created_at ordering production used to do implicitly.
 		teamID := firstTeamForOrg(t, h, orgID)
 		stores := pgstore.New(h.AdminDB, h.AdminDB)
-		seed := func(t *testing.T, ids ...string) {
+		seed := func(t *testing.T, slugs ...string) map[string]string {
 			t.Helper()
-			for _, id := range ids {
+			out := make(map[string]string, len(slugs))
+			for _, slug := range slugs {
 				// system-source rows ship with creator_user_id NULL +
-				// visibility='org' (per the system_rows_nullable_creator
-				// migration). Insert via AdminDB so the prompts_insert
-				// RLS doesn't block on missing JWT claims.
-				if _, err := h.AdminDB.Exec(`
-					INSERT INTO prompts (id, org_id, creator_user_id, visibility, source, name, body)
-					VALUES ($1, $2, NULL, 'org', 'system', $3, 'test body')
-					ON CONFLICT (org_id, id) DO NOTHING
-				`, id, orgID, id); err != nil {
-					t.Fatalf("seed prompt %s: %v", id, err)
+				// visibility='team' and a system_slug (SKY-380). The id is a
+				// random UUID; seed via SeedOrUpdate (admin pool) so the row
+				// + version sidecar land correctly and we capture the minted
+				// id for the trigger→prompt same-team FK.
+				id, err := stores.Prompts.SeedOrUpdate(t.Context(), orgID, teamID, domain.Prompt{
+					SystemSlug: slug, Name: slug, Body: "test body", Source: "system",
+				})
+				if err != nil {
+					t.Fatalf("seed prompt %s: %v", slug, err)
 				}
+				out[slug] = id
 			}
+			return out
 		}
 		return stores.EventHandlers, orgID, teamID, seed
 	})

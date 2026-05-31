@@ -560,15 +560,34 @@ func seedPgOrgForChains(t *testing.T, h *pgtest.Harness) (orgID, userID string) 
 
 // seedPgPrompt inserts a prompt row at the admin pool so chain step
 // FKs resolve. Postgres prompts.id is TEXT (slug-shaped) — same
-// surface SQLite uses.
+// surface SQLite uses. All prompts for one org resolve to that org's
+// single team via ensurePgTeamForOrg so the same-team chain→step
+// composite FK ((chain_prompt_id|step_prompt_id, team_id) →
+// prompts(id, team_id), SKY-380) holds across a chain and its steps.
 func seedPgPrompt(t *testing.T, h *pgtest.Harness, orgID, userID, id, kind string) {
 	t.Helper()
+	teamID := ensurePgTeamForOrg(t, h, orgID, userID)
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO prompts (id, org_id, creator_user_id, name, body, source, kind, allowed_tools, visibility, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, 'body', 'user', $5, '[]'::jsonb, 'private', now(), now())
-	`, id, orgID, userID, id, kind); err != nil {
+		INSERT INTO prompts (id, org_id, team_id, creator_user_id, name, body, source, kind, allowed_tools, visibility, created_at, updated_at)
+		VALUES ($1, $2, $3::uuid, $4, $5, 'body', 'user', $6, '[]'::jsonb, 'team', now(), now())
+	`, id, orgID, teamID, userID, id, kind); err != nil {
 		t.Fatalf("seed prompt %s: %v", id, err)
 	}
+}
+
+// ensurePgTeamForOrg returns the org's first team, creating a default one
+// if none exists. Prompts are team-scoped (team_id NOT NULL, SKY-380) and a
+// chain's steps must share its team, so multiple seedPgPrompt calls for one
+// org all resolve to a single stable team here.
+func ensurePgTeamForOrg(t *testing.T, h *pgtest.Harness, orgID, userID string) string {
+	t.Helper()
+	var teamID string
+	if err := h.AdminDB.QueryRow(
+		`SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1`, orgID,
+	).Scan(&teamID); err != nil {
+		return seedPgDefaultTeam(t, h, orgID, userID)
+	}
+	return teamID
 }
 
 // seedPgTask inserts a minimal task row so chain_runs.task_id FK is

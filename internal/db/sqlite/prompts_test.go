@@ -38,8 +38,8 @@ func TestPromptStore_SQLite(t *testing.T) {
 func TestPromptStore_SQLite_SeedOrUpdate_AssertsLocalOrg(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
-	err := stores.Prompts.SeedOrUpdate(t.Context(), "some-real-uuid",
-		domain.Prompt{ID: "system-bad", Name: "X", Body: "x", Source: "system"})
+	_, err := stores.Prompts.SeedOrUpdate(t.Context(), "some-real-uuid", runmode.LocalDefaultTeamID,
+		domain.Prompt{SystemSlug: "system-bad", Name: "X", Body: "x", Source: "system"})
 	if err == nil {
 		t.Fatalf("SeedOrUpdate accepted non-local orgID; should reject")
 	}

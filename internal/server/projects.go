@@ -131,12 +131,15 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		// prompt must exist" coupling — tests that don't seed prompts get
 		// NULL on insert and the curator runtime falls back to the same
 		// default at dispatch time anyway.
+		// Resolve the team's own copy of the shipped spec-authorship prompt
+		// by slug — the id is a random UUID per team copy post-SKY-380, so a
+		// slug lookup replaces the old Get(slug). Store the resolved UUID.
 		specPromptID := ""
-		def, defErr := tx.Prompts.Get(r.Context(), orgID, domain.SystemTicketSpecPromptID)
+		def, defErr := tx.Prompts.GetBySystemSlug(r.Context(), orgID, teamID, domain.SystemTicketSpecPromptID)
 		if defErr != nil {
 			log.Printf("handleProjectCreate: failed to load default spec-authorship prompt %q: %v", domain.SystemTicketSpecPromptID, defErr)
 		} else if def != nil {
-			specPromptID = domain.SystemTicketSpecPromptID
+			specPromptID = def.ID
 		}
 		id, createErr := tx.Projects.Create(r.Context(), orgID, teamID, domain.Project{
 			Name:                   name,

@@ -10,6 +10,8 @@ import (
 	"log"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -42,15 +44,21 @@ var _ db.PromptStore = (*promptStore)(nil)
 
 // --- SeedOrUpdate --------------------------------------------------
 
-func (s *promptStore) SeedOrUpdate(ctx context.Context, orgID string, p domain.Prompt) error {
+func (s *promptStore) SeedOrUpdate(ctx context.Context, orgID, teamID string, p domain.Prompt) (string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return "", err
+	}
+	if teamID == "" {
+		teamID = runmode.LocalDefaultTeamID
 	}
 	if p.Source == "" {
 		p.Source = "system"
 	}
 	if p.Source != "system" {
-		return fmt.Errorf("sqlite prompts: SeedOrUpdate only accepts Source=\"system\" (got %q); use Create or UpdateImported for non-system rows", p.Source)
+		return "", fmt.Errorf("sqlite prompts: SeedOrUpdate only accepts Source=\"system\" (got %q); use Create or UpdateImported for non-system rows", p.Source)
+	}
+	if p.SystemSlug == "" {
+		return "", fmt.Errorf("sqlite prompts: SeedOrUpdate requires a non-empty SystemSlug (the shipped slug to dedupe on)")
 	}
 	hash := shippedContentHash(p)
 	now := time.Now().UTC()
@@ -60,33 +68,34 @@ func (s *promptStore) SeedOrUpdate(ctx context.Context, orgID string, p domain.P
 	// failure would otherwise leave the version row stamped without
 	// the corresponding prompt update applied (or vice versa) and
 	// the next seed cycle would see inconsistent state.
-	return inTx(ctx, s.seeder, func(q queryer) error {
+	var resultID string
+	err := inTx(ctx, s.seeder, func(q queryer) error {
+		// Identity is per-team: (org_id, team_id, system_slug). A second
+		// team gets its own copy (same slug, different team) and re-seeds
+		// resolve the existing row by this key (SKY-380).
 		var (
-			exists       bool
+			existingID   string
 			userModified int
 		)
 		switch err := q.QueryRowContext(ctx,
-			`SELECT user_modified FROM prompts WHERE id = ?`, p.ID,
-		).Scan(&userModified); {
+			`SELECT id, user_modified FROM prompts WHERE org_id = ? AND team_id = ? AND system_slug = ?`,
+			orgID, teamID, p.SystemSlug,
+		).Scan(&existingID, &userModified); {
 		case errors.Is(err, sql.ErrNoRows):
-			exists = false
-		case err != nil:
-			return fmt.Errorf("read prompt: %w", err)
-		default:
-			exists = true
-		}
-
-		if !exists {
-			// System-shipped prompts ship visibility='org' (admin-managed,
-			// readable to every org member) so they don't need team_id.
+			// Fresh insert — mint a random UUID for this team's copy.
+			newID := uuid.New().String()
 			if _, err := q.ExecContext(ctx, `
-				INSERT INTO prompts (id, name, body, source, visibility, usage_count, user_modified, created_at, updated_at)
-				VALUES (?, ?, ?, ?, 'org', 0, 0, ?, ?)
-			`, p.ID, p.Name, p.Body, p.Source, now, now); err != nil {
+				INSERT INTO prompts (id, org_id, team_id, system_slug, name, body, source, visibility, usage_count, user_modified, created_at, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, 'team', 0, 0, ?, ?)
+			`, newID, orgID, teamID, p.SystemSlug, p.Name, p.Body, p.Source, now, now); err != nil {
 				return err
 			}
-			return upsertSystemPromptVersionSQLite(ctx, q, p.ID, hash, now)
+			resultID = newID
+			return upsertSystemPromptVersionSQLite(ctx, q, newID, hash, now)
+		case err != nil:
+			return fmt.Errorf("read prompt: %w", err)
 		}
+		resultID = existingID
 
 		// User-modified rows are intentional local edits — never
 		// overwrite, never claim a new shipped hash was applied.
@@ -99,7 +108,7 @@ func (s *promptStore) SeedOrUpdate(ctx context.Context, orgID string, p domain.P
 		// don't churn on every startup (the UI orders by updated_at).
 		var priorHash sql.NullString
 		if err := q.QueryRowContext(ctx,
-			`SELECT content_hash FROM system_prompt_versions WHERE prompt_id = ?`, p.ID,
+			`SELECT content_hash FROM system_prompt_versions WHERE prompt_id = ?`, existingID,
 		).Scan(&priorHash); err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("read prior prompt version: %w", err)
 		}
@@ -111,11 +120,15 @@ func (s *promptStore) SeedOrUpdate(ctx context.Context, orgID string, p domain.P
 			UPDATE prompts
 			SET name = ?, body = ?, source = ?, updated_at = ?
 			WHERE id = ?
-		`, p.Name, p.Body, p.Source, now, p.ID); err != nil {
+		`, p.Name, p.Body, p.Source, now, existingID); err != nil {
 			return err
 		}
-		return upsertSystemPromptVersionSQLite(ctx, q, p.ID, hash, now)
+		return upsertSystemPromptVersionSQLite(ctx, q, existingID, hash, now)
 	})
+	if err != nil {
+		return "", err
+	}
+	return resultID, nil
 }
 
 // shippedContentHash digests the shipped (name, body, source) triple
@@ -159,7 +172,7 @@ func (s *promptStore) List(ctx context.Context, orgID string, _ string) ([]domai
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT id, name, body, source, kind, allowed_tools, model, usage_count, created_at, updated_at
+		SELECT id, name, body, source, kind, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
 		FROM prompts WHERE hidden = 0 ORDER BY updated_at DESC
 	`)
 	if err != nil {
@@ -169,8 +182,8 @@ func (s *promptStore) List(ctx context.Context, orgID string, _ string) ([]domai
 
 	var prompts []domain.Prompt
 	for rows.Next() {
-		var p domain.Prompt
-		if err := rows.Scan(&p.ID, &p.Name, &p.Body, &p.Source, &p.Kind, &p.AllowedTools, &p.Model, &p.UsageCount, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		p, err := scanPromptRowSQLite(rows.Scan)
+		if err != nil {
 			return nil, err
 		}
 		prompts = append(prompts, p)
@@ -182,11 +195,10 @@ func (s *promptStore) Get(ctx context.Context, orgID string, id string) (*domain
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	var p domain.Prompt
-	err := s.q.QueryRowContext(ctx, `
-		SELECT id, name, body, source, kind, allowed_tools, model, usage_count, created_at, updated_at
+	p, err := scanPromptRowSQLite(s.q.QueryRowContext(ctx, `
+		SELECT id, name, body, source, kind, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
 		FROM prompts WHERE id = ?
-	`, id).Scan(&p.ID, &p.Name, &p.Body, &p.Source, &p.Kind, &p.AllowedTools, &p.Model, &p.UsageCount, &p.CreatedAt, &p.UpdatedAt)
+	`, id).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -196,8 +208,48 @@ func (s *promptStore) Get(ctx context.Context, orgID string, id string) (*domain
 	return &p, nil
 }
 
+// scanPromptRowSQLite decodes a prompts row in the canonical column order
+// (id … team_id, system_slug, created_at, updated_at). system_slug is
+// nullable (user prompts); team_id is NOT NULL post-SKY-380.
+func scanPromptRowSQLite(scanFn func(dst ...any) error) (domain.Prompt, error) {
+	var p domain.Prompt
+	var systemSlug sql.NullString
+	if err := scanFn(&p.ID, &p.Name, &p.Body, &p.Source, &p.Kind, &p.AllowedTools, &p.Model, &p.UsageCount, &p.TeamID, &systemSlug, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		return p, err
+	}
+	if systemSlug.Valid {
+		p.SystemSlug = systemSlug.String
+	}
+	return p, nil
+}
+
 func (s *promptStore) GetSystem(ctx context.Context, orgID string, id string) (*domain.Prompt, error) {
 	return s.Get(ctx, orgID, id)
+}
+
+// GetBySystemSlug resolves a shipped prompt by slug. SQLite is single-team
+// in production, so the slug alone is unique; a non-empty teamID further
+// scopes it (used by the per-team-divergence conformance path).
+func (s *promptStore) GetBySystemSlug(ctx context.Context, orgID, teamID, systemSlug string) (*domain.Prompt, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	q := `
+		SELECT id, name, body, source, kind, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
+		FROM prompts WHERE system_slug = ?`
+	args := []any{systemSlug}
+	if teamID != "" {
+		q += ` AND team_id = ?`
+		args = append(args, teamID)
+	}
+	p, err := scanPromptRowSQLite(s.q.QueryRowContext(ctx, q, args...).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
 }
 
 // Create inserts a prompt row scoped to the local sentinel team. The
@@ -228,10 +280,12 @@ func (s *promptStore) Create(ctx context.Context, orgID, teamID string, p domain
 	_ = teamID // local mode is single-team; the row pins LocalDefaultTeamID below
 	now := time.Now().UTC()
 	var creatorUserID any = runmode.LocalDefaultUserID
+	// Every prompt is team-scoped post-SKY-380 (visibility ∈ {private, team};
+	// 'org' is gone). source='system' rows created through this path (test
+	// fixtures) still drop the creator but stay team-visible.
 	visibility := "team"
 	if p.Source == "system" {
 		creatorUserID = nil
-		visibility = "org"
 	}
 	kind := p.Kind
 	if kind == "" {

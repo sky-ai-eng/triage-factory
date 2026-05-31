@@ -235,9 +235,10 @@ func TestMultiTeam_Postgres(t *testing.T) {
 	t.Run("prompts_list_scoped_to_active_team", func(t *testing.T) {
 		// The single-team prompts page narrows List to one team. The founder
 		// is a member of A and B, so the union shows both, but List(teamA)
-		// must show only team A's prompts plus org-visible (system) ones —
-		// never team B's. This is what closes the cross-team trigger→prompt
-		// hole structurally: team B's prompts simply aren't on team A's canvas.
+		// must show only team A's prompts — never team B's. Post-SKY-380
+		// every prompt is team-scoped (no org-visible tier), so this is a
+		// pure team filter; that's what closes the cross-team trigger→prompt
+		// hole structurally — team B's prompts simply aren't on team A's canvas.
 		mkPrompt := func(team, name string) string {
 			id := "p_scope_" + uuid.New().String()
 			if e := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
@@ -251,11 +252,6 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		}
 		pA := mkPrompt(teamA, "alpha-only")
 		pB := mkPrompt(teamB, "beta-only")
-		// An org-visible (system) prompt is visible to every team's view.
-		pOrg := "p_org_" + uuid.New().String()
-		pgtest.MustExec(t, h.AdminDB, `
-			INSERT INTO prompts (id, org_id, creator_user_id, name, body, source, visibility, usage_count, user_modified, created_at, updated_at)
-			VALUES ($1, $2, NULL, 'shared', 'b', 'system', 'org', 0, false, now(), now())`, pOrg, orgID)
 
 		promptIDs := func(ps []domain.Prompt) map[string]bool {
 			m := make(map[string]bool, len(ps))
@@ -270,22 +266,22 @@ func TestMultiTeam_Postgres(t *testing.T) {
 			if e != nil {
 				return e
 			}
-			if ga := promptIDs(a); !ga[pA] || !ga[pOrg] || ga[pB] {
-				t.Errorf("List(teamA): want {A, org} without B; got A=%v org=%v B=%v", ga[pA], ga[pOrg], ga[pB])
+			if ga := promptIDs(a); !ga[pA] || ga[pB] {
+				t.Errorf("List(teamA): want {A} without B; got A=%v B=%v", ga[pA], ga[pB])
 			}
 			b, e := store.List(ctx, orgID, teamB)
 			if e != nil {
 				return e
 			}
-			if gb := promptIDs(b); !gb[pB] || !gb[pOrg] || gb[pA] {
-				t.Errorf("List(teamB): want {B, org} without A; got B=%v org=%v A=%v", gb[pB], gb[pOrg], gb[pA])
+			if gb := promptIDs(b); !gb[pB] || gb[pA] {
+				t.Errorf("List(teamB): want {B} without A; got B=%v A=%v", gb[pB], gb[pA])
 			}
 			all, e := store.List(ctx, orgID, "")
 			if e != nil {
 				return e
 			}
-			if gall := promptIDs(all); !gall[pA] || !gall[pB] || !gall[pOrg] {
-				t.Errorf("List(unfiltered): want all three; got A=%v B=%v org=%v", gall[pA], gall[pB], gall[pOrg])
+			if gall := promptIDs(all); !gall[pA] || !gall[pB] {
+				t.Errorf("List(unfiltered): want both; got A=%v B=%v", gall[pA], gall[pB])
 			}
 			return nil
 		})
