@@ -184,25 +184,36 @@ function Sidebar({ eventTypes, activeIds }: { eventTypes: EventType[]; activeIds
 }
 
 // --- Persistence ---
-const STORAGE_KEY = 'binding-graph-layout'
+// Node positions are persisted per scope so a team's canvas and the org
+// template's canvas (and one team vs another) don't share — and overwrite —
+// each other's layout (event-type node ids are the same system registry across
+// scopes, so a shared key would bleed positions and make an event placed on
+// one canvas appear on the other). The key is derived from the scope below.
+const STORAGE_KEY_PREFIX = 'binding-graph-layout'
+
+function layoutStorageKey(template: boolean, teamId: string): string {
+  return template
+    ? `${STORAGE_KEY_PREFIX}:template`
+    : `${STORAGE_KEY_PREFIX}:team:${teamId || 'local'}`
+}
 
 interface SavedLayout {
   eventPositions: Record<string, { x: number; y: number }>
   promptPositions: Record<string, { x: number; y: number }>
 }
 
-function loadLayout(): SavedLayout {
+function loadLayout(key: string): SavedLayout {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
+    const raw = localStorage.getItem(key)
     return raw ? JSON.parse(raw) : { eventPositions: {}, promptPositions: {} }
   } catch {
     return { eventPositions: {}, promptPositions: {} }
   }
 }
 
-function saveLayout(layout: SavedLayout) {
+function saveLayout(key: string, layout: SavedLayout) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(layout))
+    localStorage.setItem(key, JSON.stringify(layout))
   } catch {
     // best effort — localStorage may be full or disabled
   }
@@ -237,7 +248,19 @@ function BindingGraphInner({
     y: number
     triggerId: string
   } | null>(null)
-  const layoutRef = useRef<SavedLayout>(loadLayout())
+  // Persisted layout, keyed per scope (team vs template, and per team) so the
+  // canvases don't overwrite each other's node positions. storageKeyRef keeps
+  // the key fresh for the save callbacks (which have empty/narrow dep arrays),
+  // matching this component's "refs so callbacks don't go stale" idiom; the
+  // effect below reloads layoutRef when the scope changes (the /prompts page
+  // switches teams without remounting).
+  const storageKey = layoutStorageKey(template, teamId)
+  const storageKeyRef = useRef(storageKey)
+  storageKeyRef.current = storageKey
+  const layoutRef = useRef<SavedLayout>(loadLayout(storageKey))
+  useEffect(() => {
+    layoutRef.current = loadLayout(storageKey)
+  }, [storageKey])
   const { screenToFlowPosition } = useReactFlow()
 
   // Refs so callbacks don't go stale
@@ -318,7 +341,7 @@ function BindingGraphInner({
         })
         const layout = layoutRef.current
         delete layout.eventPositions[eventTypeId]
-        saveLayout(layout)
+        saveLayout(storageKeyRef.current, layout)
         fetchAll()
       })
     },
@@ -422,7 +445,7 @@ function BindingGraphInner({
         }
       }
     }
-    if (dirty) saveLayout(layout)
+    if (dirty) saveLayout(storageKeyRef.current, layout)
   }, [])
 
   // Connect event -> prompt (creates a new trigger)
@@ -518,7 +541,7 @@ function BindingGraphInner({
       const position = screenToFlowPosition({ x: e.clientX, y: e.clientY })
 
       layoutRef.current.eventPositions[eventTypeId] = position
-      saveLayout(layoutRef.current)
+      saveLayout(storageKeyRef.current, layoutRef.current)
 
       setActiveEventIds((prev) => new Set([...prev, eventTypeId]))
     },
