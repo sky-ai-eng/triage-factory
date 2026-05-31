@@ -306,8 +306,8 @@ func resolveCredentials(ctx context.Context, secrets SecretsReader, orgID string
 
 	// Bedrock access-key triple: require both access key + secret.
 	// Session token + region are optional (region defaults to
-	// us-east-1 in some setups; the
-	// SDK has its own region resolution). Partial creds (e.g. access
+	// us-east-1 in some setups; the SDK has its own region resolution
+	// chain). Partial creds (e.g. access
 	// key set, secret missing) means a malformed admin config —
 	// treat as not-configured rather than half-injecting, so the
 	// caller sees ErrNoCredentialsConfigured and not an AWS-SDK

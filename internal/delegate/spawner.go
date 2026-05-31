@@ -220,9 +220,9 @@ func (s *Spawner) wasTakenOver(runID string) bool {
 // SetQueueDrainer wires the firing-queue drainer into the spawner. Done
 // post-construction because the router (which implements QueueDrainer)
 // holds a reference to the spawner, so the spawner can't take it as a
-// constructor arg without a circular dependency. Same wiring pattern as
-// UpdateCredentials. Safe to call once at startup; nil drainer disables
-// the drain hook (used in tests).
+// constructor arg without a circular dependency. Same post-construction
+// injection pattern as SetRunCredentialResolvers. Safe to call once at
+// startup; nil drainer disables the drain hook (used in tests).
 func (s *Spawner) SetQueueDrainer(d QueueDrainer) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

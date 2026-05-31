@@ -160,7 +160,7 @@ func TestClassify_WinnerAboveThreshold(t *testing.T) {
 		Title: "Migrate session token validation",
 	}
 
-	winner, votes := Classify(context.Background(), "test-org", nil, projects,entity)
+	winner, votes := Classify(context.Background(), "test-org", nil, projects, entity)
 	if winner == nil {
 		t.Fatalf("expected winner, got nil; votes: %+v", votes)
 	}
@@ -186,7 +186,7 @@ func TestClassify_AllBelowThreshold_ReturnsNil(t *testing.T) {
 	}
 	entity := domain.Entity{ID: "e1", Title: "Random PR"}
 
-	winner, votes := Classify(context.Background(), "test-org", nil, projects,entity)
+	winner, votes := Classify(context.Background(), "test-org", nil, projects, entity)
 	if winner != nil {
 		t.Errorf("expected nil winner, got %s", *winner)
 	}
@@ -213,7 +213,7 @@ func TestClassify_HighestAboveThresholdWins(t *testing.T) {
 		{ID: "p2", Name: "P2"},
 		{ID: "p3", Name: "P3"},
 	}
-	winner, _ := Classify(context.Background(), "test-org", nil, projects,domain.Entity{Title: "X"})
+	winner, _ := Classify(context.Background(), "test-org", nil, projects, domain.Entity{Title: "X"})
 	if winner == nil || *winner != "p2" {
 		got := "<nil>"
 		if winner != nil {
@@ -235,7 +235,7 @@ func TestClassify_TiesGoToFirstReturned(t *testing.T) {
 		{ID: "p-alpha", Name: "Alpha"},
 		{ID: "p-beta", Name: "Beta"},
 	}
-	winner, _ := Classify(context.Background(), "test-org", nil, projects,domain.Entity{Title: "X"})
+	winner, _ := Classify(context.Background(), "test-org", nil, projects, domain.Entity{Title: "X"})
 	if winner == nil {
 		t.Fatal("expected winner")
 	}
@@ -270,7 +270,7 @@ func TestClassify_HaikuErrorTreatedAsNoVote(t *testing.T) {
 		{ID: "p-flaky", Name: "Flaky"},
 		{ID: "p-good", Name: "Healthy"},
 	}
-	winner, votes := Classify(context.Background(), "test-org", nil, projects,domain.Entity{Title: "X"})
+	winner, votes := Classify(context.Background(), "test-org", nil, projects, domain.Entity{Title: "X"})
 	if winner == nil || *winner != "p-good" {
 		got := "<nil>"
 		if winner != nil {
@@ -313,7 +313,7 @@ func TestClassify_Stage2EscalatesOnBorderlineTruncated(t *testing.T) {
 	projects := []domain.Project{
 		{ID: projectID, Name: "Borderline", Description: "Big-KB project"},
 	}
-	winner, votes := Classify(context.Background(), "test-org", nil, projects,domain.Entity{Title: "X"})
+	winner, votes := Classify(context.Background(), "test-org", nil, projects, domain.Entity{Title: "X"})
 	if winner == nil || *winner != projectID {
 		got := "<nil>"
 		if winner != nil {
@@ -356,7 +356,7 @@ func TestClassify_Stage2DoesNotFireWithoutTruncation(t *testing.T) {
 	projects := []domain.Project{
 		{ID: "p-nt", Name: "NotTruncated"},
 	}
-	winner, _ := Classify(context.Background(), "test-org", nil, projects,domain.Entity{Title: "X"})
+	winner, _ := Classify(context.Background(), "test-org", nil, projects, domain.Entity{Title: "X"})
 	if winner != nil {
 		t.Errorf("expected nil winner without escalation, got %s", *winner)
 	}
