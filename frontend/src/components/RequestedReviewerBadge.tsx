@@ -21,7 +21,9 @@ export default function RequestedReviewerBadge({ task }: { task: Task }) {
   const url = reviewerProfileURL(task.source_url, reviewer)
   if (!url) return null
 
-  const label = reviewer.kind === 'user' ? `@${reviewer.login}` : `${reviewer.org}/${reviewer.slug}`
+  // The user glyph below already renders a leading "@", so the label omits
+  // it to avoid "@ @login"; the team label has no such prefix glyph.
+  const label = reviewer.kind === 'user' ? reviewer.login : `${reviewer.org}/${reviewer.slug}`
   const title =
     reviewer.kind === 'user'
       ? `Review requested of @${reviewer.login}`
