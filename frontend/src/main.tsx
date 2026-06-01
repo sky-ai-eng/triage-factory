@@ -26,8 +26,9 @@ import Projects from './pages/Projects'
 import ProjectDetail from './pages/ProjectDetail'
 import Login from './pages/Login'
 import NoOrgs from './pages/NoOrgs'
+import ConnectGitHub from './pages/ConnectGitHub'
 import Shell from './Shell'
-import AuthGate from './AuthGate'
+import AuthGate, { RequireGitHubIdentity } from './AuthGate'
 import ToastProvider from './components/Toast/ToastProvider'
 import { useDeploymentConfig } from './hooks/useDeploymentConfig'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
@@ -107,11 +108,25 @@ function MultiRoutes() {
               mode — integration creds live in per-org Vault (D5)
               and are configured via the admin UI (D14). */}
           <Route path="/setup" element={<Navigate to="/" replace />} />
+          {/* Onboarding gate page — its own route so it sits OUTSIDE
+              RequireGitHubIdentity (the check it exists to satisfy);
+              gated only by auth + org resolution. Declared before the
+              shell layout so the static /connect-github suffix wins. */}
+          <Route
+            path="/orgs/:org_id/connect-github"
+            element={
+              <AuthGate mode="multi">
+                <ConnectGitHub />
+              </AuthGate>
+            }
+          />
           <Route
             path="/orgs/:org_id"
             element={
               <AuthGate mode="multi">
-                <Shell />
+                <RequireGitHubIdentity>
+                  <Shell />
+                </RequireGitHubIdentity>
               </AuthGate>
             }
           >

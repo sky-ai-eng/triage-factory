@@ -619,6 +619,19 @@ func (s *Server) routes() {
 	s.api("GET /api/orgs/{org_id}/github-app", s.handleGitHubAppStatus)
 	s.api("GET /api/orgs/{org_id}/github-app/install-url", s.handleGitHubAppInstallURL)
 
+	// "Connect GitHub" user-to-server OAuth — binds a host-verified GitHub
+	// login to the signed-in user (identity, not access, not login).
+	// start redirects to {github_base_url}/login/oauth/authorize;
+	// callback exchanges the code, whoamis, and writes
+	// user_github_identities(source='connect_oauth'). Both are GETs reached
+	// via top-level navigation (the start from the gate page, the callback
+	// from GitHub's redirect), so they ride s.api (withSession, no CSRF wrap)
+	// and carry their own OAuth state-cookie CSRF defense. Any org member
+	// binds their own identity. The identity-status read backs the gate.
+	s.api("GET /api/orgs/{org_id}/github/connect/start", s.handleGitHubConnectStart)
+	s.api("GET /api/orgs/{org_id}/github/connect/callback", s.handleGitHubConnectCallback)
+	s.api("GET /api/orgs/{org_id}/identity/github", s.handleGitHubIdentityStatus)
+
 	// Per-org GitHub App webhook receiver. Pre-auth (GitHub has no
 	// session) and identified by org_id from the path; the handler
 	// verifies the HMAC signature against that org's stored webhook

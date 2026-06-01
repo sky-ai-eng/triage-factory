@@ -762,13 +762,14 @@ func upsertUserFromClaims(ctx context.Context, db *sql.DB, userID uuid.UUID, cla
 		return fmt.Errorf("upsert user: %w", err)
 	}
 
-	// GitHub-login claim → host-scoped identity row (SKY-396). The GoTrue
+	// GitHub-login claim → host-scoped identity row. The GoTrue
 	// GitHub social provider is hardwired to github.com, so this binding is
-	// always against github.com with source='login_claim' — the landmine
-	// SKY-271 demotes behind a capture seam (it silently NULLs the day login
-	// becomes Entra SAML). Skip when the claim carries no username
-	// (non-GitHub login provider): the row stays absent, preserving any
-	// previously-captured identity and honoring the NULL-degrades contract.
+	// always against github.com with source='login_claim' — the landmine the
+	// Connect capture flow demotes (it silently NULLs the day login becomes
+	// Entra SAML, but Connect/PAT fill the row when this can't). Skip when the
+	// claim carries no username (non-GitHub login provider): the row stays
+	// absent, preserving any previously-captured identity and honoring the
+	// NULL-degrades contract.
 	// The hardcoded host is already in NormalizeGitHubHost form; mirror
 	// UsersStore.UpsertGitHubIdentity (verified_at = now(), upsert on the host
 	// key) if that store method ever grows logic beyond the SQL.

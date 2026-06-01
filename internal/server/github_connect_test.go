@@ -1,0 +1,528 @@
+package server
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/auth"
+	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+)
+
+// TestGitHubConnect_NilDeployConfig_Returns404 pins that the Connect
+// endpoints 404 when deployCfg is nil (server not fully booted) — the same
+// guard the register flow carries.
+func TestGitHubConnect_NilDeployConfig_Returns404(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	// Don't call SetDeployConfig — deployCfg stays nil.
+
+	org := runmode.LocalDefaultOrgID
+	for _, path := range []string{
+		"/api/orgs/" + org + "/github/connect/start",
+		"/api/orgs/" + org + "/github/connect/callback?code=x&state=y",
+	} {
+		rec := doJSON(t, s, "GET", path, nil)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s: got %d, want 404", path, rec.Code)
+		}
+	}
+}
+
+// TestGitHubConnect_StateToken_RoundTrip verifies the HMAC-signed connect
+// state signs + parses, and that expired / tampered / malformed tokens are
+// rejected — the CSRF + session-binding carrier for the OAuth dance.
+func TestGitHubConnect_StateToken_RoundTrip(t *testing.T) {
+	var key [32]byte
+	if _, err := rand.Read(key[:]); err != nil {
+		t.Fatalf("seed key: %v", err)
+	}
+
+	st := connectState{
+		OrgID:     "00000000-0000-0000-0000-000000000099",
+		UserID:    "11111111-1111-1111-1111-111111111111",
+		CSRF:      "nonce",
+		ReturnTo:  "/orgs/x/triage",
+		ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
+	}
+	signed, err := st.sign(key)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	parsed, err := parseConnectState(signed, key)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if parsed.OrgID != st.OrgID || parsed.UserID != st.UserID || parsed.CSRF != st.CSRF || parsed.ReturnTo != st.ReturnTo {
+		t.Errorf("round-trip mismatch: got %+v want %+v", parsed, st)
+	}
+
+	t.Run("expired", func(t *testing.T) {
+		exp := st
+		exp.ExpiresAt = time.Now().Add(-time.Minute).Unix()
+		tok, _ := exp.sign(key)
+		if _, err := parseConnectState(tok, key); err == nil {
+			t.Error("expected error for expired token")
+		}
+	})
+	t.Run("wrong_key", func(t *testing.T) {
+		var other [32]byte
+		if _, err := rand.Read(other[:]); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if _, err := parseConnectState(signed, other); err == nil {
+			t.Error("expected error for wrong key")
+		}
+	})
+	t.Run("malformed", func(t *testing.T) {
+		if _, err := parseConnectState("not.a.token", key); err == nil {
+			t.Error("expected error for malformed token")
+		}
+	})
+}
+
+// TestConnectErrCode pins the error-class mapping the gate UI keys off: a
+// network-level failure is the distinct "host unreachable" infra state;
+// anything else is a generic connect failure.
+func TestConnectErrCode(t *testing.T) {
+	if got := connectErrCode(fmt.Errorf("wrap: %w", auth.ErrGitHubHostUnreachable)); got != "host_unreachable" {
+		t.Errorf("unreachable error mapped to %q, want host_unreachable", got)
+	}
+	if got := connectErrCode(errors.New("bad code")); got != "connect_failed" {
+		t.Errorf("generic error mapped to %q, want connect_failed", got)
+	}
+}
+
+// TestGitHubConnect_ManifestIncludesConnectCallback pins that a freshly-built
+// App manifest registers the Connect callback in callback_urls — without it,
+// GitHub would reject the user-to-server redirect_uri at consent time. The
+// register redirect_url stays the manifest-conversion callback.
+func TestGitHubConnect_ManifestIncludesConnectCallback(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	var key [32]byte
+	if _, err := rand.Read(key[:]); err != nil {
+		t.Fatalf("seed key: %v", err)
+	}
+	s.SetDeployConfig("http://localhost:3000", key)
+
+	org := runmode.LocalDefaultOrgID
+	_, manifestJSON, _, err := s.buildManifestAndState(context.Background(), org, runmode.LocalDefaultUserID, "user", "testuser")
+	if err != nil {
+		t.Fatalf("buildManifestAndState: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(manifestJSON), &m); err != nil {
+		t.Fatalf("unmarshal manifest: %v", err)
+	}
+
+	rawCBs, ok := m["callback_urls"].([]any)
+	if !ok {
+		t.Fatalf("callback_urls missing or not a list: %s", manifestJSON)
+	}
+	cbs := make(map[string]bool, len(rawCBs))
+	for _, c := range rawCBs {
+		cbs[c.(string)] = true
+	}
+	wantConnect := "http://localhost:3000/api/orgs/" + org + "/github/connect/callback"
+	wantRegister := "http://localhost:3000/api/orgs/" + org + "/github-app/register/callback"
+	if !cbs[wantConnect] {
+		t.Errorf("callback_urls missing the Connect callback %q: %v", wantConnect, rawCBs)
+	}
+	if !cbs[wantRegister] {
+		t.Errorf("callback_urls missing the register callback %q: %v", wantRegister, rawCBs)
+	}
+	if got, _ := m["redirect_url"].(string); got != wantRegister {
+		t.Errorf("redirect_url = %q, want the register callback %q", got, wantRegister)
+	}
+}
+
+// ---- multi-mode (Postgres-backed) ----
+
+// seedGitHubApp registers an org_github_apps row and stores its client_secret
+// in the org's Vault, mirroring the state a completed register flow leaves —
+// the precondition for Connect (which reuses the App's client_id/secret).
+func seedGitHubApp(t *testing.T, rig *authRig, orgID, userID, clientID, clientSecret string) {
+	t.Helper()
+	const ref = "github_app_999_client_secret"
+	if err := rig.srv.tx.WithTx(context.Background(), orgID, userID, func(tx db.TxStores) error {
+		if err := tx.GitHubApps.CreateForOrg(context.Background(), domain.OrgGitHubApp{
+			OrgID:              orgID,
+			AppID:              "999",
+			Slug:               "tf-connect-test",
+			ClientID:           clientID,
+			ClientSecretRef:    ref,
+			PEMRef:             "github_app_999_pem",
+			RegisteredByUserID: userID,
+		}); err != nil {
+			return err
+		}
+		return tx.Secrets.Put(context.Background(), orgID, ref, clientSecret, "test client secret")
+	}); err != nil {
+		t.Fatalf("seed github app: %v", err)
+	}
+}
+
+func seedOrgGitHubHost(t *testing.T, rig *authRig, orgID, host string) {
+	t.Helper()
+	if _, err := rig.h.AdminDB.Exec(`
+		INSERT INTO org_settings (org_id, github_base_url)
+		VALUES ($1, $2)
+		ON CONFLICT (org_id) DO UPDATE SET github_base_url = $2
+	`, orgID, host); err != nil {
+		t.Fatalf("seed org_settings: %v", err)
+	}
+}
+
+// TestGitHubConnect_StartRedirectsToHost proves Connect targets the org's
+// actual host (a GHES host here), NOT github.com — the whole reason the
+// social-login path can't be the capture mechanism. Asserts the authorize
+// URL carries the App's client_id + a CSRF state, and a state cookie is set.
+func TestGitHubConnect_StartRedirectsToHost(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	rig := newAuthRig(t)
+
+	alice := rig.seedUser()
+	orgA, _ := rig.seedOrg(alice, "ghes-org")
+	resp, _ := rig.driveCallback(alice)
+	sidA := rig.sidFromResp(resp)
+
+	const ghesHost = "https://git.corp.example.com"
+	seedOrgGitHubHost(t, rig, orgA.String(), ghesHost)
+	seedGitHubApp(t, rig, orgA.String(), alice.String(), "Iv1.connect_client", "secret")
+
+	startResp := rig.requestWithSid("GET",
+		"/api/orgs/"+orgA.String()+"/github/connect/start?return_to=/orgs/"+orgA.String()+"/triage", sidA)
+	if startResp.StatusCode != http.StatusFound {
+		t.Fatalf("start status=%d, want 302", startResp.StatusCode)
+	}
+	loc := startResp.Header.Get("Location")
+	u, err := url.Parse(loc)
+	if err != nil {
+		t.Fatalf("parse redirect %q: %v", loc, err)
+	}
+	if u.Scheme+"://"+u.Host != ghesHost {
+		t.Errorf("redirect host = %q, want the GHES host %q", u.Scheme+"://"+u.Host, ghesHost)
+	}
+	if u.Path != "/login/oauth/authorize" {
+		t.Errorf("redirect path = %q, want /login/oauth/authorize", u.Path)
+	}
+	if got := u.Query().Get("client_id"); got != "Iv1.connect_client" {
+		t.Errorf("client_id = %q, want the App's", got)
+	}
+	if u.Query().Get("state") == "" {
+		t.Error("authorize URL missing CSRF state")
+	}
+	if got := u.Query().Get("redirect_uri"); !strings.HasSuffix(got, "/github/connect/callback") {
+		t.Errorf("redirect_uri = %q, want the connect callback", got)
+	}
+
+	var stateCookieSet bool
+	for _, c := range startResp.Cookies() {
+		if c.Name == connectStateCookieName && c.Value != "" {
+			stateCookieSet = true
+		}
+	}
+	if !stateCookieSet {
+		t.Errorf("start did not set the %s cookie", connectStateCookieName)
+	}
+}
+
+// TestGitHubConnect_StartNoApp_RedirectsToGate verifies that an org without a
+// registered App can't Connect (no client_id to reuse) and is bounced to the
+// gate page with no_app — distinguishable copy, not a dead end.
+func TestGitHubConnect_StartNoApp_RedirectsToGate(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	rig := newAuthRig(t)
+
+	alice := rig.seedUser()
+	orgA, _ := rig.seedOrg(alice, "no-app-org")
+	resp, _ := rig.driveCallback(alice)
+	sidA := rig.sidFromResp(resp)
+
+	startResp := rig.requestWithSid("GET", "/api/orgs/"+orgA.String()+"/github/connect/start", sidA)
+	if startResp.StatusCode != http.StatusFound {
+		t.Fatalf("start status=%d, want 302", startResp.StatusCode)
+	}
+	loc := startResp.Header.Get("Location")
+	if !strings.Contains(loc, "/connect-github") || !strings.Contains(loc, "error=no_app") {
+		t.Errorf("redirect = %q, want the gate page with error=no_app", loc)
+	}
+}
+
+// TestGitHubConnect_CallbackBindsIdentity drives the full callback against a
+// stubbed GitHub host: code → ghu token → GET /user → login. Asserts the
+// user_github_identities row lands with source='connect_oauth' against the
+// GHES host, and the browser is redirected to the original return_to.
+func TestGitHubConnect_CallbackBindsIdentity(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	rig := newAuthRig(t)
+
+	alice := rig.seedUser()
+	orgA, _ := rig.seedOrg(alice, "bind-org")
+	resp, _ := rig.driveCallback(alice)
+	sidA := rig.sidFromResp(resp)
+
+	var gotTokenReq, gotUserReq bool
+	ghStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login/oauth/access_token":
+			gotTokenReq = true
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"access_token":"ghu_test_token","token_type":"bearer"}`)
+		case "/api/v3/user":
+			gotUserReq = true
+			if auth := r.Header.Get("Authorization"); auth != "Bearer ghu_test_token" {
+				t.Errorf("whoami Authorization = %q, want the ghu_ token", auth)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"login":"corp-octocat"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(ghStub.Close)
+
+	seedOrgGitHubHost(t, rig, orgA.String(), ghStub.URL)
+	seedGitHubApp(t, rig, orgA.String(), alice.String(), "Iv1.bind_client", "bind_secret")
+
+	csrf := "csrf-nonce-bind"
+	st := connectState{
+		OrgID:     orgA.String(),
+		UserID:    alice.String(),
+		CSRF:      csrf,
+		ReturnTo:  "/orgs/" + orgA.String() + "/triage",
+		ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
+	}
+	signed, err := st.sign(rig.srv.deployCfg.hmacKey)
+	if err != nil {
+		t.Fatalf("sign state: %v", err)
+	}
+
+	req := httptest.NewRequest("GET",
+		"/api/orgs/"+orgA.String()+"/github/connect/callback?code=valid_code&state="+csrf, nil)
+	req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: sidA})
+	req.AddCookie(&http.Cookie{Name: connectStateCookieName, Value: signed})
+	rec := httptest.NewRecorder()
+	rig.srv.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("callback status=%d body=%s, want 302", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); loc != st.ReturnTo {
+		t.Errorf("redirect = %q, want return_to %q", loc, st.ReturnTo)
+	}
+	if !gotTokenReq || !gotUserReq {
+		t.Errorf("expected both token-exchange and whoami calls (token=%v user=%v)", gotTokenReq, gotUserReq)
+	}
+
+	var login, source, host string
+	if err := rig.h.AdminDB.QueryRow(`
+		SELECT login, source, github_base_url FROM user_github_identities WHERE user_id = $1
+	`, alice.String()).Scan(&login, &source, &host); err != nil {
+		t.Fatalf("read user_github_identities: %v", err)
+	}
+	if login != "corp-octocat" {
+		t.Errorf("login = %q, want corp-octocat", login)
+	}
+	if source != "connect_oauth" {
+		t.Errorf("source = %q, want connect_oauth", source)
+	}
+	if host != ghStub.URL {
+		t.Errorf("github_base_url = %q, want the stub host %q", host, ghStub.URL)
+	}
+}
+
+// TestGitHubConnect_CallbackHostUnreachable proves the infra state is
+// distinguished: when the host can't be reached, the callback redirects to
+// the gate with error=host_unreachable (not connect_failed), and writes no
+// identity row.
+func TestGitHubConnect_CallbackHostUnreachable(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	rig := newAuthRig(t)
+
+	alice := rig.seedUser()
+	orgA, _ := rig.seedOrg(alice, "unreachable-org")
+	resp, _ := rig.driveCallback(alice)
+	sidA := rig.sidFromResp(resp)
+
+	// Stand a stub up to claim a port, then close it so dials are refused.
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+
+	seedOrgGitHubHost(t, rig, orgA.String(), deadURL)
+	seedGitHubApp(t, rig, orgA.String(), alice.String(), "Iv1.dead_client", "dead_secret")
+
+	csrf := "csrf-dead"
+	st := connectState{
+		OrgID: orgA.String(), UserID: alice.String(), CSRF: csrf,
+		ReturnTo: "/orgs/" + orgA.String(), ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
+	}
+	signed, _ := st.sign(rig.srv.deployCfg.hmacKey)
+
+	req := httptest.NewRequest("GET",
+		"/api/orgs/"+orgA.String()+"/github/connect/callback?code=c&state="+csrf, nil)
+	req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: sidA})
+	req.AddCookie(&http.Cookie{Name: connectStateCookieName, Value: signed})
+	rec := httptest.NewRecorder()
+	rig.srv.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status=%d, want 302", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "error=host_unreachable") {
+		t.Errorf("redirect = %q, want error=host_unreachable", loc)
+	}
+
+	var n int
+	if err := rig.h.AdminDB.QueryRow(
+		`SELECT COUNT(*) FROM user_github_identities WHERE user_id = $1`, alice.String()).Scan(&n); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("identity rows = %d, want 0 (no binding on unreachable host)", n)
+	}
+}
+
+// TestGitHubConnect_CallbackCSRFMismatch verifies a state/cookie mismatch is
+// rejected to the gate (no binding) — the OAuth CSRF defense.
+func TestGitHubConnect_CallbackCSRFMismatch(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	rig := newAuthRig(t)
+
+	alice := rig.seedUser()
+	orgA, _ := rig.seedOrg(alice, "csrf-org")
+	resp, _ := rig.driveCallback(alice)
+	sidA := rig.sidFromResp(resp)
+
+	seedOrgGitHubHost(t, rig, orgA.String(), "https://github.com")
+	seedGitHubApp(t, rig, orgA.String(), alice.String(), "Iv1.csrf_client", "secret")
+
+	st := connectState{
+		OrgID: orgA.String(), UserID: alice.String(), CSRF: "real-nonce",
+		ReturnTo: "/", ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
+	}
+	signed, _ := st.sign(rig.srv.deployCfg.hmacKey)
+
+	// Query carries a different state than the signed cookie.
+	req := httptest.NewRequest("GET",
+		"/api/orgs/"+orgA.String()+"/github/connect/callback?code=c&state=ATTACKER-NONCE", nil)
+	req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: sidA})
+	req.AddCookie(&http.Cookie{Name: connectStateCookieName, Value: signed})
+	rec := httptest.NewRecorder()
+	rig.srv.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status=%d, want 302", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "error=state") {
+		t.Errorf("redirect = %q, want error=state", loc)
+	}
+	var n int
+	_ = rig.h.AdminDB.QueryRow(
+		`SELECT COUNT(*) FROM user_github_identities WHERE user_id = $1`, alice.String()).Scan(&n)
+	if n != 0 {
+		t.Errorf("identity rows = %d, want 0 on CSRF mismatch", n)
+	}
+}
+
+// TestGitHubIdentityStatus exercises the onboarding gate's status read: a
+// bound user reports connected=true with the login; an unbound user reports
+// connected=false. connect_available reflects whether an App is registered.
+func TestGitHubIdentityStatus(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	rig := newAuthRig(t)
+
+	alice := rig.seedUser()
+	orgA, _ := rig.seedOrg(alice, "status-org")
+	resp, _ := rig.driveCallback(alice)
+	sidA := rig.sidFromResp(resp)
+	seedOrgGitHubHost(t, rig, orgA.String(), "https://github.com")
+
+	get := func() githubIdentityStatusResponse {
+		r := rig.requestWithSid("GET", "/api/orgs/"+orgA.String()+"/identity/github", sidA)
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("status endpoint status=%d", r.StatusCode)
+		}
+		var out githubIdentityStatusResponse
+		if err := json.NewDecoder(r.Body).Decode(&out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return out
+	}
+
+	if out := get(); out.Connected {
+		t.Errorf("fresh user reported connected=true: %+v", out)
+	}
+
+	// Bind via the store under the resolved origin (what the gate reads).
+	if err := rig.srv.tx.WithTx(context.Background(), orgA.String(), alice.String(), func(tx db.TxStores) error {
+		return tx.Users.UpsertGitHubIdentity(context.Background(), alice.String(), "https://github.com", "octocat", "connect_oauth")
+	}); err != nil {
+		t.Fatalf("seed identity: %v", err)
+	}
+
+	out := get()
+	if !out.Connected || out.Login != "octocat" {
+		t.Errorf("after bind, got %+v, want connected=true login=octocat", out)
+	}
+	if out.Host != "https://github.com" {
+		t.Errorf("host = %q, want https://github.com", out.Host)
+	}
+	if out.ConnectAvailable {
+		t.Errorf("connect_available=true with no App registered: %+v", out)
+	}
+}
+
+// TestGitHubConnect_IdentityPersistsAcrossLoginProvider closes the SKY-266
+// regression by construction: a connect_oauth binding must survive a
+// subsequent login under a non-GitHub provider (no user_name claim), where
+// the login-claim writer deliberately writes nothing.
+func TestGitHubConnect_IdentityPersistsAcrossLoginProvider(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	rig := newAuthRig(t)
+
+	alice := rig.seedUser()
+	orgA, _ := rig.seedOrg(alice, "persist-org")
+	seedOrgGitHubHost(t, rig, orgA.String(), "https://github.com")
+
+	if err := rig.srv.tx.WithTx(context.Background(), orgA.String(), alice.String(), func(tx db.TxStores) error {
+		return tx.Users.UpsertGitHubIdentity(context.Background(), alice.String(), "https://github.com", "corp-login", "connect_oauth")
+	}); err != nil {
+		t.Fatalf("seed connect identity: %v", err)
+	}
+
+	// Re-login under a non-GitHub provider (e.g. Entra SAML): claims carry no
+	// user_name, so upsertUserFromClaims writes the users row but no identity
+	// row — the login_claim writer's deliberate no-op.
+	claims := &verify.Claims{
+		Subject:      alice.String(),
+		Email:        "alice@corp.example",
+		UserMetadata: map[string]any{"full_name": "Alice Example"}, // no user_name
+	}
+	if err := upsertUserFromClaims(context.Background(), rig.h.AdminDB, alice, claims); err != nil {
+		t.Fatalf("upsertUserFromClaims: %v", err)
+	}
+
+	var login, source string
+	if err := rig.h.AdminDB.QueryRow(`
+		SELECT login, source FROM user_github_identities WHERE user_id = $1 AND github_base_url = 'https://github.com'
+	`, alice.String()).Scan(&login, &source); err != nil {
+		t.Fatalf("read identity after re-login: %v", err)
+	}
+	if login != "corp-login" || source != "connect_oauth" {
+		t.Errorf("after non-GitHub re-login got (login=%q, source=%q), want the connect_oauth binding intact", login, source)
+	}
+}

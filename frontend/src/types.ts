@@ -364,6 +364,23 @@ export interface MeResponse {
   join_policy?: 'personal-org-on-signup' | 'auto-join-default' | 'invite-only'
 }
 
+/** GET /api/orgs/{org}/identity/github — the onboarding gate's status read.
+ *  `connected` is the single bit the gate blocks on (a host-verified GitHub
+ *  identity exists for the active org's host). An absent binding is
+ *  connected=false, which the runtime tolerates as NULL — the gate just
+ *  asks the user to bind one before entering the app. */
+export interface GitHubIdentityStatus {
+  connected: boolean
+  /** The bound login, when connected. */
+  login?: string
+  /** The org's GitHub host the binding is keyed against. */
+  host: string
+  /** Whether Connect is offerable — true once the org has a registered
+   *  GitHub App (Connect reuses its client_id). When false, the gate tells
+   *  the user their admin must finish GitHub setup. */
+  connect_available: boolean
+}
+
 /** GET /api/team/members row. Backs Variant B's searchable multi-select.
  *  Local mode returns a single-entry array containing the synthetic
  *  LocalDefaultUserID; multi mode (post-SKY-251) returns the active

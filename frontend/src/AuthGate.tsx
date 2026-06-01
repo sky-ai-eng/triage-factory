@@ -2,6 +2,7 @@ import { Navigate, useLocation } from 'react-router-dom'
 import { useAuthStatus } from './hooks/useAuthStatus'
 import { useAuth } from './contexts/AuthContext'
 import { useOrgContext } from './contexts/OrgContext'
+import { useGitHubIdentity } from './hooks/useGitHubIdentity'
 
 /**
  * AuthGate routes between the existing local-mode keychain setup
@@ -84,6 +85,49 @@ function MultiAuthGate({ children }: { children: React.ReactNode }) {
   // line up.
   if (!activeOrgId) {
     return <Loading />
+  }
+  return <>{children}</>
+}
+
+/**
+ * RequireGitHubIdentity is the onboarding gate, composed *inside* the
+ * authed+org-resolved MultiAuthGate and wrapping the app shell. It blocks the
+ * app until the user has a host-verified GitHub identity for the active org's
+ * host, redirecting to the Connect page (which lives on its own route, NOT
+ * behind this gate, so there's no loop) otherwise.
+ *
+ * "Couldn't read the status" (TF-side error) is held as a retryable panel
+ * rather than rendered through — the gate must not silently admit an
+ * unconnected user on a transient failure. The Connect-failure shapes
+ * (including host-unreachable) are surfaced on the Connect page itself.
+ *
+ * Multi-mode only by construction (MultiRoutes is the sole mounter). Local
+ * mode binds identity via the PAT setup wizard, so LocalAuthGate covers it.
+ */
+export function RequireGitHubIdentity({ children }: { children: React.ReactNode }) {
+  const { activeOrgId } = useOrgContext()
+  const location = useLocation()
+  const { state, refresh } = useGitHubIdentity(activeOrgId)
+
+  if (!activeOrgId || state.status === 'loading') {
+    return <Loading />
+  }
+  if (state.status === 'error') {
+    return (
+      <div className="min-h-screen bg-surface flex items-center justify-center">
+        <div className="text-center space-y-3">
+          <p className="text-text-secondary text-sm">Couldn&apos;t check your GitHub connection.</p>
+          <button type="button" onClick={refresh} className="text-accent text-sm underline">
+            Retry
+          </button>
+        </div>
+      </div>
+    )
+  }
+  if (!state.data.connected) {
+    const target = location.pathname + location.search
+    const rt = target && target !== '/' ? '?return_to=' + encodeURIComponent(target) : ''
+    return <Navigate to={'/orgs/' + activeOrgId + '/connect-github' + rt} replace />
   }
   return <>{children}</>
 }

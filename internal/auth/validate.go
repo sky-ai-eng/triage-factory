@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,14 @@ import (
 )
 
 var httpClient = &http.Client{Timeout: 10 * time.Second}
+
+// ErrGitHubHostUnreachable wraps the network-level failure of a call to a
+// GitHub host (DNS, dial, TLS, timeout) — the case where TF's backend
+// couldn't reach the host at all, as distinct from the host answering with
+// an auth/permission error. The Connect OAuth handler keys on this via
+// errors.Is to render the "we tried to reach the host and couldn't"
+// onboarding state separately from "you haven't connected yet."
+var ErrGitHubHostUnreachable = errors.New("github host unreachable")
 
 // GitHubUser is the subset of fields we extract from the GitHub user endpoint.
 type GitHubUser struct {
@@ -65,7 +74,7 @@ func ValidateGitHub(baseURL, pat string) (*GitHubUser, error) {
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("unreachable: %w", err)
+		return nil, fmt.Errorf("%w: %v", ErrGitHubHostUnreachable, err)
 	}
 	defer resp.Body.Close()
 

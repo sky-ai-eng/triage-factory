@@ -169,11 +169,18 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 	}
 
 	manifest := map[string]any{
-		"name":          appName,
-		"url":           homepageURL,
-		"redirect_url":  publicURL + "/api/orgs/" + orgID + "/github-app/register/callback",
-		"callback_urls": []string{publicURL + "/api/orgs/" + orgID + "/github-app/register/callback"},
-		"public":        false,
+		"name":         appName,
+		"url":          homepageURL,
+		"redirect_url": publicURL + "/api/orgs/" + orgID + "/github-app/register/callback",
+		// Two callbacks: the manifest-conversion redirect (this same URL), and
+		// the user-to-server Connect callback — the identity-capture flow
+		// reuses this App's client_id and redirects back here after consent,
+		// so its callback must be registered on the App at creation.
+		"callback_urls": []string{
+			publicURL + "/api/orgs/" + orgID + "/github-app/register/callback",
+			s.connectCallbackURL(orgID),
+		},
+		"public": false,
 		"default_permissions": map[string]string{
 			"issues":        "write",
 			"pull_requests": "write",
