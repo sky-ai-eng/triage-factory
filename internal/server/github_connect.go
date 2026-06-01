@@ -62,14 +62,27 @@ func (s *Server) connectCallbackURL(orgID string) string {
 	return s.deployCfg.publicURL + "/api/orgs/" + orgID + "/github/connect/callback"
 }
 
-// resolveGitHubOrigin returns the validated scheme://host the org's GitHub
-// lives on. This is the canonical key user_github_identities rows are stored
-// under (and read back by) for that org: ResolveBaseURL maps an empty config
-// to github.com, and gitHubWebOrigin both validates the result and strips it
-// to a bare origin. Connect (the writer) and the identity-status gate (the
-// reader) both route through here so the (user, host) key always agrees.
-func resolveGitHubOrigin(orgBase string) (string, bool) {
-	return gitHubWebOrigin(ghclient.ResolveBaseURL(orgBase))
+// resolveGitHubHost returns the org's GitHub base URL resolved to the
+// canonical value user_github_identities rows are keyed under for that org —
+// the *same* value the PAT writer (settings_handlers) and the
+// factory/me/settings readers key on: orgSet.GitHubBaseURL (the store trims a
+// trailing slash via NormalizeGitHubHost), with an empty config resolving to
+// github.com exactly as the login_claim writer does. Connect (writer) and the
+// identity-status gate (reader) both route through here, so the (user, host)
+// key always agrees with the other sites — crucially including a base URL
+// that carries a path, which a bare-origin derivation would silently strip
+// (writing/reading a different key than everyone else).
+//
+// gitHubWebOrigin is used only to *validate* the configured base URL is a real
+// http(s) origin; its path-stripped output is intentionally discarded so the
+// returned value matches what the other writers/readers store. ok=false on a
+// malformed base URL.
+func resolveGitHubHost(orgBase string) (string, bool) {
+	host := ghclient.ResolveBaseURL(orgBase)
+	if _, ok := gitHubWebOrigin(host); !ok {
+		return "", false
+	}
+	return host, true
 }
 
 // handleGitHubConnectStart kicks off the user-to-server OAuth dance:
@@ -114,7 +127,7 @@ func (s *Server) handleGitHubConnectStart(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	origin, okHost := resolveGitHubOrigin(orgSet.GitHubBaseURL)
+	ghWeb, okHost := resolveGitHubHost(orgSet.GitHubBaseURL)
 	if !okHost {
 		log.Printf("[github-connect] invalid github base url for org %s", orgID)
 		s.redirectConnect(w, r, orgID, returnTo, "bad_host")
@@ -154,7 +167,7 @@ func (s *Server) handleGitHubConnectStart(w http.ResponseWriter, r *http.Request
 	q.Set("client_id", app.ClientID)
 	q.Set("redirect_uri", s.connectCallbackURL(orgID))
 	q.Set("state", st.CSRF)
-	target := origin + "/login/oauth/authorize?" + q.Encode()
+	target := ghWeb + "/login/oauth/authorize?" + q.Encode()
 
 	http.Redirect(w, r, target, http.StatusFound)
 }
@@ -244,7 +257,7 @@ func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	origin, okHost := resolveGitHubOrigin(orgSet.GitHubBaseURL)
+	ghWeb, okHost := resolveGitHubHost(orgSet.GitHubBaseURL)
 	if !okHost {
 		s.redirectConnect(w, r, orgID, returnTo, "bad_host")
 		return
@@ -255,13 +268,13 @@ func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Requ
 	// an API consumer. A network failure on either call surfaces as
 	// host_unreachable so the FE shows the infra state, not "you didn't
 	// connect."
-	token, err := auth.ExchangeGitHubOAuthCode(r.Context(), origin, app.ClientID, clientSecret, code, s.connectCallbackURL(orgID))
+	token, err := auth.ExchangeGitHubOAuthCode(r.Context(), ghWeb, app.ClientID, clientSecret, code, s.connectCallbackURL(orgID))
 	if err != nil {
 		log.Printf("[github-connect] token exchange org=%s: %v", orgID, err)
 		s.redirectConnect(w, r, orgID, returnTo, connectErrCode(err))
 		return
 	}
-	ghUser, err := auth.ValidateGitHub(origin, token)
+	ghUser, err := auth.ValidateGitHub(ghWeb, token)
 	if err != nil {
 		log.Printf("[github-connect] whoami org=%s: %v", orgID, err)
 		s.redirectConnect(w, r, orgID, returnTo, connectErrCode(err))
@@ -273,14 +286,14 @@ func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Requ
 	}
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.Users.UpsertGitHubIdentity(r.Context(), userID, origin, ghUser.Login, "connect_oauth")
+		return tx.Users.UpsertGitHubIdentity(r.Context(), userID, ghWeb, ghUser.Login, "connect_oauth")
 	}); err != nil {
 		internalError(w, "github-connect", err)
 		return
 	}
 
 	log.Printf("[github-connect] bound user=%s login=%s host=%s org=%s source=connect_oauth",
-		userID, ghUser.Login, origin, orgID)
+		userID, ghUser.Login, ghWeb, orgID)
 	http.Redirect(w, r, returnTo, http.StatusFound)
 }
 
@@ -318,10 +331,10 @@ func (s *Server) handleGitHubIdentityStatus(w http.ResponseWriter, r *http.Reque
 		if lerr != nil {
 			return lerr
 		}
-		origin, okHost := resolveGitHubOrigin(orgSet.GitHubBaseURL)
+		ghWeb, okHost := resolveGitHubHost(orgSet.GitHubBaseURL)
 		if okHost {
-			host = origin
-			login, lerr = tx.Users.GetGitHubLogin(r.Context(), userID, origin)
+			host = ghWeb
+			login, lerr = tx.Users.GetGitHubLogin(r.Context(), userID, ghWeb)
 			if lerr != nil {
 				return lerr
 			}

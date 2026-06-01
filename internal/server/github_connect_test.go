@@ -104,6 +104,35 @@ func TestConnectErrCode(t *testing.T) {
 	}
 }
 
+// TestResolveGitHubHost pins that the identity key is path-preserving — it
+// must agree with the raw orgSet.GitHubBaseURL key the PAT writer and the
+// factory/me/settings readers use, so a base URL with a path component keys
+// identically across all of them. A bare-origin derivation (gitHubWebOrigin)
+// would strip the path, splitting Connect's writes from the other sites'
+// reads. Empty resolves to github.com (matching login_claim); malformed
+// bases are rejected.
+func TestResolveGitHubHost(t *testing.T) {
+	cases := []struct {
+		in     string
+		want   string
+		wantOK bool
+	}{
+		{"https://github.com", "https://github.com", true},
+		{"", "https://github.com", true},                    // empty → github.com
+		{"https://github.com/", "https://github.com", true}, // trailing slash trimmed
+		{"https://git.corp.example.com", "https://git.corp.example.com", true},
+		{"https://git.corp.example.com/enterprise", "https://git.corp.example.com/enterprise", true}, // path PRESERVED
+		{"ftp://github.com", "", false},
+		{"not-a-url", "", false},
+	}
+	for _, tc := range cases {
+		got, ok := resolveGitHubHost(tc.in)
+		if got != tc.want || ok != tc.wantOK {
+			t.Errorf("resolveGitHubHost(%q) = (%q, %v), want (%q, %v)", tc.in, got, ok, tc.want, tc.wantOK)
+		}
+	}
+}
+
 // TestGitHubConnect_ManifestIncludesConnectCallback pins that a freshly-built
 // App manifest registers the Connect callback in callback_urls — without it,
 // GitHub would reject the user-to-server redirect_uri at consent time. The
@@ -327,10 +356,14 @@ func TestGitHubConnect_CallbackBindsIdentity(t *testing.T) {
 		t.Errorf("expected both token-exchange and whoami calls (token=%v user=%v)", gotTokenReq, gotUserReq)
 	}
 
+	// driveCallback (the GitHub login) already wrote a login_claim row on
+	// github.com; Connect adds a SEPARATE binding for the org's (stub) host.
+	// Scope the readback to the host Connect wrote.
 	var login, source, host string
 	if err := rig.h.AdminDB.QueryRow(`
-		SELECT login, source, github_base_url FROM user_github_identities WHERE user_id = $1
-	`, alice.String()).Scan(&login, &source, &host); err != nil {
+		SELECT login, source, github_base_url FROM user_github_identities
+		 WHERE user_id = $1 AND github_base_url = $2
+	`, alice.String(), ghStub.URL).Scan(&login, &source, &host); err != nil {
 		t.Fatalf("read user_github_identities: %v", err)
 	}
 	if login != "corp-octocat" {
@@ -341,6 +374,19 @@ func TestGitHubConnect_CallbackBindsIdentity(t *testing.T) {
 	}
 	if host != ghStub.URL {
 		t.Errorf("github_base_url = %q, want the stub host %q", host, ghStub.URL)
+	}
+
+	// The login_claim binding from driveCallback (github.com) must coexist —
+	// Connect adds a per-host row, it doesn't clobber the login binding.
+	var claimRows int
+	if err := rig.h.AdminDB.QueryRow(`
+		SELECT COUNT(*) FROM user_github_identities
+		 WHERE user_id = $1 AND github_base_url = 'https://github.com' AND source = 'login_claim'
+	`, alice.String()).Scan(&claimRows); err != nil {
+		t.Fatalf("count login_claim rows: %v", err)
+	}
+	if claimRows != 1 {
+		t.Errorf("login_claim github.com row count = %d, want 1 (Connect must not disturb it)", claimRows)
 	}
 }
 
@@ -386,13 +432,17 @@ func TestGitHubConnect_CallbackHostUnreachable(t *testing.T) {
 		t.Errorf("redirect = %q, want error=host_unreachable", loc)
 	}
 
+	// The login (driveCallback) leaves a login_claim row on github.com; the
+	// assertion is specifically that Connect wrote nothing for the org's
+	// (dead) host.
 	var n int
 	if err := rig.h.AdminDB.QueryRow(
-		`SELECT COUNT(*) FROM user_github_identities WHERE user_id = $1`, alice.String()).Scan(&n); err != nil {
+		`SELECT COUNT(*) FROM user_github_identities WHERE user_id = $1 AND github_base_url = $2`,
+		alice.String(), deadURL).Scan(&n); err != nil {
 		t.Fatalf("count rows: %v", err)
 	}
 	if n != 0 {
-		t.Errorf("identity rows = %d, want 0 (no binding on unreachable host)", n)
+		t.Errorf("identity rows for the unreachable host = %d, want 0", n)
 	}
 }
 
@@ -430,11 +480,14 @@ func TestGitHubConnect_CallbackCSRFMismatch(t *testing.T) {
 	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "error=state") {
 		t.Errorf("redirect = %q, want error=state", loc)
 	}
+	// login_claim from the login flow may exist; assert Connect itself bound
+	// nothing (no connect_oauth row).
 	var n int
 	_ = rig.h.AdminDB.QueryRow(
-		`SELECT COUNT(*) FROM user_github_identities WHERE user_id = $1`, alice.String()).Scan(&n)
+		`SELECT COUNT(*) FROM user_github_identities WHERE user_id = $1 AND source = 'connect_oauth'`,
+		alice.String()).Scan(&n)
 	if n != 0 {
-		t.Errorf("identity rows = %d, want 0 on CSRF mismatch", n)
+		t.Errorf("connect_oauth rows = %d, want 0 on CSRF mismatch", n)
 	}
 }
 
@@ -449,7 +502,11 @@ func TestGitHubIdentityStatus(t *testing.T) {
 	orgA, _ := rig.seedOrg(alice, "status-org")
 	resp, _ := rig.driveCallback(alice)
 	sidA := rig.sidFromResp(resp)
-	seedOrgGitHubHost(t, rig, orgA.String(), "https://github.com")
+	// Use a GHES host so the user is genuinely unconnected for this org:
+	// driveCallback's login_claim binds github.com, which must NOT satisfy the
+	// gate for a different host — the core GHES-onboarding scenario.
+	const ghesHost = "https://ghe.example.com"
+	seedOrgGitHubHost(t, rig, orgA.String(), ghesHost)
 
 	get := func() githubIdentityStatusResponse {
 		r := rig.requestWithSid("GET", "/api/orgs/"+orgA.String()+"/identity/github", sidA)
@@ -469,7 +526,7 @@ func TestGitHubIdentityStatus(t *testing.T) {
 
 	// Bind via the store under the resolved origin (what the gate reads).
 	if err := rig.srv.tx.WithTx(context.Background(), orgA.String(), alice.String(), func(tx db.TxStores) error {
-		return tx.Users.UpsertGitHubIdentity(context.Background(), alice.String(), "https://github.com", "octocat", "connect_oauth")
+		return tx.Users.UpsertGitHubIdentity(context.Background(), alice.String(), ghesHost, "octocat", "connect_oauth")
 	}); err != nil {
 		t.Fatalf("seed identity: %v", err)
 	}
@@ -478,8 +535,8 @@ func TestGitHubIdentityStatus(t *testing.T) {
 	if !out.Connected || out.Login != "octocat" {
 		t.Errorf("after bind, got %+v, want connected=true login=octocat", out)
 	}
-	if out.Host != "https://github.com" {
-		t.Errorf("host = %q, want https://github.com", out.Host)
+	if out.Host != ghesHost {
+		t.Errorf("host = %q, want %q", out.Host, ghesHost)
 	}
 	if out.ConnectAvailable {
 		t.Errorf("connect_available=true with no App registered: %+v", out)
