@@ -207,7 +207,7 @@ func (r *resolver) TokenFor(ctx context.Context, orgID, target string) (githubap
 		return githubapp.Token{}, fmt.Errorf("resolve github pat for org %s: %w", orgID, err)
 	}
 	if pat != "" {
-		log.Printf("[gh-resolver] org=%s target=%q → tier3 PAT (token)", orgID, target)
+		log.Printf("[gh-resolver] org=%s target=%q → tier3 PAT (token) user=%s", orgID, target, r.patBorrowUser(ctx, orgID))
 		return githubapp.Token{Value: pat}, nil
 	}
 

@@ -158,15 +158,14 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 // useSSHCloneProtocol returns true when the per-org GitHub clone
 // protocol is "ssh". orgs is nil-safe and any store failure logs +
 // defaults to HTTPS, matching the prior config.Load() degrade path.
+// useSSHCloneProtocol reports whether this run should clone over SSH. The
+// ssh-vs-https decision is delegated to domain.EffectiveCloneProtocol so the
+// "multi-mode is always HTTPS" invariant has a single home shared with the
+// settings API view — an App installation token is an HTTPS bearer credential
+// that can't be used over SSH, and the runtime container has no
+// ssh-agent/key/known_hosts. orgs is nil-safe and any store failure logs +
+// defaults to HTTPS, matching the prior config.Load() degrade path.
 func (s *Spawner) useSSHCloneProtocol(ctx context.Context, orgID, runID string) bool {
-	// Multi-mode is HTTPS-only (SKY-391): an App installation token is an
-	// HTTPS bearer credential that can't be used over SSH, and the runtime
-	// container has no ssh-agent/key/known_hosts. The stored value may still
-	// read "ssh" (the DefaultOrgSettings default, or a legacy write), so gate
-	// on mode here regardless of the persisted row — never SSH outside local.
-	if runmode.Current() != runmode.ModeLocal {
-		return false
-	}
 	if s.orgs == nil {
 		return false
 	}
@@ -175,7 +174,7 @@ func (s *Spawner) useSSHCloneProtocol(ctx context.Context, orgID, runID string) 
 		log.Printf("[delegate] load org settings to pick clone protocol for run %s: %v (defaulting to HTTPS)", runID, err)
 		return false
 	}
-	return settings.GitHubCloneProtocol == "ssh"
+	return domain.EffectiveCloneProtocol(settings.GitHubCloneProtocol, runmode.Current() == runmode.ModeMulti) == "ssh"
 }
 
 // SetStores hands the per-run agenthost daemon's store bundle to the
