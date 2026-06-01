@@ -10,6 +10,7 @@ import { useTeamFilter, teamFilterQuery } from '../hooks/useTeams'
 import { SlidersHorizontal } from 'lucide-react'
 import EventBadge from '../components/EventBadge'
 import SourceBadge from '../components/SourceBadge'
+import RequestedReviewerBadge from '../components/RequestedReviewerBadge'
 import PromptPicker from '../components/PromptPicker'
 import TaskRulesPanel from '../components/TaskRulesPanel'
 import TeamScopeSelect from '../components/TeamScopeSelect'
@@ -448,6 +449,7 @@ function SwipeCard({
         <div className="flex items-center gap-2.5 mb-4 shrink-0">
           <SourceBadge task={task} size="lg" />
           <EventBadge eventType={task.event_type} />
+          <RequestedReviewerBadge task={task} />
           {task.severity && (
             <span className="text-[11px] font-medium text-accent bg-accent-soft px-2 py-0.5 rounded-full">
               {task.severity}

@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import type { AgentMessage, AgentRun, Task, ToolCall } from '../types'
 import { useOrgHref } from '../hooks/useOrgHref'
 import SourceBadge from './SourceBadge'
+import RequestedReviewerBadge from './RequestedReviewerBadge'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
 import { formatDurationMs, formatElapsed, isActiveRun, statusDisplay } from '../lib/runStatus'
@@ -233,9 +234,10 @@ export default function AgentCard({
         <h3 className="text-[14px] font-semibold text-text-primary leading-snug line-clamp-2 mb-1">
           {task.title}
         </h3>
-        <div className="flex items-center gap-2 text-[11px] text-text-tertiary">
+        <div className="flex items-center gap-2 text-[11px] text-text-tertiary min-w-0">
           <SourceBadge task={task} />
           <span className="truncate">{task.source_id}</span>
+          <RequestedReviewerBadge task={task} />
         </div>
       </div>
 
