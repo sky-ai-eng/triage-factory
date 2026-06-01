@@ -163,10 +163,12 @@ func reviewerDedupKey(reviewer string) string {
 // unprefixed key (a legacy dedup_key="" task from before per-reviewer keying)
 // so the per-reviewer reconcile leaves those alone.
 func reviewerFromDedupKey(key string) (reviewer string, ok bool) {
-	if s, found := strings.CutPrefix(key, "user:"); found {
+	// Derive the prefixes from the shared key builders (applied to an empty
+	// handle) so this stays in lockstep with the format if it ever changes.
+	if s, found := strings.CutPrefix(key, events.ReviewerDedupKeyUser("")); found {
 		return s, true
 	}
-	if s, found := strings.CutPrefix(key, "team:"); found {
+	if s, found := strings.CutPrefix(key, events.ReviewerDedupKeyTeam("")); found {
 		return s, true
 	}
 	return "", false

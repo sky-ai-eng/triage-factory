@@ -156,6 +156,35 @@ func TestReviewRequested_UserRoutesToRequestedUsersTeams(t *testing.T) {
 	}
 }
 
+// TestReviewRequested_EmptyOrgHost_DefaultsToGitHubCom guards the common
+// github.com case where org_settings.github_base_url is unset: the OAuth
+// login-claim binds identities to "https://github.com" literally, so the
+// resolver must default an empty host to github.com or the reverse lookup
+// misses and the task is dropped.
+func TestReviewRequested_EmptyOrgHost_DefaultsToGitHubCom(t *testing.T) {
+	database := newTestDB(t)
+	seedHandlerFKTargets(t, database)
+	// Deliberately NOT calling setReviewHost — github_base_url stays empty.
+
+	teamReviewer := seedTeam(t, database, "reviewer-team")
+	seedUserOnTeam(t, database, teamReviewer, "alice") // bound under https://github.com
+	seedReviewRule(t, database, runmode.LocalDefaultTeamID)
+
+	entityID := reviewEntity(t, database, "owner/repo#emptyhost")
+	router := reviewRouter(database)
+	emitReviewRequested(router, entityID, "user:alice", events.GitHubPRReviewRequestedMetadata{
+		Author: "carol", Repo: "owner/repo", PRNumber: 9, RequestedLogin: "alice",
+	})
+
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	if err != nil || len(active) != 1 {
+		t.Fatalf("expected 1 task even with empty org github_base_url, got %d (err=%v)", len(active), err)
+	}
+	if vis := visTeamsOf(t, database, active[0].ID); len(vis) != 1 || vis[0] != teamReviewer {
+		t.Errorf("visibility = %v, want [%s] (resolved via github.com default)", vis, teamReviewer)
+	}
+}
+
 // TestReviewRequested_SharedLoginUnionsTeams is the regression guard for the
 // set-valued reverse lookup (acceptance #4): a login bound to two TF users on
 // the org's host makes the review task visible to the union of both users'

@@ -102,7 +102,10 @@ func (m *Manager) reviewerResolver(ctx context.Context, orgID, username string, 
 		if orgSet, err := m.orgs.GetSettingsSystem(ctx, orgID); err != nil {
 			log.Printf("[github] org %s: read settings for reviewer resolver: %v", orgID, err)
 		} else {
-			host = orgSet.GitHubBaseURL
+			// Resolve to the effective host (empty → github.com) so the
+			// reverse identity lookup matches rows captured under the
+			// canonical host (e.g. the OAuth login-claim's literal github.com).
+			host = db.EffectiveGitHubHost(orgSet.GitHubBaseURL)
 		}
 	}
 	return tracker.NewStoreReviewerResolver(ctx, orgID, host, m.users, m.githubGroups)

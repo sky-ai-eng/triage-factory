@@ -13,3 +13,22 @@ import "strings"
 // home (SKY-396); the Jira/Linear sibling tables (SKY-397/398) add their
 // own scope-normalization rather than reusing this GitHub-specific one.
 func NormalizeGitHubHost(host string) string { return strings.TrimRight(host, "/") }
+
+// DefaultGitHubHost is the public github.com web base. An org that leaves
+// github_base_url unset resolves identities under this host — notably the
+// GoTrue GitHub OAuth login-claim binds the identity row to it literally.
+const DefaultGitHubHost = "https://github.com"
+
+// EffectiveGitHubHost resolves an org's configured github_base_url to the host
+// identities are actually keyed under: an empty setting (the common github.com
+// case) means DefaultGitHubHost, and the result is trailing-slash-trimmed to
+// match NormalizeGitHubHost (what the stores key on). Read-side callers
+// building a reverse identity lookup must use this rather than the raw setting
+// — an empty setting would otherwise look up host="" and miss rows captured
+// under "https://github.com".
+func EffectiveGitHubHost(orgBase string) string {
+	if h := NormalizeGitHubHost(orgBase); h != "" {
+		return h
+	}
+	return DefaultGitHubHost
+}

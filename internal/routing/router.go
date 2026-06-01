@@ -652,7 +652,12 @@ func (r *Router) reviewRequestVisibilityTeams(orgID string, evt domain.Event) (t
 			log.Printf("[router] review_requested: read org settings for host: %v", err)
 			return nil, true
 		}
-		userIDs, err := r.users.UserIDsForGitHubLoginSystem(context.Background(), orgSet.GitHubBaseURL, meta.RequestedLogin)
+		// Resolve to the effective host (empty → github.com) so the reverse
+		// lookup matches identities captured under the canonical host (the
+		// OAuth login-claim binds to github.com literally); the raw empty
+		// setting would look up host="" and drop the task.
+		host := dbpkg.EffectiveGitHubHost(orgSet.GitHubBaseURL)
+		userIDs, err := r.users.UserIDsForGitHubLoginSystem(context.Background(), host, meta.RequestedLogin)
 		if err != nil {
 			log.Printf("[router] review_requested: reverse login lookup for %s: %v", meta.RequestedLogin, err)
 			return nil, true

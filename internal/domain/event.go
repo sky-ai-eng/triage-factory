@@ -66,12 +66,16 @@ const (
 	EventGitHubPRReviewCommented        = "github:pr:review_commented"
 	EventGitHubPRReviewDismissed        = "github:pr:review_dismissed"
 
-	// "Someone asked me to review their PR" — singular; reviewer-direction is intrinsic.
+	// "A reviewer was requested on a PR" — emitted once per newly-requested
+	// TF-known identity, dedup_key namespacing the requested reviewer
+	// ("user:<login>" / "team:<org>/<slug>"). The task routes to that
+	// identity's team(s).
 	EventGitHubPRReviewRequested = "github:pr:review_requested"
 
-	// "My review request was removed" — fires when the session user
-	// disappears from a PR's ReviewRequests list (reviewed, or author
-	// rescinded the request). Close signal for review_requested tasks.
+	// "A requested reviewer was removed" — emitted per-identity when a
+	// reviewer drops off a PR's ReviewRequests list (reviewed, or the request
+	// was rescinded), carrying the same dedup_key. Close signal for that one
+	// reviewer's review_requested task.
 	EventGitHubPRReviewRequestRemoved = "github:pr:review_request_removed"
 
 	// Labels — per-action, label_name in metadata.
