@@ -101,7 +101,7 @@ func EnsureCuratorWorktree(ctx context.Context, owner, repo, branch, projectDir 
 	// (or worktree add) points the local branch at the same SHA.
 	branchRefspec := fmt.Sprintf("+refs/heads/%s:%s", branch, remoteRef)
 	start := time.Now()
-	if err := gitRunCtxEnv(ctx, bareDir, auth.extraEnv(), "fetch", "origin", branchRefspec); err != nil {
+	if err := gitRunCtxAuth(ctx, bareDir, auth, "fetch", "origin", branchRefspec); err != nil {
 		return "", fmt.Errorf("fetch %s/%s %s: %w", owner, repo, branch, err)
 	}
 	log.Printf("[worktree] curator fetch %s/%s %s in %s", owner, repo, branch, time.Since(start).Round(time.Millisecond))

@@ -147,24 +147,74 @@ func CloneAuthFor(cloneURL, token string) CloneAuth {
 // active reports whether this CloneAuth will inject anything.
 func (a CloneAuth) active() bool { return a.urlPrefix != "" && a.token != "" }
 
-// extraEnv returns the GIT_CONFIG_* environment entries that add a
-// host-scoped Authorization extraHeader for one git subprocess, or nil when
-// the auth is inert. Git's env-config form (GIT_CONFIG_COUNT / _KEY_N /
-// _VALUE_N) is used instead of `-c key=value` argv so the token never lands
-	// in the process argv (visible via ps or /proc to any other host process); the
-// env of a child process is far less exposed.
-func (a CloneAuth) extraEnv() []string {
+// configEntry is the git config (key, value) that injects the auth as a
+// host-scoped HTTP extraHeader, or ok=false when the auth is inert. The value
+// mirrors the gitproxy's Basic-auth encoding: base64 of "x-access-token:" +
+// token. Split out so gitConfigEnviron and tests share one source of the
+// encoding.
+func (a CloneAuth) configEntry() (key, value string, ok bool) {
 	if !a.active() {
-		return nil
+		return "", "", false
 	}
 	creds := "x-access-token:" + a.token
-	header := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(creds))
-	key := "http." + a.urlPrefix + ".extraHeader"
-	return []string{
-		"GIT_CONFIG_COUNT=1",
-		"GIT_CONFIG_KEY_0=" + key,
-		"GIT_CONFIG_VALUE_0=" + header,
+	return "http." + a.urlPrefix + ".extraHeader",
+		"Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(creds)),
+		true
+}
+
+// gitConfigEnviron returns base (a parent environment, e.g. os.Environ())
+// extended with this auth's extraHeader as a git env-config entry, plus true;
+// or (nil, false) when the auth is inert, so the caller leaves cmd.Env unset
+// and the subprocess inherits the parent env unchanged.
+//
+// Git's env-config form (GIT_CONFIG_COUNT + GIT_CONFIG_KEY_n / _VALUE_n) is
+// used instead of a `-c key=value` argv flag so the token never appears in the
+// subprocess argv (which any host process can read via ps or /proc); a child's
+// environment is far less exposed.
+//
+// The entry is appended at the next free index — one past the inherited
+// GIT_CONFIG_COUNT (0 when unset) — rather than always at index 0, so a
+// pre-existing operator-provided GIT_CONFIG_* set (e.g. a custom CA) is
+// preserved and our header composes alongside it instead of clobbering it. The
+// inherited COUNT line is dropped and re-emitted bumped, so git reads a single,
+// correct COUNT and our entry regardless of how duplicate env keys would
+// otherwise resolve — we never depend on first-vs-last-wins dedup behavior.
+func (a CloneAuth) gitConfigEnviron(base []string) ([]string, bool) {
+	key, value, ok := a.configEntry()
+	if !ok {
+		return nil, false
 	}
+	idx := gitConfigCount(base)
+	out := make([]string, 0, len(base)+3)
+	for _, kv := range base {
+		if strings.HasPrefix(kv, "GIT_CONFIG_COUNT=") {
+			continue // re-emitted below, bumped to include our entry
+		}
+		out = append(out, kv)
+	}
+	return append(out,
+		"GIT_CONFIG_COUNT="+strconv.Itoa(idx+1),
+		"GIT_CONFIG_KEY_"+strconv.Itoa(idx)+"="+key,
+		"GIT_CONFIG_VALUE_"+strconv.Itoa(idx)+"="+value,
+	), true
+}
+
+// gitConfigCount parses GIT_CONFIG_COUNT (the number of git's indexed
+// env-config entries) from env, or 0 when it is absent, malformed, or
+// negative. Scans last-to-first so a duplicated COUNT resolves the way git and
+// Go's exec env-dedup would (last value wins).
+func gitConfigCount(env []string) int {
+	for i := len(env) - 1; i >= 0; i-- {
+		v, ok := strings.CutPrefix(env[i], "GIT_CONFIG_COUNT=")
+		if !ok {
+			continue
+		}
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 0 {
+			return n
+		}
+		return 0
+	}
+	return 0
 }
 
 // CloneOption configures an optional aspect of a worktree clone/fetch entry
@@ -598,7 +648,7 @@ func cloneBareIfMissing(ctx context.Context, owner, repo, cloneURL string, auth 
 			return "", fmt.Errorf("mkdir: %w", err)
 		}
 		start := time.Now()
-		if err := gitRunCtxEnv(ctx, "", auth.extraEnv(), "clone", "--bare", "--filter=blob:none", cloneURL, bareDir); err != nil {
+		if err := gitRunCtxAuth(ctx, "", auth, "clone", "--bare", "--filter=blob:none", cloneURL, bareDir); err != nil {
 			return "", fmt.Errorf("bare clone: %w", err)
 		}
 		log.Printf("[worktree] clone %s/%s completed in %s", owner, repo, time.Since(start).Round(time.Millisecond))
@@ -714,7 +764,7 @@ func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneUR
 	// authorized the clone authorizes this fetch. The fork's head is reached
 	// via the upstream's refs/pull/<n>/head, so no separate fork credential
 	// is needed here.
-	if err := gitRunCtxEnv(ctx, bareDir, auth.extraEnv(), "fetch", "origin", branchRef); err != nil {
+	if err := gitRunCtxAuth(ctx, bareDir, auth, "fetch", "origin", branchRef); err != nil {
 		return "", fmt.Errorf("fetch PR #%d head into %s: %w", prNumber, localBranch, err)
 	}
 	log.Printf("[worktree] fetch PR #%d (refs/pull/%d/head -> %s) completed in %s", prNumber, prNumber, localBranch, time.Since(start).Round(time.Millisecond))
@@ -1207,7 +1257,7 @@ func createBranchWorktreeAt(ctx context.Context, owner, repo, cloneURL, baseBran
 	remoteRef := "refs/remotes/origin/" + baseBranch
 	baseRef := fmt.Sprintf("+refs/heads/%s:%s", baseBranch, remoteRef)
 	start := time.Now()
-	if err := gitRunCtxEnv(ctx, bareDir, auth.extraEnv(), "fetch", "origin", baseRef); err != nil {
+	if err := gitRunCtxAuth(ctx, bareDir, auth, "fetch", "origin", baseRef); err != nil {
 		return "", fmt.Errorf("fetch base branch %s: %w", baseBranch, err)
 	}
 	log.Printf("[worktree] fetch %s completed in %s", baseBranch, time.Since(start).Round(time.Millisecond))
@@ -2252,21 +2302,20 @@ func clearStaleLockedWorktreesAll(baseDir string) {
 }
 
 func gitRunCtx(ctx context.Context, dir string, args ...string) error {
-	return gitRunCtxEnv(ctx, dir, nil, args...)
+	return gitRunCtxAuth(ctx, dir, CloneAuth{}, args...)
 }
 
-// gitRunCtxEnv is gitRunCtx with extra environment entries appended to the
-// subprocess env (after os.Environ, so they override). Used to pass the
-// per-invocation GIT_CONFIG_* auth header (CloneAuth.extraEnv) into a clone
-// or fetch without persisting it anywhere. extraEnv nil/empty behaves exactly
-// like gitRunCtx.
-func gitRunCtxEnv(ctx context.Context, dir string, extraEnv []string, args ...string) error {
+// gitRunCtxAuth runs git, injecting auth's extraHeader into the subprocess
+// environment when auth is active (composed at the next free GIT_CONFIG index
+// — see gitConfigEnviron). An inert auth leaves the inherited environment
+// untouched, identical to gitRunCtx.
+func gitRunCtxAuth(ctx context.Context, dir string, auth CloneAuth, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	if len(extraEnv) > 0 {
-		cmd.Env = append(os.Environ(), extraEnv...)
+	if env, ok := auth.gitConfigEnviron(os.Environ()); ok {
+		cmd.Env = env
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {

@@ -42,31 +42,96 @@ func TestCloneAuthFor_HTTPSOnly(t *testing.T) {
 	}
 }
 
-// TestCloneAuth_ExtraEnv pins the exact GIT_CONFIG_* env the injection emits:
-// a host-scoped extraHeader carrying the base64 of "x-access-token:<token>",
-// matching the gitproxy's Basic-auth encoding. An inert auth emits nothing.
-func TestCloneAuth_ExtraEnv(t *testing.T) {
-	if env := (CloneAuth{}).extraEnv(); env != nil {
-		t.Errorf("zero CloneAuth.extraEnv() = %v, want nil", env)
+// TestCloneAuth_ConfigEntry pins the git config (key, value) the injection
+// emits: a host-scoped extraHeader carrying the base64 of "x-access-token:
+// <token>", matching the gitproxy's Basic-auth encoding. An inert auth emits
+// nothing.
+func TestCloneAuth_ConfigEntry(t *testing.T) {
+	if _, _, ok := (CloneAuth{}).configEntry(); ok {
+		t.Error("zero CloneAuth.configEntry() ok=true, want false")
 	}
 
-	a := CloneAuthFor("https://github.com/acme/repo.git", "ghs_tok")
-	env := a.extraEnv()
-	want := map[string]string{
-		"GIT_CONFIG_COUNT":   "1",
-		"GIT_CONFIG_KEY_0":   "http.https://github.com/.extraHeader",
-		"GIT_CONFIG_VALUE_0": "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:ghs_tok")),
+	key, value, ok := CloneAuthFor("https://github.com/acme/repo.git", "ghs_tok").configEntry()
+	if !ok {
+		t.Fatal("configEntry() ok=false for an https token")
 	}
-	got := map[string]string{}
+	if want := "http.https://github.com/.extraHeader"; key != want {
+		t.Errorf("key = %q, want %q", key, want)
+	}
+	if want := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:ghs_tok")); value != want {
+		t.Errorf("value = %q, want %q", value, want)
+	}
+}
+
+// TestCloneAuth_GitConfigEnviron covers the env composition: an inert auth
+// leaves the env untouched; an active auth appends its entry at index 0 on a
+// clean base; and — the case the review flagged — when the parent already has
+// a GIT_CONFIG_* set, our entry is appended at the NEXT free index with COUNT
+// bumped, so the parent's config is preserved AND our header is added (never
+// clobbered, never ignored).
+func TestCloneAuth_GitConfigEnviron(t *testing.T) {
+	if env, ok := (CloneAuth{}).gitConfigEnviron([]string{"PATH=/bin"}); ok || env != nil {
+		t.Errorf("inert gitConfigEnviron = (%v, %v), want (nil, false)", env, ok)
+	}
+
+	auth := CloneAuthFor("https://github.com/acme/repo.git", "ghs_tok")
+	wantValue := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:ghs_tok"))
+
+	t.Run("clean base lands at index 0", func(t *testing.T) {
+		env, ok := auth.gitConfigEnviron([]string{"PATH=/bin"})
+		if !ok {
+			t.Fatal("ok=false")
+		}
+		assertEnv(t, env, "GIT_CONFIG_COUNT", "1")
+		assertEnv(t, env, "GIT_CONFIG_KEY_0", "http.https://github.com/.extraHeader")
+		assertEnv(t, env, "GIT_CONFIG_VALUE_0", wantValue)
+	})
+
+	t.Run("composes past an existing env-config without clobbering it", func(t *testing.T) {
+		base := []string{
+			"PATH=/bin",
+			"GIT_CONFIG_COUNT=2",
+			"GIT_CONFIG_KEY_0=http.sslCAInfo", "GIT_CONFIG_VALUE_0=/etc/ca.pem",
+			"GIT_CONFIG_KEY_1=user.name", "GIT_CONFIG_VALUE_1=op",
+		}
+		env, ok := auth.gitConfigEnviron(base)
+		if !ok {
+			t.Fatal("ok=false")
+		}
+		// COUNT bumped 2 → 3, exactly once (the old COUNT line is dropped).
+		assertEnv(t, env, "GIT_CONFIG_COUNT", "3")
+		if n := countEnv(env, "GIT_CONFIG_COUNT="); n != 1 {
+			t.Errorf("found %d GIT_CONFIG_COUNT entries, want exactly 1", n)
+		}
+		// Operator's entries 0,1 preserved; ours appended at the free index 2.
+		assertEnv(t, env, "GIT_CONFIG_KEY_0", "http.sslCAInfo")
+		assertEnv(t, env, "GIT_CONFIG_KEY_1", "user.name")
+		assertEnv(t, env, "GIT_CONFIG_KEY_2", "http.https://github.com/.extraHeader")
+		assertEnv(t, env, "GIT_CONFIG_VALUE_2", wantValue)
+	})
+}
+
+func assertEnv(t *testing.T, env []string, key, want string) {
+	t.Helper()
 	for _, kv := range env {
-		k, v, _ := strings.Cut(kv, "=")
-		got[k] = v
-	}
-	for k, w := range want {
-		if got[k] != w {
-			t.Errorf("%s = %q, want %q", k, got[k], w)
+		if k, v, _ := strings.Cut(kv, "="); k == key {
+			if v != want {
+				t.Errorf("%s = %q, want %q", key, v, want)
+			}
+			return
 		}
 	}
+	t.Errorf("%s not present in env", key)
+}
+
+func countEnv(env []string, prefix string) int {
+	n := 0
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			n++
+		}
+	}
+	return n
 }
 
 // startRefsCaptureServer stands in for a private GitHub host: it records the
