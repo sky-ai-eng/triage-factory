@@ -646,11 +646,11 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 				           SELECT i.login
 				             FROM user_github_identities i
 				            WHERE i.user_id = u.id
-				            ORDER BY (i.github_base_url = (
-				                        SELECT os.github_base_url FROM org_settings os
-				                         WHERE os.org_id = tf.current_org_id()
-				                      )) DESC NULLS LAST,
-				                     i.verified_at DESC NULLS LAST
+					            ORDER BY (i.github_base_url = rtrim((
+					                        SELECT os.github_base_url FROM org_settings os
+					                         WHERE os.org_id = tf.current_org_id()
+					                      ), '/')) DESC NULLS LAST,
+					                     i.verified_at DESC NULLS LAST
 				            LIMIT 1
 				       ), ''),
 				       COALESCE(u.jira_account_id, ''),
