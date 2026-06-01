@@ -480,7 +480,7 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 				badRequest(w, "GitHub URL is required before setting a PAT")
 				return
 			}
-			ghUser, err := auth.ValidateGitHub(url, *req.GitHubPAT)
+			ghUser, err := auth.ValidateGitHub(r.Context(), url, *req.GitHubPAT)
 			if err != nil {
 				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 					"error": "GitHub: " + err.Error(),
@@ -513,7 +513,7 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 			}); err != nil {
 				log.Printf("[settings/org] github identity backfill read failed: %v", err)
 			} else if stored == "" {
-				if ghUser, err := auth.ValidateGitHub(creds.GitHubURL, creds.GitHubPAT); err == nil {
+				if ghUser, err := auth.ValidateGitHub(r.Context(), creds.GitHubURL, creds.GitHubPAT); err == nil {
 					if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 						return tx.Users.UpsertGitHubIdentity(r.Context(), userID, creds.GitHubURL, ghUser.Login, "pat")
 					}); err != nil {
@@ -534,7 +534,7 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 				badRequest(w, "Jira URL is required before setting a PAT")
 				return
 			}
-			jiraUser, err := auth.ValidateJira(url, *req.JiraPAT)
+			jiraUser, err := auth.ValidateJira(r.Context(), url, *req.JiraPAT)
 			if err != nil {
 				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 					"error": "Jira: " + err.Error(),

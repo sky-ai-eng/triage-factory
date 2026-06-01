@@ -76,7 +76,7 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 
 	// Validate GitHub if provided
 	if req.GitHubURL != "" && req.GitHubPAT != "" {
-		ghUser, err := auth.ValidateGitHub(req.GitHubURL, req.GitHubPAT)
+		ghUser, err := auth.ValidateGitHub(r.Context(), req.GitHubURL, req.GitHubPAT)
 		if err != nil {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 				"error": "GitHub: " + err.Error(),
@@ -89,7 +89,7 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 
 	// Validate Jira if provided
 	if req.JiraURL != "" && req.JiraPAT != "" {
-		jiraUser, err := auth.ValidateJira(req.JiraURL, req.JiraPAT)
+		jiraUser, err := auth.ValidateJira(r.Context(), req.JiraURL, req.JiraPAT)
 		if err != nil {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 				"error": "Jira: " + err.Error(),

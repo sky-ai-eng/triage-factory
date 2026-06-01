@@ -161,8 +161,12 @@ func (s *Server) handleGitHubConnectStart(w http.ResponseWriter, r *http.Request
 		MaxAge:   600,
 	})
 
-	// Only the CSRF nonce travels through GitHub; the orgID/userID/return_to
-	// stay in the signed cookie, off GitHub's logs and the URL bar.
+	// No `scope`: this is a GitHub *App* user-to-server flow, where the token's
+	// capabilities come from the App's configured permissions, not an OAuth
+	// scope string (the OAuth-App model) — and GET /user, all we do, needs
+	// none. Only the CSRF nonce travels through GitHub; the
+	// orgID/userID/return_to stay in the signed cookie, off GitHub's logs and
+	// the URL bar.
 	q := url.Values{}
 	q.Set("client_id", app.ClientID)
 	q.Set("redirect_uri", s.connectCallbackURL(orgID))
@@ -274,7 +278,7 @@ func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Requ
 		s.redirectConnect(w, r, orgID, returnTo, connectErrCode(err))
 		return
 	}
-	ghUser, err := auth.ValidateGitHub(ghWeb, token)
+	ghUser, err := auth.ValidateGitHub(r.Context(), ghWeb, token)
 	if err != nil {
 		log.Printf("[github-connect] whoami org=%s: %v", orgID, err)
 		s.redirectConnect(w, r, orgID, returnTo, connectErrCode(err))

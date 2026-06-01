@@ -226,7 +226,7 @@ func bootstrapLocalGitHubIdentity(users db.UsersStore, secrets db.SecretStore) e
 	if existing != "" {
 		return nil
 	}
-	ghUser, err := auth.ValidateGitHub(creds.GitHubURL, creds.GitHubPAT)
+	ghUser, err := auth.ValidateGitHub(ctx, creds.GitHubURL, creds.GitHubPAT)
 	if err != nil {
 		log.Printf("[bootstrap] derive github identity from PAT: %v (continuing — Settings will capture next save)", err)
 		return nil
@@ -270,7 +270,7 @@ func bootstrapLocalJiraIdentity(users db.UsersStore, secrets db.SecretStore) err
 	if existingID != "" && existingName != "" {
 		return nil
 	}
-	jiraUser, err := auth.ValidateJira(creds.JiraURL, creds.JiraPAT)
+	jiraUser, err := auth.ValidateJira(ctx, creds.JiraURL, creds.JiraPAT)
 	if err != nil {
 		log.Printf("[bootstrap] derive users.jira_identity from PAT: %v (continuing — Settings will capture next save)", err)
 		return nil

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,7 +54,7 @@ func (u JiraUser) StableID() string {
 }
 
 // ValidateGitHub checks the PAT against the GitHub API and returns the user info.
-func ValidateGitHub(baseURL, pat string) (*GitHubUser, error) {
+func ValidateGitHub(ctx context.Context, baseURL, pat string) (*GitHubUser, error) {
 	baseURL = strings.TrimRight(baseURL, "/")
 
 	// github.com API lives at api.github.com; GHE uses {host}/api/v3
@@ -64,7 +65,7 @@ func ValidateGitHub(baseURL, pat string) (*GitHubUser, error) {
 		apiURL = baseURL + "/api/v3/user"
 	}
 
-	req, err := http.NewRequest("GET", apiURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -102,11 +103,11 @@ func ValidateGitHub(baseURL, pat string) (*GitHubUser, error) {
 }
 
 // ValidateJira checks the PAT against the Jira API and returns the user info.
-func ValidateJira(baseURL, pat string) (*JiraUser, error) {
+func ValidateJira(ctx context.Context, baseURL, pat string) (*JiraUser, error) {
 	baseURL = strings.TrimRight(baseURL, "/")
 	apiURL := baseURL + "/rest/api/2/myself"
 
-	req, err := http.NewRequest("GET", apiURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}

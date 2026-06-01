@@ -86,8 +86,12 @@ func TestGitHubConnect_StateToken_RoundTrip(t *testing.T) {
 		}
 	})
 	t.Run("malformed", func(t *testing.T) {
-		if _, err := parseConnectState("not.a.token", key); err == nil {
-			t.Error("expected error for malformed token")
+		// "nodot" has no separator (structurally malformed); "not.a.token"
+		// splits but its payload isn't valid base64 — both must be rejected.
+		for _, bad := range []string{"nodot", "not.a.token"} {
+			if _, err := parseConnectState(bad, key); err == nil {
+				t.Errorf("expected error for malformed token %q", bad)
+			}
 		}
 	})
 }
