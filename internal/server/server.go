@@ -794,6 +794,13 @@ func (s *Server) SetCurator(c *curator.Curator) {
 // (SKY-409) is evicted for the org *before* the restart logic runs: a creds
 // rotation, App install, or repo-set change can move which repos the org can
 // reach, and a stale cached enumeration must never satisfy the next write.
+//
+// Handlers fire this callback in a goroutine (the restart is slow), so the
+// eviction is asynchronous: a second write landing in the same instant as a
+// first could still read the pre-eviction cache. That race is benign — the
+// cache was just validated as correct, and the near-simultaneous second write
+// is still checked against it. Eviction exists to retire a *stale* enumeration
+// over the TTL window, not to serialize against a concurrent write.
 func (s *Server) SetOnGitHubChanged(fn func(orgID string)) {
 	s.onGitHubChanged = func(orgID string) {
 		s.evictReachableRepoCache(orgID)

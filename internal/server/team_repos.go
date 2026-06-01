@@ -338,7 +338,12 @@ func firstUnreachableViaFanOut(ctx context.Context, repos []domain.TeamGitHubRep
 func (s *Server) reachabilityClients(ctx context.Context, orgID, userID string) []*ghclient.Client {
 	var clients []*ghclient.Client
 
-	// Org PAT source (mirrors handleGitHubRepos).
+	// Org PAT source (mirrors handleGitHubRepos). Both errors are discarded
+	// on purpose: a failed WithTx (DB/secret-store outage) or a failed
+	// integrations.Load leaves creds zero-valued, so the PAT client is simply
+	// skipped and we fall open — consistent with the function's "fewer/zero
+	// clients on error" contract. The org settings error is folded into the
+	// WithTx return so a settings miss still drops us to the keychain base URL.
 	var (
 		creds  auth.Credentials
 		orgSet domain.OrgSettings

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -290,29 +292,27 @@ func fakeReposServer(t *testing.T, fullNames ...string) *httptest.Server {
 	for _, fn := range fullNames {
 		reachable[strings.ToLower(fn)] = true
 	}
+	writeRepoJSON := func(w http.ResponseWriter, fullName string) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ghclient.UserRepo{FullName: fullName})
+	}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Picker enumeration (cache-warm path).
 		if r.URL.Path == "/api/v3/user/repos" {
 			w.Header().Set("Content-Type", "application/json")
-			if r.URL.Query().Get("page") != "1" {
-				_, _ = w.Write([]byte(`[]`))
-				return
-			}
-			_, _ = w.Write([]byte(`[`))
-			for i, fn := range fullNames {
-				if i > 0 {
-					_, _ = w.Write([]byte(`,`))
+			page := []ghclient.UserRepo{}
+			if r.URL.Query().Get("page") == "1" {
+				for _, fn := range fullNames {
+					page = append(page, ghclient.UserRepo{FullName: fn})
 				}
-				_, _ = w.Write([]byte(`{"full_name":"` + fn + `"}`))
 			}
-			_, _ = w.Write([]byte(`]`))
+			_ = json.NewEncoder(w).Encode(page)
 			return
 		}
 		// Per-repo reachability probe (cold-path fan-out).
 		if slug, ok := strings.CutPrefix(r.URL.Path, "/api/v3/repos/"); ok && slug != "" {
 			if reachable[strings.ToLower(slug)] {
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{"full_name":"` + slug + `"}`))
+				writeRepoJSON(w, slug)
 				return
 			}
 			http.NotFound(w, r)

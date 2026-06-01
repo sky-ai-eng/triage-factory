@@ -57,6 +57,15 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 	// lowercased slug set is needed for the membership check, so we keep
 	// that rather than the full UserRepo slice. TTL-bounded and evicted on
 	// SetOnGitHubChanged.
+	//
+	// NB: this is warmed from ListUserRepos (PAT only), so the cached set is
+	// PAT-derived. That matches what the picker shows today (also PAT only),
+	// so the hot-path gate can't reject a repo the user could actually have
+	// selected. The cold-path fan-out additionally probes App-installation
+	// clients, so a repo reachable *only* via an App install would pass a
+	// cache-miss PUT but be rejected by a cache-hit one. Harmless until the
+	// picker itself sources App repos — at which point this warm must union
+	// the same App sources. Tracked in SKY-410.
 	slugs := make(map[string]struct{}, len(repos))
 	for _, repo := range repos {
 		if repo.FullName != "" {
