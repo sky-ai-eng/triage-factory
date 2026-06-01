@@ -151,7 +151,7 @@ func (a CloneAuth) active() bool { return a.urlPrefix != "" && a.token != "" }
 // host-scoped Authorization extraHeader for one git subprocess, or nil when
 // the auth is inert. Git's env-config form (GIT_CONFIG_COUNT / _KEY_N /
 // _VALUE_N) is used instead of `-c key=value` argv so the token never lands
-// in the process argv (visible via ps //proc to any other host process); the
+	// in the process argv (visible via ps or /proc to any other host process); the
 // env of a child process is far less exposed.
 func (a CloneAuth) extraEnv() []string {
 	if !a.active() {
