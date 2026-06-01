@@ -1491,9 +1491,13 @@ CREATE TABLE public.users (
 -- source records HOW the binding was captured ('pat' | 'connect_oauth' |
 -- 'scim' | 'login_claim') — load-bearing for SKY-271's "verified against the
 -- org's host, never typed-unverified" integrity rule. verified_at timestamps
--- the last authenticated /user (or SCIM / login-claim) confirmation against
--- the host — the hook for future drift re-checks. An absent row is a durable,
--- supported state (the NULL-degrades-gracefully contract from SKY-264).
+-- the last authenticated /user confirmation against the host — the hook for
+-- future drift re-checks. It is deliberately nullable: NULL is a meaningful
+-- state, "login known but not yet host-verified" — the shape a future SCIM
+-- sync (source='scim') would write when it learns a login from the directory
+-- without an authenticated round-trip to the host. Today's writers (pat,
+-- login_claim) always stamp it. An absent row is a durable, supported state
+-- (the NULL-degrades-gracefully contract from SKY-264).
 CREATE TABLE public.user_github_identities (
     user_id uuid NOT NULL,
     github_base_url text NOT NULL,

@@ -745,6 +745,11 @@ func upsertUserFromClaims(ctx context.Context, db *sql.DB, userID uuid.UUID, cla
 	// becomes Entra SAML). Skip when the claim carries no username
 	// (non-GitHub login provider): the row stays absent, preserving any
 	// previously-captured identity and honoring the NULL-degrades contract.
+	//
+	// Raw SQL rather than tx.Users.UpsertGitHubIdentity: this function takes
+	// *sql.DB (the auth-callback provisioning path), not a TxStores, and the
+	// hardcoded host is already in NormalizeGitHubHost form. Mirror that
+	// store method (verified_at = now(), upsert on the host key) if it grows.
 	if ghUsername != "" {
 		if _, err := db.ExecContext(ctx, `
 			INSERT INTO public.user_github_identities

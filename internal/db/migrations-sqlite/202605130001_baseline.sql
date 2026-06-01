@@ -164,10 +164,13 @@ CREATE TABLE users (
 -- 'scim' | 'login_claim') — load-bearing for SKY-271's "verified against the
 -- org's host, never typed-unverified" integrity rule and for trusting /
 -- distrusting a row later. verified_at timestamps the last authenticated
--- /user (or SCIM / login-claim) confirmation against the host — the hook for
--- future drift re-checks (rename / left-the-org). An absent row is a durable,
--- supported state: the NULL-degrades-gracefully contract from SKY-264 carries
--- over unchanged.
+-- /user confirmation against the host — the hook for future drift re-checks
+-- (rename / left-the-org). It is deliberately nullable: NULL is a meaningful
+-- state, "login known but not yet host-verified" — the shape a future SCIM
+-- sync (source='scim') would write when it learns a login from the directory
+-- without an authenticated round-trip to the host. Today's writers (pat,
+-- login_claim) always stamp it. An absent row is a durable, supported state:
+-- the NULL-degrades-gracefully contract from SKY-264 carries over unchanged.
 CREATE TABLE user_github_identities (
     user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     github_base_url TEXT NOT NULL,

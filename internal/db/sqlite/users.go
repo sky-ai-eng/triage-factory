@@ -5,19 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
-
-// normalizeGitHubHost trims a trailing slash so the (user_id,
-// github_base_url) key matches regardless of whether a caller passes
-// "https://github.com" or "https://github.com/". Reads and writes both
-// normalize, so they agree by construction even when org_settings stored
-// the raw form. Kept minimal (no lowercasing) — GHES path-based hosts are
-// case-sensitive below the authority.
-func normalizeGitHubHost(host string) string { return strings.TrimRight(host, "/") }
 
 // usersStore — SQLite impl. The constructor accepts two queryers for
 // signature parity with the Postgres impl (SKY-296); SQLite has one
@@ -33,7 +24,7 @@ func (s *usersStore) GetGitHubLogin(ctx context.Context, userID, githubBaseURL s
 	var login string
 	err := s.q.QueryRowContext(ctx,
 		`SELECT login FROM user_github_identities WHERE user_id = ? AND github_base_url = ?`,
-		userID, normalizeGitHubHost(githubBaseURL),
+		userID, db.NormalizeGitHubHost(githubBaseURL),
 	).Scan(&login)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
@@ -57,7 +48,7 @@ func (s *usersStore) UpsertGitHubIdentity(ctx context.Context, userID, githubBas
 			source      = excluded.source,
 			verified_at = excluded.verified_at,
 			updated_at  = CURRENT_TIMESTAMP
-	`, userID, normalizeGitHubHost(githubBaseURL), login, source)
+	`, userID, db.NormalizeGitHubHost(githubBaseURL), login, source)
 	if err != nil {
 		return fmt.Errorf("upsert user_github_identities: %w", err)
 	}
@@ -67,7 +58,7 @@ func (s *usersStore) UpsertGitHubIdentity(ctx context.Context, userID, githubBas
 func (s *usersStore) ClearGitHubIdentity(ctx context.Context, userID, githubBaseURL string) error {
 	if _, err := s.q.ExecContext(ctx,
 		`DELETE FROM user_github_identities WHERE user_id = ? AND github_base_url = ?`,
-		userID, normalizeGitHubHost(githubBaseURL),
+		userID, db.NormalizeGitHubHost(githubBaseURL),
 	); err != nil {
 		return fmt.Errorf("delete user_github_identities: %w", err)
 	}

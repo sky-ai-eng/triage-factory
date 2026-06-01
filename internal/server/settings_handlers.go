@@ -586,6 +586,10 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 			if _, err := tx.Secrets.Delete(r.Context(), orgID, integrations.KeyGitHubPAT); err != nil {
 				return fmt.Errorf("clear GitHub PAT: %w", err)
 			}
+			// PAT-only clear (URL stays), so creds.GitHubURL still holds the
+			// bound host — delete that host's identity row. If the URL were
+			// somehow already empty, NormalizeGitHubHost("") == "" and the
+			// DELETE no-ops (no row carries an empty host), which is correct.
 			if err := tx.Users.ClearGitHubIdentity(r.Context(), userID, creds.GitHubURL); err != nil {
 				return fmt.Errorf("clear github identity: %w", err)
 			}
