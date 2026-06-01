@@ -7,13 +7,31 @@ import (
 	"net/url"
 )
 
-// userTeam is the subset of GET /user/teams we care about. See:
+// userTeam is the subset of GET /user/teams we care about. The endpoint
+// returns the *full* team representation, so name and members_count ride
+// along on the same call — no per-team follow-up is needed in the
+// PAT/local path. See:
 // https://docs.github.com/en/rest/teams/teams#list-teams-for-the-authenticated-user
 type userTeam struct {
 	Slug         string `json:"slug"`
+	Name         string `json:"name"`
+	MembersCount int    `json:"members_count"`
 	Organization struct {
 		Login string `json:"login"`
 	} `json:"organization"`
+}
+
+// UserTeam is one of the authenticated user's GitHub team memberships,
+// the wire-ready shape the onboarding team-mapping step (SKY-411)
+// presents. OrgSlug + TeamSlug are the routing identity (matching what
+// the tracker emits for team reviewers); Name is display-only;
+// MemberCount drives the "broad team — noisy queue" hint and is
+// best-effort (0 when GitHub didn't return it).
+type UserTeam struct {
+	OrgSlug     string
+	TeamSlug    string
+	Name        string
+	MemberCount int
 }
 
 // OrgTeam is the subset of GET /orgs/{org}/teams we care about — the
@@ -67,6 +85,150 @@ func (c *Client) ListMyTeams() ([]string, error) {
 		}
 		if page == teamsPageCap {
 			log.Printf("[github] WARN: team membership list truncated at %d pages (%d teams max) — team-based review-request matching may miss memberships past this cap", teamsPageCap, teamsPageCap*teamsPerPage)
+		}
+	}
+	return out, nil
+}
+
+// ListMyTeamsDetailed returns the authenticated user's GitHub teams with
+// the display name and member count the onboarding mapping step needs
+// (SKY-411). It is the richer twin of ListMyTeams (which returns bare
+// "org/slug" strings for the tracker's set-membership check): same
+// endpoint and pagination, just carrying the extra fields GET /user/teams
+// already includes in its full-team response.
+//
+// This is the PAT/local-mode path — the PAT authenticates *as the user*,
+// so /user/teams answers "the teams this person is on" directly. The
+// multi-mode path can't reuse it (an App installation token authenticates
+// as the app, not a person); see handleGitHubUserTeams for the org-teams +
+// membership reconstruction it uses instead.
+//
+// Requires the read:org scope, same as ListMyTeams.
+func (c *Client) ListMyTeamsDetailed() ([]UserTeam, error) {
+	var out []UserTeam
+	for page := 1; page <= teamsPageCap; page++ {
+		path := fmt.Sprintf("/user/teams?per_page=%d&page=%d", teamsPerPage, page)
+		data, err := c.Get(path)
+		if err != nil {
+			return nil, fmt.Errorf("list teams page %d: %w", page, err)
+		}
+		var teams []userTeam
+		if err := json.Unmarshal(data, &teams); err != nil {
+			return nil, fmt.Errorf("parse teams page %d: %w", page, err)
+		}
+		for _, t := range teams {
+			if t.Slug == "" || t.Organization.Login == "" {
+				continue
+			}
+			out = append(out, UserTeam{
+				OrgSlug:     t.Organization.Login,
+				TeamSlug:    t.Slug,
+				Name:        t.Name,
+				MemberCount: t.MembersCount,
+			})
+		}
+		if len(teams) < teamsPerPage {
+			break
+		}
+		if page == teamsPageCap {
+			log.Printf("[github] WARN: team membership list truncated at %d pages (%d teams max)", teamsPageCap, teamsPageCap*teamsPerPage)
+		}
+	}
+	return out, nil
+}
+
+// ListUserTeamsInOrg returns the teams within a single GitHub org that
+// userLogin belongs to, with member counts — the multi-mode counterpart
+// to ListMyTeamsDetailed. The App installation token authenticates as the
+// app, not a person, so GET /user/teams can't answer "this user's teams";
+// instead we ask GraphQL's organization.teams connection with its
+// userLogins filter, which returns exactly the teams containing that user.
+// This is one paginated query per org (O(orgs)), not a membership probe
+// per team (O(teams)) — the connection does the filtering server-side.
+//
+// member counts ride along via members { totalCount } on the same query,
+// so the noisy-team hint costs no extra calls. orgLogin should be a real
+// org login (a user account has no teams and yields an empty result or a
+// GraphQL error, which the caller treats as "skip this owner").
+//
+// Requires the token to have org-members read for the org. A permission or
+// not-found failure surfaces as an error so the caller can skip the org
+// rather than assert it has no teams.
+func (c *Client) ListUserTeamsInOrg(orgLogin, userLogin string) ([]UserTeam, error) {
+	const query = `
+		query($org: String!, $login: String!, $cursor: String) {
+			organization(login: $org) {
+				teams(first: 100, userLogins: [$login], after: $cursor) {
+					pageInfo { hasNextPage endCursor }
+					nodes {
+						slug
+						name
+						members { totalCount }
+					}
+				}
+			}
+		}
+	`
+	var out []UserTeam
+	var cursor *string
+	for page := 1; page <= teamsPageCap; page++ {
+		data, err := c.PostGraphQL(map[string]any{
+			"query": query,
+			"variables": map[string]any{
+				"org":    orgLogin,
+				"login":  userLogin,
+				"cursor": cursor,
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list teams for %s in org %s: %w", userLogin, orgLogin, err)
+		}
+		var resp struct {
+			Data struct {
+				Organization *struct {
+					Teams struct {
+						PageInfo struct {
+							HasNextPage bool   `json:"hasNextPage"`
+							EndCursor   string `json:"endCursor"`
+						} `json:"pageInfo"`
+						Nodes []struct {
+							Slug    string `json:"slug"`
+							Name    string `json:"name"`
+							Members struct {
+								TotalCount int `json:"totalCount"`
+							} `json:"members"`
+						} `json:"nodes"`
+					} `json:"teams"`
+				} `json:"organization"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(data, &resp); err != nil {
+			return nil, fmt.Errorf("parse teams for org %s: %w", orgLogin, err)
+		}
+		// A null organization (owner is a user account, or the token can't
+		// see the org) means no teams to contribute — stop, don't error.
+		if resp.Data.Organization == nil {
+			break
+		}
+		teams := resp.Data.Organization.Teams
+		for _, t := range teams.Nodes {
+			if t.Slug == "" {
+				continue
+			}
+			out = append(out, UserTeam{
+				OrgSlug:     orgLogin,
+				TeamSlug:    t.Slug,
+				Name:        t.Name,
+				MemberCount: t.Members.TotalCount,
+			})
+		}
+		if !teams.PageInfo.HasNextPage || teams.PageInfo.EndCursor == "" {
+			break
+		}
+		c := teams.PageInfo.EndCursor
+		cursor = &c
+		if page == teamsPageCap {
+			log.Printf("[github] WARN: org %s team list truncated at %d pages for user %s", orgLogin, teamsPageCap, userLogin)
 		}
 	}
 	return out, nil

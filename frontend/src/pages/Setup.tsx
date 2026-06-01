@@ -2,9 +2,11 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { CheckCircle2, ChevronRight } from 'lucide-react'
 import RepoPickerModal, { type GitHubRepo } from '../components/RepoPickerModal'
+import GitHubTeamSelector, { type GitHubUserTeam } from '../components/GitHubTeamSelector'
 import CarryOverList from '../components/CarryOverList'
 import JiraStatusRule, { type JiraStatusRuleValue } from '../components/JiraStatusRule'
 import { useAuthStatus } from '../hooks/useAuthStatus'
+import { useDeploymentConfig } from '../hooks/useDeploymentConfig'
 
 interface JiraStatus {
   id: string
@@ -12,12 +14,30 @@ interface JiraStatus {
 }
 
 // Setup flow steps:
-//   github → repos → integrations → jira-creds → jira-config → jira-carry-over → integrations
-type Step = 'github' | 'repos' | 'integrations' | 'jira-creds' | 'jira-config' | 'jira-carry-over'
+//   github → repos → github-teams → integrations → jira-creds → jira-config → jira-carry-over → integrations
+//
+// github-teams (SKY-411) lands between repo selection and integrations:
+// it makes the GitHub-team → TF-team mapping exist *before* the first poll
+// so a user who is only review-requested via a team isn't left with an
+// empty queue on first run. Skippable; configurable later in Settings.
+type Step =
+  | 'github'
+  | 'repos'
+  | 'github-teams'
+  | 'integrations'
+  | 'jira-creds'
+  | 'jira-config'
+  | 'jira-carry-over'
 
 export default function Setup() {
   const navigate = useNavigate()
   const authStatus = useAuthStatus()
+  // Deployment mode drives the github-teams default-checked behavior:
+  // local (acting as oneself) pre-checks every team; multi (configuring on
+  // behalf of an org) starts unchecked for deliberate opt-in. Defaults to
+  // the local behavior until /api/config resolves.
+  const { config: deployConfig } = useDeploymentConfig()
+  const teamsDefaultChecked = deployConfig?.deployment_mode !== 'multi'
   const [step, setStep] = useState<Step>('github')
   const [initDone, setInitDone] = useState(false)
 
@@ -131,7 +151,7 @@ export default function Setup() {
         return
       }
       setSelectedRepos(repos)
-      setStep('integrations')
+      setStep('github-teams')
     } catch (err) {
       // Don't swallow the failure silently — a bare `catch {}` here is how
       // the next person debugging a slow/failed Continue ends up flying blind
@@ -143,14 +163,43 @@ export default function Setup() {
     }
   }
 
-  // --- Step 3: Integrations list ---
+  // --- Step 3: GitHub teams (SKY-411) ---
+  // Continue writes the checked teams to the *existing* per-team
+  // github-groups replace-set endpoint (the same write the Settings editor
+  // uses) — one canonical bulk write, idempotent and re-run safe. Onboarding
+  // targets the org's default team; SKY-294 will thread the acting team.
+  const saveTeamMappings = async (teams: GitHubUserTeam[]) => {
+    setLoading(true)
+    setError('')
+    try {
+      const groups = teams.map((t) => ({ org_login: t.org_slug, team_slug: t.team_slug }))
+      const res = await fetch('/api/settings/team/default/github-groups', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ groups }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        setError(data.error || 'Failed to save GitHub teams')
+        return
+      }
+      setStep('integrations')
+    } catch (err) {
+      console.error('saveTeamMappings failed:', err)
+      setError('Could not connect to server')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // --- Step 4: Integrations list ---
   const canContinueFromIntegrations = !jiraConnected || jiraConfigured
 
   const finishSetup = () => {
     navigate('/')
   }
 
-  // --- Step 4: Jira credentials ---
+  // --- Step 5: Jira credentials ---
   const canConnectJira = jiraForm.url.trim() !== '' && jiraForm.pat.trim() !== ''
 
   const connectJira = async () => {
@@ -189,7 +238,7 @@ export default function Setup() {
     setStep('integrations')
   }
 
-  // --- Step 5: Jira config (projects + statuses) ---
+  // --- Step 6: Jira config (projects + statuses) ---
   const fetchStatuses = async () => {
     const projects = jiraForm.projects
       .split(',')
@@ -410,7 +459,29 @@ export default function Setup() {
         </div>
       )}
 
-      {/* Step 3: Integrations list */}
+      {/* Step 3: GitHub teams (SKY-411) */}
+      {step === 'github-teams' && (
+        <div className="w-full max-w-lg space-y-3">
+          <GitHubTeamSelector
+            defaultChecked={teamsDefaultChecked}
+            onContinue={saveTeamMappings}
+            onSkip={() => {
+              // Skip advances without writing any mappings — idempotent
+              // re-run safe; the user can configure later in Settings.
+              setError('')
+              setStep('integrations')
+            }}
+            onBack={() => {
+              setError('')
+              setStep('repos')
+            }}
+            saving={loading}
+          />
+          <ErrorBanner error={error} />
+        </div>
+      )}
+
+      {/* Step 4: Integrations list */}
       {step === 'integrations' && (
         <div className={cardClass}>
           <div>
@@ -452,7 +523,11 @@ export default function Setup() {
           <ErrorBanner error={error} />
 
           <div className="flex gap-3">
-            <button type="button" onClick={() => setStep('repos')} className={secondaryBtnClass}>
+            <button
+              type="button"
+              onClick={() => setStep('github-teams')}
+              className={secondaryBtnClass}
+            >
               Back
             </button>
             <button
@@ -467,7 +542,7 @@ export default function Setup() {
         </div>
       )}
 
-      {/* Step 4: Jira credentials */}
+      {/* Step 5: Jira credentials */}
       {step === 'jira-creds' && (
         <div className={cardClass}>
           <div>
@@ -534,7 +609,7 @@ export default function Setup() {
         </div>
       )}
 
-      {/* Step 5: Jira config (projects + statuses) */}
+      {/* Step 6: Jira config (projects + statuses) */}
       {step === 'jira-config' && (
         <div className={cardClass}>
           <div>
@@ -626,7 +701,7 @@ export default function Setup() {
         </div>
       )}
 
-      {/* Step 6: Jira carry-over — decide what to do with existing assigned work */}
+      {/* Step 7: Jira carry-over — decide what to do with existing assigned work */}
       {step === 'jira-carry-over' && (
         <CarryOverList
           onSave={() => {
