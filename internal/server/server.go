@@ -630,7 +630,6 @@ func (s *Server) routes() {
 	s.api("GET /api/team/members", s.handleTeamMembers)
 	s.apiMutating("POST /api/skills/import", s.handleSkillsImport)
 	s.api("GET /api/github/repos", s.handleGitHubRepos)
-	s.api("GET /api/github/user-teams", s.handleGitHubUserTeams)
 	s.apiMutating("POST /api/github/preflight-ssh", s.handleGitHubPreflightSSH)
 	s.api("GET /api/repos", s.handleRepoProfiles)
 	s.apiMutating("PATCH /api/repos/{owner}/{repo}", s.handleRepoUpdate)

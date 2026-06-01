@@ -1,16 +1,28 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { RotateCw } from 'lucide-react'
 
-// One of the authenticated user's GitHub teams (GET /api/github/user-teams).
-// member_count is best-effort — absent/0 means "unknown", no noisy hint.
-interface GitHubUserTeam {
-  org_slug: string
+// One live GitHub team the admin can assign to this Triage Factory team —
+// the candidate shape from GET .../github-groups. member_count drives the
+// "broad team — noisy queue" hint (best-effort; absent/0 = unknown); `mine`
+// is true when the acting admin personally belongs to the team (so the
+// wizard pre-checks it).
+interface GitHubTeamCandidate {
+  org_login: string
   team_slug: string
   name: string
   member_count?: number
+  mine?: boolean
 }
 
-export type { GitHubUserTeam }
+export type { GitHubTeamCandidate }
+
+// The github-groups GET response we consume. `groups` is any already-saved
+// mapping (re-entry / re-onboarding); `candidates` is the org-wide team list.
+interface GroupsResponse {
+  groups: { org_login: string; team_slug: string }[]
+  candidates: GitHubTeamCandidate[]
+  role: string
+}
 
 // Teams larger than this get a "broad team — noisy queue" hint. Fixed, not
 // configurable: it's a nudge, not a policy (SKY-411 open-question call).
@@ -19,15 +31,12 @@ const NOISY_TEAM_THRESHOLD = 20
 const keyOf = (org: string, slug: string) => `${org.toLowerCase()}/${slug.toLowerCase()}`
 
 interface Props {
-  /**
-   * How checkboxes start out. Local mode (acting as oneself) pre-checks
-   * every team — the user almost certainly wants them all. Multi-mode
-   * onboarding (configuring on behalf of an org) starts unchecked so each
-   * team is an explicit opt-in.
-   */
-  defaultChecked: boolean
+  /** Team path segment for the github-groups GET/PUT — a UUID or the
+   *  literal "default" (matches the sibling team-settings routes).
+   *  Onboarding configures the org's default team. */
+  teamId: string
   /** Called with the checked teams when the user clicks Continue. */
-  onContinue: (teams: GitHubUserTeam[]) => void
+  onContinue: (teams: GitHubTeamCandidate[]) => void
   /** Advance without writing any mappings. */
   onSkip: () => void
   /** Go back to the previous step. */
@@ -37,76 +46,89 @@ interface Props {
   saving?: boolean
 }
 
-// GitHubTeamSelector is the onboarding step that makes the GitHub-team →
-// TF-team mapping exist *before* the first poll, so a user who is only
-// review-requested via a team isn't left with an empty queue (SKY-411).
-// Mirrors RepoPickerModal's shape: search box, scrollable list, footer
-// with Back / Skip / Continue, and a `saving` spinner.
+// GitHubTeamSelector is the onboarding step that creates the GitHub-team →
+// TF-team review-request mapping before the first poll, so a user who is
+// only review-requested via a team isn't left with an empty queue (SKY-411).
+// Mirrors RepoPickerModal's shape: search box, scrollable list, footer with
+// Back / Skip / Continue, and a `saving` spinner.
+//
+// Candidate-source invariant (SKY-413). The rows come from the SAME org-wide
+// source as the Settings editor — GET /api/settings/team/{id}/github-groups,
+// which lists every team in the configured repos' GitHub orgs, NOT the
+// caller's personal memberships. The only onboarding-specific behavior is
+// pre-checking: with ?include_membership=true the server flags the teams the
+// acting admin personally belongs to (`mine`), and those start checked. The
+// candidate SET is therefore perspective-independent — two surfaces (this
+// wizard and the Settings editor) share one list and one write target (the
+// github-groups replace-set PUT), differing only in what starts checked.
+// This is deliberately unlike the original SKY-411 shape, where the wizard
+// sourced candidates from one user's `/user/teams`: mounting this elsewhere
+// no longer risks scoping a team's candidates from a single admin's view —
+// only the default check state is personal, and an over/under-checked
+// default is a mild, user-correctable nudge, not a scope leak.
 export default function GitHubTeamSelector({
-  defaultChecked,
+  teamId,
   onContinue,
   onSkip,
   onBack,
   saving = false,
 }: Props) {
-  const [teams, setTeams] = useState<GitHubUserTeam[]>([])
+  const [candidates, setCandidates] = useState<GitHubTeamCandidate[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [checked, setChecked] = useState<Set<string>>(new Set())
   // Once the user toggles anything, their selection is sacrosanct — the
-  // mode-driven seeding effect below must never overwrite it. This matters
-  // because defaultChecked flips when /api/config resolves, which can land
-  // *after* the teams fetch and after the user has started clicking.
+  // seed below (which runs when the fetch lands) must never overwrite it.
   const userTouched = useRef(false)
 
-  // Fetch the team list exactly once. Deliberately independent of
-  // defaultChecked: seeding the checkboxes is a separate concern (the
-  // effect below), so a late /api/config resolution neither refetches nor
-  // clobbers in-progress selections.
   const fetchTeams = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
-      const res = await fetch('/api/github/user-teams')
+      const url = `/api/settings/team/${encodeURIComponent(teamId)}/github-groups?include_membership=true`
+      const res = await fetch(url)
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
         console.error('Failed to fetch teams:', data.error || `HTTP ${res.status}`)
-        setError('Failed to fetch your GitHub teams')
+        setError('Failed to fetch GitHub teams')
         return
       }
-      const data: GitHubUserTeam[] = await res.json()
-      setTeams(data)
+      const data: GroupsResponse = await res.json()
+      const list = data.candidates ?? []
+      setCandidates(list)
+      // Seed the checkboxes once, unless the user has already started
+      // clicking. A prior saved set (re-entry / re-onboarding) is their
+      // explicit choice and wins; otherwise pre-check the admin's own
+      // teams (`mine`) — the deliberate default in both deployment modes.
+      if (!userTouched.current) {
+        const saved = (data.groups ?? []).map((g) => keyOf(g.org_login, g.team_slug))
+        const seed =
+          saved.length > 0
+            ? saved
+            : list.filter((t) => t.mine).map((t) => keyOf(t.org_login, t.team_slug))
+        setChecked(new Set(seed))
+      }
     } catch (err) {
       console.error('Failed to fetch teams:', err)
-      setError('Failed to fetch your GitHub teams')
+      setError('Failed to fetch GitHub teams')
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [teamId])
 
   useEffect(() => {
     fetchTeams()
   }, [fetchTeams])
 
-  // Seed the checkbox state from the mode-driven default whenever the
-  // teams arrive or the (possibly late-resolving) default changes — but
-  // only until the user has touched the selection, after which it's
-  // hands-off.
-  useEffect(() => {
-    if (userTouched.current) return
-    setChecked(
-      defaultChecked ? new Set(teams.map((t) => keyOf(t.org_slug, t.team_slug))) : new Set(),
-    )
-  }, [teams, defaultChecked])
-
   const filtered = useMemo(() => {
-    if (!search.trim()) return teams
+    if (!search.trim()) return candidates
     const q = search.toLowerCase()
-    return teams.filter(
-      (t) => keyOf(t.org_slug, t.team_slug).includes(q) || (t.name || '').toLowerCase().includes(q),
+    return candidates.filter(
+      (t) =>
+        keyOf(t.org_login, t.team_slug).includes(q) || (t.name || '').toLowerCase().includes(q),
     )
-  }, [teams, search])
+  }, [candidates, search])
 
   const toggle = (org: string, slug: string) => {
     userTouched.current = true
@@ -120,13 +142,13 @@ export default function GitHubTeamSelector({
   }
 
   const handleContinue = () => {
-    const selected = teams.filter((t) => checked.has(keyOf(t.org_slug, t.team_slug)))
+    const selected = candidates.filter((t) => checked.has(keyOf(t.org_login, t.team_slug)))
     onContinue(selected)
   }
 
-  // Once the list has loaded and is empty, the user has no GitHub teams —
+  // Once the list has loaded and is empty, there are no teams to map —
   // Skip is the only forward affordance, Continue is meaningless.
-  const noTeams = !loading && !error && teams.length === 0
+  const noTeams = !loading && !error && candidates.length === 0
 
   return (
     <div className="w-full max-w-lg backdrop-blur-xl bg-surface-raised border border-border-glass rounded-2xl shadow-lg shadow-black/[0.04] overflow-hidden">
@@ -134,11 +156,11 @@ export default function GitHubTeamSelector({
         {/* Header */}
         <div className="px-6 pt-6 pb-4">
           <h2 className="text-[18px] font-semibold text-text-primary tracking-tight">
-            Your GitHub teams
+            GitHub teams for this Triage Factory team
           </h2>
           <p className="text-[13px] text-text-tertiary mt-1 leading-relaxed">
-            Triage Factory routes PRs that request these teams to you, in addition to ones that
-            request you individually.
+            Triage Factory routes PRs that request these GitHub teams to your Triage Factory team.
+            PRs that request you individually are routed separately via your GitHub identity.
           </p>
         </div>
 
@@ -189,22 +211,22 @@ export default function GitHubTeamSelector({
 
           {noTeams && (
             <p className="text-[13px] text-text-tertiary text-center py-8 leading-relaxed">
-              You're not on any GitHub teams yet. Skip this step — you can add team mappings later
-              in Settings.
+              No GitHub teams found for your configured repositories' organizations. Skip this step
+              — you can add team mappings later in Settings.
             </p>
           )}
 
           {!loading &&
             !error &&
             filtered.map((team) => {
-              const k = keyOf(team.org_slug, team.team_slug)
+              const k = keyOf(team.org_login, team.team_slug)
               const isChecked = checked.has(k)
               const noisy = (team.member_count ?? 0) > NOISY_TEAM_THRESHOLD
               return (
                 <button
                   key={k}
                   type="button"
-                  onClick={() => toggle(team.org_slug, team.team_slug)}
+                  onClick={() => toggle(team.org_login, team.team_slug)}
                   className={`w-full flex items-start gap-3 px-3 py-2.5 text-left rounded-xl transition-colors hover:bg-black/[0.02] ${
                     isChecked ? 'bg-accent/[0.04]' : ''
                   }`}
@@ -232,8 +254,13 @@ export default function GitHubTeamSelector({
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-[12.5px] font-medium text-text-primary font-mono truncate">
-                        {team.org_slug}/{team.team_slug}
+                        {team.org_login}/{team.team_slug}
                       </span>
+                      {team.mine && (
+                        <span className="text-[10px] text-accent border border-accent/30 rounded px-1 py-0.5">
+                          your team
+                        </span>
+                      )}
                       {team.member_count ? (
                         <span className="text-[10px] text-text-tertiary">
                           {team.member_count} member{team.member_count !== 1 ? 's' : ''}
@@ -255,11 +282,11 @@ export default function GitHubTeamSelector({
         </div>
 
         {/* Hint */}
-        {!loading && !error && teams.length > 0 && (
+        {!loading && !error && candidates.length > 0 && (
           <div className="px-6 pt-3">
             <p className="text-[11px] text-text-tertiary leading-relaxed">
-              Skip teams with many members — broad teams produce noisy queues. You can change this
-              later in Settings.
+              Broad teams produce noisy queues. Skip those here; you can add them later in Settings
+              if you want them after all.
             </p>
           </div>
         )}

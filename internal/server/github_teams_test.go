@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/zalando/go-keyring"
@@ -15,64 +16,74 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestUserTeams_LocalPATPath exercises GET /api/github/user-teams in local
-// mode: the org PAT *is* the user, so the handler calls GET /user/teams and
-// returns the wire shape the onboarding step consumes — including the
-// member_count the noisy-team hint reads.
-func TestUserTeams_LocalPATPath(t *testing.T) {
+// TestGitHubGroupCandidates_MembershipAndCounts exercises the candidate path
+// the onboarding wizard now reads: GET .../github-groups?include_membership=true
+// returns the org's *full* team list (via the GraphQL ListOrgTeamsDetailed,
+// carrying member counts) and flags the teams the caller personally belongs
+// to (Mine) so the wizard can pre-check them — the same list the Settings
+// editor reads, differing only in the pre-check. Local mode: candidates come
+// from GraphQL organization.teams; membership from REST /user/teams.
+func TestGitHubGroupCandidates_MembershipAndCounts(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
+	ctx := context.Background()
+
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v3/user/teams" {
-			http.NotFound(w, r)
-			return
-		}
 		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Query().Get("page") == "1" {
-			_, _ = w.Write([]byte(`[
-				{"slug":"platform","name":"Platform","members_count":8,"organization":{"login":"acme"}},
-				{"slug":"security","name":"Security","members_count":25,"organization":{"login":"acme"}}
-			]`))
-			return
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/graphql"):
+			// Candidates: organization.teams (no userLogins filter) — the
+			// org's full team list with member counts.
+			_, _ = w.Write([]byte(`{"data":{"organization":{"teams":{
+				"pageInfo":{"hasNextPage":false,"endCursor":""},
+				"nodes":[
+					{"slug":"platform","name":"Platform","members":{"totalCount":8}},
+					{"slug":"security","name":"Security","members":{"totalCount":40}}
+				]}}}}`))
+		case strings.HasSuffix(r.URL.Path, "/user/teams"):
+			// Membership: the caller is on platform only.
+			if r.URL.Query().Get("page") == "1" {
+				_, _ = w.Write([]byte(`[{"slug":"platform","name":"Platform","members_count":8,"organization":{"login":"acme"}}]`))
+				return
+			}
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			http.NotFound(w, r)
 		}
-		_, _ = w.Write([]byte(`[]`))
 	}))
 	t.Cleanup(ts.Close)
-	if err := integrations.Save(context.Background(), srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
+
+	if err := srv.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL}); err != nil {
+		t.Fatalf("set org github base: %v", err)
+	}
+	if err := integrations.Save(ctx, srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
 		GitHubURL: ts.URL,
 		GitHubPAT: "ghp-test",
 	}); err != nil {
 		t.Fatalf("seed creds: %v", err)
 	}
+	seedConfiguredRepo(t, srv, "acme", "api")
 
-	rec := doJSON(t, srv, http.MethodGet, "/api/github/user-teams", nil)
+	rec := doJSON(t, srv, http.MethodGet, "/api/settings/team/default/github-groups?include_membership=true", nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET user-teams = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("GET github-groups = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	var got []userTeamJSON
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+	var resp teamGitHubGroupsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode body: %v; raw=%s", err, rec.Body.String())
 	}
-	if len(got) != 2 {
-		t.Fatalf("got %d teams, want 2: %+v", len(got), got)
+	byKey := map[string]gitHubGroupCandidateJSON{}
+	for _, c := range resp.Candidates {
+		byKey[c.OrgLogin+"/"+c.TeamSlug] = c
 	}
-	if got[0].OrgSlug != "acme" || got[0].TeamSlug != "platform" || got[0].MemberCount != 8 {
-		t.Errorf("got[0] = %+v; want acme/platform with 8 members", got[0])
+	if len(byKey) != 2 {
+		t.Fatalf("got %d candidates, want 2: %+v", len(byKey), resp.Candidates)
 	}
-	if got[1].TeamSlug != "security" || got[1].MemberCount != 25 {
-		t.Errorf("got[1] = %+v; want security with 25 members", got[1])
+	if p := byKey["acme/platform"]; !p.Mine || p.MemberCount != 8 {
+		t.Errorf("platform = %+v; want Mine=true, MemberCount=8", p)
 	}
-}
-
-// TestUserTeams_NoPATIs400 mirrors handleGitHubRepos: with no PAT configured
-// the local path reports "GitHub not configured" as a 400 rather than a 502.
-func TestUserTeams_NoPATIs400(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-
-	rec := doJSON(t, srv, http.MethodGet, "/api/github/user-teams", nil)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("GET user-teams with no creds = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	if s := byKey["acme/security"]; s.Mine || s.MemberCount != 40 {
+		t.Errorf("security = %+v; want Mine=false, MemberCount=40", s)
 	}
 }
 

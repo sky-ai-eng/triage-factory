@@ -28,12 +28,21 @@ type gitHubGroupJSON struct {
 }
 
 // gitHubGroupCandidateJSON is one live GitHub team the admin can assign
-// to this TF team. Name rides along for display only — TF stores slugs,
-// never names or membership.
+// to this TF team. Name + MemberCount ride along for display only — TF
+// stores slugs, never names or membership. MemberCount drives the
+// "broad team — noisy queue" hint and is best-effort (0/omitted = unknown).
 type gitHubGroupCandidateJSON struct {
-	OrgLogin string `json:"org_login"`
-	TeamSlug string `json:"team_slug"`
-	Name     string `json:"name"`
+	OrgLogin    string `json:"org_login"`
+	TeamSlug    string `json:"team_slug"`
+	Name        string `json:"name"`
+	MemberCount int    `json:"member_count,omitempty"`
+	// Mine is true when the requesting user personally belongs to this
+	// GitHub team. Populated only when the caller asks via
+	// ?include_membership=true (the onboarding wizard, to pre-check the
+	// admin's own teams); the Settings editor omits the flag and ignores
+	// it. Pre-checking is the ONLY onboarding-specific behavior — the
+	// candidate set itself is the same org-wide list both surfaces read.
+	Mine bool `json:"mine,omitempty"`
 }
 
 type teamGitHubGroupsResponse struct {
@@ -76,9 +85,18 @@ func (s *Server) handleTeamGitHubGroupsGet(w http.ResponseWriter, r *http.Reques
 	// (read-only). The deletion-reconcile prune runs in the GitHub poll
 	// cycle, not here, so this GET never mutates — stale mappings just
 	// show flagged "not found" until the next cycle prunes them.
+	//
+	// ?include_membership=true (the onboarding wizard) additionally flags
+	// the candidates the caller personally belongs to, so the wizard can
+	// pre-check the admin's own teams. The Settings editor omits it — same
+	// candidate list, no per-user pre-check. Best-effort: a membership
+	// fetch failure leaves every Mine=false, never blanks the candidates.
 	candidates := []gitHubGroupCandidateJSON{}
 	if role != "" {
 		candidates = s.gitHubGroupCandidates(r.Context(), orgID, userID)
+		if r.URL.Query().Get("include_membership") == "true" {
+			s.annotateGitHubGroupMembership(r.Context(), orgID, userID, candidates)
+		}
 	}
 
 	var groups []domain.TeamGitHubGroup
@@ -185,7 +203,7 @@ func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID, userID string
 			}
 			continue
 		}
-		teams, err := client.ListOrgTeams(owner)
+		teams, err := client.ListOrgTeamsDetailed(owner)
 		if err != nil {
 			// The owner may be a user account (no teams) or one the org
 			// credential can't read. Skip — candidates only.
@@ -194,17 +212,45 @@ func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID, userID string
 		}
 		login := strings.ToLower(owner)
 		for _, t := range teams {
-			if t.Slug == "" {
+			if t.TeamSlug == "" {
 				continue
 			}
 			out = append(out, gitHubGroupCandidateJSON{
-				OrgLogin: login,
-				TeamSlug: strings.ToLower(t.Slug),
-				Name:     t.Name,
+				OrgLogin:    login,
+				TeamSlug:    strings.ToLower(t.TeamSlug),
+				Name:        t.Name,
+				MemberCount: t.MemberCount,
 			})
 		}
 	}
 	return out
+}
+
+// annotateGitHubGroupMembership flags each candidate the requesting user
+// personally belongs to (Mine=true), so the onboarding wizard can pre-check
+// the admin's own GitHub teams. Best-effort by design: a membership-fetch
+// failure (no PAT, no host-verified login) leaves every Mine=false and is
+// logged, never fatal — the candidate list is the load-bearing part; the
+// pre-check is a convenience the user can override.
+func (s *Server) annotateGitHubGroupMembership(ctx context.Context, orgID, userID string, candidates []gitHubGroupCandidateJSON) {
+	teams, err := s.callerGitHubTeams(ctx, orgID, userID)
+	if err != nil {
+		// errNoGitHub (local, no PAT) is the expected "can't resolve
+		// membership" case — silent. Anything else is worth a log line.
+		if !errors.Is(err, errNoGitHub) {
+			log.Printf("[github-groups] membership annotate: %v", err)
+		}
+		return
+	}
+	mine := make(map[string]bool, len(teams))
+	for _, t := range teams {
+		mine[strings.ToLower(t.OrgSlug+"/"+t.TeamSlug)] = true
+	}
+	for i := range candidates {
+		if mine[strings.ToLower(candidates[i].OrgLogin+"/"+candidates[i].TeamSlug)] {
+			candidates[i].Mine = true
+		}
+	}
 }
 
 // distinctRepoOwners returns the configured repos' owners, lowercased,

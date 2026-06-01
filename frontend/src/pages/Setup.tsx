@@ -2,11 +2,10 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { CheckCircle2, ChevronRight } from 'lucide-react'
 import RepoPickerModal, { type GitHubRepo } from '../components/RepoPickerModal'
-import GitHubTeamSelector, { type GitHubUserTeam } from '../components/GitHubTeamSelector'
+import GitHubTeamSelector, { type GitHubTeamCandidate } from '../components/GitHubTeamSelector'
 import CarryOverList from '../components/CarryOverList'
 import JiraStatusRule, { type JiraStatusRuleValue } from '../components/JiraStatusRule'
 import { useAuthStatus } from '../hooks/useAuthStatus'
-import { useDeploymentConfig } from '../hooks/useDeploymentConfig'
 
 interface JiraStatus {
   id: string
@@ -32,12 +31,6 @@ type Step =
 export default function Setup() {
   const navigate = useNavigate()
   const authStatus = useAuthStatus()
-  // Deployment mode drives the github-teams default-checked behavior:
-  // local (acting as oneself) pre-checks every team; multi (configuring on
-  // behalf of an org) starts unchecked for deliberate opt-in. Defaults to
-  // the local behavior until /api/config resolves.
-  const { config: deployConfig } = useDeploymentConfig()
-  const teamsDefaultChecked = deployConfig?.deployment_mode !== 'multi'
   const [step, setStep] = useState<Step>('github')
   const [initDone, setInitDone] = useState(false)
 
@@ -168,11 +161,11 @@ export default function Setup() {
   // github-groups replace-set endpoint (the same write the Settings editor
   // uses) — one canonical bulk write, idempotent and re-run safe. Onboarding
   // targets the org's default team; SKY-294 will thread the acting team.
-  const saveTeamMappings = async (teams: GitHubUserTeam[]) => {
+  const saveTeamMappings = async (teams: GitHubTeamCandidate[]) => {
     setLoading(true)
     setError('')
     try {
-      const groups = teams.map((t) => ({ org_login: t.org_slug, team_slug: t.team_slug }))
+      const groups = teams.map((t) => ({ org_login: t.org_login, team_slug: t.team_slug }))
       const res = await fetch('/api/settings/team/default/github-groups', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -463,7 +456,7 @@ export default function Setup() {
       {step === 'github-teams' && (
         <div className="w-full max-w-lg space-y-3">
           <GitHubTeamSelector
-            defaultChecked={teamsDefaultChecked}
+            teamId="default"
             onContinue={saveTeamMappings}
             onSkip={() => {
               // Skip advances without writing any mappings — idempotent

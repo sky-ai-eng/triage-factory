@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log"
-	"net/http"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
@@ -16,67 +15,38 @@ import (
 )
 
 // --------------------------------------------------------------------
-// GET /api/github/user-teams — the authenticated user's GitHub teams,
-// the candidate list the onboarding GitHub-team mapping step (SKY-411)
-// presents so a user who is only review-requested via a team isn't left
-// with an empty queue. Distinct from GET .../github-groups (which lists
-// the *org's* teams as import candidates): this is "the teams I'm on."
+// Caller GitHub-team membership — the "which of these teams am I on?"
+// signal the onboarding wizard uses to pre-check the team admin's own
+// GitHub teams in the github-groups mapping step (SKY-411/SKY-413).
+//
+// This is NOT a standalone endpoint. It rides on
+// GET /api/settings/team/{id}/github-groups?include_membership=true (see
+// handleTeamGitHubGroupsGet), so the wizard and the Settings editor read
+// the *same* org-wide candidate list and differ only in pre-checking —
+// the candidate set is no longer sourced from one user's perspective.
 //
 // Two sourcing paths, branched on deployment mode:
-//
 //   - Local (N=1): the org PAT *is* the user, so GET /user/teams answers
-//     directly — one paginated call carrying name + member_count.
+//     directly — one paginated call.
 //   - Multi: the App installation token authenticates as the app, not a
 //     person, so /user/teams can't be used. Instead we take the user's
 //     host-verified GitHub login (captured by the Connect OAuth flow) and
 //     ask GraphQL's organization.teams(userLogins:) connection per
-//     configured-repo owner — server-side membership filtering, O(orgs)
-//     queries rather than a per-team probe.
+//     configured-repo owner — O(orgs) queries, not a per-team probe.
 //
 // The write target is the existing PUT /api/settings/team/{id}/github-groups
-// (replace-set, idempotent, team-admin gated) — the wizard sends the
-// checked teams there via PUT. This endpoint is read-only.
+// (replace-set, idempotent, team-admin gated).
 // --------------------------------------------------------------------
 
-// userTeamJSON is one of the caller's GitHub teams on the wire.
-// MemberCount is best-effort and omitted when unknown (0) — it only
-// drives the "broad team — noisy queue" hint, never routing.
-type userTeamJSON struct {
-	OrgSlug     string `json:"org_slug"`
-	TeamSlug    string `json:"team_slug"`
-	Name        string `json:"name"`
-	MemberCount int    `json:"member_count,omitempty"`
-}
-
-func (s *Server) handleGitHubUserTeams(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
-	if !ok {
-		return
-	}
-	userID := ClaimsFrom(r.Context()).Subject
-
-	var teams []ghclient.UserTeam
-	var err error
+// callerGitHubTeams returns the GitHub teams the requesting user personally
+// belongs to, dispatched on deployment mode. Used only to set the Mine flag
+// on github-group candidates (annotateGitHubGroupMembership) — best-effort,
+// the caller tolerates an error and degrades to "nothing pre-checked."
+func (s *Server) callerGitHubTeams(ctx context.Context, orgID, userID string) ([]ghclient.UserTeam, error) {
 	if runmode.Current() == runmode.ModeMulti {
-		teams, err = s.userTeamsMulti(r.Context(), orgID, userID)
-	} else {
-		teams, err = s.userTeamsLocal(r.Context(), orgID, userID)
+		return s.userTeamsMulti(ctx, orgID, userID)
 	}
-	if err != nil {
-		// errNoGitHub is the only client-facing error (a 400, matching
-		// handleGitHubRepos). Everything else is an upstream/GitHub fault.
-		// errors.Is (not ==) so the check survives the local path wrapping
-		// the sentinel in the future, and stays consistent with the
-		// ErrNoGitHubCredentials check in userTeamsMulti.
-		if errors.Is(err, errNoGitHub) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub not configured"})
-			return
-		}
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch teams: " + err.Error()})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, toUserTeamJSON(teams))
+	return s.userTeamsLocal(ctx, orgID, userID)
 }
 
 // errNoGitHub signals the local path that no usable PAT is configured —
@@ -157,7 +127,7 @@ func (s *Server) userTeamsMulti(ctx context.Context, orgID, userID string) ([]gh
 			// backend failure worth a log line rather than a silent empty
 			// list. Mirrors gitHubGroupCandidates.
 			if !errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-				log.Printf("[user-teams] resolve GitHub client for %s: %v", owner, err)
+				log.Printf("[membership] resolve GitHub client for %s: %v", owner, err)
 			}
 			continue
 		}
@@ -165,7 +135,7 @@ func (s *Server) userTeamsMulti(ctx context.Context, orgID, userID string) ([]gh
 		if err != nil {
 			// The owner may be a user account, or one we lack org-members
 			// read on — skip, candidates only.
-			log.Printf("[user-teams] list teams for %s in org %s: %v", login, owner, err)
+			log.Printf("[membership] list teams for %s in org %s: %v", login, owner, err)
 			continue
 		}
 		for _, t := range teams {
@@ -178,17 +148,4 @@ func (s *Server) userTeamsMulti(ctx context.Context, orgID, userID string) ([]gh
 		}
 	}
 	return out, nil
-}
-
-func toUserTeamJSON(teams []ghclient.UserTeam) []userTeamJSON {
-	out := make([]userTeamJSON, 0, len(teams))
-	for _, t := range teams {
-		out = append(out, userTeamJSON{
-			OrgSlug:     t.OrgSlug,
-			TeamSlug:    t.TeamSlug,
-			Name:        t.Name,
-			MemberCount: t.MemberCount,
-		})
-	}
-	return out
 }
