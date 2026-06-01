@@ -6,7 +6,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/zalando/go-keyring"
+
+	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -417,6 +421,41 @@ func postJSONResp(t *testing.T, s *Server, path string, body any) map[string]str
 		t.Fatalf("decode %s response: %v", path, err)
 	}
 	return resp
+}
+
+// TestOrgSettingsPost_GitHubURLClear_DropsIdentityForOriginalHost is a
+// regression test (SKY-396): clearing the GitHub URL must delete the identity
+// row keyed on the host that was configured *before* the request blanked
+// creds.GitHubURL. The disconnect branch reading creds.GitHubURL directly
+// would see "" (already overwritten upstream) and orphan the real row.
+func TestOrgSettingsPost_GitHubURLClear_DropsIdentityForOriginalHost(t *testing.T) {
+	keyring.MockInit() // in-memory keychain — the sandbox has no dbus backend
+	s := newTestServer(t)
+	ctx := t.Context()
+	const host = "https://github.example.com"
+
+	// URL only (no PAT) so the stored-PAT backfill path — which would make a
+	// live ValidateGitHub call — stays inert; the identity is seeded directly.
+	if err := integrations.Save(ctx, s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{GitHubURL: host}); err != nil {
+		t.Fatalf("seed creds: %v", err)
+	}
+	if err := s.users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, host, "octocat", "pat"); err != nil {
+		t.Fatalf("seed identity: %v", err)
+	}
+	if login, _ := s.users.GetGitHubLogin(ctx, runmode.LocalDefaultUserID, host); login != "octocat" {
+		t.Fatalf("precondition: GetGitHubLogin = %q, want octocat", login)
+	}
+
+	// Disconnect: clear the GitHub URL.
+	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": ""})
+
+	login, err := s.users.GetGitHubLogin(ctx, runmode.LocalDefaultUserID, host)
+	if err != nil {
+		t.Fatalf("GetGitHubLogin after clear: %v", err)
+	}
+	if login != "" {
+		t.Errorf("identity for %s survived URL disconnect (orphaned): login=%q", host, login)
+	}
 }
 
 func TestTeamSettingsPost_ModelExceedsOrgCap_Warns(t *testing.T) {

@@ -428,6 +428,13 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 
 	orgSet := prevOrgSet
 
+	// Host the GitHub identity (if any) is bound against, captured before the
+	// req.GitHubBaseURL block below overwrites creds.GitHubURL with the request
+	// value. The disconnect paths must delete the row for this original host —
+	// reading creds.GitHubURL there would see "" on a URL-clear and orphan the
+	// real row.
+	origGitHubHost := creds.GitHubURL
+
 	if req.GitHubBaseURL != nil {
 		orgSet.GitHubBaseURL = *req.GitHubBaseURL
 		creds.GitHubURL = *req.GitHubBaseURL
@@ -574,23 +581,24 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 			if err := integrations.ClearGitHub(r.Context(), tx.Secrets, orgID); err != nil {
 				return fmt.Errorf("clear GitHub secrets: %w", err)
 			}
-			// Drop the identity binding for the host being disconnected —
-			// capture it before zeroing creds.GitHubURL below.
-			prevHost := creds.GitHubURL
 			creds.GitHubURL = ""
 			creds.GitHubPAT = ""
-			if err := tx.Users.ClearGitHubIdentity(r.Context(), userID, prevHost); err != nil {
+			// Delete the identity bound to the now-disconnected host. Use the
+			// host captured before the req block above zeroed creds.GitHubURL
+			// — creds.GitHubURL is already "" here, which would no-op the
+			// DELETE and orphan the real row.
+			if err := tx.Users.ClearGitHubIdentity(r.Context(), userID, origGitHubHost); err != nil {
 				return fmt.Errorf("clear github identity: %w", err)
 			}
 		} else if req.GitHubPAT != nil && *req.GitHubPAT == "" {
 			if _, err := tx.Secrets.Delete(r.Context(), orgID, integrations.KeyGitHubPAT); err != nil {
 				return fmt.Errorf("clear GitHub PAT: %w", err)
 			}
-			// PAT-only clear (URL stays), so creds.GitHubURL still holds the
-			// bound host — delete that host's identity row. If the URL were
-			// somehow already empty, NormalizeGitHubHost("") == "" and the
-			// DELETE no-ops (no row carries an empty host), which is correct.
-			if err := tx.Users.ClearGitHubIdentity(r.Context(), userID, creds.GitHubURL); err != nil {
+			// PAT-only clear: drop the identity for the bound host. origGitHubHost
+			// (not creds.GitHubURL) is correct even in the rare case where the URL
+			// is being changed in the same request — the row is keyed on the host
+			// it was captured against, not the new one.
+			if err := tx.Users.ClearGitHubIdentity(r.Context(), userID, origGitHubHost); err != nil {
 				return fmt.Errorf("clear github identity: %w", err)
 			}
 		}
