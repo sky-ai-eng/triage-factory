@@ -133,7 +133,11 @@ export default function Setup() {
       }
       setSelectedRepos(repos)
       setStep('integrations')
-    } catch {
+    } catch (err) {
+      // Don't swallow the failure silently — a bare `catch {}` here is how
+      // the next person debugging a slow/failed Continue ends up flying blind
+      // (SKY-409). Log the real error and surface an inline message.
+      console.error('saveRepos failed:', err)
       setError('Could not connect to server')
     } finally {
       setLoading(false)
@@ -387,17 +391,24 @@ export default function Setup() {
 
       {/* Step 2: Repo selection */}
       {step === 'repos' && (
-        <RepoPickerModal
-          selected={selectedRepos}
-          onSave={saveRepos}
-          onClose={() => {
-            /* cannot skip */
-          }}
-          onBack={githubFromEnv ? undefined : () => setStep('github')}
-          cachedRepos={cachedRepos}
-          onReposFetched={setCachedRepos}
-          inline
-        />
+        <div className="w-full max-w-lg space-y-3">
+          <RepoPickerModal
+            selected={selectedRepos}
+            onSave={saveRepos}
+            onClose={() => {
+              /* cannot skip */
+            }}
+            onBack={githubFromEnv ? undefined : () => setStep('github')}
+            cachedRepos={cachedRepos}
+            onReposFetched={setCachedRepos}
+            saving={loading}
+            inline
+          />
+          {/* The save (team-repos PUT) can fail or be rejected (e.g. an
+              unreachable repo); surface it inline instead of failing silently
+              the way the bare picker did (SKY-409). */}
+          <ErrorBanner error={error} />
+        </div>
       )}
 
       {/* Step 3: Integrations list */}

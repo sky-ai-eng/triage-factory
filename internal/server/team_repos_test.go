@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/zalando/go-keyring"
 
@@ -53,29 +55,270 @@ func TestFirstUnreachableRepo(t *testing.T) {
 	})
 }
 
-// fakeReposServer stands in for GitHub's GET /user/repos, returning the
-// given full_names on page 1 and an empty page afterward (so the client's
-// paginator terminates).
-func fakeReposServer(t *testing.T, fullNames ...string) *httptest.Server {
-	t.Helper()
+// TestReachableRepoCache_HitMissExpiryEviction exercises the SKY-409
+// enumeration cache directly: a put is readable until it expires or the org is
+// evicted, and an unrelated org's eviction leaves it intact.
+func TestReachableRepoCache_HitMissExpiryEviction(t *testing.T) {
+	srv := newTestServer(t)
+	const org, user = "org-1", "user-1"
+	set := map[string]struct{}{"owner/api": {}}
+
+	// Miss before any put.
+	if _, ok := srv.reachableRepoCacheGet(org, user); ok {
+		t.Fatal("empty cache should miss")
+	}
+
+	// Hit after put.
+	srv.reachableRepoCachePut(org, user, set)
+	got, ok := srv.reachableRepoCacheGet(org, user)
+	if !ok {
+		t.Fatal("expected cache hit after put")
+	}
+	if _, member := got["owner/api"]; !member {
+		t.Errorf("cached set missing owner/api: %v", got)
+	}
+
+	// Different user → miss (the key namespaces per user).
+	if _, ok := srv.reachableRepoCacheGet(org, "user-2"); ok {
+		t.Error("another user must not read user-1's entry")
+	}
+
+	// Expiry: force the entry stale and confirm it stops satisfying reads.
+	srv.reachableRepoMu.Lock()
+	e := srv.reachableRepoCache[reachableCacheKey(org, user)]
+	e.expiresAt = time.Now().Add(-time.Second)
+	srv.reachableRepoCache[reachableCacheKey(org, user)] = e
+	srv.reachableRepoMu.Unlock()
+	if _, ok := srv.reachableRepoCacheGet(org, user); ok {
+		t.Error("expired entry must miss")
+	}
+
+	// Eviction-on-creds-change: a fresh put, then evict the *other* org
+	// (no-op), then evict ours.
+	srv.reachableRepoCachePut(org, user, set)
+	srv.evictReachableRepoCache("org-2")
+	if _, ok := srv.reachableRepoCacheGet(org, user); !ok {
+		t.Error("evicting a different org must not drop our entry")
+	}
+	srv.evictReachableRepoCache(org)
+	if _, ok := srv.reachableRepoCacheGet(org, user); ok {
+		t.Error("evicting our org must drop the entry (creds rotated)")
+	}
+}
+
+// TestFirstUnreachableViaFanOut_MixedOutcomes drives the cold-path
+// orchestration with an injected check covering the four response shapes
+// (200 / 404 / 403 / 5xx). 200 passes, 404 and 403 are conclusive rejections,
+// and a 5xx (indeterminate) fails open — never rejected. The reported slug is
+// deterministic (first in input order) regardless of completion order.
+func TestFirstUnreachableViaFanOut_MixedOutcomes(t *testing.T) {
+	repo := func(o, r string) domain.TeamGitHubRepo { return domain.TeamGitHubRepo{Owner: o, Repo: r} }
+
+	// Maps each slug to (reachable, conclusive) — the shape CheckRepoAccess
+	// returns for 200 / 404 / 403 / 5xx respectively.
+	outcomes := map[string][2]bool{
+		"owner/ok":      {true, true},   // 200
+		"owner/missing": {false, true},  // 404
+		"owner/forbid":  {false, true},  // 403
+		"owner/flaky":   {false, false}, // 5xx → indeterminate
+	}
+	var calls atomic.Int32
+	check := func(_ context.Context, r domain.TeamGitHubRepo) (bool, bool) {
+		calls.Add(1)
+		o := outcomes[r.Slug()]
+		return o[0], o[1]
+	}
+
+	t.Run("all reachable or flaky passes", func(t *testing.T) {
+		if slug, reject := firstUnreachableViaFanOut(context.Background(),
+			[]domain.TeamGitHubRepo{repo("owner", "ok"), repo("owner", "flaky")}, 20, check); reject {
+			t.Errorf("reachable+indeterminate must pass; got reject on %q", slug)
+		}
+	})
+
+	t.Run("404 rejected", func(t *testing.T) {
+		slug, reject := firstUnreachableViaFanOut(context.Background(),
+			[]domain.TeamGitHubRepo{repo("owner", "ok"), repo("owner", "missing")}, 20, check)
+		if !reject || slug != "owner/missing" {
+			t.Errorf("got (%q,%v); want (owner/missing,true)", slug, reject)
+		}
+	})
+
+	t.Run("403 rejected", func(t *testing.T) {
+		slug, reject := firstUnreachableViaFanOut(context.Background(),
+			[]domain.TeamGitHubRepo{repo("owner", "forbid")}, 20, check)
+		if !reject || slug != "owner/forbid" {
+			t.Errorf("got (%q,%v); want (owner/forbid,true)", slug, reject)
+		}
+	})
+
+	t.Run("first unreachable in input order is reported", func(t *testing.T) {
+		// Two unreachable; the earlier-in-input one must be named even though
+		// the fan-out completes concurrently.
+		slug, reject := firstUnreachableViaFanOut(context.Background(),
+			[]domain.TeamGitHubRepo{repo("owner", "ok"), repo("owner", "forbid"), repo("owner", "missing")}, 20, check)
+		if !reject || slug != "owner/forbid" {
+			t.Errorf("got (%q,%v); want (owner/forbid,true)", slug, reject)
+		}
+	})
+
+	t.Run("flaky alone fails open", func(t *testing.T) {
+		if _, reject := firstUnreachableViaFanOut(context.Background(),
+			[]domain.TeamGitHubRepo{repo("owner", "flaky")}, 20, check); reject {
+			t.Error("an all-indeterminate selection must fail open")
+		}
+	})
+}
+
+// TestTeamReposPut_HotPathCacheAuthoritative proves the cached enumeration is
+// authoritative for membership: with the cache warmed from an enumeration that
+// lists only owner/tracked, a PUT of owner/ghost is rejected even though the
+// per-repo probe (cold path) would have accepted it. Asserting 400 proves the
+// gate consulted the cache rather than re-probing.
+func TestTeamReposPut_HotPathCacheAuthoritative(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v3/user/repos" {
-			http.NotFound(w, r)
+		// Enumeration lists only owner/tracked.
+		if r.URL.Path == "/api/v3/user/repos" {
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Query().Get("page") != "1" {
+				_, _ = w.Write([]byte(`[]`))
+				return
+			}
+			_, _ = w.Write([]byte(`[{"full_name":"owner/tracked"}]`))
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Query().Get("page") != "1" {
+		// Every per-repo probe would say reachable — so a cold-path fall-through
+		// would wrongly accept owner/ghost. The cache must win.
+		if strings.HasPrefix(r.URL.Path, "/api/v3/repos/") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"full_name":"x"}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(ts.Close)
+	if err := integrations.Save(context.Background(), srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
+		GitHubURL: ts.URL,
+		GitHubPAT: "ghp-test",
+	}); err != nil {
+		t.Fatalf("seed creds: %v", err)
+	}
+
+	// Warm the cache through the picker endpoint.
+	if rec := doJSON(t, srv, http.MethodGet, "/api/github/repos", nil); rec.Code != http.StatusOK {
+		t.Fatalf("picker GET = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Cache hit → owner/ghost absent from the enumeration → 400.
+	rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+		"repos": []string{"owner/ghost"},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("cache-hit unreachable PUT = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "owner/ghost") {
+		t.Errorf("rejection should name the offending repo; body=%s", body)
+	}
+
+	// And a slug that IS in the cached enumeration is accepted via the hot path.
+	if rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+		"repos": []string{"owner/tracked"},
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("cache-hit reachable PUT = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestTeamReposPut_ColdPathFailsOpenOn5xx proves the cold-path fan-out keeps
+// the documented fail-open posture: when the per-repo probe 5xxs (GitHub
+// outage), the write proceeds rather than coupling write availability to
+// GitHub's uptime. No cache is warmed, so the PUT takes the cold path.
+func TestTeamReposPut_ColdPathFailsOpenOn5xx(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	var probed atomic.Bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v3/user/repos" {
+			// Empty enumeration — irrelevant here, the test never warms the cache.
+			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`[]`))
 			return
 		}
-		_, _ = w.Write([]byte(`[`))
-		for i, fn := range fullNames {
-			if i > 0 {
-				_, _ = w.Write([]byte(`,`))
-			}
-			_, _ = w.Write([]byte(`{"full_name":"` + fn + `"}`))
+		if strings.HasPrefix(r.URL.Path, "/api/v3/repos/") {
+			probed.Store(true)
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
 		}
-		_, _ = w.Write([]byte(`]`))
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(ts.Close)
+	if err := integrations.Save(context.Background(), srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
+		GitHubURL: ts.URL,
+		GitHubPAT: "ghp-test",
+	}); err != nil {
+		t.Fatalf("seed creds: %v", err)
+	}
+
+	rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+		"repos": []string{"owner/whatever"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cold-path 5xx PUT = %d, want 200 (fail-open); body=%s", rec.Code, rec.Body.String())
+	}
+	if !probed.Load() {
+		t.Error("expected the cold path to actually probe the per-repo endpoint")
+	}
+}
+
+// fakeReposServer stands in for GitHub, serving the subset of endpoints the
+// repo-tracking gate touches against a fixed reachable set (the given
+// full_names):
+//
+//   - GET /user/repos — the picker enumeration (cache-warm path). Returns the
+//     full_names on page 1, an empty page afterward so the paginator stops.
+//   - GET /repos/{owner}/{repo} — the cold-path reachability probe
+//     (CheckRepoAccess). 200 when the slug is in the reachable set, 404
+//     otherwise — exactly the signal the per-repo fan-out classifies.
+//
+// Pre-SKY-409 the gate only used the enumeration; now a cache-miss PUT probes
+// per-repo, so the helper answers both. The test *cases* are unchanged: they
+// still pass a reachable set and assert reachable→200 / unreachable→400.
+func fakeReposServer(t *testing.T, fullNames ...string) *httptest.Server {
+	t.Helper()
+	reachable := make(map[string]bool, len(fullNames))
+	for _, fn := range fullNames {
+		reachable[strings.ToLower(fn)] = true
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Picker enumeration (cache-warm path).
+		if r.URL.Path == "/api/v3/user/repos" {
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Query().Get("page") != "1" {
+				_, _ = w.Write([]byte(`[]`))
+				return
+			}
+			_, _ = w.Write([]byte(`[`))
+			for i, fn := range fullNames {
+				if i > 0 {
+					_, _ = w.Write([]byte(`,`))
+				}
+				_, _ = w.Write([]byte(`{"full_name":"` + fn + `"}`))
+			}
+			_, _ = w.Write([]byte(`]`))
+			return
+		}
+		// Per-repo reachability probe (cold-path fan-out).
+		if slug, ok := strings.CutPrefix(r.URL.Path, "/api/v3/repos/"); ok && slug != "" {
+			if reachable[strings.ToLower(slug)] {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"full_name":"` + slug + `"}`))
+				return
+			}
+			http.NotFound(w, r)
+			return
+		}
+		http.NotFound(w, r)
 	}))
 	t.Cleanup(ts.Close)
 	return ts

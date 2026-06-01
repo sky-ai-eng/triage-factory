@@ -25,6 +25,13 @@ interface Props {
   cachedRepos?: GitHubRepo[]
   /** Called with fetched repos so the parent can cache them */
   onReposFetched?: (repos: GitHubRepo[]) => void
+  /**
+   * True while the parent's onSave (the team-repos PUT) is in flight. Disables
+   * the Continue/Save button and swaps in a spinner so a slow save on a large
+   * GHES org reads as "working" rather than "broken" (SKY-409). Distinct from
+   * the component's internal repo-list fetch `loading`.
+   */
+  saving?: boolean
 }
 
 export type { GitHubRepo }
@@ -37,6 +44,7 @@ export default function RepoPickerModal({
   onBack,
   cachedRepos,
   onReposFetched,
+  saving = false,
 }: Props) {
   const [repos, setRepos] = useState<GitHubRepo[]>(cachedRepos ?? [])
   const [loading, setLoading] = useState(!cachedRepos)
@@ -241,10 +249,11 @@ export default function RepoPickerModal({
           <button
             type="button"
             onClick={() => onSave(Array.from(checked))}
-            disabled={checked.size === 0}
-            className="bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-5 py-2 text-[13px] transition-colors"
+            disabled={checked.size === 0 || saving}
+            className="flex items-center gap-1.5 bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-5 py-2 text-[13px] transition-colors"
           >
-            {inline ? 'Continue' : 'Save'}
+            {saving && <RotateCw size={13} className="animate-spin" />}
+            {saving ? 'Saving…' : inline ? 'Continue' : 'Save'}
           </button>
         </div>
       </div>

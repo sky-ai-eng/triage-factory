@@ -1,9 +1,12 @@
 package github
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 )
 
@@ -77,6 +80,54 @@ func (c *Client) ListInstallationRepos() ([]UserRepo, error) {
 	}
 
 	return all, nil
+}
+
+// CheckRepoAccess probes GET /repos/{owner}/{repo} to decide whether this
+// client's credential can reach a single repo. It is the per-repo primitive
+// behind the write-time reachability fan-out (SKY-409): instead of
+// enumerating the whole org to validate a selection, the gate checks only the
+// selected slugs, bounded by selection size rather than org size.
+//
+// It returns (reachable, conclusive):
+//
+//   - (true, true)   — HTTP 200: reachable by this credential.
+//   - (false, true)  — HTTP 404 or 403: definitively unreachable (the repo
+//     doesn't exist for this credential, or access is forbidden).
+//   - (false, false) — 5xx or a transport/timeout error: indeterminate. The
+//     caller should fail OPEN for this slug, matching reachableRepoSet's
+//     long-standing posture of never coupling write availability to GitHub's
+//     uptime.
+//
+// Unlike Get/do this reads the raw status code directly — the gate needs to
+// discriminate 404/403 (conclusive "no") from 5xx (indeterminate), which the
+// flattened error string from do() can't carry. The response body is drained
+// and discarded so the connection can be reused; we only care about status.
+func (c *Client) CheckRepoAccess(ctx context.Context, owner, repo string) (reachable, conclusive bool) {
+	url := c.baseURL + fmt.Sprintf("/repos/%s/%s", owner, repo)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return false, false
+	}
+	req.Header.Set("Authorization", "Bearer "+c.pat)
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		// Transport error / context timeout → indeterminate, fail open.
+		return false, false
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	switch {
+	case resp.StatusCode == http.StatusOK:
+		return true, true
+	case resp.StatusCode == http.StatusNotFound, resp.StatusCode == http.StatusForbidden:
+		return false, true
+	default:
+		// 5xx and any other unexpected status → indeterminate, fail open.
+		return false, false
+	}
 }
 
 // RepoMeta is a subset of the GitHub repo object.

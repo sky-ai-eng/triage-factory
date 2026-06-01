@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -153,22 +155,40 @@ func repoSlugs(repos []domain.TeamGitHubRepo) []string {
 
 // rejectUnreachableRepo is the write-time guard that keeps a team from
 // tracking a repo this deployment's GitHub credentials can't reach (a
-// typo'd slug, a stale client, a hand-crafted curl). It enumerates the
-// reachable set and returns the first input repo absent from it.
+// typo'd slug, a stale client, a hand-crafted curl). It validates the
+// input repos in two tiers, both bounded by *selection* size rather than
+// *org* size (SKY-409):
 //
-// It is deliberately fail-OPEN on the enumeration itself: if we can't
-// build a complete, authoritative view (no credentials, a GitHub outage,
-// a partial fetch), it returns reject=false and the write proceeds. That
-// is not laxness — a user can't induce a GitHub outage, so every garbage
-// input submittable under normal conditions is still hard-rejected,
-// while we avoid coupling our write availability to GitHub's uptime. The
-// residual (a write accepted while GitHub was unreachable) is caught by
-// the poller, which no-ops on a repo it can't reach. When the reachable
-// set is later persisted (candidate-sourcing work), swap the source in
-// reachableRepoSet for a local read and this can go fully fail-closed.
+//   - Tier 1 (hot path): the in-process enumeration cache the picker
+//     warmed on its way out (handleGitHubRepos → reachableRepoCachePut).
+//     A cache hit is a memory lookup — no GitHub call — and the cached
+//     enumeration is authoritative for membership, so firstUnreachableRepo
+//     decides directly.
+//   - Tier 2 (cold path): on a miss (cache expired, never warmed, or
+//     evicted by a creds rotation) we probe *only the selected slugs* via
+//     per-repo GET /repos/{owner}/{repo}, concurrently, instead of
+//     re-enumerating the whole org. See fanOutUnreachableRepo.
+//
+// Both tiers preserve the long-standing fail-OPEN posture: if we can't
+// reach a conclusive "this repo does not exist for us" answer (no
+// credentials, a GitHub outage, a 5xx), the write proceeds. That is not
+// laxness — a user can't induce a GitHub outage, so every garbage input
+// submittable under normal conditions is still hard-rejected, while we
+// avoid coupling our write availability to GitHub's uptime. The residual
+// (a write accepted while GitHub was unreachable) is caught by the poller,
+// which no-ops on a repo it can't reach.
 func (s *Server) rejectUnreachableRepo(ctx context.Context, orgID, userID string, repos []domain.TeamGitHubRepo) (string, bool) {
-	reachable, checked := s.reachableRepoSet(ctx, orgID, userID)
-	return firstUnreachableRepo(reachable, checked, repos)
+	if len(repos) == 0 {
+		return "", false
+	}
+	// Tier 1: hot path. The cached picker enumeration is the local read
+	// the old docstring anticipated — authoritative for membership, so a
+	// hit checks against it directly (checked=true).
+	if set, ok := s.reachableRepoCacheGet(orgID, userID); ok {
+		return firstUnreachableRepo(set, true, repos)
+	}
+	// Tier 2: cold path. Probe only the selected slugs.
+	return s.fanOutUnreachableRepo(ctx, orgID, userID, repos)
 }
 
 // newlyAddedRepos returns the entries of desired that are not already in
@@ -205,86 +225,155 @@ func firstUnreachableRepo(reachable map[string]struct{}, checked bool, repos []d
 	return "", false
 }
 
-// reachableRepoSet enumerates every "owner/repo" the org's GitHub
-// credentials can reach — the union of the org PAT's repos
-// (ListUserRepos) and each App installation's repos
-// (ListInstallationRepos) — returning the lowercased slug set plus a
-// `checked` flag.
-//
-// checked is true only when at least one source was attempted AND every
-// attempted fetch succeeded: a complete view safe to reject against. Any
-// fetch error, or no credentials at all, yields checked=false so callers
-// fail open. Validating against this union (rather than only the PAT
-// repos the picker currently shows) is deliberately the *broadest*
-// reachable set, so we never reject a repo the picker could legitimately
-// have offered.
-func (s *Server) reachableRepoSet(ctx context.Context, orgID, userID string) (map[string]struct{}, bool) {
-	set := map[string]struct{}{}
-	attempted := 0
-	clean := true
+// reachabilityFanOutCap bounds how many per-repo reachability probes run
+// concurrently on the cold path. 20 in flight keeps a large selection from
+// opening hundreds of sockets at once while still draining the selection in a
+// handful of waves (200 repos / 20 → 10 waves).
+const reachabilityFanOutCap = 20
 
-	add := func(repos []ghclient.UserRepo) {
-		for _, repo := range repos {
-			if repo.FullName != "" {
-				set[strings.ToLower(repo.FullName)] = struct{}{}
-			}
+// reachabilityCallTimeout caps each per-repo GET. A slow GHES instance must
+// not let one probe stall the whole write; a timed-out probe is treated as
+// indeterminate (fail open for that slug), same as a 5xx.
+const reachabilityCallTimeout = 3 * time.Second
+
+// fanOutUnreachableRepo is the cold-path reachability check: on a cache miss
+// it probes only the *selected* slugs (not the whole org) by issuing per-repo
+// GET /repos/{owner}/{repo} across every credential tier the deployment has,
+// concurrently. It returns the first input-order slug that is *conclusively*
+// unreachable by all of them.
+//
+// "Conclusively" carries the fail-open posture down to the per-slug level: a
+// slug is rejected only when at least one credential returned a definitive
+// 404/403 and none returned 200; if every credential was indeterminate
+// (5xx/timeout) the slug fails open. With no credentials at all there are no
+// clients, so nothing is rejected — matching the old reachableRepoSet
+// checked=false behavior.
+func (s *Server) fanOutUnreachableRepo(ctx context.Context, orgID, userID string, repos []domain.TeamGitHubRepo) (string, bool) {
+	clients := s.reachabilityClients(ctx, orgID, userID)
+	if len(clients) == 0 {
+		// No credentials resolved → fail open (same as a checked=false
+		// enumeration). A user can't induce this, so it isn't an escape hatch.
+		return "", false
+	}
+	check := func(ctx context.Context, repo domain.TeamGitHubRepo) (reachable, conclusive bool) {
+		return repoReachableByAny(ctx, clients, repo)
+	}
+	return firstUnreachableViaFanOut(ctx, repos, reachabilityFanOutCap, check)
+}
+
+// repoReachableByAny probes one slug across every credential tier, mirroring
+// reachableRepoSet's old union semantics one repo at a time: reachable by the
+// PAT *or* any App installation counts as reachable. Returns:
+//
+//   - (true, true)  — some client got a 200.
+//   - (false, true) — no client got a 200 and at least one got a definitive
+//     404/403 (conclusively unreachable).
+//   - (false, false) — every client was indeterminate (5xx/timeout); the
+//     caller fails open for this slug.
+func repoReachableByAny(ctx context.Context, clients []*ghclient.Client, repo domain.TeamGitHubRepo) (reachable, conclusive bool) {
+	anyConclusive := false
+	for _, c := range clients {
+		callCtx, cancel := context.WithTimeout(ctx, reachabilityCallTimeout)
+		r, conc := c.CheckRepoAccess(callCtx, repo.Owner, repo.Repo)
+		cancel()
+		if r {
+			return true, true
+		}
+		if conc {
+			anyConclusive = true
 		}
 	}
+	return false, anyConclusive
+}
 
-	// Org PAT source (mirrors handleGitHubRepos). Credentials + the
-	// per-org base URL are read through the app pool inside WithTx so the
-	// SecretStore decrypts under the caller's claims.
+// reachabilityCheck reports, for a single slug, whether it is reachable and
+// whether that answer is conclusive — see CheckRepoAccess. Factored out so the
+// fan-out orchestration (firstUnreachableViaFanOut) is a pure function over an
+// injectable check, testable without a live GitHub.
+type reachabilityCheck func(ctx context.Context, repo domain.TeamGitHubRepo) (reachable, conclusive bool)
+
+// firstUnreachableViaFanOut runs check over every repo concurrently (at most
+// cap in flight) and returns the first *input-order* slug that is
+// conclusively unreachable (reachable=false AND conclusive=true). Slugs whose
+// check is indeterminate (conclusive=false) are never rejected — that is the
+// per-slug fail-open posture. Input order is preserved for the returned slug
+// (results are indexed, then scanned in order) so the rejection message is
+// deterministic regardless of completion order.
+func firstUnreachableViaFanOut(ctx context.Context, repos []domain.TeamGitHubRepo, maxInFlight int, check reachabilityCheck) (string, bool) {
+	if maxInFlight < 1 {
+		maxInFlight = 1
+	}
+	unreachable := make([]bool, len(repos))
+	sem := make(chan struct{}, maxInFlight)
+	var wg sync.WaitGroup
+	for i, repo := range repos {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, repo domain.TeamGitHubRepo) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			r, conc := check(ctx, repo)
+			unreachable[i] = conc && !r
+		}(i, repo)
+	}
+	wg.Wait()
+	for i, bad := range unreachable {
+		if bad {
+			return repos[i].Slug(), true
+		}
+	}
+	return "", false
+}
+
+// reachabilityClients builds the GitHub clients the cold-path fan-out probes
+// against, one per credential tier the org has — the org PAT plus each App
+// installation. It mirrors the credential sourcing the old reachableRepoSet
+// did (PAT from integrations.Load, installations via the resolver) but returns
+// *clients* rather than enumerating repos through them, because the fan-out
+// asks each client about specific slugs instead of listing the world.
+//
+// Credentials + base URL are read inside WithTx so SecretStore decrypts under
+// the caller's claims. A read error or missing credential just yields fewer
+// (or zero) clients — the caller fails open when the list is empty.
+func (s *Server) reachabilityClients(ctx context.Context, orgID, userID string) []*ghclient.Client {
+	var clients []*ghclient.Client
+
+	// Org PAT source (mirrors handleGitHubRepos).
 	var (
 		creds  auth.Credentials
 		orgSet domain.OrgSettings
 	)
-	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+	_ = s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		creds, _ = integrations.Load(ctx, tx.Secrets, orgID)
 		var e error
 		orgSet, e = tx.Orgs.GetSettings(ctx, orgID)
 		return e
-	}); err != nil {
-		clean = false
-	}
+	})
 	if creds.GitHubPAT != "" {
 		baseURL := orgSet.GitHubBaseURL
 		if baseURL == "" {
 			baseURL = creds.GitHubURL
 		}
 		if baseURL != "" {
-			attempted++
-			repos, err := ghclient.NewClient(baseURL, creds.GitHubPAT).ListUserRepos()
-			if err != nil {
-				clean = false
-			} else {
-				add(repos)
-			}
+			clients = append(clients, ghclient.NewClient(baseURL, creds.GitHubPAT))
 		}
 	}
 
-	// App installation sources, one per installed account. Each
-	// installation token can reach a distinct repo set; their union is
-	// the App-mode reachable universe.
+	// App installation sources, one client per installed account. Each
+	// installation token can reach a distinct repo set; probing all of them
+	// preserves the old union reachability.
 	if s.ghResolver != nil && s.githubApps != nil {
 		insts, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
-		if err != nil {
-			clean = false
-		}
-		for _, inst := range insts {
-			attempted++
-			client, err := s.ghResolver.ClientFor(ctx, orgID, inst.AccountLogin)
-			if err != nil {
-				clean = false
-				continue
+		if err == nil {
+			for _, inst := range insts {
+				client, err := s.ghResolver.ClientFor(ctx, orgID, inst.AccountLogin)
+				if err != nil {
+					continue
+				}
+				clients = append(clients, client)
 			}
-			repos, err := client.ListInstallationRepos()
-			if err != nil {
-				clean = false
-				continue
-			}
-			add(repos)
 		}
 	}
 
-	return set, attempted > 0 && clean
+	return clients
 }
