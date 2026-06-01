@@ -297,6 +297,51 @@ func TestReviewRequested_UnknownIdentity_NoTask(t *testing.T) {
 	}
 }
 
+// TestReviewSubmitted_ClosesOnlySubmittersTask pins the parity-correct close:
+// when reviewer A submits their review, only A's per-reviewer review_requested
+// task closes — B's stays open. (Pre-per-reviewer, this closed every
+// review_requested task on the entity.)
+func TestReviewSubmitted_ClosesOnlySubmittersTask(t *testing.T) {
+	database := newTestDB(t)
+	seedHandlerFKTargets(t, database)
+	setReviewHost(t, database)
+
+	teamAlice := seedTeam(t, database, "alice-team")
+	teamBob := seedTeam(t, database, "bob-team")
+	seedUserOnTeam(t, database, teamAlice, "alice")
+	seedUserOnTeam(t, database, teamBob, "bob")
+	seedReviewRule(t, database, runmode.LocalDefaultTeamID)
+
+	entityID := reviewEntity(t, database, "owner/repo#submit")
+	router := reviewRouter(database)
+	emitReviewRequested(router, entityID, "user:alice", events.GitHubPRReviewRequestedMetadata{
+		Author: "carol", Repo: "owner/repo", PRNumber: 7, RequestedLogin: "alice"})
+	emitReviewRequested(router, entityID, "user:bob", events.GitHubPRReviewRequestedMetadata{
+		Author: "carol", Repo: "owner/repo", PRNumber: 7, RequestedLogin: "bob"})
+
+	// Alice submits her review.
+	subMeta, _ := json.Marshal(events.GitHubPRReviewSubmittedMetadata{
+		Author: "carol", Reviewer: "alice", ReviewType: "approved", Repo: "owner/repo", PRNumber: 7,
+	})
+	router.HandleEvent(domain.Event{
+		EventType:    domain.EventGitHubPRReviewSubmitted,
+		EntityID:     &entityID,
+		MetadataJSON: string(subMeta),
+		OrgID:        runmode.LocalDefaultOrg,
+	})
+
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	if err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	if len(active) != 1 {
+		t.Fatalf("expected 1 surviving task (bob's), got %d", len(active))
+	}
+	if active[0].DedupKey != "user:bob" {
+		t.Errorf("surviving task dedup_key = %q, want user:bob (alice's was closed by her review)", active[0].DedupKey)
+	}
+}
+
 // TestReviewRequestRemoved_ClosesOnlyMatchingReviewer pins the per-identity
 // removal: dropping reviewer A closes A's task but leaves B's open (close by
 // dedup_key).

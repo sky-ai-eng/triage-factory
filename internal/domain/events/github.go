@@ -114,6 +114,17 @@ func (p GitHubPRReviewRequestRemovedPredicate) Matches(m GitHubPRReviewRequestRe
 		strEq(p.RequestedTeam, m.RequestedTeam)
 }
 
+// ReviewerDedupKeyUser / ReviewerDedupKeyTeam namespace a requested reviewer
+// identity into the review_requested / review_request_removed event's
+// dedup_key. The open-set discriminator is the requested reviewer; namespacing
+// keeps an individual login and a github-team slug from colliding (e.g.
+// "user:foo" vs "team:org/foo") and lets the router close the one task keyed to
+// a given reviewer. Shared so the tracker (which emits the keyed events) and
+// the router (which closes by key on review submit / request removal) can't
+// drift on the format.
+func ReviewerDedupKeyUser(login string) string   { return "user:" + login }
+func ReviewerDedupKeyTeam(orgSlug string) string { return "team:" + orgSlug }
+
 // -----------------------------------------------------------------------------
 // review_submitted — "I reviewed someone else's PR"
 // -----------------------------------------------------------------------------

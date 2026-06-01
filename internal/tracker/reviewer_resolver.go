@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 )
 
 // ReviewerResolver answers "is this PR reviewer a TF-known identity?" for the
@@ -147,12 +148,14 @@ func resolveReviewer(resolver ReviewerResolver, reviewer string) (login, team st
 // reviewerDedupKey namespaces a reviewer identity so an individual login and a
 // team slug can never collide as a task dedup_key. The namespaced value is the
 // human-stable handle (login / slug), not the internal user-id set it resolves
-// to, so the key is stable even when one login maps to several TF users.
+// to, so the key is stable even when one login maps to several TF users. The
+// format lives in the events package so the router can close by key without
+// re-deriving the prefix.
 func reviewerDedupKey(reviewer string) string {
 	if _, _, isTeam := splitReviewerTeam(reviewer); isTeam {
-		return "team:" + reviewer
+		return events.ReviewerDedupKeyTeam(reviewer)
 	}
-	return "user:" + reviewer
+	return events.ReviewerDedupKeyUser(reviewer)
 }
 
 // reviewerFromDedupKey reverses reviewerDedupKey: "user:<login>" /

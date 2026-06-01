@@ -1627,29 +1627,32 @@ func (r *Router) closeCheckReviewResolved(orgID string, evt domain.Event, entity
 	return closed
 }
 
-// closeCheckReviewSubmitted: if I submitted my review, close any active
-// review_requested task on this entity (the request is satisfied).
+// closeCheckReviewSubmitted: a reviewer submitted their review, so their
+// review_requested obligation is satisfied — close that reviewer's per-reviewer
+// task (keyed "user:<reviewer>"), and only that one. A review by reviewer A
+// must not close reviewer B's task on the same PR.
 //
-// The tracker emits review_submitted only when the session user is the
-// reviewer (see diff.go's reviewerIsSelf gate), so by construction any
-// review_submitted event we see here is a self-review — no defensive
-// check needed.
+// The reviewer is always an individual (github teams don't submit reviews), so
+// the key is the user namespace. This is mode-agnostic: in local N=1 the
+// submitter is the lone user; the close logic is identical regardless of mode.
 //
-// This closes EVERY active review_requested task on the entity, not just the
-// submitter's per-reviewer task. That is correct for the only path that fires
-// it today — local N=1, where the lone user's own request plus any of their
-// github-team requests are all satisfied by their single review (the team
-// requests are membership-dismissed too). It is deliberately NOT dedup-keyed:
-// review_submitted carries no review-request dedup_key, and the multi-mode App
-// path never emits it (reviewerIsSelf is always false when username==""). When
-// review_submitted becomes identity-aware in multi mode (the author-centric
-// routing follow-on), this must narrow to the submitter's own
-// "user:<reviewer>" task, mirroring closeCheckReviewRequestRemoved.
+// Today this only fires in local mode — the org-wide multi poll has no single
+// session user, so review_submitted (gated on reviewer==username in diff.go) is
+// not emitted there. The per-reviewer close still has full parity in multi via
+// review_request_removed: GitHub drops a reviewer from the requested list once
+// they review, and that per-reviewer removal closes the same task (see
+// closeCheckReviewRequestRemoved). Making review_submitted itself resolver-
+// driven in multi is reviewer-axis follow-on work and not required for this
+// close to be correct.
 func (r *Router) closeCheckReviewSubmitted(orgID string, evt domain.Event, entityID string) bool {
 	var meta events.GitHubPRReviewSubmittedMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
 		return false
 	}
+	if meta.Reviewer == "" {
+		return false
+	}
+	dedupKey := events.ReviewerDedupKeyUser(meta.Reviewer)
 
 	tasks, err := r.tasks.FindActiveByEntityAndTypeSystem(context.Background(), orgID, entityID, domain.EventGitHubPRReviewRequested)
 	if err != nil {
@@ -1657,10 +1660,13 @@ func (r *Router) closeCheckReviewSubmitted(orgID string, evt domain.Event, entit
 	}
 	closed := false
 	for _, t := range tasks {
+		if t.DedupKey != dedupKey {
+			continue // a different reviewer's task — leave it open
+		}
 		if err := r.closeTaskWithAudit(orgID, t.ID, evt.ID, "auto_closed_by_event", domain.EventGitHubPRReviewSubmitted); err != nil {
 			log.Printf("[router] failed to close review_requested task %s: %v", t.ID, err)
 		} else {
-			log.Printf("[router] inline-closed task %s (review submitted by self)", t.ID)
+			log.Printf("[router] inline-closed task %s (review submitted by %s)", t.ID, meta.Reviewer)
 			closed = true
 		}
 	}
