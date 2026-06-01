@@ -27,7 +27,7 @@ import (
 // AFTER pinning. Same handling — log + skip.
 //
 // tokenFor resolves the host-side clone credential for a repo's owner
-// (SKY-391) so private-repo refreshes authenticate in multi mode. It may be
+// so private-repo refreshes authenticate in multi mode. It may be
 // nil (tests) or return "" — CloneAuthFor then no-ops, and the refresh runs
 // credential-free exactly as before. The token is scoped to the profile's
 // clone URL host and only injects for an https:// origin, so a local-mode SSH
@@ -63,6 +63,11 @@ func materializePinnedRepos(ctx context.Context, repos db.RepoStore, tokenFor fu
 		if tokenFor != nil {
 			auth = worktree.CloneAuthFor(profile.CloneURL, tokenFor(ctx, owner))
 		}
+		// TODO(SKY-400): EnsureCuratorWorktree refuses to seed a missing bare,
+		// and multi-mode has no eager bootstrap, so a private pinned repo never
+		// delegated against is silently skipped here. Seed it on demand
+		// (EnsureBareClone + WithCloneAuth) before refreshing once the
+		// seed-vs-eager-bootstrap design call lands.
 		if _, err := worktree.EnsureCuratorWorktree(ctx, owner, repo, branch, projectDir, worktree.WithCloneAuth(auth)); err != nil {
 			log.Printf("[curator] project %s: materialize %s @ %s failed: %v (skipping)", projectID, slug, branch, err)
 			continue

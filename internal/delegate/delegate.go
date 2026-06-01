@@ -396,7 +396,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID string, task dom
 	}
 
 	s.updateStatus(orgID, runID, "cloning")
-	// Resolve the host-side clone credential for this repo's owner (SKY-391).
+	// Resolve the host-side clone credential for this repo's owner.
 	// CloneAuthFor scopes the token to the upstream's host and no-ops on an
 	// SSH URL or an empty token, so this is inert in local SSH mode and for
 	// public/anonymous clones — only a multi-mode HTTPS private clone gets the

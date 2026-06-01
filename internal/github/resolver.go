@@ -48,7 +48,7 @@ type Resolver interface {
 	// with — the App installation token (tier 1) or the org PAT (tier 3) —
 	// for callers that need to hand it to a subprocess rather than make API
 	// calls through a *Client. The host-side `git clone` / `git fetch` in
-	// internal/worktree is the motivating consumer (SKY-391): it injects the
+	// internal/worktree is the motivating consumer: it injects the
 	// token as an HTTPS auth header on a private-repo clone, and a *Client
 	// gives it no way to reach the token (*Client.pat is private).
 	//
@@ -185,7 +185,7 @@ func (r *resolver) tier1Token(ctx context.Context, orgID, target, base string) (
 
 // TokenFor mirrors ClientFor's tier resolution but returns the raw
 // credential instead of a *Client — see the Resolver interface doc for why
-// (SKY-391's host-side git clone needs the token as an HTTPS auth header).
+// (the host-side git clone needs the token as an HTTPS auth header).
 func (r *resolver) TokenFor(ctx context.Context, orgID, target string) (githubapp.Token, error) {
 	base, err := r.githubBaseFor(ctx, orgID)
 	if err != nil {

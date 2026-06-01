@@ -36,7 +36,7 @@ func (f *fakeResolver) ClientFor(ctx context.Context, orgID, target string) (*gh
 	return f.client, nil
 }
 
-// TokenFor satisfies the SKY-391 addition to ghclient.Resolver. The poller
+// TokenFor satisfies the ghclient.Resolver interface. The poller
 // never calls it (it works through *Client), so a zero Token is enough to
 // keep the fake compiling against the interface.
 func (f *fakeResolver) TokenFor(ctx context.Context, orgID, target string) (githubapp.Token, error) {

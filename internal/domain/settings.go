@@ -63,13 +63,13 @@ func DefaultOrgSettings() OrgSettings {
 }
 
 // EffectiveCloneProtocol resolves the clone protocol actually in force, given
-// the stored org setting and whether the deployment is multi-mode (SKY-391).
+// the stored org setting and whether the deployment is multi-mode.
 //
 // Multi-mode is ALWAYS "https", independent of the stored value: a GitHub App
 // installation token is an HTTPS bearer credential that cannot be used over
 // SSH at all, and the hosted runtime container has no ssh-agent / key /
 // known_hosts. The stored value may still read "ssh" — DefaultOrgSettings
-// returns "ssh" (correct for local), and a pre-SKY-391 row could carry it —
+// returns "ssh" (correct for local), and a legacy row could carry it —
 // so it must not be honored in multi.
 //
 // Local mode honors the stored value, treating only the literal "ssh" as SSH

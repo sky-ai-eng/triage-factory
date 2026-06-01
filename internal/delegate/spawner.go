@@ -342,7 +342,7 @@ func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner string) *ghc
 // resolveCloneToken resolves the App installation token for the host-side
 // clone of a repo owned by owner, via the same SKY-389 resolver
 // resolveGHClient uses — so the API client and the `git clone`/`git fetch`
-// share one cached installation token (SKY-391). owner selects the
+// share one cached installation token. owner selects the
 // installation.
 //
 // Multi-mode only by design: this ticket scopes host-side token injection to

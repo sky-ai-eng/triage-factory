@@ -2,7 +2,7 @@ package domain
 
 import "testing"
 
-// TestEffectiveCloneProtocol pins the mode-aware resolution (SKY-391): multi
+// TestEffectiveCloneProtocol pins the mode-aware resolution: multi
 // mode is always https regardless of the stored value (SSH is unavailable in
 // a hosted runtime), while local mode honors only the literal "ssh" and
 // defaults everything else to https.

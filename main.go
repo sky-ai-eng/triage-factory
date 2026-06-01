@@ -1018,13 +1018,17 @@ func main() {
 	//
 	// The model arg below is empty; the curator resolves its per-org
 	// default model through the SKY-389 seam wired just below.
+	// TODO(SKY-404): CancelOrphanedNonTerminalRequests takes no orgID — confirm
+	// it runs on the admin pool so it actually terminates prior-process orphans
+	// across tenants under multi-mode RLS, and cover a multi-mode curator turn
+	// end-to-end (no pgtest exercises one today).
 	if n, err := stores.Curator.CancelOrphanedNonTerminalRequests(context.Background()); err != nil {
 		log.Printf("[curator] sweep stranded turns: %v", err)
 	} else if n > 0 {
 		log.Printf("[curator] cancelled %d stranded turn(s) from prior process", n)
 	}
 	curatorRuntime := curator.New(database, stores, wsHub, "")
-	// SKY-389/SKY-391: same per-org run-credential seam as the spawner. The
+	// SKY-389: same per-org run-credential seam as the spawner. The
 	// curator resolves each turn's LLM key via runSecrets, its default model
 	// via modelFor, and the host-side pinned-repo clone credential via
 	// ghResolver — all scoped to the project-owning org.

@@ -19,6 +19,9 @@ import (
 // truth for the per-project working-dir layout — both KnowledgeDir
 // below and the kbwatcher derive paths from here.
 func ProjectsRoot() (string, error) {
+	// TODO(SKY-402): multi-mode should resolve this under internal/paths'
+	// state root (org-scoped) instead of the shared ~/.triagefactory home
+	// that every tenant shares in single-pod multi. Local mode keeps this path.
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve home dir: %w", err)

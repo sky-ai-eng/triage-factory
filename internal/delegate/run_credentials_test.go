@@ -21,7 +21,7 @@ type fakeResolver struct {
 	calls  []resolverCall
 	client *ghclient.Client
 	err    error
-	// token is what TokenFor hands back (SKY-391) — the credential the
+	// token is what TokenFor hands back — the credential the
 	// host-side clone injects. Defaults to the zero Token when unset.
 	token githubapp.Token
 }
@@ -184,7 +184,7 @@ func TestOwnerForTask(t *testing.T) {
 	}
 }
 
-// TestResolveCloneToken pins the SKY-391 host-side clone-credential seam.
+// TestResolveCloneToken pins the host-side clone-credential seam.
 // Multi mode: with a resolver wired, resolveCloneToken hands back the App
 // installation token TokenFor returns; with no resolver or on a resolver
 // error it returns "" so the clone proceeds unauthenticated rather than

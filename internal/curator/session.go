@@ -319,6 +319,11 @@ func (s *projectSession) dispatch(item queueItem) {
 		log.Printf("[curator] warning: materialize jira formatting skill for project %s: %v", s.projectID, err)
 	}
 
+	// TODO(SKY-403): no StartAgentHost is passed, so in multi-mode the agent is
+	// jailed (shouldSandbox is global) but has no in-sandbox `triagefactory
+	// exec` daemon, and the pinned-worktree / knowledge-dir bind-mounts into the
+	// jail are unverified. Wire agenthost.Start (or prove the curator's tools are
+	// exec-free and constrain them) before multi-mode curator ships.
 	outcome, runErr := agentproc.Run(msgCtx, agentproc.RunOptions{
 		Cwd:          cwd,
 		Model:        model,
@@ -503,10 +508,11 @@ func (s *projectSession) shutdown(reason string) {
 	// Must be replaced with a synthetic-claims variant before
 	// multi-mode curator ships. The shutdown caller has no
 	// queueItem in scope (the request may not have been dequeued
-	// yet, or its identity was never captured); resolution will
-	// either thread identity through the per-project session
-	// state or route this single write through the admin pool via
-	// a future `MarkRequestCancelledIfActiveSystem` variant.
+	// yet, or its identity was never captured).
+	// TODO(SKY-401): raw s.curator.database write with no claims — rejected
+	// under multi-mode RLS. Resolution will either thread identity through the
+	// per-project session state or route this single write through the admin
+	// pool via a future `MarkRequestCancelledIfActiveSystem` variant.
 	if inFlightID != "" {
 		if flipped, err := db.MarkCuratorRequestCancelledIfActive(s.curator.database, inFlightID, reason); err == nil && flipped {
 			s.curator.broadcastRequestUpdate(s.orgID, s.projectID, inFlightID, "cancelled")

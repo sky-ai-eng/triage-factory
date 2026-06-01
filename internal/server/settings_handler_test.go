@@ -14,7 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestDefaultedCloneProtocolView_ModeAware pins the API GET view (SKY-391):
+// TestDefaultedCloneProtocolView_ModeAware pins the API GET view:
 // multi mode always reports "https" regardless of the stored value, while
 // local mode reports the literal "ssh" or coerces everything else to "https".
 // This is what the Settings page reads to render the (multi-hidden) control.

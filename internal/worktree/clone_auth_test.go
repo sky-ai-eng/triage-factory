@@ -12,7 +12,7 @@ import (
 
 // TestCloneAuthFor_HTTPSOnly pins the constructor's gate: a token is attached
 // only for an https:// URL, so SSH remotes (local-mode default) and the
-// no-token path inject nothing. SKY-391.
+// no-token path inject nothing.
 func TestCloneAuthFor_HTTPSOnly(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -167,7 +167,7 @@ func startRefsCaptureServer(t *testing.T) (url string, authHeader func() string)
 // CloneAuth reaches the wire: the real `git clone` EnsureBareClone shells out
 // carries the host-scoped Authorization header on the info/refs request. The
 // clone itself fails (the server serves no repo) — we assert only the header,
-// which is what authenticates a private clone. SKY-391.
+// which is what authenticates a private clone.
 func TestCloneAuth_InjectsHeaderOnClone(t *testing.T) {
 	withTestHome(t)
 	t.Setenv("GIT_SSL_NO_VERIFY", "true") // accept the httptest self-signed cert
@@ -185,7 +185,7 @@ func TestCloneAuth_InjectsHeaderOnClone(t *testing.T) {
 }
 
 // TestCloneAuth_NoHeaderWithoutAuth is the negative control: without a
-// CloneAuth option, the clone sends no Authorization header (the pre-SKY-391
+// CloneAuth option, the clone sends no Authorization header (the prior
 // behavior, and the local-mode / public path).
 func TestCloneAuth_NoHeaderWithoutAuth(t *testing.T) {
 	withTestHome(t)

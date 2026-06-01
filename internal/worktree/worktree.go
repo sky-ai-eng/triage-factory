@@ -105,7 +105,7 @@ const (
 )
 
 // CloneAuth is an optional HTTPS credential for a host-side `git clone` /
-// `git fetch` (SKY-391). The zero value injects nothing — the git subprocess
+// `git fetch`. The zero value injects nothing — the git subprocess
 // runs exactly as before (anonymous HTTPS for public repos, or SSH via the
 // operator's agent in local mode). When populated, worktree attaches the
 // credential as a host-scoped `http.<prefix>.extraHeader` passed through the
@@ -1220,9 +1220,9 @@ func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranc
 	}
 	// No CloneAuth here: this is the in-sandbox Jira `workspace add` path
 	// (cmd/exec/workspace), where in-sandbox git credentials are SKY-394's
-	// concern, not the host-side clone this ticket (SKY-391) covers. The
-	// shared body is already auth-capable, so SKY-394 can thread a credential
-	// through when it wires the in-sandbox path.
+	// concern, not the host-side clone path. The shared body is already
+	// auth-capable, so SKY-394 can thread a credential through when it wires
+	// the in-sandbox path.
 	return createBranchWorktreeAt(ctx, owner, repo, cloneURL, baseBranch, featureBranch, runID, wtDir, CloneAuth{})
 }
 

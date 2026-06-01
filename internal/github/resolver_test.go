@@ -176,7 +176,7 @@ func TestResolver_Tier1_AppInstallationToken(t *testing.T) {
 
 // TokenFor must hand back the same App installation token ClientFor would
 // authenticate with (tier 1), and share the mint cache so the host-side clone
-// and the API client don't each mint a separate token. SKY-391.
+// and the API client don't each mint a separate token.
 func TestResolver_TokenFor_Tier1_SharesMintCacheWithClientFor(t *testing.T) {
 	gh := newGHTestServer(t)
 	r := NewResolver(
@@ -213,7 +213,7 @@ func TestResolver_TokenFor_Tier1_SharesMintCacheWithClientFor(t *testing.T) {
 }
 
 // With no App, TokenFor falls through to the PAT tier and returns it as the
-// credential, with a zero expiry (PATs have no mint lifetime). SKY-391.
+// credential, with a zero expiry (PATs have no mint lifetime).
 func TestResolver_TokenFor_Tier3_PAT(t *testing.T) {
 	r := NewResolver(
 		&fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_test"}},

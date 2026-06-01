@@ -711,7 +711,7 @@ export default function Settings() {
             <option value="5m0s">5 minutes</option>
           </select>
         </Field>
-        {/* Clone protocol is local-mode-only (SKY-391): multi-mode deployments
+        {/* Clone protocol is local-mode-only: multi-mode deployments
             hardwire HTTPS (App-token credential; the container has no SSH
             machinery), so there's nothing to choose and no SSH to test. */}
         {isLocal && (

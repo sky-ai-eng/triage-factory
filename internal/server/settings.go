@@ -171,7 +171,7 @@ func projectConfigsToRules(projects []jiraProjectConfig) []domain.JiraProjectSta
 
 // defaultedCloneProtocolView normalizes a stored CloneProtocol value for the
 // API surface using the same effective semantics as backend clone-URL
-// selection, and is mode-aware (SKY-391): multi-mode always reports "https"
+// selection, and is mode-aware: multi-mode always reports "https"
 // regardless of the stored value (SSH is unavailable there), while local mode
 // treats only the literal "ssh" as SSH and everything else as HTTPS. Clients
 // always see one of the two known forms, matching what the clone path will
@@ -447,7 +447,7 @@ func (s *Server) handleJiraStatuses(w http.ResponseWriter, r *http.Request) {
 // log so users investigating issues see the exact ssh output even
 // when the UI only renders the friendly summary.
 func (s *Server) handleGitHubPreflightSSH(w http.ResponseWriter, r *http.Request) {
-	// SSH is local-mode-only (SKY-391). PreflightSSH writes the container's
+	// SSH is local-mode-only. PreflightSSH writes the container's
 	// ~/.ssh/known_hosts (accept-new) and probes the operator's ssh-agent —
 	// neither exists in a hosted multi-mode container, and the clone path
 	// there is hardwired to HTTPS. Refuse rather than run the probe so no SSH

@@ -49,7 +49,7 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Multi-mode is HTTPS-only (SKY-391): reject an ssh selection rather than
+	// Multi-mode is HTTPS-only: reject an ssh selection rather than
 	// store a value the clone path will ignore. SSH would need a per-org key
 	// the hosted runtime has no machinery to provision, and PreflightSSH
 	// (below) must never run in a container — it writes ~/.ssh/known_hosts.
