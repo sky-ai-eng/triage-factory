@@ -128,7 +128,6 @@ export default function Setup() {
       if (!res.ok) {
         const data = await res.json()
         setError(data.error || 'Failed to save repos')
-        setLoading(false)
         return
       }
       setSelectedRepos(repos)

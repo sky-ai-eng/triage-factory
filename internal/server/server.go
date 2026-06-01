@@ -197,7 +197,8 @@ func reachableCacheKey(orgID, userID string) string {
 
 // reachableRepoCacheGet returns the cached reachable slug set for (orgID,
 // userID) when present and unexpired. A miss (absent or stale) returns
-// (nil, false); the stale entry is left for the next put/evict to overwrite.
+// (nil, false); a stale entry is reclaimed by the next put's sweep or an
+// org evict (the read path holds only an RLock and so can't delete).
 func (s *Server) reachableRepoCacheGet(orgID, userID string) (map[string]struct{}, bool) {
 	s.reachableRepoMu.RLock()
 	defer s.reachableRepoMu.RUnlock()
@@ -211,15 +212,28 @@ func (s *Server) reachableRepoCacheGet(orgID, userID string) (map[string]struct{
 // reachableRepoCachePut stores the picker enumeration for (orgID, userID) with
 // a fresh TTL. The set is stored by reference — callers must not mutate it
 // after handing it over.
+//
+// It also opportunistically sweeps already-expired entries while it holds the
+// write lock. Reads return a miss on expiry but can't delete (RLock only), so
+// without this the map would retain every distinct (orgID, userID) ever seen.
+// A put happens once per picker fetch, so the very workload that would grow
+// the map unboundedly — many distinct pairs churning through — is also what
+// drives the sweep, keeping it to roughly the live set.
 func (s *Server) reachableRepoCachePut(orgID, userID string, set map[string]struct{}) {
+	now := time.Now()
 	s.reachableRepoMu.Lock()
 	defer s.reachableRepoMu.Unlock()
 	if s.reachableRepoCache == nil {
 		s.reachableRepoCache = make(map[string]reachableRepoEntry)
 	}
+	for k, e := range s.reachableRepoCache {
+		if now.After(e.expiresAt) {
+			delete(s.reachableRepoCache, k)
+		}
+	}
 	s.reachableRepoCache[reachableCacheKey(orgID, userID)] = reachableRepoEntry{
 		set:       set,
-		expiresAt: time.Now().Add(reachableCacheTTL),
+		expiresAt: now.Add(reachableCacheTTL),
 	}
 }
 
