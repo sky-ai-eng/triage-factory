@@ -303,7 +303,7 @@ func (s *Server) handleJiraConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jiraUser, err := auth.ValidateJira(req.URL, req.PAT)
+	jiraUser, err := auth.ValidateJira(r.Context(), req.URL, req.PAT)
 	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
