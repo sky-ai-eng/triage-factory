@@ -520,6 +520,7 @@ function SwipeCard({
               rel="noopener noreferrer"
               className="text-[12px] text-accent hover:text-accent/70 font-medium transition-colors"
               onClick={(e) => e.stopPropagation()}
+              onPointerDown={(e) => e.stopPropagation()}
             >
               Open
             </a>
