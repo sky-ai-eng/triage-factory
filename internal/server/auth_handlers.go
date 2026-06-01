@@ -711,9 +711,20 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// upsertUserFromClaims mirrors the user's identity from JWT claims
-// into public.users. COALESCE preserves any field the claims happen
-// to be missing — provider responses are inconsistent across users.
+// upsertUserFromClaims mirrors the user's identity from JWT claims into
+// public.users + public.user_github_identities. COALESCE preserves any field
+// the claims happen to be missing — provider responses are inconsistent.
+//
+// Runs on the admin pool (main.go routes the raw *sql.DB to adminDB): the
+// auth-callback PROVISIONING layer that *creates* the users row this login
+// maps to (FK users.id → auth.users.id). That sits below the RLS/app-pool/
+// store model on purpose — it mints the identity tf.current_user_id() later
+// keys on. It can't route through UsersStore.UpsertGitHubIdentity even in
+// principle: that runs under a claims tx requiring the users row to already
+// exist (FK target; the runner rejects a userID with no row), and this is the
+// function creating it. Both writes target the *verified-JWT* user's own rows
+// (userID = claims.Subject), so the RLS bypass carries no untrusted target —
+// the same trust model the retired github_username column write already used.
 func upsertUserFromClaims(ctx context.Context, db *sql.DB, userID uuid.UUID, claims *verify.Claims) error {
 	var displayName, avatarURL, ghUsername string
 	if claims.UserMetadata != nil {
@@ -727,7 +738,20 @@ func upsertUserFromClaims(ctx context.Context, db *sql.DB, userID uuid.UUID, cla
 			ghUsername, _ = claims.UserMetadata["preferred_username"].(string)
 		}
 	}
-	if _, err := db.ExecContext(ctx, `
+
+	// One admin-pool tx for both inserts so a users row never lands without
+	// its identity row (or vice-versa); a mid-way failure rolls back and the
+	// next login re-runs the idempotent upsert.
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin user provisioning tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op once Commit succeeds
+
+	// Mirror display_name + avatar_url onto the users row. github_username
+	// moved out to user_github_identities (SKY-396); see the identity upsert
+	// below.
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO public.users (id, display_name, avatar_url, created_at, updated_at)
 		VALUES ($1, NULLIF($2, ''), NULLIF($3, ''), now(), now())
 		ON CONFLICT (id) DO UPDATE
@@ -735,7 +759,7 @@ func upsertUserFromClaims(ctx context.Context, db *sql.DB, userID uuid.UUID, cla
 		       avatar_url   = COALESCE(EXCLUDED.avatar_url,   public.users.avatar_url),
 		       updated_at   = now()
 	`, userID, displayName, avatarURL); err != nil {
-		return err
+		return fmt.Errorf("upsert user: %w", err)
 	}
 
 	// GitHub-login claim → host-scoped identity row (SKY-396). The GoTrue
@@ -745,13 +769,11 @@ func upsertUserFromClaims(ctx context.Context, db *sql.DB, userID uuid.UUID, cla
 	// becomes Entra SAML). Skip when the claim carries no username
 	// (non-GitHub login provider): the row stays absent, preserving any
 	// previously-captured identity and honoring the NULL-degrades contract.
-	//
-	// Raw SQL rather than tx.Users.UpsertGitHubIdentity: this function takes
-	// *sql.DB (the auth-callback provisioning path), not a TxStores, and the
-	// hardcoded host is already in NormalizeGitHubHost form. Mirror that
-	// store method (verified_at = now(), upsert on the host key) if it grows.
+	// The hardcoded host is already in NormalizeGitHubHost form; mirror
+	// UsersStore.UpsertGitHubIdentity (verified_at = now(), upsert on the host
+	// key) if that store method ever grows logic beyond the SQL.
 	if ghUsername != "" {
-		if _, err := db.ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO public.user_github_identities
 				(user_id, github_base_url, login, source, verified_at, created_at, updated_at)
 			VALUES ($1, 'https://github.com', $2, 'login_claim', now(), now(), now())
@@ -763,6 +785,10 @@ func upsertUserFromClaims(ctx context.Context, db *sql.DB, userID uuid.UUID, cla
 		`, userID, ghUsername); err != nil {
 			return fmt.Errorf("upsert github identity from login claim: %w", err)
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit user provisioning tx: %w", err)
 	}
 	return nil
 }
