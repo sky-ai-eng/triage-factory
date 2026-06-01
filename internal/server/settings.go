@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -168,16 +169,15 @@ func projectConfigsToRules(projects []jiraProjectConfig) []domain.JiraProjectSta
 	return out
 }
 
-// defaultedCloneProtocolView normalizes a stored CloneProtocol value
-// for the API surface using the same effective semantics as backend
-// clone URL selection: only the literal value "ssh" selects SSH;
-// empty, "https", and any other invalid/stale value are treated as
-// HTTPS. Clients should always see one of the two known forms.
+// defaultedCloneProtocolView normalizes a stored CloneProtocol value for the
+// API surface using the same effective semantics as backend clone-URL
+// selection, and is mode-aware (SKY-391): multi-mode always reports "https"
+// regardless of the stored value (SSH is unavailable there), while local mode
+// treats only the literal "ssh" as SSH and everything else as HTTPS. Clients
+// always see one of the two known forms, matching what the clone path will
+// actually do.
 func defaultedCloneProtocolView(stored string) string {
-	if stored == "ssh" {
-		return "ssh"
-	}
-	return "https"
+	return domain.EffectiveCloneProtocol(stored, runmode.Current() == runmode.ModeMulti)
 }
 
 // jiraProjectSettings is the per-project wire shape. Mirrors
@@ -447,6 +447,19 @@ func (s *Server) handleJiraStatuses(w http.ResponseWriter, r *http.Request) {
 // log so users investigating issues see the exact ssh output even
 // when the UI only renders the friendly summary.
 func (s *Server) handleGitHubPreflightSSH(w http.ResponseWriter, r *http.Request) {
+	// SSH is local-mode-only (SKY-391). PreflightSSH writes the container's
+	// ~/.ssh/known_hosts (accept-new) and probes the operator's ssh-agent —
+	// neither exists in a hosted multi-mode container, and the clone path
+	// there is hardwired to HTTPS. Refuse rather than run the probe so no SSH
+	// machinery is ever touched in multi mode. The UI hides the button there;
+	// this is the defense-in-depth backstop.
+	if runmode.Current() != runmode.ModeLocal {
+		writeJSON(w, http.StatusNotFound, map[string]any{
+			"ok":    false,
+			"error": "ssh clone protocol is not available in this deployment",
+		})
+		return
+	}
 	// Probe target tracks the configured GitHub base URL so the Test
 	// SSH button on the Settings page works for GHE deployments. We
 	// load creds (not settings) because creds.GitHubURL is the URL the

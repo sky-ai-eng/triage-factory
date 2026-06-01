@@ -43,6 +43,21 @@ var ErrNoGitHubCredentials = errors.New("github: no credentials resolved for org
 // callers.
 type Resolver interface {
 	ClientFor(ctx context.Context, orgID, githubTarget string) (*Client, error)
+
+	// TokenFor returns the raw credential ClientFor would authenticate
+	// with — the App installation token (tier 1) or the org PAT (tier 3) —
+	// for callers that need to hand it to a subprocess rather than make API
+	// calls through a *Client. The host-side `git clone` / `git fetch` in
+	// internal/worktree is the motivating consumer (SKY-391): it injects the
+	// token as an HTTPS auth header on a private-repo clone, and a *Client
+	// gives it no way to reach the token (*Client.pat is private).
+	//
+	// Same tier order and cache as ClientFor, so the clone and the API
+	// client share one minted installation token. The tier-1 githubapp.Token
+	// carries the real ~1h expiry; the tier-3 PAT is returned as a Token with
+	// a zero ExpiresAt (PATs have no mint lifetime we track). Returns
+	// ErrNoGitHubCredentials when neither tier resolves.
+	TokenFor(ctx context.Context, orgID, githubTarget string) (githubapp.Token, error)
 }
 
 type resolver struct {
@@ -129,18 +144,31 @@ func (r *resolver) githubBaseFor(ctx context.Context, orgID string) (string, err
 }
 
 func (r *resolver) tier1AppClient(ctx context.Context, orgID, target, base string) (*Client, bool) {
+	tok, ok := r.tier1Token(ctx, orgID, target, base)
+	if !ok {
+		return nil, false
+	}
+	return NewClient(base, tok.Value), true
+}
+
+// tier1Token resolves the org's own App installation token for target, or
+// (zero, false) when there's no usable App / installation / mintable token —
+// in which case the caller falls through to the PAT tier. Shared by
+// tier1AppClient (ClientFor) and TokenFor so the API client and the host-side
+// git clone resolve identically and hit the same TokenCache.
+func (r *resolver) tier1Token(ctx context.Context, orgID, target, base string) (githubapp.Token, bool) {
 	app, err := r.apps.GetForOrgSystem(ctx, orgID)
 	if err != nil {
 		log.Printf("[gh-resolver] org=%s: read App registration: %v (skipping tier1)", orgID, err)
-		return nil, false
+		return githubapp.Token{}, false
 	}
 	if app == nil || !app.Active {
-		return nil, false
+		return githubapp.Token{}, false
 	}
 
 	inst, ok := r.installationFor(ctx, orgID, target)
 	if !ok {
-		return nil, false
+		return githubapp.Token{}, false
 	}
 
 	tok, err := r.installationToken(ctx, orgID, app, inst, base)
@@ -149,10 +177,41 @@ func (r *resolver) tier1AppClient(ctx context.Context, orgID, target, base strin
 		// it usually means a bad/rotated PEM or a revoked installation. Fall
 		// through to PAT so the user isn't hard-blocked, but make it visible.
 		log.Printf("[gh-resolver] org=%s target=%s: mint installation token (installation=%s): %v (falling back to PAT)", orgID, target, inst.InstallationID, err)
-		return nil, false
+		return githubapp.Token{}, false
 	}
 	log.Printf("[gh-resolver] org=%s target=%q → tier1 App installation=%s account=%s", orgID, target, inst.InstallationID, inst.AccountLogin)
-	return NewClient(base, tok.Value), true
+	return tok, true
+}
+
+// TokenFor mirrors ClientFor's tier resolution but returns the raw
+// credential instead of a *Client — see the Resolver interface doc for why
+// (SKY-391's host-side git clone needs the token as an HTTPS auth header).
+func (r *resolver) TokenFor(ctx context.Context, orgID, target string) (githubapp.Token, error) {
+	base, err := r.githubBaseFor(ctx, orgID)
+	if err != nil {
+		return githubapp.Token{}, err
+	}
+
+	// Tier 1: the org's own App installation token (shared cache + mint
+	// path with ClientFor). Best-effort — any failure falls through to PAT.
+	if tok, ok := r.tier1Token(ctx, orgID, target, base); ok {
+		return tok, nil
+	}
+
+	// Tier 2 (deployment-default shared App) is deferred to SKY-363.
+
+	// Tier 3: PAT-borrow, returned as a Token with no mint expiry. A backend
+	// read error propagates rather than being misreported as "not configured".
+	pat, err := r.secrets.GetSystem(ctx, orgID, integrations.KeyGitHubPAT)
+	if err != nil {
+		return githubapp.Token{}, fmt.Errorf("resolve github pat for org %s: %w", orgID, err)
+	}
+	if pat != "" {
+		log.Printf("[gh-resolver] org=%s target=%q → tier3 PAT (token)", orgID, target)
+		return githubapp.Token{Value: pat}, nil
+	}
+
+	return githubapp.Token{}, fmt.Errorf("%w: org=%s target=%s", ErrNoGitHubCredentials, orgID, target)
 }
 
 // installationFor selects the App installation whose account matches target.

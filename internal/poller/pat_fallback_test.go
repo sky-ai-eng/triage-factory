@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -33,6 +34,16 @@ func (f *fakeResolver) ClientFor(ctx context.Context, orgID, target string) (*gh
 		return nil, f.err
 	}
 	return f.client, nil
+}
+
+// TokenFor satisfies the SKY-391 addition to ghclient.Resolver. The poller
+// never calls it (it works through *Client), so a zero Token is enough to
+// keep the fake compiling against the interface.
+func (f *fakeResolver) TokenFor(ctx context.Context, orgID, target string) (githubapp.Token, error) {
+	if f.err != nil {
+		return githubapp.Token{}, f.err
+	}
+	return githubapp.Token{}, nil
 }
 
 // fakeInstallsStore embeds db.GitHubAppsStore (nil) and overrides only

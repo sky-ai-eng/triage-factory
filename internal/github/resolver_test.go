@@ -174,6 +174,100 @@ func TestResolver_Tier1_AppInstallationToken(t *testing.T) {
 	}
 }
 
+// TokenFor must hand back the same App installation token ClientFor would
+// authenticate with (tier 1), and share the mint cache so the host-side clone
+// and the API client don't each mint a separate token. SKY-391.
+func TestResolver_TokenFor_Tier1_SharesMintCacheWithClientFor(t *testing.T) {
+	gh := newGHTestServer(t)
+	r := NewResolver(
+		&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
+		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
+		&fakeOrgs{base: gh.srv.URL},
+		&fakeAgents{},
+		nil,
+	)
+
+	tok, err := r.TokenFor(context.Background(), "org-1", "acme")
+	if err != nil {
+		t.Fatalf("TokenFor: %v", err)
+	}
+	if tok.Value != "ghs_minted" {
+		t.Errorf("TokenFor returned %q, want the minted App token", tok.Value)
+	}
+	if tok.ExpiresAt.IsZero() {
+		t.Error("tier-1 token should carry the mint expiry, got zero")
+	}
+	if gh.mintCalls != 1 {
+		t.Errorf("mint called %d times, want 1", gh.mintCalls)
+	}
+
+	// A subsequent ClientFor for the same installation must reuse the cached
+	// token rather than minting a second one — the whole point of routing both
+	// through installationToken + TokenCache.
+	if _, err := r.ClientFor(context.Background(), "org-1", "acme"); err != nil {
+		t.Fatalf("ClientFor after TokenFor: %v", err)
+	}
+	if gh.mintCalls != 1 {
+		t.Errorf("mint called %d times after a cached resolution, want 1 (shared cache)", gh.mintCalls)
+	}
+}
+
+// With no App, TokenFor falls through to the PAT tier and returns it as the
+// credential, with a zero expiry (PATs have no mint lifetime). SKY-391.
+func TestResolver_TokenFor_Tier3_PAT(t *testing.T) {
+	r := NewResolver(
+		&fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_test"}},
+		&fakeApps{app: nil},
+		&fakeOrgs{base: "https://github.com"},
+		&fakeAgents{},
+		nil,
+	)
+	tok, err := r.TokenFor(context.Background(), "org-1", "acme")
+	if err != nil {
+		t.Fatalf("TokenFor: %v", err)
+	}
+	if tok.Value != "ghp_test" {
+		t.Errorf("TokenFor returned %q, want the org PAT", tok.Value)
+	}
+	if !tok.ExpiresAt.IsZero() {
+		t.Errorf("tier-3 PAT token should have a zero expiry, got %v", tok.ExpiresAt)
+	}
+}
+
+// No App and no PAT → ErrNoGitHubCredentials, same sentinel ClientFor returns
+// so callers can distinguish "not configured" from a backend error.
+func TestResolver_TokenFor_NoCredentials(t *testing.T) {
+	r := NewResolver(
+		&fakeSecrets{vals: map[string]string{}},
+		&fakeApps{app: nil},
+		&fakeOrgs{base: "https://github.com"},
+		&fakeAgents{},
+		nil,
+	)
+	if _, err := r.TokenFor(context.Background(), "org-1", "acme"); !errors.Is(err, ErrNoGitHubCredentials) {
+		t.Errorf("got %v, want ErrNoGitHubCredentials", err)
+	}
+}
+
+// A secret-store read failure on the PAT tier must propagate, not be
+// misreported as ErrNoGitHubCredentials — mirrors ClientFor's contract.
+func TestResolver_TokenFor_PATReadError_Propagates(t *testing.T) {
+	r := NewResolver(
+		&fakeSecrets{err: errVaultDown},
+		&fakeApps{app: nil},
+		&fakeOrgs{base: "https://github.com"},
+		&fakeAgents{},
+		nil,
+	)
+	_, err := r.TokenFor(context.Background(), "org-1", "acme")
+	if err == nil || errors.Is(err, ErrNoGitHubCredentials) {
+		t.Fatalf("want a propagated backend error, got %v", err)
+	}
+	if !errors.Is(err, errVaultDown) {
+		t.Errorf("error should wrap the secret-store failure, got %v", err)
+	}
+}
+
 func TestResolver_Tier1_EmptyTargetSingleInstall(t *testing.T) {
 	gh := newGHTestServer(t)
 	r := NewResolver(

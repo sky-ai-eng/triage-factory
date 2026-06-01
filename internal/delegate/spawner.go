@@ -17,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -158,6 +159,14 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 // protocol is "ssh". orgs is nil-safe and any store failure logs +
 // defaults to HTTPS, matching the prior config.Load() degrade path.
 func (s *Spawner) useSSHCloneProtocol(ctx context.Context, orgID, runID string) bool {
+	// Multi-mode is HTTPS-only (SKY-391): an App installation token is an
+	// HTTPS bearer credential that can't be used over SSH, and the runtime
+	// container has no ssh-agent/key/known_hosts. The stored value may still
+	// read "ssh" (the DefaultOrgSettings default, or a legacy write), so gate
+	// on mode here regardless of the persisted row — never SSH outside local.
+	if runmode.Current() != runmode.ModeLocal {
+		return false
+	}
 	if s.orgs == nil {
 		return false
 	}
@@ -329,6 +338,42 @@ func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner string) *ghc
 		return nil
 	}
 	return client
+}
+
+// resolveCloneToken resolves the App installation token for the host-side
+// clone of a repo owned by owner, via the same SKY-389 resolver
+// resolveGHClient uses — so the API client and the `git clone`/`git fetch`
+// share one cached installation token (SKY-391). owner selects the
+// installation.
+//
+// Multi-mode only by design: this ticket scopes host-side token injection to
+// the hosted runtime (where SSH is unavailable and the App token is the only
+// credential). Local clones deliberately keep their existing path — the
+// operator's SSH key, or anonymous HTTPS — so local behavior is byte-for-byte
+// unchanged. (CloneAuthFor independently no-ops on an SSH-form URL; the mode
+// gate is what additionally leaves a local *HTTPS* clone uninjected, which is
+// a separate future step per the ticket.)
+//
+// Returns "" when local, when no resolver is wired (test fixtures), or when
+// resolution fails — the clone then proceeds with no injected credential. A
+// resolve failure is logged so a real backend outage (e.g. vault down) isn't
+// silent; the clone itself surfaces the auth error if the repo is private.
+func (s *Spawner) resolveCloneToken(ctx context.Context, orgID, owner string) string {
+	if runmode.Current() == runmode.ModeLocal {
+		return ""
+	}
+	s.mu.Lock()
+	resolver := s.ghResolver
+	s.mu.Unlock()
+	if resolver == nil {
+		return ""
+	}
+	tok, err := resolver.TokenFor(ctx, orgID, owner)
+	if err != nil {
+		log.Printf("[delegate] resolve clone token for org %s target %q: %v", orgID, owner, err)
+		return ""
+	}
+	return tok.Value
 }
 
 // resolveModel resolves the run's team default model via the SKY-389

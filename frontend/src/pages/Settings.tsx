@@ -711,66 +711,71 @@ export default function Settings() {
             <option value="5m0s">5 minutes</option>
           </select>
         </Field>
-        <Field label="Clone protocol">
-          <div className="flex items-center gap-3">
-            <div className="inline-flex rounded-lg border border-border-glass bg-black/[0.02] p-0.5">
-              {(['ssh', 'https'] as const).map((p) => (
-                <button
-                  key={p}
-                  type="button"
-                  onClick={() => {
-                    setForm((f) => ({ ...f, github_clone_protocol: p }))
-                    setSshTestState({ kind: 'idle' })
-                  }}
-                  className={`px-3 py-1 text-[12px] font-medium rounded-md transition-colors ${
-                    form.github_clone_protocol === p
-                      ? 'bg-white text-text-primary shadow-sm'
-                      : 'text-text-tertiary hover:text-text-secondary'
-                  }`}
-                >
-                  {p.toUpperCase()}
-                </button>
-              ))}
+        {/* Clone protocol is local-mode-only (SKY-391): multi-mode deployments
+            hardwire HTTPS (App-token credential; the container has no SSH
+            machinery), so there's nothing to choose and no SSH to test. */}
+        {isLocal && (
+          <Field label="Clone protocol">
+            <div className="flex items-center gap-3">
+              <div className="inline-flex rounded-lg border border-border-glass bg-black/[0.02] p-0.5">
+                {(['ssh', 'https'] as const).map((p) => (
+                  <button
+                    key={p}
+                    type="button"
+                    onClick={() => {
+                      setForm((f) => ({ ...f, github_clone_protocol: p }))
+                      setSshTestState({ kind: 'idle' })
+                    }}
+                    className={`px-3 py-1 text-[12px] font-medium rounded-md transition-colors ${
+                      form.github_clone_protocol === p
+                        ? 'bg-white text-text-primary shadow-sm'
+                        : 'text-text-tertiary hover:text-text-secondary'
+                    }`}
+                  >
+                    {p.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={testSSH}
+                disabled={sshTestState.kind === 'running'}
+                className="text-[11px] text-accent hover:underline disabled:opacity-50"
+              >
+                {sshTestState.kind === 'running' ? 'Testing...' : 'Test SSH connection'}
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={testSSH}
-              disabled={sshTestState.kind === 'running'}
-              className="text-[11px] text-accent hover:underline disabled:opacity-50"
-            >
-              {sshTestState.kind === 'running' ? 'Testing...' : 'Test SSH connection'}
-            </button>
-          </div>
-          <p className="text-[11px] text-text-tertiary mt-1.5 leading-relaxed">
-            Your token is still required for the GitHub API. The protocol only affects how Triage
-            Factory clones repos to your machine. Saving the toggle re-clones bare repos with the
-            new origin URL.
-          </p>
-          {sshTestState.kind === 'ok' && (
-            <p className="text-[11px] text-[var(--color-claim)] mt-1.5">
-              ✓ SSH preflight succeeded — git@
-              {(() => {
-                try {
-                  return new URL(form.github_url).hostname || 'github.com'
-                } catch {
-                  return 'github.com'
-                }
-              })()}{' '}
-              is reachable with your key.
+            <p className="text-[11px] text-text-tertiary mt-1.5 leading-relaxed">
+              Your token is still required for the GitHub API. The protocol only affects how Triage
+              Factory clones repos to your machine. Saving the toggle re-clones bare repos with the
+              new origin URL.
             </p>
-          )}
-          {sshTestState.kind === 'fail' && (
-            <pre
-              className="
+            {sshTestState.kind === 'ok' && (
+              <p className="text-[11px] text-[var(--color-claim)] mt-1.5">
+                ✓ SSH preflight succeeded — git@
+                {(() => {
+                  try {
+                    return new URL(form.github_url).hostname || 'github.com'
+                  } catch {
+                    return 'github.com'
+                  }
+                })()}{' '}
+                is reachable with your key.
+              </p>
+            )}
+            {sshTestState.kind === 'fail' && (
+              <pre
+                className="
               mt-1.5 max-h-[120px] overflow-auto rounded
               bg-[var(--color-dismiss)]/10 p-2 text-[11px]
               text-[var(--color-dismiss)] whitespace-pre-wrap break-words
             "
-            >
-              {sshTestState.stderr}
-            </pre>
-          )}
-        </Field>
+              >
+                {sshTestState.stderr}
+              </pre>
+            )}
+          </Field>
+        )}
       </div>
     </Section>
   )

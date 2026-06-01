@@ -53,7 +53,8 @@ func CuratorRepoSubpath(owner, repo string) string {
 // via filepath.Abs so callers don't have to). Holds the per-repo
 // lock throughout so concurrent curator dispatches that pin the
 // same repo queue rather than race on git state.
-func EnsureCuratorWorktree(ctx context.Context, owner, repo, branch, projectDir string) (string, error) {
+func EnsureCuratorWorktree(ctx context.Context, owner, repo, branch, projectDir string, opts ...CloneOption) (string, error) {
+	auth := resolveCloneOptions(opts).auth
 	if owner == "" || repo == "" {
 		return "", fmt.Errorf("ensure curator worktree: owner/repo required")
 	}
@@ -100,7 +101,7 @@ func EnsureCuratorWorktree(ctx context.Context, owner, repo, branch, projectDir 
 	// (or worktree add) points the local branch at the same SHA.
 	branchRefspec := fmt.Sprintf("+refs/heads/%s:%s", branch, remoteRef)
 	start := time.Now()
-	if err := gitRunCtx(ctx, bareDir, "fetch", "origin", branchRefspec); err != nil {
+	if err := gitRunCtxEnv(ctx, bareDir, auth.extraEnv(), "fetch", "origin", branchRefspec); err != nil {
 		return "", fmt.Errorf("fetch %s/%s %s: %w", owner, repo, branch, err)
 	}
 	log.Printf("[worktree] curator fetch %s/%s %s in %s", owner, repo, branch, time.Since(start).Round(time.Millisecond))

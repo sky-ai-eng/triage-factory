@@ -10,6 +10,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // fakeResolver records ClientFor calls and returns a preconfigured client.
@@ -19,6 +21,9 @@ type fakeResolver struct {
 	calls  []resolverCall
 	client *ghclient.Client
 	err    error
+	// token is what TokenFor hands back (SKY-391) — the credential the
+	// host-side clone injects. Defaults to the zero Token when unset.
+	token githubapp.Token
 }
 
 type resolverCall struct {
@@ -29,6 +34,13 @@ type resolverCall struct {
 func (f *fakeResolver) ClientFor(ctx context.Context, orgID, target string) (*ghclient.Client, error) {
 	f.calls = append(f.calls, resolverCall{orgID: orgID, target: target})
 	return f.client, f.err
+}
+
+func (f *fakeResolver) TokenFor(ctx context.Context, orgID, target string) (githubapp.Token, error) {
+	if f.err != nil {
+		return githubapp.Token{}, f.err
+	}
+	return f.token, nil
 }
 
 var _ ghclient.Resolver = (*fakeResolver)(nil)
@@ -170,4 +182,50 @@ func TestOwnerForTask(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestResolveCloneToken pins the SKY-391 host-side clone-credential seam.
+// Multi mode: with a resolver wired, resolveCloneToken hands back the App
+// installation token TokenFor returns; with no resolver or on a resolver
+// error it returns "" so the clone proceeds unauthenticated rather than
+// failing the run. Local mode never injects (this ticket leaves local clones
+// on their existing path), even with a resolver wired.
+func TestResolveCloneToken(t *testing.T) {
+	const orgID = "org-1"
+	const owner = "acme"
+
+	t.Run("multi: wired resolver returns the token value", func(t *testing.T) {
+		runmode.SetForTest(t, runmode.ModeMulti)
+		s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+		s.SetRunCredentialResolvers(&fakeResolver{token: githubapp.Token{Value: "ghs_clone"}}, nil, nil)
+		if got := s.resolveCloneToken(context.Background(), orgID, owner); got != "ghs_clone" {
+			t.Errorf("resolveCloneToken = %q, want %q", got, "ghs_clone")
+		}
+	})
+
+	t.Run("multi: no resolver returns empty", func(t *testing.T) {
+		runmode.SetForTest(t, runmode.ModeMulti)
+		s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+		if got := s.resolveCloneToken(context.Background(), orgID, owner); got != "" {
+			t.Errorf("resolveCloneToken with no resolver = %q, want empty", got)
+		}
+	})
+
+	t.Run("multi: resolver error returns empty", func(t *testing.T) {
+		runmode.SetForTest(t, runmode.ModeMulti)
+		s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+		s.SetRunCredentialResolvers(&fakeResolver{err: errors.New("vault down")}, nil, nil)
+		if got := s.resolveCloneToken(context.Background(), orgID, owner); got != "" {
+			t.Errorf("resolveCloneToken on error = %q, want empty (clone proceeds unauthenticated)", got)
+		}
+	})
+
+	t.Run("local: never injects even with a resolver wired", func(t *testing.T) {
+		runmode.SetForTest(t, runmode.ModeLocal)
+		s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+		s.SetRunCredentialResolvers(&fakeResolver{token: githubapp.Token{Value: "ghs_clone"}}, nil, nil)
+		if got := s.resolveCloneToken(context.Background(), orgID, owner); got != "" {
+			t.Errorf("resolveCloneToken in local mode = %q, want empty (local clones unchanged)", got)
+		}
+	})
 }

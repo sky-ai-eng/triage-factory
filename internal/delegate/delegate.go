@@ -396,7 +396,14 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID string, task dom
 	}
 
 	s.updateStatus(orgID, runID, "cloning")
-	wtPath, err := worktree.CreateForPR(ctx, owner, repo, upstreamCloneURL, headCloneURL, pr.HeadRef, prNumber, runID)
+	// Resolve the host-side clone credential for this repo's owner (SKY-391).
+	// CloneAuthFor scopes the token to the upstream's host and no-ops on an
+	// SSH URL or an empty token, so this is inert in local SSH mode and for
+	// public/anonymous clones — only a multi-mode HTTPS private clone gets the
+	// App installation token injected (per-invocation env, never persisted).
+	cloneToken := s.resolveCloneToken(ctx, orgID, owner)
+	wtPath, err := worktree.CreateForPR(ctx, owner, repo, upstreamCloneURL, headCloneURL, pr.HeadRef, prNumber, runID,
+		worktree.WithCloneAuth(worktree.CloneAuthFor(upstreamCloneURL, cloneToken)))
 	if err != nil {
 		return runConfig{}, fmt.Errorf("failed to create worktree: %w", err)
 	}

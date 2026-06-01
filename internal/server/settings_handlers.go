@@ -449,6 +449,14 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 			badRequest(w, "github_clone_protocol must be 'ssh' or 'https'")
 			return
 		}
+		// Multi-mode is HTTPS-only (SKY-391): refuse an ssh write rather than
+		// persist a value the effective resolver (and the clone path) will
+		// ignore. The UI hides the control in multi mode; this rejects a
+		// direct API call.
+		if req.GitHubCloneProtocol == "ssh" && runmode.Current() != runmode.ModeLocal {
+			badRequest(w, "ssh clone protocol is not available in this deployment; use https")
+			return
+		}
 		orgSet.GitHubCloneProtocol = req.GitHubCloneProtocol
 	}
 	if req.JiraBaseURL != nil {
@@ -551,8 +559,14 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// SSH preflight: gate the transition into SSH mode.
-	if orgSet.GitHubCloneProtocol == "ssh" && prevOrgSet.GitHubCloneProtocol != "ssh" {
+	// SSH preflight: gate the transition into SSH mode. Local-mode only
+	// (SKY-391) — PreflightSSH writes the container's ~/.ssh/known_hosts and
+	// probes the operator's ssh-agent, neither of which belongs in a hosted
+	// runtime. In multi mode the ssh write is already rejected above, so
+	// orgSet.GitHubCloneProtocol can't be "ssh" here; the explicit mode gate
+	// makes the no-SSH-in-multi guarantee provable at this call site too.
+	if runmode.Current() == runmode.ModeLocal &&
+		orgSet.GitHubCloneProtocol == "ssh" && prevOrgSet.GitHubCloneProtocol != "ssh" {
 		sshHost := worktree.SSHHostFromBaseURL(creds.GitHubURL)
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 		err := worktree.PreflightSSH(ctx, sshHost)

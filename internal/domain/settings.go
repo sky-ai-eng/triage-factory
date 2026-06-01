@@ -62,6 +62,29 @@ func DefaultOrgSettings() OrgSettings {
 	}
 }
 
+// EffectiveCloneProtocol resolves the clone protocol actually in force, given
+// the stored org setting and whether the deployment is multi-mode (SKY-391).
+//
+// Multi-mode is ALWAYS "https", independent of the stored value: a GitHub App
+// installation token is an HTTPS bearer credential that cannot be used over
+// SSH at all, and the hosted runtime container has no ssh-agent / key /
+// known_hosts. The stored value may still read "ssh" — DefaultOrgSettings
+// returns "ssh" (correct for local), and a pre-SKY-391 row could carry it —
+// so it must not be honored in multi.
+//
+// Local mode honors the stored value, treating only the literal "ssh" as SSH
+// and defaulting empty / "https" / any stale value to "https" — the same
+// semantics backend clone-URL selection and the API view already used.
+func EffectiveCloneProtocol(stored string, multiMode bool) string {
+	if multiMode {
+		return "https"
+	}
+	if stored == "ssh" {
+		return "ssh"
+	}
+	return "https"
+}
+
 // TeamSettings is the team-scope settings row (team_settings table).
 // JiraProjects holds the team's tracked Jira project keys — the full
 // per-project rule rows live in jira_project_status_rules and are

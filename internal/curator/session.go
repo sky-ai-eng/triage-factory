@@ -215,7 +215,9 @@ func (s *projectSession) dispatch(item queueItem) {
 	// pinning the same repo queue rather than race. Per-repo
 	// failures are non-fatal: the agent still gets the project's
 	// knowledge files plus whatever subset of repos materialized.
-	materializePinnedRepos(msgCtx, s.curator.stores.Repos, item.orgID, s.projectID, cwd, project.PinnedRepos)
+	materializePinnedRepos(msgCtx, s.curator.stores.Repos,
+		func(ctx context.Context, owner string) string { return s.curator.cloneTokenFor(ctx, item.orgID, owner) },
+		item.orgID, s.projectID, cwd, project.PinnedRepos)
 	if msgCtx.Err() != nil {
 		// Cancel fired during repo refresh (one big bare clone can
 		// take seconds on a fresh fetch). Don't waste cycles spawning

@@ -25,7 +25,14 @@ import (
 // repo_profiles (validatePinnedRepos), so a missing profile here
 // indicates a race: the user removed the repo from configured-repos
 // AFTER pinning. Same handling — log + skip.
-func materializePinnedRepos(ctx context.Context, repos db.RepoStore, orgID, projectID, projectDir string, pinnedRepos []string) {
+//
+// tokenFor resolves the host-side clone credential for a repo's owner
+// (SKY-391) so private-repo refreshes authenticate in multi mode. It may be
+// nil (tests) or return "" — CloneAuthFor then no-ops, and the refresh runs
+// credential-free exactly as before. The token is scoped to the profile's
+// clone URL host and only injects for an https:// origin, so a local-mode SSH
+// origin is untouched.
+func materializePinnedRepos(ctx context.Context, repos db.RepoStore, tokenFor func(ctx context.Context, owner string) string, orgID, projectID, projectDir string, pinnedRepos []string) {
 	for _, slug := range pinnedRepos {
 		if ctx.Err() != nil {
 			return
@@ -52,7 +59,11 @@ func materializePinnedRepos(ctx context.Context, repos db.RepoStore, orgID, proj
 			log.Printf("[curator] project %s: %s has no branch in profile (skipping)", projectID, slug)
 			continue
 		}
-		if _, err := worktree.EnsureCuratorWorktree(ctx, owner, repo, branch, projectDir); err != nil {
+		var auth worktree.CloneAuth
+		if tokenFor != nil {
+			auth = worktree.CloneAuthFor(profile.CloneURL, tokenFor(ctx, owner))
+		}
+		if _, err := worktree.EnsureCuratorWorktree(ctx, owner, repo, branch, projectDir, worktree.WithCloneAuth(auth)); err != nil {
 			log.Printf("[curator] project %s: materialize %s @ %s failed: %v (skipping)", projectID, slug, branch, err)
 			continue
 		}

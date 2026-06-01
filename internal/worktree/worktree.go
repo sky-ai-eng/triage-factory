@@ -2,9 +2,11 @@ package worktree
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -101,6 +103,96 @@ const (
 	reposDir = ".triagefactory/repos" // bare clones: ~/.triagefactory/repos/{owner}/{repo}.git
 	runsDir  = "triagefactory-runs"   // worktrees: /tmp/triagefactory-runs/{run-id}
 )
+
+// CloneAuth is an optional HTTPS credential for a host-side `git clone` /
+// `git fetch` (SKY-391). The zero value injects nothing — the git subprocess
+// runs exactly as before (anonymous HTTPS for public repos, or SSH via the
+// operator's agent in local mode). When populated, worktree attaches the
+// credential as a host-scoped `http.<prefix>.extraHeader` passed through the
+// subprocess *environment* (never argv, never the persisted origin URL), for
+// the clone and the fetch in the same call.
+//
+// This package stays credential-agnostic by design: it doesn't know whether
+// the token is a GitHub App installation token or a PAT, only that it's the
+// bearer half of GitHub's `x-access-token:<token>` HTTPS Basic credential.
+// Resolver-aware callers (the spawner, the curator) mint it; this leaf
+// package just attaches it. Build a value with CloneAuthFor.
+type CloneAuth struct {
+	// urlPrefix is the `scheme://host[:port]/` the extraHeader is scoped to,
+	// e.g. "https://github.com/". Host-scoping (rather than a bare
+	// http.extraHeader) keeps the token from leaking on a cross-host
+	// redirect. Empty disables injection.
+	urlPrefix string
+	// token is the bearer half of the credential, sent as
+	// base64("x-access-token:" + token). Empty disables injection.
+	token string
+}
+
+// CloneAuthFor scopes token to the host of cloneURL for per-invocation
+// injection. Returns the zero CloneAuth (no injection) when token is empty or
+// cloneURL is not an https:// URL — so SSH remotes (local-mode default) and
+// the no-token public path stay byte-for-byte unchanged. The injection is
+// thus implicitly HTTPS-only without the caller having to branch on protocol.
+func CloneAuthFor(cloneURL, token string) CloneAuth {
+	if token == "" || cloneURL == "" {
+		return CloneAuth{}
+	}
+	u, err := url.Parse(cloneURL)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return CloneAuth{}
+	}
+	return CloneAuth{urlPrefix: "https://" + u.Host + "/", token: token}
+}
+
+// active reports whether this CloneAuth will inject anything.
+func (a CloneAuth) active() bool { return a.urlPrefix != "" && a.token != "" }
+
+// extraEnv returns the GIT_CONFIG_* environment entries that add a
+// host-scoped Authorization extraHeader for one git subprocess, or nil when
+// the auth is inert. Git's env-config form (GIT_CONFIG_COUNT / _KEY_N /
+// _VALUE_N) is used instead of `-c key=value` argv so the token never lands
+// in the process argv (visible via ps //proc to any other host process); the
+// env of a child process is far less exposed.
+func (a CloneAuth) extraEnv() []string {
+	if !a.active() {
+		return nil
+	}
+	creds := "x-access-token:" + a.token
+	header := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(creds))
+	key := "http." + a.urlPrefix + ".extraHeader"
+	return []string{
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=" + key,
+		"GIT_CONFIG_VALUE_0=" + header,
+	}
+}
+
+// CloneOption configures an optional aspect of a worktree clone/fetch entry
+// point. Variadic options keep the ~30 existing call sites (mostly tests)
+// compiling unchanged while letting resolver-aware callers thread a
+// credential where they have one.
+type CloneOption func(*cloneConfig)
+
+type cloneConfig struct {
+	auth CloneAuth
+}
+
+// WithCloneAuth attaches an HTTPS credential to the host-side git clone +
+// fetch for this call. A zero CloneAuth (e.g. from CloneAuthFor on an SSH URL
+// or empty token) is a no-op, so callers can pass it unconditionally.
+func WithCloneAuth(auth CloneAuth) CloneOption {
+	return func(c *cloneConfig) { c.auth = auth }
+}
+
+func resolveCloneOptions(opts []CloneOption) cloneConfig {
+	var c cloneConfig
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&c)
+		}
+	}
+	return c
+}
 
 func repoDir(owner, repo string) (string, error) {
 	home, err := os.UserHomeDir()
@@ -421,11 +513,11 @@ func RemoveClaudeProjectDirForResolved(resolvedCwd string) {
 // in repo_profiles.clone_url, populated during repo profiling). Passing
 // a fork's URL would clobber the bare's origin and is the historical
 // bug this function exists to prevent — see repairOriginURL.
-func EnsureBareClone(ctx context.Context, owner, repo, cloneURL string) (string, error) {
+func EnsureBareClone(ctx context.Context, owner, repo, cloneURL string, opts ...CloneOption) (string, error) {
 	mu := lockRepo(owner, repo)
 	mu.Lock()
 	defer mu.Unlock()
-	return ensureBareCloneLocked(ctx, owner, repo, cloneURL)
+	return ensureBareCloneLocked(ctx, owner, repo, cloneURL, resolveCloneOptions(opts).auth)
 }
 
 // ensureBareCloneLocked clones the bare if missing and repairs a
@@ -445,7 +537,7 @@ func EnsureBareClone(ctx context.Context, owner, repo, cloneURL string) (string,
 // `git fetch` / `git pull`, where it would mirror every PR's head
 // on every refresh — thousands of extra refs on busy repos for no
 // internal benefit.
-func ensureBareCloneLocked(ctx context.Context, owner, repo, cloneURL string) (bareDir string, err error) {
+func ensureBareCloneLocked(ctx context.Context, owner, repo, cloneURL string, auth CloneAuth) (bareDir string, err error) {
 	// Fire the post-clone callback exactly once per call so consumers
 	// (main.go's hook → repo_profiles + websocket) see one event per
 	// attempt regardless of whether we hit the fresh-clone branch or
@@ -472,11 +564,14 @@ func ensureBareCloneLocked(ctx context.Context, owner, repo, cloneURL string) (b
 		go fireCloneResult(owner, repo, err)
 	}()
 
-	bareDir, err = cloneBareIfMissing(ctx, owner, repo, cloneURL)
+	bareDir, err = cloneBareIfMissing(ctx, owner, repo, cloneURL, auth)
 	if err != nil {
 		return "", err
 	}
 	if cloneURL != "" {
+		// repairOriginURL writes the PLAIN URL (never the token) — the
+		// credential lives only in the clone/fetch subprocess env, so the
+		// persisted remote.origin.url stays clean on disk.
 		if err = repairOriginURL(ctx, bareDir, cloneURL); err != nil {
 			return "", fmt.Errorf("repair origin url: %w", err)
 		}
@@ -488,7 +583,7 @@ func ensureBareCloneLocked(ctx context.Context, owner, repo, cloneURL string) (b
 // the bare directory doesn't yet exist. Caller must hold the per-repo
 // lock. Does NOT configure origin URL or refspecs — see
 // ensureBareCloneLocked for the full lifecycle.
-func cloneBareIfMissing(ctx context.Context, owner, repo, cloneURL string) (string, error) {
+func cloneBareIfMissing(ctx context.Context, owner, repo, cloneURL string, auth CloneAuth) (string, error) {
 	bareDir, err := repoDir(owner, repo)
 	if err != nil {
 		return "", fmt.Errorf("resolve repo dir: %w", err)
@@ -503,7 +598,7 @@ func cloneBareIfMissing(ctx context.Context, owner, repo, cloneURL string) (stri
 			return "", fmt.Errorf("mkdir: %w", err)
 		}
 		start := time.Now()
-		if err := gitRunCtx(ctx, "", "clone", "--bare", "--filter=blob:none", cloneURL, bareDir); err != nil {
+		if err := gitRunCtxEnv(ctx, "", auth.extraEnv(), "clone", "--bare", "--filter=blob:none", cloneURL, bareDir); err != nil {
 			return "", fmt.Errorf("bare clone: %w", err)
 		}
 		log.Printf("[worktree] clone %s/%s completed in %s", owner, repo, time.Since(start).Round(time.Millisecond))
@@ -583,12 +678,14 @@ func makeWorktreeDir(runID string) (string, error) {
 // CleanupPRConfig should be called after the run terminates to
 // remove the per-PR remote and config — they live in the bare's
 // shared config and would otherwise accumulate forever.
-func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, runID string) (string, error) {
+func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, runID string, opts ...CloneOption) (string, error) {
+	auth := resolveCloneOptions(opts).auth
+
 	mu := lockRepo(owner, repo)
 	mu.Lock()
 	defer mu.Unlock()
 
-	bareDir, err := ensureBareCloneLocked(ctx, owner, repo, upstreamCloneURL)
+	bareDir, err := ensureBareCloneLocked(ctx, owner, repo, upstreamCloneURL, auth)
 	if err != nil {
 		return "", err
 	}
@@ -613,7 +710,11 @@ func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneUR
 
 	branchRef := fmt.Sprintf("+refs/pull/%d/head:refs/heads/%s", prNumber, localBranch)
 	start := time.Now()
-	if err := gitRunCtx(ctx, bareDir, "fetch", "origin", branchRef); err != nil {
+	// origin == upstreamCloneURL (just ensured), so the same credential that
+	// authorized the clone authorizes this fetch. The fork's head is reached
+	// via the upstream's refs/pull/<n>/head, so no separate fork credential
+	// is needed here.
+	if err := gitRunCtxEnv(ctx, bareDir, auth.extraEnv(), "fetch", "origin", branchRef); err != nil {
 		return "", fmt.Errorf("fetch PR #%d head into %s: %w", prNumber, localBranch, err)
 	}
 	log.Printf("[worktree] fetch PR #%d (refs/pull/%d/head -> %s) completed in %s", prNumber, prNumber, localBranch, time.Since(start).Round(time.Millisecond))
@@ -1042,12 +1143,12 @@ func configureOwnRepoPRTracking(ctx context.Context, bareDir, localBranch string
 // baseBranch is empty, the repo's default branch is detected from
 // origin/HEAD. Used by the eager GitHub PR delegation path where the
 // run has exactly one repo.
-func CreateForBranch(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, runID string) (string, error) {
+func CreateForBranch(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, runID string, opts ...CloneOption) (string, error) {
 	wtDir, err := makeWorktreeDir(runID)
 	if err != nil {
 		return "", err
 	}
-	return createBranchWorktreeAt(ctx, owner, repo, cloneURL, baseBranch, featureBranch, runID, wtDir)
+	return createBranchWorktreeAt(ctx, owner, repo, cloneURL, baseBranch, featureBranch, runID, wtDir, resolveCloneOptions(opts).auth)
 }
 
 // CreateForBranchInRoot is the lazy-Jira-delegation variant: the worktree
@@ -1067,19 +1168,24 @@ func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranc
 	if err := os.MkdirAll(filepath.Dir(wtDir), 0755); err != nil {
 		return "", fmt.Errorf("mkdir owner subdir: %w", err)
 	}
-	return createBranchWorktreeAt(ctx, owner, repo, cloneURL, baseBranch, featureBranch, runID, wtDir)
+	// No CloneAuth here: this is the in-sandbox Jira `workspace add` path
+	// (cmd/exec/workspace), where in-sandbox git credentials are SKY-394's
+	// concern, not the host-side clone this ticket (SKY-391) covers. The
+	// shared body is already auth-capable, so SKY-394 can thread a credential
+	// through when it wires the in-sandbox path.
+	return createBranchWorktreeAt(ctx, owner, repo, cloneURL, baseBranch, featureBranch, runID, wtDir, CloneAuth{})
 }
 
 // createBranchWorktreeAt is the shared body of the two CreateForBranch
 // variants — bare-clone setup, base-branch fetch, `git worktree add`
 // (with branchExists reattach), and exclude-or-rollback. The two
 // public callers differ only in where wtDir lives on disk.
-func createBranchWorktreeAt(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, runID, wtDir string) (string, error) {
+func createBranchWorktreeAt(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, runID, wtDir string, auth CloneAuth) (string, error) {
 	mu := lockRepo(owner, repo)
 	mu.Lock()
 	defer mu.Unlock()
 
-	bareDir, err := ensureBareCloneLocked(ctx, owner, repo, cloneURL)
+	bareDir, err := ensureBareCloneLocked(ctx, owner, repo, cloneURL, auth)
 	if err != nil {
 		return "", err
 	}
@@ -1101,7 +1207,7 @@ func createBranchWorktreeAt(ctx context.Context, owner, repo, cloneURL, baseBran
 	remoteRef := "refs/remotes/origin/" + baseBranch
 	baseRef := fmt.Sprintf("+refs/heads/%s:%s", baseBranch, remoteRef)
 	start := time.Now()
-	if err := gitRunCtx(ctx, bareDir, "fetch", "origin", baseRef); err != nil {
+	if err := gitRunCtxEnv(ctx, bareDir, auth.extraEnv(), "fetch", "origin", baseRef); err != nil {
 		return "", fmt.Errorf("fetch base branch %s: %w", baseBranch, err)
 	}
 	log.Printf("[worktree] fetch %s completed in %s", baseBranch, time.Since(start).Round(time.Millisecond))
@@ -2146,9 +2252,21 @@ func clearStaleLockedWorktreesAll(baseDir string) {
 }
 
 func gitRunCtx(ctx context.Context, dir string, args ...string) error {
+	return gitRunCtxEnv(ctx, dir, nil, args...)
+}
+
+// gitRunCtxEnv is gitRunCtx with extra environment entries appended to the
+// subprocess env (after os.Environ, so they override). Used to pass the
+// per-invocation GIT_CONFIG_* auth header (CloneAuth.extraEnv) into a clone
+// or fetch without persisting it anywhere. extraEnv nil/empty behaves exactly
+// like gitRunCtx.
+func gitRunCtxEnv(ctx context.Context, dir string, extraEnv []string, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
+	}
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {

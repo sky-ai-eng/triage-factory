@@ -14,6 +14,31 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
+// TestDefaultedCloneProtocolView_ModeAware pins the API GET view (SKY-391):
+// multi mode always reports "https" regardless of the stored value, while
+// local mode reports the literal "ssh" or coerces everything else to "https".
+// This is what the Settings page reads to render the (multi-hidden) control.
+func TestDefaultedCloneProtocolView_ModeAware(t *testing.T) {
+	t.Run("multi coerces ssh to https", func(t *testing.T) {
+		runmode.SetForTest(t, runmode.ModeMulti)
+		if got := defaultedCloneProtocolView("ssh"); got != "https" {
+			t.Errorf("multi-mode view of stored=ssh = %q, want https", got)
+		}
+		if got := defaultedCloneProtocolView("https"); got != "https" {
+			t.Errorf("multi-mode view of stored=https = %q, want https", got)
+		}
+	})
+	t.Run("local honors ssh", func(t *testing.T) {
+		runmode.SetForTest(t, runmode.ModeLocal)
+		if got := defaultedCloneProtocolView("ssh"); got != "ssh" {
+			t.Errorf("local-mode view of stored=ssh = %q, want ssh", got)
+		}
+		if got := defaultedCloneProtocolView(""); got != "https" {
+			t.Errorf("local-mode view of stored=\"\" = %q, want https", got)
+		}
+	})
+}
+
 // --- Unit tests: validateProjectRules --------------------------------------
 //
 // Every persisted project must be fully configured. Partial saves aren't a

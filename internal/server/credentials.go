@@ -49,13 +49,27 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Multi-mode is HTTPS-only (SKY-391): reject an ssh selection rather than
+	// store a value the clone path will ignore. SSH would need a per-org key
+	// the hosted runtime has no machinery to provision, and PreflightSSH
+	// (below) must never run in a container — it writes ~/.ssh/known_hosts.
+	if req.CloneProtocol == "ssh" && runmode.Current() != runmode.ModeLocal {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+			"error": "ssh clone protocol is not available in this deployment; use https",
+			"field": "clone_protocol",
+		})
+		return
+	}
+
 	// Hard-block setup with SSH selected if our preflight against the
 	// configured GitHub host can't authenticate. Run BEFORE the PAT
 	// check so the user gets the SSH error first rather than entering
 	// a valid PAT just to find out their SSH is broken on the next
 	// step. The HTTPS path skips this entirely. The probe target is
 	// derived from the URL the user just submitted so GHE deployments
-	// see hints with their hostname, not "github.com".
+	// see hints with their hostname, not "github.com". Local-mode only —
+	// the multi-mode ssh rejection above guarantees we never reach here
+	// with ssh selected outside local.
 	if req.CloneProtocol == "ssh" {
 		sshHost := worktree.SSHHostFromBaseURL(req.GitHubURL)
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
