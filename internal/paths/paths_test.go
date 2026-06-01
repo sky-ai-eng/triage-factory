@@ -3,6 +3,7 @@ package paths
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -108,7 +109,12 @@ func TestStateRootErr_MultiHasNoHomeDependency(t *testing.T) {
 
 func TestStateRootErr_ErrorsWhenHomeUnresolvable(t *testing.T) {
 	// No SetForTest override, local mode, $HOME unset → os.UserHomeDir
-	// fails and StateRootErr surfaces it instead of panicking.
+	// fails and StateRootErr surfaces it instead of panicking. Skipped on
+	// Windows, where os.UserHomeDir reads %USERPROFILE% rather than $HOME,
+	// so an empty $HOME wouldn't force the failure under test.
+	if runtime.GOOS == "windows" {
+		t.Skip("os.UserHomeDir is USERPROFILE-based on Windows, not $HOME")
+	}
 	runmode.SetForTest(t, runmode.ModeLocal)
 	t.Setenv("HOME", "")
 	if got, err := StateRootErr(); err == nil {
@@ -117,6 +123,9 @@ func TestStateRootErr_ErrorsWhenHomeUnresolvable(t *testing.T) {
 }
 
 func TestStateRoot_PanicsWhenHomeUnresolvable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.UserHomeDir is USERPROFILE-based on Windows, not $HOME")
+	}
 	runmode.SetForTest(t, runmode.ModeLocal)
 	t.Setenv("HOME", "")
 	defer func() {
