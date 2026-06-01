@@ -119,10 +119,10 @@ func (c *Client) CheckRepoAccess(ctx context.Context, owner, repo string) (reach
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
 
-	switch {
-	case resp.StatusCode == http.StatusOK:
+	switch resp.StatusCode {
+	case http.StatusOK:
 		return true, true
-	case resp.StatusCode == http.StatusNotFound, resp.StatusCode == http.StatusForbidden:
+	case http.StatusNotFound, http.StatusForbidden:
 		return false, true
 	default:
 		// 5xx and any other unexpected status → indeterminate, fail open.
