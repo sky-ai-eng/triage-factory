@@ -164,8 +164,9 @@ export default function GitHubTeamSelector({
           </p>
         </div>
 
-        {/* Search — hidden in the empty/error states where there's nothing to filter */}
-        {!noTeams && !error && (
+        {/* Search — hidden while loading and in the empty/error states where
+            there's nothing to filter */}
+        {!loading && !noTeams && !error && (
           <div className="px-6 pb-3">
             <input
               type="text"
