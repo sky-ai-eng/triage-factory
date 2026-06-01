@@ -297,11 +297,11 @@ func TestReviewRequested_UnknownIdentity_NoTask(t *testing.T) {
 	}
 }
 
-// TestReviewSubmitted_ClosesOnlySubmittersTask pins the parity-correct close:
-// when reviewer A submits their review, only A's per-reviewer review_requested
-// task closes — B's stays open. (Pre-per-reviewer, this closed every
-// review_requested task on the entity.)
-func TestReviewSubmitted_ClosesOnlySubmittersTask(t *testing.T) {
+// TestReviewByReviewer_ClosesOnlyTheirTask pins the parity-correct close: when
+// reviewer A submits a review (any typed review_* event), only A's per-reviewer
+// review_requested task closes — B's stays open. Driven off the typed review
+// event, so it works for any reviewer in any mode.
+func TestReviewByReviewer_ClosesOnlyTheirTask(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
 	setReviewHost(t, database)
@@ -319,12 +319,12 @@ func TestReviewSubmitted_ClosesOnlySubmittersTask(t *testing.T) {
 	emitReviewRequested(router, entityID, "user:bob", events.GitHubPRReviewRequestedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 7, RequestedLogin: "bob"})
 
-	// Alice submits her review.
-	subMeta, _ := json.Marshal(events.GitHubPRReviewSubmittedMetadata{
-		Author: "carol", Reviewer: "alice", ReviewType: "approved", Repo: "owner/repo", PRNumber: 7,
+	// Alice reviews (approves).
+	subMeta, _ := json.Marshal(events.GitHubPRReviewApprovedMetadata{
+		Author: "carol", Reviewer: "alice", Repo: "owner/repo", PRNumber: 7,
 	})
 	router.HandleEvent(domain.Event{
-		EventType:    domain.EventGitHubPRReviewSubmitted,
+		EventType:    domain.EventGitHubPRReviewApproved,
 		EntityID:     &entityID,
 		MetadataJSON: string(subMeta),
 		OrgID:        runmode.LocalDefaultOrg,

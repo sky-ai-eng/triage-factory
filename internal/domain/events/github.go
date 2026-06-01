@@ -26,8 +26,9 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // -----------------------------------------------------------------------------
 
 // GitHubPRReviewRequestedMetadata is emitted when a reviewer is added to a PR.
-// This event type is scoped to "someone requested my review" — the inverse
-// (`review_submitted`) is for reviews *I* made on others' PRs.
+// This event type is scoped to "someone requested my review"; the act of
+// reviewing surfaces as the typed review_* events (approved / commented /
+// changes_requested / dismissed), which also close this request.
 //
 // The open-set discriminator for this event is the *requested reviewer* —
 // the tracker emits one event per newly-requested TF-known identity, with the
@@ -124,44 +125,6 @@ func (p GitHubPRReviewRequestRemovedPredicate) Matches(m GitHubPRReviewRequestRe
 // drift on the format.
 func ReviewerDedupKeyUser(login string) string   { return "user:" + login }
 func ReviewerDedupKeyTeam(orgSlug string) string { return "team:" + orgSlug }
-
-// -----------------------------------------------------------------------------
-// review_submitted — "I reviewed someone else's PR"
-// -----------------------------------------------------------------------------
-
-// GitHubPRReviewSubmittedMetadata is emitted when the session user posts a
-// review on someone else's PR. The ReviewType is carried in metadata (not
-// split into separate event types) because this event is historical — the
-// review already happened, so we don't fan out per type.
-type GitHubPRReviewSubmittedMetadata struct {
-	Author     string   `json:"author"`
-	Reviewer   string   `json:"reviewer"`    // session user login
-	ReviewType string   `json:"review_type"` // "approved" | "commented" | "changes_requested" | "dismissed"
-	ReviewID   int64    `json:"review_id"`
-	Repo       string   `json:"repo"`
-	PRNumber   int      `json:"pr_number"`
-	IsDraft    bool     `json:"is_draft"`
-	HeadSHA    string   `json:"head_sha"`
-	Labels     []string `json:"labels"`
-}
-
-type GitHubPRReviewSubmittedPredicate struct {
-	AuthorIn   []string `json:"author_in,omitempty" doc:"Match PRs authored by anyone in this list (e.g. for self-review flows: include your own login)."`
-	Author     *string  `json:"author,omitempty"`
-	Repo       *string  `json:"repo,omitempty"`
-	ReviewType *string  `json:"review_type,omitempty" enum:"approved,commented,changes_requested,dismissed" doc:"Filter by the review type you submitted."`
-	IsDraft    *bool    `json:"is_draft,omitempty"`
-	HasLabel   *string  `json:"has_label,omitempty"`
-}
-
-func (p GitHubPRReviewSubmittedPredicate) Matches(m GitHubPRReviewSubmittedMetadata) bool {
-	return stringInSliceFold(p.AuthorIn, m.Author) &&
-		strEq(p.Author, m.Author) &&
-		strEq(p.Repo, m.Repo) &&
-		strEq(p.ReviewType, m.ReviewType) &&
-		boolEq(p.IsDraft, m.IsDraft) &&
-		hasLabel(p.HasLabel, m.Labels)
-}
 
 // -----------------------------------------------------------------------------
 // review_changes_requested / review_approved / review_commented / review_dismissed
@@ -643,7 +606,6 @@ func (p GitHubPRMentionedPredicate) Matches(m GitHubPRMentionedMetadata) bool {
 func init() {
 	Register(newSchema[GitHubPRReviewRequestedMetadata, GitHubPRReviewRequestedPredicate](domain.EventGitHubPRReviewRequested))
 	Register(newSchema[GitHubPRReviewRequestRemovedMetadata, GitHubPRReviewRequestRemovedPredicate](domain.EventGitHubPRReviewRequestRemoved))
-	Register(newSchema[GitHubPRReviewSubmittedMetadata, GitHubPRReviewSubmittedPredicate](domain.EventGitHubPRReviewSubmitted))
 
 	Register(newSchema[GitHubPRReviewChangesRequestedMetadata, GitHubPRReviewChangesRequestedPredicate](domain.EventGitHubPRReviewChangesRequested))
 	Register(newSchema[GitHubPRReviewApprovedMetadata, GitHubPRReviewApprovedPredicate](domain.EventGitHubPRReviewApproved))

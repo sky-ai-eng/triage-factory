@@ -26,16 +26,11 @@ const EVENT_DISPLAY: Record<string, { label: string; description: string; color:
     color: 'bg-slate-500/10 text-slate-600',
   },
 
-  // --- GitHub PR: review request / submission ---
+  // --- GitHub PR: review request ---
   'github:pr:review_requested': {
     label: 'Review Requested',
     description: 'Someone requested your review on a PR',
     color: 'bg-amber-500/10 text-amber-700',
-  },
-  'github:pr:review_submitted': {
-    label: 'Review Submitted',
-    description: "You reviewed someone else's PR",
-    color: 'bg-blue-500/10 text-blue-600',
   },
 
   // --- GitHub PR: per-check CI events (split on conclusion) ---

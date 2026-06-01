@@ -273,7 +273,6 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 		if currState.State == prevState.State {
 			continue
 		}
-		reviewerIsSelf := reviewer == username
 
 		switch currState.State {
 		case "CHANGES_REQUESTED":
@@ -302,17 +301,6 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 				Author:   curr.Author,
 				Reviewer: reviewer,
 				ReviewID: 0, Repo: curr.Repo, PRNumber: curr.Number,
-				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
-			})
-		}
-
-		// Also emit review_submitted when session user posted the review.
-		if reviewerIsSelf && currState.State != prevState.State {
-			emitAt(domain.EventGitHubPRReviewSubmitted, "", currState.SubmittedAt, events.GitHubPRReviewSubmittedMetadata{
-				Author:     curr.Author,
-				Reviewer:   username,
-				ReviewType: stateToReviewType(currState.State),
-				ReviewID:   0, Repo: curr.Repo, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
 		}
@@ -587,21 +575,6 @@ func reviewMap(reviews []domain.ReviewState) map[string]domain.ReviewState {
 		m[r.Author] = r
 	}
 	return m
-}
-
-func stateToReviewType(state string) string {
-	switch state {
-	case "APPROVED":
-		return "approved"
-	case "CHANGES_REQUESTED":
-		return "changes_requested"
-	case "COMMENTED":
-		return "commented"
-	case "DISMISSED":
-		return "dismissed"
-	default:
-		return "unknown"
-	}
 }
 
 // extractProject extracts the project key from a Jira issue key (e.g. "SKY" from "SKY-123").

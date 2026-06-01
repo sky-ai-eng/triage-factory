@@ -220,7 +220,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	// Inline close checks run unconditionally — they are lifecycle signals
 	// that close stale tasks. They must fire even when no task_rules or
 	// triggers match the event, because close-signal events (ci_check_passed,
-	// review_submitted, review_request_removed) are not task-creating events.
+	// a submitted review, review_request_removed) are not task-creating events.
 	if r.runInlineCloseChecks(orgID, evt, entityID) {
 		r.ws.Broadcast(websocket.Event{Type: "tasks_updated", OrgID: orgID, Data: map[string]any{}})
 	}
@@ -1502,9 +1502,18 @@ func (r *Router) runInlineCloseChecks(orgID string, evt domain.Event, entityID s
 	case domain.EventGitHubPRReviewApproved,
 		domain.EventGitHubPRReviewCommented,
 		domain.EventGitHubPRReviewDismissed:
-		return r.closeCheckReviewResolved(orgID, evt, entityID)
-	case domain.EventGitHubPRReviewSubmitted:
-		return r.closeCheckReviewSubmitted(orgID, evt, entityID)
+		// A submitted review does two things: (a) satisfies the reviewer's
+		// own review_requested obligation, and (b) may resolve the author's
+		// outstanding changes_requested. Run both — they touch different
+		// tasks (the reviewer's request vs the author's changes).
+		reviewed := r.closeReviewerRequestOnReview(orgID, evt, entityID)
+		resolved := r.closeCheckReviewResolved(orgID, evt, entityID)
+		return reviewed || resolved
+	case domain.EventGitHubPRReviewChangesRequested:
+		// Requesting changes is still a review — the reviewer fulfilled their
+		// review_requested obligation. (The changes themselves spawn the
+		// author-side task via the normal rule path, not here.)
+		return r.closeReviewerRequestOnReview(orgID, evt, entityID)
 	case domain.EventGitHubPRReviewRequestRemoved:
 		return r.closeCheckReviewRequestRemoved(orgID, evt, entityID)
 	case domain.EventJiraIssueAssigned:
@@ -1627,32 +1636,32 @@ func (r *Router) closeCheckReviewResolved(orgID string, evt domain.Event, entity
 	return closed
 }
 
-// closeCheckReviewSubmitted: a reviewer submitted their review, so their
+// closeReviewerRequestOnReview: a reviewer submitted a review (any type:
+// approved / commented / changes_requested / dismissed), so their
 // review_requested obligation is satisfied — close that reviewer's per-reviewer
 // task (keyed "user:<reviewer>"), and only that one. A review by reviewer A
 // must not close reviewer B's task on the same PR.
 //
-// The reviewer is always an individual (github teams don't submit reviews), so
-// the key is the user namespace. This is mode-agnostic: in local N=1 the
-// submitter is the lone user; the close logic is identical regardless of mode.
+// Driven off the typed review events (which fire for EVERY reviewer in both
+// local and multi mode and carry Reviewer), not a self-only "submitted" event:
+// the close is per-reviewer by identity, mode-agnostic, and independent of
+// whether GitHub happens to drop the reviewer from the requested list (a
+// comment-only review may not, so review_request_removed alone wouldn't cover
+// it). A team review_requested task (keyed "team:<org>/<slug>") is NOT closed
+// here — an individual's review doesn't satisfy a team request; that closes via
+// the membership-dismissal review_request_removed (closeCheckReviewRequestRemoved).
 //
-// Today this only fires in local mode — the org-wide multi poll has no single
-// session user, so review_submitted (gated on reviewer==username in diff.go) is
-// not emitted there. The per-reviewer close still has full parity in multi via
-// review_request_removed: GitHub drops a reviewer from the requested list once
-// they review, and that per-reviewer removal closes the same task (see
-// closeCheckReviewRequestRemoved). Making review_submitted itself resolver-
-// driven in multi is reviewer-axis follow-on work and not required for this
-// close to be correct.
-func (r *Router) closeCheckReviewSubmitted(orgID string, evt domain.Event, entityID string) bool {
-	var meta events.GitHubPRReviewSubmittedMetadata
-	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
+// The reviewer is always an individual (github teams don't submit reviews), so
+// the key is always the user namespace.
+func (r *Router) closeReviewerRequestOnReview(orgID string, evt domain.Event, entityID string) bool {
+	// All four typed review metadata structs carry a top-level "reviewer".
+	var m struct {
+		Reviewer string `json:"reviewer"`
+	}
+	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil || m.Reviewer == "" {
 		return false
 	}
-	if meta.Reviewer == "" {
-		return false
-	}
-	dedupKey := events.ReviewerDedupKeyUser(meta.Reviewer)
+	dedupKey := events.ReviewerDedupKeyUser(m.Reviewer)
 
 	tasks, err := r.tasks.FindActiveByEntityAndTypeSystem(context.Background(), orgID, entityID, domain.EventGitHubPRReviewRequested)
 	if err != nil {
@@ -1663,10 +1672,10 @@ func (r *Router) closeCheckReviewSubmitted(orgID string, evt domain.Event, entit
 		if t.DedupKey != dedupKey {
 			continue // a different reviewer's task — leave it open
 		}
-		if err := r.closeTaskWithAudit(orgID, t.ID, evt.ID, "auto_closed_by_event", domain.EventGitHubPRReviewSubmitted); err != nil {
+		if err := r.closeTaskWithAudit(orgID, t.ID, evt.ID, "auto_closed_by_event", evt.EventType); err != nil {
 			log.Printf("[router] failed to close review_requested task %s: %v", t.ID, err)
 		} else {
-			log.Printf("[router] inline-closed task %s (review submitted by %s)", t.ID, meta.Reviewer)
+			log.Printf("[router] inline-closed task %s (reviewed by %s via %s)", t.ID, m.Reviewer, evt.EventType)
 			closed = true
 		}
 	}

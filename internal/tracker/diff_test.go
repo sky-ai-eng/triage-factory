@@ -418,9 +418,9 @@ func TestDiff_Review_SameState_NoEvent(t *testing.T) {
 	}
 }
 
-func TestDiff_Review_SelfReview_EmitsSubmitted(t *testing.T) {
+func TestDiff_Review_EmitsTypedReviewWithReviewer(t *testing.T) {
 	prev := basePRSnapshot()
-	prev.Author = "bob" // not self — so this is someone else's PR
+	prev.Author = "bob"
 	curr := basePRSnapshot()
 	curr.Author = "bob"
 	curr.Reviews = []domain.ReviewState{
@@ -429,21 +429,16 @@ func TestDiff_Review_SelfReview_EmitsSubmitted(t *testing.T) {
 
 	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 
-	// Should emit review_commented (the specific type) AND review_submitted (I reviewed).
+	// A submitted review surfaces only as the typed review_* event carrying the
+	// reviewer — there is no separate self-only "review_submitted" event; the
+	// router closes the reviewer's request off this typed event.
 	commented := findEvent(evts, domain.EventGitHubPRReviewCommented)
-	submitted := findEvent(evts, domain.EventGitHubPRReviewSubmitted)
 	if commented == nil {
-		t.Error("expected review_commented event")
+		t.Fatal("expected review_commented event")
 	}
-	if submitted == nil {
-		t.Fatal("expected review_submitted event for self-review")
-	}
-	meta := decodeMetadata[events.GitHubPRReviewSubmittedMetadata](t, *submitted)
+	meta := decodeMetadata[events.GitHubPRReviewCommentedMetadata](t, *commented)
 	if meta.Reviewer != testUser {
-		t.Errorf("expected Reviewer=%s on submitted event (tracker only emits review_submitted when session user is the reviewer), got %s", testUser, meta.Reviewer)
-	}
-	if meta.ReviewType != "commented" {
-		t.Errorf("expected ReviewType=commented, got %s", meta.ReviewType)
+		t.Errorf("expected Reviewer=%s on review_commented, got %s", testUser, meta.Reviewer)
 	}
 }
 

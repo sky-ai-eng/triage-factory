@@ -69,10 +69,6 @@ const (
 	// "Someone asked me to review their PR" — singular; reviewer-direction is intrinsic.
 	EventGitHubPRReviewRequested = "github:pr:review_requested"
 
-	// "I reviewed someone else's PR" — singular inverse of the per-reviewer events
-	// above. Type doesn't matter for triage (it already happened); kept singular.
-	EventGitHubPRReviewSubmitted = "github:pr:review_submitted"
-
 	// "My review request was removed" — fires when the session user
 	// disappears from a PR's ReviewRequests list (reviewed, or author
 	// rescinded the request). Close signal for review_requested tasks.
@@ -128,7 +124,6 @@ func AllEventTypes() []EventType {
 
 		// --- GitHub PR — review request / submission ---
 		{ID: EventGitHubPRReviewRequested, Source: "github", Category: "pr", Label: "Review Requested", Description: "Someone requested your review on a PR"},
-		{ID: EventGitHubPRReviewSubmitted, Source: "github", Category: "pr", Label: "Review Submitted", Description: "I reviewed someone else's PR (inverse of review_*)"},
 		{ID: EventGitHubPRReviewRequestRemoved, Source: "github", Category: "pr", Label: "Review Request Removed", Description: "Your review request was removed from a PR (review completed or request rescinded)"},
 
 		// --- GitHub PR — per-check CI events (split on conclusion) ---
