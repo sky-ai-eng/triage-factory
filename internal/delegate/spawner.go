@@ -155,9 +155,6 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 	}
 }
 
-// useSSHCloneProtocol returns true when the per-org GitHub clone
-// protocol is "ssh". orgs is nil-safe and any store failure logs +
-// defaults to HTTPS, matching the prior config.Load() degrade path.
 // useSSHCloneProtocol reports whether this run should clone over SSH. The
 // ssh-vs-https decision is delegated to domain.EffectiveCloneProtocol so the
 // "multi-mode is always HTTPS" invariant has a single home shared with the
