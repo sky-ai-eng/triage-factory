@@ -51,7 +51,7 @@ func TestBackfillReviewRequested_EmitsBusEvent(t *testing.T) {
 		Labels:    []string{"ready"},
 		CreatedAt: prCreatedAt,
 	}
-	if err := tracker.backfillReviewRequested("entity-xyz", snap); err != nil {
+	if err := tracker.backfillReviewRequested("entity-xyz", snap, "bob", ""); err != nil {
 		t.Fatalf("backfillReviewRequested: %v", err)
 	}
 
@@ -126,7 +126,7 @@ func TestBackfillReviewRequested_MissingCreatedAt_LeavesOccurredAtZero(t *testin
 		Author: "alice",
 		// CreatedAt deliberately empty.
 	}
-	if err := tracker.backfillReviewRequested("entity-zero", snap); err != nil {
+	if err := tracker.backfillReviewRequested("entity-zero", snap, "bob", ""); err != nil {
 		t.Fatalf("backfillReviewRequested: %v", err)
 	}
 

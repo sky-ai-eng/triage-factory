@@ -88,6 +88,26 @@ func (m *Manager) trackerForOrg(orgID string) *tracker.Tracker {
 	return tracker.New(m.database, m.bus, m.tasks, m.entities, m.repos, orgID)
 }
 
+// reviewerResolver builds the per-cycle TF-known reviewer resolver.
+// A non-empty username is the local/PAT "session user" signal → resolve
+// against that one login + their team memberships, preserving today's N=1
+// behavior. Every other path (multi mode, or local+App where there's no
+// session login) resolves against the stores, host from org_settings.
+func (m *Manager) reviewerResolver(ctx context.Context, orgID, username string, userTeams []string) tracker.ReviewerResolver {
+	if username != "" {
+		return tracker.NewLocalReviewerResolver(username, userTeams)
+	}
+	host := ""
+	if m.orgs != nil {
+		if orgSet, err := m.orgs.GetSettingsSystem(ctx, orgID); err != nil {
+			log.Printf("[github] org %s: read settings for reviewer resolver: %v", orgID, err)
+		} else {
+			host = orgSet.GitHubBaseURL
+		}
+	}
+	return tracker.NewStoreReviewerResolver(ctx, orgID, host, m.users, m.githubGroups)
+}
+
 // reportError invokes the OnError callback if set. Centralized so adding
 // behavior later (metrics, rate-limiting) has one call site. orgID
 // scopes the failure to a tenant; pass empty when the failure is
@@ -403,6 +423,11 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// configured), which 403s on this endpoint. If NO installation is
 	// functional we'd otherwise leave the org unpolled despite an available
 	// PAT — so fall through to the PAT path in that case.
+	// App tokens have no "me", so the resolver is store-backed (host from
+	// org_settings). Built once per org cycle — host is stable across the
+	// per-installation loop below.
+	resolver := m.reviewerResolver(ctx, orgID, "", nil)
+
 	covered := make(map[string]bool, len(repos))
 	anyFunctional := false
 	for _, inst := range installs {
@@ -425,7 +450,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		}
 		// App tokens have no "me" — drop the username axis for discovery
 		// (Sharp edge 2). Predicates still match per-PR fields downstream.
-		if _, rerr := m.trackerForOrg(orgID).RefreshGitHub(client, "", nil, scoped); rerr != nil {
+		if _, rerr := m.trackerForOrg(orgID).RefreshGitHub(client, "", scoped, resolver); rerr != nil {
 			log.Printf("[github] org %s installation %s: tracker error: %v", orgID, inst.AccountLogin, rerr)
 			m.reportError("github", orgID, rerr)
 		}
@@ -553,7 +578,8 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 		}
 	}
 
-	if _, err := m.trackerForOrg(orgID).RefreshGitHub(client, username, userTeams, repos); err != nil {
+	resolver := m.reviewerResolver(ctx, orgID, username, userTeams)
+	if _, err := m.trackerForOrg(orgID).RefreshGitHub(client, username, repos, resolver); err != nil {
 		log.Printf("[github] org %s: tracker error: %v", orgID, err)
 		m.reportError("github", orgID, err)
 	}

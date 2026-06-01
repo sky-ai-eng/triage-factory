@@ -1075,7 +1075,7 @@ func main() {
 	// Event router — records events, creates/bumps tasks, auto-delegates on
 	// matching triggers, runs inline close checks. Also handles post-scoring
 	// re-derive via the scorer callback wired above.
-	eventRouter = routing.NewRouter(stores.Prompts, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users, stores.Tasks, stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, stores.TeamGitHubRepos, stores.JiraStatusRules, spawner, scorer, wsHub)
+	eventRouter = routing.NewRouter(stores.Prompts, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users, stores.Tasks, stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, stores.TeamGitHubRepos, stores.JiraStatusRules, stores.TeamGitHubGroups, spawner, scorer, wsHub)
 	// System-service profile (D9a): the router branches on evt.OrgID
 	// itself when persisting and fanning out — every event flows here
 	// regardless of tenant. Multi-mode handlers thread the orgID into

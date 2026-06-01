@@ -28,6 +28,13 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // GitHubPRReviewRequestedMetadata is emitted when a reviewer is added to a PR.
 // This event type is scoped to "someone requested my review" — the inverse
 // (`review_submitted`) is for reviews *I* made on others' PRs.
+//
+// The open-set discriminator for this event is the *requested reviewer* —
+// the tracker emits one event per newly-requested TF-known identity, with the
+// event's dedup_key namespacing it ("user:<login>" / "team:<org>/<slug>").
+// Exactly one of RequestedLogin / RequestedTeam is set per event; the router
+// routes the task's visibility to that identity's team(s). Author still
+// carries the PR author for predicate matching.
 type GitHubPRReviewRequestedMetadata struct {
 	Author   string   `json:"author"` // PR author login
 	Repo     string   `json:"repo"`   // "owner/name"
@@ -36,14 +43,22 @@ type GitHubPRReviewRequestedMetadata struct {
 	HeadSHA  string   `json:"head_sha"`
 	Labels   []string `json:"labels"` // snapshot at emission time
 	Title    string   `json:"title"`
+	// RequestedLogin is the requested reviewer's GitHub login when the
+	// request named an individual user; empty for github-team requests.
+	RequestedLogin string `json:"requested_login,omitempty"`
+	// RequestedTeam is the requested github team in "org/slug" form when
+	// the request named a team; empty for individual-user requests.
+	RequestedTeam string `json:"requested_team,omitempty"`
 }
 
 type GitHubPRReviewRequestedPredicate struct {
-	AuthorIn []string `json:"author_in,omitempty" doc:"Match PRs authored by anyone in this list (GitHub logins, case-insensitive)."`
-	Author   *string  `json:"author,omitempty" doc:"Exact-match on PR author login (e.g. 'dependabot[bot]')."`
-	Repo     *string  `json:"repo,omitempty" doc:"Scope to a specific repo (owner/name)."`
-	IsDraft  *bool    `json:"is_draft,omitempty" doc:"Match draft vs. ready-for-review PRs."`
-	HasLabel *string  `json:"has_label,omitempty" doc:"Require the PR to currently bear this label."`
+	AuthorIn       []string `json:"author_in,omitempty" doc:"Match PRs authored by anyone in this list (GitHub logins, case-insensitive)."`
+	Author         *string  `json:"author,omitempty" doc:"Exact-match on PR author login (e.g. 'dependabot[bot]')."`
+	Repo           *string  `json:"repo,omitempty" doc:"Scope to a specific repo (owner/name)."`
+	IsDraft        *bool    `json:"is_draft,omitempty" doc:"Match draft vs. ready-for-review PRs."`
+	HasLabel       *string  `json:"has_label,omitempty" doc:"Require the PR to currently bear this label."`
+	RequestedLogin *string  `json:"requested_login,omitempty" doc:"Match only when this user login was the requested reviewer (e.g. predicate a team's bot auto-review on the requested identity)."`
+	RequestedTeam  *string  `json:"requested_team,omitempty" doc:"Match only when this github team ('org/slug') was the requested reviewer."`
 }
 
 func (p GitHubPRReviewRequestedPredicate) Matches(m GitHubPRReviewRequestedMetadata) bool {
@@ -51,13 +66,19 @@ func (p GitHubPRReviewRequestedPredicate) Matches(m GitHubPRReviewRequestedMetad
 		strEq(p.Author, m.Author) &&
 		strEq(p.Repo, m.Repo) &&
 		boolEq(p.IsDraft, m.IsDraft) &&
-		hasLabel(p.HasLabel, m.Labels)
+		hasLabel(p.HasLabel, m.Labels) &&
+		strEq(p.RequestedLogin, m.RequestedLogin) &&
+		strEq(p.RequestedTeam, m.RequestedTeam)
 }
 
 // -----------------------------------------------------------------------------
 // review_request_removed — "my review request was removed"
 // -----------------------------------------------------------------------------
 
+// GitHubPRReviewRequestRemovedMetadata mirrors the requested side: the
+// per-identity removal carries the same RequestedLogin / RequestedTeam so
+// the router can close the one task keyed to that reviewer rather than every
+// review_requested task on the entity.
 type GitHubPRReviewRequestRemovedMetadata struct {
 	Author   string   `json:"author"`
 	Repo     string   `json:"repo"`
@@ -66,14 +87,21 @@ type GitHubPRReviewRequestRemovedMetadata struct {
 	HeadSHA  string   `json:"head_sha"`
 	Labels   []string `json:"labels"`
 	Title    string   `json:"title"`
+	// RequestedLogin / RequestedTeam identify which requested reviewer was
+	// dropped; exactly one is set, matching the review_requested event the
+	// removal reconciles against.
+	RequestedLogin string `json:"requested_login,omitempty"`
+	RequestedTeam  string `json:"requested_team,omitempty"`
 }
 
 type GitHubPRReviewRequestRemovedPredicate struct {
-	AuthorIn []string `json:"author_in,omitempty" doc:"Match PRs authored by anyone in this list."`
-	Author   *string  `json:"author,omitempty" doc:"Exact-match on PR author login."`
-	Repo     *string  `json:"repo,omitempty" doc:"Scope to a specific repo (owner/name)."`
-	IsDraft  *bool    `json:"is_draft,omitempty" doc:"Match draft vs. ready-for-review PRs."`
-	HasLabel *string  `json:"has_label,omitempty" doc:"Require the PR to currently bear this label."`
+	AuthorIn       []string `json:"author_in,omitempty" doc:"Match PRs authored by anyone in this list."`
+	Author         *string  `json:"author,omitempty" doc:"Exact-match on PR author login."`
+	Repo           *string  `json:"repo,omitempty" doc:"Scope to a specific repo (owner/name)."`
+	IsDraft        *bool    `json:"is_draft,omitempty" doc:"Match draft vs. ready-for-review PRs."`
+	HasLabel       *string  `json:"has_label,omitempty" doc:"Require the PR to currently bear this label."`
+	RequestedLogin *string  `json:"requested_login,omitempty" doc:"Match only when this user login's request was removed."`
+	RequestedTeam  *string  `json:"requested_team,omitempty" doc:"Match only when this github team's ('org/slug') request was removed."`
 }
 
 func (p GitHubPRReviewRequestRemovedPredicate) Matches(m GitHubPRReviewRequestRemovedMetadata) bool {
@@ -81,7 +109,9 @@ func (p GitHubPRReviewRequestRemovedPredicate) Matches(m GitHubPRReviewRequestRe
 		strEq(p.Author, m.Author) &&
 		strEq(p.Repo, m.Repo) &&
 		boolEq(p.IsDraft, m.IsDraft) &&
-		hasLabel(p.HasLabel, m.Labels)
+		hasLabel(p.HasLabel, m.Labels) &&
+		strEq(p.RequestedLogin, m.RequestedLogin) &&
+		strEq(p.RequestedTeam, m.RequestedTeam)
 }
 
 // -----------------------------------------------------------------------------

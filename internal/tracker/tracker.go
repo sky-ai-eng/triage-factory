@@ -78,16 +78,18 @@ func (t *Tracker) publish(evt domain.Event) {
 
 // --- GitHub ---
 
-// RefreshGitHub runs the full tracking cycle for GitHub PRs. userTeams
-// is the "org/slug" list of teams the session user belongs to — used to
-// match team-based review requests (where the PR's reviewRequests list
-// contains the team, not the user's individual login).
+// RefreshGitHub runs the full tracking cycle for GitHub PRs. resolver
+// answers "is this requested reviewer a TF-known identity?" per cycle —
+// local mode passes a resolver built from the lone user's login + teams,
+// multi mode a store-backed one keyed on the org's GitHub host. username
+// remains the user-perspective axis for the merged/closed dashboard
+// backfill and the self-authored-PR guard (empty in multi mode).
 //
 // All entity/task reads and writes are scoped to the Tracker's
 // orgID (set at construction). In multi mode the poller's per-org
 // loop constructs one Tracker per active org per cycle; in local
 // mode there's one Tracker for the single synthetic tenant.
-func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTeams, repos []string) (int, error) {
+func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos []string, resolver ReviewerResolver) (int, error) {
 	orgID := t.orgID
 	startedAt := time.Now()
 	// Phase 1: Discovery — find new PRs and register as entities.
@@ -134,24 +136,29 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 				if err := t.entities.MarkClosedSystem(context.Background(), orgID, entity.ID); err != nil {
 					log.Printf("[tracker] failed to mark entity %s closed on discovery: %v", sid, err)
 				}
-			} else if snap.Author != username && isReviewerMatch(snap.ReviewRequests, username, userTeams) {
-				// Backfill: user is a pending reviewer (directly or via one
-				// of their teams) on a just-discovered open PR.
-				// DiffPRSnapshots' "no events on initial load" rule means
-				// pr:review_requested would never fire for requests that
-				// existed before we started watching — the user would only see
-				// them if someone re-requested. Synthesize the event + queued
-				// task directly so existing review-requests land in the queue
-				// on first connect. Mirrors the Jira carry-over queue path in
-				// handleJiraStockPost.
+			} else if snap.Author != username {
+				// Backfill: emit a per-reviewer review_requested event for
+				// every TF-known requested reviewer on a just-discovered open
+				// PR. DiffPRSnapshots' "no events on initial load"
+				// rule means pr:review_requested would never fire for requests
+				// that existed before we started watching — the reviewer would
+				// only see them if someone re-requested. Synthesizing here lands
+				// existing review-requests in the queue on first connect.
+				// Mirrors the Jira carry-over queue path in handleJiraStockPost.
 				//
 				// Self-authored PRs are skipped: GitHub forbids self-requests,
-				// so the only way the match fires here is via a team the user
-				// is on (CODEOWNERS auto-assigning them to their own PR). That
-				// isn't an ask — surfacing it as a queued task pollutes the
-				// queue. Matches the same guard in DiffPRSnapshots.
-				if err := t.backfillReviewRequested(entity.ID, snap); err != nil {
-					log.Printf("[tracker] failed to backfill review_requested for %s: %v", sid, err)
+				// so the only way a match fires here is via a team the user is
+				// on (CODEOWNERS auto-assigning them to their own PR). That isn't
+				// an ask — surfacing it pollutes the queue. Matches the guard in
+				// DiffPRSnapshots.
+				for _, reviewer := range snap.ReviewRequests {
+					login, team, known := resolveReviewer(resolver, reviewer)
+					if !known {
+						continue
+					}
+					if err := t.backfillReviewRequested(entity.ID, snap, login, team); err != nil {
+						log.Printf("[tracker] failed to backfill review_requested for %s (%s): %v", sid, reviewer, err)
+					}
 				}
 			}
 		} else {
@@ -228,27 +235,38 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 		}
 		if ok && shouldSkipRefresh(snap, fresh, age) {
 			// Skipped entities won't be diffed, so reconcile stale
-			// review_requested tasks here. Entities proceeding to
-			// DiffPRSnapshots emit their own review_request_removed events.
-			if userTeams != nil && !isReviewerMatch(snap.ReviewRequests, username, userTeams) {
-				if stale, err := t.tasks.FindActiveByEntityAndTypeSystem(context.Background(), orgID, e.ID, domain.EventGitHubPRReviewRequested); err == nil && len(stale) > 0 {
+			// per-reviewer review_requested tasks here: for each active
+			// review_requested task whose keyed reviewer is no longer in the
+			// (quiet) snapshot's request list, emit a per-identity
+			// review_request_removed so the router can close that one task.
+			// Entities proceeding to DiffPRSnapshots emit their own removals.
+			if stale, err := t.tasks.FindActiveByEntityAndTypeSystem(context.Background(), orgID, e.ID, domain.EventGitHubPRReviewRequested); err == nil && len(stale) > 0 {
+				currReq := toSet(snap.ReviewRequests)
+				for _, task := range stale {
+					reviewer, ok := reviewerFromDedupKey(task.DedupKey)
+					if !ok || currReq[reviewer] {
+						continue // legacy/unkeyed task, or reviewer still requested
+					}
+					login, team := requestedIdentityFields(reviewer)
 					meta, _ := json.Marshal(events.GitHubPRReviewRequestRemovedMetadata{
-						Author:   snap.Author,
-						Repo:     snap.Repo,
-						PRNumber: snap.Number,
-						IsDraft:  snap.IsDraft,
-						HeadSHA:  snap.HeadSHA,
-						Labels:   snap.Labels,
-						Title:    snap.Title,
+						Author:         snap.Author,
+						Repo:           snap.Repo,
+						PRNumber:       snap.Number,
+						IsDraft:        snap.IsDraft,
+						HeadSHA:        snap.HeadSHA,
+						Labels:         snap.Labels,
+						Title:          snap.Title,
+						RequestedLogin: login, RequestedTeam: team,
 					})
 					eid := e.ID
 					t.publish(domain.Event{
 						EventType:    domain.EventGitHubPRReviewRequestRemoved,
 						EntityID:     &eid,
+						DedupKey:     task.DedupKey,
 						MetadataJSON: string(meta),
 						OccurredAt:   time.Now(),
 					})
-					log.Printf("[tracker] reconciled: emitting review_request_removed for skipped entity %s", e.ID)
+					log.Printf("[tracker] reconciled: emitting review_request_removed (%s) for skipped entity %s", task.DedupKey, e.ID)
 				}
 			}
 			skippedOpen++
@@ -309,7 +327,7 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 		newSnap.NodeID = item.nodeID
 
 		// Diff against previous snapshot.
-		events := DiffPRSnapshots(item.snap, newSnap, item.entity.ID, username, userTeams)
+		events := DiffPRSnapshots(item.snap, newSnap, item.entity.ID, username, resolver)
 
 		// Update entity snapshot + title.
 		snapJSON, _ := json.Marshal(newSnap)
@@ -489,19 +507,25 @@ func splitOwnerRepo(s string) (owner, repo string) {
 // for a PR that's been pending your review for weeks. Falls back to
 // time.Now() if the GraphQL timestamp is missing or unparseable.
 //
-// The "is this PR's review requested from me" decision happens
-// upstream at the caller's matchesAny check, not here; this function
-// just records the author login on the metadata so the predicate
-// matcher can do its work.
-func (t *Tracker) backfillReviewRequested(entityID string, snap domain.PRSnapshot) error {
+// The "is this reviewer TF-known" decision happens upstream at the
+// caller's resolveReviewer check, not here; this function just records the
+// requested identity (login or "org/slug" team) plus the PR author on the
+// metadata, and keys the event by that identity, so the router routes the
+// per-reviewer task and the predicate matcher can do its work.
+func (t *Tracker) backfillReviewRequested(entityID string, snap domain.PRSnapshot, requestedLogin, requestedTeam string) error {
+	reviewer := requestedLogin
+	if reviewer == "" {
+		reviewer = requestedTeam
+	}
 	meta := events.GitHubPRReviewRequestedMetadata{
-		Author:   snap.Author,
-		Repo:     snap.Repo,
-		PRNumber: snap.Number,
-		IsDraft:  snap.IsDraft,
-		HeadSHA:  snap.HeadSHA,
-		Labels:   snap.Labels,
-		Title:    snap.Title,
+		Author:         snap.Author,
+		Repo:           snap.Repo,
+		PRNumber:       snap.Number,
+		IsDraft:        snap.IsDraft,
+		HeadSHA:        snap.HeadSHA,
+		Labels:         snap.Labels,
+		Title:          snap.Title,
+		RequestedLogin: requestedLogin, RequestedTeam: requestedTeam,
 	}
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
@@ -517,37 +541,11 @@ func (t *Tracker) backfillReviewRequested(entityID string, snap domain.PRSnapsho
 	t.publish(domain.Event{
 		EntityID:     &eid,
 		EventType:    domain.EventGitHubPRReviewRequested,
+		DedupKey:     reviewerDedupKey(reviewer),
 		MetadataJSON: string(metaJSON),
 		OccurredAt:   occurredAt,
 	})
 	return nil
-}
-
-// isReviewerMatch reports whether the session user appears in a PR's
-// reviewer list, either directly (as username) or via any of their teams
-// (as "org/slug"). Both the discovery backfill and the per-poll diff use
-// this check — getting it wrong in either place means team-based review
-// requests never surface as tasks, which is the case historically (only
-// direct-to-user requests matched the old containsString(rr, username)).
-func isReviewerMatch(reviewers []string, username string, userTeams []string) bool {
-	if len(reviewers) == 0 {
-		return false
-	}
-	set := make(map[string]struct{}, len(reviewers))
-	for _, r := range reviewers {
-		set[r] = struct{}{}
-	}
-	if username != "" {
-		if _, ok := set[username]; ok {
-			return true
-		}
-	}
-	for _, t := range userTeams {
-		if _, ok := set[t]; ok {
-			return true
-		}
-	}
-	return false
 }
 
 // --- Jira ---

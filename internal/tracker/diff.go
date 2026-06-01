@@ -14,11 +14,14 @@ import (
 // discriminators (labels). A zero-value prev (Number == 0) indicates first
 // discovery — emits initial events from the current state.
 //
-// userTeams is the "org/slug" list of teams the session user belongs to,
-// used so team-requested reviews also emit pr:review_requested.
+// resolver answers "is this requested reviewer a TF-known identity?" so the
+// review-request scan can emit one event per requested user/team that maps to a
+// routing target. A nil resolver means no reviewer is TF-known — review-request
+// events are suppressed, which is the right degraded behavior.
 //
-// Pure function — no IO.
-func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, userTeams []string) []domain.Event {
+// Not a pure function for the review-request branch: the resolver may consult
+// stores (multi-mode). Every other branch is pure.
+func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, resolver ReviewerResolver) []domain.Event {
 	now := time.Now()
 	eid := &entityID
 	authorIsSelf := curr.Author == username
@@ -204,39 +207,58 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, us
 		})
 	}
 
-	// --- Review requests ---------------------------------------------------
-	// Fire when the session user appears in the request list — directly
-	// (username) or via any of their teams (org/slug). Transition is "was
-	// not matched before, is matched now" so repeated team-level requests
-	// don't re-fire across polls where nothing changed.
+	// --- Review requests (per-reviewer) ------------------------------------
+	// The open-set discriminator is the *requested reviewer*. Scan each
+	// reviewer that transitioned in/out of the request list and emit a
+	// per-identity event (dedup_key = "user:<login>" / "team:<org>/<slug>")
+	// for every TF-known identity. The snapshot diff is the sole re-emit
+	// guard: a reviewer present last cycle and this cycle is neither added
+	// nor removed, so it doesn't re-fire.
 	//
 	// Suppress entirely when the PR is self-authored: GitHub forbids
 	// requesting yourself directly, so the only way this fires on your own
 	// PR is via a team you're on (CODEOWNERS auto-assigning your team to
-	// paths you own). That's not an "ask" — it's a reviewer-pool artifact
-	// — and surfacing it as a task pollutes the queue. The default
-	// review_requested rule is match-all, so we can't defer the filtering
-	// to predicates without forcing every user to customize it.
+	// paths you own). That's not an "ask" — it's a reviewer-pool artifact —
+	// and surfacing it pollutes the queue. (In multi mode username is empty,
+	// so authorIsSelf is false and the scan always runs.)
 	if !authorIsSelf {
-		prevMatched := matchesAny(prev.ReviewRequests, username, userTeams)
-		currMatched := matchesAny(curr.ReviewRequests, username, userTeams)
-		if currMatched && !prevMatched {
-			// Source time: ReviewRequestedEvent.createdAt for the most
-			// recent request matching one of the user's identities (login
-			// or any team). Falls back through updatedAt → detection time.
-			sourceAt := lookupReviewRequestedTime(curr.Timeline, username, userTeams)
-			emitAt(domain.EventGitHubPRReviewRequested, "", sourceAt, events.GitHubPRReviewRequestedMetadata{
+		prevReq := toSet(prev.ReviewRequests)
+		currReq := toSet(curr.ReviewRequests)
+
+		for _, reviewer := range curr.ReviewRequests {
+			if prevReq[reviewer] {
+				continue // not newly added
+			}
+			login, team, known := resolveReviewer(resolver, reviewer)
+			if !known {
+				continue
+			}
+			// Source time: this reviewer's ReviewRequestedEvent.createdAt.
+			// Falls back through updatedAt → detection time.
+			sourceAt := lookupReviewRequestedTimeFor(curr.Timeline, reviewer)
+			emitAt(domain.EventGitHubPRReviewRequested, reviewerDedupKey(reviewer), sourceAt, events.GitHubPRReviewRequestedMetadata{
 				Author: curr.Author,
 				Repo:   curr.Repo, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA,
 				Labels: curr.Labels, Title: curr.Title,
+				RequestedLogin: login, RequestedTeam: team,
 			})
-		} else if prevMatched && !currMatched {
-			emit(domain.EventGitHubPRReviewRequestRemoved, "", events.GitHubPRReviewRequestRemovedMetadata{
+		}
+
+		for _, reviewer := range prev.ReviewRequests {
+			if currReq[reviewer] {
+				continue // still requested
+			}
+			login, team, known := resolveReviewer(resolver, reviewer)
+			if !known {
+				continue
+			}
+			emit(domain.EventGitHubPRReviewRequestRemoved, reviewerDedupKey(reviewer), events.GitHubPRReviewRequestRemovedMetadata{
 				Author: curr.Author,
 				Repo:   curr.Repo, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA,
 				Labels: curr.Labels, Title: curr.Title,
+				RequestedLogin: login, RequestedTeam: team,
 			})
 		}
 	}
@@ -496,24 +518,15 @@ func lookupLabelTime(timeline []domain.TimelineEvent, kind, label string) string
 	return ""
 }
 
-// lookupReviewRequestedTime returns the createdAt of the most recent
-// ReviewRequestedEvent matching one of the session user's identities
-// (login or any of their team identifiers in "org/slug" form). Mirrors
-// the matching logic in matchesAny so the emitted event's timestamp
-// lines up with the request that actually triggered it.
-func lookupReviewRequestedTime(timeline []domain.TimelineEvent, username string, userTeams []string) string {
-	identities := make(map[string]bool, 1+len(userTeams))
-	if username != "" {
-		identities[username] = true
-	}
-	for _, team := range userTeams {
-		if team != "" {
-			identities[team] = true
-		}
-	}
+// lookupReviewRequestedTimeFor returns the createdAt of the most recent
+// ReviewRequestedEvent naming exactly this reviewer (login, or "org/slug" for
+// a team), so the per-reviewer event's timestamp lines up with the request
+// that actually triggered it. Empty when the timeline tail doesn't reach the
+// matching event; the caller's emitAt degrades to updatedAt → detection time.
+func lookupReviewRequestedTimeFor(timeline []domain.TimelineEvent, reviewer string) string {
 	for i := len(timeline) - 1; i >= 0; i-- {
 		t := timeline[i]
-		if t.Kind == "review_requested" && identities[t.Reviewer] {
+		if t.Kind == "review_requested" && t.Reviewer == reviewer {
 			return t.CreatedAt
 		}
 	}
@@ -566,13 +579,6 @@ func toSet(items []string) map[string]bool {
 		m[item] = true
 	}
 	return m
-}
-
-// matchesAny reports whether the session user's identities (direct
-// username or any team they belong to, in "org/slug" form) overlap with
-// the reviewers list.
-func matchesAny(reviewers []string, username string, userTeams []string) bool {
-	return isReviewerMatch(reviewers, username, userTeams)
 }
 
 func reviewMap(reviews []domain.ReviewState) map[string]domain.ReviewState {

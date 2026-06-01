@@ -28,6 +28,15 @@ func assertOccurredAt(t *testing.T, evt *domain.Event, want time.Time) {
 
 const testEntityID = "entity-123"
 const testUser = "aidan"
+
+// testReviewerResolver builds the local (N=1) resolver the diff uses to decide
+// which requested reviewers are TF-known — the lone user (testUser) plus the
+// given "org/slug" teams. Passing no teams yields a resolver that only knows
+// testUser directly.
+func testReviewerResolver(teams ...string) ReviewerResolver {
+	return NewLocalReviewerResolver(testUser, teams)
+}
+
 const testUserAccountID = "557058:abc-aidan"
 
 // testDoneStatuses matches the pre-existing hardcoded terminal set, kept so
@@ -470,9 +479,97 @@ func TestDiff_ReviewRequested_ForSelf(t *testing.T) {
 	curr.Author = "bob"
 	curr.ReviewRequests = []string{testUser}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, testReviewerResolver())
 	if findEvent(evts, domain.EventGitHubPRReviewRequested) == nil {
 		t.Error("expected review_requested event when self added to requests")
+	}
+}
+
+// fakeReviewerResolver knows an explicit set of user logins and "org/slug"
+// teams as TF-known — used to exercise the multi-identity per-reviewer fan-out
+// the local resolver (single user) can't express.
+type fakeReviewerResolver struct {
+	users map[string]bool
+	teams map[string]bool // keyed "org/slug"
+}
+
+func (f fakeReviewerResolver) KnownUser(login string) bool { return f.users[login] }
+func (f fakeReviewerResolver) KnownTeam(orgLogin, slug string) bool {
+	return f.teams[orgLogin+"/"+slug]
+}
+
+// TestDiff_ReviewRequested_PerReviewer_DistinctEvents pins the core behavior:
+// a PR requesting review from two users and a team (all TF-known) emits three
+// review_requested events with distinct, namespaced dedup_keys and per-event
+// requested-identity metadata. Non-TF-known reviewers produce no event.
+func TestDiff_ReviewRequested_PerReviewer_DistinctEvents(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.Author = "carol"
+	curr := basePRSnapshot()
+	curr.Author = "carol"
+	curr.ReviewRequests = []string{"alice", "bob", "acme/backend", "stranger", "acme/unmapped"}
+
+	res := fakeReviewerResolver{
+		users: map[string]bool{"alice": true, "bob": true},
+		teams: map[string]bool{"acme/backend": true},
+	}
+	evts := DiffPRSnapshots(prev, curr, testEntityID, "", res)
+	reqs := findEvents(evts, domain.EventGitHubPRReviewRequested)
+	if len(reqs) != 3 {
+		t.Fatalf("expected 3 per-reviewer review_requested events, got %d: %v", len(reqs), eventTypes(evts))
+	}
+
+	byKey := map[string]events.GitHubPRReviewRequestedMetadata{}
+	for _, e := range reqs {
+		byKey[e.DedupKey] = decodeMetadata[events.GitHubPRReviewRequestedMetadata](t, e)
+	}
+	if m, ok := byKey["user:alice"]; !ok || m.RequestedLogin != "alice" || m.RequestedTeam != "" {
+		t.Errorf("user:alice event wrong: ok=%v meta=%+v", ok, m)
+	}
+	if m, ok := byKey["user:bob"]; !ok || m.RequestedLogin != "bob" || m.RequestedTeam != "" {
+		t.Errorf("user:bob event wrong: ok=%v meta=%+v", ok, m)
+	}
+	if m, ok := byKey["team:acme/backend"]; !ok || m.RequestedTeam != "acme/backend" || m.RequestedLogin != "" {
+		t.Errorf("team:acme/backend event wrong: ok=%v meta=%+v", ok, m)
+	}
+	if _, ok := byKey["user:stranger"]; ok {
+		t.Error("non-TF-known user 'stranger' should not emit an event")
+	}
+	if _, ok := byKey["team:acme/unmapped"]; ok {
+		t.Error("non-TF-known team 'acme/unmapped' should not emit an event")
+	}
+}
+
+// TestDiff_ReviewRequestRemoved_PerReviewer pins that dropping one of several
+// requested reviewers emits a removal keyed to exactly that identity, leaving
+// the others' tasks alone (the router closes by dedup_key).
+func TestDiff_ReviewRequestRemoved_PerReviewer(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.Author = "carol"
+	prev.ReviewRequests = []string{"alice", "bob", "acme/backend"}
+	curr := basePRSnapshot()
+	curr.Author = "carol"
+	curr.ReviewRequests = []string{"bob", "acme/backend"} // alice dropped
+
+	res := fakeReviewerResolver{
+		users: map[string]bool{"alice": true, "bob": true},
+		teams: map[string]bool{"acme/backend": true},
+	}
+	evts := DiffPRSnapshots(prev, curr, testEntityID, "", res)
+	removed := findEvents(evts, domain.EventGitHubPRReviewRequestRemoved)
+	if len(removed) != 1 {
+		t.Fatalf("expected 1 review_request_removed, got %d", len(removed))
+	}
+	if removed[0].DedupKey != "user:alice" {
+		t.Errorf("removed dedup_key = %q, want user:alice", removed[0].DedupKey)
+	}
+	m := decodeMetadata[events.GitHubPRReviewRequestRemovedMetadata](t, removed[0])
+	if m.RequestedLogin != "alice" || m.RequestedTeam != "" {
+		t.Errorf("removed metadata wrong: %+v", m)
+	}
+	// No spurious re-request for the still-present reviewers.
+	if len(findEvents(evts, domain.EventGitHubPRReviewRequested)) != 0 {
+		t.Error("no review_requested expected — no reviewer was newly added")
 	}
 }
 
@@ -481,7 +578,7 @@ func TestDiff_ReviewRequested_ForOther_NoEvent(t *testing.T) {
 	curr := basePRSnapshot()
 	curr.ReviewRequests = []string{"someone-else"}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, testReviewerResolver())
 	if findEvent(evts, domain.EventGitHubPRReviewRequested) != nil {
 		t.Error("should not emit review_requested when the request is for someone else")
 	}
@@ -495,7 +592,7 @@ func TestDiff_ReviewRequested_AlreadyPresent_NoEvent(t *testing.T) {
 	curr.Author = "bob"
 	curr.ReviewRequests = []string{testUser}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, testReviewerResolver())
 	if findEvent(evts, domain.EventGitHubPRReviewRequested) != nil {
 		t.Error("should not re-emit review_requested when already in list")
 	}
@@ -511,7 +608,7 @@ func TestDiff_ReviewRequested_ViaTeam(t *testing.T) {
 	curr.Author = "bob"
 	curr.ReviewRequests = []string{"eng/pulsar"}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, []string{"eng/pulsar"})
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, testReviewerResolver("eng/pulsar"))
 	if findEvent(evts, domain.EventGitHubPRReviewRequested) == nil {
 		t.Error("expected review_requested event when user's team is added to requests")
 	}
@@ -526,7 +623,7 @@ func TestDiff_ReviewRequested_ViaTeam_AlreadyPresent_NoEvent(t *testing.T) {
 	curr.Author = "bob"
 	curr.ReviewRequests = []string{"eng/pulsar"}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, []string{"eng/pulsar"})
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, testReviewerResolver("eng/pulsar"))
 	if findEvent(evts, domain.EventGitHubPRReviewRequested) != nil {
 		t.Error("should not re-emit review_requested when team was already requested")
 	}
@@ -538,7 +635,7 @@ func TestDiff_ReviewRequested_OtherTeam_NoEvent(t *testing.T) {
 	curr := basePRSnapshot()
 	curr.ReviewRequests = []string{"eng/other-team"}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, []string{"eng/pulsar"})
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, testReviewerResolver("eng/pulsar"))
 	if findEvent(evts, domain.EventGitHubPRReviewRequested) != nil {
 		t.Error("should not emit review_requested for a team the user isn't on")
 	}
@@ -553,7 +650,7 @@ func TestDiff_ReviewRequested_SelfAuthoredViaTeam_NoEvent(t *testing.T) {
 	curr.Author = testUser
 	curr.ReviewRequests = []string{"eng/pulsar"}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, []string{"eng/pulsar"})
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, testReviewerResolver("eng/pulsar"))
 	if findEvent(evts, domain.EventGitHubPRReviewRequested) != nil {
 		t.Error("should not emit review_requested when PR is self-authored (team auto-assigned to own PR)")
 	}
@@ -568,7 +665,7 @@ func TestDiff_ReviewRequestRemoved_Direct(t *testing.T) {
 	curr := basePRSnapshot()
 	curr.Author = "bob"
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, testReviewerResolver())
 	if findEvent(evts, domain.EventGitHubPRReviewRequestRemoved) == nil {
 		t.Error("expected review_request_removed when user disappears from ReviewRequests")
 	}
@@ -581,7 +678,7 @@ func TestDiff_ReviewRequestRemoved_ViaTeam(t *testing.T) {
 	curr := basePRSnapshot()
 	curr.Author = "bob"
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, []string{"eng/pulsar"})
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, testReviewerResolver("eng/pulsar"))
 	if findEvent(evts, domain.EventGitHubPRReviewRequestRemoved) == nil {
 		t.Error("expected review_request_removed when user's team disappears from ReviewRequests")
 	}
@@ -591,7 +688,7 @@ func TestDiff_ReviewRequestRemoved_NeverPresent_NoEvent(t *testing.T) {
 	prev := basePRSnapshot()
 	curr := basePRSnapshot()
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, testReviewerResolver())
 	if findEvent(evts, domain.EventGitHubPRReviewRequestRemoved) != nil {
 		t.Error("should not emit review_request_removed when user was never in ReviewRequests")
 	}
@@ -603,7 +700,7 @@ func TestDiff_ReviewRequestRemoved_StillPresent_NoEvent(t *testing.T) {
 	curr := basePRSnapshot()
 	curr.ReviewRequests = []string{testUser}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, testReviewerResolver())
 	if findEvent(evts, domain.EventGitHubPRReviewRequestRemoved) != nil {
 		t.Error("should not emit review_request_removed when user is still in ReviewRequests")
 	}
@@ -616,7 +713,7 @@ func TestDiff_ReviewRequestRemoved_SelfAuthored_NoEvent(t *testing.T) {
 	curr := basePRSnapshot()
 	curr.Author = testUser
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, []string{"eng/pulsar"})
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, testReviewerResolver("eng/pulsar"))
 	if findEvent(evts, domain.EventGitHubPRReviewRequestRemoved) != nil {
 		t.Error("should not emit review_request_removed on self-authored PR")
 	}
@@ -1249,7 +1346,7 @@ func TestDiffPRSnapshots_ReviewRequestedUsesTimelineCreatedAt(t *testing.T) {
 			{Kind: "review_requested", Reviewer: testUser, CreatedAt: "2026-04-20T09:00:00Z"}, // 10h ago equivalent
 		},
 	}
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, testReviewerResolver())
 	assertOccurredAt(t, findEvent(evts, domain.EventGitHubPRReviewRequested),
 		time.Date(2026, 4, 20, 9, 0, 0, 0, time.UTC))
 }
@@ -1263,7 +1360,7 @@ func TestDiffPRSnapshots_ReviewRequestedMatchesTeamIdentity(t *testing.T) {
 			{Kind: "review_requested", Reviewer: "acme/platform", CreatedAt: "2026-04-20T09:00:00Z"},
 		},
 	}
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, []string{"acme/platform"})
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, testReviewerResolver("acme/platform"))
 	assertOccurredAt(t, findEvent(evts, domain.EventGitHubPRReviewRequested),
 		time.Date(2026, 4, 20, 9, 0, 0, 0, time.UTC))
 }

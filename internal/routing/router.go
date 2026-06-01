@@ -52,23 +52,24 @@ type Delegator interface {
 //     auto run or earlier queued firings (SKY-189).
 //  8. Runs inline close checks for the event type
 type Router struct {
-	prompts    dbpkg.PromptStore
-	handlers   dbpkg.EventHandlerStore
-	agents     dbpkg.AgentStore
-	teamAgents dbpkg.TeamAgentStore       // SKY-261: read team_agents.enabled before auto-firing triggers
-	users      dbpkg.UsersStore           // SKY-270: read local user's jira_account_id for inline close gates
-	tasks      dbpkg.TaskStore            // SKY-283: task lifecycle, dedup, claims, breaker
-	agentRuns  dbpkg.AgentRunStore        // SKY-285: lookup active runs for the task-close cancel cascade
-	entities   dbpkg.EntityStore          // SKY-284: closed-entity guard + entity-terminating close cascade
-	firings    dbpkg.PendingFiringsStore  // SKY-289: per-entity firing queue + active-run gate
-	events     dbpkg.EventStore           // SKY-305: admin-pool RecordSystem + GetMetadataSystem for the background subscriber
-	orgs       dbpkg.OrgsStore            // per-org iteration for the drain sweeper; nil-safe, falls back to N=1 sentinel when unset
-	teams      dbpkg.TeamsStore           // per-team auto_delegate_enabled kill-switch read post-internal/config deletion
-	teamRepos  dbpkg.TeamGitHubReposStore // team↔repo tracking gate (SKY-375); nil-safe — gate is skipped (no filtering) when unset
-	jiraRules  dbpkg.JiraStatusRulesStore // team↔project tracking gate (SKY-376); nil-safe — Jira gate skipped when unset
-	spawner    Delegator
-	scorer     Scorer
-	ws         *websocket.Hub
+	prompts      dbpkg.PromptStore
+	handlers     dbpkg.EventHandlerStore
+	agents       dbpkg.AgentStore
+	teamAgents   dbpkg.TeamAgentStore        // SKY-261: read team_agents.enabled before auto-firing triggers
+	users        dbpkg.UsersStore            // SKY-270: read local user's jira_account_id for inline close gates
+	tasks        dbpkg.TaskStore             // SKY-283: task lifecycle, dedup, claims, breaker
+	agentRuns    dbpkg.AgentRunStore         // SKY-285: lookup active runs for the task-close cancel cascade
+	entities     dbpkg.EntityStore           // SKY-284: closed-entity guard + entity-terminating close cascade
+	firings      dbpkg.PendingFiringsStore   // SKY-289: per-entity firing queue + active-run gate
+	events       dbpkg.EventStore            // SKY-305: admin-pool RecordSystem + GetMetadataSystem for the background subscriber
+	orgs         dbpkg.OrgsStore             // per-org iteration for the drain sweeper; nil-safe, falls back to N=1 sentinel when unset
+	teams        dbpkg.TeamsStore            // per-team auto_delegate_enabled kill-switch read post-internal/config deletion
+	teamRepos    dbpkg.TeamGitHubReposStore  // team↔repo tracking gate; nil-safe — gate is skipped (no filtering) when unset
+	jiraRules    dbpkg.JiraStatusRulesStore  // team↔project tracking gate; nil-safe — Jira gate skipped when unset
+	githubGroups dbpkg.TeamGitHubGroupsStore // github-team→TF-team mapping; resolves review_requested team visibility. nil-safe — review routing degrades to handler-team visibility when unset
+	spawner      Delegator
+	scorer       Scorer
+	ws           *websocket.Hub
 
 	// drainLocks serializes DrainEntity calls per entity. Without this,
 	// the non-mutating PopPendingFiringForEntity creates a window between
@@ -97,28 +98,32 @@ type Router struct {
 // teamRepos is nil-safe — the SKY-375 team↔repo gate is skipped (no
 // handler is dropped) when missing, matching pre-SKY-375 behavior where
 // repos were org-global and every team implicitly tracked them all.
-// jiraRules is nil-safe the same way — the SKY-376 team↔project gate is
-// skipped when missing.
-func NewRouter(prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, agentRuns dbpkg.AgentRunStore, entities dbpkg.EntityStore, firings dbpkg.PendingFiringsStore, events dbpkg.EventStore, orgs dbpkg.OrgsStore, teams dbpkg.TeamsStore, teamRepos dbpkg.TeamGitHubReposStore, jiraRules dbpkg.JiraStatusRulesStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+// jiraRules is nil-safe the same way — the team↔project gate is
+// skipped when missing. githubGroups is nil-safe — review_requested
+// visibility routing degrades to handler-team visibility (the
+// pre-ticket behavior) when missing or when an event carries no requested
+// identity.
+func NewRouter(prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, agentRuns dbpkg.AgentRunStore, entities dbpkg.EntityStore, firings dbpkg.PendingFiringsStore, events dbpkg.EventStore, orgs dbpkg.OrgsStore, teams dbpkg.TeamsStore, teamRepos dbpkg.TeamGitHubReposStore, jiraRules dbpkg.JiraStatusRulesStore, githubGroups dbpkg.TeamGitHubGroupsStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
 	return &Router{
-		prompts:    prompts,
-		handlers:   handlers,
-		agents:     agents,
-		teamAgents: teamAgents,
-		users:      users,
-		tasks:      tasks,
-		agentRuns:  agentRuns,
-		entities:   entities,
-		firings:    firings,
-		events:     events,
-		orgs:       orgs,
-		teams:      teams,
-		teamRepos:  teamRepos,
-		jiraRules:  jiraRules,
-		spawner:    spawner,
-		scorer:     scorer,
-		ws:         ws,
-		drainLocks: make(map[string]*sync.Mutex),
+		prompts:      prompts,
+		handlers:     handlers,
+		agents:       agents,
+		teamAgents:   teamAgents,
+		users:        users,
+		tasks:        tasks,
+		agentRuns:    agentRuns,
+		entities:     entities,
+		firings:      firings,
+		events:       events,
+		orgs:         orgs,
+		teams:        teams,
+		teamRepos:    teamRepos,
+		jiraRules:    jiraRules,
+		githubGroups: githubGroups,
+		spawner:      spawner,
+		scorer:       scorer,
+		ws:           ws,
+		drainLocks:   make(map[string]*sync.Mutex),
 	}
 }
 
@@ -339,6 +344,27 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	ownerTeam := orderedTeams[0]
 	taskPriority := teamScore(ownerTeam)
 
+	// A review_requested task's visibility (and owner) come from the
+	// *requested identity's* team(s), not from which teams' rules matched. A
+	// review is the personal obligation of whoever was asked — routed to their
+	// team(s) via the user→teams and github-team→TF-team lookups. The
+	// matched rule above still gated whether the task is created and supplies
+	// the priority; only the team set is overridden here. Falls back to the
+	// handler-team visibility above for legacy events that carry no requested
+	// identity or when the mapping stores are unwired.
+	if evt.EventType == domain.EventGitHubPRReviewRequested {
+		if reqTeams, scoped := r.reviewRequestVisibilityTeams(orgID, evt); scoped {
+			if len(reqTeams) == 0 {
+				log.Printf("[router] review_requested on entity %s: requested identity maps to no TF team — recording event, no task", entityID)
+				return
+			}
+			visibleTeams = reqTeams
+			orderedTeams = reqTeams // already sorted by team id in the helper
+			ownerTeam = reqTeams[0]
+			taskPriority = maxRuleDefaultPriority(matchedRules)
+		}
+	}
+
 	// became_atomic is the belated-discovery path for parents whose
 	// subtasks just closed. Suppress the new card if any active task
 	// already exists on the entity — otherwise an atomic ticket that
@@ -554,6 +580,96 @@ func handlerTeamID(h domain.EventHandler) string {
 	}
 	log.Printf("[router] WARNING handler %s (%s) has no team_id — falling back to LocalDefaultTeamID; check that EventHandlerStore.Seed was called with a real teamID", h.ID, h.Kind)
 	return runmode.LocalDefaultTeamID
+}
+
+// maxRuleDefaultPriority returns the highest default_priority across the
+// matched rules, defaulting to the 0.5 trigger-fallback when none carry one.
+// Used for review_requested, whose owner/visibility teams come from the
+// requested identity rather than the rule's team — so the per-owner-team
+// teamScore can't supply the priority; the matched rule(s) do.
+func maxRuleDefaultPriority(rules []domain.EventHandler) float64 {
+	s := 0.5
+	for _, rule := range rules {
+		if rule.DefaultPriority != nil && *rule.DefaultPriority > s {
+			s = *rule.DefaultPriority
+		}
+	}
+	return s
+}
+
+// reviewRequestVisibilityTeams resolves the team(s) a review_requested task is
+// visible to from the *requested identity* on the event metadata — not from
+// which teams' rules matched. A requested user routes to the union of teams
+// over every TF user the login resolves to (the set-valued reverse lookup, the
+// regression guard for a login bound to two users); a requested github team
+// routes to the TF team(s) the github-team→TF-team mapping returns.
+//
+// scoped=true means "route via the requested-identity path"; the caller uses
+// the returned teams (an empty set → drop the task: a TF-known reviewer that
+// maps to no team is a config gap, not a reason to over-fan to handler teams).
+// scoped=false means "fall back to handler-team visibility" — returned for
+// legacy events that carry no requested identity, or when the required stores
+// are unwired (test / pre-ticket wiring). Claims-free ...System lookups
+// throughout: the router runs on the eventbus subscriber goroutine with no
+// JWT context.
+func (r *Router) reviewRequestVisibilityTeams(orgID string, evt domain.Event) (teams []string, scoped bool) {
+	var meta events.GitHubPRReviewRequestedMetadata
+	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
+		return nil, false
+	}
+	if meta.RequestedLogin == "" && meta.RequestedTeam == "" {
+		return nil, false // legacy event, no requested identity captured
+	}
+
+	set := map[string]struct{}{}
+	if meta.RequestedTeam != "" {
+		if r.githubGroups == nil {
+			return nil, false
+		}
+		orgLogin, slug, ok := strings.Cut(meta.RequestedTeam, "/")
+		if !ok || orgLogin == "" || slug == "" {
+			return nil, true // malformed handle → no team
+		}
+		tids, err := r.githubGroups.TeamsForGroupSystem(context.Background(), orgID, orgLogin, slug)
+		if err != nil {
+			log.Printf("[router] review_requested: github-team mapping lookup for %s: %v", meta.RequestedTeam, err)
+			return nil, true
+		}
+		for _, t := range tids {
+			set[t] = struct{}{}
+		}
+	} else {
+		if r.users == nil || r.teams == nil || r.orgs == nil {
+			return nil, false
+		}
+		orgSet, err := r.orgs.GetSettingsSystem(context.Background(), orgID)
+		if err != nil {
+			log.Printf("[router] review_requested: read org settings for host: %v", err)
+			return nil, true
+		}
+		userIDs, err := r.users.UserIDsForGitHubLoginSystem(context.Background(), orgSet.GitHubBaseURL, meta.RequestedLogin)
+		if err != nil {
+			log.Printf("[router] review_requested: reverse login lookup for %s: %v", meta.RequestedLogin, err)
+			return nil, true
+		}
+		for _, uid := range userIDs {
+			tids, terr := r.teams.TeamIDsForUserInOrgSystem(context.Background(), orgID, uid)
+			if terr != nil {
+				log.Printf("[router] review_requested: teams for user %s: %v", uid, terr)
+				continue
+			}
+			for _, t := range tids {
+				set[t] = struct{}{}
+			}
+		}
+	}
+
+	out := make([]string, 0, len(set))
+	for t := range set {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out, true
 }
 
 // effectiveActingTeam normalizes a handler's acting team for the
@@ -1535,9 +1651,15 @@ func (r *Router) closeCheckReviewSubmitted(orgID string, evt domain.Event, entit
 	return closed
 }
 
-// closeCheckReviewRequestRemoved: user was removed from the PR's requested-
-// reviewers list (reviewed or request rescinded). Close any active
-// review_requested task on this entity.
+// closeCheckReviewRequestRemoved: a requested reviewer was dropped from the
+// PR's requested-reviewers list (reviewed or request rescinded). Close the
+// review_requested task keyed to that reviewer.
+//
+// review_requested tasks are now per-reviewer (dedup_key =
+// "user:<login>" / "team:<org>/<slug>"), so a removal closes only the one
+// task whose dedup_key matches the removal event's — dropping reviewer A must
+// not close B's task. A legacy removal carrying no dedup_key closes every
+// review_requested task on the entity (the pre-ticket behavior).
 func (r *Router) closeCheckReviewRequestRemoved(orgID string, evt domain.Event, entityID string) bool {
 	tasks, err := r.tasks.FindActiveByEntityAndTypeSystem(context.Background(), orgID, entityID, domain.EventGitHubPRReviewRequested)
 	if err != nil {
@@ -1545,10 +1667,13 @@ func (r *Router) closeCheckReviewRequestRemoved(orgID string, evt domain.Event, 
 	}
 	closed := false
 	for _, t := range tasks {
+		if evt.DedupKey != "" && t.DedupKey != evt.DedupKey {
+			continue // different reviewer's task — leave it open
+		}
 		if err := r.closeTaskWithAudit(orgID, t.ID, evt.ID, "auto_closed_by_event", domain.EventGitHubPRReviewRequestRemoved); err != nil {
 			log.Printf("[router] failed to close review_requested task %s: %v", t.ID, err)
 		} else {
-			log.Printf("[router] inline-closed task %s (review request removed)", t.ID)
+			log.Printf("[router] inline-closed task %s (review request removed: %s)", t.ID, evt.DedupKey)
 			closed = true
 		}
 	}

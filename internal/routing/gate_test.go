@@ -78,7 +78,7 @@ func gateRouter(database *sql.DB) *Router {
 	st := sqlitestore.New(database)
 	return NewRouter(testPromptStore(database), testEventHandlerStore(database), nil, nil, nil,
 		testTaskStore(database), st.AgentRuns, st.Entities, st.PendingFirings, st.Events,
-		st.Orgs, st.Teams, st.TeamGitHubRepos, st.JiraStatusRules, nil, noopScorer{}, websocket.NewHub())
+		st.Orgs, st.Teams, st.TeamGitHubRepos, st.JiraStatusRules, nil, nil, noopScorer{}, websocket.NewHub())
 }
 
 // TestGate_DisjointRepos_DropsUntrackingTeam is acceptance #1: two teams
@@ -200,7 +200,7 @@ func TestGate_EscapeHatches(t *testing.T) {
 
 	// (2) teamRepos + jiraRules unwired (nil) → pre-ticket behavior, never
 	// drops, for either source.
-	rNil := NewRouter(nil, nil, nil, nil, nil, nil, st.AgentRuns, st.Entities, st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, noopScorer{}, nil)
+	rNil := NewRouter(nil, nil, nil, nil, nil, nil, st.AgentRuns, st.Entities, st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, nil, noopScorer{}, nil)
 	if !rNil.handlerScopeMatchesEvent(githubEvt, domain.EventHandler{TeamID: "some-real-team"}, map[string]bool{}) {
 		t.Error("nil teamRepos store should skip the GitHub gate")
 	}
