@@ -68,8 +68,8 @@ func (p GitHubPRReviewRequestedPredicate) Matches(m GitHubPRReviewRequestedMetad
 		strEq(p.Repo, m.Repo) &&
 		boolEq(p.IsDraft, m.IsDraft) &&
 		hasLabel(p.HasLabel, m.Labels) &&
-		strEq(p.RequestedLogin, m.RequestedLogin) &&
-		strEq(p.RequestedTeam, m.RequestedTeam)
+		strEqFold(p.RequestedLogin, m.RequestedLogin) &&
+		strEqFold(p.RequestedTeam, m.RequestedTeam)
 }
 
 // -----------------------------------------------------------------------------
@@ -111,8 +111,8 @@ func (p GitHubPRReviewRequestRemovedPredicate) Matches(m GitHubPRReviewRequestRe
 		strEq(p.Repo, m.Repo) &&
 		boolEq(p.IsDraft, m.IsDraft) &&
 		hasLabel(p.HasLabel, m.Labels) &&
-		strEq(p.RequestedLogin, m.RequestedLogin) &&
-		strEq(p.RequestedTeam, m.RequestedTeam)
+		strEqFold(p.RequestedLogin, m.RequestedLogin) &&
+		strEqFold(p.RequestedTeam, m.RequestedTeam)
 }
 
 // ReviewerDedupKeyUser / ReviewerDedupKeyTeam namespace a requested reviewer

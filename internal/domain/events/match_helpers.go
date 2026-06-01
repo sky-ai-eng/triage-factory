@@ -20,6 +20,17 @@ func strEq(pred *string, meta string) bool {
 	return *pred == meta
 }
 
+// strEqFold is the case-insensitive sibling of strEq, for singular exact-match
+// filters on GitHub case-insensitive identifiers — a requested reviewer login
+// or "org/slug" team handle, where a rule's `requested_login: "Alice"` must
+// match an event carrying "alice". Nil predicate means "no filter."
+func strEqFold(pred *string, meta string) bool {
+	if pred == nil {
+		return true
+	}
+	return strings.EqualFold(*pred, meta)
+}
+
 // hasLabel returns true when the predicate is unset, or when the requested
 // label is present in the metadata snapshot.
 func hasLabel(pred *string, labels []string) bool {
