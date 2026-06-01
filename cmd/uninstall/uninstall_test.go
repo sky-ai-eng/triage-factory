@@ -15,7 +15,7 @@ func TestResolvedTakeoversDir_Default(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	dataDir := filepath.Join(home, ".triagefactory")
-	got, err := resolvedTakeoversDir(dataDir)
+	got, err := resolvedTakeoversDir(filepath.Join(dataDir, "triagefactory.db"), filepath.Join(dataDir, "takeovers"))
 	if err != nil {
 		t.Fatalf("resolvedTakeoversDir() error: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestResolvedTakeoversDir_ConfigOverride(t *testing.T) {
 		t.Fatalf("conn.Close(): %v", err)
 	}
 
-	got, err := resolvedTakeoversDir(dataDir)
+	got, err := resolvedTakeoversDir(filepath.Join(dataDir, "triagefactory.db"), filepath.Join(dataDir, "takeovers"))
 	if err != nil {
 		t.Fatalf("resolvedTakeoversDir() error: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestBuildPlan_DetectsTakeoversOutsideDataDir(t *testing.T) {
 		t.Fatalf("MkdirAll(%q): %v", takeoversDir, err)
 	}
 
-	plan := buildPlan(dataDir, takeoversDir, "")
+	plan := buildPlan(dataDir, takeoversDir, filepath.Join(dataDir, "projects"), "")
 	if !plan.hasTakeovers {
 		t.Fatalf("plan.hasTakeovers = false, want true")
 	}
@@ -160,7 +160,7 @@ func TestBuildPlan_DetectsCuratorProjects(t *testing.T) {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 
-	plan := buildPlan(dataDir, filepath.Join(dataDir, "takeovers"), "")
+	plan := buildPlan(dataDir, filepath.Join(dataDir, "takeovers"), projectsDir, "")
 	if !plan.hasProjects {
 		t.Fatalf("plan.hasProjects = false, want true")
 	}

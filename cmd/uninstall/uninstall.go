@@ -43,6 +43,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // Handle dispatches the uninstall subcommand.
@@ -67,10 +68,15 @@ func Handle(args []string) {
 	if err != nil {
 		fail("resolve home dir: %v", err)
 	}
-	takeoversDir, takeoversDirErr := resolvedTakeoversDir(dataDir)
+	// Resolve every subpath through internal/paths here, at the single
+	// boundary, then thread them into the (pure) plan helpers. Safe to use
+	// the error-free resolvers now that the StateRootErr pre-flight above
+	// succeeded.
+	takeoversDir, takeoversDirErr := resolvedTakeoversDir(paths.DBPath(), paths.TakeoversRoot())
+	projectsDir := paths.ProjectsRoot(runmode.LocalDefaultOrg)
 	linkPath := defaultInstallLink()
 
-	plan := buildPlan(dataDir, takeoversDir, linkPath)
+	plan := buildPlan(dataDir, takeoversDir, projectsDir, linkPath)
 	if plan.empty() {
 		fmt.Println("triagefactory: no on-disk local state found.")
 		fmt.Println("Stored keychain credentials may still be present and can be removed.")
@@ -263,8 +269,7 @@ func (p uninstallPlan) summary() []string {
 	return lines
 }
 
-func buildPlan(dataDir, takeoversDir, linkPath string) uninstallPlan {
-	projectsDir := filepath.Join(dataDir, "projects")
+func buildPlan(dataDir, takeoversDir, projectsDir, linkPath string) uninstallPlan {
 	p := uninstallPlan{dataDir: dataDir, takeoversDir: takeoversDir, projectsDir: projectsDir, linkPath: linkPath}
 
 	if info, err := os.Stat(dataDir); err == nil && info.IsDir() {
@@ -374,14 +379,17 @@ func removeClaudeProjectsForCurator(projectsDir, home string) (int, error) {
 	return count, joinedErr
 }
 
-func resolvedTakeoversDir(dataDir string) (string, error) {
-	fallback := filepath.Join(dataDir, "takeovers")
-
+// resolvedTakeoversDir returns the takeovers dir to clean: the
+// instance_config.server_takeover_dir override if the DB at dbPath has
+// one, else fallback. dbPath and fallback are resolved by the caller
+// through internal/paths (paths.DBPath / paths.TakeoversRoot) so this
+// stays a pure function of its inputs and the path single-source-of-
+// truth lives in one place (Handle), not in literals scattered here.
+func resolvedTakeoversDir(dbPath, fallback string) (string, error) {
 	// instance_config.server_takeover_dir is the persisted override;
 	// read it directly here rather than via a wrapper package. Probe
 	// for the DB file first so a fresh machine (no DB) doesn't
 	// materialize state we're about to delete.
-	dbPath := filepath.Join(dataDir, "triagefactory.db")
 	if _, err := os.Stat(dbPath); err != nil {
 		if os.IsNotExist(err) {
 			return fallback, nil
