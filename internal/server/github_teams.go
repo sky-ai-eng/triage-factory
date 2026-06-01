@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -33,8 +34,8 @@ import (
 //     queries rather than a per-team probe.
 //
 // The write target is the existing PUT /api/settings/team/{id}/github-groups
-// (replace-set, idempotent, team-admin gated) — the wizard POSTs the
-// checked teams there. This endpoint is read-only.
+// (replace-set, idempotent, team-admin gated) — the wizard sends the
+// checked teams there via PUT. This endpoint is read-only.
 // --------------------------------------------------------------------
 
 // userTeamJSON is one of the caller's GitHub teams on the wire.
@@ -151,6 +152,14 @@ func (s *Server) userTeamsMulti(ctx context.Context, orgID, userID string) ([]gh
 	for _, owner := range distinctRepoOwners(repos) {
 		client, err := s.ghResolver.ClientFor(ctx, orgID, owner)
 		if err != nil {
+			// ErrNoGitHubCredentials just means this owner has no App
+			// install and the org has no PAT — expected, skip quietly.
+			// Anything else (a secret-store/vault read fault) is a real
+			// backend failure worth a log line rather than a silent empty
+			// list. Mirrors gitHubGroupCandidates.
+			if !errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+				log.Printf("[user-teams] resolve GitHub client for %s: %v", owner, err)
+			}
 			continue
 		}
 		teams, err := client.ListUserTeamsInOrg(owner, login)

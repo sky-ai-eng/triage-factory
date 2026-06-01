@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { RotateCw } from 'lucide-react'
 
 // One of the authenticated user's GitHub teams (GET /api/github/user-teams).
@@ -54,7 +54,16 @@ export default function GitHubTeamSelector({
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [checked, setChecked] = useState<Set<string>>(new Set())
+  // Once the user toggles anything, their selection is sacrosanct — the
+  // mode-driven seeding effect below must never overwrite it. This matters
+  // because defaultChecked flips when /api/config resolves, which can land
+  // *after* the teams fetch and after the user has started clicking.
+  const userTouched = useRef(false)
 
+  // Fetch the team list exactly once. Deliberately independent of
+  // defaultChecked: seeding the checkboxes is a separate concern (the
+  // effect below), so a late /api/config resolution neither refetches nor
+  // clobbers in-progress selections.
   const fetchTeams = useCallback(async () => {
     setLoading(true)
     setError('')
@@ -68,21 +77,28 @@ export default function GitHubTeamSelector({
       }
       const data: GitHubUserTeam[] = await res.json()
       setTeams(data)
-      // Seed the checkbox state from the mode-driven default.
-      setChecked(
-        defaultChecked ? new Set(data.map((t) => keyOf(t.org_slug, t.team_slug))) : new Set(),
-      )
     } catch (err) {
       console.error('Failed to fetch teams:', err)
       setError('Failed to fetch your GitHub teams')
     } finally {
       setLoading(false)
     }
-  }, [defaultChecked])
+  }, [])
 
   useEffect(() => {
     fetchTeams()
   }, [fetchTeams])
+
+  // Seed the checkbox state from the mode-driven default whenever the
+  // teams arrive or the (possibly late-resolving) default changes — but
+  // only until the user has touched the selection, after which it's
+  // hands-off.
+  useEffect(() => {
+    if (userTouched.current) return
+    setChecked(
+      defaultChecked ? new Set(teams.map((t) => keyOf(t.org_slug, t.team_slug))) : new Set(),
+    )
+  }, [teams, defaultChecked])
 
   const filtered = useMemo(() => {
     if (!search.trim()) return teams
@@ -93,6 +109,7 @@ export default function GitHubTeamSelector({
   }, [teams, search])
 
   const toggle = (org: string, slug: string) => {
+    userTouched.current = true
     const k = keyOf(org, slug)
     setChecked((prev) => {
       const next = new Set(prev)
