@@ -65,7 +65,10 @@ func (s *Server) handleGitHubUserTeams(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// errNoGitHub is the only client-facing error (a 400, matching
 		// handleGitHubRepos). Everything else is an upstream/GitHub fault.
-		if err == errNoGitHub {
+		// errors.Is (not ==) so the check survives the local path wrapping
+		// the sentinel in the future, and stays consistent with the
+		// ErrNoGitHubCredentials check in userTeamsMulti.
+		if errors.Is(err, errNoGitHub) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub not configured"})
 			return
 		}
@@ -78,11 +81,7 @@ func (s *Server) handleGitHubUserTeams(w http.ResponseWriter, r *http.Request) {
 
 // errNoGitHub signals the local path that no usable PAT is configured —
 // surfaced to the caller as a 400, same as handleGitHubRepos.
-var errNoGitHub = errNoGitHubConfigured{}
-
-type errNoGitHubConfigured struct{}
-
-func (errNoGitHubConfigured) Error() string { return "GitHub not configured" }
+var errNoGitHub = errors.New("GitHub not configured")
 
 // userTeamsLocal sources the lone user's teams via the org PAT and
 // GET /user/teams. The PAT authenticates as the user in N=1, so this is
