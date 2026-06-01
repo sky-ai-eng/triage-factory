@@ -17,9 +17,10 @@ import (
 //
 // # Pool split (Postgres)
 //
-//   - GetDefaultForOrgSystem and GetSettingsSystem run on the admin
-//     pool. The boot-time pollers/scorer/delegation spawner have no
-//     JWT-claims context.
+//   - GetDefaultForOrgSystem, GetSettingsSystem, and
+//     TeamIDsForUserInOrgSystem run on the admin pool. The boot-time
+//     pollers/scorer/delegation spawner and the routing eventbus
+//     subscriber have no JWT-claims context.
 //   - GetSettings and UpdateSettings run on the app pool. The
 //     team_settings_select / team_settings_update RLS policies gate
 //     reads by team membership (via memberships) and writes by team
@@ -91,6 +92,29 @@ type TeamsStore interface {
 	// (single synthetic user) and returns every team in the org, which
 	// is the same set. Routes through the app pool in Postgres.
 	ListForUser(ctx context.Context, orgID string) ([]domain.Team, error)
+
+	// TeamIDsForUserInOrgSystem returns the ids of every team in orgID
+	// that userID belongs to (memberships ⋈ teams WHERE teams.org_id =
+	// orgID), ordered by team id. Claims-free admin-pool sibling of
+	// ListForUser, which resolves the *requesting* user under RLS — this
+	// takes an explicit, arbitrary userID for the author-/reviewer-
+	// routing routers, which run in an eventbus subscriber goroutine
+	// with no JWT claims. Empty slice when the user is in the org on no
+	// teams, or not in the org at all.
+	//
+	// The team set comes from the team-level memberships table
+	// (memberships(user_id, team_id, role)) joined to teams filtered by
+	// teams.org_id = orgID — not org_memberships, which is org-level
+	// ((user_id, org_id, role), no team_id). Scoping to orgID is what
+	// filters out a same-login user who belongs to a different org on the
+	// same host (legitimate on github.com, where many orgs share one
+	// host).
+	//
+	// Admin pool / claims-free: system/router callers only; never
+	// touches current_user_id(). A request-path consumer would need a
+	// separate claims-scoped method with its own RLS story, and none is
+	// needed today. SQLite collapses to one connection.
+	TeamIDsForUserInOrgSystem(ctx context.Context, orgID, userID string) ([]string, error)
 
 	// Create inserts a new team in the org and enrolls the creator as a
 	// team admin in the same transaction, returning the new row. The

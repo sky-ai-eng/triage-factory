@@ -103,6 +103,34 @@ func (s *usersStore) GetGitHubLoginSystem(ctx context.Context, userID, githubBas
 	return s.GetGitHubLogin(ctx, userID, githubBaseURL)
 }
 
+func (s *usersStore) UserIDsForGitHubLoginSystem(ctx context.Context, githubBaseURL, login string) ([]string, error) {
+	// Reverse of GetGitHubLogin: (host, login) → user_id(s). Host is
+	// normalized the same way the writers store it so the key matches;
+	// login matches verbatim. Returns every matching row — two users may
+	// bind one login on a host (PK is per-user), and source/verified_at
+	// are out of scope. SQLite is N=1, so in practice this resolves the
+	// one synthetic user to itself.
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT user_id
+		FROM user_github_identities
+		WHERE github_base_url = ? AND login = ?
+		ORDER BY user_id ASC
+	`, db.NormalizeGitHubHost(githubBaseURL), login)
+	if err != nil {
+		return nil, fmt.Errorf("read user_github_identities by login: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan user_github_identities.user_id: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 func (s *usersStore) SetJiraIdentity(ctx context.Context, userID, accountID, displayName string) error {
 	var accVal, nameVal any
 	if accountID != "" {

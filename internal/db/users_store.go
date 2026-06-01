@@ -20,8 +20,10 @@ import (
 // Most methods run on the app pool. There's no admin-pool routing for
 // row mutation because user-row creation is an auth-flow concern
 // (SKY-251) and this store only mutates existing rows. The `...System`
-// read variants route through the admin pool for boot-time callers
-// (poller bootstrap) that have no JWT-claims context.
+// read variants route through the admin pool for claims-free callers —
+// boot-time callers (poller bootstrap) and the routing eventbus
+// subscriber (reverse identity lookup) — that have no JWT-claims
+// context.
 type UsersStore interface {
 	// GetGitHubLogin returns the user's GitHub login on a specific host
 	// (user_github_identities, keyed on (user_id, github_base_url)), or
@@ -80,6 +82,32 @@ type UsersStore interface {
 	// JWT-claims context at that point. Behavior matches GetGitHubLogin;
 	// SQLite collapses the two variants to one connection.
 	GetGitHubLoginSystem(ctx context.Context, userID, githubBaseURL string) (string, error)
+
+	// UserIDsForGitHubLoginSystem returns every TF user bound to login
+	// on githubBaseURL in user_github_identities — the reverse of
+	// GetGitHubLogin. Host-scoped, org-agnostic (identity is keyed on
+	// (user_id, github_base_url), no org). Empty slice (not error) when
+	// no binding exists. The author-/reviewer-routing routers consume
+	// it from their eventbus subscriber goroutines, which carry no
+	// JWT-claims context.
+	//
+	// Returns a set deliberately. The table's PK is (user_id,
+	// github_base_url) — it constrains uniqueness per user, so nothing
+	// stops two TF users binding the same login on one host (a shared
+	// bot account, a stale pre-rename row, a typo). Callers union the
+	// resulting teams. githubBaseURL is required and normalized the same
+	// way writes are (db.NormalizeGitHubHost), so the key matches what
+	// the capture paths stored. Source / verified_at are out of scope:
+	// every matching row is returned regardless of how it was captured
+	// or whether it has been host-verified.
+	//
+	// Admin pool / claims-free: system/router callers only. Exposing
+	// this reverse lookup to a request handler would be a cross-user
+	// identity probe (resolve any login → any user); a request-path
+	// consumer would need a separate claims-scoped method with its own
+	// RLS story, and none is needed today. SQLite collapses to one
+	// connection.
+	UserIDsForGitHubLoginSystem(ctx context.Context, githubBaseURL, login string) ([]string, error)
 
 	// GetJiraIdentitySystem mirrors GetJiraIdentity but routes through
 	// the admin pool in Postgres. The router's inline close-check on

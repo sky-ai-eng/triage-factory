@@ -126,6 +126,35 @@ func (s *teamsStore) ListForUser(ctx context.Context, orgID string) ([]domain.Te
 	return out, rows.Err()
 }
 
+func (s *teamsStore) TeamIDsForUserInOrgSystem(ctx context.Context, orgID, userID string) ([]string, error) {
+	// memberships ⋈ teams, scoped to the org — identical query to the
+	// Postgres impl so both backends pin to one result. Unlike
+	// ListForUser (which short-circuits the join because SQLite is N=1),
+	// this takes an explicit userID and honors the membership rows, so
+	// the v1.11.0 baseline's seeded local-user membership is what
+	// resolves the one synthetic user to its team in N=1.
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT t.id
+		FROM memberships m
+		JOIN teams t ON t.id = m.team_id
+		WHERE t.org_id = ? AND m.user_id = ?
+		ORDER BY t.id ASC
+	`, orgID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list teams for user in org: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan team_id: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 func (s *teamsStore) Create(ctx context.Context, orgID, name, slug, creatorUserID string) (domain.Team, error) {
 	// Local mode never calls this in practice (the "add team" handler is
 	// multi-mode-gated), but the impl exists for store-conformance parity.

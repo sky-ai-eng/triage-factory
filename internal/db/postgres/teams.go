@@ -126,6 +126,35 @@ func (s *teamsStore) ListForUser(ctx context.Context, orgID string) ([]domain.Te
 	return scanTeams(rows)
 }
 
+func (s *teamsStore) TeamIDsForUserInOrgSystem(ctx context.Context, orgID, userID string) ([]string, error) {
+	// memberships ⋈ teams, scoped to the org. The join to teams is what
+	// applies the org filter (memberships carries no org_id — it FKs to
+	// teams), and it also drops any dangling membership row whose team
+	// has since been deleted. Admin pool: the router resolves an
+	// arbitrary author/reviewer userID with no JWT claims, so this can't
+	// lean on current_user_id() the way ListForUser does.
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT t.id::text
+		FROM memberships m
+		JOIN teams t ON t.id = m.team_id
+		WHERE t.org_id = $1 AND m.user_id = $2
+		ORDER BY t.id ASC
+	`, orgID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list teams for user in org: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan team_id: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 func (s *teamsStore) Create(ctx context.Context, orgID, name, slug, creatorUserID string) (domain.Team, error) {
 	var t domain.Team
 	err := s.app.QueryRowContext(ctx, `

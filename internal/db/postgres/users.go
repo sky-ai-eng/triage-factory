@@ -53,6 +53,34 @@ func getGitHubLogin(ctx context.Context, q queryer, userID, githubBaseURL string
 	return login, nil
 }
 
+func (s *usersStore) UserIDsForGitHubLoginSystem(ctx context.Context, githubBaseURL, login string) ([]string, error) {
+	// Reverse of getGitHubLogin: (host, login) → user_id(s). Host is
+	// normalized the same way the writers store it so the key matches;
+	// login matches verbatim (the writers persist it as captured, no
+	// case-folding). Returns every matching row — two users may bind one
+	// login on a host (PK is per-user), and source/verified_at are out
+	// of scope.
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT user_id::text
+		FROM user_github_identities
+		WHERE github_base_url = $1 AND login = $2
+		ORDER BY user_id ASC
+	`, db.NormalizeGitHubHost(githubBaseURL), login)
+	if err != nil {
+		return nil, fmt.Errorf("read user_github_identities by login: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan user_github_identities.user_id: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 func (s *usersStore) UpsertGitHubIdentity(ctx context.Context, userID, githubBaseURL, login, source string) error {
 	// FK on user_id enforces the row-exists contract: a missing user
 	// surfaces as a foreign_key_violation, matching the old
