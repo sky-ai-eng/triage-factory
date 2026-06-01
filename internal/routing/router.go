@@ -621,6 +621,11 @@ func (r *Router) reviewRequestVisibilityTeams(orgID string, evt domain.Event) (t
 		return nil, false // legacy event, no requested identity captured
 	}
 
+	// Unwired mapping store is test / pre-ticket wiring only — fall back to
+	// handler-team visibility (scoped=false) rather than dropping the task, so
+	// pre-existing review_requested fixtures that don't thread these stores
+	// keep working. Production always wires them, so a wired-but-unresolvable
+	// identity below takes the scoped=true path (drop, no mis-attributed task).
 	set := map[string]struct{}{}
 	if meta.RequestedTeam != "" {
 		if r.githubGroups == nil {
@@ -1629,6 +1634,17 @@ func (r *Router) closeCheckReviewResolved(orgID string, evt domain.Event, entity
 // reviewer (see diff.go's reviewerIsSelf gate), so by construction any
 // review_submitted event we see here is a self-review — no defensive
 // check needed.
+//
+// This closes EVERY active review_requested task on the entity, not just the
+// submitter's per-reviewer task. That is correct for the only path that fires
+// it today — local N=1, where the lone user's own request plus any of their
+// github-team requests are all satisfied by their single review (the team
+// requests are membership-dismissed too). It is deliberately NOT dedup-keyed:
+// review_submitted carries no review-request dedup_key, and the multi-mode App
+// path never emits it (reviewerIsSelf is always false when username==""). When
+// review_submitted becomes identity-aware in multi mode (the author-centric
+// routing follow-on), this must narrow to the submitter's own
+// "user:<reviewer>" task, mirroring closeCheckReviewRequestRemoved.
 func (r *Router) closeCheckReviewSubmitted(orgID string, evt domain.Event, entityID string) bool {
 	var meta events.GitHubPRReviewSubmittedMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {

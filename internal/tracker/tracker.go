@@ -531,11 +531,12 @@ func (t *Tracker) backfillReviewRequested(entityID string, snap domain.PRSnapsho
 	if err != nil {
 		return err
 	}
+	// Parse through the shared external-time parser (handles RFC3339Nano
+	// sub-second shapes + Jira offsets) so a fractional-seconds CreatedAt
+	// doesn't silently degrade the backfilled task's queue order to "now".
 	occurredAt := time.Time{}
-	if snap.CreatedAt != "" {
-		if parsed, perr := time.Parse(time.RFC3339, snap.CreatedAt); perr == nil {
-			occurredAt = parsed
-		}
+	if parsed, ok := domain.ParseExternalTime(snap.CreatedAt); ok {
+		occurredAt = parsed
 	}
 	eid := entityID
 	t.publish(domain.Event{

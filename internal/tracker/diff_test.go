@@ -573,6 +573,22 @@ func TestDiff_ReviewRequestRemoved_PerReviewer(t *testing.T) {
 	}
 }
 
+// TestDiff_ReviewRequested_NilResolver_NoEvent pins the degraded path: a
+// reviewer is added but the resolver is nil (nothing is TF-known) → no
+// review_requested event. resolveReviewer's nil guard is what suppresses it.
+func TestDiff_ReviewRequested_NilResolver_NoEvent(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.Author = "bob"
+	curr := basePRSnapshot()
+	curr.Author = "bob"
+	curr.ReviewRequests = []string{"alice", "acme/backend"}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
+	if findEvent(evts, domain.EventGitHubPRReviewRequested) != nil {
+		t.Error("nil resolver should suppress all review_requested events")
+	}
+}
+
 func TestDiff_ReviewRequested_ForOther_NoEvent(t *testing.T) {
 	prev := basePRSnapshot()
 	curr := basePRSnapshot()

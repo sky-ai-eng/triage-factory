@@ -66,6 +66,11 @@ func (r *localReviewerResolver) KnownTeam(orgLogin, slug string) bool {
 // store normalizes again internally so passing the raw org_settings value is
 // fine.
 type storeReviewerResolver struct {
+	// ctx is the poll cycle's context, stored deliberately: the resolver is a
+	// short-lived per-cycle object whose KnownUser/KnownTeam calls happen
+	// synchronously inside that same cycle. If the cycle is cancelled the
+	// store lookups error and resolve to known=false — the conservative
+	// outcome (suppress the event rather than mint a mis-routed task).
 	ctx    context.Context
 	orgID  string
 	host   string
