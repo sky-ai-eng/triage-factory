@@ -69,6 +69,11 @@ func doEnsureRootfs(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("rootfs: %w", err)
 	}
+	// Surface a missing $HOME as an error (the pre-paths behavior) rather
+	// than letting the error-free SandboxRootfsDir panic underneath.
+	if _, err := paths.StateRootErr(); err != nil {
+		return "", fmt.Errorf("rootfs: %w", err)
+	}
 	// Host-global cache: shared read-only across all tenants, so it hangs
 	// off the state root with no org segment (org-scoping it would
 	// re-extract an identical toolchain per org).

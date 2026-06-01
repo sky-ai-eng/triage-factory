@@ -44,6 +44,9 @@ func collectExportState(ctx context.Context, database *sql.DB, projects db.Proje
 		return nil, ErrProjectNotFound
 	}
 
+	if _, err := paths.StateRootErr(); err != nil {
+		return nil, fmt.Errorf("resolve project root: %w", err)
+	}
 	projectRoot := paths.ProjectKBDir(orgID, project.ID)
 	resolvedRoot := projectRoot
 	if resolved, err := filepath.EvalSymlinks(projectRoot); err == nil {

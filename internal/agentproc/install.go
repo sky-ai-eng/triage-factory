@@ -59,6 +59,11 @@ func EnsureSDK() (string, error) {
 }
 
 func doInstall() (string, error) {
+	// Surface a missing $HOME as an error (the pre-paths behavior) rather
+	// than letting the error-free SDKDir panic underneath.
+	if _, err := paths.StateRootErr(); err != nil {
+		return "", fmt.Errorf("resolve sdk dir: %w", err)
+	}
 	// Host-global install: the SDK toolchain is identical for every
 	// tenant, so it lives under the state root with no org segment.
 	sdkDir := paths.SDKDir()

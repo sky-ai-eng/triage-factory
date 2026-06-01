@@ -17,6 +17,11 @@ import (
 // tests) don't each re-implement the home-dir math.
 func ResolveTakeoverDir(stored string) (string, error) {
 	if stored == "" {
+		// Surface a missing $HOME as an error (the pre-paths behavior)
+		// rather than letting the error-free TakeoversRoot panic.
+		if _, err := paths.StateRootErr(); err != nil {
+			return "", err
+		}
 		return paths.TakeoversRoot(), nil
 	}
 	return paths.ExpandHome(stored)

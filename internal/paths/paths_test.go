@@ -82,6 +82,51 @@ func TestStateRoot_LocalIgnoresEnv(t *testing.T) {
 	}
 }
 
+func TestStateRootErr_MatchesStateRoot(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	SetForTest(t, "/s")
+	got, err := StateRootErr()
+	if err != nil {
+		t.Fatalf("StateRootErr() error = %v", err)
+	}
+	if got != "/s" || got != StateRoot() {
+		t.Errorf("StateRootErr() = %q, want /s == StateRoot()", got)
+	}
+}
+
+func TestStateRootErr_MultiHasNoHomeDependency(t *testing.T) {
+	// Multi mode resolves from env/default and never consults the home
+	// dir, so an unresolvable $HOME is irrelevant there.
+	runmode.SetForTest(t, runmode.ModeMulti)
+	t.Setenv("HOME", "")
+	t.Setenv(envStateRoot, "/mnt/vol")
+	got, err := StateRootErr()
+	if err != nil || got != "/mnt/vol" {
+		t.Errorf("StateRootErr() = (%q, %v), want (/mnt/vol, nil)", got, err)
+	}
+}
+
+func TestStateRootErr_ErrorsWhenHomeUnresolvable(t *testing.T) {
+	// No SetForTest override, local mode, $HOME unset → os.UserHomeDir
+	// fails and StateRootErr surfaces it instead of panicking.
+	runmode.SetForTest(t, runmode.ModeLocal)
+	t.Setenv("HOME", "")
+	if got, err := StateRootErr(); err == nil {
+		t.Errorf("StateRootErr() = (%q, nil), want an error with $HOME unset", got)
+	}
+}
+
+func TestStateRoot_PanicsWhenHomeUnresolvable(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	t.Setenv("HOME", "")
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("StateRoot() did not panic with $HOME unset")
+		}
+	}()
+	_ = StateRoot()
+}
+
 func TestOrgRoot_LocalStripsOrgSegment(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	SetForTest(t, "/s")

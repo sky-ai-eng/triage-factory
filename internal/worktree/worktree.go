@@ -266,8 +266,11 @@ func resolveCloneOptions(opts []CloneOption) cloneConfig {
 func repoDir(owner, repo string) (string, error) {
 	// orgID is the local-default sentinel for now; SKY-406 threads the
 	// real orgID through as it makes this bare cache bounded + evictable.
-	// The (string, error) signature is kept so the call sites stay
-	// untouched — the resolver itself cannot fail.
+	// StateRootErr surfaces a missing $HOME the way the pre-paths
+	// os.UserHomeDir call did, rather than letting BareCacheDir panic.
+	if _, err := paths.StateRootErr(); err != nil {
+		return "", err
+	}
 	return paths.BareCacheDir(runmode.LocalDefaultOrg, owner, repo), nil
 }
 
@@ -2077,6 +2080,9 @@ func RemoveAt(path, runID string) error {
 	}
 
 	// Prune stale worktree refs from all bare repos
+	if _, err := paths.StateRootErr(); err != nil {
+		return err
+	}
 	pruneAll(paths.BareCacheRoot(runmode.LocalDefaultOrg))
 
 	if runID != "" {
@@ -2157,6 +2163,9 @@ func CleanupWithOptions(opts CleanupOptions) {
 	// marker), then run the ordinary prune for unlocked stale entries.
 	// Safe to force here: this runs at startup before any poller/spawner
 	// can issue a concurrent add.
+	if _, err := paths.StateRootErr(); err != nil {
+		return
+	}
 	reposRoot := paths.BareCacheRoot(runmode.LocalDefaultOrg)
 	clearStaleLockedWorktreesAll(reposRoot)
 	pruneAll(reposRoot)

@@ -67,7 +67,12 @@ var (
 )
 
 // StateRoot returns the base directory under which all persistent TF
-// state lives.
+// state lives. It is the error-free convenience form of StateRootErr,
+// panicking on the (in practice unreachable) case where local mode
+// cannot resolve $HOME. Callers whose own signature returns an error
+// should use StateRootErr — or pre-flight it once — so a missing home
+// surfaces as an actionable error rather than a panic; every swept
+// error-returning call site does exactly that.
 //
 //   - A SetForTest override always wins (tests relocate state onto a
 //     t.TempDir() rather than the developer's real home).
@@ -79,19 +84,38 @@ var (
 //     installs' "byte-for-byte unchanged" guarantee at the mercy of a
 //     stray env var.
 func StateRoot() string {
+	root, err := StateRootErr()
+	if err != nil {
+		panic(fmt.Sprintf("paths: %v (is $HOME set?)", err))
+	}
+	return root
+}
+
+// StateRootErr is the error-returning form of StateRoot. It only ever
+// errors in local mode when os.UserHomeDir fails (i.e. $HOME unset) —
+// the SetForTest / TF_STATE_ROOT overrides and multi mode's defaults
+// never touch the home dir. Error-returning callers (db.Open, the
+// sandbox/SDK caches, the worktree bare cache, projectbundle, …) route
+// through here so a missing home is reported the way it was before the
+// internal/paths sweep, rather than panicking.
+func StateRootErr() (string, error) {
 	testRootMu.RLock()
 	tr := testRoot
 	testRootMu.RUnlock()
 	if tr != "" {
-		return tr
+		return tr, nil
 	}
 	if runmode.Current() == runmode.ModeMulti {
 		if env := strings.TrimSpace(os.Getenv(envStateRoot)); env != "" {
-			return env
+			return env, nil
 		}
-		return defaultMultiStateRoot
+		return defaultMultiStateRoot, nil
 	}
-	return filepath.Join(mustHome(), dirName)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory for state root: %w", err)
+	}
+	return filepath.Join(home, dirName), nil
 }
 
 // OrgRoot returns the per-tenant subtree root for org-scoped state.
@@ -195,21 +219,4 @@ func ExpandHome(p string) (string, error) {
 		return home, nil
 	}
 	return filepath.Join(home, p[2:]), nil
-}
-
-// mustHome resolves the user's home directory or panics. os.UserHomeDir
-// fails only when $HOME (or its Windows equivalent) is unset — a state
-// in which a local-mode TF binary cannot locate its DB, config, or
-// keychain entries and therefore cannot run at all. Rather than thread
-// an error return through every resolver (the API is deliberately
-// error-free: these are pure path joins), we surface that unreachable
-// condition as a loud panic at the single resolution site. Multi mode
-// and TF_STATE_ROOT never reach this; tests use SetForTest; every real
-// local launch — desktop app, CLI, CI — has $HOME set.
-func mustHome() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		panic(fmt.Sprintf("paths: cannot resolve home directory (is $HOME set?): %v", err))
-	}
-	return home
 }

@@ -269,6 +269,10 @@ func materializeProjectKnowledge(cwd string, projectID *string) {
 		return
 	}
 
+	if _, err := paths.StateRootErr(); err != nil {
+		log.Printf("[delegate] warning: resolve knowledge dir for project %s: %v", *projectID, err)
+		return
+	}
 	kbRoot := paths.ProjectKBDir(runmode.LocalDefaultOrg, *projectID)
 	srcDir := filepath.Join(kbRoot, "knowledge-base")
 

@@ -54,7 +54,10 @@ func Handle(args []string) {
 		os.Exit(2)
 	}
 
-	dataDir := paths.StateRoot()
+	dataDir, err := paths.StateRootErr()
+	if err != nil {
+		fail("resolve state dir: %v", err)
+	}
 	// home is still needed for the ~/.claude/projects session-JSONL
 	// cleanup below — that's Claude Code SDK state keyed to the real
 	// HOME, not TF state, so it does not live under the (possibly

@@ -19,6 +19,11 @@ type DB struct {
 // root (~/.triagefactory/triagefactory.db). Creates the directory if it
 // doesn't exist. Local mode only — multi mode is Postgres-backed.
 func Open() (*sql.DB, error) {
+	// Surface a missing $HOME as an error (the pre-paths behavior) rather
+	// than letting the error-free DBPath panic underneath.
+	if _, err := paths.StateRootErr(); err != nil {
+		return nil, err
+	}
 	dbPath := paths.DBPath()
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		return nil, err

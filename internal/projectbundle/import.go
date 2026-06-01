@@ -143,6 +143,9 @@ func Import(
 	if hasSession {
 		newSessionID = uuid.New().String()
 	}
+	if _, err := paths.StateRootErr(); err != nil {
+		return nil, nil, fmt.Errorf("resolve project root: %w", err)
+	}
 	projectRoot := paths.ProjectKBDir(orgID, newProjectID)
 	kbRoot := filepath.Join(projectRoot, "knowledge-base")
 	extractionBudget := newZipExtractionBudget(maxImportExtractBundleBytes, maxImportExtractEntryBytes)
