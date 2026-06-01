@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
 
 // Pinned SDK version. Bump on Triage Factory release after verifying the
@@ -57,11 +59,9 @@ func EnsureSDK() (string, error) {
 }
 
 func doInstall() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home dir: %w", err)
-	}
-	sdkDir := filepath.Join(home, ".triagefactory", "sdk")
+	// Host-global install: the SDK toolchain is identical for every
+	// tenant, so it lives under the state root with no org segment.
+	sdkDir := paths.SDKDir()
 	if err := os.MkdirAll(sdkDir, 0o755); err != nil {
 		return "", fmt.Errorf("create %s: %w", sdkDir, err)
 	}

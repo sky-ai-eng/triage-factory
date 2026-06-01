@@ -42,6 +42,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
 
 // Handle dispatches the uninstall subcommand.
@@ -53,11 +54,16 @@ func Handle(args []string) {
 		os.Exit(2)
 	}
 
-	home, err := os.UserHomeDir()
+	dataDir := paths.StateRoot()
+	// home is still needed for the ~/.claude/projects session-JSONL
+	// cleanup below — that's Claude Code SDK state keyed to the real
+	// HOME, not TF state, so it does not live under the (possibly
+	// relocated) state root. Resolved via ExpandHome so os.UserHomeDir
+	// stays confined to internal/paths.
+	home, err := paths.ExpandHome("~")
 	if err != nil {
 		fail("resolve home dir: %v", err)
 	}
-	dataDir := filepath.Join(home, ".triagefactory")
 	takeoversDir, takeoversDirErr := resolvedTakeoversDir(dataDir)
 	linkPath := defaultInstallLink()
 
@@ -425,11 +431,13 @@ func defaultInstallLink() string {
 	if runtime.GOOS == "darwin" {
 		return "/usr/local/bin/triagefactory"
 	}
-	home, err := os.UserHomeDir()
+	// Binary symlink location (~/.local/bin), not TF state — resolved via
+	// ExpandHome so os.UserHomeDir stays confined to internal/paths.
+	link, err := paths.ExpandHome("~/.local/bin/triagefactory")
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".local", "bin", "triagefactory")
+	return link
 }
 
 func confirm(prompt string) bool {

@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -44,10 +44,7 @@ func collectExportState(ctx context.Context, database *sql.DB, projects db.Proje
 		return nil, ErrProjectNotFound
 	}
 
-	projectRoot, err := curator.KnowledgeDir(project.ID)
-	if err != nil {
-		return nil, fmt.Errorf("resolve project root: %w", err)
-	}
+	projectRoot := paths.ProjectKBDir(orgID, project.ID)
 	resolvedRoot := projectRoot
 	if resolved, err := filepath.EvalSymlinks(projectRoot); err == nil {
 		resolvedRoot = resolved
@@ -163,7 +160,11 @@ func appendSessionArtifacts(resolvedProjectRoot, curatorSessionID string, out *[
 	if strings.TrimSpace(curatorSessionID) == "" {
 		return false, nil
 	}
-	home, err := os.UserHomeDir()
+	// ~/.claude/projects is Claude Code SDK session state keyed to the
+	// real HOME, not TF state — it stays home-relative even in multi mode
+	// (where TF state diverges onto a mounted volume), so it does not
+	// route through internal/paths.
+	home, err := os.UserHomeDir() //nolint:forbidigo // Claude Code SDK session state, not TF state (see internal/paths doc).
 	if err != nil {
 		return false, fmt.Errorf("resolve home dir for session export: %w", err)
 	}

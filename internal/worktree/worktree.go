@@ -15,10 +15,26 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // claudeProjectsDir is where Claude Code auto-creates per-cwd session history.
 const claudeProjectsDir = ".claude/projects"
+
+// claudeHome resolves the user's real home directory for ~/.claude
+// access. Claude Code SDK session state (the per-cwd JSONL transcripts
+// under claudeProjectsDir) is keyed to the agent's real HOME, not to TF
+// state — in the jail HOME=/work handles it, on the host it's the
+// user's ~/.claude. It therefore stays home-relative even in multi mode
+// (where TF state diverges onto a mounted volume) and does NOT route
+// through internal/paths. The single nolint here is the documented
+// exception to the forbidigo guard for every ~/.claude site in this
+// file.
+func claudeHome() (string, error) {
+	return os.UserHomeDir() //nolint:forbidigo // Claude Code SDK session state, not TF state (see internal/paths doc).
+}
 
 // Per-repo mutexes prevent concurrent fetches from racing on the same bare repo.
 var (
@@ -99,10 +115,13 @@ func WithRepoLock(owner, repo string, fn func() error) error {
 	return fn()
 }
 
-const (
-	reposDir = ".triagefactory/repos" // bare clones: ~/.triagefactory/repos/{owner}/{repo}.git
-	runsDir  = "triagefactory-runs"   // worktrees: /tmp/triagefactory-runs/{run-id}
-)
+// runsDir is the basename for ephemeral run worktrees under
+// os.TempDir() (/tmp/triagefactory-runs/{run-id}). Ephemeral and
+// unique-by-runID, so it is deliberately NOT routed through
+// internal/paths — there is no persistence and no cross-tenant
+// collision risk. The persistent bare clone cache, by contrast, lives
+// under paths.BareCacheDir / paths.BareCacheRoot.
+const runsDir = "triagefactory-runs" // worktrees: /tmp/triagefactory-runs/{run-id}
 
 // CloneAuth is an optional HTTPS credential for a host-side `git clone` /
 // `git fetch`. The zero value injects nothing — the git subprocess
@@ -245,11 +264,11 @@ func resolveCloneOptions(opts []CloneOption) cloneConfig {
 }
 
 func repoDir(owner, repo string) (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, reposDir, owner, repo+".git"), nil
+	// orgID is the local-default sentinel for now; SKY-406 threads the
+	// real orgID through as it makes this bare cache bounded + evictable.
+	// The (string, error) signature is kept so the call sites stay
+	// untouched — the resolver itself cannot fail.
+	return paths.BareCacheDir(runmode.LocalDefaultOrg, owner, repo), nil
 }
 
 // RepoDir is the exported variant for callers outside the worktree
@@ -395,7 +414,7 @@ func MaterializeSessionForTakeover(resolvedOldCwd, newCwd, sessionID string) err
 	if sessionID == "" {
 		return fmt.Errorf("materialize session: empty session id")
 	}
-	home, err := os.UserHomeDir()
+	home, err := claudeHome()
 	if err != nil {
 		return fmt.Errorf("materialize session: %w", err)
 	}
@@ -460,7 +479,7 @@ func RemoveClaudeProjectDir(cwd string) {
 		return
 	}
 
-	home, err := os.UserHomeDir()
+	home, err := claudeHome()
 	if err != nil {
 		return
 	}
@@ -515,7 +534,7 @@ func RemoveClaudeProjectDirUnderTakeover(cwd, takeoverBase string) {
 		return
 	}
 
-	home, err := os.UserHomeDir()
+	home, err := claudeHome()
 	if err != nil {
 		return
 	}
@@ -542,7 +561,7 @@ func RemoveClaudeProjectDirForResolved(resolvedCwd string) {
 	if resolvedCwd == "" {
 		return
 	}
-	home, err := os.UserHomeDir()
+	home, err := claudeHome()
 	if err != nil {
 		return
 	}
@@ -2058,11 +2077,7 @@ func RemoveAt(path, runID string) error {
 	}
 
 	// Prune stale worktree refs from all bare repos
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	pruneAll(filepath.Join(home, reposDir))
+	pruneAll(paths.BareCacheRoot(runmode.LocalDefaultOrg))
 
 	if runID != "" {
 		log.Printf("[worktree] removed %s (%s)", runID, path)
@@ -2142,12 +2157,9 @@ func CleanupWithOptions(opts CleanupOptions) {
 	// marker), then run the ordinary prune for unlocked stale entries.
 	// Safe to force here: this runs at startup before any poller/spawner
 	// can issue a concurrent add.
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return
-	}
-	clearStaleLockedWorktreesAll(filepath.Join(home, reposDir))
-	pruneAll(filepath.Join(home, reposDir))
+	reposRoot := paths.BareCacheRoot(runmode.LocalDefaultOrg)
+	clearStaleLockedWorktreesAll(reposRoot)
+	pruneAll(reposRoot)
 }
 
 func pruneAll(baseDir string) {

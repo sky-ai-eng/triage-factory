@@ -38,7 +38,10 @@ type ImportResult struct {
 func ImportAll(ctx context.Context, database *sql.DB, prompts db.PromptStore) ImportResult {
 	var result ImportResult
 
-	home, err := os.UserHomeDir()
+	// ~/.claude/skills is Claude Code user state keyed to the real HOME,
+	// not TF state — it stays home-relative and does not route through
+	// internal/paths.
+	home, err := os.UserHomeDir() //nolint:forbidigo // Claude Code user state, not TF state (see internal/paths doc).
 	if err != nil {
 		result.Errors = append(result.Errors, "could not determine home dir: "+err.Error())
 		return result

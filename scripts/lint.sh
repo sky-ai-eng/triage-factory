@@ -65,6 +65,30 @@ else
   fail=1
 fi
 
+# forbidigo (in .golangci.yml) bans os.UserHomeDir outside internal/paths,
+# but its AST matcher can't see string literals — so the ".triagefactory"
+# path literal needs this companion grep. Every persistent TF state path
+# must come from a paths.* resolver, never a hardcoded literal.
+# internal/paths owns the literal; internal/curator/knowledge.go is a
+# temporary exception until SKY-402 routes the curator runtime through
+# paths; test files may reference it for assertions.
+blue "paths state-literal guard"
+go_src=$(git ls-files '*.go' \
+  | grep -v '_test\.go$' \
+  | grep -v '^internal/paths/' \
+  | grep -v '^internal/curator/knowledge\.go$' || true)
+literal_offenders=""
+if [[ -n "$go_src" ]]; then
+  literal_offenders=$(printf '%s\n' "$go_src" | xargs grep -l '"\.triagefactory' 2>/dev/null || true)
+fi
+if [[ -n "$literal_offenders" ]]; then
+  red '".triagefactory" path literal found outside internal/paths — use a paths.* resolver:'
+  echo "$literal_offenders"
+  fail=1
+else
+  green "paths state-literal guard OK"
+fi
+
 # --- Frontend ---------------------------------------------------------------
 blue "prettier"
 cd frontend

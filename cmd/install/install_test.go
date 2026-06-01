@@ -2,7 +2,6 @@ package install
 
 import (
 	"os"
-	"path/filepath"
 	"runtime"
 	"testing"
 )
@@ -26,36 +25,9 @@ func TestDefaultDestination(t *testing.T) {
 	}
 }
 
-// TestExpandHome covers the small home-dir helper. Critical because
-// `~/.local/bin/...` is the default Linux destination and a bug here
-// would either fail with `~` in the path or write to a literal
-// directory named `~`.
-func TestExpandHome(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	cases := []struct {
-		in   string
-		want string
-	}{
-		{"~", home},
-		{"~/.local/bin/triagefactory", filepath.Join(home, ".local/bin/triagefactory")},
-		{"/absolute/path", "/absolute/path"},
-		{"relative/path", "relative/path"},
-		{"~user/elsewhere", "~user/elsewhere"}, // not a leading "~/" — pass through
-	}
-	for _, tc := range cases {
-		t.Run(tc.in, func(t *testing.T) {
-			got, err := expandHome(tc.in)
-			if err != nil {
-				t.Fatalf("expandHome: %v", err)
-			}
-			if got != tc.want {
-				t.Errorf("expandHome(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
-	}
-}
+// Tilde expansion for the install destination now lives in
+// internal/paths.ExpandHome (keeping os.UserHomeDir confined to that
+// package); its behavior is covered by internal/paths' TestExpandHome.
 
 // TestOnPath checks the "is this dir on $PATH" detection used by the
 // post-install warning. False positives or negatives would either

@@ -26,6 +26,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
 
 // Handle dispatches the install subcommand.
@@ -51,7 +53,7 @@ func Handle(args []string) {
 	if target == "" {
 		target = defaultDestination()
 	}
-	target, err = expandHome(target)
+	target, err = paths.ExpandHome(target)
 	if err != nil {
 		fail("expand destination: %v", err)
 	}
@@ -111,22 +113,6 @@ func defaultDestination() string {
 		return "/usr/local/bin/triagefactory"
 	}
 	return "~/.local/bin/triagefactory"
-}
-
-// expandHome resolves a leading "~/" or bare "~" against the current
-// user's home dir. Anything else passes through unchanged.
-func expandHome(p string) (string, error) {
-	if p == "~" || (len(p) >= 2 && p[:2] == "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		if p == "~" {
-			return home, nil
-		}
-		return filepath.Join(home, p[2:]), nil
-	}
-	return p, nil
 }
 
 // onPath returns true iff dir is one of the directories listed in

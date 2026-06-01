@@ -7,6 +7,7 @@ linters:
   default: none
   enable:
     - errcheck
+    - forbidigo
     - govet
     - ineffassign
     - staticcheck
@@ -15,6 +16,27 @@ linters:
     - unconvert
 
   settings:
+    forbidigo:
+      # internal/paths is the single source of truth for every
+      # persistent on-disk TF path (mode- and org-aware). Banning
+      # os.UserHomeDir everywhere else keeps that invariant honest: a
+      # raw home lookup is how a caller would re-hardcode ~/.triagefactory
+      # and silently break tenant isolation in multi mode. The
+      # ".triagefactory" string literal can't be matched here — forbidigo
+      # only inspects identifiers/selectors/calls, not string literals —
+      # so scripts/lint.sh carries a companion grep guard for it.
+      #
+      # Documented exceptions (see internal/paths package doc):
+      #   - ~/.claude sites (Claude Code SDK session/user state, which
+      #     follows the real HOME even in multi mode) carry a line-level
+      #     //nolint:forbidigo.
+      #   - internal/paths itself and the curator runtime (until SKY-402
+      #     routes it through paths) are path-excluded below.
+      #   - _test.go is excluded: live integration tests legitimately
+      #     resolve the real HOME for subprocess env.
+      forbid:
+        - pattern: 'os\.UserHomeDir'
+          msg: "resolve persistent TF state paths through internal/paths (mode/org-aware), not os.UserHomeDir; ~/.claude (Claude SDK state) sites use //nolint:forbidigo"
     errcheck:
       # These all represent cleanup / best-effort operations where the
       # returned error is either unrecoverable or intentionally ignored.
@@ -42,6 +64,20 @@ linters:
         linters:
           - errcheck
           - unused
+          # Live integration tests resolve the real HOME to build a
+          # subprocess env (npm cache, ~/.claude config); that's not TF
+          # state, so test files are exempt from the home-dir ban.
+          - forbidigo
+      # internal/paths is the one place os.UserHomeDir legitimately lives.
+      - path: internal/paths/
+        linters:
+          - forbidigo
+      # The curator runtime still owns its own home resolution until
+      # SKY-402 routes it through paths.ProjectKBDir. Remove this once
+      # that lands.
+      - path: internal/curator/knowledge\.go
+        linters:
+          - forbidigo
 
 formatters:
   enable:

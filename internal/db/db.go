@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -13,20 +15,16 @@ type DB struct {
 	Conn *sql.DB
 }
 
-// Open returns a connection to the SQLite database at ~/.triagefactory/triagefactory.db.
-// Creates the directory if it doesn't exist.
+// Open returns a connection to the SQLite database at the local state
+// root (~/.triagefactory/triagefactory.db). Creates the directory if it
+// doesn't exist. Local mode only — multi mode is Postgres-backed.
 func Open() (*sql.DB, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
+	dbPath := paths.DBPath()
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		return nil, err
 	}
 
-	dir := filepath.Join(home, ".triagefactory")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return nil, err
-	}
-
-	return OpenAt(filepath.Join(dir, "triagefactory.db"))
+	return OpenAt(dbPath)
 }
 
 // OpenAt returns a connection to the SQLite database at the given path.

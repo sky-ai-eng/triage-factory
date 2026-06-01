@@ -11,7 +11,10 @@ import (
 // separated string suitable for merging into --allowedTools — or ""
 // if no agent files exist or none declare tools.
 func ScanAgentTools() string {
-	home, err := os.UserHomeDir()
+	// ~/.claude/agents is Claude Code user state keyed to the real HOME,
+	// not TF state — it stays home-relative and does not route through
+	// internal/paths.
+	home, err := os.UserHomeDir() //nolint:forbidigo // Claude Code user state, not TF state (see internal/paths doc).
 	if err != nil {
 		return ""
 	}

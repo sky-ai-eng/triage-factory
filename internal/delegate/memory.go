@@ -15,8 +15,9 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // maxMemoryRetries is the hard cap on how many times the write-gate
@@ -268,11 +269,7 @@ func materializeProjectKnowledge(cwd string, projectID *string) {
 		return
 	}
 
-	kbRoot, err := curator.KnowledgeDir(*projectID)
-	if err != nil {
-		log.Printf("[delegate] warning: resolve knowledge dir for project %s: %v", *projectID, err)
-		return
-	}
+	kbRoot := paths.ProjectKBDir(runmode.LocalDefaultOrg, *projectID)
 	srcDir := filepath.Join(kbRoot, "knowledge-base")
 
 	entries, err := os.ReadDir(srcDir)

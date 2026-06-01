@@ -18,9 +18,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -143,10 +143,7 @@ func Import(
 	if hasSession {
 		newSessionID = uuid.New().String()
 	}
-	projectRoot, err := curator.KnowledgeDir(newProjectID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("resolve project root: %w", err)
-	}
+	projectRoot := paths.ProjectKBDir(orgID, newProjectID)
 	kbRoot := filepath.Join(projectRoot, "knowledge-base")
 	extractionBudget := newZipExtractionBudget(maxImportExtractBundleBytes, maxImportExtractEntryBytes)
 
@@ -601,7 +598,10 @@ func materializeSession(
 ) error {
 	newResolvedCwd := worktree.ResolveClaudeProjectCwd(projectRoot)
 	newEncoded := worktree.EncodeClaudeProjectDir(newResolvedCwd)
-	home, err := os.UserHomeDir()
+	// ~/.claude/projects is Claude Code SDK session state keyed to the
+	// real HOME, not TF state — it stays home-relative even in multi mode
+	// and so does not route through internal/paths.
+	home, err := os.UserHomeDir() //nolint:forbidigo // Claude Code SDK session state, not TF state (see internal/paths doc).
 	if err != nil {
 		return fmt.Errorf("resolve home dir for session import: %w", err)
 	}
