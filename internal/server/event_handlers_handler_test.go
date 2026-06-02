@@ -58,7 +58,7 @@ func TestHandleEventHandlerCreate_RuleHappyPath(t *testing.T) {
 	}
 	// Rule rows have NULL trigger-only fields on the wire.
 	if got["blueprint_id"] != "" {
-		t.Errorf("prompt_id=%v; rule rows must serialize empty", got["blueprint_id"])
+		t.Errorf("blueprint_id=%v; rule rows must serialize empty", got["blueprint_id"])
 	}
 	if got["breaker_threshold"] != nil {
 		t.Errorf("breaker_threshold=%v; rule rows must serialize null", got["breaker_threshold"])
