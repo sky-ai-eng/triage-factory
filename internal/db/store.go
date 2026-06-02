@@ -47,10 +47,8 @@ type Stores struct {
 	// on every routed event; handlers do full CRUD per kind.
 	EventHandlers EventHandlerStore
 
-	// Blueprints owns blueprints + blueprint_steps + blueprint_runs, plus
-	// the kind='chain:verdict' slice of run_artifacts. Read by the blueprint
-	// HTTP handlers; written by the delegate spawner and the exec verdict
-	// subcommand.
+	// Blueprints owns blueprints + blueprint_steps + blueprint_runs. Read by
+	// the blueprint HTTP handlers; written by the delegate spawner.
 	Blueprints BlueprintStore
 
 	// Agents owns the agents table — the org's workload identity.

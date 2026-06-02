@@ -3,10 +3,8 @@ package postgres
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -515,7 +513,8 @@ func runsForBlueprint(ctx context.Context, q queryer, orgID, blueprintRunID stri
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, task_id, prompt_id, status, model, started_at, completed_at,
 		       total_cost_usd, duration_ms, num_turns, stop_reason, worktree_path,
-		       result_summary, session_id, blueprint_run_id, blueprint_step_index
+		       result_summary, session_id, outcome, outcome_reason,
+		       blueprint_run_id, blueprint_step_index
 		FROM runs
 		WHERE org_id = $1 AND blueprint_run_id = $2
 		ORDER BY blueprint_step_index ASC, started_at ASC
@@ -528,23 +527,25 @@ func runsForBlueprint(ctx context.Context, q queryer, orgID, blueprintRunID stri
 	var out []domain.AgentRun
 	for rows.Next() {
 		var (
-			r            domain.AgentRun
-			completedAt  sql.NullTime
-			costUSD      sql.NullFloat64
-			durationMs   sql.NullInt64
-			numTurns     sql.NullInt64
-			stepIdx      sql.NullInt64
-			promptID     sql.NullString
-			model        sql.NullString
-			stopReason   sql.NullString
-			worktreeP    sql.NullString
-			resultSum    sql.NullString
-			sessionID    sql.NullString
-			blueprintRun sql.NullString
+			r             domain.AgentRun
+			completedAt   sql.NullTime
+			costUSD       sql.NullFloat64
+			durationMs    sql.NullInt64
+			numTurns      sql.NullInt64
+			stepIdx       sql.NullInt64
+			promptID      sql.NullString
+			model         sql.NullString
+			stopReason    sql.NullString
+			worktreeP     sql.NullString
+			resultSum     sql.NullString
+			sessionID     sql.NullString
+			outcome       sql.NullString
+			outcomeReason sql.NullString
+			blueprintRun  sql.NullString
 		)
 		if err := rows.Scan(&r.ID, &r.TaskID, &promptID, &r.Status, &model, &r.StartedAt, &completedAt,
 			&costUSD, &durationMs, &numTurns, &stopReason, &worktreeP, &resultSum, &sessionID,
-			&blueprintRun, &stepIdx); err != nil {
+			&outcome, &outcomeReason, &blueprintRun, &stepIdx); err != nil {
 			return nil, err
 		}
 		r.PromptID = promptID.String
@@ -553,6 +554,8 @@ func runsForBlueprint(ctx context.Context, q queryer, orgID, blueprintRunID stri
 		r.WorktreePath = worktreeP.String
 		r.ResultSummary = resultSum.String
 		r.SessionID = sessionID.String
+		r.Outcome = outcome.String
+		r.OutcomeReason = outcomeReason.String
 		if blueprintRun.Valid {
 			r.BlueprintRunID = blueprintRun.String
 		}
@@ -575,121 +578,6 @@ func runsForBlueprint(ctx context.Context, q queryer, orgID, blueprintRunID stri
 			r.NumTurns = &v
 		}
 		out = append(out, r)
-	}
-	return out, rows.Err()
-}
-
-// --- Verdict path (kept verbatim) ----------------------------------------
-
-func (s *blueprintStore) InsertVerdict(ctx context.Context, orgID, runID, metadataJSON string) error {
-	return insertChainVerdict(ctx, s.app, orgID, runID, metadataJSON)
-}
-
-func (s *blueprintStore) InsertVerdictSystem(ctx context.Context, orgID, runID, metadataJSON string) error {
-	return insertChainVerdict(ctx, s.admin, orgID, runID, metadataJSON)
-}
-
-func insertChainVerdict(ctx context.Context, q queryer, orgID, runID, metadataJSON string) error {
-	if !isValidUUID(runID) {
-		return fmt.Errorf("postgres blueprints: invalid run_id %q", runID)
-	}
-	_, err := q.ExecContext(ctx, `
-		INSERT INTO run_artifacts (id, org_id, run_id, kind, metadata_json, is_primary, created_at)
-		VALUES (gen_random_uuid(), $1, $2, 'chain:verdict', $3::jsonb, FALSE, now())
-	`, orgID, runID, metadataJSON)
-	return err
-}
-
-func (s *blueprintStore) GetLatestVerdict(ctx context.Context, orgID, runID string) (*domain.ChainVerdict, error) {
-	return getLatestChainVerdict(ctx, s.app, orgID, runID)
-}
-
-func (s *blueprintStore) GetLatestVerdictSystem(ctx context.Context, orgID, runID string) (*domain.ChainVerdict, error) {
-	return getLatestChainVerdict(ctx, s.admin, orgID, runID)
-}
-
-func getLatestChainVerdict(ctx context.Context, q queryer, orgID, runID string) (*domain.ChainVerdict, error) {
-	if !isValidUUID(runID) {
-		return nil, nil
-	}
-	var raw sql.NullString
-	err := q.QueryRowContext(ctx, `
-		SELECT metadata_json::text FROM run_artifacts
-		WHERE org_id = $1 AND run_id = $2 AND kind = 'chain:verdict'
-		ORDER BY created_at DESC, id DESC LIMIT 1
-	`, orgID, runID).Scan(&raw)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if !raw.Valid || raw.String == "" {
-		return &domain.ChainVerdict{}, nil
-	}
-	var v domain.ChainVerdict
-	if err := json.Unmarshal([]byte(raw.String), &v); err != nil {
-		return nil, fmt.Errorf("decode verdict: %w", err)
-	}
-	return &v, nil
-}
-
-func (s *blueprintStore) LatestVerdictsForRuns(ctx context.Context, orgID string, runIDs []string) (map[string]*domain.ChainVerdict, error) {
-	if len(runIDs) == 0 {
-		return map[string]*domain.ChainVerdict{}, nil
-	}
-	valid := make([]string, 0, len(runIDs))
-	for _, id := range runIDs {
-		if isValidUUID(id) {
-			valid = append(valid, id)
-		}
-	}
-	if len(valid) == 0 {
-		return map[string]*domain.ChainVerdict{}, nil
-	}
-
-	placeholders := make([]string, len(valid))
-	args := make([]any, len(valid))
-	for i, id := range valid {
-		placeholders[i] = fmt.Sprintf("$%d", i+1)
-		args[i] = id
-	}
-
-	query := fmt.Sprintf(`
-		SELECT run_id, metadata_json::text
-		FROM (
-			SELECT run_id, metadata_json,
-			       ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC, id DESC) AS rn
-			FROM run_artifacts
-			WHERE run_id IN (%s) AND kind = 'chain:verdict'
-		) ranked
-		WHERE rn = 1
-	`, strings.Join(placeholders, ","))
-
-	rows, err := s.app.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("query latest verdicts: %w", err)
-	}
-	defer rows.Close()
-
-	out := make(map[string]*domain.ChainVerdict)
-	for rows.Next() {
-		var (
-			runID string
-			raw   sql.NullString
-		)
-		if err := rows.Scan(&runID, &raw); err != nil {
-			return nil, err
-		}
-		if !raw.Valid || raw.String == "" {
-			out[runID] = &domain.ChainVerdict{}
-			continue
-		}
-		var v domain.ChainVerdict
-		if err := json.Unmarshal([]byte(raw.String), &v); err != nil {
-			return nil, fmt.Errorf("decode verdict for run %s: %w", runID, err)
-		}
-		out[runID] = &v
 	}
 	return out, rows.Err()
 }

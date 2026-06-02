@@ -802,8 +802,8 @@ CREATE UNIQUE INDEX runs_event_trigger_fence ON runs (triggering_event_id, trigg
 -- blueprint_steps is the ordered step list for a blueprint (length >= 1).
 -- Each step references a prompt; a multi-step blueprint runs its steps as
 -- fresh Claude sessions sharing one worktree, communicating via a handoff
--- file and recording proceed/abort verdicts on run_artifacts(kind=
--- 'chain:verdict'). Per-step runtime state stays on runs (linked via
+-- file. Each step's terminal runs.outcome (continue/finish/abort) drives
+-- advancement. Per-step runtime state stays on runs (linked via
 -- runs.blueprint_run_id); blueprint-wide abort/complete state lives on
 -- blueprint_runs.
 

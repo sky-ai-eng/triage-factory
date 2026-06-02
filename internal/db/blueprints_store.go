@@ -16,18 +16,14 @@ import (
 //     owning the worktree shared across every step.
 //   - runs                — read-only here (per-step state lives on runs;
 //     RunsForBlueprint returns the slice of step rows linked to a blueprint_run).
-//   - run_artifacts        — write-only here, kind='chain:verdict'. The verdict
-//     pipeline is the only writer; InsertVerdict hard-codes the kind so callers
-//     can't accidentally write other artifact kinds through this store. (The
-//     verdict channel is replaced by the unified envelope in the next ticket.)
+//     Step advancement reads each step run's terminal runs.outcome (see
+//     delegate.decideBlueprintStep); there is no separate verdict channel.
 //
 // Audiences:
 //
 //   - HTTP handlers (server/blueprints_handler.go, server/prompts_handler.go,
 //     server/pending_prs_handler.go, server/reviews_handler.go) — read-mostly.
 //   - Delegate spawner (delegate/blueprint.go, delegate/run.go) — every method.
-//   - exec subcommand (cmd/exec/chain/chain.go) — verdict write + step→run
-//     lookup, running as a child of the spawned agent.
 //
 // # Postgres / RLS shape
 //
@@ -123,19 +119,6 @@ type BlueprintStore interface {
 	// not reached a terminal state.
 	ActiveStepRunIDs(ctx context.Context, orgID string, blueprintRunID string) ([]string, error)
 
-	// --- Verdict path (kept verbatim; replaced by the unified envelope) --
-
-	// InsertVerdict writes a chain:verdict artifact for a step run.
-	InsertVerdict(ctx context.Context, orgID string, runID string, metadataJSON string) error
-
-	// GetLatestVerdict returns the most recent chain:verdict artifact for a
-	// run, or (nil, nil) when no verdict exists.
-	GetLatestVerdict(ctx context.Context, orgID string, runID string) (*domain.ChainVerdict, error)
-
-	// LatestVerdictsForRuns fetches the most-recent chain:verdict for each of
-	// the supplied run IDs in a single query.
-	LatestVerdictsForRuns(ctx context.Context, orgID string, runIDs []string) (map[string]*domain.ChainVerdict, error)
-
 	// --- Admin-pool variants (`...System`) ------------------------------
 	//
 	// These mirror the per-method shape of the corresponding app-pool methods
@@ -152,6 +135,4 @@ type BlueprintStore interface {
 	MarkRunStatusSystem(ctx context.Context, orgID string, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (changed bool, err error)
 	RunsForBlueprintSystem(ctx context.Context, orgID string, blueprintRunID string) ([]domain.AgentRun, error)
 	ActiveStepRunIDsSystem(ctx context.Context, orgID string, blueprintRunID string) ([]string, error)
-	InsertVerdictSystem(ctx context.Context, orgID string, runID string, metadataJSON string) error
-	GetLatestVerdictSystem(ctx context.Context, orgID string, runID string) (*domain.ChainVerdict, error)
 }

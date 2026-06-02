@@ -252,18 +252,6 @@ func (c *IPCClient) DeleteRunWorktreeByRepo(ctx context.Context, repoID string) 
 	return c.call(ctx, methodDeleteRunWorktreeByRepo, deleteRunWorktreeByRepoArgs{RepoID: repoID}, nil)
 }
 
-func (c *IPCClient) GetChainRunForRun(ctx context.Context) (*domain.BlueprintRun, *int, error) {
-	var res chainRunForRunResult
-	if err := c.call(ctx, methodGetChainRunForRun, emptyArgs{}, &res); err != nil {
-		return nil, nil, err
-	}
-	return res.ChainRun, res.StepIdx, nil
-}
-
-func (c *IPCClient) InsertChainVerdict(ctx context.Context, payload string) error {
-	return c.call(ctx, methodInsertChainVerdict, insertChainVerdictArgs{Payload: payload}, nil)
-}
-
 func (c *IPCClient) BuildAgentRunFooter(ctx context.Context, kind string) (string, error) {
 	var res buildAgentRunFooterResult
 	if err := c.call(ctx, methodBuildAgentRunFooter, buildAgentRunFooterArgs{Kind: kind}, &res); err != nil {

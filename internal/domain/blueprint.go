@@ -88,37 +88,3 @@ type BlueprintRun struct {
 	StartedAt     time.Time            `json:"started_at"`
 	CompletedAt   *time.Time           `json:"completed_at,omitempty"`
 }
-
-// ─────────────────────────────────────────────────────────────────────────
-// Verdict path — kept verbatim. The unified terminal envelope (next ticket)
-// replaces ChainVerdict + the `exec chain verdict` CLI + the
-// run_artifacts(kind='chain:verdict') channel wholesale. Until then, a
-// multi-step blueprint records per-step verdicts here exactly as today's
-// chain did, so behavior is preserved. Do not extend this — it is slated
-// for deletion.
-// ─────────────────────────────────────────────────────────────────────────
-
-// ChainVerdictOutcome is the tri-state result of a blueprint step's verdict.
-type ChainVerdictOutcome string
-
-const (
-	ChainVerdictAdvance ChainVerdictOutcome = "advance"
-	ChainVerdictAbort   ChainVerdictOutcome = "abort"
-	ChainVerdictFinal   ChainVerdictOutcome = "final"
-)
-
-// ChainVerdict is the structured handoff a blueprint step records via
-// `triagefactory exec chain verdict`. Stored as run_artifacts.metadata_json
-// with kind='chain:verdict'. Latest by created_at wins per step (idempotent
-// re-recording within a step).
-//
-// Outcome semantics:
-//   - ChainVerdictAdvance → advance to next step
-//   - ChainVerdictAbort   → abort the blueprint; leave task open for human
-//   - ChainVerdictFinal   → end the blueprint successfully at this step; close the task
-type ChainVerdict struct {
-	Outcome   ChainVerdictOutcome `json:"outcome"`
-	Reason    string              `json:"reason"`
-	Notes     string              `json:"notes,omitempty"`
-	Synthetic bool                `json:"-"` // internal flag, never on wire
-}

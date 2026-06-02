@@ -226,17 +226,17 @@ func (s *Server) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request)
 // --- Blueprint runs (multi-step instances) -------------------------------
 
 // blueprintRunResponse bundles the blueprint run row with its per-step runs
-// and verdicts so the run-detail UI can render the timeline in one fetch
-// instead of N+1.
+// so the run-detail UI can render the timeline in one fetch instead of N+1.
+// Each step run carries its terminal runs.outcome inline (Run.Outcome); there
+// is no separate verdict channel.
 type blueprintRunResponse struct {
 	BlueprintRun *domain.BlueprintRun   `json:"blueprint_run"`
 	Steps        []blueprintRunStepView `json:"steps"`
 }
 
 type blueprintRunStepView struct {
-	Step    domain.BlueprintStep `json:"step"`
-	Run     *domain.AgentRun     `json:"run,omitempty"`
-	Verdict *domain.ChainVerdict `json:"verdict,omitempty"`
+	Step domain.BlueprintStep `json:"step"`
+	Run  *domain.AgentRun     `json:"run,omitempty"`
 }
 
 func (s *Server) handleBlueprintRunGet(w http.ResponseWriter, r *http.Request) {
@@ -250,7 +250,6 @@ func (s *Server) handleBlueprintRunGet(w http.ResponseWriter, r *http.Request) {
 	var br *domain.BlueprintRun
 	var steps []domain.BlueprintStep
 	var stepRuns []domain.AgentRun
-	var verdictsByRun map[string]*domain.ChainVerdict
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		br, e = tx.Blueprints.GetRun(r.Context(), orgID, id)
@@ -265,16 +264,6 @@ func (s *Server) handleBlueprintRunGet(w http.ResponseWriter, r *http.Request) {
 			return e
 		}
 		stepRuns, e = tx.Blueprints.RunsForBlueprint(r.Context(), orgID, id)
-		if e != nil {
-			return e
-		}
-		runIDs := make([]string, 0, len(stepRuns))
-		for i := range stepRuns {
-			if stepRuns[i].BlueprintStepIndex != nil {
-				runIDs = append(runIDs, stepRuns[i].ID)
-			}
-		}
-		verdictsByRun, e = tx.Blueprints.LatestVerdictsForRuns(r.Context(), orgID, runIDs)
 		return e
 	}); err != nil {
 		internalError(w, "blueprints", err)
@@ -296,7 +285,6 @@ func (s *Server) handleBlueprintRunGet(w http.ResponseWriter, r *http.Request) {
 		view := blueprintRunStepView{Step: step}
 		if run, ok := runByStep[step.StepIndex]; ok {
 			view.Run = run
-			view.Verdict = verdictsByRun[run.ID]
 		}
 		views = append(views, view)
 	}

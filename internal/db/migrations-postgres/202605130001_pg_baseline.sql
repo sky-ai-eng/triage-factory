@@ -5226,9 +5226,9 @@ INSERT INTO events_catalog (id, source, category, label, description) VALUES
 -- same composite uniques so the trigger + step FKs can be same-team-guarded).
 --
 -- blueprint_steps is the ordered step list; blueprint_runs is the in-flight
--- instance for a multi-step blueprint (sharing one worktree, steps recording
--- proceed/abort verdicts on run_artifacts(kind='chain:verdict')). Per-step
--- runtime state stays on runs (linked via runs.blueprint_run_id);
+-- instance for a multi-step blueprint (sharing one worktree, each step's
+-- terminal runs.outcome driving advancement). Per-step runtime state stays
+-- on runs (linked via runs.blueprint_run_id);
 -- blueprint-wide abort/complete state lives on blueprint_runs.
 --
 -- Multi-tenant pattern matches the rest of the baseline: composite FKs

@@ -2,7 +2,6 @@ package delegate
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -140,8 +139,8 @@ func (s *Spawner) delegateBlueprint(orgID string, task domain.Task, blueprint *d
 // runBlueprint orchestrates a blueprint prompt against one task. It owns the
 // shared worktree (built once via setupGitHub / setupJira) and walks
 // the ordered step list, creating one runs row per step. After each
-// step terminates, it reads the latest chain:verdict artifact and
-// decides whether to advance, abort, or fail.
+// step terminates, it reads the step run's terminal `runs.outcome` and
+// decides whether to advance, finish, or abort (see decideBlueprintStep).
 //
 // Yield mid-blueprint and pending_approval mid-blueprint are handled
 // separately via ResumeBlueprintAfterYield / ResumeBlueprintAfterApproval —
@@ -322,67 +321,93 @@ func (s *Spawner) runBlueprint(
 			return
 		}
 
-		verdict, err := s.blueprints.GetLatestVerdictSystem(ctx, orgID, stepRunID)
-		if err != nil {
-			log.Printf("[blueprint] run %s step %d: read verdict: %v", blueprintRunID, i, err)
-		}
-		if verdict == nil {
-			// Synthetic abort — record so the UI shows the same shape
-			// as a real verdict, then halt.
-			synthetic := domain.ChainVerdict{
-				Outcome:   domain.ChainVerdictAbort,
-				Reason:    "no-verdict",
-				Synthetic: true,
-			}
-			if payload, err := json.Marshal(synthetic); err == nil {
-				payloadStr := string(payload)
-				var insertErr error
-				if triggerType == "manual" {
-					insertErr = s.tx.SyntheticClaimsWithTx(ctx, orgID, creatorUserID, func(ts db.TxStores) error {
-						return ts.Blueprints.InsertVerdict(ctx, orgID, stepRunID, payloadStr)
-					})
-				} else {
-					insertErr = s.blueprints.InsertVerdictSystem(ctx, orgID, stepRunID, payloadStr)
-				}
-				if insertErr != nil {
-					log.Printf("[blueprint] run %s step %d: insert synthetic verdict artifact: %v", blueprintRunID, i, insertErr)
-				}
-			}
-			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusAborted,
-				"no-verdict", &step.StepIndex, false)
-			return
-		}
-		switch verdict.Outcome {
-		case domain.ChainVerdictFinal:
-			// Step decided the blueprint's intended outcome is reached here.
-			// Terminate as completed (closes the task) and record the
-			// step index so the UI can show "exited early at step N".
-			reason := verdict.Reason
-			if reason == "" {
-				reason = "step recorded --final"
-			}
+		// The step completed; interpret its terminal envelope outcome
+		// (runs.outcome, persisted by processCompletion) to decide the
+		// next move. continue advances; finish / last-step continue end
+		// the blueprint completed and close the task; abort leaves it
+		// open; a missing outcome on a non-final step is the floor after
+		// the outcome gate exhausted its retries → abort no-outcome.
+		isFinal := i == len(steps)-1
+		decision, abortReason := decideBlueprintStep(stepRun.Outcome, isFinal)
+		switch decision {
+		case blueprintStepAdvance:
+			// Fall through to the next loop iteration.
+		case blueprintStepFinish:
 			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusCompleted,
-				reason, &step.StepIndex, false)
+				"", &step.StepIndex, false)
 			return
-		case domain.ChainVerdictAbort:
-			reason := verdict.Reason
+		case blueprintStepAbort:
+			reason := abortReason
 			if reason == "" {
-				reason = "step recorded --abort"
+				// Explicit abort: copy the agent's "why I stopped" from
+				// runs.outcome_reason into blueprint_runs.abort_reason.
+				reason = stepRun.OutcomeReason
 			}
 			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusAborted,
 				reason, &step.StepIndex, false)
-			return
-		case domain.ChainVerdictAdvance:
-		default:
-			// Unknown outcome — treat as abort.
-			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusAborted,
-				"unknown verdict outcome: "+string(verdict.Outcome), &step.StepIndex, false)
 			return
 		}
 	}
 
+	// Unreachable in practice — decideBlueprintStep never returns
+	// blueprintStepAdvance for the final step, so the last iteration always
+	// terminates above. Kept as a defensive net so a future edit that adds a
+	// loop-continue path can't strand the blueprint in 'running'.
 	s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusCompleted,
 		"", nil, false)
+}
+
+// blueprintStepOutcome is the orchestrator's decision after a completed
+// blueprint step, derived from the step's runs.outcome and its position.
+type blueprintStepOutcome int
+
+const (
+	// blueprintStepAdvance moves to the next step (a non-final `continue`).
+	blueprintStepAdvance blueprintStepOutcome = iota
+	// blueprintStepFinish terminates the blueprint completed and closes the
+	// task — an explicit `finish`, a final-step `continue` (structural
+	// finish), or an unambiguous missing outcome on the final step.
+	blueprintStepFinish
+	// blueprintStepAbort terminates the blueprint aborted and leaves the task
+	// open — an explicit `abort`, or a missing outcome on a non-final step.
+	blueprintStepAbort
+)
+
+// decideBlueprintStep maps a completed step's terminal outcome + position to
+// the orchestrator's next move. Only valid for a step whose run reached
+// status='completed'; the non-terminal statuses (awaiting_input,
+// pending_approval, cancelled, failed) are handled by the caller before this
+// is consulted, and yield never reaches here (it parks the run in
+// awaiting_input rather than completing).
+//
+// abortReason is non-empty only for the missing-outcome-on-a-non-final-step
+// case ("no-outcome"); for an explicit abort it is empty and the caller
+// copies runs.outcome_reason into blueprint_runs.abort_reason.
+func decideBlueprintStep(outcome string, isFinal bool) (decision blueprintStepOutcome, abortReason string) {
+	switch domain.RunOutcome(outcome) {
+	case domain.RunOutcomeContinue:
+		// continue hands off to the next step — except on the final step,
+		// where there is no next step and continue resolves to a structural
+		// finish.
+		if isFinal {
+			return blueprintStepFinish, ""
+		}
+		return blueprintStepAdvance, ""
+	case domain.RunOutcomeFinish:
+		return blueprintStepFinish, ""
+	case domain.RunOutcomeAbort:
+		return blueprintStepAbort, ""
+	default:
+		// Missing outcome (empty string === SQL NULL). On the final step
+		// (and therefore N=1) a missing outcome is unambiguous → finish,
+		// exactly like a single-prompt run. On a non-final step it means
+		// the outcome gate exhausted its retries without a usable hand-off;
+		// abort with "no-outcome" rather than guess at advancement.
+		if isFinal {
+			return blueprintStepFinish, ""
+		}
+		return blueprintStepAbort, "no-outcome"
+	}
 }
 
 // terminateBlueprint finalizes the blueprint run row and runs the shared
@@ -689,15 +714,17 @@ func (s *Spawner) ResumeBlueprintAfterYield(orgID, stepRunID, userID string) {
 
 // ResumeBlueprintAfterApproval is invoked by the reviews / pending-PR
 // approval handlers after they flip a step run from pending_approval
-// back to completed. It only handles the --final verdict case (the only
+// back to completed. It only handles the finish-outcome case (the only
 // shape under which a blueprint step is allowed to land in pending_approval
-// — see the guard in spawner.processCompletion): terminate the blueprint
-// as completed, close the task, and clean the shared worktree.
+// — see the multi-step coercion in spawner.processCompletion, which forces a
+// step that queued a terminal external action to runs.outcome='finish'):
+// terminate the blueprint as completed, close the task, and clean the shared
+// worktree.
 //
-// If the verdict is missing or is not Final, the blueprint stays in
-// 'running' on the assumption that something raced or the agent
-// recorded the wrong verdict; a human can inspect blueprint_runs and
-// resolve manually rather than have us guess.
+// If the step run's outcome is missing or is not finish, the blueprint stays
+// in 'running' on the assumption that something raced or the step recorded
+// the wrong outcome; a human can inspect blueprint_runs and resolve manually
+// rather than have us guess.
 //
 // userID identifies the approving user for audit. Local mode passes
 // runmode.LocalDefaultUserID; multi-mode handlers extract it from JWT
@@ -711,13 +738,13 @@ func (s *Spawner) ResumeBlueprintAfterApproval(orgID, stepRunID, userID string) 
 		return
 	}
 
-	verdict, err := s.blueprints.GetLatestVerdictSystem(context.Background(), orgID, stepRunID)
-	if err != nil {
-		log.Printf("[blueprint] approval-resume run %s: read verdict: %v", stepRunID, err)
+	stepRun, err := s.agentRuns.GetSystem(context.Background(), orgID, stepRunID)
+	if err != nil || stepRun == nil {
+		log.Printf("[blueprint] approval-resume run %s: read step run: %v", stepRunID, err)
 		return
 	}
-	if verdict == nil || verdict.Outcome != domain.ChainVerdictFinal {
-		log.Printf("[blueprint] approval-resume blueprint_run %s step run %s: verdict not --final (%+v); blueprint left running", cr.ID, stepRunID, verdict)
+	if domain.RunOutcome(stepRun.Outcome) != domain.RunOutcomeFinish {
+		log.Printf("[blueprint] approval-resume blueprint_run %s step run %s: outcome %q is not finish; blueprint left running", cr.ID, stepRunID, stepRun.Outcome)
 		return
 	}
 
@@ -739,10 +766,6 @@ func (s *Spawner) ResumeBlueprintAfterApproval(orgID, stepRunID, userID string) 
 		cfg.hasWT = true
 	}
 
-	reason := verdict.Reason
-	if reason == "" {
-		reason = "step recorded --final"
-	}
 	s.terminateBlueprint(orgID, cr.ID, cr.TaskID, "manual", userID, cr.StartedAt, cfg,
-		domain.BlueprintRunStatusCompleted, reason, stepIdx, false)
+		domain.BlueprintRunStatusCompleted, "", stepIdx, false)
 }

@@ -357,20 +357,6 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		}
 		return emptyResult{}, client.DeleteRunWorktreeByRepo(ctx, a.RepoID)
 
-	case methodGetChainRunForRun:
-		cr, idx, err := client.GetChainRunForRun(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return chainRunForRunResult{ChainRun: cr, StepIdx: idx}, nil
-
-	case methodInsertChainVerdict:
-		var a insertChainVerdictArgs
-		if err := dec(&a); err != nil {
-			return nil, err
-		}
-		return emptyResult{}, client.InsertChainVerdict(ctx, a.Payload)
-
 	case methodBuildAgentRunFooter:
 		var a buildAgentRunFooterArgs
 		if err := dec(&a); err != nil {

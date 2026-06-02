@@ -222,23 +222,8 @@ func (c *LocalClient) DeleteRunWorktreeByRepo(ctx context.Context, repoID string
 	)
 }
 
-// --- chain ---
-
-func (c *LocalClient) GetChainRunForRun(ctx context.Context) (*domain.BlueprintRun, *int, error) {
-	return c.stores.Blueprints.GetRunForRunSystem(ctx, c.info.OrgID, c.info.RunID)
-}
+// --- agent run footer ---
 
 func (c *LocalClient) BuildAgentRunFooter(_ context.Context, kind string) (string, error) {
 	return agentmeta.Build(c.stores.AgentRuns, c.info.OrgID, c.info.RunID, kind), nil
-}
-
-func (c *LocalClient) InsertChainVerdict(ctx context.Context, payload string) error {
-	return c.withWrite(ctx,
-		func() error {
-			return c.stores.Blueprints.InsertVerdictSystem(ctx, c.info.OrgID, c.info.RunID, payload)
-		},
-		func(ts db.TxStores) error {
-			return ts.Blueprints.InsertVerdict(ctx, c.info.OrgID, c.info.RunID, payload)
-		},
-	)
 }

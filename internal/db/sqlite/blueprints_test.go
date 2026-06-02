@@ -3,7 +3,6 @@ package sqlite_test
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -153,66 +152,51 @@ func TestBlueprintStore_SQLite_RunsForBlueprint_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestBlueprintStore_SQLite_LatestVerdictsForRuns verifies the per-run
-// "latest wins" projection: two verdicts for one run, abort is latest.
-func TestBlueprintStore_SQLite_LatestVerdictsForRuns(t *testing.T) {
+// TestBlueprintStore_SQLite_RunsForBlueprint_SurfacesOutcome pins the channel
+// that replaced the old per-step verdict: a step run's terminal runs.outcome
+// (and outcome_reason) round-trips through RunsForBlueprint, which is what the
+// run-detail handler renders and what the orchestrator advances on.
+func TestBlueprintStore_SQLite_RunsForBlueprint_SurfacesOutcome(t *testing.T) {
 	conn := openSQLiteForTest(t)
-	blueprints := sqlitestore.New(conn).Blueprints
+	stores := sqlitestore.New(conn)
+	blueprints := stores.Blueprints
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrg
 
-	task := seedEntityEventTask(t, conn, "blueprint-verdict")
-	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "vp-step", Name: "VP Step", Body: "x", Source: "user"})
-	insertBlueprintForTest(t, conn, "vp-blueprint", "VP Blueprint")
-	if err := blueprints.ReplaceSteps(ctx, org, "vp-blueprint", []string{"vp-step"}, nil); err != nil {
+	task := seedEntityEventTask(t, conn, "blueprint-outcome")
+	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "op-step", Name: "OP Step", Body: "x", Source: "user"})
+	insertBlueprintForTest(t, conn, "op-blueprint", "OP Blueprint")
+	if err := blueprints.ReplaceSteps(ctx, org, "op-blueprint", []string{"op-step"}, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
 	if _, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
-		ID: "vp-blueprint-run", BlueprintID: "vp-blueprint", TaskID: task.ID,
+		ID: "op-blueprint-run", BlueprintID: "op-blueprint", TaskID: task.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 	}); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 
 	step0 := 0
-	if err := sqlitestore.New(conn).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
-		ID: "vp-run", TaskID: task.ID, PromptID: "vp-step", Status: "initializing",
-		Model: "claude-sonnet-4-6", BlueprintRunID: "vp-blueprint-run", BlueprintStepIndex: &step0,
+	if err := stores.AgentRuns.Create(ctx, org, domain.AgentRun{
+		ID: "op-run", TaskID: task.ID, PromptID: "op-step", Status: "initializing",
+		Model: "claude-sonnet-4-6", BlueprintRunID: "op-blueprint-run", BlueprintStepIndex: &step0,
 	}); err != nil {
 		t.Fatalf("create agent run: %v", err)
 	}
-
-	advanceJSON, _ := json.Marshal(domain.ChainVerdict{Outcome: domain.ChainVerdictAdvance, Reason: "looks good"})
-	abortJSON, _ := json.Marshal(domain.ChainVerdict{Outcome: domain.ChainVerdictAbort, Reason: "something broke"})
-	if err := blueprints.InsertVerdict(ctx, org, "vp-run", string(advanceJSON)); err != nil {
-		t.Fatalf("insert advance verdict: %v", err)
-	}
-	if err := blueprints.InsertVerdict(ctx, org, "vp-run", string(abortJSON)); err != nil {
-		t.Fatalf("insert abort verdict: %v", err)
+	// Persist a terminal outcome the way processCompletion does.
+	if err := stores.AgentRuns.CompleteSystem(ctx, org, "op-run", "completed", 0, 0, 0, "", "did the thing", "continue", ""); err != nil {
+		t.Fatalf("complete step run: %v", err)
 	}
 
-	result, err := blueprints.LatestVerdictsForRuns(ctx, org, []string{"vp-run", "vp-run-no-verdict"})
+	runs, err := blueprints.RunsForBlueprint(ctx, org, "op-blueprint-run")
 	if err != nil {
-		t.Fatalf("LatestVerdictsForRuns: %v", err)
+		t.Fatalf("RunsForBlueprint: %v", err)
 	}
-	v, ok := result["vp-run"]
-	if !ok {
-		t.Fatal("vp-run missing from result map")
+	if len(runs) != 1 {
+		t.Fatalf("RunsForBlueprint returned %d runs, want 1", len(runs))
 	}
-	if v.Outcome != domain.ChainVerdictAbort {
-		t.Errorf("vp-run verdict outcome = %q, want %q (abort should win as the later write)", v.Outcome, domain.ChainVerdictAbort)
-	}
-	if _, ok := result["vp-run-no-verdict"]; ok {
-		t.Error("vp-run-no-verdict should be absent — no artifacts written")
-	}
-
-	// Singular variant agrees.
-	latest, err := blueprints.GetLatestVerdict(ctx, org, "vp-run")
-	if err != nil {
-		t.Fatalf("GetLatestVerdict: %v", err)
-	}
-	if latest == nil || latest.Outcome != domain.ChainVerdictAbort {
-		t.Errorf("GetLatestVerdict outcome = %+v, want abort", latest)
+	if runs[0].Outcome != "continue" {
+		t.Errorf("step run outcome = %q, want continue (the orchestrator advances on this)", runs[0].Outcome)
 	}
 }
 

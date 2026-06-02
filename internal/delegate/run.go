@@ -366,17 +366,51 @@ func (s *Spawner) processCompletion(
 	// Fallback after the outcome gate exhausted its retries: a single/
 	// terminal run with no recognizable outcome defaults to finish (parity
 	// with today's "completed on unparseable"); a blueprint step keeps a
-	// NULL outcome and is left for the orchestrator (SKY-419 reads a
-	// non-final NULL as no-outcome→abort).
+	// NULL outcome and is left for the orchestrator (decideBlueprintStep
+	// reads a non-final NULL as no-outcome→abort).
 	if !completion.IsError && outcome == "" && !isBlueprintStep {
 		outcome = string(domain.RunOutcomeFinish)
 	}
+
 	// Detached context: the run's ctx may have been cancelled (user
 	// cancel mid-stream) but the terminal write still needs to record.
 	// Manual runs wrap in synthetic claims so the UPDATE passes RLS
 	// under tf_app with the creator's identity; event-triggered runs
 	// bypass via the admin pool.
 	bgCtx := context.Background()
+
+	// Does this completed run carry a queued external action awaiting human
+	// approval? Two side-tables park a completed run in pending_approval:
+	//   - pending_reviews: agent ran `pr submit-review` under
+	//     TRIAGE_FACTORY_REVIEW_PREVIEW=1, queued the review for approval.
+	//   - pending_prs: agent ran `pr create` under the same flag.
+	// Detected once here — before the terminal write — so a blueprint step's
+	// outcome can be coerced (below) before it's persisted, and reused for
+	// the pending_approval flip after the write. Side-table lookups use
+	// admin-pool System variants (no JWT claims in scope) and run on bgCtx so
+	// a racing cancel doesn't silently strand a queued review outside the
+	// approval queue.
+	hasPending := false
+	if status == "completed" {
+		if pendingReview, _ := s.reviews.ByRunIDSystem(bgCtx, orgID, runID); pendingReview != nil {
+			hasPending = true
+		} else if pendingPR, _ := s.pendingPRs.ByRunIDSystem(bgCtx, orgID, runID); pendingPR != nil {
+			hasPending = true
+		}
+	}
+
+	// Multi-step external-action coercion: a blueprint step that took a
+	// terminal external action (queued a review or PR for human approval)
+	// ends the blueprint — there's nothing for a follow-on step to do once
+	// the work is awaiting a human. Coerce continue→finish before the
+	// terminal write so the post-approval resume (ResumeBlueprintAfterApproval)
+	// reads finish and terminates the blueprint completed. Replaces the
+	// synthetic --final verdict the chain path inserted. An explicit
+	// abort/finish the step already chose is left untouched.
+	if isBlueprintStep && hasPending && domain.RunOutcome(outcome) == domain.RunOutcomeContinue {
+		outcome = string(domain.RunOutcomeFinish)
+	}
+
 	if triggerType == "manual" {
 		if err := s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
 			return ts.AgentRuns.Complete(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary, outcome, outcomeReason)
@@ -390,40 +424,13 @@ func (s *Spawner) processCompletion(
 	s.updateBreakerCounter(task.ID, triggerType, status)
 
 	if status == "completed" {
-		// Two side-tables can park a completed run in pending_approval:
-		//   - pending_reviews: agent ran `pr submit-review` under
-		//     TRIAGE_FACTORY_REVIEW_PREVIEW=1, queued the review for
-		//     human approval.
-		//   - pending_prs: agent ran `pr create` under the same flag,
-		//     queued the PR for human approval.
-		// Either gate flips the run to pending_approval; the user
-		// approves via the UI and the server flips back to completed.
-		// Frontend distinguishes by which side-table has a row (the
-		// /api/agent/runs/{id} response carries pending_kind).
-		//
-		// A single run that produced a pending external action stays
-		// pending_approval here. Multi-step coercion (advancing/closing a
-		// blueprint when a step queues its terminal external action) lands
-		// with the orchestrator rewrite in SKY-419; until then the verdict
-		// path stays untouched and there's no auto-promote in this gate.
-		hasPending := false
-		// Use context.Background() for the pending-review lookup —
-		// the run-scoped ctx can be cancelled mid-bookkeeping (the
-		// user cancelled the run after the agent queued a review),
-		// and a context-cancelled lookup would silently leave
-		// hasPending=false and let the run finish 'completed' while
-		// the pending_reviews row strands outside the approval queue.
-		// Matches the agentRuns.Complete(context.Background(), ...)
-		// pattern above — terminal-bookkeeping survives cancellation.
-		// Side-table lookups use admin-pool System variants — no JWT
-		// claims in scope at this point in the goroutine, and the
-		// pending-approval bookkeeping survives ctx cancellation
-		// (matches the agentRuns.Complete pattern above).
-		if pendingReview, _ := s.reviews.ByRunIDSystem(bgCtx, orgID, runID); pendingReview != nil {
-			hasPending = true
-		} else if pendingPR, _ := s.pendingPRs.ByRunIDSystem(bgCtx, orgID, runID); pendingPR != nil {
-			hasPending = true
-		}
+		// A queued external action (detected above) parks the run in
+		// pending_approval: the user approves via the UI and the server
+		// flips it back to completed. Frontend distinguishes by which
+		// side-table has a row (the /api/agent/runs/{id} response carries
+		// pending_kind). A single run stays pending_approval; a blueprint
+		// step's outcome was already coerced to finish above so the
+		// post-approval resume terminates the blueprint.
 		if hasPending {
 			// Guarded transition: only flip to pending_approval if the
 			// row is still 'completed'. A racing cancel/takeover after

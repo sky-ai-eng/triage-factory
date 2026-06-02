@@ -212,8 +212,8 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 		log.Printf("[delegate] warning: failed to increment usage for blueprint %s: %v", blueprint.ID, e)
 	}
 
-	// Multi-step blueprint → the (renamed) orchestrator: one blueprint_run
-	// row, the chain:verdict path between steps, byte-for-byte today's chain.
+	// Multi-step blueprint → the orchestrator: one blueprint_run row, step
+	// advancement driven by each step run's terminal runs.outcome.
 	if len(steps) > 1 {
 		return s.delegateBlueprint(orgID, task, blueprint, steps, triggerType, triggerID, creatorUserID, ghClient, model)
 	}

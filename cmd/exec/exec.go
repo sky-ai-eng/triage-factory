@@ -9,7 +9,6 @@ import (
 	"github.com/pressly/goose/v3"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
-	"github.com/sky-ai-eng/triage-factory/cmd/exec/chain"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/gh"
 	jiraexec "github.com/sky-ai-eng/triage-factory/cmd/exec/jira"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/runident"
@@ -170,13 +169,6 @@ func Handle(args []string) {
 		defer func() { _ = host.Close() }()
 		workspace.Handle(host, cmdArgs)
 
-	case "chain":
-		// No credentials needed — chain verdict only writes a verdict
-		// row keyed by the daemon's run identity.
-		host := buildAgentHost()
-		defer func() { _ = host.Close() }()
-		chain.Handle(host, cmdArgs)
-
 	default:
 		fmt.Fprintf(os.Stderr, "unknown exec command: %s\nRun 'triagefactory exec --help' for usage.\n", cmd)
 		os.Exit(1)
@@ -193,5 +185,5 @@ func isHelp(args []string) bool {
 }
 
 func printHelp() {
-	fmt.Printf("Usage: triagefactory exec <command> [args]\n\n%s\n\n%s\n\n%s\n\n%s\n\nCommands print their result to stdout on success and errors to stderr. Most commands print JSON; workspace add prints a raw path.\n", gh.HelpText, jiraexec.HelpText, workspace.HelpText, chain.HelpText)
+	fmt.Printf("Usage: triagefactory exec <command> [args]\n\n%s\n\n%s\n\n%s\n\nCommands print their result to stdout on success and errors to stderr. Most commands print JSON; workspace add prints a raw path.\n", gh.HelpText, jiraexec.HelpText, workspace.HelpText)
 }
