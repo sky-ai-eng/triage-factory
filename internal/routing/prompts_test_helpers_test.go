@@ -43,7 +43,7 @@ func testTaskStore(database *sql.DB) db.TaskStore {
 
 // testBlueprintStore returns a SQLite-backed BlueprintStore for routing
 // tests. NewRouter takes the blueprint store immediately after the prompt
-// store post-SKY-416 (triggers fire blueprints, not prompts).
+// store (triggers fire blueprints, not prompts).
 func testBlueprintStore(database *sql.DB) db.BlueprintStore {
 	if database == nil {
 		return nil
@@ -166,7 +166,7 @@ func floatPtr(v float64) *float64 { return &v }
 
 // seedHandlerFKTargets seeds the prompts AND blueprints that shipped triggers
 // reference so EventHandlerStore.Seed's trigger rows resolve their FK to a
-// same-team blueprint (post-SKY-416 a trigger fires a blueprint, not a prompt
+// same-team blueprint (a trigger fires a blueprint, not a prompt
 // directly). Production's SeedTeamDefaults seeds prompts → blueprints (each
 // wrapping its prompt as a 1-step list) → handlers; tests that call Seed
 // directly replicate that ordering here. Returns the system_slug →

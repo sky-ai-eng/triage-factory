@@ -587,8 +587,8 @@ func seedPgOrgForBlueprints(t *testing.T, h *pgtest.Harness) (orgID, userID stri
 // FKs resolve. Postgres prompts.id is TEXT (slug-shaped) — same
 // surface SQLite uses. All prompts for one org resolve to that org's
 // single team via ensurePgTeamForOrg so the same-team blueprint→step
-// composite FK ((step_prompt_id, team_id) → prompts(id, team_id),
-// SKY-380) holds across a blueprint and its steps.
+// composite FK ((step_prompt_id, team_id) → prompts(id, team_id))
+// holds across a blueprint and its steps.
 func seedPgPrompt(t *testing.T, h *pgtest.Harness, orgID, userID, id string) {
 	t.Helper()
 	teamID := ensurePgTeamForOrg(t, h, orgID, userID)
@@ -617,8 +617,8 @@ func seedPgBlueprint(t *testing.T, h *pgtest.Harness, orgID, userID, id string) 
 }
 
 // ensurePgTeamForOrg returns the org's first team, creating a default one
-// if none exists. Prompts and blueprints are team-scoped (team_id NOT NULL,
-// SKY-380) and a blueprint's steps must share its team, so multiple
+// if none exists. Prompts and blueprints are team-scoped (team_id NOT NULL)
+// and a blueprint's steps must share its team, so multiple
 // seedPgPrompt / seedPgBlueprint calls for one org all resolve to a single
 // stable team here.
 func ensurePgTeamForOrg(t *testing.T, h *pgtest.Harness, orgID, userID string) string {

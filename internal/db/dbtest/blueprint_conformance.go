@@ -14,7 +14,7 @@ import (
 //   - the orgID to pass to every method (SQLite returns
 //     runmode.LocalDefaultOrg, Postgres a fresh org UUID)
 //   - the teamID Create/SeedOrUpdate should attribute blueprints to (every
-//     blueprint is team-scoped post-SKY-380/SKY-416)
+//     blueprint is team-scoped)
 //   - a PromptSeeder hook the harness invokes to materialize step prompts. A
 //     blueprint_steps row FKs the step prompt on (step_prompt_id, team_id), so
 //     ReplaceSteps needs real same-team prompt rows; the backend owns that
@@ -27,8 +27,8 @@ type BlueprintStoreFactory func(t *testing.T) (store db.BlueprintStore, orgID, t
 type PromptSeederForBlueprints func(t *testing.T, idHint string) string
 
 // RunBlueprintStoreConformance runs the shared seed-idempotency + CRUD +
-// step round-trip suite against any db.BlueprintStore impl (SKY-416). It
-// mirrors the prompt SeedOrUpdate idempotency tests:
+// step round-trip suite against any db.BlueprintStore impl. It mirrors the
+// prompt SeedOrUpdate idempotency tests:
 //
 //   - SeedOrUpdate a system blueprint twice → same id, no duplicate row.
 //   - List returns the seeded blueprint.

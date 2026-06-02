@@ -345,7 +345,7 @@ func TestReDeriveAfterScoring_CrossTeamTrigger_Skips(t *testing.T) {
 		t.Fatalf("seed team B: %v", err)
 	}
 	// The prompt + blueprint must be owned by team B so the same-team
-	// trigger→blueprint FK holds (SKY-380/SKY-416); createTestPrompt /
+	// trigger→blueprint FK holds; createTestPrompt /
 	// blueprintWrappingPrompt would pin them to team A.
 	insertPromptForTeam(t, database, "p-teamB", teamB)
 	bpTeamB := insertBlueprintForTeam(t, database, "bp-teamB", "p-teamB", teamB)

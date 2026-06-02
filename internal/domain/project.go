@@ -43,7 +43,7 @@ type Project struct {
 	// (`.claude/skills/ticket-spec/`) when authoring tickets for this
 	// project. Empty = use the seeded system default ("system-ticket-spec").
 	// Per-project rather than global so a user with mixed teams can give each
-	// its own editorial standard. SKY-221.
+	// its own editorial standard.
 	SpecAuthorshipBlueprintID string    `json:"spec_authorship_blueprint_id"`
 	CreatedAt                 time.Time `json:"created_at"`
 	UpdatedAt                 time.Time `json:"updated_at"`

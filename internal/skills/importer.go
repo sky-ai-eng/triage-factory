@@ -393,20 +393,20 @@ func findVisibleImportedPromptByContent(ctx context.Context, database *sql.DB, n
 }
 
 func hideDuplicateImportedPrompts(ctx context.Context, database *sql.DB, prompts db.PromptStore) (int, error) {
-	// Post-SKY-259: prompt_triggers folded into event_handlers with
-	// kind='trigger'. Post-SKY-416 a trigger references a BLUEPRINT, not a
-	// prompt directly, so "is this prompt referenced by a trigger" routes
-	// event_handlers.blueprint_id → blueprint_steps.step_prompt_id = p.id.
-	// The joins also match on org_id — every table carries org_id post-
-	// SKY-269, and matching it keeps a same-id prompt in another org from
-	// being counted as referencing each other.
+	// A trigger references a BLUEPRINT, not a prompt directly, so "is this
+	// prompt referenced by a trigger" routes event_handlers.blueprint_id →
+	// blueprint_steps.step_prompt_id = p.id. Only the event_handlers join
+	// matches org_id (so a same-id prompt in another org isn't counted as a
+	// cross-org reference); blueprint_steps has no org_id column of its own —
+	// it's keyed by blueprint_id (+ team_id) and inherits scope transitively
+	// through the blueprint. ImportAll is local-mode only (single org), so the
+	// missing blueprint_steps org_id match is exact here.
 	//
-	// The outer query is also scoped to the local org explicitly:
-	// ImportAll is local-mode only today (the skills runner reads
-	// ~/.claude/skills which is a per-machine concept), so pinning the
-	// SELECT to LocalDefaultOrg keeps the trigger_count tenant-correct
-	// here and avoids leaking imported prompts from any other org_id
-	// that might exist in the same DB during tests.
+	// The outer query is also scoped to the local org explicitly: the skills
+	// runner reads ~/.claude/skills (a per-machine concept), so pinning the
+	// SELECT to the local org keeps trigger_count tenant-correct and avoids
+	// leaking imported prompts from any other org_id that might exist in the
+	// same DB during tests.
 	rows, err := database.QueryContext(ctx, `
 		SELECT p.id, p.name, p.body, p.allowed_tools, COUNT(t.id) AS trigger_count
 		FROM prompts p

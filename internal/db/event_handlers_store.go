@@ -138,7 +138,7 @@ type EventHandlerStore interface {
 // ID is the stable system_slug ("system-rule-ci-check-failed" /
 // "system-trigger-ci-fix") — both dialects mint a random UUID for the row
 // id and store this slug in event_handlers.system_slug, deduping re-seeds
-// on (org_id, team_id, system_slug) (SKY-380). For triggers, BlueprintID is
+// on (org_id, team_id, system_slug). For triggers, BlueprintID is
 // the blueprint's system_slug ("system-ci-fix"), resolved to the team's
 // blueprint-copy UUID via the blueprintIDsBySlug map passed to Seed.
 type ShippedEventHandler struct {

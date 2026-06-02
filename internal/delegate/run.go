@@ -366,7 +366,7 @@ func (s *Spawner) processCompletion(
 		// Frontend distinguishes by which side-table has a row (the
 		// /api/agent/runs/{id} response carries pending_kind).
 		//
-		// Non-final chain steps must not submit reviews/PRs (the wrapper
+		// Non-final blueprint steps must not submit reviews/PRs (the wrapper
 		// prompt forbids it) UNLESS they recorded a --final verdict, which
 		// is the explicit early-exit channel: the step is allowed one
 		// terminal external action (e.g., a SKIP review) and the action
@@ -374,9 +374,9 @@ func (s *Spawner) processCompletion(
 		//
 		// If a non-final step creates a pending artifact without recording
 		// --final, the agent mislabelled its verdict: the pending artifact
-		// IS the chain's terminal external action. Auto-promote to --final
+		// IS the blueprint's terminal external action. Auto-promote to --final
 		// (writing a synthetic verdict that supersedes the agent's) so the
-		// chain terminates at this step on human approval instead of
+		// blueprint terminates at this step on human approval instead of
 		// advancing past stale handoff narrative into a no-op step.
 		hasPending := false
 		// Use context.Background() for the pending-review lookup —
@@ -418,7 +418,7 @@ func (s *Spawner) processCompletion(
 						if insertErr != nil {
 							log.Printf("[delegate] warning: insert synthetic --final verdict for run %s: %v", runID, insertErr)
 						} else {
-							log.Printf("[delegate] run %s: non-final chain step submitted pending artifact; auto-promoted verdict to --final", runID)
+							log.Printf("[delegate] run %s: non-final blueprint step submitted pending artifact; auto-promoted verdict to --final", runID)
 						}
 					}
 				}
@@ -449,20 +449,20 @@ func (s *Spawner) processCompletion(
 	if status == "completed" {
 		// Two guards prevent a stale completion from flipping the task:
 		//
-		// 1. Chain step: the chain orchestrator owns task lifecycle —
+		// 1. Blueprint step: the blueprint orchestrator owns task lifecycle —
 		//    individual step completions must not close the task.
 		//
 		// 2. Re-delegation race: a newer run already exists on this task
 		//    (the user re-delegated while this run was in flight). The
 		//    newer run's CreateAgentRun row is already in the DB by the
 		//    time the old run reaches processCompletion, so the EXISTS
-		//    check is deterministic. Chain step runs are excluded from
-		//    the active-run check because the chain orchestrator creates
+		//    check is deterministic. Blueprint step runs are excluded from
+		//    the active-run check because the blueprint orchestrator creates
 		//    them sequentially (step N+1's row doesn't exist yet when
 		//    step N completes).
 		run, _ := s.agentRuns.GetSystem(bgCtx, orgID, runID)
 		if run != nil && run.BlueprintRunID != "" {
-			// Chain step — skip; terminateBlueprint handles task closure.
+			// Blueprint step — skip; terminateBlueprint handles task closure.
 		} else {
 			hasOtherActiveRun, _ := s.agentRuns.HasOtherActiveRunForTaskSystem(bgCtx, orgID, task.ID, runID)
 			if !hasOtherActiveRun {
