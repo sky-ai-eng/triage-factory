@@ -475,6 +475,12 @@ CREATE TABLE entities (
     last_polled_at           DATETIME,
     closed_at                DATETIME,
     project_id               TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    -- owning_team_id is the explicit-override tier of the author-centric
+    -- owning-team ladder: NULL = derive (project → prior task → author
+    -- identity); a set value pins the entity to a team (transfer op /
+    -- TF-origin PR stamp). ON DELETE SET NULL so deleting a team drops the
+    -- override rather than orphaning the row.
+    owning_team_id           TEXT REFERENCES teams(id) ON DELETE SET NULL,
     classified_at            DATETIME,
     classification_rationale TEXT,
     org_id                   TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
@@ -689,7 +695,13 @@ CREATE TABLE tasks (
     closed_at            DATETIME,
     created_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     org_id               TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
-    team_id              TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000010',
+    -- team_id is the owning/attributed team and is NULLABLE: NULL = the
+    -- owner is unresolved (author-centric routing couldn't pick a single
+    -- team). An unowned task is still visible via task_teams and is the
+    -- auto-fire gate for free (empty team disables auto-delegation); it
+    -- resolves on the first human claim. The DEFAULT carries the local
+    -- sentinel for callers that omit the column.
+    team_id              TEXT DEFAULT '00000000-0000-0000-0000-000000000010',
     creator_user_id      TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000100',
     visibility           TEXT NOT NULL DEFAULT 'team'
                             CHECK (visibility IN ('private','team','org')),
@@ -697,8 +709,11 @@ CREATE TABLE tasks (
     claimed_by_agent_id  TEXT REFERENCES agents(id) ON DELETE SET NULL,
     claimed_by_user_id   TEXT REFERENCES users(id)  ON DELETE SET NULL,
     CONSTRAINT tasks_claim_xor CHECK (claimed_by_agent_id IS NULL OR claimed_by_user_id IS NULL),
-    CONSTRAINT tasks_team_visibility_requires_team CHECK (
-        visibility <> 'team' OR team_id IS NOT NULL
+    -- A claimed task must have a resolved owner: claiming (human or bot)
+    -- consolidates the card to a single team. The unclaimed residual may
+    -- carry team_id NULL (unresolved owner, visible via task_teams).
+    CONSTRAINT tasks_claimed_requires_team CHECK (
+        (claimed_by_user_id IS NULL AND claimed_by_agent_id IS NULL) OR team_id IS NOT NULL
     )
 );
 -- One task per real situation: identity is (entity, event_type,

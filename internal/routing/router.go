@@ -392,15 +392,21 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	ownerTeam := orderedTeams[0]
 	taskPriority := teamScore(ownerTeam)
 
-	// A review_requested task's visibility (and owner) come from the
-	// *requested identity's* team(s), not from which teams' rules matched. A
-	// review is the personal obligation of whoever was asked — routed to their
-	// team(s) via the user→teams and github-team→TF-team lookups. The
-	// matched rule above still gated whether the task is created and supplies
-	// the priority; only the team set is overridden here. Falls back to the
-	// handler-team visibility above for legacy events that carry no requested
-	// identity or when the mapping stores are unwired.
-	if evt.EventType == domain.EventGitHubPRReviewRequested {
+	// Resolve the task's owner team, visibility set, firing order, and
+	// creation-seed priority. Three routing axes, distinct from the
+	// handler-team grouping computed above:
+	//   - review_requested → the requested reviewer's team(s) (a reviewer's
+	//     personal obligation), scoped at emit time;
+	//   - author-centric github events → the entity's owning team via the
+	//     owning-team ladder (the PR author's CI/conflict/feedback lifecycle);
+	//   - everything else (Jira, etc.) → the handler-team grouping above.
+	// The matched handlers above still gate whether a task is created at all
+	// and supply the priority; only the team set is overridden here.
+	switch {
+	case evt.EventType == domain.EventGitHubPRReviewRequested:
+		// Falls back to the handler-team visibility above for legacy events
+		// that carry no requested identity or when the mapping stores are
+		// unwired (scoped=false).
 		if reqTeams, scoped := r.reviewRequestVisibilityTeams(orgID, evt); scoped {
 			if len(reqTeams) == 0 {
 				log.Printf("[router] review_requested on entity %s: requested identity maps to no TF team — recording event, no task", entityID)
@@ -410,6 +416,44 @@ func (r *Router) HandleEvent(evt domain.Event) {
 			orderedTeams = reqTeams // already sorted by team id in the helper
 			ownerTeam = reqTeams[0]
 			taskPriority = maxRuleDefaultPriority(matchedRules)
+		}
+
+	case isAuthorCentricGitHubEvent(evt.EventType):
+		owner, ownerSet := r.authorCentricOwner(orgID, evt, entityID)
+		// Visibility = {owner set} ∪ {teams whose explicit user-authored rule
+		// matched}. System/default rules gate creation + the owner's
+		// automation but never grant visibility on their own; a team widens
+		// visibility beyond ownership only by opting in with its own rule
+		// (the deliberate watch — e.g. a platform team tracking CI it doesn't
+		// author, or surfacing an external/dependabot author's CI).
+		vis := map[string]struct{}{}
+		for _, t := range ownerSet {
+			vis[t] = struct{}{}
+		}
+		for t := range explicitUserRuleTeams(matchedRules) {
+			vis[t] = struct{}{}
+		}
+		if len(vis) == 0 {
+			// Nothing resolved (external/non-TF author) and no team opted in
+			// via an explicit rule → record the event + durable entity only,
+			// no task. This is the repo-wide-poll fix: a stranger's CI failure
+			// no longer mints a task for the local user/team.
+			log.Printf("[router] author-centric %s on entity %s: no owning team resolved and no explicit watch rule — recording event, no task", evt.EventType, entityID)
+			return
+		}
+		visibleTeams = sortedKeys(vis)
+		// ownerTeam "" when the author maps to multiple teams (or none with a
+		// watch rule): the owner is unresolved, stored as NULL — the auto-fire
+		// gate for free, resolving on the first human claim.
+		ownerTeam = owner
+		taskPriority = maxRuleDefaultPriority(matchedRules)
+		// Only the owner's automation fires. A resolved owner fires its own
+		// matched triggers (acting = owner); a NULL owner fires nothing (the
+		// empty-team gate), so the bot never claims an unowned task.
+		if owner != "" {
+			orderedTeams = []string{owner}
+		} else {
+			orderedTeams = nil
 		}
 	}
 
@@ -496,7 +540,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 		}
 		// Normalize the org-visible sentinel to the resolved owner team
 		// so the kill-switch / team_agents / claim all read a real team.
-		acting := effectiveActingTeam(teamID, task.TeamID)
+		acting := effectiveActingTeam(teamID, teamIDValue(task))
 		if !r.autoDelegateEnabledForTeam(context.Background(), acting) {
 			continue
 		}
@@ -730,6 +774,147 @@ func (r *Router) reviewRequestVisibilityTeams(orgID string, evt domain.Event) (t
 	return out, true
 }
 
+// authorCentricOwner runs the owning-team ladder for an author-centric github
+// event (first hit wins). It returns the single owning team plus the set of
+// teams the ladder produced:
+//
+//	owner == team, ownerSet == {team}   — a structural owner (tier 1 override
+//	                                       or tier 2 project), a prior owned
+//	                                       author-centric task (tier 3), or a
+//	                                       single-team author (tier 4);
+//	owner == "",   ownerSet == {A,B,…}  — the author maps to multiple teams
+//	                                       (tier 4 ambiguous): no single owner,
+//	                                       visible to all of them, NULL owner;
+//	owner == "",   ownerSet == nil      — nothing resolved (external/non-TF
+//	                                       author): no task unless an explicit
+//	                                       watch rule pulls a team in.
+//
+// Claims-free ...System lookups throughout: the router runs on the eventbus
+// goroutine with no JWT context.
+func (r *Router) authorCentricOwner(orgID string, evt domain.Event, entityID string) (owner string, ownerSet []string) {
+	// Tiers 1+2 — structural owner (owning_team_id override, else a
+	// team-visibility project's team). One store query.
+	if r.entities != nil {
+		if t, err := r.entities.OwningTeamForEntitySystem(context.Background(), orgID, entityID); err != nil {
+			log.Printf("[router] author-centric owner: structural lookup for entity %s: %v", entityID, err)
+		} else if t != "" {
+			return t, []string{t}
+		}
+	}
+
+	// Tier 3 — the most recent prior owned author-centric task on the entity.
+	// review_requested is excluded by construction (not in the type set) and
+	// NULL-owned priors are excluded by the store's team_id filter, so this
+	// can't fall into the review-first trap or be anchored by an unowned task.
+	if r.tasks != nil {
+		if t, err := r.tasks.OwnerTeamForLatestTaskInTypesSystem(context.Background(), orgID, entityID, authorCentricGitHubEventTypes); err != nil {
+			log.Printf("[router] author-centric owner: prior-task lookup for entity %s: %v", entityID, err)
+		} else if t != "" {
+			return t, []string{t}
+		}
+	}
+
+	// Tier 4 — the PR author's identity → TF user(s) → teams.
+	teams := r.authorTeams(orgID, evt)
+	switch len(teams) {
+	case 0:
+		return "", nil
+	case 1:
+		return teams[0], teams
+	default:
+		return "", teams
+	}
+}
+
+// authorTeams resolves a github event's PR author login to the union of teams
+// over every TF user the login maps to, on the org's effective github host.
+// Mirrors reviewRequestVisibilityTeams' user-identity branch (the set-valued
+// reverse lookup is the regression guard for a login bound to two users).
+// Returns an empty slice when the author isn't a TF user (dependabot /
+// external) or the identity stores are unwired.
+func (r *Router) authorTeams(orgID string, evt domain.Event) []string {
+	if r.users == nil || r.teams == nil || r.orgs == nil {
+		return nil
+	}
+	var m struct {
+		Author string `json:"author"`
+	}
+	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil || m.Author == "" {
+		return nil
+	}
+	orgSet, err := r.orgs.GetSettingsSystem(context.Background(), orgID)
+	if err != nil {
+		log.Printf("[router] author-centric owner: read org settings for host: %v", err)
+		return nil
+	}
+	// Effective host (empty → github.com) so the reverse lookup matches
+	// identities captured under the canonical host — the raw empty setting
+	// would look up host="" and resolve nobody.
+	host := dbpkg.EffectiveGitHubHost(orgSet.GitHubBaseURL)
+	userIDs, err := r.users.UserIDsForGitHubLoginSystem(context.Background(), host, m.Author)
+	if err != nil {
+		log.Printf("[router] author-centric owner: reverse login lookup for %s: %v", m.Author, err)
+		return nil
+	}
+	set := map[string]struct{}{}
+	for _, uid := range userIDs {
+		tids, terr := r.teams.TeamIDsForUserInOrgSystem(context.Background(), orgID, uid)
+		if terr != nil {
+			log.Printf("[router] author-centric owner: teams for user %s: %v", uid, terr)
+			continue
+		}
+		for _, t := range tids {
+			set[t] = struct{}{}
+		}
+	}
+	return sortedKeys(set)
+}
+
+// explicitUserRuleTeams returns the teams whose matched handler is a
+// user-authored rule — the only handlers that widen an author-centric task's
+// visibility beyond the entity owner. System/default rules gate creation and
+// the owner's automation but never grant visibility on their own, so the
+// scoping stays the owner unless a team deliberately opts in.
+func explicitUserRuleTeams(matchedRules []domain.EventHandler) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, h := range matchedRules {
+		if h.Source == domain.EventHandlerSourceUser {
+			out[handlerTeamID(h)] = struct{}{}
+		}
+	}
+	return out
+}
+
+// sortedKeys returns the map's keys in ascending order — used to make the
+// task_teams write order deterministic.
+func sortedKeys(m map[string]struct{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// teamIDValue derefs a task's nullable owning team to "" when the owner is
+// unresolved (team_id NULL), so the router's string-keyed comparisons and the
+// effectiveActingTeam/auto-fire gates read a NULL owner as the empty team.
+func teamIDValue(t *domain.Task) string {
+	if t == nil || t.TeamID == nil {
+		return ""
+	}
+	return *t.TeamID
+}
+
+// teamIDPtr maps a team id back to the nullable column convention: "" → nil
+// (unresolved owner), a real team → a pointer to it.
+func teamIDPtr(teamID string) *string {
+	if teamID == "" {
+		return nil
+	}
+	return &teamID
+}
+
 // effectiveActingTeam normalizes a handler's acting team for the
 // auto-delegate gates and the bot claim. An org-visible handler routes
 // the LocalDefaultTeamID sentinel through handlerTeamID, but in
@@ -768,8 +953,8 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 	// duplication the one-task model exists to prevent. A trigger whose
 	// acting team IS the current owner still proceeds, so multiple
 	// prompts one team configured on the same event all run.
-	if task.ClaimedByAgentID != "" && actingTeamID != "" && task.TeamID != actingTeamID {
-		log.Printf("[router] auto-trigger skipped on task %s: already claimed by the bot for team %s (acting team %s lost the claim)", task.ID, task.TeamID, actingTeamID)
+	if task.ClaimedByAgentID != "" && actingTeamID != "" && teamIDValue(task) != actingTeamID {
+		log.Printf("[router] auto-trigger skipped on task %s: already claimed by the bot for team %s (acting team %s lost the claim)", task.ID, teamIDValue(task), actingTeamID)
 		return
 	}
 	// SKY-261 bot-disabled-team gate. If the task's team has the bot
@@ -806,7 +991,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 		// then the local sentinel, when the caller didn't supply one.
 		teamID := actingTeamID
 		if teamID == "" {
-			teamID = task.TeamID
+			teamID = teamIDValue(task)
 		}
 		if teamID == "" {
 			teamID = runmode.LocalDefaultTeamID
@@ -911,11 +1096,11 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 	// phantom claim. Skipped when the acting team already is the owner
 	// (the common path, and same-team multi-prompt where an active run
 	// may exist).
-	if actingTeamID != "" && actingTeamID != task.TeamID {
+	if actingTeamID != "" && actingTeamID != teamIDValue(task) {
 		if err := r.tasks.SetOwnerTeamSystem(context.Background(), orgID, task.ID, actingTeamID); err != nil {
 			log.Printf("[router] failed to consolidate owner team on task %s before fire: %v", task.ID, err)
 		} else {
-			task.TeamID = actingTeamID
+			task.TeamID = teamIDPtr(actingTeamID)
 		}
 	}
 	if _, err := r.fireDelegate(orgID, task, trigger, triggeringEventID); err != nil {
@@ -994,7 +1179,7 @@ func (r *Router) stampAgentClaim(orgID string, task *domain.Task, actingTeamID s
 	if actingTeamID != "" {
 		// Mirror the store's owner-consolidation so the shared task
 		// object reflects the new owning team for later iterations.
-		task.TeamID = actingTeamID
+		task.TeamID = teamIDPtr(actingTeamID)
 	}
 	r.ws.Broadcast(websocket.Event{
 		Type:  "task_claimed",
@@ -1417,24 +1602,33 @@ func (r *Router) reDeriveTask(orgID, taskID string) {
 		log.Printf("[router] re-derive: failed to fetch visibility teams for task %s: %v", taskID, err)
 		return
 	}
-	visibleSet := map[string]struct{}{task.TeamID: {}}
+	visibleSet := map[string]struct{}{}
+	if owner := teamIDValue(task); owner != "" {
+		visibleSet[owner] = struct{}{}
+	}
 	for _, vt := range visibleTeams {
 		visibleSet[vt] = struct{}{}
 	}
+
+	// Author-centric tasks fire only the OWNER's automation (the same rule
+	// HandleEvent applies): a deferred trigger must belong to the owning team,
+	// and a NULL owner fires nothing. Other event types keep the visibility-set
+	// gate so a matched team's deferred trigger fires against the shared task.
+	authorCentric := isAuthorCentricGitHubEvent(task.EventType)
 
 	for _, trigger := range handlers {
 		if trigger.Kind != domain.EventHandlerKindTrigger {
 			continue
 		}
-		// Each matched team's deferred trigger fires against the single
-		// task; the claim CAS resolves contention. Gate first on the
-		// task's recorded visibility set so a team that wasn't part of
-		// the original match can't ride (and claim) a task it can't see,
-		// then on the firing team's own auto_delegate kill switch. The
-		// org-visible sentinel normalizes to the resolved owner team so
-		// it matches the (resolved) visibility-set entries.
-		firingTeam := effectiveActingTeam(handlerTeamID(trigger), task.TeamID)
-		if _, visible := visibleSet[firingTeam]; !visible {
+		// Gate first on who may fire, then on the firing team's own
+		// auto_delegate kill switch. The org-visible sentinel normalizes to
+		// the resolved owner team so it matches the (resolved) entries.
+		firingTeam := effectiveActingTeam(handlerTeamID(trigger), teamIDValue(task))
+		if authorCentric {
+			if owner := teamIDValue(task); owner == "" || firingTeam != owner {
+				continue
+			}
+		} else if _, visible := visibleSet[firingTeam]; !visible {
 			continue
 		}
 		if !r.autoDelegateEnabledForTeam(context.Background(), firingTeam) {

@@ -444,6 +444,35 @@ func (s *entityStore) ClassificationStatusSystem(ctx context.Context, orgID, id 
 	return ts.Valid, true, nil
 }
 
+func (s *entityStore) OwningTeamForEntitySystem(ctx context.Context, orgID, entityID string) (string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", err
+	}
+	// Tier 1 (owning_team_id override) takes precedence; tier 2 falls back to
+	// the team that owns the entity's project, but only for a team-visibility
+	// project (a private/org project has no single owning team). COALESCE
+	// returns NULL when neither resolves; the NullString scans that to "".
+	var team sql.NullString
+	err := s.q.QueryRowContext(ctx, `
+		SELECT COALESCE(
+			e.owning_team_id,
+			(SELECT p.team_id FROM projects p
+			   WHERE p.id = e.project_id
+			     AND p.visibility = 'team'
+			     AND p.team_id IS NOT NULL)
+		)
+		FROM entities e
+		WHERE e.id = ?
+	`, entityID).Scan(&team)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return team.String, nil
+}
+
 // scanEntityRow / scanEntityFromRows return a fresh domain.Entity per
 // invocation. The two flavors mirror database/sql's *Row vs *Rows
 // types since Scan signatures aren't unifiable through a common

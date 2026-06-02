@@ -149,11 +149,17 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	// App-installation token in multi or borrows the keychain PAT in local;
 	// modelFor reads the task's team default (a multi-team org honors each
 	// team's model choice). owner is parsed from the task (empty for Jira
-	// runs); task.TeamID is the run's owning team. context.Background —
-	// Delegate has no request ctx and the resolve is a bounded token-mint /
-	// DB read; the run's own cancellable ctx is created further down for the
-	// agent subprocess.
-	ghClient, defaultModel := s.resolveRunCredentials(context.Background(), orgID, ownerForTask(task), task.TeamID)
+	// runs); task.TeamID is the run's owning team — nullable now, but a task
+	// reaching Delegate always has a resolved owner (an unowned task gates
+	// auto-fire off, and a manual claim consolidates the owner first), so the
+	// nil deref to "" is purely defensive. context.Background — Delegate has
+	// no request ctx and the resolve is a bounded token-mint / DB read; the
+	// run's own cancellable ctx is created further down for the subprocess.
+	teamID := ""
+	if task.TeamID != nil {
+		teamID = *task.TeamID
+	}
+	ghClient, defaultModel := s.resolveRunCredentials(context.Background(), orgID, ownerForTask(task), teamID)
 
 	// Compute trigger type + creator user up front so resolvePrompt
 	// can route by them (manual delegations must honor prompts_select

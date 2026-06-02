@@ -90,6 +90,33 @@ func (s *entityStore) ClassificationStatusSystem(ctx context.Context, orgID, id 
 	return ts.Valid, true, nil
 }
 
+func (s *entityStore) OwningTeamForEntitySystem(ctx context.Context, orgID, entityID string) (string, error) {
+	// Admin pool: the router resolves ownership with no JWT claims. Tier 1
+	// (owning_team_id override) wins; tier 2 falls back to the team that owns
+	// the entity's project, but only a team-visibility project (private/org
+	// projects have no single owning team). COALESCE yields NULL when neither
+	// resolves, scanned to "" so the router falls through to its later tiers.
+	var team sql.NullString
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT COALESCE(
+			e.owning_team_id,
+			(SELECT p.team_id FROM projects p
+			   WHERE p.id = e.project_id AND p.org_id = e.org_id
+			     AND p.visibility = 'team'
+			     AND p.team_id IS NOT NULL)
+		)
+		FROM entities e
+		WHERE e.org_id = $1 AND e.id = $2
+	`, orgID, entityID).Scan(&team)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return team.String, nil
+}
+
 func (s *entityStore) GetBySource(ctx context.Context, orgID, source, sourceID string) (*domain.Entity, error) {
 	return getEntityBySource(ctx, s.q, orgID, source, sourceID)
 }

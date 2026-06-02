@@ -447,14 +447,18 @@ func findOrCreateTaskAt(ctx context.Context, q queryer, orgID, teamID, entityID,
 	// UUID. Org-visible handlers (visibility='org', team_id NULL)
 	// collapse to runmode.LocalDefaultTeamID in handlerTeamID(); resolve
 	// that sentinel to the org's canonical team (oldest by created_at) so
-	// shipped system rules create tasks in Postgres mode. A truly-empty
-	// teamBind (caller passed "") still trips the guard below.
+	// shipped system rules create tasks in Postgres mode. An empty teamBind
+	// (caller passed "") means "unresolved owner" — author-centric routing
+	// couldn't pick a single team — and is inserted as NULL ($9 below binds
+	// nil): a NULL-team task is still visible via task_teams and gates
+	// auto-delegation off, consolidating to one team on the first claim.
 	teamBind, err := resolveTeamBind(ctx, q, orgID, teamID)
 	if err != nil {
 		return nil, false, err
 	}
-	if teamBind == "" {
-		return nil, false, fmt.Errorf("task store: team_id required for Postgres FindOrCreate (router must thread the user-selected team from the matched event_handler)")
+	var teamArg any
+	if teamBind != "" {
+		teamArg = teamBind
 	}
 
 	// SELECT first so the common path (task already exists) stays a
@@ -493,7 +497,7 @@ func findOrCreateTaskAt(ctx context.Context, q queryer, orgID, teamID, entityID,
 		        'team',
 		        COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)))
 		ON CONFLICT DO NOTHING
-	`, taskID, orgID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt, teamBind)
+	`, taskID, orgID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt, teamArg)
 	if err != nil {
 		return nil, false, err
 	}
@@ -674,6 +678,35 @@ func (s *taskStore) StampAgentClaimIfUnclaimed(ctx context.Context, orgID, taskI
 
 func (s *taskStore) StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error) {
 	return stampAgentClaimIfUnclaimed(ctx, s.admin, orgID, taskID, agentID, actingTeamID)
+}
+
+func (s *taskStore) OwnerTeamForLatestTaskInTypesSystem(ctx context.Context, orgID, entityID string, eventTypes []string) (string, error) {
+	if len(eventTypes) == 0 {
+		return "", nil
+	}
+	// Admin pool: the router has no JWT claims. event_type = ANY($3) binds
+	// the slice as a single array placeholder (pgx native), same shape as
+	// ListActiveRefsForEntities' entity-id array. The team_id IS NOT NULL
+	// filter excludes unowned priors; the caller's omission of
+	// review_requested from eventTypes excludes review tasks.
+	var teamID sql.NullString
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT team_id
+		FROM tasks
+		WHERE org_id = $1
+		  AND entity_id = $2
+		  AND team_id IS NOT NULL
+		  AND event_type = ANY($3)
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, orgID, entityID, eventTypes).Scan(&teamID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return teamID.String, nil
 }
 
 func stampAgentClaimIfUnclaimed(ctx context.Context, q queryer, orgID, taskID, agentID, actingTeamID string) (bool, error) {
@@ -966,7 +999,8 @@ func (s *taskScanState) targets(t *domain.Task) []any {
 
 func (s *taskScanState) finalize(t *domain.Task) {
 	if s.teamID.Valid {
-		t.TeamID = s.teamID.String
+		v := s.teamID.String
+		t.TeamID = &v
 	}
 	if s.priorityScore.Valid {
 		t.PriorityScore = &s.priorityScore.Float64

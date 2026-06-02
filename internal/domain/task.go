@@ -13,12 +13,14 @@ type Task struct {
 	EventType      string `json:"event_type"`       // FK to events_catalog.id — the event that spawned this task
 	DedupKey       string `json:"dedup_key"`        // open-set discriminator; empty for most event types
 	PrimaryEventID string `json:"primary_event_id"` // FK to events.id — the specific event that spawned/last bumped
-	// TeamID is the owning team for this task. SKY-295 made dedup per
-	// team, so the team is part of the task's identity — surfaces so
-	// downstream consumers (re-derive's trigger filter, future
-	// per-team UI scoping) can decide cross-team boundaries without
-	// joining back to teams.
-	TeamID string `json:"team_id"`
+	// TeamID is the owning/attributed team for this task, or nil when the
+	// owner is unresolved (author-centric routing couldn't pick a single
+	// team). Pointer-for-nullable: nil = "no owner yet" — distinct from a
+	// team whose id happens to be empty (which never occurs). An unowned
+	// task is still visible via task_teams and gates auto-delegation off
+	// (the bot never claims an unowned task); it consolidates to a single
+	// team on the first human claim.
+	TeamID *string `json:"team_id,omitempty"`
 
 	// Status + lifecycle. SKY-261 B+ removed `claimed` and `delegated`
 	// (responsibility moved to the claim cols). SKY-330 added

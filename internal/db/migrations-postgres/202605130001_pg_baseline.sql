@@ -670,6 +670,7 @@ CREATE TABLE public.entities (
     description text DEFAULT ''::text NOT NULL,
     state text DEFAULT 'active'::text NOT NULL,
     project_id uuid,
+    owning_team_id uuid,
     classified_at timestamp with time zone,
     classification_rationale text,
     last_polled_at timestamp with time zone,
@@ -1355,7 +1356,7 @@ CREATE TABLE public.tasks (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
     creator_user_id uuid NOT NULL,
-    team_id uuid NOT NULL,
+    team_id uuid,
     visibility text DEFAULT 'team'::text NOT NULL,
     entity_id uuid NOT NULL,
     event_type text NOT NULL,
@@ -1378,7 +1379,7 @@ CREATE TABLE public.tasks (
     claimed_by_agent_id uuid,
     claimed_by_user_id uuid,
     CONSTRAINT tasks_claim_xor CHECK (((claimed_by_agent_id IS NULL) OR (claimed_by_user_id IS NULL))),
-    CONSTRAINT tasks_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
+    CONSTRAINT tasks_claimed_requires_team CHECK ((((claimed_by_user_id IS NULL) AND (claimed_by_agent_id IS NULL)) OR (team_id IS NOT NULL))),
     CONSTRAINT tasks_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text]))),
     CONSTRAINT tasks_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'in_progress'::text, 'in_review'::text, 'done'::text, 'dismissed'::text, 'snoozed'::text])))
 );
@@ -2674,6 +2675,14 @@ ALTER TABLE ONLY public.entities
 
 ALTER TABLE ONLY public.entities
     ADD CONSTRAINT entities_project_id_org_id_fkey FOREIGN KEY (project_id, org_id) REFERENCES public.projects(id, org_id) ON DELETE SET NULL;
+
+
+--
+-- Name: entities entities_owning_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.entities
+    ADD CONSTRAINT entities_owning_team_id_fkey FOREIGN KEY (owning_team_id) REFERENCES public.teams(id) ON DELETE SET NULL;
 
 
 --
@@ -4234,28 +4243,28 @@ ALTER TABLE public.tasks ENABLE ROW LEVEL SECURITY;
 -- Name: tasks tasks_delete; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY tasks_delete ON public.tasks FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (((claimed_by_agent_id IS NULL) AND (claimed_by_user_id IS NULL) AND (EXISTS ( SELECT 1 FROM public.task_teams tt WHERE ((tt.task_id = tasks.id) AND tf.user_in_team(tt.team_id))))) OR tf.user_in_team(team_id))))));
+CREATE POLICY tasks_delete ON public.tasks FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (((claimed_by_agent_id IS NULL) AND (claimed_by_user_id IS NULL) AND (EXISTS ( SELECT 1 FROM public.task_teams tt WHERE ((tt.task_id = tasks.id) AND tf.user_in_team(tt.team_id))))) OR (team_id IS NOT NULL AND tf.user_in_team(team_id)))))));
 
 
 --
 -- Name: tasks tasks_insert; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY tasks_insert ON public.tasks FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND ((visibility <> 'team'::text) OR tf.user_in_team(team_id)) AND ((visibility <> 'org'::text) OR tf.user_is_org_admin(org_id))));
+CREATE POLICY tasks_insert ON public.tasks FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND ((visibility <> 'team'::text) OR (team_id IS NOT NULL AND tf.user_in_team(team_id))) AND ((visibility <> 'org'::text) OR tf.user_is_org_admin(org_id))));
 
 
 --
 -- Name: tasks tasks_select; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY tasks_select ON public.tasks FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (((claimed_by_agent_id IS NULL) AND (claimed_by_user_id IS NULL) AND (EXISTS ( SELECT 1 FROM public.task_teams tt WHERE ((tt.task_id = tasks.id) AND tf.user_in_team(tt.team_id))))) OR tf.user_in_team(team_id))) OR (visibility = 'org'::text))));
+CREATE POLICY tasks_select ON public.tasks FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (((claimed_by_agent_id IS NULL) AND (claimed_by_user_id IS NULL) AND (EXISTS ( SELECT 1 FROM public.task_teams tt WHERE ((tt.task_id = tasks.id) AND tf.user_in_team(tt.team_id))))) OR (team_id IS NOT NULL AND tf.user_in_team(team_id)))) OR (visibility = 'org'::text))));
 
 
 --
 -- Name: tasks tasks_update; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY tasks_update ON public.tasks FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (((claimed_by_agent_id IS NULL) AND (claimed_by_user_id IS NULL) AND (EXISTS ( SELECT 1 FROM public.task_teams tt WHERE ((tt.task_id = tasks.id) AND tf.user_in_team(tt.team_id))))) OR tf.user_in_team(team_id))) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id))))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (((claimed_by_agent_id IS NULL) AND (claimed_by_user_id IS NULL) AND (EXISTS ( SELECT 1 FROM public.task_teams tt WHERE ((tt.task_id = tasks.id) AND tf.user_in_team(tt.team_id))))) OR tf.user_in_team(team_id))) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id)))));
+CREATE POLICY tasks_update ON public.tasks FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (((claimed_by_agent_id IS NULL) AND (claimed_by_user_id IS NULL) AND (EXISTS ( SELECT 1 FROM public.task_teams tt WHERE ((tt.task_id = tasks.id) AND tf.user_in_team(tt.team_id))))) OR (team_id IS NOT NULL AND tf.user_in_team(team_id)))) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id))))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (((claimed_by_agent_id IS NULL) AND (claimed_by_user_id IS NULL) AND (EXISTS ( SELECT 1 FROM public.task_teams tt WHERE ((tt.task_id = tasks.id) AND tf.user_in_team(tt.team_id))))) OR (team_id IS NOT NULL AND tf.user_in_team(team_id)))) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id)))));
 
 
 --

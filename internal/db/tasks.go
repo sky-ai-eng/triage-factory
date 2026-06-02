@@ -313,6 +313,22 @@ type TaskStore interface {
 	RecordEventSystem(ctx context.Context, orgID, taskID, eventID, kind string) error
 	CountConsecutiveFailedRunsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error)
 	StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error)
+
+	// OwnerTeamForLatestTaskInTypesSystem returns the team_id of the most
+	// recent task on the entity whose event_type is in eventTypes AND whose
+	// owner (team_id) is non-NULL, or "" when none matches. It is tier 3 of
+	// the router's author-centric owning-team ladder: the caller passes the
+	// author-centric event-type set so a later CI/conflict/feedback event
+	// anchors to the team that already owns the entity's PR lifecycle.
+	//
+	// Two exclusions fall out by construction: review_requested tasks never
+	// confer ownership (the caller omits that type from eventTypes — the
+	// review-first trap), and an unowned (team_id NULL) task can't confer
+	// ownership (the team_id IS NOT NULL filter). All statuses are
+	// considered — a prior CI task that already closed (CI went green) still
+	// anchors the entity's owner. Empty eventTypes returns "". Admin-pool:
+	// the router runs on the eventbus goroutine with no JWT claims.
+	OwnerTeamForLatestTaskInTypesSystem(ctx context.Context, orgID, entityID string, eventTypes []string) (string, error)
 }
 
 // HandoffResult discriminates the three outcomes HandoffAgentClaim

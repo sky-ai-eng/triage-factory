@@ -259,4 +259,21 @@ type EntityStore interface {
 	// variant because there is no claims-bearing caller. org_id is still
 	// filtered in the WHERE clause as defense in depth.
 	ClassificationStatusSystem(ctx context.Context, orgID, id string) (classified, exists bool, err error)
+
+	// OwningTeamForEntitySystem resolves an entity's *structural* owning team
+	// for author-centric task routing — the first two tiers of the router's
+	// owning-team ladder, in one query:
+	//
+	//  1. entities.owning_team_id — an explicit override (set by the transfer
+	//     op / the TF-origin PR stamp); takes precedence when present.
+	//  2. else the entity's project team, for a *team-visibility* project only
+	//     (entities.project_id → projects.team_id WHERE visibility='team'):
+	//     a private/org-visibility project has no single owning team.
+	//
+	// Returns "" when neither resolves so the router falls through to its
+	// prior-task and author-identity tiers. Admin-pool (BYPASSRLS): the
+	// router resolves ownership on the eventbus goroutine with no JWT claims,
+	// mirroring the store's other ...System reads; org_id stays in the WHERE
+	// clause as defense in depth.
+	OwningTeamForEntitySystem(ctx context.Context, orgID, entityID string) (string, error)
 }

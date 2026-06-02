@@ -98,6 +98,10 @@ func TestHandleEvent_OrgIDThreaded(t *testing.T) {
 	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
 		t.Fatalf("seed event handlers: %v", err)
 	}
+	// An explicit team-owned watch rule so the author-centric CI event creates
+	// a task regardless of author identity (this test is about org_id
+	// threading into the event row + task, not owner routing).
+	seedMatchAllCIRule(t, database, runmode.LocalDefaultTeamID)
 
 	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#thread", "pr", "PR", "https://example.com/thread")
 	if err != nil {

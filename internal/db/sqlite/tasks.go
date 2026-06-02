@@ -279,6 +279,39 @@ func (s *taskStore) StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID,
 	return s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID, actingTeamID)
 }
 
+func (s *taskStore) OwnerTeamForLatestTaskInTypesSystem(ctx context.Context, orgID, entityID string, eventTypes []string) (string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", err
+	}
+	if len(eventTypes) == 0 {
+		return "", nil
+	}
+	placeholders := make([]string, len(eventTypes))
+	args := make([]any, 0, len(eventTypes)+1)
+	args = append(args, entityID)
+	for i, et := range eventTypes {
+		placeholders[i] = "?"
+		args = append(args, et)
+	}
+	var teamID string
+	err := s.q.QueryRowContext(ctx, `
+		SELECT team_id
+		FROM tasks
+		WHERE entity_id = ?
+		  AND team_id IS NOT NULL
+		  AND event_type IN (`+strings.Join(placeholders, ",")+`)
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, args...).Scan(&teamID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return teamID, nil
+}
+
 func (s *taskStore) FindActiveByEntity(ctx context.Context, orgID, entityID string) ([]domain.Task, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
@@ -383,8 +416,14 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID,
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, false, err
 	}
-	if teamID == "" {
-		return nil, false, fmt.Errorf("sqlite task store: team_id required (it stamps the owning team on a newly created task; caller must thread the matched event_handler's team or runmode.LocalDefaultTeamID)")
+	// teamID is the owning/attributed team stamped on a new row. Empty is
+	// allowed and means "unresolved owner" — author-centric routing couldn't
+	// pick a single team — and is inserted as NULL. A NULL-team task is still
+	// visible via task_teams and gates auto-delegation off; it consolidates
+	// to one team on the first human claim.
+	var teamBind any
+	if teamID != "" {
+		teamBind = teamID
 	}
 	// Try to find an existing active task first. Identity is
 	// (entity, event_type, dedup_key) — team is not part of it, so a
@@ -420,7 +459,7 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID,
 		                   status, priority_score, scoring_status, created_at,
 		                   team_id, visibility)
 		VALUES (?, ?, ?, ?, ?, 'queued', ?, 'pending', ?, ?, 'team')
-	`, id, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt, teamID)
+	`, id, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt, teamBind)
 	if err != nil {
 		var raced domain.Task
 		err2 := scanTaskFromRow(s.q.QueryRowContext(ctx, `
@@ -918,7 +957,8 @@ func (s *taskScanState) targets(t *domain.Task) []any {
 
 func (s *taskScanState) finalize(t *domain.Task) {
 	if s.teamID.Valid {
-		t.TeamID = s.teamID.String
+		v := s.teamID.String
+		t.TeamID = &v
 	}
 	if s.priorityScore.Valid {
 		t.PriorityScore = &s.priorityScore.Float64

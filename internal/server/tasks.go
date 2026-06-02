@@ -95,8 +95,19 @@ func taskToJSON(t domain.Task) taskJSON {
 		OpenSubtaskCount:    t.OpenSubtaskCount,
 		ClaimedByAgentID:    t.ClaimedByAgentID,
 		ClaimedByUserID:     t.ClaimedByUserID,
-		TeamID:              t.TeamID,
+		TeamID:              teamIDString(t.TeamID),
 	}
+}
+
+// teamIDString flattens a task's nullable owning team to "" when unresolved
+// (team_id NULL) so the response keeps emitting a plain string; the
+// json:"team_id,omitempty" tag then omits the field entirely for an unowned
+// task rather than sending an empty-string team.
+func teamIDString(teamID *string) string {
+	if teamID == nil {
+		return ""
+	}
+	return *teamID
 }
 
 // teamFilterParam extracts the per-page multi-team read filter from the

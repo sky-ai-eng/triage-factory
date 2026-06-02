@@ -76,7 +76,10 @@ func ciEvent(t *testing.T, entityID, repo string) domain.Event {
 
 func gateRouter(database *sql.DB) *Router {
 	st := sqlitestore.New(database)
-	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
+	// Users wired so author-centric owner resolution (the PR author → team
+	// ladder) runs — the gate operates on the visibility set either way, but
+	// wiring it lets the CI tests assert a real owner instead of a NULL one.
+	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, st.Users,
 		testTaskStore(database), st.AgentRuns, st.Entities, st.PendingFirings, st.Events,
 		st.Orgs, st.Teams, st.TeamGitHubRepos, st.JiraStatusRules, nil, nil, noopScorer{}, websocket.NewHub())
 }
@@ -100,6 +103,12 @@ func TestGate_DisjointRepos_DropsUntrackingTeam(t *testing.T) {
 	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrg, teamB, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo-b"}}); err != nil {
 		t.Fatalf("teamB track: %v", err)
 	}
+
+	// The PR author belongs to teamB (the repo-b owner), so the author-centric
+	// ladder resolves the owner to teamB — the same team the gate keeps in the
+	// visibility set. teamA is gated out of both.
+	setReviewHost(t, dbh)
+	seedUserOnTeam(t, dbh, teamB, "aidan")
 
 	seedMatchAllCIRule(t, dbh, teamA)
 	seedMatchAllCIRule(t, dbh, teamB)
@@ -125,8 +134,8 @@ func TestGate_DisjointRepos_DropsUntrackingTeam(t *testing.T) {
 	if len(vis) != 1 || vis[0] != teamB {
 		t.Fatalf("visibility = %v, want only teamB %q (teamA gated out)", vis, teamB)
 	}
-	if active[0].TeamID != teamB {
-		t.Errorf("owner = %q, want teamB %q", active[0].TeamID, teamB)
+	if teamIDValue(&active[0]) != teamB {
+		t.Errorf("owner = %q, want teamB %q", teamIDValue(&active[0]), teamB)
 	}
 }
 
@@ -276,8 +285,8 @@ func TestJiraGate_DisjointProjects_DropsUntrackingTeam(t *testing.T) {
 	if len(vis) != 1 || vis[0] != teamA {
 		t.Fatalf("visibility = %v, want only teamA %q (teamB gated out)", vis, teamA)
 	}
-	if active[0].TeamID != teamA {
-		t.Errorf("owner = %q, want teamA %q", active[0].TeamID, teamA)
+	if teamIDValue(&active[0]) != teamA {
+		t.Errorf("owner = %q, want teamA %q", teamIDValue(&active[0]), teamA)
 	}
 }
 
@@ -327,6 +336,10 @@ func TestGate_LocalN1_NoOp(t *testing.T) {
 	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrg, teamA, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo"}}); err != nil {
 		t.Fatalf("teamA track: %v", err)
 	}
+	// N=1: the local author is on the one team, so the author-centric ladder
+	// resolves the owner to it.
+	setReviewHost(t, dbh)
+	seedUserOnTeam(t, dbh, teamA, "aidan")
 	seedMatchAllCIRule(t, dbh, teamA)
 
 	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "owner/repo#1", "pr", "PR", "https://example.com/1")
@@ -339,7 +352,7 @@ func TestGate_LocalN1_NoOp(t *testing.T) {
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
 	}
-	if active[0].TeamID != teamA {
-		t.Errorf("owner = %q, want teamA %q", active[0].TeamID, teamA)
+	if teamIDValue(&active[0]) != teamA {
+		t.Errorf("owner = %q, want teamA %q", teamIDValue(&active[0]), teamA)
 	}
 }

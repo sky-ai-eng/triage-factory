@@ -339,6 +339,48 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 	})
 
+	// OwningTeamForEntitySystem resolves the structural owner (SKY-372 tiers
+	// 1+2). A plain entity has no override and no project → empty; an entity
+	// attached to a team-visibility project resolves to that project's team.
+	// (The owning_team_id override tier needs a writer this ticket doesn't add,
+	// so it's exercised at the router layer; here we cover the project tier and
+	// the empty fall-through across both dialects.)
+	t.Run("OwningTeamForEntity_resolves_project_team_else_empty", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+
+		// No project, no override → empty (the router then falls to its
+		// prior-task / author-identity tiers).
+		plain, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#owner-plain", "pr", "T", "")
+		if err != nil {
+			t.Fatalf("seed plain entity: %v", err)
+		}
+		if team, err := s.OwningTeamForEntitySystem(ctx, orgID, plain.ID); err != nil || team != "" {
+			t.Errorf("plain entity: got (%q, %v), want (\"\", nil)", team, err)
+		}
+
+		// Attached to a team-visibility project → the project's team.
+		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#owner-proj", "pr", "T", "")
+		if err != nil {
+			t.Fatalf("seed entity: %v", err)
+		}
+		pid := seed.Project(t, "Owned")
+		if err := s.AssignProject(ctx, orgID, ent.ID, &pid, ""); err != nil {
+			t.Fatalf("AssignProject: %v", err)
+		}
+		team, err := s.OwningTeamForEntitySystem(ctx, orgID, ent.ID)
+		if err != nil {
+			t.Fatalf("OwningTeamForEntitySystem: %v", err)
+		}
+		if team == "" {
+			t.Error("project-attached entity resolved no owning team; want the project's team")
+		}
+
+		// Missing entity → empty, not an error.
+		if team, err := s.OwningTeamForEntitySystem(ctx, orgID, uuid.New().String()); err != nil || team != "" {
+			t.Errorf("missing entity: got (%q, %v), want (\"\", nil)", team, err)
+		}
+	})
+
 	t.Run("ClassificationStatusSystem_keys_on_classified_at", func(t *testing.T) {
 		// SKY-392: the delegation wait reads classification state through
 		// this dialect-aware store method (not a raw `?`-placeholder

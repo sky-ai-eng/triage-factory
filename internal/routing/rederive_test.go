@@ -477,8 +477,8 @@ func TestReDeriveAfterScoring_TeamNotInVisibilitySet_Skips(t *testing.T) {
 	if got.ClaimedByAgentID != "" {
 		t.Errorf("task claimed by agent (%q); a team outside the visibility set must not consolidate ownership", got.ClaimedByAgentID)
 	}
-	if got.TeamID != runmode.LocalDefaultTeamID {
-		t.Errorf("owner team_id = %q, want unchanged %q (no cross-team consolidation)", got.TeamID, runmode.LocalDefaultTeamID)
+	if teamIDValue(got) != runmode.LocalDefaultTeamID {
+		t.Errorf("owner team_id = %q, want unchanged %q (no cross-team consolidation)", teamIDValue(got), runmode.LocalDefaultTeamID)
 	}
 }
 

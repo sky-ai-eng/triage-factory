@@ -12,16 +12,21 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// newQueueWorkerRouter builds a fully-wired router with the durable
-// event queue set and the shipped handlers seeded, so a ci_check_failed
-// event routed through the worker creates a task (same rule the orgid
-// tests rely on). teamRepos is nil → the team↔repo gate fails open.
+// newQueueWorkerRouter builds a fully-wired router with the durable event
+// queue set so a ci_check_failed event routed through the worker creates a
+// task. The shipped (system) CI rule no longer creates an author-centric task
+// on its own — owner routing scopes it — so an explicit team-owned watch rule
+// is seeded too: it grants visibility (and thus task creation) regardless of
+// whether the event's author resolves to a TF user, which keeps these
+// queue-durability tests focused on the queue, not on identity. teamRepos is
+// nil → the team↔repo gate fails open.
 func newQueueWorkerRouter(t *testing.T, database *sql.DB) *Router {
 	t.Helper()
 	st := sqlitestore.New(database)
 	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
 		t.Fatalf("seed event handlers: %v", err)
 	}
+	seedMatchAllCIRule(t, database, runmode.LocalDefaultTeamID)
 	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), st.AgentRuns, st.Entities, st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
 	r.SetEventQueue(st.EventQueue)
 	return r

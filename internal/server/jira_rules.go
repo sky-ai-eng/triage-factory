@@ -19,12 +19,12 @@ import (
 // the app-pool ListForTeam (jira_rules_select RLS gates by team
 // membership) — keeps request-handler reads RLS-consistent.
 func lookupJiraRuleForTask(ctx context.Context, tx db.TxStores, task *domain.Task) *domain.JiraProjectStatusRules {
-	if task == nil || task.EntitySource != "jira" || task.TeamID == "" {
+	if task == nil || task.EntitySource != "jira" || task.TeamID == nil || *task.TeamID == "" {
 		return nil
 	}
-	rules, err := tx.JiraStatusRules.ListForTeam(ctx, task.TeamID)
+	rules, err := tx.JiraStatusRules.ListForTeam(ctx, *task.TeamID)
 	if err != nil {
-		log.Printf("[jira-rule] list rules for team %s: %v", task.TeamID, err)
+		log.Printf("[jira-rule] list rules for team %s: %v", *task.TeamID, err)
 		return nil
 	}
 	return domain.RuleForProject(rules, projectFromKey(task.EntitySourceID))

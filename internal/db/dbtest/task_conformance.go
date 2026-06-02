@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -773,6 +774,95 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			if x.ID == taskID {
 				t.Error("QueuedIncludingSnoozed surfaced a user-claimed task; SKY-261 invariant says only unclaimed rows belong in the queue projection")
 			}
+		}
+	})
+
+	// --- Author-centric owner routing (SKY-372) ---
+
+	t.Run("FindOrCreate_empty_team_stores_null_owner", func(t *testing.T) {
+		s, orgID, _, _, _, seed, _ := mk(t)
+		entityID, eventID, _ := seed(t, "null-owner")
+		// Empty teamID = unresolved owner → team_id NULL, but the task is
+		// still created (visible via task_teams elsewhere).
+		task, created, err := s.FindOrCreate(ctx, orgID, "", entityID, domain.EventGitHubPRConflicts, "", eventID, 0.5)
+		if err != nil {
+			t.Fatalf("FindOrCreate(empty team): %v", err)
+		}
+		if !created {
+			t.Error("expected a new task for the unresolved-owner situation")
+		}
+		if task.TeamID != nil {
+			t.Errorf("team_id = %q, want nil (unresolved owner)", *task.TeamID)
+		}
+		// Re-read confirms the NULL persisted, not just the in-memory struct.
+		got, err := s.Get(ctx, orgID, task.ID)
+		if err != nil || got == nil {
+			t.Fatalf("re-read: %v", err)
+		}
+		if got.TeamID != nil {
+			t.Errorf("persisted team_id = %q, want nil", *got.TeamID)
+		}
+	})
+
+	t.Run("ClaimedRequiresTeam_check_rejects_unowned_claim", func(t *testing.T) {
+		s, orgID, _, _, userID, seed, _ := mk(t)
+		entityID, eventID, _ := seed(t, "claim-unowned")
+		task, _, err := s.FindOrCreate(ctx, orgID, "", entityID, domain.EventGitHubPRConflicts, "", eventID, 0.5)
+		if err != nil {
+			t.Fatalf("FindOrCreate(empty team): %v", err)
+		}
+		// SetClaimedByUser is the no-guard primitive: it sets the claim
+		// without consolidating an owner, so the claimed-⇒-owned CHECK must
+		// reject claiming a NULL-team task. (Production claims go through
+		// ClaimQueuedForUser, which sets the owning team atomically.)
+		if err := s.SetClaimedByUser(ctx, orgID, task.ID, userID); err == nil {
+			t.Error("expected the claimed-requires-team CHECK to reject claiming an unowned task, got nil error")
+		}
+	})
+
+	t.Run("OwnerTeamForLatestTaskInTypes_latest_owned_excludes_null_and_out_of_set", func(t *testing.T) {
+		s, orgID, teamID, _, _, seed, seedTeam := mk(t)
+		entityID, eventID, _ := seed(t, "tier3")
+		teamB := seedTeam(t, "tier3b")
+
+		base := time.Now().UTC()
+		// Owned, older.
+		if _, _, err := s.FindOrCreateAt(ctx, orgID, teamID, entityID, domain.EventGitHubPRCICheckPassed, "a", eventID, 0.5, base); err != nil {
+			t.Fatalf("seed owned task A: %v", err)
+		}
+		// Unowned (NULL), newer — must be ignored by the lookup.
+		if _, _, err := s.FindOrCreateAt(ctx, orgID, "", entityID, domain.EventGitHubPRConflicts, "b", eventID, 0.5, base.Add(time.Second)); err != nil {
+			t.Fatalf("seed unowned task B: %v", err)
+		}
+
+		// With only ci_check_passed (owned) and conflicts (NULL) in scope,
+		// the NULL one is excluded → the owned team comes back.
+		got, err := s.OwnerTeamForLatestTaskInTypesSystem(ctx, orgID, entityID, []string{domain.EventGitHubPRCICheckPassed, domain.EventGitHubPRConflicts})
+		if err != nil {
+			t.Fatalf("OwnerTeamForLatestTaskInTypes: %v", err)
+		}
+		if got != teamID {
+			t.Errorf("owner = %q, want %q (NULL-owned newer task must be excluded)", got, teamID)
+		}
+
+		// A newer owned task on teamB wins "latest".
+		if _, _, err := s.FindOrCreateAt(ctx, orgID, teamB, entityID, domain.EventGitHubPRLabelAdded, "c", eventID, 0.5, base.Add(2*time.Second)); err != nil {
+			t.Fatalf("seed owned task C: %v", err)
+		}
+		got, err = s.OwnerTeamForLatestTaskInTypesSystem(ctx, orgID, entityID, []string{domain.EventGitHubPRCICheckPassed, domain.EventGitHubPRLabelAdded})
+		if err != nil {
+			t.Fatalf("OwnerTeamForLatestTaskInTypes (latest): %v", err)
+		}
+		if got != teamB {
+			t.Errorf("owner = %q, want teamB %q (most recent owned task wins)", got, teamB)
+		}
+
+		// A type with no task → empty; an empty type set → empty.
+		if got, err := s.OwnerTeamForLatestTaskInTypesSystem(ctx, orgID, entityID, []string{domain.EventGitHubPRNewCommits}); err != nil || got != "" {
+			t.Errorf("no matching type: got (%q, %v), want (\"\", nil)", got, err)
+		}
+		if got, err := s.OwnerTeamForLatestTaskInTypesSystem(ctx, orgID, entityID, nil); err != nil || got != "" {
+			t.Errorf("empty type set: got (%q, %v), want (\"\", nil)", got, err)
 		}
 	})
 

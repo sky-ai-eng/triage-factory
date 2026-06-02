@@ -56,39 +56,26 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, blue
 	now := time.Now().UTC()
 	var inserted int64
 
-	// SKY-264: ShippedEventHandlers carry `author_in: []` as a placeholder
-	// where the rule scopes to "my events." In local mode we know exactly
-	// who "me" is — the synthetic user's github_username — so substitute
-	// it into the empty allowlist at seed time. INSERT OR IGNORE below
-	// means this only takes effect on first install / clean-slate;
-	// existing installs preserve whatever the user has saved via the
-	// Settings UI.
+	// Shipped GitHub rules ship `author_in: []` (match-all) verbatim — the
+	// host-dependent seed-time rewrite that scoped them to the local user's
+	// login is GONE. Author-centric owner routing scopes these at event time
+	// instead (resolving the PR author's team via the owning-team ladder),
+	// which also fixes the "connected GitHub after the seed" gap the
+	// seed-once rewrite had. The author_in field + matcher stay, as an
+	// optional per-member filter for user-authored rules.
 	//
-	// Empty username (user hasn't connected GitHub yet) leaves the
-	// allowlist empty — the rule fires for everyone, which is the
-	// match-all default. User can edit the rule once they connect.
-	// Best-effort: a missing row (fresh install pre-bootstrap) returns
-	// empty and substituteLocalGitHubIdentity degrades to leaving the
-	// placeholder allowlist empty. Identity is host-scoped (SKY-396):
-	// resolve the org's GitHub host from org_settings, then read the
-	// local user's login for that (user, host) pair.
-	var ghHost sql.NullString
-	_ = s.q.QueryRowContext(ctx,
-		`SELECT github_base_url FROM org_settings WHERE org_id = ?`, orgID,
-	).Scan(&ghHost)
-	localGitHubUsername, _ := s.users.GetGitHubLogin(ctx, runmode.LocalDefaultUserID, ghHost.String)
-
-	// SKY-270: same shape for Jira. The shipped jira-assigned and
-	// jira-became-atomic rules ship with `assignee_in: []` placeholders;
-	// fill them with the local user's Atlassian account ID so the rule
+	// Jira keeps the seed-time fill: the shipped jira-assigned and
+	// jira-became-atomic rules ship `assignee_in: []` placeholders, and Jira
+	// routes via jira_project_status_rules (not an owner ladder), so the
+	// local user's Atlassian account id is substituted here so the rule
 	// matches without manual setup. Empty value (Jira not connected yet)
-	// leaves the allowlist empty → rule matches every assignee, matching
-	// the GitHub side's degrade-cleanly default.
+	// leaves the allowlist empty → matches every assignee. INSERT OR IGNORE
+	// below means this only takes on first install / clean-slate; existing
+	// installs keep whatever the user saved via Settings.
 	localJiraAccountID, _, _ := s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID)
 
 	for _, h := range db.ShippedEventHandlers {
-		predStr := substituteLocalGitHubIdentity(h.Predicate, localGitHubUsername)
-		predStr = substituteLocalJiraIdentity(predStr, localJiraAccountID)
+		predStr := substituteLocalJiraIdentity(h.Predicate, localJiraAccountID)
 		var pred any
 		if predStr != "" {
 			pred = predStr
@@ -483,27 +470,14 @@ func derefInt(p *int) int {
 	return *p
 }
 
-// substituteLocalGitHubIdentity rewrites a seed-time predicate so empty
-// allowlist fields (`author_in: []`, `reviewer_in: []`, `commenter_in: []`)
-// become single-entry allowlists scoped to the local user. Local-mode
-// callers pass `localUser` = users.github_username for the synthetic
-// LocalDefaultUserID; multi-mode never calls this (Postgres Seed inserts
-// the shipped predicates verbatim).
-//
-// Pre-filled allowlists (non-empty arrays) are left untouched — that's
-// the user's customization and Seed's INSERT OR IGNORE shouldn't
-// stomp it. Malformed predicate JSON falls through unchanged; the
-// downstream matcher already fails-closed on undecodable predicates.
-func substituteLocalGitHubIdentity(predJSON, localUser string) string {
-	return substituteEmptyAllowlists(predJSON, localUser, "author_in", "reviewer_in", "commenter_in")
-}
-
-// substituteLocalJiraIdentity is the Jira analog of
-// substituteLocalGitHubIdentity. Shipped Jira-scoped rules carry
-// `assignee_in: []` placeholders; this fills them with the local user's
-// jira_account_id at seed time. Same semantics as the GitHub helper —
-// non-empty arrays are user-customizations and preserved; missing keys
+// substituteLocalJiraIdentity fills the shipped Jira-scoped rules' empty
+// `assignee_in: []` placeholder with the local user's jira_account_id at seed
+// time. Non-empty arrays are user-customizations and preserved; missing keys
 // stay missing; malformed JSON falls through unchanged.
+//
+// GitHub has no analog anymore — author-centric owner routing scopes the
+// shipped GitHub rules at event time, so they ship match-all and are not
+// rewritten at seed.
 //
 // Reporter / commenter allowlists are not currently shipped on any
 // system handler (they're predicate-only — exposed in the rule editor

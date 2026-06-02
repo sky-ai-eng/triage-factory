@@ -77,6 +77,10 @@ func (s *fenceStubDelegator) Cancel(orgID, runID, userID string) error { return 
 // the assertions isolate.
 func setupFenceScenario(t *testing.T, database *sql.DB) (entityID string) {
 	t.Helper()
+	// The PR author resolves to the one team so the owning-team ladder picks
+	// it as the owner — the owner's automation (the trigger below) then fires.
+	setReviewHost(t, database)
+	seedUserOnTeam(t, database, runmode.LocalDefaultTeamID, "aidan")
 	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#fence", "pr",
 		"Fence PR", "https://github.com/owner/repo/pull/1")
 	if err != nil {
@@ -123,8 +127,10 @@ func recordFenceEvent(t *testing.T, database *sql.DB, entityID string) domain.Ev
 
 func fenceRouter(database *sql.DB, spawner Delegator) *Router {
 	st := sqlitestore.New(database)
+	// Users wired so the author-centric ladder resolves the owner (whose
+	// automation fires); teamRepos/jiraRules nil → scope gate fails open.
 	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
-		nil, nil, nil, testTaskStore(database), st.AgentRuns, st.Entities, st.PendingFirings, st.Events,
+		nil, nil, st.Users, testTaskStore(database), st.AgentRuns, st.Entities, st.PendingFirings, st.Events,
 		st.Orgs, st.Teams, nil, nil, nil, spawner, noopScorer{}, websocket.NewHub())
 }
 

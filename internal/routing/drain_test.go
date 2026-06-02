@@ -33,7 +33,7 @@ type stubDelegator struct {
 func (s *stubDelegator) Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error) {
 	atomic.AddInt64(&s.calls, 1)
 	s.mu.Lock()
-	s.lastTaskTeamID = task.TeamID
+	s.lastTaskTeamID = teamIDValue(&task)
 	s.mu.Unlock()
 	runID := fmt.Sprintf("stub-run-%d", time.Now().UnixNano())
 	// opts.ExplicitBlueprintID is a blueprint id; the run row's prompt_id FK

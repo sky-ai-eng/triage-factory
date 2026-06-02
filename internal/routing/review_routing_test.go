@@ -148,8 +148,8 @@ func TestReviewRequested_UserRoutesToRequestedUsersTeams(t *testing.T) {
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
 	}
-	if active[0].TeamID != teamReviewer {
-		t.Errorf("owner team_id = %q, want reviewer's team %q (not the rule's team %q)", active[0].TeamID, teamReviewer, teamA)
+	if teamIDValue(&active[0]) != teamReviewer {
+		t.Errorf("owner team_id = %q, want reviewer's team %q (not the rule's team %q)", teamIDValue(&active[0]), teamReviewer, teamA)
 	}
 	if vis := visTeamsOf(t, database, active[0].ID); len(vis) != 1 || vis[0] != teamReviewer {
 		t.Errorf("visibility = %v, want [%s] (the requested user's team only)", vis, teamReviewer)
@@ -289,7 +289,7 @@ func TestReviewRequested_PerReviewerDistinctTasks(t *testing.T) {
 	}
 	keys := map[string]string{} // dedup_key → owner team
 	for _, task := range active {
-		keys[task.DedupKey] = task.TeamID
+		keys[task.DedupKey] = teamIDValue(&task)
 	}
 	if keys["user:alice"] != teamAlice {
 		t.Errorf("alice task owner = %q, want %q", keys["user:alice"], teamAlice)

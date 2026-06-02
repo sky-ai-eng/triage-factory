@@ -17,10 +17,12 @@ import (
 )
 
 // TestHandleEvent_MultipleTeams_OneTask pins the core of the task-model
-// reversal: when one event matches rules belonging to N different
-// teams, the router creates ONE task — not N. The teams are recorded
-// as a visibility set (task_teams), and the owning team_id is the
-// deterministic pick among them.
+// reversal AND the author-centric visibility rule: a CI failure (author-
+// centric) matching explicit user-authored rules on N teams creates ONE
+// task whose visibility set is those N teams. The author here isn't a TF
+// user (no identity seeded) so the owning-team ladder resolves no single
+// owner — team_id stays NULL (unresolved), while the explicit watch rules
+// still surface the task in both teams' queues.
 func TestHandleEvent_MultipleTeams_OneTask(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
@@ -88,11 +90,12 @@ func TestHandleEvent_MultipleTeams_OneTask(t *testing.T) {
 		t.Fatalf("expected exactly 1 task for the situation (team is visibility, not count), got %d", len(active))
 	}
 
-	// Owner is the deterministic pick — lowest team id on a priority
-	// tie. teamA (LocalDefaultTeamID, all-zero prefix) sorts below the
-	// random teamB.
-	if active[0].TeamID != teamA {
-		t.Errorf("owner team_id = %q, want teamA %q (lowest-id tie-break)", active[0].TeamID, teamA)
+	// Owner is unresolved (NULL): author-centric routing found no single
+	// owning team for a non-TF author, and explicit watch rules grant
+	// visibility but never ownership. NULL is the auto-fire gate — the bot
+	// never claims an unowned task.
+	if active[0].TeamID != nil {
+		t.Errorf("owner team_id = %v, want nil (unresolved owner for a non-TF author)", *active[0].TeamID)
 	}
 
 	// Both teams are in the visibility set.
@@ -167,6 +170,8 @@ func TestHandleEvent_NoOccurredAt_FallsBackToNow(t *testing.T) {
 	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
 		t.Fatalf("seed event handlers: %v", err)
 	}
+	setReviewHost(t, database)
+	seedUserOnTeam(t, database, runmode.LocalDefaultTeamID, "aidan")
 
 	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#now", "pr", "Now PR", "https://example.com/now")
 	if err != nil {
@@ -182,7 +187,7 @@ func TestHandleEvent_NoOccurredAt_FallsBackToNow(t *testing.T) {
 	metaJSON, _ := json.Marshal(meta)
 
 	before := time.Now()
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	router := reviewRouter(database)
 	router.HandleEvent(domain.Event{
 		EventType:    domain.EventGitHubPRCICheckFailed,
 		EntityID:     &entity.ID,
@@ -370,17 +375,21 @@ func TestTryAutoDelegate_PerTeamBotGate(t *testing.T) {
 	}
 	// The claim consolidated the owning team to the acting (firing)
 	// team A.
-	if got.TeamID != teamA {
-		t.Errorf("owner team_id = %q after team A claim, want %q", got.TeamID, teamA)
+	if teamIDValue(got) != teamA {
+		t.Errorf("owner team_id = %q after team A claim, want %q", teamIDValue(got), teamA)
 	}
 }
 
 // TestHandleEvent_MultipleTeams_OneBotRun pins the exclusive-claim
-// contention fix: when two teams both have auto-delegation fully
-// enabled and an immediate trigger on the same event, the single shared
-// task gets exactly ONE bot run (the first team in priority/id order
-// wins the claim and becomes the owner), and the losing team does NOT
-// leave a queued firing behind that would drain into a duplicate run.
+// contention fix on the default (handler-team) routing path — a Jira
+// assignment, where multiple teams' rules legitimately fan to one shared
+// task. When two teams both have auto-delegation fully enabled and an
+// immediate trigger on the same event, the single shared task gets exactly
+// ONE bot run (the first team in priority/id order wins the claim and
+// becomes the owner), and the losing team hits the claim guard rather than
+// leaving a queued firing that would drain into a duplicate run.
+// (Author-centric github events route owner-only, so the cross-team
+// contention they used to exhibit now lives on this Jira path.)
 func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
@@ -408,7 +417,7 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 		t.Fatalf("add agent to team B: %v", err)
 	}
 
-	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#onerun", "pr", "One-run PR", "https://example.com/onerun")
+	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "SKY-onerun", "issue", "One-run issue", "https://example.com/onerun")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -422,7 +431,7 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 	createTriggerForTestRouting(t, database, domain.EventHandler{
 		ID: "trigger-A-onerun", Kind: domain.EventHandlerKindTrigger,
 		BlueprintID: "p-onerun", TriggerType: domain.TriggerTypeEvent,
-		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4),
+		EventType: domain.EventJiraIssueAssigned, BreakerThreshold: intPtr(4),
 		MinAutonomySuitability: floatPtr(0), Enabled: true,
 	})
 	// teamB's immediate trigger (raw insert for the second team), bound to
@@ -436,19 +445,19 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 			 created_at, updated_at)
 		VALUES (?, ?, ?, ?, 'trigger', ?, NULL, 1, 'user', ?, 4, 0, datetime('now'), datetime('now'))
 	`, "trigger-B-onerun", runmode.LocalDefaultOrg, teamB, runmode.LocalDefaultUserID,
-		domain.EventGitHubPRCICheckFailed, bpOnerunB); err != nil {
+		domain.EventJiraIssueAssigned, bpOnerunB); err != nil {
 		t.Fatalf("seed team B trigger: %v", err)
 	}
 
-	meta := events.GitHubPRCICheckFailedMetadata{Author: "aidan", CheckName: "build", Repo: "owner/repo"}
+	meta := events.JiraIssueAssignedMetadata{Assignee: "aidan", IssueKey: "SKY-onerun", Project: "SKY", Status: "To Do"}
 	metaJSON, _ := json.Marshal(meta)
 
 	stub := &stubDelegator{db: database}
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
 
 	router.HandleEvent(domain.Event{
-		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID,
-		DedupKey: "build", MetadataJSON: string(metaJSON), OrgID: runmode.LocalDefaultOrg,
+		EventType: domain.EventJiraIssueAssigned, EntityID: &entity.ID,
+		MetadataJSON: string(metaJSON), OrgID: runmode.LocalDefaultOrg,
 	})
 
 	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrg, entity.ID)
@@ -461,8 +470,8 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 	if active[0].ClaimedByAgentID == "" {
 		t.Error("task should be bot-claimed after the winning team fired")
 	}
-	if active[0].TeamID != teamA {
-		t.Errorf("owner team_id = %q, want teamA %q (first in priority/id order wins the claim)", active[0].TeamID, teamA)
+	if teamIDValue(&active[0]) != teamA {
+		t.Errorf("owner team_id = %q, want teamA %q (first in priority/id order wins the claim)", teamIDValue(&active[0]), teamA)
 	}
 	// The losing team (B) must not have left a queued firing that would
 	// later drain into a duplicate run.
@@ -475,13 +484,15 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 	}
 }
 
-// TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam pins that
-// when the highest-priority owner team has auto-delegation disabled and
-// a lower-priority team fires the bot, the owner is consolidated to the
-// acting team BEFORE the run is created — so the run (which inherits
-// runs.team_id from tasks.team_id) is attributed to the team that
-// acted, not the stale owner. The stub records the task's owner team at
-// Delegate time.
+// TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam pins, on the
+// default (handler-team) routing path via a Jira assignment, that when the
+// highest-priority owner team has auto-delegation disabled and a
+// lower-priority team fires the bot, the owner is consolidated to the acting
+// team BEFORE the run is created — so the run (which inherits runs.team_id
+// from tasks.team_id) is attributed to the team that acted, not the stale
+// owner. The stub records the task's owner team at Delegate time.
+// (Author-centric github events route owner-only, so this cross-team
+// consolidation lives on the Jira path.)
 func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
@@ -509,7 +520,7 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 		t.Fatalf("add agent to team B: %v", err)
 	}
 
-	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#attr", "pr", "Attr PR", "https://example.com/attr")
+	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "SKY-attr", "issue", "Attr issue", "https://example.com/attr")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -524,13 +535,13 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 			(id, org_id, team_id, creator_user_id, kind, event_type,
 			 scope_predicate_json, enabled, source, name, default_priority, sort_order, created_at, updated_at)
 		VALUES (?, ?, ?, ?, 'rule', ?, NULL, 1, 'user', 'A rule', 0.9, 100, datetime('now'), datetime('now'))
-	`, "rule-A-attr", runmode.LocalDefaultOrg, teamA, runmode.LocalDefaultUserID, domain.EventGitHubPRCICheckFailed); err != nil {
+	`, "rule-A-attr", runmode.LocalDefaultOrg, teamA, runmode.LocalDefaultUserID, domain.EventJiraIssueAssigned); err != nil {
 		t.Fatalf("seed team A rule: %v", err)
 	}
 	createTriggerForTestRouting(t, database, domain.EventHandler{
 		ID: "trigger-A-attr", Kind: domain.EventHandlerKindTrigger,
 		BlueprintID: "p-attr", TriggerType: domain.TriggerTypeEvent,
-		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4),
+		EventType: domain.EventJiraIssueAssigned, BreakerThreshold: intPtr(4),
 		MinAutonomySuitability: floatPtr(0), Enabled: true,
 	})
 	// Team B (lower priority) also has a trigger and IS enabled.
@@ -541,19 +552,19 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 			 scope_predicate_json, enabled, source, blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
 		VALUES (?, ?, ?, ?, 'trigger', ?, NULL, 1, 'user', ?, 4, 0, datetime('now'), datetime('now'))
 	`, "trigger-B-attr", runmode.LocalDefaultOrg, teamB, runmode.LocalDefaultUserID,
-		domain.EventGitHubPRCICheckFailed, bpAttrB); err != nil {
+		domain.EventJiraIssueAssigned, bpAttrB); err != nil {
 		t.Fatalf("seed team B trigger: %v", err)
 	}
 
-	meta := events.GitHubPRCICheckFailedMetadata{Author: "aidan", CheckName: "build", Repo: "owner/repo"}
+	meta := events.JiraIssueAssignedMetadata{Assignee: "aidan", IssueKey: "SKY-attr", Project: "SKY", Status: "To Do"}
 	metaJSON, _ := json.Marshal(meta)
 
 	stub := &stubDelegator{db: database}
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
 
 	router.HandleEvent(domain.Event{
-		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID,
-		DedupKey: "build", MetadataJSON: string(metaJSON), OrgID: runmode.LocalDefaultOrg,
+		EventType: domain.EventJiraIssueAssigned, EntityID: &entity.ID,
+		MetadataJSON: string(metaJSON), OrgID: runmode.LocalDefaultOrg,
 	})
 
 	if stub.calls != 1 {
@@ -571,23 +582,28 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 	if len(active) != 1 {
 		t.Fatalf("expected 1 task, got %d", len(active))
 	}
-	if active[0].TeamID != teamB {
-		t.Errorf("final owner team_id = %q, want teamB %q", active[0].TeamID, teamB)
+	if teamIDValue(&active[0]) != teamB {
+		t.Errorf("final owner team_id = %q, want teamB %q", teamIDValue(&active[0]), teamB)
 	}
 	if active[0].ClaimedByAgentID == "" {
 		t.Error("task should be bot-claimed by the acting team")
 	}
 }
 
-// TestHandleEvent_SingleTeam_OneTask is the regression baseline: with
-// only one matching rule, exactly one task gets created — the
-// local-mode + single-team-rule path.
+// TestHandleEvent_SingleTeam_OneTask is the local N=1 happy path (the
+// repo-wide-poll fix's positive case): a CI failure on the local user's own
+// PR — author resolves to the one team via the owning-team ladder — creates
+// exactly one task owned by that team, off the shipped (system) CI rule.
 func TestHandleEvent_SingleTeam_OneTask(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
 	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
 		t.Fatalf("seed event handlers: %v", err)
 	}
+	// The local author is bound to the one team, so author-centric routing
+	// resolves the owner to it.
+	setReviewHost(t, database)
+	seedUserOnTeam(t, database, runmode.LocalDefaultTeamID, "aidan")
 
 	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#single", "pr", "Single team PR", "https://example.com/single")
 	if err != nil {
@@ -602,7 +618,7 @@ func TestHandleEvent_SingleTeam_OneTask(t *testing.T) {
 	}
 	metaJSON, _ := json.Marshal(meta)
 
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	router := reviewRouter(database)
 
 	router.HandleEvent(domain.Event{
 		EventType:    domain.EventGitHubPRCICheckFailed,
@@ -618,9 +634,12 @@ func TestHandleEvent_SingleTeam_OneTask(t *testing.T) {
 		t.Fatalf("list active tasks: %v", err)
 	}
 	if len(active) != 1 {
-		t.Errorf("expected exactly 1 active task with one matching rule, got %d", len(active))
+		t.Fatalf("expected exactly 1 active task with one matching rule, got %d", len(active))
 	}
-	if len(active) >= 1 && active[0].EventType != domain.EventGitHubPRCICheckFailed {
+	if active[0].EventType != domain.EventGitHubPRCICheckFailed {
 		t.Errorf("task event_type=%q, want %q", active[0].EventType, domain.EventGitHubPRCICheckFailed)
+	}
+	if teamIDValue(&active[0]) != runmode.LocalDefaultTeamID {
+		t.Errorf("owner team_id=%q, want the one team %q", teamIDValue(&active[0]), runmode.LocalDefaultTeamID)
 	}
 }
