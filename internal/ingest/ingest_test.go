@@ -3,6 +3,7 @@ package ingest_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -180,5 +181,52 @@ func TestIngestor_NilQueue_BusOnly(t *testing.T) {
 	}
 	if e := awaitEvent(t, got); e.EventType != domain.EventGitHubPRCICheckFailed {
 		t.Errorf("bus event type = %q, want ci_check_failed", e.EventType)
+	}
+}
+
+// failingEnqueueQueue is a db.EventQueueStore whose Enqueue always errors;
+// every other method is an inert stub. Used to exercise the ingest
+// failure path without standing up a broken DB.
+type failingEnqueueQueue struct{ err error }
+
+func (q failingEnqueueQueue) Enqueue(context.Context, string, domain.Event) (string, error) {
+	return "", q.err
+}
+func (failingEnqueueQueue) ClaimNext(context.Context) (*domain.QueuedEvent, error)  { return nil, nil }
+func (failingEnqueueQueue) MarkDone(context.Context, string, int64) error           { return nil }
+func (failingEnqueueQueue) MarkFailed(context.Context, string, int64, string) error { return nil }
+func (failingEnqueueQueue) Requeue(context.Context, string, int64, string) error    { return nil }
+func (failingEnqueueQueue) ResetProcessing(context.Context) (int, error)            { return 0, nil }
+func (failingEnqueueQueue) PruneDone(context.Context, time.Time) (int, error)       { return 0, nil }
+func (failingEnqueueQueue) ListForEntity(context.Context, string, string) ([]domain.QueuedEvent, error) {
+	return nil, nil
+}
+
+var _ db.EventQueueStore = failingEnqueueQueue{}
+
+// TestIngestor_EnqueueFailure_DropsNoBusPhantom pins that when the durable
+// enqueue fails, the router-bound event is dropped rather than forwarded
+// to the bus — no id-less phantom live update, and the drainer isn't
+// woken for work that was never queued.
+func TestIngestor_EnqueueFailure_DropsNoBusPhantom(t *testing.T) {
+	bus, got := captureBus(t)
+	var wakes int32
+	ing := ingest.New(bus, failingEnqueueQueue{err: errors.New("db down")}, func() { atomic.AddInt32(&wakes, 1) })
+
+	eid := "entity-x"
+	ing.Publish(domain.Event{
+		OrgID:     runmode.LocalDefaultOrg,
+		EntityID:  &eid,
+		EventType: domain.EventGitHubPRCICheckFailed,
+	})
+
+	select {
+	case e := <-got:
+		t.Fatalf("enqueue failure should not publish to the bus, got %q", e.EventType)
+	case <-time.After(150 * time.Millisecond):
+		// expected: nothing delivered
+	}
+	if n := atomic.LoadInt32(&wakes); n != 0 {
+		t.Errorf("wake called %d times on enqueue failure, want 0", n)
 	}
 }

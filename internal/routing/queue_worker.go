@@ -16,6 +16,15 @@ import (
 // spinning on one row while the rest of the queue waits behind it.
 const maxEventAttempts = 5
 
+// claimErrorEscalateThreshold is how many consecutive ClaimNext failures
+// the worker tolerates before escalating from a one-line notice to a loud
+// "routing stalled" warning. A transient blip clears in one tick; a
+// persistent schema/connection fault would otherwise only ever drip a
+// uniform log line, so the threshold turns a sustained outage into an
+// obviously-different, periodically-repeated signal (and a recovery line
+// when it clears).
+const claimErrorEscalateThreshold = 5
+
 // Default cadences for RunEventQueue, exported so main can tune them and
 // tests can drive the loop fast. The floor scan is the correctness
 // backstop (a dropped wake only delays to the next tick); prune is the
@@ -55,6 +64,15 @@ func (r *Router) RunEventQueue(ctx context.Context, wake <-chan struct{}, scanIn
 	// died mid-process (single worker, so no other claimant). Reset it to
 	// 'pending' and replay — re-routing is idempotent w.r.t. task creation
 	// via the tasks dedup index.
+	//
+	// A reset row deliberately KEEPS its attempts count. A genuinely
+	// poisonous event that hard-crashes the process (OOM / SIGKILL, which
+	// bypass processQueuedEvent's recover) would otherwise replay forever;
+	// retaining attempts means it still parks as 'failed' after
+	// maxEventAttempts restarts instead of crash-looping. The tradeoff: an
+	// innocent event that happened to be in-flight during an unrelated
+	// crash spends one of its retries. Recovering a parked 'failed' row is
+	// a manual/admin affordance (a separate ticket), not automatic.
 	if n, err := r.eventQueue.ResetProcessing(ctx); err != nil {
 		log.Printf("[router] event-queue boot recovery: reset processing rows: %v", err)
 	} else if n > 0 {
@@ -66,16 +84,39 @@ func (r *Router) RunEventQueue(ctx context.Context, wake <-chan struct{}, scanIn
 	prune := time.NewTicker(pruneInterval)
 	defer prune.Stop()
 
-	r.drainEventQueue(ctx) // drain whatever survived the restart
+	// drain runs one full drain pass and tracks consecutive ClaimNext
+	// failures so a sustained DB fault escalates loudly instead of only
+	// dripping a per-tick line (see claimErrorEscalateThreshold). The
+	// floor scan paces retries at scanInterval, so no extra backoff is
+	// needed — and adding one would only slow recovery once the DB heals.
+	claimFails := 0
+	drain := func() {
+		if err := r.drainEventQueue(ctx); err != nil {
+			claimFails++
+			switch {
+			case claimFails == 1:
+				log.Printf("[router] event-queue claim failed: %v (retrying on the next scan)", err)
+			case claimFails == claimErrorEscalateThreshold || claimFails%claimErrorEscalateThreshold == 0:
+				log.Printf("[router] event-queue: ROUTING STALLED — %d consecutive claim failures, not progressing: %v", claimFails, err)
+			}
+			return
+		}
+		if claimFails >= claimErrorEscalateThreshold {
+			log.Printf("[router] event-queue: routing recovered after %d consecutive claim failures", claimFails)
+		}
+		claimFails = 0
+	}
+
+	drain() // drain whatever survived the restart
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-wake:
-			r.drainEventQueue(ctx)
+			drain()
 		case <-scan.C:
-			r.drainEventQueue(ctx)
+			drain()
 		case <-prune.C:
 			if n, err := r.eventQueue.PruneDone(ctx, time.Now().Add(-pruneAge)); err != nil {
 				log.Printf("[router] event-queue prune: %v", err)
@@ -87,19 +128,20 @@ func (r *Router) RunEventQueue(ctx context.Context, wake <-chan struct{}, scanIn
 }
 
 // drainEventQueue claims and processes pending rows until the queue is
-// empty (or ctx is cancelled).
-func (r *Router) drainEventQueue(ctx context.Context) {
+// empty (or ctx is cancelled). Returns the ClaimNext error if one occurs
+// so the caller can track consecutive failures and escalate; a clean
+// drain or ctx cancellation returns nil.
+func (r *Router) drainEventQueue(ctx context.Context) error {
 	for {
 		if ctx.Err() != nil {
-			return
+			return nil // clean stop, not a claim failure
 		}
 		qe, err := r.eventQueue.ClaimNext(ctx)
 		if err != nil {
-			log.Printf("[router] event-queue claim: %v", err)
-			return // transient; the next scan tick retries
+			return err // caller owns logging + consecutive-failure escalation
 		}
 		if qe == nil {
-			return // queue drained
+			return nil // queue drained
 		}
 		r.processQueuedEvent(ctx, qe)
 	}

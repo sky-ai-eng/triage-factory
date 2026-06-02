@@ -52,18 +52,23 @@ func (i *Ingestor) Publish(evt domain.Event) {
 	if i.queue != nil && routerBound(evt.EventType) {
 		id, err := i.queue.Enqueue(context.Background(), evt.OrgID, evt)
 		if err != nil {
-			// The durability boundary failed — this event will not route.
-			// That's the loss this package exists to prevent, so log it
-			// loudly; a DB write failure here is exceptional (and the next
-			// poll re-diffs forward). Still fall through to the bus so the
-			// cosmetic UI reflects the event.
-			log.Printf("[ingest] durable enqueue failed for %s (org %s): %v — event will not route",
+			// The durability boundary failed — this event will not route
+			// (no events row, no task). That's the loss this package exists
+			// to prevent, so log it loudly; a DB write failure here is
+			// exceptional and the next poll re-diffs the entity forward.
+			//
+			// Deliberately do NOT fall through to the bus: with no events
+			// row, evt.ID is empty, and forwarding an id-less event would
+			// push a phantom live update that has no durable backing for
+			// the frontend to correlate against. Dropping it (the next poll
+			// re-emits) is cleaner than a broadcast we can't stand behind.
+			log.Printf("[ingest] durable enqueue failed for %s (org %s): %v — dropping (next poll re-diffs)",
 				evt.EventType, evt.OrgID, err)
-		} else {
-			evt.ID = id // so the bus event and the queue row agree on the id
-			if i.wake != nil {
-				i.wake()
-			}
+			return
+		}
+		evt.ID = id // so the bus event and the queue row agree on the id
+		if i.wake != nil {
+			i.wake()
 		}
 	}
 	i.bus.Publish(evt)

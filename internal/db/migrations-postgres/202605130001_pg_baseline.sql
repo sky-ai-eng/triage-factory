@@ -5608,9 +5608,12 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_template_handlers TO tf
 -- rows and creates tasks — drains this transactional-outbox queue
 -- instead. The events audit row and a queue row are written atomically at
 -- ingest (the store's Enqueue), and ClaimNext uses FOR UPDATE SKIP LOCKED
--- so multiple router workers can drain concurrently without double-
--- processing (groundwork for horizontal routing; running N is a
--- non-goal). Admin-pool wired: the ingestor + drain worker are system
+-- so multiple router workers can drain concurrently without claiming the
+-- same row twice (groundwork for horizontal routing; running N is a
+-- non-goal). Delivery is at-least-once, not exactly-once: a 'processing'
+-- row left by a crash is reset to pending at boot and replayed, so the
+-- router's processing is idempotent (the task dedup index makes a replay
+-- a no-op). Admin-pool wired: the ingestor + drain worker are system
 -- services, so the RLS policy below is defense-in-depth (admin bypasses
 -- it) and org_id is bound in every statement.
 --
