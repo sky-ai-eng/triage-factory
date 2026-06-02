@@ -1246,6 +1246,8 @@ CREATE TABLE public.runs (
     session_id text,
     worktree_path text,
     result_summary text,
+    outcome text,
+    outcome_reason text,
     stop_reason text,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     completed_at timestamp with time zone,

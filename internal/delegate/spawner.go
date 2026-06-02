@@ -408,7 +408,8 @@ func (s *Spawner) updateStatus(orgID, runID, status string) {
 		log.Printf("[delegate] warning: failed to update status for run %s: %v", runID, err)
 	}
 	s.broadcastRunUpdate(orgID, runID, status)
-	s.advanceTaskFromRunStatus(orgID, runID, status)
+	// Transient progress states never close a task; pass an empty outcome.
+	s.advanceTaskFromRunStatus(orgID, runID, status, "")
 }
 
 // advanceTaskFromRunStatus is SKY-330's bot-side auto-progression:
@@ -427,7 +428,11 @@ func (s *Spawner) updateStatus(orgID, runID, status string) {
 // been persisted and broadcast; failing the task transition would
 // leave the system in a recoverable state (next poll / next event
 // reconciles).
-func (s *Spawner) advanceTaskFromRunStatus(orgID, runID, runStatus string) {
+// outcome is the parsed terminal-envelope outcome (empty for transient
+// states): an `abort` completion suppresses the close so the task stays open
+// for a human, parity with processCompletion's inline disposition — a run can
+// complete (status='completed') while deliberately leaving its task open.
+func (s *Spawner) advanceTaskFromRunStatus(orgID, runID, runStatus, outcome string) {
 	if s.tasks == nil {
 		return
 	}
@@ -436,6 +441,10 @@ func (s *Spawner) advanceTaskFromRunStatus(orgID, runID, runStatus string) {
 	}
 	target, isClose := targetTaskStatusForRunStatus(runStatus)
 	if target == "" {
+		return
+	}
+	// abort completes the run but leaves the task open — never close on it.
+	if isClose && outcome == string(domain.RunOutcomeAbort) {
 		return
 	}
 	ctx := context.Background()

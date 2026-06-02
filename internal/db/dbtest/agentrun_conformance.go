@@ -179,7 +179,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if err := store.AddPartialTotals(ctx, orgID, runID, 1.25, 4000, 3); err != nil {
 			t.Fatalf("AddPartialTotals: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, runID, "completed", 0.75, 2000, 5, "ok", "all done"); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "completed", 0.75, 2000, 5, "ok", "all done", "abort", "needs human"); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, runID)
@@ -203,6 +203,12 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 		if got.StopReason != "ok" {
 			t.Errorf("stop_reason = %q, want ok", got.StopReason)
+		}
+		if got.Outcome != "abort" {
+			t.Errorf("outcome = %q, want abort", got.Outcome)
+		}
+		if got.OutcomeReason != "needs human" {
+			t.Errorf("outcome_reason = %q, want \"needs human\"", got.OutcomeReason)
 		}
 	})
 
@@ -556,7 +562,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		// Terminate the event run; only terminal event-trigger rows
 		// remain plus the still-running manual — gate flips back to
 		// false.
-		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, "", "", "finish", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		if has, _ := store.HasActiveAutoRunForEntity(ctx, orgID, ent); has {

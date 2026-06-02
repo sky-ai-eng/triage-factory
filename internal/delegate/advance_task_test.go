@@ -26,7 +26,7 @@ func TestAdvanceTaskFromRunStatus_RunningSetsInProgress(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "ip")
 	stampBotClaim(t, database, taskID)
 
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "running")
+	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "running", "")
 
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
 		t.Errorf("task.status = %q, want in_progress", got)
@@ -44,7 +44,7 @@ func TestAdvanceTaskFromRunStatus_InitializingSetsInProgress(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "init")
 	stampBotClaim(t, database, taskID)
 
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "initializing")
+	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "initializing", "")
 
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
 		t.Errorf("task.status = %q, want in_progress", got)
@@ -55,7 +55,7 @@ func TestAdvanceTaskFromRunStatus_PendingApprovalSetsInReview(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "ir")
 	stampBotClaim(t, database, taskID)
 
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "pending_approval")
+	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "pending_approval", "")
 
 	if got := readTaskStatus(t, database, taskID); got != "in_review" {
 		t.Errorf("task.status = %q, want in_review", got)
@@ -70,7 +70,7 @@ func TestAdvanceTaskFromRunStatus_CompletedClosesWithReason(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "done")
 	stampBotClaim(t, database, taskID)
 
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "completed")
+	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "completed", "")
 
 	var status, closeReason string
 	var closedAt sql.NullTime
@@ -104,7 +104,7 @@ func TestAdvanceTaskFromRunStatus_FailedNoOp(t *testing.T) {
 		t.Fatalf("park: %v", err)
 	}
 
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "failed")
+	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "failed", "")
 
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
 		t.Errorf("status = %q, want in_progress (failed must not transition)", got)
@@ -118,7 +118,7 @@ func TestAdvanceTaskFromRunStatus_CancelledNoOp(t *testing.T) {
 		t.Fatalf("park: %v", err)
 	}
 
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "cancelled")
+	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "cancelled", "")
 
 	if got := readTaskStatus(t, database, taskID); got != "in_review" {
 		t.Errorf("status = %q, want in_review (cancelled must not transition)", got)
@@ -132,7 +132,7 @@ func TestAdvanceTaskFromRunStatus_TaskUnsolvableNoOp(t *testing.T) {
 		t.Fatalf("park: %v", err)
 	}
 
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "task_unsolvable")
+	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "task_unsolvable", "")
 
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
 		t.Errorf("status = %q, want in_progress (task_unsolvable must not transition)", got)
@@ -146,7 +146,7 @@ func TestAdvanceTaskFromRunStatus_UserClaimedTaskIgnored(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "user-claim")
 	stampUserClaim(t, database, taskID)
 
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "pending_approval")
+	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "pending_approval", "")
 
 	if got := readTaskStatus(t, database, taskID); got != "queued" {
 		t.Errorf("status = %q, want queued (user-claimed task must not auto-advance)", got)
@@ -160,7 +160,7 @@ func TestAdvanceTaskFromRunStatus_UserClaimedTaskIgnored(t *testing.T) {
 func TestAdvanceTaskFromRunStatus_UnclaimedTaskIgnored(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "unclaimed")
 
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "completed")
+	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "completed", "")
 
 	if got := readTaskStatus(t, database, taskID); got != "queued" {
 		t.Errorf("status = %q, want queued (unclaimed task must not be closed)", got)
@@ -178,7 +178,7 @@ func TestAdvanceTaskFromRunStatus_AlreadyTerminalIgnored(t *testing.T) {
 		t.Fatalf("park: %v", err)
 	}
 
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "completed")
+	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "completed", "")
 
 	if got := readTaskStatus(t, database, taskID); got != "dismissed" {
 		t.Errorf("status = %q, want dismissed (terminal task must not flip)", got)
@@ -209,7 +209,7 @@ func TestAdvanceTaskFromRunStatus_StaleRunNoOpWhenNewerActive(t *testing.T) {
 	}
 
 	// The OLDER run (runID from the fixture) reaches completed.
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "completed")
+	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "completed", "")
 
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
 		t.Errorf("status = %q, want in_progress (stale completed run must not close a task with a newer active run)", got)
@@ -218,7 +218,7 @@ func TestAdvanceTaskFromRunStatus_StaleRunNoOpWhenNewerActive(t *testing.T) {
 	// Same scenario for pending_approval: older run produces a
 	// review while the newer run keeps working. The task must not
 	// jump to in_review.
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "pending_approval")
+	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "pending_approval", "")
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
 		t.Errorf("status = %q, want in_progress (stale pending_approval must not move task to in_review)", got)
 	}
@@ -252,7 +252,7 @@ func TestAdvanceTaskFromRunStatus_ChainStepIgnored(t *testing.T) {
 		t.Fatalf("set blueprint_run_id: %v", err)
 	}
 
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "pending_approval")
+	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "pending_approval", "")
 
 	if got := readTaskStatus(t, database, taskID); got != "queued" {
 		t.Errorf("status = %q, want queued (chain step terminal must not flip the task; chain orchestrator owns it)", got)

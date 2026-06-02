@@ -14,22 +14,22 @@ func TestParseAgentResult_AcceptsYieldEnvelope(t *testing.T) {
 	}{
 		{
 			name: "confirmation",
-			text: `{"status":"yield","yield":{"type":"confirmation","message":"go?","accept_label":"Yes","reject_label":"No"}}`,
+			text: `{"outcome":"yield","yield":{"type":"confirmation","message":"go?","accept_label":"Yes","reject_label":"No"}}`,
 			typ:  domain.YieldTypeConfirmation,
 		},
 		{
 			name: "choice",
-			text: `{"status":"yield","yield":{"type":"choice","message":"which?","options":[{"id":"a","label":"A"}],"multi":false}}`,
+			text: `{"outcome":"yield","yield":{"type":"choice","message":"which?","options":[{"id":"a","label":"A"}],"multi":false}}`,
 			typ:  domain.YieldTypeChoice,
 		},
 		{
 			name: "prompt",
-			text: `{"status":"yield","yield":{"type":"prompt","message":"name?","placeholder":"x"}}`,
+			text: `{"outcome":"yield","yield":{"type":"prompt","message":"name?","placeholder":"x"}}`,
 			typ:  domain.YieldTypePrompt,
 		},
 		{
 			name: "with surrounding markdown fences",
-			text: "```json\n{\"status\":\"yield\",\"yield\":{\"type\":\"confirmation\",\"message\":\"ok?\"}}\n```",
+			text: "```json\n{\"outcome\":\"yield\",\"yield\":{\"type\":\"confirmation\",\"message\":\"ok?\"}}\n```",
 			typ:  domain.YieldTypeConfirmation,
 		},
 	}
@@ -39,8 +39,8 @@ func TestParseAgentResult_AcceptsYieldEnvelope(t *testing.T) {
 			if got == nil {
 				t.Fatalf("nil parse for %q", tc.text)
 			}
-			if got.Status != "yield" {
-				t.Errorf("status = %q, want yield", got.Status)
+			if got.Outcome != "yield" {
+				t.Errorf("outcome = %q, want yield", got.Outcome)
 			}
 			if got.Yield == nil || got.Yield.Type != tc.typ {
 				t.Errorf("yield.type = %v, want %q", got.Yield, tc.typ)
@@ -51,24 +51,24 @@ func TestParseAgentResult_AcceptsYieldEnvelope(t *testing.T) {
 
 func TestParseAgentResult_RejectsBadYield(t *testing.T) {
 	bad := []string{
-		// status:yield but no yield payload
-		`{"status":"yield"}`,
+		// outcome:yield but no yield payload
+		`{"outcome":"yield"}`,
 		// yield with unknown type
-		`{"status":"yield","yield":{"type":"plan_steps","message":"…"}}`,
+		`{"outcome":"yield","yield":{"type":"plan_steps","message":"…"}}`,
 		// yield with empty type
-		`{"status":"yield","yield":{"message":"…"}}`,
+		`{"outcome":"yield","yield":{"message":"…"}}`,
 		// confirmation with empty message
-		`{"status":"yield","yield":{"type":"confirmation","message":""}}`,
+		`{"outcome":"yield","yield":{"type":"confirmation","message":""}}`,
 		// prompt with whitespace-only message
-		`{"status":"yield","yield":{"type":"prompt","message":"   "}}`,
+		`{"outcome":"yield","yield":{"type":"prompt","message":"   "}}`,
 		// choice with no options
-		`{"status":"yield","yield":{"type":"choice","message":"pick","options":[]}}`,
+		`{"outcome":"yield","yield":{"type":"choice","message":"pick","options":[]}}`,
 		// choice with empty option id
-		`{"status":"yield","yield":{"type":"choice","message":"pick","options":[{"id":"","label":"A"}]}}`,
+		`{"outcome":"yield","yield":{"type":"choice","message":"pick","options":[{"id":"","label":"A"}]}}`,
 		// choice with empty option label
-		`{"status":"yield","yield":{"type":"choice","message":"pick","options":[{"id":"a","label":""}]}}`,
+		`{"outcome":"yield","yield":{"type":"choice","message":"pick","options":[{"id":"a","label":""}]}}`,
 		// choice with duplicate option ids
-		`{"status":"yield","yield":{"type":"choice","message":"pick","options":[{"id":"a","label":"A"},{"id":"a","label":"Also A"}]}}`,
+		`{"outcome":"yield","yield":{"type":"choice","message":"pick","options":[{"id":"a","label":"A"},{"id":"a","label":"Also A"}]}}`,
 	}
 	for _, text := range bad {
 		if got := parseAgentResult(text); got != nil {
@@ -77,12 +77,43 @@ func TestParseAgentResult_RejectsBadYield(t *testing.T) {
 	}
 }
 
-func TestParseAgentResult_StillAcceptsLegacyCompletion(t *testing.T) {
-	got := parseAgentResult(`{"status":"completed","summary":"done"}`)
+func TestParseAgentResult_AcceptsFinishCompletion(t *testing.T) {
+	got := parseAgentResult(`{"outcome":"finish","summary":"done"}`)
 	if got == nil {
-		t.Fatal("legacy completion rejected")
+		t.Fatal("finish completion rejected")
 	}
 	if got.Summary != "done" {
 		t.Errorf("summary = %q, want done", got.Summary)
+	}
+	if !got.hasValidOutcome() {
+		t.Errorf("finish should be a valid outcome")
+	}
+}
+
+// TestParseAgentResult_AbortCarriesReason confirms the abort envelope keeps
+// reason distinct from summary.
+func TestParseAgentResult_AbortCarriesReason(t *testing.T) {
+	got := parseAgentResult(`{"outcome":"abort","summary":"looked into it","reason":"needs a human to approve the migration"}`)
+	if got == nil {
+		t.Fatal("abort completion rejected")
+	}
+	if got.Summary != "looked into it" {
+		t.Errorf("summary = %q", got.Summary)
+	}
+	if got.Reason != "needs a human to approve the migration" {
+		t.Errorf("reason = %q", got.Reason)
+	}
+}
+
+// TestAgentResult_SummaryOnlyHasNoValidOutcome confirms the outcome gate's
+// invariant: a summary-only envelope parses (isValid) but has no recognized
+// outcome, so the gate would re-prompt.
+func TestAgentResult_SummaryOnlyHasNoValidOutcome(t *testing.T) {
+	got := parseAgentResult(`{"summary":"did stuff"}`)
+	if got == nil {
+		t.Fatal("summary-only envelope should still parse")
+	}
+	if got.hasValidOutcome() {
+		t.Errorf("summary-only envelope must not report a valid outcome")
 	}
 }

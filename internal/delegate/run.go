@@ -7,7 +7,6 @@ package delegate
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -278,7 +277,7 @@ func (s *Spawner) processCompletion(
 	// hit) that happens to carry yield-shaped JSON is still a failure,
 	// not an intentional pause.
 	if !completion.IsError {
-		if parsed := parseAgentResult(completion.Result); parsed != nil && parsed.Status == "yield" && parsed.Yield != nil {
+		if parsed := parseAgentResult(completion.Result); parsed != nil && parsed.Outcome == string(domain.RunOutcomeYield) && parsed.Yield != nil {
 			if err := s.persistYield(orgID, runID, parsed.Yield, completion, triggerType, creatorUserID); err != nil {
 				log.Printf("[delegate] failed to persist yield for run %s: %v", runID, err)
 				s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, "failed to record yield: "+err.Error())
@@ -322,19 +321,43 @@ func (s *Spawner) processCompletion(
 		log.Printf("[delegate] run %s: memory file unreadable after gate retries (agent_content NULL)", runID)
 	}
 
+	// Outcome-validity gate (separate from the memory gate above): if the
+	// terminal envelope didn't parse or omits a valid outcome, re-prompt
+	// the agent for one before accepting any fallback. Skipped on an infra
+	// IsError completion — that's failing regardless and outcome stays
+	// NULL. The memory ticket later consolidates the two gates.
+	if !completion.IsError {
+		completion = s.runOutcomeGate(ctx, orgID, runID, claudeCwd, completion, sessionID, model, repoEnv, extraAllowedTools, triggerType, creatorUserID)
+	}
+
+	// Is this a step inside a multi-step blueprint? Single/terminal runs
+	// (no blueprint_run_id) own their own task disposition below; blueprint
+	// steps persist outcome/status only and leave advancement to the
+	// orchestrator. Fetched once and reused by the close-task guard.
+	runRow, _ := s.agentRuns.GetSystem(context.Background(), orgID, runID)
+	isBlueprintStep := runRow != nil && runRow.BlueprintRunID != ""
+
 	resultSummary := ""
 	status := "completed"
 	if completion.IsError {
 		status = "failed"
 	}
+	var outcome, outcomeReason string
 	if parsed := parseAgentResult(completion.Result); parsed != nil {
 		resultSummary = parsed.Summary
-		switch parsed.Status {
-		case "failed":
-			status = "failed"
-		case "task_unsolvable":
-			status = "task_unsolvable"
+		if parsed.hasValidOutcome() {
+			outcome = parsed.Outcome
+			if domain.RunOutcome(parsed.Outcome) == domain.RunOutcomeAbort {
+				outcomeReason = parsed.Reason
+			}
 		}
+	}
+	// Fallback after the outcome gate exhausted its retries: a single/
+	// terminal run defaults to finish (parity with today's "completed on
+	// unparseable"); a blueprint step keeps a NULL outcome and is left for
+	// the orchestrator (SKY-419 reads a non-final NULL as no-outcome→abort).
+	if !completion.IsError && outcome == "" && !isBlueprintStep {
+		outcome = string(domain.RunOutcomeFinish)
 	}
 	// Detached context: the run's ctx may have been cancelled (user
 	// cancel mid-stream) but the terminal write still needs to record.
@@ -344,11 +367,11 @@ func (s *Spawner) processCompletion(
 	bgCtx := context.Background()
 	if triggerType == "manual" {
 		if err := s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			return ts.AgentRuns.Complete(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary)
+			return ts.AgentRuns.Complete(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary, outcome, outcomeReason)
 		}); err != nil {
 			log.Printf("[delegate] warning: failed to record completion for run %s: %v", runID, err)
 		}
-	} else if err := s.agentRuns.CompleteSystem(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary); err != nil {
+	} else if err := s.agentRuns.CompleteSystem(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary, outcome, outcomeReason); err != nil {
 		log.Printf("[delegate] warning: failed to record completion for run %s: %v", runID, err)
 	}
 
@@ -366,18 +389,11 @@ func (s *Spawner) processCompletion(
 		// Frontend distinguishes by which side-table has a row (the
 		// /api/agent/runs/{id} response carries pending_kind).
 		//
-		// Non-final blueprint steps must not submit reviews/PRs (the wrapper
-		// prompt forbids it) UNLESS they recorded a --final verdict, which
-		// is the explicit early-exit channel: the step is allowed one
-		// terminal external action (e.g., a SKIP review) and the action
-		// still flows through this same human-approval gate.
-		//
-		// If a non-final step creates a pending artifact without recording
-		// --final, the agent mislabelled its verdict: the pending artifact
-		// IS the blueprint's terminal external action. Auto-promote to --final
-		// (writing a synthetic verdict that supersedes the agent's) so the
-		// blueprint terminates at this step on human approval instead of
-		// advancing past stale handoff narrative into a no-op step.
+		// A single run that produced a pending external action stays
+		// pending_approval here. Multi-step coercion (advancing/closing a
+		// blueprint when a step queues its terminal external action) lands
+		// with the orchestrator rewrite in SKY-419; until then the verdict
+		// path stays untouched and there's no auto-promote in this gate.
 		hasPending := false
 		// Use context.Background() for the pending-review lookup —
 		// the run-scoped ctx can be cancelled mid-bookkeeping (the
@@ -397,32 +413,6 @@ func (s *Spawner) processCompletion(
 			hasPending = true
 		}
 		if hasPending {
-			if s.isNonFinalBlueprintStep(orgID, runID) {
-				verdict, _ := s.blueprints.GetLatestVerdictSystem(bgCtx, orgID, runID)
-				if verdict == nil || verdict.Outcome != domain.ChainVerdictFinal {
-					synthetic := domain.ChainVerdict{
-						Outcome:   domain.ChainVerdictFinal,
-						Reason:    "auto-promoted: non-final step submitted external action without --final",
-						Synthetic: true,
-					}
-					if payload, err := json.Marshal(synthetic); err == nil {
-						payloadStr := string(payload)
-						var insertErr error
-						if triggerType == "manual" {
-							insertErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-								return ts.Blueprints.InsertVerdict(bgCtx, orgID, runID, payloadStr)
-							})
-						} else {
-							insertErr = s.blueprints.InsertVerdictSystem(bgCtx, orgID, runID, payloadStr)
-						}
-						if insertErr != nil {
-							log.Printf("[delegate] warning: insert synthetic --final verdict for run %s: %v", runID, insertErr)
-						} else {
-							log.Printf("[delegate] run %s: non-final blueprint step submitted pending artifact; auto-promoted verdict to --final", runID)
-						}
-					}
-				}
-			}
 			// Guarded transition: only flip to pending_approval if the
 			// row is still 'completed'. A racing cancel/takeover after
 			// agentRuns.Complete would otherwise be silently clobbered
@@ -446,13 +436,17 @@ func (s *Spawner) processCompletion(
 		}
 	}
 
-	if status == "completed" {
-		// Two guards prevent a stale completion from flipping the task:
+	if status == "completed" && outcome != string(domain.RunOutcomeAbort) {
+		// Three guards prevent a stale completion from flipping the task:
 		//
-		// 1. Blueprint step: the blueprint orchestrator owns task lifecycle —
+		// 1. abort outcome: handled by the outer condition — an abort
+		//    leaves the task open (its reason is in runs.outcome_reason)
+		//    rather than closing it. finish/continue/fallback all close.
+		//
+		// 2. Blueprint step: the blueprint orchestrator owns task lifecycle —
 		//    individual step completions must not close the task.
 		//
-		// 2. Re-delegation race: a newer run already exists on this task
+		// 3. Re-delegation race: a newer run already exists on this task
 		//    (the user re-delegated while this run was in flight). The
 		//    newer run's CreateAgentRun row is already in the DB by the
 		//    time the old run reaches processCompletion, so the EXISTS
@@ -460,8 +454,7 @@ func (s *Spawner) processCompletion(
 		//    the active-run check because the blueprint orchestrator creates
 		//    them sequentially (step N+1's row doesn't exist yet when
 		//    step N completes).
-		run, _ := s.agentRuns.GetSystem(bgCtx, orgID, runID)
-		if run != nil && run.BlueprintRunID != "" {
+		if isBlueprintStep {
 			// Blueprint step — skip; terminateBlueprint handles task closure.
 		} else {
 			hasOtherActiveRun, _ := s.agentRuns.HasOtherActiveRunForTaskSystem(bgCtx, orgID, task.ID, runID)
@@ -494,14 +487,14 @@ func (s *Spawner) processCompletion(
 		}
 	}
 	s.broadcastRunUpdate(orgID, runID, status)
-	// SKY-330: mirror the run's terminal status onto the task. The
-	// inline 'completed' path above already set task.status='done'
-	// (so advanceTaskFromRunStatus's idempotent check skips it);
-	// this call handles the pending_approval branch (the run's
-	// status was flipped at line 415 above) by setting
-	// task.status='in_review' and broadcasting task_updated. Failed
-	// / cancelled / task_unsolvable map to no target → no-op.
-	s.advanceTaskFromRunStatus(orgID, runID, status)
+	// Mirror the run's terminal status onto the task. The inline
+	// 'completed' path above already closed the task (so the helper's
+	// idempotent check skips it) — EXCEPT on abort, where the inline path
+	// deliberately left the task open; passing the outcome keeps the
+	// helper from closing it on the 'completed'→'done' mapping. The helper
+	// also handles the pending_approval branch by setting
+	// task.status='in_review'. failed / cancelled map to no target → no-op.
+	s.advanceTaskFromRunStatus(orgID, runID, status, outcome)
 
 	// Toast the terminal state. Success cases auto-hide; failed/unsolvable
 	// show as an error toast so the user notices even if they've clicked

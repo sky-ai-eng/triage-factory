@@ -2,6 +2,40 @@ package domain
 
 import "time"
 
+// RunOutcome is the single terminal vocabulary an agent emits in its
+// completion envelope (the `outcome` field). It replaces the dual-channel
+// design where single runs used a completion `status` and blueprint steps
+// used the separate `chain verdict` CLI:
+//
+//   - RunOutcomeContinue → hand off to the next blueprint stage. Non-terminal
+//     steps only; the overwhelmingly common, correct choice when a step's
+//     part is done.
+//   - RunOutcomeFinish   → end the whole blueprint successfully and close the
+//     task. On a single/terminal run this is normal completion.
+//   - RunOutcomeAbort    → stop; leave the task open for a human. Carries a
+//     natural-language `reason` (the old `unsolvable` folds into this).
+//   - RunOutcomeYield    → hand to the user; the run parks in awaiting_input.
+//
+// runs.outcome persists the parsed value; SKY-419's orchestrator advancement
+// and the later queue work read it.
+type RunOutcome string
+
+const (
+	RunOutcomeContinue RunOutcome = "continue"
+	RunOutcomeFinish   RunOutcome = "finish"
+	RunOutcomeAbort    RunOutcome = "abort"
+	RunOutcomeYield    RunOutcome = "yield"
+)
+
+// Valid reports whether o is one of the four recognized outcomes.
+func (o RunOutcome) Valid() bool {
+	switch o {
+	case RunOutcomeContinue, RunOutcomeFinish, RunOutcomeAbort, RunOutcomeYield:
+		return true
+	}
+	return false
+}
+
 // AgentRun represents a delegated agent execution.
 type AgentRun struct {
 	ID            string
@@ -17,6 +51,17 @@ type AgentRun struct {
 	StopReason    string
 	WorktreePath  string
 	ResultSummary string
+
+	// Outcome is the parsed terminal envelope `outcome` (RunOutcome
+	// vocabulary), persisted by processCompletion. Empty string === SQL
+	// NULL: an infra-error run (status='failed') or a blueprint step whose
+	// outcome gate exhausted its retries without a valid envelope. SKY-419
+	// reads this to advance the orchestrator.
+	Outcome string
+	// OutcomeReason is the natural-language "why I stopped / what a human
+	// needs to do" populated only on an abort outcome. Distinct from
+	// ResultSummary (the always-present "what I did"). Empty === NULL.
+	OutcomeReason string
 	SessionID     string // Claude Code session_id captured from `claude -p --output-format json`, used for --resume
 	MemoryMissing bool   // true if the pre-complete memory-file gate was exhausted without the agent writing a memory file
 	TriggerType   string // "manual" | "event" (matches prompt_triggers.trigger_type vocabulary)

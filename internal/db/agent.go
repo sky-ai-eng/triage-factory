@@ -49,7 +49,11 @@ type AgentRunStore interface {
 	// yield-resume flow keeps cost/duration/turns running via
 	// AddPartialTotals; this call adds the terminal invocation's
 	// deltas to produce correct cumulative spend.
-	Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary string) error
+	//
+	// outcome / outcomeReason persist the parsed terminal-envelope
+	// outcome and (abort-only) reason; pass "" for both on runs that
+	// have no agent outcome (cancellation, infra failure).
+	Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason string) error
 
 	// AddPartialTotals folds an invocation's cost/duration/turns
 	// into the running totals without flipping status or
@@ -279,7 +283,7 @@ type AgentRunStore interface {
 	// has been passed in. Routes through the admin pool because the
 	// agent subprocess has no JWT-claims context yet.
 	LookupOrgForRunSystem(ctx context.Context, runID string) (string, error)
-	CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary string) error
+	CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason string) error
 	AddPartialTotalsSystem(ctx context.Context, orgID, runID string, costUSD float64, durationMs, numTurns int) error
 	MarkAwaitingInputSystem(ctx context.Context, orgID, runID string) (bool, error)
 	MarkResumingSystem(ctx context.Context, orgID, runID string) (bool, error)

@@ -738,6 +738,13 @@ CREATE TABLE runs (
     session_id      TEXT,
     worktree_path   TEXT,
     result_summary  TEXT,
+    -- outcome is the parsed terminal-envelope outcome
+    -- (continue|finish|abort|yield); NULL on infra-error runs and on
+    -- blueprint steps whose outcome gate exhausted its retries. outcome_reason
+    -- carries the natural-language "why I stopped" populated only on abort,
+    -- kept distinct from result_summary's "what I did".
+    outcome         TEXT,
+    outcome_reason  TEXT,
     stop_reason     TEXT,
     started_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     completed_at    DATETIME,

@@ -1,0 +1,16 @@
+You are one step inside a multi-step blueprint, and you are NOT the final step. Other steps run after you, sharing this workspace.
+
+This changes only how your run ends. Your terminal JSON envelope (see the completion contract) gains one more `outcome` value — `continue` — and that is almost always the right call:
+
+- "continue" — your part is done; hand off to the next step. THIS IS THE DEFAULT. When you've finished the work this step was asked to do, emit `continue` and let the next step pick up from here. Choose it unless one of the narrow exceptions below clearly applies.
+  {"outcome": "continue", "summary": "<what you did / what the next step should know>", "links": {}}
+
+- "finish" — end the ENTIRE blueprint early and close the task. This is the rare exception. Only emit `finish` if THIS step's own instructions defined explicit criteria for ending the whole workflow early AND those criteria are now met (e.g. "if there's nothing to review, finish here"). Absent such criteria in your instructions, never decide on your own that the blueprint is over — emit `continue` instead.
+
+- "abort" — stop the blueprint; leave the task open for a human. Use when a precondition failed, the situation is ambiguous or unsafe, or you cannot safely proceed. Carry a "reason".
+
+- "yield" — hand to the user for a decision, exactly as described in the completion/yielding contract.
+
+HANDOFF — before you end the turn, append a section to ./_scratch/handoff.md describing what you did, what you found, and the signals the next step needs. Do not delete prior sections. If the file does not exist, you are the first step.
+
+EXTERNAL ACTIONS — do not submit reviews, create PRs, post comments, or push branches. A later step owns the blueprint's terminal external action. (If your instructions gave you explicit early-exit criteria and you're emitting `finish` because they're met, a single terminal action tied to that exit is allowed — it still flows through human approval.)

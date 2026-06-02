@@ -7,11 +7,10 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
-	_ "embed" // powers blueprintStepSystemPrompt
+	_ "embed" // powers blueprintStepNonterminalPrompt
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -22,8 +21,15 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-//go:embed prompts/chain-step-system.txt
-var blueprintStepSystemPrompt string
+// blueprintStepNonterminalPrompt is the addendum appended to a NON-terminal
+// blueprint step's system prompt. It adds the `continue` outcome (framed as
+// the default hand-off) plus the narrow `finish` exception to the base
+// completion contract. The terminal step and the N=1 single-prompt case
+// append nothing — normal completion there IS `finish`, identical to a
+// single-prompt run, so they never see `continue`.
+//
+//go:embed prompts/blueprint-step-nonterminal.txt
+var blueprintStepNonterminalPrompt string
 
 // delegateBlueprint is the multi-step analog of Delegate's single-prompt
 // body. The caller supplies the resolved blueprint + its ordered (len > 1)
@@ -250,7 +256,12 @@ func (s *Spawner) runBlueprint(
 		stepCfg.isBlueprintStep = true
 		stepCfg.blueprintRunID = blueprintRunID
 		stepCfg.blueprintStep = i
-		stepCfg.appendSysPrompt = blueprintStepSystemPrompt
+		// Position is one bit, system-injected: only non-terminal steps
+		// get the contract fragment that offers `continue`. The terminal
+		// step (and the N=1 single-prompt case) append nothing and complete
+		// via the default `finish`, exactly like a single-prompt run. No
+		// numeric index reaches the agent.
+		stepCfg.appendSysPrompt = nonterminalStepSysPrompt(i, len(steps))
 		stepCfg.extraAllowedTools = s.collectExtraTools(stepPrompt.AllowedTools)
 
 		var nextStepName string
@@ -501,19 +512,29 @@ func taskEntityID(tasks db.TaskStore, orgID, taskID string) string {
 	return t.EntityID
 }
 
+// nonterminalStepSysPrompt returns the system-prompt addendum for step i of
+// total steps: the non-terminal contract fragment (which offers `continue`)
+// for every step before the last, and the empty string for the terminal step
+// — and therefore the empty string for the whole N=1 single-step case, where
+// i==0 is also the last step. This is the one position bit the agent's
+// contract depends on; nothing else about ordering reaches the agent.
+func nonterminalStepSysPrompt(i, total int) string {
+	if i < total-1 {
+		return blueprintStepNonterminalPrompt
+	}
+	return ""
+}
+
 // buildBlueprintStepWrapperPrompt produces the per-step user prompt carrying
-// step-specific data. The system prompt (chain-step-system.txt) owns the
-// protocol contract; this wrapper supplies only the step's context.
+// step-specific data. The base completion contract (envelope.txt) plus the
+// non-terminal addendum (blueprint-step-nonterminal.txt, injected only for
+// non-final steps) own the protocol; this wrapper supplies only the step's
+// context.
 func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep, stepPrompt *domain.Prompt, slug string, total int, nextStepName string) string {
 	mission := strings.TrimSpace(step.Brief)
 	if mission == "" {
 		mission = stepPrompt.Name
 	}
-	binaryPath, _ := os.Executable()
-	if binaryPath == "" {
-		binaryPath = "triagefactory"
-	}
-	binaryPath = filepath.Clean(binaryPath)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "You are step %d of %d in a blueprint firing on this task.\n\n", step.StepIndex+1, total)
@@ -529,7 +550,6 @@ func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep
 		}
 		fmt.Fprintf(&b, "Next step: %q\n", nextLabel)
 	}
-	fmt.Fprintf(&b, "Binary path for verdict commands: %s\n", binaryPath)
 	b.WriteString("Handoff notes from prior steps: ./_scratch/handoff.md\n")
 	return b.String()
 }
@@ -725,36 +745,4 @@ func (s *Spawner) ResumeBlueprintAfterApproval(orgID, stepRunID, userID string) 
 	}
 	s.terminateBlueprint(orgID, cr.ID, cr.TaskID, "manual", userID, cr.StartedAt, cfg,
 		domain.BlueprintRunStatusCompleted, reason, stepIdx, false)
-}
-
-// isNonFinalBlueprintStep returns true when the run is a blueprint step that
-// is not the last step in the blueprint. Used as a guard in
-// processCompletion to prevent mid-blueprint approval stalls.
-//
-// Returns true (safe default) on DB error: treating an unknown step as
-// non-final ensures the pending-approval guard still engages even when
-// the DB is flaky, preventing unintended mid-blueprint external actions.
-func (s *Spawner) isNonFinalBlueprintStep(orgID, runID string) bool {
-	run, err := s.agentRuns.GetSystem(context.Background(), orgID, runID)
-	if err != nil {
-		log.Printf("[blueprint] isNonFinalBlueprintStep: query run %s: %v", runID, err)
-		return true
-	}
-	if run == nil || run.BlueprintRunID == "" || run.BlueprintStepIndex == nil {
-		return false
-	}
-	blueprintRun, err := s.blueprints.GetRunSystem(context.Background(), orgID, run.BlueprintRunID)
-	if err != nil {
-		log.Printf("[blueprint] isNonFinalBlueprintStep: query blueprint_run %s for run %s: %v", run.BlueprintRunID, runID, err)
-		return true
-	}
-	if blueprintRun == nil {
-		return false
-	}
-	steps, err := s.blueprints.ListStepsSystem(context.Background(), orgID, blueprintRun.BlueprintID)
-	if err != nil {
-		log.Printf("[blueprint] isNonFinalBlueprintStep: list steps for blueprint %s run %s: %v", run.BlueprintRunID, runID, err)
-		return true
-	}
-	return *run.BlueprintStepIndex+1 < len(steps)
 }

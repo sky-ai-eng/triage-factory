@@ -146,10 +146,10 @@ func (s *Spawner) handleCancelled(orgID, runID string, startTime time.Time, wtPa
 	var completeErr error
 	if triggerType == "manual" {
 		completeErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			return ts.AgentRuns.Complete(bgCtx, orgID, runID, "cancelled", 0, elapsed, 0, "cancelled", "Cancelled by user")
+			return ts.AgentRuns.Complete(bgCtx, orgID, runID, "cancelled", 0, elapsed, 0, "cancelled", "Cancelled by user", "", "")
 		})
 	} else {
-		completeErr = s.agentRuns.CompleteSystem(bgCtx, orgID, runID, "cancelled", 0, elapsed, 0, "cancelled", "Cancelled by user")
+		completeErr = s.agentRuns.CompleteSystem(bgCtx, orgID, runID, "cancelled", 0, elapsed, 0, "cancelled", "Cancelled by user", "", "")
 	}
 	if completeErr != nil {
 		log.Printf("[delegate] warning: failed to record cancellation for run %s: %v", runID, completeErr)

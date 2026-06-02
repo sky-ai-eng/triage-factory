@@ -145,15 +145,15 @@ func (s *agentRunStore) createManual(ctx context.Context, orgID string, run doma
 	return err
 }
 
-func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary string) error {
-	return completeRun(ctx, s.q, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary)
+func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason string) error {
+	return completeRun(ctx, s.q, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason)
 }
 
-func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary string) error {
-	return completeRun(ctx, s.admin, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary)
+func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason string) error {
+	return completeRun(ctx, s.admin, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason)
 }
 
-func completeRun(ctx context.Context, q queryer, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary string) error {
+func completeRun(ctx context.Context, q queryer, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason string) error {
 	_, err := q.ExecContext(ctx, `
 		UPDATE runs
 		SET status = $1,
@@ -162,9 +162,11 @@ func completeRun(ctx context.Context, q queryer, orgID, runID, status string, co
 		    duration_ms = COALESCE(duration_ms, 0) + $4,
 		    num_turns = COALESCE(num_turns, 0) + $5,
 		    stop_reason = $6,
-		    result_summary = $7
-		WHERE org_id = $8 AND id = $9
-	`, status, time.Now(), costUSD, durationMs, numTurns, stopReason, resultSummary, orgID, runID)
+		    result_summary = $7,
+		    outcome = NULLIF($8, ''),
+		    outcome_reason = NULLIF($9, '')
+		WHERE org_id = $10 AND id = $11
+	`, status, time.Now(), costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason, orgID, runID)
 	return err
 }
 
@@ -505,7 +507,9 @@ const pgRunColumns = `
 	r.id, r.task_id, r.status, COALESCE(r.model, ''), r.started_at, r.completed_at,
 	r.total_cost_usd, r.duration_ms, r.num_turns,
 	COALESCE(r.stop_reason, ''), COALESCE(r.worktree_path, ''),
-	COALESCE(r.result_summary, ''), COALESCE(r.session_id, ''),
+	COALESCE(r.result_summary, ''),
+	COALESCE(r.outcome, ''), COALESCE(r.outcome_reason, ''),
+	COALESCE(r.session_id, ''),
 	COALESCE(r.actor_agent_id::text, ''),
 	COALESCE(r.trigger_type, ''),
 	COALESCE(r.creator_user_id::text, ''),
@@ -998,7 +1002,7 @@ func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
 	if err := row.Scan(
 		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
-		&r.ResultSummary, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &blueprintRunID, &blueprintStep,
+		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &blueprintRunID, &blueprintStep,
 		&r.MemoryMissing,
 	); err != nil {
 		return err
@@ -1016,7 +1020,7 @@ func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
 	if err := rows.Scan(
 		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
-		&r.ResultSummary, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &blueprintRunID, &blueprintStep,
+		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &blueprintRunID, &blueprintStep,
 		&r.MemoryMissing,
 	); err != nil {
 		return err
