@@ -84,7 +84,7 @@ func TestHandleEventHandlerCreate_TriggerHappyPath(t *testing.T) {
 		t.Errorf("kind=%v want trigger", got["kind"])
 	}
 	if got["blueprint_id"] != "p-trigger-create" {
-		t.Errorf("prompt_id=%v", got["blueprint_id"])
+		t.Errorf("blueprint_id=%v", got["blueprint_id"])
 	}
 	// Triggers default to disabled (project convention — users opt in).
 	if got["enabled"] != false {
