@@ -19,7 +19,7 @@ import (
 func TestMaterializeProjectKnowledge_NilProjectID_CreatesEmptyDir(t *testing.T) {
 	cwd := t.TempDir()
 
-	materializeProjectKnowledge(cwd, nil)
+	materializeProjectKnowledge(runmode.LocalDefaultOrgID, cwd, nil)
 
 	dir := filepath.Join(cwd, "_scratch", "project-knowledge")
 	info, err := os.Stat(dir)
@@ -63,7 +63,7 @@ func TestMaterializeProjectKnowledge_CopiesAllMarkdown(t *testing.T) {
 	}
 
 	cwd := t.TempDir()
-	materializeProjectKnowledge(cwd, &projectID)
+	materializeProjectKnowledge(runmode.LocalDefaultOrgID, cwd, &projectID)
 
 	dst := filepath.Join(cwd, "_scratch", "project-knowledge")
 	for _, name := range []string{"architecture.md", "conventions.md"} {
@@ -94,7 +94,7 @@ func TestMaterializeProjectKnowledge_OversizedLogs(t *testing.T) {
 	}
 
 	cwd := t.TempDir()
-	materializeProjectKnowledge(cwd, &projectID)
+	materializeProjectKnowledge(runmode.LocalDefaultOrgID, cwd, &projectID)
 
 	dst := filepath.Join(cwd, "_scratch", "project-knowledge", "huge.md")
 	info, err := os.Stat(dst)
@@ -116,7 +116,7 @@ func TestMaterializeProjectKnowledge_MissingKnowledgeDir_NoOp(t *testing.T) {
 
 	projectID := "proj-empty"
 	cwd := t.TempDir()
-	materializeProjectKnowledge(cwd, &projectID)
+	materializeProjectKnowledge(runmode.LocalDefaultOrgID, cwd, &projectID)
 
 	dst := filepath.Join(cwd, "_scratch", "project-knowledge")
 	info, err := os.Stat(dst)
@@ -147,7 +147,7 @@ func TestLookupEntityProjectID_RoundTrips(t *testing.T) {
 		t.Fatalf("entity: %v", err)
 	}
 
-	if got := lookupEntityProjectID(sqlitestore.New(database).Entities, runmode.LocalDefaultOrg, entity.ID); got != nil {
+	if got := lookupEntityProjectID(sqlitestore.New(database).Entities, runmode.LocalDefaultOrgID, entity.ID); got != nil {
 		t.Errorf("expected nil for unassigned entity, got %q", *got)
 	}
 
@@ -158,7 +158,7 @@ func TestLookupEntityProjectID_RoundTrips(t *testing.T) {
 		t.Fatalf("assign project: %v", err)
 	}
 
-	got := lookupEntityProjectID(sqlitestore.New(database).Entities, runmode.LocalDefaultOrg, entity.ID)
+	got := lookupEntityProjectID(sqlitestore.New(database).Entities, runmode.LocalDefaultOrgID, entity.ID)
 	if got == nil {
 		t.Fatal("expected project id after assignment, got nil")
 	}

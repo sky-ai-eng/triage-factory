@@ -11,25 +11,37 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // KnowledgeWatcher emits `project_knowledge_updated` websocket events
-// the moment a file under <projectsRoot>/<id>/knowledge-base/ is
+// the moment a file under a project's knowledge-base/ directory is
 // created, modified, removed, or renamed — so the frontend Knowledge
 // panel refreshes mid-turn as the curator agent writes notes.
 //
-// We watch three nested layers because new projects + new
-// knowledge-base dirs can appear at runtime:
+// The watcher is mode-aware because SKY-402 moved the curator's on-disk
+// state under a per-org subtree in multi mode. Two layouts, one
+// mechanism:
 //
-//	<projectsRoot>            → catches new project dirs
-//	<projectsRoot>/<id>       → catches the knowledge-base subdir being created
-//	<projectsRoot>/<id>/knowledge-base   → catches every file change inside
+//	local:  <root>/<projectID>/knowledge-base/...
+//	multi:  <root>/orgs/<orgID>/projects/<projectID>/knowledge-base/...
 //
-// fsnotify watches are non-recursive on every supported platform, so
-// we maintain the inner watches ourselves: on a Create event one level
-// up, we add the corresponding watch and (for the kb-dir-creation case)
-// fire the event so the frontend renders whatever lands inside.
+// The variable middle (orgs/<orgID>/projects) is the watcher's `prefix`
+// — the literal directory segments between the watch root and the
+// project-id dir, with a wildcard ("") element for the per-tenant org
+// id. Local mode has an empty prefix (project dirs are direct children
+// of the root), so its behavior is byte-for-byte what it was before.
+// ProjectsWatchRoot picks the paired root for each mode.
+//
+// fsnotify watches are non-recursive on every supported platform, so we
+// maintain the inner watches ourselves: starting at the root we descend
+// only along the prefix path (never into siblings like repos/ or the
+// bare-clone cache), watch each project dir, and watch its
+// knowledge-base subdir. On a Create one level up we add the
+// corresponding watch and (for the kb-dir-creation case) fire so the
+// frontend renders whatever lands inside.
 //
 // Per-project debouncing collapses the burst of fs events a single
 // agent Write tends to fire (Write often emits Create + Write + Chmod
@@ -38,6 +50,45 @@ const (
 	kbDirName         = "knowledge-base"
 	knowledgeDebounce = 100 * time.Millisecond
 )
+
+// ProjectsWatchRoot returns the directory the KnowledgeWatcher should
+// root at so it observes every project's knowledge-base, in either mode.
+// It is the producer-side companion to watchPrefix: this picks the root,
+// watchPrefix picks the segments between that root and the project-id
+// dir, and the two must agree, so they live together.
+//
+//   - local: the single projects dir (paths.ProjectsRoot for the
+//     local-default org) — project dirs are its direct children, exactly
+//     as before SKY-402.
+//   - multi: the state root itself — projects live under the per-org
+//     subtree <root>/orgs/<orgID>/projects/<id>, so the watcher roots
+//     above the org segment and descends through orgs/*/projects.
+//
+// It pre-flights paths.StateRootErr so a missing $HOME surfaces as an
+// actionable error rather than a panic from the underlying resolver.
+func ProjectsWatchRoot() (string, error) {
+	if _, err := paths.StateRootErr(); err != nil {
+		return "", fmt.Errorf("resolve state root: %w", err)
+	}
+	if runmode.Current() == runmode.ModeMulti {
+		return paths.StateRoot(), nil
+	}
+	return paths.ProjectsRoot(runmode.LocalDefaultOrgID), nil
+}
+
+// watchPrefix returns the literal directory segments between the watch
+// root and a project-id dir, for the current run mode. An empty-string
+// element is a wildcard that matches any single segment (the per-tenant
+// org id). See ProjectsWatchRoot for the paired root.
+//
+//   - local: nil — project dirs are direct children of the root.
+//   - multi: {"orgs", "", "projects"} — <root>/orgs/<orgID>/projects/<id>.
+func watchPrefix() []string {
+	if runmode.Current() == runmode.ModeMulti {
+		return []string{"orgs", "", "projects"}
+	}
+	return nil
+}
 
 // Broadcaster is the subset of *websocket.Hub behavior the watcher needs.
 // Stating it as an interface lets tests substitute a recorder without
@@ -72,25 +123,27 @@ type KnowledgeWatcher struct {
 	watcher       *fsnotify.Watcher
 	hub           Broadcaster
 	root          string
+	prefix        []string
 	resolveOrgFor ProjectOrgResolver
 
 	mu       sync.Mutex
 	debounce map[string]*time.Timer
 }
 
-// NewKnowledgeWatcher constructs a watcher rooted at projectsRoot and
-// starts the event loop. The root is created if missing — fresh
-// installs haven't run a curator turn yet, so the dir genuinely may
-// not exist.
+// NewKnowledgeWatcher constructs a watcher rooted at root and starts the
+// event loop. The root is created if missing — fresh installs haven't
+// run a curator turn yet, so the dir genuinely may not exist. The
+// per-mode prefix (see watchPrefix) is captured at construction; pass
+// the matching root (see ProjectsWatchRoot).
 //
-// resolveOrgFor maps a project id (the directory name under the
-// watcher's root) to its owning org so the broadcast can be scoped
-// to that tenant's clients. Nil resolver is tolerated (tests, pre-
-// wiring) and falls back to empty-org broadcasts that the hub
+// resolveOrgFor maps a project id (the directory name at the project
+// level of the watched tree) to its owning org so the broadcast can be
+// scoped to that tenant's clients. Nil resolver is tolerated (tests,
+// pre-wiring) and falls back to empty-org broadcasts that the hub
 // delivers to every client.
-func NewKnowledgeWatcher(hub Broadcaster, projectsRoot string, resolveOrgFor ProjectOrgResolver) (*KnowledgeWatcher, error) {
-	if err := os.MkdirAll(projectsRoot, 0o755); err != nil {
-		return nil, fmt.Errorf("ensure projects root: %w", err)
+func NewKnowledgeWatcher(hub Broadcaster, root string, resolveOrgFor ProjectOrgResolver) (*KnowledgeWatcher, error) {
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return nil, fmt.Errorf("ensure watch root: %w", err)
 	}
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -99,47 +152,63 @@ func NewKnowledgeWatcher(hub Broadcaster, projectsRoot string, resolveOrgFor Pro
 	kw := &KnowledgeWatcher{
 		watcher:       w,
 		hub:           hub,
-		root:          projectsRoot,
+		root:          root,
+		prefix:        watchPrefix(),
 		resolveOrgFor: resolveOrgFor,
 		debounce:      make(map[string]*time.Timer),
 	}
-	if err := w.Add(projectsRoot); err != nil {
+	// Watching the root is required — without it the watcher can never
+	// learn about the dirs below it, so a failure here is fatal.
+	if err := w.Add(root); err != nil {
 		_ = w.Close()
-		return nil, fmt.Errorf("watch root %q: %w", projectsRoot, err)
+		return nil, fmt.Errorf("watch root %q: %w", root, err)
 	}
-	if err := kw.seedExistingWatches(); err != nil {
-		log.Printf("[kbwatcher] seed existing watches: %v (continuing)", err)
-	}
+	// Seed watches for everything already on disk. Failures on individual
+	// subdirs log + continue inside descendChildren — a permission glitch
+	// on one project shouldn't take the watcher down for all.
+	kw.descendChildren(root, 0, false)
 	go kw.run()
 	return kw, nil
 }
 
-// seedExistingWatches walks the root once at startup, adding watches
-// for every existing project dir + every existing knowledge-base
-// subdir. Failures on individual subdirs log + continue — a permission
-// glitch on one project shouldn't take the watcher down for all.
-func (kw *KnowledgeWatcher) seedExistingWatches() error {
-	entries, err := os.ReadDir(kw.root)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		projectDir := filepath.Join(kw.root, e.Name())
-		if err := kw.watcher.Add(projectDir); err != nil {
-			log.Printf("[kbwatcher] watch %s: %v", projectDir, err)
-			continue
-		}
-		kbDir := filepath.Join(projectDir, kbDirName)
-		if info, err := os.Stat(kbDir); err == nil && info.IsDir() {
-			if err := kw.watcher.Add(kbDir); err != nil {
-				log.Printf("[kbwatcher] watch %s: %v", kbDir, err)
-			}
+// projectDepth is the number of path segments between the watch root and
+// a project-id dir: 0 in local mode (direct children), len(prefix)
+// otherwise. The knowledge-base dir sits one level deeper.
+func (kw *KnowledgeWatcher) projectDepth() int { return len(kw.prefix) }
+
+// onPrefixPath reports whether parts' leading segments are consistent
+// with the watch prefix — i.e. parts could be (or live under) a project
+// dir rather than a sibling tree like repos/ or the bare-clone cache.
+// Wildcard prefix elements ("") match any segment; segments beyond what
+// parts provides are treated as not-yet-present (still on-path).
+func (kw *KnowledgeWatcher) onPrefixPath(parts []string) bool {
+	n := min(len(parts), len(kw.prefix))
+	for i := 0; i < n; i++ {
+		if seg := kw.prefix[i]; seg != "" && parts[i] != seg {
+			return false
 		}
 	}
-	return nil
+	return true
+}
+
+// knowledgeProjectID returns the project id for an event whose path is a
+// project's knowledge-base dir or something inside it, and ok=false for
+// anything else (a project dir on its own, a sibling like repos/, an off-
+// prefix path). The project id is the segment immediately above
+// knowledge-base.
+func (kw *KnowledgeWatcher) knowledgeProjectID(parts []string) (string, bool) {
+	pd := kw.projectDepth()
+	kb := pd + 1 // knowledge-base segment index
+	if len(parts) <= kb {
+		return "", false
+	}
+	if parts[kb] != kbDirName {
+		return "", false
+	}
+	if !kw.onPrefixPath(parts) {
+		return "", false
+	}
+	return parts[pd], true
 }
 
 func (kw *KnowledgeWatcher) run() {
@@ -159,19 +228,18 @@ func (kw *KnowledgeWatcher) run() {
 	}
 }
 
-// handle dispatches a single fsnotify event. Three shapes:
+// handle dispatches a single fsnotify event in two passes:
 //
-//   - <root>/<id>                  → new project dir (Create). Add a watch
-//     so we can later catch its knowledge-base subdir.
-//   - <root>/<id>/knowledge-base   → kb subdir created (Create). Add a
-//     watch and fire — the file that triggered its creation has
-//     probably already landed by the time we add the watch, so emit
-//     immediately rather than relying on a follow-up event.
-//   - <root>/<id>/knowledge-base/* → any file change. Fire (debounced).
+//  1. Watch management — on a directory Create, descend the newly-created
+//     dir if it's on the path to (or is) a project dir, so future events
+//     inside it reach us. fsnotify is non-recursive, so we install these
+//     inner watches ourselves.
+//  2. Fire — on any change (create, write, remove, rename) under a
+//     project's knowledge-base subtree, broadcast (debounced).
 //
-// fsnotify also delivers Remove events when watched dirs disappear;
-// the watcher auto-removes its handle in that case, so we don't have
-// to explicitly Unwatch on project deletion.
+// fsnotify also delivers Remove events when watched dirs disappear; the
+// watcher auto-removes its handle in that case, so we don't have to
+// explicitly Unwatch on project deletion.
 func (kw *KnowledgeWatcher) handle(event fsnotify.Event) {
 	rel, err := filepath.Rel(kw.root, event.Name)
 	if err != nil {
@@ -179,51 +247,105 @@ func (kw *KnowledgeWatcher) handle(event fsnotify.Event) {
 	}
 	parts := strings.Split(rel, string(filepath.Separator))
 
-	if len(parts) == 1 {
-		// <root>/<dir-or-file>. Only care about Create on dirs.
-		if event.Op&fsnotify.Create != 0 {
-			if info, statErr := os.Stat(event.Name); statErr == nil && info.IsDir() {
-				if err := kw.watcher.Add(event.Name); err != nil {
-					log.Printf("[kbwatcher] watch new project %s: %v", event.Name, err)
-				}
-				// The new project dir may already contain
-				// `knowledge-base/` — `os.MkdirAll(<id>/knowledge-base)`
-				// creates both levels in one shot, and project import
-				// tooling lays the entire tree down atomically before
-				// any of our fs events land. In both cases the inner
-				// dir's own Create event was emitted into a watch we
-				// hadn't installed yet, so a `len(parts) == 2` branch
-				// below would never fire for it. Detect it now and
-				// install the inner watch + fire so the panel picks
-				// up whatever's already inside.
-				kbDir := filepath.Join(event.Name, kbDirName)
-				if info2, statErr2 := os.Stat(kbDir); statErr2 == nil && info2.IsDir() {
-					if err := kw.watcher.Add(kbDir); err != nil {
-						log.Printf("[kbwatcher] watch new kb %s: %v", kbDir, err)
-					}
-					kw.fire(parts[0])
-				}
-			}
+	if event.Op&fsnotify.Create != 0 {
+		if info, statErr := os.Stat(event.Name); statErr == nil && info.IsDir() {
+			kw.handleDirCreated(parts, event.Name)
 		}
-		return
 	}
 
-	if len(parts) >= 2 && parts[1] == kbDirName {
-		projectID := parts[0]
-		if len(parts) == 2 {
-			// <root>/<id>/knowledge-base — the kb dir itself.
-			if event.Op&fsnotify.Create != 0 {
-				if info, statErr := os.Stat(event.Name); statErr == nil && info.IsDir() {
-					if err := kw.watcher.Add(event.Name); err != nil {
-						log.Printf("[kbwatcher] watch new kb %s: %v", event.Name, err)
-					}
-				}
-				kw.fire(projectID)
-			}
-			return
-		}
-		// <root>/<id>/knowledge-base/... — file inside.
+	if projectID, ok := kw.knowledgeProjectID(parts); ok {
 		kw.fire(projectID)
+	}
+}
+
+// handleDirCreated installs watches for a directory that just appeared,
+// if it lies on the prefix path to a project's knowledge-base. The fire
+// for knowledge-base activity is handled separately by handle's
+// knowledgeProjectID branch (so a kb dir created on its own still emits);
+// watchTree's fireExisting=true covers the atomic case where a project
+// dir is laid down with its knowledge-base already inside (project import
+// + a fresh project's first turn both MkdirAll the whole tree in one
+// shot, so the inner Create events fire into watches we hadn't installed
+// yet).
+func (kw *KnowledgeWatcher) handleDirCreated(parts []string, full string) {
+	if !kw.onPrefixPath(parts) {
+		return
+	}
+	pd := kw.projectDepth()
+	idx := len(parts) - 1 // index of the created dir
+	switch {
+	case idx <= pd:
+		// An intermediate dir on the prefix path (orgs, orgs/<org>, …) or
+		// a project dir. Watch it and descend; for an atomically-created
+		// tree this reaches the knowledge-base and fires.
+		kw.watchTree(full, idx+1, true)
+	case idx == pd+1 && parts[idx] == kbDirName:
+		// knowledge-base dir created on its own. Watch it so file changes
+		// inside reach us; handle's fire branch emits for this create.
+		if err := kw.watcher.Add(full); err != nil {
+			log.Printf("[kbwatcher] watch new kb %s: %v", full, err)
+		}
+	}
+}
+
+// watchTree adds a watch on dir and then descends. depth is the part-
+// index that dir's immediate children occupy (root's children are
+// depth 0). fireExisting, when true, emits for any knowledge-base dir
+// found already populated during the descent — used for runtime
+// atomic-create detection, left false during startup seeding so existing
+// content doesn't spuriously fire on boot.
+func (kw *KnowledgeWatcher) watchTree(dir string, depth int, fireExisting bool) {
+	if err := kw.watcher.Add(dir); err != nil {
+		log.Printf("[kbwatcher] watch %s: %v", dir, err)
+		return
+	}
+	kw.descendChildren(dir, depth, fireExisting)
+}
+
+// descendChildren walks the immediate children of an already-watched
+// dir, installing inner watches along the prefix → project → kb path and
+// nowhere else. depth is the index dir's children occupy. It stops at the
+// knowledge-base dir (depth pd+1): the kb dir itself is watched so file
+// changes fire, but we never descend into its subtree (parity with
+// pre-SKY-402 behavior, and it keeps repos/ + nested scratch off the
+// watch set).
+func (kw *KnowledgeWatcher) descendChildren(dir string, depth int, fireExisting bool) {
+	pd := kw.projectDepth()
+	if depth > pd+1 {
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		log.Printf("[kbwatcher] read %s: %v", dir, err)
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		child := filepath.Join(dir, e.Name())
+		switch {
+		case depth < pd:
+			// Intermediate prefix level — descend only along the prefix
+			// (so orgs/<org>/repos and other siblings stay unwatched).
+			if seg := kw.prefix[depth]; seg == "" || seg == e.Name() {
+				kw.watchTree(child, depth+1, fireExisting)
+			}
+		case depth == pd:
+			// Children are project dirs.
+			kw.watchTree(child, depth+1, fireExisting)
+		case depth == pd+1:
+			// Children of a project dir — only knowledge-base is watched.
+			if e.Name() == kbDirName {
+				if err := kw.watcher.Add(child); err != nil {
+					log.Printf("[kbwatcher] watch %s: %v", child, err)
+					continue
+				}
+				if fireExisting {
+					kw.fire(filepath.Base(dir)) // dir is the project dir
+				}
+			}
+		}
 	}
 }
 

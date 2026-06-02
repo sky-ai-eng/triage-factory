@@ -161,7 +161,7 @@ func (s *projectSession) dispatch(item queueItem) {
 		return
 	}
 
-	cwd, err := ensureKnowledgeDir(s.projectID)
+	cwd, err := ensureKnowledgeDir(item.orgID, s.projectID)
 	if err != nil {
 		s.failRequest(item, fmt.Sprintf("knowledge dir: %v", err))
 		return

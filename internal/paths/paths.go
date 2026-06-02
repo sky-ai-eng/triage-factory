@@ -24,11 +24,11 @@
 // os.UserHomeDir and the ".triagefactory" path literal live ONLY in
 // this package; a forbidigo rule (.golangci.yml) plus a lint.sh grep
 // guard keep every other package routing through these resolvers. The
-// documented exceptions are ~/.claude state — Claude Code SDK session
+// one documented exception is ~/.claude state — Claude Code SDK session
 // dirs, which must follow the real HOME even in multi mode where TF
-// state diverges onto a mounted volume — and, until SKY-402 lands, the
-// curator runtime (internal/curator/knowledge.go), which still owns its
-// own home resolution.
+// state diverges onto a mounted volume. (The curator runtime resolved
+// its own home until SKY-402 routed KnowledgeDir/ProjectsRoot through
+// ProjectKBDir/ProjectsRoot here.)
 package paths
 
 import (

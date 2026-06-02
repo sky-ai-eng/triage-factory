@@ -12,7 +12,7 @@
 //	  Trigger: no Stage 1 winner above ConfidenceThreshold AND ≥1
 //	  project scored borderlineMin..ConfidenceThreshold with a
 //	  truncated KB. Re-classify all such projects in agent-mode:
-//	  cmd.Dir = curator.KnowledgeDir(project.ID), --max-turns 6,
+//	  cmd.Dir = curator.KnowledgeDir(orgID, project.ID), --max-turns 6,
 //	  prompt directs at ./knowledge-base/ via Read/Glob/Grep. The
 //	  agent may take 3-8 model turns to selectively read what's
 //	  relevant.
@@ -226,7 +226,7 @@ func pickWinner(votes []Vote) *string {
 func voteStage1(ctx context.Context, orgID string, secrets agentproc.SecretsReader, project domain.Project, entity domain.Entity) Vote {
 	v := Vote{ProjectID: project.ID, Stage: 1}
 
-	kb, truncated, err := readProjectKB(project.ID)
+	kb, truncated, err := readProjectKB(orgID, project.ID)
 	if err != nil {
 		log.Printf("[classify] project %s stage 1: KB read failed (%v) — voting with empty KB", project.ID, err)
 		kb = ""
@@ -261,7 +261,7 @@ func voteStage1(ctx context.Context, orgID string, secrets agentproc.SecretsRead
 func voteStage2(ctx context.Context, orgID string, secrets agentproc.SecretsReader, project domain.Project, entity domain.Entity) Vote {
 	v := Vote{ProjectID: project.ID, Stage: 2}
 
-	kbRoot, err := curator.KnowledgeDir(project.ID)
+	kbRoot, err := curator.KnowledgeDir(orgID, project.ID)
 	if err != nil {
 		v.Err = fmt.Errorf("resolve project dir: %w", err)
 		return v
@@ -315,8 +315,8 @@ func truncateDescription(desc string) string {
 // We Stat each file before reading so we never load oversized content
 // into memory. truncated=true signals at least one file was skipped,
 // which is the orchestrator's escalation trigger.
-func readProjectKB(projectID string) (string, bool, error) {
-	root, err := curator.KnowledgeDir(projectID)
+func readProjectKB(orgID, projectID string) (string, bool, error) {
+	root, err := curator.KnowledgeDir(orgID, projectID)
 	if err != nil {
 		return "", false, err
 	}

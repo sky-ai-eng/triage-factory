@@ -1084,7 +1084,7 @@ func main() {
 		}
 		return orgID
 	}
-	if root, err := curator.ProjectsRoot(); err != nil {
+	if root, err := curator.ProjectsWatchRoot(); err != nil {
 		log.Printf("[kbwatcher] resolve projects root: %v (live KB updates disabled)", err)
 	} else if _, err := curator.NewKnowledgeWatcher(wsHub, root, resolveOrgForProject); err != nil {
 		log.Printf("[kbwatcher] start: %v (live KB updates disabled)", err)
