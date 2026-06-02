@@ -50,6 +50,13 @@ func TestDecideBlueprintStep(t *testing.T) {
 		// so we never act on a value we can't interpret.
 		{"unknown non-final aborts", "bogus", false, blueprintStepAbort, "unknown-outcome: bogus"},
 		{"unknown final aborts", "bogus", true, blueprintStepAbort, "unknown-outcome: bogus"},
+
+		// yield is a valid RunOutcome but never reaches a completed step (it
+		// parks the run in awaiting_input before completing). Pin that even if
+		// a buggy write ever persisted it on a completed step, the default
+		// branch refuses to act on it — abort, never finish — on either side.
+		{"yield on completed step aborts (non-final)", "yield", false, blueprintStepAbort, "unknown-outcome: yield"},
+		{"yield on completed step aborts (final)", "yield", true, blueprintStepAbort, "unknown-outcome: yield"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
