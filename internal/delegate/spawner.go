@@ -102,7 +102,7 @@ type Spawner struct {
 	cancels               map[string]context.CancelFunc                     // runID → cancel the entire run
 	drainer               QueueDrainer                                      // nil-safe; set post-construction via SetQueueDrainer
 	takenOver             map[string]bool                                   // runIDs claimed by Takeover. Sticky-on for the rest of the goroutine's lifetime even after rollback — clearing the entry would let late-firing goroutine gates race the takeover/abort lifecycle. Suppresses every cleanup path in runAgent so Takeover/abortTakeover own the row's terminal state.
-	blueprintRunIDs       map[string]bool                                   // chain_run IDs whose setup phase reuses the per-run status helpers but is not backed by a runs row. broadcastRunUpdate skips wsHub emission for these so clients don't fetch /api/runs/{id} and 404.
+	blueprintRunIDs       map[string]bool                                   // blueprint_run IDs whose setup phase reuses the per-run status helpers but is not backed by a runs row. broadcastRunUpdate skips wsHub emission for these so clients don't fetch /api/runs/{id} and 404.
 	waitForClassification func(ctx context.Context, orgID, entityID string) // SKY-220 hook: blocks until the project classifier has decided this entity, or a timeout/ctx-cancel elapses. orgID scopes the classification read to the run's tenant (SKY-392 — the read goes through the org-scoped admin-pool store, not a raw query). Nil-safe (test setups skip it). Wired in main.go via SetWaitForClassification — keeps internal/delegate from importing internal/projectclassify.
 
 	agentToolsOnce  sync.Once
