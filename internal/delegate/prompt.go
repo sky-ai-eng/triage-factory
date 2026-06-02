@@ -236,17 +236,22 @@ func (r *agentResult) isYield() bool {
 	return r.Outcome == string(domain.RunOutcomeYield) && r.Yield != nil && r.Yield.Validate() == nil
 }
 
-// hasValidOutcome reports whether the envelope carries a usable outcome. The
-// three terminating outcomes (continue/finish/abort) need only the outcome
-// token; yield additionally requires a well-formed payload (isYield) —
-// otherwise a payload-less "yield" would satisfy the outcome gate and then
-// fall through to the normal completion path. Looser than isValid only in
-// that a summary alone never substitutes for a missing outcome: a
-// summary-only envelope parses but trips the gate.
+// hasValidOutcome reports whether the envelope carries a usable outcome.
+// continue/finish need only the outcome token. abort additionally requires a
+// non-empty reason: abort is the agent's *voluntary* "I'm functioning but
+// choosing to stop" decision (involuntary death is the separate `failed`
+// status), so the why is exactly the thing worth collecting — a reasonless
+// abort is re-prompted by the outcome gate. yield requires a well-formed
+// payload (isYield) — otherwise a payload-less "yield" would satisfy the gate
+// and then fall through to the normal completion path. Looser than isValid
+// only in that a summary alone never substitutes for a missing/incomplete
+// outcome: a summary-only envelope parses but trips the gate.
 func (r *agentResult) hasValidOutcome() bool {
 	switch domain.RunOutcome(r.Outcome) {
-	case domain.RunOutcomeContinue, domain.RunOutcomeFinish, domain.RunOutcomeAbort:
+	case domain.RunOutcomeContinue, domain.RunOutcomeFinish:
 		return true
+	case domain.RunOutcomeAbort:
+		return r.Reason != ""
 	case domain.RunOutcomeYield:
 		return r.isYield()
 	default:

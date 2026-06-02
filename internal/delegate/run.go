@@ -348,17 +348,26 @@ func (s *Spawner) processCompletion(
 	var outcome, outcomeReason string
 	if parsed := parseAgentResult(completion.Result); parsed != nil {
 		resultSummary = parsed.Summary
-		if parsed.hasValidOutcome() {
+		switch {
+		case parsed.hasValidOutcome():
 			outcome = parsed.Outcome
 			if domain.RunOutcome(parsed.Outcome) == domain.RunOutcomeAbort {
 				outcomeReason = parsed.Reason
 			}
+		case domain.RunOutcome(parsed.Outcome) == domain.RunOutcomeAbort:
+			// The agent deliberately chose to abort but never supplied a
+			// reason, even after the outcome gate's retries. Honor the abort
+			// (leaving the task open) rather than letting the finish fallback
+			// below close a task the agent explicitly declined to complete;
+			// the reason stays empty.
+			outcome = string(domain.RunOutcomeAbort)
 		}
 	}
 	// Fallback after the outcome gate exhausted its retries: a single/
-	// terminal run defaults to finish (parity with today's "completed on
-	// unparseable"); a blueprint step keeps a NULL outcome and is left for
-	// the orchestrator (SKY-419 reads a non-final NULL as no-outcome→abort).
+	// terminal run with no recognizable outcome defaults to finish (parity
+	// with today's "completed on unparseable"); a blueprint step keeps a
+	// NULL outcome and is left for the orchestrator (SKY-419 reads a
+	// non-final NULL as no-outcome→abort).
 	if !completion.IsError && outcome == "" && !isBlueprintStep {
 		outcome = string(domain.RunOutcomeFinish)
 	}

@@ -137,6 +137,24 @@ func TestOutcomeRetryLoop_ErrorHaltsRetries(t *testing.T) {
 	}
 }
 
+// TestOutcomeRetryLoop_RepromptsAbortMissingReason: an abort with no reason is
+// re-prompted (it's the deliberate-stop decision; we collect the why), and a
+// reason supplied on the retry is accepted.
+func TestOutcomeRetryLoop_RepromptsAbortMissingReason(t *testing.T) {
+	calls := 0
+	resume := func() (*agentproc.Result, error) {
+		calls++
+		return res(`{"outcome":"abort","summary":"stopped","reason":"needs a human to rotate the token"}`), nil
+	}
+	got := runOutcomeRetryLoop("ra", res(`{"outcome":"abort","summary":"stopped"}`), resume, maxOutcomeRetries)
+	if calls != 1 {
+		t.Errorf("resume called %d times; a reasonless abort should re-prompt once then accept", calls)
+	}
+	if !completionHasValidOutcome(got) {
+		t.Errorf("an abort with a reason on retry should be accepted")
+	}
+}
+
 // --- Single/terminal disposition parity -----------------------------------
 
 func loadRun(t *testing.T, s *Spawner, runID string) *domain.AgentRun {
@@ -217,6 +235,34 @@ func TestProcessCompletion_AbortLeavesTaskOpen(t *testing.T) {
 	}
 	if got := readTaskStatus(t, database, taskID); got == "done" {
 		t.Errorf("task.status = %q (was %q); abort must leave the task open", got, before)
+	}
+}
+
+// TestProcessCompletion_AbortMissingReason_StillLeavesTaskOpen: the agent
+// chose abort but never supplied a reason and there's no session to
+// re-prompt. The run must NOT degrade to the finish fallback (which would
+// close the task) — it stays an abort with an empty reason, task left open.
+func TestProcessCompletion_AbortMissingReason_StillLeavesTaskOpen(t *testing.T) {
+	s, database, runID, taskID := setupAdvanceFixture(t, "abort-noreason")
+	// Bot-claim so both the inline path and advanceTaskFromRunStatus are
+	// exercised — the finish fallback would have closed a bot-claimed task.
+	stampBotClaim(t, database, taskID)
+	task := loadTask(t, s, taskID)
+	cwd := t.TempDir()
+
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, task,
+		res(`{"outcome":"abort","summary":"stopped, couldn't proceed"}`),
+		cwd, "", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
+
+	run := loadRun(t, s, runID)
+	if run.Outcome != "abort" {
+		t.Errorf("run.outcome = %q, want abort (a reasonless abort must not degrade to finish)", run.Outcome)
+	}
+	if run.OutcomeReason != "" {
+		t.Errorf("run.outcome_reason = %q, want empty (no reason was supplied)", run.OutcomeReason)
+	}
+	if got := readTaskStatus(t, database, taskID); got == "done" {
+		t.Errorf("task.status = %q; a reasonless abort must still leave the task open", got)
 	}
 }
 

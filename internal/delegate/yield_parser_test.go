@@ -105,6 +105,25 @@ func TestParseAgentResult_AbortCarriesReason(t *testing.T) {
 	}
 }
 
+// TestAbortRequiresReason: abort is the agent's voluntary stop decision, so
+// the reason is required at the gate. An abort with a summary but no reason
+// parses (isValid via summary) but is NOT a valid outcome — the outcome gate
+// re-prompts for the why. An abort with a reason is valid.
+func TestAbortRequiresReason(t *testing.T) {
+	noReason := parseAgentResult(`{"outcome":"abort","summary":"stopped"}`)
+	if noReason == nil {
+		t.Fatal("abort envelope should still parse on its summary")
+	}
+	if noReason.hasValidOutcome() {
+		t.Errorf("abort without a reason must not satisfy the outcome gate")
+	}
+
+	withReason := parseAgentResult(`{"outcome":"abort","summary":"stopped","reason":"needs a human"}`)
+	if withReason == nil || !withReason.hasValidOutcome() {
+		t.Errorf("abort with a reason should be a valid outcome: got=%+v", withReason)
+	}
+}
+
 // TestAgentResult_SummaryOnlyHasNoValidOutcome confirms the outcome gate's
 // invariant: a summary-only envelope parses (isValid) but has no recognized
 // outcome, so the gate would re-prompt.
