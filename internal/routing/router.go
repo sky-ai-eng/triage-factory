@@ -434,11 +434,14 @@ func (r *Router) HandleEvent(evt domain.Event) {
 			vis[t] = struct{}{}
 		}
 		if len(vis) == 0 {
-			// Nothing resolved (external/non-TF author) and no team opted in
-			// via an explicit rule → record the event + durable entity only,
-			// no task. This is the repo-wide-poll fix: a stranger's CI failure
-			// no longer mints a task for the local user/team.
-			log.Printf("[router] author-centric %s on entity %s: no owning team resolved and no explicit watch rule — recording event, no task", evt.EventType, entityID)
+			// Nothing resolved (external/non-TF author — dependabot, renovate,
+			// outside contributors) and no team opted in via an explicit rule
+			// → record the event + durable entity only, no task. This is the
+			// repo-wide-poll fix: a stranger's CI failure no longer mints a
+			// task for the local user/team. Deliberately silent: this is the
+			// expected high-volume path (dozens of external-author events per
+			// poll cycle in a busy repo) with nothing actionable — the event is
+			// already durably recorded at step 1.
 			return
 		}
 		visibleTeams = sortedKeys(vis)
