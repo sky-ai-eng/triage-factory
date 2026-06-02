@@ -284,7 +284,7 @@ func (s *Server) handleEventHandlerCreate(w http.ResponseWriter, r *http.Request
 // Partial update. Any field left nil/absent is unchanged. kind and
 // event_type are immutable (kind transitions go through /promote;
 // event_type changes would invalidate the predicate schema). For
-// triggers, prompt_id is also immutable here.
+// triggers, blueprint_id is also immutable here.
 type patchEventHandlerRequest struct {
 	ScopePredicateJSON json.RawMessage `json:"scope_predicate_json"`
 	Enabled            *bool           `json:"enabled"`

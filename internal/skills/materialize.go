@@ -43,7 +43,7 @@ func sanitizeSlug(s string) string {
 	return s
 }
 
-// MaterializeStepSkill writes a SKILL.md for one chain step into
+// MaterializeStepSkill writes a SKILL.md for one blueprint step into
 // `<wt>/.claude/skills/<slug>/SKILL.md`. Branches on the prompt's
 // source so an off-the-shelf imported skill is written byte-identical
 // (modulo a name-rewrite when needed) and a regular user/system
@@ -126,7 +126,7 @@ func ensureFrontmatterName(body, slug, promptName, brief string) string {
 func synthesizeSkillFile(slug, promptName, body, brief string) string {
 	desc := strings.TrimSpace(brief)
 	if desc == "" {
-		desc = fmt.Sprintf("Run the %q step in this chain.", strings.TrimSpace(promptName))
+		desc = fmt.Sprintf("Run the %q step in this blueprint.", strings.TrimSpace(promptName))
 	}
 	var b strings.Builder
 	b.WriteString("---\n")
@@ -146,13 +146,13 @@ func synthesizeSkillFile(slug, promptName, body, brief string) string {
 	return b.String()
 }
 
-// WipeChainSkills removes the chain step skill directories so step
+// WipeBlueprintSkills removes the blueprint step skill directories so step
 // N+1 doesn't see step N's SKILL.md. The whole `.claude/skills/`
-// directory is wiped — chains don't compose with the curator skill
-// materialization (chains run on PRs/Jira, the curator runs on
+// directory is wiped — blueprints don't compose with the curator skill
+// materialization (blueprints run on PRs/Jira, the curator runs on
 // projects), so collateral damage to other materialized skills is
 // not a concern in this code path.
-func WipeChainSkills(worktree string) error {
+func WipeBlueprintSkills(worktree string) error {
 	dir := filepath.Join(worktree, ".claude", "skills")
 	if err := os.RemoveAll(dir); err != nil && !os.IsNotExist(err) {
 		return err

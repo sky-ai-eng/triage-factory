@@ -9,10 +9,12 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // seed.go; centralizing it here means the two seed paths can't drift.
 //
 // Order is not significant for prompts (each upserts independently), but
-// note the shipped event handlers (db.ShippedEventHandlers) carry
-// trigger rows whose prompt_id FKs into these — so any seed flow must
-// seed prompts before handlers. The SystemSlug values here must stay in
-// sync with the PromptID (prompt-slug) references in db.ShippedEventHandlers.
+// note the seed chains through blueprints: each shipped prompt is wrapped by
+// a 1-step blueprint (ai.ShippedBlueprints), and the shipped event handlers
+// (db.ShippedEventHandlers) carry trigger rows whose blueprint_id FKs into
+// those blueprints — so any seed flow must run prompts → blueprints → handlers.
+// The SystemSlug values here must stay in sync with the slugs ShippedBlueprints
+// wraps and the BlueprintID references in db.ShippedEventHandlers.
 //
 // SKY-380: prompts are team-scoped. Each entry carries a SystemSlug (the
 // stable shipped identifier) rather than a literal id — the seeder mints a

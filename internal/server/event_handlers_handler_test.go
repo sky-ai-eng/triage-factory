@@ -308,7 +308,7 @@ func TestHandleEventHandlerPromote_RuleToTrigger(t *testing.T) {
 		t.Errorf("kind=%v want trigger", got["kind"])
 	}
 	if got["blueprint_id"] != "p-promote" {
-		t.Errorf("prompt_id=%v", got["blueprint_id"])
+		t.Errorf("blueprint_id=%v", got["blueprint_id"])
 	}
 	// Rule-only fields must be cleared on the promoted row.
 	if got["name"] != "" {

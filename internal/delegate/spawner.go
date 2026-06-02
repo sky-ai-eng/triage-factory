@@ -543,9 +543,9 @@ func (s *Spawner) updateBreakerCounter(taskID, triggerType, status string) {
 	// See internal/routing/router.go and internal/db/tasks.go.
 }
 
-// markBlueprintRunID flags a chain_run id so broadcastRunUpdate skips
-// wsHub emission for it. The setup phase of a chain reuses the per-run
-// status helpers with the chain_run id (the first step's runs row
+// markBlueprintRunID flags a blueprint_run id so broadcastRunUpdate skips
+// wsHub emission for it. The setup phase of a multi-step blueprint reuses the
+// per-run status helpers with the blueprint_run id (the first step's runs row
 // doesn't exist yet) — those UPDATEs are harmless no-ops, but the
 // matching WS event causes clients to fetch /api/runs/{id} and 404.
 func (s *Spawner) markBlueprintRunID(id string) {

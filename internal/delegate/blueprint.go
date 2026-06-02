@@ -176,7 +176,7 @@ func (s *Spawner) runBlueprint(
 
 		// Wipe any prior step's materialized skill so step N+1 only
 		// sees its own SKILL.md.
-		if err := skills.WipeChainSkills(cfg.wtPath); err != nil {
+		if err := skills.WipeBlueprintSkills(cfg.wtPath); err != nil {
 			log.Printf("[blueprint] run %s step %d: wipe skills: %v", blueprintRunID, i, err)
 		}
 		slug := skills.SlugForBlueprintStep(i, stepPrompt.Name)

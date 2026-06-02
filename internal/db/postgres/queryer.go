@@ -29,7 +29,7 @@ type queryer interface {
 // skeleton rows for new ones inside one tx so the table can't
 // observe a partial mid-sync state.
 //
-// AgentRunStore + ChainStore inline their own tx wrappers because
+// AgentRunStore + BlueprintStore inline their own tx wrappers because
 // they need savepoint-on-claim-race semantics (see
 // errScopedRollback). Stores without that requirement should use
 // this helper.

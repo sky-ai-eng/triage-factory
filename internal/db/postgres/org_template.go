@@ -260,7 +260,9 @@ func (s *orgTemplateStore) MaterializeIntoTeam(ctx context.Context, orgID, teamI
 		}
 	}
 
-	// Phase 2: handlers. Re-point a trigger's prompt_id to the team's copy and
+	// Phase 3: handlers. Re-point a trigger's template prompt to the team's
+	// synthesized blueprint copy (template handlers carry a prompt_id; the
+	// materialized team trigger carries the corresponding blueprint_id) and
 	// preserve enabled + source verbatim. Idempotent on (org, team, slug).
 	// Buffer the rows first: the INSERTs below run on the same tx connection,
 	// so they can't be issued while hrows is still streaming.

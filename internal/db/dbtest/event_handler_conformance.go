@@ -31,10 +31,10 @@ type BlueprintSeeder func(t *testing.T, slugs ...string) map[string]string
 // the unified rule + trigger store (SKY-259). What it covers:
 //
 //   - Seed inserts both rule and trigger ShippedEventHandlers rows,
-//     resolving each trigger's prompt slug through the seeded map;
+//     resolving each trigger's blueprint slug through the seeded map;
 //     re-seed is idempotent (ON CONFLICT on (org_id, team_id, system_slug)).
-//   - Create rejects mis-shaped writes per kind (rule with prompt_id,
-//     trigger missing prompt_id, etc.) — validateForCreate catches
+//   - Create rejects mis-shaped writes per kind (rule with blueprint_id,
+//     trigger missing blueprint_id, etc.) — validateForCreate catches
 //     before the CHECK constraint does.
 //   - List with kind filter returns only matching rows; kind="" returns
 //     both.
@@ -50,7 +50,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 
 	t.Run("Seed_InsertsBothKinds", func(t *testing.T) {
 		store, orgID, teamID, seedBlueprints := factory(t)
-		// Trigger rows in ShippedEventHandlers reference these prompts.
+		// Trigger rows in ShippedEventHandlers reference these blueprints.
 		ids := seedBlueprints(t,
 			"system-pr-review",
 			"system-conflict-resolution",
@@ -132,7 +132,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			t.Errorf("DefaultPriority=%v want 0.75", got.DefaultPriority)
 		}
 		if got.BlueprintID != "" {
-			t.Errorf("PromptID=%q; rule rows must have empty PromptID", got.BlueprintID)
+			t.Errorf("BlueprintID=%q; rule rows must have empty BlueprintID", got.BlueprintID)
 		}
 	})
 
@@ -163,7 +163,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			t.Errorf("Kind=%q want trigger", got.Kind)
 		}
 		if got.BlueprintID != blueprintID {
-			t.Errorf("PromptID=%q want %q", got.BlueprintID, blueprintID)
+			t.Errorf("BlueprintID=%q want %q", got.BlueprintID, blueprintID)
 		}
 		if got.BreakerThreshold == nil || *got.BreakerThreshold != 2 {
 			t.Errorf("BreakerThreshold=%v want 2", got.BreakerThreshold)
@@ -193,7 +193,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}
 	})
 
-	t.Run("Create_RejectsTriggerWithoutPromptID", func(t *testing.T) {
+	t.Run("Create_RejectsTriggerWithoutBlueprintID", func(t *testing.T) {
 		store, orgID, teamID, _ := factory(t)
 		breaker := 4
 		minAutonomy := 0.0
@@ -203,10 +203,10 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			EventType:              domain.EventGitHubPRCICheckFailed,
 			BreakerThreshold:       &breaker,
 			MinAutonomySuitability: &minAutonomy,
-			// PromptID intentionally empty.
+			// BlueprintID intentionally empty.
 		}
 		if err := store.Create(context.Background(), orgID, teamID, h); err == nil {
-			t.Error("Create accepted a trigger with empty prompt_id; want error")
+			t.Error("Create accepted a trigger with empty blueprint_id; want error")
 		}
 	})
 
@@ -411,7 +411,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			t.Fatalf("Promote did not flip kind: got=%v", got)
 		}
 		if got.BlueprintID != promoteTarget {
-			t.Errorf("PromptID=%q after promote", got.BlueprintID)
+			t.Errorf("BlueprintID=%q after promote", got.BlueprintID)
 		}
 		if got.Name != "" {
 			t.Errorf("Name=%q after promote; rule-only field must be cleared", got.Name)

@@ -205,8 +205,11 @@ func (s *orgTemplateStore) MaterializeIntoTeam(ctx context.Context, orgID, teamI
 			teamBlueprintIDByTemplatePromptID[p.id] = existing
 		}
 
-		// Phase 2: handlers. INSERT OR IGNORE for idempotency; re-point the
-		// trigger prompt_id and preserve enabled + source verbatim.
+		// Phase 3: handlers. INSERT OR IGNORE for idempotency; re-point a
+		// trigger's template prompt to the team's synthesized blueprint copy
+		// (template handlers carry a prompt_id; the materialized team trigger
+		// carries the corresponding blueprint_id) and preserve enabled +
+		// source verbatim.
 		hrows, err := q.QueryContext(ctx, `
 			SELECT system_slug, kind, event_type, scope_predicate_json, enabled, source,
 			       name, default_priority, sort_order, prompt_id, breaker_threshold, min_autonomy_suitability
