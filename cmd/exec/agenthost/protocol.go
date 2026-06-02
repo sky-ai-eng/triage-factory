@@ -223,15 +223,6 @@ type deleteRunWorktreeByRepoArgs struct {
 	RepoID string `json:"repo_id"`
 }
 
-type chainRunForRunResult struct {
-	ChainRun *domain.BlueprintRun `json:"chain_run,omitempty"`
-	StepIdx  *int                 `json:"step_idx,omitempty"`
-}
-
-type insertChainVerdictArgs struct {
-	Payload string `json:"payload"`
-}
-
 type buildAgentRunFooterArgs struct {
 	Kind string `json:"kind"`
 }
@@ -242,9 +233,9 @@ type buildAgentRunFooterResult struct {
 
 // emptyArgs is the args type for methods that take no parameters
 // (LookupRun, GetPendingPRByRunID, GetAgentRun, ListRunWorktrees,
-// ListRepos, GetChainRunForRun). Using an empty struct rather than
-// json.RawMessage(nil) lets the daemon-side dispatch use the same
-// json.Unmarshal call shape for every method without a nil-check.
+// ListRepos). Using an empty struct rather than json.RawMessage(nil)
+// lets the daemon-side dispatch use the same json.Unmarshal call shape
+// for every method without a nil-check.
 type emptyArgs struct{}
 
 type emptyResult struct{}
@@ -272,7 +263,5 @@ const (
 	methodListRunWorktrees           = "ListRunWorktrees"
 	methodInsertRunWorktree          = "InsertRunWorktree"
 	methodDeleteRunWorktreeByRepo    = "DeleteRunWorktreeByRepo"
-	methodGetChainRunForRun          = "GetChainRunForRun"
-	methodInsertChainVerdict         = "InsertChainVerdict"
 	methodBuildAgentRunFooter        = "BuildAgentRunFooter"
 )

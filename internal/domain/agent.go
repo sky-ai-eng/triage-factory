@@ -5,7 +5,7 @@ import "time"
 // RunOutcome is the single terminal vocabulary an agent emits in its
 // completion envelope (the `outcome` field). It replaces the dual-channel
 // design where single runs used a completion `status` and blueprint steps
-// used the separate `chain verdict` CLI:
+// used a separate per-step verdict CLI:
 //
 //   - RunOutcomeContinue → hand off to the next blueprint stage. Non-terminal
 //     steps only; the overwhelmingly common, correct choice when a step's
@@ -16,8 +16,8 @@ import "time"
 //     natural-language `reason` (the old `unsolvable` folds into this).
 //   - RunOutcomeYield    → hand to the user; the run parks in awaiting_input.
 //
-// runs.outcome persists the parsed value; SKY-419's orchestrator advancement
-// and the later queue work read it.
+// runs.outcome persists the parsed value; the blueprint orchestrator's step
+// advancement and the later queue work read it.
 type RunOutcome string
 
 const (

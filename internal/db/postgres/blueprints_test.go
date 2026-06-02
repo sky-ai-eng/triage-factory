@@ -3,7 +3,6 @@ package postgres_test
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"testing"
 
@@ -107,9 +106,9 @@ func TestBlueprintStore_Postgres_ReplaceAndListSteps(t *testing.T) {
 }
 
 // TestBlueprintStore_Postgres_RunLifecycle exercises CreateRun → GetRun →
-// MarkRunStatus → GetLatestVerdict on a real Postgres tx. Covers the
-// UUID/TEXT column split (blueprint_runs.id UUID, blueprint_id TEXT)
-// and the now()-based verdict timestamp ordering.
+// RunsForBlueprint (surfacing the step run's terminal runs.outcome) →
+// MarkRunStatus → GetRunForRun on a real Postgres tx. Covers the UUID/TEXT
+// column split (blueprint_runs.id UUID, blueprint_id TEXT).
 func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -149,31 +148,19 @@ func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 		t.Errorf("status = %q, want running", cr.Status)
 	}
 
-	// Seed a step run and write two verdicts; latest wins.
+	// Seed a step run, persist a terminal outcome the way processCompletion
+	// does, and confirm RunsForBlueprint surfaces it — the channel the
+	// orchestrator advances on (the successor to the old per-step verdict).
 	stepRunID := seedPgRun(t, h, orgID, userID, taskID, stepPromptID, blueprintRunID, 0)
-	advanceJSON, _ := json.Marshal(domain.ChainVerdict{Outcome: domain.ChainVerdictAdvance, Reason: "ok"})
-	finalJSON, _ := json.Marshal(domain.ChainVerdict{Outcome: domain.ChainVerdictFinal, Reason: "done"})
-	if err := blueprints.InsertVerdict(ctx, orgID, stepRunID, string(advanceJSON)); err != nil {
-		t.Fatalf("InsertVerdict advance: %v", err)
+	if err := stores.AgentRuns.CompleteSystem(ctx, orgID, stepRunID, "completed", 0, 0, 0, "", "did the thing", "finish", ""); err != nil {
+		t.Fatalf("complete step run: %v", err)
 	}
-	if err := blueprints.InsertVerdict(ctx, orgID, stepRunID, string(finalJSON)); err != nil {
-		t.Fatalf("InsertVerdict final: %v", err)
-	}
-
-	latest, err := blueprints.GetLatestVerdict(ctx, orgID, stepRunID)
+	stepRuns, err := blueprints.RunsForBlueprint(ctx, orgID, blueprintRunID)
 	if err != nil {
-		t.Fatalf("GetLatestVerdict: %v", err)
+		t.Fatalf("RunsForBlueprint: %v", err)
 	}
-	if latest == nil || latest.Outcome != domain.ChainVerdictFinal {
-		t.Errorf("latest = %+v, want final", latest)
-	}
-
-	mapped, err := blueprints.LatestVerdictsForRuns(ctx, orgID, []string{stepRunID})
-	if err != nil {
-		t.Fatalf("LatestVerdictsForRuns: %v", err)
-	}
-	if v := mapped[stepRunID]; v == nil || v.Outcome != domain.ChainVerdictFinal {
-		t.Errorf("mapped[stepRunID] = %+v, want final", v)
+	if len(stepRuns) != 1 || stepRuns[0].Outcome != "finish" {
+		t.Errorf("RunsForBlueprint = %+v, want one run with outcome=finish", stepRuns)
 	}
 
 	// Mark the blueprint completed; second attempt should be no-op.
@@ -389,17 +376,10 @@ func TestBlueprintStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRun B: %v", err)
 	}
-	stepRunA := seedPgRun(t, h, orgA, userA, taskA, stepIDA, crA, 0)
-	stepRunB := seedPgRun(t, h, orgB, userB, taskB, stepIDB, crB, 0)
-
-	verdictA, _ := json.Marshal(domain.ChainVerdict{Outcome: domain.ChainVerdictFinal, Reason: "A"})
-	verdictB, _ := json.Marshal(domain.ChainVerdict{Outcome: domain.ChainVerdictFinal, Reason: "B"})
-	if err := blueprints.InsertVerdictSystem(ctx, orgA, stepRunA, string(verdictA)); err != nil {
-		t.Fatalf("InsertVerdictSystem A: %v", err)
-	}
-	if err := blueprints.InsertVerdictSystem(ctx, orgB, stepRunB, string(verdictB)); err != nil {
-		t.Fatalf("InsertVerdictSystem B: %v", err)
-	}
+	// Seed a step run under each blueprint so the cross-org
+	// RunsForBlueprintSystem check below has rows to (not) leak.
+	seedPgRun(t, h, orgA, userA, taskA, stepIDA, crA, 0)
+	seedPgRun(t, h, orgB, userB, taskB, stepIDB, crB, 0)
 
 	// ListStepsSystem on org A must not see blueprint B's step.
 	stepsA, err := blueprints.ListStepsSystem(ctx, orgA, blueprintIDB)
@@ -408,27 +388,6 @@ func TestBlueprintStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	}
 	if len(stepsA) != 0 {
 		t.Errorf("ListStepsSystem(orgA, blueprintIDB) leaked %d rows, want 0", len(stepsA))
-	}
-
-	// GetLatestVerdictSystem on org A reading org B's step run must
-	// return (nil, nil) — the run_id is unique across orgs but the
-	// admin pool bypasses RLS, so the org_id WHERE clause on
-	// run_artifacts is the only thing standing between the system
-	// variant and a cross-tenant verdict leak.
-	verdictCrossOrg, err := blueprints.GetLatestVerdictSystem(ctx, orgA, stepRunB)
-	if err != nil {
-		t.Fatalf("GetLatestVerdictSystem cross-org: %v", err)
-	}
-	if verdictCrossOrg != nil {
-		t.Errorf("GetLatestVerdictSystem(orgA, stepRunB) returned %+v, want nil (cross-org leak)", verdictCrossOrg)
-	}
-	// Same-org read still returns the verdict.
-	verdictSameOrg, err := blueprints.GetLatestVerdictSystem(ctx, orgB, stepRunB)
-	if err != nil {
-		t.Fatalf("GetLatestVerdictSystem same-org: %v", err)
-	}
-	if verdictSameOrg == nil || verdictSameOrg.Reason != "B" {
-		t.Errorf("GetLatestVerdictSystem(orgB, stepRunB) = %+v, want reason=B", verdictSameOrg)
 	}
 
 	// RunsForBlueprintSystem on org A must not return cross-org step runs.

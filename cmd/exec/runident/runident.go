@@ -70,7 +70,7 @@ type RunIdentity struct {
 
 	// RunID is TRIAGE_FACTORY_RUN_ID — the run the subprocess is
 	// acting on behalf of. Stamped into pending_review.run_id,
-	// pending_pr.run_id, run_worktrees.run_id, chain verdicts, etc.
+	// pending_pr.run_id, run_worktrees.run_id, etc.
 	RunID string
 
 	// IsEventTriggered is true when the run was spawned by an

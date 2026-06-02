@@ -85,13 +85,12 @@ func New(admin, app *sql.DB) db.Stores {
 		// app — same pool-split pattern PromptStore + the predecessor
 		// stores used.
 		EventHandlers: newEventHandlerStore(app, admin),
-		// Chains wires both pools. CreateRun routes internally on
+		// Blueprints wires both pools. CreateRun routes internally on
 		// trigger_type (event → admin with NULL creator, manual → app
 		// with COALESCE fallback), mirroring AgentRunStore.Create. The
 		// `...System` variants on the read/write methods (ListSteps,
-		// MarkRunStatus, RunsForBlueprint, InsertVerdict, GetLatestVerdict)
-		// give the blueprint orchestrator goroutine an admin-pool route
-		// for its detached-context work.
+		// MarkRunStatus, RunsForBlueprint) give the blueprint orchestrator
+		// goroutine an admin-pool route for its detached-context work.
 		Blueprints: newBlueprintStore(app, admin),
 		// Agents.Create routes through admin (bootstrap has no JWT
 		// claims and the agents_insert policy gates on

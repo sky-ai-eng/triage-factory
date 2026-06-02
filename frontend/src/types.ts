@@ -84,6 +84,13 @@ export interface AgentRun {
   NumTurns?: number
   StopReason?: string
   ResultSummary: string
+  // Outcome is the parsed terminal-envelope outcome
+  // (continue|finish|abort|yield), persisted to runs.outcome. Empty/absent
+  // for an infra-error run or a blueprint step whose outcome gate gave up.
+  // The blueprint run timeline reads this in place of the old verdict object.
+  Outcome?: string
+  // OutcomeReason is the "why I stopped" populated only on an abort outcome.
+  OutcomeReason?: string
   SessionID?: string
   WorktreePath?: string
   // pending_kind is set by the server's runResponse projection when
@@ -229,19 +236,9 @@ export interface BlueprintStep {
   created_at: string
 }
 
-export type BlueprintVerdictOutcome = 'advance' | 'abort' | 'final'
-
-export interface BlueprintVerdict {
-  outcome: BlueprintVerdictOutcome
-  reason: string
-  notes?: string
-  // synthetic is internal-only (json:"-" in Go) — not on the wire
-}
-
 export interface BlueprintRunStepView {
   step: BlueprintStep
   run?: AgentRun
-  verdict?: BlueprintVerdict
 }
 
 export interface BlueprintRunResponse {
