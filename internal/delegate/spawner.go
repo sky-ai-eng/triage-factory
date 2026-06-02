@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/storage"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -98,6 +99,14 @@ type Spawner struct {
 	ghResolver ghclient.Resolver                            // per-(org, owner) GitHub client source (App token in multi, keychain PAT in local)
 	runSecrets agentproc.SecretsReader                      // per-org LLM-credential reader (nil in local → ambient subscription; system-door reader in multi)
 	modelFor   func(context.Context, string, string) string // per-(org, team) default-model resolver (prompt.Model still overrides per delegation)
+
+	// blobs is the durable blob/object store handle for the blueprint
+	// workspace seam: local mode → an on-disk store under the state root,
+	// multi → an S3-compatible object store. Wired once at startup via
+	// SetStorage, mirroring SetRunCredentialResolvers above; read through
+	// Storage() by the snapshot/rehydrate consumer (a follow-up). Guarded
+	// by mu like the credential seam it sits beside.
+	blobs storage.Storage
 
 	cancels               map[string]context.CancelFunc                     // runID → cancel the entire run
 	drainer               QueueDrainer                                      // nil-safe; set post-construction via SetQueueDrainer
@@ -300,6 +309,26 @@ func (s *Spawner) SetRunCredentialResolvers(resolver ghclient.Resolver, secrets 
 	s.ghResolver = resolver
 	s.runSecrets = secrets
 	s.modelFor = modelFor
+}
+
+// SetStorage wires the durable blob store into the spawner. Done
+// post-construction (like SetRunCredentialResolvers and SetStores) so the
+// constructor signature — and every test fixture's NewSpawner call — stays
+// put. Safe to call once at startup; nil is tolerated (tests that never
+// touch the workspace seam leave it unset, and Storage() returns nil).
+func (s *Spawner) SetStorage(blobs storage.Storage) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.blobs = blobs
+}
+
+// Storage returns the wired blob store, or nil if none was set. It is the
+// read side of the seam for the blueprint-workspace snapshot/rehydrate
+// path; the lock keeps it race-free against a startup-time SetStorage.
+func (s *Spawner) Storage() storage.Storage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.blobs
 }
 
 // resolveRunCredentials resolves the per-(org, owner) GitHub client and

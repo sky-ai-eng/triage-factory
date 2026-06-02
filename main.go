@@ -38,6 +38,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server"
 	"github.com/sky-ai-eng/triage-factory/internal/sessions"
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
+	"github.com/sky-ai-eng/triage-factory/internal/storage"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -1012,6 +1013,18 @@ func main() {
 	// `triagefactory exec` invocations send. Local-mode + non-sandbox
 	// paths never read this back; nil-safe inside the spawner.
 	spawner.SetStores(stores)
+	// Durable blob store for the blueprint workspace seam. Local mode →
+	// an on-disk store under the state root, needing no new service (so it
+	// can never brick a local boot); multi → an S3-compatible object store
+	// from the TF_BLOB_* env, required and validated here so a
+	// misconfigured deployment fails fast at startup rather than on its
+	// first snapshot. The snapshot/rehydrate consumer reads it back via
+	// spawner.Storage() in a follow-up.
+	blobStore, err := storage.New()
+	if err != nil {
+		log.Fatalf("storage init: %v", err)
+	}
+	spawner.SetStorage(blobStore)
 	srv.SetSpawner(spawner)
 
 	// SKY-220: wire the classifier wait into the spawner's setup path.
