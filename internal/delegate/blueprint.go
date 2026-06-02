@@ -397,7 +397,7 @@ func decideBlueprintStep(outcome string, isFinal bool) (decision blueprintStepOu
 		return blueprintStepFinish, ""
 	case domain.RunOutcomeAbort:
 		return blueprintStepAbort, ""
-	default:
+	case "":
 		// Missing outcome (empty string === SQL NULL). On the final step
 		// (and therefore N=1) a missing outcome is unambiguous → finish,
 		// exactly like a single-prompt run. On a non-final step it means
@@ -407,6 +407,14 @@ func decideBlueprintStep(outcome string, isFinal bool) (decision blueprintStepOu
 			return blueprintStepFinish, ""
 		}
 		return blueprintStepAbort, "no-outcome"
+	default:
+		// An unrecognized, non-empty outcome — a future/buggy value the
+		// orchestrator can't interpret (a valid completed step only ever
+		// holds continue/finish/abort, or NULL; yield never completes).
+		// Never close a task on a value we don't understand: abort and leave
+		// it open for a human, regardless of position. Mirrors the old
+		// "unknown verdict → abort" floor.
+		return blueprintStepAbort, "unknown-outcome: " + outcome
 	}
 }
 

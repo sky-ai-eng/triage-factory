@@ -392,10 +392,24 @@ func (s *Spawner) processCompletion(
 	// approval queue.
 	hasPending := false
 	if status == "completed" {
-		if pendingReview, _ := s.reviews.ByRunIDSystem(bgCtx, orgID, runID); pendingReview != nil {
+		// A lookup error leaves hasPending=false, which would let the run
+		// finish 'completed' while a queued review/PR strands outside the
+		// approval queue (and skips the blueprint-step coercion below) — log
+		// it so that failure mode is observable rather than silent.
+		pendingReview, rErr := s.reviews.ByRunIDSystem(bgCtx, orgID, runID)
+		if rErr != nil {
+			log.Printf("[delegate] warning: pending-review lookup for run %s failed; a queued review may strand outside the approval queue: %v", runID, rErr)
+		}
+		if pendingReview != nil {
 			hasPending = true
-		} else if pendingPR, _ := s.pendingPRs.ByRunIDSystem(bgCtx, orgID, runID); pendingPR != nil {
-			hasPending = true
+		} else {
+			pendingPR, pErr := s.pendingPRs.ByRunIDSystem(bgCtx, orgID, runID)
+			if pErr != nil {
+				log.Printf("[delegate] warning: pending-PR lookup for run %s failed; a queued PR may strand outside the approval queue: %v", runID, pErr)
+			}
+			if pendingPR != nil {
+				hasPending = true
+			}
 		}
 	}
 

@@ -44,6 +44,12 @@ func TestDecideBlueprintStep(t *testing.T) {
 		// abort no-outcome; unambiguous on the final step → finish.
 		{"missing non-final aborts no-outcome", "", false, blueprintStepAbort, "no-outcome"},
 		{"missing final finishes", "", true, blueprintStepFinish, ""},
+
+		// An unrecognized/garbage outcome (a future or buggy value) must
+		// never close a task on finish — it aborts regardless of position,
+		// so we never act on a value we can't interpret.
+		{"unknown non-final aborts", "bogus", false, blueprintStepAbort, "unknown-outcome: bogus"},
+		{"unknown final aborts", "bogus", true, blueprintStepAbort, "unknown-outcome: bogus"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
