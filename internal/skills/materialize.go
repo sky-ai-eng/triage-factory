@@ -21,10 +21,10 @@ func yamlQuoteString(s string) string {
 }
 
 // SlugForBlueprintStep produces the directory name used under
-// `<wt>/.claude/skills/` for a chain step. Including the step index
-// guards against two steps in one chain referencing the same prompt
-// and overwriting each other's SKILL.md. The slug also doubles as the
-// `name:` field of the generated frontmatter.
+// `<wt>/.claude/skills/` for a blueprint step (historically "chain-step-...").
+// Including the step index guards against two steps in one blueprint
+// referencing the same prompt and overwriting each other's SKILL.md. The slug
+// also doubles as the `name:` field of the generated frontmatter.
 func SlugForBlueprintStep(stepIndex int, promptName string) string {
 	return fmt.Sprintf("chain-step-%d-%s", stepIndex, sanitizeSlug(promptName))
 }
