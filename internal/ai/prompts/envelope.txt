@@ -82,7 +82,7 @@ Field reference:
   - "finish" — you accomplished the mission; the task is done and should close. This is normal completion.
   - "abort" — you cannot safely complete the mission (a precondition failed, the situation is ambiguous or unsafe, or it's provably impossible with the tools and context available). The task stays open for a human. Add a "reason" field explaining precisely what blocked you and what a human needs to do to unblock.
   - "yield" — you need user input before continuing (see <yielding> above).
-- summary: a brief natural-language description of what you did — always present, for every outcome.
+- summary: a brief natural-language description of what you did — required on a "finish" or "abort". A "yield" does not need one; what you're asking the user lives in the yield payload (see <yielding> above).
 - reason: required on "abort" — the "why I stopped / what a human needs to do" note. Distinct from summary; omit it for non-abort outcomes.
 - links: optional object — populate with relevant URLs produced during the run:
   - "pr_review": URL to a submitted PR review (with #pullrequestreview-NNNNN anchor)

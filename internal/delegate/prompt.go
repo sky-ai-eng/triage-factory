@@ -208,9 +208,7 @@ type agentResult struct {
 // Two terminal shapes are accepted:
 //   - continue / finish / abort: Summary is non-empty (every successful
 //     or stopped envelope carries a natural-language summary)
-//   - yield: Outcome == "yield" and the yield payload passes
-//     YieldRequest.Validate (known type, non-empty message, well-formed
-//     options for choice yields, no duplicate option ids)
+//   - yield: a well-formed yield envelope (see isYield)
 //
 // Anything else is treated as "didn't parse cleanly" — the parser
 // falls through to its markdown-fence and brace-extraction paths
@@ -222,19 +220,38 @@ func (r *agentResult) isValid() bool {
 	if r.Summary != "" {
 		return true
 	}
-	if r.Outcome == string(domain.RunOutcomeYield) && r.Yield != nil {
-		return r.Yield.Validate() == nil
-	}
-	return false
+	return r.isYield()
 }
 
-// hasValidOutcome reports whether the envelope carries a recognized
-// outcome (one of the four RunOutcome values). The outcome-validity gate
-// in processCompletion re-prompts the agent until this holds (or its
-// retries exhaust); isValid above is deliberately looser — a summary-
-// only envelope parses, but its empty outcome still trips the gate.
+// isYield reports whether this is a well-formed yield envelope: outcome
+// "yield" AND a yield payload that passes YieldRequest.Validate (known type,
+// non-empty message, well-formed options for choice yields, no duplicate
+// option ids). Both the run-completion yield routing and hasValidOutcome
+// gate on it so a "yield" carrying a missing/malformed payload is never
+// (a) parked in awaiting_input with a modal the user can't act on, nor
+// (b) waved through the outcome gate and then treated as a normal completion
+// that closes the task. A non-empty summary does NOT make a payload-less
+// yield valid — the payload is what the UI needs.
+func (r *agentResult) isYield() bool {
+	return r.Outcome == string(domain.RunOutcomeYield) && r.Yield != nil && r.Yield.Validate() == nil
+}
+
+// hasValidOutcome reports whether the envelope carries a usable outcome. The
+// three terminating outcomes (continue/finish/abort) need only the outcome
+// token; yield additionally requires a well-formed payload (isYield) —
+// otherwise a payload-less "yield" would satisfy the outcome gate and then
+// fall through to the normal completion path. Looser than isValid only in
+// that a summary alone never substitutes for a missing outcome: a
+// summary-only envelope parses but trips the gate.
 func (r *agentResult) hasValidOutcome() bool {
-	return domain.RunOutcome(r.Outcome).Valid()
+	switch domain.RunOutcome(r.Outcome) {
+	case domain.RunOutcomeContinue, domain.RunOutcomeFinish, domain.RunOutcomeAbort:
+		return true
+	case domain.RunOutcomeYield:
+		return r.isYield()
+	default:
+		return false
+	}
 }
 
 // PrimaryLink returns the most relevant URL from the result.

@@ -266,24 +266,16 @@ func (s *Spawner) processCompletion(
 	completion *agentproc.Result,
 	claudeCwd, sessionID, model, owner, repo, triggerType, creatorUserID, extraAllowedTools string,
 ) {
-	// Yield branch (SKY-139): the agent emitted status:"yield" to
-	// pause the run for user input rather than terminating. Skip the
-	// memory gate (the agent isn't terminating; the gate runs at real
-	// completion) and skip CompleteAgentRun. Park the run in
-	// awaiting_input; the respond endpoint reopens the session via
-	// ResumeAfterYield when the user answers.
-	//
-	// IsError takes precedence: a Claude-side error (e.g. max-turns
-	// hit) that happens to carry yield-shaped JSON is still a failure,
-	// not an intentional pause.
-	if !completion.IsError {
-		if parsed := parseAgentResult(completion.Result); parsed != nil && parsed.Outcome == string(domain.RunOutcomeYield) && parsed.Yield != nil {
-			if err := s.persistYield(orgID, runID, parsed.Yield, completion, triggerType, creatorUserID); err != nil {
-				log.Printf("[delegate] failed to persist yield for run %s: %v", runID, err)
-				s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, "failed to record yield: "+err.Error())
-			}
-			return
-		}
+	// Yield branch (SKY-139): the agent emitted outcome:"yield" to pause
+	// the run for user input rather than terminating. Park it in
+	// awaiting_input and skip BOTH gates and CompleteAgentRun — a pause
+	// isn't a termination, so we don't force a memory write or an outcome.
+	// The respond endpoint reopens the session via ResumeAfterYield when the
+	// user answers. routeYield's IsError guard keeps a Claude-side error
+	// (e.g. max-turns hit) that happens to carry yield-shaped JSON a failure,
+	// not a pause.
+	if s.routeYield(orgID, runID, task, completion, triggerType, creatorUserID) {
+		return
 	}
 
 	// Enforce the pre-complete entity-memory write gate. If the agent
@@ -328,6 +320,17 @@ func (s *Spawner) processCompletion(
 	// NULL. The memory ticket later consolidates the two gates.
 	if !completion.IsError {
 		completion = s.runOutcomeGate(ctx, orgID, runID, claudeCwd, completion, sessionID, model, repoEnv, extraAllowedTools, triggerType, creatorUserID)
+	}
+
+	// A gate resume above can itself end in a yield (the agent decided it
+	// needs the user before it can write memory or a valid outcome). Honor
+	// that yield exactly as an initial one — park in awaiting_input — rather
+	// than letting it fall through to the terminal-completion path below,
+	// which would record status=completed and (for a single run) close the
+	// task. The memory upsert just ran, but it's idempotent and gets
+	// rewritten when the run truly terminates after the user responds.
+	if s.routeYield(orgID, runID, task, completion, triggerType, creatorUserID) {
+		return
 	}
 
 	// Is this a step inside a multi-step blueprint? Single/terminal runs
@@ -507,6 +510,34 @@ func (s *Spawner) processCompletion(
 	case "task_unsolvable":
 		toast.Warning(s.wsHub, orgID, fmt.Sprintf("Run %s — task unsolvable: %s", shortRunID(runID), truncateToastMsg(resultSummary, 140)))
 	}
+}
+
+// routeYield parks the run in awaiting_input when completion is a well-formed
+// yield envelope, returning true if it handled the completion (the caller must
+// then return without running the terminal-completion path). Used in two
+// places in processCompletion: before the memory/outcome gates (an initial
+// yield is a pause, not a termination, so it skips both gates) and again after
+// them (a gate resume can itself end in a yield, which must still park rather
+// than be treated as a completion that closes the task).
+//
+// A malformed/payload-less "yield" is deliberately NOT routed here (isYield
+// gates on a valid payload) — it falls through so the outcome gate can
+// re-prompt for a usable envelope instead of parking a modal the user can't
+// act on. An IsError completion is never a yield, however yield-shaped its
+// JSON.
+func (s *Spawner) routeYield(orgID, runID string, task domain.Task, completion *agentproc.Result, triggerType, creatorUserID string) bool {
+	if completion.IsError {
+		return false
+	}
+	parsed := parseAgentResult(completion.Result)
+	if parsed == nil || !parsed.isYield() {
+		return false
+	}
+	if err := s.persistYield(orgID, runID, parsed.Yield, completion, triggerType, creatorUserID); err != nil {
+		log.Printf("[delegate] failed to persist yield for run %s: %v", runID, err)
+		s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, "failed to record yield: "+err.Error())
+	}
+	return true
 }
 
 // persistYield records an agent yield request, accumulates the partial

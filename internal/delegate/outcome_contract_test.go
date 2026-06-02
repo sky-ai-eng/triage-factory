@@ -260,3 +260,72 @@ func TestProcessCompletion_UnparseableFallsBackToFinish(t *testing.T) {
 		t.Errorf("task.status = %q, want done", got)
 	}
 }
+
+// --- routeYield: yield routing before AND after the gates -----------------
+
+// TestRouteYield_ParksWellFormedYield: routeYield handles a valid yield by
+// parking the run, returning true. This is the reusable park the post-gate
+// check uses so a yield emitted during a memory/outcome-gate resume still
+// lands in awaiting_input instead of the completion path.
+func TestRouteYield_ParksWellFormedYield(t *testing.T) {
+	s, _, runID, taskID := setupAdvanceFixture(t, "ry-park")
+	task := loadTask(t, s, taskID)
+
+	handled := s.routeYield(runmode.LocalDefaultOrg, runID, task,
+		res(`{"outcome":"yield","yield":{"type":"confirmation","message":"Proceed?"}}`), "event", "")
+	if !handled {
+		t.Fatal("routeYield should handle a well-formed yield")
+	}
+	if got := loadRun(t, s, runID).Status; got != "awaiting_input" {
+		t.Errorf("run.status = %q, want awaiting_input", got)
+	}
+}
+
+// TestRouteYield_IgnoresMalformedYield: a yield-outcome with a non-empty
+// summary but no payload must NOT be parked — routeYield returns false so the
+// completion falls through to the outcome gate / fallback rather than parking
+// a modal the user can't act on or (worse) being treated as a completion.
+func TestRouteYield_IgnoresMalformedYield(t *testing.T) {
+	s, _, runID, taskID := setupAdvanceFixture(t, "ry-bad")
+	task := loadTask(t, s, taskID)
+
+	handled := s.routeYield(runmode.LocalDefaultOrg, runID, task,
+		res(`{"outcome":"yield","summary":"I want to pause"}`), "event", "")
+	if handled {
+		t.Fatal("routeYield must not park a yield with no payload")
+	}
+	if got := loadRun(t, s, runID).Status; got == "awaiting_input" {
+		t.Errorf("run.status = %q; a payload-less yield must not park the run", got)
+	}
+}
+
+// TestRouteYield_IgnoresNonYield: a finish completion is not a yield.
+func TestRouteYield_IgnoresNonYield(t *testing.T) {
+	s, _, runID, taskID := setupAdvanceFixture(t, "ry-finish")
+	task := loadTask(t, s, taskID)
+
+	if s.routeYield(runmode.LocalDefaultOrg, runID, task,
+		res(`{"outcome":"finish","summary":"done"}`), "event", "") {
+		t.Fatal("routeYield must not treat a finish as a yield")
+	}
+}
+
+// TestProcessCompletion_MalformedYieldDoesNotPark is the end-to-end guard for
+// the regression: a yield-outcome with a non-empty summary but no payload, on
+// a single/terminal run with no session to re-prompt, must not be parked with
+// a broken payload. The conservative fallback applies (finish) instead.
+func TestProcessCompletion_MalformedYieldDoesNotPark(t *testing.T) {
+	s, _, runID, taskID := setupAdvanceFixture(t, "bad-yield")
+	task := loadTask(t, s, taskID)
+	cwd := t.TempDir()
+
+	// sessionID empty → the outcome gate can't re-prompt; the malformed
+	// yield is not a valid outcome, so the single/terminal fallback to
+	// finish applies. The key assertion is that it did NOT park.
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, task,
+		res(`{"outcome":"yield","summary":"please decide"}`), cwd, "", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
+
+	if got := loadRun(t, s, runID).Status; got == "awaiting_input" {
+		t.Errorf("run.status = %q; a payload-less yield must not park the run", got)
+	}
+}

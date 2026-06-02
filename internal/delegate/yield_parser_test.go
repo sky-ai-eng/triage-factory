@@ -117,3 +117,38 @@ func TestAgentResult_SummaryOnlyHasNoValidOutcome(t *testing.T) {
 		t.Errorf("summary-only envelope must not report a valid outcome")
 	}
 }
+
+// TestYieldWithoutPayloadIsNotValid pins the fix for the malformed-yield
+// hole: outcome="yield" with a non-empty summary but no (or an invalid)
+// yield payload must NOT count as a well-formed yield or a valid outcome.
+// Otherwise it would parse on the summary, slip past the outcome gate, and
+// then be treated as a normal completion that closes the task.
+func TestYieldWithoutPayloadIsNotValid(t *testing.T) {
+	// outcome=yield, summary present, payload entirely missing.
+	got := parseAgentResult(`{"outcome":"yield","summary":"I want to pause and ask"}`)
+	if got == nil {
+		t.Fatal("envelope should still parse on its summary")
+	}
+	if got.isYield() {
+		t.Errorf("a yield with no payload must not be a well-formed yield")
+	}
+	if got.hasValidOutcome() {
+		t.Errorf("a yield with no payload must not satisfy the outcome gate")
+	}
+
+	// outcome=yield, summary present, payload present but invalid (choice
+	// with no options — nothing for the user to click).
+	bad := parseAgentResult(`{"outcome":"yield","summary":"pick one","yield":{"type":"choice","message":"which?","options":[]}}`)
+	if bad == nil {
+		t.Fatal("envelope should still parse on its summary")
+	}
+	if bad.isYield() || bad.hasValidOutcome() {
+		t.Errorf("a yield with an invalid payload must not be valid: isYield=%v hasValidOutcome=%v", bad.isYield(), bad.hasValidOutcome())
+	}
+
+	// A well-formed yield (no summary) remains both isYield and a valid outcome.
+	good := parseAgentResult(`{"outcome":"yield","yield":{"type":"confirmation","message":"Proceed?"}}`)
+	if good == nil || !good.isYield() || !good.hasValidOutcome() {
+		t.Errorf("a well-formed yield should pass: got=%+v", good)
+	}
+}
