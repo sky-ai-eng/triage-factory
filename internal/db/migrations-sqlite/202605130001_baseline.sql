@@ -826,6 +826,39 @@ CREATE TABLE pending_firings (
 CREATE INDEX        idx_pending_firings_entity_pending ON pending_firings(entity_id, queued_at) WHERE status = 'pending';
 CREATE UNIQUE INDEX idx_pending_firings_dedup          ON pending_firings(task_id, trigger_id)  WHERE status = 'pending';
 
+-- === Durable router event queue (SKY-414) ================================
+-- The in-memory event bus drops events for slow subscribers under burst
+-- (Publish is a non-blocking send onto a 256-deep channel). The router is
+-- the system of record — it persists event rows and creates tasks — so it
+-- must not ride that lossy delivery. This is the transactional-outbox
+-- queue it drains instead: the events audit row and a queue row are
+-- inserted atomically at ingest, so a recorded event is always routable
+-- and survives restarts. Sibling to pending_firings above.
+--
+-- Status lifecycle: pending -> processing -> done | failed. 'processing'
+-- rows left by a crash reset to pending at boot (single worker) and
+-- replay. SQLite/local is single-worker; the Postgres baseline's
+-- equivalent table is drained with FOR UPDATE SKIP LOCKED so multiple
+-- router workers can drain concurrently (groundwork; running N is a
+-- non-goal).
+CREATE TABLE event_queue (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id     TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    entity_id    TEXT REFERENCES entities(id),
+    event_type   TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'pending',   -- pending | processing | done | failed
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    last_error   TEXT,
+    enqueued_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    claimed_at   DATETIME,
+    processed_at DATETIME,
+    org_id       TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'
+);
+CREATE INDEX        idx_event_queue_pending          ON event_queue(id)                  WHERE status = 'pending';
+CREATE INDEX        idx_event_queue_entity           ON event_queue(entity_id);
+CREATE INDEX        idx_event_queue_status_processed ON event_queue(status, processed_at);
+CREATE UNIQUE INDEX idx_event_queue_event            ON event_queue(event_id);
+
 -- === Run artifacts / messages / memory / worktrees =======================
 CREATE TABLE run_artifacts (
     id            TEXT PRIMARY KEY,
