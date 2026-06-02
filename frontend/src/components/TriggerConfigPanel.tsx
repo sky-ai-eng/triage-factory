@@ -54,7 +54,7 @@ export default function TriggerConfigPanel({
     setPromptName('')
 
     // Resolve the bound blueprint's name for the badge. Template scope has a
-    // single-get on its prompt family; team-scope blueprints expose only a
+    // single-get on its blueprint family; team-scope blueprints expose only a
     // list endpoint, so fetch the list and find by id.
     if (templateScope) {
       fetch(`${blueprintsBase(true)}/${encodeURIComponent(trigger.blueprint_id)}`)

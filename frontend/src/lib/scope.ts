@@ -22,10 +22,10 @@ export function handlersBase(template: boolean): string {
   return template ? '/api/org-template/event-handlers' : '/api/event-handlers'
 }
 
-// blueprintsBase returns the REST root for blueprints. Template scope reuses
-// its prompt-template family for the name lookup (the org template is leaf-only,
-// so a template trigger points at a single-step blueprint stored alongside the
-// template prompts); team scope hits the dedicated /api/blueprints endpoint.
+// blueprintsBase returns the REST root for blueprints. Both scopes are
+// symmetric: a template trigger fires a template blueprint, a team trigger fires
+// a team blueprint. Template scope hits the org-scoped /api/org-template/blueprints
+// family; team scope hits the dedicated /api/blueprints endpoint.
 export function blueprintsBase(template: boolean): string {
-  return template ? '/api/org-template/prompts' : '/api/blueprints'
+  return template ? '/api/org-template/blueprints' : '/api/blueprints'
 }

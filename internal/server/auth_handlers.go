@@ -307,7 +307,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		if berr := tfdb.BootstrapNewOrg(r.Context(), s.allStores,
 			provResult.bootstrapOrgID.UUID.String(),
 			provResult.bootstrapTeamID.UUID.String(),
-			ai.ShippedPrompts(),
+			ai.ShippedPrompts(), ai.ShippedBlueprints(),
 		); berr != nil {
 			log.Printf("[auth] org %s provisioned but bootstrap failed (shipped prompts/rules/bot may be missing): %v",
 				provResult.bootstrapOrgID.UUID, berr)

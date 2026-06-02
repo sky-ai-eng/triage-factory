@@ -6,19 +6,19 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// OrgTemplateStore owns the org_template_prompts + org_template_handlers
-// tables — the org-level template that BootstrapNewOrg / BootstrapNewTeam
-// copy into a new team's prompts + event_handlers (SKY-381). It is the
-// editable source that sits between TF's shipped defaults and the per-team
-// seed:
+// OrgTemplateStore owns the org_template_prompts + org_template_blueprints
+// (+ org_template_blueprint_steps) + org_template_handlers tables — the
+// org-level template that BootstrapNewOrg / BootstrapNewTeam copy into a new
+// team's prompts + blueprints + event_handlers (SKY-381). It is the editable
+// source that sits between TF's shipped defaults and the per-team seed:
 //
-//	ai.ShippedPrompts() + db.ShippedEventHandlers  (TF defaults, Go slices)
+//	ai.ShippedPrompts() + ai.ShippedBlueprints() + db.ShippedEventHandlers
 //	        │  SeedFromShipped — once, at org-create
 //	        ▼
 //	org_template_*  (per-org, admin-editable)
 //	        │  MaterializeIntoTeam — at every team-create (first + Nth)
 //	        ▼
-//	prompts + event_handlers  (per-team copies, the real working rows)
+//	prompts + blueprints + event_handlers  (per-team copies, the real rows)
 //
 // Editing the template is forward-only: it changes what the *next* new team
 // inherits and never touches a team that already exists (consistent with the
@@ -49,27 +49,30 @@ import (
 // need the admin pool), matching PromptStore.SeedOrUpdate.
 type OrgTemplateStore interface {
 	// SeedFromShipped seeds the org's template from the TF shipped defaults:
-	// shippedPrompts (passed in so internal/db stays free of the internal/ai
-	// dependency — callers supply ai.ShippedPrompts()) plus the in-package
-	// db.ShippedEventHandlers. Two-phase like SeedTeamDefaults: prompts first
-	// (capturing system_slug → template prompt id), then handlers resolving
-	// each trigger's prompt slug. Rules seed enabled, triggers disabled
+	// shippedPrompts + shippedBlueprints (passed in so internal/db stays free
+	// of the internal/ai dependency — callers supply ai.ShippedPrompts() /
+	// ai.ShippedBlueprints()) plus the in-package db.ShippedEventHandlers.
+	// Three-phase like SeedTeamDefaults: prompts first (capturing system_slug →
+	// template prompt id), then blueprints + their steps (resolving each step's
+	// prompt slug via the phase-1 map), then handlers resolving each trigger's
+	// blueprint slug via the phase-2 map. Rules seed enabled, triggers disabled
 	// (shipped convention). Idempotent via ON CONFLICT(org_id, system_slug)
 	// DO NOTHING — a re-run preserves any admin edits and never resurrects a
 	// row the admin deleted. Admin pool; must run OUTSIDE WithTx.
-	SeedFromShipped(ctx context.Context, orgID string, shippedPrompts []domain.Prompt) error
+	SeedFromShipped(ctx context.Context, orgID string, shippedPrompts []domain.Prompt, shippedBlueprints []domain.SeedBlueprint) error
 
 	// MaterializeIntoTeam copies the org's current template into teamID's
-	// prompts + blueprints + event_handlers (and system_prompt_versions for
-	// system rows), reproducing what SeedTeamDefaults would have written from
-	// the shipped lists — only the source rows differ. Three-phase: each
-	// template prompt becomes a team prompt copy (new random UUID, same
-	// system_slug + source + content); each template prompt also gets a
-	// synthesized 1-step team blueprint (same system_slug, step → that prompt);
-	// then each template handler becomes a team handler copy, a trigger's
-	// template prompt remapped to the team's blueprint copy and its enabled
-	// state preserved verbatim. Idempotent on (org_id, team_id, system_slug)
-	// so a bootstrap re-run no-ops. Admin pool; must run OUTSIDE WithTx.
+	// prompts + blueprints (+ blueprint_steps) + event_handlers (and
+	// system_prompt_versions for system rows), reproducing what SeedTeamDefaults
+	// would have written from the shipped lists — only the source rows differ.
+	// Three-phase: each template prompt becomes a team prompt copy (new random
+	// UUID, same system_slug + source + content); each template blueprint is
+	// deep-copied into a team blueprint (same system_slug + source + name) with
+	// its steps re-pointed at the team's prompt copies; then each template
+	// handler becomes a team handler copy, a trigger's template blueprint
+	// remapped to the team's blueprint copy and its enabled state preserved
+	// verbatim. Idempotent on (org_id, team_id, system_slug) so a bootstrap
+	// re-run no-ops. Admin pool; must run OUTSIDE WithTx.
 	MaterializeIntoTeam(ctx context.Context, orgID, teamID string) error
 
 	// --- template prompts CRUD (app pool, org-admin RLS) ---
@@ -84,11 +87,37 @@ type OrgTemplateStore interface {
 	CreatePrompt(ctx context.Context, orgID string, p domain.Prompt) error
 	// UpdatePrompt edits a template prompt's name + body + model.
 	UpdatePrompt(ctx context.Context, orgID, id, name, body, model string) error
-	// DeletePrompt hard-deletes a template prompt; its template triggers
-	// cascade (FK). Unlike the team prompts table there is no boot re-seed to
-	// resurrect a deleted shipped row, so removing a shipped default from the
-	// template is a real delete (that's the "a shipped trigger removed" lever).
+	// DeletePrompt hard-deletes a template prompt. A prompt used as a step in a
+	// template blueprint can't be deleted out from under it (RESTRICT, mirroring
+	// the team prompts→blueprint_steps guard). Unlike the team prompts table
+	// there is no boot re-seed to resurrect a deleted shipped row, so removing a
+	// shipped default from the template is a real delete.
 	DeletePrompt(ctx context.Context, orgID, id string) error
+
+	// --- template blueprints CRUD (app pool, org-admin RLS) ---
+
+	// ListBlueprints returns the org's template blueprints ordered by
+	// updated_at DESC (the editor's blueprint list / the canvas node set).
+	ListBlueprints(ctx context.Context, orgID string) ([]domain.Blueprint, error)
+	// GetBlueprint returns one template blueprint by id, or (nil, nil) if absent.
+	GetBlueprint(ctx context.Context, orgID, id string) (*domain.Blueprint, error)
+	// CreateBlueprint inserts an admin-authored template blueprint header. The
+	// caller supplies ID + SystemSlug (a generated tmpl-<uuid>) and sets Source.
+	// Steps are written separately via ReplaceBlueprintSteps.
+	CreateBlueprint(ctx context.Context, orgID string, b domain.Blueprint) error
+	// UpdateBlueprint renames a template blueprint header.
+	UpdateBlueprint(ctx context.Context, orgID, id, name string) error
+	// DeleteBlueprint hard-deletes a template blueprint; its steps and any
+	// template triggers referencing it cascade (FK). Like template prompts there
+	// is no boot re-seed to resurrect a deleted shipped row.
+	DeleteBlueprint(ctx context.Context, orgID, id string) error
+	// ListBlueprintSteps returns the ordered step list for a template blueprint.
+	ListBlueprintSteps(ctx context.Context, orgID, blueprintID string) ([]domain.BlueprintStep, error)
+	// ReplaceBlueprintSteps replaces the entire step list for a template
+	// blueprint in one transaction. step_index is densely packed 0..N-1; briefs
+	// are positional and may be empty. Each step_prompt_id must reference a
+	// template prompt in the same org (same-org composite FK).
+	ReplaceBlueprintSteps(ctx context.Context, orgID, blueprintID string, stepPromptIDs, briefs []string) error
 
 	// --- template handlers CRUD (app pool, org-admin RLS) ---
 
@@ -99,12 +128,12 @@ type OrgTemplateStore interface {
 	// GetHandler returns one template handler by id, or (nil, nil) if absent.
 	GetHandler(ctx context.Context, orgID, id string) (*domain.EventHandler, error)
 	// CreateHandler inserts an admin-authored template handler. The caller
-	// supplies ID + SystemSlug (a generated tmpl-<uuid>); a trigger's PromptID
-	// must reference a template prompt in the same org.
+	// supplies ID + SystemSlug (a generated tmpl-<uuid>); a trigger's BlueprintID
+	// must reference a template blueprint in the same org.
 	CreateHandler(ctx context.Context, orgID string, h domain.EventHandler) error
 	// UpdateHandler edits a template handler's mutable fields (predicate +
 	// enabled + the per-kind fields). kind, event_type, and a trigger's
-	// prompt_id are immutable. The UPDATE pins the row's kind in its WHERE, so
+	// blueprint_id are immutable. The UPDATE pins the row's kind in its WHERE, so
 	// it returns matched=false (rather than silently no-op'ing) when the row
 	// was deleted or promoted (rule→trigger) since the caller read it — the
 	// handler maps that to 404/409 instead of a misleading 200. Correct under

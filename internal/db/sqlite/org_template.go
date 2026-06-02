@@ -37,14 +37,19 @@ const orgTemplatePromptColumns = `id, name, body, source, allowed_tools, model, 
 
 const orgTemplateHandlerColumns = `id, kind, event_type, scope_predicate_json, enabled, source, system_slug,
 	name, default_priority, sort_order,
-	prompt_id, breaker_threshold, min_autonomy_suitability,
+	blueprint_id, breaker_threshold, min_autonomy_suitability,
 	created_at, updated_at`
+
+const orgTemplateBlueprintColumns = `id, name, source, system_slug, created_at, updated_at`
 
 // --- SeedFromShipped ------------------------------------------------
 
-func (s *orgTemplateStore) SeedFromShipped(ctx context.Context, orgID string, shippedPrompts []domain.Prompt) error {
+func (s *orgTemplateStore) SeedFromShipped(ctx context.Context, orgID string, shippedPrompts []domain.Prompt, shippedBlueprints []domain.SeedBlueprint) error {
 	now := time.Now().UTC()
 	return inTx(ctx, s.q, func(q queryer) error {
+		// Phase 1: prompts. INSERT OR IGNORE preserves admin edits across re-runs;
+		// the follow-up SELECT resolves the (existing or fresh) id for the step +
+		// trigger wiring.
 		promptIDsBySlug := make(map[string]string, len(shippedPrompts))
 		for _, p := range shippedPrompts {
 			if p.SystemSlug == "" {
@@ -65,6 +70,53 @@ func (s *orgTemplateStore) SeedFromShipped(ctx context.Context, orgID string, sh
 			promptIDsBySlug[p.SystemSlug] = id
 		}
 
+		// Phase 2: blueprints + steps. Each shipped blueprint becomes a template
+		// blueprint (source='system'); its steps re-point at the phase-1 prompts.
+		// Steps are written only when the blueprint is freshly inserted so a
+		// re-seed never clobbers an admin's edited step list.
+		blueprintIDsBySlug := make(map[string]string, len(shippedBlueprints))
+		for _, b := range shippedBlueprints {
+			if b.SystemSlug == "" {
+				return fmt.Errorf("org_template seed: shipped blueprint %q has empty system_slug", b.Name)
+			}
+			res, err := q.ExecContext(ctx, `
+				INSERT OR IGNORE INTO org_template_blueprints (id, org_id, system_slug, name, source, created_at, updated_at)
+				VALUES (?, ?, ?, ?, 'system', ?, ?)
+			`, uuid.New().String(), orgID, b.SystemSlug, b.Name, now, now)
+			if err != nil {
+				return fmt.Errorf("seed org_template blueprint %s: %w", b.SystemSlug, err)
+			}
+			var bpID string
+			if err := q.QueryRowContext(ctx,
+				`SELECT id FROM org_template_blueprints WHERE org_id = ? AND system_slug = ?`, orgID, b.SystemSlug,
+			).Scan(&bpID); err != nil {
+				return fmt.Errorf("resolve org_template blueprint %s: %w", b.SystemSlug, err)
+			}
+			blueprintIDsBySlug[b.SystemSlug] = bpID
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n == 0 {
+				continue // already existed — leave its steps untouched
+			}
+			for i, slug := range b.StepPromptSlugs {
+				promptID, ok := promptIDsBySlug[slug]
+				if !ok || promptID == "" {
+					return fmt.Errorf("seed org_template blueprint %s: step prompt slug %q not found (seed prompts before blueprints)", b.SystemSlug, slug)
+				}
+				if _, err := q.ExecContext(ctx, `
+					INSERT INTO org_template_blueprint_steps (org_id, blueprint_id, step_index, step_prompt_id, brief, created_at)
+					VALUES (?, ?, ?, ?, '', ?)
+				`, orgID, bpID, i, promptID, now); err != nil {
+					return fmt.Errorf("seed org_template blueprint %s step %d: %w", b.SystemSlug, i, err)
+				}
+			}
+		}
+
+		// Phase 3: handlers. Rules seed enabled, triggers disabled (shipped
+		// convention); a trigger's blueprint slug resolves to the phase-2
+		// template blueprint id.
 		for _, h := range db.ShippedEventHandlers {
 			var pred any
 			if h.Predicate != "" {
@@ -81,16 +133,16 @@ func (s *orgTemplateStore) SeedFromShipped(ctx context.Context, orgID string, sh
 					return fmt.Errorf("seed org_template rule %s: %w", h.ID, err)
 				}
 			case domain.EventHandlerKindTrigger:
-				promptID, ok := promptIDsBySlug[h.BlueprintID]
-				if !ok || promptID == "" {
-					return fmt.Errorf("seed org_template trigger %s: prompt slug %q not found (seed prompts before handlers)", h.ID, h.BlueprintID)
+				blueprintID, ok := blueprintIDsBySlug[h.BlueprintID]
+				if !ok || blueprintID == "" {
+					return fmt.Errorf("seed org_template trigger %s: blueprint slug %q not found (seed blueprints before handlers)", h.ID, h.BlueprintID)
 				}
 				if _, err := q.ExecContext(ctx, `
 					INSERT OR IGNORE INTO org_template_handlers
 						(id, org_id, system_slug, kind, event_type, scope_predicate_json, enabled, source,
-						 prompt_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
+						 blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
 					VALUES (?, ?, ?, 'trigger', ?, ?, 0, 'system', ?, ?, ?, ?, ?)
-				`, uuid.New().String(), orgID, h.ID, h.EventType, pred, promptID, h.BreakerThreshold, h.MinAutonomySuitability, now, now); err != nil {
+				`, uuid.New().String(), orgID, h.ID, h.EventType, pred, blueprintID, h.BreakerThreshold, h.MinAutonomySuitability, now, now); err != nil {
 					return fmt.Errorf("seed org_template trigger %s: %w", h.ID, err)
 				}
 			default:
@@ -169,50 +221,109 @@ func (s *orgTemplateStore) MaterializeIntoTeam(ctx context.Context, orgID, teamI
 			}
 		}
 
-		// Phase 2: synthesize a 1-step team blueprint per template prompt
-		// (slug == prompt slug, step → that prompt). Triggers fire blueprints,
-		// so the team needs a blueprint copy for every prompt a template
-		// trigger references. Idempotent: probe by (org, team, slug) first.
-		teamBlueprintIDByTemplatePromptID := make(map[string]string, len(tprompts))
-		for _, p := range tprompts {
-			teamPromptID := teamPromptIDByTemplateID[p.id]
+		// Phase 2: deep-copy template blueprints (+ their steps) into the team's
+		// blueprints / blueprint_steps. Buffer the template rows first (SQLite is
+		// single-connection: an open cursor can't coexist with the INSERTs below).
+		type tmplBlueprint struct {
+			id, slug, name, source string
+		}
+		brows, err := q.QueryContext(ctx, `
+			SELECT id, system_slug, name, source FROM org_template_blueprints WHERE org_id = ?
+		`, orgID)
+		if err != nil {
+			return fmt.Errorf("org_template materialize: list blueprints: %w", err)
+		}
+		var tblueprints []tmplBlueprint
+		for brows.Next() {
+			var b tmplBlueprint
+			if err := brows.Scan(&b.id, &b.slug, &b.name, &b.source); err != nil {
+				_ = brows.Close()
+				return fmt.Errorf("org_template materialize: scan blueprint: %w", err)
+			}
+			tblueprints = append(tblueprints, b)
+		}
+		if err := brows.Err(); err != nil {
+			_ = brows.Close()
+			return err
+		}
+		_ = brows.Close()
+
+		// Buffer template steps keyed by template blueprint id, in step order.
+		type tmplStep struct {
+			stepPromptID, brief string
+		}
+		srows, err := q.QueryContext(ctx, `
+			SELECT blueprint_id, step_prompt_id, brief
+			FROM org_template_blueprint_steps WHERE org_id = ?
+			ORDER BY blueprint_id, step_index ASC
+		`, orgID)
+		if err != nil {
+			return fmt.Errorf("org_template materialize: list blueprint steps: %w", err)
+		}
+		stepsByBlueprint := make(map[string][]tmplStep)
+		for srows.Next() {
+			var bid string
+			var st tmplStep
+			if err := srows.Scan(&bid, &st.stepPromptID, &st.brief); err != nil {
+				_ = srows.Close()
+				return fmt.Errorf("org_template materialize: scan blueprint step: %w", err)
+			}
+			stepsByBlueprint[bid] = append(stepsByBlueprint[bid], st)
+		}
+		if err := srows.Err(); err != nil {
+			_ = srows.Close()
+			return err
+		}
+		_ = srows.Close()
+
+		// Probe by (org, team, slug) first; an existing team blueprint keeps its
+		// steps untouched (idempotent re-run). A fresh copy gets the full step
+		// list re-pointed at the team's prompt copies.
+		teamBlueprintIDByTemplateID := make(map[string]string, len(tblueprints))
+		for _, b := range tblueprints {
 			var existing string
 			err := q.QueryRowContext(ctx,
-				`SELECT id FROM blueprints WHERE org_id = ? AND team_id = ? AND system_slug = ?`, orgID, teamID, p.slug,
+				`SELECT id FROM blueprints WHERE org_id = ? AND team_id = ? AND system_slug = ?`, orgID, teamID, b.slug,
 			).Scan(&existing)
-			if err != nil && !errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("org_template materialize: probe team blueprint %s: %w", p.slug, err)
+			if err == nil {
+				teamBlueprintIDByTemplateID[b.id] = existing
+				continue
 			}
-			if errors.Is(err, sql.ErrNoRows) {
-				var creator any
-				if p.source != "system" {
-					creator = runmode.LocalDefaultUserID
-				}
-				existing = uuid.New().String()
-				if _, err := q.ExecContext(ctx, `
-					INSERT INTO blueprints (id, org_id, team_id, system_slug, creator_user_id, name, source, usage_count, user_modified, created_at, updated_at)
-					VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
-				`, existing, orgID, teamID, p.slug, creator, p.name, p.source, now, now); err != nil {
-					return fmt.Errorf("org_template materialize: insert blueprint %s: %w", p.slug, err)
+			if !errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("org_template materialize: probe team blueprint %s: %w", b.slug, err)
+			}
+			var creator any
+			if b.source != "system" {
+				creator = runmode.LocalDefaultUserID
+			}
+			newID := uuid.New().String()
+			if _, err := q.ExecContext(ctx, `
+				INSERT INTO blueprints (id, org_id, team_id, system_slug, creator_user_id, name, source, usage_count, user_modified, created_at, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+			`, newID, orgID, teamID, b.slug, creator, b.name, b.source, now, now); err != nil {
+				return fmt.Errorf("org_template materialize: insert blueprint %s: %w", b.slug, err)
+			}
+			for i, st := range stepsByBlueprint[b.id] {
+				teamPromptID, ok := teamPromptIDByTemplateID[st.stepPromptID]
+				if !ok || teamPromptID == "" {
+					return fmt.Errorf("org_template materialize: blueprint %s step %d references a template prompt with no team copy", b.slug, i)
 				}
 				if _, err := q.ExecContext(ctx, `
 					INSERT INTO blueprint_steps (blueprint_id, step_index, step_prompt_id, team_id, brief, created_at)
-					VALUES (?, 0, ?, ?, '', ?)
-				`, existing, teamPromptID, teamID, now); err != nil {
-					return fmt.Errorf("org_template materialize: insert blueprint step %s: %w", p.slug, err)
+					VALUES (?, ?, ?, ?, ?, ?)
+				`, newID, i, teamPromptID, teamID, st.brief, now); err != nil {
+					return fmt.Errorf("org_template materialize: insert blueprint step %s/%d: %w", b.slug, i, err)
 				}
 			}
-			teamBlueprintIDByTemplatePromptID[p.id] = existing
+			teamBlueprintIDByTemplateID[b.id] = newID
 		}
 
 		// Phase 3: handlers. INSERT OR IGNORE for idempotency; re-point a
-		// trigger's template prompt to the team's synthesized blueprint copy
-		// (template handlers carry a prompt_id; the materialized team trigger
-		// carries the corresponding blueprint_id) and preserve enabled +
-		// source verbatim.
+		// trigger's template blueprint to the team's blueprint copy and preserve
+		// enabled + source verbatim.
 		hrows, err := q.QueryContext(ctx, `
 			SELECT system_slug, kind, event_type, scope_predicate_json, enabled, source,
-			       name, default_priority, sort_order, prompt_id, breaker_threshold, min_autonomy_suitability
+			       name, default_priority, sort_order, blueprint_id, breaker_threshold, min_autonomy_suitability
 			FROM org_template_handlers WHERE org_id = ?
 		`, orgID)
 		if err != nil {
@@ -220,7 +331,7 @@ func (s *orgTemplateStore) MaterializeIntoTeam(ctx context.Context, orgID, teamI
 		}
 		type tmplHandler struct {
 			slug, kind, eventType, source string
-			pred, name, promptID          sql.NullString
+			pred, name, blueprintID       sql.NullString
 			enabled                       bool
 			defPriority, minAutonomy      sql.NullFloat64
 			sortOrder, breaker            sql.NullInt64
@@ -229,7 +340,7 @@ func (s *orgTemplateStore) MaterializeIntoTeam(ctx context.Context, orgID, teamI
 		for hrows.Next() {
 			var h tmplHandler
 			if err := hrows.Scan(&h.slug, &h.kind, &h.eventType, &h.pred, &h.enabled, &h.source,
-				&h.name, &h.defPriority, &h.sortOrder, &h.promptID, &h.breaker, &h.minAutonomy); err != nil {
+				&h.name, &h.defPriority, &h.sortOrder, &h.blueprintID, &h.breaker, &h.minAutonomy); err != nil {
 				_ = hrows.Close()
 				return fmt.Errorf("org_template materialize: scan handler: %w", err)
 			}
@@ -263,9 +374,9 @@ func (s *orgTemplateStore) MaterializeIntoTeam(ctx context.Context, orgID, teamI
 					return fmt.Errorf("org_template materialize: insert rule %s: %w", h.slug, err)
 				}
 			case domain.EventHandlerKindTrigger:
-				teamBlueprintID, ok := teamBlueprintIDByTemplatePromptID[h.promptID.String]
+				teamBlueprintID, ok := teamBlueprintIDByTemplateID[h.blueprintID.String]
 				if !ok || teamBlueprintID == "" {
-					return fmt.Errorf("org_template materialize: trigger %s references template prompt %q with no team blueprint copy", h.slug, h.promptID.String)
+					return fmt.Errorf("org_template materialize: trigger %s references template blueprint %q with no team copy", h.slug, h.blueprintID.String)
 				}
 				if _, err := q.ExecContext(ctx, `
 					INSERT OR IGNORE INTO event_handlers
@@ -361,6 +472,132 @@ func scanOrgTemplatePrompt(scanFn func(dst ...any) error) (domain.Prompt, error)
 	return p, nil
 }
 
+// --- blueprints CRUD ------------------------------------------------
+
+func (s *orgTemplateStore) ListBlueprints(ctx context.Context, orgID string) ([]domain.Blueprint, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+orgTemplateBlueprintColumns+`
+		FROM org_template_blueprints WHERE org_id = ? ORDER BY updated_at DESC
+	`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Blueprint
+	for rows.Next() {
+		b, err := scanOrgTemplateBlueprint(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+func (s *orgTemplateStore) GetBlueprint(ctx context.Context, orgID, id string) (*domain.Blueprint, error) {
+	b, err := scanOrgTemplateBlueprint(s.q.QueryRowContext(ctx, `
+		SELECT `+orgTemplateBlueprintColumns+`
+		FROM org_template_blueprints WHERE org_id = ? AND id = ?
+	`, orgID, id).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+func (s *orgTemplateStore) CreateBlueprint(ctx context.Context, orgID string, b domain.Blueprint) error {
+	if b.SystemSlug == "" {
+		return errors.New("sqlite org_template CreateBlueprint: system_slug required")
+	}
+	source := b.Source
+	if source == "" {
+		source = "user"
+	}
+	now := time.Now().UTC()
+	_, err := s.q.ExecContext(ctx, `
+		INSERT INTO org_template_blueprints (id, org_id, system_slug, name, source, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, b.ID, orgID, b.SystemSlug, b.Name, source, now, now)
+	return err
+}
+
+func (s *orgTemplateStore) UpdateBlueprint(ctx context.Context, orgID, id, name string) error {
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE org_template_blueprints SET name = ?, updated_at = ?
+		WHERE org_id = ? AND id = ?
+	`, name, time.Now().UTC(), orgID, id)
+	return err
+}
+
+func (s *orgTemplateStore) DeleteBlueprint(ctx context.Context, orgID, id string) error {
+	_, err := s.q.ExecContext(ctx, `DELETE FROM org_template_blueprints WHERE org_id = ? AND id = ?`, orgID, id)
+	return err
+}
+
+func (s *orgTemplateStore) ListBlueprintSteps(ctx context.Context, orgID, blueprintID string) ([]domain.BlueprintStep, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT blueprint_id, step_index, step_prompt_id, brief, created_at
+		FROM org_template_blueprint_steps
+		WHERE org_id = ? AND blueprint_id = ?
+		ORDER BY step_index ASC
+	`, orgID, blueprintID)
+	if err != nil {
+		return nil, fmt.Errorf("query org_template blueprint steps: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.BlueprintStep
+	for rows.Next() {
+		var st domain.BlueprintStep
+		if err := rows.Scan(&st.BlueprintID, &st.StepIndex, &st.StepPromptID, &st.Brief, &st.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, st)
+	}
+	return out, rows.Err()
+}
+
+func (s *orgTemplateStore) ReplaceBlueprintSteps(ctx context.Context, orgID, blueprintID string, stepPromptIDs, briefs []string) error {
+	if len(briefs) != 0 && len(briefs) != len(stepPromptIDs) {
+		return fmt.Errorf("briefs length %d must match stepPromptIDs length %d", len(briefs), len(stepPromptIDs))
+	}
+	return inTx(ctx, s.q, func(q queryer) error {
+		if _, err := q.ExecContext(ctx,
+			`DELETE FROM org_template_blueprint_steps WHERE org_id = ? AND blueprint_id = ?`,
+			orgID, blueprintID); err != nil {
+			return fmt.Errorf("clear existing template steps: %w", err)
+		}
+		now := time.Now().UTC()
+		for i, stepID := range stepPromptIDs {
+			brief := ""
+			if i < len(briefs) {
+				brief = briefs[i]
+			}
+			if _, err := q.ExecContext(ctx, `
+				INSERT INTO org_template_blueprint_steps (org_id, blueprint_id, step_index, step_prompt_id, brief, created_at)
+				VALUES (?, ?, ?, ?, ?, ?)
+			`, orgID, blueprintID, i, stepID, brief, now); err != nil {
+				return fmt.Errorf("insert template step %d: %w", i, err)
+			}
+		}
+		return nil
+	})
+}
+
+func scanOrgTemplateBlueprint(scanFn func(dst ...any) error) (domain.Blueprint, error) {
+	var b domain.Blueprint
+	var slug sql.NullString
+	if err := scanFn(&b.ID, &b.Name, &b.Source, &slug, &b.CreatedAt, &b.UpdatedAt); err != nil {
+		return b, err
+	}
+	if slug.Valid {
+		b.SystemSlug = slug.String
+	}
+	return b, nil
+}
+
 // --- handlers CRUD --------------------------------------------------
 
 func (s *orgTemplateStore) ListHandlers(ctx context.Context, orgID, kind string) ([]domain.EventHandler, error) {
@@ -429,7 +666,7 @@ func (s *orgTemplateStore) CreateHandler(ctx context.Context, orgID string, h do
 		_, err := s.q.ExecContext(ctx, `
 			INSERT INTO org_template_handlers
 				(id, org_id, system_slug, kind, event_type, scope_predicate_json, enabled, source,
-				 prompt_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
+				 blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
 			VALUES (?, ?, ?, 'trigger', ?, ?, ?, 'user', ?, ?, ?, ?, ?)
 		`, h.ID, orgID, h.SystemSlug, h.EventType, pred, h.Enabled, h.BlueprintID, derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability), now, now)
 		return err
@@ -503,7 +740,7 @@ func (s *orgTemplateStore) PromoteHandler(ctx context.Context, orgID, id string,
 	}
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE org_template_handlers
-		SET kind = 'trigger', prompt_id = ?, breaker_threshold = ?, min_autonomy_suitability = ?,
+		SET kind = 'trigger', blueprint_id = ?, breaker_threshold = ?, min_autonomy_suitability = ?,
 		    name = NULL, default_priority = NULL, sort_order = NULL, scope_predicate_json = ?, updated_at = ?
 		WHERE org_id = ? AND id = ? AND kind = 'rule'
 	`, t.BlueprintID, *t.BreakerThreshold, *t.MinAutonomySuitability, pred, time.Now().UTC(), orgID, id)
@@ -543,14 +780,14 @@ func scanOrgTemplateHandler(scanFn func(dst ...any) error) (domain.EventHandler,
 		nameNS        sql.NullString
 		defPriority   sql.NullFloat64
 		sortOrder     sql.NullInt64
-		promptID      sql.NullString
+		blueprintID   sql.NullString
 		breakerNS     sql.NullInt64
 		minAutonomyNS sql.NullFloat64
 	)
 	if err := scanFn(
 		&h.ID, &h.Kind, &h.EventType, &pred, &h.Enabled, &h.Source, &slug,
 		&nameNS, &defPriority, &sortOrder,
-		&promptID, &breakerNS, &minAutonomyNS,
+		&blueprintID, &breakerNS, &minAutonomyNS,
 		&h.CreatedAt, &h.UpdatedAt,
 	); err != nil {
 		return h, err
@@ -573,8 +810,8 @@ func scanOrgTemplateHandler(scanFn func(dst ...any) error) (domain.EventHandler,
 		v := int(sortOrder.Int64)
 		h.SortOrder = &v
 	}
-	if promptID.Valid {
-		h.BlueprintID = promptID.String
+	if blueprintID.Valid {
+		h.BlueprintID = blueprintID.String
 	}
 	if breakerNS.Valid {
 		v := int(breakerNS.Int64)

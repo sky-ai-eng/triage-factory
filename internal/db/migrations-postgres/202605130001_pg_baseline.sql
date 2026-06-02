@@ -5594,6 +5594,31 @@ CREATE TABLE public.org_template_prompts (
     CONSTRAINT org_template_prompts_source_check CHECK ((source = ANY (ARRAY['system'::text, 'user'::text])))
 );
 
+-- Template blueprints + their ordered steps. Org-scoped (no team_id) like the
+-- other org_template_* tables — the template is the *source*; MaterializeIntoTeam
+-- deep-copies a blueprint (header + steps' prompts) into the team's blueprints /
+-- blueprint_steps. Mirrors blueprints / blueprint_steps minus the team scoping,
+-- with org_id as the composite-FK partner in place of the team-table's team_id.
+CREATE TABLE public.org_template_blueprints (
+    id text DEFAULT (gen_random_uuid())::text NOT NULL,
+    org_id uuid NOT NULL,
+    system_slug text NOT NULL,
+    name text NOT NULL,
+    source text DEFAULT 'user'::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT org_template_blueprints_source_check CHECK ((source = ANY (ARRAY['system'::text, 'user'::text])))
+);
+
+CREATE TABLE public.org_template_blueprint_steps (
+    org_id uuid NOT NULL,
+    blueprint_id text NOT NULL,
+    step_index integer NOT NULL,
+    step_prompt_id text NOT NULL,
+    brief text DEFAULT ''::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
 CREATE TABLE public.org_template_handlers (
     id text DEFAULT (gen_random_uuid())::text NOT NULL,
     org_id uuid NOT NULL,
@@ -5606,15 +5631,15 @@ CREATE TABLE public.org_template_handlers (
     name text,
     default_priority real,
     sort_order integer,
-    prompt_id text,
+    blueprint_id text,
     breaker_threshold integer,
     min_autonomy_suitability real,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT org_template_handlers_kind_check CHECK ((kind = ANY (ARRAY['rule'::text, 'trigger'::text]))),
     CONSTRAINT org_template_handlers_source_check CHECK ((source = ANY (ARRAY['system'::text, 'user'::text]))),
-    CONSTRAINT org_template_handlers_rule_shape CHECK (((kind <> 'rule'::text) OR ((prompt_id IS NULL) AND (breaker_threshold IS NULL) AND (min_autonomy_suitability IS NULL) AND (name IS NOT NULL) AND (default_priority IS NOT NULL) AND (sort_order IS NOT NULL)))),
-    CONSTRAINT org_template_handlers_trigger_shape CHECK (((kind <> 'trigger'::text) OR ((prompt_id IS NOT NULL) AND (breaker_threshold IS NOT NULL) AND (min_autonomy_suitability IS NOT NULL) AND (default_priority IS NULL) AND (sort_order IS NULL) AND (name IS NULL))))
+    CONSTRAINT org_template_handlers_rule_shape CHECK (((kind <> 'rule'::text) OR ((blueprint_id IS NULL) AND (breaker_threshold IS NULL) AND (min_autonomy_suitability IS NULL) AND (name IS NOT NULL) AND (default_priority IS NOT NULL) AND (sort_order IS NOT NULL)))),
+    CONSTRAINT org_template_handlers_trigger_shape CHECK (((kind <> 'trigger'::text) OR ((blueprint_id IS NOT NULL) AND (breaker_threshold IS NOT NULL) AND (min_autonomy_suitability IS NOT NULL) AND (default_priority IS NULL) AND (sort_order IS NULL) AND (name IS NULL))))
 );
 
 ALTER TABLE ONLY public.org_template_prompts
@@ -5624,27 +5649,61 @@ ALTER TABLE ONLY public.org_template_prompts
 ALTER TABLE ONLY public.org_template_prompts
     ADD CONSTRAINT org_template_prompts_org_slug_key UNIQUE (org_id, system_slug);
 
+ALTER TABLE ONLY public.org_template_blueprints
+    ADD CONSTRAINT org_template_blueprints_pkey PRIMARY KEY (org_id, id);
+ALTER TABLE ONLY public.org_template_blueprints
+    ADD CONSTRAINT org_template_blueprints_id_org_id_key UNIQUE (id, org_id);
+ALTER TABLE ONLY public.org_template_blueprints
+    ADD CONSTRAINT org_template_blueprints_org_slug_key UNIQUE (org_id, system_slug);
+
+ALTER TABLE ONLY public.org_template_blueprint_steps
+    ADD CONSTRAINT org_template_blueprint_steps_pkey PRIMARY KEY (org_id, blueprint_id, step_index);
+
 ALTER TABLE ONLY public.org_template_handlers
     ADD CONSTRAINT org_template_handlers_pkey PRIMARY KEY (org_id, id);
 ALTER TABLE ONLY public.org_template_handlers
     ADD CONSTRAINT org_template_handlers_org_slug_key UNIQUE (org_id, system_slug);
 
 CREATE INDEX idx_org_template_handlers_kind ON public.org_template_handlers USING btree (org_id, kind);
+CREATE INDEX idx_org_template_blueprint_steps_step_prompt ON public.org_template_blueprint_steps USING btree (step_prompt_id, org_id);
 
 ALTER TABLE ONLY public.org_template_prompts
     ADD CONSTRAINT org_template_prompts_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.org_template_blueprints
+    ADD CONSTRAINT org_template_blueprints_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+-- A template blueprint steps through template prompts in the same org; deleting
+-- a template blueprint drops its steps (CASCADE), and a template prompt can't be
+-- removed while a step references it (RESTRICT) — mirrors blueprint_steps.
+ALTER TABLE ONLY public.org_template_blueprint_steps
+    ADD CONSTRAINT org_template_blueprint_steps_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.org_template_blueprint_steps
+    ADD CONSTRAINT org_template_blueprint_steps_blueprint_fkey FOREIGN KEY (blueprint_id, org_id) REFERENCES public.org_template_blueprints(id, org_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.org_template_blueprint_steps
+    ADD CONSTRAINT org_template_blueprint_steps_step_prompt_fkey FOREIGN KEY (step_prompt_id, org_id) REFERENCES public.org_template_prompts(id, org_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.org_template_handlers
     ADD CONSTRAINT org_template_handlers_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.org_template_handlers
     ADD CONSTRAINT org_template_handlers_event_type_fkey FOREIGN KEY (event_type) REFERENCES public.events_catalog(id) ON DELETE RESTRICT;
--- A template trigger may only bind a template prompt in the same org; deleting
--- a template prompt cascades its triggers (mirrors the team-table CASCADE).
+-- A template trigger may only fire a template blueprint in the same org; deleting
+-- a template blueprint cascades its triggers (mirrors the team-table CASCADE).
 ALTER TABLE ONLY public.org_template_handlers
-    ADD CONSTRAINT org_template_handlers_prompt_id_org_id_fkey FOREIGN KEY (prompt_id, org_id) REFERENCES public.org_template_prompts(id, org_id) ON DELETE CASCADE;
+    ADD CONSTRAINT org_template_handlers_blueprint_id_org_id_fkey FOREIGN KEY (blueprint_id, org_id) REFERENCES public.org_template_blueprints(id, org_id) ON DELETE CASCADE;
 
 ALTER TABLE public.org_template_prompts ENABLE ROW LEVEL SECURITY;
 CREATE POLICY org_template_prompts_all ON public.org_template_prompts
+    USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)))
+    WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+
+ALTER TABLE public.org_template_blueprints ENABLE ROW LEVEL SECURITY;
+CREATE POLICY org_template_blueprints_all ON public.org_template_blueprints
+    USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)))
+    WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+
+ALTER TABLE public.org_template_blueprint_steps ENABLE ROW LEVEL SECURITY;
+CREATE POLICY org_template_blueprint_steps_all ON public.org_template_blueprint_steps
     USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)))
     WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
 
@@ -5658,6 +5717,18 @@ GRANT ALL ON TABLE public.org_template_prompts TO anon;
 GRANT ALL ON TABLE public.org_template_prompts TO authenticated;
 GRANT ALL ON TABLE public.org_template_prompts TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_template_prompts TO tf_app;
+
+GRANT ALL ON TABLE public.org_template_blueprints TO postgres;
+GRANT ALL ON TABLE public.org_template_blueprints TO anon;
+GRANT ALL ON TABLE public.org_template_blueprints TO authenticated;
+GRANT ALL ON TABLE public.org_template_blueprints TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_template_blueprints TO tf_app;
+
+GRANT ALL ON TABLE public.org_template_blueprint_steps TO postgres;
+GRANT ALL ON TABLE public.org_template_blueprint_steps TO anon;
+GRANT ALL ON TABLE public.org_template_blueprint_steps TO authenticated;
+GRANT ALL ON TABLE public.org_template_blueprint_steps TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_template_blueprint_steps TO tf_app;
 
 GRANT ALL ON TABLE public.org_template_handlers TO postgres;
 GRANT ALL ON TABLE public.org_template_handlers TO anon;

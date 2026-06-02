@@ -213,6 +213,9 @@ export interface Prompt {
 export interface Blueprint {
   id: string
   name: string
+  // source is 'system' for shipped/template-seeded blueprints, 'user' for
+  // authored ones. Optional because not every Blueprint-shaped response sets it.
+  source?: string
   team_id?: string
   created_at: string
   updated_at: string

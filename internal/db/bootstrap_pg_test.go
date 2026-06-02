@@ -39,7 +39,7 @@ func TestBootstrapNewOrg_Postgres_TwoPool(t *testing.T) {
 	stores := pgstore.New(h.AdminDB, h.AppDB)
 
 	ctx := context.Background()
-	if err := db.BootstrapNewOrg(ctx, stores, orgID, teamID, ai.ShippedPrompts()); err != nil {
+	if err := db.BootstrapNewOrg(ctx, stores, orgID, teamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
 		t.Fatalf("BootstrapNewOrg on the two-pool store: %v", err)
 	}
 

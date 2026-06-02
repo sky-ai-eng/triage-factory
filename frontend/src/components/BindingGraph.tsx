@@ -294,9 +294,9 @@ function BindingGraphInner({
     // unfiltered, the solo/local case); template scope is org-scoped (no
     // team_id). event-types is a system registry — never scoped.
     const teamQuery = !template && teamId ? `team_id=${encodeURIComponent(teamId)}` : ''
-    // Triggers now bind to blueprints, so the canvas node set is the blueprint
-    // list (a 1-step blueprint is the former leaf prompt). Template scope reuses
-    // its prompt-template family (org template is leaf-only) — see blueprintsBase.
+    // Triggers bind to blueprints, so the canvas node set is the blueprint list
+    // (a 1-step blueprint is the former leaf prompt). Both scopes return Blueprint
+    // rows — team from /api/blueprints, template from /api/org-template/blueprints.
     const blueprintsURL = `${blueprintsBase(template)}${teamQuery ? `?${teamQuery}` : ''}`
     const triggersURL = `${handlersBase(template)}?kind=trigger${teamQuery ? `&${teamQuery}` : ''}`
     try {
@@ -306,20 +306,19 @@ function BindingGraphInner({
         fetch(triggersURL).then((r) => parseOrThrow(r, 'triggers')),
       ])
       setEventTypes(etRes)
-      // Normalize blueprints into the prompt-node shape the canvas renders.
-      // Template scope returns full prompts already (leaf-only template family);
-      // team scope returns Blueprint rows that lack body / usage stats.
-      const nodeList: Prompt[] = template
-        ? (pRes as Prompt[])
-        : (pRes as Blueprint[]).map((b) => ({
-            id: b.id,
-            name: b.name,
-            body: '',
-            source: 'user',
-            usage_count: 0,
-            created_at: b.created_at,
-            updated_at: b.updated_at,
-          }))
+      // Normalize blueprints into the prompt-node shape the canvas renders. Both
+      // scopes return Blueprint rows (which lack body / usage stats); the node
+      // tile only needs id + name + source. Template blueprints carry source
+      // 'system' on shipped rows, so pass it through rather than forcing 'user'.
+      const nodeList: Prompt[] = (pRes as Blueprint[]).map((b) => ({
+        id: b.id,
+        name: b.name,
+        body: '',
+        source: b.source || 'user',
+        usage_count: 0,
+        created_at: b.created_at,
+        updated_at: b.updated_at,
+      }))
       setPrompts(nodeList)
       setTriggers(tRes)
 

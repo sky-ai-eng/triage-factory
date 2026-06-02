@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -14,10 +15,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// errTemplatePromptMissing signals (inside a WithTx closure) that a trigger's
-// referenced template prompt doesn't exist, so the handler can 404 instead of
+// errTemplateBlueprintMissing signals (inside a WithTx closure) that a trigger's
+// referenced template blueprint doesn't exist, so the handler can 404 instead of
 // surfacing the downstream FK error.
-var errTemplatePromptMissing = errors.New("template prompt not found")
+var errTemplateBlueprintMissing = errors.New("template blueprint not found")
 
 // /api/org-template/* — the org-admin editor over the org template that
 // new teams are seeded from (SKY-381). Full parity with the team-scoped
@@ -32,7 +33,14 @@ var errTemplatePromptMissing = errors.New("template prompt not found")
 //	POST   /api/org-template/prompts                     — create
 //	GET    /api/org-template/prompts/{id}                — get
 //	PUT    /api/org-template/prompts/{id}                — update
-//	DELETE /api/org-template/prompts/{id}                — delete (cascades triggers)
+//	DELETE /api/org-template/prompts/{id}                — delete (RESTRICT if a blueprint step)
+//	GET    /api/org-template/blueprints                  — list
+//	POST   /api/org-template/blueprints                  — create
+//	GET    /api/org-template/blueprints/{id}             — get
+//	PUT    /api/org-template/blueprints/{id}             — rename
+//	DELETE /api/org-template/blueprints/{id}             — delete (cascades steps + triggers)
+//	GET    /api/org-template/blueprints/{id}/steps       — list steps
+//	PUT    /api/org-template/blueprints/{id}/steps       — replace steps
 //	GET    /api/org-template/event-handlers[?kind=]      — list
 //	POST   /api/org-template/event-handlers              — create
 //	PATCH  /api/org-template/event-handlers/{id}         — partial update
@@ -230,6 +238,249 @@ func (s *Server) handleOrgTemplatePromptDelete(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
+// --- blueprints -----------------------------------------------------
+
+// orgTemplateBlueprintRequest is the create/rename body for a template
+// blueprint header. Steps are managed separately via the /steps endpoints.
+type orgTemplateBlueprintRequest struct {
+	Name string `json:"name"`
+}
+
+func (s *Server) handleOrgTemplateBlueprintsList(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := s.requireOrgTemplate(w, r)
+	if !ok {
+		return
+	}
+	var blueprints []domain.Blueprint
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		blueprints, e = tx.OrgTemplate.ListBlueprints(r.Context(), orgID)
+		return e
+	}); err != nil {
+		internalError(w, "org_template", err)
+		return
+	}
+	if blueprints == nil {
+		blueprints = []domain.Blueprint{}
+	}
+	writeJSON(w, http.StatusOK, blueprints)
+}
+
+func (s *Server) handleOrgTemplateBlueprintCreate(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := s.requireOrgTemplate(w, r)
+	if !ok {
+		return
+	}
+	var req orgTemplateBlueprintRequest
+	if !decodeJSON(w, r, &req, "") {
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		badRequest(w, "name is required")
+		return
+	}
+	b := domain.Blueprint{
+		ID:         uuid.New().String(),
+		SystemSlug: newTemplateSlug(),
+		Name:       strings.TrimSpace(req.Name),
+		Source:     "user",
+	}
+	var created *domain.Blueprint
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		if e := tx.OrgTemplate.CreateBlueprint(r.Context(), orgID, b); e != nil {
+			return e
+		}
+		var ge error
+		created, ge = tx.OrgTemplate.GetBlueprint(r.Context(), orgID, b.ID)
+		return ge
+	}); err != nil {
+		internalError(w, "org_template", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, created)
+}
+
+func (s *Server) handleOrgTemplateBlueprintGet(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := s.requireOrgTemplate(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	var bp *domain.Blueprint
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		bp, e = tx.OrgTemplate.GetBlueprint(r.Context(), orgID, id)
+		return e
+	}); err != nil {
+		internalError(w, "org_template", err)
+		return
+	}
+	if bp == nil {
+		notFound(w, "template blueprint")
+		return
+	}
+	writeJSON(w, http.StatusOK, bp)
+}
+
+func (s *Server) handleOrgTemplateBlueprintPut(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := s.requireOrgTemplate(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	var req orgTemplateBlueprintRequest
+	if !decodeJSON(w, r, &req, "") {
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		badRequest(w, "name is required")
+		return
+	}
+	var updated *domain.Blueprint
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		existing, e := tx.OrgTemplate.GetBlueprint(r.Context(), orgID, id)
+		if e != nil || existing == nil {
+			return e
+		}
+		if e := tx.OrgTemplate.UpdateBlueprint(r.Context(), orgID, id, strings.TrimSpace(req.Name)); e != nil {
+			return e
+		}
+		updated, e = tx.OrgTemplate.GetBlueprint(r.Context(), orgID, id)
+		return e
+	}); err != nil {
+		internalError(w, "org_template", err)
+		return
+	}
+	if updated == nil {
+		notFound(w, "template blueprint")
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *Server) handleOrgTemplateBlueprintDelete(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := s.requireOrgTemplate(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	var found bool
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		existing, e := tx.OrgTemplate.GetBlueprint(r.Context(), orgID, id)
+		if e != nil || existing == nil {
+			return e
+		}
+		found = true
+		// Hard delete — its steps and any template triggers referencing it
+		// cascade (FK). The team copies already made are untouched (forward-only).
+		return tx.OrgTemplate.DeleteBlueprint(r.Context(), orgID, id)
+	}); err != nil {
+		internalError(w, "org_template", err)
+		return
+	}
+	if !found {
+		notFound(w, "template blueprint")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (s *Server) handleOrgTemplateBlueprintStepsGet(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := s.requireOrgTemplate(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	var bp *domain.Blueprint
+	var steps []domain.BlueprintStep
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		bp, e = tx.OrgTemplate.GetBlueprint(r.Context(), orgID, id)
+		if e != nil || bp == nil {
+			return e
+		}
+		steps, e = tx.OrgTemplate.ListBlueprintSteps(r.Context(), orgID, id)
+		return e
+	}); err != nil {
+		internalError(w, "org_template", err)
+		return
+	}
+	if bp == nil {
+		notFound(w, "template blueprint")
+		return
+	}
+	if steps == nil {
+		steps = []domain.BlueprintStep{}
+	}
+	writeJSON(w, http.StatusOK, steps)
+}
+
+func (s *Server) handleOrgTemplateBlueprintStepsPut(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := s.requireOrgTemplate(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	var req blueprintStepsPutRequest
+	if !decodeJSON(w, r, &req, "") {
+		return
+	}
+	if len(req.Steps) > maxBlueprintSteps {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+			"error": "blueprint may not exceed " + strconv.Itoa(maxBlueprintSteps) + " steps",
+		})
+		return
+	}
+	stepIDs := make([]string, 0, len(req.Steps))
+	briefs := make([]string, 0, len(req.Steps))
+	for _, step := range req.Steps {
+		if step.StepPromptID == "" {
+			badRequest(w, "step_prompt_id is required for every step")
+			return
+		}
+		stepIDs = append(stepIDs, step.StepPromptID)
+		briefs = append(briefs, step.Brief)
+	}
+
+	var bpMissing bool
+	var validationErr string
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		bp, e := tx.OrgTemplate.GetBlueprint(r.Context(), orgID, id)
+		if e != nil {
+			return e
+		}
+		if bp == nil {
+			bpMissing = true
+			return nil
+		}
+		// Each step must reference a template prompt in the same org; the
+		// composite FK enforces it, but pre-check for a clean 422.
+		for i, sid := range stepIDs {
+			p, e := tx.OrgTemplate.GetPrompt(r.Context(), orgID, sid)
+			if e != nil {
+				return e
+			}
+			if p == nil {
+				validationErr = "step " + strconv.Itoa(i) + " references a non-existent template prompt"
+				return nil
+			}
+		}
+		return tx.OrgTemplate.ReplaceBlueprintSteps(r.Context(), orgID, id, stepIDs, briefs)
+	}); err != nil {
+		internalError(w, "org_template", err)
+		return
+	}
+	if bpMissing {
+		notFound(w, "template blueprint")
+		return
+	}
+	if validationErr != "" {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": validationErr})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // --- event handlers -------------------------------------------------
 
 func (s *Server) handleOrgTemplateHandlersList(w http.ResponseWriter, r *http.Request) {
@@ -352,15 +603,15 @@ func (s *Server) handleOrgTemplateHandlerCreate(w http.ResponseWriter, r *http.R
 
 	var fresh *domain.EventHandler
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		// A template trigger may only bind a template prompt in the same org.
-		// Pre-check for a clean 400 instead of the downstream FK error.
+		// A template trigger may only fire a template blueprint in the same org.
+		// Pre-check for a clean 404 instead of the downstream FK error.
 		if h.Kind == domain.EventHandlerKindTrigger {
-			p, e := tx.OrgTemplate.GetPrompt(r.Context(), orgID, h.BlueprintID)
+			b, e := tx.OrgTemplate.GetBlueprint(r.Context(), orgID, h.BlueprintID)
 			if e != nil {
 				return e
 			}
-			if p == nil {
-				return errTemplatePromptMissing
+			if b == nil {
+				return errTemplateBlueprintMissing
 			}
 		}
 		if e := tx.OrgTemplate.CreateHandler(r.Context(), orgID, h); e != nil {
@@ -370,8 +621,8 @@ func (s *Server) handleOrgTemplateHandlerCreate(w http.ResponseWriter, r *http.R
 		fresh, ge = tx.OrgTemplate.GetHandler(r.Context(), orgID, h.ID)
 		return ge
 	}); err != nil {
-		if err == errTemplatePromptMissing {
-			notFound(w, "template prompt")
+		if err == errTemplateBlueprintMissing {
+			notFound(w, "template blueprint")
 			return
 		}
 		internalError(w, "org_template", err)
@@ -584,7 +835,7 @@ func (s *Server) handleOrgTemplateHandlerPromote(w http.ResponseWriter, r *http.
 	}
 
 	var existing *domain.EventHandler
-	var prompt *domain.Prompt
+	var blueprint *domain.Blueprint
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		existing, e = tx.OrgTemplate.GetHandler(r.Context(), orgID, id)
@@ -594,7 +845,7 @@ func (s *Server) handleOrgTemplateHandlerPromote(w http.ResponseWriter, r *http.
 		if existing.Kind != domain.EventHandlerKindRule {
 			return nil
 		}
-		prompt, e = tx.OrgTemplate.GetPrompt(r.Context(), orgID, req.BlueprintID)
+		blueprint, e = tx.OrgTemplate.GetBlueprint(r.Context(), orgID, req.BlueprintID)
 		return e
 	}); err != nil {
 		internalError(w, "org_template", err)
@@ -608,8 +859,8 @@ func (s *Server) handleOrgTemplateHandlerPromote(w http.ResponseWriter, r *http.
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "only rules can be promoted"})
 		return
 	}
-	if prompt == nil {
-		notFound(w, "template prompt")
+	if blueprint == nil {
+		notFound(w, "template blueprint")
 		return
 	}
 

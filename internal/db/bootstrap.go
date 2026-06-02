@@ -199,11 +199,11 @@ func BootstrapNewTeam(ctx context.Context, stores Stores, orgID, teamID string) 
 // BootstrapNewOrg materializes the defaults for a brand-new org + its
 // default team (the multi-mode founder-signup path, SKY-378 / SKY-251 D7):
 // the org's single agents row, the org template (seeded from the shipped
-// lists), the founder's first team's prompts + handlers (copied *from the
-// template*, SKY-381), and the team's default-enabled bot membership.
-// shippedPrompts is passed in (rather than read from internal/ai) so
-// internal/db stays free of the ai dependency — main / server supply
-// ai.ShippedPrompts().
+// lists), the founder's first team's prompts + blueprints + handlers (copied
+// *from the template*, SKY-381), and the team's default-enabled bot membership.
+// shippedPrompts + shippedBlueprints are passed in (rather than read from
+// internal/ai) so internal/db stays free of the ai dependency — main / server
+// supply ai.ShippedPrompts() / ai.ShippedBlueprints().
 //
 // Order is load-bearing: agent → seed template → materialize first team →
 // team_agents. The org template is seeded from the shipped lists first
@@ -221,11 +221,11 @@ func BootstrapNewTeam(ctx context.Context, stores Stores, orgID, teamID string) 
 // error: a provisioned org with un-seeded defaults is usable (the user
 // is signed in with an org + team) and a later bootstrap re-run repairs
 // auto-delegation, whereas failing the signup callback strands the user.
-func BootstrapNewOrg(ctx context.Context, stores Stores, orgID, teamID string, shippedPrompts []domain.Prompt) error {
+func BootstrapNewOrg(ctx context.Context, stores Stores, orgID, teamID string, shippedPrompts []domain.Prompt, shippedBlueprints []domain.SeedBlueprint) error {
 	if _, err := BootstrapAgentForOrg(ctx, stores, orgID); err != nil {
 		return err
 	}
-	if err := stores.OrgTemplate.SeedFromShipped(ctx, orgID, shippedPrompts); err != nil {
+	if err := stores.OrgTemplate.SeedFromShipped(ctx, orgID, shippedPrompts, shippedBlueprints); err != nil {
 		return fmt.Errorf("bootstrap new org: seed template: %w", err)
 	}
 	if err := stores.OrgTemplate.MaterializeIntoTeam(ctx, orgID, teamID); err != nil {

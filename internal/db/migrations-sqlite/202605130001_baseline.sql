@@ -622,6 +622,46 @@ CREATE TABLE org_template_prompts (
 );
 CREATE UNIQUE INDEX org_template_prompts_id_org_unique ON org_template_prompts (id, org_id);
 
+-- Template blueprints: the org-level blueprint a new team's blueprints are
+-- copied from at team creation. Org-scoped (no team_id) like the other
+-- org_template_* tables — the template is the *source*; MaterializeIntoTeam
+-- deep-copies it (header + steps' prompts) into the team's blueprints /
+-- blueprint_steps. Mirrors blueprints minus the team scoping. system_slug is
+-- NOT NULL and stable (the real shipped slug for source='system' rows, a
+-- generated tmpl-<uuid> for admin-authored rows), so the per-team copy dedupes
+-- on (org_id, team_id, system_slug) like the shipped seed. A template trigger
+-- fires a template blueprint (org_template_handlers.blueprint_id below).
+CREATE TABLE org_template_blueprints (
+    id            TEXT PRIMARY KEY,
+    org_id        TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
+    system_slug   TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    source        TEXT NOT NULL DEFAULT 'user' CHECK (source IN ('system', 'user')),
+    created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT org_template_blueprints_org_slug_unique UNIQUE (org_id, system_slug)
+);
+CREATE UNIQUE INDEX org_template_blueprints_id_org_unique ON org_template_blueprints (id, org_id);
+
+-- Ordered step list for a template blueprint (length >= 1). Org-scoped; each
+-- step references a template prompt in the same org. Deleting a template
+-- blueprint drops its steps (CASCADE); a template prompt can't be deleted while
+-- a template blueprint steps through it (RESTRICT) — mirrors blueprint_steps'
+-- CASCADE/RESTRICT split, with org_id as the composite-FK partner in place of
+-- the team-table's team_id.
+CREATE TABLE org_template_blueprint_steps (
+    org_id          TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
+    blueprint_id    TEXT NOT NULL,
+    step_index      INTEGER NOT NULL,           -- 0-based; densely packed by ReplaceSteps
+    step_prompt_id  TEXT NOT NULL,
+    brief           TEXT NOT NULL DEFAULT '',
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (blueprint_id, step_index),
+    FOREIGN KEY (blueprint_id, org_id)   REFERENCES org_template_blueprints (id, org_id) ON DELETE CASCADE,
+    FOREIGN KEY (step_prompt_id, org_id) REFERENCES org_template_prompts (id, org_id) ON DELETE RESTRICT
+);
+CREATE INDEX idx_org_template_blueprint_steps_step_prompt ON org_template_blueprint_steps(step_prompt_id);
+
 CREATE TABLE org_template_handlers (
     id              TEXT PRIMARY KEY,
     org_id          TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
@@ -637,17 +677,17 @@ CREATE TABLE org_template_handlers (
     name             TEXT,
     default_priority REAL,
     sort_order       INTEGER,
-    prompt_id        TEXT,
+    blueprint_id     TEXT,
     breaker_threshold INTEGER,
     min_autonomy_suitability REAL,
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    -- A template trigger may only bind a template prompt in the same org;
-    -- deleting a template prompt cascades its triggers (mirrors the team-table
-    -- prompt→trigger CASCADE). NULL prompt_id (rules) skips the FK.
-    FOREIGN KEY (prompt_id, org_id) REFERENCES org_template_prompts (id, org_id) ON DELETE CASCADE,
+    -- A template trigger may only fire a template blueprint in the same org;
+    -- deleting a template blueprint cascades its triggers (mirrors the team-table
+    -- blueprint→trigger CASCADE). NULL blueprint_id (rules) skips the FK.
+    FOREIGN KEY (blueprint_id, org_id) REFERENCES org_template_blueprints (id, org_id) ON DELETE CASCADE,
     CHECK (kind <> 'rule' OR (
-        prompt_id IS NULL
+        blueprint_id IS NULL
         AND breaker_threshold IS NULL
         AND min_autonomy_suitability IS NULL
         AND name IS NOT NULL
@@ -655,7 +695,7 @@ CREATE TABLE org_template_handlers (
         AND sort_order IS NOT NULL
     )),
     CHECK (kind <> 'trigger' OR (
-        prompt_id IS NOT NULL
+        blueprint_id IS NOT NULL
         AND breaker_threshold IS NOT NULL
         AND min_autonomy_suitability IS NOT NULL
         AND default_priority IS NULL

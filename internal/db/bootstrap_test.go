@@ -146,7 +146,7 @@ func TestBootstrapNewTeam_SeedsPerTeamDefaults(t *testing.T) {
 	// Org-create seeds the agent + the org template + the founder's (sentinel)
 	// team. The 2nd team then copies the same template.
 	if err := db.BootstrapNewOrg(ctx, stores,
-		runmode.LocalDefaultOrg, db.LocalDefaultTeamID, ai.ShippedPrompts(),
+		runmode.LocalDefaultOrg, db.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints(),
 	); err != nil {
 		t.Fatalf("BootstrapNewOrg: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestBootstrapNewOrg_SeedsFullStack(t *testing.T) {
 	ctx := t.Context()
 
 	if err := db.BootstrapNewOrg(ctx, stores,
-		runmode.LocalDefaultOrg, db.LocalDefaultTeamID, ai.ShippedPrompts(),
+		runmode.LocalDefaultOrg, db.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints(),
 	); err != nil {
 		t.Fatalf("BootstrapNewOrg: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestOrgTemplate_ForwardOnly(t *testing.T) {
 
 	// Org-create: agent + template + founder's (sentinel) team materialized
 	// from the template-as-shipped.
-	if err := db.BootstrapNewOrg(ctx, stores, org, db.LocalDefaultTeamID, ai.ShippedPrompts()); err != nil {
+	if err := db.BootstrapNewOrg(ctx, stores, org, db.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
 		t.Fatalf("BootstrapNewOrg: %v", err)
 	}
 

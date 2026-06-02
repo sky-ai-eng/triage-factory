@@ -41,10 +41,10 @@ func TestOrgTemplate_Postgres_ForwardOnlyAndIsolation(t *testing.T) {
 	ctx := context.Background()
 
 	// Org-create seeds each org's template + founder team from the shipped lists.
-	if err := db.BootstrapNewOrg(ctx, stores, orgA, founderTeamA, ai.ShippedPrompts()); err != nil {
+	if err := db.BootstrapNewOrg(ctx, stores, orgA, founderTeamA, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
 		t.Fatalf("BootstrapNewOrg A: %v", err)
 	}
-	if err := db.BootstrapNewOrg(ctx, stores, orgB, founderTeamB, ai.ShippedPrompts()); err != nil {
+	if err := db.BootstrapNewOrg(ctx, stores, orgB, founderTeamB, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
 		t.Fatalf("BootstrapNewOrg B: %v", err)
 	}
 
@@ -113,5 +113,131 @@ func TestOrgTemplate_Postgres_ForwardOnlyAndIsolation(t *testing.T) {
 	}
 	if bTemplateCustom != 0 {
 		t.Errorf("org B's template has %d copies of org A's custom slug; want 0", bTemplateCustom)
+	}
+}
+
+// TestOrgTemplate_Postgres_MultiStepDeepCopy is the multi-step authoring
+// acceptance pin on the real two-pool Postgres store: an org admin authors a
+// multi-step template
+// blueprint (app pool, org-admin RLS), and a new team materialized from it
+// (admin pool) gets a deep-copied multi-step team blueprint with its steps
+// re-pointed at the team's prompt copies — plus a team trigger that fires the
+// team's blueprint copy (clean blueprint_id). Also pins that a non-admin member
+// can't write the new org_template_blueprints table (RLS).
+//
+// Skips when Docker is unavailable (pgtest harness).
+func TestOrgTemplate_Postgres_MultiStepDeepCopy(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	orgA, ownerA, founderTeamA := pgtest.SeedOrgWithUser(t, h, "orgA-deepcopy")
+	memberA := pgtest.SeedUser(t, h, "orgA-deepcopy-member")
+	pgtest.AddOrgMember(t, h, memberA, orgA, founderTeamA, "member", "member")
+
+	stores := pgstore.New(h.AdminDB, h.AppDB)
+	ctx := context.Background()
+
+	if err := db.BootstrapNewOrg(ctx, stores, orgA, founderTeamA, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+		t.Fatalf("BootstrapNewOrg: %v", err)
+	}
+
+	// A non-admin member's template-blueprint write is refused by RLS.
+	memberErr := h.WithUser(t, memberA, orgA, func(tx *sql.Tx) error {
+		return pgstore.NewForTx(tx).OrgTemplate.CreateBlueprint(ctx, orgA, domain.Blueprint{
+			ID: uuid.New().String(), SystemSlug: "tmpl-member-bp", Name: "Nope", Source: "user",
+		})
+	})
+	if memberErr == nil {
+		t.Error("non-admin member created an org_template_blueprints row; RLS should refuse it")
+	}
+
+	// The org admin authors two template prompts + a 2-step template blueprint,
+	// then promotes a rule to a trigger firing it — all on the app pool.
+	promptAID := uuid.New().String()
+	promptBID := uuid.New().String()
+	blueprintID := uuid.New().String()
+	var triggerSlug string
+	if err := h.WithUser(t, ownerA, orgA, func(tx *sql.Tx) error {
+		st := pgstore.NewForTx(tx).OrgTemplate
+		if e := st.CreatePrompt(ctx, orgA, domain.Prompt{ID: promptAID, SystemSlug: "tmpl-step-a", Name: "Step A", Body: "a", Source: "user"}); e != nil {
+			return e
+		}
+		if e := st.CreatePrompt(ctx, orgA, domain.Prompt{ID: promptBID, SystemSlug: "tmpl-step-b", Name: "Step B", Body: "b", Source: "user"}); e != nil {
+			return e
+		}
+		if e := st.CreateBlueprint(ctx, orgA, domain.Blueprint{ID: blueprintID, SystemSlug: "tmpl-multi", Name: "Two-step", Source: "user"}); e != nil {
+			return e
+		}
+		if e := st.ReplaceBlueprintSteps(ctx, orgA, blueprintID, []string{promptAID, promptBID}, []string{"do a", "do b"}); e != nil {
+			return e
+		}
+		rules, e := st.ListHandlers(ctx, orgA, domain.EventHandlerKindRule)
+		if e != nil || len(rules) == 0 {
+			t.Fatalf("ListHandlers(rule): err=%v n=%d", e, len(rules))
+		}
+		triggerSlug = rules[0].SystemSlug
+		bt := 3
+		minA := 0.0
+		return st.PromoteHandler(ctx, orgA, rules[0].ID, domain.EventHandler{
+			Kind: domain.EventHandlerKindTrigger, BlueprintID: blueprintID, BreakerThreshold: &bt, MinAutonomySuitability: &minA,
+		})
+	}); err != nil {
+		t.Fatalf("author multi-step template: %v", err)
+	}
+
+	// Materialize a new team from the edited template.
+	team2 := pgtest.SeedTeam(t, h, orgA, "team2-deepcopy")
+	if err := db.BootstrapNewTeam(ctx, stores, orgA, team2); err != nil {
+		t.Fatalf("BootstrapNewTeam: %v", err)
+	}
+
+	// The new team got a real multi-step blueprint copy (read via admin pool).
+	var teamBPID string
+	if err := h.AdminDB.QueryRowContext(ctx,
+		`SELECT id FROM blueprints WHERE org_id = $1 AND team_id = $2 AND system_slug = 'tmpl-multi'`, orgA, team2,
+	).Scan(&teamBPID); err != nil {
+		t.Fatalf("resolve team multi-step blueprint: %v", err)
+	}
+	var stepCount int
+	if err := h.AdminDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM blueprint_steps WHERE org_id = $1 AND blueprint_id = $2`, orgA, teamBPID,
+	).Scan(&stepCount); err != nil {
+		t.Fatalf("count team steps: %v", err)
+	}
+	if stepCount != 2 {
+		t.Fatalf("team multi-step blueprint has %d steps; want 2 (deep-copy, not a 1-step wrapper)", stepCount)
+	}
+
+	// Steps re-point at the team's own prompt copies, in order.
+	rows, err := h.AdminDB.QueryContext(ctx, `
+		SELECT bs.step_prompt_id, p.system_slug
+		FROM blueprint_steps bs JOIN prompts p ON p.id = bs.step_prompt_id AND p.org_id = bs.org_id
+		WHERE bs.org_id = $1 AND bs.blueprint_id = $2 ORDER BY bs.step_index`, orgA, teamBPID)
+	if err != nil {
+		t.Fatalf("read team steps: %v", err)
+	}
+	defer rows.Close()
+	var gotSlugs []string
+	for rows.Next() {
+		var pid, slug string
+		if err := rows.Scan(&pid, &slug); err != nil {
+			t.Fatalf("scan step: %v", err)
+		}
+		gotSlugs = append(gotSlugs, slug)
+	}
+	if len(gotSlugs) != 2 || gotSlugs[0] != "tmpl-step-a" || gotSlugs[1] != "tmpl-step-b" {
+		t.Errorf("team step prompt slugs = %v; want [tmpl-step-a tmpl-step-b]", gotSlugs)
+	}
+
+	// The materialized team trigger fires the team's blueprint copy.
+	var teamTriggerBP string
+	if err := h.AdminDB.QueryRowContext(ctx,
+		`SELECT blueprint_id FROM event_handlers WHERE org_id = $1 AND team_id = $2 AND system_slug = $3`,
+		orgA, team2, triggerSlug,
+	).Scan(&teamTriggerBP); err != nil {
+		t.Fatalf("read team trigger: %v", err)
+	}
+	if teamTriggerBP != teamBPID {
+		t.Errorf("team trigger blueprint_id=%q; want the team's multi-step blueprint copy %q", teamTriggerBP, teamBPID)
 	}
 }
