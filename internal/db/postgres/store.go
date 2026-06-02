@@ -186,6 +186,12 @@ func New(admin, app *sql.DB) db.Stores {
 		// enrichment). events_all RLS gates the app side; admin
 		// bypasses, org_id is bound everywhere as defense in depth.
 		Events: newEventStore(app, admin),
+		// EventQueue is admin-pool only (SKY-414): the ingestor and
+		// drain worker are system services with no JWT-claims context.
+		// The store self-manages the Enqueue transaction, so it holds
+		// the admin *sql.DB directly. event_queue_all RLS is
+		// defense-in-depth (admin bypasses it).
+		EventQueue: newEventQueueStore(admin),
 		// TaskMemory wires both pools: app for request-handler
 		// equivalents (review/PR submit, swipe-discard cleanup,
 		// factory + run-summary reads) and admin for the delegate
