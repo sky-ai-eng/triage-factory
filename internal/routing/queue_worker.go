@@ -65,14 +65,26 @@ func (r *Router) RunEventQueue(ctx context.Context, wake <-chan struct{}, scanIn
 	// 'pending' and replay — re-routing is idempotent w.r.t. task creation
 	// via the tasks dedup index.
 	//
-	// A reset row deliberately KEEPS its attempts count. A genuinely
-	// poisonous event that hard-crashes the process (OOM / SIGKILL, which
-	// bypass processQueuedEvent's recover) would otherwise replay forever;
-	// retaining attempts means it still parks as 'failed' after
-	// maxEventAttempts restarts instead of crash-looping. The tradeoff: an
-	// innocent event that happened to be in-flight during an unrelated
-	// crash spends one of its retries. Recovering a parked 'failed' row is
-	// a manual/admin affordance (a separate ticket), not automatic.
+	// A reset row deliberately KEEPS its attempts count — but this is cheap
+	// tail-risk insurance, not the main poison-pill guard. The realistic
+	// poison case, a deterministic panic in HandleEvent, is caught
+	// in-process by processQueuedEvent's recover and parked via attempts
+	// with no crash at all. A row only reaches boot recovery still
+	// 'processing' after a HARD death that bypasses recover (a deploy
+	// SIGKILL, a cgroup OOM driven by something else, VM loss) — and since
+	// the work done while a row is 'processing' is bounded (a few queries +
+	// small metadata; the heavy delegation runs in a detached goroutine
+	// after the row is marked done), that death is almost never caused by
+	// this particular event. So retaining attempts here mostly guards an
+	// asymmetric tail: IF some event ever did deterministically hard-crash
+	// the process, resetting attempts would crash-loop the service on every
+	// boot, whereas retaining parks the row after maxEventAttempts and
+	// keeps the service healthy. The cost — an innocent event caught by an
+	// unrelated crash spends one of its five retries, and would need ~5
+	// such crashes on the same row to be wrongly parked — is mild and
+	// unlikely. Recovering a parked 'failed' row is a manual/admin
+	// affordance (a separate ticket); it matters because the tracker's
+	// snapshot-diff is forward-only and may not re-emit a parked event.
 	if n, err := r.eventQueue.ResetProcessing(ctx); err != nil {
 		log.Printf("[router] event-queue boot recovery: reset processing rows: %v", err)
 	} else if n > 0 {
