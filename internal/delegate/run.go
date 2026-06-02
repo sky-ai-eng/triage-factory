@@ -241,7 +241,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	}
 
 	if outcome != nil && outcome.Result != nil {
-		s.processCompletion(ctx, orgID, runID, task, outcome.Result, claudeCwd, outcome.SessionID, model, cfg.owner, cfg.repo, triggerType, creatorUserID, cfg.extraAllowedTools)
+		s.processCompletion(ctx, orgID, runID, cfg.blueprintRunID, task, outcome.Result, claudeCwd, outcome.SessionID, model, cfg.owner, cfg.repo, triggerType, creatorUserID, cfg.extraAllowedTools)
 		return
 	}
 
@@ -263,18 +263,25 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 
 // processCompletion handles the post-stream branching for any Claude
 // invocation (initial run or yield-resume): if the parsed envelope is
-// a yield, park the run in awaiting_input; otherwise run the memory
+// a yield, park the run in awaiting_input; otherwise run the completion
 // gate and finalize the run as terminal. Shared between runAgent and
 // ResumeAfterYield so a yield-then-resume run lands in identical
-// terminal state to a run that completed in one shot — same memory
-// gate, same toast, same task-done bookkeeping. SKY-139.
+// terminal state to a run that completed in one shot — same gate, same
+// toast, same task-done bookkeeping. SKY-139.
+//
+// blueprintRunID is the run's blueprint run (cfg.blueprintRunID for an initial
+// run, the resumed run's blueprint_run_id for a yield-resume); empty for a
+// standalone run. It's the authoritative source for the memory namespace and
+// for whether this is a blueprint step — threaded in by the caller, which
+// already holds it, rather than re-fetched, so a DB hiccup can't silently
+// mis-namespace the memory or mis-route the task close.
 //
 // The caller is responsible for draining any subprocess state
 // (the agentproc.Run path waits internally); this helper only
 // operates on the parsed completion.
 func (s *Spawner) processCompletion(
 	ctx context.Context,
-	orgID, runID string,
+	orgID, runID, blueprintRunID string,
 	task domain.Task,
 	completion *agentproc.Result,
 	claudeCwd, sessionID, model, owner, repo, triggerType, creatorUserID, extraAllowedTools string,
@@ -296,16 +303,11 @@ func (s *Spawner) processCompletion(
 		repoEnv = owner + "/" + repo
 	}
 
-	// Fetch the run row once. Its blueprint_run_id is the memory namespace —
-	// the folder grouping this run's memory file with its blueprint siblings
-	// (so step N+1 reads step N's as its handoff), else the run's own id for a
-	// standalone run. The same row tells us below whether this is a blueprint
-	// step (which defers task disposition to the orchestrator).
-	runRow, _ := s.agentRuns.GetSystem(context.Background(), orgID, runID)
-	blueprintRunID := ""
-	if runRow != nil {
-		blueprintRunID = runRow.BlueprintRunID
-	}
+	// The memory namespace is the folder grouping this run's memory file with
+	// its blueprint siblings (so step N+1 reads step N's as its handoff), else
+	// the run's own id for a standalone run. Derived from the caller-supplied
+	// blueprint_run_id — no DB fetch, so it can't silently fall back to the
+	// wrong namespace on a transient read error.
 	namespace := memoryNamespace(blueprintRunID, runID)
 
 	// One completion gate (consolidates the former memory-write + outcome
@@ -359,8 +361,8 @@ func (s *Spawner) processCompletion(
 	// Is this a step inside a multi-step blueprint? Single/terminal runs
 	// (no blueprint_run_id) own their own task disposition below; blueprint
 	// steps persist outcome/status only and leave advancement to the
-	// orchestrator. runRow was fetched above for the namespace and is reused.
-	isBlueprintStep := runRow != nil && runRow.BlueprintRunID != ""
+	// orchestrator. Derived from the caller-supplied blueprint_run_id.
+	isBlueprintStep := blueprintRunID != ""
 
 	resultSummary := ""
 	status := "completed"

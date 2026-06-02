@@ -94,7 +94,7 @@ func TestProcessCompletion_BlueprintStepExternalActionCoercesToFinish(t *testing
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, "bpr-"+runID, task,
 		res(`{"outcome":"continue","summary":"opened a PR"}`), cwd, "", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
 
 	run := loadRun(t, s, runID)
@@ -116,7 +116,7 @@ func TestProcessCompletion_BlueprintStepContinueNoPendingStaysContinue(t *testin
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, "bpr-"+runID, task,
 		res(`{"outcome":"continue","summary":"did step work"}`), cwd, "", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
 
 	run := loadRun(t, s, runID)
@@ -157,7 +157,7 @@ func TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow(t *testing.T) 
 
 	// No session id → the gate can't (and needn't) retry; the staged file plus
 	// a valid continue outcome already satisfy it.
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, "bpr-"+runID, task,
 		res(`{"outcome":"continue","summary":"did step work"}`), cwd, "", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
 
 	mem, err := sqlitestore.New(database).TaskMemory.GetRunMemory(context.Background(), runmode.LocalDefaultOrg, runID)

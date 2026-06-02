@@ -295,7 +295,7 @@ func TestProcessCompletion_FinishClosesTask(t *testing.T) {
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, "", task,
 		res(`{"outcome":"finish","summary":"shipped it"}`), cwd, "", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
 
 	run := loadRun(t, s, runID)
@@ -324,7 +324,7 @@ func TestProcessCompletion_AbortLeavesTaskOpen(t *testing.T) {
 	before := readTaskStatus(t, database, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, "", task,
 		res(`{"outcome":"abort","summary":"investigated the failure","reason":"needs a human to rotate the token"}`),
 		cwd, "", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
 
@@ -358,7 +358,7 @@ func TestProcessCompletion_AbortMissingReason_StillLeavesTaskOpen(t *testing.T) 
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, "", task,
 		res(`{"outcome":"abort","summary":"stopped, couldn't proceed"}`),
 		cwd, "", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
 
@@ -381,7 +381,7 @@ func TestProcessCompletion_YieldParks(t *testing.T) {
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, "", task,
 		res(`{"outcome":"yield","summary":"need a decision","yield":{"type":"confirmation","message":"Proceed?"}}`),
 		cwd, "sess-yield", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
 
@@ -400,7 +400,7 @@ func TestProcessCompletion_UnparseableFallsBackToFinish(t *testing.T) {
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, "", task,
 		res(`this is not a JSON envelope`), cwd, "", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
 
 	run := loadRun(t, s, runID)
@@ -476,7 +476,7 @@ func TestProcessCompletion_MalformedYieldDoesNotPark(t *testing.T) {
 	// sessionID empty → the outcome gate can't re-prompt; the malformed
 	// yield is not a valid outcome, so the single/terminal fallback to
 	// finish applies. The key assertion is that it did NOT park.
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, "", task,
 		res(`{"outcome":"yield","summary":"please decide"}`), cwd, "", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
 
 	if got := loadRun(t, s, runID).Status; got == "awaiting_input" {

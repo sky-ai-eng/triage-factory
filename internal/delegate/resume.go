@@ -113,10 +113,13 @@ func (s *Spawner) ResumeAfterYield(orgID, runID, agentMessage, userID string) er
 	cwd := run.WorktreePath
 	model := run.Model
 	taskCopy := *task
-	// Memory namespace for the resumed env: the run's blueprint_run_id, else
-	// its own id. Keeps the resumed agent reading/writing the same
-	// _scratch/entity-memory/<namespace>/ folder as the initial invocation.
-	namespace := memoryNamespace(run.BlueprintRunID, runID)
+	// The run's blueprint_run_id drives both the resumed env's memory namespace
+	// and processCompletion's namespacing + task disposition. Capture the raw
+	// value and derive the namespace (blueprint_run_id, else the run's own id)
+	// so the resumed agent reads/writes the same _scratch/entity-memory/
+	// <namespace>/ folder as the initial invocation.
+	blueprintRunID := run.BlueprintRunID
+	namespace := memoryNamespace(blueprintRunID, runID)
 	// trigger_type is non-null in the schema (the CHECK pairs it
 	// with creator_user_id nullability), so this fallback only
 	// defends against legacy / test fixture rows that left the
@@ -258,7 +261,7 @@ func (s *Spawner) ResumeAfterYield(orgID, runID, agentMessage, userID string) er
 			return
 		}
 
-		s.processCompletion(ctx, orgID, runID, taskCopy, outcome.Completion, cwd, sessionID, model, owner, repo, "manual", userID, extraTools)
+		s.processCompletion(ctx, orgID, runID, blueprintRunID, taskCopy, outcome.Completion, cwd, sessionID, model, owner, repo, "manual", userID, extraTools)
 	}()
 	return nil
 }
