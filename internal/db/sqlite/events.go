@@ -130,3 +130,37 @@ func (s *eventStore) GetMetadataSystem(ctx context.Context, orgID, eventID strin
 	}
 	return metadata.String, nil
 }
+
+func (s *eventStore) GetSystem(ctx context.Context, orgID, eventID string) (*domain.Event, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	row := s.admin.QueryRowContext(ctx, `
+		SELECT id, entity_id, event_type, dedup_key,
+		       COALESCE(metadata_json, ''), occurred_at, created_at
+		FROM events WHERE id = ?
+	`, eventID)
+	var (
+		evt        domain.Event
+		entID      sql.NullString
+		occurredAt sql.NullTime
+	)
+	if err := row.Scan(&evt.ID, &entID, &evt.EventType, &evt.DedupKey,
+		&evt.MetadataJSON, &occurredAt, &evt.CreatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if entID.Valid {
+		s := entID.String
+		evt.EntityID = &s
+	}
+	if occurredAt.Valid {
+		evt.OccurredAt = occurredAt.Time
+	}
+	// Stamp the tenant context the worker needs for routing. SQLite is
+	// single-tenant so orgID is always the local sentinel.
+	evt.OrgID = orgID
+	return &evt, nil
+}

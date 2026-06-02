@@ -26,6 +26,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
@@ -956,7 +957,24 @@ func main() {
 	// token inside the expiry guard as a miss, so consumers re-mint on
 	// their own schedule without sharing the server handler's cache.
 	ghResolver := ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil)
-	pollerMgr := poller.NewManager(database, bus, stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.Orgs, stores.JiraStatusRules, stores.TeamGitHubGroups, stores.Secrets, stores.GitHubApps, ghResolver)
+
+	// SKY-414: the durable ingest seam. The poller/tracker emit through
+	// the ingestor instead of straight onto the bus — github:/jira: events
+	// are durably enqueued (so the router can't drop them under burst) and
+	// every event is still forwarded to the bus for the loss-tolerant
+	// subscribers (ws-broadcast, scorer). eventWake is a best-effort,
+	// coalescing nudge to the router's drain worker; a dropped wake only
+	// delays a drain to the worker's floor scan, never loses an event.
+	eventWake := make(chan struct{}, 1)
+	wakeEventDrainer := func() {
+		select {
+		case eventWake <- struct{}{}:
+		default: // a wake is already pending; the drainer will see this event
+		}
+	}
+	eventIngestor := ingest.New(bus, stores.EventQueue, wakeEventDrainer)
+
+	pollerMgr := poller.NewManager(database, eventIngestor, stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.Orgs, stores.JiraStatusRules, stores.TeamGitHubGroups, stores.Secrets, stores.GitHubApps, ghResolver)
 	pollerMgr.OnError = func(source, orgID string, err error) {
 		// Throttle key includes orgID so a chronic failure on one tenant
 		// doesn't suppress a fresh failure on another. Process-level
@@ -1076,15 +1094,13 @@ func main() {
 	// matching triggers, runs inline close checks. Also handles post-scoring
 	// re-derive via the scorer callback wired above.
 	eventRouter = routing.NewRouter(stores.Prompts, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users, stores.Tasks, stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, stores.TeamGitHubRepos, stores.JiraStatusRules, stores.TeamGitHubGroups, spawner, scorer, wsHub)
-	// System-service profile (D9a): the router branches on evt.OrgID
-	// itself when persisting and fanning out — every event flows here
-	// regardless of tenant. Multi-mode handlers thread the orgID into
-	// the per-handler store calls.
-	bus.Subscribe(eventbus.Subscriber{
-		Name:   "router",
-		Filter: []string{"github:", "jira:"},
-		Handle: eventRouter.HandleEvent,
-	})
+	// SKY-414: the router no longer subscribes to the lossy in-memory bus
+	// (which dropped events for slow subscribers under burst, losing event
+	// rows and tasks). It drains the durable event_queue instead — the
+	// ingestor enqueues github:/jira: events there at emit time, and
+	// RunEventQueue (started below) claims and routes them. The worker
+	// branches on each event's OrgID itself, system-service style.
+	eventRouter.SetEventQueue(stores.EventQueue)
 
 	// Wire the queue drainer. Spawner calls router.DrainEntity from each
 	// auto-run terminal so queued firings progress without their own
@@ -1101,6 +1117,14 @@ func main() {
 	// Background context: the binary doesn't have a top-level cancel
 	// today, so the goroutine lives for the process lifetime.
 	go eventRouter.RunDrainSweeper(context.Background(), 30*time.Second)
+
+	// SKY-414: the durable event-queue drain worker. Claims github:/jira:
+	// events the ingestor enqueued, routes them (the work the bus
+	// subscription used to do), and marks them done. Woken by eventWake
+	// after each enqueue; the floor scan is the correctness backstop and
+	// the prune sweep enforces retention. Background context for the
+	// process lifetime, matching the drain sweeper above.
+	go eventRouter.RunEventQueue(context.Background(), eventWake, routing.DefaultEventScanInterval, routing.DefaultEventPruneInterval, routing.DefaultEventPruneAge)
 
 	// Tracks per-source "announce next poll completion as a toast". Set when
 	// a config change triggers a poller restart; cleared after the first

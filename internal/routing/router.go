@@ -62,6 +62,7 @@ type Router struct {
 	entities     dbpkg.EntityStore           // SKY-284: closed-entity guard + entity-terminating close cascade
 	firings      dbpkg.PendingFiringsStore   // SKY-289: per-entity firing queue + active-run gate
 	events       dbpkg.EventStore            // SKY-305: admin-pool RecordSystem + GetMetadataSystem for the background subscriber
+	eventQueue   dbpkg.EventQueueStore       // SKY-414: durable router queue the drain worker claims from; set post-construction via SetEventQueue (nil → worker is a no-op)
 	orgs         dbpkg.OrgsStore             // per-org iteration for the drain sweeper; nil-safe, falls back to N=1 sentinel when unset
 	teams        dbpkg.TeamsStore            // per-team auto_delegate_enabled kill-switch read post-internal/config deletion
 	teamRepos    dbpkg.TeamGitHubReposStore  // team↔repo tracking gate; nil-safe — gate is skipped (no filtering) when unset
@@ -127,6 +128,16 @@ func NewRouter(prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agen
 	}
 }
 
+// SetEventQueue wires the durable router queue (SKY-414) post-
+// construction, mirroring the spawner.SetQueueDrainer pattern. The drain
+// worker (RunEventQueue) claims from this store; the ingestor enqueues to
+// it. Kept off NewRouter's already-wide signature — it's a late-bound dep
+// only the worker needs, and leaving it nil makes RunEventQueue a no-op so
+// the ~30 existing test constructions don't have to thread it.
+func (r *Router) SetEventQueue(q dbpkg.EventQueueStore) {
+	r.eventQueue = q
+}
+
 // autoDelegateEnabledForTeam returns the team's auto_delegate_enabled
 // kill switch. TeamsStore.GetSettingsSystem returns
 // domain.DefaultTeamSettings() on missing rows, so a missing team
@@ -176,15 +187,22 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	}
 	orgID := evt.OrgID
 
-	// Step 1: Always record — durable audit log regardless of routing outcome.
-	// Later routing logic relies on evt.ID referring to a persisted event row,
-	// so stop here if the insert fails.
-	id, err := r.events.RecordSystem(context.Background(), orgID, evt)
-	if err != nil {
-		log.Printf("[router] failed to record event %s: %v", evt.EventType, err)
-		return
+	// Step 1: ensure the event is persisted. In production the ingestor
+	// wrote the events row at enqueue (SKY-414 durable outbox) and the
+	// drain worker loaded it via EventStore.GetSystem, so evt.ID is
+	// already set — recording is decoupled from routing and we route the
+	// pre-persisted event as-is. As a safety net for a caller that hands
+	// us an unpersisted event (no id — e.g. a direct test call), we record
+	// it here. Later routing relies on evt.ID referring to a real row, so
+	// stop if that insert fails.
+	if evt.ID == "" {
+		id, err := r.events.RecordSystem(context.Background(), orgID, evt)
+		if err != nil {
+			log.Printf("[router] failed to record event %s: %v", evt.EventType, err)
+			return
+		}
+		evt.ID = id
 	}
-	evt.ID = id
 
 	// Step 2: Entity lifecycle — entity-terminating events close the entity
 	// and cascade-close all its tasks. Return after — no task creation on a

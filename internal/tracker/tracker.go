@@ -13,10 +13,19 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
-	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 )
+
+// Publisher is the event sink the tracker emits to. In production it's
+// the SKY-414 ingestor, which durably enqueues router-bound github:/jira:
+// events (so the router can't drop them under burst) and forwards every
+// event to the in-memory bus for cosmetic subscribers. The plain
+// *eventbus.Bus also satisfies this interface, so tests (and any purely
+// loss-tolerant path) can pass a bare bus.
+type Publisher interface {
+	Publish(evt domain.Event)
+}
 
 const (
 	jiraBatchSize = 100 // max issues per JQL key IN (...) query
@@ -39,7 +48,7 @@ const (
 //   - does NOT create or update tasks
 type Tracker struct {
 	database *sql.DB
-	bus      *eventbus.Bus
+	pub      Publisher
 	tasks    db.TaskStore   // SKY-283: tracker creates review_requested tasks during discovery + reconciles stale ones
 	entities db.EntityStore // SKY-284: entity lifecycle (find/create, snapshot, title/description, close/reactivate)
 	repos    db.RepoStore   // per-repo conditional-request (ETag) state for GitHub open-PR discovery
@@ -60,8 +69,8 @@ type Tracker struct {
 // loop calls this once per active org per cycle; the resulting
 // Tracker handles all event-emission for that org and stamps every
 // published event with the tenant via publish() below.
-func New(database *sql.DB, bus *eventbus.Bus, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore, orgID string) *Tracker {
-	return &Tracker{database: database, bus: bus, tasks: tasks, entities: entities, repos: repos, orgID: orgID}
+func New(database *sql.DB, pub Publisher, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore, orgID string) *Tracker {
+	return &Tracker{database: database, pub: pub, tasks: tasks, entities: entities, repos: repos, orgID: orgID}
 }
 
 // publish stamps evt.OrgID with the tracker's configured tenant before
@@ -73,7 +82,7 @@ func (t *Tracker) publish(evt domain.Event) {
 	if evt.OrgID == "" {
 		evt.OrgID = t.orgID
 	}
-	t.bus.Publish(evt)
+	t.pub.Publish(evt)
 }
 
 // --- GitHub ---

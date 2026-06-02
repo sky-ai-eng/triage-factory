@@ -11,7 +11,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -23,7 +22,7 @@ import (
 // stopped and restarted when credentials or config change.
 type Manager struct {
 	database *sql.DB
-	bus      *eventbus.Bus
+	pub      tracker.Publisher // SKY-414: the durable ingestor in production; *eventbus.Bus in tests
 	// tracker dependencies are held instead of a single Tracker instance
 	// because each poll cycle constructs one Tracker per active org —
 	// orgID is a per-tracker construction parameter, not a per-call
@@ -61,10 +60,10 @@ type Manager struct {
 	nextPoll map[string]time.Time
 }
 
-func NewManager(database *sql.DB, bus *eventbus.Bus, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, resolver ghclient.Resolver) *Manager {
+func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, resolver ghclient.Resolver) *Manager {
 	return &Manager{
 		database:     database,
-		bus:          bus,
+		pub:          pub,
 		tasks:        tasks,
 		entities:     entities,
 		users:        users,
@@ -85,7 +84,7 @@ func NewManager(database *sql.DB, bus *eventbus.Bus, users db.UsersStore, tasks 
 // (struct of method holders + store references) so per-cycle
 // allocation is fine.
 func (m *Manager) trackerForOrg(orgID string) *tracker.Tracker {
-	return tracker.New(m.database, m.bus, m.tasks, m.entities, m.repos, orgID)
+	return tracker.New(m.database, m.pub, m.tasks, m.entities, m.repos, orgID)
 }
 
 // reviewerResolver builds the per-cycle TF-known reviewer resolver.

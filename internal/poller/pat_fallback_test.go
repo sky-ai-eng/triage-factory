@@ -99,7 +99,7 @@ func TestRunGitHubCycleForOrg_PATFallbackWhenInstallationTokenUnusable(t *testin
 
 	m := &Manager{
 		database: database,
-		bus:      bus,
+		pub:      bus,
 		tasks:    stores.Tasks,
 		entities: stores.Entities,
 		repos:    stores.Repos,

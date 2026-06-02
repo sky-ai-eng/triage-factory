@@ -373,4 +373,60 @@ func RunEventStoreConformance(t *testing.T, mk EventStoreFactory) {
 			t.Errorf("GetMetadataSystem on NULL metadata should be empty, got %q", got)
 		}
 	})
+
+	t.Run("GetSystem_round_trips_full_event", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t, "get-system")
+		eid := entityID
+		when := time.Now().UTC().Truncate(time.Second).Add(-3 * time.Hour)
+		const meta = `{"check_name":"build"}`
+		eventID, err := s.Record(ctx, orgID, domain.Event{
+			EntityID:     &eid,
+			EventType:    domain.EventGitHubPRCICheckFailed,
+			DedupKey:     "build",
+			MetadataJSON: meta,
+			OccurredAt:   when,
+		})
+		if err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+		got, err := s.GetSystem(ctx, orgID, eventID)
+		if err != nil || got == nil {
+			t.Fatalf("GetSystem: got=%v err=%v", got, err)
+		}
+		if got.ID != eventID {
+			t.Errorf("ID = %q, want %q", got.ID, eventID)
+		}
+		if got.EventType != domain.EventGitHubPRCICheckFailed {
+			t.Errorf("EventType = %q, want %q", got.EventType, domain.EventGitHubPRCICheckFailed)
+		}
+		if got.DedupKey != "build" {
+			t.Errorf("DedupKey = %q, want %q", got.DedupKey, "build")
+		}
+		if got.EntityID == nil || *got.EntityID != entityID {
+			t.Errorf("EntityID = %v, want %q", got.EntityID, entityID)
+		}
+		if !got.OccurredAt.Equal(when) {
+			t.Errorf("OccurredAt = %v, want %v", got.OccurredAt, when)
+		}
+		if !jsonEqual(t, got.MetadataJSON, meta) {
+			t.Errorf("MetadataJSON = %q, want JSON-equivalent to %q", got.MetadataJSON, meta)
+		}
+		// The worker relies on OrgID being stamped so HandleEvent has the
+		// tenant context.
+		if got.OrgID != orgID {
+			t.Errorf("OrgID = %q, want %q (stamped for the worker)", got.OrgID, orgID)
+		}
+	})
+
+	t.Run("GetSystem_returns_nil_on_miss", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		got, err := s.GetSystem(ctx, orgID, "00000000-0000-0000-0000-000000000000")
+		if err != nil {
+			t.Fatalf("GetSystem: %v", err)
+		}
+		if got != nil {
+			t.Errorf("GetSystem on miss should be nil, got %+v", got)
+		}
+	})
 }

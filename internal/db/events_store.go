@@ -67,4 +67,13 @@ type EventStore interface {
 	// services. No handler caller exists, so the speculative app-
 	// pool variant is omitted per the SKY-296 convention.
 	GetMetadataSystem(ctx context.Context, orgID, eventID string) (string, error)
+
+	// GetSystem returns the full event row by id, or (nil, nil) if the
+	// event doesn't exist. The SKY-414 drain worker loads the event it
+	// claimed from event_queue to route it (the queue row carries only
+	// the id + denormalized routing fields). Admin-pool: the worker is a
+	// background system service. org_id is bound in the WHERE as defense
+	// in depth and stamped onto the returned event so HandleEvent has the
+	// tenant context it needs.
+	GetSystem(ctx context.Context, orgID, eventID string) (*domain.Event, error)
 }

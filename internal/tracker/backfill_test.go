@@ -38,7 +38,7 @@ func TestBackfillReviewRequested_EmitsBusEvent(t *testing.T) {
 		},
 	})
 
-	tracker := &Tracker{bus: bus}
+	tracker := &Tracker{pub: bus}
 
 	prCreatedAt := "2026-04-01T10:00:00Z"
 	wantOccurred, _ := time.Parse(time.RFC3339, prCreatedAt)
@@ -119,7 +119,7 @@ func TestBackfillReviewRequested_MissingCreatedAt_LeavesOccurredAtZero(t *testin
 		},
 	})
 
-	tracker := &Tracker{bus: bus}
+	tracker := &Tracker{pub: bus}
 	snap := domain.PRSnapshot{
 		Repo:   "owner/repo",
 		Number: 99,
