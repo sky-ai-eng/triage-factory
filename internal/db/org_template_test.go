@@ -123,6 +123,16 @@ func TestOrgTemplate_MultiStepBlueprint_DeepCopy(t *testing.T) {
 		t.Fatalf("ReplaceBlueprintSteps: %v", err)
 	}
 
+	// The store counts blueprint-step references so the prompt-delete handler
+	// can 409 instead of letting the RESTRICT FK surface as a 500; a prompt
+	// still used as a step can't be deleted.
+	if refs, err := stores.OrgTemplate.CountBlueprintStepReferences(ctx, org, "tmpl-prompt-a"); err != nil || refs != 1 {
+		t.Fatalf("CountBlueprintStepReferences(tmpl-prompt-a) = %d, err=%v; want 1", refs, err)
+	}
+	if err := stores.OrgTemplate.DeletePrompt(ctx, org, "tmpl-prompt-a"); err == nil {
+		t.Error("DeletePrompt on a prompt used as a blueprint step succeeded; want a RESTRICT FK error")
+	}
+
 	// Wire a template trigger at the multi-step blueprint by promoting a rule.
 	rules, err := stores.OrgTemplate.ListHandlers(ctx, org, domain.EventHandlerKindRule)
 	if err != nil || len(rules) == 0 {

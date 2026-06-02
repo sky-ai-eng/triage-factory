@@ -118,6 +118,12 @@ type OrgTemplateStore interface {
 	// are positional and may be empty. Each step_prompt_id must reference a
 	// template prompt in the same org (same-org composite FK).
 	ReplaceBlueprintSteps(ctx context.Context, orgID, blueprintID string, stepPromptIDs, briefs []string) error
+	// CountBlueprintStepReferences returns the number of distinct template
+	// blueprints that step through the given template prompt. The prompt-delete
+	// handler uses it to refuse (409) deleting a prompt still in use — surfacing
+	// a friendly message instead of the raw RESTRICT FK error
+	// (org_template_blueprint_steps.step_prompt_id is ON DELETE RESTRICT).
+	CountBlueprintStepReferences(ctx context.Context, orgID, stepPromptID string) (int, error)
 
 	// --- template handlers CRUD (app pool, org-admin RLS) ---
 

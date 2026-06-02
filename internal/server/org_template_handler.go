@@ -164,6 +164,10 @@ func (s *Server) handleOrgTemplatePromptCreate(w http.ResponseWriter, r *http.Re
 		internalError(w, "org_template", err)
 		return
 	}
+	if created == nil {
+		internalError(w, "org_template", errors.New("template prompt created but not readable"))
+		return
+	}
 	writeJSON(w, http.StatusCreated, created)
 }
 
@@ -218,14 +222,26 @@ func (s *Server) handleOrgTemplatePromptDelete(w http.ResponseWriter, r *http.Re
 	}
 	id := r.PathValue("id")
 	var found bool
+	var conflictErr string
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		existing, e := tx.OrgTemplate.GetPrompt(r.Context(), orgID, id)
 		if e != nil || existing == nil {
 			return e
 		}
 		found = true
-		// Hard delete — the template isn't re-seeded on boot, so removing a
-		// shipped default sticks. Triggers referencing it cascade (FK).
+		// Block deletion if this prompt is a step in any template blueprint.
+		// org_template_blueprint_steps.step_prompt_id is ON DELETE RESTRICT, so
+		// the FK would fire anyway; surface a friendly 409 instead of a raw 500.
+		// (The template isn't re-seeded on boot, so an unreferenced delete is a
+		// real, sticking delete.)
+		refs, e := tx.OrgTemplate.CountBlueprintStepReferences(r.Context(), orgID, id)
+		if e != nil {
+			return e
+		}
+		if refs > 0 {
+			conflictErr = "This prompt is used as a step in one or more template blueprints. Remove it from those blueprints first."
+			return nil
+		}
 		return tx.OrgTemplate.DeletePrompt(r.Context(), orgID, id)
 	}); err != nil {
 		internalError(w, "org_template", err)
@@ -233,6 +249,10 @@ func (s *Server) handleOrgTemplatePromptDelete(w http.ResponseWriter, r *http.Re
 	}
 	if !found {
 		notFound(w, "template prompt")
+		return
+	}
+	if conflictErr != "" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": conflictErr})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
@@ -295,6 +315,10 @@ func (s *Server) handleOrgTemplateBlueprintCreate(w http.ResponseWriter, r *http
 		return ge
 	}); err != nil {
 		internalError(w, "org_template", err)
+		return
+	}
+	if created == nil {
+		internalError(w, "org_template", errors.New("template blueprint created but not readable"))
 		return
 	}
 	writeJSON(w, http.StatusCreated, created)

@@ -586,6 +586,16 @@ func (s *orgTemplateStore) ReplaceBlueprintSteps(ctx context.Context, orgID, blu
 	})
 }
 
+func (s *orgTemplateStore) CountBlueprintStepReferences(ctx context.Context, orgID, stepPromptID string) (int, error) {
+	var n int
+	err := s.q.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT blueprint_id)
+		FROM org_template_blueprint_steps
+		WHERE org_id = ? AND step_prompt_id = ?
+	`, orgID, stepPromptID).Scan(&n)
+	return n, err
+}
+
 func scanOrgTemplateBlueprint(scanFn func(dst ...any) error) (domain.Blueprint, error) {
 	var b domain.Blueprint
 	var slug sql.NullString
