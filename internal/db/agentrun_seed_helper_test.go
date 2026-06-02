@@ -34,17 +34,17 @@ func createRunForTest(t *testing.T, database *sql.DB, run domain.AgentRun) error
 		creator = runmode.LocalDefaultUserID
 	}
 	var stepIdx any
-	if run.ChainStepIndex != nil {
-		stepIdx = *run.ChainStepIndex
+	if run.BlueprintStepIndex != nil {
+		stepIdx = *run.BlueprintStepIndex
 	}
 	_, err := database.Exec(`
 		INSERT INTO runs (id, task_id, prompt_id, status, model, worktree_path,
 		                  trigger_type, trigger_id, team_id, visibility,
-		                  creator_user_id, actor_agent_id, chain_run_id, chain_step_index)
+		                  creator_user_id, actor_agent_id, blueprint_run_id, blueprint_step_index)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?, ?)
 	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath,
 		triggerType, nullIfEmpty(run.TriggerID), runmode.LocalDefaultTeamID,
 		nullIfEmpty(creator), nullIfEmpty(run.ActorAgentID),
-		nullIfEmpty(run.ChainRunID), stepIdx)
+		nullIfEmpty(run.BlueprintRunID), stepIdx)
 	return err
 }

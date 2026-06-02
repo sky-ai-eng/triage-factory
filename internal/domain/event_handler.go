@@ -10,9 +10,11 @@ import "time"
 //	                 prompt_id, breaker_threshold, min_autonomy_suitability
 //	                 must be nil.
 //	kind="trigger" — auto-delegation; creates a task and (post-SKY-261)
-//	                 stamps claimed_by_agent_id at creation. prompt_id,
+//	                 stamps claimed_by_agent_id at creation. blueprint_id,
 //	                 breaker_threshold, min_autonomy_suitability are
 //	                 required. default_priority, sort_order must be nil.
+//	                 A trigger always fires a blueprint (length >= 1); a
+//	                 single prompt is just a 1-step blueprint.
 //
 // The CHECK constraints on event_handlers enforce the shape pair at the
 // SQL level; both backends rely on it.
@@ -46,7 +48,7 @@ type EventHandler struct {
 	SortOrder       *int     `json:"sort_order"`
 
 	// Trigger-only (zero/nil for rules).
-	PromptID               string   `json:"prompt_id"`
+	BlueprintID            string   `json:"blueprint_id"`
 	TriggerType            string   `json:"trigger_type"` // V1: only "event"
 	BreakerThreshold       *int     `json:"breaker_threshold"`
 	MinAutonomySuitability *float64 `json:"min_autonomy_suitability"`

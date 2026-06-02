@@ -54,13 +54,13 @@ type createProjectRequest struct {
 // uses *[]string so a client can clear it with [] without colliding
 // with the absent case.
 type patchProjectRequest struct {
-	Name                   *string   `json:"name"`
-	Description            *string   `json:"description"`
-	PinnedRepos            *[]string `json:"pinned_repos"`
-	JiraProjectKey         *string   `json:"jira_project_key"`
-	LinearProjectKey       *string   `json:"linear_project_key"`
-	CuratorSessionID       *string   `json:"curator_session_id"`
-	SpecAuthorshipPromptID *string   `json:"spec_authorship_prompt_id"`
+	Name                      *string   `json:"name"`
+	Description               *string   `json:"description"`
+	PinnedRepos               *[]string `json:"pinned_repos"`
+	JiraProjectKey            *string   `json:"jira_project_key"`
+	LinearProjectKey          *string   `json:"linear_project_key"`
+	CuratorSessionID          *string   `json:"curator_session_id"`
+	SpecAuthorshipBlueprintID *string   `json:"spec_authorship_blueprint_id"`
 }
 
 func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
@@ -125,30 +125,29 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Validation passed — default the spec-authorship skill to the
-		// seeded system prompt when it exists. Doing this at the API layer
+		// Validation passed — default the spec-authorship skill to the team's
+		// seeded system blueprint when it exists. Doing this at the API layer
 		// (not in db.CreateProject) keeps the DB layer free of any "system
-		// prompt must exist" coupling — tests that don't seed prompts get
-		// NULL on insert and the curator runtime falls back to the same
-		// default at dispatch time anyway.
-		// Resolve the team's own copy of the shipped spec-authorship prompt
-		// by slug — the id is a random UUID per team copy post-SKY-380, so a
-		// slug lookup replaces the old Get(slug). Store the resolved UUID.
-		specPromptID := ""
-		def, defErr := tx.Prompts.GetBySystemSlug(r.Context(), orgID, teamID, domain.SystemTicketSpecPromptID)
+		// blueprint must exist" coupling — tests that don't seed blueprints
+		// get NULL on insert and the curator runtime falls back to the same
+		// default at dispatch time anyway. Resolve the team's own copy of the
+		// shipped spec-authorship blueprint by slug (id is a random UUID per
+		// team copy); store the resolved UUID.
+		specBlueprintID := ""
+		def, defErr := tx.Blueprints.GetBySystemSlug(r.Context(), orgID, teamID, domain.SystemTicketSpecPromptID)
 		if defErr != nil {
-			log.Printf("handleProjectCreate: failed to load default spec-authorship prompt %q: %v", domain.SystemTicketSpecPromptID, defErr)
+			log.Printf("handleProjectCreate: failed to load default spec-authorship blueprint %q: %v", domain.SystemTicketSpecPromptID, defErr)
 		} else if def != nil {
-			specPromptID = def.ID
+			specBlueprintID = def.ID
 		}
 		id, createErr := tx.Projects.Create(r.Context(), orgID, teamID, domain.Project{
-			Name:                   name,
-			Description:            req.Description,
-			PinnedRepos:            pinned,
-			JiraProjectKey:         jiraKey,
-			LinearProjectKey:       linearKey,
-			CuratorSessionID:       req.CuratorSessionID,
-			SpecAuthorshipPromptID: specPromptID,
+			Name:                      name,
+			Description:               req.Description,
+			PinnedRepos:               pinned,
+			JiraProjectKey:            jiraKey,
+			LinearProjectKey:          linearKey,
+			CuratorSessionID:          req.CuratorSessionID,
+			SpecAuthorshipBlueprintID: specBlueprintID,
 		})
 		if createErr != nil {
 			return createErr
@@ -565,39 +564,29 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	if req.CuratorSessionID != nil {
 		updated.CuratorSessionID = *req.CuratorSessionID
 	}
-	if req.SpecAuthorshipPromptID != nil {
-		// Empty string clears the override (project falls back to the
-		// seeded default on next dispatch). Non-empty values must
-		// reference an existing prompt — without this guard a typo
-		// would silently break ticket authorship by pointing at a
-		// non-existent row, which the curator would then resolve back
-		// to the default but log a warning every dispatch. Validating
-		// up front keeps the contract crisp.
-		trimmed := strings.TrimSpace(*req.SpecAuthorshipPromptID)
+	if req.SpecAuthorshipBlueprintID != nil {
+		// Empty string clears the override (project falls back to the seeded
+		// default on next dispatch). Non-empty values must reference an
+		// existing blueprint owned by the project's team — without this guard
+		// a typo would silently break ticket authorship.
+		trimmed := strings.TrimSpace(*req.SpecAuthorshipBlueprintID)
 		if trimmed != "" {
-			// Validate against the project's OWN team, not just the org:
-			// the curator runs this prompt under existing.TeamID, so a
-			// cross-team prompt would let a team-A project run a team-B
-			// prompt. Mirror the picker's list predicate — Prompts.List
-			// (visibility='org' OR team_id=existing.TeamID) — so a chosen
-			// prompt is accepted iff it's org-visible (system) or owned by
-			// this project's team. (Prompts.Get is org-scoped only and the
-			// domain.Prompt struct doesn't expose team_id/visibility yet —
-			// SKY-380 — so a same-team-list membership check is the
-			// available way to enforce this without the schema reshape.)
-			// SQLite ignores teamID (local is single-team), so this is a
-			// no-op there and only constrains multi-mode.
+			// Validate against the project's OWN team, not just the org: the
+			// curator runs this blueprint under existing.TeamID, so a
+			// cross-team blueprint would let a team-A project run a team-B
+			// blueprint. List the team's blueprints and require membership.
+			// SQLite ignores teamID (local is single-team).
 			if existing.TeamID == "" {
 				internalError(w, "projects", fmt.Errorf("project %s has no team_id", existing.ID))
 				return
 			}
-			var visible []domain.Prompt
+			var visible []domain.Blueprint
 			if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 				var e error
-				visible, e = tx.Prompts.List(r.Context(), orgID, existing.TeamID)
+				visible, e = tx.Blueprints.List(r.Context(), orgID, existing.TeamID)
 				return e
 			}); err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "load prompt: " + err.Error()})
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "load blueprint: " + err.Error()})
 				return
 			}
 			found := false
@@ -608,15 +597,13 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if !found {
-				// Same 400 for "unknown" and "other team's" — the client
-				// shouldn't be able to distinguish a prompt that exists but
-				// isn't theirs from one that doesn't exist (don't leak the
-				// existence of another team's prompt by id).
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "spec_authorship_prompt_id references unknown prompt"})
+				// Same 400 for "unknown" and "other team's" — don't leak the
+				// existence of another team's blueprint by id.
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "spec_authorship_blueprint_id references unknown blueprint"})
 				return
 			}
 		}
-		updated.SpecAuthorshipPromptID = trimmed
+		updated.SpecAuthorshipBlueprintID = trimmed
 	}
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {

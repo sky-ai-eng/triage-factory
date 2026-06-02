@@ -127,7 +127,7 @@ func runVerdict(host agenthost.Client, args []string) {
 	if chainRun == nil {
 		exitErr("this run is not part of a chain (no chain_run_id on the run row)")
 	}
-	if chainRun.Status != domain.ChainRunStatusRunning {
+	if chainRun.Status != domain.BlueprintRunStatusRunning {
 		exitErr(fmt.Sprintf("chain run %s is %s; cannot record a verdict", chainRun.ID, chainRun.Status))
 	}
 

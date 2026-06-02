@@ -15,10 +15,10 @@ import (
 // All four fields are required; dedup_key may be empty for non-
 // discriminator event types (the common case).
 type factoryDelegateRequest struct {
-	EntityID  string `json:"entity_id"`
-	EventType string `json:"event_type"`
-	DedupKey  string `json:"dedup_key"`
-	PromptID  string `json:"prompt_id"`
+	EntityID    string `json:"entity_id"`
+	EventType   string `json:"event_type"`
+	DedupKey    string `json:"dedup_key"`
+	BlueprintID string `json:"blueprint_id"`
 	// TeamID is the acting team the write picker supplied — the team the
 	// synthesized task is created (and bot-claimed) under. Required in the
 	// UI when the caller belongs to ≥2 teams; empty (sole-team fallback)
@@ -60,8 +60,8 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req, "") {
 		return
 	}
-	if req.EntityID == "" || req.EventType == "" || req.PromptID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "entity_id, event_type, and prompt_id are required"})
+	if req.EntityID == "" || req.EventType == "" || req.BlueprintID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "entity_id, event_type, and blueprint_id are required"})
 		return
 	}
 
@@ -322,10 +322,10 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// reads it correctly.
 	task.ClaimedByAgentID = a.ID
 	runID, err := s.spawner.Delegate(*task, delegate.DelegateOpts{
-		OrgID:            orgID,
-		ExplicitPromptID: req.PromptID,
-		TriggerType:      "manual",
-		CreatorUserID:    userID,
+		OrgID:               orgID,
+		ExplicitBlueprintID: req.BlueprintID,
+		TriggerType:         "manual",
+		CreatorUserID:       userID,
 	})
 	if err != nil {
 		// Claim is already stamped (and broadcast), swipe audit

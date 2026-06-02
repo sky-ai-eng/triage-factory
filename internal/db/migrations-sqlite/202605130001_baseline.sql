@@ -27,10 +27,6 @@ CREATE TABLE prompts (
     body            TEXT NOT NULL,
     source          TEXT NOT NULL DEFAULT 'user'
                         CHECK (source IN ('system', 'user', 'imported')),
-    -- kind = 'leaf' (single-prompt, today's default) or 'chain'
-    -- (an ordered list of leaf steps in prompt_chain_steps). Triggers
-    -- fire prompts by id regardless of kind; only the spawner branches.
-    kind            TEXT NOT NULL DEFAULT 'leaf',
     usage_count     INTEGER DEFAULT 0,
     hidden          BOOLEAN DEFAULT 0,
     created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -74,6 +70,39 @@ CREATE TABLE system_prompt_versions (
     prompt_id     TEXT PRIMARY KEY REFERENCES prompts(id) ON DELETE CASCADE,
     content_hash  TEXT NOT NULL,
     applied_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- === Blueprints ==========================================================
+-- A blueprint is the triggerable, team-scoped composition: an ordered list
+-- of prompt steps (blueprint_steps), length >= 1. Everything an event
+-- handler fires is a blueprint; a single prompt is just a 1-step blueprint.
+-- Modeled on prompts (same team-scoping, same system_slug idempotency key,
+-- same composite uniques so the trigger + step FKs can be same-team-guarded).
+CREATE TABLE blueprints (
+    id              TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    source          TEXT NOT NULL DEFAULT 'user'
+                        CHECK (source IN ('system', 'user', 'imported')),
+    usage_count     INTEGER DEFAULT 0,
+    hidden          BOOLEAN DEFAULT 0,
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    user_modified   INTEGER NOT NULL DEFAULT 0,
+    org_id          TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
+    -- team_id is NOT NULL: every blueprint is team-owned (mirrors prompts).
+    team_id         TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000010',
+    -- creator_user_id is nullable: source='system' rows have NULL (no human
+    -- author); other sources must have a value. Enforced by the CHECK below.
+    creator_user_id TEXT,
+    -- system_slug is the stable shipped identifier ("system-ci-fix", …) for
+    -- source='system' rows; NULL for user/imported blueprints. Re-seed
+    -- idempotency + slug→id lookups key on (org_id, team_id, system_slug).
+    system_slug     TEXT,
+    CONSTRAINT blueprints_system_has_no_creator CHECK (
+        (source = 'system' AND creator_user_id IS NULL)
+        OR (source <> 'system' AND creator_user_id IS NOT NULL)
+    ),
+    CONSTRAINT blueprints_org_team_slug_unique UNIQUE (org_id, team_id, system_slug)
 );
 
 -- === Event catalog =======================================================
@@ -421,7 +450,7 @@ CREATE TABLE projects (
     updated_at                DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     jira_project_key          TEXT,
     linear_project_key        TEXT,
-    spec_authorship_prompt_id TEXT REFERENCES prompts(id) ON DELETE SET NULL,
+    spec_authorship_blueprint_id TEXT REFERENCES blueprints(id) ON DELETE SET NULL,
     org_id                    TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
     team_id                   TEXT,
     creator_user_id           TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000100',
@@ -515,23 +544,23 @@ CREATE TABLE event_handlers (
     sort_order       INTEGER,
 
     -- Trigger-only fields. NULL for rules.
-    prompt_id                TEXT,
+    blueprint_id             TEXT,
     breaker_threshold        INTEGER,
     min_autonomy_suitability REAL,
 
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
-    FOREIGN KEY (prompt_id, org_id) REFERENCES prompts (id, org_id) ON DELETE CASCADE,
-    -- Same-team guard (SKY-380): a trigger may only bind a prompt its own
-    -- team owns. (prompt_id, team_id) → prompts(id, team_id) refuses a
-    -- handler whose team_id doesn't match the referenced prompt's team.
-    -- NULL prompt_id (rules) skips the FK. CASCADE mirrors the org FK so a
-    -- prompt delete still removes its triggers.
-    FOREIGN KEY (prompt_id, team_id) REFERENCES prompts (id, team_id) ON DELETE CASCADE,
+    FOREIGN KEY (blueprint_id, org_id) REFERENCES blueprints (id, org_id) ON DELETE CASCADE,
+    -- Same-team guard: a trigger may only fire a blueprint its own team owns.
+    -- (blueprint_id, team_id) → blueprints(id, team_id) refuses a handler
+    -- whose team_id doesn't match the referenced blueprint's team. NULL
+    -- blueprint_id (rules) skips the FK. CASCADE mirrors the org FK so a
+    -- blueprint delete still removes its triggers.
+    FOREIGN KEY (blueprint_id, team_id) REFERENCES blueprints (id, team_id) ON DELETE CASCADE,
 
     CHECK (kind <> 'rule' OR (
-        prompt_id IS NULL
+        blueprint_id IS NULL
         AND breaker_threshold IS NULL
         AND min_autonomy_suitability IS NULL
         AND name IS NOT NULL
@@ -539,7 +568,7 @@ CREATE TABLE event_handlers (
         AND sort_order IS NOT NULL
     )),
     CHECK (kind <> 'trigger' OR (
-        prompt_id IS NOT NULL
+        blueprint_id IS NOT NULL
         AND breaker_threshold IS NOT NULL
         AND min_autonomy_suitability IS NOT NULL
         AND default_priority IS NULL
@@ -558,7 +587,7 @@ CREATE TABLE event_handlers (
 CREATE UNIQUE INDEX event_handlers_id_org_unique          ON event_handlers (id, org_id);
 CREATE INDEX        idx_event_handlers_event_type_enabled ON event_handlers(org_id, event_type) WHERE enabled = 1;
 CREATE INDEX        idx_event_handlers_kind               ON event_handlers(org_id, kind);
-CREATE INDEX        idx_event_handlers_prompt             ON event_handlers(org_id, prompt_id) WHERE prompt_id IS NOT NULL;
+CREATE INDEX        idx_event_handlers_blueprint          ON event_handlers(org_id, blueprint_id) WHERE blueprint_id IS NOT NULL;
 
 -- === Org default templates (SKY-381) =====================================
 -- The org-level template a new team's prompts + handlers are copied from at
@@ -583,7 +612,6 @@ CREATE TABLE org_template_prompts (
     -- affordance): 'system' rows copy as system (creator NULL); 'user' rows are
     -- admin-authored org defaults and copy as team-owned user prompts.
     source        TEXT NOT NULL DEFAULT 'user' CHECK (source IN ('system', 'user')),
-    kind          TEXT NOT NULL DEFAULT 'leaf',
     allowed_tools TEXT NOT NULL DEFAULT '',
     model         TEXT NOT NULL DEFAULT '',
     created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -726,11 +754,11 @@ CREATE TABLE runs (
     visibility      TEXT NOT NULL DEFAULT 'team'
                        CHECK (visibility IN ('private','team','org')),
     actor_agent_id  TEXT REFERENCES agents(id) ON DELETE SET NULL,
-    -- chain_run_id / chain_step_index link a step run back to its
-    -- parent chain instance. NULL on stand-alone (kind='leaf') runs.
-    -- See the Prompt chains section below for the parent table.
-    chain_run_id     TEXT REFERENCES chain_runs(id),
-    chain_step_index INTEGER,
+    -- blueprint_run_id / blueprint_step_index link a step run back to its
+    -- parent multi-step blueprint instance. NULL on 1-step blueprint runs.
+    -- See the Blueprints section below for the parent table.
+    blueprint_run_id     TEXT REFERENCES blueprint_runs(id),
+    blueprint_step_index INTEGER,
     -- Pair trigger_type with creator_user_id nullability so the
     -- seeder can't drift back to lying.
     CONSTRAINT runs_creator_matches_trigger_type CHECK (
@@ -748,42 +776,44 @@ CREATE INDEX        idx_runs_trigger        ON runs(trigger_id);
 CREATE INDEX        idx_runs_status         ON runs(status);
 CREATE UNIQUE INDEX runs_id_org_unique      ON runs (id, org_id);
 CREATE INDEX        runs_actor_agent_idx    ON runs(actor_agent_id) WHERE actor_agent_id IS NOT NULL;
-CREATE INDEX        idx_runs_chain          ON runs(chain_run_id, chain_step_index);
+CREATE INDEX        idx_runs_blueprint      ON runs(blueprint_run_id, blueprint_step_index);
 
--- === Prompt chains =======================================================
--- Linear sequences of prompt steps that share one worktree. Each step
--- runs as a fresh Claude session in the same worktree; adjacent steps
--- communicate via a handoff file and record proceed/abort verdicts on
--- run_artifacts(kind='chain:verdict'). Per-step runtime state stays on
--- runs (linked via runs.chain_run_id); chain-wide abort/complete state
--- lives on chain_runs.
+-- === Blueprint steps + runs ==============================================
+-- blueprint_steps is the ordered step list for a blueprint (length >= 1).
+-- Each step references a prompt; a multi-step blueprint runs its steps as
+-- fresh Claude sessions sharing one worktree, communicating via a handoff
+-- file and recording proceed/abort verdicts on run_artifacts(kind=
+-- 'chain:verdict'). Per-step runtime state stays on runs (linked via
+-- runs.blueprint_run_id); blueprint-wide abort/complete state lives on
+-- blueprint_runs.
 
-CREATE TABLE prompt_chain_steps (
-    chain_prompt_id TEXT NOT NULL,
-    step_index      INTEGER NOT NULL,           -- 0-based; densely packed by ReplaceChainSteps
+CREATE TABLE blueprint_steps (
+    blueprint_id    TEXT NOT NULL,
+    step_index      INTEGER NOT NULL,           -- 0-based; densely packed by ReplaceSteps
     step_prompt_id  TEXT NOT NULL,
-    -- team_id is the chain prompt's owning team (SKY-380). The composite FKs
-    -- below pin both the chain prompt AND each step to this team, so a chain
-    -- can only step through prompts its own team owns. Sentinel default keeps
+    -- team_id is the blueprint's owning team. The composite FKs below pin
+    -- both the blueprint AND each step to this team, so a blueprint can only
+    -- step through prompts its own team owns. Sentinel default keeps
     -- local-mode (N=1) inserts implicit.
     team_id         TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000010',
     -- Author-supplied one-liner shown in the wrapper user prompt and
     -- in the run-detail UI. Falls back to step_prompt.name when empty.
     brief           TEXT NOT NULL DEFAULT '',
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (chain_prompt_id, step_index),
-    -- Same-team guards (SKY-380): both the chain and every step resolve
-    -- against prompts(id, team_id), so a cross-team step is refused. CASCADE
-    -- on the chain (deleting the chain prompt drops its steps); RESTRICT on
-    -- the step (a prompt used as a step can't be deleted out from under it).
-    FOREIGN KEY (chain_prompt_id, team_id) REFERENCES prompts (id, team_id) ON DELETE CASCADE,
-    FOREIGN KEY (step_prompt_id, team_id)  REFERENCES prompts (id, team_id) ON DELETE RESTRICT
+    PRIMARY KEY (blueprint_id, step_index),
+    -- Same-team guards: the blueprint resolves against blueprints(id, team_id)
+    -- and every step against prompts(id, team_id), so a cross-team step is
+    -- refused. CASCADE on the blueprint (deleting it drops its steps);
+    -- RESTRICT on the step (a prompt used as a step can't be deleted out from
+    -- under it).
+    FOREIGN KEY (blueprint_id, team_id)   REFERENCES blueprints (id, team_id) ON DELETE CASCADE,
+    FOREIGN KEY (step_prompt_id, team_id) REFERENCES prompts (id, team_id) ON DELETE RESTRICT
 );
-CREATE INDEX idx_prompt_chain_steps_step_prompt ON prompt_chain_steps(step_prompt_id);
+CREATE INDEX idx_blueprint_steps_step_prompt ON blueprint_steps(step_prompt_id);
 
-CREATE TABLE chain_runs (
+CREATE TABLE blueprint_runs (
     id              TEXT PRIMARY KEY,
-    chain_prompt_id TEXT NOT NULL REFERENCES prompts(id),
+    blueprint_id    TEXT NOT NULL REFERENCES blueprints(id),
     task_id         TEXT NOT NULL REFERENCES tasks(id),
     trigger_type    TEXT NOT NULL DEFAULT 'manual',
     trigger_id      TEXT REFERENCES event_handlers(id),
@@ -795,8 +825,8 @@ CREATE TABLE chain_runs (
     started_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     completed_at    DATETIME
 );
-CREATE INDEX idx_chain_runs_task   ON chain_runs(task_id);
-CREATE INDEX idx_chain_runs_status ON chain_runs(status);
+CREATE INDEX idx_blueprint_runs_task   ON blueprint_runs(task_id);
+CREATE INDEX idx_blueprint_runs_status ON blueprint_runs(status);
 
 -- === Task <-> event mapping + firing queue ===============================
 CREATE TABLE task_events (
@@ -1087,11 +1117,15 @@ CREATE INDEX        idx_curator_pending_context_consumer
 -- Required by the (prompt_id, org_id) composite FK on event_handlers and
 -- mirrored across every tenant-scoped table for symmetry with Postgres.
 CREATE UNIQUE INDEX prompts_id_org_unique          ON prompts          (id, org_id);
--- Parent key for the same-team composite FKs (event_handlers.prompt_id,
--- prompt_chain_steps.chain_prompt_id / step_prompt_id reference
--- prompts(id, team_id) so a trigger / chain step can only bind a prompt its
--- own team owns) (SKY-380).
+-- Parent key for the same-team composite FKs (blueprint_steps.step_prompt_id
+-- references prompts(id, team_id) so a step can only bind a prompt its own
+-- team owns) (SKY-380).
 CREATE UNIQUE INDEX prompts_id_team_unique         ON prompts          (id, team_id);
+-- Parent keys for the blueprint composite FKs: event_handlers.blueprint_id
+-- and blueprint_steps.blueprint_id reference blueprints(id, org_id) /
+-- (id, team_id) so a trigger / step can only bind a blueprint its own team owns.
+CREATE UNIQUE INDEX blueprints_id_org_unique        ON blueprints       (id, org_id);
+CREATE UNIQUE INDEX blueprints_id_team_unique       ON blueprints       (id, team_id);
 CREATE UNIQUE INDEX projects_id_org_unique         ON projects         (id, org_id);
 CREATE UNIQUE INDEX entities_id_org_unique         ON entities         (id, org_id);
 CREATE UNIQUE INDEX events_id_org_unique           ON events           (id, org_id);

@@ -48,7 +48,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 				// dir is gone.
 				return
 			}
-			if cfg.isChainStep {
+			if cfg.isBlueprintStep {
 				return
 			}
 			// Capture the RemoveAt error rather than discarding it.
@@ -82,7 +82,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			if s.wasTakenOver(runID) {
 				return
 			}
-			if cfg.isChainStep {
+			if cfg.isBlueprintStep {
 				return
 			}
 			rows, err := s.runWorktrees.ListSystem(context.Background(), orgID, runID)
@@ -120,7 +120,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		if s.wasTakenOver(runID) {
 			return
 		}
-		if cfg.isChainStep {
+		if cfg.isBlueprintStep {
 			return
 		}
 		worktree.RemoveClaudeProjectDir(claudeCwd)
@@ -397,8 +397,8 @@ func (s *Spawner) processCompletion(
 			hasPending = true
 		}
 		if hasPending {
-			if s.isNonFinalChainStep(orgID, runID) {
-				verdict, _ := s.chains.GetLatestVerdictSystem(bgCtx, orgID, runID)
+			if s.isNonFinalBlueprintStep(orgID, runID) {
+				verdict, _ := s.blueprints.GetLatestVerdictSystem(bgCtx, orgID, runID)
 				if verdict == nil || verdict.Outcome != domain.ChainVerdictFinal {
 					synthetic := domain.ChainVerdict{
 						Outcome:   domain.ChainVerdictFinal,
@@ -410,10 +410,10 @@ func (s *Spawner) processCompletion(
 						var insertErr error
 						if triggerType == "manual" {
 							insertErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-								return ts.Chains.InsertVerdict(bgCtx, orgID, runID, payloadStr)
+								return ts.Blueprints.InsertVerdict(bgCtx, orgID, runID, payloadStr)
 							})
 						} else {
-							insertErr = s.chains.InsertVerdictSystem(bgCtx, orgID, runID, payloadStr)
+							insertErr = s.blueprints.InsertVerdictSystem(bgCtx, orgID, runID, payloadStr)
 						}
 						if insertErr != nil {
 							log.Printf("[delegate] warning: insert synthetic --final verdict for run %s: %v", runID, insertErr)
@@ -461,8 +461,8 @@ func (s *Spawner) processCompletion(
 		//    them sequentially (step N+1's row doesn't exist yet when
 		//    step N completes).
 		run, _ := s.agentRuns.GetSystem(bgCtx, orgID, runID)
-		if run != nil && run.ChainRunID != "" {
-			// Chain step — skip; terminateChain handles task closure.
+		if run != nil && run.BlueprintRunID != "" {
+			// Chain step — skip; terminateBlueprint handles task closure.
 		} else {
 			hasOtherActiveRun, _ := s.agentRuns.HasOtherActiveRunForTaskSystem(bgCtx, orgID, task.ID, runID)
 			if !hasOtherActiveRun {

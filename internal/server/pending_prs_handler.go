@@ -343,7 +343,7 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 	// above — a failure here is best-effort logging; the user's
 	// GitHub PR exists and the pending row is gone (or kept under
 	// step 2's failure path).
-	var chainRun *domain.ChainRun
+	var chainRun *domain.BlueprintRun
 	if pr.RunID != "" {
 		if err := s.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
 			if _, err := tx.AgentRuns.MarkCompletedIfPendingApproval(cleanupCtx, orgID, pr.RunID); err != nil {
@@ -354,7 +354,7 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 			// row finalizes first. A chain lookup error leaves the
 			// task open for human follow-up rather than racing
 			// terminateChain.
-			cr, _, chainLookupErr := tx.Chains.GetRunForRun(cleanupCtx, orgID, pr.RunID)
+			cr, _, chainLookupErr := tx.Blueprints.GetRunForRun(cleanupCtx, orgID, pr.RunID)
 			if chainLookupErr != nil {
 				log.Printf("[pending-prs] warning: chain lookup failed for run %s; skipping task closure: %v", pr.RunID, chainLookupErr)
 				return nil
@@ -385,7 +385,7 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 			Data:  map[string]string{"status": "completed"},
 		})
 		if chainRun != nil && s.spawner != nil {
-			s.spawner.ResumeChainAfterApproval(orgID, pr.RunID, userID)
+			s.spawner.ResumeBlueprintAfterApproval(orgID, pr.RunID, userID)
 		}
 	}
 

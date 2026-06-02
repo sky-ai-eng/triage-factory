@@ -19,7 +19,8 @@ func TestMaterializeSpecSkill_WritesProjectChoice(t *testing.T) {
 	})
 
 	cwd := t.TempDir()
-	project := &domain.Project{ID: "p1", SpecAuthorshipPromptID: "custom-spec"}
+	bpID := seedTestBlueprint(t, database, "custom-spec", "")
+	project := &domain.Project{ID: "p1", TeamID: runmode.LocalDefaultTeamID, SpecAuthorshipBlueprintID: bpID}
 	if err := materializeSpecSkill(t.Context(), sqlitestore.New(database), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, project, cwd); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -54,8 +55,11 @@ func TestMaterializeSpecSkill_FallsBackToSystemDefault(t *testing.T) {
 	})
 
 	cwd := t.TempDir()
-	// Empty SpecAuthorshipPromptID → fall through to system default.
-	project := &domain.Project{ID: "p1"}
+	// Empty SpecAuthorshipBlueprintID → fall through to the team's default
+	// spec blueprint (resolved by system_slug = SystemTicketSpecPromptID).
+	defaultPromptID := resolvePromptID(t, database, "system", domain.SystemTicketSpecPromptID)
+	seedTestBlueprint(t, database, defaultPromptID, domain.SystemTicketSpecPromptID)
+	project := &domain.Project{ID: "p1", TeamID: runmode.LocalDefaultTeamID}
 	if err := materializeSpecSkill(t.Context(), sqlitestore.New(database), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, project, cwd); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -80,7 +84,9 @@ func TestMaterializeSpecSkill_StaleReferenceFallsBack(t *testing.T) {
 	})
 
 	cwd := t.TempDir()
-	project := &domain.Project{ID: "p1", SpecAuthorshipPromptID: "ghost-id-that-does-not-exist"}
+	defaultPromptID := resolvePromptID(t, database, "system", domain.SystemTicketSpecPromptID)
+	seedTestBlueprint(t, database, defaultPromptID, domain.SystemTicketSpecPromptID)
+	project := &domain.Project{ID: "p1", TeamID: runmode.LocalDefaultTeamID, SpecAuthorshipBlueprintID: "ghost-id-that-does-not-exist"}
 	if err := materializeSpecSkill(t.Context(), sqlitestore.New(database), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, project, cwd); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -107,7 +113,9 @@ func TestMaterializeSpecSkill_OverwritesOnEachCall(t *testing.T) {
 
 	cwd := t.TempDir()
 	skillPath := filepath.Join(cwd, ".claude", "skills", "ticket-spec", "SKILL.md")
-	project := &domain.Project{ID: "p1", SpecAuthorshipPromptID: "v1"}
+	bpV1 := seedTestBlueprint(t, database, "v1", "")
+	bpV2 := seedTestBlueprint(t, database, "v2", "")
+	project := &domain.Project{ID: "p1", TeamID: runmode.LocalDefaultTeamID, SpecAuthorshipBlueprintID: bpV1}
 	if err := materializeSpecSkill(t.Context(), sqlitestore.New(database), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, project, cwd); err != nil {
 		t.Fatalf("first: %v", err)
 	}
@@ -120,7 +128,7 @@ func TestMaterializeSpecSkill_OverwritesOnEachCall(t *testing.T) {
 	}
 
 	// Swap project's prompt; next dispatch should overwrite.
-	project.SpecAuthorshipPromptID = "v2"
+	project.SpecAuthorshipBlueprintID = bpV2
 	if err := materializeSpecSkill(t.Context(), sqlitestore.New(database), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, project, cwd); err != nil {
 		t.Fatalf("second: %v", err)
 	}
@@ -162,7 +170,8 @@ func TestMaterializeSpecSkill_NoPromptClearsStaleFile(t *testing.T) {
 	})
 
 	cwd := t.TempDir()
-	project := &domain.Project{ID: "p1", SpecAuthorshipPromptID: "v1"}
+	bpV1 := seedTestBlueprint(t, database, "v1", "")
+	project := &domain.Project{ID: "p1", TeamID: runmode.LocalDefaultTeamID, SpecAuthorshipBlueprintID: bpV1}
 	if err := materializeSpecSkill(t.Context(), sqlitestore.New(database), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, project, cwd); err != nil {
 		t.Fatalf("first dispatch: %v", err)
 	}
@@ -174,7 +183,7 @@ func TestMaterializeSpecSkill_NoPromptClearsStaleFile(t *testing.T) {
 	// User repoints the project at a non-existent prompt and there's
 	// no system default seeded. Resolution should fail through to the
 	// no-prompt branch.
-	project.SpecAuthorshipPromptID = "ghost"
+	project.SpecAuthorshipBlueprintID = "ghost"
 	if err := materializeSpecSkill(t.Context(), sqlitestore.New(database), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, project, cwd); err != nil {
 		t.Fatalf("second dispatch: %v", err)
 	}

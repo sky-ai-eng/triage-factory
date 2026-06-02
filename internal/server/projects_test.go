@@ -347,42 +347,43 @@ func TestProjectPatch_RejectsEmptyName(t *testing.T) {
 	}
 }
 
-// TestProjectPatch_SpecPromptAcceptsVisible: setting spec_authorship_prompt_id
-// to a prompt the project's team can see (here a same-team user prompt)
-// succeeds. The validation runs the same List(team) predicate the picker
-// uses, so anything the picker offers is accepted.
-func TestProjectPatch_SpecPromptAcceptsVisible(t *testing.T) {
+// TestProjectPatch_SpecBlueprintAcceptsVisible: setting
+// spec_authorship_blueprint_id to a blueprint the project's team can see (here
+// a same-team user blueprint) succeeds. The validation runs the same
+// List(team) predicate the picker uses, so anything the picker offers is
+// accepted.
+func TestProjectPatch_SpecBlueprintAcceptsVisible(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.prompts.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID,
-		domain.Prompt{ID: "spec-ok", Name: "Spec", Body: "x", Source: "user"}); err != nil {
-		t.Fatalf("seed prompt: %v", err)
+	if err := s.blueprints.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID,
+		domain.Blueprint{ID: "spec-ok", Name: "Spec", Source: "user", TeamID: runmode.LocalDefaultTeamID}); err != nil {
+		t.Fatalf("seed blueprint: %v", err)
 	}
 	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
-		"spec_authorship_prompt_id": "spec-ok",
+		"spec_authorship_blueprint_id": "spec-ok",
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
 	var got domain.Project
 	_ = json.Unmarshal(rec.Body.Bytes(), &got)
-	if got.SpecAuthorshipPromptID != "spec-ok" {
-		t.Errorf("spec_authorship_prompt_id = %q, want %q", got.SpecAuthorshipPromptID, "spec-ok")
+	if got.SpecAuthorshipBlueprintID != "spec-ok" {
+		t.Errorf("spec_authorship_blueprint_id = %q, want %q", got.SpecAuthorshipBlueprintID, "spec-ok")
 	}
 }
 
-// TestProjectPatch_SpecPromptRejectsInvisible: an id the project's team
+// TestProjectPatch_SpecBlueprintRejectsInvisible: an id the project's team
 // can't see (here simply a non-existent one) is a 400. In multi mode the
-// same List(team) predicate rejects another team's prompt — the cross-team
+// same List(team) predicate rejects another team's blueprint — the cross-team
 // guard — which the store-level List-narrowing pgtest covers directly; here
 // we pin the handler wiring and the 400 on the SQLite path.
-func TestProjectPatch_SpecPromptRejectsInvisible(t *testing.T) {
+func TestProjectPatch_SpecBlueprintRejectsInvisible(t *testing.T) {
 	s := newTestServer(t)
 	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
-		"spec_authorship_prompt_id": "ghost-id-not-a-real-prompt",
+		"spec_authorship_blueprint_id": "ghost-id-not-a-real-prompt",
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())

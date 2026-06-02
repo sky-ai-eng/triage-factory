@@ -694,7 +694,7 @@ func main() {
 	// shipped content seeded by the org-create / team-create flows
 	// (D14), which run against real orgs and teams.
 	if runmode.Current() == runmode.ModeLocal {
-		seedDefaultPrompts(stores.Prompts, stores.EventHandlers)
+		seedDefaultPrompts(stores.Prompts, stores.Blueprints, stores.EventHandlers)
 	}
 
 	// Bootstrap the local-mode agent identity (SKY-260 D-Agent). One
@@ -1093,7 +1093,7 @@ func main() {
 	// Event router — records events, creates/bumps tasks, auto-delegates on
 	// matching triggers, runs inline close checks. Also handles post-scoring
 	// re-derive via the scorer callback wired above.
-	eventRouter = routing.NewRouter(stores.Prompts, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users, stores.Tasks, stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, stores.TeamGitHubRepos, stores.JiraStatusRules, stores.TeamGitHubGroups, spawner, scorer, wsHub)
+	eventRouter = routing.NewRouter(stores.Prompts, stores.Blueprints, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users, stores.Tasks, stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, stores.TeamGitHubRepos, stores.JiraStatusRules, stores.TeamGitHubGroups, spawner, scorer, wsHub)
 	// The router no longer subscribes to the lossy in-memory bus
 	// (which dropped events for slow subscribers under burst, losing event
 	// rows and tasks). It drains the durable event_queue instead — the

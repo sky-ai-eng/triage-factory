@@ -323,14 +323,11 @@ func (s *promptStore) Create(ctx context.Context, orgID, teamID string, p domain
 	return err
 }
 
-func (s *promptStore) Update(ctx context.Context, orgID string, id, name, body, kind, model string) error {
-	if kind == "" {
-		kind = string(domain.PromptKindLeaf)
-	}
+func (s *promptStore) Update(ctx context.Context, orgID string, id, name, body, model string) error {
 	_, err := s.app.ExecContext(ctx, `
-		UPDATE prompts SET name = $1, body = $2, kind = $3, model = $4, user_modified = TRUE, updated_at = now()
-		WHERE org_id = $5 AND id = $6
-	`, name, body, kind, model, orgID, id)
+		UPDATE prompts SET name = $1, body = $2, model = $3, user_modified = TRUE, updated_at = now()
+		WHERE org_id = $4 AND id = $5
+	`, name, body, model, orgID, id)
 	return err
 }
 

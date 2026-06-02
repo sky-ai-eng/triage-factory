@@ -27,9 +27,10 @@ var jiraFormattingSkillTemplate string
 
 // materializeSpecSkill writes <cwd>/.claude/skills/<specSkillDirName>/SKILL.md
 // containing the body of the project's effective spec-authorship prompt.
-// Resolution order: project's `spec_authorship_prompt_id`, then the
-// seeded `domain.SystemTicketSpecPromptID`. Either path falling through
-// to a missing/empty prompt logs a warning and removes any prior
+// Resolution order: project's `spec_authorship_blueprint_id` → its single
+// step → that step's prompt, then the seeded `domain.SystemTicketSpecPromptID`
+// blueprint. Either path falling through to a missing/empty prompt logs a
+// warning and removes any prior
 // SKILL.md rather than failing the dispatch — the Curator should still
 // answer the user's message even without the skill, and a stale file
 // from a previous resolution would otherwise keep feeding the agent
@@ -93,37 +94,59 @@ func materializeJiraFormattingSkill(cwd string) error {
 	return nil
 }
 
-// resolveSpecPrompt returns the project's chosen prompt or the seeded
-// default. A NULL/empty pointer on the project, or a pointer to a
-// deleted prompt, both fall through to the default — the schema's
-// ON DELETE SET NULL drops dangling FKs but a stale in-memory project
-// row could still carry the deleted id, so we re-check.
+// resolveSpecPrompt returns the prompt backing the project's chosen spec
+// blueprint (or the seeded default blueprint). The extra hop vs. the
+// pre-blueprint code: resolve the blueprint, take its first step, then load
+// that step's prompt. A NULL/empty pointer on the project, or a pointer to a
+// deleted blueprint, both fall through to the default — the schema's
+// ON DELETE SET NULL drops dangling FKs but a stale in-memory project row
+// could still carry the deleted id, so we re-check.
 //
-// Reads happen inside SyntheticClaimsWithTx so multi-mode RLS on
-// prompts_select gates on (org_id = tf.current_org_id() AND
-// tf.user_has_org_access). The lookup is read-only; the tx exists
-// purely to set claims for that one call.
+// Reads happen inside SyntheticClaimsWithTx so multi-mode RLS gates on
+// (org_id = tf.current_org_id() AND tf.user_has_org_access). The lookups are
+// read-only; the tx exists purely to set claims for those calls.
 func resolveSpecPrompt(ctx context.Context, stores db.Stores, orgID, creatorUserID string, project *domain.Project) (*domain.Prompt, error) {
 	var result *domain.Prompt
 	err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, creatorUserID, func(ts db.TxStores) error {
-		if project.SpecAuthorshipPromptID != "" {
-			p, err := ts.Prompts.Get(ctx, orgID, project.SpecAuthorshipPromptID)
+		// Resolve the project's spec blueprint: the configured id first, else
+		// the team's seeded default by system_slug (its id is a random UUID
+		// per team copy).
+		var bp *domain.Blueprint
+		if project.SpecAuthorshipBlueprintID != "" {
+			b, err := ts.Blueprints.Get(ctx, orgID, project.SpecAuthorshipBlueprintID)
 			if err != nil {
-				return fmt.Errorf("load configured spec prompt: %w", err)
+				return fmt.Errorf("load configured spec blueprint: %w", err)
 			}
-			if p != nil {
-				result = p
-				return nil
+			if b != nil {
+				bp = b
+			} else {
+				log.Printf("[curator] project %s references missing spec blueprint %s; falling back to system default",
+					project.ID, project.SpecAuthorshipBlueprintID)
 			}
-			log.Printf("[curator] project %s references missing spec prompt %s; falling back to system default",
-				project.ID, project.SpecAuthorshipPromptID)
 		}
-		// The shipped spec prompt is a per-team copy keyed by system_slug
-		// (its id is a random UUID post-SKY-380), so resolve it through the
-		// calling project's team rather than a by-id Get.
-		p, err := ts.Prompts.GetBySystemSlug(ctx, orgID, project.TeamID, domain.SystemTicketSpecPromptID)
+		if bp == nil {
+			b, err := ts.Blueprints.GetBySystemSlug(ctx, orgID, project.TeamID, domain.SystemTicketSpecPromptID)
+			if err != nil {
+				return fmt.Errorf("load default spec blueprint: %w", err)
+			}
+			bp = b
+		}
+		if bp == nil {
+			return nil // no blueprint resolved; caller clears any stale skill
+		}
+
+		// First step's prompt is the spec-authorship content.
+		steps, err := ts.Blueprints.ListSteps(ctx, orgID, bp.ID)
 		if err != nil {
-			return fmt.Errorf("load default spec prompt: %w", err)
+			return fmt.Errorf("load spec blueprint steps: %w", err)
+		}
+		if len(steps) == 0 {
+			log.Printf("[curator] spec blueprint %s has no steps; clearing stale skill if any", bp.ID)
+			return nil
+		}
+		p, err := ts.Prompts.Get(ctx, orgID, steps[0].StepPromptID)
+		if err != nil {
+			return fmt.Errorf("load spec step prompt: %w", err)
 		}
 		result = p
 		return nil

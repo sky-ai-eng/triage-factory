@@ -551,7 +551,7 @@ func TestHandleSwipe_DelegateRefusedLeavesNoAuditRow(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_drefuse/swipe",
-		map[string]any{"action": "delegate", "hesitation_ms": 0, "prompt_id": "any"})
+		map[string]any{"action": "delegate", "hesitation_ms": 0, "blueprint_id": "any"})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -667,7 +667,7 @@ func TestHandleSwipe_DelegateDifferentiatesRefusalReasons(t *testing.T) {
 	t.Run("missing_task_404", func(t *testing.T) {
 		s := newTestServer(t)
 		rec := doJSON(t, s, http.MethodPost, "/api/tasks/no-such-task/swipe",
-			map[string]any{"action": "delegate", "hesitation_ms": 0, "prompt_id": "any"})
+			map[string]any{"action": "delegate", "hesitation_ms": 0, "blueprint_id": "any"})
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
 		}
@@ -697,7 +697,7 @@ func TestHandleSwipe_DelegateDifferentiatesRefusalReasons(t *testing.T) {
 			t.Fatalf("seed terminal task: %v", err)
 		}
 		rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_term_del/swipe",
-			map[string]any{"action": "delegate", "hesitation_ms": 0, "prompt_id": "any"})
+			map[string]any{"action": "delegate", "hesitation_ms": 0, "blueprint_id": "any"})
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 		}
@@ -737,7 +737,7 @@ func TestHandleSwipe_DelegateDifferentiatesRefusalReasons(t *testing.T) {
 			t.Fatalf("seed other-user-claimed task: %v", err)
 		}
 		rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_diff_del/swipe",
-			map[string]any{"action": "delegate", "hesitation_ms": 0, "prompt_id": "any"})
+			map[string]any{"action": "delegate", "hesitation_ms": 0, "blueprint_id": "any"})
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 		}
@@ -786,7 +786,7 @@ func TestHandleSwipe_DelegateRefusedWhenBotDisabled(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_bot_off/swipe",
-		map[string]any{"action": "delegate", "hesitation_ms": 0, "prompt_id": "any"})
+		map[string]any{"action": "delegate", "hesitation_ms": 0, "blueprint_id": "any"})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (bot disabled); body=%s", rec.Code, rec.Body.String())
 	}
@@ -949,7 +949,7 @@ func TestHandleSwipe_DelegateTransfersOwnUserClaim(t *testing.T) {
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/task-y2a/swipe", map[string]any{
 		"action":        "delegate",
 		"hesitation_ms": 0,
-		"prompt_id":     "no-such-prompt",
+		"blueprint_id":  "no-such-prompt",
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (delegate accepted as user→bot transfer); body=%s", rec.Code, rec.Body.String())

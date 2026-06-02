@@ -124,13 +124,12 @@ func (s *Server) handleOrgTemplatePromptCreate(w http.ResponseWriter, r *http.Re
 	if !decodeJSON(w, r, &req, "") {
 		return
 	}
-	kind := normalizePromptKind(req.Kind)
 	if req.Name == "" {
 		badRequest(w, "name is required")
 		return
 	}
-	if kind == domain.PromptKindLeaf && req.Body == "" {
-		badRequest(w, "body is required for leaf prompts")
+	if req.Body == "" {
+		badRequest(w, "body is required")
 		return
 	}
 	if !validPromptModel(req.Model) {
@@ -143,7 +142,6 @@ func (s *Server) handleOrgTemplatePromptCreate(w http.ResponseWriter, r *http.Re
 		Name:       req.Name,
 		Body:       req.Body,
 		Source:     "user",
-		Kind:       kind,
 		Model:      req.Model,
 	}
 	var created *domain.Prompt
@@ -171,13 +169,12 @@ func (s *Server) handleOrgTemplatePromptPut(w http.ResponseWriter, r *http.Reque
 	if !decodeJSON(w, r, &req, "") {
 		return
 	}
-	kind := normalizePromptKind(req.Kind)
 	if req.Name == "" {
 		badRequest(w, "name is required")
 		return
 	}
-	if kind == domain.PromptKindLeaf && req.Body == "" {
-		badRequest(w, "body is required for leaf prompts")
+	if req.Body == "" {
+		badRequest(w, "body is required")
 		return
 	}
 	if !validPromptModel(req.Model) {
@@ -190,7 +187,7 @@ func (s *Server) handleOrgTemplatePromptPut(w http.ResponseWriter, r *http.Reque
 		if e != nil || existing == nil {
 			return e
 		}
-		if e := tx.OrgTemplate.UpdatePrompt(r.Context(), orgID, id, req.Name, req.Body, string(kind), req.Model); e != nil {
+		if e := tx.OrgTemplate.UpdatePrompt(r.Context(), orgID, id, req.Name, req.Body, req.Model); e != nil {
 			return e
 		}
 		updated, e = tx.OrgTemplate.GetPrompt(r.Context(), orgID, id)
@@ -323,11 +320,11 @@ func (s *Server) handleOrgTemplateHandlerCreate(w http.ResponseWriter, r *http.R
 			h.Enabled = *req.Enabled
 		}
 	case domain.EventHandlerKindTrigger:
-		if req.PromptID == "" {
-			badRequest(w, "prompt_id is required for kind=trigger")
+		if req.BlueprintID == "" {
+			badRequest(w, "blueprint_id is required for kind=trigger")
 			return
 		}
-		h.PromptID = req.PromptID
+		h.BlueprintID = req.BlueprintID
 		h.TriggerType = domain.TriggerTypeEvent
 		threshold := 4
 		if req.BreakerThreshold != nil {
@@ -358,7 +355,7 @@ func (s *Server) handleOrgTemplateHandlerCreate(w http.ResponseWriter, r *http.R
 		// A template trigger may only bind a template prompt in the same org.
 		// Pre-check for a clean 400 instead of the downstream FK error.
 		if h.Kind == domain.EventHandlerKindTrigger {
-			p, e := tx.OrgTemplate.GetPrompt(r.Context(), orgID, h.PromptID)
+			p, e := tx.OrgTemplate.GetPrompt(r.Context(), orgID, h.BlueprintID)
 			if e != nil {
 				return e
 			}
@@ -577,8 +574,8 @@ func (s *Server) handleOrgTemplateHandlerPromote(w http.ResponseWriter, r *http.
 	if !decodeJSON(w, r, &req, "") {
 		return
 	}
-	if req.PromptID == "" {
-		badRequest(w, "prompt_id is required")
+	if req.BlueprintID == "" {
+		badRequest(w, "blueprint_id is required")
 		return
 	}
 	if req.BreakerThreshold == nil || req.MinAutonomySuitability == nil {
@@ -597,7 +594,7 @@ func (s *Server) handleOrgTemplateHandlerPromote(w http.ResponseWriter, r *http.
 		if existing.Kind != domain.EventHandlerKindRule {
 			return nil
 		}
-		prompt, e = tx.OrgTemplate.GetPrompt(r.Context(), orgID, req.PromptID)
+		prompt, e = tx.OrgTemplate.GetPrompt(r.Context(), orgID, req.BlueprintID)
 		return e
 	}); err != nil {
 		internalError(w, "org_template", err)
@@ -632,7 +629,7 @@ func (s *Server) handleOrgTemplateHandlerPromote(w http.ResponseWriter, r *http.
 
 	target := domain.EventHandler{
 		Kind:                   domain.EventHandlerKindTrigger,
-		PromptID:               req.PromptID,
+		BlueprintID:            req.BlueprintID,
 		BreakerThreshold:       req.BreakerThreshold,
 		MinAutonomySuitability: req.MinAutonomySuitability,
 		ScopePredicateJSON:     predicate,

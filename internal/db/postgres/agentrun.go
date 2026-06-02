@@ -50,8 +50,8 @@ func (s *agentRunStore) Create(ctx context.Context, orgID string, run domain.Age
 		triggerType = "manual"
 	}
 	var stepIdx any
-	if run.ChainStepIndex != nil {
-		stepIdx = *run.ChainStepIndex
+	if run.BlueprintStepIndex != nil {
+		stepIdx = *run.BlueprintStepIndex
 	}
 	// team_id resolves from the parent task — runs inherit team
 	// scope from their task so team-scoped queue / Board filters
@@ -95,14 +95,14 @@ func (s *agentRunStore) createEventTriggered(ctx context.Context, orgID string, 
 	_, err := s.admin.ExecContext(ctx, `
 		INSERT INTO runs (id, org_id, task_id, prompt_id, status, model, worktree_path,
 		                  trigger_type, trigger_id, team_id, visibility, creator_user_id,
-		                  actor_agent_id, chain_run_id, chain_step_index)
+		                  actor_agent_id, blueprint_run_id, blueprint_step_index)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, 'event', $8,
 		        (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2),
 		        'team', NULL,
 		        $9, $10, $11)
 	`, run.ID, orgID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath,
 		nullIfEmpty(run.TriggerID),
-		nullIfEmpty(run.ActorAgentID), nullIfEmpty(run.ChainRunID), stepIdx)
+		nullIfEmpty(run.ActorAgentID), nullIfEmpty(run.BlueprintRunID), stepIdx)
 	return err
 }
 
@@ -128,7 +128,7 @@ func (s *agentRunStore) createManual(ctx context.Context, orgID string, run doma
 	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO runs (id, org_id, task_id, prompt_id, status, model, worktree_path,
 		                  trigger_type, trigger_id, team_id, visibility, creator_user_id,
-		                  actor_agent_id, chain_run_id, chain_step_index)
+		                  actor_agent_id, blueprint_run_id, blueprint_step_index)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, 'manual', $8,
 		        (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2),
 		        'team',
@@ -141,7 +141,7 @@ func (s *agentRunStore) createManual(ctx context.Context, orgID string, run doma
 	`, run.ID, orgID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath,
 		nullIfEmpty(run.TriggerID),
 		creatorBind, nullIfEmpty(run.ActorAgentID),
-		nullIfEmpty(run.ChainRunID), stepIdx)
+		nullIfEmpty(run.BlueprintRunID), stepIdx)
 	return err
 }
 
@@ -509,7 +509,7 @@ const pgRunColumns = `
 	COALESCE(r.actor_agent_id::text, ''),
 	COALESCE(r.trigger_type, ''),
 	COALESCE(r.creator_user_id::text, ''),
-	r.chain_run_id, r.chain_step_index,
+	r.blueprint_run_id, r.blueprint_step_index,
 	(NULLIF(BTRIM(rm.agent_content, E' \t\n\r'), '') IS NULL) AS memory_missing
 `
 
@@ -992,46 +992,46 @@ func (s *agentRunStore) LatestYieldRequest(ctx context.Context, orgID, runID str
 func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
 	var completedAt sql.NullTime
 	var costUSD sql.NullFloat64
-	var durationMs, numTurns, chainStep sql.NullInt64
-	var chainRunID sql.NullString
+	var durationMs, numTurns, blueprintStep sql.NullInt64
+	var blueprintRunID sql.NullString
 
 	if err := row.Scan(
 		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
-		&r.ResultSummary, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &chainRunID, &chainStep,
+		&r.ResultSummary, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &blueprintRunID, &blueprintStep,
 		&r.MemoryMissing,
 	); err != nil {
 		return err
 	}
-	finalizeAgentRun(r, completedAt, costUSD, durationMs, numTurns, chainStep, chainRunID)
+	finalizeAgentRun(r, completedAt, costUSD, durationMs, numTurns, blueprintStep, blueprintRunID)
 	return nil
 }
 
 func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
 	var completedAt sql.NullTime
 	var costUSD sql.NullFloat64
-	var durationMs, numTurns, chainStep sql.NullInt64
-	var chainRunID sql.NullString
+	var durationMs, numTurns, blueprintStep sql.NullInt64
+	var blueprintRunID sql.NullString
 
 	if err := rows.Scan(
 		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
-		&r.ResultSummary, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &chainRunID, &chainStep,
+		&r.ResultSummary, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &blueprintRunID, &blueprintStep,
 		&r.MemoryMissing,
 	); err != nil {
 		return err
 	}
-	finalizeAgentRun(r, completedAt, costUSD, durationMs, numTurns, chainStep, chainRunID)
+	finalizeAgentRun(r, completedAt, costUSD, durationMs, numTurns, blueprintStep, blueprintRunID)
 	return nil
 }
 
-func finalizeAgentRun(r *domain.AgentRun, completedAt sql.NullTime, costUSD sql.NullFloat64, durationMs, numTurns, chainStep sql.NullInt64, chainRunID sql.NullString) {
-	if chainRunID.Valid {
-		r.ChainRunID = chainRunID.String
+func finalizeAgentRun(r *domain.AgentRun, completedAt sql.NullTime, costUSD sql.NullFloat64, durationMs, numTurns, blueprintStep sql.NullInt64, blueprintRunID sql.NullString) {
+	if blueprintRunID.Valid {
+		r.BlueprintRunID = blueprintRunID.String
 	}
-	if chainStep.Valid {
-		v := int(chainStep.Int64)
-		r.ChainStepIndex = &v
+	if blueprintStep.Valid {
+		v := int(blueprintStep.Int64)
+		r.BlueprintStepIndex = &v
 	}
 	if completedAt.Valid {
 		r.CompletedAt = &completedAt.Time

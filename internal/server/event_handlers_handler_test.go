@@ -9,27 +9,23 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// seedSystemPromptForTrigger inserts a system-source prompt that
-// trigger fixtures point at. event_handlers.prompt_id has a composite
-// FK to prompts(id, org_id); without a real prompt row, creating a
-// trigger fails the FK at the SQL layer (or the handler-level prompt
-// lookup, whichever fires first).
-func seedSystemPromptForTrigger(t *testing.T, s *Server, id string) {
+// seedBlueprintForTrigger inserts a user-source blueprint that trigger
+// fixtures point at. event_handlers.blueprint_id has composite FKs to
+// blueprints(id, org_id) AND the same-team blueprints(id, team_id); the
+// handler also validates the id via Blueprints.Get before insert. Without a
+// real blueprint row, creating a trigger fails the FK (or the handler-level
+// lookup, whichever fires first). Existence-guarded so a test that seeds the
+// same id twice is a no-op (Create is not idempotent on its own).
+func seedBlueprintForTrigger(t *testing.T, s *Server, id string) {
 	t.Helper()
-	// Seed via Create with an explicit id so trigger fixtures keep
-	// referencing the prompt by that literal id. SeedOrUpdate now mints a
-	// random UUID per team copy and keys on system_slug (SKY-380); the
-	// trigger→prompt same-team FK only needs the row to exist on the local
-	// team, which Create satisfies. Existence-guarded so a test that seeds
-	// the same id twice is a no-op (Create is not idempotent on its own).
 	ctx := t.Context()
-	if existing, _ := s.prompts.Get(ctx, runmode.LocalDefaultOrg, id); existing != nil {
+	if existing, _ := s.blueprints.Get(ctx, runmode.LocalDefaultOrg, id); existing != nil {
 		return
 	}
-	if err := s.prompts.Create(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Prompt{
-		ID: id, Name: id, Body: "test body", Source: "system",
+	if err := s.blueprints.Create(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Blueprint{
+		ID: id, Name: id, Source: "user", TeamID: runmode.LocalDefaultTeamID,
 	}); err != nil {
-		t.Fatalf("seed prompt %s: %v", id, err)
+		t.Fatalf("seed blueprint %s: %v", id, err)
 	}
 }
 
@@ -61,8 +57,8 @@ func TestHandleEventHandlerCreate_RuleHappyPath(t *testing.T) {
 		t.Errorf("source=%v want user", got["source"])
 	}
 	// Rule rows have NULL trigger-only fields on the wire.
-	if got["prompt_id"] != "" {
-		t.Errorf("prompt_id=%v; rule rows must serialize empty", got["prompt_id"])
+	if got["blueprint_id"] != "" {
+		t.Errorf("prompt_id=%v; rule rows must serialize empty", got["blueprint_id"])
 	}
 	if got["breaker_threshold"] != nil {
 		t.Errorf("breaker_threshold=%v; rule rows must serialize null", got["breaker_threshold"])
@@ -71,11 +67,11 @@ func TestHandleEventHandlerCreate_RuleHappyPath(t *testing.T) {
 
 func TestHandleEventHandlerCreate_TriggerHappyPath(t *testing.T) {
 	s := newTestServer(t)
-	seedSystemPromptForTrigger(t, s, "p-trigger-create")
+	seedBlueprintForTrigger(t, s, "p-trigger-create")
 	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
 		"kind":                     "trigger",
 		"event_type":               "github:pr:ci_check_failed",
-		"prompt_id":                "p-trigger-create",
+		"blueprint_id":             "p-trigger-create",
 		"breaker_threshold":        5,
 		"min_autonomy_suitability": 0.4,
 	})
@@ -87,8 +83,8 @@ func TestHandleEventHandlerCreate_TriggerHappyPath(t *testing.T) {
 	if got["kind"] != "trigger" {
 		t.Errorf("kind=%v want trigger", got["kind"])
 	}
-	if got["prompt_id"] != "p-trigger-create" {
-		t.Errorf("prompt_id=%v", got["prompt_id"])
+	if got["blueprint_id"] != "p-trigger-create" {
+		t.Errorf("prompt_id=%v", got["blueprint_id"])
 	}
 	// Triggers default to disabled (project convention — users opt in).
 	if got["enabled"] != false {
@@ -102,11 +98,11 @@ func TestHandleEventHandlerCreate_TriggerAppliesDefaults(t *testing.T) {
 	// pre-SKY-259 /api/triggers contract so drag-to-create paths can
 	// supply only prompt_id + event_type.
 	s := newTestServer(t)
-	seedSystemPromptForTrigger(t, s, "p-defaults")
+	seedBlueprintForTrigger(t, s, "p-defaults")
 	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":       "trigger",
-		"event_type": "github:pr:ci_check_failed",
-		"prompt_id":  "p-defaults",
+		"kind":         "trigger",
+		"event_type":   "github:pr:ci_check_failed",
+		"blueprint_id": "p-defaults",
 	})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
@@ -295,11 +291,11 @@ func TestHandleEventHandlerDelete_UserRowHardDeletes(t *testing.T) {
 
 func TestHandleEventHandlerPromote_RuleToTrigger(t *testing.T) {
 	s := newTestServer(t)
-	seedSystemPromptForTrigger(t, s, "p-promote")
+	seedBlueprintForTrigger(t, s, "p-promote")
 	id := createUserRule(t, s)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/"+id+"/promote", map[string]any{
-		"prompt_id":                "p-promote",
+		"blueprint_id":             "p-promote",
 		"breaker_threshold":        3,
 		"min_autonomy_suitability": 0.2,
 	})
@@ -311,8 +307,8 @@ func TestHandleEventHandlerPromote_RuleToTrigger(t *testing.T) {
 	if got["kind"] != "trigger" {
 		t.Errorf("kind=%v want trigger", got["kind"])
 	}
-	if got["prompt_id"] != "p-promote" {
-		t.Errorf("prompt_id=%v", got["prompt_id"])
+	if got["blueprint_id"] != "p-promote" {
+		t.Errorf("prompt_id=%v", got["blueprint_id"])
 	}
 	// Rule-only fields must be cleared on the promoted row.
 	if got["name"] != "" {
@@ -325,12 +321,12 @@ func TestHandleEventHandlerPromote_RuleToTrigger(t *testing.T) {
 
 func TestHandleEventHandlerPromote_RejectsAlreadyTrigger(t *testing.T) {
 	s := newTestServer(t)
-	seedSystemPromptForTrigger(t, s, "p-already-trigger")
+	seedBlueprintForTrigger(t, s, "p-already-trigger")
 	// Create a trigger then try to promote it.
 	createRec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
 		"kind":                     "trigger",
 		"event_type":               "github:pr:ci_check_failed",
-		"prompt_id":                "p-already-trigger",
+		"blueprint_id":             "p-already-trigger",
 		"breaker_threshold":        4,
 		"min_autonomy_suitability": 0.0,
 	})
@@ -339,7 +335,7 @@ func TestHandleEventHandlerPromote_RejectsAlreadyTrigger(t *testing.T) {
 	id := created["id"].(string)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/"+id+"/promote", map[string]any{
-		"prompt_id":                "p-already-trigger",
+		"blueprint_id":             "p-already-trigger",
 		"breaker_threshold":        4,
 		"min_autonomy_suitability": 0.0,
 	})
@@ -353,7 +349,7 @@ func TestHandleEventHandlerPromote_RequiresFields(t *testing.T) {
 	id := createUserRule(t, s)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/"+id+"/promote", map[string]any{
-		"prompt_id": "p-promote",
+		"blueprint_id": "p-promote",
 		// missing breaker_threshold + min_autonomy_suitability
 	})
 	if rec.Code != http.StatusBadRequest {
@@ -395,11 +391,11 @@ func TestHandleEventHandlerReorder_RejectsEmpty(t *testing.T) {
 func TestHandleEventHandlersList_KindFilter(t *testing.T) {
 	s := newTestServer(t)
 	_ = createUserRule(t, s)
-	seedSystemPromptForTrigger(t, s, "p-list")
+	seedBlueprintForTrigger(t, s, "p-list")
 	doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
 		"kind":                     "trigger",
 		"event_type":               "github:pr:ci_check_failed",
-		"prompt_id":                "p-list",
+		"blueprint_id":             "p-list",
 		"breaker_threshold":        4,
 		"min_autonomy_suitability": 0.0,
 	})

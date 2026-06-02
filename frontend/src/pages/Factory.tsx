@@ -257,7 +257,7 @@ export default function Factory() {
             entity_id: pd.entity.id,
             event_type: pd.eventType,
             dedup_key: pd.dedupKey,
-            prompt_id: promptId,
+            blueprint_id: promptId,
             team_id: delegateTeam,
           }),
         })
@@ -338,6 +338,9 @@ export default function Factory() {
       </DragOverlay>
       <PromptPicker
         open={pendingDelegate != null}
+        source="blueprints"
+        title="Choose a blueprint"
+        subtitle="Select a blueprint to run for this task"
         onSelect={handlePromptSelected}
         onClose={() => setPendingDelegate(null)}
         onEditPrompts={() => {

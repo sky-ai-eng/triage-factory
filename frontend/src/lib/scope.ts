@@ -21,3 +21,11 @@ export function promptsBase(template: boolean): string {
 export function handlersBase(template: boolean): string {
   return template ? '/api/org-template/event-handlers' : '/api/event-handlers'
 }
+
+// blueprintsBase returns the REST root for blueprints. Template scope reuses
+// its prompt-template family for the name lookup (the org template is leaf-only,
+// so a template trigger points at a single-step blueprint stored alongside the
+// template prompts); team scope hits the dedicated /api/blueprints endpoint.
+export function blueprintsBase(template: boolean): string {
+  return template ? '/api/org-template/prompts' : '/api/blueprints'
+}

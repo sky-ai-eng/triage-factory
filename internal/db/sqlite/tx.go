@@ -58,7 +58,7 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		Dashboard:        newDashboardStore(tx),
 		Secrets:          newSecretStore(),
 		EventHandlers:    newEventHandlerStore(tx, users),
-		Chains:           newChainStore(tx, tx),
+		Blueprints:       newBlueprintStore(tx, tx),
 		Agents:           newAgentStore(tx, tx),
 		TeamAgents:       newTeamAgentStore(tx),
 		Users:            users,

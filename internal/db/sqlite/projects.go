@@ -56,13 +56,13 @@ func (s *projectStore) Create(ctx context.Context, orgID, teamID string, p domai
 	}
 	now := time.Now().UTC()
 	_, err = s.q.ExecContext(ctx, `
-		INSERT INTO projects (id, name, description, curator_session_id, pinned_repos, jira_project_key, linear_project_key, spec_authorship_prompt_id, team_id, created_at, updated_at)
+		INSERT INTO projects (id, name, description, curator_session_id, pinned_repos, jira_project_key, linear_project_key, spec_authorship_blueprint_id, team_id, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		id, p.Name, p.Description,
 		nullIfEmpty(p.CuratorSessionID), string(pinnedJSON),
 		nullIfEmpty(p.JiraProjectKey), nullIfEmpty(p.LinearProjectKey),
-		nullIfEmpty(p.SpecAuthorshipPromptID),
+		nullIfEmpty(p.SpecAuthorshipBlueprintID),
 		runmode.LocalDefaultTeamID,
 		now, now,
 	)
@@ -78,7 +78,7 @@ func (s *projectStore) Get(ctx context.Context, orgID, id string) (*domain.Proje
 	}
 	row := s.q.QueryRowContext(ctx, `
 		SELECT id, name, description, curator_session_id, pinned_repos,
-		       jira_project_key, linear_project_key, spec_authorship_prompt_id,
+		       jira_project_key, linear_project_key, spec_authorship_blueprint_id,
 		       team_id, created_at, updated_at
 		FROM projects WHERE id = ?
 	`, id)
@@ -91,7 +91,7 @@ func (s *projectStore) List(ctx context.Context, orgID string) ([]domain.Project
 	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT id, name, description, curator_session_id, pinned_repos,
-		       jira_project_key, linear_project_key, spec_authorship_prompt_id,
+		       jira_project_key, linear_project_key, spec_authorship_blueprint_id,
 		       team_id, created_at, updated_at
 		FROM projects ORDER BY LOWER(name) ASC
 	`)
@@ -130,14 +130,14 @@ func (s *projectStore) Update(ctx context.Context, orgID string, p domain.Projec
 		SET name = ?, description = ?,
 		    curator_session_id = ?, pinned_repos = ?,
 		    jira_project_key = ?, linear_project_key = ?,
-		    spec_authorship_prompt_id = ?,
+		    spec_authorship_blueprint_id = ?,
 		    updated_at = ?
 		WHERE id = ?
 	`,
 		p.Name, p.Description,
 		nullIfEmpty(p.CuratorSessionID), string(pinnedJSON),
 		nullIfEmpty(p.JiraProjectKey), nullIfEmpty(p.LinearProjectKey),
-		nullIfEmpty(p.SpecAuthorshipPromptID),
+		nullIfEmpty(p.SpecAuthorshipBlueprintID),
 		now, p.ID,
 	)
 	if err != nil {
@@ -225,19 +225,19 @@ func scanSqliteProjectRow(row interface {
 	Scan(dest ...any) error
 }) (*domain.Project, error) {
 	var (
-		p            domain.Project
-		sessionID    sql.NullString
-		jiraKey      sql.NullString
-		linearKey    sql.NullString
-		specPromptID sql.NullString
-		teamID       sql.NullString
-		pinnedJSON   string
-		createdAt    time.Time
-		updatedAt    time.Time
+		p               domain.Project
+		sessionID       sql.NullString
+		jiraKey         sql.NullString
+		linearKey       sql.NullString
+		specBlueprintID sql.NullString
+		teamID          sql.NullString
+		pinnedJSON      string
+		createdAt       time.Time
+		updatedAt       time.Time
 	)
 	err := row.Scan(
 		&p.ID, &p.Name, &p.Description, &sessionID, &pinnedJSON,
-		&jiraKey, &linearKey, &specPromptID,
+		&jiraKey, &linearKey, &specBlueprintID,
 		&teamID, &createdAt, &updatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -249,7 +249,7 @@ func scanSqliteProjectRow(row interface {
 	p.CuratorSessionID = sessionID.String
 	p.JiraProjectKey = jiraKey.String
 	p.LinearProjectKey = linearKey.String
-	p.SpecAuthorshipPromptID = specPromptID.String
+	p.SpecAuthorshipBlueprintID = specBlueprintID.String
 	p.TeamID = teamID.String
 	p.CreatedAt = createdAt
 	p.UpdatedAt = updatedAt

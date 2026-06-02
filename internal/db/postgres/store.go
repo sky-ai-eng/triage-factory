@@ -89,10 +89,10 @@ func New(admin, app *sql.DB) db.Stores {
 		// trigger_type (event → admin with NULL creator, manual → app
 		// with COALESCE fallback), mirroring AgentRunStore.Create. The
 		// `...System` variants on the read/write methods (ListSteps,
-		// MarkRunStatus, RunsForChain, InsertVerdict, GetLatestVerdict)
-		// give the chain orchestrator goroutine an admin-pool route
+		// MarkRunStatus, RunsForBlueprint, InsertVerdict, GetLatestVerdict)
+		// give the blueprint orchestrator goroutine an admin-pool route
 		// for its detached-context work.
-		Chains: newChainStore(app, admin),
+		Blueprints: newBlueprintStore(app, admin),
 		// Agents.Create routes through admin (bootstrap has no JWT
 		// claims and the agents_insert policy gates on
 		// tf.user_is_org_admin); every other method on app. Same
@@ -301,7 +301,7 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		Dashboard:     newDashboardStore(tx),
 		Secrets:       newSecretStore(tx, tx),
 		EventHandlers: newTxEventHandlerStore(tx),
-		Chains:        newChainStore(tx, tx),
+		Blueprints:    newBlueprintStore(tx, tx),
 		Agents:        newTxAgentStore(tx),
 		TeamAgents:    newTxTeamAgentStore(tx),
 		Users:         newUsersStore(tx, tx),

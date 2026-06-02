@@ -207,7 +207,7 @@ func (s *curatorStore) ConsumePendingContext(ctx context.Context, orgID, project
 		p, err := scanPgCuratorProject(tx.QueryRowContext(ctx, `
 			SELECT id::text, name, description, curator_session_id,
 			       pinned_repos, jira_project_key, linear_project_key,
-			       spec_authorship_prompt_id, created_at, updated_at
+			       spec_authorship_blueprint_id, created_at, updated_at
 			FROM projects
 			WHERE org_id = $1 AND id = $2
 		`, orgID, projectID))
@@ -407,16 +407,16 @@ func scanPgCuratorProject(row interface {
 	Scan(dest ...any) error
 }) (*domain.Project, error) {
 	var (
-		p            domain.Project
-		sessionID    sql.NullString
-		jiraKey      sql.NullString
-		linearKey    sql.NullString
-		specPromptID sql.NullString
-		pinnedJSON   []byte
+		p               domain.Project
+		sessionID       sql.NullString
+		jiraKey         sql.NullString
+		linearKey       sql.NullString
+		specBlueprintID sql.NullString
+		pinnedJSON      []byte
 	)
 	err := row.Scan(
 		&p.ID, &p.Name, &p.Description, &sessionID, &pinnedJSON,
-		&jiraKey, &linearKey, &specPromptID,
+		&jiraKey, &linearKey, &specBlueprintID,
 		&p.CreatedAt, &p.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -428,7 +428,7 @@ func scanPgCuratorProject(row interface {
 	p.CuratorSessionID = sessionID.String
 	p.JiraProjectKey = jiraKey.String
 	p.LinearProjectKey = linearKey.String
-	p.SpecAuthorshipPromptID = specPromptID.String
+	p.SpecAuthorshipBlueprintID = specBlueprintID.String
 	if len(pinnedJSON) == 0 {
 		p.PinnedRepos = []string{}
 	} else if err := json.Unmarshal(pinnedJSON, &p.PinnedRepos); err != nil {

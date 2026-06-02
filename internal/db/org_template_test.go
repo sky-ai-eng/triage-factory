@@ -66,7 +66,7 @@ func TestOrgTemplate_UpdateHandler_MatchedSemantics(t *testing.T) {
 	minA := 0.0
 	if err := stores.OrgTemplate.PromoteHandler(ctx, org, rule.ID, domain.EventHandler{
 		Kind:                   domain.EventHandlerKindTrigger,
-		PromptID:               prompts[0].ID,
+		BlueprintID:            prompts[0].ID,
 		BreakerThreshold:       &bt,
 		MinAutonomySuitability: &minA,
 	}); err != nil {

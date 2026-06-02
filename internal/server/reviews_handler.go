@@ -205,7 +205,7 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 2: run/task bookkeeping. Independent of the delete above.
-	var chainRun *domain.ChainRun
+	var chainRun *domain.BlueprintRun
 	if review.RunID != "" {
 		if err := s.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
 			if _, err := tx.AgentRuns.MarkCompletedIfPendingApproval(cleanupCtx, orgID, review.RunID); err != nil {
@@ -216,7 +216,7 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 			// row finalizes first. A chain lookup error leaves the
 			// task open for human follow-up rather than racing
 			// terminateChain.
-			cr, _, chainLookupErr := tx.Chains.GetRunForRun(cleanupCtx, orgID, review.RunID)
+			cr, _, chainLookupErr := tx.Blueprints.GetRunForRun(cleanupCtx, orgID, review.RunID)
 			if chainLookupErr != nil {
 				log.Printf("[reviews] warning: chain lookup failed for run %s; skipping task closure: %v", review.RunID, chainLookupErr)
 				return nil
@@ -245,7 +245,7 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 			Data:  map[string]string{"status": "completed"},
 		})
 		if chainRun != nil && s.spawner != nil {
-			s.spawner.ResumeChainAfterApproval(orgID, review.RunID, userID)
+			s.spawner.ResumeBlueprintAfterApproval(orgID, review.RunID, userID)
 		}
 	}
 

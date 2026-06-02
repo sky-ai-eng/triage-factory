@@ -119,12 +119,12 @@ export default function RunDetail() {
   // steps with synthetic "pending" placeholders so the rail can render
   // the full length of the chain before later steps have spawned.
   useEffect(() => {
-    if (!run?.chain_run_id) {
+    if (!run?.blueprint_run_id) {
       setChainSteps(null)
       return
     }
     let cancelled = false
-    fetch(`/api/chain-runs/${run.chain_run_id}`)
+    fetch(`/api/blueprint-runs/${run.blueprint_run_id}`)
       .then((r) => (r.ok ? r.json() : null))
       .then(
         (
@@ -136,14 +136,14 @@ export default function RunDetail() {
           const padded: AgentRun[] = data.steps.map((s, i) => {
             if (s.run) return s.run
             return {
-              ID: `__pending-${run.chain_run_id}-${i}`,
+              ID: `__pending-${run.blueprint_run_id}-${i}`,
               TaskID: run.TaskID,
               Status: 'pending',
               Model: '',
               StartedAt: '',
               ResultSummary: '',
-              chain_run_id: run.chain_run_id,
-              chain_step_index: i,
+              blueprint_run_id: run.blueprint_run_id,
+              blueprint_step_index: i,
             } as unknown as AgentRun
           })
           setChainSteps(padded)
@@ -153,7 +153,7 @@ export default function RunDetail() {
     return () => {
       cancelled = true
     }
-  }, [run?.chain_run_id, run?.TaskID])
+  }, [run?.blueprint_run_id, run?.TaskID])
 
   // Keyboard shortcuts: Esc → back, 1/2 → modes, t → take over.
   // handleTakeover is declared below; capture via ref so the listener

@@ -86,8 +86,8 @@ func seedPgAgentRunPrompt(t *testing.T, h *pgtest.Harness, orgID, userID string)
 	t.Helper()
 	teamID := firstTeamForOrg(t, h, orgID)
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, kind, allowed_tools, created_at, updated_at)
-		VALUES ('p_agentrun_test', $1, $2, $3, 'AgentRun Test', 'body', 'user', 'leaf', '', now(), now())
+		INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, allowed_tools, created_at, updated_at)
+		VALUES ('p_agentrun_test', $1, $2, $3, 'AgentRun Test', 'body', 'user', '', now(), now())
 	`, orgID, userID, teamID); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}
@@ -640,8 +640,8 @@ func seedPgAgentRunPromptIn(t *testing.T, h *pgtest.Harness, id, orgID, userID s
 	t.Helper()
 	teamID := firstTeamForOrg(t, h, orgID)
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, kind, allowed_tools, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, 'X-leak Test', 'body', 'user', 'leaf', '', now(), now())
+		INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, allowed_tools, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 'X-leak Test', 'body', 'user', '', now(), now())
 	`, id, orgID, userID, teamID); err != nil {
 		t.Fatalf("seed prompt %s: %v", id, err)
 	}

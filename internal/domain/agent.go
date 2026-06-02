@@ -38,8 +38,8 @@ type AgentRun struct {
 	// migration introduced for prompts / task_rules / etc.
 	CreatorUserID string
 
-	ChainRunID     string `json:"chain_run_id,omitempty"`     // FK to chain_runs.id — populated for runs that are a step inside a chain
-	ChainStepIndex *int   `json:"chain_step_index,omitempty"` // 0-based step index within the chain; nil for non-chain runs
+	BlueprintRunID     string `json:"blueprint_run_id,omitempty"`     // FK to blueprint_runs.id — populated for runs that are a step inside a multi-step blueprint
+	BlueprintStepIndex *int   `json:"blueprint_step_index,omitempty"` // 0-based step index within the blueprint; nil for non-blueprint-step runs
 }
 
 // AgentMessage represents a single message within an agent run.

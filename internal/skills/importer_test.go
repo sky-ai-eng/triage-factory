@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	_ "modernc.org/sqlite"
@@ -270,7 +271,7 @@ func TestImportAll_DoesNotHideDuplicatePromptReferencedByTrigger(t *testing.T) {
 	trigger := domain.EventHandler{
 		ID:                     "trigger-keep-imported-prompt",
 		Kind:                   domain.EventHandlerKindTrigger,
-		PromptID:               keepID,
+		BlueprintID:            keepID,
 		TriggerType:            domain.TriggerTypeEvent,
 		EventType:              domain.EventGitHubPRReviewRequested,
 		BreakerThreshold:       intPtr(4),
@@ -288,8 +289,14 @@ func TestImportAll_DoesNotHideDuplicatePromptReferencedByTrigger(t *testing.T) {
 	if storedTrigger == nil {
 		t.Fatal("expected trigger to remain after import")
 	}
-	if storedTrigger.PromptID != keepID {
-		t.Fatalf("expected trigger to keep prompt %q, got %q", keepID, storedTrigger.PromptID)
+	// The trigger now references a blueprint wrapping keepID; resolve through
+	// its first step to confirm it still points at the kept prompt.
+	steps, err := sqlitestore.New(database).Blueprints.ListSteps(t.Context(), runmode.LocalDefaultOrg, storedTrigger.BlueprintID)
+	if err != nil || len(steps) == 0 {
+		t.Fatalf("resolve trigger blueprint steps: steps=%v err=%v", steps, err)
+	}
+	if steps[0].StepPromptID != keepID {
+		t.Fatalf("expected trigger blueprint to keep prompt %q, got %q", keepID, steps[0].StepPromptID)
 	}
 	if promptHidden(t, database, keepID) {
 		t.Fatalf("prompt %q has a trigger and should not be hidden", keepID)

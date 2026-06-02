@@ -16,15 +16,15 @@ import (
 // claims) both work without per-subtest plumbing — same shape the
 // other Postgres conformance tests use.
 //
-// The PromptSeeder inserts a system-source prompt per requested slug;
-// event_handlers.prompt_id has composite FKs to prompts(id, org_id) AND
-// the same-team prompts(id, team_id) (SKY-380), so trigger fixtures need
-// real prompt rows owned by the factory's team, and the seeder returns the
-// slug→prompt-id map the harness threads into Seed / Create.
+// The BlueprintSeeder inserts a system-source blueprint per requested slug;
+// event_handlers.blueprint_id has composite FKs to blueprints(id, org_id) AND
+// the same-team blueprints(id, team_id), so trigger fixtures need real
+// blueprint rows owned by the factory's team, and the seeder returns the
+// slug→blueprint-id map the harness threads into Seed / Create.
 func TestEventHandlerStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 
-	dbtest.RunEventHandlerStoreConformance(t, func(t *testing.T) (db.EventHandlerStore, string, string, dbtest.PromptSeeder) {
+	dbtest.RunEventHandlerStoreConformance(t, func(t *testing.T) (db.EventHandlerStore, string, string, dbtest.BlueprintSeeder) {
 		t.Helper()
 		h.Reset(t)
 		orgID := seedPgOrgForAgents(t, h)
@@ -37,16 +37,15 @@ func TestEventHandlerStore_Postgres(t *testing.T) {
 			t.Helper()
 			out := make(map[string]string, len(slugs))
 			for _, slug := range slugs {
-				// system-source rows ship with creator_user_id NULL +
-				// visibility='team' and a system_slug (SKY-380). The id is a
-				// random UUID; seed via SeedOrUpdate (admin pool) so the row
-				// + version sidecar land correctly and we capture the minted
-				// id for the trigger→prompt same-team FK.
-				id, err := stores.Prompts.SeedOrUpdate(t.Context(), orgID, teamID, domain.Prompt{
-					SystemSlug: slug, Name: slug, Body: "test body", Source: "system",
+				// system-source rows ship with creator_user_id NULL and a
+				// system_slug. The id is a random UUID; seed via SeedOrUpdate
+				// (admin pool) and capture the minted id for the
+				// trigger→blueprint same-team FK.
+				id, err := stores.Blueprints.SeedOrUpdate(t.Context(), orgID, teamID, domain.Blueprint{
+					SystemSlug: slug, Name: slug, Source: "system",
 				})
 				if err != nil {
-					t.Fatalf("seed prompt %s: %v", slug, err)
+					t.Fatalf("seed blueprint %s: %v", slug, err)
 				}
 				out[slug] = id
 			}

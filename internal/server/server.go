@@ -34,7 +34,7 @@ type Server struct {
 	agents        db.AgentStore     // SKY-261 D-Claims: resolves the org's agent for claim stamps
 	teamAgents    db.TeamAgentStore // SKY-261 D-Claims: re-checks team_agents.enabled on swipe-delegate / factory-delegate
 	users         db.UsersStore     // display_name + Jira binding on the user row; host-scoped GitHub identity via user_github_identities (SKY-396)
-	chains        db.ChainStore
+	blueprints    db.BlueprintStore
 	tasks         db.TaskStore            // SKY-283: task lifecycle, claim, queue + factory snapshot reads
 	factory       db.FactoryReadStore     // SKY-292: factory snapshot reads
 	agentRuns     db.AgentRunStore        // SKY-285: agent run lifecycle + transcript + yields
@@ -390,7 +390,7 @@ func New(database *sql.DB, stores db.Stores, takeoverDir string, serverPort int)
 		agents:        stores.Agents,
 		teamAgents:    stores.TeamAgents,
 		users:         stores.Users,
-		chains:        stores.Chains,
+		blueprints:    stores.Blueprints,
 		tasks:         stores.Tasks,
 		factory:       stores.Factory,
 		agentRuns:     stores.AgentRuns,
@@ -676,10 +676,12 @@ func (s *Server) routes() {
 	s.apiMutating("PUT /api/prompts/{id}", s.handlePromptPut)
 	s.apiMutating("DELETE /api/prompts/{id}", s.handlePromptDelete)
 	s.api("GET /api/prompts/{id}/stats", s.handlePromptStats)
-	s.api("GET /api/prompts/{id}/chain-steps", s.handleChainStepsGet)
-	s.apiMutating("PUT /api/prompts/{id}/chain-steps", s.handleChainStepsPut)
-	s.api("GET /api/chain-runs/{id}", s.handleChainRunGet)
-	s.apiMutating("POST /api/chain-runs/{id}/cancel", s.handleChainRunCancel)
+	s.api("GET /api/blueprints", s.handleBlueprintsList)
+	s.apiMutating("POST /api/blueprints", s.handleBlueprintCreate)
+	s.api("GET /api/blueprints/{id}/steps", s.handleBlueprintStepsGet)
+	s.apiMutating("PUT /api/blueprints/{id}/steps", s.handleBlueprintStepsPut)
+	s.api("GET /api/blueprint-runs/{id}", s.handleBlueprintRunGet)
+	s.apiMutating("POST /api/blueprint-runs/{id}/cancel", s.handleBlueprintRunCancel)
 
 	// Org template editor (SKY-381) — org-admin-gated, multi-mode only.
 	// Mirrors the /api/prompts + /api/event-handlers families at org-template

@@ -234,8 +234,8 @@ func seedPgPendingPRPrompt(t *testing.T, h *pgtest.Harness, orgID, userID string
 	teamID := firstTeamForOrg(t, h, orgID)
 	id := "p_pending_pr_test_" + orgID[:8]
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, kind, allowed_tools, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, 'PendingPR Test', 'body', 'user', 'leaf', '', now(), now())
+		INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, allowed_tools, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 'PendingPR Test', 'body', 'user', '', now(), now())
 	`, id, orgID, userID, teamID); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}

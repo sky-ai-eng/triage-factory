@@ -196,6 +196,7 @@ func newPgPendingFiringsSeeder(h *pgtest.Harness, orgID, userID string) dbtest.P
 		taskID := uuid.New().String()
 		triggerID := uuid.New().String()
 		promptID := uuid.New().String()
+		blueprintID := uuid.New().String()
 		sourceID := fmt.Sprintf("owner/repo#%s", entityID[:8])
 
 		if _, err := conn.Exec(`
@@ -205,10 +206,25 @@ func newPgPendingFiringsSeeder(h *pgtest.Harness, orgID, userID string) dbtest.P
 			t.Fatalf("seed entity: %v", err)
 		}
 		if _, err := conn.Exec(`
-			INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, kind, allowed_tools, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, 'PendingFirings Test', 'body', 'user', 'leaf', '', now(), now())
+			INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, allowed_tools, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, 'PendingFirings Test', 'body', 'user', '', now(), now())
 		`, promptID, orgID, userID, teamID); err != nil {
 			t.Fatalf("seed prompt: %v", err)
+		}
+		// The trigger's blueprint_id FKs to blueprints(id, org_id) AND the
+		// same-team blueprints(id, team_id), so seed a team-owned blueprint
+		// wrapping the prompt above.
+		if _, err := conn.Exec(`
+			INSERT INTO blueprints (id, org_id, creator_user_id, team_id, name, source, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, 'PendingFirings BP', 'user', now(), now())
+		`, blueprintID, orgID, userID, teamID); err != nil {
+			t.Fatalf("seed blueprint: %v", err)
+		}
+		if _, err := conn.Exec(`
+			INSERT INTO blueprint_steps (org_id, team_id, blueprint_id, step_index, step_prompt_id)
+			VALUES ($1, $2, $3, 0, $4)
+		`, orgID, teamID, blueprintID, promptID); err != nil {
+			t.Fatalf("seed blueprint step: %v", err)
 		}
 		if _, err := conn.Exec(`
 			INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
@@ -223,9 +239,9 @@ func newPgPendingFiringsSeeder(h *pgtest.Harness, orgID, userID string) dbtest.P
 			t.Fatalf("seed task: %v", err)
 		}
 		if _, err := conn.Exec(`
-			INSERT INTO event_handlers (id, org_id, creator_user_id, team_id, kind, event_type, source, prompt_id, breaker_threshold, min_autonomy_suitability, enabled, created_at, updated_at)
+			INSERT INTO event_handlers (id, org_id, creator_user_id, team_id, kind, event_type, source, blueprint_id, breaker_threshold, min_autonomy_suitability, enabled, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, 'trigger', 'github:pr:ci_check_failed', 'user', $5, 4, 0, true, now(), now())
-		`, triggerID, orgID, userID, teamID, promptID); err != nil {
+		`, triggerID, orgID, userID, teamID, blueprintID); err != nil {
 			t.Fatalf("seed trigger: %v", err)
 		}
 
@@ -247,8 +263,8 @@ func newPgPendingFiringsSeeder(h *pgtest.Harness, orgID, userID string) dbtest.P
 		runID := uuid.New().String()
 		promptID := uuid.New().String()
 		if _, err := conn.Exec(`
-			INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, kind, allowed_tools, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, 'Run Prompt', 'x', 'user', 'leaf', '', now(), now())
+			INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, allowed_tools, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, 'Run Prompt', 'x', 'user', '', now(), now())
 		`, promptID, orgID, userID, teamID); err != nil {
 			t.Fatalf("seed run prompt: %v", err)
 		}

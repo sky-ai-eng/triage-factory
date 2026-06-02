@@ -14,8 +14,8 @@ import (
 //
 //	kind="rule"    — declarative; creates an unclaimed task. Carries
 //	                 default_priority, sort_order, name.
-//	kind="trigger" — auto-delegation; creates a task and fires a prompt.
-//	                 Carries prompt_id, breaker_threshold,
+//	kind="trigger" — auto-delegation; creates a task and fires a blueprint.
+//	                 Carries blueprint_id, breaker_threshold,
 //	                 min_autonomy_suitability.
 //
 // Per-kind CHECK constraints on the event_handlers table enforce that each
@@ -44,13 +44,13 @@ type EventHandlerStore interface {
 	// ship with Enabled=false per project convention (system triggers are
 	// reference examples — users opt in).
 	//
-	// promptIDsBySlug resolves each shipped trigger's prompt slug
-	// (ShippedEventHandler.PromptID) to the team's prompt-copy UUID — the
-	// caller seeds the team's prompts first (phase 1) and threads the
-	// resulting slug→id map here (phase 2) so the trigger→prompt
-	// same-team FK ((prompt_id, team_id) → prompts(id, team_id)) resolves.
-	// A trigger whose prompt slug is absent from the map is a seeding bug
-	// and returns an error rather than writing a dangling row.
+	// blueprintIDsBySlug resolves each shipped trigger's blueprint slug
+	// (ShippedEventHandler.BlueprintID) to the team's blueprint-copy UUID —
+	// the caller seeds the team's prompts + blueprints first and threads the
+	// resulting slug→id map here so the trigger→blueprint same-team FK
+	// ((blueprint_id, team_id) → blueprints(id, team_id)) resolves. A trigger
+	// whose blueprint slug is absent from the map is a seeding bug and returns
+	// an error rather than writing a dangling row.
 	//
 	// System rows are team-scoped (team_id=teamID; no visibility column).
 	// The router routes matched handlers to team-scoped tasks; carrying
@@ -58,7 +58,7 @@ type EventHandlerStore interface {
 	// team does this fire for?" In local mode the caller passes
 	// runmode.LocalDefaultTeamID; in multi mode each new team calls Seed at
 	// creation time to inherit the shipped defaults.
-	Seed(ctx context.Context, orgID, teamID string, promptIDsBySlug map[string]string) error
+	Seed(ctx context.Context, orgID, teamID string, blueprintIDsBySlug map[string]string) error
 
 	// List returns handlers in the order:
 	//   rules first by sort_order ASC, then name ASC,
@@ -80,11 +80,10 @@ type EventHandlerStore interface {
 	// two-phase loop.
 	GetEnabledForEvent(ctx context.Context, orgID string, eventType string) ([]domain.EventHandler, error)
 
-	// ListForPrompt returns all trigger handlers referencing the given
-	// prompt (any source), ordered by created_at DESC. The prompts handler
-	// uses it to surface "triggers using this prompt." Returns only
-	// kind='trigger' rows.
-	ListForPrompt(ctx context.Context, orgID string, promptID string) ([]domain.EventHandler, error)
+	// ListForBlueprint returns all trigger handlers referencing the given
+	// blueprint (any source), ordered by created_at DESC. Used to surface
+	// "triggers firing this blueprint." Returns only kind='trigger' rows.
+	ListForBlueprint(ctx context.Context, orgID string, blueprintID string) ([]domain.EventHandler, error)
 
 	// Create inserts a new user-source handler owned by teamID — the
 	// acting team the handler resolved for the request. Caller supplies
@@ -97,7 +96,7 @@ type EventHandlerStore interface {
 
 	// Update changes a handler's mutable fields. ID, kind, source,
 	// event_type, and created_at are immutable. For triggers,
-	// prompt_id is also immutable. updated_at is refreshed.
+	// blueprint_id is also immutable. updated_at is refreshed.
 	Update(ctx context.Context, orgID string, h domain.EventHandler) error
 
 	// SetEnabled flips just the enabled bit. Used for the
@@ -139,9 +138,9 @@ type EventHandlerStore interface {
 // ID is the stable system_slug ("system-rule-ci-check-failed" /
 // "system-trigger-ci-fix") — both dialects mint a random UUID for the row
 // id and store this slug in event_handlers.system_slug, deduping re-seeds
-// on (org_id, team_id, system_slug) (SKY-380). For triggers, PromptID is
-// the prompt's system_slug ("system-ci-fix"), resolved to the team's
-// prompt-copy UUID via the promptIDsBySlug map passed to Seed.
+// on (org_id, team_id, system_slug) (SKY-380). For triggers, BlueprintID is
+// the blueprint's system_slug ("system-ci-fix"), resolved to the team's
+// blueprint-copy UUID via the blueprintIDsBySlug map passed to Seed.
 type ShippedEventHandler struct {
 	ID        string
 	Kind      string // "rule" | "trigger"
@@ -153,8 +152,9 @@ type ShippedEventHandler struct {
 	DefaultPriority float64
 	SortOrder       int
 
-	// Trigger-only. PromptID is the referenced prompt's system_slug.
-	PromptID               string
+	// Trigger-only. BlueprintID is the referenced blueprint's system_slug
+	// (which reuses the wrapped prompt's slug).
+	BlueprintID            string
 	BreakerThreshold       int
 	MinAutonomySuitability float64
 }
@@ -164,10 +164,11 @@ type ShippedEventHandler struct {
 // with Enabled=true (the post-Seed default in the Create path);
 // triggers ship with Enabled=false per project convention.
 //
-// PromptID values on trigger entries reference shipped prompts seeded by
-// PromptStore.SeedOrUpdate. Call order at boot is PromptStore.SeedOrUpdate
-// → EventHandlerStore.Seed so the FK from event_handlers (prompt_id, org_id)
-// → prompts (id, org_id) is satisfied at seed time in Postgres.
+// BlueprintID values on trigger entries reference shipped blueprints seeded
+// by BlueprintStore.SeedOrUpdate. Call order at boot is prompts →
+// blueprints(+steps) → EventHandlerStore.Seed so the FK from event_handlers
+// (blueprint_id, org_id) → blueprints (id, org_id) is satisfied at seed time
+// in Postgres.
 var ShippedEventHandlers = []ShippedEventHandler{
 	// ----- rules ------------------------------------------------------------
 	//
@@ -242,7 +243,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 	{
 		ID:                     "system-trigger-ci-fix",
 		Kind:                   domain.EventHandlerKindTrigger,
-		PromptID:               "system-ci-fix",
+		BlueprintID:            "system-ci-fix",
 		EventType:              domain.EventGitHubPRCICheckFailed,
 		Predicate:              `{"author_in":[]}`,
 		BreakerThreshold:       3,
@@ -251,7 +252,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 	{
 		ID:                     "system-trigger-conflict-resolution",
 		Kind:                   domain.EventHandlerKindTrigger,
-		PromptID:               "system-conflict-resolution",
+		BlueprintID:            "system-conflict-resolution",
 		EventType:              domain.EventGitHubPRConflicts,
 		Predicate:              `{"author_in":[]}`,
 		BreakerThreshold:       2,
@@ -260,7 +261,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 	{
 		ID:                     "system-trigger-jira-implement",
 		Kind:                   domain.EventHandlerKindTrigger,
-		PromptID:               "system-jira-implement",
+		BlueprintID:            "system-jira-implement",
 		EventType:              domain.EventJiraIssueAssigned,
 		Predicate:              `{"assignee_in":[]}`,
 		BreakerThreshold:       2,
@@ -271,7 +272,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		// rule note above for the decomposition path that lands here.
 		ID:                     "system-trigger-jira-implement-atomic",
 		Kind:                   domain.EventHandlerKindTrigger,
-		PromptID:               "system-jira-implement",
+		BlueprintID:            "system-jira-implement",
 		EventType:              domain.EventJiraIssueBecameAtomic,
 		Predicate:              `{"assignee_in":[]}`,
 		BreakerThreshold:       2,
@@ -283,7 +284,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		// user-scoped at emit time — no predicate needed.
 		ID:                     "system-trigger-pr-review",
 		Kind:                   domain.EventHandlerKindTrigger,
-		PromptID:               "system-pr-review",
+		BlueprintID:            "system-pr-review",
 		EventType:              domain.EventGitHubPRReviewRequested,
 		Predicate:              "",
 		BreakerThreshold:       3,
@@ -292,7 +293,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 	{
 		ID:                     "system-trigger-fix-review-feedback",
 		Kind:                   domain.EventHandlerKindTrigger,
-		PromptID:               "system-fix-review-feedback",
+		BlueprintID:            "system-fix-review-feedback",
 		EventType:              domain.EventGitHubPRReviewChangesRequested,
 		Predicate:              `{"author_in":[]}`,
 		BreakerThreshold:       3,

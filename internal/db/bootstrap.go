@@ -97,24 +97,28 @@ func BootstrapTeamAgent(ctx context.Context, stores Stores, orgID, teamID string
 	return nil
 }
 
-// SeedTeamDefaults seeds a team's own copies of the shipped prompts and
-// shipped event handlers in two phases (SKY-380):
+// SeedTeamDefaults seeds a team's own copies of the shipped prompts,
+// blueprints, and event handlers in three phases:
 //
 //	(1) seed each prompt copy, capturing system_slug → the team's
 //	    prompt-copy UUID;
-//	(2) seed the handlers, resolving each trigger's prompt slug to that map
-//	    so the trigger→prompt same-team FK ((prompt_id, team_id) →
-//	    prompts(id, team_id)) is satisfied.
+//	(2) seed each blueprint header + its steps (resolving each step's prompt
+//	    slug via the phase-1 map), capturing system_slug → the team's
+//	    blueprint-copy UUID;
+//	(3) seed the handlers, resolving each trigger's blueprint slug via the
+//	    phase-2 map so the trigger→blueprint same-team FK
+//	    ((blueprint_id, team_id) → blueprints(id, team_id)) is satisfied.
 //
-// Idempotent: re-runs no-op via the (org_id, team_id, system_slug) unique
-// keys on prompts + event_handlers. shippedPrompts is passed in (rather than
+// Idempotent: re-runs no-op via the (org_id, team_id, system_slug) unique keys
+// on prompts + blueprints + event_handlers (steps re-write to the same dense
+// 0..N-1 list). shippedPrompts + shippedBlueprints are passed in (rather than
 // imported from internal/ai) so internal/db stays free of the ai dependency —
-// callers supply ai.ShippedPrompts().
+// callers supply ai.ShippedPrompts() / ai.ShippedBlueprints().
 //
 // Must run OUTSIDE any caller WithTx: SeedOrUpdate + EventHandlers.Seed route
 // through the Postgres admin pool (the system_prompt_versions sidecar +
 // claims-less system rows) and refuse to run inside an app-pool tx.
-func SeedTeamDefaults(ctx context.Context, prompts PromptStore, handlers EventHandlerStore, orgID, teamID string, shippedPrompts []domain.Prompt) error {
+func SeedTeamDefaults(ctx context.Context, prompts PromptStore, blueprints BlueprintStore, handlers EventHandlerStore, orgID, teamID string, shippedPrompts []domain.Prompt, shippedBlueprints []domain.SeedBlueprint) error {
 	promptIDsBySlug := make(map[string]string, len(shippedPrompts))
 	for _, p := range shippedPrompts {
 		id, err := prompts.SeedOrUpdate(ctx, orgID, teamID, p)
@@ -125,7 +129,32 @@ func SeedTeamDefaults(ctx context.Context, prompts PromptStore, handlers EventHa
 			promptIDsBySlug[p.SystemSlug] = id
 		}
 	}
-	if err := handlers.Seed(ctx, orgID, teamID, promptIDsBySlug); err != nil {
+
+	blueprintIDsBySlug := make(map[string]string, len(shippedBlueprints))
+	for _, b := range shippedBlueprints {
+		bpID, err := blueprints.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
+			SystemSlug: b.SystemSlug, Name: b.Name, Source: "system",
+		})
+		if err != nil {
+			return fmt.Errorf("seed team defaults: blueprint %s: %w", b.SystemSlug, err)
+		}
+		stepPromptIDs := make([]string, 0, len(b.StepPromptSlugs))
+		for _, slug := range b.StepPromptSlugs {
+			pid, ok := promptIDsBySlug[slug]
+			if !ok || pid == "" {
+				return fmt.Errorf("seed team defaults: blueprint %s step prompt slug %q not seeded (seed prompts before blueprints)", b.SystemSlug, slug)
+			}
+			stepPromptIDs = append(stepPromptIDs, pid)
+		}
+		if err := blueprints.ReplaceSteps(ctx, orgID, bpID, stepPromptIDs, nil); err != nil {
+			return fmt.Errorf("seed team defaults: blueprint %s steps: %w", b.SystemSlug, err)
+		}
+		if b.SystemSlug != "" {
+			blueprintIDsBySlug[b.SystemSlug] = bpID
+		}
+	}
+
+	if err := handlers.Seed(ctx, orgID, teamID, blueprintIDsBySlug); err != nil {
 		return fmt.Errorf("seed team defaults: event handlers: %w", err)
 	}
 	return nil

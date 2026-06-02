@@ -161,7 +161,7 @@ export default function ChainStepEditor({
         onClose={() => setPickerOpen(false)}
         title="Add a chain step"
         subtitle="Pick a leaf prompt to run as the next step in this chain"
-        filter={(p) => p.kind !== 'chain' && p.id !== chainPromptId}
+        filter={(p) => p.id !== chainPromptId}
         // Scope the picker's options to the chain's team. teamValue without
         // onTeamChange scopes the fetch without rendering a header team
         // picker — the team is fixed by the page, not chosen here.

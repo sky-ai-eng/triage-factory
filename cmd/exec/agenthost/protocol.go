@@ -224,8 +224,8 @@ type deleteRunWorktreeByRepoArgs struct {
 }
 
 type chainRunForRunResult struct {
-	ChainRun *domain.ChainRun `json:"chain_run,omitempty"`
-	StepIdx  *int             `json:"step_idx,omitempty"`
+	ChainRun *domain.BlueprintRun `json:"chain_run,omitempty"`
+	StepIdx  *int                 `json:"step_idx,omitempty"`
 }
 
 type insertChainVerdictArgs struct {

@@ -246,7 +246,7 @@ export default function AgentCard({
           <ChainStepsRail
             steps={chainSteps}
             currentRunID={run.ID}
-            currentStepIndex={run.chain_step_index ?? undefined}
+            currentStepIndex={run.blueprint_step_index ?? undefined}
           />
         </div>
       )}

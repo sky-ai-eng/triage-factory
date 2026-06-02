@@ -146,8 +146,8 @@ func TestPromptStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	promptA := "prompt-rls-" + orgA[:8]
 	teamA := firstTeamForOrg(t, h, orgA)
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, kind, allowed_tools, created_at, updated_at)
-		VALUES ($1, $2, $3, $4::uuid, 'RLS Prompt', 'body', 'user', 'leaf', '', now(), now())
+		INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, allowed_tools, created_at, updated_at)
+		VALUES ($1, $2, $3, $4::uuid, 'RLS Prompt', 'body', 'user', '', now(), now())
 	`, promptA, orgA, alice, teamA); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}

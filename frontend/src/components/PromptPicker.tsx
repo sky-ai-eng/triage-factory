@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
-import type { Prompt } from '../types'
+import type { Blueprint, Prompt } from '../types'
 import TeamPicker from './TeamPicker'
 
 interface Props {
@@ -32,6 +32,14 @@ interface Props {
    *  list. */
   teamValue?: string
   onTeamChange?: (teamId: string) => void
+  /** Which list the picker draws from. Default 'prompts' keeps the
+   *  leaf-prompt picker used by the chain/blueprint step editor. The
+   *  delegation callers (swipe-delegate, factory create-delegate, Cards)
+   *  pass 'blueprints' so the user picks the blueprint a trigger / manual
+   *  delegate fires; onSelect then yields a blueprint_id. The tile UI is
+   *  shared — blueprints are normalized into the Prompt tile shape (no
+   *  body / usage stats, so those fields render empty). */
+  source?: 'prompts' | 'blueprints'
   /** When true, prompt tiles are non-interactive and dimmed. The factory
    *  create-delegate caller sets this until /api/teams has loaded so a
    *  selection in the cold-load window can't post a blank/unresolved
@@ -50,6 +58,7 @@ export default function PromptPicker({
   filter,
   teamValue,
   onTeamChange,
+  source = 'prompts',
   selectionDisabled,
 }: Props) {
   const [prompts, setPrompts] = useState<Prompt[]>([])
@@ -79,13 +88,28 @@ export default function PromptPicker({
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setPrompts([])
     }
-    fetch(`/api/prompts${q}`)
+    const listPath = source === 'blueprints' ? '/api/blueprints' : '/api/prompts'
+    fetch(`${listPath}${q}`)
       .then((res) => res.json())
-      .then((data: Prompt[]) => {
-        if (!cancelled) {
-          setPrompts(data)
-          setFetchFailed(false)
-        }
+      .then((data: Prompt[] | Blueprint[]) => {
+        if (cancelled) return
+        // Blueprints lack the prompt-tile fields (body / source / usage
+        // stats); normalize them so the shared tile renders without a
+        // redesign. The later authoring-UX ticket owns a real blueprint tile.
+        const normalized: Prompt[] =
+          source === 'blueprints'
+            ? (data as Blueprint[]).map((b) => ({
+                id: b.id,
+                name: b.name,
+                body: '',
+                source: 'user',
+                usage_count: 0,
+                created_at: b.created_at,
+                updated_at: b.updated_at,
+              }))
+            : (data as Prompt[])
+        setPrompts(normalized)
+        setFetchFailed(false)
       })
       .catch(() => {
         if (!cancelled) setFetchFailed(true)
@@ -93,7 +117,7 @@ export default function PromptPicker({
     return () => {
       cancelled = true
     }
-  }, [open, teamValue])
+  }, [open, teamValue, source])
 
   return (
     <AnimatePresence>

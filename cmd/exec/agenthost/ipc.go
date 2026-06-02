@@ -252,7 +252,7 @@ func (c *IPCClient) DeleteRunWorktreeByRepo(ctx context.Context, repoID string) 
 	return c.call(ctx, methodDeleteRunWorktreeByRepo, deleteRunWorktreeByRepoArgs{RepoID: repoID}, nil)
 }
 
-func (c *IPCClient) GetChainRunForRun(ctx context.Context) (*domain.ChainRun, *int, error) {
+func (c *IPCClient) GetChainRunForRun(ctx context.Context) (*domain.BlueprintRun, *int, error) {
 	var res chainRunForRunResult
 	if err := c.call(ctx, methodGetChainRunForRun, emptyArgs{}, &res); err != nil {
 		return nil, nil, err

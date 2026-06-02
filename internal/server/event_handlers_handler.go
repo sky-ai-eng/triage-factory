@@ -72,7 +72,7 @@ func (s *Server) handleEventHandlersList(w http.ResponseWriter, r *http.Request)
 //   - kind='rule':    name + event_type are required; default_priority
 //     defaults to 0.5 and sort_order to 0 when omitted.
 //     enabled defaults to true.
-//   - kind='trigger': prompt_id + event_type are required;
+//   - kind='trigger': blueprint_id + event_type are required;
 //     breaker_threshold defaults to 4,
 //     min_autonomy_suitability to 0.0, enabled to false
 //     when omitted. The defaults are load-bearing for
@@ -91,7 +91,7 @@ type createEventHandlerRequest struct {
 	SortOrder       *int     `json:"sort_order"`
 
 	// Trigger-only.
-	PromptID               string   `json:"prompt_id"`
+	BlueprintID            string   `json:"blueprint_id"`
 	BreakerThreshold       *int     `json:"breaker_threshold"`
 	MinAutonomySuitability *float64 `json:"min_autonomy_suitability"`
 
@@ -168,33 +168,31 @@ func (s *Server) handleEventHandlerCreate(w http.ResponseWriter, r *http.Request
 		}
 
 	case domain.EventHandlerKindTrigger:
-		if req.PromptID == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "prompt_id is required for kind=trigger"})
+		if req.BlueprintID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "blueprint_id is required for kind=trigger"})
 			return
 		}
-		// Verify the prompt exists for clearer 404 than the downstream FK
-		// integrity error.
-		// Verify the prompt exists (clearer 404 than the downstream FK
+		// Verify the blueprint exists (clearer 404 than the downstream FK
 		// integrity error) AND that the acting team owns it. A trigger may
-		// only bind a prompt its own team owns (SKY-380): the DB enforces
-		// this via the (prompt_id, team_id) composite FK, but we resolve the
-		// acting team here and pre-check for a clean 400 instead of a generic
-		// constraint error. Both lookups share one tx so the prompt's team
+		// only fire a blueprint its own team owns: the DB enforces this via
+		// the (blueprint_id, team_id) composite FK, but we resolve the acting
+		// team here and pre-check for a clean 400 instead of a generic
+		// constraint error. Both lookups share one tx so the blueprint's team
 		// and the resolved acting team are read under the same claims.
-		var prompt *domain.Prompt
-		var crossTeamPrompt bool
+		var blueprint *domain.Blueprint
+		var crossTeamBlueprint bool
 		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 			var e error
-			prompt, e = tx.Prompts.Get(r.Context(), orgID, req.PromptID)
-			if e != nil || prompt == nil {
+			blueprint, e = tx.Blueprints.Get(r.Context(), orgID, req.BlueprintID)
+			if e != nil || blueprint == nil {
 				return e
 			}
 			teamID, e := resolveActingTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 			if e != nil {
 				return e
 			}
-			if prompt.TeamID != "" && prompt.TeamID != teamID {
-				crossTeamPrompt = true
+			if blueprint.TeamID != "" && blueprint.TeamID != teamID {
+				crossTeamBlueprint = true
 			}
 			return nil
 		}); err != nil {
@@ -204,15 +202,15 @@ func (s *Server) handleEventHandlerCreate(w http.ResponseWriter, r *http.Request
 			internalError(w, "event_handlers", err)
 			return
 		}
-		if prompt == nil {
-			notFound(w, "prompt")
+		if blueprint == nil {
+			notFound(w, "blueprint")
 			return
 		}
-		if crossTeamPrompt {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "prompt_id references a prompt owned by another team"})
+		if crossTeamBlueprint {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "blueprint_id references a blueprint owned by another team"})
 			return
 		}
-		h.PromptID = req.PromptID
+		h.BlueprintID = req.BlueprintID
 		h.TriggerType = domain.TriggerTypeEvent
 		threshold := 4
 		if req.BreakerThreshold != nil {
@@ -510,11 +508,12 @@ func (s *Server) handleEventHandlerToggle(w http.ResponseWriter, r *http.Request
 // POST /api/event-handlers/{id}/promote
 //
 // Rule → trigger transition. Body carries the trigger-side fields the
-// promoted row needs (prompt_id, breaker_threshold, min_autonomy_suitability,
-// optionally a new predicate). The store enforces atomicity via a single
-// UPDATE that flips kind and populates the trigger fields together.
+// promoted row needs (blueprint_id, breaker_threshold,
+// min_autonomy_suitability, optionally a new predicate). The store enforces
+// atomicity via a single UPDATE that flips kind and populates the trigger
+// fields together.
 type promoteEventHandlerRequest struct {
-	PromptID               string   `json:"prompt_id"`
+	BlueprintID            string   `json:"blueprint_id"`
 	BreakerThreshold       *int     `json:"breaker_threshold"`
 	MinAutonomySuitability *float64 `json:"min_autonomy_suitability"`
 	ScopePredicateJSON     *string  `json:"scope_predicate_json"`
@@ -532,8 +531,8 @@ func (s *Server) handleEventHandlerPromote(w http.ResponseWriter, r *http.Reques
 	if !decodeJSON(w, r, &req, "") {
 		return
 	}
-	if req.PromptID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "prompt_id is required"})
+	if req.BlueprintID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "blueprint_id is required"})
 		return
 	}
 	if req.BreakerThreshold == nil || req.MinAutonomySuitability == nil {
@@ -542,7 +541,7 @@ func (s *Server) handleEventHandlerPromote(w http.ResponseWriter, r *http.Reques
 	}
 
 	var existing *domain.EventHandler
-	var prompt *domain.Prompt
+	var blueprint *domain.Blueprint
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		existing, e = tx.EventHandlers.Get(r.Context(), orgID, id)
@@ -555,7 +554,7 @@ func (s *Server) handleEventHandlerPromote(w http.ResponseWriter, r *http.Reques
 		if existing.Kind != domain.EventHandlerKindRule {
 			return nil
 		}
-		prompt, e = tx.Prompts.Get(r.Context(), orgID, req.PromptID)
+		blueprint, e = tx.Blueprints.Get(r.Context(), orgID, req.BlueprintID)
 		return e
 	}); err != nil {
 		internalError(w, "event_handlers", err)
@@ -569,15 +568,15 @@ func (s *Server) handleEventHandlerPromote(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "only rules can be promoted"})
 		return
 	}
-	if prompt == nil {
-		notFound(w, "prompt")
+	if blueprint == nil {
+		notFound(w, "blueprint")
 		return
 	}
-	// Same-team guard (SKY-380): a promoted trigger may only bind a prompt
-	// the rule's own team owns. The DB enforces this via the (prompt_id,
-	// team_id) composite FK on the Promote UPDATE; pre-check for a clean 400.
-	if existing.TeamID != "" && prompt.TeamID != "" && prompt.TeamID != existing.TeamID {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "prompt_id references a prompt owned by another team"})
+	// Same-team guard: a promoted trigger may only fire a blueprint the rule's
+	// own team owns. The DB enforces this via the (blueprint_id, team_id)
+	// composite FK on the Promote UPDATE; pre-check for a clean 400.
+	if existing.TeamID != "" && blueprint.TeamID != "" && blueprint.TeamID != existing.TeamID {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "blueprint_id references a blueprint owned by another team"})
 		return
 	}
 
@@ -597,7 +596,7 @@ func (s *Server) handleEventHandlerPromote(w http.ResponseWriter, r *http.Reques
 
 	target := domain.EventHandler{
 		Kind:                   domain.EventHandlerKindTrigger,
-		PromptID:               req.PromptID,
+		BlueprintID:            req.BlueprintID,
 		BreakerThreshold:       req.BreakerThreshold,
 		MinAutonomySuitability: req.MinAutonomySuitability,
 		ScopePredicateJSON:     predicate,

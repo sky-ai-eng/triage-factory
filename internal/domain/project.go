@@ -38,31 +38,33 @@ type Project struct {
 	// integration is future work; until it ships, validation rejects
 	// any non-empty value at the API layer.
 	LinearProjectKey string `json:"linear_project_key"`
-	// SpecAuthorshipPromptID points at the prompt the Curator
-	// materializes as a Claude Code skill (`.claude/skills/ticket-spec/`)
-	// when authoring tickets for this project. Empty = use the seeded
-	// system default ("system-ticket-spec"). Per-project rather than
-	// global so a user with mixed teams can give each its own
-	// editorial standard. SKY-221.
-	SpecAuthorshipPromptID string    `json:"spec_authorship_prompt_id"`
-	CreatedAt              time.Time `json:"created_at"`
-	UpdatedAt              time.Time `json:"updated_at"`
+	// SpecAuthorshipBlueprintID points at the blueprint whose single step's
+	// prompt the Curator materializes as a Claude Code skill
+	// (`.claude/skills/ticket-spec/`) when authoring tickets for this
+	// project. Empty = use the seeded system default ("system-ticket-spec").
+	// Per-project rather than global so a user with mixed teams can give each
+	// its own editorial standard. SKY-221.
+	SpecAuthorshipBlueprintID string    `json:"spec_authorship_blueprint_id"`
+	CreatedAt                 time.Time `json:"created_at"`
+	UpdatedAt                 time.Time `json:"updated_at"`
 }
 
-// SystemTicketSpecPromptID is the stable system_slug of the seeded
-// default spec-authorship prompt (post-SKY-380 the prompt's id is a
-// random UUID per team copy; this constant identifies it by slug).
-// Three sites consume it:
+// SystemTicketSpecPromptID is the stable system_slug of the seeded default
+// spec-authorship unit. The shipped prompt and its wrapping 1-step blueprint
+// both carry this slug (distinct tables, so no collision); the id of each is
+// a random UUID per team copy, so callers resolve by slug. Three sites
+// consume it:
 //
-//   - the seed step in main.go (writes the team's copy via SeedOrUpdate,
-//     which stores this as the row's system_slug).
-//   - the project-create HTTP handler, which resolves the team's copy via
-//     GetBySystemSlug and auto-points new projects at its id when present.
-//     The DB layer itself stores whatever it's handed (NULL when the field
-//     is empty); defaulting lives at the API layer to keep the schema free
-//     of any "system prompt must exist" coupling that would break tests.
-//   - the curator dispatch path, which falls back to the team's copy
-//     (resolved via GetBySystemSlug) at skill materialization time when a
-//     project's SpecAuthorshipPromptID is empty (covers projects created
-//     before the seed landed).
+//   - the seed step (writes the team's prompt + blueprint copies, storing
+//     this as each row's system_slug).
+//   - the project-create HTTP handler, which resolves the team's blueprint
+//     copy via the blueprint store's GetBySystemSlug and auto-points new
+//     projects at its id when present. The DB layer stores whatever it's
+//     handed (NULL when the field is empty); defaulting lives at the API
+//     layer to keep the schema free of any "system blueprint must exist"
+//     coupling that would break tests.
+//   - the curator dispatch path, which falls back to the team's blueprint
+//     copy at skill materialization time when a project's
+//     SpecAuthorshipBlueprintID is empty (covers projects created before the
+//     seed landed).
 const SystemTicketSpecPromptID = "system-ticket-spec"

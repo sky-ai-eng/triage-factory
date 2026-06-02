@@ -33,15 +33,29 @@ func createTriggerForTest(t *testing.T, database *sql.DB, trig domain.EventHandl
 	if source == domain.EventHandlerSourceUser {
 		creatorUserID = runmode.LocalDefaultUserID
 	}
+	// A trigger FK-references a blueprint its own team owns. Materialize a
+	// user-source blueprint owned by LocalDefaultTeamID with the id the
+	// trigger points at so the same-team (blueprint_id, team_id) FK is
+	// satisfied. The blueprint wraps no steps here — the helper exists only
+	// to satisfy the FK shape, not to drive a delegation.
+	if _, err := database.Exec(`
+		INSERT INTO blueprints (id, name, source, org_id, team_id, creator_user_id, created_at, updated_at)
+		VALUES (?, ?, 'user', ?, ?, ?, ?, ?)
+		ON CONFLICT (id) DO NOTHING
+	`, trig.BlueprintID, "trigger-blueprint", runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+		runmode.LocalDefaultUserID, now, now,
+	); err != nil {
+		t.Fatalf("createTriggerForTest blueprint %s: %v", trig.BlueprintID, err)
+	}
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers (id, kind, event_type, scope_predicate_json,
 		                            breaker_threshold, min_autonomy_suitability,
-		                            prompt_id, enabled, source, team_id, creator_user_id,
+		                            blueprint_id, enabled, source, team_id, creator_user_id,
 		                            created_at, updated_at)
 		VALUES (?, 'trigger', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, trig.ID, trig.EventType, trig.ScopePredicateJSON,
 		ptrDerefInt(trig.BreakerThreshold), ptrDerefFloat(trig.MinAutonomySuitability),
-		trig.PromptID, trig.Enabled, source,
+		trig.BlueprintID, trig.Enabled, source,
 		runmode.LocalDefaultTeamID, creatorUserID,
 		now, now,
 	); err != nil {

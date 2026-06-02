@@ -31,7 +31,70 @@ var (
 	// id. The picker should have prevented this; 400 Bad Request when
 	// the contract is violated.
 	ErrPromptUnspecified = errors.New("delegate: no prompt specified")
+
+	// ErrBlueprintNotFound — Delegate's caller passed a blueprint id that
+	// doesn't resolve to any row. Race-correctable — 400 Bad Request.
+	ErrBlueprintNotFound = errors.New("delegate: blueprint not found")
+
+	// ErrBlueprintUnspecified — Delegate's caller passed an empty blueprint
+	// id. The picker / trigger should have prevented this; 400 Bad Request.
+	ErrBlueprintUnspecified = errors.New("delegate: no blueprint specified")
 )
+
+// resolveBlueprint finds the blueprint to fire from an explicit blueprint ID.
+// Manual delegation requires the caller to pick a blueprint; auto-delegation
+// supplies the blueprint_id from the trigger row. Routing splits on
+// triggerType to honor RLS exactly as resolvePrompt does: "manual" loads via
+// the app pool under the user's synthetic claims (so a caller can't run a
+// blueprint they can't see); "event" stays on the admin pool (the router is a
+// system actor with no user identity).
+func (s *Spawner) resolveBlueprint(orgID, explicitBlueprintID, triggerType, creatorUserID string) (*domain.Blueprint, error) {
+	if explicitBlueprintID == "" {
+		return nil, fmt.Errorf("%w — select one from the picker", ErrBlueprintUnspecified)
+	}
+	var (
+		b   *domain.Blueprint
+		err error
+	)
+	if triggerType == "manual" {
+		err = s.tx.SyntheticClaimsWithTx(context.Background(), orgID, creatorUserID, func(ts db.TxStores) error {
+			got, gErr := ts.Blueprints.Get(context.Background(), orgID, explicitBlueprintID)
+			if gErr != nil {
+				return gErr
+			}
+			b = got
+			return nil
+		})
+	} else {
+		b, err = s.blueprints.GetSystem(context.Background(), orgID, explicitBlueprintID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to load blueprint %s: %w", explicitBlueprintID, err)
+	}
+	if b == nil {
+		return nil, fmt.Errorf("%w: %s", ErrBlueprintNotFound, explicitBlueprintID)
+	}
+	return b, nil
+}
+
+// resolveBlueprintSteps loads a blueprint's ordered step list under the pool
+// the trigger type dictates (same RLS rationale as resolveBlueprint).
+func (s *Spawner) resolveBlueprintSteps(orgID, blueprintID, triggerType, creatorUserID string) ([]domain.BlueprintStep, error) {
+	var (
+		steps []domain.BlueprintStep
+		err   error
+	)
+	if triggerType == "manual" {
+		err = s.tx.SyntheticClaimsWithTx(context.Background(), orgID, creatorUserID, func(ts db.TxStores) error {
+			got, gErr := ts.Blueprints.ListSteps(context.Background(), orgID, blueprintID)
+			steps = got
+			return gErr
+		})
+	} else {
+		steps, err = s.blueprints.ListStepsSystem(context.Background(), orgID, blueprintID)
+	}
+	return steps, err
+}
 
 // resolvePrompt finds the prompt for a task from an explicit prompt ID.
 // Manual delegation always requires the caller to pick a prompt; auto-

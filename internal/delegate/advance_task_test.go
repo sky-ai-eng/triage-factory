@@ -7,6 +7,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -223,27 +224,32 @@ func TestAdvanceTaskFromRunStatus_StaleRunNoOpWhenNewerActive(t *testing.T) {
 	}
 }
 
-// Chain steps: the chain orchestrator owns task lifecycle for the
-// whole chain. Mid-chain step terminals must not flip the task —
-// terminateChain handles closure when the chain itself terminates.
+// Blueprint steps: the blueprint orchestrator owns task lifecycle for the
+// whole blueprint. Mid-blueprint step terminals must not flip the task —
+// terminateBlueprint handles closure when the blueprint itself terminates.
 func TestAdvanceTaskFromRunStatus_ChainStepIgnored(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "chain-step")
 	stampBotClaim(t, database, taskID)
-	// Seed a chain_runs row first (FK requirement), then point the
-	// existing run at it so advanceTaskFromRunStatus's chain-step
-	// guard trips.
-	if _, err := database.Exec(
-		`INSERT INTO chain_runs (id, chain_prompt_id, task_id, worktree_path)
-		 VALUES (?, ?, ?, ?)`,
-		"chain-abc", "test-prompt", taskID, "/tmp/wt-chain",
-	); err != nil {
-		t.Fatalf("seed chain_runs: %v", err)
+	// Seed a blueprint + blueprint_runs row first (FK requirements), then
+	// point the existing run at it so advanceTaskFromRunStatus's
+	// blueprint-step guard trips.
+	if err := sqlitestore.New(database).Blueprints.Create(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Blueprint{
+		ID: "bp-abc", Name: "bp-abc", Source: "user", TeamID: runmode.LocalDefaultTeamID,
+	}); err != nil {
+		t.Fatalf("seed blueprint: %v", err)
 	}
 	if _, err := database.Exec(
-		`UPDATE runs SET chain_run_id = ? WHERE id = ?`,
+		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, worktree_path)
+		 VALUES (?, ?, ?, 'manual', ?)`,
+		"chain-abc", "bp-abc", taskID, "/tmp/wt-chain",
+	); err != nil {
+		t.Fatalf("seed blueprint_runs: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE runs SET blueprint_run_id = ? WHERE id = ?`,
 		"chain-abc", runID,
 	); err != nil {
-		t.Fatalf("set chain_run_id: %v", err)
+		t.Fatalf("set blueprint_run_id: %v", err)
 	}
 
 	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "pending_approval")

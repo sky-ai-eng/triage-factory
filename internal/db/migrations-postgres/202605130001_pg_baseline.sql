@@ -710,16 +710,16 @@ CREATE TABLE public.event_handlers (
     name text,
     default_priority real,
     sort_order integer,
-    prompt_id text,
+    blueprint_id text,
     breaker_threshold integer,
     min_autonomy_suitability real,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT event_handlers_kind_check CHECK ((kind = ANY (ARRAY['rule'::text, 'trigger'::text]))),
-    CONSTRAINT event_handlers_rule_shape CHECK (((kind <> 'rule'::text) OR ((prompt_id IS NULL) AND (breaker_threshold IS NULL) AND (min_autonomy_suitability IS NULL) AND (name IS NOT NULL) AND (default_priority IS NOT NULL) AND (sort_order IS NOT NULL)))),
+    CONSTRAINT event_handlers_rule_shape CHECK (((kind <> 'rule'::text) OR ((blueprint_id IS NULL) AND (breaker_threshold IS NULL) AND (min_autonomy_suitability IS NULL) AND (name IS NOT NULL) AND (default_priority IS NOT NULL) AND (sort_order IS NOT NULL)))),
     CONSTRAINT event_handlers_source_check CHECK ((source = ANY (ARRAY['system'::text, 'user'::text]))),
     CONSTRAINT event_handlers_system_has_no_creator CHECK ((((source = 'system'::text) AND (creator_user_id IS NULL)) OR ((source = 'user'::text) AND (creator_user_id IS NOT NULL)))),
-    CONSTRAINT event_handlers_trigger_shape CHECK (((kind <> 'trigger'::text) OR ((prompt_id IS NOT NULL) AND (breaker_threshold IS NOT NULL) AND (min_autonomy_suitability IS NOT NULL) AND (default_priority IS NULL) AND (sort_order IS NULL) AND (name IS NULL))))
+    CONSTRAINT event_handlers_trigger_shape CHECK (((kind <> 'trigger'::text) OR ((blueprint_id IS NOT NULL) AND (breaker_threshold IS NOT NULL) AND (min_autonomy_suitability IS NOT NULL) AND (default_priority IS NULL) AND (sort_order IS NULL) AND (name IS NULL))))
 );
 
 
@@ -1078,7 +1078,7 @@ CREATE TABLE public.projects (
     pinned_repos jsonb DEFAULT '[]'::jsonb NOT NULL,
     jira_project_key text,
     linear_project_key text,
-    spec_authorship_prompt_id text,
+    spec_authorship_blueprint_id text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT projects_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
@@ -1098,7 +1098,6 @@ CREATE TABLE public.prompts (
     name text NOT NULL,
     body text NOT NULL,
     source text DEFAULT 'user'::text NOT NULL,
-    kind text DEFAULT 'leaf'::text NOT NULL,
     usage_count integer DEFAULT 0 NOT NULL,
     hidden boolean DEFAULT false NOT NULL,
     user_modified boolean DEFAULT false NOT NULL,
@@ -1254,8 +1253,8 @@ CREATE TABLE public.runs (
     num_turns integer,
     total_cost_usd real,
     actor_agent_id uuid,
-    chain_run_id uuid,
-    chain_step_index integer,
+    blueprint_run_id uuid,
+    blueprint_step_index integer,
     CONSTRAINT runs_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL)))),
     CONSTRAINT runs_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
     CONSTRAINT runs_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text])))
@@ -1856,9 +1855,8 @@ ALTER TABLE ONLY public.prompts
 -- Name: prompts prompts_id_team_id_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
--- Parent key for the same-team composite FKs (event_handlers.prompt_id,
--- prompt_chain_steps.chain_prompt_id / step_prompt_id) so a trigger / chain
--- step can only bind a prompt its own team owns (SKY-380).
+-- Parent key for the same-team composite FK (blueprint_steps.step_prompt_id)
+-- so a blueprint step can only bind a prompt its own team owns (SKY-380).
 ALTER TABLE ONLY public.prompts
     ADD CONSTRAINT prompts_id_team_id_key UNIQUE (id, team_id);
 
@@ -2165,10 +2163,10 @@ CREATE INDEX idx_event_handlers_org_kind ON public.event_handlers USING btree (o
 
 
 --
--- Name: idx_event_handlers_prompt; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_event_handlers_blueprint; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_event_handlers_prompt ON public.event_handlers USING btree (org_id, prompt_id) WHERE (prompt_id IS NOT NULL);
+CREATE INDEX idx_event_handlers_blueprint ON public.event_handlers USING btree (org_id, blueprint_id) WHERE (blueprint_id IS NOT NULL);
 
 
 --
@@ -2712,25 +2710,10 @@ ALTER TABLE ONLY public.event_handlers
     ADD CONSTRAINT event_handlers_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
---
--- Name: event_handlers event_handlers_prompt_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.event_handlers
-    ADD CONSTRAINT event_handlers_prompt_id_org_id_fkey FOREIGN KEY (prompt_id, org_id) REFERENCES public.prompts(id, org_id) ON DELETE CASCADE;
-
-
---
--- Name: event_handlers event_handlers_prompt_id_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
--- Same-team guard (SKY-380): a trigger may only bind a prompt its own team
--- owns. (prompt_id, team_id) -> prompts(id, team_id) refuses a handler whose
--- team_id doesn't match the referenced prompt's team. NULL prompt_id (rules)
--- skips the FK. CASCADE mirrors the org FK so a prompt delete still removes
--- its triggers.
-ALTER TABLE ONLY public.event_handlers
-    ADD CONSTRAINT event_handlers_prompt_id_team_id_fkey FOREIGN KEY (prompt_id, team_id) REFERENCES public.prompts(id, team_id) ON DELETE CASCADE;
+-- event_handlers trigger -> blueprints FK constraints
+-- (event_handlers_blueprint_id_org_id_fkey / _team_id_fkey) are added in the
+-- Blueprints section near the bottom of this file, after the blueprints table
+-- exists.
 
 
 --
@@ -3005,12 +2988,10 @@ ALTER TABLE ONLY public.projects
     ADD CONSTRAINT projects_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
---
--- Name: projects projects_spec_authorship_prompt_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.projects
-    ADD CONSTRAINT projects_spec_authorship_prompt_id_org_id_fkey FOREIGN KEY (spec_authorship_prompt_id, org_id) REFERENCES public.prompts(id, org_id) ON DELETE SET NULL;
+-- projects.spec_authorship_blueprint_id -> blueprints FK
+-- (projects_spec_authorship_blueprint_id_org_id_fkey) is added in the
+-- Blueprints section near the bottom of this file, after the blueprints table
+-- exists.
 
 
 --
@@ -5211,42 +5192,113 @@ INSERT INTO events_catalog (id, source, category, label, description) VALUES
 
 
 --
--- Prompt chains
+-- Blueprints
 --
--- Linear sequences of prompt steps that share one worktree. Each step
--- runs as a fresh Claude session in the same worktree; adjacent steps
--- communicate via a handoff file and record proceed/abort verdicts on
--- run_artifacts(kind='chain:verdict'). Per-step runtime state stays on
--- runs (linked via runs.chain_run_id); chain-wide abort/complete state
--- lives on chain_runs.
+-- A blueprint is the triggerable, team-scoped composition: an ordered list
+-- of prompt steps (blueprint_steps), length >= 1. Everything an event
+-- handler fires is a blueprint; a single prompt is just a 1-step blueprint.
+-- Modeled on prompts (same team-scoping, same system_slug idempotency key,
+-- same composite uniques so the trigger + step FKs can be same-team-guarded).
+--
+-- blueprint_steps is the ordered step list; blueprint_runs is the in-flight
+-- instance for a multi-step blueprint (sharing one worktree, steps recording
+-- proceed/abort verdicts on run_artifacts(kind='chain:verdict')). Per-step
+-- runtime state stays on runs (linked via runs.blueprint_run_id);
+-- blueprint-wide abort/complete state lives on blueprint_runs.
 --
 -- Multi-tenant pattern matches the rest of the baseline: composite FKs
 -- against (id, org_id) on every parent ref, RLS gated on
 -- tf.current_org_id() with EXISTS guards against same-id cross-tenant
--- access (prompts.id is text and can collide across orgs).
+-- access (blueprints.id is text and can collide across orgs).
 --
 
-CREATE TABLE public.prompt_chain_steps (
+CREATE TABLE public.blueprints (
+    id text DEFAULT (gen_random_uuid())::text NOT NULL,
+    org_id uuid NOT NULL,
+    creator_user_id uuid,
+    team_id uuid NOT NULL,
+    name text NOT NULL,
+    source text DEFAULT 'user'::text NOT NULL,
+    usage_count integer DEFAULT 0 NOT NULL,
+    hidden boolean DEFAULT false NOT NULL,
+    user_modified boolean DEFAULT false NOT NULL,
+    system_slug text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT blueprints_source_check CHECK ((source = ANY (ARRAY['system'::text, 'user'::text, 'imported'::text]))),
+    CONSTRAINT blueprints_system_has_no_creator CHECK ((((source = 'system'::text) AND (creator_user_id IS NULL)) OR ((source <> 'system'::text) AND (creator_user_id IS NOT NULL))))
+);
+
+ALTER TABLE ONLY public.blueprints
+    ADD CONSTRAINT blueprints_pkey PRIMARY KEY (org_id, id);
+ALTER TABLE ONLY public.blueprints
+    ADD CONSTRAINT blueprints_id_org_id_key UNIQUE (id, org_id);
+ALTER TABLE ONLY public.blueprints
+    ADD CONSTRAINT blueprints_id_team_id_key UNIQUE (id, team_id);
+ALTER TABLE ONLY public.blueprints
+    ADD CONSTRAINT blueprints_org_team_slug_key UNIQUE (org_id, team_id, system_slug);
+
+ALTER TABLE ONLY public.blueprints
+    ADD CONSTRAINT blueprints_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.blueprints
+    ADD CONSTRAINT blueprints_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.blueprints
+    ADD CONSTRAINT blueprints_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.blueprints FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+
+ALTER TABLE public.blueprints ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY blueprints_select ON public.blueprints FOR SELECT
+  USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)
+          AND ((creator_user_id = tf.current_user_id())
+               OR (EXISTS (SELECT 1 FROM public.memberships m
+                           WHERE ((m.user_id = tf.current_user_id()) AND (m.team_id = blueprints.team_id)))))));
+CREATE POLICY blueprints_insert ON public.blueprints FOR INSERT
+  WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_in_team(team_id)));
+CREATE POLICY blueprints_update ON public.blueprints FOR UPDATE
+  USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)))
+  WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)));
+CREATE POLICY blueprints_delete ON public.blueprints FOR DELETE
+  USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)));
+
+GRANT ALL ON TABLE public.blueprints TO postgres;
+GRANT ALL ON TABLE public.blueprints TO anon;
+GRANT ALL ON TABLE public.blueprints TO authenticated;
+GRANT ALL ON TABLE public.blueprints TO service_role;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.blueprints TO tf_app;
+
+-- Retargeted FKs deferred from the main section (blueprints didn't exist yet):
+-- a trigger fires a blueprint its own team owns; a project's spec-authorship
+-- blueprint resolves same-org.
+ALTER TABLE ONLY public.event_handlers
+    ADD CONSTRAINT event_handlers_blueprint_id_org_id_fkey FOREIGN KEY (blueprint_id, org_id) REFERENCES public.blueprints(id, org_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.event_handlers
+    ADD CONSTRAINT event_handlers_blueprint_id_team_id_fkey FOREIGN KEY (blueprint_id, team_id) REFERENCES public.blueprints(id, team_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.projects
+    ADD CONSTRAINT projects_spec_authorship_blueprint_id_org_id_fkey FOREIGN KEY (spec_authorship_blueprint_id, org_id) REFERENCES public.blueprints(id, org_id) ON DELETE SET NULL;
+
+CREATE TABLE public.blueprint_steps (
     org_id uuid NOT NULL,
     team_id uuid NOT NULL,
-    chain_prompt_id text NOT NULL,
+    blueprint_id text NOT NULL,
     step_index integer NOT NULL,
     step_prompt_id text NOT NULL,
     brief text DEFAULT ''::text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
-CREATE TABLE public.chain_runs (
+CREATE TABLE public.blueprint_runs (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
-    -- creator_user_id is nullable for trigger_type='event' chains
+    -- creator_user_id is nullable for trigger_type='event' runs
     -- (system-emitted by the router via the admin pool); manual
-    -- chains carry the human delegator. The matching
-    -- chain_runs_creator_matches_trigger_type CHECK below pairs the
+    -- runs carry the human delegator. The matching
+    -- blueprint_runs_creator_matches_trigger_type CHECK below pairs the
     -- two so the seeder can't drift. Mirrors the runs table's
     -- runs_creator_matches_trigger_type pattern.
     creator_user_id uuid,
-    chain_prompt_id text NOT NULL,
+    blueprint_id text NOT NULL,
     task_id uuid NOT NULL,
     trigger_type text NOT NULL,
     trigger_id uuid,
@@ -5256,101 +5308,89 @@ CREATE TABLE public.chain_runs (
     worktree_path text NOT NULL,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     completed_at timestamp with time zone,
-    CONSTRAINT chain_runs_status_check CHECK ((status = ANY (ARRAY['running'::text, 'completed'::text, 'aborted'::text, 'failed'::text, 'cancelled'::text]))),
-    CONSTRAINT chain_runs_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL))))
+    CONSTRAINT blueprint_runs_status_check CHECK ((status = ANY (ARRAY['running'::text, 'completed'::text, 'aborted'::text, 'failed'::text, 'cancelled'::text]))),
+    CONSTRAINT blueprint_runs_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL))))
 );
 
-ALTER TABLE ONLY public.prompt_chain_steps
-    ADD CONSTRAINT prompt_chain_steps_pkey PRIMARY KEY (org_id, chain_prompt_id, step_index);
+ALTER TABLE ONLY public.blueprint_steps
+    ADD CONSTRAINT blueprint_steps_pkey PRIMARY KEY (org_id, blueprint_id, step_index);
 
-ALTER TABLE ONLY public.chain_runs
-    ADD CONSTRAINT chain_runs_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.blueprint_runs
+    ADD CONSTRAINT blueprint_runs_pkey PRIMARY KEY (id);
 
-ALTER TABLE ONLY public.chain_runs
-    ADD CONSTRAINT chain_runs_id_org_id_key UNIQUE (id, org_id);
+ALTER TABLE ONLY public.blueprint_runs
+    ADD CONSTRAINT blueprint_runs_id_org_id_key UNIQUE (id, org_id);
 
-CREATE INDEX idx_prompt_chain_steps_step_prompt ON public.prompt_chain_steps (step_prompt_id, org_id);
-CREATE INDEX idx_chain_runs_task   ON public.chain_runs (task_id, org_id);
-CREATE INDEX idx_chain_runs_status ON public.chain_runs (status) WHERE (status = 'running'::text);
-CREATE INDEX idx_runs_chain        ON public.runs (chain_run_id, chain_step_index) WHERE (chain_run_id IS NOT NULL);
+CREATE INDEX idx_blueprint_steps_step_prompt ON public.blueprint_steps (step_prompt_id, org_id);
+CREATE INDEX idx_blueprint_runs_task   ON public.blueprint_runs (task_id, org_id);
+CREATE INDEX idx_blueprint_runs_status ON public.blueprint_runs (status) WHERE (status = 'running'::text);
+CREATE INDEX idx_runs_blueprint        ON public.runs (blueprint_run_id, blueprint_step_index) WHERE (blueprint_run_id IS NOT NULL);
 
-ALTER TABLE ONLY public.prompt_chain_steps
-    ADD CONSTRAINT prompt_chain_steps_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
-ALTER TABLE ONLY public.prompt_chain_steps
-    ADD CONSTRAINT prompt_chain_steps_chain_prompt_fkey FOREIGN KEY (chain_prompt_id, org_id) REFERENCES public.prompts(id, org_id) ON DELETE CASCADE;
-ALTER TABLE ONLY public.prompt_chain_steps
-    ADD CONSTRAINT prompt_chain_steps_step_prompt_fkey  FOREIGN KEY (step_prompt_id,  org_id) REFERENCES public.prompts(id, org_id) ON DELETE RESTRICT;
--- Same-team guards (SKY-380): both the chain prompt and every step resolve
--- against prompts(id, team_id), so a chain can only step through prompts its
--- own team owns. The writer derives team_id from the chain prompt, making the
--- chain FK a tautology and the step FK the real cross-team refusal.
-ALTER TABLE ONLY public.prompt_chain_steps
-    ADD CONSTRAINT prompt_chain_steps_chain_prompt_team_fkey FOREIGN KEY (chain_prompt_id, team_id) REFERENCES public.prompts(id, team_id) ON DELETE CASCADE;
-ALTER TABLE ONLY public.prompt_chain_steps
-    ADD CONSTRAINT prompt_chain_steps_step_prompt_team_fkey  FOREIGN KEY (step_prompt_id,  team_id) REFERENCES public.prompts(id, team_id) ON DELETE RESTRICT;
+ALTER TABLE ONLY public.blueprint_steps
+    ADD CONSTRAINT blueprint_steps_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.blueprint_steps
+    ADD CONSTRAINT blueprint_steps_blueprint_fkey FOREIGN KEY (blueprint_id, org_id) REFERENCES public.blueprints(id, org_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.blueprint_steps
+    ADD CONSTRAINT blueprint_steps_step_prompt_fkey  FOREIGN KEY (step_prompt_id,  org_id) REFERENCES public.prompts(id, org_id) ON DELETE RESTRICT;
+-- Same-team guards: the blueprint resolves against blueprints(id, team_id)
+-- and every step against prompts(id, team_id), so a blueprint can only step
+-- through prompts its own team owns. The writer derives team_id from the
+-- blueprint, making the blueprint FK a tautology and the step FK the real
+-- cross-team refusal.
+ALTER TABLE ONLY public.blueprint_steps
+    ADD CONSTRAINT blueprint_steps_blueprint_team_fkey FOREIGN KEY (blueprint_id, team_id) REFERENCES public.blueprints(id, team_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.blueprint_steps
+    ADD CONSTRAINT blueprint_steps_step_prompt_team_fkey  FOREIGN KEY (step_prompt_id,  team_id) REFERENCES public.prompts(id, team_id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY public.chain_runs
-    ADD CONSTRAINT chain_runs_org_id_fkey          FOREIGN KEY (org_id)          REFERENCES public.orgs(id) ON DELETE CASCADE;
-ALTER TABLE ONLY public.chain_runs
-    ADD CONSTRAINT chain_runs_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
-ALTER TABLE ONLY public.chain_runs
-    ADD CONSTRAINT chain_runs_chain_prompt_fkey    FOREIGN KEY (chain_prompt_id, org_id) REFERENCES public.prompts(id, org_id);
-ALTER TABLE ONLY public.chain_runs
-    ADD CONSTRAINT chain_runs_task_fkey            FOREIGN KEY (task_id, org_id)         REFERENCES public.tasks(id, org_id);
-ALTER TABLE ONLY public.chain_runs
-    ADD CONSTRAINT chain_runs_trigger_fkey         FOREIGN KEY (trigger_id, org_id)      REFERENCES public.event_handlers(id, org_id);
+ALTER TABLE ONLY public.blueprint_runs
+    ADD CONSTRAINT blueprint_runs_org_id_fkey          FOREIGN KEY (org_id)          REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.blueprint_runs
+    ADD CONSTRAINT blueprint_runs_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.blueprint_runs
+    ADD CONSTRAINT blueprint_runs_blueprint_fkey       FOREIGN KEY (blueprint_id, org_id) REFERENCES public.blueprints(id, org_id);
+ALTER TABLE ONLY public.blueprint_runs
+    ADD CONSTRAINT blueprint_runs_task_fkey            FOREIGN KEY (task_id, org_id)         REFERENCES public.tasks(id, org_id);
+ALTER TABLE ONLY public.blueprint_runs
+    ADD CONSTRAINT blueprint_runs_trigger_fkey         FOREIGN KEY (trigger_id, org_id)      REFERENCES public.event_handlers(id, org_id);
 
 ALTER TABLE ONLY public.runs
-    ADD CONSTRAINT runs_chain_run_fkey FOREIGN KEY (chain_run_id, org_id) REFERENCES public.chain_runs(id, org_id);
+    ADD CONSTRAINT runs_blueprint_run_fkey FOREIGN KEY (blueprint_run_id, org_id) REFERENCES public.blueprint_runs(id, org_id);
 
-ALTER TABLE public.prompt_chain_steps ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.chain_runs         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.blueprint_steps ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.blueprint_runs  ENABLE ROW LEVEL SECURITY;
 
--- prompt_chain_steps inherits the chain prompt's access — if the
--- caller can't see the parent prompt, they can't see its step list.
--- prompts RLS already applies creator + team-membership rules.
--- The EXISTS subquery joins on p.org_id = prompt_chain_steps.org_id
--- because prompts.id is text and can collide across orgs.
-CREATE POLICY prompt_chain_steps_all ON public.prompt_chain_steps FOR ALL
+-- blueprint_steps inherits the blueprint's access — if the caller can't see
+-- the parent blueprint, they can't see its step list. blueprints RLS already
+-- applies creator + team-membership rules. The EXISTS subquery joins on
+-- b.org_id = blueprint_steps.org_id because blueprints.id is text and can
+-- collide across orgs.
+CREATE POLICY blueprint_steps_all ON public.blueprint_steps FOR ALL
   USING      ((org_id = tf.current_org_id())
-              AND (EXISTS (SELECT 1 FROM public.prompts p
-                           WHERE p.id = prompt_chain_steps.chain_prompt_id
-                             AND p.org_id = prompt_chain_steps.org_id)))
+              AND (EXISTS (SELECT 1 FROM public.blueprints b
+                           WHERE b.id = blueprint_steps.blueprint_id
+                             AND b.org_id = blueprint_steps.org_id)))
   WITH CHECK ((org_id = tf.current_org_id())
-              AND (EXISTS (SELECT 1 FROM public.prompts p
-                           WHERE p.id = prompt_chain_steps.chain_prompt_id
-                             AND p.org_id = prompt_chain_steps.org_id)));
+              AND (EXISTS (SELECT 1 FROM public.blueprints b
+                           WHERE b.id = blueprint_steps.blueprint_id
+                             AND b.org_id = blueprint_steps.org_id)));
 
--- chain_runs are creator-scoped for manual chains and org-visible
--- for event-triggered chains. The chain_runs_creator_matches_trigger_type
--- CHECK pairs trigger_type with creator nullability: trigger_type='event'
--- rows have creator_user_id NULL (system-emitted via the admin pool by
--- the router / spawner). Those event rows would otherwise be unreadable
--- through the app pool, because the manual-only `creator_user_id =
--- tf.current_user_id()` predicate is unsatisfiable when the column is
--- NULL — leaving the chain detail handlers, GetRun, GetRunForRun, and
--- CancelChain unable to see system-emitted chains for any request user.
---
--- Policies are split per command so INSERT keeps the strict
--- creator-equals-caller WITH CHECK (the app pool must never be able to
--- write trigger_type='event' rows directly — that would let any org
--- member impersonate the router by inserting NULL-creator rows and
--- erase the audit boundary between system-emitted and human-delegated
--- chains). SELECT, UPDATE, DELETE widen to "creator IS NULL OR creator
--- = caller" so request handlers can read + cancel auto-fired chains.
--- Mirrors the runs table's per-command policy split.
-CREATE POLICY chain_runs_select ON public.chain_runs FOR SELECT
+-- blueprint_runs are creator-scoped for manual runs and org-visible for
+-- event-triggered runs. The blueprint_runs_creator_matches_trigger_type CHECK
+-- pairs trigger_type with creator nullability: trigger_type='event' rows have
+-- creator_user_id NULL (system-emitted via the admin pool by the router /
+-- spawner). Per-command split mirrors the runs table.
+CREATE POLICY blueprint_runs_select ON public.blueprint_runs FOR SELECT
   USING ((org_id = tf.current_org_id())
          AND tf.user_has_org_access(org_id)
          AND ((creator_user_id IS NULL)
               OR (creator_user_id = tf.current_user_id())));
 
-CREATE POLICY chain_runs_insert ON public.chain_runs FOR INSERT
+CREATE POLICY blueprint_runs_insert ON public.blueprint_runs FOR INSERT
   WITH CHECK ((org_id = tf.current_org_id())
               AND tf.user_has_org_access(org_id)
               AND (creator_user_id = tf.current_user_id()));
 
-CREATE POLICY chain_runs_update ON public.chain_runs FOR UPDATE
+CREATE POLICY blueprint_runs_update ON public.blueprint_runs FOR UPDATE
   USING ((org_id = tf.current_org_id())
          AND tf.user_has_org_access(org_id)
          AND ((creator_user_id IS NULL)
@@ -5360,14 +5400,14 @@ CREATE POLICY chain_runs_update ON public.chain_runs FOR UPDATE
               AND ((creator_user_id IS NULL)
                    OR (creator_user_id = tf.current_user_id())));
 
-CREATE POLICY chain_runs_delete ON public.chain_runs FOR DELETE
+CREATE POLICY blueprint_runs_delete ON public.blueprint_runs FOR DELETE
   USING ((org_id = tf.current_org_id())
          AND tf.user_has_org_access(org_id)
          AND ((creator_user_id IS NULL)
               OR (creator_user_id = tf.current_user_id())));
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.prompt_chain_steps TO tf_app;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.chain_runs         TO tf_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.blueprint_steps TO tf_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.blueprint_runs  TO tf_app;
 
 
 --
@@ -5522,7 +5562,6 @@ CREATE TABLE public.org_template_prompts (
     name text NOT NULL,
     body text NOT NULL,
     source text DEFAULT 'user'::text NOT NULL,
-    kind text DEFAULT 'leaf'::text NOT NULL,
     allowed_tools text DEFAULT ''::text NOT NULL,
     model text DEFAULT ''::text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,

@@ -2,31 +2,22 @@ package domain
 
 import "time"
 
-// PromptKind distinguishes single-prompt leaves from multi-step chains.
-type PromptKind string
-
-const (
-	PromptKindLeaf  PromptKind = "leaf"
-	PromptKindChain PromptKind = "chain"
-)
-
 // Prompt is a user- or system-defined delegation prompt template.
 // The body contains the "mission" — what the agent should do.
 // The system envelope (tool guidance, completion format, repo scoping) is always
 // injected by the spawner and is not part of the prompt body.
 type Prompt struct {
-	ID           string     `json:"id"`
-	Name         string     `json:"name"`
-	Body         string     `json:"body"`
-	Source       string     `json:"source"`        // "system", "user", "imported"
-	Kind         PromptKind `json:"kind"`          // PromptKindLeaf | PromptKindChain (defaults to "leaf")
-	AllowedTools string     `json:"allowed_tools"` // comma-separated extra tools parsed from SKILL.md/agent frontmatter
-	Model        string     `json:"model"`         // per-prompt model override; "" = inherit settings.AI.Model at dispatch
-	UsageCount   int        `json:"usage_count"`   // how many agent runs have used this prompt
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Body         string `json:"body"`
+	Source       string `json:"source"`        // "system", "user", "imported"
+	AllowedTools string `json:"allowed_tools"` // comma-separated extra tools parsed from SKILL.md/agent frontmatter
+	Model        string `json:"model"`         // per-prompt model override; "" = inherit settings.AI.Model at dispatch
+	UsageCount   int    `json:"usage_count"`   // how many agent runs have used this prompt
 	// TeamID is the owning team. Every prompt is team-scoped (SKY-380):
 	// team_id is NOT NULL and is the sole scoping signal (no visibility
 	// column). Handlers read this to enforce same-team references (a
-	// trigger / chain step may only bind a prompt its own team owns).
+	// blueprint step may only bind a prompt its own team owns).
 	// Stores populate it on read; Create stamps it from the resolved
 	// acting team. In SQLite (N=1) it is always the local sentinel team.
 	TeamID string `json:"team_id"`

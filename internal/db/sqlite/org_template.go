@@ -33,7 +33,7 @@ func newOrgTemplateStore(q queryer) db.OrgTemplateStore {
 
 var _ db.OrgTemplateStore = (*orgTemplateStore)(nil)
 
-const orgTemplatePromptColumns = `id, name, body, source, kind, allowed_tools, model, system_slug, created_at, updated_at`
+const orgTemplatePromptColumns = `id, name, body, source, allowed_tools, model, system_slug, created_at, updated_at`
 
 const orgTemplateHandlerColumns = `id, kind, event_type, scope_predicate_json, enabled, source, system_slug,
 	name, default_priority, sort_order,
@@ -50,14 +50,10 @@ func (s *orgTemplateStore) SeedFromShipped(ctx context.Context, orgID string, sh
 			if p.SystemSlug == "" {
 				return fmt.Errorf("org_template seed: shipped prompt %q has empty system_slug", p.Name)
 			}
-			kind := p.Kind
-			if kind == "" {
-				kind = domain.PromptKindLeaf
-			}
 			if _, err := q.ExecContext(ctx, `
-				INSERT OR IGNORE INTO org_template_prompts (id, org_id, system_slug, name, body, source, kind, allowed_tools, model, created_at, updated_at)
-				VALUES (?, ?, ?, ?, ?, 'system', ?, ?, ?, ?, ?)
-			`, uuid.New().String(), orgID, p.SystemSlug, p.Name, p.Body, string(kind), p.AllowedTools, p.Model, now, now); err != nil {
+				INSERT OR IGNORE INTO org_template_prompts (id, org_id, system_slug, name, body, source, allowed_tools, model, created_at, updated_at)
+				VALUES (?, ?, ?, ?, ?, 'system', ?, ?, ?, ?)
+			`, uuid.New().String(), orgID, p.SystemSlug, p.Name, p.Body, p.AllowedTools, p.Model, now, now); err != nil {
 				return fmt.Errorf("seed org_template prompt %s: %w", p.SystemSlug, err)
 			}
 			var id string
@@ -85,9 +81,9 @@ func (s *orgTemplateStore) SeedFromShipped(ctx context.Context, orgID string, sh
 					return fmt.Errorf("seed org_template rule %s: %w", h.ID, err)
 				}
 			case domain.EventHandlerKindTrigger:
-				promptID, ok := promptIDsBySlug[h.PromptID]
+				promptID, ok := promptIDsBySlug[h.BlueprintID]
 				if !ok || promptID == "" {
-					return fmt.Errorf("seed org_template trigger %s: prompt slug %q not found (seed prompts before handlers)", h.ID, h.PromptID)
+					return fmt.Errorf("seed org_template trigger %s: prompt slug %q not found (seed prompts before handlers)", h.ID, h.BlueprintID)
 				}
 				if _, err := q.ExecContext(ctx, `
 					INSERT OR IGNORE INTO org_template_handlers
@@ -116,19 +112,19 @@ func (s *orgTemplateStore) MaterializeIntoTeam(ctx context.Context, orgID, teamI
 		// Phase 1: prompts. SELECT-then-INSERT keeps it idempotent and yields
 		// the team copy id for the trigger re-point map.
 		rows, err := q.QueryContext(ctx, `
-			SELECT id, system_slug, name, body, source, kind, allowed_tools, model
+			SELECT id, system_slug, name, body, source, allowed_tools, model
 			FROM org_template_prompts WHERE org_id = ?
 		`, orgID)
 		if err != nil {
 			return fmt.Errorf("org_template materialize: list prompts: %w", err)
 		}
 		type tmplPrompt struct {
-			id, slug, name, body, source, kind, allowedTools, model string
+			id, slug, name, body, source, allowedTools, model string
 		}
 		var tprompts []tmplPrompt
 		for rows.Next() {
 			var p tmplPrompt
-			if err := rows.Scan(&p.id, &p.slug, &p.name, &p.body, &p.source, &p.kind, &p.allowedTools, &p.model); err != nil {
+			if err := rows.Scan(&p.id, &p.slug, &p.name, &p.body, &p.source, &p.allowedTools, &p.model); err != nil {
 				_ = rows.Close()
 				return fmt.Errorf("org_template materialize: scan prompt: %w", err)
 			}
@@ -159,9 +155,9 @@ func (s *orgTemplateStore) MaterializeIntoTeam(ctx context.Context, orgID, teamI
 			}
 			newID := uuid.New().String()
 			if _, err := q.ExecContext(ctx, `
-				INSERT INTO prompts (id, org_id, team_id, system_slug, creator_user_id, name, body, source, kind, allowed_tools, model, usage_count, user_modified, created_at, updated_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
-			`, newID, orgID, teamID, p.slug, creator, p.name, p.body, p.source, p.kind, p.allowedTools, p.model, now, now); err != nil {
+				INSERT INTO prompts (id, org_id, team_id, system_slug, creator_user_id, name, body, source, allowed_tools, model, usage_count, user_modified, created_at, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+			`, newID, orgID, teamID, p.slug, creator, p.name, p.body, p.source, p.allowedTools, p.model, now, now); err != nil {
 				return fmt.Errorf("org_template materialize: insert prompt %s: %w", p.slug, err)
 			}
 			teamPromptIDByTemplateID[p.id] = newID
@@ -171,6 +167,42 @@ func (s *orgTemplateStore) MaterializeIntoTeam(ctx context.Context, orgID, teamI
 					return err
 				}
 			}
+		}
+
+		// Phase 2: synthesize a 1-step team blueprint per template prompt
+		// (slug == prompt slug, step → that prompt). Triggers fire blueprints,
+		// so the team needs a blueprint copy for every prompt a template
+		// trigger references. Idempotent: probe by (org, team, slug) first.
+		teamBlueprintIDByTemplatePromptID := make(map[string]string, len(tprompts))
+		for _, p := range tprompts {
+			teamPromptID := teamPromptIDByTemplateID[p.id]
+			var existing string
+			err := q.QueryRowContext(ctx,
+				`SELECT id FROM blueprints WHERE org_id = ? AND team_id = ? AND system_slug = ?`, orgID, teamID, p.slug,
+			).Scan(&existing)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("org_template materialize: probe team blueprint %s: %w", p.slug, err)
+			}
+			if errors.Is(err, sql.ErrNoRows) {
+				var creator any
+				if p.source != "system" {
+					creator = runmode.LocalDefaultUserID
+				}
+				existing = uuid.New().String()
+				if _, err := q.ExecContext(ctx, `
+					INSERT INTO blueprints (id, org_id, team_id, system_slug, creator_user_id, name, source, usage_count, user_modified, created_at, updated_at)
+					VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+				`, existing, orgID, teamID, p.slug, creator, p.name, p.source, now, now); err != nil {
+					return fmt.Errorf("org_template materialize: insert blueprint %s: %w", p.slug, err)
+				}
+				if _, err := q.ExecContext(ctx, `
+					INSERT INTO blueprint_steps (blueprint_id, step_index, step_prompt_id, team_id, brief, created_at)
+					VALUES (?, 0, ?, ?, '', ?)
+				`, existing, teamPromptID, teamID, now); err != nil {
+					return fmt.Errorf("org_template materialize: insert blueprint step %s: %w", p.slug, err)
+				}
+			}
+			teamBlueprintIDByTemplatePromptID[p.id] = existing
 		}
 
 		// Phase 2: handlers. INSERT OR IGNORE for idempotency; re-point the
@@ -228,17 +260,17 @@ func (s *orgTemplateStore) MaterializeIntoTeam(ctx context.Context, orgID, teamI
 					return fmt.Errorf("org_template materialize: insert rule %s: %w", h.slug, err)
 				}
 			case domain.EventHandlerKindTrigger:
-				teamPromptID, ok := teamPromptIDByTemplateID[h.promptID.String]
-				if !ok || teamPromptID == "" {
-					return fmt.Errorf("org_template materialize: trigger %s references template prompt %q with no team copy", h.slug, h.promptID.String)
+				teamBlueprintID, ok := teamBlueprintIDByTemplatePromptID[h.promptID.String]
+				if !ok || teamBlueprintID == "" {
+					return fmt.Errorf("org_template materialize: trigger %s references template prompt %q with no team blueprint copy", h.slug, h.promptID.String)
 				}
 				if _, err := q.ExecContext(ctx, `
 					INSERT OR IGNORE INTO event_handlers
 						(id, org_id, team_id, creator_user_id, kind, event_type, system_slug,
-						 scope_predicate_json, enabled, source, prompt_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
+						 scope_predicate_json, enabled, source, blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
 					VALUES (?, ?, ?, ?, 'trigger', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				`, newID, orgID, teamID, creator, h.eventType, h.slug, predArg, h.enabled, h.source,
-					teamPromptID, h.breaker.Int64, h.minAutonomy.Float64, now, now); err != nil {
+					teamBlueprintID, h.breaker.Int64, h.minAutonomy.Float64, now, now); err != nil {
 					return fmt.Errorf("org_template materialize: insert trigger %s: %w", h.slug, err)
 				}
 			default:
@@ -293,26 +325,19 @@ func (s *orgTemplateStore) CreatePrompt(ctx context.Context, orgID string, p dom
 	if source == "" {
 		source = "user"
 	}
-	kind := p.Kind
-	if kind == "" {
-		kind = domain.PromptKindLeaf
-	}
 	now := time.Now().UTC()
 	_, err := s.q.ExecContext(ctx, `
-		INSERT INTO org_template_prompts (id, org_id, system_slug, name, body, source, kind, allowed_tools, model, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, p.ID, orgID, p.SystemSlug, p.Name, p.Body, source, string(kind), p.AllowedTools, p.Model, now, now)
+		INSERT INTO org_template_prompts (id, org_id, system_slug, name, body, source, allowed_tools, model, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, p.ID, orgID, p.SystemSlug, p.Name, p.Body, source, p.AllowedTools, p.Model, now, now)
 	return err
 }
 
-func (s *orgTemplateStore) UpdatePrompt(ctx context.Context, orgID, id, name, body, kind, model string) error {
-	if kind == "" {
-		kind = string(domain.PromptKindLeaf)
-	}
+func (s *orgTemplateStore) UpdatePrompt(ctx context.Context, orgID, id, name, body, model string) error {
 	_, err := s.q.ExecContext(ctx, `
-		UPDATE org_template_prompts SET name = ?, body = ?, kind = ?, model = ?, updated_at = ?
+		UPDATE org_template_prompts SET name = ?, body = ?, model = ?, updated_at = ?
 		WHERE org_id = ? AND id = ?
-	`, name, body, kind, model, time.Now().UTC(), orgID, id)
+	`, name, body, model, time.Now().UTC(), orgID, id)
 	return err
 }
 
@@ -324,7 +349,7 @@ func (s *orgTemplateStore) DeletePrompt(ctx context.Context, orgID, id string) e
 func scanOrgTemplatePrompt(scanFn func(dst ...any) error) (domain.Prompt, error) {
 	var p domain.Prompt
 	var slug sql.NullString
-	if err := scanFn(&p.ID, &p.Name, &p.Body, &p.Source, &p.Kind, &p.AllowedTools, &p.Model, &slug, &p.CreatedAt, &p.UpdatedAt); err != nil {
+	if err := scanFn(&p.ID, &p.Name, &p.Body, &p.Source, &p.AllowedTools, &p.Model, &slug, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return p, err
 	}
 	if slug.Valid {
@@ -403,7 +428,7 @@ func (s *orgTemplateStore) CreateHandler(ctx context.Context, orgID string, h do
 				(id, org_id, system_slug, kind, event_type, scope_predicate_json, enabled, source,
 				 prompt_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
 			VALUES (?, ?, ?, 'trigger', ?, ?, ?, 'user', ?, ?, ?, ?, ?)
-		`, h.ID, orgID, h.SystemSlug, h.EventType, pred, h.Enabled, h.PromptID, derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability), now, now)
+		`, h.ID, orgID, h.SystemSlug, h.EventType, pred, h.Enabled, h.BlueprintID, derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability), now, now)
 		return err
 	}
 	return fmt.Errorf("sqlite org_template CreateHandler: unknown kind %q", h.Kind)
@@ -466,7 +491,7 @@ func (s *orgTemplateStore) PromoteHandler(ctx context.Context, orgID, id string,
 	if t.Kind != domain.EventHandlerKindTrigger {
 		return errors.New("sqlite org_template PromoteHandler: target kind must be 'trigger'")
 	}
-	if t.PromptID == "" || t.BreakerThreshold == nil || t.MinAutonomySuitability == nil {
+	if t.BlueprintID == "" || t.BreakerThreshold == nil || t.MinAutonomySuitability == nil {
 		return errors.New("sqlite org_template PromoteHandler: trigger fields required")
 	}
 	var pred any
@@ -478,7 +503,7 @@ func (s *orgTemplateStore) PromoteHandler(ctx context.Context, orgID, id string,
 		SET kind = 'trigger', prompt_id = ?, breaker_threshold = ?, min_autonomy_suitability = ?,
 		    name = NULL, default_priority = NULL, sort_order = NULL, scope_predicate_json = ?, updated_at = ?
 		WHERE org_id = ? AND id = ? AND kind = 'rule'
-	`, t.PromptID, *t.BreakerThreshold, *t.MinAutonomySuitability, pred, time.Now().UTC(), orgID, id)
+	`, t.BlueprintID, *t.BreakerThreshold, *t.MinAutonomySuitability, pred, time.Now().UTC(), orgID, id)
 	if err != nil {
 		return err
 	}
@@ -546,7 +571,7 @@ func scanOrgTemplateHandler(scanFn func(dst ...any) error) (domain.EventHandler,
 		h.SortOrder = &v
 	}
 	if promptID.Valid {
-		h.PromptID = promptID.String
+		h.BlueprintID = promptID.String
 	}
 	if breakerNS.Valid {
 		v := int(breakerNS.Int64)

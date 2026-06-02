@@ -189,11 +189,11 @@ export default function Board() {
     kind: 'review' | 'pr'
   } | null>(null)
 
-  // Pads /api/chain-runs/{id} into a length-N array with synthetic
+  // Pads /api/blueprint-runs/{id} into a length-N array with synthetic
   // 'pending' placeholders so the rail can render before all steps exist.
   const seedChainStepRuns = useCallback(async (taskID: string, chainRunID: string) => {
     try {
-      const res = await fetch(`/api/chain-runs/${chainRunID}`)
+      const res = await fetch(`/api/blueprint-runs/${chainRunID}`)
       if (!res.ok) return
       const data: {
         steps?: Array<{ step: { step_index: number }; run?: AgentRun | null }>
@@ -206,8 +206,8 @@ export default function Board() {
         return {
           ID: `__pending-${chainRunID}-${i}`,
           Status: 'pending',
-          chain_run_id: chainRunID,
-          chain_step_index: i,
+          blueprint_run_id: chainRunID,
+          blueprint_step_index: i,
         } as unknown as AgentRun
       })
       setChainStepRuns((prev) => ({ ...prev, [taskID]: padded }))
@@ -290,11 +290,11 @@ export default function Board() {
           const runs: AgentRun[] = await runsRes.json()
           if (runs.length > 0) {
             const latestRun = runs[0]
-            const chainRunID = latestRun.chain_run_id
+            const chainRunID = latestRun.blueprint_run_id
             if (chainRunID) {
               const stepRuns = runs
-                .filter((r) => r.chain_run_id === chainRunID)
-                .sort((a, b) => (a.chain_step_index ?? 0) - (b.chain_step_index ?? 0))
+                .filter((r) => r.blueprint_run_id === chainRunID)
+                .sort((a, b) => (a.blueprint_step_index ?? 0) - (b.blueprint_step_index ?? 0))
               await seedChainStepRuns(task.id, chainRunID)
               const activeStep =
                 stepRuns.find((r) =>
@@ -382,8 +382,8 @@ export default function Board() {
                 }
                 return { ...p, [fullRun.TaskID]: fullRun }
               })
-              if (fullRun.chain_run_id) {
-                seedChainStepRuns(fullRun.TaskID, fullRun.chain_run_id)
+              if (fullRun.blueprint_run_id) {
+                seedChainStepRuns(fullRun.TaskID, fullRun.blueprint_run_id)
               }
             })
             .catch(() => {})
@@ -409,7 +409,7 @@ export default function Board() {
             // haven't tracked yet render immediately.
             let isChainStep = false
             for (const steps of Object.values(chainStepRunsRef.current)) {
-              if (steps.some((r) => r.chain_run_id && r.ID === event.run_id)) {
+              if (steps.some((r) => r.blueprint_run_id && r.ID === event.run_id)) {
                 isChainStep = true
                 break
               }
@@ -432,8 +432,8 @@ export default function Board() {
                 .then((fullRun: AgentRun | null) => {
                   if (!fullRun) return
                   setAgentRuns((p) => ({ ...p, [fullRun.TaskID]: fullRun }))
-                  if (fullRun.chain_run_id) {
-                    seedChainStepRuns(fullRun.TaskID, fullRun.chain_run_id)
+                  if (fullRun.blueprint_run_id) {
+                    seedChainStepRuns(fullRun.TaskID, fullRun.blueprint_run_id)
                   }
                 })
                 .catch(() => {})
@@ -727,7 +727,7 @@ export default function Board() {
       const res = await fetch(`/api/tasks/${task.id}/swipe`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'delegate', hesitation_ms: 0, prompt_id: promptId }),
+        body: JSON.stringify({ action: 'delegate', hesitation_ms: 0, blueprint_id: promptId }),
       })
       if (res.ok) {
         try {
@@ -872,6 +872,9 @@ export default function Board() {
 
       <PromptPicker
         open={showPromptPicker}
+        source="blueprints"
+        title="Choose a blueprint"
+        subtitle="Select a blueprint to run for this task"
         onSelect={handlePromptSelected}
         onClose={() => {
           setShowPromptPicker(false)

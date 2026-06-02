@@ -50,7 +50,7 @@ type runConfig struct {
 
 	extraAllowedTools string // comma-separated extra tools from prompt.AllowedTools + agent scans; merged into --allowedTools at spawn time
 
-	// Chain-mode toggles. When isChainStep is true the chain
+	// Chain-mode toggles. When isBlueprintStep is true the chain
 	// orchestrator owns the worktree lifecycle: runAgent's cleanup
 	// defers (RemoveAt, RemoveRunRoot, RemoveClaudeProjectDir) all
 	// short-circuit so the worktree survives across steps. The
@@ -58,9 +58,9 @@ type runConfig struct {
 	// terminates. appendSysPrompt is forwarded to agentproc as
 	// --append-system-prompt so the chain protocol reaches the model
 	// without modifying the step's prompt body.
-	chainRunID      string
-	chainStep       int
-	isChainStep     bool
+	blueprintRunID  string
+	blueprintStep   int
+	isBlueprintStep bool
 	appendSysPrompt string
 }
 
@@ -81,10 +81,11 @@ type DelegateOpts struct {
 	// the input and does not re-validate.
 	OrgID string
 
-	// ExplicitPromptID forces a specific prompt instead of letting
-	// resolvePrompt walk the entity-type → default chain. Empty for
-	// the default path.
-	ExplicitPromptID string
+	// ExplicitBlueprintID forces a specific blueprint to fire instead of
+	// letting the caller's default path pick one. Manual delegation supplies
+	// the user's chosen blueprint; auto-delegation supplies the trigger row's
+	// blueprint_id. Required — the picker / trigger always names a blueprint.
+	ExplicitBlueprintID string
 
 	// TriggerType is "manual" (user clicked Delegate) or "event"
 	// (router auto-fired from a matched event_handler). Drives the
@@ -157,26 +158,57 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 		}
 	}
 
-	// Resolve prompt under the right pool for the trigger type. See
-	// resolvePrompt's docstring for the routing rationale.
-	resolved, err := s.resolvePrompt(orgID, task, opts.ExplicitPromptID, triggerType, creatorUserID)
+	// Resolve the blueprint to fire + its ordered steps under the right pool
+	// for the trigger type. Execution parity branches on step count, not on a
+	// kind discriminator: a 1-step blueprint runs the single-prompt path; a
+	// multi-step blueprint runs the orchestrator.
+	blueprint, err := s.resolveBlueprint(orgID, opts.ExplicitBlueprintID, triggerType, creatorUserID)
+	if err != nil {
+		return "", err
+	}
+	steps, err := s.resolveBlueprintSteps(orgID, blueprint.ID, triggerType, creatorUserID)
+	if err != nil {
+		return "", fmt.Errorf("load blueprint steps: %w", err)
+	}
+	if len(steps) == 0 {
+		return "", fmt.Errorf("blueprint %q has no steps", blueprint.Name)
+	}
+
+	model := defaultModel
+
+	// Bump blueprint usage_count, routed per trigger type. Manual delegations
+	// write under the user's synthetic claims; event-triggered ones fire
+	// through the admin pool.
+	bgCtx := context.Background()
+	if triggerType == "manual" {
+		if e := s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
+			return ts.Blueprints.IncrementUsage(bgCtx, orgID, blueprint.ID)
+		}); e != nil {
+			log.Printf("[delegate] warning: failed to increment usage for blueprint %s: %v", blueprint.ID, e)
+		}
+	} else if e := s.blueprints.IncrementUsageSystem(bgCtx, orgID, blueprint.ID); e != nil {
+		log.Printf("[delegate] warning: failed to increment usage for blueprint %s: %v", blueprint.ID, e)
+	}
+
+	// Multi-step blueprint → the (renamed) orchestrator: one blueprint_run
+	// row, the chain:verdict path between steps, byte-for-byte today's chain.
+	if len(steps) > 1 {
+		return s.delegateBlueprint(orgID, task, blueprint, steps, triggerType, triggerID, creatorUserID, ghClient, model)
+	}
+
+	// 1-step blueprint → today's single-prompt path on that step's prompt:
+	// no blueprint_run row, completion envelope closes the task.
+	resolved, err := s.resolvePrompt(orgID, task, steps[0].StepPromptID, triggerType, creatorUserID)
 	if err != nil {
 		return "", err
 	}
 	promptID := resolved.ID
 	mission := resolved.Body
-
-	model := defaultModel
 	if resolved.Model != "" {
 		model = resolved.Model
 	}
-
 	extraTools := s.collectExtraTools(resolved.AllowedTools)
 
-	// IncrementUsage routes per trigger type. Manual delegations
-	// write under the user's synthetic claims; event-triggered ones
-	// fire through the admin pool.
-	bgCtx := context.Background()
 	var incErr error
 	if triggerType == "manual" {
 		incErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
@@ -187,10 +219,6 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	}
 	if incErr != nil {
 		log.Printf("[delegate] warning: failed to increment usage for prompt %s: %v", promptID, incErr)
-	}
-
-	if resolved.Kind == domain.PromptKindChain {
-		return s.delegateChain(orgID, task, resolved, triggerType, triggerID, creatorUserID, ghClient, model)
 	}
 
 	// Stamp actor_agent_id at run start. Prefer the task's stamped

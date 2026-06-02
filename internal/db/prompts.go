@@ -90,11 +90,11 @@ type PromptStore interface {
 	// single-team and pins the sentinel).
 	Create(ctx context.Context, orgID, teamID string, p domain.Prompt) error
 
-	// Update changes name + body + kind + model and stamps user_modified=true.
+	// Update changes name + body + model and stamps user_modified=true.
 	// The flag tells SeedOrUpdate to leave the row alone on subsequent
-	// shipped-content updates. kind defaults to "leaf" when blank.
-	// model="" means "inherit the global default at dispatch time".
-	Update(ctx context.Context, orgID string, id, name, body, kind, model string) error
+	// shipped-content updates. model="" means "inherit the global default
+	// at dispatch time".
+	Update(ctx context.Context, orgID string, id, name, body, model string) error
 
 	// UpdateImported updates a re-imported skill's metadata + body
 	// + allowed_tools WITHOUT setting user_modified, because the
@@ -115,8 +115,8 @@ type PromptStore interface {
 	Unhide(ctx context.Context, orgID string, id string) error
 
 	// CountRunReferences returns the number of runs rows that reference
-	// the given prompt. The update handler uses this to block kind
-	// changes when the prompt already has execution history.
+	// the given prompt. Used to surface execution history before a
+	// destructive edit / delete.
 	CountRunReferences(ctx context.Context, orgID string, id string) (int, error)
 
 	// IncrementUsage bumps usage_count by 1. Called from the

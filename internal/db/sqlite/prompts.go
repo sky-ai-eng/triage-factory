@@ -172,7 +172,7 @@ func (s *promptStore) List(ctx context.Context, orgID string, _ string) ([]domai
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT id, name, body, source, kind, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
+		SELECT id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
 		FROM prompts WHERE hidden = 0 ORDER BY updated_at DESC
 	`)
 	if err != nil {
@@ -196,7 +196,7 @@ func (s *promptStore) Get(ctx context.Context, orgID string, id string) (*domain
 		return nil, err
 	}
 	p, err := scanPromptRowSQLite(s.q.QueryRowContext(ctx, `
-		SELECT id, name, body, source, kind, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
+		SELECT id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
 		FROM prompts WHERE id = ?
 	`, id).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -214,7 +214,7 @@ func (s *promptStore) Get(ctx context.Context, orgID string, id string) (*domain
 func scanPromptRowSQLite(scanFn func(dst ...any) error) (domain.Prompt, error) {
 	var p domain.Prompt
 	var systemSlug sql.NullString
-	if err := scanFn(&p.ID, &p.Name, &p.Body, &p.Source, &p.Kind, &p.AllowedTools, &p.Model, &p.UsageCount, &p.TeamID, &systemSlug, &p.CreatedAt, &p.UpdatedAt); err != nil {
+	if err := scanFn(&p.ID, &p.Name, &p.Body, &p.Source, &p.AllowedTools, &p.Model, &p.UsageCount, &p.TeamID, &systemSlug, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return p, err
 	}
 	if systemSlug.Valid {
@@ -237,7 +237,7 @@ func (s *promptStore) GetBySystemSlug(ctx context.Context, orgID, teamID, system
 		return nil, err
 	}
 	q := `
-		SELECT id, name, body, source, kind, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
+		SELECT id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
 		FROM prompts WHERE org_id = ? AND system_slug = ?`
 	args := []any{orgID, systemSlug}
 	if teamID != "" {
@@ -283,27 +283,20 @@ func (s *promptStore) Create(ctx context.Context, orgID, teamID string, p domain
 	if p.Source == "system" {
 		creatorUserID = nil
 	}
-	kind := p.Kind
-	if kind == "" {
-		kind = domain.PromptKindLeaf
-	}
 	_, err := s.q.ExecContext(ctx, `
-		INSERT INTO prompts (id, name, body, source, kind, allowed_tools, model, usage_count, team_id, creator_user_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
-	`, p.ID, p.Name, p.Body, p.Source, kind, p.AllowedTools, p.Model, runmode.LocalDefaultTeamID, creatorUserID, now, now)
+		INSERT INTO prompts (id, name, body, source, allowed_tools, model, usage_count, team_id, creator_user_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+	`, p.ID, p.Name, p.Body, p.Source, p.AllowedTools, p.Model, runmode.LocalDefaultTeamID, creatorUserID, now, now)
 	return err
 }
 
-func (s *promptStore) Update(ctx context.Context, orgID string, id, name, body, kind, model string) error {
+func (s *promptStore) Update(ctx context.Context, orgID string, id, name, body, model string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	if kind == "" {
-		kind = string(domain.PromptKindLeaf)
-	}
 	_, err := s.q.ExecContext(ctx, `
-		UPDATE prompts SET name = ?, body = ?, kind = ?, model = ?, user_modified = 1, updated_at = ? WHERE id = ?
-	`, name, body, kind, model, time.Now().UTC(), id)
+		UPDATE prompts SET name = ?, body = ?, model = ?, user_modified = 1, updated_at = ? WHERE id = ?
+	`, name, body, model, time.Now().UTC(), id)
 	return err
 }
 

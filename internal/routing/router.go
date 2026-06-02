@@ -53,6 +53,7 @@ type Delegator interface {
 //  8. Runs inline close checks for the event type
 type Router struct {
 	prompts      dbpkg.PromptStore
+	blueprints   dbpkg.BlueprintStore // resolves a trigger's blueprint → first step prompt for the per-(entity, prompt) breaker
 	handlers     dbpkg.EventHandlerStore
 	agents       dbpkg.AgentStore
 	teamAgents   dbpkg.TeamAgentStore        // SKY-261: read team_agents.enabled before auto-firing triggers
@@ -104,9 +105,10 @@ type Router struct {
 // visibility routing degrades to handler-team visibility (the
 // pre-ticket behavior) when missing or when an event carries no requested
 // identity.
-func NewRouter(prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, agentRuns dbpkg.AgentRunStore, entities dbpkg.EntityStore, firings dbpkg.PendingFiringsStore, events dbpkg.EventStore, orgs dbpkg.OrgsStore, teams dbpkg.TeamsStore, teamRepos dbpkg.TeamGitHubReposStore, jiraRules dbpkg.JiraStatusRulesStore, githubGroups dbpkg.TeamGitHubGroupsStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+func NewRouter(prompts dbpkg.PromptStore, blueprints dbpkg.BlueprintStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, agentRuns dbpkg.AgentRunStore, entities dbpkg.EntityStore, firings dbpkg.PendingFiringsStore, events dbpkg.EventStore, orgs dbpkg.OrgsStore, teams dbpkg.TeamsStore, teamRepos dbpkg.TeamGitHubReposStore, jiraRules dbpkg.JiraStatusRulesStore, githubGroups dbpkg.TeamGitHubGroupsStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
 	return &Router{
 		prompts:      prompts,
+		blueprints:   blueprints,
 		handlers:     handlers,
 		agents:       agents,
 		teamAgents:   teamAgents,
@@ -126,6 +128,25 @@ func NewRouter(prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agen
 		ws:           ws,
 		drainLocks:   make(map[string]*sync.Mutex),
 	}
+}
+
+// breakerPromptID resolves the prompt id the auto-delegate breaker keys on
+// for a trigger. The trigger fires a blueprint; the breaker tracks failed
+// runs per (entity, prompt), and runs are prompt-keyed, so it tracks the
+// blueprint's first step prompt — exactly the wrapped prompt for the 1-step
+// blueprints every shipped trigger uses. Returns "" when the blueprint or its
+// steps can't be resolved (CountConsecutiveFailedRunsSystem then matches no
+// runs → breaker never trips, the safe default that doesn't block
+// auto-delegation on a transient read error). nil-safe on the store.
+func (r *Router) breakerPromptID(orgID, blueprintID string) string {
+	if r.blueprints == nil || blueprintID == "" {
+		return ""
+	}
+	steps, err := r.blueprints.ListStepsSystem(context.Background(), orgID, blueprintID)
+	if err != nil || len(steps) == 0 {
+		return ""
+	}
+	return steps[0].StepPromptID
 }
 
 // SetEventQueue wires the durable router queue post-
@@ -801,21 +822,25 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 	}
 	// Breaker gate. trigger.BreakerThreshold is *int because the column
 	// is nullable at the schema level (rule rows have NULL); kind='trigger'
-	// rows are guaranteed non-nil by the per-kind CHECK constraint.
+	// rows are guaranteed non-nil by the per-kind CHECK constraint. The
+	// breaker keys on the blueprint's first step prompt (runs are prompt-
+	// keyed; for the 1-step blueprints every shipped trigger uses, that is
+	// the wrapped prompt — identical to the pre-blueprint behavior).
 	breakerThreshold := derefIntDefault(trigger.BreakerThreshold, 0)
-	failures, err := r.tasks.CountConsecutiveFailedRunsSystem(context.Background(), orgID, entityID, trigger.PromptID)
+	breakerPromptID := r.breakerPromptID(orgID, trigger.BlueprintID)
+	failures, err := r.tasks.CountConsecutiveFailedRunsSystem(context.Background(), orgID, entityID, breakerPromptID)
 	if err != nil {
-		log.Printf("[router] breaker query error for entity %s prompt %s: %v", entityID, trigger.PromptID, err)
+		log.Printf("[router] breaker query error for entity %s prompt %s: %v", entityID, breakerPromptID, err)
 		return
 	}
 	if failures >= breakerThreshold {
 		log.Printf("[router] breaker tripped for entity %s prompt %s (%d >= %d)",
-			entityID, trigger.PromptID, failures, breakerThreshold)
+			entityID, breakerPromptID, failures, breakerThreshold)
 		// Look up prompt name for the toast — opportunistic, falls back to a
 		// generic message if the lookup fails since the breaker trip itself
 		// is the load-bearing signal. One toast per trip (happens rarely).
 		promptName := ""
-		if p, perr := r.prompts.GetSystem(context.Background(), orgID, trigger.PromptID); perr == nil && p != nil {
+		if p, perr := r.prompts.GetSystem(context.Background(), orgID, breakerPromptID); perr == nil && p != nil {
 			promptName = p.Name
 		}
 		if promptName == "" {
@@ -989,8 +1014,8 @@ func (r *Router) fireDelegate(orgID string, task *domain.Task, trigger domain.Ev
 	// genuine lifecycle move (done / dismissed / snoozed). Dedup is
 	// unaffected — the partial unique index gates on status NOT IN
 	// ('done', 'dismissed'), so a queued+claimed task still matches.
-	log.Printf("[router] auto-delegating task %s (trigger %s, prompt %s)",
-		task.ID, trigger.ID, trigger.PromptID)
+	log.Printf("[router] auto-delegating task %s (trigger %s, blueprint %s)",
+		task.ID, trigger.ID, trigger.BlueprintID)
 
 	// Re-read task to get entity-joined display fields the spawner needs.
 	fresh, err := r.tasks.GetSystem(context.Background(), orgID, task.ID)
@@ -1002,10 +1027,10 @@ func (r *Router) fireDelegate(orgID string, task *domain.Task, trigger domain.Ev
 	}
 
 	runID, err := r.spawner.Delegate(*fresh, delegate.DelegateOpts{
-		OrgID:            orgID,
-		ExplicitPromptID: trigger.PromptID,
-		TriggerType:      "event",
-		TriggerID:        trigger.ID,
+		OrgID:               orgID,
+		ExplicitBlueprintID: trigger.BlueprintID,
+		TriggerType:         "event",
+		TriggerID:           trigger.ID,
 	})
 	if err != nil {
 		// Post-B+: nothing to revert status-wise (status stayed 'queued').
@@ -1233,7 +1258,7 @@ func (r *Router) attemptDrainOne(orgID string, firing *domain.PendingFiring) (ru
 	}
 
 	breakerThreshold := derefIntDefault(trigger.BreakerThreshold, 0)
-	failures, err := r.tasks.CountConsecutiveFailedRunsSystem(context.Background(), orgID, firing.EntityID, trigger.PromptID)
+	failures, err := r.tasks.CountConsecutiveFailedRunsSystem(context.Background(), orgID, firing.EntityID, r.breakerPromptID(orgID, trigger.BlueprintID))
 	if err != nil {
 		return "", "", fmt.Errorf("breaker query: %w", err)
 	}

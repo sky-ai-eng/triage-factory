@@ -41,15 +41,57 @@ func testTaskStore(database *sql.DB) db.TaskStore {
 	return sqlitestore.New(database).Tasks
 }
 
+// testBlueprintStore returns a SQLite-backed BlueprintStore for routing
+// tests. NewRouter takes the blueprint store immediately after the prompt
+// store post-SKY-416 (triggers fire blueprints, not prompts).
+func testBlueprintStore(database *sql.DB) db.BlueprintStore {
+	if database == nil {
+		return nil
+	}
+	return sqlitestore.New(database).Blueprints
+}
+
+// blueprintWrappingPrompt creates a single-step user blueprint owned by
+// teamID wrapping promptID and returns the blueprint id. A trigger now FKs a
+// same-team blueprint (not a prompt), so trigger fixtures wrap their prompt
+// here. blueprintID is derived from promptID so repeat calls for the same
+// (prompt, team) are stable; the caller points the trigger's BlueprintID at
+// the returned id.
+func blueprintWrappingPrompt(t *testing.T, database *sql.DB, promptID, teamID string) string {
+	t.Helper()
+	blueprintID := "bp-" + promptID
+	store := sqlitestore.New(database).Blueprints
+	ctx := context.Background()
+	if existing, _ := store.Get(ctx, runmode.LocalDefaultOrg, blueprintID); existing == nil {
+		if err := store.Create(ctx, runmode.LocalDefaultOrg, teamID, domain.Blueprint{
+			ID: blueprintID, Name: blueprintID, Source: "user", TeamID: teamID,
+		}); err != nil {
+			t.Fatalf("blueprintWrappingPrompt create %s (team %s): %v", blueprintID, teamID, err)
+		}
+		if err := store.ReplaceSteps(ctx, runmode.LocalDefaultOrg, blueprintID, []string{promptID}, nil); err != nil {
+			t.Fatalf("blueprintWrappingPrompt steps %s: %v", blueprintID, err)
+		}
+	}
+	return blueprintID
+}
+
 // createTriggerForTestRouting + setTriggerEnabledForTestRouting are
 // trigger-shape helpers used by drain_test + rederive_test. Post-
 // SKY-259 they wrap EventHandlerStore.Create / SetEnabled, building a
 // kind='trigger' EventHandler from the legacy-shaped fields.
+// createTriggerForTestRouting builds a kind='trigger' EventHandler on the
+// local default team (team A). The trigger's BlueprintID field is supplied
+// holding a PROMPT id (the legacy shape); this helper wraps that prompt in a
+// single-step team-A blueprint and rebinds BlueprintID to the blueprint id, so
+// the trigger satisfies the same-team blueprint FK.
 func createTriggerForTestRouting(t *testing.T, database *sql.DB, trig domain.EventHandler) {
 	t.Helper()
 	trig.Kind = domain.EventHandlerKindTrigger
 	if trig.TriggerType == "" {
 		trig.TriggerType = domain.TriggerTypeEvent
+	}
+	if trig.BlueprintID != "" {
+		trig.BlueprintID = blueprintWrappingPrompt(t, database, trig.BlueprintID, runmode.LocalDefaultTeamID)
 	}
 	if err := testEventHandlerStore(database).Create(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, trig); err != nil {
 		t.Fatalf("createTriggerForTestRouting %s: %v", trig.ID, err)
@@ -85,11 +127,34 @@ func createTestPrompt(t *testing.T, database *sql.DB, p domain.Prompt) {
 func insertPromptForTeam(t *testing.T, database *sql.DB, id, teamID string) {
 	t.Helper()
 	if _, err := database.Exec(`
-		INSERT INTO prompts (id, org_id, team_id, creator_user_id, source, kind, name, body, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'user', 'leaf', ?, 'x', datetime('now'), datetime('now'))
+		INSERT INTO prompts (id, org_id, team_id, creator_user_id, source, name, body, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'user', ?, 'x', datetime('now'), datetime('now'))
 	`, id, runmode.LocalDefaultOrg, teamID, runmode.LocalDefaultUserID, id); err != nil {
 		t.Fatalf("insertPromptForTeam %s (team %s): %v", id, teamID, err)
 	}
+}
+
+// insertBlueprintForTeam seeds a user blueprint (+ a 1-step list wrapping
+// promptID) owned by a specific team via raw INSERTs. Mirrors
+// insertPromptForTeam: the SQLite BlueprintStore.Create / ReplaceSteps pin
+// LocalDefaultTeamID (team A), so a team-B trigger fixture that must reference
+// a team-B blueprint seeds it here with the matching team_id. Returns the
+// blueprint id.
+func insertBlueprintForTeam(t *testing.T, database *sql.DB, blueprintID, promptID, teamID string) string {
+	t.Helper()
+	if _, err := database.Exec(`
+		INSERT INTO blueprints (id, org_id, team_id, creator_user_id, source, name, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'user', ?, datetime('now'), datetime('now'))
+	`, blueprintID, runmode.LocalDefaultOrg, teamID, runmode.LocalDefaultUserID, blueprintID); err != nil {
+		t.Fatalf("insertBlueprintForTeam %s (team %s): %v", blueprintID, teamID, err)
+	}
+	if _, err := database.Exec(`
+		INSERT INTO blueprint_steps (blueprint_id, step_index, step_prompt_id, team_id, created_at)
+		VALUES (?, 0, ?, ?, datetime('now'))
+	`, blueprintID, promptID, teamID); err != nil {
+		t.Fatalf("insertBlueprintForTeam step %s (team %s): %v", blueprintID, teamID, err)
+	}
+	return blueprintID
 }
 
 // intPtr / floatPtr are convenience wrappers for the pointer-shaped
@@ -99,29 +164,44 @@ func insertPromptForTeam(t *testing.T, database *sql.DB, id, teamID string) {
 func intPtr(v int) *int           { return &v }
 func floatPtr(v float64) *float64 { return &v }
 
-// seedHandlerFKTargets seeds the prompts that shipped triggers reference
-// so EventHandlerStore.Seed's trigger rows resolve their FK to prompts.
-// Production calls seedDefaultPrompts which seeds prompts THEN handlers in
-// the same loop; tests that call Seed directly replicate that ordering
-// manually. Returns the system_slug → prompt-id map the caller threads into
-// Seed (the id is a random UUID per team copy post-SKY-380; the two-phase
-// seed resolves a trigger's prompt slug through this map).
+// seedHandlerFKTargets seeds the prompts AND blueprints that shipped triggers
+// reference so EventHandlerStore.Seed's trigger rows resolve their FK to a
+// same-team blueprint (post-SKY-416 a trigger fires a blueprint, not a prompt
+// directly). Production's SeedTeamDefaults seeds prompts → blueprints (each
+// wrapping its prompt as a 1-step list) → handlers; tests that call Seed
+// directly replicate that ordering here. Returns the system_slug →
+// blueprint-id map the caller threads into Seed (the id is a random UUID per
+// team copy post-SKY-380).
 func seedHandlerFKTargets(t *testing.T, database *sql.DB) map[string]string {
 	t.Helper()
-	store := testPromptStore(database)
+	ctx := context.Background()
+	prompts := testPromptStore(database)
+	blueprints := testBlueprintStore(database)
+	slugs := []struct {
+		slug, name string
+	}{
+		{"system-pr-review", "PR Review"},
+		{"system-conflict-resolution", "Conflicts"},
+		{"system-ci-fix", "CI Fix"},
+		{"system-jira-implement", "Jira Implement"},
+		{"system-fix-review-feedback", "Fix Review"},
+	}
 	out := map[string]string{}
-	for _, p := range []domain.Prompt{
-		{SystemSlug: "system-pr-review", Name: "PR Review", Body: "x", Source: "system"},
-		{SystemSlug: "system-conflict-resolution", Name: "Conflicts", Body: "x", Source: "system"},
-		{SystemSlug: "system-ci-fix", Name: "CI Fix", Body: "x", Source: "system"},
-		{SystemSlug: "system-jira-implement", Name: "Jira Implement", Body: "x", Source: "system"},
-		{SystemSlug: "system-fix-review-feedback", Name: "Fix Review", Body: "x", Source: "system"},
-	} {
-		id, err := store.SeedOrUpdate(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, p)
+	for _, s := range slugs {
+		promptID, err := prompts.SeedOrUpdate(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID,
+			domain.Prompt{SystemSlug: s.slug, Name: s.name, Body: "x", Source: "system"})
 		if err != nil {
-			t.Fatalf("seed prompt %s: %v", p.SystemSlug, err)
+			t.Fatalf("seed prompt %s: %v", s.slug, err)
 		}
-		out[p.SystemSlug] = id
+		bpID, err := blueprints.SeedOrUpdate(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID,
+			domain.Blueprint{SystemSlug: s.slug, Name: s.name, Source: "system"})
+		if err != nil {
+			t.Fatalf("seed blueprint %s: %v", s.slug, err)
+		}
+		if err := blueprints.ReplaceSteps(ctx, runmode.LocalDefaultOrg, bpID, []string{promptID}, nil); err != nil {
+			t.Fatalf("seed blueprint steps %s: %v", s.slug, err)
+		}
+		out[s.slug] = bpID
 	}
 	return out
 }

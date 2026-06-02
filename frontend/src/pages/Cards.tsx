@@ -121,7 +121,7 @@ export default function Cards() {
               body: JSON.stringify({
                 action,
                 hesitation_ms: hesitationMs,
-                ...(promptId && { prompt_id: promptId }),
+                ...(promptId && { blueprint_id: promptId }),
               }),
             })
 
@@ -317,6 +317,9 @@ export default function Cards() {
 
       <PromptPicker
         open={showPromptPicker}
+        source="blueprints"
+        title="Choose a blueprint"
+        subtitle="Select a blueprint to run for this task"
         onSelect={delegateWithPrompt}
         onClose={() => setShowPromptPicker(false)}
         onEditPrompts={() => {

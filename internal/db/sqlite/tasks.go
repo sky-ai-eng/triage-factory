@@ -822,23 +822,23 @@ func (s *taskStore) CountConsecutiveFailedRuns(ctx context.Context, orgID, entit
 		WITH recent AS (
 			SELECT
 				CASE
-					WHEN r.chain_run_id IS NULL THEN 'leaf'
-					ELSE 'chain'
+					WHEN r.blueprint_run_id IS NULL THEN 'leaf'
+					ELSE 'blueprint'
 				END AS kind,
-				r.chain_run_id,
+				r.blueprint_run_id,
 				COALESCE(cr.status, r.status) AS status,
 				COALESCE(cr.started_at, r.started_at) AS started_at,
 				ROW_NUMBER() OVER (
-					PARTITION BY COALESCE(r.chain_run_id, r.id)
+					PARTITION BY COALESCE(r.blueprint_run_id, r.id)
 					ORDER BY r.started_at ASC
 				) AS step_rank
 			FROM runs r
 			JOIN tasks t ON r.task_id = t.id
-			LEFT JOIN chain_runs cr ON cr.id = r.chain_run_id
+			LEFT JOIN blueprint_runs cr ON cr.id = r.blueprint_run_id
 			WHERE t.entity_id = ?
 				AND (
-					(r.chain_run_id IS NULL AND r.prompt_id = ?)
-					OR (cr.chain_prompt_id = ?)
+					(r.blueprint_run_id IS NULL AND r.prompt_id = ?)
+					OR (cr.blueprint_id = ?)
 				)
 				AND r.trigger_type = 'event'
 		),

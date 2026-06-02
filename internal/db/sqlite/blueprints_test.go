@@ -1,0 +1,291 @@
+package sqlite_test
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+)
+
+// TestBlueprintStore_SQLite_Conformance runs the shared blueprint
+// seed-idempotency + step round-trip suite against the SQLite impl.
+func TestBlueprintStore_SQLite_Conformance(t *testing.T) {
+	dbtest.RunBlueprintStoreConformance(t, func(t *testing.T) (db.BlueprintStore, string, string, dbtest.PromptSeederForBlueprints) {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		stores := sqlitestore.New(conn)
+		seedPrompt := func(t *testing.T, idHint string) string {
+			t.Helper()
+			id := idHint + "-" + uuid.New().String()[:8]
+			insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: id, Name: id, Body: "x", Source: "user"})
+			return id
+		}
+		return stores.Blueprints, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, seedPrompt
+	})
+}
+
+// insertPromptForBlueprintTest seeds a prompt row directly. PromptStore.Create
+// exists but takes the full create-shape; for FK-only seeding we want a
+// minimal raw INSERT, matching the pattern other sqlite_test files use
+// when seeding tables they don't own.
+func insertPromptForBlueprintTest(t *testing.T, conn *sql.DB, p domain.Prompt) {
+	t.Helper()
+	now := time.Now().UTC()
+	if _, err := conn.Exec(`
+		INSERT INTO prompts (id, name, body, source, allowed_tools, usage_count, team_id, creator_user_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, '[]', 0, ?, ?, ?, ?)
+	`, p.ID, p.Name, p.Body, p.Source, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, now, now); err != nil {
+		t.Fatalf("seed prompt %s: %v", p.ID, err)
+	}
+}
+
+// insertBlueprintForTest creates a user-source blueprint row owned by the
+// local default team so blueprint_runs / blueprint_steps FKs resolve. The
+// blueprint id is the supplied id (tests reference it directly).
+func insertBlueprintForTest(t *testing.T, conn *sql.DB, id, name string) {
+	t.Helper()
+	if err := sqlitestore.New(conn).Blueprints.Create(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Blueprint{
+		ID: id, Name: name, Source: "user", TeamID: runmode.LocalDefaultTeamID,
+	}); err != nil {
+		t.Fatalf("seed blueprint %s: %v", id, err)
+	}
+}
+
+// seedEntityEventTask builds the entity → event → task FK chain that
+// every blueprint test needs. Returns the task so tests can reference its
+// ID. suffix scopes the seeded source_id so subtests don't collide.
+func seedEntityEventTask(t *testing.T, conn *sql.DB, suffix string) *domain.Task {
+	t.Helper()
+	entity, _, err := sqlitestore.New(conn).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github",
+		"owner/repo#"+suffix, "pr", "Blueprint Test "+suffix, "https://example.com/"+suffix)
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+	eventID, err := sqlitestore.New(conn).Events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
+		EventType:    domain.EventGitHubPRCICheckFailed,
+		EntityID:     &entity.ID,
+		MetadataJSON: `{"check_name":"build"}`,
+	})
+	if err != nil {
+		t.Fatalf("record event: %v", err)
+	}
+	task, _, err := sqlitestore.New(conn).Tasks.FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID,
+		domain.EventGitHubPRCICheckFailed, suffix, eventID, 0.5)
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	return task
+}
+
+// TestBlueprintStore_SQLite_RunsForBlueprint_RoundTrip protects the 16-column
+// SELECT/Scan pair in RunsForBlueprint against silent column-order drift.
+func TestBlueprintStore_SQLite_RunsForBlueprint_RoundTrip(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	blueprints := sqlitestore.New(conn).Blueprints
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrg
+
+	task := seedEntityEventTask(t, conn, "blueprint-rt")
+	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "step-prompt-1", Name: "Step 1", Body: "do step 1", Source: "user"})
+	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "step-prompt-2", Name: "Step 2", Body: "do step 2", Source: "user"})
+	insertBlueprintForTest(t, conn, "blueprint-1", "My Blueprint")
+
+	if err := blueprints.ReplaceSteps(ctx, org, "blueprint-1", []string{"step-prompt-1", "step-prompt-2"}, nil); err != nil {
+		t.Fatalf("ReplaceSteps: %v", err)
+	}
+
+	blueprintRunID, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+		ID:           "blueprint-run-rt",
+		BlueprintID:  "blueprint-1",
+		TaskID:       task.ID,
+		TriggerType:  domain.BlueprintTriggerManual,
+		Status:       domain.BlueprintRunStatusRunning,
+		WorktreePath: "/tmp/wt-blueprint-rt",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if blueprintRunID != "blueprint-run-rt" {
+		t.Fatalf("unexpected blueprint run id: %s", blueprintRunID)
+	}
+
+	step0 := 0
+	step1 := 1
+	for _, run := range []domain.AgentRun{
+		{ID: "blueprint-step-run-0", TaskID: task.ID, PromptID: "step-prompt-1", Status: "initializing", Model: "claude-sonnet-4-6", BlueprintRunID: "blueprint-run-rt", BlueprintStepIndex: &step0},
+		{ID: "blueprint-step-run-1", TaskID: task.ID, PromptID: "step-prompt-2", Status: "initializing", Model: "claude-sonnet-4-6", BlueprintRunID: "blueprint-run-rt", BlueprintStepIndex: &step1},
+	} {
+		if err := sqlitestore.New(conn).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, run); err != nil {
+			t.Fatalf("create agent run %s: %v", run.ID, err)
+		}
+	}
+
+	runs, err := blueprints.RunsForBlueprint(ctx, org, "blueprint-run-rt")
+	if err != nil {
+		t.Fatalf("RunsForBlueprint: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("expected 2 runs, got %d", len(runs))
+	}
+	if runs[0].ID != "blueprint-step-run-0" || runs[1].ID != "blueprint-step-run-1" {
+		t.Errorf("unexpected order: %v", []string{runs[0].ID, runs[1].ID})
+	}
+	if runs[0].BlueprintStepIndex == nil || *runs[0].BlueprintStepIndex != 0 {
+		t.Errorf("run[0].BlueprintStepIndex = %v, want 0", runs[0].BlueprintStepIndex)
+	}
+	if runs[1].BlueprintStepIndex == nil || *runs[1].BlueprintStepIndex != 1 {
+		t.Errorf("run[1].BlueprintStepIndex = %v, want 1", runs[1].BlueprintStepIndex)
+	}
+	if runs[0].PromptID != "step-prompt-1" {
+		t.Errorf("run[0].PromptID = %q, want step-prompt-1", runs[0].PromptID)
+	}
+	if runs[0].Model != "claude-sonnet-4-6" {
+		t.Errorf("run[0].Model = %q, want claude-sonnet-4-6", runs[0].Model)
+	}
+}
+
+// TestBlueprintStore_SQLite_LatestVerdictsForRuns verifies the per-run
+// "latest wins" projection: two verdicts for one run, abort is latest.
+func TestBlueprintStore_SQLite_LatestVerdictsForRuns(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	blueprints := sqlitestore.New(conn).Blueprints
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrg
+
+	task := seedEntityEventTask(t, conn, "blueprint-verdict")
+	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "vp-step", Name: "VP Step", Body: "x", Source: "user"})
+	insertBlueprintForTest(t, conn, "vp-blueprint", "VP Blueprint")
+	if err := blueprints.ReplaceSteps(ctx, org, "vp-blueprint", []string{"vp-step"}, nil); err != nil {
+		t.Fatalf("ReplaceSteps: %v", err)
+	}
+	if _, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+		ID: "vp-blueprint-run", BlueprintID: "vp-blueprint", TaskID: task.ID,
+		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
+	}); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	step0 := 0
+	if err := sqlitestore.New(conn).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
+		ID: "vp-run", TaskID: task.ID, PromptID: "vp-step", Status: "initializing",
+		Model: "claude-sonnet-4-6", BlueprintRunID: "vp-blueprint-run", BlueprintStepIndex: &step0,
+	}); err != nil {
+		t.Fatalf("create agent run: %v", err)
+	}
+
+	advanceJSON, _ := json.Marshal(domain.ChainVerdict{Outcome: domain.ChainVerdictAdvance, Reason: "looks good"})
+	abortJSON, _ := json.Marshal(domain.ChainVerdict{Outcome: domain.ChainVerdictAbort, Reason: "something broke"})
+	if err := blueprints.InsertVerdict(ctx, org, "vp-run", string(advanceJSON)); err != nil {
+		t.Fatalf("insert advance verdict: %v", err)
+	}
+	if err := blueprints.InsertVerdict(ctx, org, "vp-run", string(abortJSON)); err != nil {
+		t.Fatalf("insert abort verdict: %v", err)
+	}
+
+	result, err := blueprints.LatestVerdictsForRuns(ctx, org, []string{"vp-run", "vp-run-no-verdict"})
+	if err != nil {
+		t.Fatalf("LatestVerdictsForRuns: %v", err)
+	}
+	v, ok := result["vp-run"]
+	if !ok {
+		t.Fatal("vp-run missing from result map")
+	}
+	if v.Outcome != domain.ChainVerdictAbort {
+		t.Errorf("vp-run verdict outcome = %q, want %q (abort should win as the later write)", v.Outcome, domain.ChainVerdictAbort)
+	}
+	if _, ok := result["vp-run-no-verdict"]; ok {
+		t.Error("vp-run-no-verdict should be absent — no artifacts written")
+	}
+
+	// Singular variant agrees.
+	latest, err := blueprints.GetLatestVerdict(ctx, org, "vp-run")
+	if err != nil {
+		t.Fatalf("GetLatestVerdict: %v", err)
+	}
+	if latest == nil || latest.Outcome != domain.ChainVerdictAbort {
+		t.Errorf("GetLatestVerdict outcome = %+v, want abort", latest)
+	}
+}
+
+// TestBlueprintStore_SQLite_MarkRunStatus_Guarded pins the lost-update
+// race guard: only non-terminal statuses accept a transition.
+func TestBlueprintStore_SQLite_MarkRunStatus_Guarded(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	blueprints := sqlitestore.New(conn).Blueprints
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrg
+
+	task := seedEntityEventTask(t, conn, "blueprint-guard")
+	insertBlueprintForTest(t, conn, "guard-blueprint", "Guard Blueprint")
+
+	blueprintRunID, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+		ID: "blueprint-run-guard", BlueprintID: "guard-blueprint", TaskID: task.ID,
+		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	changed, err := blueprints.MarkRunStatus(ctx, org, blueprintRunID, domain.BlueprintRunStatusCompleted, "", nil)
+	if err != nil {
+		t.Fatalf("MarkRunStatus: %v", err)
+	}
+	if !changed {
+		t.Error("expected changed=true for running → completed")
+	}
+
+	changed2, err := blueprints.MarkRunStatus(ctx, org, blueprintRunID, domain.BlueprintRunStatusAborted, "late abort", nil)
+	if err != nil {
+		t.Fatalf("MarkRunStatus second: %v", err)
+	}
+	if changed2 {
+		t.Error("expected changed=false when blueprint run already terminal")
+	}
+
+	cr, err := blueprints.GetRun(ctx, org, blueprintRunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if cr.Status != domain.BlueprintRunStatusCompleted {
+		t.Errorf("status = %q, want completed", cr.Status)
+	}
+}
+
+// TestBlueprintStore_SQLite_CreateRun_RequiresTriggerType verifies the
+// upfront validation: empty TriggerType errors rather than silently
+// defaulting.
+func TestBlueprintStore_SQLite_CreateRun_RequiresTriggerType(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	blueprints := sqlitestore.New(conn).Blueprints
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrg
+
+	task := seedEntityEventTask(t, conn, "ttype")
+	insertBlueprintForTest(t, conn, "ttype-blueprint", "T")
+
+	if _, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+		ID: "ttype-run", BlueprintID: "ttype-blueprint", TaskID: task.ID,
+		TriggerType: "", Status: domain.BlueprintRunStatusRunning,
+	}); err == nil {
+		t.Error("expected error for empty TriggerType, got nil")
+	}
+}
+
+// TestBlueprintStore_SQLite_AssertsLocalOrg pins the local-org guard: any
+// orgID other than runmode.LocalDefaultOrg must fail loudly.
+func TestBlueprintStore_SQLite_AssertsLocalOrg(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	blueprints := sqlitestore.New(conn).Blueprints
+	if _, err := blueprints.ListSteps(context.Background(), "some-real-uuid", "anything"); err == nil {
+		t.Fatal("ListSteps accepted non-local orgID; should reject")
+	}
+}

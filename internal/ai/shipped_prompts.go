@@ -45,10 +45,31 @@ func ShippedPrompts() []domain.Prompt {
 		{SystemSlug: "system-fix-review-feedback", Name: "Fix Review Feedback", Body: FixReviewFeedbackPromptTemplate, Source: "system"},
 
 		// Default Curator spec-authorship skill (SKY-221). The Curator
-		// materializes whichever prompt a project points at as a
+		// materializes whichever prompt a project's blueprint points at as a
 		// literal Claude Code skill on each dispatch; new projects start
-		// pointing at this one. Users override per-project via the
+		// pointing at this one's blueprint. Users override per-project via the
 		// Projects page.
 		{SystemSlug: domain.SystemTicketSpecPromptID, Name: "Curator: Ticket as a Spec", Body: TicketSpecPromptTemplate, Source: "system"},
 	}
+}
+
+// ShippedBlueprints returns one 1-step blueprint per shipped prompt: a
+// blueprint reuses the wrapped prompt's system_slug (distinct table, no
+// collision) and its single step points at that prompt's slug. Every shipped
+// prompt is either fired by a trigger (CI-fix, conflict-resolution, PR-review,
+// jira-implement, fix-review-feedback) or used by the curator
+// (system-ticket-spec), so wrapping each one keeps both the trigger→blueprint
+// and project→blueprint references resolvable. The seeder seeds prompts first,
+// then these blueprints + steps, then wires triggers to the blueprint slugs.
+func ShippedBlueprints() []domain.SeedBlueprint {
+	prompts := ShippedPrompts()
+	out := make([]domain.SeedBlueprint, 0, len(prompts))
+	for _, p := range prompts {
+		out = append(out, domain.SeedBlueprint{
+			SystemSlug:      p.SystemSlug,
+			Name:            p.Name,
+			StepPromptSlugs: []string{p.SystemSlug},
+		})
+	}
+	return out
 }

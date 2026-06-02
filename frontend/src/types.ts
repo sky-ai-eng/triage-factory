@@ -93,8 +93,8 @@ export interface AgentRun {
   // PendingPROverlay (title/body editor + Open-PR button). Empty /
   // undefined for non-pending runs.
   pending_kind?: 'review' | 'pr'
-  chain_run_id?: string
-  chain_step_index?: number | null
+  blueprint_run_id?: string
+  blueprint_step_index?: number | null
 }
 
 export interface HeldTakeover {
@@ -197,50 +197,58 @@ export interface DomainEvent {
   created_at?: string
 }
 
-export type PromptKind = 'leaf' | 'chain'
-
 export interface Prompt {
   id: string
   name: string
   body: string
   source: string
-  kind: PromptKind
   usage_count: number
   created_at: string
   updated_at: string
 }
 
-export interface ChainStep {
-  chain_prompt_id: string
+// Blueprint is the unified successor to prompt-chains. A blueprint is an
+// ordered list of steps; a single-step blueprint is what used to be a "leaf"
+// prompt. Multi-step blueprints replace the former "chain" prompts.
+export interface Blueprint {
+  id: string
+  name: string
+  team_id?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface BlueprintStep {
+  blueprint_id: string
   step_index: number
   step_prompt_id: string
   brief: string
   created_at: string
 }
 
-export type ChainVerdictOutcome = 'advance' | 'abort' | 'final'
+export type BlueprintVerdictOutcome = 'advance' | 'abort' | 'final'
 
-export interface ChainVerdict {
-  outcome: ChainVerdictOutcome
+export interface BlueprintVerdict {
+  outcome: BlueprintVerdictOutcome
   reason: string
   notes?: string
   // synthetic is internal-only (json:"-" in Go) — not on the wire
 }
 
-export interface ChainRunStepView {
-  step: ChainStep
+export interface BlueprintRunStepView {
+  step: BlueprintStep
   run?: AgentRun
-  verdict?: ChainVerdict
+  verdict?: BlueprintVerdict
 }
 
-export interface ChainRunResponse {
-  chain_run: ChainRun
-  steps: ChainRunStepView[]
+export interface BlueprintRunResponse {
+  blueprint_run: BlueprintRun
+  steps: BlueprintRunStepView[]
 }
 
-export interface ChainRun {
+export interface BlueprintRun {
   id: string
-  chain_prompt_id: string
+  blueprint_id: string
   task_id: string
   trigger_type: string
   trigger_id?: string
@@ -286,7 +294,7 @@ export interface RuleHandler extends EventHandlerBase {
 
 export interface TriggerHandler extends EventHandlerBase {
   kind: 'trigger'
-  prompt_id: string
+  blueprint_id: string
   trigger_type: string
   breaker_threshold: number
   min_autonomy_suitability: number
@@ -419,7 +427,7 @@ export interface Project {
    *  materializes whichever prompt this points at as a literal Claude
    *  Code skill at `<cwd>/.claude/skills/ticket-spec/SKILL.md` on every
    *  turn — changes apply immediately without a session reset. */
-  spec_authorship_prompt_id: string
+  spec_authorship_blueprint_id: string
   created_at: string
   updated_at: string
 }

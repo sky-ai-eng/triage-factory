@@ -15,10 +15,10 @@ import {
   applyNodeChanges,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import type { Prompt, TriggerHandler } from '../types'
+import type { Blueprint, Prompt, TriggerHandler } from '../types'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
-import { type BindingScope, isTemplateScope, promptsBase, handlersBase } from '../lib/scope'
+import { type BindingScope, isTemplateScope, blueprintsBase, handlersBase } from '../lib/scope'
 
 interface EventType {
   id: string
@@ -294,16 +294,33 @@ function BindingGraphInner({
     // unfiltered, the solo/local case); template scope is org-scoped (no
     // team_id). event-types is a system registry — never scoped.
     const teamQuery = !template && teamId ? `team_id=${encodeURIComponent(teamId)}` : ''
-    const promptsURL = `${promptsBase(template)}${teamQuery ? `?${teamQuery}` : ''}`
+    // Triggers now bind to blueprints, so the canvas node set is the blueprint
+    // list (a 1-step blueprint is the former leaf prompt). Template scope reuses
+    // its prompt-template family (org template is leaf-only) — see blueprintsBase.
+    const blueprintsURL = `${blueprintsBase(template)}${teamQuery ? `?${teamQuery}` : ''}`
     const triggersURL = `${handlersBase(template)}?kind=trigger${teamQuery ? `&${teamQuery}` : ''}`
     try {
       const [etRes, pRes, tRes] = await Promise.all([
         fetch('/api/event-types').then((r) => parseOrThrow(r, 'event-types')),
-        fetch(promptsURL).then((r) => parseOrThrow(r, 'prompts')),
+        fetch(blueprintsURL).then((r) => parseOrThrow(r, 'blueprints')),
         fetch(triggersURL).then((r) => parseOrThrow(r, 'triggers')),
       ])
       setEventTypes(etRes)
-      setPrompts(pRes)
+      // Normalize blueprints into the prompt-node shape the canvas renders.
+      // Template scope returns full prompts already (leaf-only template family);
+      // team scope returns Blueprint rows that lack body / usage stats.
+      const nodeList: Prompt[] = template
+        ? (pRes as Prompt[])
+        : (pRes as Blueprint[]).map((b) => ({
+            id: b.id,
+            name: b.name,
+            body: '',
+            source: 'user',
+            usage_count: 0,
+            created_at: b.created_at,
+            updated_at: b.updated_at,
+          }))
+      setPrompts(nodeList)
       setTriggers(tRes)
 
       const saved = layoutRef.current
@@ -404,7 +421,7 @@ function BindingGraphInner({
     .map((t) => ({
       id: t.id,
       source: `et:${t.event_type}`,
-      target: `p:${t.prompt_id}`,
+      target: `p:${t.blueprint_id}`,
       type: 'default',
       animated: t.enabled,
       style: {
@@ -465,7 +482,7 @@ function BindingGraphInner({
       // team_id — the row lands on the org template).
       const body: Record<string, unknown> = {
         kind: 'trigger',
-        prompt_id: promptId,
+        blueprint_id: promptId,
         event_type: eventType,
       }
       if (!template) {

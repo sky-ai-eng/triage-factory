@@ -46,10 +46,10 @@ var _ db.EventHandlerStore = (*eventHandlerStore)(nil)
 const sqliteEventHandlerColumns = `id, kind, event_type, scope_predicate_json, enabled, source,
        team_id,
        name, default_priority, sort_order,
-       prompt_id, breaker_threshold, min_autonomy_suitability,
+       blueprint_id, breaker_threshold, min_autonomy_suitability,
        created_at, updated_at`
 
-func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, promptIDsBySlug map[string]string) error {
+func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, blueprintIDsBySlug map[string]string) error {
 	if teamID == "" {
 		return fmt.Errorf("sqlite event_handlers Seed: teamID required (shipped handlers are team-scoped; local mode passes runmode.LocalDefaultTeamID)")
 	}
@@ -126,13 +126,13 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, prom
 			inserted += n
 
 		case domain.EventHandlerKindTrigger:
-			// Resolve the trigger's prompt slug to this team's prompt-copy
+			// Resolve the trigger's blueprint slug to this team's blueprint-copy
 			// UUID (phase-2 of the two-phase seed). A missing entry means
 			// the caller didn't seed the prompts first — fail loudly rather
 			// than write a dangling reference.
-			promptID, ok := promptIDsBySlug[h.PromptID]
-			if !ok || promptID == "" {
-				return fmt.Errorf("seed event_handler trigger %s: prompt slug %q not found in promptIDsBySlug (seed prompts before handlers)", h.ID, h.PromptID)
+			blueprintID, ok := blueprintIDsBySlug[h.BlueprintID]
+			if !ok || blueprintID == "" {
+				return fmt.Errorf("seed event_handler trigger %s: blueprint slug %q not found in blueprintIDsBySlug (seed prompts before handlers)", h.ID, h.BlueprintID)
 			}
 			// Shipped triggers ship disabled (project convention —
 			// users opt in or replace).
@@ -140,7 +140,7 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, prom
 				INSERT OR IGNORE INTO event_handlers
 					(id, org_id, team_id, creator_user_id, kind, event_type,
 					 system_slug, scope_predicate_json, enabled, source,
-					 prompt_id, breaker_threshold, min_autonomy_suitability,
+					 blueprint_id, breaker_threshold, min_autonomy_suitability,
 					 created_at, updated_at)
 				VALUES (?, ?, ?, NULL, 'trigger', ?,
 				        ?, ?, 0, 'system',
@@ -148,7 +148,7 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, prom
 				        ?, ?)
 			`, uuid.New().String(), orgID, teamID, h.EventType,
 				h.ID, pred,
-				promptID, h.BreakerThreshold, h.MinAutonomySuitability,
+				blueprintID, h.BreakerThreshold, h.MinAutonomySuitability,
 				now, now)
 			if err != nil {
 				return fmt.Errorf("seed event_handler trigger %s: %w", h.ID, err)
@@ -223,13 +223,13 @@ func (s *eventHandlerStore) GetEnabledForEvent(ctx context.Context, orgID, event
 	return collectEventHandlersSQLite(rows)
 }
 
-func (s *eventHandlerStore) ListForPrompt(ctx context.Context, orgID, promptID string) ([]domain.EventHandler, error) {
+func (s *eventHandlerStore) ListForBlueprint(ctx context.Context, orgID, blueprintID string) ([]domain.EventHandler, error) {
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+sqliteEventHandlerColumns+`
 		FROM event_handlers
-		WHERE org_id = ? AND prompt_id = ? AND kind = 'trigger'
+		WHERE org_id = ? AND blueprint_id = ? AND kind = 'trigger'
 		ORDER BY created_at DESC
-	`, orgID, promptID)
+	`, orgID, blueprintID)
 	if err != nil {
 		return nil, err
 	}
@@ -276,7 +276,7 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 			INSERT INTO event_handlers
 				(id, org_id, team_id, creator_user_id, kind, event_type,
 				 scope_predicate_json, enabled, source,
-				 prompt_id, breaker_threshold, min_autonomy_suitability,
+				 blueprint_id, breaker_threshold, min_autonomy_suitability,
 				 created_at, updated_at)
 			VALUES (?, ?, ?, ?, 'trigger', ?,
 			        ?, ?, 'user',
@@ -284,7 +284,7 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 			        ?, ?)
 		`, h.ID, orgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, h.EventType,
 			pred, h.Enabled,
-			h.PromptID, derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability),
+			h.BlueprintID, derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability),
 			now, now)
 		return err
 	}
@@ -360,7 +360,7 @@ func (s *eventHandlerStore) Promote(ctx context.Context, orgID string, id string
 	if t.Kind != domain.EventHandlerKindTrigger {
 		return errors.New("sqlite event_handlers Promote: target kind must be 'trigger'")
 	}
-	if t.PromptID == "" || t.BreakerThreshold == nil || t.MinAutonomySuitability == nil {
+	if t.BlueprintID == "" || t.BreakerThreshold == nil || t.MinAutonomySuitability == nil {
 		return errors.New("sqlite event_handlers Promote: trigger fields required")
 	}
 	var pred any
@@ -372,12 +372,12 @@ func (s *eventHandlerStore) Promote(ctx context.Context, orgID string, id string
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE event_handlers
 		SET kind = 'trigger',
-		    prompt_id = ?, breaker_threshold = ?, min_autonomy_suitability = ?,
+		    blueprint_id = ?, breaker_threshold = ?, min_autonomy_suitability = ?,
 		    name = NULL, default_priority = NULL, sort_order = NULL,
 		    scope_predicate_json = ?,
 		    updated_at = ?
 		WHERE org_id = ? AND id = ? AND kind = 'rule'
-	`, t.PromptID, *t.BreakerThreshold, *t.MinAutonomySuitability,
+	`, t.BlueprintID, *t.BreakerThreshold, *t.MinAutonomySuitability,
 		pred, time.Now().UTC(),
 		orgID, id)
 	if err != nil {
@@ -421,7 +421,7 @@ func scanEventHandlerFromAnySQLite(scanFn func(dst ...any) error) (domain.EventH
 		nameNS        sql.NullString
 		defPriority   sql.NullFloat64
 		sortOrder     sql.NullInt64
-		promptID      sql.NullString
+		blueprintID   sql.NullString
 		breakerNS     sql.NullInt64
 		minAutonomyNS sql.NullFloat64
 	)
@@ -429,7 +429,7 @@ func scanEventHandlerFromAnySQLite(scanFn func(dst ...any) error) (domain.EventH
 		&h.ID, &h.Kind, &h.EventType, &pred, &h.Enabled, &h.Source,
 		&teamID,
 		&nameNS, &defPriority, &sortOrder,
-		&promptID, &breakerNS, &minAutonomyNS,
+		&blueprintID, &breakerNS, &minAutonomyNS,
 		&h.CreatedAt, &h.UpdatedAt,
 	); err != nil {
 		return h, err
@@ -452,8 +452,8 @@ func scanEventHandlerFromAnySQLite(scanFn func(dst ...any) error) (domain.EventH
 		v := int(sortOrder.Int64)
 		h.SortOrder = &v
 	}
-	if promptID.Valid {
-		h.PromptID = promptID.String
+	if blueprintID.Valid {
+		h.BlueprintID = blueprintID.String
 	}
 	if breakerNS.Valid {
 		v := int(breakerNS.Int64)

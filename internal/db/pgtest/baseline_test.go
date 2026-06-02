@@ -1020,7 +1020,15 @@ func TestRLS_TeamVisibilityIsTeamScoped(t *testing.T) {
 	AddOrgMember(t, h, carol, orgA, teamB, "member", "member")
 
 	// Seed one team-scoped row in each of the four tables.
-	prompt := seedPrompt(t, h, orgA, alice, "p1")
+	// A trigger references a blueprint (FK to the same-team blueprints), so
+	// seed a teamA-owned blueprint for the trigger to point at.
+	var teamBlueprintID string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO blueprints (org_id, creator_user_id, team_id, name, source)
+		VALUES ($1, $2, $3, 'team-blueprint', 'user') RETURNING id
+	`, orgA, alice, teamA).Scan(&teamBlueprintID); err != nil {
+		t.Fatalf("seed team blueprint: %v", err)
+	}
 	var teamPromptID, teamProjectID, teamRuleID, teamTriggerID string
 
 	if err := h.AdminDB.QueryRow(`
@@ -1042,9 +1050,9 @@ func TestRLS_TeamVisibilityIsTeamScoped(t *testing.T) {
 		t.Fatalf("seed team rule: %v", err)
 	}
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO event_handlers (org_id, creator_user_id, team_id, kind, prompt_id, event_type, breaker_threshold, min_autonomy_suitability)
+		INSERT INTO event_handlers (org_id, creator_user_id, team_id, kind, blueprint_id, event_type, breaker_threshold, min_autonomy_suitability)
 		VALUES ($1, $2, $3, 'trigger', $4, 'github:pr:opened', 4, 0.0) RETURNING id
-	`, orgA, alice, teamA, prompt).Scan(&teamTriggerID); err != nil {
+	`, orgA, alice, teamA, teamBlueprintID).Scan(&teamTriggerID); err != nil {
 		t.Fatalf("seed team trigger: %v", err)
 	}
 
@@ -1581,14 +1589,14 @@ func TestFK_CrossOrgRejected(t *testing.T) {
 		t.Fatalf("cross-org event INSERT succeeded — composite FK broken")
 	}
 
-	// And a project in orgA referencing a prompt in orgB.
-	bobPrompt := seedPrompt(t, h, orgB, bob, "bob-prompt")
+	// And a project in orgA referencing a blueprint in orgB.
+	bobBlueprint := seedBlueprint(t, h, orgB, bob, "bob-blueprint")
 	_, err = h.AdminDB.Exec(`
-		INSERT INTO projects (org_id, creator_user_id, name, spec_authorship_prompt_id)
+		INSERT INTO projects (org_id, creator_user_id, name, spec_authorship_blueprint_id)
 		VALUES ($1, $2, 'p', $3)
-	`, orgA, alice, bobPrompt)
+	`, orgA, alice, bobBlueprint)
 	if err == nil {
-		t.Fatalf("cross-org project→prompt INSERT succeeded — composite FK broken")
+		t.Fatalf("cross-org project→blueprint INSERT succeeded — composite FK broken")
 	}
 }
 
@@ -2338,6 +2346,19 @@ func seedPrompt(t *testing.T, h *Harness, orgID, creatorID, name string) string 
 		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, '') RETURNING id
 	`, orgID, creatorID, name).Scan(&id); err != nil {
 		t.Fatalf("seed prompt: %v", err)
+	}
+	return id
+}
+
+func seedBlueprint(t *testing.T, h *Harness, orgID, creatorID, name string) string {
+	t.Helper()
+	var id string
+	// team_id resolved inline from the org's first team (SKY-262 team-default).
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO blueprints (org_id, creator_user_id, team_id, name, source)
+		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, 'user') RETURNING id
+	`, orgID, creatorID, name).Scan(&id); err != nil {
+		t.Fatalf("seed blueprint: %v", err)
 	}
 	return id
 }

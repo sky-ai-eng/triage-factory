@@ -60,15 +60,16 @@ type OrgTemplateStore interface {
 	SeedFromShipped(ctx context.Context, orgID string, shippedPrompts []domain.Prompt) error
 
 	// MaterializeIntoTeam copies the org's current template into teamID's
-	// prompts + event_handlers (and system_prompt_versions for system rows),
-	// reproducing what SeedTeamDefaults would have written from the shipped
-	// lists — only the source rows differ. Two-phase: each template prompt
-	// becomes a team prompt copy (new random UUID, same system_slug + source +
-	// content), then each template handler becomes a team handler copy with its
-	// prompt_id remapped to the team's copy and its enabled state preserved
-	// verbatim (an org admin enabling a trigger in the template flows to the
-	// new team). Idempotent on (org_id, team_id, system_slug) so a bootstrap
-	// re-run no-ops. Admin pool; must run OUTSIDE WithTx.
+	// prompts + blueprints + event_handlers (and system_prompt_versions for
+	// system rows), reproducing what SeedTeamDefaults would have written from
+	// the shipped lists — only the source rows differ. Three-phase: each
+	// template prompt becomes a team prompt copy (new random UUID, same
+	// system_slug + source + content); each template prompt also gets a
+	// synthesized 1-step team blueprint (same system_slug, step → that prompt);
+	// then each template handler becomes a team handler copy, a trigger's
+	// template prompt remapped to the team's blueprint copy and its enabled
+	// state preserved verbatim. Idempotent on (org_id, team_id, system_slug)
+	// so a bootstrap re-run no-ops. Admin pool; must run OUTSIDE WithTx.
 	MaterializeIntoTeam(ctx context.Context, orgID, teamID string) error
 
 	// --- template prompts CRUD (app pool, org-admin RLS) ---
@@ -81,8 +82,8 @@ type OrgTemplateStore interface {
 	// CreatePrompt inserts an admin-authored template prompt. The caller
 	// supplies ID + SystemSlug (a generated tmpl-<uuid>) and sets Source.
 	CreatePrompt(ctx context.Context, orgID string, p domain.Prompt) error
-	// UpdatePrompt edits a template prompt's name + body + kind + model.
-	UpdatePrompt(ctx context.Context, orgID, id, name, body, kind, model string) error
+	// UpdatePrompt edits a template prompt's name + body + model.
+	UpdatePrompt(ctx context.Context, orgID, id, name, body, model string) error
 	// DeletePrompt hard-deletes a template prompt; its template triggers
 	// cascade (FK). Unlike the team prompts table there is no boot re-seed to
 	// resurrect a deleted shipped row, so removing a shipped default from the

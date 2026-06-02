@@ -394,11 +394,12 @@ func findVisibleImportedPromptByContent(ctx context.Context, database *sql.DB, n
 
 func hideDuplicateImportedPrompts(ctx context.Context, database *sql.DB, prompts db.PromptStore) (int, error) {
 	// Post-SKY-259: prompt_triggers folded into event_handlers with
-	// kind='trigger'. The LEFT JOIN must also match on org_id — both
-	// tables carry org_id post-SKY-269, and the Postgres composite FK
-	// from event_handlers.(prompt_id, org_id) → prompts.(id, org_id)
-	// means a trigger in org A and a prompt with the same id in org B
-	// would otherwise be counted as referencing each other.
+	// kind='trigger'. Post-SKY-416 a trigger references a BLUEPRINT, not a
+	// prompt directly, so "is this prompt referenced by a trigger" routes
+	// event_handlers.blueprint_id → blueprint_steps.step_prompt_id = p.id.
+	// The joins also match on org_id — every table carries org_id post-
+	// SKY-269, and matching it keeps a same-id prompt in another org from
+	// being counted as referencing each other.
 	//
 	// The outer query is also scoped to the local org explicitly:
 	// ImportAll is local-mode only today (the skills runner reads
@@ -409,10 +410,12 @@ func hideDuplicateImportedPrompts(ctx context.Context, database *sql.DB, prompts
 	rows, err := database.QueryContext(ctx, `
 		SELECT p.id, p.name, p.body, p.allowed_tools, COUNT(t.id) AS trigger_count
 		FROM prompts p
+		LEFT JOIN blueprint_steps bs
+		       ON bs.step_prompt_id = p.id
 		LEFT JOIN event_handlers t
-		       ON t.prompt_id = p.id
-		      AND t.org_id   = p.org_id
-		      AND t.kind     = 'trigger'
+		       ON t.blueprint_id = bs.blueprint_id
+		      AND t.org_id       = p.org_id
+		      AND t.kind         = 'trigger'
 		WHERE p.source = 'imported' AND p.hidden = 0
 		  AND p.org_id = ?
 		GROUP BY p.id, p.name, p.body, p.allowed_tools, p.updated_at, p.created_at

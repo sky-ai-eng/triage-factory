@@ -95,10 +95,10 @@ export default function CuratorChat({ project, onPatch }: Props) {
   // internal/curator/skill.go so the badge matches what the next
   // dispatch will materialize.
   const hasProjectSpecPrompt =
-    !!project.spec_authorship_prompt_id &&
-    prompts.some((p) => p.id === project.spec_authorship_prompt_id)
+    !!project.spec_authorship_blueprint_id &&
+    prompts.some((p) => p.id === project.spec_authorship_blueprint_id)
   const effectiveSpecPromptID = hasProjectSpecPrompt
-    ? project.spec_authorship_prompt_id
+    ? project.spec_authorship_blueprint_id
     : prompts.some((p) => p.id === SYSTEM_TICKET_SPEC_PROMPT_ID)
       ? SYSTEM_TICKET_SPEC_PROMPT_ID
       : ''
@@ -117,7 +117,7 @@ export default function CuratorChat({ project, onPatch }: Props) {
     if (promptId === effectiveSpecPromptID) return
     // Failure toast lives in ProjectDetail's patch() (handles both HTTP
     // and network errors). Toasting here too would double-fire.
-    await onPatch({ spec_authorship_prompt_id: promptId })
+    await onPatch({ spec_authorship_blueprint_id: promptId })
   }
 
   // Per-mount fetch of the Jira base URL for the linkifier. Earlier

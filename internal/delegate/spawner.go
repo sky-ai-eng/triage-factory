@@ -47,7 +47,7 @@ type Spawner struct {
 	database   *sql.DB
 	prompts    db.PromptStore
 	agents     db.AgentStore // resolves actor for run.actor_agent_id stamping
-	chains     db.ChainStore
+	blueprints db.BlueprintStore
 	tasks      db.TaskStore      // re-read tasks for run lifecycle handlers
 	agentRuns  db.AgentRunStore  // run lifecycle + transcript + yields
 	entities   db.EntityStore    // entity reads for project lookup + resume context
@@ -102,7 +102,7 @@ type Spawner struct {
 	cancels               map[string]context.CancelFunc                     // runID → cancel the entire run
 	drainer               QueueDrainer                                      // nil-safe; set post-construction via SetQueueDrainer
 	takenOver             map[string]bool                                   // runIDs claimed by Takeover. Sticky-on for the rest of the goroutine's lifetime even after rollback — clearing the entry would let late-firing goroutine gates race the takeover/abort lifecycle. Suppresses every cleanup path in runAgent so Takeover/abortTakeover own the row's terminal state.
-	chainRunIDs           map[string]bool                                   // chain_run IDs whose setup phase reuses the per-run status helpers but is not backed by a runs row. broadcastRunUpdate skips wsHub emission for these so clients don't fetch /api/runs/{id} and 404.
+	blueprintRunIDs       map[string]bool                                   // chain_run IDs whose setup phase reuses the per-run status helpers but is not backed by a runs row. broadcastRunUpdate skips wsHub emission for these so clients don't fetch /api/runs/{id} and 404.
 	waitForClassification func(ctx context.Context, orgID, entityID string) // SKY-220 hook: blocks until the project classifier has decided this entity, or a timeout/ctx-cancel elapses. orgID scopes the classification read to the run's tenant (SKY-392 — the read goes through the org-scoped admin-pool store, not a raw query). Nil-safe (test setups skip it). Wired in main.go via SetWaitForClassification — keeps internal/delegate from importing internal/projectclassify.
 
 	agentToolsOnce  sync.Once
@@ -131,27 +131,27 @@ type Spawner struct {
 // nil-safe interface.
 func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, wsHub *websocket.Hub, model, takeoverDir string) *Spawner {
 	return &Spawner{
-		database:     database,
-		prompts:      stores.Prompts,
-		agents:       stores.Agents,
-		chains:       stores.Chains,
-		tasks:        stores.Tasks,
-		agentRuns:    stores.AgentRuns,
-		entities:     stores.Entities,
-		reviews:      stores.Reviews,
-		pendingPRs:   stores.PendingPRs,
-		events:       stores.Events,
-		taskMemory:   stores.TaskMemory,
-		runWorktrees: stores.RunWorktrees,
-		orgs:         stores.Orgs,
-		tx:           stores.Tx,
-		ghClient:     ghClient,
-		wsHub:        wsHub,
-		model:        model,
-		takeoverDir:  takeoverDir,
-		cancels:      make(map[string]context.CancelFunc),
-		takenOver:    make(map[string]bool),
-		chainRunIDs:  make(map[string]bool),
+		database:        database,
+		prompts:         stores.Prompts,
+		agents:          stores.Agents,
+		blueprints:      stores.Blueprints,
+		tasks:           stores.Tasks,
+		agentRuns:       stores.AgentRuns,
+		entities:        stores.Entities,
+		reviews:         stores.Reviews,
+		pendingPRs:      stores.PendingPRs,
+		events:          stores.Events,
+		taskMemory:      stores.TaskMemory,
+		runWorktrees:    stores.RunWorktrees,
+		orgs:            stores.Orgs,
+		tx:              stores.Tx,
+		ghClient:        ghClient,
+		wsHub:           wsHub,
+		model:           model,
+		takeoverDir:     takeoverDir,
+		cancels:         make(map[string]context.CancelFunc),
+		takenOver:       make(map[string]bool),
+		blueprintRunIDs: make(map[string]bool),
 	}
 }
 
@@ -431,7 +431,7 @@ func (s *Spawner) advanceTaskFromRunStatus(orgID, runID, runStatus string) {
 	if s.tasks == nil {
 		return
 	}
-	if s.isChainRunID(runID) {
+	if s.isBlueprintRunID(runID) {
 		return
 	}
 	target, isClose := targetTaskStatusForRunStatus(runStatus)
@@ -449,7 +449,7 @@ func (s *Spawner) advanceTaskFromRunStatus(orgID, runID, runStatus string) {
 	// task to in_review / done — the next step is about to run.
 	// processCompletion's inline 'completed' path has the same
 	// guard at run.go:435.
-	if run.ChainRunID != "" {
+	if run.BlueprintRunID != "" {
 		return
 	}
 	task, err := s.tasks.GetSystem(ctx, orgID, run.TaskID)
@@ -543,27 +543,27 @@ func (s *Spawner) updateBreakerCounter(taskID, triggerType, status string) {
 	// See internal/routing/router.go and internal/db/tasks.go.
 }
 
-// markChainRunID flags a chain_run id so broadcastRunUpdate skips
+// markBlueprintRunID flags a chain_run id so broadcastRunUpdate skips
 // wsHub emission for it. The setup phase of a chain reuses the per-run
 // status helpers with the chain_run id (the first step's runs row
 // doesn't exist yet) — those UPDATEs are harmless no-ops, but the
 // matching WS event causes clients to fetch /api/runs/{id} and 404.
-func (s *Spawner) markChainRunID(id string) {
+func (s *Spawner) markBlueprintRunID(id string) {
 	s.mu.Lock()
-	s.chainRunIDs[id] = true
+	s.blueprintRunIDs[id] = true
 	s.mu.Unlock()
 }
 
-func (s *Spawner) unmarkChainRunID(id string) {
+func (s *Spawner) unmarkBlueprintRunID(id string) {
 	s.mu.Lock()
-	delete(s.chainRunIDs, id)
+	delete(s.blueprintRunIDs, id)
 	s.mu.Unlock()
 }
 
-func (s *Spawner) isChainRunID(id string) bool {
+func (s *Spawner) isBlueprintRunID(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.chainRunIDs[id]
+	return s.blueprintRunIDs[id]
 }
 
 // broadcastRunUpdate stamps the run's owning org on the event so the
@@ -575,7 +575,7 @@ func (s *Spawner) broadcastRunUpdate(orgID, runID, status string) {
 	if s.wsHub == nil {
 		return
 	}
-	if s.isChainRunID(runID) {
+	if s.isBlueprintRunID(runID) {
 		return
 	}
 	s.wsHub.Broadcast(websocket.Event{

@@ -28,7 +28,7 @@ const reviewTestHost = "https://github.com"
 func reviewRouter(database *sql.DB) *Router {
 	st := sqlitestore.New(database)
 	return NewRouter(
-		testPromptStore(database), testEventHandlerStore(database), nil, nil, st.Users,
+		testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, st.Users,
 		testTaskStore(database), st.AgentRuns, st.Entities, st.PendingFirings, st.Events,
 		st.Orgs, st.Teams, nil, nil, st.TeamGitHubGroups, nil, noopScorer{}, websocket.NewHub(),
 	)

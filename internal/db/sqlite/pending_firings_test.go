@@ -1,6 +1,7 @@
 package sqlite_test
 
 import (
+	"context"
 	"database/sql"
 	"testing"
 	"time"
@@ -92,6 +93,7 @@ func newSQLitePendingFiringsSeeder(conn *sql.DB) dbtest.PendingFiringsSeeder {
 		taskID := "t-" + suf
 		triggerID := "tr-" + suf
 		promptID := "p-" + suf
+		blueprintID := "bp-" + suf
 
 		// entity: synthetic id keeps the (source, source_id)
 		// UNIQUE happy across subtests.
@@ -110,6 +112,18 @@ func newSQLitePendingFiringsSeeder(conn *sql.DB) dbtest.PendingFiringsSeeder {
 			VALUES (?, 'Test', 'x', 'user', ?, ?)
 		`, promptID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
 			t.Fatalf("seed prompt: %v", err)
+		}
+
+		// blueprint (+ step): the trigger's blueprint_id FKs to
+		// blueprints(id, org_id) AND the same-team blueprints(id, team_id),
+		// so it needs a real team-owned blueprint wrapping the prompt above.
+		if err := sqlitestore.New(conn).Blueprints.Create(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Blueprint{
+			ID: blueprintID, Name: "Test BP", Source: "user", TeamID: runmode.LocalDefaultTeamID,
+		}); err != nil {
+			t.Fatalf("seed blueprint: %v", err)
+		}
+		if err := sqlitestore.New(conn).Blueprints.ReplaceSteps(context.Background(), runmode.LocalDefaultOrg, blueprintID, []string{promptID}, nil); err != nil {
+			t.Fatalf("seed blueprint step: %v", err)
 		}
 
 		// event: pending_firings.triggering_event_id FKs to events(id).
@@ -133,13 +147,13 @@ func newSQLitePendingFiringsSeeder(conn *sql.DB) dbtest.PendingFiringsSeeder {
 
 		// event_handler (trigger kind): FK target of
 		// pending_firings.trigger_id. The kind-specific CHECK requires
-		// triggers to set prompt_id + breaker_threshold +
+		// triggers to set blueprint_id + breaker_threshold +
 		// min_autonomy_suitability and to leave the rule-only columns
 		// (name, default_priority, sort_order) NULL.
 		if _, err := conn.Exec(`
-			INSERT INTO event_handlers (id, kind, event_type, prompt_id, breaker_threshold, min_autonomy_suitability, enabled, source, creator_user_id)
-			VALUES (?, 'trigger', ?, ?, 4, 0, 1, 'user', ?)
-		`, triggerID, domain.EventGitHubPRCICheckFailed, promptID, runmode.LocalDefaultUserID); err != nil {
+			INSERT INTO event_handlers (id, kind, event_type, blueprint_id, breaker_threshold, min_autonomy_suitability, enabled, source, creator_user_id, team_id)
+			VALUES (?, 'trigger', ?, ?, 4, 0, 1, 'user', ?, ?)
+		`, triggerID, domain.EventGitHubPRCICheckFailed, blueprintID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
 			t.Fatalf("seed trigger: %v", err)
 		}
 

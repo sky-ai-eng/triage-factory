@@ -97,10 +97,10 @@ func max(a, b int) int {
 	return b
 }
 
-// SlugForChainStep produces distinct slugs for prompts named "Foo Bar" at index 0 vs "foo-bar" at index 1.
-func TestSlugForChainStep_Collision(t *testing.T) {
-	slug0 := SlugForChainStep(0, "Foo Bar") // chain-step-0-foo-bar
-	slug1 := SlugForChainStep(1, "foo-bar") // chain-step-1-foo-bar
+// SlugForBlueprintStep produces distinct slugs for prompts named "Foo Bar" at index 0 vs "foo-bar" at index 1.
+func TestSlugForBlueprintStep_Collision(t *testing.T) {
+	slug0 := SlugForBlueprintStep(0, "Foo Bar") // chain-step-0-foo-bar
+	slug1 := SlugForBlueprintStep(1, "foo-bar") // chain-step-1-foo-bar
 	if slug0 == slug1 {
 		t.Errorf("expected distinct slugs; both are %q", slug0)
 	}
@@ -110,7 +110,7 @@ func TestSlugForChainStep_Collision(t *testing.T) {
 func TestMaterializeStepSkill_UserPrompt(t *testing.T) {
 	wt := t.TempDir()
 	p := userPrompt("Test Step", "Run the test suite.\n")
-	slug := SlugForChainStep(0, p.Name)
+	slug := SlugForBlueprintStep(0, p.Name)
 
 	if err := MaterializeStepSkill(wt, slug, p, "run tests"); err != nil {
 		t.Fatalf("MaterializeStepSkill: %v", err)

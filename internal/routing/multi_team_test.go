@@ -69,7 +69,7 @@ func TestHandleEvent_MultipleTeams_OneTask(t *testing.T) {
 	}
 	metaJSON, _ := json.Marshal(meta)
 
-	router := NewRouter(testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
 
 	router.HandleEvent(domain.Event{
 		EventType:    domain.EventGitHubPRCICheckFailed,
@@ -138,7 +138,7 @@ func TestHandleEvent_BackfillCreatedAt_PreservesOccurredAt(t *testing.T) {
 	}
 	metaJSON, _ := json.Marshal(meta)
 
-	router := NewRouter(testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
 
 	router.HandleEvent(domain.Event{
 		EventType:    domain.EventGitHubPRReviewRequested,
@@ -182,7 +182,7 @@ func TestHandleEvent_NoOccurredAt_FallsBackToNow(t *testing.T) {
 	metaJSON, _ := json.Marshal(meta)
 
 	before := time.Now()
-	router := NewRouter(testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
 	router.HandleEvent(domain.Event{
 		EventType:    domain.EventGitHubPRCICheckFailed,
 		EntityID:     &entity.ID,
@@ -263,7 +263,7 @@ func TestHandleEvent_BecameAtomic_Suppressed(t *testing.T) {
 	}
 	atomicJSON, _ := json.Marshal(atomicMeta)
 
-	router := NewRouter(testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
 	router.HandleEvent(domain.Event{
 		EventType:    domain.EventJiraIssueBecameAtomic,
 		EntityID:     &entity.ID,
@@ -343,7 +343,7 @@ func TestTryAutoDelegate_PerTeamBotGate(t *testing.T) {
 	trigger := domain.EventHandler{
 		ID:                     "trigger-gate",
 		Kind:                   domain.EventHandlerKindTrigger,
-		PromptID:               "p-gate",
+		BlueprintID:            "p-gate",
 		TriggerType:            domain.TriggerTypeEvent,
 		EventType:              domain.EventGitHubPRCICheckFailed,
 		BreakerThreshold:       intPtr(4),
@@ -353,7 +353,7 @@ func TestTryAutoDelegate_PerTeamBotGate(t *testing.T) {
 	createTriggerForTestRouting(t, database, trigger)
 
 	stub := &stubDelegator{db: database}
-	router := NewRouter(testPromptStore(database), testEventHandlerStore(database), stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
+	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
 
 	// Fire the trigger as team B (bot disabled) — must be blocked — and
 	// as team A (bot enabled) — must delegate. Order doesn't matter:
@@ -421,21 +421,22 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 	// LocalDefaultTeamID = teamA).
 	createTriggerForTestRouting(t, database, domain.EventHandler{
 		ID: "trigger-A-onerun", Kind: domain.EventHandlerKindTrigger,
-		PromptID: "p-onerun", TriggerType: domain.TriggerTypeEvent,
+		BlueprintID: "p-onerun", TriggerType: domain.TriggerTypeEvent,
 		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4),
 		MinAutonomySuitability: floatPtr(0), Enabled: true,
 	})
 	// teamB's immediate trigger (raw insert for the second team), bound to
-	// team B's own prompt copy.
+	// team B's own blueprint copy wrapping its own prompt.
+	bpOnerunB := insertBlueprintForTeam(t, database, "bp-onerun-b", "p-onerun-b", teamB)
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
 			(id, org_id, team_id, creator_user_id, kind, event_type,
 			 scope_predicate_json, enabled, source,
-			 prompt_id, breaker_threshold, min_autonomy_suitability,
+			 blueprint_id, breaker_threshold, min_autonomy_suitability,
 			 created_at, updated_at)
 		VALUES (?, ?, ?, ?, 'trigger', ?, NULL, 1, 'user', ?, 4, 0, datetime('now'), datetime('now'))
 	`, "trigger-B-onerun", runmode.LocalDefaultOrg, teamB, runmode.LocalDefaultUserID,
-		domain.EventGitHubPRCICheckFailed, "p-onerun-b"); err != nil {
+		domain.EventGitHubPRCICheckFailed, bpOnerunB); err != nil {
 		t.Fatalf("seed team B trigger: %v", err)
 	}
 
@@ -443,7 +444,7 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 	metaJSON, _ := json.Marshal(meta)
 
 	stub := &stubDelegator{db: database}
-	router := NewRouter(testPromptStore(database), testEventHandlerStore(database), stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
+	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
 
 	router.HandleEvent(domain.Event{
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID,
@@ -528,18 +529,19 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 	}
 	createTriggerForTestRouting(t, database, domain.EventHandler{
 		ID: "trigger-A-attr", Kind: domain.EventHandlerKindTrigger,
-		PromptID: "p-attr", TriggerType: domain.TriggerTypeEvent,
+		BlueprintID: "p-attr", TriggerType: domain.TriggerTypeEvent,
 		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4),
 		MinAutonomySuitability: floatPtr(0), Enabled: true,
 	})
 	// Team B (lower priority) also has a trigger and IS enabled.
+	bpAttrB := insertBlueprintForTeam(t, database, "bp-attr-b", "p-attr-b", teamB)
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers
 			(id, org_id, team_id, creator_user_id, kind, event_type,
-			 scope_predicate_json, enabled, source, prompt_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
+			 scope_predicate_json, enabled, source, blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
 		VALUES (?, ?, ?, ?, 'trigger', ?, NULL, 1, 'user', ?, 4, 0, datetime('now'), datetime('now'))
 	`, "trigger-B-attr", runmode.LocalDefaultOrg, teamB, runmode.LocalDefaultUserID,
-		domain.EventGitHubPRCICheckFailed, "p-attr-b"); err != nil {
+		domain.EventGitHubPRCICheckFailed, bpAttrB); err != nil {
 		t.Fatalf("seed team B trigger: %v", err)
 	}
 
@@ -547,7 +549,7 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 	metaJSON, _ := json.Marshal(meta)
 
 	stub := &stubDelegator{db: database}
-	router := NewRouter(testPromptStore(database), testEventHandlerStore(database), stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
+	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
 
 	router.HandleEvent(domain.Event{
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID,
@@ -600,7 +602,7 @@ func TestHandleEvent_SingleTeam_OneTask(t *testing.T) {
 	}
 	metaJSON, _ := json.Marshal(meta)
 
-	router := NewRouter(testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
 
 	router.HandleEvent(domain.Event{
 		EventType:    domain.EventGitHubPRCICheckFailed,

@@ -42,9 +42,9 @@ func TestHandleFactoryDelegate_ServiceUnavailableWithoutSpawner(t *testing.T) {
 	}
 	// No SetSpawner call — simulate startup-order or test-config gap.
 	rec := doJSON(t, s, http.MethodPost, "/api/factory/delegate", map[string]string{
-		"entity_id":  entity.ID,
-		"event_type": domain.EventGitHubPRCICheckPassed,
-		"prompt_id":  "p1",
+		"entity_id":    entity.ID,
+		"event_type":   domain.EventGitHubPRCICheckPassed,
+		"blueprint_id": "p1",
 	})
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want 503", rec.Code)
@@ -54,9 +54,9 @@ func TestHandleFactoryDelegate_ServiceUnavailableWithoutSpawner(t *testing.T) {
 func TestHandleFactoryDelegate_404OnMissingEntity(t *testing.T) {
 	s := newTestServer(t)
 	rec := doJSON(t, s, http.MethodPost, "/api/factory/delegate", map[string]string{
-		"entity_id":  "no-such-entity",
-		"event_type": domain.EventGitHubPRCICheckPassed,
-		"prompt_id":  "p1",
+		"entity_id":    "no-such-entity",
+		"event_type":   domain.EventGitHubPRCICheckPassed,
+		"blueprint_id": "p1",
 	})
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rec.Code)
@@ -78,9 +78,9 @@ func TestHandleFactoryDelegate_400OnNoMatchingEvent(t *testing.T) {
 	// No event recorded — request asks to delegate at a station the
 	// entity has never produced.
 	rec := doJSON(t, s, http.MethodPost, "/api/factory/delegate", map[string]string{
-		"entity_id":  entity.ID,
-		"event_type": domain.EventGitHubPRCICheckPassed,
-		"prompt_id":  "p1",
+		"entity_id":    entity.ID,
+		"event_type":   domain.EventGitHubPRCICheckPassed,
+		"blueprint_id": "p1",
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400 (no matching event)", rec.Code)
@@ -110,9 +110,9 @@ func TestHandleFactoryDelegate_409OnClosedEntity(t *testing.T) {
 		t.Fatalf("record event: %v", err)
 	}
 	rec := doJSON(t, s, http.MethodPost, "/api/factory/delegate", map[string]string{
-		"entity_id":  entity.ID,
-		"event_type": domain.EventGitHubPRMerged,
-		"prompt_id":  "p1",
+		"entity_id":    entity.ID,
+		"event_type":   domain.EventGitHubPRMerged,
+		"blueprint_id": "p1",
 	})
 	if rec.Code != http.StatusConflict {
 		t.Errorf("status = %d, want 409 (closed entity)", rec.Code)
@@ -176,9 +176,9 @@ func TestHandleFactoryDelegate_DelegateErrorPreservesClaim(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/factory/delegate", map[string]string{
-		"entity_id":  entity.ID,
-		"event_type": domain.EventGitHubPRCICheckPassed,
-		"prompt_id":  "no-such-prompt",
+		"entity_id":    entity.ID,
+		"event_type":   domain.EventGitHubPRCICheckPassed,
+		"blueprint_id": "no-such-prompt",
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (partial-success convention: claim stamped, run didn't fire)", rec.Code)
@@ -276,9 +276,9 @@ func TestHandleFactoryDelegate_RefusedWhenBotDisabled(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/factory/delegate", map[string]string{
-		"entity_id":  entity.ID,
-		"event_type": domain.EventGitHubPRCICheckPassed,
-		"prompt_id":  "any-prompt",
+		"entity_id":    entity.ID,
+		"event_type":   domain.EventGitHubPRCICheckPassed,
+		"blueprint_id": "any-prompt",
 	})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (bot disabled); body=%s", rec.Code, rec.Body.String())

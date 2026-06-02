@@ -9,7 +9,7 @@ import PredicateEditor from './PredicateEditor'
 import Slider from './Slider'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
-import { promptsBase, handlersBase } from '../lib/scope'
+import { blueprintsBase, handlersBase } from '../lib/scope'
 
 interface TriggerConfigPanelProps {
   open: boolean
@@ -53,12 +53,27 @@ export default function TriggerConfigPanel({
     setConfirmDelete(false)
     setPromptName('')
 
-    fetch(`${promptsBase(templateScope)}/${encodeURIComponent(trigger.prompt_id)}`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((p) => {
-        if (!cancelled && p) setPromptName(p.name)
-      })
-      .catch(() => {})
+    // Resolve the bound blueprint's name for the badge. Template scope has a
+    // single-get on its prompt family; team-scope blueprints expose only a
+    // list endpoint, so fetch the list and find by id.
+    if (templateScope) {
+      fetch(`${blueprintsBase(true)}/${encodeURIComponent(trigger.blueprint_id)}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((p) => {
+          if (!cancelled && p) setPromptName(p.name)
+        })
+        .catch(() => {})
+    } else {
+      fetch(blueprintsBase(false))
+        .then((r) => (r.ok ? r.json() : []))
+        .then((list: Array<{ id: string; name: string }>) => {
+          const match = Array.isArray(list)
+            ? list.find((b) => b.id === trigger.blueprint_id)
+            : undefined
+          if (!cancelled && match) setPromptName(match.name)
+        })
+        .catch(() => {})
+    }
 
     return () => {
       cancelled = true

@@ -139,7 +139,7 @@ type Client interface {
 
 	// --- chain (chain verdict) ---
 
-	GetChainRunForRun(ctx context.Context) (*domain.ChainRun, *int, error)
+	GetChainRunForRun(ctx context.Context) (*domain.BlueprintRun, *int, error)
 	InsertChainVerdict(ctx context.Context, payload string) error
 
 	// BuildAgentRunFooter returns the "*This <kind> was partially

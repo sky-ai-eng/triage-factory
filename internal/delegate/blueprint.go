@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	_ "embed" // powers chainStepSystemPrompt
+	_ "embed" // powers blueprintStepSystemPrompt
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -23,51 +23,47 @@ import (
 )
 
 //go:embed prompts/chain-step-system.txt
-var chainStepSystemPrompt string
+var blueprintStepSystemPrompt string
 
-// delegateChain is the chain analog of Delegate's single-prompt body.
-// It loads the step list, sets up the shared worktree, creates the
-// chain_runs row, and spawns the orchestrator goroutine. The returned
-// id is the chain_run id (not a step run id) — the UI / API surfaces
-// this as "the chain that was kicked off".
+// delegateBlueprint is the multi-step analog of Delegate's single-prompt
+// body. The caller supplies the resolved blueprint + its ordered (len > 1)
+// step list; this sets up the shared worktree, creates the blueprint_runs
+// row, and spawns the orchestrator goroutine. The returned id is the
+// blueprint_run id (not a step run id) — the UI / API surfaces this as "the
+// blueprint that was kicked off".
 //
-// Failures inside this function (empty step list, worktree setup
-// failure, db write errors) terminate the chain immediately with a
-// matching abort_reason rather than returning an error to the caller —
-// the caller already has the chain_run id and the UI subscribes to
-// the chain row by id, so a synchronous error wouldn't be reflected
-// anywhere visible.
-func (s *Spawner) delegateChain(orgID string, task domain.Task, chainPrompt *domain.Prompt, triggerType, triggerID, creatorUserID string, gh *ghclient.Client, model string) (string, error) {
-	steps, err := s.chains.ListStepsSystem(context.Background(), orgID, chainPrompt.ID)
-	if err != nil {
-		return "", fmt.Errorf("load chain steps: %w", err)
-	}
+// Failures inside this function (empty step list, worktree setup failure, db
+// write errors) terminate the blueprint immediately with a matching
+// abort_reason rather than returning an error to the caller — the caller
+// already has the blueprint_run id and the UI subscribes to the row by id, so
+// a synchronous error wouldn't be reflected anywhere visible.
+func (s *Spawner) delegateBlueprint(orgID string, task domain.Task, blueprint *domain.Blueprint, steps []domain.BlueprintStep, triggerType, triggerID, creatorUserID string, gh *ghclient.Client, model string) (string, error) {
 	if len(steps) == 0 {
-		return "", fmt.Errorf("chain prompt %q has no steps", chainPrompt.Name)
+		return "", fmt.Errorf("blueprint %q has no steps", blueprint.Name)
 	}
 
-	// Allocate the chain id up front so the goroutine and the caller
+	// Allocate the blueprint-run id up front so the goroutine and the caller
 	// both reference the same row — we want callers to be able to
 	// subscribe to chain_runs/{id} immediately, not wait for a setup
 	// round-trip.
-	chainRunID := uuid.New().String()
+	blueprintRunID := uuid.New().String()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s.mu.Lock()
-	s.cancels[chainRunID] = cancel
+	s.cancels[blueprintRunID] = cancel
 	s.mu.Unlock()
 	// Mark this id as a chain_run so the setup phase's status helpers
 	// don't broadcast agent_run_update events for a non-existent runs row.
-	s.markChainRunID(chainRunID)
+	s.markBlueprintRunID(blueprintRunID)
 
 	go func() {
 		startTime := time.Now()
 		defer func() {
 			s.mu.Lock()
-			delete(s.cancels, chainRunID)
+			delete(s.cancels, blueprintRunID)
 			s.mu.Unlock()
 			cancel()
-			s.unmarkChainRunID(chainRunID)
+			s.unmarkBlueprintRunID(blueprintRunID)
 		}()
 
 		// Build the shared worktree exactly once. The same setupGitHub /
@@ -76,9 +72,9 @@ func (s *Spawner) delegateChain(orgID string, task domain.Task, chainPrompt *dom
 		var setupErr error
 		switch task.EntitySource {
 		case "github":
-			cfg, setupErr = s.setupGitHub(ctx, orgID, chainRunID, task, gh)
+			cfg, setupErr = s.setupGitHub(ctx, orgID, blueprintRunID, task, gh)
 		case "jira":
-			cfg, setupErr = s.setupJira(ctx, orgID, chainRunID, task, gh)
+			cfg, setupErr = s.setupJira(ctx, orgID, blueprintRunID, task, gh)
 		default:
 			setupErr = fmt.Errorf("unsupported task source: %s", task.EntitySource)
 		}
@@ -88,16 +84,16 @@ func (s *Spawner) delegateChain(orgID string, task domain.Task, chainPrompt *dom
 			// show; write abort_reason and completed_at directly in the
 			// insert — MarkRunStatus won't match a row that isn't 'running'.
 			now := time.Now().UTC()
-			_, _ = s.chains.CreateRun(ctx, orgID, domain.ChainRun{
-				ID:            chainRunID,
-				ChainPromptID: chainPrompt.ID,
-				TaskID:        task.ID,
-				TriggerType:   domain.ChainTriggerType(triggerType),
-				TriggerID:     triggerID,
-				Status:        domain.ChainRunStatusFailed,
-				AbortReason:   setupErr.Error(),
-				CompletedAt:   &now,
-				WorktreePath:  "",
+			_, _ = s.blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
+				ID:           blueprintRunID,
+				BlueprintID:  blueprint.ID,
+				TaskID:       task.ID,
+				TriggerType:  domain.BlueprintTriggerType(triggerType),
+				TriggerID:    triggerID,
+				Status:       domain.BlueprintRunStatusFailed,
+				AbortReason:  setupErr.Error(),
+				CompletedAt:  &now,
+				WorktreePath: "",
 			})
 			if cfgEntity := taskEntityID(s.tasks, orgID, task.ID); cfgEntity != "" {
 				s.notifyDrainer(orgID, triggerType, cfgEntity)
@@ -105,53 +101,53 @@ func (s *Spawner) delegateChain(orgID string, task domain.Task, chainPrompt *dom
 			return
 		}
 
-		if _, err := s.chains.CreateRun(ctx, orgID, domain.ChainRun{
-			ID:            chainRunID,
-			ChainPromptID: chainPrompt.ID,
-			TaskID:        task.ID,
-			TriggerType:   domain.ChainTriggerType(triggerType),
-			TriggerID:     triggerID,
-			Status:        domain.ChainRunStatusRunning,
-			WorktreePath:  cfg.wtPath,
+		if _, err := s.blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
+			ID:           blueprintRunID,
+			BlueprintID:  blueprint.ID,
+			TaskID:       task.ID,
+			TriggerType:  domain.BlueprintTriggerType(triggerType),
+			TriggerID:    triggerID,
+			Status:       domain.BlueprintRunStatusRunning,
+			WorktreePath: cfg.wtPath,
 		}); err != nil {
-			log.Printf("[chain] failed to persist chain_run %s: %v", chainRunID, err)
-			s.runChainWorktreeCleanup(chainRunID, cfg)
+			log.Printf("[blueprint] failed to persist chain_run %s: %v", blueprintRunID, err)
+			s.runBlueprintWorktreeCleanup(blueprintRunID, cfg)
 			if cfgEntity := taskEntityID(s.tasks, orgID, task.ID); cfgEntity != "" {
 				s.notifyDrainer(orgID, triggerType, cfgEntity)
 			}
 			return
 		}
 
-		verb := "Chain started"
+		verb := "Blueprint started"
 		if triggerType == "event" {
-			verb = "Auto-fired chain"
+			verb = "Auto-fired blueprint"
 		}
 		toast.Info(s.wsHub, orgID, fmt.Sprintf("%s: %s (%s)",
-			verb, truncateToastMsg(chainPrompt.Name, 60), shortRunID(chainRunID)))
+			verb, truncateToastMsg(blueprint.Name, 60), shortRunID(blueprintRunID)))
 
-		s.runChain(ctx, orgID, chainRunID, task, chainPrompt, steps, cfg, startTime, model, triggerType, creatorUserID)
+		s.runBlueprint(ctx, orgID, blueprintRunID, task, blueprint, steps, cfg, startTime, model, triggerType, creatorUserID)
 	}()
 
-	return chainRunID, nil
+	return blueprintRunID, nil
 }
 
-// runChain orchestrates a chain prompt against one task. It owns the
+// runBlueprint orchestrates a chain prompt against one task. It owns the
 // shared worktree (built once via setupGitHub / setupJira) and walks
 // the ordered step list, creating one runs row per step. After each
 // step terminates, it reads the latest chain:verdict artifact and
 // decides whether to advance, abort, or fail.
 //
 // Yield mid-chain and pending_approval mid-chain are handled
-// separately via ResumeChainAfterYield / ResumeChainAfterApproval —
+// separately via ResumeBlueprintAfterYield / ResumeBlueprintAfterApproval —
 // the orchestrator returns early when the step lands in awaiting_input
 // or pending_approval, leaving chain_runs.status='running' and the
 // shared worktree on disk for the eventual resume.
-func (s *Spawner) runChain(
+func (s *Spawner) runBlueprint(
 	ctx context.Context,
-	orgID, chainRunID string,
+	orgID, blueprintRunID string,
 	task domain.Task,
-	chainPrompt *domain.Prompt,
-	steps []domain.ChainStep,
+	blueprint *domain.Blueprint,
+	steps []domain.BlueprintStep,
 	cfg runConfig,
 	startTime time.Time,
 	model string,
@@ -159,38 +155,33 @@ func (s *Spawner) runChain(
 	creatorUserID string,
 ) {
 	if len(steps) == 0 {
-		s.terminateChain(orgID, chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusFailed,
+		s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusFailed,
 			"chain has no steps", nil, false)
 		return
 	}
 
 	for i, step := range steps {
 		if ctx.Err() != nil {
-			s.terminateChain(orgID, chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusCancelled,
+			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusCancelled,
 				"cancelled", &step.StepIndex, false)
 			return
 		}
 
 		stepPrompt, err := s.prompts.GetSystem(ctx, orgID, step.StepPromptID)
 		if err != nil || stepPrompt == nil {
-			s.terminateChain(orgID, chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusFailed,
+			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusFailed,
 				fmt.Sprintf("step %d prompt fetch failed", i), &step.StepIndex, false)
-			return
-		}
-		if stepPrompt.Kind == domain.PromptKindChain {
-			s.terminateChain(orgID, chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusAborted,
-				"nested_chain_step", &step.StepIndex, false)
 			return
 		}
 
 		// Wipe any prior step's materialized skill so step N+1 only
 		// sees its own SKILL.md.
 		if err := skills.WipeChainSkills(cfg.wtPath); err != nil {
-			log.Printf("[chain] run %s step %d: wipe skills: %v", chainRunID, i, err)
+			log.Printf("[blueprint] run %s step %d: wipe skills: %v", blueprintRunID, i, err)
 		}
-		slug := skills.SlugForChainStep(i, stepPrompt.Name)
+		slug := skills.SlugForBlueprintStep(i, stepPrompt.Name)
 		if err := skills.MaterializeStepSkill(cfg.wtPath, slug, stepPrompt, step.Brief); err != nil {
-			s.terminateChain(orgID, chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusFailed,
+			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusFailed,
 				fmt.Sprintf("materialize step %d skill: %s", i, err.Error()), &step.StepIndex, false)
 			return
 		}
@@ -211,16 +202,16 @@ func (s *Spawner) runChain(
 		// SyntheticClaimsWithTx so runs_insert's RLS check sees the
 		// step's creator; event-triggered stays on the admin pool.
 		stepRow := domain.AgentRun{
-			ID:             stepRunID,
-			TaskID:         task.ID,
-			PromptID:       stepPrompt.ID,
-			Status:         "initializing",
-			Model:          model,
-			TriggerType:    triggerType,
-			CreatorUserID:  creatorUserID,
-			ChainRunID:     chainRunID,
-			ChainStepIndex: &stepIdxCopy,
-			WorktreePath:   cfg.wtPath,
+			ID:                 stepRunID,
+			TaskID:             task.ID,
+			PromptID:           stepPrompt.ID,
+			Status:             "initializing",
+			Model:              model,
+			TriggerType:        triggerType,
+			CreatorUserID:      creatorUserID,
+			BlueprintRunID:     blueprintRunID,
+			BlueprintStepIndex: &stepIdxCopy,
+			WorktreePath:       cfg.wtPath,
 		}
 		var stepCreateErr error
 		if triggerType == "manual" {
@@ -231,7 +222,7 @@ func (s *Spawner) runChain(
 			stepCreateErr = s.agentRuns.Create(context.Background(), orgID, stepRow)
 		}
 		if stepCreateErr != nil {
-			s.terminateChain(orgID, chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusFailed,
+			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusFailed,
 				fmt.Sprintf("create step %d run: %s", i, stepCreateErr.Error()), &step.StepIndex, false)
 			return
 		}
@@ -245,7 +236,7 @@ func (s *Spawner) runChain(
 			incErr = s.prompts.IncrementUsageSystem(ctx, orgID, stepPrompt.ID)
 		}
 		if incErr != nil {
-			log.Printf("[chain] warning: failed to increment usage for step prompt %s: %v", stepPrompt.ID, incErr)
+			log.Printf("[blueprint] warning: failed to increment usage for step prompt %s: %v", stepPrompt.ID, incErr)
 		}
 
 		// Per-step cancel handle so Cancel(stepRunID) cancels just the
@@ -256,10 +247,10 @@ func (s *Spawner) runChain(
 		s.mu.Unlock()
 
 		stepCfg := cfg
-		stepCfg.isChainStep = true
-		stepCfg.chainRunID = chainRunID
-		stepCfg.chainStep = i
-		stepCfg.appendSysPrompt = chainStepSystemPrompt
+		stepCfg.isBlueprintStep = true
+		stepCfg.blueprintRunID = blueprintRunID
+		stepCfg.blueprintStep = i
+		stepCfg.appendSysPrompt = blueprintStepSystemPrompt
 		stepCfg.extraAllowedTools = s.collectExtraTools(stepPrompt.AllowedTools)
 
 		var nextStepName string
@@ -268,9 +259,9 @@ func (s *Spawner) runChain(
 				nextStepName = np.Name
 			}
 		}
-		mission := buildChainStepWrapperPrompt(task, step, stepPrompt, slug, len(steps), nextStepName)
+		mission := buildBlueprintStepWrapperPrompt(task, step, stepPrompt, slug, len(steps), nextStepName)
 
-		toast.Info(s.wsHub, orgID, fmt.Sprintf("Chain step %d/%d: %s (%s)",
+		toast.Info(s.wsHub, orgID, fmt.Sprintf("Blueprint step %d/%d: %s (%s)",
 			i+1, len(steps), truncateToastMsg(stepPrompt.Name, 60), shortRunID(stepRunID)))
 
 		s.runAgent(stepCtx, stepRunID, task, mission, stepCfg, time.Now(), model, triggerType, creatorUserID)
@@ -286,27 +277,27 @@ func (s *Spawner) runChain(
 		// / pending_approval / yield all come back through here.
 		stepRun, err := s.agentRuns.GetSystem(context.Background(), orgID, stepRunID)
 		if err != nil || stepRun == nil {
-			s.terminateChain(orgID, chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusFailed,
+			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusFailed,
 				fmt.Sprintf("read step %d run after agent: %v", i, err), &step.StepIndex, false)
 			return
 		}
 
 		// Yield / pending_approval mid-chain: leave the chain in
 		// 'running' and the worktree on disk. The corresponding resume
-		// hook (ResumeChainAfterYield / ResumeChainAfterApproval) will
+		// hook (ResumeBlueprintAfterYield / ResumeBlueprintAfterApproval) will
 		// pick up where we left off.
 		if stepRun.Status == "awaiting_input" || stepRun.Status == "pending_approval" {
-			log.Printf("[chain] run %s step %d paused at status=%s; chain remains running", chainRunID, i, stepRun.Status)
+			log.Printf("[blueprint] run %s step %d paused at status=%s; chain remains running", blueprintRunID, i, stepRun.Status)
 			return
 		}
 
 		if stepRun.Status == "cancelled" {
-			s.terminateChain(orgID, chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusCancelled,
+			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusCancelled,
 				"step cancelled", &step.StepIndex, false)
 			return
 		}
 		if stepRun.Status == "failed" || stepRun.Status == "task_unsolvable" {
-			s.terminateChain(orgID, chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusFailed,
+			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusFailed,
 				"step "+stepRun.Status, &step.StepIndex, false)
 			return
 		}
@@ -315,14 +306,14 @@ func (s *Spawner) runChain(
 			// is the most likely candidate) ends the chain in failed
 			// state. taken_over runs are owned by the user from here on,
 			// so the chain can't sensibly continue.
-			s.terminateChain(orgID, chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusFailed,
+			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusFailed,
 				"step ended with status "+stepRun.Status, &step.StepIndex, false)
 			return
 		}
 
-		verdict, err := s.chains.GetLatestVerdictSystem(ctx, orgID, stepRunID)
+		verdict, err := s.blueprints.GetLatestVerdictSystem(ctx, orgID, stepRunID)
 		if err != nil {
-			log.Printf("[chain] run %s step %d: read verdict: %v", chainRunID, i, err)
+			log.Printf("[blueprint] run %s step %d: read verdict: %v", blueprintRunID, i, err)
 		}
 		if verdict == nil {
 			// Synthetic abort — record so the UI shows the same shape
@@ -337,16 +328,16 @@ func (s *Spawner) runChain(
 				var insertErr error
 				if triggerType == "manual" {
 					insertErr = s.tx.SyntheticClaimsWithTx(ctx, orgID, creatorUserID, func(ts db.TxStores) error {
-						return ts.Chains.InsertVerdict(ctx, orgID, stepRunID, payloadStr)
+						return ts.Blueprints.InsertVerdict(ctx, orgID, stepRunID, payloadStr)
 					})
 				} else {
-					insertErr = s.chains.InsertVerdictSystem(ctx, orgID, stepRunID, payloadStr)
+					insertErr = s.blueprints.InsertVerdictSystem(ctx, orgID, stepRunID, payloadStr)
 				}
 				if insertErr != nil {
-					log.Printf("[chain] run %s step %d: insert synthetic verdict artifact: %v", chainRunID, i, insertErr)
+					log.Printf("[blueprint] run %s step %d: insert synthetic verdict artifact: %v", blueprintRunID, i, insertErr)
 				}
 			}
-			s.terminateChain(orgID, chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusAborted,
+			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusAborted,
 				"no-verdict", &step.StepIndex, false)
 			return
 		}
@@ -359,7 +350,7 @@ func (s *Spawner) runChain(
 			if reason == "" {
 				reason = "step recorded --final"
 			}
-			s.terminateChain(orgID, chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusCompleted,
+			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusCompleted,
 				reason, &step.StepIndex, false)
 			return
 		case domain.ChainVerdictAbort:
@@ -367,23 +358,23 @@ func (s *Spawner) runChain(
 			if reason == "" {
 				reason = "step recorded --abort"
 			}
-			s.terminateChain(orgID, chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusAborted,
+			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusAborted,
 				reason, &step.StepIndex, false)
 			return
 		case domain.ChainVerdictAdvance:
 		default:
 			// Unknown outcome — treat as abort.
-			s.terminateChain(orgID, chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusAborted,
+			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusAborted,
 				"unknown verdict outcome: "+string(verdict.Outcome), &step.StepIndex, false)
 			return
 		}
 	}
 
-	s.terminateChain(orgID, chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusCompleted,
+	s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusCompleted,
 		"", nil, false)
 }
 
-// terminateChain finalizes the chain run row and runs the shared
+// terminateBlueprint finalizes the chain run row and runs the shared
 // worktree cleanup that runAgent's per-step defers skipped. taskDone
 // distinguishes "all steps green, mark task done like a single run
 // would" (status=completed) from "stopped early — leave the task open
@@ -391,14 +382,14 @@ func (s *Spawner) runChain(
 // when the worktree itself is already gone (worktree_lost path).
 //
 // triggerType + creatorUserID route the terminal writes. Manual chains
-// (and user-initiated CancelChain / Resume* that pass "manual" + the
+// (and user-initiated CancelBlueprint / Resume* that pass "manual" + the
 // requesting user's ID) write under synthetic claims; event-triggered
 // chains write through the admin pool.
-func (s *Spawner) terminateChain(
-	orgID, chainRunID, taskID, triggerType, creatorUserID string,
+func (s *Spawner) terminateBlueprint(
+	orgID, blueprintRunID, taskID, triggerType, creatorUserID string,
 	startTime time.Time,
 	cfg runConfig,
-	status domain.ChainRunStatus,
+	status domain.BlueprintRunStatus,
 	abortReason string,
 	abortedAtStep *int,
 	skipCleanup bool,
@@ -407,18 +398,18 @@ func (s *Spawner) terminateChain(
 	var markErr error
 	if triggerType == "manual" {
 		markErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			_, mErr := ts.Chains.MarkRunStatus(bgCtx, orgID, chainRunID, status, abortReason, abortedAtStep)
+			_, mErr := ts.Blueprints.MarkRunStatus(bgCtx, orgID, blueprintRunID, status, abortReason, abortedAtStep)
 			return mErr
 		})
 	} else {
-		_, markErr = s.chains.MarkRunStatusSystem(bgCtx, orgID, chainRunID, status, abortReason, abortedAtStep)
+		_, markErr = s.blueprints.MarkRunStatusSystem(bgCtx, orgID, blueprintRunID, status, abortReason, abortedAtStep)
 	}
 	if markErr != nil {
-		log.Printf("[chain] FATAL: mark chain_run %s status=%s: %v — skipping cleanup to keep chain row consistent", chainRunID, status, markErr)
+		log.Printf("[blueprint] FATAL: mark chain_run %s status=%s: %v — skipping cleanup to keep chain row consistent", blueprintRunID, status, markErr)
 		return
 	}
 
-	if status == domain.ChainRunStatusCompleted {
+	if status == domain.BlueprintRunStatusCompleted {
 		// Mirror single-run behavior: a clean chain finalization closes the task.
 		var closeErr error
 		if triggerType == "manual" {
@@ -429,7 +420,7 @@ func (s *Spawner) terminateChain(
 			closeErr = s.tasks.CloseSystem(bgCtx, orgID, taskID, "run_completed", "")
 		}
 		if closeErr != nil {
-			log.Printf("[chain] close task %s: %v", taskID, closeErr)
+			log.Printf("[blueprint] close task %s: %v", taskID, closeErr)
 		}
 	}
 	// Aborted / failed / cancelled chains intentionally do NOT mark
@@ -437,7 +428,7 @@ func (s *Spawner) terminateChain(
 	// _scratch/handoff.md and decide what to do next.
 
 	if !skipCleanup {
-		s.runChainWorktreeCleanup(chainRunID, cfg)
+		s.runBlueprintWorktreeCleanup(blueprintRunID, cfg)
 	}
 
 	// Drain the per-entity queue exactly once for the chain (independent
@@ -447,16 +438,16 @@ func (s *Spawner) terminateChain(
 	}
 
 	dur := time.Since(startTime)
-	log.Printf("[chain] chain_run %s terminated status=%s reason=%q duration=%s",
-		chainRunID, status, abortReason, dur)
+	log.Printf("[blueprint] chain_run %s terminated status=%s reason=%q duration=%s",
+		blueprintRunID, status, abortReason, dur)
 }
 
-// runChainWorktreeCleanup performs the cleanup runAgent would have done
+// runBlueprintWorktreeCleanup performs the cleanup runAgent would have done
 // per-step, except now once for the whole chain.
-func (s *Spawner) runChainWorktreeCleanup(chainRunID string, cfg runConfig) {
+func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConfig) {
 	if cfg.hasWT {
-		if err := worktree.RemoveAt(cfg.wtPath, chainRunID); err != nil {
-			log.Printf("[chain] worktree remove failed for chain %s: %v", chainRunID, err)
+		if err := worktree.RemoveAt(cfg.wtPath, blueprintRunID); err != nil {
+			log.Printf("[blueprint] worktree remove failed for chain %s: %v", blueprintRunID, err)
 			return
 		}
 		if cfg.prNumber > 0 && cfg.owner != "" && cfg.repo != "" {
@@ -468,30 +459,30 @@ func (s *Spawner) runChainWorktreeCleanup(chainRunID string, cfg runConfig) {
 		// agent's TRIAGE_FACTORY_RUN_ID), not by the chain_run_id.
 		// Iterate every step run in the chain so we actually find and
 		// remove their reservations.
-		stepRuns, err := s.chains.RunsForChainSystem(context.Background(), cfg.orgID, chainRunID)
+		stepRuns, err := s.blueprints.RunsForBlueprintSystem(context.Background(), cfg.orgID, blueprintRunID)
 		if err != nil {
-			log.Printf("[chain] run %s: list step runs for cleanup: %v", chainRunID, err)
+			log.Printf("[blueprint] run %s: list step runs for cleanup: %v", blueprintRunID, err)
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		for _, sr := range stepRuns {
 			rows, err := s.runWorktrees.ListSystem(context.Background(), cfg.orgID, sr.ID)
 			if err != nil {
-				log.Printf("[chain] run %s: list run_worktrees for step %s: %v", chainRunID, sr.ID, err)
+				log.Printf("[blueprint] run %s: list run_worktrees for step %s: %v", blueprintRunID, sr.ID, err)
 				// Log but continue to attempt DB row deletion below.
 				rows = nil
 			}
 			for _, w := range rows {
 				if err := worktree.RemoveAt(w.Path, sr.ID); err != nil && !errors.Is(err, os.ErrNotExist) {
-					log.Printf("[chain] run %s: remove worktree %s: %v", chainRunID, w.Path, err)
+					log.Printf("[blueprint] run %s: remove worktree %s: %v", blueprintRunID, w.Path, err)
 					// Still attempt the DB row deletion even if the worktree remove failed.
 				}
 				if err := s.runWorktrees.DeleteByPathSystem(cleanupCtx, cfg.orgID, sr.ID, w.Path); err != nil {
-					log.Printf("[chain] run %s: delete run_worktrees row for %s: %v", chainRunID, w.Path, err)
+					log.Printf("[blueprint] run %s: delete run_worktrees row for %s: %v", blueprintRunID, w.Path, err)
 				}
 			}
 		}
-		worktree.RemoveRunRoot(chainRunID)
+		worktree.RemoveRunRoot(blueprintRunID)
 	}
 	worktree.RemoveClaudeProjectDir(cfg.wtPath)
 }
@@ -501,7 +492,7 @@ func (s *Spawner) runChainWorktreeCleanup(chainRunID string, cfg runConfig) {
 func taskEntityID(tasks db.TaskStore, orgID, taskID string) string {
 	t, err := tasks.GetSystem(context.Background(), orgID, taskID)
 	if err != nil {
-		log.Printf("[chain] taskEntityID: failed to resolve entity for task %s: %v", taskID, err)
+		log.Printf("[blueprint] taskEntityID: failed to resolve entity for task %s: %v", taskID, err)
 		return ""
 	}
 	if t == nil {
@@ -510,10 +501,10 @@ func taskEntityID(tasks db.TaskStore, orgID, taskID string) string {
 	return t.EntityID
 }
 
-// buildChainStepWrapperPrompt produces the per-step user prompt carrying
+// buildBlueprintStepWrapperPrompt produces the per-step user prompt carrying
 // step-specific data. The system prompt (chain-step-system.txt) owns the
 // protocol contract; this wrapper supplies only the step's context.
-func buildChainStepWrapperPrompt(task domain.Task, step domain.ChainStep, stepPrompt *domain.Prompt, slug string, total int, nextStepName string) string {
+func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep, stepPrompt *domain.Prompt, slug string, total int, nextStepName string) string {
 	mission := strings.TrimSpace(step.Brief)
 	if mission == "" {
 		mission = stepPrompt.Name
@@ -543,7 +534,7 @@ func buildChainStepWrapperPrompt(task domain.Task, step domain.ChainStep, stepPr
 	return b.String()
 }
 
-// CancelChain cancels every step inside a chain run, marks the chain
+// CancelBlueprint cancels every step inside a chain run, marks the chain
 // row cancelled, and lets the active step's runAgent return naturally.
 // Safe to call when the chain is already terminal.
 //
@@ -553,15 +544,15 @@ func buildChainStepWrapperPrompt(task domain.Task, step domain.ChainStep, stepPr
 // original trigger_type. In local mode callers pass
 // runmode.LocalDefaultUserID; multi-mode handlers extract the user
 // from JWT claims.
-func (s *Spawner) CancelChain(orgID, chainRunID, userID string) error {
-	cr, err := s.chains.GetRunSystem(context.Background(), orgID, chainRunID)
+func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
+	cr, err := s.blueprints.GetRunSystem(context.Background(), orgID, blueprintRunID)
 	if err != nil {
 		return fmt.Errorf("load chain run: %w", err)
 	}
 	if cr == nil {
-		return fmt.Errorf("chain run %s not found", chainRunID)
+		return fmt.Errorf("chain run %s not found", blueprintRunID)
 	}
-	if cr.Status != domain.ChainRunStatusRunning {
+	if cr.Status != domain.BlueprintRunStatusRunning {
 		return nil
 	}
 
@@ -575,9 +566,9 @@ func (s *Spawner) CancelChain(orgID, chainRunID, userID string) error {
 	// got canceled. If nothing was active — the chain is paused on a
 	// pending_approval or awaiting_input step — the orchestrator
 	// goroutine has already exited, so no later path will run cleanup.
-	// In that case we drive terminateChain ourselves below.
+	// In that case we drive terminateBlueprint ourselves below.
 	var anyActive bool
-	stepIDs, err := s.chains.ActiveStepRunIDsSystem(context.Background(), orgID, chainRunID)
+	stepIDs, err := s.blueprints.ActiveStepRunIDsSystem(context.Background(), orgID, blueprintRunID)
 	if err == nil {
 		s.mu.Lock()
 		for _, runID := range stepIDs {
@@ -586,8 +577,8 @@ func (s *Spawner) CancelChain(orgID, chainRunID, userID string) error {
 				anyActive = true
 			}
 		}
-		// Also cancel the chain-level context registered at delegateChain.
-		if chainCancel, ok := s.cancels[chainRunID]; ok {
+		// Also cancel the chain-level context registered at delegateBlueprint.
+		if chainCancel, ok := s.cancels[blueprintRunID]; ok {
 			chainCancel()
 			anyActive = true
 		}
@@ -597,23 +588,23 @@ func (s *Spawner) CancelChain(orgID, chainRunID, userID string) error {
 	if anyActive {
 		// Orchestrator goroutine is still alive — it will observe the
 		// cancellation, the step's runAgent will return, and the loop
-		// will call terminateChain (which marks the chain cancelled and
-		// runs cleanup). Avoid double-marking here so terminateChain's
+		// will call terminateBlueprint (which marks the chain cancelled and
+		// runs cleanup). Avoid double-marking here so terminateBlueprint's
 		// MarkRunStatus succeeds.
 		return nil
 	}
 
-	// Paused chain: rebuild just enough cfg for terminateChain's worktree
-	// cleanup (mirrors ResumeChainAfterApproval — owner/repo/prNumber
+	// Paused chain: rebuild just enough cfg for terminateBlueprint's worktree
+	// cleanup (mirrors ResumeBlueprintAfterApproval — owner/repo/prNumber
 	// aren't persisted on chain_runs, so CleanupPRConfig is skipped).
 	task, err := s.tasks.GetSystem(context.Background(), orgID, cr.TaskID)
 	if err != nil || task == nil {
-		log.Printf("[chain] CancelChain: load task for paused chain_run %s: %v", chainRunID, err)
+		log.Printf("[blueprint] CancelBlueprint: load task for paused chain_run %s: %v", blueprintRunID, err)
 		// User-initiated cancel — write under the cancelling user's
 		// synthetic claims rather than the chain's original trigger
 		// identity. Audit shows "user X cancelled this chain".
 		var markErr error
-		_, markErr = s.markChainRunStatusAsUser(context.Background(), orgID, userID, chainRunID, domain.ChainRunStatusCancelled, "user_cancelled", nil)
+		_, markErr = s.markBlueprintRunStatusAsUser(context.Background(), orgID, userID, blueprintRunID, domain.BlueprintRunStatusCancelled, "user_cancelled", nil)
 		return markErr
 	}
 	cfg := runConfig{orgID: orgID, wtPath: cr.WorktreePath}
@@ -622,27 +613,27 @@ func (s *Spawner) CancelChain(orgID, chainRunID, userID string) error {
 	}
 	// User-initiated cancel uses "manual" routing with the cancelling
 	// user's identity regardless of the chain's original trigger type.
-	s.terminateChain(orgID, cr.ID, cr.TaskID, "manual", userID, cr.StartedAt, cfg,
-		domain.ChainRunStatusCancelled, "user_cancelled", nil, false)
+	s.terminateBlueprint(orgID, cr.ID, cr.TaskID, "manual", userID, cr.StartedAt, cfg,
+		domain.BlueprintRunStatusCancelled, "user_cancelled", nil, false)
 	return nil
 }
 
-// markChainRunStatusAsUser writes a chain_run status transition under
-// the given user's synthetic claims. Used by user-initiated CancelChain
+// markBlueprintRunStatusAsUser writes a chain_run status transition under
+// the given user's synthetic claims. Used by user-initiated CancelBlueprint
 // / Resume* paths that need to attribute the write to the requesting
 // user even though the chain's original trigger_type may have been
 // 'event'.
-func (s *Spawner) markChainRunStatusAsUser(ctx context.Context, orgID, userID, chainRunID string, status domain.ChainRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
+func (s *Spawner) markBlueprintRunStatusAsUser(ctx context.Context, orgID, userID, blueprintRunID string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
 	var changed bool
 	err := s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
-		c, mErr := ts.Chains.MarkRunStatus(ctx, orgID, chainRunID, status, abortReason, abortedAtStep)
+		c, mErr := ts.Blueprints.MarkRunStatus(ctx, orgID, blueprintRunID, status, abortReason, abortedAtStep)
 		changed = c
 		return mErr
 	})
 	return changed, err
 }
 
-// ResumeChainAfterYield re-enters the orchestrator loop for the
+// ResumeBlueprintAfterYield re-enters the orchestrator loop for the
 // remaining steps after a yield-resume completes successfully.
 // Currently not fully implemented: marks the chain aborted so it
 // doesn't silently stall in 'running'.
@@ -651,32 +642,32 @@ func (s *Spawner) markChainRunStatusAsUser(ctx context.Context, orgID, userID, c
 // resumed the yielded run). Local mode passes
 // runmode.LocalDefaultUserID; multi-mode handlers extract it from
 // JWT claims.
-func (s *Spawner) ResumeChainAfterYield(orgID, stepRunID, userID string) {
-	cr, stepIdx, err := s.chains.GetRunForRunSystem(context.Background(), orgID, stepRunID)
+func (s *Spawner) ResumeBlueprintAfterYield(orgID, stepRunID, userID string) {
+	cr, stepIdx, err := s.blueprints.GetRunForRunSystem(context.Background(), orgID, stepRunID)
 	if err != nil || cr == nil {
 		return
 	}
-	if cr.Status != domain.ChainRunStatusRunning {
+	if cr.Status != domain.BlueprintRunStatusRunning {
 		return
 	}
-	log.Printf("[chain] yield-resume not yet implemented for chain_run %s step run %s; aborting chain", cr.ID, stepRunID)
+	log.Printf("[blueprint] yield-resume not yet implemented for chain_run %s step run %s; aborting chain", cr.ID, stepRunID)
 	task, err := s.tasks.GetSystem(context.Background(), orgID, cr.TaskID)
 	if err != nil || task == nil {
-		log.Printf("[chain] yield-resume: load task for chain_run %s: %v", cr.ID, err)
-		// Fall back to a bare MarkChainRunStatus without full cleanup.
+		log.Printf("[blueprint] yield-resume: load task for chain_run %s: %v", cr.ID, err)
+		// Fall back to a bare MarkBlueprintRunStatus without full cleanup.
 		// User-initiated — attribute to the resuming user.
-		_, _ = s.markChainRunStatusAsUser(context.Background(), orgID, userID, cr.ID, domain.ChainRunStatusAborted, "yield_resume_not_implemented", stepIdx)
+		_, _ = s.markBlueprintRunStatusAsUser(context.Background(), orgID, userID, cr.ID, domain.BlueprintRunStatusAborted, "yield_resume_not_implemented", stepIdx)
 		return
 	}
 	cfg := runConfig{orgID: orgID, wtPath: cr.WorktreePath}
 	if task.EntitySource == "github" {
 		cfg.hasWT = true
 	}
-	s.terminateChain(orgID, cr.ID, cr.TaskID, "manual", userID, cr.StartedAt, cfg,
-		domain.ChainRunStatusAborted, "yield_resume_not_implemented", stepIdx, false)
+	s.terminateBlueprint(orgID, cr.ID, cr.TaskID, "manual", userID, cr.StartedAt, cfg,
+		domain.BlueprintRunStatusAborted, "yield_resume_not_implemented", stepIdx, false)
 }
 
-// ResumeChainAfterApproval is invoked by the reviews / pending-PR
+// ResumeBlueprintAfterApproval is invoked by the reviews / pending-PR
 // approval handlers after they flip a step run from pending_approval
 // back to completed. It only handles the --final verdict case (the only
 // shape under which a chain step is allowed to land in pending_approval
@@ -691,32 +682,32 @@ func (s *Spawner) ResumeChainAfterYield(orgID, stepRunID, userID string) {
 // userID identifies the approving user for audit. Local mode passes
 // runmode.LocalDefaultUserID; multi-mode handlers extract it from JWT
 // claims.
-func (s *Spawner) ResumeChainAfterApproval(orgID, stepRunID, userID string) {
-	cr, stepIdx, err := s.chains.GetRunForRunSystem(context.Background(), orgID, stepRunID)
+func (s *Spawner) ResumeBlueprintAfterApproval(orgID, stepRunID, userID string) {
+	cr, stepIdx, err := s.blueprints.GetRunForRunSystem(context.Background(), orgID, stepRunID)
 	if err != nil || cr == nil {
 		return
 	}
-	if cr.Status != domain.ChainRunStatusRunning {
+	if cr.Status != domain.BlueprintRunStatusRunning {
 		return
 	}
 
-	verdict, err := s.chains.GetLatestVerdictSystem(context.Background(), orgID, stepRunID)
+	verdict, err := s.blueprints.GetLatestVerdictSystem(context.Background(), orgID, stepRunID)
 	if err != nil {
-		log.Printf("[chain] approval-resume run %s: read verdict: %v", stepRunID, err)
+		log.Printf("[blueprint] approval-resume run %s: read verdict: %v", stepRunID, err)
 		return
 	}
 	if verdict == nil || verdict.Outcome != domain.ChainVerdictFinal {
-		log.Printf("[chain] approval-resume chain_run %s step run %s: verdict not --final (%+v); chain left running", cr.ID, stepRunID, verdict)
+		log.Printf("[blueprint] approval-resume chain_run %s step run %s: verdict not --final (%+v); chain left running", cr.ID, stepRunID, verdict)
 		return
 	}
 
 	task, err := s.tasks.GetSystem(context.Background(), orgID, cr.TaskID)
 	if err != nil || task == nil {
-		log.Printf("[chain] approval-resume chain_run %s: load task: %v", cr.ID, err)
+		log.Printf("[blueprint] approval-resume chain_run %s: load task: %v", cr.ID, err)
 		return
 	}
 
-	// Reconstruct just enough runConfig for terminateChain's worktree
+	// Reconstruct just enough runConfig for terminateBlueprint's worktree
 	// cleanup. The original orchestrator goroutine (which held the full
 	// cfg) returned when the step landed in pending_approval, so we
 	// rebuild from durable state. owner/repo/prNumber/headRef are not
@@ -732,38 +723,38 @@ func (s *Spawner) ResumeChainAfterApproval(orgID, stepRunID, userID string) {
 	if reason == "" {
 		reason = "step recorded --final"
 	}
-	s.terminateChain(orgID, cr.ID, cr.TaskID, "manual", userID, cr.StartedAt, cfg,
-		domain.ChainRunStatusCompleted, reason, stepIdx, false)
+	s.terminateBlueprint(orgID, cr.ID, cr.TaskID, "manual", userID, cr.StartedAt, cfg,
+		domain.BlueprintRunStatusCompleted, reason, stepIdx, false)
 }
 
-// isNonFinalChainStep returns true when the run is a chain step that
+// isNonFinalBlueprintStep returns true when the run is a chain step that
 // is not the last step in the chain. Used as a guard in
 // processCompletion to prevent mid-chain approval stalls.
 //
 // Returns true (safe default) on DB error: treating an unknown step as
 // non-final ensures the pending-approval guard still engages even when
 // the DB is flaky, preventing unintended mid-chain external actions.
-func (s *Spawner) isNonFinalChainStep(orgID, runID string) bool {
+func (s *Spawner) isNonFinalBlueprintStep(orgID, runID string) bool {
 	run, err := s.agentRuns.GetSystem(context.Background(), orgID, runID)
 	if err != nil {
-		log.Printf("[chain] isNonFinalChainStep: query run %s: %v", runID, err)
+		log.Printf("[blueprint] isNonFinalBlueprintStep: query run %s: %v", runID, err)
 		return true
 	}
-	if run == nil || run.ChainRunID == "" || run.ChainStepIndex == nil {
+	if run == nil || run.BlueprintRunID == "" || run.BlueprintStepIndex == nil {
 		return false
 	}
-	chainRun, err := s.chains.GetRunSystem(context.Background(), orgID, run.ChainRunID)
+	chainRun, err := s.blueprints.GetRunSystem(context.Background(), orgID, run.BlueprintRunID)
 	if err != nil {
-		log.Printf("[chain] isNonFinalChainStep: query chain_run %s for run %s: %v", run.ChainRunID, runID, err)
+		log.Printf("[blueprint] isNonFinalBlueprintStep: query chain_run %s for run %s: %v", run.BlueprintRunID, runID, err)
 		return true
 	}
 	if chainRun == nil {
 		return false
 	}
-	steps, err := s.chains.ListStepsSystem(context.Background(), orgID, chainRun.ChainPromptID)
+	steps, err := s.blueprints.ListStepsSystem(context.Background(), orgID, chainRun.BlueprintID)
 	if err != nil {
-		log.Printf("[chain] isNonFinalChainStep: list steps for chain %s run %s: %v", run.ChainRunID, runID, err)
+		log.Printf("[blueprint] isNonFinalBlueprintStep: list steps for chain %s run %s: %v", run.BlueprintRunID, runID, err)
 		return true
 	}
-	return *run.ChainStepIndex+1 < len(steps)
+	return *run.BlueprintStepIndex+1 < len(steps)
 }

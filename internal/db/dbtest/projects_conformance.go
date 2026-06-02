@@ -78,7 +78,7 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 
 	t.Run("Create_then_Get_round_trips_full_surface", func(t *testing.T) {
 		s, orgID, teamID := mk(t)
-		// SpecAuthorshipPromptID is intentionally left empty here — it
+		// SpecAuthorshipBlueprintID is intentionally left empty here — it
 		// FKs to prompts(id), which would need a backend-specific
 		// fixture to seed. The empty path exercises the NULLIF
 		// collapse; non-empty handling is covered indirectly via the
@@ -115,8 +115,8 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 		if got.TeamID != teamID {
 			t.Errorf("TeamID = %q, want %q (the team the project was created under)", got.TeamID, teamID)
 		}
-		if got.SpecAuthorshipPromptID != "" {
-			t.Errorf("SpecAuthorshipPromptID = %q, want empty (no prompt fixture seeded)", got.SpecAuthorshipPromptID)
+		if got.SpecAuthorshipBlueprintID != "" {
+			t.Errorf("SpecAuthorshipBlueprintID = %q, want empty (no prompt fixture seeded)", got.SpecAuthorshipBlueprintID)
 		}
 		if !reflect.DeepEqual(got.PinnedRepos, input.PinnedRepos) {
 			t.Errorf("PinnedRepos = %v, want %v", got.PinnedRepos, input.PinnedRepos)

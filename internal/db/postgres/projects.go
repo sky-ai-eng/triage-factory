@@ -85,7 +85,7 @@ func (s *projectStore) Create(ctx context.Context, orgID, teamID string, p domai
 		INSERT INTO projects
 		  (id, org_id, creator_user_id, team_id, name, description,
 		   curator_session_id, pinned_repos,
-		   jira_project_key, linear_project_key, spec_authorship_prompt_id)
+		   jira_project_key, linear_project_key, spec_authorship_blueprint_id)
 		VALUES
 		  ($1, $2,
 		   COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
@@ -96,7 +96,7 @@ func (s *projectStore) Create(ctx context.Context, orgID, teamID string, p domai
 		id, orgID, teamBind,
 		p.Name, p.Description,
 		p.CuratorSessionID, string(pinnedJSON),
-		p.JiraProjectKey, p.LinearProjectKey, p.SpecAuthorshipPromptID,
+		p.JiraProjectKey, p.LinearProjectKey, p.SpecAuthorshipBlueprintID,
 	)
 	if err != nil {
 		return "", err
@@ -107,7 +107,7 @@ func (s *projectStore) Create(ctx context.Context, orgID, teamID string, p domai
 func (s *projectStore) Get(ctx context.Context, orgID, id string) (*domain.Project, error) {
 	row := s.q.QueryRowContext(ctx, `
 		SELECT id, name, description, curator_session_id, pinned_repos,
-		       jira_project_key, linear_project_key, spec_authorship_prompt_id,
+		       jira_project_key, linear_project_key, spec_authorship_blueprint_id,
 		       team_id, created_at, updated_at
 		FROM projects
 		WHERE org_id = $1 AND id = $2
@@ -154,7 +154,7 @@ func (s *projectStore) ResolveOrgSystem(ctx context.Context, projectID string) (
 func listProjects(ctx context.Context, q queryer, orgID string) ([]domain.Project, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, name, description, curator_session_id, pinned_repos,
-		       jira_project_key, linear_project_key, spec_authorship_prompt_id,
+		       jira_project_key, linear_project_key, spec_authorship_blueprint_id,
 		       team_id, created_at, updated_at
 		FROM projects
 		WHERE org_id = $1
@@ -193,13 +193,13 @@ func (s *projectStore) Update(ctx context.Context, orgID string, p domain.Projec
 		    pinned_repos = $4::jsonb,
 		    jira_project_key = NULLIF($5, ''),
 		    linear_project_key = NULLIF($6, ''),
-		    spec_authorship_prompt_id = NULLIF($7, ''),
+		    spec_authorship_blueprint_id = NULLIF($7, ''),
 		    updated_at = now()
 		WHERE org_id = $8 AND id = $9
 	`,
 		p.Name, p.Description,
 		p.CuratorSessionID, string(pinnedJSON),
-		p.JiraProjectKey, p.LinearProjectKey, p.SpecAuthorshipPromptID,
+		p.JiraProjectKey, p.LinearProjectKey, p.SpecAuthorshipBlueprintID,
 		orgID, p.ID,
 	)
 	if err != nil {
@@ -254,17 +254,17 @@ func scanProjectRow(row interface {
 	Scan(dest ...any) error
 }) (*domain.Project, error) {
 	var (
-		p            domain.Project
-		sessionID    sql.NullString
-		jiraKey      sql.NullString
-		linearKey    sql.NullString
-		specPromptID sql.NullString
-		teamID       sql.NullString
-		pinnedJSON   []byte
+		p               domain.Project
+		sessionID       sql.NullString
+		jiraKey         sql.NullString
+		linearKey       sql.NullString
+		specBlueprintID sql.NullString
+		teamID          sql.NullString
+		pinnedJSON      []byte
 	)
 	err := row.Scan(
 		&p.ID, &p.Name, &p.Description, &sessionID, &pinnedJSON,
-		&jiraKey, &linearKey, &specPromptID,
+		&jiraKey, &linearKey, &specBlueprintID,
 		&teamID, &p.CreatedAt, &p.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -276,7 +276,7 @@ func scanProjectRow(row interface {
 	p.CuratorSessionID = sessionID.String
 	p.JiraProjectKey = jiraKey.String
 	p.LinearProjectKey = linearKey.String
-	p.SpecAuthorshipPromptID = specPromptID.String
+	p.SpecAuthorshipBlueprintID = specBlueprintID.String
 	p.TeamID = teamID.String
 	if len(pinnedJSON) == 0 {
 		p.PinnedRepos = []string{}

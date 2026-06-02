@@ -9,7 +9,7 @@ import (
 
 // ValidateEventHandlerForCreate ensures the incoming handler satisfies its
 // kind's shape contract before the DB sees it. Catching the violation here
-// surfaces a precise error like "trigger requires prompt_id" instead of the
+// surfaces a precise error like "trigger requires blueprint_id" instead of the
 // generic integrity-violation that the per-kind CHECK constraints would
 // otherwise produce.
 //
@@ -24,12 +24,12 @@ func ValidateEventHandlerForCreate(h *domain.EventHandler) error {
 		if h.DefaultPriority == nil || h.SortOrder == nil {
 			return errors.New("event_handlers Create: rule requires default_priority and sort_order")
 		}
-		if h.PromptID != "" || h.BreakerThreshold != nil || h.MinAutonomySuitability != nil {
+		if h.BlueprintID != "" || h.BreakerThreshold != nil || h.MinAutonomySuitability != nil {
 			return errors.New("event_handlers Create: rule must not populate trigger-only fields")
 		}
 	case domain.EventHandlerKindTrigger:
-		if h.PromptID == "" {
-			return errors.New("event_handlers Create: trigger requires prompt_id")
+		if h.BlueprintID == "" {
+			return errors.New("event_handlers Create: trigger requires blueprint_id")
 		}
 		if h.BreakerThreshold == nil || h.MinAutonomySuitability == nil {
 			return errors.New("event_handlers Create: trigger requires breaker_threshold and min_autonomy_suitability")

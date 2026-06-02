@@ -215,7 +215,6 @@ func TestMultiTeam_Postgres(t *testing.T) {
 				Name:   "Scoped",
 				Body:   "do the thing",
 				Source: "user",
-				Kind:   "leaf",
 			})
 		})
 		if err != nil {
@@ -243,7 +242,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 			id := "p_scope_" + uuid.New().String()
 			if e := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 				return pgstore.NewForTx(tx).Prompts.Create(ctx, orgID, team, domain.Prompt{
-					ID: id, Name: name, Body: "b", Source: "user", Kind: "leaf",
+					ID: id, Name: name, Body: "b", Source: "user",
 				})
 			}); e != nil {
 				t.Fatalf("create prompt %s: %v", name, e)

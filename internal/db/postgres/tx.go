@@ -122,12 +122,12 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// has no EXECUTE on. Same pool-routing as Chains above.
 		Secrets:       newSecretStore(tx, s.admin),
 		EventHandlers: newTxEventHandlerStore(tx),
-		// Chains: composed half is tx; admin half stays the real
+		// Blueprints: composed half is tx; admin half stays the real
 		// admin pool so event-triggered CreateRun + the `...System`
 		// reads route around RLS. The admin writes commit
 		// autonomously from the outer tx — same pool-routing
 		// semantics as AgentRunStore.Create.
-		Chains:     newChainStore(tx, s.admin),
+		Blueprints: newBlueprintStore(tx, s.admin),
 		Agents:     newTxAgentStore(tx),
 		TeamAgents: newTxTeamAgentStore(tx),
 		Users:      newUsersStore(tx, tx),
