@@ -382,12 +382,12 @@ func provisionAutoJoinDefault(ctx context.Context, tx *sql.Tx, userID uuid.UUID)
 			// bot row and auto-delegation stays dead until an operator
 			// re-runs bootstrap. BootstrapNewOrg (the path created=true
 			// drives) runs on the admin pool outside this tx and is
-			// idempotent on the already-seeded org — agent/prompts skip via
-			// ON CONFLICT; its load-bearing effect here is the new team's
-			// bot row + restoring the Default org's shipped handlers. Full
-			// (not bot-only) seeding is correct because the Default team is
-			// the shared auto-join target — it must carry the shipped
-			// rules/triggers, unlike a user-created blank team.
+			// idempotent on the already-seeded org — agent/prompts/blueprints
+			// skip via ON CONFLICT; its load-bearing effect here is the new
+			// team's bot row + restoring the Default org's shipped blueprints +
+			// handlers. Full (not bot-only) seeding is correct because the
+			// Default team is the shared auto-join target — it must carry the
+			// shipped rules/triggers, unlike a user-created blank team.
 			backfilledTeam = true
 		} else {
 			return uuid.Nil, uuid.Nil, false, fmt.Errorf("read default team: %w", err)

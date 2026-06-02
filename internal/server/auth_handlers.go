@@ -294,10 +294,10 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	defaultOrg := provResult.activeOrgID
 
-	// Seed the shipped defaults (agent + prompts + handlers + team_agents)
-	// for a freshly-created org. Runs AFTER provisionUserOrgs has committed
-	// its transaction: the seeders route through the admin pool and refuse
-	// to run inside a WithTx, so they can't join the provisioning tx.
+	// Seed the shipped defaults (agent + prompts + blueprints + handlers +
+	// team_agents) for a freshly-created org. Runs AFTER provisionUserOrgs has
+	// committed its transaction: the seeders route through the admin pool and
+	// refuse to run inside a WithTx, so they can't join the provisioning tx.
 	// Idempotent + log-and-continue — a signed-in user with an un-seeded
 	// org is usable (auto-delegation just won't fire until a bootstrap
 	// re-run repairs it), whereas failing the callback here would strand a
@@ -309,7 +309,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 			provResult.bootstrapTeamID.UUID.String(),
 			ai.ShippedPrompts(), ai.ShippedBlueprints(),
 		); berr != nil {
-			log.Printf("[auth] org %s provisioned but bootstrap failed (shipped prompts/rules/bot may be missing): %v",
+			log.Printf("[auth] org %s provisioned but bootstrap failed (shipped prompts/blueprints/rules/bot may be missing): %v",
 				provResult.bootstrapOrgID.UUID, berr)
 		}
 	}

@@ -332,11 +332,12 @@ func (s *orgTemplateStore) MaterializeIntoTeam(ctx context.Context, orgID, teamI
 			creator = owner.String
 		}
 		newID := uuid.New().String()
-		if _, err := tx.ExecContext(ctx, `
+		res, err := tx.ExecContext(ctx, `
 			INSERT INTO blueprints (id, org_id, team_id, system_slug, creator_user_id, name, source, usage_count, user_modified, created_at, updated_at)
 			VALUES ($1, $2, $3::uuid, $4, $5, $6, $7, 0, FALSE, $8, $8)
 			ON CONFLICT (org_id, team_id, system_slug) DO NOTHING
-		`, newID, orgID, teamID, b.slug, creator, b.name, b.source, now); err != nil {
+		`, newID, orgID, teamID, b.slug, creator, b.name, b.source, now)
+		if err != nil {
 			return fmt.Errorf("org_template materialize: insert blueprint %s: %w", b.slug, err)
 		}
 		var teamBlueprintID string
@@ -347,8 +348,17 @@ func (s *orgTemplateStore) MaterializeIntoTeam(ctx context.Context, orgID, teamI
 		}
 		teamBlueprintIDByTemplateID[b.id] = teamBlueprintID
 
-		// Steps re-pointed at the team's prompt copies. ON CONFLICT keeps a
-		// bootstrap re-run a no-op (PK is (org, blueprint, step_index)).
+		// Write steps only when the blueprint header was freshly inserted; an
+		// existing team blueprint keeps its steps untouched, so a bootstrap
+		// re-run never re-adds a step the team intentionally removed. Matches the
+		// SQLite probe-and-skip path and the documented idempotency contract.
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			continue
+		}
 		for i, st := range stepsByBlueprint[b.id] {
 			teamPromptID, ok := teamPromptIDByTemplateID[st.stepPromptID]
 			if !ok || teamPromptID == "" {
@@ -357,7 +367,6 @@ func (s *orgTemplateStore) MaterializeIntoTeam(ctx context.Context, orgID, teamI
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO blueprint_steps (org_id, team_id, blueprint_id, step_index, step_prompt_id, brief, created_at)
 				VALUES ($1, $2::uuid, $3, $4, $5, $6, $7)
-				ON CONFLICT (org_id, blueprint_id, step_index) DO NOTHING
 			`, orgID, teamID, teamBlueprintID, i, teamPromptID, st.brief, now); err != nil {
 				return fmt.Errorf("org_template materialize: insert blueprint step %s/%d: %w", b.slug, i, err)
 			}

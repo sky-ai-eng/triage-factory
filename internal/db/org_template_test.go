@@ -207,4 +207,22 @@ func TestOrgTemplate_MultiStepBlueprint_DeepCopy(t *testing.T) {
 	if len(shippedSteps) != 1 {
 		t.Errorf("shipped blueprint system-ci-fix has %d steps; want 1", len(shippedSteps))
 	}
+
+	// (4) Idempotency: if the team edits its blueprint (removes a step), a
+	// materialize re-run must NOT re-add it — steps are written only when the
+	// team blueprint header is freshly inserted.
+	if _, err := conn.ExecContext(ctx,
+		`DELETE FROM blueprint_steps WHERE blueprint_id = ? AND step_index = 1`, teamBP.ID); err != nil {
+		t.Fatalf("delete team step: %v", err)
+	}
+	if err := db.BootstrapNewTeam(ctx, stores, org, newTeamID); err != nil {
+		t.Fatalf("BootstrapNewTeam re-run: %v", err)
+	}
+	stepsAfter, err := stores.Blueprints.ListSteps(ctx, org, teamBP.ID)
+	if err != nil {
+		t.Fatalf("ListSteps after re-run: %v", err)
+	}
+	if len(stepsAfter) != 1 {
+		t.Errorf("materialize re-run re-added a team-removed step: %d steps, want 1 (existing team blueprints' steps must stay untouched)", len(stepsAfter))
+	}
 }

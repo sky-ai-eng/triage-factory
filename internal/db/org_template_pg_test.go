@@ -240,4 +240,24 @@ func TestOrgTemplate_Postgres_MultiStepDeepCopy(t *testing.T) {
 	if teamTriggerBP != teamBPID {
 		t.Errorf("team trigger blueprint_id=%q; want the team's multi-step blueprint copy %q", teamTriggerBP, teamBPID)
 	}
+
+	// Idempotency: if the team removes a step, a materialize re-run must NOT
+	// re-add it — steps are written only when the team blueprint header is
+	// freshly inserted (a re-run finds the existing header and skips steps).
+	if _, err := h.AdminDB.ExecContext(ctx,
+		`DELETE FROM blueprint_steps WHERE org_id = $1 AND blueprint_id = $2 AND step_index = 1`, orgA, teamBPID); err != nil {
+		t.Fatalf("delete team step: %v", err)
+	}
+	if err := db.BootstrapNewTeam(ctx, stores, orgA, team2); err != nil {
+		t.Fatalf("BootstrapNewTeam re-run: %v", err)
+	}
+	var stepsAfterRerun int
+	if err := h.AdminDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM blueprint_steps WHERE org_id = $1 AND blueprint_id = $2`, orgA, teamBPID,
+	).Scan(&stepsAfterRerun); err != nil {
+		t.Fatalf("count steps after re-run: %v", err)
+	}
+	if stepsAfterRerun != 1 {
+		t.Errorf("materialize re-run re-added a team-removed step: step count = %d, want 1 (existing team blueprints' steps must stay untouched)", stepsAfterRerun)
+	}
 }
