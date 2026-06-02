@@ -147,6 +147,25 @@ func newPgAgentRunSeeder(conn *sql.DB, orgID, userID, agentID, promptID string) 
 				t.Fatalf("stamp claim: %v", err)
 			}
 		},
+		EventHandler: func(t *testing.T, eventType string) string {
+			t.Helper()
+			id := uuid.New().String()
+			// Minimal rule shape. source='user' requires a non-NULL
+			// creator_user_id (event_handlers_system_has_no_creator CHECK);
+			// team_id resolves from the org's sole seeded team, mirroring
+			// the Task seeder's subquery.
+			if _, err := conn.Exec(`
+				INSERT INTO event_handlers
+					(id, org_id, creator_user_id, team_id, kind, event_type, enabled, source,
+					 name, default_priority, sort_order)
+				VALUES ($1, $2, $3,
+				        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
+				        'rule', $4, true, 'user', 'fence-fk', 0.5, 100)
+			`, id, orgID, userID, eventType); err != nil {
+				t.Fatalf("seed event_handler: %v", err)
+			}
+			return id
+		},
 		SetRunMemory: func(t *testing.T, runID, entityID, content string) {
 			t.Helper()
 			memID := uuid.New().String()

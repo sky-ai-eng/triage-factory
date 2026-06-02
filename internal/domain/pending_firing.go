@@ -46,4 +46,11 @@ const (
 	// pre-B+ the drain would still fire even after a user grabbed the
 	// task, producing a phantom bot run on a now-user-claimed task.
 	PendingFiringSkipClaimChanged = "claim_changed"
+	// PendingFiringSkipAlreadyFired fires when the drain's fenced run
+	// insert hits the (triggering_event_id, trigger_id) fence (SKY-424):
+	// a run for this firing's event already committed — a prior drain
+	// fired it but died before MarkFired, or the immediate path fired it
+	// before this firing was popped. Skipping is correct: the existing
+	// run is the materialization, and re-firing would duplicate it.
+	PendingFiringSkipAlreadyFired = "already_fired"
 )

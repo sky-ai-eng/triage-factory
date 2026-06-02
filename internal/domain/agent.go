@@ -67,6 +67,16 @@ type AgentRun struct {
 	TriggerType   string // "manual" | "event" (matches prompt_triggers.trigger_type vocabulary)
 	TriggerID     string // FK to prompt_triggers.id — populated for auto runs only
 
+	// TriggeringEventID is the event instance that auto-fired this run
+	// (SKY-424). Set only on the event path; empty (→ SQL NULL) for manual
+	// runs and blueprint-step runs. Paired with TriggerID it forms the
+	// runs_event_trigger_fence partial unique index, which makes
+	// event-triggered auto-delegation exactly-once under the at-least-once
+	// router queue: a replayed event whose first run already committed
+	// conflicts on the fence and is skipped. Forward-only provenance —
+	// written via AgentRunStore.CreateIfNotFiredSystem, not hydrated by Get.
+	TriggeringEventID string
+
 	// ActorAgentID is the agents.id the spawner stamped at run start
 	// (SKY-261 D-Claims). Immutable audit pointer — survives later
 	// config edits and agent-row deletion (SET NULL on delete). Empty

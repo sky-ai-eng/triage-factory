@@ -2,9 +2,20 @@ package db
 
 import (
 	"context"
+	"errors"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// ErrFenceRequiresEventAndTrigger is returned by CreateIfNotFiredSystem
+// when run.TriggeringEventID or run.TriggerID is empty. Both bind to SQL
+// NULL, which the runs_event_trigger_fence partial unique index treats as
+// distinct — the fence would silently not engage and the method's
+// exactly-once contract would be lost without a trace (SKY-424). The event
+// path always supplies both (the router threads the event id + the matched
+// handler id), so an empty value is a programming error, surfaced loud
+// rather than degrading to an unfenced insert.
+var ErrFenceRequiresEventAndTrigger = errors.New("db: CreateIfNotFiredSystem requires non-empty TriggeringEventID and TriggerID")
 
 //go:generate go run github.com/vektra/mockery/v2 --name=AgentRunStore --output=./mocks --case=underscore --with-expecter
 
@@ -43,6 +54,27 @@ type AgentRunStore interface {
 	// per the schema CHECK that pairs trigger_type and creator
 	// nullability.
 	Create(ctx context.Context, orgID string, run domain.AgentRun) error
+
+	// CreateIfNotFiredSystem inserts an event-triggered run fenced on
+	// (triggering_event_id, trigger_id) by the runs_event_trigger_fence
+	// partial unique index (SKY-424). Returns inserted=false (no error)
+	// when a run for this (event, trigger) already committed — the
+	// at-least-once router queue (SKY-414) replayed an event whose first
+	// auto-delegation already happened. The run insert is the crash-
+	// consistent commit point: fence row exists iff run exists, so a crash
+	// after the run commits replays into a clean skip and a crash before it
+	// re-fires cleanly. Event path only — run.TriggerType is forced to
+	// 'event' (creator_user_id NULL per the runs_creator_matches_trigger_type
+	// CHECK), so on Postgres it routes through the admin pool like the
+	// event branch of Create. Manual runs stay on Create, whose NULL
+	// triggering_event_id never reaches the partial index.
+	//
+	// Precondition: run.TriggeringEventID and run.TriggerID must be
+	// non-empty — both are part of the fence key, and an empty value binds
+	// NULL (which the partial index treats as distinct, silently skipping
+	// the fence). Impls reject that with ErrFenceRequiresEventAndTrigger
+	// rather than insert an unfenced row.
+	CreateIfNotFiredSystem(ctx context.Context, orgID string, run domain.AgentRun) (inserted bool, err error)
 
 	// Complete finalizes a run with the terminal totals folded
 	// into any partial totals already on the row. SKY-139's

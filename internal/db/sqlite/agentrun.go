@@ -67,6 +67,51 @@ func (s *agentRunStore) Create(ctx context.Context, orgID string, run domain.Age
 	return err
 }
 
+// CreateIfNotFiredSystem is the event-path fenced insert (SKY-424). It
+// mirrors Create's column binds but forces trigger_type='event' (so
+// creator_user_id stays NULL per the schema CHECK), writes
+// triggering_event_id, and adds ON CONFLICT … DO NOTHING against the
+// runs_event_trigger_fence partial unique index. inserted=false means a
+// run for this (triggering_event_id, trigger_id) already exists — a
+// replayed event, skipped cleanly. SQLite has one connection so there is
+// no admin/app pool split; the contract matches the Postgres impl.
+func (s *agentRunStore) CreateIfNotFiredSystem(ctx context.Context, orgID string, run domain.AgentRun) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	// Both halves of the fence key are required: an empty value binds NULL,
+	// the partial unique index treats NULL as distinct, and the insert would
+	// silently skip the fence. Fail loud — this is the fenced path, and an
+	// unfenced run here would defeat its purpose (SKY-424).
+	if run.TriggeringEventID == "" || run.TriggerID == "" {
+		return false, db.ErrFenceRequiresEventAndTrigger
+	}
+	var stepIdx any
+	if run.BlueprintStepIndex != nil {
+		stepIdx = *run.BlueprintStepIndex
+	}
+	// trigger_type is hard-coded 'event': this method is the event path's
+	// only insert, and creator_user_id is left NULL to satisfy the
+	// runs_creator_matches_trigger_type CHECK.
+	res, err := s.q.ExecContext(ctx, `
+		INSERT INTO runs (id, task_id, prompt_id, status, model, worktree_path,
+		                  trigger_type, trigger_id, triggering_event_id, team_id, visibility,
+		                  creator_user_id, actor_agent_id, blueprint_run_id, blueprint_step_index)
+		VALUES (?, ?, ?, ?, ?, ?, 'event', ?, ?, ?, 'team', NULL, ?, ?, ?)
+		ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
+	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath,
+		nullIfEmpty(run.TriggerID), nullIfEmpty(run.TriggeringEventID), runmode.LocalDefaultTeamID,
+		nullIfEmpty(run.ActorAgentID), nullIfEmpty(run.BlueprintRunID), stepIdx)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err

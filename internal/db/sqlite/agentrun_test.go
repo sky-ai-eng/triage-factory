@@ -113,6 +113,22 @@ func newSQLiteAgentRunSeeder(conn *sql.DB) dbtest.AgentRunSeeder {
 				t.Fatalf("stamp claim: %v", err)
 			}
 		},
+		EventHandler: func(t *testing.T, eventType string) string {
+			t.Helper()
+			id := uuid.New().String()
+			// Minimal rule shape: name/default_priority/sort_order non-NULL,
+			// trigger-only cols NULL (the event_handlers rule CHECK). org_id
+			// takes its local-sentinel DEFAULT.
+			if _, err := conn.Exec(`
+				INSERT INTO event_handlers
+					(id, creator_user_id, team_id, kind, event_type, enabled, source,
+					 name, default_priority, sort_order)
+				VALUES (?, ?, ?, 'rule', ?, 1, 'user', 'fence-fk', 0.5, 100)
+			`, id, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID, eventType); err != nil {
+				t.Fatalf("seed event_handler: %v", err)
+			}
+			return id
+		},
 		SetRunMemory: func(t *testing.T, runID, entityID, content string) {
 			t.Helper()
 			memID := uuid.New().String()

@@ -766,6 +766,14 @@ CREATE TABLE runs (
     -- See the Blueprints section below for the parent table.
     blueprint_run_id     TEXT REFERENCES blueprint_runs(id),
     blueprint_step_index INTEGER,
+    -- triggering_event_id is the event instance that auto-fired this run
+    -- (SKY-424). NULL for manual runs and blueprint-step runs. The
+    -- runs_event_trigger_fence partial unique index below makes
+    -- (triggering_event_id, trigger_id) at-most-once, so a replayed event
+    -- under the at-least-once router queue (SKY-414) can't spawn a second
+    -- delegated run. Forward-only provenance — written by the event path's
+    -- CreateIfNotFiredSystem, not read back into the run projection.
+    triggering_event_id  TEXT REFERENCES events(id),
     -- Pair trigger_type with creator_user_id nullability so the
     -- seeder can't drift back to lying.
     CONSTRAINT runs_creator_matches_trigger_type CHECK (
@@ -784,6 +792,11 @@ CREATE INDEX        idx_runs_status         ON runs(status);
 CREATE UNIQUE INDEX runs_id_org_unique      ON runs (id, org_id);
 CREATE INDEX        runs_actor_agent_idx    ON runs(actor_agent_id) WHERE actor_agent_id IS NOT NULL;
 CREATE INDEX        idx_runs_blueprint      ON runs(blueprint_run_id, blueprint_step_index);
+-- Fired-fence (SKY-424): one event firing one trigger materializes at most
+-- one run. Partial WHERE triggering_event_id IS NOT NULL so manual and
+-- blueprint-step runs (NULL) never participate — multiple manual runs of one
+-- task stay allowed, and two distinct event instances still fire independently.
+CREATE UNIQUE INDEX runs_event_trigger_fence ON runs (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL;
 
 -- === Blueprint steps + runs ==============================================
 -- blueprint_steps is the ordered step list for a blueprint (length >= 1).

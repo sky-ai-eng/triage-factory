@@ -1257,6 +1257,7 @@ CREATE TABLE public.runs (
     actor_agent_id uuid,
     blueprint_run_id uuid,
     blueprint_step_index integer,
+    triggering_event_id uuid,
     CONSTRAINT runs_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL)))),
     CONSTRAINT runs_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
     CONSTRAINT runs_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text])))
@@ -2399,6 +2400,17 @@ CREATE INDEX runs_actor_agent_idx ON public.runs USING btree (actor_agent_id) WH
 
 
 --
+-- Name: runs_event_trigger_fence; Type: INDEX; Schema: public; Owner: -
+--
+-- Fired-fence (SKY-424): one event firing one trigger materializes at most
+-- one run. Partial WHERE triggering_event_id IS NOT NULL so manual and
+-- blueprint-step runs (NULL) never participate — multiple manual runs of one
+-- task stay allowed, and two distinct event instances still fire independently.
+
+CREATE UNIQUE INDEX runs_event_trigger_fence ON public.runs USING btree (triggering_event_id, trigger_id) WHERE (triggering_event_id IS NOT NULL);
+
+
+--
 -- Name: tasks_claimed_agent_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3162,6 +3174,17 @@ ALTER TABLE ONLY public.runs
 
 ALTER TABLE ONLY public.runs
     ADD CONSTRAINT runs_trigger_id_org_id_fkey FOREIGN KEY (trigger_id, org_id) REFERENCES public.event_handlers(id, org_id);
+
+
+--
+-- Name: runs runs_triggering_event_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+-- Composite FK mirrors pending_firings.triggering_event_id. NULL
+-- triggering_event_id (manual / blueprint-step runs) skips the check under
+-- MATCH SIMPLE, so only event-fired runs are tied to a real event row.
+
+ALTER TABLE ONLY public.runs
+    ADD CONSTRAINT runs_triggering_event_id_org_id_fkey FOREIGN KEY (triggering_event_id, org_id) REFERENCES public.events(id, org_id);
 
 
 --

@@ -6,6 +6,7 @@ package delegate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -64,6 +65,14 @@ type runConfig struct {
 	appendSysPrompt string
 }
 
+// ErrAlreadyFired is returned by Delegate on the event path when the run
+// insert hit the (triggering_event_id, trigger_id) fence — a run for this
+// (event, trigger) already committed on a prior delivery of the same event
+// (SKY-424). The router treats it as a clean skip: the at-least-once event
+// queue replayed an event whose first auto-delegation already happened, so
+// there is nothing to re-fire and the original run's claim still stands.
+var ErrAlreadyFired = errors.New("delegate: run already fired for this (event, trigger)")
+
 // DelegateOpts carries the per-call inputs to Delegate that grew past
 // the comfortable positional-arg threshold. The struct exists so
 // adding a field (CreatorUserID, future multi-mode session context)
@@ -107,6 +116,19 @@ type DelegateOpts struct {
 	// TriggerID is the event_handler ID for event-triggered runs,
 	// empty for manual. Recorded on the runs row for audit.
 	TriggerID string
+
+	// TriggeringEventID is the event instance that fired this run, for
+	// event-triggered delegations; empty for manual (SKY-424). Server-side
+	// provenance like TriggerID — the router threads it from the event
+	// being processed (immediate path) or the pending firing row (drain
+	// path). Paired with TriggerID it drives the runs_event_trigger_fence:
+	// the event-path insert is conflict-aware, so a replayed event whose
+	// first run already committed returns ErrAlreadyFired instead of
+	// spawning a duplicate. Required on the event path — CreateIfNotFiredSystem
+	// rejects an empty value (it would bind NULL and silently skip the fence)
+	// with ErrFenceRequiresEventAndTrigger. Manual delegation never sets this
+	// field; it uses the unfenced Create, which doesn't write the column.
+	TriggeringEventID string
 
 	// CreatorUserID is the user who initiated this Delegate call.
 	// Required when TriggerType == "manual"; ignored otherwise (the
@@ -236,28 +258,42 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 
 	runID := uuid.New().String()
 	runRow := domain.AgentRun{
-		ID:            runID,
-		TaskID:        task.ID,
-		PromptID:      promptID,
-		Status:        "initializing",
-		Model:         model,
-		TriggerType:   triggerType,
-		TriggerID:     triggerID,
-		ActorAgentID:  actorAgentID,
-		CreatorUserID: creatorUserID,
+		ID:                runID,
+		TaskID:            task.ID,
+		PromptID:          promptID,
+		Status:            "initializing",
+		Model:             model,
+		TriggerType:       triggerType,
+		TriggerID:         triggerID,
+		TriggeringEventID: opts.TriggeringEventID,
+		ActorAgentID:      actorAgentID,
+		CreatorUserID:     creatorUserID,
 	}
 	// Route by trigger type, mirroring the IncrementUsage split above.
 	// Manual inserts wrap in SyntheticClaimsWithTx so runs_insert's RLS
 	// check (creator_user_id = tf.current_user_id()) sees the correct
 	// identity; event-triggered inserts stay on the admin pool because
 	// the router has no user identity to project.
+	//
+	// Event-triggered runs go through CreateIfNotFiredSystem, the
+	// (triggering_event_id, trigger_id) fenced insert (SKY-424). On a
+	// replayed event whose first run already committed, no row inserts and
+	// we return ErrAlreadyFired so the router skips cleanly instead of
+	// spawning a duplicate agent. The run insert is the crash-consistent
+	// commit point: anything before it (blueprint/prompt resolution, usage
+	// bumps) is cheap and idempotent enough to re-run on a fenced replay.
 	var createErr error
 	if triggerType == "manual" {
 		createErr = s.tx.SyntheticClaimsWithTx(context.Background(), orgID, creatorUserID, func(ts db.TxStores) error {
 			return ts.AgentRuns.Create(context.Background(), orgID, runRow)
 		})
 	} else {
-		createErr = s.agentRuns.Create(context.Background(), orgID, runRow)
+		inserted, err := s.agentRuns.CreateIfNotFiredSystem(context.Background(), orgID, runRow)
+		if err != nil {
+			createErr = err
+		} else if !inserted {
+			return "", ErrAlreadyFired
+		}
 	}
 	if createErr != nil {
 		return "", fmt.Errorf("create agent run: %w", createErr)

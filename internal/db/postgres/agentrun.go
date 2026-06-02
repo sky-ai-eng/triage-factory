@@ -145,6 +145,49 @@ func (s *agentRunStore) createManual(ctx context.Context, orgID string, run doma
 	return err
 }
 
+// CreateIfNotFiredSystem is the event-path fenced insert (SKY-424). Same
+// admin-pool routing and team_id derivation as createEventTriggered (the
+// runs_creator_matches_trigger_type CHECK + runs_insert RLS make the app
+// pool unable to write trigger_type='event' rows), plus triggering_event_id
+// and ON CONFLICT … DO NOTHING against the runs_event_trigger_fence partial
+// unique index. inserted=false means a run for this (triggering_event_id,
+// trigger_id) already committed — a replayed event, skipped cleanly. The
+// run insert is the crash-consistent commit point, so the fence is exact:
+// fence row exists iff run exists.
+func (s *agentRunStore) CreateIfNotFiredSystem(ctx context.Context, orgID string, run domain.AgentRun) (bool, error) {
+	// Both halves of the fence key are required: an empty value binds NULL,
+	// the partial unique index treats NULL as distinct, and the insert would
+	// silently skip the fence. Fail loud — this is the fenced path, and an
+	// unfenced run here would defeat its purpose (SKY-424).
+	if run.TriggeringEventID == "" || run.TriggerID == "" {
+		return false, db.ErrFenceRequiresEventAndTrigger
+	}
+	var stepIdx any
+	if run.BlueprintStepIndex != nil {
+		stepIdx = *run.BlueprintStepIndex
+	}
+	res, err := s.admin.ExecContext(ctx, `
+		INSERT INTO runs (id, org_id, task_id, prompt_id, status, model, worktree_path,
+		                  trigger_type, trigger_id, triggering_event_id, team_id, visibility, creator_user_id,
+		                  actor_agent_id, blueprint_run_id, blueprint_step_index)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, 'event', $8, $9,
+		        (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2),
+		        'team', NULL,
+		        $10, $11, $12)
+		ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
+	`, run.ID, orgID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath,
+		nullIfEmpty(run.TriggerID), nullIfEmpty(run.TriggeringEventID),
+		nullIfEmpty(run.ActorAgentID), nullIfEmpty(run.BlueprintRunID), stepIdx)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason string) error {
 	return completeRun(ctx, s.q, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason)
 }
