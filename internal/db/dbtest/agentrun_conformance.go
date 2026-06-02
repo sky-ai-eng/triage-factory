@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"testing"
 	"time"
@@ -266,6 +267,52 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 		if len(runs) != 2 {
 			t.Errorf("manual runs must not be fenced: want 2, got %d", len(runs))
+		}
+	})
+
+	t.Run("CreateIfNotFiredSystem_RejectsMissingEventOrTrigger", func(t *testing.T) {
+		// The fenced insert must refuse an empty TriggeringEventID or
+		// TriggerID rather than bind NULL and silently skip the fence —
+		// otherwise the method meant to enforce exactly-once would hand
+		// back an unfenced row (SKY-424).
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "fence-guard")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		trigID := seed.EventHandler(t, domain.EventGitHubPROpened)
+
+		base := domain.AgentRun{
+			TaskID:      taskID,
+			PromptID:    agentRunTestPrompt(t),
+			Status:      "initializing",
+			Model:       "claude-test",
+			TriggerType: "event",
+		}
+
+		// Missing triggering event.
+		missingEvent := base
+		missingEvent.ID = uuid.New().String()
+		missingEvent.TriggerID = trigID
+		if inserted, err := store.CreateIfNotFiredSystem(ctx, orgID, missingEvent); inserted || !errors.Is(err, db.ErrFenceRequiresEventAndTrigger) {
+			t.Errorf("missing TriggeringEventID: got inserted=%v err=%v, want inserted=false err=ErrFenceRequiresEventAndTrigger", inserted, err)
+		}
+
+		// Missing trigger.
+		missingTrigger := base
+		missingTrigger.ID = uuid.New().String()
+		missingTrigger.TriggeringEventID = ev
+		if inserted, err := store.CreateIfNotFiredSystem(ctx, orgID, missingTrigger); inserted || !errors.Is(err, db.ErrFenceRequiresEventAndTrigger) {
+			t.Errorf("missing TriggerID: got inserted=%v err=%v, want inserted=false err=ErrFenceRequiresEventAndTrigger", inserted, err)
+		}
+
+		// Neither attempt wrote a row.
+		runs, err := store.ListForTask(ctx, orgID, taskID)
+		if err != nil {
+			t.Fatalf("ListForTask: %v", err)
+		}
+		if len(runs) != 0 {
+			t.Errorf("guard must reject before insert: want 0 runs, got %d", len(runs))
 		}
 	})
 

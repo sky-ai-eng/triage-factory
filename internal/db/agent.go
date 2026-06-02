@@ -2,9 +2,20 @@ package db
 
 import (
 	"context"
+	"errors"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// ErrFenceRequiresEventAndTrigger is returned by CreateIfNotFiredSystem
+// when run.TriggeringEventID or run.TriggerID is empty. Both bind to SQL
+// NULL, which the runs_event_trigger_fence partial unique index treats as
+// distinct — the fence would silently not engage and the method's
+// exactly-once contract would be lost without a trace (SKY-424). The event
+// path always supplies both (the router threads the event id + the matched
+// handler id), so an empty value is a programming error, surfaced loud
+// rather than degrading to an unfenced insert.
+var ErrFenceRequiresEventAndTrigger = errors.New("db: CreateIfNotFiredSystem requires non-empty TriggeringEventID and TriggerID")
 
 //go:generate go run github.com/vektra/mockery/v2 --name=AgentRunStore --output=./mocks --case=underscore --with-expecter
 
@@ -57,6 +68,12 @@ type AgentRunStore interface {
 	// CHECK), so on Postgres it routes through the admin pool like the
 	// event branch of Create. Manual runs stay on Create, whose NULL
 	// triggering_event_id never reaches the partial index.
+	//
+	// Precondition: run.TriggeringEventID and run.TriggerID must be
+	// non-empty — both are part of the fence key, and an empty value binds
+	// NULL (which the partial index treats as distinct, silently skipping
+	// the fence). Impls reject that with ErrFenceRequiresEventAndTrigger
+	// rather than insert an unfenced row.
 	CreateIfNotFiredSystem(ctx context.Context, orgID string, run domain.AgentRun) (inserted bool, err error)
 
 	// Complete finalizes a run with the terminal totals folded

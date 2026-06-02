@@ -124,8 +124,10 @@ type DelegateOpts struct {
 	// path). Paired with TriggerID it drives the runs_event_trigger_fence:
 	// the event-path insert is conflict-aware, so a replayed event whose
 	// first run already committed returns ErrAlreadyFired instead of
-	// spawning a duplicate. Empty here degrades to a plain insert (the
-	// partial fence index ignores NULL), so manual delegation is untouched.
+	// spawning a duplicate. Required on the event path — CreateIfNotFiredSystem
+	// rejects an empty value (it would bind NULL and silently skip the fence)
+	// with ErrFenceRequiresEventAndTrigger. Manual delegation never sets this
+	// field; it uses the unfenced Create, which doesn't write the column.
 	TriggeringEventID string
 
 	// CreatorUserID is the user who initiated this Delegate call.

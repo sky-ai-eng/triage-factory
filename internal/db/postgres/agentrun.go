@@ -155,6 +155,13 @@ func (s *agentRunStore) createManual(ctx context.Context, orgID string, run doma
 // run insert is the crash-consistent commit point, so the fence is exact:
 // fence row exists iff run exists.
 func (s *agentRunStore) CreateIfNotFiredSystem(ctx context.Context, orgID string, run domain.AgentRun) (bool, error) {
+	// Both halves of the fence key are required: an empty value binds NULL,
+	// the partial unique index treats NULL as distinct, and the insert would
+	// silently skip the fence. Fail loud — this is the fenced path, and an
+	// unfenced run here would defeat its purpose (SKY-424).
+	if run.TriggeringEventID == "" || run.TriggerID == "" {
+		return false, db.ErrFenceRequiresEventAndTrigger
+	}
 	var stepIdx any
 	if run.BlueprintStepIndex != nil {
 		stepIdx = *run.BlueprintStepIndex
