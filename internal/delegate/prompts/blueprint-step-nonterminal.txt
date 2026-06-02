@@ -11,6 +11,6 @@ This changes only how your run ends. Your terminal JSON envelope (see the comple
 
 - "yield" — hand to the user for a decision, exactly as described in the completion/yielding contract.
 
-HANDOFF — before you end the turn, append a section to ./_scratch/handoff.md describing what you did, what you found, and the signals the next step needs. Do not delete prior sections. If the file does not exist, you are the first step.
+HANDOFF — the memory file you write before finishing (see the <entity_memory> contract) IS your handoff to the next step. Earlier steps of this same workflow run wrote theirs into the same `$TRIAGE_FACTORY_BLUEPRINT_RUN_ID` folder under `_scratch/entity-memory/` — read those first, then write yours so the next step can build on what you did, what you decided and why, what you ruled out, and what it needs to do next.
 
 EXTERNAL ACTIONS — do not submit reviews, create PRs, post comments, or push branches. A later step owns the blueprint's terminal external action. (If your instructions gave you explicit early-exit criteria and you're emitting `finish` because they're met, a single terminal action tied to that exit is allowed — it still flows through human approval.)

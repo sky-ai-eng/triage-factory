@@ -51,12 +51,12 @@ func newTaskMemoryStore(q, admin queryer) db.TaskMemoryStore {
 
 var _ db.TaskMemoryStore = (*taskMemoryStore)(nil)
 
-func (s *taskMemoryStore) UpsertAgentMemory(ctx context.Context, orgID, runID, entityID, content string) error {
-	return upsertAgentMemory(ctx, s.q, orgID, runID, entityID, content)
+func (s *taskMemoryStore) UpsertAgentMemory(ctx context.Context, orgID, runID, entityID, blueprintRunID, content string) error {
+	return upsertAgentMemory(ctx, s.q, orgID, runID, entityID, blueprintRunID, content)
 }
 
-func (s *taskMemoryStore) UpsertAgentMemorySystem(ctx context.Context, orgID, runID, entityID, content string) error {
-	return upsertAgentMemory(ctx, s.admin, orgID, runID, entityID, content)
+func (s *taskMemoryStore) UpsertAgentMemorySystem(ctx context.Context, orgID, runID, entityID, blueprintRunID, content string) error {
+	return upsertAgentMemory(ctx, s.admin, orgID, runID, entityID, blueprintRunID, content)
 }
 
 // upsertAgentMemory is the shared body for the app- and admin-pool
@@ -71,16 +71,20 @@ func (s *taskMemoryStore) UpsertAgentMemorySystem(ctx context.Context, orgID, ru
 // Empty / whitespace-only content canonicalizes to SQL NULL so
 // downstream consumers (factory's memory_missing derivation) see a
 // single truth condition for "agent didn't comply with the gate."
-func upsertAgentMemory(ctx context.Context, q queryer, orgID, runID, entityID, content string) error {
+func upsertAgentMemory(ctx context.Context, q queryer, orgID, runID, entityID, blueprintRunID, content string) error {
 	var agentContent any
 	if strings.TrimSpace(content) != "" {
 		agentContent = content
 	}
+	var blueprintRun any
+	if blueprintRunID != "" {
+		blueprintRun = blueprintRunID
+	}
 	_, err := q.ExecContext(ctx, `
-		INSERT INTO run_memory (id, org_id, run_id, entity_id, agent_content, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (run_id) DO UPDATE SET agent_content = EXCLUDED.agent_content
-	`, uuid.New().String(), orgID, runID, entityID, agentContent, time.Now().UTC())
+		INSERT INTO run_memory (id, org_id, run_id, entity_id, blueprint_run_id, agent_content, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (run_id) DO UPDATE SET agent_content = EXCLUDED.agent_content, blueprint_run_id = EXCLUDED.blueprint_run_id
+	`, uuid.New().String(), orgID, runID, entityID, blueprintRun, agentContent, time.Now().UTC())
 	return err
 }
 
@@ -136,7 +140,7 @@ func getMemoriesForEntity(ctx context.Context, q queryer, orgID, entityID string
 			UNION
 			SELECT from_entity_id FROM entity_links WHERE org_id = $1 AND to_entity_id = $2
 		)
-		SELECT rm.id, rm.run_id, rm.entity_id, rm.agent_content, rm.human_content, rm.created_at
+		SELECT rm.id, rm.run_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at
 		FROM run_memory rm
 		WHERE rm.org_id = $1 AND rm.entity_id IN (SELECT id FROM related)
 		ORDER BY rm.created_at ASC
@@ -149,11 +153,12 @@ func getMemoriesForEntity(ctx context.Context, q queryer, orgID, entityID string
 	var out []domain.TaskMemory
 	for rows.Next() {
 		var m domain.TaskMemory
-		var agentContent, humanContent sql.NullString
+		var blueprintRunID, agentContent, humanContent sql.NullString
 		var createdAt time.Time
-		if err := rows.Scan(&m.ID, &m.RunID, &m.EntityID, &agentContent, &humanContent, &createdAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.RunID, &m.EntityID, &blueprintRunID, &agentContent, &humanContent, &createdAt); err != nil {
 			return nil, err
 		}
+		m.BlueprintRunID = blueprintRunID.String
 		m.Content = materializeMemory(agentContent.String, humanContent.String)
 		m.CreatedAt = createdAt
 		out = append(out, m)
@@ -163,20 +168,21 @@ func getMemoriesForEntity(ctx context.Context, q queryer, orgID, entityID string
 
 func (s *taskMemoryStore) GetRunMemory(ctx context.Context, orgID, runID string) (*domain.TaskMemory, error) {
 	row := s.q.QueryRowContext(ctx, `
-		SELECT id, run_id, entity_id, agent_content, human_content, created_at
+		SELECT id, run_id, entity_id, blueprint_run_id, agent_content, human_content, created_at
 		FROM run_memory WHERE org_id = $1 AND run_id = $2
 	`, orgID, runID)
 
 	var m domain.TaskMemory
-	var agentContent, humanContent sql.NullString
+	var blueprintRunID, agentContent, humanContent sql.NullString
 	var createdAt time.Time
-	err := row.Scan(&m.ID, &m.RunID, &m.EntityID, &agentContent, &humanContent, &createdAt)
+	err := row.Scan(&m.ID, &m.RunID, &m.EntityID, &blueprintRunID, &agentContent, &humanContent, &createdAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	m.BlueprintRunID = blueprintRunID.String
 	m.Content = materializeMemory(agentContent.String, humanContent.String)
 	m.CreatedAt = createdAt
 	return &m, nil

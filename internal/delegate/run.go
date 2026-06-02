@@ -125,12 +125,20 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		worktree.RemoveClaudeProjectDir(claudeCwd)
 	}()
 
-	// Materialize any prior task memories into ./_scratch/entity-memory/
-	// so the agent sees what previous iterations on this task have
-	// already tried. The directory is git-excluded by writeLocalExcludes
+	// The memory namespace groups this run's memory file with its siblings:
+	// the blueprint_run_id when this run is a blueprint step (so step N+1 reads
+	// step N's memory as its handoff), else the run's own id. It names the
+	// folder the agent reads from and writes into, and it's exported below so
+	// the contract can reference it deterministically.
+	namespace := memoryNamespace(cfg.blueprintRunID, runID)
+
+	// Materialize any prior task memories into ./_scratch/entity-memory/, one
+	// folder per workflow run, and create this run's own namespace folder, so
+	// the agent sees what previous iterations on this task have already tried.
+	// The directory is git-excluded by writeLocalExcludes
 	// (managedExcludePatterns in internal/worktree/worktree.go) so
 	// nothing leaks into the PR.
-	materializePriorMemories(s.taskMemory, orgID, claudeCwd, task.EntityID)
+	materializePriorMemories(s.taskMemory, orgID, claudeCwd, task.EntityID, namespace)
 
 	// SKY-219: copy the entity's project knowledge-base into
 	// ./_scratch/project-knowledge/ if the entity is assigned to a
@@ -167,7 +175,12 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	extraEnv := []string{
 		"TRIAGE_FACTORY_RUN_ID=" + runID,
 		"TRIAGE_FACTORY_REVIEW_PREVIEW=1",
-		"TRIAGE_FACTORY_RUN_ROOT=" + cfg.runRoot, // Set for both sources so the memory-gate retry message can reference an absolute _scratch/entity-memory path that resolves regardless of which worktree the agent has cd'd into.
+		"TRIAGE_FACTORY_RUN_ROOT=" + cfg.runRoot, // Set for both sources so the completion-gate retry message can reference an absolute _scratch/entity-memory path that resolves regardless of which worktree the agent has cd'd into.
+		// The memory namespace folder: blueprint_run_id for a blueprint step
+		// (its siblings' handoff), else the run's own id. Non-absolute, so it
+		// passes through translateEnvForSandbox unchanged. The <entity_memory>
+		// contract names this folder via the env var.
+		"TRIAGE_FACTORY_BLUEPRINT_RUN_ID=" + namespace,
 	}
 	// Set TRIAGE_FACTORY_REPO when the run has a resolved GitHub repo context
 	// (GitHub PR runs only) so gh subcommands can default to the right target
@@ -278,30 +291,49 @@ func (s *Spawner) processCompletion(
 		return
 	}
 
-	// Enforce the pre-complete entity-memory write gate. If the agent
-	// returned a completion JSON without writing
-	// ./_scratch/entity-memory/<runID>.md, resume the session with a
-	// correction message (up to 2 retries).
-	// Retries that produce new completions are merged into the totals
-	// so cost/duration accounting reflects the full invocation, not
-	// just the initial call.
-	//
-	// Pass model + repoEnv explicitly rather than letting the gate
-	// read live spawner state, so a concurrent UpdateCredentials
-	// can't silently switch models or drop repo context mid-run.
 	repoEnv := ""
 	if owner != "" && repo != "" {
 		repoEnv = owner + "/" + repo
 	}
-	completion = s.runMemoryGate(ctx, orgID, runID, task.ID, claudeCwd, completion, sessionID, model, repoEnv, extraAllowedTools, triggerType, creatorUserID)
+
+	// Fetch the run row once. Its blueprint_run_id is the memory namespace —
+	// the folder grouping this run's memory file with its blueprint siblings
+	// (so step N+1 reads step N's as its handoff), else the run's own id for a
+	// standalone run. The same row tells us below whether this is a blueprint
+	// step (which defers task disposition to the orchestrator).
+	runRow, _ := s.agentRuns.GetSystem(context.Background(), orgID, runID)
+	blueprintRunID := ""
+	if runRow != nil {
+		blueprintRunID = runRow.BlueprintRunID
+	}
+	namespace := memoryNamespace(blueprintRunID, runID)
+
+	// One completion gate (consolidates the former memory-write + outcome
+	// gates): if the agent terminated without writing its namespaced memory
+	// file ./_scratch/entity-memory/<namespace>/<runID>.md OR without a valid
+	// terminal outcome, resume the session with a correction naming exactly
+	// what's missing, up to maxCompletionRetries. Skipped on an infra IsError
+	// completion — that's failing regardless and resuming a crashed session is
+	// futile. Retries that produce new completions are merged into the totals
+	// so cost/duration accounting reflects the full invocation, not just the
+	// initial call.
+	//
+	// Pass model + repoEnv explicitly rather than letting the gate read live
+	// spawner state, so a concurrent UpdateCredentials can't silently switch
+	// models or drop repo context mid-run.
+	if !completion.IsError {
+		completion = s.completionGate(ctx, orgID, runID, claudeCwd, namespace, completion, sessionID, model, repoEnv, extraAllowedTools, triggerType, creatorUserID)
+	}
 
 	// Unconditional upsert of the run_memory row at termination
 	// (SKY-204): row presence === "termination passed through the
-	// memory gate", agent_content NULL === "agent didn't comply with
-	// the gate after retries" (UpsertAgentMemory normalizes
-	// empty/whitespace input to NULL on the way in).
-	agentContent, fileState := readAgentMemoryFile(claudeCwd, runID)
-	if err := s.taskMemory.UpsertAgentMemorySystem(context.Background(), orgID, runID, task.EntityID, agentContent); err != nil {
+	// gate", agent_content NULL === "agent didn't comply with the gate
+	// after retries" (UpsertAgentMemory normalizes empty/whitespace
+	// input to NULL on the way in). blueprint_run_id is denormalized
+	// onto the row so the next run's materializer folders this file
+	// under the right namespace.
+	agentContent, fileState := readAgentMemoryFile(claudeCwd, namespace, runID)
+	if err := s.taskMemory.UpsertAgentMemorySystem(context.Background(), orgID, runID, task.EntityID, blueprintRunID, agentContent); err != nil {
 		log.Printf("[delegate] warning: failed to upsert memory for run %s: %v", runID, err)
 	}
 	switch fileState {
@@ -311,15 +343,6 @@ func (s *Spawner) processCompletion(
 		log.Printf("[delegate] run %s: memory file present but empty after gate retries (agent_content NULL)", runID)
 	case memoryFileReadErr:
 		log.Printf("[delegate] run %s: memory file unreadable after gate retries (agent_content NULL)", runID)
-	}
-
-	// Outcome-validity gate (separate from the memory gate above): if the
-	// terminal envelope didn't parse or omits a valid outcome, re-prompt
-	// the agent for one before accepting any fallback. Skipped on an infra
-	// IsError completion — that's failing regardless and outcome stays
-	// NULL. The memory ticket later consolidates the two gates.
-	if !completion.IsError {
-		completion = s.runOutcomeGate(ctx, orgID, runID, claudeCwd, completion, sessionID, model, repoEnv, extraAllowedTools, triggerType, creatorUserID)
 	}
 
 	// A gate resume above can itself end in a yield (the agent decided it
@@ -336,8 +359,7 @@ func (s *Spawner) processCompletion(
 	// Is this a step inside a multi-step blueprint? Single/terminal runs
 	// (no blueprint_run_id) own their own task disposition below; blueprint
 	// steps persist outcome/status only and leave advancement to the
-	// orchestrator. Fetched once and reused by the close-task guard.
-	runRow, _ := s.agentRuns.GetSystem(context.Background(), orgID, runID)
+	// orchestrator. runRow was fetched above for the namespace and is reused.
 	isBlueprintStep := runRow != nil && runRow.BlueprintRunID != ""
 
 	resultSummary := ""

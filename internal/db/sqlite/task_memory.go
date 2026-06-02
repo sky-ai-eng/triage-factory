@@ -35,7 +35,7 @@ func newTaskMemoryStore(q, _ queryer) db.TaskMemoryStore { return &taskMemorySto
 
 var _ db.TaskMemoryStore = (*taskMemoryStore)(nil)
 
-func (s *taskMemoryStore) UpsertAgentMemory(ctx context.Context, orgID, runID, entityID, content string) error {
+func (s *taskMemoryStore) UpsertAgentMemory(ctx context.Context, orgID, runID, entityID, blueprintRunID, content string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
@@ -43,16 +43,20 @@ func (s *taskMemoryStore) UpsertAgentMemory(ctx context.Context, orgID, runID, e
 	if strings.TrimSpace(content) != "" {
 		agentContent = content
 	}
+	var blueprintRun any
+	if blueprintRunID != "" {
+		blueprintRun = blueprintRunID
+	}
 	_, err := s.q.ExecContext(ctx, `
-		INSERT INTO run_memory (id, run_id, entity_id, agent_content, created_at)
-		VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(run_id) DO UPDATE SET agent_content = excluded.agent_content
-	`, uuid.New().String(), runID, entityID, agentContent, time.Now().UTC())
+		INSERT INTO run_memory (id, run_id, entity_id, blueprint_run_id, agent_content, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(run_id) DO UPDATE SET agent_content = excluded.agent_content, blueprint_run_id = excluded.blueprint_run_id
+	`, uuid.New().String(), runID, entityID, blueprintRun, agentContent, time.Now().UTC())
 	return err
 }
 
-func (s *taskMemoryStore) UpsertAgentMemorySystem(ctx context.Context, orgID, runID, entityID, content string) error {
-	return s.UpsertAgentMemory(ctx, orgID, runID, entityID, content)
+func (s *taskMemoryStore) UpsertAgentMemorySystem(ctx context.Context, orgID, runID, entityID, blueprintRunID, content string) error {
+	return s.UpsertAgentMemory(ctx, orgID, runID, entityID, blueprintRunID, content)
 }
 
 func (s *taskMemoryStore) UpdateRunMemoryHumanContent(ctx context.Context, orgID, runID, content string) error {
@@ -116,7 +120,7 @@ func getMemoriesForEntity(ctx context.Context, q queryer, entityID string) ([]do
 			UNION
 			SELECT from_entity_id FROM entity_links WHERE to_entity_id = ?
 		)
-		SELECT rm.id, rm.run_id, rm.entity_id, rm.agent_content, rm.human_content, rm.created_at
+		SELECT rm.id, rm.run_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at
 		FROM run_memory rm
 		WHERE rm.entity_id IN (SELECT id FROM related)
 		ORDER BY rm.created_at ASC
@@ -129,11 +133,12 @@ func getMemoriesForEntity(ctx context.Context, q queryer, entityID string) ([]do
 	var out []domain.TaskMemory
 	for rows.Next() {
 		var m domain.TaskMemory
-		var agentContent, humanContent sql.NullString
+		var blueprintRunID, agentContent, humanContent sql.NullString
 		var createdAt time.Time
-		if err := rows.Scan(&m.ID, &m.RunID, &m.EntityID, &agentContent, &humanContent, &createdAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.RunID, &m.EntityID, &blueprintRunID, &agentContent, &humanContent, &createdAt); err != nil {
 			return nil, err
 		}
+		m.BlueprintRunID = blueprintRunID.String
 		m.Content = materializeMemory(agentContent.String, humanContent.String)
 		m.CreatedAt = createdAt
 		out = append(out, m)
@@ -146,20 +151,21 @@ func (s *taskMemoryStore) GetRunMemory(ctx context.Context, orgID, runID string)
 		return nil, err
 	}
 	row := s.q.QueryRowContext(ctx, `
-		SELECT id, run_id, entity_id, agent_content, human_content, created_at
+		SELECT id, run_id, entity_id, blueprint_run_id, agent_content, human_content, created_at
 		FROM run_memory WHERE run_id = ?
 	`, runID)
 
 	var m domain.TaskMemory
-	var agentContent, humanContent sql.NullString
+	var blueprintRunID, agentContent, humanContent sql.NullString
 	var createdAt time.Time
-	err := row.Scan(&m.ID, &m.RunID, &m.EntityID, &agentContent, &humanContent, &createdAt)
+	err := row.Scan(&m.ID, &m.RunID, &m.EntityID, &blueprintRunID, &agentContent, &humanContent, &createdAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	m.BlueprintRunID = blueprintRunID.String
 	m.Content = materializeMemory(agentContent.String, humanContent.String)
 	m.CreatedAt = createdAt
 	return &m, nil

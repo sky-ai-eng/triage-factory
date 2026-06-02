@@ -51,18 +51,24 @@ type TaskMemoryStore interface {
 	// derivation) get a single truth condition for "agent didn't
 	// comply with the gate."
 	//
+	// blueprintRunID is the run's blueprint run (denormalized from the
+	// run, like entityID); pass empty for a standalone run, where it
+	// canonicalizes to SQL NULL. It groups one blueprint run's memory
+	// so the materializer can fold each step's file into a shared
+	// namespace folder.
+	//
 	// Idempotent on (run_id) via ON CONFLICT — re-running the gate
 	// after a retry overwrites agent_content but preserves the row's
 	// id, created_at, and any human_content the user has already
 	// attached.
-	UpsertAgentMemory(ctx context.Context, orgID, runID, entityID, content string) error
+	UpsertAgentMemory(ctx context.Context, orgID, runID, entityID, blueprintRunID, content string) error
 
 	// UpsertAgentMemorySystem is the admin-pool variant for the
 	// delegate spawner's post-completion gate teardown. Fires inside
 	// the runAgent goroutine, which has no JWT-claims context, so the
 	// write routes around RLS via BYPASSRLS. Same idempotency +
 	// NULL-on-empty contract as the non-System variant.
-	UpsertAgentMemorySystem(ctx context.Context, orgID, runID, entityID, content string) error
+	UpsertAgentMemorySystem(ctx context.Context, orgID, runID, entityID, blueprintRunID, content string) error
 
 	// UpdateRunMemoryHumanContent records the human's verdict on a
 	// run's agent draft into the run_memory row keyed by runID. The
@@ -87,7 +93,9 @@ type TaskMemoryStore interface {
 	// this entity (and linked entities via entity_links), oldest
 	// first. The returned TaskMemory.Content is materialized from
 	// agent_content + human_content via the stable separator format
-	// the next agent's prompt context parses.
+	// the next agent's prompt context parses. Each row carries its
+	// BlueprintRunID so the materializer can drop the file into the
+	// right per-blueprint-run namespace folder.
 	GetMemoriesForEntity(ctx context.Context, orgID, entityID string) ([]domain.TaskMemory, error)
 
 	// GetMemoriesForEntitySystem mirrors GetMemoriesForEntity but

@@ -66,7 +66,7 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 	// run_memory: agent finished and wrote its self-report (the
 	// SKY-204 termination upsert). We assert below that
 	// human_content lands without trampling agent_content.
-	if err := sqlitestore.New(database).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrg, "r_pa", "e_pa", "agent self-report"); err != nil {
+	if err := sqlitestore.New(database).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrg, "r_pa", "e_pa", "", "agent self-report"); err != nil {
 		t.Fatalf("UpsertAgentMemory: %v", err)
 	}
 

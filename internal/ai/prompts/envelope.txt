@@ -43,15 +43,19 @@ The allowlisted shell tools include the usual text-processing suite (cat, head, 
 </scratch>
 
 <entity_memory>
-Entity memory lives at `$TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/` as one markdown file per prior run on this task. The env var resolves to your run's root directory regardless of where you've cd'd, so the path works whether you're at the run root or inside a materialized worktree subdir. If the directory contains any files, read them before making changes — they describe what previous iterations tried, what they ruled out, and what they'd try next. Build on that context rather than starting from scratch.
+Entity memory lives under `$TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/`, organized as one folder per workflow run — there are no loose files at the top level. The env var resolves to your run's root directory regardless of where you've cd'd, so the path works whether you're at the run root or inside a materialized worktree subdir.
 
-Before finishing, write a new markdown file to `$TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/{{RUN_ID}}.md` describing:
-- What you did
-- Why you made the decisions you did
-- What you tried, including approaches that didn't work and why you ruled them out
-- What you'd try next if this recurs
+- The folder named `$TRIAGE_FACTORY_BLUEPRINT_RUN_ID` holds the memory of earlier steps of YOUR CURRENT workflow run. Read those first — that is your handoff from the steps before you. (If you're the first or only step, this folder may be empty except for what you write.)
+- The other folders are history from prior, separate runs on this entity. Skim them for what past attempts tried and ruled out, and build on that rather than starting from scratch.
 
-Aim for 100-250 words — enough to orient the next run, not a novel. Use the absolute path; do NOT write to a relative `./_scratch/entity-memory/` (that resolves to whatever cwd you're in, which may be a materialized worktree where the file would be ignored by git but missed by the post-run completion gate). Your task is NOT complete until the file exists at the absolute path. If you return a completion JSON without writing this file, you will be asked to resume the session and write it before the run is accepted.
+Before finishing, write your own memory file to `$TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/$TRIAGE_FACTORY_BLUEPRINT_RUN_ID/{{RUN_ID}}.md`. This one file serves double duty: the durable record of this run on the entity AND the handoff to whatever comes next — the next step in this workflow, or a future run. Write it now, while you still have full context, so a cheaper later step never has to re-derive your reasoning from the diff. Capture, concisely:
+- What you did and what changed — the state you're leaving behind.
+- How — the key approach and decisions, so the next stage doesn't redo them.
+- Why — the reasoning behind those decisions (the durable "why" a summary would lose).
+- What you ruled out and why — the dead ends.
+- What's left / what the next stage needs to do or know.
+
+Aim for ~150-300 words — enough to orient the next stage and a future run without re-reading the diff, not a transcript; expand only as the work genuinely warrants. Use the absolute path; do NOT write to a relative `./_scratch/entity-memory/...` (that resolves to whatever cwd you're in, which may be a materialized worktree where the file would be ignored by git but missed by the post-run completion gate). Your task is NOT complete until the file exists at the absolute path. If you return a completion without writing it, you will be asked to resume the session and write it before the run is accepted.
 </entity_memory>
 
 <yielding>

@@ -19,20 +19,34 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
 
-// maxMemoryRetries is the hard cap on how many times the write-gate
-// will resume a run to ask the agent to write its memory file. Chosen
-// in the SKY-141 design: 0 retries is too strict (one missed write
-// shouldn't discard work), 3+ is overkill (if the agent ignored the
-// first correction, a third attempt is almost never the one that
-// works). Not a config knob because no one needs to tune it per-run.
-const maxMemoryRetries = 2
+// maxCompletionRetries is the hard cap on how many times the completion
+// gate will resume a run to ask the agent for whatever it still owes
+// before the run is accepted — its namespaced memory file and/or a valid
+// terminal outcome. Three gives a model that fumbled the contract real
+// chances to correct without spending unbounded resumes on one that's
+// ignoring it. Not a config knob because no one needs to tune it per-run.
+const maxCompletionRetries = 3
+
+// memoryNamespace is the folder under _scratch/entity-memory/ that groups a
+// run's memory file. It's the blueprint_run_id when the run belongs to a
+// blueprint run — so every step of one workflow shares a folder and step N+1
+// reads step N's memory as its handoff — else the run's own id (the N=1 case,
+// until blueprint_run becomes universal). Both the write path (the agent's own
+// file) and the read path (materialized priors) resolve through this, so the
+// tree is uniformly foldered with no top-level .md files.
+func memoryNamespace(blueprintRunID, runID string) string {
+	if blueprintRunID != "" {
+		return blueprintRunID
+	}
+	return runID
+}
 
 // memoryFileExists returns true iff the agent wrote
-// ./_scratch/entity-memory/<runID>.md during the run. Used by the
-// write-gate both before retrying (is another attempt needed?) and
+// ./_scratch/entity-memory/<namespace>/<runID>.md during the run. Used by the
+// completion gate both before retrying (is another attempt needed?) and
 // after (did the retry succeed?).
-func memoryFileExists(cwd, runID string) bool {
-	_, err := os.Stat(filepath.Join(cwd, "_scratch", "entity-memory", runID+".md"))
+func memoryFileExists(cwd, namespace, runID string) bool {
+	_, err := os.Stat(filepath.Join(cwd, "_scratch", "entity-memory", namespace, runID+".md"))
 	return err == nil
 }
 
@@ -52,15 +66,15 @@ const (
 )
 
 // readAgentMemoryFile returns the agent-written
-// ./_scratch/entity-memory/<runID>.md content along with a state
+// ./_scratch/entity-memory/<namespace>/<runID>.md content along with a state
 // classification. The content string is empty for every non-Present
 // state — callers pass it straight to UpsertAgentMemory either way,
 // but inspect the state to log distinctly rather than collapsing every
 // form of noncompliance to the same line. Read errors that aren't a
 // missing file are logged at the read site so they aren't lost when
 // the caller picks a higher-level message.
-func readAgentMemoryFile(cwd, runID string) (string, memoryFileState) {
-	path := filepath.Join(cwd, "_scratch", "entity-memory", runID+".md")
+func readAgentMemoryFile(cwd, namespace, runID string) (string, memoryFileState) {
+	path := filepath.Join(cwd, "_scratch", "entity-memory", namespace, runID+".md")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -76,71 +90,89 @@ func readAgentMemoryFile(cwd, runID string) (string, memoryFileState) {
 	return content, memoryFilePresent
 }
 
-// runMemoryGate enforces the pre-complete entity-memory file requirement.
-//
-// If the agent wrote ./_scratch/entity-memory/<runID>.md during its initial
-// invocation, returns the original completion unchanged. Otherwise
-// resumes the session (up to maxMemoryRetries times) with a correction
-// message and re-checks after each attempt. Completions from resumed
-// sessions are merged into the returned completion so cost/duration/
-// num_turns accounting reflects the full span of the run.
-//
-// The gate does not touch runs status — that remains the caller's
-// responsibility. Side effects: (a) spawns resume subprocesses via
-// ResumeWithMessage, whose messages land in run_messages via the
-// runSink, (b) logs progress for operator diagnosis.
-//
-// Model and repoEnv are passed in rather than read from live spawner
-// state so the gate's retries use the same model and repo context as
-// the initial invocation. If we read s.model at resume time, a
-// concurrent UpdateCredentials could silently switch models mid-run.
-//
-// If no session id is available (shouldn't happen in practice because
-// the runSink persists the init event, but defensive), the gate
-// logs and returns without retrying. The caller will see a missing
-// memory file and flag memory_missing.
-func (s *Spawner) runMemoryGate(
-	ctx context.Context,
-	orgID, runID, taskID, cwd string,
+// completionHasValidOutcome reports whether the completion's terminal envelope
+// parses and carries a recognized outcome. A summary-only envelope (parses via
+// isValid, empty outcome) returns false — that's exactly a case the gate
+// re-prompts for.
+func completionHasValidOutcome(completion *agentproc.Result) bool {
+	parsed := parseAgentResult(completion.Result)
+	return parsed != nil && parsed.hasValidOutcome()
+}
+
+// completionRetryMessage builds the correction the gate resumes a run with,
+// naming exactly what's still missing: the namespaced memory file, a valid
+// terminal outcome, or both. memOK/outcomeOK are the current pass/fail of each
+// check — at least one is false whenever this is called.
+func completionRetryMessage(namespace, runID string, memOK, outcomeOK bool) string {
+	memPath := fmt.Sprintf("$TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/%s/%s.md", namespace, runID)
+	memMsg := "write your memory file to " + memPath + " using the absolute path (the env var " +
+		"resolves to the run-root regardless of which worktree you have cd'd into): what you did " +
+		"and the state you're leaving, the key decisions and why, what you ruled out, and what the " +
+		"next stage needs"
+	outcomeMsg := "return your terminal completion as your final message — ONLY a JSON object whose " +
+		"\"outcome\" is one of \"continue\", \"finish\", \"abort\", or \"yield\", with a \"summary\" " +
+		"(and a \"reason\" when the outcome is \"abort\"), and no other text"
+	switch {
+	case !memOK && !outcomeOK:
+		return "Before this run can be accepted, two things are missing. First, " + memMsg +
+			". Then, " + outcomeMsg + "."
+	case !memOK:
+		return "You returned a completion but did not " + memMsg +
+			". Write it now, then return your completion JSON again."
+	default: // !outcomeOK
+		return "Your final message was not a valid completion envelope. Re-read the completion " +
+			"contract and " + outcomeMsg + "."
+	}
+}
+
+// runCompletionRetryLoop drives the consolidated gate's re-prompt loop. On each
+// pass it asks the agent for whatever's still missing — the namespaced memory
+// file (checked via memoryPresent, which re-stats disk) and/or a valid terminal
+// outcome (checked on the merged completion) — merging each resume's completion
+// so cost/duration/num_turns accounting spans the whole run. It stops the
+// moment both checks pass, the completion becomes a yield (a pause isn't a
+// termination; the caller's post-gate routeYield parks it, so we don't keep
+// demanding the memory write), a resume errors, or maxRetries is exhausted.
+// Pure (no spawner / DB) so the mechanics are unit-testable; resume performs one
+// re-invoke given the correction text and returns the resumed completion (nil if
+// none was observed).
+func runCompletionRetryLoop(
+	runID, namespace string,
 	initial *agentproc.Result,
-	sessionID, model, repoEnv, extraAllowedTools string,
-	triggerType, creatorUserID string,
+	memoryPresent func() bool,
+	resume func(message string) (*agentproc.Result, error),
+	maxRetries int,
 ) *agentproc.Result {
-	if memoryFileExists(cwd, runID) {
+	memOK := memoryPresent()
+	outcomeOK := completionHasValidOutcome(initial)
+	if memOK && outcomeOK {
 		return initial
 	}
-
-	if sessionID == "" {
-		log.Printf("[delegate] run %s: memory file missing and no session id available — cannot gate-retry", runID)
-		return initial
-	}
-
-	resumeOpts := ResumeOptions{Model: model, RepoEnv: repoEnv, ExtraAllowedTools: extraAllowedTools}
 
 	current := initial
-	for attempt := 1; attempt <= maxMemoryRetries; attempt++ {
-		log.Printf("[delegate] run %s: memory file missing after attempt %d, resuming", runID, attempt-1)
-		msg := fmt.Sprintf(
-			"You returned a completion JSON but did not write your memory file to "+
-				"$TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/%s.md. Write it now using the "+
-				"absolute path (the env var resolves to the run-root regardless of "+
-				"which worktree you have cd'd into) — one paragraph of what you did, "+
-				"one of why, one of what to try next if this recurs — then return "+
-				"your completion JSON again.",
-			runID,
-		)
-		outcome, err := s.ResumeWithMessage(ctx, orgID, runID, sessionID, cwd, msg, resumeOpts, triggerType, creatorUserID)
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		log.Printf("[delegate] run %s: completion gate resuming (attempt %d; memory_present=%v outcome_valid=%v)", runID, attempt, memOK, outcomeOK)
+		completion, err := resume(completionRetryMessage(namespace, runID, memOK, outcomeOK))
 		if err != nil {
-			log.Printf("[delegate] run %s: resume attempt %d failed: %v", runID, attempt, err)
-			// Give up on further retries — the caller will mark
-			// memory_missing. Don't wipe out the initial completion's
-			// accounting just because the retry subprocess crashed.
+			log.Printf("[delegate] run %s: completion-gate resume attempt %d failed: %v", runID, attempt, err)
+			// Give up on further retries — the caller applies its conservative
+			// fallback. Don't wipe the accumulated completion's accounting just
+			// because the retry subprocess crashed.
 			return current
 		}
-		if outcome.Completion != nil {
-			current = agentproc.MergeResult(current, outcome.Completion)
+		if completion != nil {
+			current = agentproc.MergeResult(current, completion)
 		}
-		if memoryFileExists(cwd, runID) {
+		// A gate resume can itself end in a yield — the agent decided it needs
+		// the user before it can finish. Stop and return; processCompletion's
+		// post-gate routeYield parks it. A pause isn't a termination, so we
+		// don't keep demanding the memory write on it.
+		if parsed := parseAgentResult(current.Result); parsed != nil && parsed.isYield() {
+			return current
+		}
+		memOK = memoryPresent()
+		outcomeOK = completionHasValidOutcome(current)
+		if memOK && outcomeOK {
 			return current
 		}
 	}
@@ -148,18 +180,79 @@ func (s *Spawner) runMemoryGate(
 	return current
 }
 
-// materializePriorMemories writes any existing run_memory rows for the
-// task into <cwd>/_scratch/entity-memory/<prior_run_id>.md as individual
-// markdown files, so a fresh agent invocation sees what previous
-// iterations on the same task have already tried. The agent is taught
-// to read this directory by the envelope.
+// completionGate consolidates the two pre-finalization checks a terminating run
+// must pass: (a) the agent wrote its namespaced memory file, and (b) the
+// terminal envelope carries a valid outcome. If either is missing, it resumes
+// the session with a correction naming exactly what's missing (memory file
+// and/or outcome), re-checks after each attempt, and repeats up to
+// maxCompletionRetries. Completions from resumed sessions are merged so
+// cost/duration/num_turns accounting reflects the full span of the run.
 //
-// The directory is created unconditionally — even on the very first run
-// when there are no priors. Two reasons: the prompt instructs the agent
-// to `ls _scratch/entity-memory/` early (fails noisily without the dir),
-// and the memory-gate retry message tells the agent to write to
-// `$TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run>.md` (which fails
-// on a missing parent dir unless the agent guesses to mkdir first).
+// The gate does not touch runs status or persist the outcome — that remains the
+// caller's responsibility. The caller (processCompletion) reads the memory
+// file, upserts run_memory, parses the returned completion, applies the
+// single/terminal-vs-blueprint outcome fallback, and writes runs.outcome. Side
+// effects: (a) spawns resume subprocesses via ResumeWithMessage, whose messages
+// land in run_messages via the runSink, (b) logs progress for operator
+// diagnosis.
+//
+// Model and repoEnv are passed in rather than read from live spawner state so
+// the gate's retries use the same model and repo context as the initial
+// invocation. If we read s.model at resume time, a concurrent UpdateCredentials
+// could silently switch models mid-run.
+//
+// If no session id is available (shouldn't happen in practice because the
+// runSink persists the init event, but defensive), the gate logs and returns
+// without retrying. The caller will see the missing file / outcome and apply
+// its fallbacks (memory_missing, the finish/no-outcome floor).
+func (s *Spawner) completionGate(
+	ctx context.Context,
+	orgID, runID, cwd, namespace string,
+	initial *agentproc.Result,
+	sessionID, model, repoEnv, extraAllowedTools string,
+	triggerType, creatorUserID string,
+) *agentproc.Result {
+	memoryPresent := func() bool { return memoryFileExists(cwd, namespace, runID) }
+	if memoryPresent() && completionHasValidOutcome(initial) {
+		return initial
+	}
+
+	if sessionID == "" {
+		log.Printf("[delegate] run %s: completion gate needs a resume but no session id available — cannot gate-retry", runID)
+		return initial
+	}
+
+	resumeOpts := ResumeOptions{Model: model, RepoEnv: repoEnv, ExtraAllowedTools: extraAllowedTools, Namespace: namespace}
+	resume := func(message string) (*agentproc.Result, error) {
+		outcome, err := s.ResumeWithMessage(ctx, orgID, runID, sessionID, cwd, message, resumeOpts, triggerType, creatorUserID)
+		if err != nil {
+			return nil, err
+		}
+		if outcome == nil {
+			return nil, nil
+		}
+		return outcome.Completion, nil
+	}
+
+	return runCompletionRetryLoop(runID, namespace, initial, memoryPresent, resume, maxCompletionRetries)
+}
+
+// materializePriorMemories writes any existing run_memory rows for the
+// entity into <cwd>/_scratch/entity-memory/<namespace>/<prior_run_id>.md as
+// individual markdown files, so a fresh agent invocation sees what previous
+// iterations on the same task have already tried — and so the sibling steps of
+// one blueprint run land in a shared folder the later steps read as their
+// handoff. Each prior's namespace is its own blueprint_run_id (else its run
+// id); the tree is all <namespace>/ folders with no top-level .md files. The
+// agent is taught to read this layout by the envelope.
+//
+// namespace is the CURRENT run's namespace — its folder is created
+// unconditionally, even on the very first run when there are no priors. Two
+// reasons: the prompt instructs the agent to `ls` its namespace folder early
+// (fails noisily without the dir), and the completion-gate retry message tells
+// the agent to write to
+// `$TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<namespace>/<run>.md` (which
+// fails on a missing parent dir unless the agent guesses to mkdir first).
 //
 // Pattern: DB is the source of truth, we materialize into the worktree
 // at startup, and ingest back on completion. The worktree is destroyed
@@ -172,10 +265,13 @@ func (s *Spawner) runMemoryGate(
 // cross-run memory benefit. This "advisory" posture only holds for
 // the read side — the write-before-finish gate is enforced separately
 // for NEW memories produced during the run.
-func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, cwd, entityID string) {
-	memDir := filepath.Join(cwd, "_scratch", "entity-memory")
-	if err := os.MkdirAll(memDir, 0755); err != nil {
-		log.Printf("[delegate] warning: failed to create entity-memory dir at %s: %v", memDir, err)
+func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, cwd, entityID, namespace string) {
+	// Create the current run's namespace folder up front so the agent's
+	// pre-flight `ls` and its own memory write both have a parent dir, even
+	// when this entity has no prior memories.
+	ownDir := filepath.Join(cwd, "_scratch", "entity-memory", namespace)
+	if err := os.MkdirAll(ownDir, 0755); err != nil {
+		log.Printf("[delegate] warning: failed to create entity-memory namespace dir at %s: %v", ownDir, err)
 		return
 	}
 
@@ -190,7 +286,12 @@ func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, cwd, entityI
 
 	written := 0
 	for _, m := range memories {
-		filename := filepath.Join(memDir, m.RunID+".md")
+		dir := filepath.Join(cwd, "_scratch", "entity-memory", memoryNamespace(m.BlueprintRunID, m.RunID))
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			log.Printf("[delegate] warning: failed to create entity-memory namespace dir at %s: %v", dir, err)
+			continue
+		}
+		filename := filepath.Join(dir, m.RunID+".md")
 		if err := os.WriteFile(filename, []byte(m.Content), 0644); err != nil {
 			log.Printf("[delegate] warning: failed to materialize task memory %s: %v", filename, err)
 			continue

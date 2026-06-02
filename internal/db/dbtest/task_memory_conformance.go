@@ -29,6 +29,12 @@ type TaskMemorySeeder struct {
 	// suffix discriminates per-subtest seeds so the unique indexes on
 	// entities/runs don't collide.
 	Run func(t *testing.T, suffix string) (runID, entityID string)
+
+	// BlueprintRun seeds a blueprint + blueprint_run row so a run_memory
+	// row can carry a valid blueprint_run_id (run_memory FKs it with ON
+	// DELETE SET NULL), and returns the blueprint_run id. Only the
+	// round-trip subtest needs it.
+	BlueprintRun func(t *testing.T, suffix string) (blueprintRunID string)
 }
 
 // RunTaskMemoryStoreConformance covers the TaskMemoryStore contract
@@ -60,7 +66,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 	t.Run("UpsertAgentMemory_writes_agent_content", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		runID, entityID := seed.Run(t, "upsert-agent")
-		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "agent wrote this"); err != nil {
+		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "", "agent wrote this"); err != nil {
 			t.Fatalf("UpsertAgentMemory: %v", err)
 		}
 		mem, err := s.GetRunMemory(ctx, orgID, runID)
@@ -88,7 +94,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 			t.Run(tc.name, func(t *testing.T) {
 				s, orgID, seed := mk(t)
 				runID, entityID := seed.Run(t, "empty-"+tc.name)
-				if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, tc.content); err != nil {
+				if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "", tc.content); err != nil {
 					t.Fatalf("UpsertAgentMemory: %v", err)
 				}
 				mem, err := s.GetRunMemory(ctx, orgID, runID)
@@ -114,13 +120,13 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		// between the first agent attempt and the second.
 		s, orgID, seed := mk(t)
 		runID, entityID := seed.Run(t, "idempotent")
-		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "first attempt"); err != nil {
+		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "", "first attempt"); err != nil {
 			t.Fatalf("first upsert: %v", err)
 		}
 		if err := s.UpdateRunMemoryHumanContent(ctx, orgID, runID, "human kept it as-is"); err != nil {
 			t.Fatalf("seed human_content: %v", err)
 		}
-		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "second attempt"); err != nil {
+		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "", "second attempt"); err != nil {
 			t.Fatalf("second upsert: %v", err)
 		}
 		mem, err := s.GetRunMemory(ctx, orgID, runID)
@@ -138,7 +144,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 	t.Run("UpdateRunMemoryHumanContent_lands_on_existing_row", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		runID, entityID := seed.Run(t, "update-human")
-		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "agent self-report"); err != nil {
+		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "", "agent self-report"); err != nil {
 			t.Fatalf("UpsertAgentMemory: %v", err)
 		}
 		if err := s.UpdateRunMemoryHumanContent(ctx, orgID, runID, "Looks good."); err != nil {
@@ -162,7 +168,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 	t.Run("UpdateRunMemoryHumanContent_empty_canonicalizes_to_null", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		runID, entityID := seed.Run(t, "update-blank")
-		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "agent text"); err != nil {
+		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "", "agent text"); err != nil {
 			t.Fatalf("UpsertAgentMemory: %v", err)
 		}
 		if err := s.UpdateRunMemoryHumanContent(ctx, orgID, runID, "   \t  \n  "); err != nil {
@@ -197,7 +203,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		// the slice order.
 		s, orgID, seed := mk(t)
 		run1, entityID := seed.Run(t, "order-first")
-		if err := s.UpsertAgentMemory(ctx, orgID, run1, entityID, "first"); err != nil {
+		if err := s.UpsertAgentMemory(ctx, orgID, run1, entityID, "", "first"); err != nil {
 			t.Fatalf("upsert first: %v", err)
 		}
 		// Sleep so SQLite's second-resolution column doesn't tie. The
@@ -212,7 +218,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		// changed mid-call, so write the second memory under run2 +
 		// entityID (the first entity) by re-pointing — backends accept
 		// any entity_id that exists, and the first entity does.
-		if err := s.UpsertAgentMemory(ctx, orgID, run2, entityID, "second"); err != nil {
+		if err := s.UpsertAgentMemory(ctx, orgID, run2, entityID, "", "second"); err != nil {
 			t.Fatalf("upsert second: %v", err)
 		}
 		mems, err := s.GetMemoriesForEntity(ctx, orgID, entityID)
@@ -235,7 +241,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		// here would silently corrupt memory replay.
 		s, orgID, seed := mk(t)
 		runID, entityID := seed.Run(t, "separator")
-		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "agent reasoning"); err != nil {
+		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "", "agent reasoning"); err != nil {
 			t.Fatalf("upsert agent: %v", err)
 		}
 		if err := s.UpdateRunMemoryHumanContent(ctx, orgID, runID, "human verdict"); err != nil {
@@ -268,7 +274,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		// to skip past.
 		s, orgID, seed := mk(t)
 		runID, entityID := seed.Run(t, "agent-only")
-		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "agent reasoning only"); err != nil {
+		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "", "agent reasoning only"); err != nil {
 			t.Fatalf("upsert: %v", err)
 		}
 		mems, err := s.GetMemoriesForEntity(ctx, orgID, entityID)
@@ -280,6 +286,50 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		}
 		if mems[0].Content != "agent reasoning only" {
 			t.Errorf("Content = %q, want %q (no separator when human_content is NULL)", mems[0].Content, "agent reasoning only")
+		}
+	})
+
+	t.Run("blueprint_run_id_round_trips", func(t *testing.T) {
+		// The denormalized blueprint_run_id is what groups one blueprint
+		// run's memory under a shared namespace folder. Pin that it survives
+		// the write and both read paths, and that an empty value
+		// canonicalizes to SQL NULL (the N=1 / standalone-run case).
+		s, orgID, seed := mk(t)
+		runID, entityID := seed.Run(t, "bp-roundtrip")
+		blueprintRunID := seed.BlueprintRun(t, "bp-roundtrip")
+		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, blueprintRunID, "step memory"); err != nil {
+			t.Fatalf("UpsertAgentMemory: %v", err)
+		}
+		mem, err := s.GetRunMemory(ctx, orgID, runID)
+		if err != nil || mem == nil {
+			t.Fatalf("GetRunMemory: mem=%v err=%v", mem, err)
+		}
+		if mem.BlueprintRunID != blueprintRunID {
+			t.Errorf("GetRunMemory BlueprintRunID = %q, want %q", mem.BlueprintRunID, blueprintRunID)
+		}
+		mems, err := s.GetMemoriesForEntity(ctx, orgID, entityID)
+		if err != nil {
+			t.Fatalf("GetMemoriesForEntity: %v", err)
+		}
+		if len(mems) != 1 {
+			t.Fatalf("len(mems) = %d, want 1", len(mems))
+		}
+		if mems[0].BlueprintRunID != blueprintRunID {
+			t.Errorf("GetMemoriesForEntity BlueprintRunID = %q, want %q", mems[0].BlueprintRunID, blueprintRunID)
+		}
+
+		// Standalone run: empty blueprintRunID canonicalizes to SQL NULL and
+		// reads back empty.
+		run2, ent2 := seed.Run(t, "bp-null")
+		if err := s.UpsertAgentMemory(ctx, orgID, run2, ent2, "", "standalone memory"); err != nil {
+			t.Fatalf("UpsertAgentMemory standalone: %v", err)
+		}
+		mem2, err := s.GetRunMemory(ctx, orgID, run2)
+		if err != nil || mem2 == nil {
+			t.Fatalf("GetRunMemory standalone: mem=%v err=%v", mem2, err)
+		}
+		if mem2.BlueprintRunID != "" {
+			t.Errorf("standalone BlueprintRunID = %q, want empty (NULL)", mem2.BlueprintRunID)
 		}
 	})
 

@@ -468,8 +468,8 @@ func (s *Spawner) terminateBlueprint(
 		}
 	}
 	// Aborted / failed / cancelled blueprints intentionally do NOT mark
-	// the task done — leave it in the queue so a human can inspect
-	// _scratch/handoff.md and decide what to do next.
+	// the task done — leave it in the queue so a human can inspect the
+	// steps' run memory (durable in run_memory) and decide what to do next.
 
 	if !skipCleanup {
 		s.runBlueprintWorktreeCleanup(blueprintRunID, cfg)
@@ -583,7 +583,10 @@ func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep
 		}
 		fmt.Fprintf(&b, "Next step: %q\n", nextLabel)
 	}
-	b.WriteString("Handoff notes from prior steps: ./_scratch/handoff.md\n")
+	// Prior steps' findings are their memory files in this blueprint run's
+	// namespace folder under _scratch/entity-memory/ — the <entity_memory>
+	// contract tells the agent to read them first as its handoff. No separate
+	// handoff file.
 	return b.String()
 }
 

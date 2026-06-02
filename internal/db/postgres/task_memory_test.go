@@ -34,6 +34,10 @@ func TestTaskMemoryStore_Postgres(t *testing.T) {
 				t.Helper()
 				return seedPgRunForTaskMemory(t, h, orgID, userID, promptID, suffix)
 			},
+			BlueprintRun: func(t *testing.T, suffix string) string {
+				t.Helper()
+				return seedPgBlueprintRunForTaskMemory(t, h, orgID, userID, suffix)
+			},
 		}
 		return stores.TaskMemory, orgID, seed
 	})
@@ -60,7 +64,7 @@ func TestTaskMemoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 
 	// Write the memory in orgA via the admin-pool variant (the
 	// delegate spawner's call site).
-	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgA, runA, entA, "orgA narrative"); err != nil {
+	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgA, runA, entA, "", "orgA narrative"); err != nil {
 		t.Fatalf("UpsertAgentMemorySystem orgA: %v", err)
 	}
 
@@ -138,7 +142,7 @@ func TestTaskMemoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	// Seed a memory row in orgA via admin so the row exists.
 	stores := pgstore.New(h.AdminDB, h.AdminDB)
 	ctx := context.Background()
-	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgA, runA, entA, "orgA memory"); err != nil {
+	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgA, runA, entA, "", "orgA memory"); err != nil {
 		t.Fatalf("seed memory in orgA: %v", err)
 	}
 
@@ -186,10 +190,52 @@ func TestTaskMemoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// hit USING instead.
 		freshRun, freshEnt := seedPgRunForTaskMemory(t, h, orgA, alice, promptA, "rls-write")
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			return pgstore.NewForTx(tx).TaskMemory.UpsertAgentMemory(ctx, orgA, freshRun, freshEnt, "cross-org write")
+			return pgstore.NewForTx(tx).TaskMemory.UpsertAgentMemory(ctx, orgA, freshRun, freshEnt, "", "cross-org write")
 		})
 		pgtest.AssertRLSViolation(t, err)
 	})
+}
+
+// TestTaskMemoryStore_Postgres_BlueprintRunCrossOrgFKRejected pins the
+// tenant-isolation guarantee of the composite (blueprint_run_id, org_id) FK:
+// a run_memory row in orgA cannot reference a blueprint_run that lives in orgB.
+// RLS's WITH CHECK only validates org_id, not which blueprint_run the row
+// points at, so without the composite FK a confused/hostile write (even one
+// that passes RLS) could plant a cross-org reference. The FK applies on the
+// admin pool too (it bypasses RLS, not foreign keys), so this is real defense
+// in depth.
+func TestTaskMemoryStore_Postgres_BlueprintRunCrossOrgFKRejected(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	ctx := context.Background()
+
+	orgA, userA := seedPgTaskMemoryOrg(t, h)
+	orgB, userB := seedPgTaskMemoryOrg(t, h)
+	promptA := seedPgTaskMemoryPrompt(t, h, orgA, userA)
+
+	runA, entA := seedPgRunForTaskMemory(t, h, orgA, userA, promptA, "fk-A")
+	blueprintRunB := seedPgBlueprintRunForTaskMemory(t, h, orgB, userB, "fk-B")
+
+	// orgA memory referencing orgB's blueprint_run → FK violation. The
+	// composite (blueprint_run_id, org_id) target (blueprintRunB, orgA) does
+	// not exist in blueprint_runs (that row is org_id=orgB).
+	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgA, runA, entA, blueprintRunB, "cross-org blueprint ref"); err == nil {
+		t.Fatalf("expected FK violation writing orgA memory with orgB blueprint_run_id; got nil")
+	}
+
+	// Same-org blueprint_run is accepted — the FK only blocks cross-org refs.
+	blueprintRunA := seedPgBlueprintRunForTaskMemory(t, h, orgA, userA, "fk-A2")
+	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgA, runA, entA, blueprintRunA, "same-org blueprint ref"); err != nil {
+		t.Fatalf("same-org blueprint_run_id should be accepted: %v", err)
+	}
+	mem, err := stores.TaskMemory.GetRunMemory(ctx, orgA, runA)
+	if err != nil || mem == nil {
+		t.Fatalf("GetRunMemory: mem=%v err=%v", mem, err)
+	}
+	if mem.BlueprintRunID != blueprintRunA {
+		t.Errorf("BlueprintRunID = %q, want %q", mem.BlueprintRunID, blueprintRunA)
+	}
 }
 
 // seedPgTaskMemoryOrg builds the auth user + public user + org +
@@ -291,4 +337,58 @@ func seedPgRunForTaskMemory(t *testing.T, h *pgtest.Harness, orgID, userID, prom
 		t.Fatalf("seed run: %v", err)
 	}
 	return runID, entityID
+}
+
+// seedPgBlueprintRunForTaskMemory seeds the entity + event + task + blueprint +
+// blueprint_run FK chain a run_memory.blueprint_run_id can point at (the column
+// FKs blueprint_runs(id) ON DELETE SET NULL). Returns the blueprint_run id.
+func seedPgBlueprintRunForTaskMemory(t *testing.T, h *pgtest.Harness, orgID, userID, suffix string) string {
+	t.Helper()
+	conn := h.AdminDB
+	now := time.Now().UTC()
+	teamID := firstTeamForOrg(t, h, orgID)
+
+	entityID := uuid.New().String()
+	sourceID := fmt.Sprintf("bp-run-%s-%s", suffix, entityID[:8])
+	if _, err := conn.Exec(`
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, state)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Blueprint Run Conformance', 'https://example/bp', '{}'::jsonb, $4, 'active')
+	`, entityID, orgID, sourceID, now); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+
+	eventID := uuid.New().String()
+	const eventType = "github:pr:opened"
+	if _, err := conn.Exec(`
+		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
+		VALUES ($1, $2, $3, $4, '', '{}'::jsonb, $5)
+	`, eventID, orgID, entityID, eventType, now); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+
+	taskID := uuid.New().String()
+	if _, err := conn.Exec(`
+		INSERT INTO tasks (id, org_id, creator_user_id, team_id, visibility, entity_id, event_type, dedup_key, primary_event_id,
+		                   status, scoring_status, priority_score, created_at)
+		VALUES ($1, $2, $3, $4, 'team', $5, $6, '', $7, 'done', 'pending', 0.5, $8)
+	`, taskID, orgID, userID, teamID, entityID, eventType, eventID, now); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+
+	blueprintID := "bp_" + uuid.New().String()
+	if _, err := conn.Exec(`
+		INSERT INTO blueprints (id, org_id, creator_user_id, team_id, name, source, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 'BP', 'user', now(), now())
+	`, blueprintID, orgID, userID, teamID); err != nil {
+		t.Fatalf("seed blueprint: %v", err)
+	}
+
+	blueprintRunID := uuid.New().String()
+	if _, err := conn.Exec(`
+		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, worktree_path)
+		VALUES ($1, $2, $3, $4, $5, 'manual', $6)
+	`, blueprintRunID, orgID, userID, blueprintID, taskID, "/tmp/wt-"+blueprintRunID); err != nil {
+		t.Fatalf("seed blueprint_run: %v", err)
+	}
+	return blueprintRunID
 }

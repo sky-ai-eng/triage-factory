@@ -989,14 +989,27 @@ CREATE TABLE run_memory (
     id             TEXT PRIMARY KEY,
     run_id         TEXT NOT NULL REFERENCES runs(id)     ON DELETE CASCADE,
     entity_id      TEXT NOT NULL REFERENCES entities(id),
+    -- Denormalized from the run (like entity_id): the blueprint run this
+    -- memory belongs to, or NULL for a standalone run. Groups every step of
+    -- one blueprint run's memory together so a step reads its siblings as its
+    -- handoff; the on-disk namespace folder falls back to run_id when NULL.
+    -- ON DELETE SET NULL so deleting a blueprint run doesn't destroy the
+    -- durable memory rows. Single-column FK here (vs the composite
+    -- (blueprint_run_id, org_id) the Postgres baseline uses for tenant
+    -- isolation): local mode is N=1, blueprint_runs has no org_id column, and
+    -- cross-org references are impossible with one org — so there's nothing to
+    -- scope. Mirrors the documented "Postgres-only scoping; SQLite/local stays
+    -- unscoped" rule.
+    blueprint_run_id TEXT REFERENCES blueprint_runs(id) ON DELETE SET NULL,
     agent_content  TEXT,
     human_content  TEXT,
     created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     org_id         TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
     UNIQUE(run_id)
 );
-CREATE INDEX idx_run_memory_entity_created ON run_memory(entity_id, created_at ASC);
-CREATE INDEX idx_run_memory_run            ON run_memory(run_id);
+CREATE INDEX idx_run_memory_entity_created   ON run_memory(entity_id, created_at ASC);
+CREATE INDEX idx_run_memory_entity_blueprint ON run_memory(entity_id, blueprint_run_id);
+CREATE INDEX idx_run_memory_run              ON run_memory(run_id);
 
 CREATE TABLE run_worktrees (
     run_id         TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,

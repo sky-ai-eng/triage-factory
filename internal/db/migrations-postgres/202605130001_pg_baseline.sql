@@ -1164,6 +1164,7 @@ CREATE TABLE public.run_memory (
     org_id uuid NOT NULL,
     run_id uuid NOT NULL,
     entity_id uuid NOT NULL,
+    blueprint_run_id uuid,
     agent_content text,
     human_content text,
     created_at timestamp with time zone DEFAULT now() NOT NULL
@@ -2267,6 +2268,13 @@ CREATE INDEX idx_run_artifacts_run ON public.run_artifacts USING btree (run_id);
 --
 
 CREATE INDEX idx_run_memory_entity_created ON public.run_memory USING btree (entity_id, created_at);
+
+
+--
+-- Name: idx_run_memory_entity_blueprint; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_run_memory_entity_blueprint ON public.run_memory USING btree (entity_id, blueprint_run_id);
 
 
 --
@@ -5380,6 +5388,19 @@ ALTER TABLE ONLY public.blueprint_runs
 
 ALTER TABLE ONLY public.runs
     ADD CONSTRAINT runs_blueprint_run_fkey FOREIGN KEY (blueprint_run_id, org_id) REFERENCES public.blueprint_runs(id, org_id);
+
+-- run_memory.blueprint_run_id is denormalized from the run and grouped per
+-- blueprint run. Composite (blueprint_run_id, org_id) FK, matching the
+-- tenant-isolation pattern every other cross-table reference here uses: a
+-- cross-org blueprint_run reference is structurally impossible at the DB level
+-- — defense in depth beyond RLS, whose WITH CHECK only validates org_id, not
+-- which blueprint_run the row points at. Lives in this block (not the run_memory
+-- FK section above) because blueprint_runs is created here. ON DELETE SET NULL
+-- is scoped to blueprint_run_id alone (the PG 15 column-list form) so deleting a
+-- blueprint run keeps the durable memory row with its org_id intact; a bare SET
+-- NULL would try to null org_id too (NOT NULL) and fail the delete.
+ALTER TABLE ONLY public.run_memory
+    ADD CONSTRAINT run_memory_blueprint_run_id_org_id_fkey FOREIGN KEY (blueprint_run_id, org_id) REFERENCES public.blueprint_runs(id, org_id) ON DELETE SET NULL (blueprint_run_id);
 
 ALTER TABLE public.blueprint_steps ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.blueprint_runs  ENABLE ROW LEVEL SECURITY;

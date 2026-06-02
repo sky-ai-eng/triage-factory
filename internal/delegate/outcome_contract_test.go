@@ -66,37 +66,46 @@ func TestNonterminalFragmentFramesContinueAsDefault(t *testing.T) {
 	}
 }
 
-// --- Outcome-validity retry loop ------------------------------------------
+// --- Consolidated completion-gate retry loop ------------------------------
 
 func res(body string) *agentproc.Result { return &agentproc.Result{Result: body} }
 
-// TestOutcomeRetryLoop_ValidInitialSkipsRetry: a completion that already
-// carries a valid outcome is returned untouched and never resumes.
-func TestOutcomeRetryLoop_ValidInitialSkipsRetry(t *testing.T) {
+// memPresentTrue / memPresentFalse are the two fixed memoryPresent predicates
+// the outcome-focused loop tests use; the consolidated tests below use a
+// closure that flips when the resume "writes" the file.
+func memPresentTrue() bool  { return true }
+func memPresentFalse() bool { return false }
+
+// TestCompletionRetryLoop_ValidInitialSkipsRetry: a completion that already
+// has its memory file AND a valid outcome is returned untouched, never resumes.
+func TestCompletionRetryLoop_ValidInitialSkipsRetry(t *testing.T) {
 	calls := 0
-	resume := func() (*agentproc.Result, error) { calls++; return res(`{"outcome":"finish","summary":"ok"}`), nil }
-	got := runOutcomeRetryLoop("r1", res(`{"outcome":"finish","summary":"done"}`), resume, maxOutcomeRetries)
+	resume := func(string) (*agentproc.Result, error) {
+		calls++
+		return res(`{"outcome":"finish","summary":"ok"}`), nil
+	}
+	got := runCompletionRetryLoop("r1", "ns", res(`{"outcome":"finish","summary":"done"}`), memPresentTrue, resume, maxCompletionRetries)
 	if calls != 0 {
-		t.Errorf("resume called %d times for a valid initial envelope; want 0", calls)
+		t.Errorf("resume called %d times for a valid initial envelope with memory present; want 0", calls)
 	}
 	if !completionHasValidOutcome(got) {
 		t.Errorf("valid initial envelope should pass through")
 	}
 }
 
-// TestOutcomeRetryLoop_AcceptsValidOnRetry2 pins the acceptance: an
-// unparseable envelope re-prompts, and a valid outcome on the second attempt
-// is accepted (no further retries).
-func TestOutcomeRetryLoop_AcceptsValidOnRetry2(t *testing.T) {
+// TestCompletionRetryLoop_AcceptsValidOnRetry2 pins the acceptance: an
+// unparseable envelope (memory present) re-prompts, and a valid outcome on the
+// second attempt is accepted (no further retries).
+func TestCompletionRetryLoop_AcceptsValidOnRetry2(t *testing.T) {
 	calls := 0
-	resume := func() (*agentproc.Result, error) {
+	resume := func(string) (*agentproc.Result, error) {
 		calls++
 		if calls < 2 {
 			return res(`not json`), nil // attempt 1 still invalid
 		}
 		return res(`{"outcome":"finish","summary":"recovered"}`), nil // attempt 2 valid
 	}
-	got := runOutcomeRetryLoop("r2", res(`{"summary":"no outcome"}`), resume, maxOutcomeRetries)
+	got := runCompletionRetryLoop("r2", "ns", res(`{"summary":"no outcome"}`), memPresentTrue, resume, maxCompletionRetries)
 	if calls != 2 {
 		t.Errorf("resume called %d times; want exactly 2 (valid on retry-2, then stop)", calls)
 	}
@@ -108,27 +117,27 @@ func TestOutcomeRetryLoop_AcceptsValidOnRetry2(t *testing.T) {
 	}
 }
 
-// TestOutcomeRetryLoop_ExhaustsThreeRetries: when no valid outcome ever
-// arrives, the loop resumes exactly maxOutcomeRetries (3) times before giving
+// TestCompletionRetryLoop_ExhaustsThreeRetries: when nothing ever satisfies the
+// gate, the loop resumes exactly maxCompletionRetries (3) times before giving
 // up to the caller's fallback.
-func TestOutcomeRetryLoop_ExhaustsThreeRetries(t *testing.T) {
+func TestCompletionRetryLoop_ExhaustsThreeRetries(t *testing.T) {
 	calls := 0
-	resume := func() (*agentproc.Result, error) { calls++; return res(`still not valid`), nil }
-	got := runOutcomeRetryLoop("r3", res(`{"summary":"no outcome"}`), resume, maxOutcomeRetries)
+	resume := func(string) (*agentproc.Result, error) { calls++; return res(`still not valid`), nil }
+	got := runCompletionRetryLoop("r3", "ns", res(`{"summary":"no outcome"}`), memPresentTrue, resume, maxCompletionRetries)
 	if calls != 3 {
-		t.Errorf("resume called %d times; want 3 (maxOutcomeRetries)", calls)
+		t.Errorf("resume called %d times; want 3 (maxCompletionRetries)", calls)
 	}
 	if completionHasValidOutcome(got) {
 		t.Errorf("loop should give up with no valid outcome after exhausting retries")
 	}
 }
 
-// TestOutcomeRetryLoop_ErrorHaltsRetries: a resume error stops the loop and
+// TestCompletionRetryLoop_ErrorHaltsRetries: a resume error stops the loop and
 // preserves the accumulated completion rather than crashing.
-func TestOutcomeRetryLoop_ErrorHaltsRetries(t *testing.T) {
+func TestCompletionRetryLoop_ErrorHaltsRetries(t *testing.T) {
 	calls := 0
-	resume := func() (*agentproc.Result, error) { calls++; return nil, context.DeadlineExceeded }
-	got := runOutcomeRetryLoop("r4", res(`{"summary":"no outcome"}`), resume, maxOutcomeRetries)
+	resume := func(string) (*agentproc.Result, error) { calls++; return nil, context.DeadlineExceeded }
+	got := runCompletionRetryLoop("r4", "ns", res(`{"summary":"no outcome"}`), memPresentTrue, resume, maxCompletionRetries)
 	if calls != 1 {
 		t.Errorf("resume called %d times; a resume error should halt after the first attempt", calls)
 	}
@@ -137,21 +146,120 @@ func TestOutcomeRetryLoop_ErrorHaltsRetries(t *testing.T) {
 	}
 }
 
-// TestOutcomeRetryLoop_RepromptsAbortMissingReason: an abort with no reason is
-// re-prompted (it's the deliberate-stop decision; we collect the why), and a
+// TestCompletionRetryLoop_RepromptsAbortMissingReason: an abort with no reason
+// is re-prompted (it's the deliberate-stop decision; we collect the why), and a
 // reason supplied on the retry is accepted.
-func TestOutcomeRetryLoop_RepromptsAbortMissingReason(t *testing.T) {
+func TestCompletionRetryLoop_RepromptsAbortMissingReason(t *testing.T) {
 	calls := 0
-	resume := func() (*agentproc.Result, error) {
+	resume := func(string) (*agentproc.Result, error) {
 		calls++
 		return res(`{"outcome":"abort","summary":"stopped","reason":"needs a human to rotate the token"}`), nil
 	}
-	got := runOutcomeRetryLoop("ra", res(`{"outcome":"abort","summary":"stopped"}`), resume, maxOutcomeRetries)
+	got := runCompletionRetryLoop("ra", "ns", res(`{"outcome":"abort","summary":"stopped"}`), memPresentTrue, resume, maxCompletionRetries)
 	if calls != 1 {
 		t.Errorf("resume called %d times; a reasonless abort should re-prompt once then accept", calls)
 	}
 	if !completionHasValidOutcome(got) {
 		t.Errorf("an abort with a reason on retry should be accepted")
+	}
+}
+
+// TestCompletionRetryLoop_MissingBoth_AsksForBothThenAccepts is the headline
+// consolidation case: a run missing BOTH its memory file and a valid outcome
+// gets a single re-invoke whose correction names both, and is accepted once the
+// resume supplies both.
+func TestCompletionRetryLoop_MissingBoth_AsksForBothThenAccepts(t *testing.T) {
+	memWritten := false
+	var lastMsg string
+	calls := 0
+	resume := func(msg string) (*agentproc.Result, error) {
+		calls++
+		lastMsg = msg
+		memWritten = true // the agent writes its memory file on the resume
+		return res(`{"outcome":"finish","summary":"did both"}`), nil
+	}
+	got := runCompletionRetryLoop("rb", "ns-x", res(`{"summary":"no outcome"}`),
+		func() bool { return memWritten }, resume, maxCompletionRetries)
+	if calls != 1 {
+		t.Errorf("resume called %d times; both satisfied on retry-1 should stop, want 1", calls)
+	}
+	// The correction must name BOTH the namespaced memory path and the outcome.
+	if !strings.Contains(lastMsg, "entity-memory/ns-x/rb.md") {
+		t.Errorf("missing-both correction should name the namespaced memory path; got %q", lastMsg)
+	}
+	if !strings.Contains(lastMsg, "outcome") {
+		t.Errorf("missing-both correction should ask for a valid outcome; got %q", lastMsg)
+	}
+	if !completionHasValidOutcome(got) {
+		t.Errorf("both satisfied on retry should be accepted")
+	}
+}
+
+// TestCompletionRetryLoop_MemoryOnly_RepromptsForMemory: a valid outcome but no
+// memory file re-prompts for the memory file only (not the outcome message),
+// and accepts once the file appears.
+func TestCompletionRetryLoop_MemoryOnly_RepromptsForMemory(t *testing.T) {
+	memWritten := false
+	var lastMsg string
+	resume := func(msg string) (*agentproc.Result, error) {
+		lastMsg = msg
+		memWritten = true
+		return res(`{"outcome":"finish","summary":"wrote memory"}`), nil
+	}
+	got := runCompletionRetryLoop("rm", "ns-y", res(`{"outcome":"finish","summary":"done"}`),
+		func() bool { return memWritten }, resume, maxCompletionRetries)
+	if !strings.Contains(lastMsg, "entity-memory/ns-y/rm.md") {
+		t.Errorf("memory-only correction should name the namespaced memory path; got %q", lastMsg)
+	}
+	if strings.Contains(lastMsg, "Re-read the completion") {
+		t.Errorf("memory-only correction must not be the outcome-only message; got %q", lastMsg)
+	}
+	if !completionHasValidOutcome(got) {
+		t.Errorf("memory present + valid outcome should be accepted")
+	}
+}
+
+// TestCompletionRetryLoop_YieldDuringResumeStops: a gate resume that ends in a
+// yield stops the loop immediately (the caller parks it), even with the memory
+// file still absent — a pause isn't a termination.
+func TestCompletionRetryLoop_YieldDuringResumeStops(t *testing.T) {
+	calls := 0
+	resume := func(string) (*agentproc.Result, error) {
+		calls++
+		return res(`{"outcome":"yield","yield":{"type":"confirmation","message":"Proceed?"}}`), nil
+	}
+	got := runCompletionRetryLoop("ry", "ns-z", res(`{"summary":"no outcome"}`), memPresentFalse, resume, maxCompletionRetries)
+	if calls != 1 {
+		t.Errorf("a yield during resume should stop the loop after one attempt; calls=%d", calls)
+	}
+	if parsed := parseAgentResult(got.Result); parsed == nil || !parsed.isYield() {
+		t.Errorf("loop should return the yield completion for the caller to park, got %+v", parsed)
+	}
+}
+
+// TestCompletionRetryMessage_NamesWhatsMissing pins the three correction
+// shapes: memory-only, outcome-only, and both.
+func TestCompletionRetryMessage_NamesWhatsMissing(t *testing.T) {
+	// Memory missing, outcome valid → memory-only.
+	memOnly := completionRetryMessage("nsA", "runA", false, true)
+	if !strings.Contains(memOnly, "entity-memory/nsA/runA.md") {
+		t.Errorf("memory-only message should name the path; got %q", memOnly)
+	}
+	if strings.Contains(memOnly, "Re-read the completion") {
+		t.Errorf("memory-only message should not include the outcome-only phrasing; got %q", memOnly)
+	}
+	// Memory present, outcome missing → outcome-only.
+	outcomeOnly := completionRetryMessage("nsB", "runB", true, false)
+	if strings.Contains(outcomeOnly, "entity-memory/nsB/runB.md") {
+		t.Errorf("outcome-only message should not name the memory path; got %q", outcomeOnly)
+	}
+	if !strings.Contains(outcomeOnly, "outcome") {
+		t.Errorf("outcome-only message should mention the outcome; got %q", outcomeOnly)
+	}
+	// Both missing → names both.
+	both := completionRetryMessage("nsC", "runC", false, false)
+	if !strings.Contains(both, "entity-memory/nsC/runC.md") || !strings.Contains(both, "outcome") {
+		t.Errorf("both-missing message should name memory path AND outcome; got %q", both)
 	}
 }
 

@@ -3,6 +3,8 @@ package delegate
 import (
 	"context"
 	"database/sql"
+	"os"
+	"path/filepath"
 	"testing"
 
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -128,6 +130,45 @@ func TestProcessCompletion_BlueprintStepContinueNoPendingStaysContinue(t *testin
 	// completion must not close the task.
 	if got := readTaskStatus(t, database, taskID); got == "done" {
 		t.Errorf("task.status = done; a blueprint step completion must not close the task")
+	}
+}
+
+// TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow pins the write
+// side of the namespacing: processCompletion ingests the agent's memory file
+// from _scratch/entity-memory/<blueprint_run_id>/<run_id>.md (not the old
+// top-level path) and stamps the run's blueprint_run_id onto the run_memory
+// row, so the next step's materializer folders it correctly.
+func TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow(t *testing.T) {
+	s, database, runID, taskID := setupAdvanceFixture(t, "bp-memrow")
+	makeRunBlueprintStep(t, database, runID, taskID) // sets blueprint_run_id = "bpr-<runID>"
+	task := loadTask(t, s, taskID)
+	cwd := t.TempDir()
+
+	// Stage the agent's memory file at the namespaced path the contract
+	// dictates. The blueprint_run_id is the namespace folder.
+	blueprintRunID := "bpr-" + runID
+	memDir := filepath.Join(cwd, "_scratch", "entity-memory", blueprintRunID)
+	if err := os.MkdirAll(memDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(memDir, runID+".md"), []byte("step did X; next step needs Y"), 0o644); err != nil {
+		t.Fatalf("write memory: %v", err)
+	}
+
+	// No session id → the gate can't (and needn't) retry; the staged file plus
+	// a valid continue outcome already satisfy it.
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, task,
+		res(`{"outcome":"continue","summary":"did step work"}`), cwd, "", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
+
+	mem, err := sqlitestore.New(database).TaskMemory.GetRunMemory(context.Background(), runmode.LocalDefaultOrg, runID)
+	if err != nil || mem == nil {
+		t.Fatalf("GetRunMemory: mem=%v err=%v", mem, err)
+	}
+	if mem.Content != "step did X; next step needs Y" {
+		t.Errorf("agent_content = %q; processCompletion should ingest the file from the namespaced path", mem.Content)
+	}
+	if mem.BlueprintRunID != blueprintRunID {
+		t.Errorf("run_memory.blueprint_run_id = %q, want %q", mem.BlueprintRunID, blueprintRunID)
 	}
 }
 

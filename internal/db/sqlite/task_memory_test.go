@@ -29,6 +29,10 @@ func TestTaskMemoryStore_SQLite(t *testing.T) {
 				t.Helper()
 				return seedSQLiteRunForTaskMemory(t, conn, suffix)
 			},
+			BlueprintRun: func(t *testing.T, suffix string) (blueprintRunID string) {
+				t.Helper()
+				return seedSQLiteBlueprintRunForTaskMemory(t, conn, suffix)
+			},
 		}
 		return stores.TaskMemory, runmode.LocalDefaultOrg, seed
 	})
@@ -45,10 +49,10 @@ func TestTaskMemoryStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	ctx := context.Background()
 
 	const badOrg = "11111111-1111-1111-1111-111111111111"
-	if err := stores.TaskMemory.UpsertAgentMemory(ctx, badOrg, "r", "e", "x"); err == nil {
+	if err := stores.TaskMemory.UpsertAgentMemory(ctx, badOrg, "r", "e", "", "x"); err == nil {
 		t.Error("UpsertAgentMemory(non-local org) should error")
 	}
-	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, badOrg, "r", "e", "x"); err == nil {
+	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, badOrg, "r", "e", "", "x"); err == nil {
 		t.Error("UpsertAgentMemorySystem(non-local org) should error")
 	}
 	if err := stores.TaskMemory.UpdateRunMemoryHumanContent(ctx, badOrg, "r", "x"); err == nil {
@@ -110,4 +114,50 @@ func seedSQLiteRunForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (runI
 		t.Fatalf("seed run: %v", err)
 	}
 	return runID, entityID
+}
+
+// seedSQLiteBlueprintRunForTaskMemory seeds the entity + event + task +
+// blueprint + blueprint_run FK chain a run_memory.blueprint_run_id can point
+// at (the column FKs blueprint_runs(id) ON DELETE SET NULL). Returns the
+// blueprint_run id. Independent of seedSQLiteRunForTaskMemory's run — the
+// round-trip test only needs a valid FK target.
+func seedSQLiteBlueprintRunForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (blueprintRunID string) {
+	t.Helper()
+	now := time.Now().UTC()
+	entityID := uuid.New().String()
+	sourceID := fmt.Sprintf("bp-run-%s-%d", suffix, now.UnixNano())
+	if _, err := conn.Exec(`
+		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, state)
+		VALUES (?, 'github', ?, 'pr', 'Blueprint Run Conformance', 'https://example/bp', '{}', ?, 'active')
+	`, entityID, sourceID, now); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	eventID := uuid.New().String()
+	const eventType = "github:pr:opened"
+	if _, err := conn.Exec(`
+		INSERT INTO events (id, entity_id, event_type, dedup_key) VALUES (?, ?, ?, '')
+	`, eventID, entityID, eventType); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	taskID := uuid.New().String()
+	if _, err := conn.Exec(`
+		INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
+		VALUES (?, ?, ?, ?, 'done')
+	`, taskID, entityID, eventType, eventID); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	blueprintID := "bp_" + uuid.New().String()
+	if _, err := conn.Exec(`
+		INSERT INTO blueprints (id, name, source, creator_user_id, team_id) VALUES (?, 'BP', 'user', ?, ?)
+	`, blueprintID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
+		t.Fatalf("seed blueprint: %v", err)
+	}
+	blueprintRunID = uuid.New().String()
+	if _, err := conn.Exec(`
+		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, worktree_path)
+		VALUES (?, ?, ?, 'manual', ?)
+	`, blueprintRunID, blueprintID, taskID, "/tmp/wt-"+blueprintRunID); err != nil {
+		t.Fatalf("seed blueprint_run: %v", err)
+	}
+	return blueprintRunID
 }
