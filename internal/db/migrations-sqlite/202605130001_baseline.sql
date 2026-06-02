@@ -826,7 +826,7 @@ CREATE TABLE pending_firings (
 CREATE INDEX        idx_pending_firings_entity_pending ON pending_firings(entity_id, queued_at) WHERE status = 'pending';
 CREATE UNIQUE INDEX idx_pending_firings_dedup          ON pending_firings(task_id, trigger_id)  WHERE status = 'pending';
 
--- === Durable router event queue (SKY-414) ================================
+-- === Durable router event queue =========================================
 -- The in-memory event bus drops events for slow subscribers under burst
 -- (Publish is a non-blocking send onto a 256-deep channel). The router is
 -- the system of record — it persists event rows and creates tasks — so it

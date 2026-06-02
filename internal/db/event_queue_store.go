@@ -8,8 +8,8 @@ import (
 )
 
 // EventQueueStore owns the event_queue table — the durable, DB-backed
-// queue the router drains instead of riding the lossy in-memory bus
-// (SKY-414). It is a transactional-outbox: Enqueue writes the events
+// queue the router drains instead of riding the lossy in-memory bus.
+// It is a transactional-outbox: Enqueue writes the events
 // audit row and the queue row in one transaction, so a recorded event is
 // always routable and a queued event always has its audit row.
 //

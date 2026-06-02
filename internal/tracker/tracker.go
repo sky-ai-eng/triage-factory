@@ -18,7 +18,7 @@ import (
 )
 
 // Publisher is the event sink the tracker emits to. In production it's
-// the SKY-414 ingestor, which durably enqueues router-bound github:/jira:
+// the durable ingestor, which enqueues router-bound github:/jira:
 // events (so the router can't drop them under burst) and forwards every
 // event to the in-memory bus for cosmetic subscribers. The plain
 // *eventbus.Bus also satisfies this interface, so tests (and any purely

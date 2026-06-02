@@ -958,7 +958,7 @@ func main() {
 	// their own schedule without sharing the server handler's cache.
 	ghResolver := ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil)
 
-	// SKY-414: the durable ingest seam. The poller/tracker emit through
+	// The durable ingest seam. The poller/tracker emit through
 	// the ingestor instead of straight onto the bus — github:/jira: events
 	// are durably enqueued (so the router can't drop them under burst) and
 	// every event is still forwarded to the bus for the loss-tolerant
@@ -1094,7 +1094,7 @@ func main() {
 	// matching triggers, runs inline close checks. Also handles post-scoring
 	// re-derive via the scorer callback wired above.
 	eventRouter = routing.NewRouter(stores.Prompts, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users, stores.Tasks, stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, stores.TeamGitHubRepos, stores.JiraStatusRules, stores.TeamGitHubGroups, spawner, scorer, wsHub)
-	// SKY-414: the router no longer subscribes to the lossy in-memory bus
+	// The router no longer subscribes to the lossy in-memory bus
 	// (which dropped events for slow subscribers under burst, losing event
 	// rows and tasks). It drains the durable event_queue instead — the
 	// ingestor enqueues github:/jira: events there at emit time, and
@@ -1118,7 +1118,7 @@ func main() {
 	// today, so the goroutine lives for the process lifetime.
 	go eventRouter.RunDrainSweeper(context.Background(), 30*time.Second)
 
-	// SKY-414: the durable event-queue drain worker. Claims github:/jira:
+	// The durable event-queue drain worker. Claims github:/jira:
 	// events the ingestor enqueued, routes them (the work the bus
 	// subscription used to do), and marks them done. Woken by eventWake
 	// after each enqueue; the floor scan is the correctness backstop and

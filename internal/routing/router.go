@@ -62,7 +62,7 @@ type Router struct {
 	entities     dbpkg.EntityStore           // SKY-284: closed-entity guard + entity-terminating close cascade
 	firings      dbpkg.PendingFiringsStore   // SKY-289: per-entity firing queue + active-run gate
 	events       dbpkg.EventStore            // SKY-305: admin-pool RecordSystem + GetMetadataSystem for the background subscriber
-	eventQueue   dbpkg.EventQueueStore       // SKY-414: durable router queue the drain worker claims from; set post-construction via SetEventQueue (nil → worker is a no-op)
+	eventQueue   dbpkg.EventQueueStore       // durable router queue the drain worker claims from; set post-construction via SetEventQueue (nil → worker is a no-op)
 	orgs         dbpkg.OrgsStore             // per-org iteration for the drain sweeper; nil-safe, falls back to N=1 sentinel when unset
 	teams        dbpkg.TeamsStore            // per-team auto_delegate_enabled kill-switch read post-internal/config deletion
 	teamRepos    dbpkg.TeamGitHubReposStore  // team↔repo tracking gate; nil-safe — gate is skipped (no filtering) when unset
@@ -128,7 +128,7 @@ func NewRouter(prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agen
 	}
 }
 
-// SetEventQueue wires the durable router queue (SKY-414) post-
+// SetEventQueue wires the durable router queue post-
 // construction, mirroring the spawner.SetQueueDrainer pattern. The drain
 // worker (RunEventQueue) claims from this store; the ingestor enqueues to
 // it. Kept off NewRouter's already-wide signature — it's a late-bound dep
@@ -172,8 +172,16 @@ func (r *Router) entityDrainLock(entityID string) *sync.Mutex {
 	return mu
 }
 
-// HandleEvent is the eventbus subscriber callback. Called asynchronously
-// from the bus's per-subscriber goroutine.
+// HandleEvent routes a single event: entity lifecycle, dedup task
+// creation/bump, inline close checks, and auto-delegation. In production
+// it is invoked by the durable event-queue drain worker with an
+// already-persisted event (evt.ID set) — it is no longer an eventbus
+// subscriber. It is also safe to call directly with an unpersisted event
+// (step 1 records it first); that path is used by tests.
+//
+// Processing is best-effort and idempotent w.r.t. re-delivery: the queue
+// is at-least-once (a crash mid-process replays the event), and the task
+// dedup index makes a replay a no-op rather than a double-create.
 func (r *Router) HandleEvent(evt domain.Event) {
 	// Defensive: every upstream emitter (poller, per-org loop in
 	// SKY-312) tags events with evt.OrgID. A missing OrgID indicates
@@ -188,7 +196,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	orgID := evt.OrgID
 
 	// Step 1: ensure the event is persisted. In production the ingestor
-	// wrote the events row at enqueue (SKY-414 durable outbox) and the
+	// wrote the events row at enqueue (the durable outbox) and the
 	// drain worker loaded it via EventStore.GetSystem, so evt.ID is
 	// already set — recording is decoupled from routing and we route the
 	// pre-persisted event as-is. As a safety net for a caller that hands

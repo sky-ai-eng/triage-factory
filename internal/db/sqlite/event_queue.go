@@ -9,7 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// eventQueueStore is the SQLite impl of db.EventQueueStore (SKY-414) —
+// eventQueueStore is the SQLite impl of db.EventQueueStore —
 // the durable router queue. SQLite/local is single-worker (N=1), so
 // ClaimNext doesn't need the FOR UPDATE SKIP LOCKED the Postgres impl
 // uses; the UPDATE ... WHERE id = (oldest pending) RETURNING form is

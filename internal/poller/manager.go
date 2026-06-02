@@ -22,7 +22,7 @@ import (
 // stopped and restarted when credentials or config change.
 type Manager struct {
 	database *sql.DB
-	pub      tracker.Publisher // SKY-414: the durable ingestor in production; *eventbus.Bus in tests
+	pub      tracker.Publisher // the durable ingestor in production; *eventbus.Bus in tests
 	// tracker dependencies are held instead of a single Tracker instance
 	// because each poll cycle constructs one Tracker per active org —
 	// orgID is a per-tracker construction parameter, not a per-call

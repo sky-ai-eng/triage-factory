@@ -5603,7 +5603,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_template_handlers TO tf
 
 
 --
--- Durable router event queue (SKY-414). The in-memory bus drops events
+-- Durable router event queue. The in-memory bus drops events
 -- for slow subscribers under burst; the router — which persists event
 -- rows and creates tasks — drains this transactional-outbox queue
 -- instead. The events audit row and a queue row are written atomically at

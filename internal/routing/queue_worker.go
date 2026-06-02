@@ -27,7 +27,7 @@ const (
 	DefaultEventPruneAge      = 7 * 24 * time.Hour
 )
 
-// RunEventQueue is the durable router drain loop (SKY-414). It replaces
+// RunEventQueue is the durable router drain loop. It replaces
 // the router's old eventbus subscription: rather than ride the lossy
 // in-memory bus (which drops events for slow subscribers under burst),
 // the router drains the event_queue table that the ingestor populates

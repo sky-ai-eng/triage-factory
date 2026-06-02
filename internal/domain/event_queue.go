@@ -2,7 +2,7 @@ package domain
 
 import "time"
 
-// QueuedEvent is one row of the durable router event queue (SKY-414).
+// QueuedEvent is one row of the durable router event queue.
 //
 // The in-memory event bus drops events for slow subscribers under burst;
 // the router — which persists event rows and creates tasks — must not
@@ -17,6 +17,11 @@ import "time"
 // exhausts its retry budget lands in failed (a poison pill, retained for
 // debugging). 'processing' rows left by a crash are reset to pending at
 // boot (single worker) and replayed.
+//
+// Delivery is therefore at-least-once, NOT exactly-once: a crash
+// mid-process (or a transient retry) replays the event, so routing must
+// be idempotent. The task partial-unique dedup index is what makes a
+// replay a no-op rather than a double-create.
 type QueuedEvent struct {
 	ID    int64  `json:"id"`
 	OrgID string `json:"org_id"`

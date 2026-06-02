@@ -9,7 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// eventQueueStore is the Postgres impl of db.EventQueueStore (SKY-414) —
+// eventQueueStore is the Postgres impl of db.EventQueueStore —
 // the durable router queue. Wired against the admin pool in postgres.New:
 // the ingestor and drain worker are system services with no per-user
 // identity, so impersonating a user via the app pool would be wrong. The
@@ -64,7 +64,7 @@ func (s *eventQueueStore) ClaimNext(ctx context.Context) (*domain.QueuedEvent, e
 	// FOR UPDATE SKIP LOCKED on the inner select so multiple router
 	// workers can drain concurrently without ever claiming the same row
 	// — the horizontal-routing groundwork (running N workers is a
-	// SKY-414 non-goal). The single-statement UPDATE ... RETURNING is
+	// non-goal for now). The single-statement UPDATE ... RETURNING is
 	// atomic; an empty queue matches no row and the scan reports
 	// ErrNoRows -> (nil, nil).
 	row := s.conn.QueryRowContext(ctx, `

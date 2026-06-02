@@ -1,5 +1,5 @@
 // Package ingest is the single emit seam for poller/tracker-produced
-// events (SKY-414). It splits event delivery by durability need so the
+// events. It splits event delivery by durability need so the
 // router stops riding the lossy in-memory bus while cosmetic/idempotent
 // subscribers keep their best-effort delivery.
 package ingest
@@ -20,7 +20,7 @@ import (
 //     events audit row and a queue row, written atomically — then a
 //     best-effort wake nudges the router's drain worker. This is the
 //     path that must never drop: losing one of these loses an event row
-//     and its task, which is exactly the data loss SKY-414 fixes.
+//     and its task, which is exactly the data loss this seam prevents.
 //   - Every event (the durable ones included) is also published to the
 //     in-memory bus for loss-tolerant subscribers: ws-broadcast's
 //     cosmetic UI feed and the scorer's idempotent poll-complete kick.

@@ -148,9 +148,9 @@ type Stores struct {
 	// re-derive, delegate post-run metadata enrichment).
 	Events EventStore
 
-	// EventQueue owns the event_queue table — the durable router queue
-	// (SKY-414). Enqueue writes the events audit row + a queue row
-	// atomically at ingest (transactional outbox); the drain worker
+	// EventQueue owns the event_queue table — the durable router queue.
+	// Enqueue writes the events audit row + a queue row atomically at
+	// ingest (transactional outbox); the drain worker
 	// claims pending rows, routes them, and marks them done. A
 	// system-service store (admin pool in Postgres): the ingestor and
 	// worker run as background goroutines with no per-user identity.
