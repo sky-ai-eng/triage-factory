@@ -383,9 +383,10 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	// into the same _scratch/entity-memory/<namespace>/ folder it used on the
 	// initial invocation (the completion-gate retry path depends on this, and a
 	// yield-resume continuing the work must land its memory in the same place).
-	if opts.Namespace != "" {
-		extraEnv = append(extraEnv, "TRIAGE_FACTORY_BLUEPRINT_RUN_ID="+opts.Namespace)
+	if opts.Namespace == "" {
+		return nil, fmt.Errorf("resume: missing namespace (caller must pass the memory namespace captured at run start)")
 	}
+	extraEnv = append(extraEnv, "TRIAGE_FACTORY_BLUEPRINT_RUN_ID="+opts.Namespace)
 	// Preserve the initial run's GitHub repo context so gh subcommands
 	// in the resumed session keep their implicit --repo default. Without
 	// this, a resumed run on a GitHub task could suddenly fail any gh
