@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -217,6 +218,67 @@ func TestKnowledgeWatcher_IgnoresChangesOutsideKnowledgeBase(t *testing.T) {
 			t.Errorf("unexpected event for write outside knowledge-base: %+v", e)
 		}
 	}
+}
+
+func TestKnowledgeWatcher_Multi_FiresUnderOrgScopedTree(t *testing.T) {
+	// In multi mode the curator writes to
+	// <root>/orgs/<orgID>/projects/<id>/knowledge-base (SKY-402), so the
+	// watcher roots at the state root and descends the per-org tree. The
+	// whole chain is laid down by one MkdirAll (a project's first turn),
+	// exactly the atomic case the local import test covers — the watcher
+	// must descend orgs/<org>/projects/<id> as it reacts to the top-level
+	// Create and fire keyed on the project id (the dir above
+	// knowledge-base), not the org id.
+	runmode.SetForTest(t, runmode.ModeMulti)
+	root := t.TempDir()
+
+	rec := &recordingHub{}
+	w, err := NewKnowledgeWatcher(rec, root, nil)
+	if err != nil {
+		t.Fatalf("new watcher: %v", err)
+	}
+	defer w.Close()
+
+	const orgID = "org-xyz"
+	const projectID = "proj-multi"
+	kbDir := filepath.Join(root, "orgs", orgID, "projects", projectID, "knowledge-base")
+	if err := os.MkdirAll(kbDir, 0o755); err != nil {
+		t.Fatalf("mkdir kb: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(kbDir, "note.md"), []byte("hi"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	waitForEvent(t, rec, projectID, 1)
+}
+
+func TestKnowledgeWatcher_Multi_SeedsExistingOrgTree(t *testing.T) {
+	// Pin the seed path for the multi layout: a project tree already on
+	// disk at construction must be walked (orgs/<org>/projects/<id>) and
+	// its knowledge-base watched, so a later write fires. Mirrors
+	// FiresOnFileWriteInExistingKB for the per-org tree.
+	runmode.SetForTest(t, runmode.ModeMulti)
+	root := t.TempDir()
+
+	const orgID = "org-seed"
+	const projectID = "proj-seed"
+	kbDir := filepath.Join(root, "orgs", orgID, "projects", projectID, "knowledge-base")
+	if err := os.MkdirAll(kbDir, 0o755); err != nil {
+		t.Fatalf("mkdir kb: %v", err)
+	}
+
+	rec := &recordingHub{}
+	w, err := NewKnowledgeWatcher(rec, root, nil)
+	if err != nil {
+		t.Fatalf("new watcher: %v", err)
+	}
+	defer w.Close()
+
+	if err := os.WriteFile(filepath.Join(kbDir, "seeded.md"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	waitForEvent(t, rec, projectID, 1)
 }
 
 func TestKnowledgeWatcher_FiresWhenProjectAndKBImportedAtomically(t *testing.T) {

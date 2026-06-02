@@ -727,7 +727,7 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	// logged server-side; the header is a generic message so we
 	// don't leak filesystem layout to the client.
 	const cleanupWarning = "on-disk cleanup of project knowledge dir failed; check server logs"
-	dir, dirErr := curator.KnowledgeDir(id)
+	dir, dirErr := curator.KnowledgeDir(orgID, id)
 	switch {
 	case dirErr != nil:
 		log.Printf("[projects] cannot resolve knowledge dir for project %s; on-disk cleanup skipped: %v", id, dirErr)
@@ -1044,7 +1044,7 @@ func (s *Server) handleProjectKnowledge(w http.ResponseWriter, r *http.Request) 
 		notFound(w, "project")
 		return
 	}
-	root, err := curator.KnowledgeDir(id)
+	root, err := curator.KnowledgeDir(orgID, id)
 	if err != nil {
 		log.Printf("[projects] knowledge list: resolve dir for %s: %v", id, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read knowledge base"})
@@ -1273,8 +1273,8 @@ func sanitizeKnowledgeFilename(raw string) (string, string) {
 // failures (UserHomeDir, etc.). Earlier versions collapsed both
 // cases to a 400, which misclassified internal failures as bad
 // input and made operator triage harder.
-func resolveKnowledgePath(projectID, rawPath string) (string, string, int, string) {
-	root, err := curator.KnowledgeDir(projectID)
+func resolveKnowledgePath(orgID, projectID, rawPath string) (string, string, int, string) {
+	root, err := curator.KnowledgeDir(orgID, projectID)
 	if err != nil {
 		log.Printf("[projects] resolve knowledge dir for %s: %v", projectID, err)
 		return "", "", http.StatusInternalServerError, "failed to resolve knowledge dir"
@@ -1331,7 +1331,7 @@ func (s *Server) handleProjectKnowledgeFile(w http.ResponseWriter, r *http.Reque
 		notFound(w, "project")
 		return
 	}
-	_, full, status, errMsg := resolveKnowledgePath(id, r.PathValue("path"))
+	_, full, status, errMsg := resolveKnowledgePath(orgID, id, r.PathValue("path"))
 	if errMsg != "" {
 		writeJSON(w, status, map[string]string{"error": errMsg})
 		return
@@ -1441,7 +1441,7 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 		notFound(w, "project")
 		return
 	}
-	root, err := curator.KnowledgeDir(id)
+	root, err := curator.KnowledgeDir(orgID, id)
 	if err != nil {
 		log.Printf("[projects] knowledge upload: resolve dir for %s: %v", id, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to resolve knowledge dir"})
@@ -1657,7 +1657,7 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 		notFound(w, "project")
 		return
 	}
-	_, full, status, errMsg := resolveKnowledgePath(id, r.PathValue("path"))
+	_, full, status, errMsg := resolveKnowledgePath(orgID, id, r.PathValue("path"))
 	if errMsg != "" {
 		writeJSON(w, status, map[string]string{"error": errMsg})
 		return

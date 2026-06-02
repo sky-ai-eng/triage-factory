@@ -72,12 +72,6 @@ linters:
       - path: internal/paths/
         linters:
           - forbidigo
-      # The curator runtime still owns its own home resolution until
-      # SKY-402 routes it through paths.ProjectKBDir. Remove this once
-      # that lands.
-      - path: internal/curator/knowledge\.go
-        linters:
-          - forbidigo
 
 formatters:
   enable:

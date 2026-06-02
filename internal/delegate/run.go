@@ -137,7 +137,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// ./_scratch/project-knowledge/ if the entity is assigned to a
 	// project, so the agent has curated project context available
 	// alongside prior memories.
-	materializeProjectKnowledge(claudeCwd, cfg.projectID)
+	materializeProjectKnowledge(orgID, claudeCwd, cfg.projectID)
 
 	selfBin, err := os.Executable()
 	if err != nil {

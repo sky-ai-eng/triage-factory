@@ -76,14 +76,12 @@ fi
 # So: strip // line comments first, then match .triagefactory only as a
 # path *segment* — flanked by a quote/backtick/slash/tilde and ending the
 # segment with / or a closing quote/backtick (the domain is followed by
-# ".com", so it's excluded). internal/paths owns the literal;
-# internal/curator/knowledge.go is a temporary exception until SKY-402
-# routes the curator runtime through paths; test files may reference it.
+# ".com", so it's excluded). internal/paths owns the literal; test files
+# may reference it.
 blue "paths state-literal guard"
 go_src=$(git ls-files '*.go' \
   | grep -v '_test\.go$' \
-  | grep -v '^internal/paths/' \
-  | grep -v '^internal/curator/knowledge\.go$' || true)
+  | grep -v '^internal/paths/' || true)
 literal_offenders=""
 for f in $go_src; do
   if sed 's://.*::' "$f" | grep -qE '[`"/~]\.triagefactory[/"`]'; then

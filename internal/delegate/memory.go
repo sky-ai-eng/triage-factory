@@ -17,7 +17,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // maxMemoryRetries is the hard cap on how many times the write-gate
@@ -252,13 +251,17 @@ func streamCopyFile(src, dst string) (int64, error) {
 // unconditionally" pattern so the agent's pre-flight `ls` doesn't fail
 // noisily on ENOENT when no project is assigned.
 //
-// Reads from ~/.triagefactory/projects/<projectID>/knowledge-base/*.md
-// (the path the Curator writes to per SKY-216) and copies each .md file
-// flat into _scratch/project-knowledge/, preserving source filenames.
+// Reads from the Curator's per-project knowledge base (the path the
+// Curator writes to per SKY-216, resolved through internal/paths under
+// the project-owning org's subtree) and copies each .md file flat into
+// _scratch/project-knowledge/, preserving source filenames. orgID is the
+// run's owning tenant — the same org the assigned project belongs to —
+// so in multi mode this reads the org-scoped dir the Curator wrote
+// rather than the org-stripped default (SKY-402).
 //
 // Degrades gracefully: a nil projectID, a missing knowledge-base dir,
 // or per-file copy failures are logged but never fail the run.
-func materializeProjectKnowledge(cwd string, projectID *string) {
+func materializeProjectKnowledge(orgID, cwd string, projectID *string) {
 	dir := filepath.Join(cwd, "_scratch", "project-knowledge")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		log.Printf("[delegate] warning: failed to create project-knowledge dir at %s: %v", dir, err)
@@ -273,7 +276,7 @@ func materializeProjectKnowledge(cwd string, projectID *string) {
 		log.Printf("[delegate] warning: resolve knowledge dir for project %s: %v", *projectID, err)
 		return
 	}
-	kbRoot := paths.ProjectKBDir(runmode.LocalDefaultOrg, *projectID)
+	kbRoot := paths.ProjectKBDir(orgID, *projectID)
 	srcDir := filepath.Join(kbRoot, "knowledge-base")
 
 	entries, err := os.ReadDir(srcDir)

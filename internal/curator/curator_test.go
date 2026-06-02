@@ -181,7 +181,7 @@ func TestCurator_CrossProjectParallel(t *testing.T) {
 }
 
 func TestKnowledgeDir_RequiresProjectID(t *testing.T) {
-	if _, err := KnowledgeDir(""); err == nil {
+	if _, err := KnowledgeDir(runmode.LocalDefaultOrgID, ""); err == nil {
 		t.Error("empty project id should error")
 	}
 }

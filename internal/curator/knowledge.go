@@ -12,45 +12,56 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
+
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
 
-// ProjectsRoot returns ~/.triagefactory/projects/. Single source of
-// truth for the per-project working-dir layout — both KnowledgeDir
-// below and the kbwatcher derive paths from here.
-func ProjectsRoot() (string, error) {
-	// TODO(SKY-402): multi-mode should resolve this under internal/paths'
-	// state root (org-scoped) instead of the shared ~/.triagefactory home
-	// that every tenant shares in single-pod multi. Local mode keeps this path.
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home dir: %w", err)
+// ProjectsRoot returns the parent of every curator project working dir
+// for orgID, routed through internal/paths so it lands under the
+// mode/org-aware state root: ~/.triagefactory/projects in local mode and
+// <state-root>/orgs/<orgID>/projects in multi mode. Single source of
+// truth for the per-project working-dir layout — both KnowledgeDir below
+// and the kbwatcher derive paths from here (SKY-402).
+//
+// It pre-flights paths.StateRootErr so a missing $HOME surfaces as the
+// actionable error every caller already handles, rather than letting the
+// underlying paths.ProjectsRoot panic.
+func ProjectsRoot(orgID string) (string, error) {
+	if _, err := paths.StateRootErr(); err != nil {
+		return "", fmt.Errorf("resolve state root: %w", err)
 	}
-	return filepath.Join(home, ".triagefactory", "projects"), nil
+	return paths.ProjectsRoot(orgID), nil
 }
 
-// KnowledgeDir returns ~/.triagefactory/projects/<id>/. The Curator's
-// CC subprocess runs from here, and SKY-218 will populate
-// knowledge-base/*.md inside it. Path resolution lives in this
-// package because it's the producer; the projects HTTP delete handler
-// imports it for cleanup.
-func KnowledgeDir(projectID string) (string, error) {
+// KnowledgeDir returns one project's working directory —
+// <ProjectsRoot>/<projectID> — routed through internal/paths
+// (paths.ProjectKBDir). The Curator's CC subprocess runs from here and
+// the knowledge base lives under knowledge-base/, pinned-repo worktrees
+// under repos/, and the materialized skills under .claude/. Path
+// resolution lives in this package because it's the producer; the
+// projects HTTP handlers and the classifier import it.
+//
+// orgID is the project's owning tenant. In multi mode it inserts the
+// per-org subtree so two tenants' projects never collide on disk; in
+// local mode (or when orgID is the local-default sentinel) the org
+// segment is stripped and the layout is byte-for-byte what it was before
+// SKY-402.
+func KnowledgeDir(orgID, projectID string) (string, error) {
 	if projectID == "" {
 		return "", errors.New("project id is required")
 	}
-	root, err := ProjectsRoot()
-	if err != nil {
-		return "", err
+	if _, err := paths.StateRootErr(); err != nil {
+		return "", fmt.Errorf("resolve state root: %w", err)
 	}
-	return filepath.Join(root, projectID), nil
+	return paths.ProjectKBDir(orgID, projectID), nil
 }
 
 // ensureKnowledgeDir creates the project's working directory if it
 // doesn't exist. Called lazily on the first message of each project
 // so empty projects don't create directories on disk before they're
 // chatted with.
-func ensureKnowledgeDir(projectID string) (string, error) {
-	dir, err := KnowledgeDir(projectID)
+func ensureKnowledgeDir(orgID, projectID string) (string, error) {
+	dir, err := KnowledgeDir(orgID, projectID)
 	if err != nil {
 		return "", err
 	}
