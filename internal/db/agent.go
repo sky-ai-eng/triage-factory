@@ -44,6 +44,21 @@ type AgentRunStore interface {
 	// nullability.
 	Create(ctx context.Context, orgID string, run domain.AgentRun) error
 
+	// CreateIfNotFiredSystem inserts an event-triggered run fenced on
+	// (triggering_event_id, trigger_id) by the runs_event_trigger_fence
+	// partial unique index (SKY-424). Returns inserted=false (no error)
+	// when a run for this (event, trigger) already committed — the
+	// at-least-once router queue (SKY-414) replayed an event whose first
+	// auto-delegation already happened. The run insert is the crash-
+	// consistent commit point: fence row exists iff run exists, so a crash
+	// after the run commits replays into a clean skip and a crash before it
+	// re-fires cleanly. Event path only — run.TriggerType is forced to
+	// 'event' (creator_user_id NULL per the runs_creator_matches_trigger_type
+	// CHECK), so on Postgres it routes through the admin pool like the
+	// event branch of Create. Manual runs stay on Create, whose NULL
+	// triggering_event_id never reaches the partial index.
+	CreateIfNotFiredSystem(ctx context.Context, orgID string, run domain.AgentRun) (inserted bool, err error)
+
 	// Complete finalizes a run with the terminal totals folded
 	// into any partial totals already on the row. SKY-139's
 	// yield-resume flow keeps cost/duration/turns running via

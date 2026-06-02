@@ -44,6 +44,14 @@ type AgentRunSeeder struct {
 	// hanging off it.
 	Task func(t *testing.T, entityID, eventType, primaryEventID string) string
 
+	// EventHandler inserts a minimal enabled rule handler and returns
+	// its id, used as a stable runs.trigger_id FK target for the
+	// SKY-424 fence subtest. A rule (not a trigger) keeps the seed
+	// cheap — no blueprint row to wire — and the fence only needs a
+	// non-NULL handler id, since the partial unique index treats NULL
+	// trigger_id as distinct (the fence would silently not engage).
+	EventHandler func(t *testing.T, eventType string) string
+
 	// StampAgentClaim sets the task's claimed_by_agent_id directly.
 	// Used to set up the MarkTakenOver atomic-flip preconditions:
 	// the takeover only flips the task claim when the bot still
@@ -154,6 +162,110 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		// runs as manual on yield/resume.
 		if got.TriggerType != "event" {
 			t.Errorf("TriggerType = %q, want event", got.TriggerType)
+		}
+	})
+
+	t.Run("CreateIfNotFiredSystem_FencesReplayPerEventTrigger", func(t *testing.T) {
+		// SKY-424: the (triggering_event_id, trigger_id) fence makes
+		// event-triggered auto-delegation exactly-once under the
+		// at-least-once router queue. A replayed event whose first run
+		// already committed must not insert a second run; two DISTINCT
+		// event instances firing the same trigger still insert
+		// independently (the fence is per event instance, not per trigger).
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "fence")
+		ev1 := seed.Event(t, ent, domain.EventGitHubPROpened)
+		ev2 := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev1)
+		trigID := seed.EventHandler(t, domain.EventGitHubPROpened)
+
+		mkRun := func(eventID string) domain.AgentRun {
+			return domain.AgentRun{
+				ID:                uuid.New().String(),
+				TaskID:            taskID,
+				PromptID:          agentRunTestPrompt(t),
+				Status:            "initializing",
+				Model:             "claude-test",
+				TriggerType:       "event",
+				TriggerID:         trigID,
+				TriggeringEventID: eventID,
+			}
+		}
+
+		// First fire for (ev1, trig): inserts.
+		run1 := mkRun(ev1)
+		inserted, err := store.CreateIfNotFiredSystem(ctx, orgID, run1)
+		if err != nil {
+			t.Fatalf("first fire: %v", err)
+		}
+		if !inserted {
+			t.Fatal("first fire should insert (no prior run for this event+trigger)")
+		}
+
+		// Replay of the SAME event instance: fence trips, no row inserted.
+		replayed, err := store.CreateIfNotFiredSystem(ctx, orgID, mkRun(ev1))
+		if err != nil {
+			t.Fatalf("replay fire: %v", err)
+		}
+		if replayed {
+			t.Error("replay of the same (event, trigger) must NOT insert a second run")
+		}
+
+		// The first run still exists and is unchanged.
+		got, err := store.Get(ctx, orgID, run1.ID)
+		if err != nil || got == nil {
+			t.Fatalf("Get run1: err=%v got=%v", err, got)
+		}
+
+		// A distinct event instance firing the same trigger inserts.
+		inserted2, err := store.CreateIfNotFiredSystem(ctx, orgID, mkRun(ev2))
+		if err != nil {
+			t.Fatalf("distinct-event fire: %v", err)
+		}
+		if !inserted2 {
+			t.Error("a distinct event instance must fire independently of the fence")
+		}
+
+		// Exactly two event-fired runs on the task: ev1 once, ev2 once.
+		runs, err := store.ListForTask(ctx, orgID, taskID)
+		if err != nil {
+			t.Fatalf("ListForTask: %v", err)
+		}
+		if len(runs) != 2 {
+			t.Errorf("want exactly 2 runs (replay fenced, distinct event fired), got %d", len(runs))
+		}
+	})
+
+	t.Run("Create_ManualRuns_NotFencedByNullTriggeringEvent", func(t *testing.T) {
+		// SKY-424: manual runs carry no triggering_event_id, so the
+		// partial fence index never applies — multiple manual runs of one
+		// task stay allowed. Pins that the fence didn't accidentally
+		// constrain the manual path.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "manual-fence")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+
+		for i := 0; i < 2; i++ {
+			if err := store.Create(ctx, orgID, domain.AgentRun{
+				ID:       uuid.New().String(),
+				TaskID:   taskID,
+				PromptID: agentRunTestPrompt(t),
+				Status:   "running",
+				Model:    "claude-test",
+				// TriggerType defaults to manual; TriggeringEventID empty → NULL.
+			}); err != nil {
+				t.Fatalf("manual run %d: %v", i, err)
+			}
+		}
+		runs, err := store.ListForTask(ctx, orgID, taskID)
+		if err != nil {
+			t.Fatalf("ListForTask: %v", err)
+		}
+		if len(runs) != 2 {
+			t.Errorf("manual runs must not be fenced: want 2, got %d", len(runs))
 		}
 	})
 

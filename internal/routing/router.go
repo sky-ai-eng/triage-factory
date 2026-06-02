@@ -3,6 +3,7 @@ package routing
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -917,7 +918,16 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 			task.TeamID = actingTeamID
 		}
 	}
-	if _, err := r.fireDelegate(orgID, task, trigger); err != nil {
+	if _, err := r.fireDelegate(orgID, task, trigger, triggeringEventID); err != nil {
+		// SKY-424: a replayed event (at-least-once queue) whose first run
+		// already committed hits the (event, trigger) fence and comes back
+		// as ErrAlreadyFired. Clean skip — the original run + its claim
+		// stand, so we must NOT re-stamp the claim or log an error.
+		if errors.Is(err, delegate.ErrAlreadyFired) {
+			log.Printf("[router] auto-delegate skipped for task %s (trigger %s): event %s already fired this trigger (replay)",
+				task.ID, trigger.ID, triggeringEventID)
+			return
+		}
 		log.Printf("[router] fire failed for task %s (trigger %s): %v", task.ID, trigger.ID, err)
 		return
 	}
@@ -1000,7 +1010,14 @@ func (r *Router) stampAgentClaim(orgID string, task *domain.Task, actingTeamID s
 // fireDelegate transitions the task to delegated status, broadcasts the
 // change, then fires the spawner. Returns the run ID on success — used by
 // DrainEntity to record which run a queued firing materialized into.
-func (r *Router) fireDelegate(orgID string, task *domain.Task, trigger domain.EventHandler) (string, error) {
+//
+// triggeringEventID is the event instance driving this fire (SKY-424):
+// the immediate path passes tryAutoDelegate's event id, the drain path
+// passes the pending firing's. It threads into DelegateOpts so the run
+// insert is fenced on (triggering_event_id, trigger_id); a replayed event
+// whose first run already committed surfaces as delegate.ErrAlreadyFired,
+// which both callers treat as a clean skip rather than a duplicate fire.
+func (r *Router) fireDelegate(orgID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID string) (string, error) {
 	if r.spawner == nil {
 		return "", fmt.Errorf("spawner not configured")
 	}
@@ -1031,6 +1048,7 @@ func (r *Router) fireDelegate(orgID string, task *domain.Task, trigger domain.Ev
 		ExplicitBlueprintID: trigger.BlueprintID,
 		TriggerType:         "event",
 		TriggerID:           trigger.ID,
+		TriggeringEventID:   triggeringEventID,
 	})
 	if err != nil {
 		// Post-B+: nothing to revert status-wise (status stayed 'queued').
@@ -1266,8 +1284,16 @@ func (r *Router) attemptDrainOne(orgID string, firing *domain.PendingFiring) (ru
 		return "", domain.PendingFiringSkipBreakerTripped, nil
 	}
 
-	id, err := r.fireDelegate(orgID, task, *trigger)
+	id, err := r.fireDelegate(orgID, task, *trigger, firing.TriggeringEventID)
 	if err != nil {
+		// SKY-424: the run for this (event, trigger) already exists — a
+		// prior drain attempt fired it (process died before MarkFired), or
+		// the immediate path did before this firing was popped. Definitive
+		// "no longer relevant": mark skipped_stale so the firing doesn't
+		// retry forever. The existing run gates / drains the entity.
+		if errors.Is(err, delegate.ErrAlreadyFired) {
+			return "", domain.PendingFiringSkipAlreadyFired, nil
+		}
 		return "", "", fmt.Errorf("fire delegate: %w", err)
 	}
 	return id, "", nil
