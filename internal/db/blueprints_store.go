@@ -117,6 +117,40 @@ type BlueprintStore interface {
 	// are taken positionally and may be empty.
 	ReplaceSteps(ctx context.Context, orgID string, blueprintID string, stepPromptIDs []string, briefs []string) error
 
+	// MergeInto absorbs the source blueprint's steps onto the tail of the host
+	// blueprint and soft-deletes the now-empty source, atomically. The host
+	// keeps its identity, name, and trigger; the source is retired. This is the
+	// canvas "merge" gesture (drag the tail of host A onto the entry of a
+	// trigger-less source B) as one transactional primitive — done as a
+	// sequence of ReplaceSteps + Delete over REST it would orphan prompts on a
+	// mid-sequence failure.
+	//
+	// Source steps are densely appended after the host's existing steps
+	// (step_index = host_len + source_step_index); each prompt still lives in
+	// exactly one blueprint (the copy-only step-prompt unique index is
+	// unaffected — ownership just moves from source to host). team_id/org_id are
+	// unchanged since both blueprints share them (validated same-team by the
+	// caller). The host's updated_at is bumped.
+	//
+	// The caller must reject a triggered source for a clean 422; the partial-
+	// unique event_handlers index is the hard backstop. MergeInto itself does
+	// not touch event_handlers — the source carrying no trigger is a
+	// precondition, not something this method enforces or repairs.
+	MergeInto(ctx context.Context, orgID string, hostID, sourceID string) error
+
+	// SplitAt partitions a blueprint at atIndex into two, atomically: steps
+	// [0, atIndex) stay on id (the trigger, if any, lives on step 0 and is
+	// untouched); steps [atIndex, N) move to a new, trigger-less blueprint
+	// (newBlueprintID, source="user", same team, name=newName) re-densified
+	// 0-based. This is the canvas "split" gesture (disconnect a mid-chain
+	// prompt→prompt edge) as one transactional primitive. Both updated_at's are
+	// bumped. Returns newBlueprintID for the caller's convenience.
+	//
+	// The caller validates 0 < atIndex < N (a split that keeps one side empty
+	// is a no-op) and supplies newName (defaulted to the new step-0 prompt's
+	// name, consistent with auto-wrap).
+	SplitAt(ctx context.Context, orgID string, id string, atIndex int, newBlueprintID, newName string) (string, error)
+
 	// --- Runs -----------------------------------------------------------
 
 	// CreateRun inserts a new blueprint instance row. TriggerType is required.

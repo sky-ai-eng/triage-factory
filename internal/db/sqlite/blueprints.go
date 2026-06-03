@@ -330,6 +330,91 @@ func (s *blueprintStore) ReplaceSteps(ctx context.Context, orgID, blueprintID st
 	})
 }
 
+// reparentBlueprintSteps moves the steps of fromBlueprint whose step_index is
+// >= minIndex onto toBlueprint, shifting each step_index by indexShift. It is
+// the shared mechanic behind MergeInto (append source onto host) and SplitAt
+// (peel the tail onto a new blueprint). The target step_index values must not
+// collide with any existing rows on toBlueprint — MergeInto guarantees this by
+// shifting source steps past the host's length; SplitAt's target is a freshly
+// created empty blueprint. step_prompt_id is unchanged, so the copy-only step
+// uniqueness holds throughout (a prompt just moves to a different blueprint).
+func reparentBlueprintSteps(ctx context.Context, q queryer, fromBlueprint, toBlueprint string, indexShift, minIndex int) error {
+	_, err := q.ExecContext(ctx, `
+		UPDATE blueprint_steps
+		SET blueprint_id = ?, step_index = step_index + ?
+		WHERE blueprint_id = ? AND step_index >= ?
+	`, toBlueprint, indexShift, fromBlueprint, minIndex)
+	return err
+}
+
+func (s *blueprintStore) MergeInto(ctx context.Context, orgID, hostID, sourceID string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	return inTx(ctx, s.q, func(q queryer) error {
+		var hostLen int
+		if err := q.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM blueprint_steps WHERE blueprint_id = ?`, hostID,
+		).Scan(&hostLen); err != nil {
+			return fmt.Errorf("count host steps: %w", err)
+		}
+		// Append source's steps after the host's, densely (host_len + i).
+		if err := reparentBlueprintSteps(ctx, q, sourceID, hostID, hostLen, 0); err != nil {
+			return fmt.Errorf("reparent source steps: %w", err)
+		}
+		now := time.Now().UTC()
+		// Soft-delete the now-empty source (mirrors Delete; inlined so it shares
+		// this tx whether s.q is a *sql.Tx or a fresh inTx-opened one).
+		res, err := q.ExecContext(ctx,
+			`UPDATE blueprints SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`, now, sourceID)
+		if err != nil {
+			return fmt.Errorf("soft-delete source: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return fmt.Errorf("blueprint %s not found or already deleted", sourceID)
+		}
+		if _, err := q.ExecContext(ctx,
+			`UPDATE blueprints SET updated_at = ? WHERE id = ?`, now, hostID); err != nil {
+			return fmt.Errorf("bump host updated_at: %w", err)
+		}
+		return nil
+	})
+}
+
+func (s *blueprintStore) SplitAt(ctx context.Context, orgID, id string, atIndex int, newBlueprintID, newName string) (string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", err
+	}
+	err := inTx(ctx, s.q, func(q queryer) error {
+		now := time.Now().UTC()
+		// Create the new trigger-less downstream blueprint (user source, same
+		// sentinel team as everything in local mode).
+		if _, err := q.ExecContext(ctx, `
+			INSERT INTO blueprints (id, name, source, usage_count, team_id, creator_user_id, created_at, updated_at)
+			VALUES (?, ?, 'user', 0, ?, ?, ?, ?)
+		`, newBlueprintID, newName, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, now, now); err != nil {
+			return fmt.Errorf("create downstream blueprint: %w", err)
+		}
+		// Peel steps [atIndex, N) onto the new blueprint, re-densified 0-based.
+		if err := reparentBlueprintSteps(ctx, q, id, newBlueprintID, -atIndex, atIndex); err != nil {
+			return fmt.Errorf("reparent tail steps: %w", err)
+		}
+		if _, err := q.ExecContext(ctx,
+			`UPDATE blueprints SET updated_at = ? WHERE id = ?`, now, id); err != nil {
+			return fmt.Errorf("bump upstream updated_at: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return newBlueprintID, nil
+}
+
 // --- Runs ----------------------------------------------------------------
 
 func (s *blueprintStore) CreateRun(ctx context.Context, orgID string, br domain.BlueprintRun) (string, error) {

@@ -58,15 +58,20 @@ func TestOrgTemplate_UpdateHandler_MatchedSemantics(t *testing.T) {
 	// TOCTTOU: promote the rule to a trigger, then a stale rule-shaped update
 	// must report matched=false (its kind-pinned WHERE no longer matches)
 	// rather than silently clobbering the now-trigger row.
-	blueprints, err := stores.OrgTemplate.ListBlueprints(ctx, org)
-	if err != nil || len(blueprints) == 0 {
-		t.Fatalf("ListBlueprints: err=%v n=%d", err, len(blueprints))
+	//
+	// Promote onto a fresh, trigger-less template blueprint: the shipped
+	// blueprints are already 1:1 with shipped triggers, and a template blueprint
+	// is fired by exactly one event (org_template_handlers_one_trigger_per_blueprint).
+	if err := stores.OrgTemplate.CreateBlueprint(ctx, org, domain.Blueprint{
+		ID: "promote-target-bp", SystemSlug: "promote-target-slug", Name: "Promote Target", Source: "user",
+	}); err != nil {
+		t.Fatalf("CreateBlueprint (promote target): %v", err)
 	}
 	bt := 3
 	minA := 0.0
 	if err := stores.OrgTemplate.PromoteHandler(ctx, org, rule.ID, domain.EventHandler{
 		Kind:                   domain.EventHandlerKindTrigger,
-		BlueprintID:            blueprints[0].ID,
+		BlueprintID:            "promote-target-bp",
 		BreakerThreshold:       &bt,
 		MinAutonomySuitability: &minA,
 	}); err != nil {

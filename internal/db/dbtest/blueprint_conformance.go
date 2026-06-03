@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -271,6 +273,129 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		_, ok, err = store.StepPromptOwner(ctx, orgID, p)
 		if err != nil || ok {
 			t.Fatalf("post-delete: StepPromptOwner = (_, %v, %v); want (_, false, nil)", ok, err)
+		}
+	})
+
+	t.Run("MergeInto_AppendsSourceStepsAndRetiresSource", func(t *testing.T) {
+		store, orgID, teamID, seedPrompt := factory(t)
+		ctx := context.Background()
+		host, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "merge-host", Name: "Host", Source: "system"})
+		if err != nil {
+			t.Fatalf("seed host: %v", err)
+		}
+		source, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "merge-source", Name: "Source", Source: "system"})
+		if err != nil {
+			t.Fatalf("seed source: %v", err)
+		}
+		h1, h2 := seedPrompt(t, "host-1"), seedPrompt(t, "host-2")
+		s1, s2 := seedPrompt(t, "src-1"), seedPrompt(t, "src-2")
+		if err := store.ReplaceSteps(ctx, orgID, host, []string{h1, h2}, []string{"h1", "h2"}); err != nil {
+			t.Fatalf("ReplaceSteps host: %v", err)
+		}
+		if err := store.ReplaceSteps(ctx, orgID, source, []string{s1, s2}, []string{"s1", "s2"}); err != nil {
+			t.Fatalf("ReplaceSteps source: %v", err)
+		}
+		if err := store.MergeInto(ctx, orgID, host, source); err != nil {
+			t.Fatalf("MergeInto: %v", err)
+		}
+		// Host now resolves with N+M densely-indexed steps in order.
+		steps, err := store.ListSteps(ctx, orgID, host)
+		if err != nil {
+			t.Fatalf("ListSteps host: %v", err)
+		}
+		wantPrompts := []string{h1, h2, s1, s2}
+		wantBriefs := []string{"h1", "h2", "s1", "s2"}
+		if len(steps) != 4 {
+			t.Fatalf("merged host has %d steps, want 4: %+v", len(steps), steps)
+		}
+		for i, st := range steps {
+			if st.StepIndex != i {
+				t.Errorf("step %d has index %d, want dense %d", i, st.StepIndex, i)
+			}
+			if st.StepPromptID != wantPrompts[i] {
+				t.Errorf("step %d prompt = %s, want %s", i, st.StepPromptID, wantPrompts[i])
+			}
+			if st.Brief != wantBriefs[i] {
+				t.Errorf("step %d brief = %q, want %q", i, st.Brief, wantBriefs[i])
+			}
+		}
+		// Source is retired: request-facing Get → nil, GetSystem still resolves.
+		if got, err := store.Get(ctx, orgID, source); err != nil || got != nil {
+			t.Fatalf("Get(source) after merge = (%v, %v), want (nil, nil)", got, err)
+		}
+		if got, err := store.GetSystem(ctx, orgID, source); err != nil || got == nil {
+			t.Fatalf("GetSystem(source) after merge = (%v, %v), want a row", got, err)
+		}
+		// step_prompt_id uniqueness still holds: each moved prompt now resolves
+		// to the host as its sole owner.
+		for _, p := range []string{s1, s2} {
+			owner, ok, err := store.StepPromptOwner(ctx, orgID, p)
+			if err != nil || !ok || owner != host {
+				t.Fatalf("StepPromptOwner(%s) = (%q, %v, %v), want (%q, true, nil)", p, owner, ok, err, host)
+			}
+		}
+	})
+
+	t.Run("SplitAt_PartitionsAndCreatesTriggerlessDownstream", func(t *testing.T) {
+		store, orgID, teamID, seedPrompt := factory(t)
+		ctx := context.Background()
+		bp, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "split-bp", Name: "Split", Source: "system"})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		p0, p1, p2, p3 := seedPrompt(t, "sp-0"), seedPrompt(t, "sp-1"), seedPrompt(t, "sp-2"), seedPrompt(t, "sp-3")
+		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1, p2, p3}, []string{"b0", "b1", "b2", "b3"}); err != nil {
+			t.Fatalf("ReplaceSteps: %v", err)
+		}
+		newID := uuid.New().String()
+		got, err := store.SplitAt(ctx, orgID, bp, 2, newID, "Downstream")
+		if err != nil {
+			t.Fatalf("SplitAt: %v", err)
+		}
+		if got != newID {
+			t.Fatalf("SplitAt returned %s, want %s", got, newID)
+		}
+		// Upstream keeps [0,2) at their original indices.
+		up, err := store.ListSteps(ctx, orgID, bp)
+		if err != nil {
+			t.Fatalf("ListSteps upstream: %v", err)
+		}
+		if len(up) != 2 || up[0].StepPromptID != p0 || up[1].StepPromptID != p1 {
+			t.Fatalf("upstream steps = %+v, want [p0,p1]", up)
+		}
+		if up[0].StepIndex != 0 || up[1].StepIndex != 1 {
+			t.Errorf("upstream indices not dense: %+v", up)
+		}
+		// Downstream gets [2,N) re-densified 0-based with their briefs.
+		down, err := store.ListSteps(ctx, orgID, newID)
+		if err != nil {
+			t.Fatalf("ListSteps downstream: %v", err)
+		}
+		if len(down) != 2 || down[0].StepPromptID != p2 || down[1].StepPromptID != p3 {
+			t.Fatalf("downstream steps = %+v, want [p2,p3]", down)
+		}
+		if down[0].StepIndex != 0 || down[1].StepIndex != 1 {
+			t.Errorf("downstream indices not re-densified 0-based: %+v", down)
+		}
+		if down[0].Brief != "b2" || down[1].Brief != "b3" {
+			t.Errorf("downstream briefs = [%q,%q], want [b2,b3]", down[0].Brief, down[1].Brief)
+		}
+		// The downstream blueprint exists, is request-visible, and carries the
+		// supplied name.
+		dbp, err := store.Get(ctx, orgID, newID)
+		if err != nil || dbp == nil {
+			t.Fatalf("Get(downstream) = (%v, %v), want a row", dbp, err)
+		}
+		if dbp.Name != "Downstream" {
+			t.Errorf("downstream name = %q, want Downstream", dbp.Name)
+		}
+		// at_step_index at the ends is the handler's job to reject, but the store
+		// must keep the partition non-empty when asked to split at a real
+		// boundary — covered above. Each prompt still has exactly one owner.
+		ownerUp, _, _ := store.StepPromptOwner(ctx, orgID, p1)
+		ownerDown, _, _ := store.StepPromptOwner(ctx, orgID, p2)
+		if ownerUp != bp || ownerDown != newID {
+			t.Fatalf("ownership after split: p1→%s (want %s), p2→%s (want %s)", ownerUp, bp, ownerDown, newID)
 		}
 	})
 

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -19,6 +20,28 @@ import (
 // referenced template blueprint doesn't exist, so the handler can 404 instead of
 // surfacing the downstream FK error.
 var errTemplateBlueprintMissing = errors.New("template blueprint not found")
+
+// errTemplateBlueprintTriggered signals (inside a WithTx closure) that the
+// referenced template blueprint already has a trigger, so the handler can 409
+// instead of letting the partial-unique index surface a raw 500 (a template
+// blueprint is fired by exactly one event).
+var errTemplateBlueprintTriggered = errors.New("template blueprint already has a trigger")
+
+// templateBlueprintTriggered reports whether any template trigger already fires
+// blueprintID. Backs the ≤1-trigger-per-blueprint 409 pre-check on the template
+// create / promote paths.
+func templateBlueprintTriggered(ctx context.Context, tx db.TxStores, orgID, blueprintID string) (bool, error) {
+	triggers, err := tx.OrgTemplate.ListHandlers(ctx, orgID, domain.EventHandlerKindTrigger)
+	if err != nil {
+		return false, err
+	}
+	for _, t := range triggers {
+		if t.BlueprintID == blueprintID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 
 // /api/org-template/* — the org-admin editor over the org template that
 // new teams are seeded from (SKY-381). Full parity with the team-scoped
@@ -701,6 +724,13 @@ func (s *Server) handleOrgTemplateHandlerCreate(w http.ResponseWriter, r *http.R
 			if b == nil {
 				return errTemplateBlueprintMissing
 			}
+			triggered, e := templateBlueprintTriggered(r.Context(), tx, orgID, h.BlueprintID)
+			if e != nil {
+				return e
+			}
+			if triggered {
+				return errTemplateBlueprintTriggered
+			}
 		}
 		if e := tx.OrgTemplate.CreateHandler(r.Context(), orgID, h); e != nil {
 			return e
@@ -711,6 +741,10 @@ func (s *Server) handleOrgTemplateHandlerCreate(w http.ResponseWriter, r *http.R
 	}); err != nil {
 		if err == errTemplateBlueprintMissing {
 			notFound(w, "template blueprint")
+			return
+		}
+		if err == errTemplateBlueprintTriggered {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
 			return
 		}
 		internalError(w, "org_template", err)
@@ -924,6 +958,7 @@ func (s *Server) handleOrgTemplateHandlerPromote(w http.ResponseWriter, r *http.
 
 	var existing *domain.EventHandler
 	var blueprint *domain.Blueprint
+	var blueprintHasTrigger bool
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		existing, e = tx.OrgTemplate.GetHandler(r.Context(), orgID, id)
@@ -934,6 +969,10 @@ func (s *Server) handleOrgTemplateHandlerPromote(w http.ResponseWriter, r *http.
 			return nil
 		}
 		blueprint, e = tx.OrgTemplate.GetBlueprint(r.Context(), orgID, req.BlueprintID)
+		if e != nil {
+			return e
+		}
+		blueprintHasTrigger, e = templateBlueprintTriggered(r.Context(), tx, orgID, req.BlueprintID)
 		return e
 	}); err != nil {
 		internalError(w, "org_template", err)
@@ -949,6 +988,10 @@ func (s *Server) handleOrgTemplateHandlerPromote(w http.ResponseWriter, r *http.
 	}
 	if blueprint == nil {
 		notFound(w, "template blueprint")
+		return
+	}
+	if blueprintHasTrigger {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
 		return
 	}
 

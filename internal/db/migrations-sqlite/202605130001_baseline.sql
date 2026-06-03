@@ -609,6 +609,14 @@ CREATE UNIQUE INDEX event_handlers_id_org_unique          ON event_handlers (id,
 CREATE INDEX        idx_event_handlers_event_type_enabled ON event_handlers(org_id, event_type) WHERE enabled = 1;
 CREATE INDEX        idx_event_handlers_kind               ON event_handlers(org_id, kind);
 CREATE INDEX        idx_event_handlers_blueprint          ON event_handlers(org_id, blueprint_id) WHERE blueprint_id IS NOT NULL;
+-- A blueprint is fired by exactly one event: at most one trigger may reference
+-- a given blueprint. blueprint_id IS NOT NULL already implies kind='trigger'
+-- (the rule-shape CHECK pins rules to a NULL blueprint_id), so the partial
+-- predicate needs no kind clause. The mirror of the copy-only step index — that
+-- one keeps a prompt in one blueprint, this one keeps a blueprint behind one
+-- event. Events still fan out 1:many (one event_type may fire many blueprints
+-- via many distinct trigger rows); this only bounds the per-blueprint side.
+CREATE UNIQUE INDEX event_handlers_one_trigger_per_blueprint ON event_handlers(blueprint_id) WHERE blueprint_id IS NOT NULL;
 
 -- === Org default templates (SKY-381) =====================================
 -- The org-level template a new team's prompts + handlers are copied from at
@@ -728,6 +736,9 @@ CREATE TABLE org_template_handlers (
     CONSTRAINT org_template_handlers_org_slug_unique UNIQUE (org_id, system_slug)
 );
 CREATE INDEX idx_org_template_handlers_kind ON org_template_handlers(org_id, kind);
+-- Mirror of the team-table backstop: a template trigger fires exactly one
+-- template blueprint.
+CREATE UNIQUE INDEX org_template_handlers_one_trigger_per_blueprint ON org_template_handlers(blueprint_id) WHERE blueprint_id IS NOT NULL;
 
 -- === Tasks + runs ========================================================
 CREATE TABLE tasks (

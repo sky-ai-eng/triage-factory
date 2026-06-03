@@ -267,17 +267,12 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		BreakerThreshold:       2,
 		MinAutonomySuitability: 0.0,
 	},
-	{
-		// Companion to system-trigger-jira-implement; see jira-became-atomic
-		// rule note above for the decomposition path that lands here.
-		ID:                     "system-trigger-jira-implement-atomic",
-		Kind:                   domain.EventHandlerKindTrigger,
-		BlueprintID:            "system-jira-implement",
-		EventType:              domain.EventJiraIssueBecameAtomic,
-		Predicate:              `{"assignee_in":[]}`,
-		BreakerThreshold:       2,
-		MinAutonomySuitability: 0.0,
-	},
+	// No became_atomic trigger ships: a blueprint is fired by exactly one event
+	// (the partial-unique event_handlers_one_trigger_per_blueprint index), and
+	// system-jira-implement is already claimed by system-trigger-jira-implement
+	// on jira_issue_assigned. A decomposition-resolved ticket still surfaces as
+	// a task via system-rule-jira-became-atomic; auto-delegating it is a
+	// user-authored trigger on its own blueprint (or a blueprint copy).
 	{
 		// review_requested only fires when the session user is added
 		// to the PR's review-request list, so the event is already

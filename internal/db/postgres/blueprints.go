@@ -311,6 +311,88 @@ func (s *blueprintStore) ReplaceSteps(ctx context.Context, orgID, blueprintID st
 	})
 }
 
+// reparentBlueprintStepsPG moves the steps of fromBlueprint whose step_index
+// is >= minIndex onto toBlueprint, shifting each step_index by indexShift. It
+// is the shared mechanic behind MergeInto and SplitAt. org_id is threaded
+// through the WHERE for defense in depth alongside RLS. team_id is left
+// unchanged: both blueprints share a team (same-team validated by the caller),
+// so the (blueprint_id, team_id) composite FK still resolves to the new owner.
+// step_prompt_id is untouched, so the copy-only step uniqueness holds.
+func reparentBlueprintStepsPG(ctx context.Context, q queryer, orgID, fromBlueprint, toBlueprint string, indexShift, minIndex int) error {
+	_, err := q.ExecContext(ctx, `
+		UPDATE blueprint_steps
+		SET blueprint_id = $1, step_index = step_index + $2
+		WHERE org_id = $3 AND blueprint_id = $4 AND step_index >= $5
+	`, toBlueprint, indexShift, orgID, fromBlueprint, minIndex)
+	return err
+}
+
+func (s *blueprintStore) MergeInto(ctx context.Context, orgID, hostID, sourceID string) error {
+	return s.runInTx(ctx, func(tx queryer) error {
+		var hostLen int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM blueprint_steps WHERE org_id = $1 AND blueprint_id = $2`,
+			orgID, hostID).Scan(&hostLen); err != nil {
+			return fmt.Errorf("count host steps: %w", err)
+		}
+		// Append source's steps after the host's, densely (host_len + i).
+		if err := reparentBlueprintStepsPG(ctx, tx, orgID, sourceID, hostID, hostLen, 0); err != nil {
+			return fmt.Errorf("reparent source steps: %w", err)
+		}
+		res, err := tx.ExecContext(ctx,
+			`UPDATE blueprints SET deleted_at = now() WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL`,
+			orgID, sourceID)
+		if err != nil {
+			return fmt.Errorf("soft-delete source: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return fmt.Errorf("blueprint %s not found or already deleted", sourceID)
+		}
+		// Bump host.updated_at (the set_updated_at trigger also stamps it, but
+		// the row must be touched for the trigger to fire).
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE blueprints SET updated_at = now() WHERE org_id = $1 AND id = $2`, orgID, hostID); err != nil {
+			return fmt.Errorf("bump host updated_at: %w", err)
+		}
+		return nil
+	})
+}
+
+func (s *blueprintStore) SplitAt(ctx context.Context, orgID, id string, atIndex int, newBlueprintID, newName string) (string, error) {
+	err := s.runInTx(ctx, func(tx queryer) error {
+		// Create the new trigger-less downstream blueprint, deriving its team
+		// from the blueprint being split so both halves share a team (and the
+		// reparented steps' (blueprint_id, team_id) FK still resolves). Mirrors
+		// Create's COALESCE(current_user_id, org owner) creator default.
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO blueprints (id, org_id, creator_user_id, team_id, name, source, usage_count, created_at, updated_at)
+			SELECT $1, $2,
+				COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
+				b.team_id, $3, 'user', 0, now(), now()
+			FROM blueprints b WHERE b.id = $4 AND b.org_id = $2
+		`, newBlueprintID, orgID, newName, id); err != nil {
+			return fmt.Errorf("create downstream blueprint: %w", err)
+		}
+		// Peel steps [atIndex, N) onto the new blueprint, re-densified 0-based.
+		if err := reparentBlueprintStepsPG(ctx, tx, orgID, id, newBlueprintID, -atIndex, atIndex); err != nil {
+			return fmt.Errorf("reparent tail steps: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE blueprints SET updated_at = now() WHERE org_id = $1 AND id = $2`, orgID, id); err != nil {
+			return fmt.Errorf("bump upstream updated_at: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return newBlueprintID, nil
+}
+
 // --- Runs ----------------------------------------------------------------
 
 func (s *blueprintStore) CreateRun(ctx context.Context, orgID string, br domain.BlueprintRun) (string, error) {

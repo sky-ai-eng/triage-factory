@@ -2182,6 +2182,20 @@ CREATE INDEX idx_event_handlers_blueprint ON public.event_handlers USING btree (
 
 
 --
+-- Name: event_handlers_one_trigger_per_blueprint; Type: INDEX; Schema: public; Owner: -
+--
+-- A blueprint is fired by exactly one event: at most one trigger may reference
+-- a given blueprint. blueprint_id IS NOT NULL already implies kind='trigger'
+-- (the rule-shape CHECK pins rules to a NULL blueprint_id), so the partial
+-- predicate needs no kind clause. The mirror of the copy-only step index — that
+-- one keeps a prompt in one blueprint, this one keeps a blueprint behind one
+-- event. Events still fan out 1:many (one event_type may fire many blueprints
+-- via many distinct trigger rows); this only bounds the per-blueprint side.
+
+CREATE UNIQUE INDEX event_handlers_one_trigger_per_blueprint ON public.event_handlers USING btree (org_id, blueprint_id) WHERE (blueprint_id IS NOT NULL);
+
+
+--
 -- Name: idx_events_org_entity_created; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -5720,6 +5734,10 @@ ALTER TABLE ONLY public.org_template_handlers
 
 CREATE INDEX idx_org_template_handlers_kind ON public.org_template_handlers USING btree (org_id, kind);
 CREATE INDEX idx_org_template_blueprint_steps_step_prompt ON public.org_template_blueprint_steps USING btree (step_prompt_id, org_id);
+
+-- Mirror of the team-table backstop: a template trigger fires exactly one
+-- template blueprint.
+CREATE UNIQUE INDEX org_template_handlers_one_trigger_per_blueprint ON public.org_template_handlers USING btree (org_id, blueprint_id) WHERE (blueprint_id IS NOT NULL);
 
 ALTER TABLE ONLY public.org_template_prompts
     ADD CONSTRAINT org_template_prompts_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
