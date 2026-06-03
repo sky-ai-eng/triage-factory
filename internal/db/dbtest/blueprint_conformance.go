@@ -239,6 +239,41 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		}
 	})
 
+	t.Run("StepPromptOwner_FalseAfterBlueprintSoftDelete", func(t *testing.T) {
+		// Regression: StepPromptOwner must return ok=false once the owning
+		// blueprint is soft-deleted. The step row persists as an audit trail
+		// (RESTRICT FK), so without the deleted_at IS NULL join, StepPromptOwner
+		// incorrectly returns ok=true — blocking the prompt from being claimed by
+		// a new blueprint with a phantom 422.
+		store, orgID, teamID, seedPrompt := factory(t)
+		ctx := context.Background()
+		bp, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
+			SystemSlug: "softdel-owner-bp", Name: "SoftDelOwner", Source: "system",
+		})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		p := seedPrompt(t, "paired-prompt")
+		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p}, nil); err != nil {
+			t.Fatalf("ReplaceSteps: %v", err)
+		}
+		// Confirm the prompt is owned before deletion.
+		owner, ok, err := store.StepPromptOwner(ctx, orgID, p)
+		if err != nil || !ok || owner != bp {
+			t.Fatalf("pre-delete: StepPromptOwner = (%q, %v, %v); want (%q, true, nil)", owner, ok, err, bp)
+		}
+		// Soft-delete the owning blueprint (simulates the delete-pairing path).
+		if err := store.Delete(ctx, orgID, bp); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		// After soft-delete, StepPromptOwner must return ok=false so the prompt
+		// can be claimed by a new blueprint without a spurious 422.
+		_, ok, err = store.StepPromptOwner(ctx, orgID, p)
+		if err != nil || ok {
+			t.Fatalf("post-delete: StepPromptOwner = (_, %v, %v); want (_, false, nil)", ok, err)
+		}
+	})
+
 	t.Run("SeedOrUpdate_CtxCancellation_FailsFast", func(t *testing.T) {
 		store, orgID, teamID, _ := factory(t)
 		ctx, cancel := context.WithCancel(context.Background())

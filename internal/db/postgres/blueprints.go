@@ -188,18 +188,34 @@ func (s *blueprintStore) Create(ctx context.Context, orgID, teamID string, b dom
 // so the copy-only unique index keeps the wrapped prompt pinned; the prompt is
 // soft-deleted alongside by the delete-pairing.
 func (s *blueprintStore) Delete(ctx context.Context, orgID string, id string) error {
-	_, err := s.app.ExecContext(ctx, `UPDATE blueprints SET deleted_at = now() WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL`, orgID, id)
-	return err
+	res, err := s.app.ExecContext(ctx, `UPDATE blueprints SET deleted_at = now() WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL`, orgID, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("blueprint %s not found or already deleted", id)
+	}
+	return nil
 }
 
 // StepPromptOwner returns the blueprint that holds promptID as a step. The
 // copy-only unique index (org_id, step_prompt_id) guarantees at most one row.
+// Only considers non-deleted blueprints — a step row in a soft-deleted
+// blueprint does not count as ownership (the step persists as audit trail;
+// the prompt is free to be claimed by a new blueprint).
 func (s *blueprintStore) StepPromptOwner(ctx context.Context, orgID string, promptID string) (string, bool, error) {
 	var blueprintID string
-	err := s.app.QueryRowContext(ctx,
-		`SELECT blueprint_id FROM blueprint_steps WHERE org_id = $1 AND step_prompt_id = $2 LIMIT 1`,
-		orgID, promptID,
-	).Scan(&blueprintID)
+	err := s.app.QueryRowContext(ctx, `
+		SELECT bs.blueprint_id
+		FROM blueprint_steps bs
+		JOIN blueprints b ON b.id = bs.blueprint_id AND b.org_id = bs.org_id
+		WHERE bs.org_id = $1 AND bs.step_prompt_id = $2 AND b.deleted_at IS NULL
+		LIMIT 1
+	`, orgID, promptID).Scan(&blueprintID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}

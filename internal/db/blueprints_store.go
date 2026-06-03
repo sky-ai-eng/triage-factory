@@ -55,8 +55,14 @@ type BlueprintStore interface {
 	// The SQLite impl ignores teamID (local mode is single-team).
 	List(ctx context.Context, orgID string, teamID string) ([]domain.Blueprint, error)
 
-	// Get returns one blueprint by id (regardless of hidden state) or
-	// (nil, nil) if not found.
+	// Get returns one blueprint by id or (nil, nil) if not found.
+	// Request-facing, so it filters deleted_at IS NULL — a soft-deleted
+	// blueprint reads as absent here (use GetSystem to resolve it for in-flight
+	// runs / past timelines). Transparent to hidden: Get returns hidden=true
+	// rows while filtering deleted rows — the two signals are intentionally
+	// asymmetric (hidden removes a row from List but keeps it live; deleted_at
+	// is a durable soft-delete that makes the row invisible to all
+	// request-facing paths).
 	Get(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
 
 	// GetBySystemSlug resolves a team's copy of a shipped blueprint by its

@@ -75,6 +75,8 @@ func (s *Server) handleBlueprintCreate(w http.ResponseWriter, r *http.Request) {
 
 	// With first_prompt the blueprint name defaults to the prompt's name; the
 	// prompt itself must carry a name + body (it's the step's mission).
+	// Name defaulting happens here (before resolveActingTeam inside the tx)
+	// because it is a pure string assignment independent of team resolution.
 	if req.FirstPrompt != nil {
 		if req.FirstPrompt.Name == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "first_prompt.name is required"})

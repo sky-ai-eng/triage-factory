@@ -190,21 +190,37 @@ func (s *blueprintStore) Delete(ctx context.Context, orgID string, id string) er
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	_, err := s.q.ExecContext(ctx, `UPDATE blueprints SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`, time.Now().UTC(), id)
-	return err
+	res, err := s.q.ExecContext(ctx, `UPDATE blueprints SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`, time.Now().UTC(), id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("blueprint %s not found or already deleted", id)
+	}
+	return nil
 }
 
 // StepPromptOwner returns the blueprint that holds promptID as a step. The
 // copy-only unique index guarantees at most one row, so a single SELECT
-// resolves the owner.
+// resolves the owner. Only considers non-deleted blueprints — a step row in a
+// soft-deleted blueprint does not count as ownership (the step persists as
+// audit trail; the prompt is free to be claimed by a new blueprint).
 func (s *blueprintStore) StepPromptOwner(ctx context.Context, orgID string, promptID string) (string, bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", false, err
 	}
 	var blueprintID string
-	err := s.q.QueryRowContext(ctx,
-		`SELECT blueprint_id FROM blueprint_steps WHERE step_prompt_id = ? LIMIT 1`, promptID,
-	).Scan(&blueprintID)
+	err := s.q.QueryRowContext(ctx, `
+		SELECT bs.blueprint_id
+		FROM blueprint_steps bs
+		JOIN blueprints b ON b.id = bs.blueprint_id
+		WHERE bs.step_prompt_id = ? AND b.deleted_at IS NULL
+		LIMIT 1
+	`, promptID).Scan(&blueprintID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
