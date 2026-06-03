@@ -5,7 +5,7 @@ import { keyOf, type GitHubTeamCandidate } from '../lib/githubTeams'
 
 // Re-exported for callers that still import the candidate shape from the
 // wizard (e.g. Setup's onContinue handler). The canonical definition lives
-// in GitHubTeamChecklist, the shared body both surfaces render.
+// in ../lib/githubTeams so both wrappers and the shared body agree.
 export type { GitHubTeamCandidate }
 
 // The github-groups GET response we consume. `groups` is any already-saved
