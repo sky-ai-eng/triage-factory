@@ -110,7 +110,7 @@ Smoke-test the round-trip against the composed MinIO (exercises the same bucket 
 
 ```sh
 # set -a; source .env; set +a   # load TF_BLOB_* into your shell first
-docker compose exec minio-postinit sh -c '
+docker compose run --rm --no-deps minio-postinit '
   mc alias set tf http://minio:9000 "$TF_BLOB_ACCESS_KEY" "$TF_BLOB_SECRET_KEY" &&
   echo hello | mc pipe tf/"${TF_BLOB_BUCKET:-tf-workspaces}"/smoke.txt &&
   mc cat tf/"${TF_BLOB_BUCKET:-tf-workspaces}"/smoke.txt &&        # -> hello
