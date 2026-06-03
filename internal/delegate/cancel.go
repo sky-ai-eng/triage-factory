@@ -219,6 +219,15 @@ func (s *Spawner) failRun(orgID, runID, taskID, triggerType, creatorUserID, errM
 	s.updateBreakerCounter(taskID, triggerType, "failed")
 	s.broadcastRunUpdate(orgID, runID, "failed")
 
+	// A failed run won't resume, so drop the workspace snapshot it may have
+	// written when it parked (e.g. a yield that then failed mid-resume, or a
+	// persistYield that couldn't record). Keyed by the run's own id: for a
+	// blueprint step (whose snapshot is keyed by blueprint_run_id) this is a
+	// harmless no-op and terminateBlueprint owns that blob; for a run that never
+	// snapshotted it's also a no-op. The single failure chokepoint covers every
+	// failRun caller (the resume goroutine's three exits among them).
+	s.discardWorkspaceSnapshot(bgCtx, orgID, runID)
+
 	// Surface as a sticky error toast so the user sees the failure even when
 	// they're not watching the runs page. Truncate the message — full stderr
 	// dumps don't fit in a toast card.

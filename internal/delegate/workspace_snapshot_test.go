@@ -246,6 +246,34 @@ func TestEnsureWorkspace_ColdPath_NoSnapshotErrors(t *testing.T) {
 	}
 }
 
+// TestFailRun_DiscardsWorkspaceSnapshot: a parked run that then fails (e.g. a
+// yield-resume that errors mid-execution, or a persistYield that couldn't
+// record) drops its snapshot rather than orphaning the blob. failRun is the
+// single failure chokepoint covering the resume goroutine's failure exits.
+func TestFailRun_DiscardsWorkspaceSnapshot(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	s, _, runID, taskID := setupAdvanceFixture(t, "failrun-discard")
+	blobs, err := storage.New()
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	s.SetStorage(blobs)
+
+	ctx := context.Background()
+	key := snapshotKey(runmode.LocalDefaultOrg, runID)
+	if err := blobs.Put(ctx, key, strings.NewReader("snapshot")); err != nil {
+		t.Fatalf("seed snapshot: %v", err)
+	}
+
+	// triggerType "event" so failRun routes through the admin-pool System
+	// methods (no synthetic-claims tx needed in the fixture).
+	s.failRun(runmode.LocalDefaultOrg, runID, taskID, "event", "", "boom")
+
+	if ok, _ := blobs.Exists(ctx, key); ok {
+		t.Error("failRun did not discard the workspace snapshot — blob orphaned on failure")
+	}
+}
+
 // --- helpers ---------------------------------------------------------------
 
 // newStorageSpawner builds a bare Spawner with only the blob store wired —

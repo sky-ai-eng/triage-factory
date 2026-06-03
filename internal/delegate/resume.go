@@ -216,6 +216,11 @@ func (s *Spawner) ResumeAfterYield(orgID, runID, agentMessage, userID string) er
 			})
 			if ok {
 				s.broadcastRunUpdate(orgID, runID, "cancelled")
+				// Cancelled mid-resume: the run won't continue, so drop the
+				// snapshot taken when it parked. Same key/no-op semantics as
+				// failRun's discard (runID-keyed; harmless for a blueprint step,
+				// which terminateBlueprint cleans by blueprint_run_id).
+				s.discardWorkspaceSnapshot(cancelCtx, orgID, runID)
 			}
 		}
 
