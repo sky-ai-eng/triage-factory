@@ -15,10 +15,16 @@ import {
   applyNodeChanges,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import type { Blueprint, Prompt, TriggerHandler } from '../types'
+import type { Blueprint, BlueprintStep, Prompt, TriggerHandler } from '../types'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
-import { type BindingScope, isTemplateScope, blueprintsBase, handlersBase } from '../lib/scope'
+import {
+  type BindingScope,
+  isTemplateScope,
+  blueprintsBase,
+  promptsBase,
+  handlersBase,
+} from '../lib/scope'
 
 interface EventType {
   id: string
@@ -240,6 +246,10 @@ function BindingGraphInner({
   const [eventTypes, setEventTypes] = useState<EventType[]>([])
   const [prompts, setPrompts] = useState<Prompt[]>([])
   const [triggers, setTriggers] = useState<TriggerHandler[]>([])
+  // Each canvas node is a prompt (a blueprint step); a trigger fires a
+  // blueprint. blueprintFirstPrompt maps a blueprint id → its step-0 prompt id
+  // so an event edge targets the first prompt of the blueprint it fires.
+  const [blueprintFirstPrompt, setBlueprintFirstPrompt] = useState<Record<string, string>>({})
   const [nodes, setNodes] = useState<Node[]>([])
   const [loading, setLoading] = useState(true)
   const [activeEventIds, setActiveEventIds] = useState<Set<string>>(new Set())
@@ -266,6 +276,10 @@ function BindingGraphInner({
   // Refs so callbacks don't go stale
   const triggersRef = useRef(triggers)
   triggersRef.current = triggers
+  // Inverse of blueprintFirstPrompt (step-0 prompt id → blueprint id), in a ref
+  // so the connect gesture can resolve a dropped prompt back to the blueprint it
+  // fronts without going stale.
+  const blueprintByFirstPromptRef = useRef<Record<string, string>>({})
   const onPromptClickRef = useRef(onPromptClick)
   onPromptClickRef.current = onPromptClick
   const onTriggerClickRef = useRef(onTriggerClick)
@@ -294,33 +308,65 @@ function BindingGraphInner({
     // unfiltered, the solo/local case); template scope is org-scoped (no
     // team_id). event-types is a system registry — never scoped.
     const teamQuery = !template && teamId ? `team_id=${encodeURIComponent(teamId)}` : ''
-    // Triggers bind to blueprints, so the canvas node set is the blueprint list
-    // (a 1-step blueprint is the former leaf prompt). Both scopes return Blueprint
-    // rows — team from /api/blueprints, template from /api/org-template/blueprints.
+    // The canvas renders PROMPTS (a blueprint's steps), not blueprints: a node is
+    // one blueprint step, carrying a real prompt id so clicking it opens the
+    // PromptDrawer (/api/prompts/{id}). The blueprint is just the grouping an
+    // event fires; the box drawn around its prompts is a separate ticket. We need
+    // the blueprint list + each blueprint's steps to learn the step → prompt
+    // mapping (and which prompt is step 0 — the event-edge target), plus the
+    // prompt list for titles + bodies. Both scopes are symmetric — team from
+    // /api/*, template from /api/org-template/*.
     const blueprintsURL = `${blueprintsBase(template)}${teamQuery ? `?${teamQuery}` : ''}`
+    const promptsURL = `${promptsBase(template)}${teamQuery ? `?${teamQuery}` : ''}`
     const triggersURL = `${handlersBase(template)}?kind=trigger${teamQuery ? `&${teamQuery}` : ''}`
     try {
-      const [etRes, pRes, tRes] = await Promise.all([
+      const [etRes, bpRes, promptRes, tRes] = await Promise.all([
         fetch('/api/event-types').then((r) => parseOrThrow(r, 'event-types')),
         fetch(blueprintsURL).then((r) => parseOrThrow(r, 'blueprints')),
+        fetch(promptsURL).then((r) => parseOrThrow(r, 'prompts')),
         fetch(triggersURL).then((r) => parseOrThrow(r, 'triggers')),
       ])
       setEventTypes(etRes)
-      // Normalize blueprints into the prompt-node shape the canvas renders. Both
-      // scopes return Blueprint rows (which lack body / usage stats); the node
-      // tile only needs id + name + source. Template blueprints carry source
-      // 'system' on shipped rows, so pass it through rather than forcing 'user'.
-      const nodeList: Prompt[] = (pRes as Blueprint[]).map((b) => ({
-        id: b.id,
-        name: b.name,
-        body: '',
-        source: b.source || 'user',
-        usage_count: 0,
-        created_at: b.created_at,
-        updated_at: b.updated_at,
-      }))
-      setPrompts(nodeList)
       setTriggers(tRes)
+
+      const blueprints = bpRes as Blueprint[]
+      const promptById = new Map((promptRes as Prompt[]).map((p): [string, Prompt] => [p.id, p]))
+
+      // Fetch each blueprint's steps (N+1 over the handful of blueprints — a bulk
+      // "blueprints-with-steps" read is a tracked, optional optimization).
+      const stepsURL = (id: string) => `${blueprintsBase(template)}/${encodeURIComponent(id)}/steps`
+      const stepLists = await Promise.all(
+        blueprints.map((b) =>
+          fetch(stepsURL(b.id))
+            .then((r) => parseOrThrow(r, 'blueprint-steps'))
+            .then((steps) => ({ blueprintId: b.id, steps: steps as BlueprintStep[] })),
+        ),
+      )
+
+      // One node per blueprint step (= a prompt), deduped by prompt id so a
+      // prompt reused across blueprints doesn't collide on the React Flow node
+      // id. firstPrompt: blueprint → its step-0 prompt (the event-edge target);
+      // byFirstPrompt is the inverse the connect gesture resolves through.
+      const firstPrompt: Record<string, string> = {}
+      const byFirstPrompt: Record<string, string> = {}
+      const nodeList: Prompt[] = []
+      const seen = new Set<string>()
+      for (const { blueprintId, steps } of stepLists) {
+        const ordered = [...steps].sort((a, b) => a.step_index - b.step_index)
+        if (ordered.length > 0) {
+          firstPrompt[blueprintId] = ordered[0].step_prompt_id
+          byFirstPrompt[ordered[0].step_prompt_id] = blueprintId
+        }
+        for (const step of ordered) {
+          if (seen.has(step.step_prompt_id)) continue
+          seen.add(step.step_prompt_id)
+          const prompt = promptById.get(step.step_prompt_id)
+          if (prompt) nodeList.push(prompt)
+        }
+      }
+      setPrompts(nodeList)
+      setBlueprintFirstPrompt(firstPrompt)
+      blueprintByFirstPromptRef.current = byFirstPrompt
 
       const saved = layoutRef.current
       const boundIds = new Set((tRes as TriggerHandler[]).map((t) => t.event_type))
@@ -416,11 +462,14 @@ function BindingGraphInner({
 
   // Build edges
   const edges: Edge[] = triggers
-    .filter((t) => activeEventIds.has(t.event_type))
+    // Drop triggers whose blueprint has no resolvable step-0 prompt so we never
+    // emit an edge pointing at a node that isn't on the canvas.
+    .filter((t) => activeEventIds.has(t.event_type) && blueprintFirstPrompt[t.blueprint_id])
     .map((t) => ({
       id: t.id,
       source: `et:${t.event_type}`,
-      target: `p:${t.blueprint_id}`,
+      // The event wires to the blueprint's first step (a prompt node).
+      target: `p:${blueprintFirstPrompt[t.blueprint_id]}`,
       type: 'default',
       animated: t.enabled,
       style: {
@@ -464,7 +513,9 @@ function BindingGraphInner({
     if (dirty) saveLayout(storageKeyRef.current, layout)
   }, [])
 
-  // Connect event -> prompt (creates a new trigger)
+  // Connect event -> prompt (creates a new trigger). The canvas nodes are
+  // prompts, but a trigger fires a blueprint, so resolve the dropped prompt back
+  // to the blueprint it fronts.
   const onConnect = useCallback(
     async (connection: Connection) => {
       const eventType = connection.source?.replace('et:', '')
@@ -477,11 +528,21 @@ function BindingGraphInner({
       // triggers).
       if (!scopeReady) return
 
+      // Resolve the dropped prompt to the blueprint it heads. Today every prompt
+      // node is a 1-step blueprint's sole (step-0) prompt, so this is a clean
+      // 1:1 lookup; wiring into a multi-step blueprint's interior is a routing
+      // constraint owned by a follow-up ticket.
+      const blueprintId = blueprintByFirstPromptRef.current[promptId]
+      if (!blueprintId) {
+        toast.error('That prompt is not a blueprint entry point — cannot bind an event to it')
+        return
+      }
+
       // Team scope stamps the acting team; template scope is org-scoped (no
       // team_id — the row lands on the org template).
       const body: Record<string, unknown> = {
         kind: 'trigger',
-        blueprint_id: promptId,
+        blueprint_id: blueprintId,
         event_type: eventType,
       }
       if (!template) {
