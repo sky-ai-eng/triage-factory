@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -82,6 +83,109 @@ func (s *Server) handleBlueprintCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, created)
+}
+
+// handleBlueprintGet returns one blueprint header by id. Team-scoped: RLS gates
+// the row to the caller's team membership (the metadata popup loads from here).
+func (s *Server) handleBlueprintGet(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	id := r.PathValue("id")
+
+	var bp *domain.Blueprint
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		bp, e = tx.Blueprints.Get(r.Context(), orgID, id)
+		return e
+	}); err != nil {
+		internalError(w, "blueprints", err)
+		return
+	}
+	if bp == nil {
+		notFound(w, "blueprint")
+		return
+	}
+	writeJSON(w, http.StatusOK, bp)
+}
+
+// updateBlueprintRequest is the metadata-popup PUT body: title + description.
+// Structure (steps / order / trigger binding) is edited elsewhere, never here.
+type updateBlueprintRequest struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// handleBlueprintPut updates a blueprint's metadata (name + description).
+// Mirrors handleOrgTemplateBlueprintPut at team scope.
+func (s *Server) handleBlueprintPut(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	id := r.PathValue("id")
+
+	var req updateBlueprintRequest
+	if !decodeJSON(w, r, &req, "") {
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		badRequest(w, "name is required")
+		return
+	}
+
+	var updated *domain.Blueprint
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		existing, e := tx.Blueprints.Get(r.Context(), orgID, id)
+		if e != nil || existing == nil {
+			return e
+		}
+		if e := tx.Blueprints.Update(r.Context(), orgID, id, strings.TrimSpace(req.Name), req.Description); e != nil {
+			return e
+		}
+		updated, e = tx.Blueprints.Get(r.Context(), orgID, id)
+		return e
+	}); err != nil {
+		internalError(w, "blueprints", err)
+		return
+	}
+	if updated == nil {
+		notFound(w, "blueprint")
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+// handleBlueprintDelete hard-deletes a blueprint (steps + triggers cascade).
+// Mirrors handleOrgTemplateBlueprintDelete at team scope.
+func (s *Server) handleBlueprintDelete(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	id := r.PathValue("id")
+
+	var found bool
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		existing, e := tx.Blueprints.Get(r.Context(), orgID, id)
+		if e != nil || existing == nil {
+			return e
+		}
+		found = true
+		return tx.Blueprints.Delete(r.Context(), orgID, id)
+	}); err != nil {
+		internalError(w, "blueprints", err)
+		return
+	}
+	if !found {
+		notFound(w, "blueprint")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 // --- Blueprint steps -----------------------------------------------------

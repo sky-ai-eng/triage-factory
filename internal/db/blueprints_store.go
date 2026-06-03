@@ -68,6 +68,16 @@ type BlueprintStore interface {
 	// (it satisfies the team-membership RLS); the SQLite impl ignores it.
 	Create(ctx context.Context, orgID, teamID string, b domain.Blueprint) error
 
+	// Update sets the blueprint's name + description (the metadata-popup
+	// fields) and bumps updated_at. Mirrors OrgTemplate.UpdateBlueprint at
+	// team scope; RLS gates the write to the caller's team in Postgres.
+	Update(ctx context.Context, orgID, id, name, description string) error
+
+	// Delete hard-deletes a blueprint. Steps and triggers referencing it
+	// cascade (FK); already-made team copies are independent and untouched.
+	// Mirrors OrgTemplate.DeleteBlueprint at team scope.
+	Delete(ctx context.Context, orgID, id string) error
+
 	// GetSystem mirrors Get but routes through the admin pool in Postgres.
 	// The delegate spawner resolves a trigger/manual blueprint from a
 	// goroutine that continues past the request lifecycle.

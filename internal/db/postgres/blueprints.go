@@ -83,7 +83,7 @@ func (s *blueprintStore) SeedOrUpdate(ctx context.Context, orgID, teamID string,
 
 func (s *blueprintStore) List(ctx context.Context, orgID string, teamID string) ([]domain.Blueprint, error) {
 	args := []any{orgID}
-	q := `SELECT id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
+	q := `SELECT id, name, description, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
 		FROM blueprints WHERE org_id = $1 AND hidden = FALSE`
 	if teamID != "" {
 		args = append(args, teamID)
@@ -120,7 +120,7 @@ func (s *blueprintStore) GetBySystemSlug(ctx context.Context, orgID, teamID, sys
 		return nil, errors.New("postgres blueprints: GetBySystemSlug requires team_id")
 	}
 	b, err := scanBlueprintRowPG(s.app.QueryRowContext(ctx, `
-		SELECT id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
+		SELECT id, name, description, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
 		FROM blueprints WHERE org_id = $1 AND team_id = $2 AND system_slug = $3
 	`, orgID, teamID, systemSlug).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -134,7 +134,7 @@ func (s *blueprintStore) GetBySystemSlug(ctx context.Context, orgID, teamID, sys
 
 func getBlueprint(ctx context.Context, q queryer, orgID, id string) (*domain.Blueprint, error) {
 	b, err := scanBlueprintRowPG(q.QueryRowContext(ctx, `
-		SELECT id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
+		SELECT id, name, description, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
 		FROM blueprints WHERE org_id = $1 AND id = $2
 	`, orgID, id).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -149,7 +149,7 @@ func getBlueprint(ctx context.Context, q queryer, orgID, id string) (*domain.Blu
 func scanBlueprintRowPG(scanFn func(dst ...any) error) (domain.Blueprint, error) {
 	var b domain.Blueprint
 	var systemSlug sql.NullString
-	if err := scanFn(&b.ID, &b.Name, &b.Source, &b.UsageCount, &b.UserModified, &b.TeamID, &systemSlug, &b.CreatedAt, &b.UpdatedAt); err != nil {
+	if err := scanFn(&b.ID, &b.Name, &b.Description, &b.Source, &b.UsageCount, &b.UserModified, &b.TeamID, &systemSlug, &b.CreatedAt, &b.UpdatedAt); err != nil {
 		return b, err
 	}
 	if systemSlug.Valid {
@@ -170,11 +170,30 @@ func (s *blueprintStore) Create(ctx context.Context, orgID, teamID string, b dom
 		systemSlug = b.SystemSlug
 	}
 	_, err := s.app.ExecContext(ctx, `
-		INSERT INTO blueprints (id, org_id, creator_user_id, team_id, name, source, system_slug, usage_count, created_at, updated_at)
+		INSERT INTO blueprints (id, org_id, creator_user_id, team_id, name, description, source, system_slug, usage_count, created_at, updated_at)
 		VALUES ($1, $2,
 			COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
-			$3::uuid, $4, $5, $6, 0, now(), now())
-	`, b.ID, orgID, teamID, b.Name, b.Source, systemSlug)
+			$3::uuid, $4, $5, $6, $7, 0, now(), now())
+	`, b.ID, orgID, teamID, b.Name, b.Description, b.Source, systemSlug)
+	return err
+}
+
+// Update sets the blueprint's name + description (the metadata-popup fields).
+// updated_at is maintained by the set_updated_at trigger; org_id stays in the
+// WHERE as defense in depth (RLS blueprints_update gates the rest).
+func (s *blueprintStore) Update(ctx context.Context, orgID, id, name, description string) error {
+	_, err := s.app.ExecContext(ctx, `
+		UPDATE blueprints SET name = $1, description = $2
+		WHERE org_id = $3 AND id = $4
+	`, name, description, orgID, id)
+	return err
+}
+
+// Delete hard-deletes a blueprint. Its steps and any triggers referencing it
+// cascade (FK ON DELETE CASCADE); team copies are independent rows, untouched.
+// RLS blueprints_delete gates the row to the caller's team.
+func (s *blueprintStore) Delete(ctx context.Context, orgID, id string) error {
+	_, err := s.app.ExecContext(ctx, `DELETE FROM blueprints WHERE org_id = $1 AND id = $2`, orgID, id)
 	return err
 }
 

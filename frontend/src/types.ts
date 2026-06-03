@@ -220,6 +220,9 @@ export interface Prompt {
 export interface Blueprint {
   id: string
   name: string
+  // description is free-text authoring metadata edited from the metadata popup.
+  // Optional because org-template blueprints carry no description column.
+  description?: string
   // source is 'system' for shipped/template-seeded blueprints, 'user' for
   // authored ones. Optional because not every Blueprint-shaped response sets it.
   source?: string

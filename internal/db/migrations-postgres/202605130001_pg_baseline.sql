@@ -5260,6 +5260,7 @@ CREATE TABLE public.blueprints (
     creator_user_id uuid,
     team_id uuid NOT NULL,
     name text NOT NULL,
+    description text DEFAULT ''::text NOT NULL,
     source text DEFAULT 'user'::text NOT NULL,
     usage_count integer DEFAULT 0 NOT NULL,
     hidden boolean DEFAULT false NOT NULL,

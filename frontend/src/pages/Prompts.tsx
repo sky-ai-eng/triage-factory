@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react'
 import { AnimatePresence } from 'motion/react'
 import PromptDrawer from '../components/PromptDrawer'
+import BlueprintMetaPopup from '../components/BlueprintMetaPopup'
 import BindingGraph from '../components/BindingGraph'
 import ForgivingBanner from '../components/ForgivingBanner'
 import TaskRuleEditor from '../components/TaskRuleEditor'
@@ -10,8 +11,14 @@ import { useActiveTeam } from '../hooks/useTeams'
 import type { TriggerHandler, RuleHandler } from '../types'
 
 export default function Prompts() {
+  // PromptDrawer state — edits a prompt's content (body/model) via
+  // /api/prompts/{id}. Kept wired for the "New Prompt" create flow (and, once
+  // step nodes land, for editing a step's prompt); a blueprint node never opens
+  // it (that 404s — a blueprint id is not a prompt id).
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [isNew, setIsNew] = useState(false)
+  // Blueprint metadata popup — opened by clicking a blueprint node.
+  const [blueprintMetaId, setBlueprintMetaId] = useState<string | null>(null)
   const [graphKey, setGraphKey] = useState(0)
 
   // The prompts page is single-team: it doubles as the auto-delegation
@@ -32,11 +39,6 @@ export default function Prompts() {
     setSelectedId(null)
     setIsNew(true)
   }
-
-  const openEdit = useCallback((id: string) => {
-    setIsNew(false)
-    setSelectedId(id)
-  }, [])
 
   const closeDrawer = () => {
     setSelectedId(null)
@@ -119,7 +121,7 @@ export default function Prompts() {
           key={graphKey}
           scope={{ kind: 'team', teamId: activeTeam.teamId }}
           scopeReady={activeTeam.ready}
-          onPromptClick={openEdit}
+          onBlueprintClick={setBlueprintMetaId}
           onTriggerClick={setEditingTrigger}
           onTriggerDeleted={handleTriggerDeleted}
         />
@@ -132,6 +134,20 @@ export default function Prompts() {
         onClose={closeDrawer}
         onSaved={handleSaved}
         onDeleted={handleDeleted}
+      />
+
+      {/* Blueprint metadata popup — title + description, off a blueprint node. */}
+      <BlueprintMetaPopup
+        blueprintId={blueprintMetaId}
+        onClose={() => setBlueprintMetaId(null)}
+        onSaved={() => {
+          setBlueprintMetaId(null)
+          setGraphKey((k) => k + 1)
+        }}
+        onDeleted={() => {
+          setBlueprintMetaId(null)
+          setGraphKey((k) => k + 1)
+        }}
       />
 
       {/* Task rule editor — opened by forgiving banner's "Create task rule" action */}

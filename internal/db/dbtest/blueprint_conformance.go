@@ -163,6 +163,64 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		}
 	})
 
+	t.Run("Update_RoundTripsNameAndDescription", func(t *testing.T) {
+		store, orgID, teamID, _ := factory(t)
+		ctx := context.Background()
+		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
+			SystemSlug: "system-update-bp", Name: "Before", Source: "system",
+		})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if err := store.Update(ctx, orgID, id, "After", "A longer description"); err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, id)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got == nil {
+			t.Fatalf("Get returned nil after Update")
+		}
+		if got.Name != "After" {
+			t.Errorf("name = %q, want After", got.Name)
+		}
+		if got.Description != "A longer description" {
+			t.Errorf("description = %q, want 'A longer description' (must round-trip)", got.Description)
+		}
+	})
+
+	t.Run("Delete_RemovesBlueprint", func(t *testing.T) {
+		store, orgID, teamID, _ := factory(t)
+		ctx := context.Background()
+		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
+			SystemSlug: "system-delete-bp", Name: "Doomed", Source: "system",
+		})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if err := store.Delete(ctx, orgID, id); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, id)
+		if err != nil {
+			t.Fatalf("Get after delete: %v", err)
+		}
+		if got != nil {
+			t.Fatalf("Get after Delete returned %+v, want nil", got)
+		}
+		// And it must drop out of List.
+		list, err := store.List(ctx, orgID, teamID)
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		for _, b := range list {
+			if b.ID == id {
+				t.Fatalf("List still shows deleted blueprint %s", id)
+			}
+		}
+	})
+
 	t.Run("SeedOrUpdate_CtxCancellation_FailsFast", func(t *testing.T) {
 		store, orgID, teamID, _ := factory(t)
 		ctx, cancel := context.WithCancel(context.Background())

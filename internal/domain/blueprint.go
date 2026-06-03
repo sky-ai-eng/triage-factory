@@ -29,9 +29,14 @@ const (
 // fires is a blueprint; a single prompt is just a 1-step blueprint. Modeled
 // on Prompt (same team-scoping, same system_slug idempotency key).
 type Blueprint struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Source string `json:"source"` // "system", "user", "imported"
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Description is free-text authoring metadata (the blueprint's "what it
+	// does") edited from the metadata popup. NOT NULL DEFAULT '' — always
+	// present on team blueprints; empty on org-template blueprints (that table
+	// has no description column).
+	Description string `json:"description"`
+	Source      string `json:"source"` // "system", "user", "imported"
 	// TeamID is the owning team — NOT NULL, the sole scoping signal. A
 	// trigger may only fire a blueprint its own team owns. Stores populate it
 	// on read; Create stamps it from the resolved acting team.

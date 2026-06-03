@@ -81,7 +81,7 @@ func (s *blueprintStore) List(ctx context.Context, orgID string, _ string) ([]do
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
+		SELECT id, name, description, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
 		FROM blueprints WHERE hidden = 0 ORDER BY updated_at DESC
 	`)
 	if err != nil {
@@ -105,7 +105,7 @@ func (s *blueprintStore) Get(ctx context.Context, orgID string, id string) (*dom
 		return nil, err
 	}
 	b, err := scanBlueprintRowSQLite(s.q.QueryRowContext(ctx, `
-		SELECT id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
+		SELECT id, name, description, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
 		FROM blueprints WHERE id = ?
 	`, id).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -126,7 +126,7 @@ func (s *blueprintStore) GetBySystemSlug(ctx context.Context, orgID, teamID, sys
 		return nil, err
 	}
 	q := `
-		SELECT id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
+		SELECT id, name, description, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
 		FROM blueprints WHERE org_id = ? AND system_slug = ?`
 	args := []any{orgID, systemSlug}
 	if teamID != "" {
@@ -161,9 +161,33 @@ func (s *blueprintStore) Create(ctx context.Context, orgID, teamID string, b dom
 		systemSlug = b.SystemSlug
 	}
 	_, err := s.q.ExecContext(ctx, `
-		INSERT INTO blueprints (id, name, source, usage_count, team_id, creator_user_id, system_slug, created_at, updated_at)
-		VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?)
-	`, b.ID, b.Name, b.Source, runmode.LocalDefaultTeamID, creatorUserID, systemSlug, now, now)
+		INSERT INTO blueprints (id, name, description, source, usage_count, team_id, creator_user_id, system_slug, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+	`, b.ID, b.Name, b.Description, b.Source, runmode.LocalDefaultTeamID, creatorUserID, systemSlug, now, now)
+	return err
+}
+
+// Update sets the blueprint's name + description (the metadata-popup fields)
+// and bumps updated_at. SQLite has no set_updated_at trigger, so the timestamp
+// is written explicitly (mirrors the org-template UpdateBlueprint).
+func (s *blueprintStore) Update(ctx context.Context, orgID, id, name, description string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE blueprints SET name = ?, description = ?, updated_at = ?
+		WHERE id = ?
+	`, name, description, time.Now().UTC(), id)
+	return err
+}
+
+// Delete hard-deletes a blueprint. Its steps and any triggers referencing it
+// cascade (FK ON DELETE CASCADE); team copies are independent rows, untouched.
+func (s *blueprintStore) Delete(ctx context.Context, orgID, id string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `DELETE FROM blueprints WHERE id = ?`, id)
 	return err
 }
 
@@ -183,7 +207,7 @@ func (s *blueprintStore) IncrementUsageSystem(ctx context.Context, orgID string,
 func scanBlueprintRowSQLite(scanFn func(dst ...any) error) (domain.Blueprint, error) {
 	var b domain.Blueprint
 	var systemSlug sql.NullString
-	if err := scanFn(&b.ID, &b.Name, &b.Source, &b.UsageCount, &b.UserModified, &b.TeamID, &systemSlug, &b.CreatedAt, &b.UpdatedAt); err != nil {
+	if err := scanFn(&b.ID, &b.Name, &b.Description, &b.Source, &b.UsageCount, &b.UserModified, &b.TeamID, &systemSlug, &b.CreatedAt, &b.UpdatedAt); err != nil {
 		return b, err
 	}
 	if systemSlug.Valid {

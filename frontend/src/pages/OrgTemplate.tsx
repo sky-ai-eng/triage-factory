@@ -3,6 +3,7 @@ import { Navigate } from 'react-router-dom'
 import { AnimatePresence } from 'motion/react'
 import { Layers } from 'lucide-react'
 import PromptDrawer from '../components/PromptDrawer'
+import BlueprintMetaPopup from '../components/BlueprintMetaPopup'
 import BindingGraph from '../components/BindingGraph'
 import ForgivingBanner from '../components/ForgivingBanner'
 import TaskRuleEditor from '../components/TaskRuleEditor'
@@ -20,8 +21,12 @@ export default function OrgTemplate() {
   const orgHref = useOrgHref()
   const { available, ready, loading } = useTemplateScope()
 
+  // PromptDrawer state — edits a template prompt's content; the "New Prompt"
+  // create flow keeps it wired. A blueprint node opens the metadata popup, not
+  // this drawer.
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [isNew, setIsNew] = useState(false)
+  const [blueprintMetaId, setBlueprintMetaId] = useState<string | null>(null)
   const [graphKey, setGraphKey] = useState(0)
   const [editingTrigger, setEditingTrigger] = useState<TriggerHandler | null>(null)
   const [bannerEventType, setBannerEventType] = useState<string | null>(null)
@@ -31,10 +36,6 @@ export default function OrgTemplate() {
     setSelectedId(null)
     setIsNew(true)
   }
-  const openEdit = useCallback((id: string) => {
-    setIsNew(false)
-    setSelectedId(id)
-  }, [])
   const closeDrawer = () => {
     setSelectedId(null)
     setIsNew(false)
@@ -136,7 +137,7 @@ export default function OrgTemplate() {
           key={graphKey}
           scope={{ kind: 'template' }}
           scopeReady={ready}
-          onPromptClick={openEdit}
+          onBlueprintClick={setBlueprintMetaId}
           onTriggerClick={setEditingTrigger}
           onTriggerDeleted={handleTriggerDeleted}
         />
@@ -149,6 +150,22 @@ export default function OrgTemplate() {
         onClose={closeDrawer}
         onSaved={handleSaved}
         onDeleted={handleDeleted}
+      />
+
+      {/* Blueprint metadata popup — title only at template scope (no description
+          column on org-template blueprints). */}
+      <BlueprintMetaPopup
+        blueprintId={blueprintMetaId}
+        templateScope
+        onClose={() => setBlueprintMetaId(null)}
+        onSaved={() => {
+          setBlueprintMetaId(null)
+          setGraphKey((k) => k + 1)
+        }}
+        onDeleted={() => {
+          setBlueprintMetaId(null)
+          setGraphKey((k) => k + 1)
+        }}
       />
 
       <TaskRuleEditor

@@ -38,7 +38,11 @@ interface GraphProps {
   // cold-load window → 400); for template scope it gates on org-admin + multi
   // confirming. The connect gesture no-ops while false.
   scopeReady: boolean
-  onPromptClick?: (promptId: string) => void
+  // A graph node is a blueprint (a 1-step blueprint is the former leaf prompt),
+  // so the node click emits the raw blueprint_id. The parent opens the metadata
+  // popup with it — never PromptDrawer, which edits prompt *content*, not a
+  // blueprint.
+  onBlueprintClick?: (blueprintId: string) => void
   onTriggerClick?: (trigger: TriggerHandler) => void
   onTriggerDeleted?: (eventType: string, predicate?: string | null) => void
 }
@@ -224,7 +228,7 @@ function saveLayout(key: string, layout: SavedLayout) {
 function BindingGraphInner({
   scope,
   scopeReady,
-  onPromptClick,
+  onBlueprintClick,
   onTriggerClick,
   onTriggerDeleted,
 }: GraphProps) {
@@ -266,8 +270,8 @@ function BindingGraphInner({
   // Refs so callbacks don't go stale
   const triggersRef = useRef(triggers)
   triggersRef.current = triggers
-  const onPromptClickRef = useRef(onPromptClick)
-  onPromptClickRef.current = onPromptClick
+  const onBlueprintClickRef = useRef(onBlueprintClick)
+  onBlueprintClickRef.current = onBlueprintClick
   const onTriggerClickRef = useRef(onTriggerClick)
   onTriggerClickRef.current = onTriggerClick
   const onTriggerDeletedRef = useRef(onTriggerDeleted)
@@ -406,7 +410,7 @@ function BindingGraphInner({
           source: p.source,
           usageCount: p.usage_count,
           bodyPreview: p.body.slice(0, 80) + (p.body.length > 80 ? '...' : ''),
-          onClick: () => onPromptClickRef.current?.(p.id),
+          onClick: () => onBlueprintClickRef.current?.(p.id),
         },
       }
     })
@@ -468,8 +472,9 @@ function BindingGraphInner({
   const onConnect = useCallback(
     async (connection: Connection) => {
       const eventType = connection.source?.replace('et:', '')
-      const promptId = connection.target?.replace('p:', '')
-      if (!eventType || !promptId) return
+      // Graph targets are blueprints; the trigger binds the blueprint_id.
+      const blueprintId = connection.target?.replace('p:', '')
+      if (!eventType || !blueprintId) return
       // Wait for the scope to resolve. For team scope before /api/teams loads,
       // teamId is '' and posting it would 400 (ambiguous); for template scope,
       // scopeReady gates on org-admin + multi. The gesture no-ops rather than
@@ -481,7 +486,7 @@ function BindingGraphInner({
       // team_id — the row lands on the org template).
       const body: Record<string, unknown> = {
         kind: 'trigger',
-        blueprint_id: promptId,
+        blueprint_id: blueprintId,
         event_type: eventType,
       }
       if (!template) {

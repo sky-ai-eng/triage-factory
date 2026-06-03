@@ -81,6 +81,9 @@ CREATE TABLE system_prompt_versions (
 CREATE TABLE blueprints (
     id              TEXT PRIMARY KEY,
     name            TEXT NOT NULL,
+    -- description is free-text authoring metadata edited from the blueprint
+    -- metadata popup; '' when unset.
+    description     TEXT NOT NULL DEFAULT '',
     source          TEXT NOT NULL DEFAULT 'user'
                         CHECK (source IN ('system', 'user', 'imported')),
     usage_count     INTEGER DEFAULT 0,
