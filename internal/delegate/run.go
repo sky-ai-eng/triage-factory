@@ -732,6 +732,14 @@ func (s *Spawner) persistYield(orgID, runID string, req *domain.YieldRequest, co
 		// transcript completeness but the run ends in whatever
 		// terminal state the racing path chose; no toast or
 		// broadcast needed (the racing path already broadcast).
+		//
+		// The snapshot taken just above won't be read (the run won't resume),
+		// so drop it rather than orphan the blob. Standalone runs only —
+		// blueprint steps are owned by terminateBlueprint, which the
+		// orchestrator drives once it sees the racing terminal status.
+		if blueprintRunID == "" {
+			s.discardWorkspaceSnapshot(bgCtx, orgID, runID)
+		}
 		return nil
 	}
 	s.broadcastRunUpdate(orgID, runID, "awaiting_input")

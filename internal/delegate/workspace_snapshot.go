@@ -203,8 +203,12 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 	if wtDir != run.WorktreePath {
 		// Point the run (and the cleanup paths that key off it) at the rebuilt
 		// worktree. System write — resume goroutines hold no JWT claims.
+		// Non-fatal: the rebuilt path is returned and this resume proceeds. But
+		// run.WorktreePath stays stale, so the NEXT yield+resume won't find the
+		// warm copy and will cold-rehydrate again (correct, just slower) — log
+		// it distinctly so unexpected repeat rehydrates are diagnosable.
 		if err := s.agentRuns.SetWorktreePathSystem(context.Background(), orgID, run.ID, wtDir); err != nil {
-			log.Printf("[delegate] rehydrate: update worktree_path for run %s: %v", run.ID, err)
+			log.Printf("[delegate] rehydrate: failed to persist new worktree_path %q for run %s; stale path will force a repeat cold rehydrate on the next resume: %v", wtDir, run.ID, err)
 		}
 	}
 	return wtDir, nil
@@ -215,10 +219,27 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 // directory for a non-git run-root), restore the ephemeral _scratch tree, and
 // drop the Claude session transcript at the new cwd's encoding so
 // `claude --resume` reconnects.
+//
+// The bounded members (manifest, bundle, patch, session) are read into memory;
+// the _scratch tree — which can run to GBs — is streamed to a staging dir on
+// disk as it's read (the worktree it belongs in doesn't exist until
+// RestoreWorkspaceGit runs below), then moved into place with one rename. This
+// mirrors the snapshot side's temp-file staging so neither direction buffers a
+// large workspace whole.
 func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, owner, repo, cloneURL, wtDir string, r io.Reader) error {
 	var man snapshotManifest
 	var bundle, patch, session []byte
-	scratch := map[string][]byte{}
+
+	if err := os.MkdirAll(filepath.Dir(wtDir), 0o755); err != nil {
+		return fmt.Errorf("rehydrate: mkdir runs parent: %w", err)
+	}
+	// Sibling of wtDir → the post-restore move is an intra-filesystem rename.
+	scratchStaging, err := os.MkdirTemp(filepath.Dir(wtDir), ".scratch-rehydrate-*")
+	if err != nil {
+		return fmt.Errorf("rehydrate: scratch staging: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(scratchStaging) }() // no-op once renamed into place
+	sawScratch := false
 
 	tr := tar.NewReader(r)
 	for {
@@ -229,23 +250,32 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, owner, repo, cloneU
 		if err != nil {
 			return fmt.Errorf("rehydrate: read tar: %w", err)
 		}
-		data, err := io.ReadAll(tr)
-		if err != nil {
-			return fmt.Errorf("rehydrate: read %s: %w", hdr.Name, err)
-		}
 		switch {
 		case hdr.Name == snapManifest:
+			data, err := io.ReadAll(tr)
+			if err != nil {
+				return fmt.Errorf("rehydrate: read manifest: %w", err)
+			}
 			if err := json.Unmarshal(data, &man); err != nil {
 				return fmt.Errorf("rehydrate: manifest: %w", err)
 			}
 		case hdr.Name == snapBundle:
-			bundle = data
+			if bundle, err = io.ReadAll(tr); err != nil {
+				return fmt.Errorf("rehydrate: read bundle: %w", err)
+			}
 		case hdr.Name == snapPatch:
-			patch = data
+			if patch, err = io.ReadAll(tr); err != nil {
+				return fmt.Errorf("rehydrate: read patch: %w", err)
+			}
 		case hdr.Name == snapSession:
-			session = data
+			if session, err = io.ReadAll(tr); err != nil {
+				return fmt.Errorf("rehydrate: read session: %w", err)
+			}
 		case strings.HasPrefix(hdr.Name, snapScratchPrefix):
-			scratch[strings.TrimPrefix(hdr.Name, snapScratchPrefix)] = data
+			if err := stageScratchMember(scratchStaging, strings.TrimPrefix(hdr.Name, snapScratchPrefix), tr); err != nil {
+				return err
+			}
+			sawScratch = true
 		}
 	}
 
@@ -260,8 +290,12 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, owner, repo, cloneU
 		return fmt.Errorf("rehydrate: make run root: %w", err)
 	}
 
-	if err := restoreScratch(wtDir, scratch); err != nil {
-		return err
+	if sawScratch {
+		// The fresh worktree has no _scratch (git-excluded), so move the staged
+		// tree in wholesale.
+		if err := os.Rename(scratchStaging, filepath.Join(wtDir, "_scratch")); err != nil {
+			return fmt.Errorf("rehydrate: install scratch: %w", err)
+		}
 	}
 	if len(session) > 0 && man.SessionID != "" {
 		if err := restoreSessionTranscript(wtDir, man.SessionID, session); err != nil {
@@ -334,16 +368,28 @@ func tarScratch(tw *tar.Writer, wtPath string) error {
 	})
 }
 
-// restoreScratch writes the captured _scratch files back under wtDir/_scratch.
-func restoreScratch(wtDir string, scratch map[string][]byte) error {
-	for rel, data := range scratch {
-		dest := filepath.Join(wtDir, "_scratch", filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
-			return fmt.Errorf("rehydrate: mkdir scratch: %w", err)
-		}
-		if err := os.WriteFile(dest, data, 0o600); err != nil {
-			return fmt.Errorf("rehydrate: write scratch %s: %w", rel, err)
-		}
+// stageScratchMember streams one _scratch tar member to relPath under
+// stagingDir without buffering it whole. The cleaned destination is verified to
+// stay under stagingDir so a crafted blob (multi-mode object store) can't escape
+// via a "../" member name.
+func stageScratchMember(stagingDir, relPath string, r io.Reader) error {
+	dest := filepath.Join(stagingDir, filepath.FromSlash(relPath))
+	if rel, err := filepath.Rel(stagingDir, dest); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("rehydrate: scratch member %q escapes staging dir", relPath)
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
+		return fmt.Errorf("rehydrate: mkdir scratch: %w", err)
+	}
+	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("rehydrate: create scratch %s: %w", relPath, err)
+	}
+	if _, err := io.Copy(f, r); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("rehydrate: write scratch %s: %w", relPath, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("rehydrate: flush scratch %s: %w", relPath, err)
 	}
 	return nil
 }
