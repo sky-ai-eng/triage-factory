@@ -1,7 +1,8 @@
 # Triage Factory — multi-mode compose stack.
 #
-# Brings up Postgres + GoTrue + the TF binary as a service. Local-mode
-# (SQLite, the default) doesn't need any of this.
+# Brings up Postgres + GoTrue + MinIO (the durable-workspace object store)
+# + the TF binary as a service. Local-mode (SQLite, the default) doesn't
+# need any of this.
 #
 # Prerequisites — see docs/self-host-setup.md:
 #   1. Create a GitHub OAuth app with callback ${TF_PUBLIC_URL}/auth/v1/callback
@@ -168,6 +169,69 @@ services:
       timeout: 3s
       retries: 10
 
+  # S3-compatible object store for durable blueprint workspaces (multi
+  # mode). The TF binary's objectStorage backend snapshots a workspace to
+  # a bucket here so it outlives the executor that created it; the host
+  # worktree is only a warm cache. Self-host runs MinIO — one
+  # self-contained S3 container, no Postgres/JWT coupling. The SAME
+  # aws-sdk-go-v2 client (path-style, BaseEndpoint) points at hosted
+  # Supabase Storage / S3 / R2 for SaaS or BYO: only TF_BLOB_ENDPOINT
+  # changes, never this compose file. Local mode doesn't run any of this —
+  # it writes blobs to the on-disk state-root.
+  #
+  # MinIO's root creds ARE the TF blob creds: MINIO_ROOT_USER /
+  # MINIO_ROOT_PASSWORD derive from the single TF_BLOB_ACCESS_KEY /
+  # TF_BLOB_SECRET_KEY source the TF binary reads, rather than a parallel
+  # MINIO_ROOT_* pair that could drift out of sync. One identity, one input.
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${TF_BLOB_ACCESS_KEY:?missing TF_BLOB_ACCESS_KEY (see .env.example)}
+      MINIO_ROOT_PASSWORD: ${TF_BLOB_SECRET_KEY:?missing TF_BLOB_SECRET_KEY (see .env.example)}
+    volumes:
+      - minio-data:/data
+    ports:
+      # 9000 = the S3 API. TF reaches it over the compose network as
+      # http://minio:9000 (TF_BLOB_ENDPOINT default below); published to the
+      # host so the acceptance Put/Get smoke can hit it directly.
+      # 9001 = the web console (optional — handy for eyeballing snapshots).
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      # mc ships inside the server image; `mc ready local` probes the bundled
+      # server. curl/wget were removed from the image, so this is the
+      # current-images-compatible health probe (no extra tooling required).
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Creates the workspace bucket idempotently on every `docker compose up`,
+  # mirroring postgres-postinit. `mc mb --ignore-existing` is a no-op when the
+  # bucket already exists, so re-running is safe. Reads the same creds + bucket
+  # name TF does, keeping one source of truth across server, sidecar, and
+  # client. The triagefactory service waits on this completing so its first
+  # snapshot never races a missing bucket.
+  minio-postinit:
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    depends_on:
+      minio: { condition: service_healthy }
+    environment:
+      TF_BLOB_ACCESS_KEY: ${TF_BLOB_ACCESS_KEY:?missing TF_BLOB_ACCESS_KEY (see .env.example)}
+      TF_BLOB_SECRET_KEY: ${TF_BLOB_SECRET_KEY:?missing TF_BLOB_SECRET_KEY (see .env.example)}
+      TF_BLOB_BUCKET: ${TF_BLOB_BUCKET:-tf-workspaces}
+    entrypoint: ["sh", "-c"]
+    # $$ escapes compose interpolation so the inner shell expands the vars
+    # against the container env (same pattern as postgres-postinit). mc reads
+    # the creds from the env it was handed, not from a baked-in alias file.
+    command:
+      - |
+        set -eu
+        mc alias set tf http://minio:9000 "$$TF_BLOB_ACCESS_KEY" "$$TF_BLOB_SECRET_KEY"
+        mc mb --ignore-existing tf/"$$TF_BLOB_BUCKET"
+    restart: "no"
+
   # Triage Factory itself. Image is built from docker/Dockerfile for
   # local iteration; in production an operator pins
   # `ghcr.io/sky-ai-eng/triage-factory:<tag>` instead (see the commented
@@ -194,6 +258,9 @@ services:
       # postgres-postinit is a one-shot; wait for it so the migration
       # step on first boot runs against a reconciled role set.
       postgres-postinit: { condition: service_completed_successfully }
+      # minio-postinit is a one-shot; wait for the bucket to exist so the
+      # first workspace snapshot doesn't race its creation.
+      minio-postinit: { condition: service_completed_successfully }
     environment:
       TF_MODE: multi
       # supabase_admin is the real superuser in the supabase/postgres
@@ -211,6 +278,16 @@ services:
       TF_PUBLIC_URL: ${TF_PUBLIC_URL:?missing TF_PUBLIC_URL (see .env.example)}
       TF_SESSION_ENCRYPTION_KEY: ${TF_SESSION_ENCRYPTION_KEY:?missing TF_SESSION_ENCRYPTION_KEY (see .env.example)}
       TF_COOKIE_SECRET: ${TF_COOKIE_SECRET:?missing TF_COOKIE_SECRET (see .env.example)}
+      # Durable-workspace object store. Defaults target the bundled `minio`
+      # service; for SaaS / BYO leave the creds and bucket as-is but set
+      # TF_BLOB_ENDPOINT in .env to your hosted Supabase Storage / S3 / R2
+      # endpoint (same client, no compose change). Region is wanted by AWS
+      # S3 / Supabase and ignored by MinIO.
+      TF_BLOB_ENDPOINT: ${TF_BLOB_ENDPOINT:-http://minio:9000}
+      TF_BLOB_BUCKET: ${TF_BLOB_BUCKET:-tf-workspaces}
+      TF_BLOB_ACCESS_KEY: ${TF_BLOB_ACCESS_KEY:?missing TF_BLOB_ACCESS_KEY (see .env.example)}
+      TF_BLOB_SECRET_KEY: ${TF_BLOB_SECRET_KEY:?missing TF_BLOB_SECRET_KEY (see .env.example)}
+      TF_BLOB_REGION: ${TF_BLOB_REGION:-us-east-1}
     # Required for the in-container gVisor sandbox to do its netns +
     # iptables + runsc work. Tightening these later is a hardening
     # follow-up (SKY-336); the initial release ships the well-known
@@ -240,3 +317,4 @@ services:
 volumes:
   pg-data:
   tf-home:
+  minio-data:

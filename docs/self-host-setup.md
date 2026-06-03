@@ -27,6 +27,7 @@ Fill in:
 - `GH_CLIENT_ID` / `GH_CLIENT_SECRET` — from step 1
 - `TF_SESSION_ENCRYPTION_KEY` — 32 random bytes; AES-GCM master key for the access/refresh tokens stored at rest in `public.sessions`. **Generate with `openssl rand -hex 32`.** Rotating this key invalidates every existing session (ciphertext can't be decrypted) — plan it as a forced re-auth event.
 - `TF_COOKIE_SECRET` — 32 random bytes; HMAC-SHA256 key for the short-lived OAuth state cookie (carries PKCE verifier + CSRF token). **Generate with `openssl rand -hex 32`.** Kept distinct from `TF_SESSION_ENCRYPTION_KEY` so the two rotate independently — rotating only this one invalidates in-flight OAuth handshakes (10-minute window), not active sessions.
+- `TF_BLOB_ACCESS_KEY` / `TF_BLOB_SECRET_KEY` — credentials for the durable-workspace object store. The compose stack feeds these to the bundled `minio` service's root user *and* to TF's S3 client — one identity, one input, so they can't drift. **Generate each with `openssl rand -hex 32`** (access key must be ≥3 chars, secret ≥8 — a 64-char hex clears both). The endpoint (`http://minio:9000`), bucket (`tf-workspaces`), and region (`us-east-1`) all default in `docker-compose.yml`; leave them unset for self-host. See [Durable workspace storage](#durable-workspace-storage-minio) below for the BYO / hosted-Supabase path.
 
 > **Rotating passwords:** edit `.env` and re-run `docker compose up -d`. A short-lived `postgres-postinit` sidecar runs on every boot and reapplies `ALTER USER` for the non-superuser roles (`supabase_auth_admin`, `authenticator`), so password changes propagate without wiping the data volume. Rotating `POSTGRES_PASSWORD` itself requires more care — that's the superuser's password and Postgres only honors the env var on first init, so changing it means `ALTER USER postgres WITH PASSWORD '...'` by hand inside the running container.
 
@@ -46,16 +47,17 @@ Re-running `jwk-init --write-env .env` appends a *second* line, which works (GoT
 docker compose up -d
 ```
 
-This brings up the full stack: Postgres, GoTrue, and the `triagefactory` service running the TF binary in a container. The Postgres image is `supabase/postgres`, which pre-provisions the `auth` schema, the `supabase_auth_admin` role GoTrue connects as, the `authenticator` role TF's app pool uses, and the vault / pgsodium / pgvector extensions for per-org secret storage.
+This brings up the full stack: Postgres, GoTrue, MinIO (the durable-workspace object store), and the `triagefactory` service running the TF binary in a container. The Postgres image is `supabase/postgres`, which pre-provisions the `auth` schema, the `supabase_auth_admin` role GoTrue connects as, the `authenticator` role TF's app pool uses, and the vault / pgsodium / pgvector extensions for per-org secret storage.
 
-On first boot, the `postgres-postinit` sidecar reconciles the `supabase_auth_admin` and `authenticator` role passwords, then the `triagefactory` container's entrypoint runs `triagefactory migrate up` against the admin DSN before starting the server.
+On first boot, the `postgres-postinit` sidecar reconciles the `supabase_auth_admin` and `authenticator` role passwords, the `minio-postinit` sidecar creates the workspace bucket (idempotent — `mc mb --ignore-existing`), then the `triagefactory` container's entrypoint runs `triagefactory migrate up` against the admin DSN before starting the server.
 
 Smoke-check the stack came up:
 
 ```sh
-docker compose ps                         # all services should be "running"/"healthy" (postgres-postinit shows "exited(0)")
+docker compose ps                         # all services should be "running"/"healthy" (postgres-postinit and minio-postinit show "exited(0)")
 curl -fsS http://localhost:3000/api/health   # 200 OK
 curl -s http://localhost:9999/.well-known/jwks.json | jq .   # JWKS with one public RSA key
+curl -fsS http://localhost:9000/minio/health/live   # MinIO S3 API is live
 ```
 
 ## 5. Verify the GitHub OAuth flow
@@ -95,6 +97,39 @@ echo "$TOKEN" | TF_GOTRUE_JWKS_URL=http://localhost:9999/.well-known/jwks.json \
 ```
 
 You should see the parsed claims printed as JSON (`Subject`, `Email`, `Provider`, etc.). This requires a local TF binary on the host — useful when the in-container TF service is misbehaving and you want to isolate the Verifier path from the rest of the server.
+
+## Durable workspace storage (MinIO)
+
+A blueprint's workspace — the git worktree plus the scratch space its steps hand off through — must survive the executor that created it (a yield to a human can outlast the process; an executor can scale down mid-run). The TF binary snapshots that workspace to an **S3-compatible object store** and rehydrates it on resume; the host worktree is only a warm cache.
+
+Self-host runs **MinIO** for this: one self-contained S3 container, no Postgres or JWT coupling. The workspace snapshots are opaque server-internal tarballs — they need a dumb bucket, not a storage API's RLS / resumable-upload / CDN layer. The `minio` service in `docker-compose.yml` provides exactly that, and a one-shot `minio-postinit` sidecar creates the bucket on every `up` (`mc mb --ignore-existing` — idempotent).
+
+The TF binary talks to it through the `TF_BLOB_*` env (read only in multi mode; local mode writes blobs to `~/.triagefactory/blobs` and runs none of this). The compose stack derives MinIO's root user/password from the single `TF_BLOB_ACCESS_KEY` / `TF_BLOB_SECRET_KEY` pair you set in `.env`, so server, bucket sidecar, and client all share one credential — there's no second `MINIO_ROOT_*` input to drift.
+
+Smoke-test the round-trip against the composed MinIO (exercises the same bucket and creds TF's S3 client uses):
+
+```sh
+# set -a; source .env; set +a   # load TF_BLOB_* into your shell first
+docker compose exec minio-postinit sh -c '
+  mc alias set tf http://minio:9000 "$TF_BLOB_ACCESS_KEY" "$TF_BLOB_SECRET_KEY" &&
+  echo hello | mc pipe tf/"${TF_BLOB_BUCKET:-tf-workspaces}"/smoke.txt &&
+  mc cat tf/"${TF_BLOB_BUCKET:-tf-workspaces}"/smoke.txt &&        # -> hello
+  mc rm tf/"${TF_BLOB_BUCKET:-tf-workspaces}"/smoke.txt'
+```
+
+The console (port `9001`, `http://localhost:9001`) is handy for eyeballing snapshot objects; log in with the same access key / secret.
+
+### Hosted Supabase Storage, S3, or R2 (SaaS / BYO)
+
+The same `aws-sdk-go-v2` client (path-style addressing, configurable `BaseEndpoint`) drives **any** S3-protocol backend — there's no compose change to point it elsewhere. Set `TF_BLOB_ACCESS_KEY` / `TF_BLOB_SECRET_KEY` to that backend's keys and override the endpoint (and bucket / region as needed) in `.env`:
+
+```sh
+TF_BLOB_ENDPOINT=https://<ref>.supabase.co/storage/v1/s3   # base path IS preserved
+TF_BLOB_BUCKET=tf-workspaces
+TF_BLOB_REGION=us-east-1
+```
+
+`TF_BLOB_ENDPOINT` is a full URL — its scheme selects TLS and any base path (Supabase Storage's `/storage/v1/s3`) is kept intact. The bundled `minio` service still starts in this configuration but goes unused; drop it via a compose override if you don't want it running. Pre-create the bucket on the hosted side (the `minio-postinit` sidecar only ensures the bucket on the bundled MinIO).
 
 ## Rotating the signing key
 
