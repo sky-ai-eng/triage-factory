@@ -14,7 +14,7 @@ import (
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
@@ -39,7 +39,7 @@ const (
 // resolution, so SigV4 covers the prefixed path the server verifies.
 type objectStorage struct {
 	client   *s3.Client
-	uploader *manager.Uploader
+	uploader *transfermanager.Client
 	bucket   string
 }
 
@@ -141,16 +141,18 @@ func newObjectStorage(cfg ObjectConfig) (*objectStorage, error) {
 	})
 	return &objectStorage{
 		client:   client,
-		uploader: manager.NewUploader(client),
+		uploader: transfermanager.New(client),
 		bucket:   cfg.Bucket,
 	}, nil
 }
 
 func (o *objectStorage) Put(ctx context.Context, key string, r io.Reader) error {
-	// The Uploader streams via multipart with a bounded part buffer, so a
-	// large tarball of unknown size never buffers whole in memory (plain
-	// PutObject would need a seekable body or a content length).
-	if _, err := o.uploader.Upload(ctx, &s3.PutObjectInput{
+	// The transfer manager streams via multipart with a bounded part buffer,
+	// so a large tarball of unknown size never buffers whole in memory (plain
+	// PutObject would need a seekable body or a content length). It delegates
+	// to the s3 client above, so the BaseEndpoint/path-style config carries
+	// through.
+	if _, err := o.uploader.UploadObject(ctx, &transfermanager.UploadObjectInput{
 		Bucket: aws.String(o.bucket),
 		Key:    aws.String(key),
 		Body:   r,
