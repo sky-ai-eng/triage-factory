@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
-import type { Blueprint, Prompt } from '../types'
+import type { Blueprint, BlueprintStep, Prompt } from '../types'
 import TeamPicker from './TeamPicker'
 
 interface Props {
@@ -88,32 +88,67 @@ export default function PromptPicker({
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setPrompts([])
     }
-    const listPath = source === 'blueprints' ? '/api/blueprints' : '/api/prompts'
-    fetch(`${listPath}${q}`)
-      .then((res) => res.json())
-      .then((data: Prompt[] | Blueprint[]) => {
-        if (cancelled) return
-        // Blueprints lack the prompt-tile fields (body / source / usage
-        // stats); normalize them so the shared tile renders without a
-        // redesign. The later authoring-UX ticket owns a real blueprint tile.
-        const normalized: Prompt[] =
-          source === 'blueprints'
-            ? (data as Blueprint[]).map((b) => ({
-                id: b.id,
-                name: b.name,
-                body: '',
-                source: 'user',
-                usage_count: 0,
-                created_at: b.created_at,
-                updated_at: b.updated_at,
-              }))
-            : (data as Prompt[])
+
+    const load = async () => {
+      // The 'prompts' source is already a flat list carrying bodies.
+      if (source !== 'blueprints') {
+        const data: Prompt[] = await fetch(`/api/prompts${q}`).then((r) => r.json())
+        if (!cancelled) {
+          setPrompts(data)
+          setFetchFailed(false)
+        }
+        return
+      }
+
+      // A blueprint has no body of its own. Pull the blueprint list, the prompt
+      // list (for bodies), and each blueprint's steps so a single-step blueprint
+      // can borrow that step's prompt body for its tile preview — the
+      // pre-blueprint picker showed the prompt body, and a 1-step blueprint with
+      // no blueprint-level description is exactly that one prompt.
+      const [blueprints, promptList] = await Promise.all([
+        fetch(`/api/blueprints${q}`).then((r) => r.json() as Promise<Blueprint[]>),
+        fetch(`/api/prompts${q}`).then((r) => r.json() as Promise<Prompt[]>),
+      ])
+      const promptById = new Map(promptList.map((p): [string, Prompt] => [p.id, p]))
+      // Per-blueprint steps (N+1 over the handful of blueprints). A failed steps
+      // fetch degrades to an empty preview rather than breaking the picker.
+      const stepLists = await Promise.all(
+        blueprints.map((b) =>
+          fetch(`/api/blueprints/${encodeURIComponent(b.id)}/steps`)
+            .then((r) => r.json() as Promise<BlueprintStep[]>)
+            .catch(() => [] as BlueprintStep[])
+            .then((steps) => [b.id, steps] as [string, BlueprintStep[]]),
+        ),
+      )
+      const stepsByBlueprint = new Map(stepLists)
+
+      // Normalize blueprints into the shared prompt-tile shape. For a 1-step
+      // blueprint with no blueprint-level description, surface the sole step's
+      // prompt body so the tile isn't blank; multi-step (and, later, described)
+      // blueprints keep the empty preview the richer composition tile will own.
+      const normalized: Prompt[] = blueprints.map((b) => {
+        const steps = stepsByBlueprint.get(b.id) ?? []
+        const sole = steps.length === 1 ? promptById.get(steps[0].step_prompt_id) : undefined
+        return {
+          id: b.id,
+          name: b.name,
+          body: sole?.body ?? '',
+          source: 'user',
+          usage_count: 0,
+          created_at: b.created_at,
+          updated_at: b.updated_at,
+        }
+      })
+      if (!cancelled) {
         setPrompts(normalized)
         setFetchFailed(false)
-      })
-      .catch(() => {
-        if (!cancelled) setFetchFailed(true)
-      })
+      }
+    }
+
+    load().catch(() => {
+      if (!cancelled) setFetchFailed(true)
+    })
+
     return () => {
       cancelled = true
     }
