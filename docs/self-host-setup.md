@@ -129,7 +129,7 @@ TF_BLOB_BUCKET=tf-workspaces
 TF_BLOB_REGION=us-east-1
 ```
 
-`TF_BLOB_ENDPOINT` is a full URL — its scheme selects TLS and any base path (Supabase Storage's `/storage/v1/s3`) is kept intact. The bundled `minio` service still starts in this configuration but goes unused; drop it via a compose override if you don't want it running. Pre-create the bucket on the hosted side (the `minio-postinit` sidecar only ensures the bucket on the bundled MinIO).
+`TF_BLOB_ENDPOINT` is a full URL — its scheme selects TLS and any base path (Supabase Storage's `/storage/v1/s3`) is kept intact. The bundled `minio` service still starts in this configuration but goes unused; drop it via a compose override (and remove `minio-postinit` from `triagefactory`'s `depends_on` in that override) if you don't want it running. Pre-create the bucket on the hosted side (the `minio-postinit` sidecar only ensures the bucket on the bundled MinIO).
 
 ## Rotating the signing key
 
