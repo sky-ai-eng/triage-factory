@@ -150,7 +150,7 @@ func (o *objectStorage) Get(ctx context.Context, key string) (io.ReadCloser, err
 	// ErrNotFound here — matching the filesystem backend — instead of on
 	// the caller's first Read.
 	if _, err := obj.Stat(); err != nil {
-		obj.Close()
+		_ = obj.Close()
 		if isNotFound(err) {
 			return nil, ErrNotFound
 		}
