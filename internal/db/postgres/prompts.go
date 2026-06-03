@@ -349,8 +349,18 @@ func (s *promptStore) UpdateImported(ctx context.Context, orgID string, id, name
 // runs.prompt_id (RESTRICT) and blueprint_steps.step_prompt_id (RESTRICT) FKs
 // never fire and historical runs keep resolving the prompt via GetSystem.
 func (s *promptStore) Delete(ctx context.Context, orgID string, id string) error {
-	_, err := s.app.ExecContext(ctx, `UPDATE prompts SET deleted_at = now() WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL`, orgID, id)
-	return err
+	res, err := s.app.ExecContext(ctx, `UPDATE prompts SET deleted_at = now() WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL`, orgID, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("prompt %s not found or already deleted", id)
+	}
+	return nil
 }
 
 func (s *promptStore) Hide(ctx context.Context, orgID string, id string) error {

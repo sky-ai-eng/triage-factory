@@ -336,8 +336,18 @@ func (s *promptStore) Delete(ctx context.Context, orgID string, id string) error
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	_, err := s.q.ExecContext(ctx, `UPDATE prompts SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`, time.Now().UTC(), id)
-	return err
+	res, err := s.q.ExecContext(ctx, `UPDATE prompts SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`, time.Now().UTC(), id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("prompt %s not found or already deleted", id)
+	}
+	return nil
 }
 
 func (s *promptStore) Hide(ctx context.Context, orgID string, id string) error {

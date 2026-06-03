@@ -74,6 +74,16 @@ func TestBlueprintCreate_AutoWrapRequiresPromptBody(t *testing.T) {
 	}
 }
 
+func TestBlueprintCreate_AutoWrapRequiresPromptName(t *testing.T) {
+	s := newTestServer(t)
+	rec := doJSON(t, s, http.MethodPost, "/api/blueprints", map[string]any{
+		"first_prompt": map[string]any{"body": "do something"},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing first_prompt.name, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestBlueprintCreate_BareStillValid(t *testing.T) {
 	// first_prompt is optional — a bare blueprint (name only) still works.
 	s := newTestServer(t)
