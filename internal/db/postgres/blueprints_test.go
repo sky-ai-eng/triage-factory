@@ -509,6 +509,46 @@ func TestBlueprintStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	})
 }
 
+// TestBlueprintStore_Postgres_Delete_WithRunHistory_SoftDeletes mirrors the
+// SQLite case: a blueprint with run history must still be deletable, and Delete
+// is soft so blueprint_runs (the durable audit trail) survive.
+func TestBlueprintStore_Postgres_Delete_WithRunHistory_SoftDeletes(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	orgID, userID := seedPgOrgForBlueprints(t, h)
+	seedPgDefaultTeam(t, h, orgID, userID)
+	blueprintID := "del-bp-" + orgID[:8]
+	seedPgBlueprint(t, h, orgID, userID, blueprintID)
+	taskID := seedPgTask(t, h, orgID, userID)
+
+	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	blueprints := stores.Blueprints
+	ctx := context.Background()
+
+	runID, err := blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
+		BlueprintID: blueprintID, TaskID: taskID,
+		TriggerType: domain.BlueprintTriggerManual, WorktreePath: "/tmp/del-runs",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	// Must not error despite the blueprint_runs RESTRICT FK.
+	if err := blueprints.Delete(ctx, orgID, blueprintID); err != nil {
+		t.Fatalf("Delete with run history errored (%v); it should soft-delete", err)
+	}
+	if got, err := blueprints.Get(ctx, orgID, blueprintID); err != nil || got != nil {
+		t.Errorf("Get after soft-delete = (%+v, %v); want (nil, nil)", got, err)
+	}
+	if sys, err := blueprints.GetSystem(ctx, orgID, blueprintID); err != nil || sys == nil {
+		t.Errorf("GetSystem after soft-delete = (%+v, %v); want the row preserved", sys, err)
+	}
+	if run, err := blueprints.GetRun(ctx, orgID, runID); err != nil || run == nil {
+		t.Errorf("blueprint_run after blueprint delete = (%+v, %v); audit history must survive", run, err)
+	}
+}
+
 // seedPgOrgForBlueprints creates the (org, user, membership) triplet
 // blueprint row writes need to satisfy creator_user_id FK resolution.
 // Returns both ids — blueprint tests also need the userID directly for

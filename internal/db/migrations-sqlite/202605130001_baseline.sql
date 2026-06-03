@@ -98,6 +98,11 @@ CREATE TABLE blueprints (
     -- source='system' rows; NULL for user/imported blueprints. Re-seed
     -- idempotency + slug→id lookups key on (org_id, team_id, system_slug).
     system_slug     TEXT,
+    -- Soft delete: a user-deleted blueprint keeps its row (and its runs +
+    -- steps as audit history) but is filtered from request-facing reads.
+    -- NULL = live. Deletion is soft because blueprint_runs RESTRICTs a hard
+    -- delete and run history (incl. opened PRs / posted reviews) is durable.
+    deleted_at      DATETIME,
     CONSTRAINT blueprints_system_has_no_creator CHECK (
         (source = 'system' AND creator_user_id IS NULL)
         OR (source <> 'system' AND creator_user_id IS NOT NULL)

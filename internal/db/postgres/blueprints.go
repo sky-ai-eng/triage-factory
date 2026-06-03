@@ -84,7 +84,7 @@ func (s *blueprintStore) SeedOrUpdate(ctx context.Context, orgID, teamID string,
 func (s *blueprintStore) List(ctx context.Context, orgID string, teamID string) ([]domain.Blueprint, error) {
 	args := []any{orgID}
 	q := `SELECT id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
-		FROM blueprints WHERE org_id = $1 AND hidden = FALSE`
+		FROM blueprints WHERE org_id = $1 AND hidden = FALSE AND deleted_at IS NULL`
 	if teamID != "" {
 		args = append(args, teamID)
 		q += fmt.Sprintf(" AND team_id = $%d", len(args))
@@ -107,12 +107,16 @@ func (s *blueprintStore) List(ctx context.Context, orgID string, teamID string) 
 	return out, rows.Err()
 }
 
+// Get is the request-facing read: it filters soft-deleted blueprints so the
+// editor / dispatch never resolve a deleted one.
 func (s *blueprintStore) Get(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
-	return getBlueprint(ctx, s.app, orgID, id)
+	return getBlueprint(ctx, s.app, orgID, id, false)
 }
 
+// GetSystem includes soft-deleted rows so the orchestrator can finish an
+// in-flight run whose blueprint was deleted mid-flight.
 func (s *blueprintStore) GetSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
-	return getBlueprint(ctx, s.admin, orgID, id)
+	return getBlueprint(ctx, s.admin, orgID, id, true)
 }
 
 func (s *blueprintStore) GetBySystemSlug(ctx context.Context, orgID, teamID, systemSlug string) (*domain.Blueprint, error) {
@@ -132,11 +136,14 @@ func (s *blueprintStore) GetBySystemSlug(ctx context.Context, orgID, teamID, sys
 	return &b, nil
 }
 
-func getBlueprint(ctx context.Context, q queryer, orgID, id string) (*domain.Blueprint, error) {
-	b, err := scanBlueprintRowPG(q.QueryRowContext(ctx, `
+func getBlueprint(ctx context.Context, q queryer, orgID, id string, includeDeleted bool) (*domain.Blueprint, error) {
+	query := `
 		SELECT id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
-		FROM blueprints WHERE org_id = $1 AND id = $2
-	`, orgID, id).Scan)
+		FROM blueprints WHERE org_id = $1 AND id = $2`
+	if !includeDeleted {
+		query += ` AND deleted_at IS NULL`
+	}
+	b, err := scanBlueprintRowPG(q.QueryRowContext(ctx, query, orgID, id).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -186,12 +193,14 @@ func (s *blueprintStore) Update(ctx context.Context, orgID string, id, name stri
 	return err
 }
 
-// Delete hard-deletes the blueprint; blueprint_steps and any triggers cascade.
-// A blueprint with blueprint_runs is FK-protected — the RESTRICT FK surfaces
-// as an error rather than silently dropping run history. Runs on the app pool
-// so RLS gates the delete to a blueprint the caller may touch.
+// Delete soft-deletes the blueprint (stamps deleted_at). Its steps + runs stay
+// as audit history; request-facing reads filter deleted_at IS NULL. Triggers
+// are cleared by the handler (a soft delete doesn't cascade them away). Runs on
+// the app pool so RLS gates it to a blueprint the caller may touch.
 func (s *blueprintStore) Delete(ctx context.Context, orgID string, id string) error {
-	_, err := s.app.ExecContext(ctx, `DELETE FROM blueprints WHERE org_id = $1 AND id = $2`, orgID, id)
+	_, err := s.app.ExecContext(ctx,
+		`UPDATE blueprints SET deleted_at = now() WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL`,
+		orgID, id)
 	return err
 }
 

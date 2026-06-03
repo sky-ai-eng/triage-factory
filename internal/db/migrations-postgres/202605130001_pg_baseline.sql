@@ -5267,6 +5267,7 @@ CREATE TABLE public.blueprints (
     system_slug text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    deleted_at timestamp with time zone,
     CONSTRAINT blueprints_source_check CHECK ((source = ANY (ARRAY['system'::text, 'user'::text, 'imported'::text]))),
     CONSTRAINT blueprints_system_has_no_creator CHECK ((((source = 'system'::text) AND (creator_user_id IS NULL)) OR ((source <> 'system'::text) AND (creator_user_id IS NOT NULL))))
 );

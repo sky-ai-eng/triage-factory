@@ -74,12 +74,14 @@ type BlueprintStore interface {
 	// matches (org_id + id).
 	Update(ctx context.Context, orgID string, id, name string) error
 
-	// Delete hard-deletes a blueprint. Its steps and any triggers referencing
-	// it cascade (the blueprint_steps / event_handlers composite FKs are
-	// ON DELETE CASCADE); a blueprint with run history is FK-protected
-	// (blueprint_runs pins it via RESTRICT), so this errors rather than
-	// orphaning the audit trail. Forward-only: deleting a shipped system
-	// blueprint doesn't stop a later re-seed from reinstating it.
+	// Delete soft-deletes a blueprint: it stamps deleted_at and leaves the row,
+	// its blueprint_steps, and its blueprint_runs in place so run history (incl.
+	// externally-visible artifacts like opened PRs) survives as an audit trail.
+	// Request-facing reads (List, Get) filter deleted_at IS NULL; the
+	// orchestrator's ...System reads still see it so an in-flight run finishes.
+	// The caller is responsible for clearing the blueprint's triggers (with a
+	// hard delete those cascaded; a soft delete leaves the row, so a lingering
+	// trigger would still fire it). No-op when no live row matches.
 	Delete(ctx context.Context, orgID string, id string) error
 
 	// GetSystem mirrors Get but routes through the admin pool in Postgres.

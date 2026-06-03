@@ -264,6 +264,43 @@ func TestBlueprintStore_SQLite_CreateRun_RequiresTriggerType(t *testing.T) {
 	}
 }
 
+// TestBlueprintStore_SQLite_Delete_WithRunHistory_SoftDeletes pins the fix for
+// the delete-with-runs case: a blueprint that has already run must still be
+// deletable. Delete is soft (stamps deleted_at) so the run history — the
+// durable audit trail, including externally-visible artifacts — survives.
+func TestBlueprintStore_SQLite_Delete_WithRunHistory_SoftDeletes(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	blueprints := sqlitestore.New(conn).Blueprints
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrg
+
+	task := seedEntityEventTask(t, conn, "del-runs")
+	insertBlueprintForTest(t, conn, "del-bp", "Doomed")
+	if _, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+		ID: "del-bp-run", BlueprintID: "del-bp", TaskID: task.ID,
+		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
+	}); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	// The whole point: this must NOT error despite the blueprint_runs RESTRICT FK.
+	if err := blueprints.Delete(ctx, org, "del-bp"); err != nil {
+		t.Fatalf("Delete with run history errored (%v); it should soft-delete", err)
+	}
+
+	// Request-facing Get filters it; GetSystem still sees it (in-flight runs);
+	// the run row itself is untouched (audit trail preserved).
+	if got, err := blueprints.Get(ctx, org, "del-bp"); err != nil || got != nil {
+		t.Errorf("Get after soft-delete = (%+v, %v); want (nil, nil)", got, err)
+	}
+	if sys, err := blueprints.GetSystem(ctx, org, "del-bp"); err != nil || sys == nil {
+		t.Errorf("GetSystem after soft-delete = (%+v, %v); want the row preserved", sys, err)
+	}
+	if run, err := blueprints.GetRun(ctx, org, "del-bp-run"); err != nil || run == nil {
+		t.Errorf("blueprint_run after blueprint delete = (%+v, %v); audit history must survive", run, err)
+	}
+}
+
 // TestBlueprintStore_SQLite_AssertsLocalOrg pins the local-org guard: any
 // orgID other than runmode.LocalDefaultOrg must fail loudly.
 func TestBlueprintStore_SQLite_AssertsLocalOrg(t *testing.T) {

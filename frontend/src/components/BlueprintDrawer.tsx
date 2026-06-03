@@ -175,52 +175,51 @@ export default function BlueprintDrawer({
     setSaving(true)
     setError('')
 
-    const stepsBody = {
-      steps: steps.map((s) => ({ step_prompt_id: s.step_prompt_id, brief: s.brief })),
-    }
+    const stepsPayload = steps.map((s) => ({ step_prompt_id: s.step_prompt_id, brief: s.brief }))
+    const json = { 'Content-Type': 'application/json' }
 
     try {
-      // Two-phase save: the header (POST create / PUT rename) resolves the id,
-      // then the ordered step list is replaced via the dedicated steps PUT.
-      let id = blueprintId
       if (isNew) {
+        // Atomic create-with-steps: the header and its ordered steps are written
+        // in one request, so if step validation fails the server rolls back the
+        // header — a failed save never leaves a zero-step orphan on the graph.
         const createBody = templateScope
-          ? { name: trimmed }
-          : { name: trimmed, team_id: lockedTeamId ?? '' }
+          ? { name: trimmed, steps: stepsPayload }
+          : { name: trimmed, team_id: lockedTeamId ?? '', steps: stepsPayload }
         const res = await fetch(base, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: json,
           body: JSON.stringify(createBody),
         })
         if (!res.ok) {
           toast.error(await readError(res, 'Failed to create blueprint'))
           return
         }
-        const created = (await res.json()) as Blueprint
-        id = created.id
-      } else {
-        const res = await fetch(`${base}/${blueprintId}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: trimmed }),
-        })
-        if (!res.ok) {
-          toast.error(await readError(res, 'Failed to save blueprint'))
-          return
-        }
+        if (!templateScope && lockedTeamId) noteWrittenTeam(lockedTeamId)
+        onSaved()
+        return
       }
 
-      const stepsRes = await fetch(`${base}/${id}/steps`, {
+      // Edit: the header already exists, so rename then replace steps — a
+      // mid-save failure is recoverable (retry), with no orphan to clean up.
+      const res = await fetch(`${base}/${blueprintId}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(stepsBody),
+        headers: json,
+        body: JSON.stringify({ name: trimmed }),
+      })
+      if (!res.ok) {
+        toast.error(await readError(res, 'Failed to save blueprint'))
+        return
+      }
+      const stepsRes = await fetch(`${base}/${blueprintId}/steps`, {
+        method: 'PUT',
+        headers: json,
+        body: JSON.stringify({ steps: stepsPayload }),
       })
       if (!stepsRes.ok) {
         toast.error(await readError(stepsRes, 'Failed to save blueprint steps'))
         return
       }
-
-      if (!templateScope && isNew && lockedTeamId) noteWrittenTeam(lockedTeamId)
       onSaved()
     } catch (err) {
       toast.error(`Failed to save blueprint: ${(err as Error).message}`)

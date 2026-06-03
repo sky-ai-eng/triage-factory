@@ -82,7 +82,7 @@ func (s *blueprintStore) List(ctx context.Context, orgID string, _ string) ([]do
 	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
-		FROM blueprints WHERE hidden = 0 ORDER BY updated_at DESC
+		FROM blueprints WHERE hidden = 0 AND deleted_at IS NULL ORDER BY updated_at DESC
 	`)
 	if err != nil {
 		return nil, err
@@ -100,14 +100,29 @@ func (s *blueprintStore) List(ctx context.Context, orgID string, _ string) ([]do
 	return out, rows.Err()
 }
 
+// Get is the request-facing read: it filters soft-deleted blueprints so the
+// editor / dispatch never resolve a deleted one.
 func (s *blueprintStore) Get(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+	return s.getBlueprint(ctx, orgID, id, false)
+}
+
+// GetSystem includes soft-deleted rows so the orchestrator can finish an
+// in-flight run whose blueprint was deleted mid-flight.
+func (s *blueprintStore) GetSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+	return s.getBlueprint(ctx, orgID, id, true)
+}
+
+func (s *blueprintStore) getBlueprint(ctx context.Context, orgID, id string, includeDeleted bool) (*domain.Blueprint, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	b, err := scanBlueprintRowSQLite(s.q.QueryRowContext(ctx, `
+	q := `
 		SELECT id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
-		FROM blueprints WHERE id = ?
-	`, id).Scan)
+		FROM blueprints WHERE id = ?`
+	if !includeDeleted {
+		q += ` AND deleted_at IS NULL`
+	}
+	b, err := scanBlueprintRowSQLite(s.q.QueryRowContext(ctx, q, id).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -115,10 +130,6 @@ func (s *blueprintStore) Get(ctx context.Context, orgID string, id string) (*dom
 		return nil, err
 	}
 	return &b, nil
-}
-
-func (s *blueprintStore) GetSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
-	return s.Get(ctx, orgID, id)
 }
 
 func (s *blueprintStore) GetBySystemSlug(ctx context.Context, orgID, teamID, systemSlug string) (*domain.Blueprint, error) {
@@ -177,14 +188,16 @@ func (s *blueprintStore) Update(ctx context.Context, orgID string, id, name stri
 	return err
 }
 
-// Delete hard-deletes the blueprint; blueprint_steps and any triggers cascade.
-// A blueprint with blueprint_runs is FK-protected — the RESTRICT FK surfaces
-// as an error rather than silently dropping run history.
+// Delete soft-deletes the blueprint (stamps deleted_at). Its steps + runs stay
+// as audit history; request-facing reads filter deleted_at IS NULL. Triggers
+// are cleared by the handler (a soft delete doesn't cascade them away).
 func (s *blueprintStore) Delete(ctx context.Context, orgID string, id string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	_, err := s.q.ExecContext(ctx, `DELETE FROM blueprints WHERE id = ?`, id)
+	_, err := s.q.ExecContext(ctx,
+		`UPDATE blueprints SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`,
+		time.Now().UTC(), id)
 	return err
 }
 

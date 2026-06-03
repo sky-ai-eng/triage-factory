@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -264,6 +265,41 @@ func (s *Server) handleOrgTemplatePromptDelete(w http.ResponseWriter, r *http.Re
 // blueprint header. Steps are managed separately via the /steps endpoints.
 type orgTemplateBlueprintRequest struct {
 	Name string `json:"name"`
+	// Steps lets the editor create a template blueprint and its ordered steps in
+	// one atomic request — a step-validation failure rolls back the header so no
+	// orphan blueprint is left behind. Optional; ignored by the rename PUT.
+	Steps []blueprintStepInput `json:"steps"`
+}
+
+// validateAndReplaceOrgTemplateBlueprintSteps mirrors
+// validateAndReplaceBlueprintSteps for org-template scope: it validates each
+// step references an existing org-template prompt (org-scoped — no team check)
+// and replaces the step list inside tx. Returns *blueprintStepValidation on a
+// client-side failure, which (returned as an error) rolls the surrounding tx
+// back so an atomic create can't leave an orphan header.
+func validateAndReplaceOrgTemplateBlueprintSteps(ctx context.Context, tx db.TxStores, orgID, blueprintID string, steps []blueprintStepInput) error {
+	if len(steps) > maxBlueprintSteps {
+		return &blueprintStepValidation{http.StatusUnprocessableEntity, "blueprint may not exceed " + strconv.Itoa(maxBlueprintSteps) + " steps"}
+	}
+	stepIDs := make([]string, 0, len(steps))
+	briefs := make([]string, 0, len(steps))
+	for _, step := range steps {
+		if step.StepPromptID == "" {
+			return &blueprintStepValidation{http.StatusBadRequest, "step_prompt_id is required for every step"}
+		}
+		stepIDs = append(stepIDs, step.StepPromptID)
+		briefs = append(briefs, step.Brief)
+	}
+	for i, sid := range stepIDs {
+		p, e := tx.OrgTemplate.GetPrompt(ctx, orgID, sid)
+		if e != nil {
+			return e
+		}
+		if p == nil {
+			return &blueprintStepValidation{http.StatusUnprocessableEntity, "step " + strconv.Itoa(i) + " references a non-existent template prompt"}
+		}
+	}
+	return tx.OrgTemplate.ReplaceBlueprintSteps(ctx, orgID, blueprintID, stepIDs, briefs)
 }
 
 func (s *Server) handleOrgTemplateBlueprintsList(w http.ResponseWriter, r *http.Request) {
@@ -306,14 +342,27 @@ func (s *Server) handleOrgTemplateBlueprintCreate(w http.ResponseWriter, r *http
 		Source:     "user",
 	}
 	var created *domain.Blueprint
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		if e := tx.OrgTemplate.CreateBlueprint(r.Context(), orgID, b); e != nil {
 			return e
+		}
+		// Atomic create-with-steps: a validation failure returns an error that
+		// rolls back the header insert above, so no orphan blueprint survives.
+		if len(req.Steps) > 0 {
+			if e := validateAndReplaceOrgTemplateBlueprintSteps(r.Context(), tx, orgID, b.ID, req.Steps); e != nil {
+				return e
+			}
 		}
 		var ge error
 		created, ge = tx.OrgTemplate.GetBlueprint(r.Context(), orgID, b.ID)
 		return ge
-	}); err != nil {
+	})
+	var ve *blueprintStepValidation
+	if errors.As(err, &ve) {
+		writeJSON(w, ve.status, map[string]string{"error": ve.msg})
+		return
+	}
+	if err != nil {
 		internalError(w, "org_template", err)
 		return
 	}
@@ -449,57 +498,30 @@ func (s *Server) handleOrgTemplateBlueprintStepsPut(w http.ResponseWriter, r *ht
 	if !decodeJSON(w, r, &req, "") {
 		return
 	}
-	if len(req.Steps) > maxBlueprintSteps {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "blueprint may not exceed " + strconv.Itoa(maxBlueprintSteps) + " steps",
-		})
-		return
-	}
-	stepIDs := make([]string, 0, len(req.Steps))
-	briefs := make([]string, 0, len(req.Steps))
-	for _, step := range req.Steps {
-		if step.StepPromptID == "" {
-			badRequest(w, "step_prompt_id is required for every step")
-			return
-		}
-		stepIDs = append(stepIDs, step.StepPromptID)
-		briefs = append(briefs, step.Brief)
-	}
 
-	var bpMissing bool
-	var validationErr string
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	var missing bool
+	err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		bp, e := tx.OrgTemplate.GetBlueprint(r.Context(), orgID, id)
 		if e != nil {
 			return e
 		}
 		if bp == nil {
-			bpMissing = true
+			missing = true
 			return nil
 		}
-		// Each step must reference a template prompt in the same org; the
-		// composite FK enforces it, but pre-check for a clean 422.
-		for i, sid := range stepIDs {
-			p, e := tx.OrgTemplate.GetPrompt(r.Context(), orgID, sid)
-			if e != nil {
-				return e
-			}
-			if p == nil {
-				validationErr = "step " + strconv.Itoa(i) + " references a non-existent template prompt"
-				return nil
-			}
-		}
-		return tx.OrgTemplate.ReplaceBlueprintSteps(r.Context(), orgID, id, stepIDs, briefs)
-	}); err != nil {
+		return validateAndReplaceOrgTemplateBlueprintSteps(r.Context(), tx, orgID, id, req.Steps)
+	})
+	var ve *blueprintStepValidation
+	if errors.As(err, &ve) {
+		writeJSON(w, ve.status, map[string]string{"error": ve.msg})
+		return
+	}
+	if err != nil {
 		internalError(w, "org_template", err)
 		return
 	}
-	if bpMissing {
+	if missing {
 		notFound(w, "template blueprint")
-		return
-	}
-	if validationErr != "" {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": validationErr})
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

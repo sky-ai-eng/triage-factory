@@ -187,7 +187,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		}
 	})
 
-	t.Run("Delete_RemovesBlueprintAndCascadesSteps", func(t *testing.T) {
+	t.Run("Delete_SoftDeletesAndKeepsHistory", func(t *testing.T) {
 		store, orgID, teamID, seedPrompt := factory(t)
 		ctx := context.Background()
 		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
@@ -203,20 +203,38 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		if err := store.Delete(ctx, orgID, id); err != nil {
 			t.Fatalf("Delete: %v", err)
 		}
+		// Soft delete: request-facing Get + List filter the row out...
 		got, err := store.Get(ctx, orgID, id)
 		if err != nil {
 			t.Fatalf("Get after delete: %v", err)
 		}
 		if got != nil {
-			t.Fatalf("Get after delete = %+v; want nil", got)
+			t.Fatalf("Get after delete = %+v; want nil (soft-deleted rows are filtered)", got)
 		}
-		// Steps cascade with the blueprint (ON DELETE CASCADE).
+		list, err := store.List(ctx, orgID, teamID)
+		if err != nil {
+			t.Fatalf("List after delete: %v", err)
+		}
+		for _, b := range list {
+			if b.ID == id {
+				t.Fatalf("List returned soft-deleted blueprint %s", id)
+			}
+		}
+		// ...but the row + its steps survive as audit history: GetSystem still
+		// resolves it (so an in-flight run finishes) and steps are NOT cascaded.
+		sys, err := store.GetSystem(ctx, orgID, id)
+		if err != nil {
+			t.Fatalf("GetSystem after delete: %v", err)
+		}
+		if sys == nil {
+			t.Fatalf("GetSystem after delete = nil; the soft-deleted row must survive for in-flight runs")
+		}
 		steps, err := store.ListSteps(ctx, orgID, id)
 		if err != nil {
 			t.Fatalf("ListSteps after delete: %v", err)
 		}
-		if len(steps) != 0 {
-			t.Fatalf("ListSteps after delete = %d rows; want 0 (cascade)", len(steps))
+		if len(steps) != 1 {
+			t.Fatalf("ListSteps after delete = %d rows; want 1 (steps retained as history)", len(steps))
 		}
 	})
 
