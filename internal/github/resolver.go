@@ -298,7 +298,6 @@ func (r *resolver) tier3PATClient(ctx context.Context, orgID, base string) (*Cli
 	if pat == "" {
 		return nil, nil
 	}
-	log.Printf("[gh-resolver] org=%s → tier3 PAT user=%s", orgID, r.patBorrowUser(ctx, orgID))
 	return NewClient(base, pat), nil
 }
 
