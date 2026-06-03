@@ -99,6 +99,14 @@ func parseEndpoint(s string) (host string, secure bool, err error) {
 	if u.Host == "" {
 		return "", false, fmt.Errorf("%s=%q has no host", envBlobEndpoint, s)
 	}
+	// minio-go's endpoint is host[:port] only — it has no notion of a base
+	// path. Reject a path/query/fragment rather than silently dropping it, so
+	// an operator who points at e.g. https://host/storage/v1/s3 gets a clear
+	// error instead of requests quietly going to the wrong place. (A bare
+	// trailing "/" is fine.)
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return "", false, fmt.Errorf("%s=%q must be a bare scheme://host[:port] with no path, query, or fragment", envBlobEndpoint, s)
+	}
 	switch u.Scheme {
 	case "https":
 		return u.Host, true, nil
@@ -120,8 +128,21 @@ func newObjectStorage(cfg ObjectConfig) (*objectStorage, error) {
 	if cfg.Bucket == "" {
 		return nil, fmt.Errorf("storage: object bucket is empty")
 	}
+	// With explicit keys, sign with static V4. With neither key set, fall
+	// through to the standard AWS provider chain (AWS_* env, shared creds
+	// file, then EC2/ECS instance role) rather than signing with empty
+	// credentials — so an instance-role deployment works without baking
+	// secrets into TF_BLOB_*, matching the "optional credentials" contract.
+	creds := credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, "")
+	if cfg.AccessKey == "" && cfg.SecretKey == "" {
+		creds = credentials.NewChainCredentials([]credentials.Provider{
+			&credentials.EnvAWS{},
+			&credentials.FileAWSCredentials{},
+			&credentials.IAM{},
+		})
+	}
 	client, err := minio.New(cfg.Endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
+		Creds:  creds,
 		Secure: cfg.UseSSL,
 		Region: cfg.Region,
 	})

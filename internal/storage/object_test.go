@@ -96,8 +96,11 @@ func TestParseEndpoint(t *testing.T) {
 		{in: "minio:9000", wantHost: "minio:9000", wantSecure: true},
 		{in: "https://s3.amazonaws.com", wantHost: "s3.amazonaws.com", wantSecure: true},
 		{in: "http://localhost:9000", wantHost: "localhost:9000", wantSecure: false},
+		{in: "https://host/", wantHost: "host", wantSecure: true}, // bare trailing slash is fine
 		{in: "ftp://nope", wantErr: true},
 		{in: "https://", wantErr: true},
+		{in: "https://host/storage/v1/s3", wantErr: true}, // base path unsupported by minio-go
+		{in: "http://host:9000?region=x", wantErr: true},  // query unsupported
 	}
 	for _, tc := range cases {
 		host, secure, err := parseEndpoint(tc.in)

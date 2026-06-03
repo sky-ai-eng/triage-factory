@@ -114,13 +114,18 @@ func (s *fsStorage) path(key string) (string, error) {
 			return "", fmt.Errorf("storage: invalid key %q (..)", key)
 		}
 	}
-	clean := path.Clean("/" + strings.TrimPrefix(key, "/"))
-	if clean == "/" {
+	// Clean to collapse "." and redundant slashes, then strip the leading
+	// separator so the remainder joins strictly UNDER the root as a relative
+	// path. (filepath.Join would not actually discard the root for an
+	// absolute second arg — Go cleans the concatenation rather than treating
+	// it like Python's os.path.join — but joining a relative remainder makes
+	// the containment obvious to a reader.)
+	rel := strings.TrimPrefix(path.Clean("/"+strings.TrimPrefix(key, "/")), "/")
+	if rel == "" {
 		return "", fmt.Errorf("storage: invalid key %q", key)
 	}
-	p := filepath.Join(s.root, filepath.FromSlash(clean))
-	root := filepath.Clean(s.root)
-	if !strings.HasPrefix(p, root+string(os.PathSeparator)) {
+	p := filepath.Join(s.root, filepath.FromSlash(rel))
+	if root := filepath.Clean(s.root); !strings.HasPrefix(p, root+string(os.PathSeparator)) {
 		return "", fmt.Errorf("storage: invalid key %q", key)
 	}
 	return p, nil
