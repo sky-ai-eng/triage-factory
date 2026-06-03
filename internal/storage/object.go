@@ -75,7 +75,7 @@ func ObjectConfigFromEnv() (ObjectConfig, error) {
 		Endpoint:  endpoint,
 		Bucket:    bucket,
 		AccessKey: strings.TrimSpace(os.Getenv(envBlobAccessKey)),
-		SecretKey: os.Getenv(envBlobSecretKey),
+		SecretKey: strings.TrimSpace(os.Getenv(envBlobSecretKey)),
 		Region:    strings.TrimSpace(os.Getenv(envBlobRegion)),
 	}, nil
 }
@@ -95,6 +95,12 @@ func validateEndpoint(s string) error {
 	}
 	if u.Host == "" {
 		return fmt.Errorf("%s=%q has no host", envBlobEndpoint, s)
+	}
+	// A base path is fine (Supabase's /storage/v1/s3), but a query or fragment
+	// is meaningless for an S3 BaseEndpoint and would only confuse request
+	// routing — reject it at boot rather than forwarding it silently.
+	if u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("%s=%q must not include a query string or fragment", envBlobEndpoint, s)
 	}
 	return nil
 }
@@ -123,6 +129,12 @@ func newObjectStorage(cfg ObjectConfig) (*objectStorage, error) {
 
 	var awsCfg aws.Config
 	if cfg.AccessKey != "" || cfg.SecretKey != "" {
+		// Require both or neither. One-of-two would sign with an empty string
+		// for the missing half and fail every request with an opaque 403; a
+		// boot-time error is far easier to act on.
+		if cfg.AccessKey == "" || cfg.SecretKey == "" {
+			return nil, fmt.Errorf("storage: %s and %s must both be set, or both omitted for the AWS default chain", envBlobAccessKey, envBlobSecretKey)
+		}
 		awsCfg = aws.Config{
 			Region:      region,
 			Credentials: credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, ""),

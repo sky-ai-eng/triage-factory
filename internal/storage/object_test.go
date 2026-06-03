@@ -133,9 +133,11 @@ func TestValidateEndpoint(t *testing.T) {
 		{in: "https://ref.supabase.co/storage/v1/s3", wantErr: false}, // base path is allowed and preserved
 		{in: "http://localhost:9000", wantErr: false},
 		{in: "https://s3.amazonaws.com", wantErr: false},
-		{in: "minio:9000", wantErr: true}, // scheme-less host-only form no longer accepted
-		{in: "ftp://nope", wantErr: true}, // unsupported scheme
-		{in: "https://", wantErr: true},   // no host
+		{in: "minio:9000", wantErr: true},                   // scheme-less host-only form no longer accepted
+		{in: "ftp://nope", wantErr: true},                   // unsupported scheme
+		{in: "https://", wantErr: true},                     // no host
+		{in: "http://minio:9000?debug=true", wantErr: true}, // query string rejected
+		{in: "https://host/path#frag", wantErr: true},       // fragment rejected
 	}
 	for _, tc := range cases {
 		if err := validateEndpoint(tc.in); (err != nil) != tc.wantErr {
@@ -220,5 +222,25 @@ func TestNewObjectStorage_NoCredsUsesDefaultChain(t *testing.T) {
 	}
 	if store == nil {
 		t.Fatal("newObjectStorage returned nil store")
+	}
+}
+
+func TestNewObjectStorage_PartialCredsRejected(t *testing.T) {
+	// Exactly one of access key / secret key set is a misconfiguration —
+	// signing with an empty half fails every request with an opaque 403, so
+	// it must be caught at construction, not deferred to the server.
+	base := ObjectConfig{Endpoint: "http://minio:9000", Bucket: "b", Region: "us-east-1"}
+	for _, tc := range []struct {
+		name string
+		cfg  ObjectConfig
+	}{
+		{"access only", func() ObjectConfig { c := base; c.AccessKey = "ak"; return c }()},
+		{"secret only", func() ObjectConfig { c := base; c.SecretKey = "sk"; return c }()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := newObjectStorage(tc.cfg); err == nil {
+				t.Fatalf("newObjectStorage(%s) = nil; want error for partial credentials", tc.name)
+			}
+		})
 	}
 }
