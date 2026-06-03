@@ -16,7 +16,6 @@ package delegate
 
 import (
 	"archive/tar"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -54,6 +53,7 @@ var scratchExcludes = map[string]bool{"entity-memory": true, "project-knowledge"
 // read first on rehydrate to decide how to reconstruct.
 type snapshotManifest struct {
 	Branch    string `json:"branch"`
+	Head      string `json:"head"`
 	SessionID string `json:"session_id"`
 	HasGit    bool   `json:"has_git"`
 }
@@ -91,19 +91,50 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, keyID, wtPath, s
 		return fmt.Errorf("snapshot: empty worktree path")
 	}
 
-	var buf bytes.Buffer
-	tw := tar.NewWriter(&buf)
-	man := snapshotManifest{SessionID: sessionID}
-
 	// Git delta — nil for a non-git run-root (e.g. a Jira lazy run), in which
 	// case the snapshot carries only _scratch + the session transcript.
 	delta, err := worktree.CaptureWorkspaceGit(ctx, wtPath)
 	if err != nil {
 		return fmt.Errorf("snapshot: capture git: %w", err)
 	}
+
+	// Stage the tar on disk, then stream it into Put. A large workspace (the
+	// _scratch tree especially) never buffers whole in memory: scratch files
+	// are copied into the tar file by file, and Put reads the staged tar back
+	// incrementally rather than from a single in-RAM buffer.
+	f, err := os.CreateTemp("", "tf-snapshot-*.tar")
+	if err != nil {
+		return fmt.Errorf("snapshot: tempfile: %w", err)
+	}
+	name := f.Name()
+	defer func() { _ = os.Remove(name) }()
+	if err := writeSnapshotTar(f, delta, wtPath, sessionID); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("snapshot: rewind tar: %w", err)
+	}
+	putErr := blobs.Put(ctx, snapshotKey(orgID, keyID), f)
+	_ = f.Close()
+	if putErr != nil {
+		return fmt.Errorf("snapshot: put: %w", putErr)
+	}
+	return nil
+}
+
+// writeSnapshotTar streams the snapshot members into w as one tar: the git
+// bundle + uncommitted patch (bounded — they're the delta, not full history),
+// the ephemeral _scratch tree (streamed file by file), the Claude session
+// transcript, and the manifest.
+func writeSnapshotTar(w io.Writer, delta *worktree.GitDelta, wtPath, sessionID string) error {
+	tw := tar.NewWriter(w)
+	man := snapshotManifest{SessionID: sessionID}
 	if delta != nil {
 		man.HasGit = true
 		man.Branch = delta.Branch
+		man.Head = delta.Head
 		if len(delta.Bundle) > 0 {
 			if err := writeTarBytes(tw, snapBundle, delta.Bundle); err != nil {
 				return err
@@ -115,11 +146,9 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, keyID, wtPath, s
 			}
 		}
 	}
-
 	if err := tarScratch(tw, wtPath); err != nil {
 		return fmt.Errorf("snapshot: tar scratch: %w", err)
 	}
-
 	if sessionID != "" {
 		if data, ok := readSessionTranscript(wtPath, sessionID); ok {
 			if err := writeTarBytes(tw, snapSession, data); err != nil {
@@ -127,7 +156,6 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, keyID, wtPath, s
 			}
 		}
 	}
-
 	manBytes, err := json.Marshal(man)
 	if err != nil {
 		return fmt.Errorf("snapshot: marshal manifest: %w", err)
@@ -135,14 +163,7 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, keyID, wtPath, s
 	if err := writeTarBytes(tw, snapManifest, manBytes); err != nil {
 		return err
 	}
-	if err := tw.Close(); err != nil {
-		return fmt.Errorf("snapshot: close tar: %w", err)
-	}
-
-	if err := blobs.Put(ctx, snapshotKey(orgID, keyID), &buf); err != nil {
-		return fmt.Errorf("snapshot: put: %w", err)
-	}
-	return nil
+	return tw.Close()
 }
 
 // ensureWorkspace guarantees the run's worktree exists on disk before a resume
@@ -229,7 +250,7 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, owner, repo, cloneU
 	}
 
 	if man.HasGit {
-		delta := &worktree.GitDelta{Branch: man.Branch, Bundle: bundle, Patch: patch}
+		delta := &worktree.GitDelta{Branch: man.Branch, Head: man.Head, Bundle: bundle, Patch: patch}
 		if err := worktree.RestoreWorkspaceGit(ctx, owner, repo, wtDir, delta, cloneURL); err != nil {
 			return fmt.Errorf("rehydrate: restore git: %w", err)
 		}
@@ -307,11 +328,9 @@ func tarScratch(tw *tar.Writer, wtPath string) error {
 		if !fi.Mode().IsRegular() {
 			return nil // directories implied by their files; skip symlinks/etc.
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		return writeTarBytes(tw, snapScratchPrefix+filepath.ToSlash(rel), data)
+		// Stream each file into the tar rather than reading it whole — _scratch
+		// (ci-logs, etc.) is the part that can run to GBs.
+		return writeTarFile(tw, snapScratchPrefix+filepath.ToSlash(rel), path, fi.Size())
 	})
 }
 
@@ -364,7 +383,9 @@ func restoreSessionTranscript(wtDir, sessionID string, data []byte) error {
 	return nil
 }
 
-// writeTarBytes writes one regular-file member into the snapshot tar.
+// writeTarBytes writes one regular-file member into the snapshot tar from an
+// in-memory buffer. Used for the bounded members (bundle, patch, session,
+// manifest); _scratch files stream through writeTarFile instead.
 func writeTarBytes(tw *tar.Writer, name string, data []byte) error {
 	if err := tw.WriteHeader(&tar.Header{
 		Name:     name,
@@ -376,6 +397,31 @@ func writeTarBytes(tw *tar.Writer, name string, data []byte) error {
 	}
 	if _, err := tw.Write(data); err != nil {
 		return fmt.Errorf("tar write %s: %w", name, err)
+	}
+	return nil
+}
+
+// writeTarFile streams a file into the snapshot tar without buffering it whole.
+// size is the header length; the run is parked (dormant) when a snapshot is
+// taken, so _scratch isn't being written concurrently and the on-disk size is
+// stable. If a short read still occurs, io.Copy's count mismatch surfaces as a
+// tar error rather than silent corruption.
+func writeTarFile(tw *tar.Writer, name, path string, size int64) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("tar open %s: %w", name, err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     name,
+		Mode:     0o600,
+		Size:     size,
+		Typeflag: tar.TypeReg,
+	}); err != nil {
+		return fmt.Errorf("tar header %s: %w", name, err)
+	}
+	if _, err := io.Copy(tw, f); err != nil {
+		return fmt.Errorf("tar copy %s: %w", name, err)
 	}
 	return nil
 }

@@ -25,12 +25,19 @@ import (
 // so there is no git state to carry.
 type GitDelta struct {
 	// Branch is the worktree's checked-out branch. Empty when HEAD is
-	// detached — restore then falls back to whatever the bare's ref resolves.
+	// detached — restore then checks out Head directly (detached).
 	Branch string
-	// Bundle is a `git bundle` of the commits reachable from Branch but not
+	// Head is the HEAD commit SHA, always captured. It's the authoritative
+	// tip restore positions the worktree at, and it's what lets restore
+	// recreate the branch even when the bundle is empty and the branch was
+	// never pushed to a remote (the never-pushed-local-branch case), or check
+	// out a detached HEAD (no branch at all).
+	Head string
+	// Bundle is a `git bundle` of the commits reachable from Head but not
 	// from any remote-tracking ref — i.e. only the agent's local-only work.
 	// nil when the tip is already on a remote (nothing local to carry); the
-	// bare reproduces the committed state by itself in that case.
+	// bare reproduces the committed state by itself in that case, and Head is
+	// reachable there.
 	Bundle []byte
 	// Patch is a single binary diff capturing every uncommitted change
 	// (tracked modifications and untracked additions alike), with the managed
@@ -61,8 +68,19 @@ func CaptureWorkspaceGit(ctx context.Context, wtPath string) (*GitDelta, error) 
 	}
 	d := &GitDelta{}
 
+	// HEAD commit SHA — always captured. Restore positions the worktree here,
+	// and it's what lets restore recreate a never-pushed branch or check out a
+	// detached HEAD when the bundle is empty. A failure here is a real anomaly
+	// (a delegated worktree always has commits), so surface it rather than
+	// snapshotting a workspace we can't rebuild.
+	head, err := gitCapture(ctx, wtPath, nil, "rev-parse", "HEAD")
+	if err != nil {
+		return nil, fmt.Errorf("rev-parse HEAD: %w", err)
+	}
+	d.Head = strings.TrimSpace(string(head))
+
 	// rev-parse --abbrev-ref reports "HEAD" for a detached head; treat that as
-	// "no branch" so restore resolves the bare's ref instead of trying to
+	// "no branch" so restore checks out d.Head detached instead of trying to
 	// check out a branch literally named HEAD.
 	if out, err := gitCapture(ctx, wtPath, nil, "rev-parse", "--abbrev-ref", "HEAD"); err == nil {
 		if b := strings.TrimSpace(string(out)); b != "HEAD" {
@@ -172,14 +190,17 @@ func RestoreWorkspaceGit(ctx context.Context, owner, repo, wtDir string, d *GitD
 	if d == nil {
 		return fmt.Errorf("restore: nil git delta")
 	}
-	if d.Branch == "" {
-		return fmt.Errorf("restore: snapshot has no branch to check out")
+	if d.Head == "" {
+		return fmt.Errorf("restore: snapshot has no HEAD commit to check out")
 	}
 	bareDir, err := repoDir(owner, repo)
 	if err != nil {
 		return err
 	}
-	if _, statErr := os.Stat(bareDir); statErr != nil {
+	switch _, statErr := os.Stat(bareDir); {
+	case statErr == nil:
+		// Bare present (the local reboot / `/tmp`-wipe case): reuse it.
+	case os.IsNotExist(statErr):
 		// Bare absent on this host (fresh executor). Seed it from the remote so
 		// the bundle's prerequisite commits resolve. EnsureBareClone takes the
 		// per-repo lock itself, so it runs outside the WithRepoLock below.
@@ -189,42 +210,66 @@ func RestoreWorkspaceGit(ctx context.Context, owner, repo, wtDir string, d *GitD
 		if _, err := EnsureBareClone(ctx, owner, repo, cloneURL); err != nil {
 			return fmt.Errorf("restore: seed bare: %w", err)
 		}
+	default:
+		// A non-"missing" stat error (permission, I/O) is a real problem —
+		// surface it rather than masking it as a missing bare and re-cloning.
+		return fmt.Errorf("restore: stat bare %s: %w", bareDir, statErr)
 	}
 
 	branch := d.Branch
 	if err := WithRepoLock(owner, repo, func() error {
-		// Fold the agent's local-only commits into the bare's branch ref. The
-		// bundle's prerequisites are the remote commits the (surviving or
-		// freshly cloned) bare already has, so the fetch resolves. An absent
-		// bundle means the tip was already published; ensure the local branch
-		// exists from the remote so worktree add has something to attach.
+		// Clear any stale dir + worktree registration FIRST, so the branch ref
+		// isn't "checked out" when we update it below (a surviving bare still
+		// has the pre-loss worktree registered until this prune).
+		_ = os.RemoveAll(wtDir)
+		if err := gitRunCtx(ctx, bareDir, "worktree", "prune"); err != nil {
+			return fmt.Errorf("prune worktrees: %w", err)
+		}
+
+		// Get d.Head's objects into the bare and position the ref we'll check
+		// out, across four cases (bundle present/absent × branch/detached):
 		if len(d.Bundle) > 0 {
+			// The bundle carries the agent's local-only commits; its
+			// prerequisites are remote commits the (surviving or freshly
+			// cloned) bare already has, so the fetch resolves.
 			bname, cleanup, werr := writeTempBundle(d.Bundle)
 			if werr != nil {
 				return werr
 			}
 			defer cleanup()
-			if err := gitRunCtx(ctx, bareDir, "fetch", bname,
-				fmt.Sprintf("+refs/heads/%s:refs/heads/%s", branch, branch)); err != nil {
-				return fmt.Errorf("unbundle: %w", err)
+			if branch != "" {
+				// Force the branch ref to the bundled tip (and import objects).
+				if err := gitRunCtx(ctx, bareDir, "fetch", bname,
+					fmt.Sprintf("+refs/heads/%s:refs/heads/%s", branch, branch)); err != nil {
+					return fmt.Errorf("unbundle into branch: %w", err)
+				}
+			} else if err := gitRunCtx(ctx, bareDir, "fetch", bname, "HEAD"); err != nil {
+				// Detached: just import the objects; the detached add below
+				// resolves d.Head directly.
+				return fmt.Errorf("unbundle (detached): %w", err)
 			}
-		} else if !branchExists(bareDir, branch) {
-			if err := gitRunCtx(ctx, bareDir, "branch", branch, "refs/remotes/origin/"+branch); err != nil {
-				return fmt.Errorf("create branch from origin: %w", err)
+		} else if branch != "" && !branchExists(bareDir, branch) {
+			// No local-only commits, and the branch isn't in the bare (a fresh
+			// clone, or a branch never pushed to a remote). An empty bundle
+			// means d.Head is reachable from a remote ref, so it's already in
+			// the bare — create the branch directly at the SHA rather than
+			// guessing a refs/remotes/origin/<branch> that may not exist.
+			if err := gitRunCtx(ctx, bareDir, "branch", branch, d.Head); err != nil {
+				return fmt.Errorf("create branch at %s: %w", d.Head, err)
 			}
 		}
 
-		// Clear any stale dir + registration from a prior partial rehydrate so
-		// `worktree add` can't wedge on "already exists".
-		_ = os.RemoveAll(wtDir)
-		if err := gitRunCtx(ctx, bareDir, "worktree", "prune"); err != nil {
-			return fmt.Errorf("prune worktrees: %w", err)
-		}
 		if err := os.MkdirAll(filepath.Dir(wtDir), 0o755); err != nil {
 			return fmt.Errorf("mkdir runs parent: %w", err)
 		}
-		if err := gitRunCtx(ctx, bareDir, "worktree", "add", wtDir, branch); err != nil {
-			return fmt.Errorf("worktree add: %w", err)
+		if branch != "" {
+			if err := gitRunCtx(ctx, bareDir, "worktree", "add", wtDir, branch); err != nil {
+				return fmt.Errorf("worktree add: %w", err)
+			}
+		} else if err := gitRunCtx(ctx, bareDir, "worktree", "add", "--detach", wtDir, d.Head); err != nil {
+			// No branch: check out the exact commit detached, mirroring the
+			// snapshotted detached HEAD.
+			return fmt.Errorf("worktree add --detach: %w", err)
 		}
 		return nil
 	}); err != nil {

@@ -133,6 +133,105 @@ func TestEnsureWorkspace_ColdPath_RehydratesFromSnapshot(t *testing.T) {
 	assertFileContains(t, sessPath2, `"sid":"cold"`)
 }
 
+// TestEnsureWorkspace_ColdPath_DetachedHead: a worktree snapshotted while HEAD
+// is detached (e.g. the agent ran `git checkout <sha>`) rehydrates to the same
+// detached commit — the manifest carries the HEAD SHA, so an empty branch no
+// longer strands the run.
+func TestEnsureWorkspace_ColdPath_DetachedHead(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	setupGitTestEnv(t)
+	s := newStorageSpawner(t)
+
+	const runID = "wt-detached"
+	wtPath, owner, repo := setupTestWorktree(t, runID)
+	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, runID) })
+
+	// Agent commits, then detaches HEAD at that commit.
+	writeFile(t, filepath.Join(wtPath, "agent.txt"), "committed by agent")
+	gitT(t, wtPath, "add", "agent.txt")
+	gitT(t, wtPath, "commit", "-m", "agent work")
+	gitT(t, wtPath, "checkout", "--detach", "HEAD")
+	writeFile(t, filepath.Join(wtPath, "README.md"), "hello\ndetached edit\n")
+	headSHA := strings.TrimSpace(gitOut(t, wtPath, "rev-parse", "HEAD"))
+
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrg, runID, wtPath, ""); err != nil {
+		t.Fatalf("snapshotWorkspace: %v", err)
+	}
+
+	// Lose the worktree and drop the branch so the commit returns via the bundle.
+	if err := os.RemoveAll(wtPath); err != nil {
+		t.Fatalf("rm worktree: %v", err)
+	}
+	bareDir, err := worktree.RepoDir(owner, repo)
+	if err != nil {
+		t.Fatalf("RepoDir: %v", err)
+	}
+	gitT(t, bareDir, "worktree", "prune")
+	gitT(t, bareDir, "branch", "-D", "feature")
+
+	run := &domain.AgentRun{ID: runID, WorktreePath: wtPath}
+	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrg, run, owner, repo, "")
+	if err != nil {
+		t.Fatalf("ensureWorkspace (detached): %v", err)
+	}
+	assertFileContains(t, filepath.Join(got, "agent.txt"), "committed by agent")
+	assertFileContains(t, filepath.Join(got, "README.md"), "detached edit")
+	if gotSHA := strings.TrimSpace(gitOut(t, got, "rev-parse", "HEAD")); gotSHA != headSHA {
+		t.Errorf("rehydrated HEAD = %s, want %s", gotSHA, headSHA)
+	}
+	if err := exec.Command("git", "-C", got, "symbolic-ref", "-q", "HEAD").Run(); err == nil {
+		t.Error("rehydrated HEAD is on a branch; want detached")
+	}
+}
+
+// TestEnsureWorkspace_ColdPath_NeverPushedBranchNoCommits: a run on a local
+// branch that was never pushed and has no local-only commits (only uncommitted
+// changes) still rehydrates — the manifest's HEAD SHA recreates the branch even
+// though the bundle is empty and there's no refs/remotes/origin/<branch>.
+func TestEnsureWorkspace_ColdPath_NeverPushedBranchNoCommits(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	setupGitTestEnv(t)
+	s := newStorageSpawner(t)
+
+	const runID = "wt-nopush"
+	wtPath, owner, repo := setupTestWorktree(t, runID)
+	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, runID) })
+
+	// No commits — only an uncommitted edit on the never-pushed "feature" branch.
+	writeFile(t, filepath.Join(wtPath, "README.md"), "hello\nwork in progress\n")
+	headSHA := strings.TrimSpace(gitOut(t, wtPath, "rev-parse", "HEAD"))
+
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrg, runID, wtPath, ""); err != nil {
+		t.Fatalf("snapshotWorkspace: %v", err)
+	}
+
+	// Simulate a fresh host: worktree gone and the bare lacks the never-pushed
+	// branch (only origin/* survives a fresh clone), but it still has origin/main
+	// — which is where HEAD points, since "feature" had no commits.
+	if err := os.RemoveAll(wtPath); err != nil {
+		t.Fatalf("rm worktree: %v", err)
+	}
+	bareDir, err := worktree.RepoDir(owner, repo)
+	if err != nil {
+		t.Fatalf("RepoDir: %v", err)
+	}
+	gitT(t, bareDir, "worktree", "prune")
+	gitT(t, bareDir, "branch", "-D", "feature")
+
+	run := &domain.AgentRun{ID: runID, WorktreePath: wtPath}
+	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrg, run, owner, repo, "")
+	if err != nil {
+		t.Fatalf("ensureWorkspace (never-pushed branch): %v", err)
+	}
+	assertFileContains(t, filepath.Join(got, "README.md"), "work in progress")
+	if gotBranch := strings.TrimSpace(gitOut(t, got, "rev-parse", "--abbrev-ref", "HEAD")); gotBranch != "feature" {
+		t.Errorf("rehydrated branch = %q, want feature", gotBranch)
+	}
+	if gotSHA := strings.TrimSpace(gitOut(t, got, "rev-parse", "HEAD")); gotSHA != headSHA {
+		t.Errorf("rehydrated HEAD = %s, want %s", gotSHA, headSHA)
+	}
+}
+
 // TestEnsureWorkspace_ColdPath_NoSnapshotErrors: with the worktree gone and no
 // snapshot ever written, ensureWorkspace surfaces a clear error rather than
 // silently handing back a dead path.
@@ -211,6 +310,20 @@ func gitT(t *testing.T, dir string, args ...string) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s in %q: %v\n%s", strings.Join(args, " "), dir, err, out)
 	}
+}
+
+// gitOut runs git and returns stdout (for rev-parse and friends).
+func gitOut(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %s in %q: %v", strings.Join(args, " "), dir, err)
+	}
+	return string(out)
 }
 
 // writeSession writes a fake Claude session transcript for wtPath's cwd and
