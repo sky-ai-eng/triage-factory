@@ -649,6 +649,21 @@ func (s *orgTemplateStore) CountBlueprintStepReferences(ctx context.Context, org
 	return n, err
 }
 
+func (s *orgTemplateStore) BlueprintStepPromptOwner(ctx context.Context, orgID, stepPromptID string) (string, bool, error) {
+	var blueprintID string
+	err := s.app.QueryRowContext(ctx,
+		`SELECT blueprint_id FROM org_template_blueprint_steps WHERE org_id = $1 AND step_prompt_id = $2 LIMIT 1`,
+		orgID, stepPromptID,
+	).Scan(&blueprintID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return blueprintID, true, nil
+}
+
 func replaceOrgTemplateBlueprintSteps(ctx context.Context, tx *sql.Tx, orgID, blueprintID string, stepPromptIDs, briefs []string) error {
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM org_template_blueprint_steps WHERE org_id = $1 AND blueprint_id = $2`,

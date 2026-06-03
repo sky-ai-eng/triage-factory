@@ -1107,6 +1107,13 @@ CREATE TABLE public.prompts (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     model text DEFAULT ''::text NOT NULL,
     system_slug text,
+    -- deleted_at soft-deletes a prompt: the row + its runs stay (runs.prompt_id
+    -- is RESTRICT, so a hard DELETE on a prompt with run history would error);
+    -- request-facing reads filter deleted_at IS NULL, the ...System reads keep
+    -- resolving it for in-flight runs + past-run timelines. Load-bearing once
+    -- every new prompt is auto-wrapped as a 1-step blueprint (the step FK is
+    -- RESTRICT), so hard-delete is impossible.
+    deleted_at timestamp with time zone,
     CONSTRAINT prompts_source_check CHECK ((source = ANY (ARRAY['system'::text, 'user'::text, 'imported'::text]))),
     CONSTRAINT prompts_system_has_no_creator CHECK ((((source = 'system'::text) AND (creator_user_id IS NULL)) OR ((source <> 'system'::text) AND (creator_user_id IS NOT NULL))))
 );
@@ -5265,6 +5272,10 @@ CREATE TABLE public.blueprints (
     hidden boolean DEFAULT false NOT NULL,
     user_modified boolean DEFAULT false NOT NULL,
     system_slug text,
+    -- deleted_at soft-deletes a blueprint (mirrors prompts). Deleting the
+    -- prompt that solely constitutes a 1-step blueprint soft-deletes both;
+    -- request-facing reads filter deleted_at IS NULL, ...System reads don't.
+    deleted_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT blueprints_source_check CHECK ((source = ANY (ARRAY['system'::text, 'user'::text, 'imported'::text]))),
@@ -5356,6 +5367,14 @@ CREATE TABLE public.blueprint_runs (
 
 ALTER TABLE ONLY public.blueprint_steps
     ADD CONSTRAINT blueprint_steps_pkey PRIMARY KEY (org_id, blueprint_id, step_index);
+
+-- Copy-only prompts: a prompt is a step in AT MOST ONE blueprint. step_prompt_id
+-- holds globally-unique UUIDs; org_id is included to match the partition/RLS
+-- convention of the other unique indexes. The handler pre-checks for a clean
+-- 422; this constraint is the durable backstop (it also forbids a prompt at two
+-- step_indexes within one blueprint, which is intended).
+ALTER TABLE ONLY public.blueprint_steps
+    ADD CONSTRAINT blueprint_steps_org_step_prompt_key UNIQUE (org_id, step_prompt_id);
 
 ALTER TABLE ONLY public.blueprint_runs
     ADD CONSTRAINT blueprint_runs_pkey PRIMARY KEY (id);
@@ -5688,6 +5707,11 @@ ALTER TABLE ONLY public.org_template_blueprints
 
 ALTER TABLE ONLY public.org_template_blueprint_steps
     ADD CONSTRAINT org_template_blueprint_steps_pkey PRIMARY KEY (org_id, blueprint_id, step_index);
+
+-- Copy-only prompts (template mirror): a template prompt is a step in at most
+-- one template blueprint.
+ALTER TABLE ONLY public.org_template_blueprint_steps
+    ADD CONSTRAINT org_template_blueprint_steps_org_step_prompt_key UNIQUE (org_id, step_prompt_id);
 
 ALTER TABLE ONLY public.org_template_handlers
     ADD CONSTRAINT org_template_handlers_pkey PRIMARY KEY (org_id, id);

@@ -81,6 +81,46 @@ func TestOrgTemplate_UpdateHandler_MatchedSemantics(t *testing.T) {
 	}
 }
 
+// TestOrgTemplate_CopyOnly_OwnerAndUniqueConstraint pins the template mirror of
+// the copy-only invariant: a template prompt is a step in at most one template
+// blueprint (the unique index refuses a second), and BlueprintStepPromptOwner
+// resolves the single owner (ok=false for an un-stepped prompt). This is the
+// store-level backing for the template steps-put 422 + prompt-delete pairing.
+func TestOrgTemplate_CopyOnly_OwnerAndUniqueConstraint(t *testing.T) {
+	conn := openInMemorySQLite(t)
+	stores := sqlitestore.New(conn)
+	ctx := t.Context()
+	org := runmode.LocalDefaultOrg
+	if err := db.BootstrapNewOrg(ctx, stores, org, db.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+		t.Fatalf("BootstrapNewOrg: %v", err)
+	}
+	if err := stores.OrgTemplate.CreatePrompt(ctx, org, domain.Prompt{ID: "co-p", SystemSlug: "co-step", Name: "P", Body: "b", Source: "user"}); err != nil {
+		t.Fatalf("CreatePrompt: %v", err)
+	}
+	if err := stores.OrgTemplate.CreateBlueprint(ctx, org, domain.Blueprint{ID: "co-bp1", SystemSlug: "co-bp1-slug", Name: "BP1", Source: "user"}); err != nil {
+		t.Fatalf("CreateBlueprint bp1: %v", err)
+	}
+	if err := stores.OrgTemplate.CreateBlueprint(ctx, org, domain.Blueprint{ID: "co-bp2", SystemSlug: "co-bp2-slug", Name: "BP2", Source: "user"}); err != nil {
+		t.Fatalf("CreateBlueprint bp2: %v", err)
+	}
+	if err := stores.OrgTemplate.ReplaceBlueprintSteps(ctx, org, "co-bp1", []string{"co-p"}, nil); err != nil {
+		t.Fatalf("ReplaceBlueprintSteps bp1: %v", err)
+	}
+	owner, ok, err := stores.OrgTemplate.BlueprintStepPromptOwner(ctx, org, "co-p")
+	if err != nil || !ok || owner != "co-bp1" {
+		t.Fatalf("BlueprintStepPromptOwner = (%q, %v, %v); want (co-bp1, true, nil)", owner, ok, err)
+	}
+	if err := stores.OrgTemplate.ReplaceBlueprintSteps(ctx, org, "co-bp2", []string{"co-p"}, nil); err == nil {
+		t.Fatal("ReplaceBlueprintSteps reused a template prompt in a 2nd blueprint; want unique-constraint error")
+	}
+	if err := stores.OrgTemplate.CreatePrompt(ctx, org, domain.Prompt{ID: "co-orphan", SystemSlug: "co-orphan-step", Name: "O", Body: "b", Source: "user"}); err != nil {
+		t.Fatalf("CreatePrompt orphan: %v", err)
+	}
+	if _, ok, err := stores.OrgTemplate.BlueprintStepPromptOwner(ctx, org, "co-orphan"); err != nil || ok {
+		t.Fatalf("BlueprintStepPromptOwner(orphan) = (_, %v, %v); want (_, false, nil)", ok, err)
+	}
+}
+
 // TestOrgTemplate_MultiStepBlueprint_DeepCopy is the multi-step authoring
 // acceptance pin: an org admin authors a multi-step template blueprint, and a
 // team materialized from that template gets a REAL multi-step team blueprint

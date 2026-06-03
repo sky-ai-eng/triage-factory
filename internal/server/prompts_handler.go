@@ -241,23 +241,37 @@ func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 
-		// Block deletion if this prompt is a step inside any blueprint. The FK
-		// (blueprint_steps.step_prompt_id) is ON DELETE RESTRICT so the
-		// underlying constraint would fire anyway; we surface a friendlier
-		// message and the count of blueprints. This also covers the trigger
-		// case — a trigger fires a blueprint, and a 1-step blueprint a trigger
-		// fires holds this prompt as its sole step, so the reference count is
-		// non-zero and deletion is blocked here.
-		stepRefs, e := tx.Blueprints.CountStepReferences(r.Context(), orgID, id)
+		// Delete-pairing under copy-only prompts. Every new prompt is auto-wrapped
+		// as a 1-step blueprint, so a bare prompt-delete would hit the
+		// blueprint_steps RESTRICT FK. Resolve the prompt's owning blueprint:
+		//   - owner is a ≥2-step blueprint (a real composition) → 409, remove it
+		//     there first.
+		//   - owner is a 1-step blueprint this prompt solely constitutes (the
+		//     auto-wrap case) → soft-delete that blueprint alongside the prompt so
+		//     the wrapper doesn't linger.
+		//   - no owner (prompt removed from all blueprints already) → just delete
+		//     the prompt.
+		ownerID, owned, e := tx.Blueprints.StepPromptOwner(r.Context(), orgID, id)
 		if e != nil {
 			return e
 		}
-		if stepRefs > 0 {
-			conflictErr = "This prompt is used as a step in one or more blueprints. Remove it from those blueprints first."
-			return nil
+		if owned {
+			steps, e := tx.Blueprints.ListSteps(r.Context(), orgID, ownerID)
+			if e != nil {
+				return e
+			}
+			if len(steps) > 1 {
+				conflictErr = "This prompt is a step in a multi-step blueprint. Remove it from that blueprint first."
+				return nil
+			}
+			if e := tx.Blueprints.Delete(r.Context(), orgID, ownerID); e != nil {
+				return e
+			}
 		}
 
-		// System and imported prompts are soft-deleted (hidden), user prompts are hard-deleted
+		// System and imported prompts are soft-deleted via Hide; user prompts via
+		// Delete (also soft — runs.prompt_id is RESTRICT). Both leave the row +
+		// its runs so historical timelines still resolve the prompt.
 		if prompt.Source == "system" || prompt.Source == "imported" {
 			if e := tx.Prompts.Hide(r.Context(), orgID, id); e != nil {
 				return e

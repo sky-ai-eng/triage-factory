@@ -124,6 +124,13 @@ type OrgTemplateStore interface {
 	// a friendly message instead of the raw RESTRICT FK error
 	// (org_template_blueprint_steps.step_prompt_id is ON DELETE RESTRICT).
 	CountBlueprintStepReferences(ctx context.Context, orgID, stepPromptID string) (int, error)
+	// BlueprintStepPromptOwner returns the id of the template blueprint that
+	// holds stepPromptID as a step, if any. The copy-only unique index
+	// guarantees at most one. Used by the template steps-put handler's
+	// cross-blueprint 422 pre-check and by the template prompt-delete pairing
+	// (hard-delete the wrapping blueprint → its CASCADE drops the step → delete
+	// the prompt). ok=false when the prompt is not a step in any blueprint.
+	BlueprintStepPromptOwner(ctx context.Context, orgID, stepPromptID string) (blueprintID string, ok bool, err error)
 
 	// --- template handlers CRUD (app pool, org-admin RLS) ---
 

@@ -198,7 +198,7 @@ func upsertSystemPromptVersionPG(ctx context.Context, q queryer, orgID, promptID
 func (s *promptStore) List(ctx context.Context, orgID string, teamID string) ([]domain.Prompt, error) {
 	args := []any{orgID}
 	q := `SELECT id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
-		FROM prompts WHERE org_id = $1 AND hidden = FALSE`
+		FROM prompts WHERE org_id = $1 AND hidden = FALSE AND deleted_at IS NULL`
 	if teamID != "" {
 		// Prompts page narrowed to one team: that team's prompts. Every
 		// prompt is team-scoped post-SKY-380 (no org-visible tier), so this
@@ -224,12 +224,15 @@ func (s *promptStore) List(ctx context.Context, orgID string, teamID string) ([]
 	return prompts, rows.Err()
 }
 
+// Get is request-facing: it filters deleted_at IS NULL. GetSystem (admin pool)
+// omits the filter so soft-deleted prompts still resolve for in-flight runs and
+// past-run timelines.
 func (s *promptStore) Get(ctx context.Context, orgID string, id string) (*domain.Prompt, error) {
-	return getPrompt(ctx, s.app, orgID, id)
+	return getPrompt(ctx, s.app, orgID, id, false)
 }
 
 func (s *promptStore) GetSystem(ctx context.Context, orgID string, id string) (*domain.Prompt, error) {
-	return getPrompt(ctx, s.admin, orgID, id)
+	return getPrompt(ctx, s.admin, orgID, id, true)
 }
 
 // GetBySystemSlug resolves a team's copy of a shipped prompt by slug. Runs
@@ -241,7 +244,7 @@ func (s *promptStore) GetBySystemSlug(ctx context.Context, orgID, teamID, system
 	}
 	p, err := scanPromptRowPG(s.app.QueryRowContext(ctx, `
 		SELECT id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
-		FROM prompts WHERE org_id = $1 AND team_id = $2 AND system_slug = $3
+		FROM prompts WHERE org_id = $1 AND team_id = $2 AND system_slug = $3 AND deleted_at IS NULL
 	`, orgID, teamID, systemSlug).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -252,11 +255,14 @@ func (s *promptStore) GetBySystemSlug(ctx context.Context, orgID, teamID, system
 	return &p, nil
 }
 
-func getPrompt(ctx context.Context, q queryer, orgID, id string) (*domain.Prompt, error) {
-	p, err := scanPromptRowPG(q.QueryRowContext(ctx, `
+func getPrompt(ctx context.Context, q queryer, orgID, id string, includeDeleted bool) (*domain.Prompt, error) {
+	query := `
 		SELECT id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
-		FROM prompts WHERE org_id = $1 AND id = $2
-	`, orgID, id).Scan)
+		FROM prompts WHERE org_id = $1 AND id = $2`
+	if !includeDeleted {
+		query += ` AND deleted_at IS NULL`
+	}
+	p, err := scanPromptRowPG(q.QueryRowContext(ctx, query, orgID, id).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -339,8 +345,11 @@ func (s *promptStore) UpdateImported(ctx context.Context, orgID string, id, name
 	return err
 }
 
+// Delete soft-deletes: it stamps deleted_at rather than removing the row, so
+// runs.prompt_id (RESTRICT) and blueprint_steps.step_prompt_id (RESTRICT) FKs
+// never fire and historical runs keep resolving the prompt via GetSystem.
 func (s *promptStore) Delete(ctx context.Context, orgID string, id string) error {
-	_, err := s.app.ExecContext(ctx, `DELETE FROM prompts WHERE org_id = $1 AND id = $2`, orgID, id)
+	_, err := s.app.ExecContext(ctx, `UPDATE prompts SET deleted_at = now() WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL`, orgID, id)
 	return err
 }
 

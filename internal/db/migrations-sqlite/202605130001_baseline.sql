@@ -47,6 +47,15 @@ CREATE TABLE prompts (
     -- random UUID per team copy, so re-seed idempotency and slug→id lookups
     -- key on (org_id, team_id, system_slug) instead of the id (SKY-380).
     system_slug     TEXT,
+    -- deleted_at soft-deletes a prompt. The row + its runs stay as the
+    -- durable audit trail (runs.prompt_id is RESTRICT, so a hard DELETE on a
+    -- prompt with run history would 500); request-facing reads (List/Get/
+    -- pickers/CountStepReferences) filter deleted_at IS NULL, while the
+    -- ...System reads keep resolving it so in-flight runs + past-run timelines
+    -- still render the prompt's name/body. Auto-wrapping every new prompt as a
+    -- 1-step blueprint makes hard-delete impossible (the step FK is RESTRICT),
+    -- so soft-delete is load-bearing, not a nicety.
+    deleted_at      DATETIME,
     -- There is no visibility column: every prompt is team-owned (team_id NOT
     -- NULL) and visible to its team. A per-user 'private' tier was never
     -- reachable and org-wide sharing is the marketplace's copy-on-publish
@@ -98,6 +107,12 @@ CREATE TABLE blueprints (
     -- source='system' rows; NULL for user/imported blueprints. Re-seed
     -- idempotency + slug→id lookups key on (org_id, team_id, system_slug).
     system_slug     TEXT,
+    -- deleted_at soft-deletes a blueprint (mirrors prompts). Auto-wrapping
+    -- makes every new prompt's blueprint un-hard-deletable (its step FK is
+    -- RESTRICT, and a blueprint a trigger fired has run history), so deleting
+    -- the prompt that solely constitutes a 1-step blueprint soft-deletes both;
+    -- request-facing reads filter deleted_at IS NULL, ...System reads don't.
+    deleted_at      DATETIME,
     CONSTRAINT blueprints_system_has_no_creator CHECK (
         (source = 'system' AND creator_user_id IS NULL)
         OR (source <> 'system' AND creator_user_id IS NOT NULL)
@@ -666,7 +681,9 @@ CREATE TABLE org_template_blueprint_steps (
     FOREIGN KEY (blueprint_id, org_id)   REFERENCES org_template_blueprints (id, org_id) ON DELETE CASCADE,
     FOREIGN KEY (step_prompt_id, org_id) REFERENCES org_template_prompts (id, org_id) ON DELETE RESTRICT
 );
-CREATE INDEX idx_org_template_blueprint_steps_step_prompt ON org_template_blueprint_steps(step_prompt_id);
+-- Copy-only prompts (template mirror): a template prompt is a step in at most
+-- one template blueprint.
+CREATE UNIQUE INDEX idx_org_template_blueprint_steps_step_prompt ON org_template_blueprint_steps(step_prompt_id);
 
 CREATE TABLE org_template_handlers (
     id              TEXT PRIMARY KEY,
@@ -884,7 +901,12 @@ CREATE TABLE blueprint_steps (
     FOREIGN KEY (blueprint_id, team_id)   REFERENCES blueprints (id, team_id) ON DELETE CASCADE,
     FOREIGN KEY (step_prompt_id, team_id) REFERENCES prompts (id, team_id) ON DELETE RESTRICT
 );
-CREATE INDEX idx_blueprint_steps_step_prompt ON blueprint_steps(step_prompt_id);
+-- Copy-only prompts: a prompt is a step in AT MOST ONE blueprint. The unique
+-- index on step_prompt_id is the durable enforcement of that invariant — to
+-- reuse a prompt you copy it. (It also forbids a prompt at two step_indexes
+-- within one blueprint, which is intended.) The handler pre-checks for a clean
+-- 422; this index is the backstop.
+CREATE UNIQUE INDEX idx_blueprint_steps_step_prompt ON blueprint_steps(step_prompt_id);
 
 CREATE TABLE blueprint_runs (
     id              TEXT PRIMARY KEY,

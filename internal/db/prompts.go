@@ -69,7 +69,9 @@ type PromptStore interface {
 	List(ctx context.Context, orgID string, teamID string) ([]domain.Prompt, error)
 
 	// Get returns one prompt by id (regardless of hidden state) or
-	// (nil, nil) if not found.
+	// (nil, nil) if not found. Request-facing, so it filters
+	// deleted_at IS NULL — a soft-deleted prompt reads as absent here
+	// (use GetSystem to resolve it for in-flight runs / past timelines).
 	Get(ctx context.Context, orgID string, id string) (*domain.Prompt, error)
 
 	// GetBySystemSlug resolves a team's copy of a shipped prompt by its
@@ -101,13 +103,17 @@ type PromptStore interface {
 	// change came from a file re-import not a user edit.
 	UpdateImported(ctx context.Context, orgID string, id, name, body, allowedTools string) error
 
-	// Delete hard-deletes a prompt + its bindings (FK CASCADE).
-	// Handlers call this only for user-source prompts; system /
-	// imported prompts go through Hide instead.
+	// Delete soft-deletes a prompt (stamps deleted_at). The row + its runs stay
+	// as the durable audit trail — runs.prompt_id is RESTRICT, so a hard DELETE
+	// on a prompt with run history would error, and auto-wrapping every new
+	// prompt as a 1-step blueprint (the step FK is also RESTRICT) makes
+	// hard-delete impossible. Request-facing reads (List/Get/GetBySystemSlug)
+	// filter deleted_at IS NULL; the ...System reads keep resolving it so
+	// in-flight runs + past-run timelines still render the name/body.
 	Delete(ctx context.Context, orgID string, id string) error
 
-	// Hide soft-deletes a prompt (hidden=true). Used for system /
-	// imported prompts so they disappear from List but remain
+	// Hide soft-deletes a prompt (hidden=true) — the system/imported analog of
+	// Delete. Used so shipped/imported prompts disappear from List but remain
 	// available to historical runs that already reference them.
 	Hide(ctx context.Context, orgID string, id string) error
 
@@ -134,9 +140,10 @@ type PromptStore interface {
 	Stats(ctx context.Context, orgID string, id string) (*domain.PromptStats, error)
 
 	// GetSystem mirrors Get but routes through the admin pool in
-	// Postgres. The router's breaker-tripped toast looks up the
-	// prompt name from its eventbus subscriber goroutine, which has
-	// no JWT-claims context.
+	// Postgres AND does NOT filter deleted_at — so a soft-deleted prompt
+	// still resolves for in-flight runs and past-run timelines. The
+	// router's breaker-tripped toast looks up the prompt name from its
+	// eventbus subscriber goroutine, which has no JWT-claims context.
 	GetSystem(ctx context.Context, orgID string, id string) (*domain.Prompt, error)
 
 	// IncrementUsageSystem mirrors IncrementUsage but routes through

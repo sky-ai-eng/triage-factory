@@ -4,7 +4,7 @@ import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
 import TeamPicker from './TeamPicker'
 import { useTeams, pickerDefault, noteWrittenTeam } from '../hooks/useTeams'
-import { promptsBase } from '../lib/scope'
+import { promptsBase, blueprintsBase } from '../lib/scope'
 
 interface Props {
   promptId: string | null
@@ -303,22 +303,31 @@ export default function PromptDrawer({
     setError('')
 
     try {
-      // Template scope is org-scoped — no team_id (the server ignores it
-      // anyway, but we keep the body clean).
-      const createBody = templateScope
-        ? { name, body, model }
-        : { name, body, model, team_id: effectiveTeam }
-      const res = isNew
-        ? await fetch(base, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(createBody),
-          })
-        : await fetch(`${base}/${promptId}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, body, model }),
-          })
+      // Create under copy-only prompts: a new prompt is auto-wrapped in its own
+      // 1-step blueprint so it lands on the canvas as a wireable node. We POST
+      // first_prompt to the blueprint endpoint, which creates prompt +
+      // blueprint + step atomically (the server defaults the blueprint name to
+      // the prompt name). Edit (PUT) still targets the prompt directly.
+      let res: Response
+      if (isNew) {
+        const firstPrompt = { name, body, model }
+        // Template scope is org-scoped — no team_id (the server ignores it
+        // anyway, but we keep the body clean).
+        const createBody = templateScope
+          ? { first_prompt: firstPrompt }
+          : { first_prompt: firstPrompt, team_id: effectiveTeam }
+        res = await fetch(blueprintsBase(templateScope), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(createBody),
+        })
+      } else {
+        res = await fetch(`${base}/${promptId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, body, model }),
+        })
+      }
       if (!res.ok) {
         toast.error(await readError(res, `Failed to ${isNew ? 'create' : 'save'} prompt`))
         return

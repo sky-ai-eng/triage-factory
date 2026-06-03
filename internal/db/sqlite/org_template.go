@@ -596,6 +596,21 @@ func (s *orgTemplateStore) CountBlueprintStepReferences(ctx context.Context, org
 	return n, err
 }
 
+func (s *orgTemplateStore) BlueprintStepPromptOwner(ctx context.Context, orgID, stepPromptID string) (string, bool, error) {
+	var blueprintID string
+	err := s.q.QueryRowContext(ctx,
+		`SELECT blueprint_id FROM org_template_blueprint_steps WHERE org_id = ? AND step_prompt_id = ? LIMIT 1`,
+		orgID, stepPromptID,
+	).Scan(&blueprintID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return blueprintID, true, nil
+}
+
 func scanOrgTemplateBlueprint(scanFn func(dst ...any) error) (domain.Blueprint, error) {
 	var b domain.Blueprint
 	var slug sql.NullString

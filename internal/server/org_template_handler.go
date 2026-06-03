@@ -229,18 +229,31 @@ func (s *Server) handleOrgTemplatePromptDelete(w http.ResponseWriter, r *http.Re
 			return e
 		}
 		found = true
-		// Block deletion if this prompt is a step in any template blueprint.
-		// org_template_blueprint_steps.step_prompt_id is ON DELETE RESTRICT, so
-		// the FK would fire anyway; surface a friendly 409 instead of a raw 500.
-		// (The template isn't re-seeded on boot, so an unreferenced delete is a
-		// real, sticking delete.)
-		refs, e := tx.OrgTemplate.CountBlueprintStepReferences(r.Context(), orgID, id)
+		// Delete-pairing (template mirror). Templates have no run history, so the
+		// pairing hard-deletes: resolve the prompt's owning template blueprint —
+		//   - owner is a ≥2-step blueprint → 409, remove it there first.
+		//   - owner is a 1-step blueprint this prompt solely constitutes (the
+		//     auto-wrap case) → delete that blueprint; its ON DELETE CASCADE drops
+		//     the step, then we hard-delete the prompt.
+		//   - no owner → just delete the prompt.
+		ownerID, owned, e := tx.OrgTemplate.BlueprintStepPromptOwner(r.Context(), orgID, id)
 		if e != nil {
 			return e
 		}
-		if refs > 0 {
-			conflictErr = "This prompt is used as a step in one or more template blueprints. Remove it from those blueprints first."
-			return nil
+		if owned {
+			steps, e := tx.OrgTemplate.ListBlueprintSteps(r.Context(), orgID, ownerID)
+			if e != nil {
+				return e
+			}
+			if len(steps) > 1 {
+				conflictErr = "This prompt is a step in a multi-step template blueprint. Remove it from that blueprint first."
+				return nil
+			}
+			// Delete the wrapping blueprint first; its CASCADE drops the step so
+			// the prompt's RESTRICT FK no longer blocks the delete below.
+			if e := tx.OrgTemplate.DeleteBlueprint(r.Context(), orgID, ownerID); e != nil {
+				return e
+			}
 		}
 		return tx.OrgTemplate.DeletePrompt(r.Context(), orgID, id)
 	}); err != nil {
@@ -264,6 +277,9 @@ func (s *Server) handleOrgTemplatePromptDelete(w http.ResponseWriter, r *http.Re
 // blueprint header. Steps are managed separately via the /steps endpoints.
 type orgTemplateBlueprintRequest struct {
 	Name string `json:"name"`
+	// FirstPrompt, when set, auto-wraps a new template prompt as this template
+	// blueprint's sole step in one transaction (mirrors the team endpoint).
+	FirstPrompt *firstPromptInput `json:"first_prompt"`
 }
 
 func (s *Server) handleOrgTemplateBlueprintsList(w http.ResponseWriter, r *http.Request) {
@@ -295,20 +311,58 @@ func (s *Server) handleOrgTemplateBlueprintCreate(w http.ResponseWriter, r *http
 	if !decodeJSON(w, r, &req, "") {
 		return
 	}
-	if strings.TrimSpace(req.Name) == "" {
+	name := strings.TrimSpace(req.Name)
+	if req.FirstPrompt != nil {
+		if req.FirstPrompt.Name == "" {
+			badRequest(w, "first_prompt.name is required")
+			return
+		}
+		if req.FirstPrompt.Body == "" {
+			badRequest(w, "first_prompt.body is required")
+			return
+		}
+		if !validPromptModel(req.FirstPrompt.Model) {
+			badRequest(w, invalidPromptModelError())
+			return
+		}
+		if name == "" {
+			name = req.FirstPrompt.Name
+		}
+	} else if name == "" {
 		badRequest(w, "name is required")
 		return
 	}
 	b := domain.Blueprint{
 		ID:         uuid.New().String(),
 		SystemSlug: newTemplateSlug(),
-		Name:       strings.TrimSpace(req.Name),
+		Name:       name,
 		Source:     "user",
 	}
 	var created *domain.Blueprint
+	var firstPromptID string
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		// Auto-wrap: create the template prompt, then the blueprint, then bind
+		// the step — one tx, no orphan template prompt on partial failure.
+		if req.FirstPrompt != nil {
+			firstPromptID = uuid.New().String()
+			if e := tx.OrgTemplate.CreatePrompt(r.Context(), orgID, domain.Prompt{
+				ID:         firstPromptID,
+				SystemSlug: newTemplateSlug(),
+				Name:       req.FirstPrompt.Name,
+				Body:       req.FirstPrompt.Body,
+				Source:     "user",
+				Model:      req.FirstPrompt.Model,
+			}); e != nil {
+				return e
+			}
+		}
 		if e := tx.OrgTemplate.CreateBlueprint(r.Context(), orgID, b); e != nil {
 			return e
+		}
+		if firstPromptID != "" {
+			if e := tx.OrgTemplate.ReplaceBlueprintSteps(r.Context(), orgID, b.ID, []string{firstPromptID}, nil); e != nil {
+				return e
+			}
 		}
 		var ge error
 		created, ge = tx.OrgTemplate.GetBlueprint(r.Context(), orgID, b.ID)
@@ -321,7 +375,7 @@ func (s *Server) handleOrgTemplateBlueprintCreate(w http.ResponseWriter, r *http
 		internalError(w, "org_template", errors.New("template blueprint created but not readable"))
 		return
 	}
-	writeJSON(w, http.StatusCreated, created)
+	writeJSON(w, http.StatusCreated, blueprintCreateResponse{Blueprint: created, FirstPromptID: firstPromptID})
 }
 
 func (s *Server) handleOrgTemplateBlueprintGet(w http.ResponseWriter, r *http.Request) {
@@ -486,6 +540,16 @@ func (s *Server) handleOrgTemplateBlueprintStepsPut(w http.ResponseWriter, r *ht
 			}
 			if p == nil {
 				validationErr = "step " + strconv.Itoa(i) + " references a non-existent template prompt"
+				return nil
+			}
+			// Copy-only guard (template mirror): a template prompt belongs to at
+			// most one template blueprint. Owner == this blueprint is fine.
+			ownerID, owned, e := tx.OrgTemplate.BlueprintStepPromptOwner(r.Context(), orgID, sid)
+			if e != nil {
+				return e
+			}
+			if owned && ownerID != id {
+				validationErr = "step " + strconv.Itoa(i) + " references a prompt that already belongs to another blueprint — copy it to reuse."
 				return nil
 			}
 		}

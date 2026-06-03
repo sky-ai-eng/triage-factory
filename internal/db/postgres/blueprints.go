@@ -84,7 +84,7 @@ func (s *blueprintStore) SeedOrUpdate(ctx context.Context, orgID, teamID string,
 func (s *blueprintStore) List(ctx context.Context, orgID string, teamID string) ([]domain.Blueprint, error) {
 	args := []any{orgID}
 	q := `SELECT id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
-		FROM blueprints WHERE org_id = $1 AND hidden = FALSE`
+		FROM blueprints WHERE org_id = $1 AND hidden = FALSE AND deleted_at IS NULL`
 	if teamID != "" {
 		args = append(args, teamID)
 		q += fmt.Sprintf(" AND team_id = $%d", len(args))
@@ -107,12 +107,15 @@ func (s *blueprintStore) List(ctx context.Context, orgID string, teamID string) 
 	return out, rows.Err()
 }
 
+// Get is request-facing: it filters deleted_at IS NULL. GetSystem (admin pool)
+// omits the filter so a soft-deleted blueprint still resolves for in-flight
+// runs and past-run timelines.
 func (s *blueprintStore) Get(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
-	return getBlueprint(ctx, s.app, orgID, id)
+	return getBlueprint(ctx, s.app, orgID, id, false)
 }
 
 func (s *blueprintStore) GetSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
-	return getBlueprint(ctx, s.admin, orgID, id)
+	return getBlueprint(ctx, s.admin, orgID, id, true)
 }
 
 func (s *blueprintStore) GetBySystemSlug(ctx context.Context, orgID, teamID, systemSlug string) (*domain.Blueprint, error) {
@@ -121,7 +124,7 @@ func (s *blueprintStore) GetBySystemSlug(ctx context.Context, orgID, teamID, sys
 	}
 	b, err := scanBlueprintRowPG(s.app.QueryRowContext(ctx, `
 		SELECT id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
-		FROM blueprints WHERE org_id = $1 AND team_id = $2 AND system_slug = $3
+		FROM blueprints WHERE org_id = $1 AND team_id = $2 AND system_slug = $3 AND deleted_at IS NULL
 	`, orgID, teamID, systemSlug).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -132,11 +135,14 @@ func (s *blueprintStore) GetBySystemSlug(ctx context.Context, orgID, teamID, sys
 	return &b, nil
 }
 
-func getBlueprint(ctx context.Context, q queryer, orgID, id string) (*domain.Blueprint, error) {
-	b, err := scanBlueprintRowPG(q.QueryRowContext(ctx, `
+func getBlueprint(ctx context.Context, q queryer, orgID, id string, includeDeleted bool) (*domain.Blueprint, error) {
+	query := `
 		SELECT id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
-		FROM blueprints WHERE org_id = $1 AND id = $2
-	`, orgID, id).Scan)
+		FROM blueprints WHERE org_id = $1 AND id = $2`
+	if !includeDeleted {
+		query += ` AND deleted_at IS NULL`
+	}
+	b, err := scanBlueprintRowPG(q.QueryRowContext(ctx, query, orgID, id).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -176,6 +182,31 @@ func (s *blueprintStore) Create(ctx context.Context, orgID, teamID string, b dom
 			$3::uuid, $4, $5, $6, 0, now(), now())
 	`, b.ID, orgID, teamID, b.Name, b.Source, systemSlug)
 	return err
+}
+
+// Delete soft-deletes a blueprint (stamps deleted_at). Its blueprint_steps stay
+// so the copy-only unique index keeps the wrapped prompt pinned; the prompt is
+// soft-deleted alongside by the delete-pairing.
+func (s *blueprintStore) Delete(ctx context.Context, orgID string, id string) error {
+	_, err := s.app.ExecContext(ctx, `UPDATE blueprints SET deleted_at = now() WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL`, orgID, id)
+	return err
+}
+
+// StepPromptOwner returns the blueprint that holds promptID as a step. The
+// copy-only unique index (org_id, step_prompt_id) guarantees at most one row.
+func (s *blueprintStore) StepPromptOwner(ctx context.Context, orgID string, promptID string) (string, bool, error) {
+	var blueprintID string
+	err := s.app.QueryRowContext(ctx,
+		`SELECT blueprint_id FROM blueprint_steps WHERE org_id = $1 AND step_prompt_id = $2 LIMIT 1`,
+		orgID, promptID,
+	).Scan(&blueprintID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return blueprintID, true, nil
 }
 
 func (s *blueprintStore) IncrementUsage(ctx context.Context, orgID string, id string) error {
@@ -224,9 +255,10 @@ func listBlueprintSteps(ctx context.Context, q queryer, orgID, blueprintID strin
 func (s *blueprintStore) CountStepReferences(ctx context.Context, orgID, stepPromptID string) (int, error) {
 	var n int
 	err := s.app.QueryRowContext(ctx, `
-		SELECT COUNT(DISTINCT blueprint_id)
-		FROM blueprint_steps
-		WHERE org_id = $1 AND step_prompt_id = $2
+		SELECT COUNT(DISTINCT bs.blueprint_id)
+		FROM blueprint_steps bs
+		JOIN blueprints b ON b.id = bs.blueprint_id AND b.org_id = bs.org_id
+		WHERE bs.org_id = $1 AND bs.step_prompt_id = $2 AND b.deleted_at IS NULL
 	`, orgID, stepPromptID).Scan(&n)
 	return n, err
 }

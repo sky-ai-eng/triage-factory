@@ -68,6 +68,23 @@ type BlueprintStore interface {
 	// (it satisfies the team-membership RLS); the SQLite impl ignores it.
 	Create(ctx context.Context, orgID, teamID string, b domain.Blueprint) error
 
+	// Delete soft-deletes a blueprint (stamps deleted_at). The row + its
+	// blueprint_steps stay as the durable audit trail (a blueprint a trigger
+	// fired has run history; its step FK is RESTRICT), but request-facing reads
+	// (List/Get) filter deleted_at IS NULL. The ...System reads keep resolving
+	// it so in-flight runs + past-run timelines still render the name. Called by
+	// the prompt-delete handler's delete-pairing when a prompt that solely
+	// constitutes a 1-step blueprint is deleted.
+	Delete(ctx context.Context, orgID string, id string) error
+
+	// StepPromptOwner returns the id of the blueprint that holds promptID as a
+	// step, if any. The copy-only unique index guarantees at most one, so this
+	// resolves the single owner. Used by the steps-put handler's cross-blueprint
+	// 422 pre-check ("prompt already belongs to another blueprint — copy it to
+	// reuse") and by the prompt-delete delete-pairing. ok=false when the prompt
+	// is not a step in any blueprint.
+	StepPromptOwner(ctx context.Context, orgID string, promptID string) (blueprintID string, ok bool, err error)
+
 	// GetSystem mirrors Get but routes through the admin pool in Postgres.
 	// The delegate spawner resolves a trigger/manual blueprint from a
 	// goroutine that continues past the request lifecycle.
@@ -83,9 +100,10 @@ type BlueprintStore interface {
 	// (not error) when the blueprint has no steps configured.
 	ListSteps(ctx context.Context, orgID string, blueprintID string) ([]domain.BlueprintStep, error)
 
-	// CountStepReferences returns the number of distinct blueprints that
-	// reference the given prompt as a step. Used by the prompt-delete handler
-	// to surface "used by N blueprint(s)".
+	// CountStepReferences returns the number of distinct non-deleted blueprints
+	// that reference the given prompt as a step. Request-facing, so it filters
+	// blueprints.deleted_at IS NULL. With the copy-only unique index this is
+	// always 0 or 1; kept for the "used by a blueprint" surfacing.
 	CountStepReferences(ctx context.Context, orgID string, stepPromptID string) (int, error)
 
 	// ReplaceSteps replaces the entire step list for a blueprint in a single

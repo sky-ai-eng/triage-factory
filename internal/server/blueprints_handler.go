@@ -36,10 +36,31 @@ func (s *Server) handleBlueprintsList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, blueprints)
 }
 
+// firstPromptInput is the optional inline prompt the canvas's "New Prompt"
+// gesture posts to the blueprint-create endpoint. Present ⇒ the handler creates
+// prompt + 1-step blueprint + step atomically (no orphan prompts — an
+// un-wrapped prompt can't be a canvas node or a trigger target). Absent ⇒ a
+// bare blueprint, as before.
+type firstPromptInput struct {
+	Name  string `json:"name"`
+	Body  string `json:"body"`
+	Model string `json:"model"`
+}
+
 type createBlueprintRequest struct {
 	Name string `json:"name"`
 	// TeamID is the acting team the write picker supplied (see resolveActingTeam).
 	TeamID string `json:"team_id"`
+	// FirstPrompt, when set, auto-wraps a new prompt as this blueprint's sole
+	// step in one transaction. Optional — bare-blueprint callers omit it.
+	FirstPrompt *firstPromptInput `json:"first_prompt"`
+}
+
+// blueprintCreateResponse returns the created blueprint plus the id of the
+// auto-wrapped first prompt (empty when no first_prompt was supplied).
+type blueprintCreateResponse struct {
+	*domain.Blueprint
+	FirstPromptID string `json:"first_prompt_id,omitempty"`
 }
 
 func (s *Server) handleBlueprintCreate(w http.ResponseWriter, r *http.Request) {
@@ -51,7 +72,26 @@ func (s *Server) handleBlueprintCreate(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req, "") {
 		return
 	}
-	if req.Name == "" {
+
+	// With first_prompt the blueprint name defaults to the prompt's name; the
+	// prompt itself must carry a name + body (it's the step's mission).
+	if req.FirstPrompt != nil {
+		if req.FirstPrompt.Name == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "first_prompt.name is required"})
+			return
+		}
+		if req.FirstPrompt.Body == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "first_prompt.body is required"})
+			return
+		}
+		if !validPromptModel(req.FirstPrompt.Model) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": invalidPromptModelError()})
+			return
+		}
+		if req.Name == "" {
+			req.Name = req.FirstPrompt.Name
+		}
+	} else if req.Name == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
 		return
 	}
@@ -59,10 +99,25 @@ func (s *Server) handleBlueprintCreate(w http.ResponseWriter, r *http.Request) {
 	id := uuid.New().String()
 	userID := ClaimsFrom(r.Context()).Subject
 	var created *domain.Blueprint
+	var firstPromptID string
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		teamID, e := resolveActingTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
+		}
+		// Auto-wrap: create the prompt first, then the blueprint, then bind the
+		// step — all in this tx so a mid-stream failure leaves no orphan prompt.
+		if req.FirstPrompt != nil {
+			firstPromptID = uuid.New().String()
+			if e := tx.Prompts.Create(r.Context(), orgID, teamID, domain.Prompt{
+				ID:     firstPromptID,
+				Name:   req.FirstPrompt.Name,
+				Body:   req.FirstPrompt.Body,
+				Source: "user",
+				Model:  req.FirstPrompt.Model,
+			}); e != nil {
+				return e
+			}
 		}
 		if e := tx.Blueprints.Create(r.Context(), orgID, teamID, domain.Blueprint{
 			ID:     id,
@@ -70,6 +125,11 @@ func (s *Server) handleBlueprintCreate(w http.ResponseWriter, r *http.Request) {
 			Source: "user",
 		}); e != nil {
 			return e
+		}
+		if firstPromptID != "" {
+			if e := tx.Blueprints.ReplaceSteps(r.Context(), orgID, id, []string{firstPromptID}, nil); e != nil {
+				return e
+			}
 		}
 		var ge error
 		created, ge = tx.Blueprints.Get(r.Context(), orgID, id)
@@ -81,7 +141,7 @@ func (s *Server) handleBlueprintCreate(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "blueprints", err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, created)
+	writeJSON(w, http.StatusCreated, blueprintCreateResponse{Blueprint: created, FirstPromptID: firstPromptID})
 }
 
 // --- Blueprint steps -----------------------------------------------------
@@ -203,6 +263,19 @@ func (s *Server) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request)
 			// composite FK on ReplaceSteps; pre-check for a clean 422.
 			if blueprint.TeamID != "" && stepPrompt.TeamID != "" && stepPrompt.TeamID != blueprint.TeamID {
 				validationErr = "step " + strconv.Itoa(i) + " references a prompt owned by another team"
+				validationStatus = http.StatusUnprocessableEntity
+				return nil
+			}
+			// Copy-only guard: a prompt belongs to at most one blueprint. If this
+			// prompt is already a step in a *different* blueprint, refuse with a
+			// clean 422 instead of letting the unique index 500. (Owner == this
+			// blueprint is fine — re-saving its own step list.)
+			ownerID, owned, e := tx.Blueprints.StepPromptOwner(r.Context(), orgID, sid)
+			if e != nil {
+				return e
+			}
+			if owned && ownerID != id {
+				validationErr = "step " + strconv.Itoa(i) + " references a prompt that already belongs to another blueprint — copy it to reuse."
 				validationStatus = http.StatusUnprocessableEntity
 				return nil
 			}

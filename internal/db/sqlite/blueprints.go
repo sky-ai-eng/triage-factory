@@ -82,7 +82,7 @@ func (s *blueprintStore) List(ctx context.Context, orgID string, _ string) ([]do
 	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
-		FROM blueprints WHERE hidden = 0 ORDER BY updated_at DESC
+		FROM blueprints WHERE hidden = 0 AND deleted_at IS NULL ORDER BY updated_at DESC
 	`)
 	if err != nil {
 		return nil, err
@@ -100,7 +100,27 @@ func (s *blueprintStore) List(ctx context.Context, orgID string, _ string) ([]do
 	return out, rows.Err()
 }
 
+// Get is request-facing: it filters deleted_at IS NULL. GetSystem omits the
+// filter so a soft-deleted blueprint still resolves for in-flight runs and
+// past-run timelines.
 func (s *blueprintStore) Get(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	b, err := scanBlueprintRowSQLite(s.q.QueryRowContext(ctx, `
+		SELECT id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
+		FROM blueprints WHERE id = ? AND deleted_at IS NULL
+	`, id).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+func (s *blueprintStore) GetSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -117,17 +137,13 @@ func (s *blueprintStore) Get(ctx context.Context, orgID string, id string) (*dom
 	return &b, nil
 }
 
-func (s *blueprintStore) GetSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error) {
-	return s.Get(ctx, orgID, id)
-}
-
 func (s *blueprintStore) GetBySystemSlug(ctx context.Context, orgID, teamID, systemSlug string) (*domain.Blueprint, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
 	q := `
 		SELECT id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
-		FROM blueprints WHERE org_id = ? AND system_slug = ?`
+		FROM blueprints WHERE org_id = ? AND system_slug = ? AND deleted_at IS NULL`
 	args := []any{orgID, systemSlug}
 	if teamID != "" {
 		q += ` AND team_id = ?`
@@ -165,6 +181,37 @@ func (s *blueprintStore) Create(ctx context.Context, orgID, teamID string, b dom
 		VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?)
 	`, b.ID, b.Name, b.Source, runmode.LocalDefaultTeamID, creatorUserID, systemSlug, now, now)
 	return err
+}
+
+// Delete soft-deletes a blueprint (stamps deleted_at). Its blueprint_steps stay
+// so the copy-only unique index keeps the wrapped prompt pinned; the prompt is
+// soft-deleted alongside by the delete-pairing.
+func (s *blueprintStore) Delete(ctx context.Context, orgID string, id string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `UPDATE blueprints SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`, time.Now().UTC(), id)
+	return err
+}
+
+// StepPromptOwner returns the blueprint that holds promptID as a step. The
+// copy-only unique index guarantees at most one row, so a single SELECT
+// resolves the owner.
+func (s *blueprintStore) StepPromptOwner(ctx context.Context, orgID string, promptID string) (string, bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", false, err
+	}
+	var blueprintID string
+	err := s.q.QueryRowContext(ctx,
+		`SELECT blueprint_id FROM blueprint_steps WHERE step_prompt_id = ? LIMIT 1`, promptID,
+	).Scan(&blueprintID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return blueprintID, true, nil
 }
 
 func (s *blueprintStore) IncrementUsage(ctx context.Context, orgID string, id string) error {
@@ -226,9 +273,10 @@ func (s *blueprintStore) CountStepReferences(ctx context.Context, orgID, stepPro
 	}
 	var n int
 	err := s.q.QueryRowContext(ctx, `
-		SELECT COUNT(DISTINCT blueprint_id)
-		FROM blueprint_steps
-		WHERE step_prompt_id = ?
+		SELECT COUNT(DISTINCT bs.blueprint_id)
+		FROM blueprint_steps bs
+		JOIN blueprints b ON b.id = bs.blueprint_id
+		WHERE bs.step_prompt_id = ? AND b.deleted_at IS NULL
 	`, stepPromptID).Scan(&n)
 	return n, err
 }

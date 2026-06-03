@@ -345,6 +345,50 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		}
 	})
 
+	t.Run("SoftDelete_HidesFromListAndGetButSystemResolves", func(t *testing.T) {
+		store, orgID, teamID, _ := factory(t)
+		ctx := context.Background()
+		if err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: "sd-1", Name: "SD", Body: "x", Source: "user"}); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if err := store.Delete(ctx, orgID, "sd-1"); err != nil {
+			t.Fatalf("delete: %v", err)
+		}
+		// Request-facing Get + List hide it.
+		if got, err := store.Get(ctx, orgID, "sd-1"); err != nil || got != nil {
+			t.Fatalf("Get after soft-delete = (%v, %v); want (nil, nil)", got, err)
+		}
+		if list, _ := store.List(ctx, orgID, ""); containsPromptID(list, "sd-1") {
+			t.Fatalf("soft-deleted prompt leaked into List")
+		}
+		// ...System still resolves it so historical runs render the name/body.
+		got, err := store.GetSystem(ctx, orgID, "sd-1")
+		if err != nil || got == nil {
+			t.Fatalf("GetSystem after soft-delete = (%v, %v); want a row", got, err)
+		}
+	})
+
+	t.Run("Delete_WithRunHistory_Succeeds", func(t *testing.T) {
+		// The original SKY-430 regression: a user prompt with run history must be
+		// deletable without hitting the runs.prompt_id RESTRICT FK (a hard DELETE
+		// would 500). Soft-delete sidesteps the FK and keeps the audit trail.
+		store, orgID, teamID, seedRuns := factory(t)
+		ctx := context.Background()
+		if err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: "rh-1", Name: "RH", Body: "x", Source: "user"}); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		seedRuns(t, "rh-1", []string{"completed", "failed"})
+		if err := store.Delete(ctx, orgID, "rh-1"); err != nil {
+			t.Fatalf("delete prompt with run history failed (the FK-500 regression): %v", err)
+		}
+		if got, _ := store.Get(ctx, orgID, "rh-1"); got != nil {
+			t.Fatalf("Get after delete = %+v; want nil", got)
+		}
+		if got, _ := store.GetSystem(ctx, orgID, "rh-1"); got == nil {
+			t.Fatalf("GetSystem after delete = nil; the row + its runs must survive as the audit trail")
+		}
+	})
+
 	t.Run("Get_Missing_ReturnsNilNoError", func(t *testing.T) {
 		// Pre-D2 prompts.go convention: Get for a non-existent ID
 		// returns (nil, nil), not an error. Handlers depend on it.
