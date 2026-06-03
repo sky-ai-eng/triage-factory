@@ -168,6 +168,7 @@ export default function GitHubTeamChecklist({
       <div className="shrink-0 space-y-2 pb-3">
         <input
           type="text"
+          aria-label="Search GitHub teams"
           placeholder="Search teams..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
