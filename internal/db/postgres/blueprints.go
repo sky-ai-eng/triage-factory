@@ -178,6 +178,23 @@ func (s *blueprintStore) Create(ctx context.Context, orgID, teamID string, b dom
 	return err
 }
 
+func (s *blueprintStore) Update(ctx context.Context, orgID string, id, name string) error {
+	_, err := s.app.ExecContext(ctx, `
+		UPDATE blueprints SET name = $1, user_modified = TRUE, updated_at = now()
+		WHERE org_id = $2 AND id = $3
+	`, name, orgID, id)
+	return err
+}
+
+// Delete hard-deletes the blueprint; blueprint_steps and any triggers cascade.
+// A blueprint with blueprint_runs is FK-protected — the RESTRICT FK surfaces
+// as an error rather than silently dropping run history. Runs on the app pool
+// so RLS gates the delete to a blueprint the caller may touch.
+func (s *blueprintStore) Delete(ctx context.Context, orgID string, id string) error {
+	_, err := s.app.ExecContext(ctx, `DELETE FROM blueprints WHERE org_id = $1 AND id = $2`, orgID, id)
+	return err
+}
+
 func (s *blueprintStore) IncrementUsage(ctx context.Context, orgID string, id string) error {
 	_, err := s.app.ExecContext(ctx, `UPDATE blueprints SET usage_count = usage_count + 1 WHERE org_id = $1 AND id = $2`, orgID, id)
 	return err

@@ -1,55 +1,64 @@
 import { useEffect, useState } from 'react'
 import type { Prompt } from '../types'
 import PromptPicker from './PromptPicker'
+import { promptsBase } from '../lib/scope'
 
 interface Props {
-  // The chain prompt's own id, so the picker can hide it from the
-  // selectable set (a chain can't reference itself as a step).
-  chainPromptId: string
-  // Controlled step list. The parent owns the working draft so save
-  // can PUT /api/prompts/{id}/chain-steps atomically with the prompt
-  // PUT, and so resyncing from a refetch doesn't require an effect-
-  // body setState in this component (the linter rightly objects).
-  steps: ChainStepDraft[]
-  onChange: (draft: ChainStepDraft[]) => void
-  // True when the parent is currently saving — disables drag/drop and
-  // the picker so the working state can't change mid-PUT.
+  // Controlled step list. The parent (BlueprintDrawer) owns the working draft
+  // so save can PUT /api/blueprints/{id}/steps atomically alongside the
+  // header PUT, and so resyncing from a refetch doesn't require an effect-body
+  // setState here (the linter rightly objects).
+  steps: BlueprintStepDraft[]
+  onChange: (draft: BlueprintStepDraft[]) => void
+  // True while the parent is saving — disables drag/drop and the picker so the
+  // working state can't change mid-PUT.
   busy?: boolean
-  // The active team on the single-team prompts page. Scopes both the
-  // name-lookup fetch and the step picker so a chain on team A can only
-  // reference team A's (and org-visible) leaf prompts — otherwise a
-  // multi-team user could add a team-B step to a team-A chain, and the
-  // chain would run another team's prompt. '' for solo/local (the server
-  // resolves the sole team); the chain prompt itself is stamped to this
-  // same team by PromptDrawer, so the steps must match.
+  // Team scope: the active team. Scopes both the name-lookup fetch and the
+  // step picker so a team-A blueprint can only reference team-A's (and
+  // org-visible) prompts — the backend enforces the same-team guard on the
+  // steps PUT, so the options must match. '' for solo/local (the server
+  // resolves the sole team). Ignored when templateScope is set.
   lockedTeamId?: string
+  // Template scope (org-template editor): steps reference org-template prompts
+  // (/api/org-template/prompts), which are org-scoped — no team_id.
+  templateScope?: boolean
+  // Opens the per-prompt editor for an existing step's prompt (edit
+  // body/model/tools). The blueprint editor owns the drawer; this just asks it
+  // to open against a prompt id.
+  onEditPrompt?: (promptId: string) => void
+  // Creates a brand-new prompt to use as a step — opens the per-prompt editor
+  // in create mode. Wired to the picker's "+ New Prompt" affordance so an
+  // author with no prompts yet can still build their first step.
+  onNewPrompt?: () => void
 }
 
-export interface ChainStepDraft {
+export interface BlueprintStepDraft {
   step_prompt_id: string
   brief: string
 }
 
-export default function ChainStepEditor({
-  chainPromptId,
+export default function BlueprintStepEditor({
   steps,
   onChange,
   busy,
   lockedTeamId,
+  templateScope = false,
+  onEditPrompt,
+  onNewPrompt,
 }: Props) {
   const [allPrompts, setAllPrompts] = useState<Prompt[]>([])
   const [pickerOpen, setPickerOpen] = useState(false)
   const [dragIndex, setDragIndex] = useState<number | null>(null)
 
-  // Cache the prompts list so we can show step names. The picker
-  // re-fetches on its own (already a low-volume call), so this fetch
-  // is purely for the per-step name lookup. Scoped to the locked team so
-  // a step's name resolves only within the chain's own team set (matches
-  // the picker's options); refetches if the team changes.
+  // Cache the prompt list for per-step name lookup. The picker re-fetches on
+  // its own; this fetch is purely so a step row can show its prompt's name.
+  // Scoped to match the picker's option set (locked team, or org-template) so
+  // a step's name resolves within the same set the user picked from.
   useEffect(() => {
     let cancelled = false
-    const q = lockedTeamId ? `?team_id=${encodeURIComponent(lockedTeamId)}` : ''
-    fetch(`/api/prompts${q}`)
+    const base = promptsBase(templateScope)
+    const q = !templateScope && lockedTeamId ? `?team_id=${encodeURIComponent(lockedTeamId)}` : ''
+    fetch(`${base}${q}`)
       .then((res) => res.json())
       .then((data: Prompt[]) => {
         if (!cancelled) setAllPrompts(data)
@@ -58,9 +67,9 @@ export default function ChainStepEditor({
     return () => {
       cancelled = true
     }
-  }, [pickerOpen, lockedTeamId])
+  }, [pickerOpen, lockedTeamId, templateScope])
 
-  const update = (next: ChainStepDraft[]) => onChange(next)
+  const update = (next: BlueprintStepDraft[]) => onChange(next)
 
   const promptById = (id: string) => allPrompts.find((p) => p.id === id)
 
@@ -81,7 +90,8 @@ export default function ChainStepEditor({
       <label className="block text-[12px] font-medium text-text-secondary">Steps</label>
       {steps.length === 0 && (
         <div className="text-[12px] text-text-tertiary border border-dashed border-border-subtle rounded-lg px-3 py-4 text-center">
-          No steps yet. Add a prompt to start the chain.
+          A blueprint needs at least one step — step&nbsp;1 is the entry the trigger fires. Add a
+          prompt to begin.
         </div>
       )}
 
@@ -116,6 +126,17 @@ export default function ChainStepEditor({
                     <span className="text-[9px] uppercase font-semibold tracking-wider text-text-tertiary bg-black/[0.04] px-1.5 py-0.5 rounded">
                       {prompt.source}
                     </span>
+                  )}
+                  {onEditPrompt && (
+                    <button
+                      type="button"
+                      onClick={() => onEditPrompt(step.step_prompt_id)}
+                      disabled={busy}
+                      className="ml-auto text-[11px] font-medium text-accent hover:text-accent/80 transition-colors disabled:opacity-50"
+                      title="Edit this step's prompt (body, model, tools)"
+                    >
+                      Edit prompt
+                    </button>
                   )}
                 </div>
                 <input
@@ -159,13 +180,25 @@ export default function ChainStepEditor({
           setPickerOpen(false)
         }}
         onClose={() => setPickerOpen(false)}
-        title="Add a chain step"
-        subtitle="Pick a leaf prompt to run as the next step in this chain"
-        filter={(p) => p.id !== chainPromptId}
-        // Scope the picker's options to the chain's team. teamValue without
-        // onTeamChange scopes the fetch without rendering a header team
-        // picker — the team is fixed by the page, not chosen here.
-        teamValue={lockedTeamId}
+        title="Add a blueprint step"
+        subtitle="Pick a prompt to run as the next step in this blueprint"
+        // Scope the picker to the blueprint's team (team scope) or the
+        // org-template prompts (template scope). teamValue without onTeamChange
+        // scopes the fetch without rendering a header team picker — the team is
+        // fixed by the page, not chosen here.
+        teamValue={templateScope ? undefined : lockedTeamId}
+        templateScope={templateScope}
+        // "+ New Prompt" opens the per-prompt editor in create mode so a new
+        // prompt can be authored without leaving the blueprint flow. Close the
+        // picker first so the per-prompt drawer doesn't stack over it.
+        onEditPrompts={
+          onNewPrompt
+            ? () => {
+                setPickerOpen(false)
+                onNewPrompt()
+              }
+            : undefined
+        }
       />
     </div>
   )

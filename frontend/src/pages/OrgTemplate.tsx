@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react'
 import { Navigate } from 'react-router-dom'
 import { AnimatePresence } from 'motion/react'
 import { Layers } from 'lucide-react'
-import PromptDrawer from '../components/PromptDrawer'
+import BlueprintDrawer from '../components/BlueprintDrawer'
 import BindingGraph from '../components/BindingGraph'
 import ForgivingBanner from '../components/ForgivingBanner'
 import TaskRuleEditor from '../components/TaskRuleEditor'
@@ -20,7 +20,8 @@ export default function OrgTemplate() {
   const orgHref = useOrgHref()
   const { available, ready, loading } = useTemplateScope()
 
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  // Graph nodes are blueprints, so the editor drawer carries a blueprint id.
+  const [selectedBlueprintId, setSelectedBlueprintId] = useState<string | null>(null)
   const [isNew, setIsNew] = useState(false)
   const [graphKey, setGraphKey] = useState(0)
   const [editingTrigger, setEditingTrigger] = useState<TriggerHandler | null>(null)
@@ -28,15 +29,15 @@ export default function OrgTemplate() {
   const [ruleEditorOpen, setRuleEditorOpen] = useState(false)
 
   const openNew = () => {
-    setSelectedId(null)
+    setSelectedBlueprintId(null)
     setIsNew(true)
   }
-  const openEdit = useCallback((id: string) => {
+  const openEdit = useCallback((blueprintId: string) => {
     setIsNew(false)
-    setSelectedId(id)
+    setSelectedBlueprintId(blueprintId)
   }, [])
   const closeDrawer = () => {
-    setSelectedId(null)
+    setSelectedBlueprintId(null)
     setIsNew(false)
   }
   const handleSaved = () => {
@@ -106,7 +107,7 @@ export default function OrgTemplate() {
           onClick={openNew}
           className="text-[13px] font-semibold text-white bg-accent hover:bg-accent/90 px-4 py-2 rounded-full transition-colors"
         >
-          New Prompt
+          New Blueprint
         </button>
       </div>
 
@@ -136,14 +137,14 @@ export default function OrgTemplate() {
           key={graphKey}
           scope={{ kind: 'template' }}
           scopeReady={ready}
-          onPromptClick={openEdit}
+          onBlueprintClick={openEdit}
           onTriggerClick={setEditingTrigger}
           onTriggerDeleted={handleTriggerDeleted}
         />
       </div>
 
-      <PromptDrawer
-        promptId={selectedId}
+      <BlueprintDrawer
+        blueprintId={selectedBlueprintId}
         isNew={isNew}
         templateScope
         onClose={closeDrawer}

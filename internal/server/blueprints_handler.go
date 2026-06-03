@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -82,6 +83,105 @@ func (s *Server) handleBlueprintCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, created)
+}
+
+// handleBlueprintGet returns one blueprint header by id. This is the read the
+// editor drawer opens with — clicking a node in the binding graph carries a
+// blueprint id, so the drawer loads the header here and its steps from
+// handleBlueprintStepsGet.
+func (s *Server) handleBlueprintGet(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	id := r.PathValue("id")
+	var bp *domain.Blueprint
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		bp, e = tx.Blueprints.Get(r.Context(), orgID, id)
+		return e
+	}); err != nil {
+		internalError(w, "blueprints", err)
+		return
+	}
+	if bp == nil {
+		notFound(w, "blueprint")
+		return
+	}
+	writeJSON(w, http.StatusOK, bp)
+}
+
+type updateBlueprintRequest struct {
+	Name string `json:"name"`
+}
+
+// handleBlueprintPut renames a blueprint (header/meta save). Steps are saved
+// separately via handleBlueprintStepsPut.
+func (s *Server) handleBlueprintPut(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	id := r.PathValue("id")
+	var req updateBlueprintRequest
+	if !decodeJSON(w, r, &req, "") {
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+		return
+	}
+	var updated *domain.Blueprint
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		existing, e := tx.Blueprints.Get(r.Context(), orgID, id)
+		if e != nil || existing == nil {
+			return e
+		}
+		if e := tx.Blueprints.Update(r.Context(), orgID, id, strings.TrimSpace(req.Name)); e != nil {
+			return e
+		}
+		updated, e = tx.Blueprints.Get(r.Context(), orgID, id)
+		return e
+	}); err != nil {
+		internalError(w, "blueprints", err)
+		return
+	}
+	if updated == nil {
+		notFound(w, "blueprint")
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+// handleBlueprintDelete hard-deletes a blueprint. Its steps and any triggers
+// referencing it cascade (FK); a blueprint with run history is FK-protected by
+// blueprint_runs and the delete errors rather than dropping the audit trail.
+func (s *Server) handleBlueprintDelete(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	id := r.PathValue("id")
+	var found bool
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		existing, e := tx.Blueprints.Get(r.Context(), orgID, id)
+		if e != nil || existing == nil {
+			return e
+		}
+		found = true
+		return tx.Blueprints.Delete(r.Context(), orgID, id)
+	}); err != nil {
+		internalError(w, "blueprints", err)
+		return
+	}
+	if !found {
+		notFound(w, "blueprint")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 // --- Blueprint steps -----------------------------------------------------

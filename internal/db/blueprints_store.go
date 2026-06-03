@@ -68,6 +68,20 @@ type BlueprintStore interface {
 	// (it satisfies the team-membership RLS); the SQLite impl ignores it.
 	Create(ctx context.Context, orgID, teamID string, b domain.Blueprint) error
 
+	// Update renames a blueprint and marks it user-modified (mirrors
+	// PromptStore.Update). The team-scoped editor's rename/meta save; touches
+	// only the header — steps are replaced via ReplaceSteps. No-op when no row
+	// matches (org_id + id).
+	Update(ctx context.Context, orgID string, id, name string) error
+
+	// Delete hard-deletes a blueprint. Its steps and any triggers referencing
+	// it cascade (the blueprint_steps / event_handlers composite FKs are
+	// ON DELETE CASCADE); a blueprint with run history is FK-protected
+	// (blueprint_runs pins it via RESTRICT), so this errors rather than
+	// orphaning the audit trail. Forward-only: deleting a shipped system
+	// blueprint doesn't stop a later re-seed from reinstating it.
+	Delete(ctx context.Context, orgID string, id string) error
+
 	// GetSystem mirrors Get but routes through the admin pool in Postgres.
 	// The delegate spawner resolves a trigger/manual blueprint from a
 	// goroutine that continues past the request lifecycle.

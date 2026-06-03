@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import type { Blueprint, Prompt } from '../types'
 import TeamPicker from './TeamPicker'
+import { promptsBase, blueprintsBase } from '../lib/scope'
 
 interface Props {
   open: boolean
@@ -20,8 +21,7 @@ interface Props {
   selectedId?: string
   /** Optional client-side filter applied after the prompts list is
    *  fetched. Use this to hide prompts that aren't valid in the calling
-   *  context — e.g. the chain step editor passes a filter that hides
-   *  chain-kind prompts (no nested chains) and the chain itself. */
+   *  context. */
   filter?: (p: Prompt) => boolean
   /** When the picker drives a *create* delegate (the factory
    *  drag-to-station flow synthesizes a task), wiring onTeamChange renders
@@ -40,6 +40,12 @@ interface Props {
    *  shared — blueprints are normalized into the Prompt tile shape (no
    *  body / usage stats, so those fields render empty). */
   source?: 'prompts' | 'blueprints'
+  /** When true, the list is drawn from the org-template family
+   *  (/api/org-template/prompts | .../blueprints) instead of the team
+   *  family. The blueprint step editor passes this through at template scope
+   *  so a template blueprint picks template prompts. Org-scoped — teamValue is
+   *  undefined here, so no team_id is sent. */
+  templateScope?: boolean
   /** When true, prompt tiles are non-interactive and dimmed. The factory
    *  create-delegate caller sets this until /api/teams has loaded so a
    *  selection in the cold-load window can't post a blank/unresolved
@@ -59,6 +65,7 @@ export default function PromptPicker({
   teamValue,
   onTeamChange,
   source = 'prompts',
+  templateScope = false,
   selectionDisabled,
 }: Props) {
   const [prompts, setPrompts] = useState<Prompt[]>([])
@@ -88,7 +95,8 @@ export default function PromptPicker({
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setPrompts([])
     }
-    const listPath = source === 'blueprints' ? '/api/blueprints' : '/api/prompts'
+    const listPath =
+      source === 'blueprints' ? blueprintsBase(templateScope) : promptsBase(templateScope)
     fetch(`${listPath}${q}`)
       .then((res) => res.json())
       .then((data: Prompt[] | Blueprint[]) => {
@@ -117,7 +125,7 @@ export default function PromptPicker({
     return () => {
       cancelled = true
     }
-  }, [open, teamValue, source])
+  }, [open, teamValue, source, templateScope])
 
   return (
     <AnimatePresence>
@@ -212,8 +220,8 @@ export default function PromptPicker({
                     ))}
 
                     {/* Add new tile — hidden when no edit handler is wired
-                        (e.g. ChainStepEditor's nested picker has no
-                        meaningful "edit prompts" navigation). */}
+                        (callers that only select an existing prompt leave
+                        onEditPrompts undefined). */}
                     {onEditPrompts && (
                       <button
                         onClick={onEditPrompts}

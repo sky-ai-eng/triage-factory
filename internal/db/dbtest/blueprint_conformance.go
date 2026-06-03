@@ -163,6 +163,63 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		}
 	})
 
+	t.Run("Update_RenamesHeader", func(t *testing.T) {
+		store, orgID, teamID, _ := factory(t)
+		ctx := context.Background()
+		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
+			SystemSlug: "system-rename-bp", Name: "Before", Source: "system",
+		})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if err := store.Update(ctx, orgID, id, "After"); err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, id)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got == nil || got.Name != "After" {
+			t.Fatalf("after Update, Get = %+v; want Name=After", got)
+		}
+		if !got.UserModified {
+			t.Errorf("Update did not set user_modified")
+		}
+	})
+
+	t.Run("Delete_RemovesBlueprintAndCascadesSteps", func(t *testing.T) {
+		store, orgID, teamID, seedPrompt := factory(t)
+		ctx := context.Background()
+		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
+			SystemSlug: "system-delete-bp", Name: "Doomed", Source: "system",
+		})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		p1 := seedPrompt(t, "del-step-1")
+		if err := store.ReplaceSteps(ctx, orgID, id, []string{p1}, nil); err != nil {
+			t.Fatalf("ReplaceSteps: %v", err)
+		}
+		if err := store.Delete(ctx, orgID, id); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, id)
+		if err != nil {
+			t.Fatalf("Get after delete: %v", err)
+		}
+		if got != nil {
+			t.Fatalf("Get after delete = %+v; want nil", got)
+		}
+		// Steps cascade with the blueprint (ON DELETE CASCADE).
+		steps, err := store.ListSteps(ctx, orgID, id)
+		if err != nil {
+			t.Fatalf("ListSteps after delete: %v", err)
+		}
+		if len(steps) != 0 {
+			t.Fatalf("ListSteps after delete = %d rows; want 0 (cascade)", len(steps))
+		}
+	})
+
 	t.Run("SeedOrUpdate_CtxCancellation_FailsFast", func(t *testing.T) {
 		store, orgID, teamID, _ := factory(t)
 		ctx, cancel := context.WithCancel(context.Background())

@@ -167,6 +167,27 @@ func (s *blueprintStore) Create(ctx context.Context, orgID, teamID string, b dom
 	return err
 }
 
+func (s *blueprintStore) Update(ctx context.Context, orgID string, id, name string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE blueprints SET name = ?, user_modified = 1, updated_at = ? WHERE id = ?
+	`, name, time.Now().UTC(), id)
+	return err
+}
+
+// Delete hard-deletes the blueprint; blueprint_steps and any triggers cascade.
+// A blueprint with blueprint_runs is FK-protected — the RESTRICT FK surfaces
+// as an error rather than silently dropping run history.
+func (s *blueprintStore) Delete(ctx context.Context, orgID string, id string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `DELETE FROM blueprints WHERE id = ?`, id)
+	return err
+}
+
 func (s *blueprintStore) IncrementUsage(ctx context.Context, orgID string, id string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err

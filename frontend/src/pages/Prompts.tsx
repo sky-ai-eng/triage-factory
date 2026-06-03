@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react'
 import { AnimatePresence } from 'motion/react'
-import PromptDrawer from '../components/PromptDrawer'
+import BlueprintDrawer from '../components/BlueprintDrawer'
 import BindingGraph from '../components/BindingGraph'
 import ForgivingBanner from '../components/ForgivingBanner'
 import TaskRuleEditor from '../components/TaskRuleEditor'
@@ -10,7 +10,8 @@ import { useActiveTeam } from '../hooks/useTeams'
 import type { TriggerHandler, RuleHandler } from '../types'
 
 export default function Prompts() {
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  // The graph nodes are blueprints, so the editor drawer carries a blueprint id.
+  const [selectedBlueprintId, setSelectedBlueprintId] = useState<string | null>(null)
   const [isNew, setIsNew] = useState(false)
   const [graphKey, setGraphKey] = useState(0)
 
@@ -29,17 +30,17 @@ export default function Prompts() {
   const [ruleEditorOpen, setRuleEditorOpen] = useState(false)
 
   const openNew = () => {
-    setSelectedId(null)
+    setSelectedBlueprintId(null)
     setIsNew(true)
   }
 
-  const openEdit = useCallback((id: string) => {
+  const openEdit = useCallback((blueprintId: string) => {
     setIsNew(false)
-    setSelectedId(id)
+    setSelectedBlueprintId(blueprintId)
   }, [])
 
   const closeDrawer = () => {
-    setSelectedId(null)
+    setSelectedBlueprintId(null)
     setIsNew(false)
   }
 
@@ -97,7 +98,7 @@ export default function Prompts() {
             onClick={openNew}
             className="text-[13px] font-semibold text-white bg-accent hover:bg-accent/90 px-4 py-2 rounded-full transition-colors"
           >
-            New Prompt
+            New Blueprint
           </button>
         </div>
       </div>
@@ -119,14 +120,14 @@ export default function Prompts() {
           key={graphKey}
           scope={{ kind: 'team', teamId: activeTeam.teamId }}
           scopeReady={activeTeam.ready}
-          onPromptClick={openEdit}
+          onBlueprintClick={openEdit}
           onTriggerClick={setEditingTrigger}
           onTriggerDeleted={handleTriggerDeleted}
         />
       </div>
 
-      <PromptDrawer
-        promptId={selectedId}
+      <BlueprintDrawer
+        blueprintId={selectedBlueprintId}
         isNew={isNew}
         lockedTeamId={activeTeam.teamId}
         onClose={closeDrawer}
