@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -667,7 +668,25 @@ func main() {
 			for _, id := range preserveIDs {
 				preserveSet[id] = true
 			}
-			worktree.CleanupWithOptions(worktree.CleanupOptions{PreserveClaudeProjectFor: preserveSet})
+			// Parked runs (awaiting_input / pending_approval) keep their whole
+			// worktree as the warm resume cache: preserve the dir AND its
+			// session JSONL. Keyed by worktree dir name (= filepath.Base of
+			// worktree_path, i.e. the run_id, or the blueprint_run_id for a
+			// blueprint's shared worktree). A load failure just forgoes the
+			// optimization — those runs still resume by rehydrating from their
+			// snapshot — so it's non-fatal.
+			preserveWorktrees := map[string]bool{}
+			if parkedPaths, perr := stores.AgentRuns.ListParkedWorktreePathsSystem(context.Background(), runmode.LocalDefaultOrgID); perr != nil {
+				log.Printf("[server] WARNING: failed to load parked worktree paths; parked workspaces will rehydrate from snapshot rather than reuse the warm cache: %v", perr)
+			} else {
+				for _, p := range parkedPaths {
+					preserveWorktrees[filepath.Base(p)] = true
+				}
+			}
+			worktree.CleanupWithOptions(worktree.CleanupOptions{
+				PreserveClaudeProjectFor: preserveSet,
+				PreserveWorktreeFor:      preserveWorktrees,
+			})
 		}
 	} else {
 		worktree.CleanupWithOptions(worktree.CleanupOptions{SkipClaudeProjectCleanup: true})

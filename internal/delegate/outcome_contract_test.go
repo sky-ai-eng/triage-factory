@@ -426,7 +426,7 @@ func TestRouteYield_ParksWellFormedYield(t *testing.T) {
 	task := loadTask(t, s, taskID)
 
 	handled := s.routeYield(runmode.LocalDefaultOrg, runID, task,
-		res(`{"outcome":"yield","yield":{"type":"confirmation","message":"Proceed?"}}`), "event", "")
+		res(`{"outcome":"yield","yield":{"type":"confirmation","message":"Proceed?"}}`), "", "", "", "event", "")
 	if !handled {
 		t.Fatal("routeYield should handle a well-formed yield")
 	}
@@ -444,7 +444,7 @@ func TestRouteYield_IgnoresMalformedYield(t *testing.T) {
 	task := loadTask(t, s, taskID)
 
 	handled := s.routeYield(runmode.LocalDefaultOrg, runID, task,
-		res(`{"outcome":"yield","summary":"I want to pause"}`), "event", "")
+		res(`{"outcome":"yield","summary":"I want to pause"}`), "", "", "", "event", "")
 	if handled {
 		t.Fatal("routeYield must not park a yield with no payload")
 	}
@@ -459,8 +459,33 @@ func TestRouteYield_IgnoresNonYield(t *testing.T) {
 	task := loadTask(t, s, taskID)
 
 	if s.routeYield(runmode.LocalDefaultOrg, runID, task,
-		res(`{"outcome":"finish","summary":"done"}`), "event", "") {
+		res(`{"outcome":"finish","summary":"done"}`), "", "", "", "event", "") {
 		t.Fatal("routeYield must not treat a finish as a yield")
+	}
+}
+
+// TestProcessCompletion_YieldReturnsParked locks the warm-cache signal: a yield
+// parks the run AND returns parked=true (the flag runAgent's defers read to keep
+// the worktree + session JSONL on disk), while a terminal finish returns false
+// so the defers clean up normally.
+func TestProcessCompletion_YieldReturnsParked(t *testing.T) {
+	yielded, _, yieldRun, yieldTask := setupAdvanceFixture(t, "pc-yield")
+	if parked := yielded.processCompletion(context.Background(), runmode.LocalDefaultOrg, yieldRun, "",
+		loadTask(t, yielded, yieldTask),
+		res(`{"outcome":"yield","yield":{"type":"confirmation","message":"Proceed?"}}`),
+		t.TempDir(), "sess", "claude-sonnet-4-6", "owner", "repo", "event", "", ""); !parked {
+		t.Error("processCompletion(yield) = false; want true (parked → keep the warm worktree)")
+	}
+	if got := loadRun(t, yielded, yieldRun).Status; got != "awaiting_input" {
+		t.Errorf("run.status = %q, want awaiting_input", got)
+	}
+
+	done, _, doneRun, doneTask := setupAdvanceFixture(t, "pc-finish")
+	if parked := done.processCompletion(context.Background(), runmode.LocalDefaultOrg, doneRun, "",
+		loadTask(t, done, doneTask),
+		res(`{"outcome":"finish","summary":"done"}`),
+		t.TempDir(), "", "claude-sonnet-4-6", "owner", "repo", "event", "", ""); parked {
+		t.Error("processCompletion(finish) = true; want false (terminal, not parked)")
 	}
 }
 

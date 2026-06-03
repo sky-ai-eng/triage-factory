@@ -805,6 +805,59 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
+	t.Run("ListParkedWorktreePaths_FiltersByStatusAndWorktree", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+
+		// awaiting_input + pending_approval WITH a worktree path → included.
+		awaiting := seedAgentRunForTest(t, store, orgID, seed, "awaiting_input")
+		if err := store.SetWorktreePath(ctx, orgID, awaiting, "/tmp/triagefactory-runs/awaiting"); err != nil {
+			t.Fatalf("set worktree (awaiting): %v", err)
+		}
+		pending := seedAgentRunForTest(t, store, orgID, seed, "pending_approval")
+		if err := store.SetWorktreePath(ctx, orgID, pending, "/tmp/triagefactory-runs/pending"); err != nil {
+			t.Fatalf("set worktree (pending): %v", err)
+		}
+		// awaiting_input WITHOUT a worktree → excluded by the COALESCE filter.
+		_ = seedAgentRunForTest(t, store, orgID, seed, "awaiting_input")
+		// running WITH a worktree → excluded by the status filter.
+		running := seedAgentRunForTest(t, store, orgID, seed, "running")
+		if err := store.SetWorktreePath(ctx, orgID, running, "/tmp/triagefactory-runs/running"); err != nil {
+			t.Fatalf("set worktree (running): %v", err)
+		}
+
+		paths, err := store.ListParkedWorktreePaths(ctx, orgID)
+		if err != nil {
+			t.Fatalf("ListParkedWorktreePaths: %v", err)
+		}
+		got := map[string]bool{}
+		for _, p := range paths {
+			got[p] = true
+		}
+		if !got["/tmp/triagefactory-runs/awaiting"] {
+			t.Error("awaiting_input worktree missing from ListParkedWorktreePaths")
+		}
+		if !got["/tmp/triagefactory-runs/pending"] {
+			t.Error("pending_approval worktree missing from ListParkedWorktreePaths")
+		}
+		if got["/tmp/triagefactory-runs/running"] {
+			t.Error("running worktree leaked — status filter failed")
+		}
+		if len(got) != 2 {
+			t.Errorf("got %d parked paths, want 2 (%v)", len(got), paths)
+		}
+
+		// System variant (admin pool; the startup sweep has no JWT-claims
+		// context) returns the same set as the app-pool variant.
+		sysPaths, err := store.ListParkedWorktreePathsSystem(ctx, orgID)
+		if err != nil {
+			t.Fatalf("ListParkedWorktreePathsSystem: %v", err)
+		}
+		if len(sysPaths) != len(paths) {
+			t.Errorf("System returned %d paths, app returned %d", len(sysPaths), len(paths))
+		}
+	})
+
 	t.Run("EntitiesWithAwaitingInput_EmptyInputFastPath", func(t *testing.T) {
 		store, orgID, _, _ := mk(t)
 		got, err := store.EntitiesWithAwaitingInput(context.Background(), orgID, nil)

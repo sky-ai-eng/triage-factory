@@ -32,6 +32,13 @@ import (
 // methods, no JWT-claims context).
 func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model string, triggerType string, creatorUserID string) {
 	orgID := cfg.orgID
+	// parked is set true by processCompletion when this run ends in a dormant
+	// state (awaiting_input / pending_approval) rather than terminating. The
+	// per-run cleanup defers below read it to KEEP the worktree and session
+	// JSONL on disk as the warm resume cache — mirroring the wasTakenOver /
+	// isBlueprintStep skips. Captured by reference by the deferred closures, so
+	// they observe its final value at return.
+	var parked bool
 	if cfg.hasWT {
 		// GitHub PR cleanup. Best-effort cleanup on return; the worktree ID is unique per run
 		// so a failed remove just leaves a dangling directory under _worktrees.
@@ -48,6 +55,11 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 				return
 			}
 			if cfg.isBlueprintStep {
+				return
+			}
+			if parked {
+				// Dormant yield/approval: the worktree is the warm cache the
+				// resume reuses (a snapshot was taken too, for the cold path).
 				return
 			}
 			// Capture the RemoveAt error rather than discarding it.
@@ -82,6 +94,9 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 				return
 			}
 			if cfg.isBlueprintStep {
+				return
+			}
+			if parked {
 				return
 			}
 			rows, err := s.runWorktrees.ListSystem(context.Background(), orgID, runID)
@@ -120,6 +135,11 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			return
 		}
 		if cfg.isBlueprintStep {
+			return
+		}
+		if parked {
+			// Keep the session JSONL: it's the conversation state the resumed
+			// `claude --resume` reads (and what the cold-path snapshot carries).
 			return
 		}
 		worktree.RemoveClaudeProjectDir(claudeCwd)
@@ -241,7 +261,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	}
 
 	if outcome != nil && outcome.Result != nil {
-		s.processCompletion(ctx, orgID, runID, cfg.blueprintRunID, task, outcome.Result, claudeCwd, outcome.SessionID, model, cfg.owner, cfg.repo, triggerType, creatorUserID, cfg.extraAllowedTools)
+		parked = s.processCompletion(ctx, orgID, runID, cfg.blueprintRunID, task, outcome.Result, claudeCwd, outcome.SessionID, model, cfg.owner, cfg.repo, triggerType, creatorUserID, cfg.extraAllowedTools)
 		return
 	}
 
@@ -279,13 +299,17 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 // The caller is responsible for draining any subprocess state
 // (the agentproc.Run path waits internally); this helper only
 // operates on the parsed completion.
+//
+// Returns parked: true when the run ended dormant (awaiting_input or
+// pending_approval) rather than terminal, so runAgent's cleanup defers keep
+// the worktree + session JSONL on disk as the warm resume cache.
 func (s *Spawner) processCompletion(
 	ctx context.Context,
 	orgID, runID, blueprintRunID string,
 	task domain.Task,
 	completion *agentproc.Result,
 	claudeCwd, sessionID, model, owner, repo, triggerType, creatorUserID, extraAllowedTools string,
-) {
+) (parked bool) {
 	// Yield branch (SKY-139): the agent emitted outcome:"yield" to pause
 	// the run for user input rather than terminating. Park it in
 	// awaiting_input and skip BOTH gates and CompleteAgentRun — a pause
@@ -294,8 +318,8 @@ func (s *Spawner) processCompletion(
 	// user answers. routeYield's IsError guard keeps a Claude-side error
 	// (e.g. max-turns hit) that happens to carry yield-shaped JSON a failure,
 	// not a pause.
-	if s.routeYield(orgID, runID, task, completion, triggerType, creatorUserID) {
-		return
+	if s.routeYield(orgID, runID, task, completion, claudeCwd, blueprintRunID, sessionID, triggerType, creatorUserID) {
+		return true
 	}
 
 	repoEnv := ""
@@ -354,8 +378,8 @@ func (s *Spawner) processCompletion(
 	// which would record status=completed and (for a single run) close the
 	// task. The memory upsert just ran, but it's idempotent and gets
 	// rewritten when the run truly terminates after the user responds.
-	if s.routeYield(orgID, runID, task, completion, triggerType, creatorUserID) {
-		return
+	if s.routeYield(orgID, runID, task, completion, claudeCwd, blueprintRunID, sessionID, triggerType, creatorUserID) {
+		return true
 	}
 
 	// Is this a step inside a multi-step blueprint? Single/terminal runs
@@ -470,6 +494,16 @@ func (s *Spawner) processCompletion(
 		// step's outcome was already coerced to finish above so the
 		// post-approval resume terminates the blueprint.
 		if hasPending {
+			// Snapshot the workspace to durable storage BEFORE parking in
+			// pending_approval: once the run is dormant a resume could land
+			// without the warm worktree, so the blob has to exist by the time
+			// the flip commits. Best-effort — the warm worktree (kept on disk
+			// below via the parked guard) is the primary path; the snapshot is
+			// the cold-path backstop. Keyed by namespace (blueprint_run_id for a
+			// step, else run_id).
+			if err := s.snapshotWorkspace(ctx, orgID, namespace, claudeCwd, sessionID); err != nil {
+				log.Printf("[delegate] warning: failed to snapshot workspace for run %s before pending_approval: %v", runID, err)
+			}
 			// Guarded transition: only flip to pending_approval if the
 			// row is still 'completed'. A racing cancel/takeover after
 			// agentRuns.Complete would otherwise be silently clobbered
@@ -489,6 +523,9 @@ func (s *Spawner) processCompletion(
 				log.Printf("[delegate] warning: failed to set pending_approval for run %s: %v", runID, flipErr)
 			} else if flippedToPending {
 				status = "pending_approval"
+				// Dormant: keep the worktree as the warm cache. The snapshot is
+				// discarded by the approval/terminate path, not here.
+				parked = true
 			}
 		}
 	}
@@ -564,6 +601,17 @@ func (s *Spawner) processCompletion(
 	case "task_unsolvable":
 		toast.Warning(s.wsHub, orgID, fmt.Sprintf("Run %s — task unsolvable: %s", shortRunID(runID), truncateToastMsg(resultSummary, 140)))
 	}
+
+	// Single-run terminal cleanup: a standalone run that reached a terminal
+	// state (not parked, not a blueprint step) drops any snapshot it wrote on
+	// an earlier yield/approval so durable storage doesn't orphan a blob.
+	// Idempotent — a no-op when no snapshot exists. Blueprint-step snapshots are
+	// keyed by blueprint_run_id and owned by terminateBlueprint; parked runs
+	// keep their snapshot for the eventual resume.
+	if !parked && blueprintRunID == "" {
+		s.discardWorkspaceSnapshot(bgCtx, orgID, runID)
+	}
+	return parked
 }
 
 // routeYield parks the run in awaiting_input when completion is a well-formed
@@ -579,7 +627,11 @@ func (s *Spawner) processCompletion(
 // re-prompt for a usable envelope instead of parking a modal the user can't
 // act on. An IsError completion is never a yield, however yield-shaped its
 // JSON.
-func (s *Spawner) routeYield(orgID, runID string, task domain.Task, completion *agentproc.Result, triggerType, creatorUserID string) bool {
+//
+// claudeCwd / blueprintRunID / sessionID are threaded through to persistYield
+// so it can snapshot the workspace before parking — the run is about to go
+// dormant and a resume could land without the warm worktree.
+func (s *Spawner) routeYield(orgID, runID string, task domain.Task, completion *agentproc.Result, claudeCwd, blueprintRunID, sessionID, triggerType, creatorUserID string) bool {
 	if completion.IsError {
 		return false
 	}
@@ -587,7 +639,7 @@ func (s *Spawner) routeYield(orgID, runID string, task domain.Task, completion *
 	if parsed == nil || !parsed.isYield() {
 		return false
 	}
-	if err := s.persistYield(orgID, runID, parsed.Yield, completion, triggerType, creatorUserID); err != nil {
+	if err := s.persistYield(orgID, runID, parsed.Yield, completion, claudeCwd, blueprintRunID, sessionID, triggerType, creatorUserID); err != nil {
 		log.Printf("[delegate] failed to persist yield for run %s: %v", runID, err)
 		s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, "failed to record yield: "+err.Error())
 	}
@@ -606,7 +658,7 @@ func (s *Spawner) routeYield(orgID, runID string, task domain.Task, completion *
 // yield_request message for transcript completeness but skip the
 // status flip and the toast. The terminal status the racing path set
 // stands.
-func (s *Spawner) persistYield(orgID, runID string, req *domain.YieldRequest, completion *agentproc.Result, triggerType, creatorUserID string) error {
+func (s *Spawner) persistYield(orgID, runID string, req *domain.YieldRequest, completion *agentproc.Result, claudeCwd, blueprintRunID, sessionID, triggerType, creatorUserID string) error {
 	// Detached context — yield bookkeeping must survive ctx cancel
 	// (a user cancel mid-yield-emit still needs the transcript
 	// row recorded for audit).
@@ -642,6 +694,18 @@ func (s *Spawner) persistYield(orgID, runID string, req *domain.YieldRequest, co
 		msg = m
 	}
 	s.broadcastMessage(orgID, runID, msg)
+
+	// Snapshot the workspace to durable storage BEFORE parking in
+	// awaiting_input. Parking makes the run resumable on a host that may not
+	// have the warm worktree, so the snapshot must exist by the time the flip
+	// commits. Best-effort: the warm worktree (kept on disk by runAgent's
+	// parked guard) is the fast resume path; this blob is the cold-path
+	// backstop ensureWorkspace reads when the cache is gone. Keyed by namespace
+	// (blueprint_run_id for a step, else run_id) — the same key the worktree dir
+	// is named after.
+	if err := s.snapshotWorkspace(bgCtx, orgID, memoryNamespace(blueprintRunID, runID), claudeCwd, sessionID); err != nil {
+		log.Printf("[delegate] warning: failed to snapshot workspace for run %s before yield: %v", runID, err)
+	}
 
 	var flipped bool
 	if triggerType == "manual" {

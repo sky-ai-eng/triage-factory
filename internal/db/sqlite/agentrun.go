@@ -698,6 +698,33 @@ func (s *agentRunStore) ListTakenOverIDs(ctx context.Context, orgID string) ([]s
 	return ids, rows.Err()
 }
 
+func (s *agentRunStore) ListParkedWorktreePathsSystem(ctx context.Context, orgID string) ([]string, error) {
+	return s.ListParkedWorktreePaths(ctx, orgID)
+}
+
+func (s *agentRunStore) ListParkedWorktreePaths(ctx context.Context, orgID string) ([]string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx,
+		`SELECT worktree_path FROM runs
+		 WHERE status IN ('awaiting_input', 'pending_approval')
+		   AND COALESCE(worktree_path, '') != ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var paths []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		paths = append(paths, p)
+	}
+	return paths, rows.Err()
+}
+
 func (s *agentRunStore) ListTakenOverForResume(ctx context.Context, orgID string) ([]domain.TakenOverRun, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

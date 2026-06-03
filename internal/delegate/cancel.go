@@ -120,6 +120,13 @@ func (s *Spawner) Cancel(orgID, runID, userID string) error {
 		return fmt.Errorf("no active run %s", runID)
 	}
 	s.broadcastRunUpdate(orgID, runID, "cancelled")
+	// A parked single run (yield / pending_approval) carries a workspace
+	// snapshot; drop it now the run is terminal so the blob store doesn't
+	// orphan it. Blueprint steps are owned by terminateBlueprint (user cancel
+	// routes through CancelBlueprint), so skip those here.
+	if run.BlueprintRunID == "" {
+		s.discardWorkspaceSnapshot(context.Background(), orgID, run.ID)
+	}
 	if entityID != "" {
 		s.notifyDrainer(orgID, triggerType, entityID)
 	}

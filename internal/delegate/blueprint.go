@@ -475,6 +475,13 @@ func (s *Spawner) terminateBlueprint(
 		s.runBlueprintWorktreeCleanup(blueprintRunID, cfg)
 	}
 
+	// Drop the durable workspace snapshot now the blueprint is terminal so the
+	// blob store doesn't orphan it. Keyed by blueprint_run_id (the shared
+	// workspace's key); idempotent, so this is a no-op for a blueprint that
+	// never parked and never snapshotted. Covers every terminal path through
+	// here: clean finish, abort/fail, cancel, and the approval-resume finalize.
+	s.discardWorkspaceSnapshot(bgCtx, orgID, blueprintRunID)
+
 	// Drain the per-entity queue exactly once for the blueprint (independent
 	// of how many steps ran).
 	if cfgEntity := taskEntityID(s.tasks, orgID, taskID); cfgEntity != "" {
@@ -765,6 +772,12 @@ func (s *Spawner) ResumeBlueprintAfterApproval(orgID, stepRunID, userID string) 
 		return
 	}
 
+	// No workspace rehydrate here: approval finalizes the blueprint (it does
+	// not re-invoke the agent), so there is no resumed run to hand a warm
+	// worktree to. A cold-swept worktree is fine — terminateBlueprint's cleanup
+	// RemoveAt/RemoveClaudeProjectDir no-op on a missing dir, and it drops the
+	// durable snapshot regardless.
+	//
 	// Reconstruct just enough runConfig for terminateBlueprint's worktree
 	// cleanup. The original orchestrator goroutine (which held the full
 	// cfg) returned when the step landed in pending_approval, so we

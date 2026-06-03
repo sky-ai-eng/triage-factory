@@ -228,6 +228,20 @@ type AgentRunStore interface {
 	// split as the rest of this wave.
 	ListTakenOverIDsSystem(ctx context.Context, orgID string) ([]string, error)
 
+	// ListParkedWorktreePaths returns the worktree_path of every run
+	// parked in awaiting_input or pending_approval with a non-empty
+	// worktree_path. Read at startup so the worktree-cleanup sweep
+	// preserves a parked run's warm workspace (worktree dir + session
+	// JSONL) as the fast resume path. A swept entry still resumes via
+	// snapshot rehydrate, so this is an optimization, not a correctness
+	// gate.
+	ListParkedWorktreePaths(ctx context.Context, orgID string) ([]string, error)
+
+	// ListParkedWorktreePathsSystem mirrors ListParkedWorktreePaths but
+	// routes through the admin pool in Postgres. The startup sweep reads
+	// it before any JWT-claims context exists.
+	ListParkedWorktreePathsSystem(ctx context.Context, orgID string) ([]string, error)
+
 	// HasActiveAutoRunForEntitySystem mirrors HasActiveAutoRunForEntity
 	// but routes through the admin pool in Postgres. The router's
 	// per-entity firing gate consumes this from its eventbus subscriber

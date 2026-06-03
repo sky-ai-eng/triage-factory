@@ -2120,6 +2120,20 @@ type CleanupOptions struct {
 	// dir cleanup for this sweep. The worktree dir removal and bare-repo
 	// pruning still run, so we don't leak large temp directories.
 	SkipClaudeProjectCleanup bool
+
+	// PreserveWorktreeFor names worktree directories that must survive the
+	// sweep WHOLE — the directory AND its ~/.claude/projects session JSONL —
+	// because the run parked in awaiting_input / pending_approval and the
+	// worktree is the warm cache an eventual resume reuses. Unlike
+	// PreserveClaudeProjectFor (which keeps only the JSONL while still deleting
+	// the worktree dir), a matching entry here skips removal of both.
+	//
+	// Keys are worktree directory names — i.e. filepath.Base(worktree_path),
+	// which is the run_id for a standalone run and the blueprint_run_id for a
+	// blueprint's shared worktree. A swept (un-preserved) parked workspace
+	// still resumes via snapshot rehydrate, so this is the fast path, not a
+	// correctness gate. Ignored for any dir not present here.
+	PreserveWorktreeFor map[string]bool
 }
 
 // CleanupWithOptions is the parameterized Cleanup the takeover flow uses
@@ -2138,6 +2152,13 @@ func CleanupWithOptions(opts CleanupOptions) {
 			if e.IsDir() {
 				fullPath := filepath.Join(runsBase, e.Name())
 				runID := strings.TrimSuffix(e.Name(), "-nocwd")
+				// Parked runs keep their worktree WHOLE — the dir and its
+				// session JSONL — as the warm resume cache, so skip them
+				// entirely (no project-dir delete, no dir removal). A swept one
+				// still resumes via snapshot rehydrate.
+				if opts.PreserveWorktreeFor[runID] {
+					continue
+				}
 				// Project-dir deletion has two opt-outs: a global SkipAll
 				// (caller couldn't determine the preserve set) and a per-
 				// runID preserve (this run is in taken_over state). Either

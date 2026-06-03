@@ -727,6 +727,36 @@ func listTakenOverRunIDs(ctx context.Context, q queryer, orgID string) ([]string
 	return ids, rows.Err()
 }
 
+func (s *agentRunStore) ListParkedWorktreePaths(ctx context.Context, orgID string) ([]string, error) {
+	return listParkedWorktreePaths(ctx, s.q, orgID)
+}
+
+func (s *agentRunStore) ListParkedWorktreePathsSystem(ctx context.Context, orgID string) ([]string, error) {
+	return listParkedWorktreePaths(ctx, s.admin, orgID)
+}
+
+func listParkedWorktreePaths(ctx context.Context, q queryer, orgID string) ([]string, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT worktree_path FROM runs
+		WHERE org_id = $1
+		  AND status IN ('awaiting_input', 'pending_approval')
+		  AND COALESCE(worktree_path, '') != ''
+	`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var paths []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		paths = append(paths, p)
+	}
+	return paths, rows.Err()
+}
+
 func (s *agentRunStore) ListTakenOverForResume(ctx context.Context, orgID string) ([]domain.TakenOverRun, error) {
 	// Postgres' pgx round-trips timestamps cleanly even through
 	// COALESCE, so the SQLite-side dance around stripped type

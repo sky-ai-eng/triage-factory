@@ -246,6 +246,11 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 		})
 		if blueprintRun != nil && s.spawner != nil {
 			s.spawner.ResumeBlueprintAfterApproval(orgID, review.RunID, userID)
+		} else if s.spawner != nil {
+			// Standalone run: approval is its terminal, so drop the durable
+			// workspace snapshot taken when it parked in pending_approval. The
+			// blueprint mirror of this cleanup lives in terminateBlueprint.
+			s.spawner.DiscardWorkspaceSnapshot(orgID, review.RunID)
 		}
 	}
 
