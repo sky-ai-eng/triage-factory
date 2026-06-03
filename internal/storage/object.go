@@ -2,16 +2,21 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 // Env var names for the object backend. Documented in
@@ -22,105 +27,85 @@ const (
 	envBlobAccessKey = "TF_BLOB_ACCESS_KEY"
 	envBlobSecretKey = "TF_BLOB_SECRET_KEY"
 	envBlobRegion    = "TF_BLOB_REGION"
-	envBlobUseSSL    = "TF_BLOB_USE_SSL"
 )
 
 // objectStorage is the multi-mode backend: an S3-compatible object store
 // reached over the network, so a blob written by one executor is readable
-// by the next to own the shard. minio-go is the client; any S3-protocol
-// server (MinIO, AWS S3, Cloudflare R2, or Supabase Storage's S3 endpoint)
-// sits behind it unchanged.
+// by the next to own the shard. The client is aws-sdk-go-v2 rather than a
+// host-only S3 client because its BaseEndpoint carries a full URL including
+// a base path — which is what lets one client target a bare MinIO/S3/R2
+// endpoint AND Supabase Storage's path-prefixed S3 endpoint
+// (https://<ref>.supabase.co/storage/v1/s3). Signing happens after endpoint
+// resolution, so SigV4 covers the prefixed path the server verifies.
 type objectStorage struct {
-	client *minio.Client
-	bucket string
+	client   *s3.Client
+	uploader *manager.Uploader
+	bucket   string
 }
 
 // ObjectConfig is the S3 connection config for objectStorage, normally
 // built from the environment by ObjectConfigFromEnv. Tests construct it
 // directly to point at a throwaway MinIO container.
 type ObjectConfig struct {
-	Endpoint  string // host[:port], no scheme — the scheme drives UseSSL separately
+	Endpoint  string // full URL: scheme://host[:port][/base/path]
 	Bucket    string
 	AccessKey string
 	SecretKey string
-	UseSSL    bool
-	Region    string // optional; S3 wants one, MinIO ignores it
+	Region    string // S3 wants one; MinIO ignores it. Defaults to us-east-1.
 }
 
 // ObjectConfigFromEnv reads the TF_BLOB_* environment into an ObjectConfig.
 // Endpoint and bucket are required; access key/secret are normally set but
-// left optional so an IAM-role / instance-profile deployment can supply
-// credentials out of band. TF_BLOB_ENDPOINT may carry a scheme
-// (https://… ⇒ TLS, http://… ⇒ plaintext); a bare host[:port] defaults to
-// TLS unless TF_BLOB_USE_SSL=false overrides it.
+// left optional so an instance-role / AWS-provider-chain deployment can
+// supply credentials out of band (see newObjectStorage). TF_BLOB_ENDPOINT
+// is a full URL — its scheme selects TLS and any base path is preserved.
 func ObjectConfigFromEnv() (ObjectConfig, error) {
 	endpoint := strings.TrimSpace(os.Getenv(envBlobEndpoint))
 	if endpoint == "" {
 		return ObjectConfig{}, fmt.Errorf("%s is required in multi mode", envBlobEndpoint)
 	}
+	if err := validateEndpoint(endpoint); err != nil {
+		return ObjectConfig{}, err
+	}
 	bucket := strings.TrimSpace(os.Getenv(envBlobBucket))
 	if bucket == "" {
 		return ObjectConfig{}, fmt.Errorf("%s is required in multi mode", envBlobBucket)
 	}
-	host, secure, err := parseEndpoint(endpoint)
-	if err != nil {
-		return ObjectConfig{}, err
-	}
-	if v := strings.TrimSpace(os.Getenv(envBlobUseSSL)); v != "" {
-		b, err := strconv.ParseBool(v)
-		if err != nil {
-			return ObjectConfig{}, fmt.Errorf("%s=%q: %w", envBlobUseSSL, v, err)
-		}
-		secure = b
-	}
 	return ObjectConfig{
-		Endpoint:  host,
+		Endpoint:  endpoint,
 		Bucket:    bucket,
 		AccessKey: strings.TrimSpace(os.Getenv(envBlobAccessKey)),
 		SecretKey: os.Getenv(envBlobSecretKey),
-		UseSSL:    secure,
 		Region:    strings.TrimSpace(os.Getenv(envBlobRegion)),
 	}, nil
 }
 
-// parseEndpoint splits a TF_BLOB_ENDPOINT value into the bare host[:port]
-// minio-go wants plus the TLS flag implied by any scheme. A value with a
-// scheme (http/https) is parsed as a URL; a bare host[:port] defaults to
-// TLS (the safe production default) and leaves the final say to
-// TF_BLOB_USE_SSL.
-func parseEndpoint(s string) (host string, secure bool, err error) {
-	if !strings.Contains(s, "://") {
-		return s, true, nil
-	}
+// validateEndpoint checks TF_BLOB_ENDPOINT is a full URL aws-sdk's
+// BaseEndpoint accepts: an http/https scheme plus a host, optionally with a
+// base path (Supabase Storage's /storage/v1/s3). The path is deliberately
+// kept — unlike a host-only S3 client, this backend carries it through to
+// the wire.
+func validateEndpoint(s string) error {
 	u, err := url.Parse(s)
 	if err != nil {
-		return "", false, fmt.Errorf("%s=%q: %w", envBlobEndpoint, s, err)
+		return fmt.Errorf("%s=%q: %w", envBlobEndpoint, s, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("%s=%q must be a full URL with an http or https scheme", envBlobEndpoint, s)
 	}
 	if u.Host == "" {
-		return "", false, fmt.Errorf("%s=%q has no host", envBlobEndpoint, s)
+		return fmt.Errorf("%s=%q has no host", envBlobEndpoint, s)
 	}
-	// minio-go's endpoint is host[:port] only — it has no notion of a base
-	// path. Reject a path/query/fragment rather than silently dropping it, so
-	// an operator who points at e.g. https://host/storage/v1/s3 gets a clear
-	// error instead of requests quietly going to the wrong place. (A bare
-	// trailing "/" is fine.)
-	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
-		return "", false, fmt.Errorf("%s=%q must be a bare scheme://host[:port] with no path, query, or fragment", envBlobEndpoint, s)
-	}
-	switch u.Scheme {
-	case "https":
-		return u.Host, true, nil
-	case "http":
-		return u.Host, false, nil
-	default:
-		return "", false, fmt.Errorf("%s=%q: unsupported scheme %q (want http or https)", envBlobEndpoint, s, u.Scheme)
-	}
+	return nil
 }
 
-// newObjectStorage builds the minio-go client for cfg. It does not create
+// newObjectStorage builds the aws-sdk S3 client for cfg. It does not create
 // or probe the bucket — the bucket is provisioned by the deployment (the
-// compose storage service / the operator) — and minio.New is lazy, so a
-// bad endpoint surfaces on the first operation, not here.
+// compose storage service / the operator). With explicit keys it signs with
+// static V4; with neither key set it falls through to the standard AWS
+// provider chain (AWS_* env, shared creds file, then EC2/ECS instance role)
+// rather than signing with empty credentials. UsePathStyle is required by
+// Supabase Storage and harmless for MinIO/S3.
 func newObjectStorage(cfg ObjectConfig) (*objectStorage, error) {
 	if cfg.Endpoint == "" {
 		return nil, fmt.Errorf("storage: object endpoint is empty")
@@ -128,69 +113,84 @@ func newObjectStorage(cfg ObjectConfig) (*objectStorage, error) {
 	if cfg.Bucket == "" {
 		return nil, fmt.Errorf("storage: object bucket is empty")
 	}
-	// With explicit keys, sign with static V4. With neither key set, fall
-	// through to the standard AWS provider chain (AWS_* env, shared creds
-	// file, then EC2/ECS instance role) rather than signing with empty
-	// credentials — so an instance-role deployment works without baking
-	// secrets into TF_BLOB_*, matching the "optional credentials" contract.
-	creds := credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, "")
-	if cfg.AccessKey == "" && cfg.SecretKey == "" {
-		creds = credentials.NewChainCredentials([]credentials.Provider{
-			&credentials.EnvAWS{},
-			&credentials.FileAWSCredentials{},
-			&credentials.IAM{},
-		})
+	region := cfg.Region
+	if region == "" {
+		// MinIO ignores the region; S3/Supabase want one. Defaulting it
+		// also keeps the default-chain branch below from probing IMDS for a
+		// region at construction time.
+		region = "us-east-1"
 	}
-	client, err := minio.New(cfg.Endpoint, &minio.Options{
-		Creds:  creds,
-		Secure: cfg.UseSSL,
-		Region: cfg.Region,
+
+	var awsCfg aws.Config
+	if cfg.AccessKey != "" || cfg.SecretKey != "" {
+		awsCfg = aws.Config{
+			Region:      region,
+			Credentials: credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, ""),
+		}
+	} else {
+		loaded, err := config.LoadDefaultConfig(context.Background(), config.WithRegion(region))
+		if err != nil {
+			return nil, fmt.Errorf("storage: load aws config: %w", err)
+		}
+		awsCfg = loaded
+	}
+
+	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(cfg.Endpoint)
+		o.UsePathStyle = true
 	})
-	if err != nil {
-		return nil, fmt.Errorf("storage: init object client: %w", err)
-	}
-	return &objectStorage{client: client, bucket: cfg.Bucket}, nil
+	return &objectStorage{
+		client:   client,
+		uploader: manager.NewUploader(client),
+		bucket:   cfg.Bucket,
+	}, nil
 }
 
 func (o *objectStorage) Put(ctx context.Context, key string, r io.Reader) error {
-	// size -1 streams via multipart with a bounded part buffer, so a large
-	// tarball never buffers whole in memory.
-	if _, err := o.client.PutObject(ctx, o.bucket, key, r, -1, minio.PutObjectOptions{}); err != nil {
+	// The Uploader streams via multipart with a bounded part buffer, so a
+	// large tarball of unknown size never buffers whole in memory (plain
+	// PutObject would need a seekable body or a content length).
+	if _, err := o.uploader.Upload(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(o.bucket),
+		Key:    aws.String(key),
+		Body:   r,
+	}); err != nil {
 		return fmt.Errorf("storage: put %q: %w", key, err)
 	}
 	return nil
 }
 
 func (o *objectStorage) Get(ctx context.Context, key string) (io.ReadCloser, error) {
-	obj, err := o.client.GetObject(ctx, o.bucket, key, minio.GetObjectOptions{})
+	resp, err := o.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(o.bucket),
+		Key:    aws.String(key),
+	})
 	if err != nil {
-		return nil, fmt.Errorf("storage: get %q: %w", key, err)
-	}
-	// GetObject is lazy: it returns a handle and performs the request only
-	// on the first Read/Stat. Stat up front so a missing key surfaces as
-	// ErrNotFound here — matching the filesystem backend — instead of on
-	// the caller's first Read.
-	if _, err := obj.Stat(); err != nil {
-		_ = obj.Close()
 		if isNotFound(err) {
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("storage: get %q: %w", key, err)
 	}
-	return obj, nil
+	return resp.Body, nil
 }
 
 func (o *objectStorage) Delete(ctx context.Context, key string) error {
 	// S3 DELETE is idempotent — removing a missing key is a success — so
 	// this matches the filesystem backend without a special case.
-	if err := o.client.RemoveObject(ctx, o.bucket, key, minio.RemoveObjectOptions{}); err != nil {
+	if _, err := o.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(o.bucket),
+		Key:    aws.String(key),
+	}); err != nil {
 		return fmt.Errorf("storage: delete %q: %w", key, err)
 	}
 	return nil
 }
 
 func (o *objectStorage) Exists(ctx context.Context, key string) (bool, error) {
-	if _, err := o.client.StatObject(ctx, o.bucket, key, minio.StatObjectOptions{}); err != nil {
+	if _, err := o.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(o.bucket),
+		Key:    aws.String(key),
+	}); err != nil {
 		if isNotFound(err) {
 			return false, nil
 		}
@@ -199,11 +199,19 @@ func (o *objectStorage) Exists(ctx context.Context, key string) (bool, error) {
 	return true, nil
 }
 
-// isNotFound reports whether an S3 error means "no such object". minio-go
-// returns a typed ErrorResponse; a missing key is either the NoSuchKey
-// code (GET) or a bare 404 (HEAD/StatObject, which carries no body to
-// parse a code from).
+// isNotFound reports whether an S3 error means "no such object". GetObject
+// surfaces a typed *types.NoSuchKey; HeadObject (a HEAD, no body to parse a
+// code from) surfaces *types.NotFound or a bare 404, so we also accept a 404
+// on the underlying HTTP response.
 func isNotFound(err error) bool {
-	resp := minio.ToErrorResponse(err)
-	return resp.Code == "NoSuchKey" || resp.StatusCode == http.StatusNotFound
+	var nsk *types.NoSuchKey
+	var nf *types.NotFound
+	if errors.As(err, &nsk) || errors.As(err, &nf) {
+		return true
+	}
+	var respErr *awshttp.ResponseError
+	if errors.As(err, &respErr) {
+		return respErr.HTTPStatusCode() == http.StatusNotFound
+	}
+	return false
 }
