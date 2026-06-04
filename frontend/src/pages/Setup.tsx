@@ -122,8 +122,10 @@ export default function Setup() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          github_url: githubForm.url,
-          github_pat: githubForm.pat,
+          // Trim to match the canSubmitGitHub guard, so stray whitespace
+          // can't be stored and then fail a later "invalid token" check.
+          github_url: githubForm.url.trim(),
+          github_pat: githubForm.pat.trim(),
           clone_protocol: githubForm.clone_protocol,
         }),
       })

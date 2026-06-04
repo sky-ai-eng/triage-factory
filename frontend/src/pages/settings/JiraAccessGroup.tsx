@@ -1,5 +1,7 @@
 import { useState } from 'react'
 import { Section, Field, inputClass } from './primitives'
+import { toast } from '../../components/Toast/toastStore'
+import { readError } from '../../lib/api'
 
 interface JiraAccessValue {
   jira_url: string
@@ -64,22 +66,44 @@ export default function JiraAccessGroup({
   }
 
   const disconnect = async () => {
+    // DELETE /api/integrations/jira clears the SecretStore entries
+    // (URL + PAT) but leaves org_settings.jira_base_url populated. Once that
+    // succeeds the connection is effectively broken, so we reflect the
+    // disconnected state regardless of whether the URL-column clear lands.
+    let credCleared = false
     try {
-      // DELETE /api/integrations/jira clears the SecretStore entries
-      // (URL + PAT) but leaves org_settings.jira_base_url populated.
+      const credRes = await fetch('/api/integrations/jira', { method: 'DELETE' })
+      if (!credRes.ok) {
+        toast.error(await readError(credRes, 'Failed to disconnect Jira'))
+        return
+      }
+      credCleared = true
       // Follow with an explicit org POST so the URL column also clears,
       // otherwise reloading would show the stale URL prefilled with
-      // has_jira_pat:false.
-      const credRes = await fetch('/api/integrations/jira', { method: 'DELETE' })
-      if (!credRes.ok) return
+      // has_jira_pat:false. This is a deliberately sparse body: the
+      // /api/settings/org handler treats absent fields as nil/unchanged
+      // (pointer fields) or empty-omit (interval strings), so the GitHub
+      // URL/PAT, poll intervals, and model cap are untouched.
       const orgRes = await fetch('/api/settings/org', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jira_base_url: '' }),
       })
-      if (!orgRes.ok) return
+      if (!orgRes.ok) {
+        toast.error(
+          await readError(
+            orgRes,
+            'Jira credentials were removed, but clearing the saved URL failed',
+          ),
+        )
+      }
     } catch {
-      return
+      toast.error(
+        credCleared
+          ? 'Jira credentials were removed, but clearing the saved URL failed.'
+          : 'Could not reach the server to disconnect Jira.',
+      )
+      if (!credCleared) return
     }
     onChange({ jira_url: '', jira_pat: '' })
     onDisconnected?.()

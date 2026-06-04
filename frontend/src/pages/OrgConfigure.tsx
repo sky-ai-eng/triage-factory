@@ -53,6 +53,13 @@ export default function OrgConfigure() {
         setForm(orgConfigFromSettings(org))
         setHasGitHubPat(org.has_github_pat)
         setJiraConnected(org.has_jira_pat && !!org.jira_base_url)
+      } else {
+        // Couldn't read the new org's defaults. The step still works off the
+        // seeded form, but the prefilled base URLs / intervals may be wrong,
+        // so flag it rather than silently presenting defaults as truth.
+        toast.error(
+          'Could not load your organization settings. Showing defaults — verify before saving.',
+        )
       }
       setLoaded(true)
     })

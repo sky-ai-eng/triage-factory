@@ -127,14 +127,21 @@ export default function GitHubAccessGroup({
                     </button>
                   ))}
                 </div>
-                <button
-                  type="button"
-                  onClick={testSSH}
-                  disabled={sshTestState.kind === 'running'}
-                  className="text-[11px] text-accent hover:underline disabled:opacity-50"
-                >
-                  {sshTestState.kind === 'running' ? 'Testing...' : 'Test SSH connection'}
-                </button>
+                {/* The preflight probes the SSH host derived from the
+                    *stored* GitHub base URL (server-side), not the form, so
+                    it's only meaningful once credentials are saved. Hide it
+                    until then — pre-save, the GitHub step's submit runs its
+                    own server-side preflight against the URL being saved. */}
+                {hasToken && (
+                  <button
+                    type="button"
+                    onClick={testSSH}
+                    disabled={sshTestState.kind === 'running'}
+                    className="text-[11px] text-accent hover:underline disabled:opacity-50"
+                  >
+                    {sshTestState.kind === 'running' ? 'Testing...' : 'Test SSH connection'}
+                  </button>
+                )}
               </div>
               <p className="text-[11px] text-text-tertiary mt-1.5 leading-relaxed">
                 Your token is still required for the GitHub API. The protocol only affects how
