@@ -138,8 +138,11 @@ function PromptNode({
 // and independently draggable, and this box's rect is recomputed from their
 // measured positions on every change (see computeBoxNodes). It is
 // non-selectable / non-connectable / non-draggable, sits behind the nodes, and
-// is click-through (pointerEvents:none) except its title + edit affordance, so
-// panning over it still reaches the canvas. The faint fill keeps the sequence
+// is click-through (pointerEvents:none on the body) so panning over it still
+// reaches the canvas — while the title + edit affordance set pointerEvents:auto
+// to re-enable themselves (a descendant may opt back in under a
+// pointer-events:none ancestor; that exception is what keeps the kebab clickable
+// without the box body eating pan gestures). The faint fill keeps the sequence
 // edges that run between members visible through it.
 function BlueprintBoxNode({
   data,
@@ -153,7 +156,7 @@ function BlueprintBoxNode({
 }) {
   return (
     <div
-      className="w-full h-full rounded-2xl border border-border-subtle/80 bg-accent/[0.025]"
+      className="w-full h-full rounded-2xl border border-border-subtle bg-accent/[0.04]"
       style={{ pointerEvents: 'none' }}
     >
       {/* Title (top-left) — faint, the blueprint's name. */}
@@ -643,6 +646,8 @@ function BindingGraphInner({
         }
         // Need at least two placed members for a meaningful box.
         if (found < 2) continue
+        const width = maxX - minX + BOX_PAD.left + BOX_PAD.right
+        const height = maxY - minY + BOX_PAD.top + BOX_PAD.bottom
         boxes.push({
           id: `bp:${bpId}`,
           type: 'blueprintBox',
@@ -659,11 +664,14 @@ function BindingGraphInner({
           deletable: false,
           // Behind the nodes; the faint fill keeps inner edges visible (decision 4).
           zIndex: 0,
-          style: {
-            width: maxX - minX + BOX_PAD.left + BOX_PAD.right,
-            height: maxY - minY + BOX_PAD.top + BOX_PAD.bottom,
-            pointerEvents: 'none',
-          },
+          // We compute the exact rect, so hand ReactFlow the dimensions as
+          // already-"measured". Otherwise it renders the node visibility:hidden
+          // pending its own measure pass — which this onNodesChange box rebuild
+          // discards every cycle, so the box would stay hidden forever.
+          width,
+          height,
+          measured: { width, height },
+          style: { width, height, pointerEvents: 'none' },
         })
       }
       return boxes
@@ -793,7 +801,9 @@ function BindingGraphInner({
           id: `seq:${bpId}:${i}`,
           source: `p:${ids[i]}`,
           target: `p:${ids[i + 1]}`,
-          type: 'smoothstep',
+          // Smooth bezier (like the trigger edges), solid (not dashed) to read as
+          // a committed step link rather than an unfired binding.
+          type: 'default',
           // Disconnecting this edge splits the blueprint before step i+1.
           data: { kind: 'sequence', blueprintId: bpId, atStepIndex: i + 1 },
           style: { stroke: 'var(--color-text-tertiary)', strokeWidth: 1.5 },
