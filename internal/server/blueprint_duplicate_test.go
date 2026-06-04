@@ -68,9 +68,11 @@ func TestBlueprintDuplicate_FullBlueprintAtomic(t *testing.T) {
 
 	// Originals untouched: source blueprint still has its 3 steps with the
 	// original prompt ids.
-	srcSteps := doJSON(t, s, http.MethodGet, "/api/blueprints/"+src+"/steps", nil)
-	var got composeSteps
-	_ = json.Unmarshal(srcSteps.Body.Bytes(), &got)
+srcSteps := doJSON(t, s, http.MethodGet, "/api/blueprints/"+src+"/steps", nil)
+var got composeSteps
+if err := json.Unmarshal(srcSteps.Body.Bytes(), &got); err != nil {
+	t.Fatalf("decode source steps: %v", err)
+}
 	if len(got) != 3 || got[0]["step_prompt_id"] != p[0] || got[2]["step_prompt_id"] != p[2] {
 		t.Fatalf("source mutated by duplicate: %+v", got)
 	}
