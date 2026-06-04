@@ -124,8 +124,10 @@ func TestBlueprintDuplicate_CopyIsTriggerlessSourceUntouched(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("duplicate triggered: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var out []blueprintWithStepsView
-	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+var out []blueprintWithStepsView
+if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+	t.Fatalf("decode: %v", err)
+}
 	if len(out) != 1 {
 		t.Fatalf("duplicate produced %d blueprints, want 1", len(out))
 	}
