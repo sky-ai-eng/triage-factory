@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -146,6 +147,54 @@ func (s *Server) handleBlueprintCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, blueprintCreateResponse{Blueprint: created, FirstPromptID: firstPromptID})
+}
+
+type renameBlueprintRequest struct {
+	Name string `json:"name"`
+}
+
+// handleBlueprintUpdate renames a blueprint header. A blueprint's name is
+// independent of its entry prompt's (auto-wrap defaults them equal, but the box
+// chrome lets a user rename the blueprint without touching the prompt). The
+// org-template family has the same endpoint; this is the team-scope mirror.
+func (s *Server) handleBlueprintUpdate(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	id := r.PathValue("id")
+
+	var req renameBlueprintRequest
+	if !decodeJSON(w, r, &req, "") {
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+		return
+	}
+
+	var updated *domain.Blueprint
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		existing, e := tx.Blueprints.Get(r.Context(), orgID, id)
+		if e != nil || existing == nil {
+			return e
+		}
+		if e := tx.Blueprints.Rename(r.Context(), orgID, id, name); e != nil {
+			return e
+		}
+		updated, e = tx.Blueprints.Get(r.Context(), orgID, id)
+		return e
+	}); err != nil {
+		internalError(w, "blueprints", err)
+		return
+	}
+	if updated == nil {
+		notFound(w, "blueprint")
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
 }
 
 // --- Blueprint steps -----------------------------------------------------

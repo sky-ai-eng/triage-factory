@@ -133,17 +133,15 @@ function PromptNode({
 }
 
 // BlueprintBoxNode is the procedural bounding box drawn around a multi-step
-// blueprint's prompts (decision 4). It is a *decorative background element*,
-// NOT a ReactFlow group/parent node: the member prompt nodes stay free-floating
-// and independently draggable, and this box's rect is recomputed from their
-// measured positions on every change (see computeBoxNodes). It is
-// non-selectable / non-connectable / non-draggable, sits behind the nodes, and
-// is click-through (pointerEvents:none on the body) so panning over it still
-// reaches the canvas — while the title + edit affordance set pointerEvents:auto
-// to re-enable themselves (a descendant may opt back in under a
-// pointer-events:none ancestor; that exception is what keeps the kebab clickable
-// without the box body eating pan gestures). The faint fill keeps the sequence
-// edges that run between members visible through it.
+// blueprint's prompts (decision 4). It is a *decorative grouping element*, NOT a
+// ReactFlow group/parent node: the member prompt nodes stay free-floating and
+// independently draggable, and this box's rect is recomputed from their measured
+// positions on every change (see computeBoxNodes). It is non-selectable /
+// non-connectable and sits behind the nodes, but IS draggable — grabbing the box
+// (its padding ring, header, or the gaps between cards) moves the whole
+// blueprint, translated onto every member in onNodesChange. The kebab carries
+// `nodrag` so clicking it opens the details popup instead of starting a drag.
+// The faint fill keeps the sequence edges that run between members visible.
 function BlueprintBoxNode({
   data,
 }: {
@@ -155,28 +153,22 @@ function BlueprintBoxNode({
   }
 }) {
   return (
-    <div
-      className="w-full h-full rounded-2xl border border-border-subtle bg-accent/[0.04]"
-      style={{ pointerEvents: 'none' }}
-    >
+    <div className="w-full h-full rounded-2xl border border-border-subtle bg-accent/[0.04] cursor-grab active:cursor-grabbing">
       {/* Title (top-left) — faint, the blueprint's name. */}
-      <div
-        className="absolute left-3 top-2 flex items-center gap-1.5 max-w-[70%]"
-        style={{ pointerEvents: 'auto' }}
-      >
+      <div className="absolute left-3 top-2 flex items-center gap-1.5 max-w-[70%]">
         <Layers size={12} className="text-text-tertiary shrink-0" />
         <span className="text-[11px] font-semibold text-text-tertiary truncate">{data.name}</span>
         <span className="text-[10px] text-text-tertiary/60 shrink-0">· {data.stepCount} steps</span>
       </div>
-      {/* Edit button (top-right) — opens the blueprint details popup. */}
+      {/* Edit button (top-right) — opens the blueprint details popup. `nodrag`
+          keeps a click from starting a box drag. */}
       <button
         onClick={(e) => {
           e.stopPropagation()
           data.onBoxEdit(data.blueprintId, e.clientX, e.clientY)
         }}
         title="Blueprint details"
-        className="absolute right-1.5 top-1.5 w-6 h-6 rounded-md flex items-center justify-center text-text-tertiary hover:text-text-secondary hover:bg-black/[0.04] transition-colors"
-        style={{ pointerEvents: 'auto' }}
+        className="nodrag absolute right-1.5 top-1.5 w-6 h-6 rounded-md flex items-center justify-center text-text-tertiary hover:text-text-secondary hover:bg-black/[0.04] transition-colors cursor-pointer"
       >
         <MoreVertical size={14} />
       </button>
@@ -424,6 +416,9 @@ function BindingGraphInner({
   >(null)
   // Blueprint details popup (the box's edit button).
   const [boxMenu, setBoxMenu] = useState<{ x: number; y: number; blueprintId: string } | null>(null)
+  // Draft for the blueprint rename field in the details popup, seeded from the
+  // current name when the popup opens.
+  const [boxNameDraft, setBoxNameDraft] = useState('')
   // Persisted layout, keyed per scope (team vs template, and per team) so the
   // canvases don't overwrite each other's node positions. storageKeyRef keeps
   // the key fresh for the save callbacks (which have empty/narrow dep arrays),
@@ -611,8 +606,37 @@ function BindingGraphInner({
 
   // Open the blueprint details popup at the edit button's location.
   const onBoxEdit = useCallback((blueprintId: string, clientX: number, clientY: number) => {
+    setBoxNameDraft(blueprintNamesRef.current[blueprintId] ?? '')
     setBoxMenu({ x: clientX, y: clientY, blueprintId })
   }, [])
+
+  // Rename a blueprint (its name is independent of its entry prompt's). Both
+  // scopes have the endpoint — team via PUT /api/blueprints/{id}, template via
+  // the org-template mirror — so the URL is scope-derived like every other call.
+  const saveBoxName = useCallback(
+    async (blueprintId: string, rawName: string) => {
+      const name = rawName.trim()
+      if (!name) return
+      try {
+        const res = await fetch(`${blueprintsBase(template)}/${encodeURIComponent(blueprintId)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        })
+        if (!res.ok) {
+          toast.error(await readError(res, 'Failed to rename blueprint'))
+          return
+        }
+        setBoxMenu(null)
+        fetchAll()
+      } catch (err) {
+        toast.error(
+          `Failed to rename blueprint: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+    },
+    [template, fetchAll],
+  )
 
   // Recompute the procedural boxes from the current member node geometry. A box
   // is drawn only at ≥2 steps (decision 3); it hugs its members with a header
@@ -658,11 +682,14 @@ function BindingGraphInner({
             stepCount: promptIds.length,
             onBoxEdit,
           },
-          draggable: false,
+          // Draggable so the box moves the whole blueprint (onNodesChange
+          // translates the box's delta onto its members); never selected /
+          // connected. Behind the nodes; the faint fill keeps inner edges
+          // visible (decision 4).
+          draggable: true,
           selectable: false,
           connectable: false,
           deletable: false,
-          // Behind the nodes; the faint fill keeps inner edges visible (decision 4).
           zIndex: 0,
           // We compute the exact rect, so hand ReactFlow the dimensions as
           // already-"measured". Otherwise it renders the node visibility:hidden
@@ -671,7 +698,7 @@ function BindingGraphInner({
           width,
           height,
           measured: { width, height },
-          style: { width, height, pointerEvents: 'none' },
+          style: { width, height },
         })
       }
       return boxes
@@ -873,12 +900,41 @@ function BindingGraphInner({
   // and detect a reorder on drag-end.
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => {
-      const applied = applyNodeChanges(changes, nodesRef.current)
+      // A blueprint box drags as a unit: translate its position delta onto its
+      // member prompt nodes and drop the box's own change — the box is recomputed
+      // from its members, so it re-hugs them at the new spot. The delta tracks
+      // ReactFlow's drag exactly (box pos = minX(members) − pad), so no drift.
+      const memberMoves: NodeChange[] = []
+      for (const c of changes) {
+        if (c.type === 'position' && c.id.startsWith('bp:') && c.position) {
+          const box = nodesRef.current.find((n) => n.id === c.id)
+          if (!box) continue
+          const dx = c.position.x - box.position.x
+          const dy = c.position.y - box.position.y
+          if (dx === 0 && dy === 0) continue
+          for (const pid of blueprintStepsRef.current[c.id.slice(3)] ?? []) {
+            const node = nodesRef.current.find((n) => n.id === `p:${pid}`)
+            if (!node) continue
+            memberMoves.push({
+              id: `p:${pid}`,
+              type: 'position',
+              position: { x: node.position.x + dx, y: node.position.y + dy },
+              dragging: c.dragging,
+            })
+          }
+        }
+      }
+      const effective: NodeChange[] = [
+        ...changes.filter((c) => !(c.type === 'position' && c.id.startsWith('bp:'))),
+        ...memberMoves,
+      ]
+      const applied = applyNodeChanges(effective, nodesRef.current)
 
-      // Persist position changes.
+      // Persist position changes (events + prompts; box drags persist via the
+      // synthesized member moves).
       const layout = layoutRef.current
       let dirty = false
-      for (const change of changes) {
+      for (const change of effective) {
         if (change.type === 'position' && !change.dragging && change.position) {
           const id = change.id
           if (id.startsWith('et:')) {
@@ -898,7 +954,8 @@ function BindingGraphInner({
       nodesRef.current = next
       setNodes(next)
 
-      // Reorder detection on drag-end.
+      // Reorder detection on drag-end — only a direct prompt drag can reorder; a
+      // box drag moves every member by the same delta, so order is unchanged.
       for (const change of changes) {
         if (change.type === 'position' && change.dragging === false && change.id.startsWith('p:')) {
           maybeReorder(nonBox, change.id)
@@ -1172,14 +1229,34 @@ function BindingGraphInner({
         <>
           <div className="fixed inset-0 z-50" onClick={() => setBoxMenu(null)} />
           <div
-            className="fixed z-50 bg-surface-raised/95 backdrop-blur-xl border border-border-glass rounded-xl shadow-xl shadow-black/10 p-3 w-[240px]"
-            style={{ left: boxMenu.x - 220, top: boxMenu.y + 6 }}
+            className="fixed z-50 bg-surface-raised/95 backdrop-blur-xl border border-border-glass rounded-xl shadow-xl shadow-black/10 p-3 w-[260px]"
+            style={{ left: boxMenu.x - 240, top: boxMenu.y + 6 }}
           >
-            <div className="flex items-center gap-1.5 mb-0.5">
-              <Layers size={13} className="text-text-tertiary shrink-0" />
-              <span className="text-[13px] font-semibold text-text-primary truncate">
-                {blueprintNames[boxMenu.blueprintId] ?? 'Blueprint'}
-              </span>
+            {/* Rename — the blueprint's name is its own, not the entry prompt's. */}
+            <label className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-tertiary mb-1">
+              <Layers size={11} className="shrink-0" />
+              Blueprint name
+            </label>
+            <div className="flex items-center gap-1.5 mb-2.5">
+              <input
+                autoFocus
+                value={boxNameDraft}
+                onChange={(e) => setBoxNameDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') saveBoxName(boxMenu.blueprintId, boxNameDraft)
+                }}
+                className="flex-1 min-w-0 px-2 py-1 rounded-md border border-border-subtle bg-white/60 text-[12px] text-text-primary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors"
+              />
+              <button
+                onClick={() => saveBoxName(boxMenu.blueprintId, boxNameDraft)}
+                disabled={
+                  !boxNameDraft.trim() ||
+                  boxNameDraft.trim() === (blueprintNames[boxMenu.blueprintId] ?? '')
+                }
+                className="text-[11px] font-semibold text-white bg-accent hover:bg-accent/90 disabled:opacity-40 px-2.5 py-1 rounded-md transition-colors"
+              >
+                Save
+              </button>
             </div>
             <div className="text-[11px] text-text-tertiary mb-2.5">
               {(blueprintSteps[boxMenu.blueprintId]?.length ?? 0) + ' steps · composed on canvas'}

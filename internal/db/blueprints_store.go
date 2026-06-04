@@ -199,6 +199,12 @@ type BlueprintStore interface {
 	// (it satisfies the team-membership RLS); the SQLite impl ignores it.
 	Create(ctx context.Context, orgID, teamID string, b domain.Blueprint) error
 
+	// Rename updates a blueprint's name (its only mutable header field — steps
+	// are managed via ReplaceSteps, composition via merge/split). Lets a
+	// blueprint carry a name independent of its entry prompt's. No-op on a
+	// missing / soft-deleted row; the handler 404s by re-reading.
+	Rename(ctx context.Context, orgID, id, name string) error
+
 	// Delete soft-deletes a blueprint (stamps deleted_at). The row + its
 	// blueprint_steps stay as the durable audit trail (a blueprint a trigger
 	// fired has run history; its step FK is RESTRICT), but request-facing reads

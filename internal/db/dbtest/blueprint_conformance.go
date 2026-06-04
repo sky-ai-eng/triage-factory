@@ -276,6 +276,27 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		}
 	})
 
+	t.Run("Rename_UpdatesName", func(t *testing.T) {
+		store, orgID, teamID, _ := factory(t)
+		ctx := context.Background()
+		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
+			SystemSlug: "rename-bp", Name: "Before", Source: "system",
+		})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if err := store.Rename(ctx, orgID, id, "After"); err != nil {
+			t.Fatalf("Rename: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, id)
+		if err != nil || got == nil {
+			t.Fatalf("Get after rename = (%v, %v)", got, err)
+		}
+		if got.Name != "After" {
+			t.Errorf("renamed blueprint name = %q, want %q", got.Name, "After")
+		}
+	})
+
 	t.Run("MergeInto_AppendsSourceStepsAndRetiresSource", func(t *testing.T) {
 		store, orgID, teamID, seedPrompt := factory(t)
 		ctx := context.Background()

@@ -184,6 +184,14 @@ func (s *blueprintStore) Create(ctx context.Context, orgID, teamID string, b dom
 	return err
 }
 
+func (s *blueprintStore) Rename(ctx context.Context, orgID, id, name string) error {
+	_, err := s.app.ExecContext(ctx, `
+		UPDATE blueprints SET name = $1, updated_at = now()
+		WHERE org_id = $2 AND id = $3 AND deleted_at IS NULL
+	`, name, orgID, id)
+	return err
+}
+
 // Delete soft-deletes a blueprint (stamps deleted_at). Its blueprint_steps stay
 // so the copy-only unique index keeps the wrapped prompt pinned; the prompt is
 // soft-deleted alongside by the delete-pairing.
