@@ -329,8 +329,16 @@ func (s *Server) handleSetupStart(w http.ResponseWriter, r *http.Request) {
 	//
 	// If the org row exists but no agents row, this is a crash-mid-provision
 	// state — fall through to re-run BootstrapLocalOrg.
+	//
+	// Probe via the System (admin-pool) variant to match the org probe
+	// above and the rest of the bootstrap chain: a provisioning-state read
+	// is a claims-free system read, not a user-RLS-scoped one. SQLite (the
+	// only backend this local-gated handler ever runs against) collapses
+	// both pools to one connection, so this is behaviorally identical to
+	// GetForOrg today — but it keeps the function correct if the local-only
+	// gate is ever lifted onto Postgres, where the app pool would fault.
 	if org != nil {
-		agent, err := s.allStores.Agents.GetForOrg(r.Context(), runmode.LocalDefaultOrg)
+		agent, err := s.allStores.Agents.GetForOrgSystem(r.Context(), runmode.LocalDefaultOrg)
 		if err != nil {
 			log.Printf("[setup] setup/start agent probe: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{
