@@ -130,8 +130,9 @@ export default function GitHubAccessGroup({
                 <button
                   type="button"
                   onClick={testSSH}
-                  disabled={sshTestState.kind === 'running'}
+                  disabled={sshTestState.kind === 'running' || !hasToken}
                   className="text-[11px] text-accent hover:underline disabled:opacity-50"
+                >
                 >
                   {sshTestState.kind === 'running' ? 'Testing...' : 'Test SSH connection'}
                 </button>
