@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -104,16 +105,20 @@ func newGHTestServer(t *testing.T) *ghTestServer {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("[]"))
 	})
-	mux.HandleFunc("/api/v3/installation/repositories", func(w http.ResponseWriter, _ *http.Request) {
-		repos := make([]map[string]any, 0, len(g.installRepos))
-		for _, name := range g.installRepos {
-			repos = append(repos, map[string]any{"full_name": name})
+	// Repo-access probe (ClientForRepo's coverage check via CheckRepoAccess):
+	// GET /repos/{owner}/{repo} → 200 if the repo is in the installation's
+	// grant (installRepos), else 404 like an installation token sees for a
+	// repo outside its "Selected repositories" scope.
+	mux.HandleFunc("/api/v3/repos/", func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/api/v3/repos/")
+		for _, granted := range g.installRepos {
+			if granted == name {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"full_name":"` + name + `"}`))
+				return
+			}
 		}
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"total_count":  len(repos),
-			"repositories": repos,
-		})
+		w.WriteHeader(http.StatusNotFound)
 	})
 	g.srv = httptest.NewServer(mux)
 	t.Cleanup(g.srv.Close)

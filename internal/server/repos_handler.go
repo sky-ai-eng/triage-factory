@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"sort"
@@ -129,6 +130,10 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 // must not blank the whole picker, so they're logged and skipped while the
 // rest still contribute. ErrNoGitHubCredentials is only surfaced when the
 // resolver produced no client for any installation (genuine "not configured").
+// But if clients resolved yet *every* list attempt failed and the union is
+// empty, the failure is surfaced rather than returned as an empty list — an
+// empty result there is a fetch error masquerading as "no repos" (and would
+// also warm the reachable-repo cache with an empty set).
 func (s *Server) installationReposUnion(ctx context.Context, orgID string, insts []domain.OrgGitHubAppInstallation) ([]ghclient.UserRepo, error) {
 	if s.ghResolver == nil {
 		return nil, ghclient.ErrNoGitHubCredentials
@@ -136,6 +141,7 @@ func (s *Server) installationReposUnion(ctx context.Context, orgID string, insts
 
 	byName := make(map[string]ghclient.UserRepo)
 	resolvedAny := false
+	var lastListErr error
 	for _, inst := range insts {
 		client, err := s.ghResolver.ClientFor(ctx, orgID, inst.AccountLogin)
 		if err != nil {
@@ -151,6 +157,7 @@ func (s *Server) installationReposUnion(ctx context.Context, orgID string, insts
 		repos, err := client.ListInstallationRepos()
 		if err != nil {
 			log.Printf("[repos] org %s: list installation repos for %s: %v", orgID, inst.AccountLogin, err)
+			lastListErr = err
 			continue
 		}
 		for _, repo := range repos {
@@ -166,12 +173,19 @@ func (s *Server) installationReposUnion(ctx context.Context, orgID string, insts
 	if !resolvedAny {
 		return nil, ghclient.ErrNoGitHubCredentials
 	}
+	// Clients resolved but produced nothing, and at least one list errored:
+	// surface the fetch failure instead of an empty (and misleading) picker.
+	// A genuinely empty union with no errors (App installed on zero repos) is
+	// a legitimate empty result and falls through.
+	if len(byName) == 0 && lastListErr != nil {
+		return nil, fmt.Errorf("list installation repositories for org %s: %w", orgID, lastListErr)
+	}
 
 	out := make([]ghclient.UserRepo, 0, len(byName))
 	for _, repo := range byName {
 		out = append(out, repo)
 	}
-	sort.Slice(out, func(i, j int) bool {
+	sort.SliceStable(out, func(i, j int) bool {
 		return strings.ToLower(out[i].FullName) < strings.ToLower(out[j].FullName)
 	})
 	return out, nil

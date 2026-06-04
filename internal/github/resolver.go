@@ -51,9 +51,10 @@ type Resolver interface {
 	// token for any repo under the account — minting is per-installation, not
 	// per-repo — so an owner-grain ClientFor would hand back a token that 403s
 	// on a repo outside the grant, silently skipping the PAT that would have
-	// worked. Deciding coverage up front (intersecting the installation's repo
-	// set) lets the resolver fall through to tier 3 instead. Genuinely
-	// account-grain callers (no single repo in view) keep using ClientFor.
+	// worked. Deciding coverage up front (a single repo-access probe on the
+	// installation token) lets the resolver fall through to tier 3 instead.
+	// Genuinely account-grain callers (no single repo in view) keep using
+	// ClientFor.
 	ClientForRepo(ctx context.Context, orgID, owner, repo string) (*Client, error)
 
 	// TokenFor returns the raw credential ClientFor would authenticate
@@ -127,19 +128,22 @@ func (r *resolver) ClientForRepo(ctx context.Context, orgID, owner, repo string)
 
 	// Tier 1, repo-aware: the org's App installation for owner, but only when
 	// its grant covers owner/repo (see the ClientForRepo interface doc).
-	// Coverage is decided up front rather than via a 403-retry — 403 is
-	// ambiguous and the grant is knowable ahead of time.
+	// Coverage is probed up front rather than via a 403-retry — 403 is
+	// ambiguous and the grant is knowable ahead of time. A single
+	// GET /repos/{owner}/{repo} on the installation token answers it (200 →
+	// covered, 404/403 → not in grant), which is far cheaper than paginating
+	// the whole installation repo set per request.
 	if client, ok := r.tier1AppClient(ctx, orgID, owner, base); ok {
-		covered, known := r.installationCoversRepo(client, owner, repo)
-		if covered || !known {
-			// Covered, or coverage indeterminate (a transient list error) — in
+		reachable, conclusive := client.CheckRepoAccess(ctx, owner, repo)
+		if reachable || !conclusive {
+			// Covered, or coverage indeterminate (5xx / transport error) — in
 			// the unknown case prefer the App client we already minted, the
 			// same one owner-grain ClientFor would have returned, over
 			// discarding a working credential on a guess.
 			return client, nil
 		}
-		// known && !covered: installed on this account but this repo isn't in
-		// the grant. Fall through to the PAT, which may still reach it.
+		// Conclusively not covered: installed on this account but this repo
+		// isn't in the grant. Fall through to the PAT, which may still reach it.
 		log.Printf("[gh-resolver] org=%s repo=%s/%s: App installed on account but repo not in grant → falling back to PAT", orgID, owner, repo)
 	}
 
@@ -157,25 +161,6 @@ func (r *resolver) ClientForRepo(ctx context.Context, orgID, owner, repo string)
 	}
 
 	return nil, fmt.Errorf("%w: org=%s repo=%s/%s", ErrNoGitHubCredentials, orgID, owner, repo)
-}
-
-// installationCoversRepo reports whether the installation behind client grants
-// access to owner/repo, by intersecting against the installation's repository
-// set (GET /installation/repositories — the §1 primitive). known is false when
-// that list can't be fetched (a transient error); the caller then can't rule
-// the App out and keeps the minted client rather than guessing.
-func (r *resolver) installationCoversRepo(client *Client, owner, repo string) (covered, known bool) {
-	grant, err := client.ListInstallationRepos()
-	if err != nil {
-		return false, false
-	}
-	want := strings.ToLower(owner + "/" + repo)
-	for _, g := range grant {
-		if strings.ToLower(g.FullName) == want {
-			return true, true
-		}
-	}
-	return false, true
 }
 
 // githubBaseFor resolves the org's user-facing GitHub base URL (github.com

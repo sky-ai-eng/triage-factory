@@ -137,6 +137,35 @@ func TestHandleGitHubRepos_AppSingleInstallation(t *testing.T) {
 	}
 }
 
+// App org where every installation's repo-list call fails: the handler must
+// surface a fetch error (502), not return an empty list that reads as "no
+// repositories" and warms the reachable-repo cache with an empty set.
+func TestHandleGitHubRepos_AppListFailureSurfacesError(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v3/app/installations/", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token":      "ghs_x",
+			"expires_at": time.Now().Add(time.Hour).UTC(),
+		})
+	})
+	mux.HandleFunc("/api/v3/installation/repositories", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, []domain.OrgGitHubAppInstallation{
+		{InstallationID: "111", AccountType: "Organization", AccountLogin: "acme"},
+	})
+
+	rec := doJSON(t, srv, http.MethodGet, "/api/github/repos", nil)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("GET /api/github/repos = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 // App org with multiple installations: the picker returns the union of every
 // installation's repos, deduped by full name and sorted stably.
 func TestHandleGitHubRepos_AppMultiInstallationDedup(t *testing.T) {
