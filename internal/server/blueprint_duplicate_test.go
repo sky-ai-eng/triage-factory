@@ -134,9 +134,11 @@ if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 	copyID, _ := out[0].Blueprint["id"].(string)
 
 	// The source's trigger is intact; the copy has none.
-	handlers := doJSON(t, s, http.MethodGet, "/api/event-handlers", nil)
-	var hs []map[string]any
-	_ = json.Unmarshal(handlers.Body.Bytes(), &hs)
+handlers := doJSON(t, s, http.MethodGet, "/api/event-handlers", nil)
+var hs []map[string]any
+if err := json.Unmarshal(handlers.Body.Bytes(), &hs); err != nil {
+	t.Fatalf("decode handlers: %v", err)
+}
 	var srcTriggered, copyTriggered bool
 	for _, h := range hs {
 		if h["kind"] != "trigger" {
