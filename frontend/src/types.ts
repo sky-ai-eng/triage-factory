@@ -369,9 +369,10 @@ export interface MeResponse {
   /** Whether self-service users may create their own org (the inverse
    *  of the instance's TF_PREVENT_ORG_CREATION). Drives the onboarding
    *  entry: when false, the "create your org" affordance is disabled and
-   *  the page shows the invite-only "ask your admin" state. Always true
-   *  in local mode (N=1, never renders onboarding). */
-  org_creation_enabled?: boolean
+   *  the page shows the invite-only "ask your admin" state. Always sent
+   *  by the server (both modes) — true in local mode (N=1, never renders
+   *  onboarding). */
+  org_creation_enabled: boolean
 }
 
 /** GET /api/orgs/{org}/identity/github — the onboarding gate's status read.

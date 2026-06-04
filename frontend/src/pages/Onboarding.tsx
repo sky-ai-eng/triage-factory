@@ -39,10 +39,20 @@ export default function Onboarding() {
     }
   }, [auth.status, auth.orgs, navigate])
 
-  const accountLabel = auth.me?.display_name || auth.me?.email || 'this account'
-  // Default to permissive when the field is absent — only an explicit
-  // false (TF_PREVENT_ORG_CREATION) disables self-service creation.
-  const canCreate = auth.me?.org_creation_enabled !== false
+  // Hold a loading state until auth resolves. This page lives outside
+  // MultiAuthGate, so without the guard the create-enabled UI would flash
+  // before me (and org_creation_enabled) are known, and the unauth case
+  // would render for a frame before the redirect effect above fires.
+  if (auth.status !== 'authed' || !auth.me) {
+    return (
+      <div className="min-h-screen bg-surface flex items-center justify-center">
+        <p className="text-text-tertiary text-sm">Loading...</p>
+      </div>
+    )
+  }
+
+  const accountLabel = auth.me.display_name || auth.me.email || 'this account'
+  const canCreate = auth.me.org_creation_enabled
 
   return (
     <div className="min-h-screen bg-surface flex items-center justify-center p-4">
