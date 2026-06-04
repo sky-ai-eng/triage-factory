@@ -1,10 +1,12 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { CheckCircle2, ChevronRight } from 'lucide-react'
 import RepoPickerModal, { type GitHubRepo } from '../components/RepoPickerModal'
 import GitHubTeamSelector, { type GitHubTeamCandidate } from '../components/GitHubTeamSelector'
 import CarryOverList from '../components/CarryOverList'
 import JiraStatusRule, { type JiraStatusRuleValue } from '../components/JiraStatusRule'
+import GitHubAccessGroup from './settings/GitHubAccessGroup'
+import JiraAccessGroup from './settings/JiraAccessGroup'
+import { LOCAL_DEFAULT_ORG_ID } from '../lib/githubApp'
 import { useAuthStatus } from '../hooks/useAuthStatus'
 
 interface JiraStatus {
@@ -13,20 +15,19 @@ interface JiraStatus {
 }
 
 // Setup flow steps:
-//   github → repos → github-teams → integrations → jira-creds → jira-config → jira-carry-over → integrations
+//   github → repos → github-teams → integrations → jira-config → jira-carry-over
 //
-// github-teams (SKY-411) lands between repo selection and integrations:
-// it makes the GitHub-team → TF-team mapping exist *before* the first poll
-// so a user who is only review-requested via a team isn't left with an
-// empty queue on first run. Skippable; configurable later in Settings.
-type Step =
-  | 'github'
-  | 'repos'
-  | 'github-teams'
-  | 'integrations'
-  | 'jira-creds'
-  | 'jira-config'
-  | 'jira-carry-over'
+// The org-level credential steps (github, integrations) render the SAME
+// shared field groups as the Settings page and the org-create configure
+// step — GitHubAccessGroup (local PAT path) and JiraAccessGroup — so there's
+// no bespoke re-implementation to drift. The team-level steps (repos,
+// github-teams, jira-config, jira-carry-over) are unchanged.
+//
+// github-teams (SKY-411) lands between repo selection and integrations: it
+// makes the GitHub-team → TF-team mapping exist *before* the first poll so a
+// user who is only review-requested via a team isn't left with an empty
+// queue on first run. Skippable; configurable later in Settings.
+type Step = 'github' | 'repos' | 'github-teams' | 'integrations' | 'jira-config' | 'jira-carry-over'
 
 export default function Setup() {
   const navigate = useNavigate()
@@ -34,11 +35,10 @@ export default function Setup() {
   const [step, setStep] = useState<Step>('github')
   const [initDone, setInitDone] = useState(false)
 
-  // GitHub (mandatory). clone_protocol defaults to 'ssh' — the user
-  // can flip it to 'https' on this same step if their machine doesn't
-  // have SSH access set up. The server runs a preflight when "ssh" is
-  // selected and rejects setup if it fails; the rejection surfaces as
-  // an inline error via the existing ErrorBanner.
+  // GitHub (mandatory). clone_protocol defaults to 'ssh' — the user can flip
+  // it to 'https' on this same step (via the shared group) if their machine
+  // doesn't have SSH set up. The server runs a preflight when "ssh" is
+  // selected and rejects setup if it fails; the rejection surfaces inline.
   const [githubForm, setGithubForm] = useState<{
     url: string
     pat: string
@@ -75,7 +75,6 @@ export default function Setup() {
 
   const envProvided = authStatus.env_provided ?? []
   const githubFromEnv = envProvided.includes('github')
-  const jiraFromEnv = envProvided.includes('jira')
 
   useEffect(() => {
     if (authStatus.loading || initDone) return
@@ -94,16 +93,31 @@ export default function Setup() {
   // --- Step 1: GitHub credentials ---
   const canSubmitGitHub = githubForm.url.trim() !== '' && githubForm.pat.trim() !== ''
 
+  // patchGitHub maps the shared group's org_settings-keyed patch onto the
+  // wizard's local github form shape.
+  const patchGitHub = (patch: {
+    github_url?: string
+    github_pat?: string
+    github_clone_protocol?: 'ssh' | 'https'
+  }) =>
+    setGithubForm((f) => ({
+      ...f,
+      ...(patch.github_url !== undefined ? { url: patch.github_url } : {}),
+      ...(patch.github_pat !== undefined ? { pat: patch.github_pat } : {}),
+      ...(patch.github_clone_protocol !== undefined
+        ? { clone_protocol: patch.github_clone_protocol }
+        : {}),
+    }))
+
   const submitGitHub = async (e: React.FormEvent) => {
     e.preventDefault()
     setError('')
     setLoading(true)
     try {
-      // The server is authoritative on SSH preflight: it runs the
-      // check itself when clone_protocol == "ssh" and rejects the
-      // setup with a clear error if it fails. Don't double-check
-      // here — duplicating the gate forces us to keep two error
-      // surfaces in sync.
+      // The server is authoritative on SSH preflight: it runs the check
+      // itself when clone_protocol == "ssh" and rejects the setup with a
+      // clear error if it fails. Don't double-check here — duplicating the
+      // gate forces us to keep two error surfaces in sync.
       const res = await fetch('/api/integrations/setup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -185,53 +199,31 @@ export default function Setup() {
     }
   }
 
-  // --- Step 4: Integrations list ---
-  const canContinueFromIntegrations = !jiraConnected || jiraConfigured
+  // --- Step 4: Integrations (Jira credentials, via the shared group) ---
+  const patchJira = (patch: { jira_url?: string; jira_pat?: string }) =>
+    setJiraForm((f) => ({
+      ...f,
+      ...(patch.jira_url !== undefined ? { url: patch.jira_url } : {}),
+      ...(patch.jira_pat !== undefined ? { pat: patch.jira_pat } : {}),
+    }))
 
   const finishSetup = () => {
     navigate('/')
   }
 
-  // --- Step 5: Jira credentials ---
-  const canConnectJira = jiraForm.url.trim() !== '' && jiraForm.pat.trim() !== ''
-
-  const connectJira = async () => {
+  // Continue from the integrations step: connected-but-unconfigured Jira goes
+  // to the team project/status step; otherwise (no Jira, or already
+  // configured) we're done.
+  const continueFromIntegrations = () => {
     setError('')
-    setLoading(true)
-    try {
-      const res = await fetch('/api/jira/connect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url: jiraForm.url.trim(),
-          pat: jiraForm.pat.trim(),
-        }),
-      })
-      if (!res.ok) {
-        const data = await res.json()
-        setError(data.error || 'Failed to connect to Jira')
-        return
-      }
-      setJiraForm((f) => ({ ...f, pat: '' }))
-      setJiraConnected(true)
+    if (jiraConnected && !jiraConfigured) {
       setStep('jira-config')
-    } catch {
-      setError('Could not connect to server')
-    } finally {
-      setLoading(false)
+      return
     }
+    finishSetup()
   }
 
-  const backFromJiraCreds = () => {
-    // Wipe entered-but-unsubmitted credentials (5.5 requirement)
-    if (!jiraConnected) {
-      setJiraForm((f) => ({ ...f, url: '', pat: '' }))
-    }
-    setError('')
-    setStep('integrations')
-  }
-
-  // --- Step 6: Jira config (projects + statuses) ---
+  // --- Step 5: Jira config (projects + statuses) ---
   const fetchStatuses = async () => {
     const projects = jiraForm.projects
       .split(',')
@@ -271,11 +263,10 @@ export default function Setup() {
     setError('')
     setLoading(true)
     try {
-      // Setup configures all listed projects with the same rule
-      // triple — heterogeneous workflows are configured later in
-      // Settings (SKY-272). For the common single-project setup
-      // flow this still works fine: one project gets the rules the
-      // user just picked.
+      // Setup configures all listed projects with the same rule triple —
+      // heterogeneous workflows are configured later in Settings (SKY-272).
+      // For the common single-project setup this still works fine: one
+      // project gets the rules the user just picked.
       const projects = jiraForm.projects
         .split(',')
         .map((s) => s.trim())
@@ -306,31 +297,12 @@ export default function Setup() {
     }
   }
 
-  const backFromJiraConfig = async () => {
+  // Back from jira-config returns to the integrations step. Credentials stay
+  // connected — the user can disconnect explicitly from the shared group
+  // there if they want to re-enter them.
+  const backFromJiraConfig = () => {
     setError('')
-    if (jiraFromEnv) {
-      setStep('integrations')
-      return
-    }
-    // Disconnect Jira — clear stored credentials so the user must
-    // re-enter at least the PAT to reconnect.
-    try {
-      await fetch('/api/integrations/jira', { method: 'DELETE' })
-    } catch {
-      // Best-effort — proceed with local state reset regardless.
-    }
-    setJiraConnected(false)
-    setJiraConfigured(false)
-    setJiraForm((f) => ({
-      ...f,
-      pat: '',
-      projects: '',
-      pickup: { members: [] },
-      in_progress: { members: [] },
-      done: { members: [] },
-    }))
-    setJiraStatuses([])
-    setStep('jira-creds')
+    setStep('integrations')
   }
 
   const updateJira = (field: string) => (e: React.ChangeEvent<HTMLInputElement>) =>
@@ -346,10 +318,10 @@ export default function Setup() {
 
   return (
     <div className="min-h-screen bg-surface flex items-center justify-center p-4">
-      {/* Step 1: GitHub credentials */}
+      {/* Step 1: GitHub credentials (shared GitHubAccessGroup, local PAT path) */}
       {step === 'github' && (
-        <form onSubmit={submitGitHub} className={cardClass}>
-          <div>
+        <form onSubmit={submitGitHub} className="w-full max-w-lg space-y-4">
+          <div className="px-1">
             <h1 className="text-[22px] font-semibold text-text-primary tracking-tight">
               Connect GitHub
             </h1>
@@ -359,68 +331,18 @@ export default function Setup() {
             </p>
           </div>
 
-          <div className="space-y-3">
-            <input
-              type="url"
-              placeholder="https://github.yourcompany.com"
-              value={githubForm.url}
-              onChange={(e) => setGithubForm((f) => ({ ...f, url: e.target.value }))}
-              className={inputClass}
-            />
-            <input
-              type="password"
-              placeholder="GitHub Personal Access Token"
-              value={githubForm.pat}
-              onChange={(e) => setGithubForm((f) => ({ ...f, pat: e.target.value }))}
-              className={inputClass}
-            />
-            <p className="text-[11px] text-text-tertiary">
-              Requires a{' '}
-              <a
-                href="https://github.com/settings/tokens/new?scopes=repo,read:org&description=Triage+Factory"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-accent hover:underline"
-              >
-                classic PAT
-              </a>{' '}
-              with <code className="text-text-secondary">repo</code> and{' '}
-              <code className="text-text-secondary">read:org</code> scopes.{' '}
-              <code className="text-text-secondary">read:org</code> is needed to resolve your team
-              memberships so review requests sent to your teams (e.g. CODEOWNERS) surface as tasks —
-              without it, only PRs that request you individually will show up.
-            </p>
-
-            {/* Clone protocol — controls how we materialize bare clones in
-                ~/.triagefactory/repos/. The token is still required for
-                the GitHub API regardless of which form we pick here. */}
-            <div className="space-y-1.5">
-              <label className="text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
-                Clone protocol
-              </label>
-              <div className="inline-flex rounded-lg border border-border-glass bg-black/[0.02] p-0.5">
-                {(['ssh', 'https'] as const).map((p) => (
-                  <button
-                    key={p}
-                    type="button"
-                    onClick={() => setGithubForm((f) => ({ ...f, clone_protocol: p }))}
-                    className={`px-3 py-1 text-[12px] font-medium rounded-md transition-colors ${
-                      githubForm.clone_protocol === p
-                        ? 'bg-white text-text-primary shadow-sm'
-                        : 'text-text-tertiary hover:text-text-secondary'
-                    }`}
-                  >
-                    {p.toUpperCase()}
-                  </button>
-                ))}
-              </div>
-              <p className="text-[11px] text-text-tertiary leading-relaxed">
-                Your token is still required for the GitHub API. The protocol only affects how
-                Triage Factory clones repos to your machine — SSH uses your existing key + agent,
-                HTTPS uses your git credential helper.
-              </p>
-            </div>
-          </div>
+          <GitHubAccessGroup
+            value={{
+              github_url: githubForm.url,
+              github_pat: githubForm.pat,
+              github_clone_protocol: githubForm.clone_protocol,
+            }}
+            onChange={patchGitHub}
+            hasToken={false}
+            isLocal
+            orgId={LOCAL_DEFAULT_ORG_ID}
+            showAppPanel={false}
+          />
 
           <ErrorBanner error={error} />
 
@@ -474,44 +396,28 @@ export default function Setup() {
         </div>
       )}
 
-      {/* Step 4: Integrations list */}
+      {/* Step 4: Integrations — Jira credentials via the shared group */}
       {step === 'integrations' && (
-        <div className={cardClass}>
-          <div>
+        <div className="w-full max-w-lg space-y-4">
+          <div className="px-1">
             <h1 className="text-[22px] font-semibold text-text-primary tracking-tight">
               Integrations
             </h1>
             <p className="text-[13px] text-text-tertiary mt-1.5 leading-relaxed">
-              Optionally connect other services. You can always configure these later in Settings.
+              Optionally connect Jira. You can always configure this later in Settings.
             </p>
           </div>
 
-          {/* Integration rows */}
-          <div className="space-y-2">
-            <button
-              type="button"
-              onClick={() => {
-                setError('')
-                setStep(jiraFromEnv || jiraConnected ? 'jira-config' : 'jira-creds')
-              }}
-              className="w-full flex items-center justify-between px-4 py-3 rounded-xl border border-border-subtle bg-white/50 hover:border-accent/30 transition-colors text-left"
-            >
-              <div className="flex items-center gap-3">
-                <span className="text-[13px] font-medium text-text-primary">Jira</span>
-                {jiraConfigured ? (
-                  <span className="flex items-center gap-1 text-[11px] text-claim font-medium">
-                    <CheckCircle2 size={12} />
-                    Connected
-                  </span>
-                ) : jiraConnected ? (
-                  <span className="text-[11px] text-snooze font-medium">
-                    Credentials saved — needs config
-                  </span>
-                ) : null}
-              </div>
-              <ChevronRight size={14} className="text-text-tertiary" />
-            </button>
-          </div>
+          <JiraAccessGroup
+            value={{ jira_url: jiraForm.url, jira_pat: jiraForm.pat }}
+            onChange={patchJira}
+            connected={jiraConnected}
+            onConnected={() => setJiraConnected(true)}
+            onDisconnected={() => {
+              setJiraConnected(false)
+              setJiraConfigured(false)
+            }}
+          />
 
           <ErrorBanner error={error} />
 
@@ -523,86 +429,14 @@ export default function Setup() {
             >
               Back
             </button>
-            <button
-              type="button"
-              onClick={finishSetup}
-              disabled={!canContinueFromIntegrations}
-              className={primaryBtnClass}
-            >
-              Continue
+            <button type="button" onClick={continueFromIntegrations} className={primaryBtnClass}>
+              {jiraConnected && !jiraConfigured ? 'Configure Jira' : 'Continue'}
             </button>
           </div>
         </div>
       )}
 
-      {/* Step 5: Jira credentials */}
-      {step === 'jira-creds' && (
-        <div className={cardClass}>
-          <div>
-            <h1 className="text-[22px] font-semibold text-text-primary tracking-tight">
-              Connect Jira
-            </h1>
-            <p className="text-[13px] text-text-tertiary mt-1.5 leading-relaxed">
-              Enter your Jira instance URL and a Personal Access Token.
-            </p>
-          </div>
-
-          <div className="space-y-3">
-            <input
-              type="url"
-              placeholder="https://jira.yourcompany.com"
-              value={jiraForm.url}
-              onChange={updateJira('url')}
-              disabled={jiraConnected}
-              className={jiraConnected ? inputDisabledClass : inputClass}
-            />
-            <input
-              type="password"
-              placeholder="Jira Personal Access Token"
-              value={jiraForm.pat}
-              onChange={updateJira('pat')}
-              disabled={jiraConnected}
-              className={jiraConnected ? inputDisabledClass : inputClass}
-            />
-            {jiraConnected && (
-              <p className="text-[11px] text-claim font-medium">
-                Connected. Continue to configure projects and statuses.
-              </p>
-            )}
-          </div>
-
-          <ErrorBanner error={error} />
-
-          <div className="flex gap-3">
-            <button type="button" onClick={backFromJiraCreds} className={secondaryBtnClass}>
-              Back
-            </button>
-            {jiraConnected ? (
-              <button
-                type="button"
-                onClick={() => {
-                  setError('')
-                  setStep('jira-config')
-                }}
-                className={primaryBtnClass}
-              >
-                Continue
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={connectJira}
-                disabled={loading || !canConnectJira}
-                className={primaryBtnClass}
-              >
-                {loading ? 'Connecting...' : 'Connect'}
-              </button>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Step 6: Jira config (projects + statuses) */}
+      {/* Step 5: Jira config (projects + statuses) */}
       {step === 'jira-config' && (
         <div className={cardClass}>
           <div>
@@ -614,7 +448,7 @@ export default function Setup() {
             </p>
           </div>
 
-          {/* Grayed-out credential fields */}
+          {/* Grayed-out instance field */}
           <div className="space-y-3">
             <div>
               <span className="text-[11px] text-text-tertiary mb-1.5 block">Instance</span>
@@ -694,7 +528,7 @@ export default function Setup() {
         </div>
       )}
 
-      {/* Step 7: Jira carry-over — decide what to do with existing assigned work */}
+      {/* Step 6: Jira carry-over — decide what to do with existing assigned work */}
       {step === 'jira-carry-over' && (
         <CarryOverList
           onSave={() => {

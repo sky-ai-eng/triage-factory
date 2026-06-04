@@ -26,6 +26,7 @@ import Projects from './pages/Projects'
 import ProjectDetail from './pages/ProjectDetail'
 import Login from './pages/Login'
 import Onboarding from './pages/Onboarding'
+import OrgConfigure from './pages/OrgConfigure'
 import ConnectGitHub from './pages/ConnectGitHub'
 import Shell from './Shell'
 import AuthGate, { RequireGitHubIdentity } from './AuthGate'
@@ -120,6 +121,18 @@ function MultiRoutes() {
             element={
               <AuthGate mode="multi">
                 <ConnectGitHub />
+              </AuthGate>
+            }
+          />
+          {/* Create-time configure step (the second half of "Start your
+              Factory"). Outside RequireGitHubIdentity for the same reason
+              as connect-github — it's where GitHub access gets set up, so
+              gating it on GitHub identity would loop. */}
+          <Route
+            path="/orgs/:org_id/configure"
+            element={
+              <AuthGate mode="multi">
+                <OrgConfigure />
               </AuthGate>
             }
           />

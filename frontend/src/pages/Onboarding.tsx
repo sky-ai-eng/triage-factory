@@ -28,6 +28,12 @@ export default function Onboarding() {
   const [orgName, setOrgName] = useState('')
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
+  // Set to the id of an org this session just created, so the
+  // membership-appears effect routes the founder into the create-time
+  // configure step rather than straight into the (unconfigured) app. An
+  // invite-driven membership (createdOrgId still null) routes into the app
+  // as before — that org is already configured by its own admin.
+  const [createdOrgId, setCreatedOrgId] = useState<string | null>(null)
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault()
@@ -38,11 +44,12 @@ export default function Onboarding() {
     setCreating(true)
     setCreateError(null)
     try {
-      await apiJSON('/api/orgs', {
+      const created = await apiJSON<{ id: string }>('/api/orgs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name }),
       })
+      setCreatedOrgId(created.id)
     } catch (err) {
       // Only the create call is guarded here: nothing was persisted, so
       // re-enable the form for a retry. (refresh() below folds its own
@@ -72,12 +79,17 @@ export default function Onboarding() {
   }, [auth.status, navigate])
 
   // When a membership appears (e.g. an admin adds the user to an org, or
-  // the create-org flow completes), route into the app without a reload.
+  // the create-org flow completes), route onward without a reload. A
+  // just-created org goes to its configure step (GitHub/Jira/poller/model);
+  // an invite-driven membership goes straight into the app.
   useEffect(() => {
-    if (auth.status === 'authed' && auth.orgs.length > 0) {
-      navigate('/orgs/' + auth.orgs[0].id, { replace: true })
+    if (auth.status !== 'authed' || auth.orgs.length === 0) return
+    if (createdOrgId && auth.orgs.some((o) => o.id === createdOrgId)) {
+      navigate('/orgs/' + createdOrgId + '/configure', { replace: true })
+      return
     }
-  }, [auth.status, auth.orgs, navigate])
+    navigate('/orgs/' + auth.orgs[0].id, { replace: true })
+  }, [auth.status, auth.orgs, createdOrgId, navigate])
 
   // This page lives outside MultiAuthGate and manages its own auth
   // observations, so it handles loading/error/unauth itself rather than

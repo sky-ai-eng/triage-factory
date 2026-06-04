@@ -1,22 +1,22 @@
 import { useState, useEffect } from 'react'
-import { ChevronDown, ChevronRight, ExternalLink, Lock, Trash2 } from 'lucide-react'
+import { ChevronDown, ChevronRight, Lock, Trash2 } from 'lucide-react'
 import GitHubGroupsEditor from '../components/GitHubGroupsEditor'
 import JiraStatusRule, { type JiraStatusRuleValue } from '../components/JiraStatusRule'
 import SettingsTabs, { type SettingsTab } from '../components/SettingsTabs'
 import { toast } from '../components/Toast/toastStore'
 import { readError } from '../lib/api'
 import { getStoredTheme, setTheme, type ThemeMode } from '../lib/theme'
-import {
-  LOCAL_DEFAULT_ORG_ID,
-  getGitHubAppStatus,
-  getGitHubAppInstallURL,
-  startGitHubAppRegistration,
-  type GitHubAppStatus,
-} from '../lib/githubApp'
+import { LOCAL_DEFAULT_ORG_ID } from '../lib/githubApp'
 import { useOptionalAuth } from '../contexts/AuthContext'
 import { useActiveOrgId } from '../contexts/OrgContext'
 import { computeAccess } from './settings/access'
 import TeamManagementSection from '../components/TeamManagementSection'
+import { Section, Field, inputClass } from './settings/primitives'
+import GitHubAccessGroup from './settings/GitHubAccessGroup'
+import JiraAccessGroup from './settings/JiraAccessGroup'
+import PollerTimingGroup from './settings/PollerTimingGroup'
+import ModelGroup from './settings/ModelGroup'
+import { saveOrgConfig, type OrgSettingsData } from './settings/orgConfig'
 
 interface JiraStatus {
   id: string
@@ -32,20 +32,6 @@ interface JiraProjectConfig {
   pickup: JiraStatusRuleValue
   in_progress: JiraStatusRuleValue
   done: JiraStatusRuleValue
-}
-
-interface OrgSettingsData {
-  github_base_url: string
-  github_poll_interval: string
-  github_clone_protocol: 'ssh' | 'https'
-  has_github_pat: boolean
-  jira_base_url: string
-  jira_poll_interval: string
-  has_jira_pat: boolean
-  max_llm_model_tier?: string
-  has_anthropic_api_key: boolean
-  has_bedrock_credentials: boolean
-  member_count: number
 }
 
 interface TeamSettingsData {
@@ -125,17 +111,6 @@ export default function Settings() {
   const [tab, setTab] = useState<SettingsTab>(() =>
     typeof window !== 'undefined' && window.location.hash === '#github-app' ? 'workspace' : 'team',
   )
-  // Discriminated so the panel can tell "still resolving" / "load failed"
-  // apart from "no app registered" — they must render differently (a load
-  // failure must NOT show the registration form).
-  const [ghAppState, setGhAppState] = useState<
-    { kind: 'loading' } | { kind: 'error' } | { kind: 'loaded'; status: GitHubAppStatus }
-  >({ kind: 'loading' })
-  const [ghReloadKey, setGhReloadKey] = useState(0)
-  const [ghAppOwnerType, setGhAppOwnerType] = useState<'user' | 'org'>('user')
-  const [ghAppOwnerLogin, setGhAppOwnerLogin] = useState('')
-  const [ghAppRegistering, setGhAppRegistering] = useState(false)
-  const [ghAppDetailsExpanded, setGhAppDetailsExpanded] = useState(false)
   const [form, setForm] = useState<{
     github_enabled: boolean
     github_url: string
@@ -178,12 +153,7 @@ export default function Settings() {
   // flow; additional projects start collapsed.
   const [expandedKeys, setExpandedKeys] = useState<Record<string, boolean>>({})
   const [jiraConnected, setJiraConnected] = useState(false)
-  const [jiraConnecting, setJiraConnecting] = useState(false)
-  const [jiraConnectError, setJiraConnectError] = useState<string | null>(null)
   const [theme, setThemeState] = useState<ThemeMode>(() => getStoredTheme())
-  const [sshTestState, setSshTestState] = useState<
-    { kind: 'idle' } | { kind: 'running' } | { kind: 'ok' } | { kind: 'fail'; stderr: string }
-  >({ kind: 'idle' })
 
   const access = computeAccess({
     isLocal,
@@ -194,29 +164,6 @@ export default function Settings() {
     teamRole,
   })
   const { isN1, isOrgAdmin, isTeamAdmin } = access
-
-  // Test SSH preflight on demand. Doesn't save settings — purely
-  // diagnostic. Useful for users on the Settings page after they've
-  // toggled SSH (or fixed their key) and want a clean confirmation
-  // before saving and watching the bootstrap re-run.
-  const testSSH = async () => {
-    setSshTestState({ kind: 'running' })
-    try {
-      const res = await fetch('/api/github/preflight-ssh', { method: 'POST' })
-      if (!res.ok) {
-        setSshTestState({ kind: 'fail', stderr: `Server returned ${res.status}` })
-        return
-      }
-      const data = (await res.json()) as { ok: boolean; stderr?: string }
-      if (data.ok) {
-        setSshTestState({ kind: 'ok' })
-      } else {
-        setSshTestState({ kind: 'fail', stderr: data.stderr || 'Preflight failed.' })
-      }
-    } catch (err) {
-      setSshTestState({ kind: 'fail', stderr: (err as Error).message })
-    }
-  }
 
   useEffect(() => {
     Promise.all([
@@ -285,40 +232,6 @@ export default function Settings() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // GitHub App status drives the "GitHub access" panel. Refetch on window
-  // focus too: after "Install on another account" opens GitHub in a new
-  // tab, returning focus to this tab is the cue that a new installation
-  // may exist (the webhook lands the row server-side; in local mode behind
-  // NAT it arrives via API backfill on the next poll).
-  //
-  // orgId is null in multi mode until the active org resolves — stay in the
-  // loading state rather than fetch the wrong org. The mount call runs once;
-  // the focus listener only fires on subsequent focus events (no double
-  // fetch on mount). A focus-refetch failure keeps any already-loaded data
-  // rather than flipping the panel to an error.
-  useEffect(() => {
-    if (!orgId) return
-    let cancelled = false
-    const load = () => {
-      getGitHubAppStatus(orgId)
-        .then((s) => {
-          if (!cancelled) setGhAppState({ kind: 'loaded', status: s })
-        })
-        .catch(() => {
-          if (!cancelled) {
-            setGhAppState((prev) => (prev.kind === 'loaded' ? prev : { kind: 'error' }))
-          }
-        })
-    }
-    load()
-    const onFocus = () => load()
-    window.addEventListener('focus', onFocus)
-    return () => {
-      cancelled = true
-      window.removeEventListener('focus', onFocus)
-    }
-  }, [orgId, ghReloadKey])
-
   // fetchJiraStatuses queries the backend for statuses across the
   // given project list. The backend intersects across projects, so
   // the returned list is the safe set to offer in EVERY project's
@@ -348,90 +261,28 @@ export default function Settings() {
     }
   }
 
-  const connectJira = async () => {
-    setJiraConnecting(true)
-    setJiraConnectError(null)
-    try {
-      const res = await fetch('/api/jira/connect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: form.jira_url, pat: form.jira_pat }),
-      })
-      const body = await res.json()
-      if (!res.ok) {
-        setJiraConnectError(body.error || 'Connection failed')
-        return
-      }
-      // If URL changed from what was previously stored, wipe project/status config
-      if (data && data.jira.base_url && data.jira.base_url !== form.jira_url) {
-        setForm((f) => ({
-          ...f,
-          jira_pat: '',
-          jira_projects: [],
-        }))
-        setJiraStatusesByProject({})
-      } else {
-        setForm((f) => ({ ...f, jira_pat: '' }))
-      }
-      setJiraConnected(true)
-    } catch {
-      setJiraConnectError('Could not connect to server')
-    } finally {
-      setJiraConnecting(false)
+  // Jira connect/disconnect live in JiraAccessGroup now; these callbacks
+  // own the team-scope follow-up the shared group can't see. On a connect
+  // against a different instance URL, the prior team project/status config
+  // no longer maps, so it's wiped; disconnect clears it outright.
+  const onJiraConnected = (url: string) => {
+    if (data && data.jira.base_url && data.jira.base_url !== url) {
+      setForm((f) => ({ ...f, jira_projects: [] }))
+      setJiraStatusesByProject({})
     }
+    setJiraConnected(true)
   }
 
-  const disconnectJira = async () => {
-    try {
-      // DELETE /api/integrations/jira clears the SecretStore entries
-      // (URL + PAT) but leaves org_settings.jira_base_url populated.
-      // Follow with an explicit org POST so the URL column also clears,
-      // otherwise reloading the page would show the stale URL prefilled
-      // with has_jira_pat:false.
-      const credRes = await fetch('/api/integrations/jira', { method: 'DELETE' })
-      if (!credRes.ok) return
-      const orgRes = await fetch('/api/settings/org', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jira_base_url: '' }),
-      })
-      if (!orgRes.ok) return
-    } catch {
-      return
-    }
+  const onJiraDisconnected = () => {
     setJiraConnected(false)
     setJiraStatusesByProject({})
-    setForm((f) => ({
-      ...f,
-      jira_enabled: false,
-      jira_url: '',
-      jira_pat: '',
-      jira_projects: [],
-    }))
+    setForm((f) => ({ ...f, jira_enabled: false, jira_projects: [] }))
   }
 
-  // registerGitHubApp leaves the page: it navigates to the backend launch
-  // bounce page, which renders the manifest form under its own CSP and
-  // POSTs to github.com on confirm. Control returns via the callback
-  // redirect, not here.
-  const registerGitHubApp = () => {
-    if (!orgId) return
-    setGhAppRegistering(true)
-    startGitHubAppRegistration(orgId, {
-      owner_type: ghAppOwnerType,
-      owner_login: ghAppOwnerLogin.trim(),
-    })
-  }
-
-  const openInstallOnAccount = async () => {
-    if (!orgId) return
-    try {
-      const url = await getGitHubAppInstallURL(orgId)
-      window.open(url, '_blank', 'noopener,noreferrer')
-    } catch (err) {
-      toast.error((err as Error).message)
-    }
-  }
+  // Spread a shared field-group patch into the flat form state. The group
+  // patches are keyed by the org_settings field names, so this is a plain
+  // merge — no per-field mapping.
+  const patchForm = (patch: Partial<typeof form>) => setForm((f) => ({ ...f, ...patch }))
 
   const update = (field: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     setForm((f) => ({ ...f, [field]: e.target.value }))
@@ -546,26 +397,26 @@ export default function Settings() {
     return true
   }
 
+  // saveOrg persists the org-level field group through the shared
+  // saveOrgConfig helper (the same POST /api/settings/org path the
+  // create-configure step and Setup use), then folds the saved values back
+  // into `data` so the next change-detection compares against current
+  // state, not the stale mount snapshot.
   const saveOrg = async (): Promise<boolean> => {
-    const res = await fetch('/api/settings/org', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        github_base_url: form.github_url,
-        github_pat: form.github_pat || undefined,
-        github_poll_interval: form.github_poll_interval,
-        github_clone_protocol: form.github_clone_protocol,
-        jira_base_url: form.jira_url,
-        jira_pat: form.jira_pat || undefined,
-        jira_poll_interval: form.jira_poll_interval,
-        max_llm_model_tier: form.max_llm_model_tier,
-      }),
+    const result = await saveOrgConfig({
+      github_url: form.github_url,
+      github_pat: form.github_pat,
+      github_clone_protocol: form.github_clone_protocol,
+      github_poll_interval: form.github_poll_interval,
+      jira_url: form.jira_url,
+      jira_pat: form.jira_pat,
+      jira_poll_interval: form.jira_poll_interval,
+      max_llm_model_tier: form.max_llm_model_tier,
     })
-    if (!res.ok) {
-      toast.error(await readError(res, 'Failed to save settings'))
+    if (!result.ok) {
+      toast.error(result.error)
       return false
     }
-    const body = (await res.json().catch(() => null)) as { warning?: string } | null
     setData((d) =>
       d
         ? {
@@ -589,7 +440,7 @@ export default function Settings() {
     )
     // Lowering the cap below the default team's preference still saves;
     // the warning surfaces that its effective model dropped.
-    if (body?.warning) toast.info(body.warning)
+    if (result.warning) toast.info(result.warning)
     return true
   }
 
@@ -661,374 +512,46 @@ export default function Settings() {
 
   // ---- Section renderers (closures over current state; no prop drilling).
 
-  const renderGitHub = () => (
-    <Section>
-      <h2 className="text-[13px] font-medium text-text-secondary mb-4">GitHub</h2>
-      <div className="space-y-3">
-        <Field label="Base URL">
-          <input
-            type="url"
-            placeholder="https://github.com"
-            value={form.github_url}
-            onChange={update('github_url')}
-            className={inputClass}
-          />
-        </Field>
-        <Field label={`Token${data.github.has_token ? ' (leave blank to keep current)' : ''}`}>
-          <input
-            type="password"
-            placeholder={data.github.has_token ? '••••••••' : 'GitHub Personal Access Token'}
-            value={form.github_pat}
-            onChange={update('github_pat')}
-            className={inputClass}
-          />
-          <p className="text-[11px] text-text-tertiary mt-1">
-            Requires a{' '}
-            <a
-              href="https://github.com/settings/tokens/new?scopes=repo,read:org&description=Triage+Factory"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-accent hover:underline"
-            >
-              classic PAT
-            </a>{' '}
-            with <code className="text-text-secondary">repo</code> and{' '}
-            <code className="text-text-secondary">read:org</code> scopes.{' '}
-            <code className="text-text-secondary">read:org</code> is needed to resolve your team
-            memberships so review requests sent to your teams (e.g. CODEOWNERS) surface as tasks —
-            without it, only PRs that request you individually will show up.
-          </p>
-        </Field>
-        <Field label="Poll interval">
-          <select
-            value={form.github_poll_interval}
-            onChange={update('github_poll_interval')}
-            className={inputClass}
-          >
-            <option value="30s">30 seconds</option>
-            <option value="1m0s">1 minute</option>
-            <option value="2m0s">2 minutes</option>
-            <option value="5m0s">5 minutes</option>
-          </select>
-        </Field>
-        {/* Clone protocol is local-mode-only: multi-mode deployments
-            hardwire HTTPS (App-token credential; the container has no SSH
-            machinery), so there's nothing to choose and no SSH to test. */}
-        {isLocal && (
-          <Field label="Clone protocol">
-            <div className="flex items-center gap-3">
-              <div className="inline-flex rounded-lg border border-border-glass bg-black/[0.02] p-0.5">
-                {(['ssh', 'https'] as const).map((p) => (
-                  <button
-                    key={p}
-                    type="button"
-                    onClick={() => {
-                      setForm((f) => ({ ...f, github_clone_protocol: p }))
-                      setSshTestState({ kind: 'idle' })
-                    }}
-                    className={`px-3 py-1 text-[12px] font-medium rounded-md transition-colors ${
-                      form.github_clone_protocol === p
-                        ? 'bg-white text-text-primary shadow-sm'
-                        : 'text-text-tertiary hover:text-text-secondary'
-                    }`}
-                  >
-                    {p.toUpperCase()}
-                  </button>
-                ))}
-              </div>
-              <button
-                type="button"
-                onClick={testSSH}
-                disabled={sshTestState.kind === 'running'}
-                className="text-[11px] text-accent hover:underline disabled:opacity-50"
-              >
-                {sshTestState.kind === 'running' ? 'Testing...' : 'Test SSH connection'}
-              </button>
-            </div>
-            <p className="text-[11px] text-text-tertiary mt-1.5 leading-relaxed">
-              Your token is still required for the GitHub API. The protocol only affects how Triage
-              Factory clones repos to your machine. Saving the toggle re-clones bare repos with the
-              new origin URL.
-            </p>
-            {sshTestState.kind === 'ok' && (
-              <p className="text-[11px] text-[var(--color-claim)] mt-1.5">
-                ✓ SSH preflight succeeded — git@
-                {(() => {
-                  try {
-                    return new URL(form.github_url).hostname || 'github.com'
-                  } catch {
-                    return 'github.com'
-                  }
-                })()}{' '}
-                is reachable with your key.
-              </p>
-            )}
-            {sshTestState.kind === 'fail' && (
-              <pre
-                className="
-              mt-1.5 max-h-[120px] overflow-auto rounded
-              bg-[var(--color-dismiss)]/10 p-2 text-[11px]
-              text-[var(--color-dismiss)] whitespace-pre-wrap break-words
-            "
-              >
-                {sshTestState.stderr}
-              </pre>
-            )}
-          </Field>
-        )}
-      </div>
-    </Section>
+  // GitHub access (org scope): base URL + PAT + clone protocol, plus the
+  // App-registration alternative — all shared with the create-configure
+  // step and (PAT path) the local Setup wizard.
+  const renderGitHubAccess = () => (
+    <GitHubAccessGroup
+      value={{
+        github_url: form.github_url,
+        github_pat: form.github_pat,
+        github_clone_protocol: form.github_clone_protocol,
+      }}
+      onChange={patchForm}
+      hasToken={data.github.has_token}
+      isLocal={isLocal}
+      orgId={orgId}
+    />
   )
 
-  // GitHub access (App registration). Org/workspace scope. An alternative
-  // to the PAT above — a registered App polls under its own bot identity.
-  // Local + self-host have no deployment-default App, so the only path is
-  // "register your own"; the hosted-default one-click option lands with the
-  // hosted-default backend mechanism.
-  const renderGitHubApp = () => {
-    const status = ghAppState.kind === 'loaded' ? ghAppState.status : null
-    const app = status?.app ?? null
-    return (
-      <Section>
-        <h2 className="text-[13px] font-medium text-text-secondary mb-1">GitHub access</h2>
-        <p className="text-[11px] text-text-tertiary mb-4 leading-relaxed">
-          A GitHub App is an alternative to the Personal Access Token above — it polls under its own
-          bot identity and supports multiple installations. The PAT keeps working as the simpler
-          default; you don&rsquo;t need both.
-        </p>
+  // Jira access (org scope): credentials + connect/disconnect. Poll cadence
+  // moved to the shared poller-timing group.
+  const renderJiraAccess = () => (
+    <JiraAccessGroup
+      value={{ jira_url: form.jira_url, jira_pat: form.jira_pat }}
+      onChange={patchForm}
+      connected={jiraConnected}
+      onConnected={onJiraConnected}
+      onDisconnected={onJiraDisconnected}
+    />
+  )
 
-        {ghAppState.kind === 'loading' && (
-          <p className="text-[12px] text-text-tertiary italic">Loading GitHub App status…</p>
-        )}
-
-        {ghAppState.kind === 'error' && (
-          <div className="flex items-center justify-between gap-2 rounded-xl bg-dismiss/[0.06] border border-dismiss/15 px-4 py-2.5">
-            <span className="text-[12px] text-dismiss">Couldn&rsquo;t load GitHub App status.</span>
-            <button
-              type="button"
-              onClick={() => setGhReloadKey((k) => k + 1)}
-              className="shrink-0 text-[11px] text-accent hover:text-accent/80"
-            >
-              Retry
-            </button>
-          </div>
-        )}
-
-        {status &&
-          (app ? (
-            <div className="space-y-3">
-              <button
-                type="button"
-                onClick={() => setGhAppDetailsExpanded((v) => !v)}
-                aria-expanded={ghAppDetailsExpanded}
-                className="w-full flex items-center gap-2 rounded-xl bg-claim/[0.06] border border-claim/15 px-4 py-2.5 text-left transition-colors hover:bg-claim/[0.1]"
-              >
-                <div className="w-1.5 h-1.5 rounded-full bg-claim shrink-0" />
-                <span className="text-[12px] text-claim flex-1">
-                  Connected to GitHub via your own App ({app.slug})
-                </span>
-                {ghAppDetailsExpanded ? (
-                  <ChevronDown size={14} className="text-claim/70 shrink-0" />
-                ) : (
-                  <ChevronRight size={14} className="text-claim/70 shrink-0" />
-                )}
-              </button>
-
-              {ghAppDetailsExpanded && (
-                <div className="text-[11px] text-text-tertiary space-y-0.5 px-1">
-                  <p>
-                    App slug: <span className="text-text-secondary">{app.slug}</span>
-                  </p>
-                  {app.registered_at && (
-                    <p>
-                      Registered:{' '}
-                      <span className="text-text-secondary">
-                        {new Date(app.registered_at).toLocaleDateString()}
-                      </span>
-                      {app.registered_by_display_name
-                        ? ` by ${app.registered_by_display_name}`
-                        : ''}
-                    </p>
-                  )}
-                  <p>
-                    Installations:{' '}
-                    <span className="text-text-secondary">{status.installations.length}</span>
-                  </p>
-                  {status.installations.length > 0 && (
-                    <div className="space-y-1 pt-2">
-                      {status.installations.map((inst) => (
-                        <div
-                          key={inst.installation_id}
-                          className="flex items-center justify-between rounded-xl border border-border-subtle bg-white/40 px-3 py-2"
-                        >
-                          <span className="text-[12px] text-text-primary">
-                            {inst.account_login}
-                          </span>
-                          <span className="text-[10px] uppercase tracking-wide text-text-tertiary">
-                            {inst.account_type}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {status.installations.length === 0 ? (
-                <div className="space-y-2">
-                  <button
-                    type="button"
-                    onClick={openInstallOnAccount}
-                    className="inline-flex items-center gap-1.5 text-[12px] text-accent hover:text-accent/80 border border-accent/20 rounded-xl px-4 py-2 transition-colors"
-                  >
-                    <ExternalLink size={13} />
-                    Install the App on your repositories
-                  </button>
-                  <p className="text-[11px] text-text-tertiary leading-relaxed">
-                    Registering created the App, but GitHub doesn&rsquo;t grant repo access until
-                    it&rsquo;s installed. Install it to choose which repositories Triage Factory can
-                    see — pick &ldquo;All&rdquo; for parity with PAT behavior, or specific repos for
-                    tighter scope. This choice does not inherit from your PAT.
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  <button
-                    type="button"
-                    onClick={openInstallOnAccount}
-                    className="inline-flex items-center gap-1.5 text-[12px] text-accent hover:text-accent/80 border border-accent/20 rounded-xl px-4 py-2 transition-colors"
-                  >
-                    <ExternalLink size={13} />
-                    Install on another GitHub account
-                  </button>
-                  <p className="text-[11px] text-text-tertiary leading-relaxed">
-                    GitHub will ask which repositories to grant. This choice does not inherit from
-                    your PAT.
-                  </p>
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="space-y-3">
-              <Field label="Account type">
-                <div className="inline-flex rounded-lg border border-border-glass bg-black/[0.02] p-0.5">
-                  {(['user', 'org'] as const).map((t) => (
-                    <button
-                      key={t}
-                      type="button"
-                      onClick={() => setGhAppOwnerType(t)}
-                      className={`px-3 py-1 text-[12px] font-medium rounded-md transition-colors ${
-                        ghAppOwnerType === t
-                          ? 'bg-white text-text-primary shadow-sm'
-                          : 'text-text-tertiary hover:text-text-secondary'
-                      }`}
-                    >
-                      {t === 'user' ? 'Personal' : 'Organization'}
-                    </button>
-                  ))}
-                </div>
-              </Field>
-              <Field label={ghAppOwnerType === 'org' ? 'GitHub organization' : 'GitHub username'}>
-                <input
-                  type="text"
-                  placeholder={ghAppOwnerType === 'org' ? 'your-org' : 'your-username'}
-                  value={ghAppOwnerLogin}
-                  onChange={(e) => setGhAppOwnerLogin(e.target.value)}
-                  className={inputClass}
-                />
-              </Field>
-              <button
-                type="button"
-                onClick={registerGitHubApp}
-                disabled={ghAppRegistering || !ghAppOwnerLogin.trim()}
-                className="w-full bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
-              >
-                {ghAppRegistering ? 'Redirecting to GitHub…' : 'Register your own GitHub App'}
-              </button>
-              <p className="text-[11px] text-text-tertiary leading-relaxed">
-                You&rsquo;ll be taken to GitHub to confirm the App, then returned here. GitHub will
-                ask which repositories to grant on install.
-              </p>
-            </div>
-          ))}
-      </Section>
-    )
-  }
-
-  const renderJiraConnection = () => (
-    <Section>
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-[13px] font-medium text-text-secondary">Jira connection</h2>
-        {jiraConnected && (
-          <button
-            type="button"
-            onClick={disconnectJira}
-            className="text-[11px] text-dismiss hover:text-dismiss/80 transition-colors"
-          >
-            Disconnect
-          </button>
-        )}
-      </div>
-
-      {!jiraConnected ? (
-        /* Stage 1: Connect credentials */
-        <div className="space-y-3">
-          <Field label="Base URL">
-            <input
-              type="url"
-              placeholder="https://jira.yourcompany.com"
-              value={form.jira_url}
-              onChange={update('jira_url')}
-              className={inputClass}
-            />
-          </Field>
-          <Field label="Personal Access Token">
-            <input
-              type="password"
-              placeholder="Jira Personal Access Token"
-              value={form.jira_pat}
-              onChange={update('jira_pat')}
-              className={inputClass}
-            />
-          </Field>
-          {jiraConnectError && (
-            <div className="rounded-xl px-4 py-2.5 text-[13px] bg-dismiss/[0.08] border border-dismiss/20 text-dismiss">
-              {jiraConnectError}
-            </div>
-          )}
-          <button
-            type="button"
-            onClick={connectJira}
-            disabled={jiraConnecting || !form.jira_url.trim() || !form.jira_pat.trim()}
-            className="w-full bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
-          >
-            {jiraConnecting ? 'Connecting...' : 'Connect'}
-          </button>
-        </div>
-      ) : (
-        /* Stage 2: connected — show status + poll interval */
-        <div className="space-y-3">
-          <div className="flex items-center gap-2 rounded-xl bg-claim/[0.06] border border-claim/15 px-4 py-2.5">
-            <div className="w-1.5 h-1.5 rounded-full bg-claim shrink-0" />
-            <span className="text-[12px] text-claim">
-              Connected to {form.jira_url.replace(/^https?:\/\//, '')}
-            </span>
-          </div>
-          <Field label="Poll interval">
-            <select
-              value={form.jira_poll_interval}
-              onChange={update('jira_poll_interval')}
-              className={inputClass}
-            >
-              <option value="30s">30 seconds</option>
-              <option value="1m0s">1 minute</option>
-              <option value="2m0s">2 minutes</option>
-              <option value="5m0s">5 minutes</option>
-            </select>
-          </Field>
-        </div>
-      )}
-    </Section>
+  // Poller timing (org scope): GitHub + Jira cadence. The Jira interval is
+  // only meaningful once Jira is connected.
+  const renderPollerTiming = () => (
+    <PollerTimingGroup
+      value={{
+        github_poll_interval: form.github_poll_interval,
+        jira_poll_interval: form.jira_poll_interval,
+      }}
+      onChange={patchForm}
+      showJira={jiraConnected}
+    />
   )
 
   const renderJiraProjects = () => (
@@ -1194,25 +717,7 @@ export default function Settings() {
   // Workspace (org) scope: a hard ceiling over every team's model choice.
   // The team default lives in renderAI (team scope); this caps it.
   const renderModelCap = () => (
-    <Section>
-      <h2 className="text-[13px] font-medium text-text-secondary mb-4">AI</h2>
-      <Field label="Max model tier (workspace cap)">
-        <select
-          value={form.max_llm_model_tier}
-          onChange={update('max_llm_model_tier')}
-          className={inputClass}
-        >
-          <option value="">No cap</option>
-          <option value="haiku">Haiku</option>
-          <option value="sonnet">Sonnet</option>
-          <option value="opus">Opus</option>
-        </select>
-        <p className="text-[11px] text-text-tertiary mt-1">
-          Hard ceiling for the whole workspace. A team default above this cap is clamped down to it
-          — the team is told, but the cap wins.
-        </p>
-      </Field>
-    </Section>
+    <ModelGroup value={{ max_llm_model_tier: form.max_llm_model_tier }} onChange={patchForm} />
   )
 
   const renderAppearance = () => (
@@ -1314,9 +819,9 @@ export default function Settings() {
 
   const workspaceSections = (
     <>
-      {renderGitHub()}
-      {renderGitHubApp()}
-      {renderJiraConnection()}
+      {renderGitHubAccess()}
+      {renderJiraAccess()}
+      {renderPollerTiming()}
       {renderModelCap()}
       {renderTeams()}
       {renderIntegrations()}
@@ -1338,10 +843,10 @@ export default function Settings() {
           Settings
         </h1>
         <form onSubmit={saveAll} className="space-y-5">
-          {renderGitHub()}
-          {renderGitHubApp()}
+          {renderGitHubAccess()}
           <GitHubGroupsEditor teamId="default" canEdit={isTeamAdmin} />
-          {renderJiraConnection()}
+          {renderJiraAccess()}
+          {renderPollerTiming()}
           {renderJiraProjects()}
           {renderAI()}
           {renderModelCap()}
@@ -1426,30 +931,6 @@ export default function Settings() {
         </div>
       )}
     </div>
-  )
-}
-
-const inputClass =
-  'w-full bg-white/50 border border-border-subtle rounded-xl px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/40 transition-colors disabled:opacity-60 disabled:cursor-not-allowed'
-
-function Section({ children, danger }: { children: React.ReactNode; danger?: boolean }) {
-  return (
-    <section
-      className={`backdrop-blur-xl bg-surface-raised border rounded-2xl p-6 shadow-sm shadow-black/[0.03] ${
-        danger ? 'border-dismiss/15' : 'border-border-glass'
-      }`}
-    >
-      {children}
-    </section>
-  )
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="block">
-      <span className="text-[11px] text-text-tertiary mb-1.5 block">{label}</span>
-      {children}
-    </label>
   )
 }
 
