@@ -15,7 +15,7 @@ import {
   applyNodeChanges,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { Layers, MoreVertical } from 'lucide-react'
+import { Copy, Layers, MoreVertical } from 'lucide-react'
 import type { Blueprint, BlueprintStep, Prompt, TriggerHandler } from '../types'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
@@ -376,6 +376,48 @@ function planConnection(c: Connection, m: Membership): ConnPlan {
   return { ok: false, reason: 'Unsupported connection' }
 }
 
+// --- Duplication ---
+// Copies land at a fixed offset from their originals so a duplicate reads as a
+// distinct, unstacked copy (and a group duplicate keeps the selection's relative
+// layout, shifted as a whole).
+const DUP_OFFSET = 40
+
+// orderSelectedPromptIds reproduces the duplicate endpoint's deterministic output
+// ordering (its PartitionDuplicationRuns) on the client, so a returned copy can be
+// placed at its original's position. The endpoint groups the selected prompts by
+// source blueprint (id-sorted), sorts each group by step_index, drops duplicate
+// selections, and partitions into contiguous runs; flattening that in order is
+// simply blueprints-by-id then steps-by-index. Reproducing exactly that flattened
+// order means returned-copy[k] corresponds to original[k]. Unresolvable ids (a
+// stale clipboard entry whose prompt is gone) are dropped, matching the endpoint.
+function orderSelectedPromptIds(
+  promptIds: string[],
+  stepsByBlueprint: Record<string, string[]>,
+  promptToBlueprint: Record<string, string>,
+): string[] {
+  const byBlueprint = new Map<string, number[]>()
+  const seen = new Set<string>()
+  for (const pid of promptIds) {
+    if (seen.has(pid)) continue
+    seen.add(pid)
+    const bpId = promptToBlueprint[pid]
+    if (!bpId) continue
+    const idx = (stepsByBlueprint[bpId] ?? []).indexOf(pid)
+    if (idx < 0) continue
+    const arr = byBlueprint.get(bpId)
+    if (arr) arr.push(idx)
+    else byBlueprint.set(bpId, [idx])
+  }
+  const out: string[] = []
+  for (const bpId of [...byBlueprint.keys()].sort()) {
+    const steps = stepsByBlueprint[bpId] ?? []
+    for (const idx of [...new Set(byBlueprint.get(bpId)!)].sort((a, b) => a - b)) {
+      out.push(steps[idx])
+    }
+  }
+  return out
+}
+
 // --- Inner Graph ---
 
 function BindingGraphInner({
@@ -477,6 +519,15 @@ function BindingGraphInner({
   onTriggerClickRef.current = onTriggerClick
   const onTriggerDeletedRef = useRef(onTriggerDeleted)
   onTriggerDeletedRef.current = onTriggerDeleted
+  // In-canvas clipboard backing Cmd/Ctrl+C → V. Same-scope only: it carries the
+  // scope's storage key so a copy in one team/template can't paste into another
+  // (the endpoint would reject the cross-scope ids anyway; this fails the gesture
+  // cleanly first). Page-local — not persisted across reloads (a non-goal).
+  const clipboardRef = useRef<{ scopeKey: string; promptIds: string[] } | null>(null)
+  // Prompt ids to mark selected after the next fetch rebuilds the nodes — set by a
+  // duplicate so the freshly-pasted copies come back selected and immediately
+  // wireable. Read + cleared in the node-build effect.
+  const pendingSelectRef = useRef<Set<string>>(new Set())
 
   const fetchAll = useCallback(async () => {
     // Hold in the loading state until the scope resolves. For team scope, a
@@ -746,6 +797,9 @@ function BindingGraphInner({
         id: `et:${et.id}`,
         type: 'eventType',
         position: pos,
+        // Events aren't duplication targets — only prompt (step) nodes are
+        // selectable so a marquee/Ctrl+D never sweeps an event in. Still draggable.
+        selectable: false,
         data: {
           label: et.label,
           source: et.source,
@@ -776,6 +830,9 @@ function BindingGraphInner({
           id: `p:${pid}`,
           type: 'prompt',
           position: pos,
+          // Freshly-duplicated copies come back selected so a follow-up drag/wire
+          // is immediate (the pending set is cleared once consumed, below).
+          selected: pendingSelectRef.current.has(pid),
           data: {
             label: p.name,
             source: p.source,
@@ -790,6 +847,9 @@ function BindingGraphInner({
 
     const nonBox = [...eventNodes, ...promptNodes]
     setNodes([...computeBoxNodes(nonBox), ...nonBox])
+    // Pending selection is one-shot — consumed by this rebuild so a later,
+    // unrelated fetch doesn't re-select stale ids.
+    if (pendingSelectRef.current.size > 0) pendingSelectRef.current = new Set()
   }, [
     eventTypes,
     prompts,
@@ -1061,6 +1121,143 @@ function BindingGraphInner({
     [scopeReady, template, teamId, fetchAll],
   )
 
+  // Deep-copy a flat set of prompt ids into new trigger-less blueprint(s) via the
+  // duplicate endpoint, then place + select the copies and refetch. The endpoint
+  // owns the grouping (induced contiguous runs → trigger-less blueprint copies),
+  // so the canvas just resolves the selection to prompt ids and sends the set; the
+  // returned blueprints come back in a deterministic order that orderSelectedPromptIds
+  // mirrors, letting each copy land at its original's position + offset (relative
+  // layout preserved, shifted as a group). Both scopes share the call — only the
+  // REST root differs (blueprintsBase).
+  const duplicatePromptIds = useCallback(
+    async (promptIds: string[]) => {
+      if (!scopeReady) return
+      const origOrdered = orderSelectedPromptIds(
+        promptIds,
+        blueprintStepsRef.current,
+        promptToBlueprintRef.current,
+      )
+      if (origOrdered.length === 0) return
+      // Team scope stamps the acting team; template scope is org-scoped.
+      const body: Record<string, unknown> = { prompt_ids: origOrdered }
+      if (!template) body.team_id = teamId
+      try {
+        const res = await fetch(`${blueprintsBase(template)}/duplicate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        })
+        if (!res.ok) {
+          toast.error(await readError(res, 'Failed to duplicate'))
+          return
+        }
+        const created = (await res.json()) as { blueprint: Blueprint; steps: BlueprintStep[] }[]
+        // Flatten the returned steps in the endpoint's order (blueprints as
+        // returned, steps by step_index); this aligns 1:1 with origOrdered.
+        const newOrdered: string[] = []
+        for (const bp of created) {
+          for (const s of [...bp.steps].sort((a, b) => a.step_index - b.step_index)) {
+            newOrdered.push(s.step_prompt_id)
+          }
+        }
+        // Pre-seed each copy's layout position at its original + offset so it
+        // renders offset (and distinct) on the refetch rather than at the default
+        // grid spot. Original position comes from the live node (most current,
+        // including unsaved drags), falling back to the persisted layout.
+        const layout = layoutRef.current
+        const n = Math.min(origOrdered.length, newOrdered.length)
+        for (let k = 0; k < n; k++) {
+          const origNode = nodesRef.current.find((nd) => nd.id === `p:${origOrdered[k]}`)
+          const origPos = origNode?.position ?? layout.promptPositions[origOrdered[k]]
+          if (origPos) {
+            layout.promptPositions[newOrdered[k]] = {
+              x: origPos.x + DUP_OFFSET,
+              y: origPos.y + DUP_OFFSET,
+            }
+          }
+        }
+        saveLayout(storageKeyRef.current, layout)
+        pendingSelectRef.current = new Set(newOrdered)
+        await fetchAll()
+        const count = newOrdered.length
+        toast.success(`Duplicated ${count} prompt${count === 1 ? '' : 's'}`)
+      } catch (err) {
+        toast.error(`Failed to duplicate: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    },
+    [scopeReady, template, teamId, fetchAll],
+  )
+
+  // The currently-selected prompt nodes' prompt ids (event nodes are
+  // non-selectable, so a selection is always prompts).
+  const selectedPromptIds = useCallback(
+    () =>
+      nodesRef.current.filter((n) => n.type === 'prompt' && n.selected).map((n) => n.id.slice(2)),
+    [],
+  )
+
+  // Cmd/Ctrl+D — duplicate the selection in place. Returns whether it acted (so
+  // the key handler only swallows the event when it did).
+  const duplicateSelection = useCallback(() => {
+    const ids = selectedPromptIds()
+    if (ids.length === 0) return false
+    void duplicatePromptIds(ids)
+    return true
+  }, [selectedPromptIds, duplicatePromptIds])
+
+  // Cmd/Ctrl+C — snapshot the selected prompt ids into the in-canvas clipboard.
+  const copySelection = useCallback(() => {
+    const ids = selectedPromptIds()
+    if (ids.length === 0) return false
+    clipboardRef.current = { scopeKey: storageKeyRef.current, promptIds: ids }
+    toast.success(`Copied ${ids.length} prompt${ids.length === 1 ? '' : 's'}`)
+    return true
+  }, [selectedPromptIds])
+
+  // Cmd/Ctrl+V — paste the clipboard via the duplicate endpoint. Same-scope only:
+  // a clipboard from another team/template is ignored.
+  const pasteClipboard = useCallback(() => {
+    const clip = clipboardRef.current
+    if (!clip || clip.promptIds.length === 0) return false
+    if (clip.scopeKey !== storageKeyRef.current) return false
+    void duplicatePromptIds(clip.promptIds)
+    return true
+  }, [duplicatePromptIds])
+
+  // Keyboard duplication gestures. Window-level (the canvas has no single focus
+  // target), guarded so typing Cmd+C/D/V in an input/textarea/contenteditable —
+  // e.g. the blueprint rename field — is left to the browser.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return
+      const t = e.target as HTMLElement | null
+      if (
+        t &&
+        (t.tagName === 'INPUT' ||
+          t.tagName === 'TEXTAREA' ||
+          t.tagName === 'SELECT' ||
+          t.isContentEditable)
+      ) {
+        return
+      }
+      let handled = false
+      switch (e.key.toLowerCase()) {
+        case 'd':
+          handled = duplicateSelection()
+          break
+        case 'c':
+          handled = copySelection()
+          break
+        case 'v':
+          handled = pasteClipboard()
+          break
+      }
+      if (handled) e.preventDefault()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [duplicateSelection, copySelection, pasteClipboard])
+
   const doDeleteTrigger = useCallback(
     async (triggerId: string) => {
       // Capture trigger info before deletion for the forgiving banner callback.
@@ -1191,6 +1388,11 @@ function BindingGraphInner({
         minZoom={0.4}
         maxZoom={1.5}
         defaultEdgeOptions={{ type: 'default' }}
+        // Multi-select prompt nodes for duplication: Shift+drag the pane for a
+        // marquee, Shift/Cmd/Ctrl-click to add to the selection. The selected set
+        // backs Cmd/Ctrl+D and C/V (see the keydown effect).
+        selectionKeyCode="Shift"
+        multiSelectionKeyCode={['Meta', 'Control', 'Shift']}
         // Deletions go through explicit affordances (prompt drawer, the edge
         // shift-click menu, the event node's ✕) — not a stray Backspace that
         // would only desync the canvas from the backend until the next fetch.
@@ -1291,6 +1493,19 @@ function BindingGraphInner({
             <div className="text-[11px] text-text-tertiary mb-2.5">
               {(blueprintSteps[boxMenu.blueprintId]?.length ?? 0) + ' steps · composed on canvas'}
             </div>
+            {/* Duplicate the whole blueprint — passes all its step prompt ids to the
+                same endpoint, yielding a trigger-less full copy. */}
+            <button
+              onClick={() => {
+                const ids = blueprintSteps[boxMenu.blueprintId] ?? []
+                setBoxMenu(null)
+                void duplicatePromptIds(ids)
+              }}
+              className="w-full flex items-center gap-1.5 text-left text-[12px] text-text-secondary hover:text-text-primary hover:bg-black/[0.04] font-medium px-2.5 py-1.5 rounded-lg border border-border-subtle transition-colors mb-1.5"
+            >
+              <Copy size={12} className="shrink-0" />
+              Duplicate blueprint
+            </button>
             {boxMenuTrigger ? (
               <button
                 onClick={() => {
