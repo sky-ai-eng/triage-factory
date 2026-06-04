@@ -211,6 +211,19 @@ export default function Setup() {
     navigate('/')
   }
 
+  // Back out of the integrations step. Wipe entered-but-unsubmitted Jira
+  // credentials so a stray token can't linger in component state (or be
+  // accidentally submitted later). Connected creds live server-side and the
+  // shared group already clears the PAT on connect, so only the unconnected
+  // case holds anything worth clearing.
+  const backFromIntegrations = () => {
+    setError('')
+    if (!jiraConnected) {
+      setJiraForm((f) => ({ ...f, url: '', pat: '' }))
+    }
+    setStep('github-teams')
+  }
+
   // Continue from the integrations step: connected-but-unconfigured Jira goes
   // to the team project/status step; otherwise (no Jira, or already
   // configured) we're done.
@@ -422,11 +435,7 @@ export default function Setup() {
           <ErrorBanner error={error} />
 
           <div className="flex gap-3">
-            <button
-              type="button"
-              onClick={() => setStep('github-teams')}
-              className={secondaryBtnClass}
-            >
+            <button type="button" onClick={backFromIntegrations} className={secondaryBtnClass}>
               Back
             </button>
             <button type="button" onClick={continueFromIntegrations} className={primaryBtnClass}>
