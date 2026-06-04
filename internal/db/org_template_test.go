@@ -27,7 +27,7 @@ func TestOrgTemplate_UpdateHandler_MatchedSemantics(t *testing.T) {
 	ctx := t.Context()
 	org := runmode.LocalDefaultOrg
 
-	if err := db.BootstrapNewOrg(ctx, stores, org, db.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapNewOrg(ctx, stores, org, runmode.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
 		t.Fatalf("BootstrapNewOrg: %v", err)
 	}
 
@@ -98,7 +98,7 @@ func TestOrgTemplate_CopyOnly_OwnerAndUniqueConstraint(t *testing.T) {
 	stores := sqlitestore.New(conn)
 	ctx := t.Context()
 	org := runmode.LocalDefaultOrg
-	if err := db.BootstrapNewOrg(ctx, stores, org, db.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapNewOrg(ctx, stores, org, runmode.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
 		t.Fatalf("BootstrapNewOrg: %v", err)
 	}
 	if err := stores.OrgTemplate.CreatePrompt(ctx, org, domain.Prompt{ID: "co-p", SystemSlug: "co-step", Name: "P", Body: "b", Source: "user"}); err != nil {
@@ -144,7 +144,7 @@ func TestOrgTemplate_MultiStepBlueprint_DeepCopy(t *testing.T) {
 
 	// Org-create seeds the template (prompts + blueprints + handlers) and
 	// materializes the founder's team from it.
-	if err := db.BootstrapNewOrg(ctx, stores, org, db.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapNewOrg(ctx, stores, org, runmode.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
 		t.Fatalf("BootstrapNewOrg: %v", err)
 	}
 
@@ -295,7 +295,7 @@ func TestOrgTemplate_MergeAndSplit(t *testing.T) {
 	stores := sqlitestore.New(conn)
 	ctx := t.Context()
 	org := runmode.LocalDefaultOrg
-	if err := db.BootstrapNewOrg(ctx, stores, org, db.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapNewOrg(ctx, stores, org, runmode.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
 		t.Fatalf("BootstrapNewOrg: %v", err)
 	}
 	ot := stores.OrgTemplate
@@ -379,7 +379,7 @@ func TestOrgTemplate_DuplicateBlueprintPrompts(t *testing.T) {
 	stores := sqlitestore.New(conn)
 	ctx := t.Context()
 	org := runmode.LocalDefaultOrg
-	if err := db.BootstrapNewOrg(ctx, stores, org, db.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapNewOrg(ctx, stores, org, runmode.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
 		t.Fatalf("BootstrapNewOrg: %v", err)
 	}
 	tmpl := stores.OrgTemplate

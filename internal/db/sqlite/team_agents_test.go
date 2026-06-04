@@ -24,7 +24,7 @@ func TestTeamAgentStore_SQLite(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed agent: %v", err)
 		}
-		return stores.TeamAgents, runmode.LocalDefaultOrg, db.LocalDefaultTeamID, agentID
+		return stores.TeamAgents, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, agentID
 	})
 }
 
