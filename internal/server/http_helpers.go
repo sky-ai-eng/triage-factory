@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -35,6 +36,23 @@ func notFound(w http.ResponseWriter, thing string) {
 // badRequest writes a 400 with the given message.
 func badRequest(w http.ResponseWriter, msg string) {
 	writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
+}
+
+// isUniqueViolation reports whether err is a unique-constraint failure on
+// either driver — SQLite returns "UNIQUE constraint failed: ...", Postgres
+// "duplicate key value violates unique constraint ...". Handlers that pre-check
+// a uniqueness invariant for a clean 409 in the common case still need this to
+// catch the narrow concurrent-writer race where two requests pass the
+// (separate-transaction) pre-check before either writes; the index is the
+// authority and surfaces here rather than as a raw 500. The driver strings leak
+// schema/index names, so callers translate to a generic message and log the raw
+// error.
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "UNIQUE constraint") || strings.Contains(s, "duplicate key")
 }
 
 // requireOrg returns the active org ID from request context. In multi

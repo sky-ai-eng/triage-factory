@@ -378,6 +378,21 @@ func (s *Server) handleBlueprintMerge(w http.ResponseWriter, r *http.Request) {
 			failStatus, failMsg = http.StatusUnprocessableEntity, "the absorbed blueprint has its own event trigger; detach it first"
 			return nil
 		}
+		// Cap: the merged blueprint must stay editable via the normal steps-PUT,
+		// which rejects lists longer than maxBlueprintSteps. Reject up front
+		// rather than minting an un-editable blueprint.
+		hostSteps, e := tx.Blueprints.ListSteps(r.Context(), orgID, hostID)
+		if e != nil {
+			return e
+		}
+		sourceSteps, e := tx.Blueprints.ListSteps(r.Context(), orgID, req.SourceBlueprintID)
+		if e != nil {
+			return e
+		}
+		if len(hostSteps)+len(sourceSteps) > maxBlueprintSteps {
+			failStatus, failMsg = http.StatusUnprocessableEntity, "merged blueprint would exceed "+strconv.Itoa(maxBlueprintSteps)+" steps"
+			return nil
+		}
 		if e := tx.Blueprints.MergeInto(r.Context(), orgID, hostID, req.SourceBlueprintID); e != nil {
 			return e
 		}
@@ -410,8 +425,9 @@ func (s *Server) handleBlueprintMerge(w http.ResponseWriter, r *http.Request) {
 
 type splitBlueprintRequest struct {
 	// AtStepIndex k splits the boundary before step k: steps [0,k) stay on
-	// {id}, steps [k,N) move to a new trigger-less blueprint.
-	AtStepIndex int `json:"at_step_index"`
+	// {id}, steps [k,N) move to a new trigger-less blueprint. Pointer so a
+	// missing field 400s ("required") instead of silently defaulting to 0.
+	AtStepIndex *int `json:"at_step_index"`
 }
 
 // blueprintSplitResponse returns both halves of a split: the upstream blueprint
@@ -436,6 +452,13 @@ func (s *Server) handleBlueprintSplit(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req, "") {
 		return
 	}
+	// *int so a missing field is distinguishable from an explicit 0 (which is a
+	// real index whose 422 message is about non-empty halves, not absence).
+	if req.AtStepIndex == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "at_step_index is required"})
+		return
+	}
+	atIndex := *req.AtStepIndex
 
 	newID := uuid.New().String()
 	var (
@@ -455,19 +478,25 @@ func (s *Server) handleBlueprintSplit(w http.ResponseWriter, r *http.Request) {
 			return e
 		}
 		// 0 < k < N: a split that keeps one side empty is a no-op.
-		if req.AtStepIndex <= 0 || req.AtStepIndex >= len(steps) {
+		if atIndex <= 0 || atIndex >= len(steps) {
 			failStatus, failMsg = http.StatusUnprocessableEntity, "at_step_index must split the blueprint into two non-empty halves"
 			return nil
 		}
 		// The downstream name defaults to its new step-0 prompt's name (the
 		// prompt at the original boundary index), consistent with auto-wrap.
+		// Fall back to a placeholder on the theoretical missing-prompt path so
+		// the new blueprint is never anonymous (prompts.name is non-empty in
+		// practice — create + auto-wrap both require it).
 		newName := ""
-		if p, e := tx.Prompts.Get(r.Context(), orgID, steps[req.AtStepIndex].StepPromptID); e != nil {
+		if p, e := tx.Prompts.Get(r.Context(), orgID, steps[atIndex].StepPromptID); e != nil {
 			return e
 		} else if p != nil {
 			newName = p.Name
 		}
-		if _, e := tx.Blueprints.SplitAt(r.Context(), orgID, id, req.AtStepIndex, newID, newName); e != nil {
+		if newName == "" {
+			newName = "Untitled blueprint"
+		}
+		if _, e := tx.Blueprints.SplitAt(r.Context(), orgID, id, atIndex, newID, newName); e != nil {
 			return e
 		}
 		if upstream, e = tx.Blueprints.Get(r.Context(), orgID, id); e != nil {

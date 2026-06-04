@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 )
@@ -95,6 +96,56 @@ func TestBlueprintMerge_TriggeredSourceRejected(t *testing.T) {
 	_ = json.Unmarshal(steps.Body.Bytes(), &hostSteps)
 	if len(hostSteps) != 1 {
 		t.Fatalf("host steps after rejected merge = %d, want 1 (untouched)", len(hostSteps))
+	}
+}
+
+func TestBlueprintMerge_ExceedsStepCapRejected(t *testing.T) {
+	s := newTestServer(t)
+	// A host already at the cap; merging even a 1-step source would overflow it
+	// into a blueprint the normal steps-PUT (capped at maxBlueprintSteps) could
+	// no longer edit.
+	host := createBareBlueprint(t, s, "BigHost")
+	steps := make([]map[string]any, 0, maxBlueprintSteps)
+	for i := 0; i < maxBlueprintSteps; i++ {
+		pid := createBarePrompt(t, s, fmt.Sprintf("cap-step-%d", i))
+		steps = append(steps, map[string]any{"step_prompt_id": pid})
+	}
+	if put := doJSON(t, s, http.MethodPut, "/api/blueprints/"+host+"/steps", map[string]any{"steps": steps}); put.Code != http.StatusNoContent {
+		t.Fatalf("seed %d steps: %d: %s", maxBlueprintSteps, put.Code, put.Body.String())
+	}
+	source, _ := createWrappedBlueprint(t, s, "OneMore")
+
+	rec := doJSON(t, s, http.MethodPost, "/api/blueprints/"+host+"/merge", map[string]any{
+		"source_blueprint_id": source,
+	})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("merge over cap: expected 422, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Both blueprints untouched — host still at the cap, source not retired.
+	hostSteps := doJSON(t, s, http.MethodGet, "/api/blueprints/"+host+"/steps", nil)
+	var hs composeSteps
+	_ = json.Unmarshal(hostSteps.Body.Bytes(), &hs)
+	if len(hs) != maxBlueprintSteps {
+		t.Fatalf("host steps after rejected merge = %d, want %d (untouched)", len(hs), maxBlueprintSteps)
+	}
+	if g := doJSON(t, s, http.MethodGet, "/api/blueprints/"+source+"/steps", nil); g.Code != http.StatusOK {
+		t.Fatalf("source steps after rejected merge: expected 200 (not retired), got %d", g.Code)
+	}
+}
+
+func TestBlueprintSplit_RequiresIndex(t *testing.T) {
+	s := newTestServer(t)
+	p0 := createBarePrompt(t, s, "R0")
+	p1 := createBarePrompt(t, s, "R1")
+	bp := createBareBlueprint(t, s, "NeedsIndex")
+	doJSON(t, s, http.MethodPut, "/api/blueprints/"+bp+"/steps", map[string]any{
+		"steps": []map[string]any{{"step_prompt_id": p0}, {"step_prompt_id": p1}},
+	})
+	// A missing at_step_index is a clean 400 "required", distinct from the 422
+	// the ends return — a present 0 is a real index, not absence.
+	rec := doJSON(t, s, http.MethodPost, "/api/blueprints/"+bp+"/split", map[string]any{})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("split without at_step_index: expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
