@@ -133,23 +133,22 @@ func (r *resolver) ClientForRepo(ctx context.Context, orgID, owner, repo string)
 	// ambiguous and the grant is knowable ahead of time. A single
 	// GET /repos/{owner}/{repo} on the installation token answers it (200 →
 	// covered, 404/403 → not in grant), far cheaper than paginating the whole
-	// installation repo set; the conclusive answer is memoized (repoCoverageTTL)
-	// so the per-card dashboard path doesn't re-probe every request.
+	// installation repo set; a positive answer is memoized (repoCoverageTTL) so
+	// the per-card dashboard path doesn't re-probe every request. Negatives are
+	// deliberately not cached — see repoCoverageCache.
 	if client, ok := r.tier1AppClient(ctx, orgID, owner, base); ok {
-		covered, cached := r.coverage.get(orgID, owner, repo)
-		if !cached {
-			reachable, conclusive := client.CheckRepoAccess(ctx, owner, repo)
-			if !conclusive {
-				// Indeterminate (5xx / transport error) — fail open with the
-				// minted App client (the same one owner-grain ClientFor would
-				// return) and don't cache, so a transient outage can't pin a
-				// wrong coverage answer.
-				return client, nil
-			}
-			covered = reachable
-			r.coverage.set(orgID, owner, repo, covered)
+		if r.coverage.covered(orgID, owner, repo) {
+			return client, nil // memoized: in the grant
 		}
-		if covered {
+		reachable, conclusive := client.CheckRepoAccess(ctx, owner, repo)
+		if !conclusive {
+			// Indeterminate (5xx / transport error) — fail open with the minted
+			// App client (the same one owner-grain ClientFor would return) and
+			// don't cache, so a transient outage can't pin a wrong answer.
+			return client, nil
+		}
+		if reachable {
+			r.coverage.markCovered(orgID, owner, repo)
 			return client, nil
 		}
 		// Conclusively not covered: installed on this account but this repo

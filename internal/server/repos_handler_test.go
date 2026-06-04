@@ -155,14 +155,22 @@ func TestHandleGitHubRepos_AppListFailureSurfacesError(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v3/app/installations/", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/v3/app/installations/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token":      "ghs_x",
 			"expires_at": time.Now().Add(time.Hour).UTC(),
 		})
 	})
-	mux.HandleFunc("/api/v3/installation/repositories", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/v3/installation/repositories", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		w.WriteHeader(http.StatusInternalServerError)
 	})
 	stub := httptest.NewServer(mux)

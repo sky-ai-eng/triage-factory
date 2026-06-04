@@ -305,7 +305,70 @@ func TestResolver_ClientForRepo_CachesCoverage(t *testing.T) {
 		}
 	}
 	if got := atomic.LoadInt32(&gh.repoProbes); got != 1 {
-		t.Errorf("coverage probes = %d, want 1 (decision should be memoized)", got)
+		t.Errorf("coverage probes = %d, want 1 (positive decision should be memoized)", got)
+	}
+}
+
+// ClientForRepo must NOT cache a non-coverage answer: a repo newly added to a
+// selective grant has to be picked up on the next call, not pinned to the PAT
+// (or to ErrNoGitHubCredentials for an App-only org) for a whole TTL. So each
+// not-covered resolution re-probes.
+func TestResolver_ClientForRepo_DoesNotCacheNonCoverage(t *testing.T) {
+	gh := newGHTestServer(t)
+	gh.installRepos = []string{"acme/widget"} // "acme/other" not granted
+	r := NewResolver(
+		&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
+		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
+		&fakeOrgs{base: gh.srv.URL},
+		&fakeAgents{},
+		nil,
+	)
+
+	for i := 0; i < 2; i++ {
+		if _, err := r.ClientForRepo(context.Background(), "org-1", "acme", "other"); err != nil {
+			t.Fatalf("ClientForRepo #%d: %v", i, err)
+		}
+	}
+	if got := atomic.LoadInt32(&gh.repoProbes); got != 2 {
+		t.Errorf("coverage probes = %d, want 2 (non-coverage must not be cached)", got)
+	}
+}
+
+// A cached positive coverage decision expires after repoCoverageTTL: once the
+// clock advances past it, the next resolution re-probes rather than serving a
+// stale "covered" answer (which would 403 if the grant had since dropped it).
+func TestResolver_ClientForRepo_CoverageExpires(t *testing.T) {
+	gh := newGHTestServer(t)
+	gh.installRepos = []string{"acme/widget"}
+	r := NewResolver(
+		&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
+		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
+		&fakeOrgs{base: gh.srv.URL},
+		&fakeAgents{},
+		nil,
+	)
+	// Drive the cache's clock so the TTL boundary is exercised deterministically.
+	clock := time.Now()
+	r.(*resolver).coverage.now = func() time.Time { return clock }
+
+	if _, err := r.ClientForRepo(context.Background(), "org-1", "acme", "widget"); err != nil {
+		t.Fatalf("ClientForRepo (populate): %v", err)
+	}
+	// Still inside the TTL → cache hit, no re-probe.
+	clock = clock.Add(repoCoverageTTL - time.Second)
+	if _, err := r.ClientForRepo(context.Background(), "org-1", "acme", "widget"); err != nil {
+		t.Fatalf("ClientForRepo (fresh): %v", err)
+	}
+	if got := atomic.LoadInt32(&gh.repoProbes); got != 1 {
+		t.Fatalf("coverage probes = %d before expiry, want 1", got)
+	}
+	// Past the TTL → entry expired, re-probe.
+	clock = clock.Add(2 * time.Second)
+	if _, err := r.ClientForRepo(context.Background(), "org-1", "acme", "widget"); err != nil {
+		t.Fatalf("ClientForRepo (expired): %v", err)
+	}
+	if got := atomic.LoadInt32(&gh.repoProbes); got != 2 {
+		t.Errorf("coverage probes = %d after expiry, want 2 (expired entry must re-probe)", got)
 	}
 }
 
