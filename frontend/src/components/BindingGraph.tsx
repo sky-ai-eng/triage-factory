@@ -95,7 +95,13 @@ function PromptNode({
 }) {
   return (
     <div
-      onClick={data.onClick}
+      onClick={(e) => {
+        // A modifier-click is a multi-select gesture (add to / toggle the
+        // selection), not an "open this prompt" click — let ReactFlow handle the
+        // selection and don't open the drawer over it.
+        if (e.shiftKey || e.metaKey || e.ctrlKey) return
+        data.onClick?.()
+      }}
       className="bg-white/90 backdrop-blur border border-border-subtle rounded-lg px-3 py-2.5 min-w-[200px] max-w-[240px] shadow-sm hover:border-accent/30 hover:shadow-md transition-all cursor-pointer"
     >
       {/* Target (left): a prompt's single input — an event (it becomes a
@@ -1230,6 +1236,8 @@ function BindingGraphInner({
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return
+      // Ignore auto-repeat so holding the combo can't fire a burst of duplicates.
+      if (e.repeat) return
       const t = e.target as HTMLElement | null
       if (
         t &&
@@ -1238,6 +1246,13 @@ function BindingGraphInner({
           t.tagName === 'SELECT' ||
           t.isContentEditable)
       ) {
+        return
+      }
+      // A live text selection (e.g. dragging across a prompt node's body) means
+      // the user wants the browser's native copy/cut/paste — defer to it rather
+      // than hijacking the combo to act on the node selection.
+      const domSelection = window.getSelection()
+      if (domSelection && !domSelection.isCollapsed && domSelection.toString().length > 0) {
         return
       }
       let handled = false
