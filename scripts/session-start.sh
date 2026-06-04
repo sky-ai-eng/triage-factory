@@ -32,8 +32,8 @@ go mod download >>"$log" 2>&1
 
 # REQUIRED: creates frontend/dist for the go:embed above. Without this the
 # root package (and therefore `go test ./...` / `go build .`) does not compile.
-echo "[session-start] frontend: npm install + vite build (creates frontend/dist)"
-( cd frontend && npm install && npm run build ) >>"$log" 2>&1
+echo "[session-start] frontend: npm ci + vite build (creates frontend/dist)"
+( cd frontend && npm ci && npm run build ) >>"$log" 2>&1
 
 # Best-effort: scripts/lint.sh + the repo's PostToolUse formatter need these.
 echo "[session-start] go tooling (goimports, golangci-lint)"
