@@ -47,7 +47,6 @@ func (s *orgsStore) GetOrgSystem(ctx context.Context, orgID string) (*domain.Org
 func (s *orgsStore) CreateLocalTenant(ctx context.Context) error {
 	return fmt.Errorf("db: CreateLocalTenant is not supported in multi mode")
 }
-}
 
 func getOrg(ctx context.Context, q queryer, orgID string) (*domain.Org, error) {
 	var (

@@ -46,12 +46,13 @@ import (
 // user provisions.
 //
 // Fully re-entrant for crash-mid-provision recovery: re-running after a
-// partial provision reaches the same end state. Note: if called after a user
-// deletes shipped defaults, the seed/materialize steps can re-create them;
-// /api/setup/start avoids that by no-op'ing once a tenant exists. shippedPrompts +
-// shippedBlueprints are passed in (rather
-// than read from internal/ai) so internal/db stays free of the ai
-// dependency — the caller supplies ai.ShippedPrompts() /
+// partial provision reaches the same end state. Note that if it runs
+// again after a user has deleted shipped defaults, the seed/materialize
+// steps can re-create them — POST /api/setup/start avoids that by
+// no-op'ing once a tenant exists, which is where the non-resurrection
+// guarantee lives. shippedPrompts + shippedBlueprints are passed in
+// (rather than read from internal/ai) so internal/db stays free of the
+// ai dependency — the caller supplies ai.ShippedPrompts() /
 // ai.ShippedBlueprints().
 func BootstrapLocalOrg(ctx context.Context, stores Stores, shippedPrompts []domain.Prompt, shippedBlueprints []domain.SeedBlueprint) error {
 	if err := stores.Orgs.CreateLocalTenant(ctx); err != nil {

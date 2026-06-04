@@ -48,7 +48,17 @@ func (s *orgsStore) GetOrgSystem(ctx context.Context, orgID string) (*domain.Org
 }
 
 func (s *orgsStore) CreateLocalTenant(ctx context.Context) error {
-	return db.SeedLocalTenantRows(ctx, s.q)
+	// Wrap the multi-statement seed in a single transaction so the tenant
+	// appears all-at-once to other goroutines. Without this, each
+	// INSERT OR IGNORE auto-commits separately and a background loop that
+	// enumerates orgs (poller ListActiveSystem, scorer) could observe the
+	// orgs row before its teams / org_settings / team_settings land,
+	// causing transient "missing settings" errors. inTx reuses the caller's
+	// tx when CreateLocalTenant is composed inside one, or opens a fresh
+	// tx against the *sql.DB otherwise (the provision-action path).
+	return inTx(ctx, s.q, func(q queryer) error {
+		return db.SeedLocalTenantRows(ctx, q)
+	})
 }
 
 func (s *orgsStore) ListActiveSystem(ctx context.Context) ([]string, error) {
