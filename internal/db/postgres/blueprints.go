@@ -393,6 +393,92 @@ func (s *blueprintStore) SplitAt(ctx context.Context, orgID, id string, atIndex 
 	return newBlueprintID, nil
 }
 
+func (s *blueprintStore) DuplicatePrompts(ctx context.Context, orgID, teamID string, promptIDs []string) ([]string, error) {
+	if teamID == "" {
+		return nil, fmt.Errorf("postgres blueprints DuplicatePrompts: team_id required (handler must thread the resolved acting team)")
+	}
+	ids := db.DedupPreserveOrder(promptIDs)
+	if len(ids) == 0 {
+		return nil, db.ErrDuplicateNoPrompts
+	}
+	var newIDs []string
+	err := s.runInTx(ctx, func(tx queryer) error {
+		// Resolve each prompt id → its step + prompt payload. org_id is threaded
+		// through every join for defense in depth alongside RLS; copy-only means
+		// a live prompt is a step of at most one non-deleted blueprint.
+		resolved := make([]db.DuplicationStep, 0, len(ids))
+		for _, pid := range ids {
+			var (
+				st   db.DuplicationStep
+				team string
+			)
+			err := tx.QueryRowContext(ctx, `
+				SELECT bs.blueprint_id, b.name, b.team_id::text, bs.step_index, bs.brief,
+				       p.name, p.body, p.model, p.allowed_tools,
+				       (SELECT COUNT(*) FROM blueprint_steps bs2
+				        WHERE bs2.org_id = $1 AND bs2.blueprint_id = bs.blueprint_id)
+				FROM blueprint_steps bs
+				JOIN blueprints b ON b.id = bs.blueprint_id AND b.org_id = bs.org_id
+				JOIN prompts p ON p.id = bs.step_prompt_id AND p.org_id = bs.org_id
+				WHERE bs.org_id = $1 AND bs.step_prompt_id = $2 AND b.deleted_at IS NULL
+			`, orgID, pid).Scan(&st.BlueprintID, &st.BlueprintName, &team, &st.StepIndex, &st.Brief,
+				&st.PromptName, &st.PromptBody, &st.PromptModel, &st.PromptTools, &st.BlueprintTotal)
+			if errors.Is(err, sql.ErrNoRows) {
+				return db.ErrDuplicatePromptNotFound
+			}
+			if err != nil {
+				return fmt.Errorf("resolve prompt %s: %w", pid, err)
+			}
+			if team != teamID {
+				return db.ErrDuplicateCrossTeam
+			}
+			resolved = append(resolved, st)
+		}
+
+		for _, run := range db.PartitionDuplicationRuns(resolved) {
+			bpID := uuid.New().String()
+			// New blueprint: trigger-less, user source, attributed to the acting
+			// team (validated == every source's team). Creator mirrors Create's
+			// COALESCE(current_user_id, org owner).
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO blueprints (id, org_id, creator_user_id, team_id, name, source, usage_count, created_at, updated_at)
+				VALUES ($1, $2,
+					COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
+					$3::uuid, $4, 'user', 0, now(), now())
+			`, bpID, orgID, teamID, run.Name); err != nil {
+				return fmt.Errorf("create duplicated blueprint: %w", err)
+			}
+			for i, step := range run.Steps {
+				// Deep-copy the prompt into a fresh, independent user row
+				// (system_slug NULL — a copy of a system/imported prompt decouples).
+				newPromptID := uuid.New().String()
+				if _, err := tx.ExecContext(ctx, `
+					INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, allowed_tools, model, usage_count, created_at, updated_at)
+					VALUES ($1, $2,
+						COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
+						$3::uuid, $4, $5, 'user', $6, $7, 0, now(), now())
+				`, newPromptID, orgID, teamID, step.PromptName, step.PromptBody, step.PromptTools, step.PromptModel); err != nil {
+					return fmt.Errorf("copy prompt: %w", err)
+				}
+				// team_id on the step matches the new blueprint + prompt so the
+				// same-team composite FKs resolve.
+				if _, err := tx.ExecContext(ctx, `
+					INSERT INTO blueprint_steps (org_id, team_id, blueprint_id, step_index, step_prompt_id, brief, created_at)
+					VALUES ($1, $2::uuid, $3, $4, $5, $6, now())
+				`, orgID, teamID, bpID, i, newPromptID, step.Brief); err != nil {
+					return fmt.Errorf("insert duplicated step %d: %w", i, err)
+				}
+			}
+			newIDs = append(newIDs, bpID)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return newIDs, nil
+}
+
 // --- Runs ----------------------------------------------------------------
 
 func (s *blueprintStore) CreateRun(ctx context.Context, orgID string, br domain.BlueprintRun) (string, error) {

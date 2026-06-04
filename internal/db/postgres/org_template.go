@@ -664,6 +664,97 @@ func (s *orgTemplateStore) BlueprintStepPromptOwner(ctx context.Context, orgID, 
 	return blueprintID, true, nil
 }
 
+func (s *orgTemplateStore) DuplicateBlueprintPrompts(ctx context.Context, orgID string, promptIDs []string) ([]string, error) {
+	ids := db.DedupPreserveOrder(promptIDs)
+	if len(ids) == 0 {
+		return nil, db.ErrDuplicateNoPrompts
+	}
+	var newIDs []string
+	run := func(tx *sql.Tx) error {
+		list, err := duplicateOrgTemplateBlueprintPrompts(ctx, tx, orgID, ids)
+		newIDs = list
+		return err
+	}
+	switch v := s.app.(type) {
+	case *sql.Tx:
+		if err := run(v); err != nil {
+			return nil, err
+		}
+	case *sql.DB:
+		tx, err := v.BeginTx(ctx, nil)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := run(tx); err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, errors.New("postgres org_template DuplicateBlueprintPrompts: unexpected queryer type")
+	}
+	return newIDs, nil
+}
+
+// duplicateOrgTemplateBlueprintPrompts runs the resolve → partition → deep-copy
+// against the org_template_* tables inside tx. org_id is threaded through every
+// WHERE so an out-of-org id simply fails to resolve.
+func duplicateOrgTemplateBlueprintPrompts(ctx context.Context, tx *sql.Tx, orgID string, ids []string) ([]string, error) {
+	resolved := make([]db.DuplicationStep, 0, len(ids))
+	for _, pid := range ids {
+		var st db.DuplicationStep
+		err := tx.QueryRowContext(ctx, `
+			SELECT bs.blueprint_id, b.name, bs.step_index, bs.brief,
+			       p.name, p.body, p.model, p.allowed_tools,
+			       (SELECT COUNT(*) FROM org_template_blueprint_steps bs2
+			        WHERE bs2.org_id = $1 AND bs2.blueprint_id = bs.blueprint_id)
+			FROM org_template_blueprint_steps bs
+			JOIN org_template_blueprints b ON b.id = bs.blueprint_id AND b.org_id = bs.org_id
+			JOIN org_template_prompts p ON p.id = bs.step_prompt_id AND p.org_id = bs.org_id
+			WHERE bs.org_id = $1 AND bs.step_prompt_id = $2
+		`, orgID, pid).Scan(&st.BlueprintID, &st.BlueprintName, &st.StepIndex, &st.Brief,
+			&st.PromptName, &st.PromptBody, &st.PromptModel, &st.PromptTools, &st.BlueprintTotal)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, db.ErrDuplicatePromptNotFound
+		}
+		if err != nil {
+			return nil, fmt.Errorf("resolve template prompt %s: %w", pid, err)
+		}
+		resolved = append(resolved, st)
+	}
+
+	var newIDs []string
+	for _, r := range db.PartitionDuplicationRuns(resolved) {
+		bpID := uuid.New().String()
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO org_template_blueprints (id, org_id, system_slug, name, source, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, 'user', now(), now())
+		`, bpID, orgID, "tmpl-"+uuid.New().String(), r.Name); err != nil {
+			return nil, fmt.Errorf("create duplicated template blueprint: %w", err)
+		}
+		for i, step := range r.Steps {
+			newPromptID := uuid.New().String()
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO org_template_prompts (id, org_id, system_slug, name, body, source, allowed_tools, model, created_at, updated_at)
+				VALUES ($1, $2, $3, $4, $5, 'user', $6, $7, now(), now())
+			`, newPromptID, orgID, "tmpl-"+uuid.New().String(), step.PromptName, step.PromptBody,
+				step.PromptTools, step.PromptModel); err != nil {
+				return nil, fmt.Errorf("copy template prompt: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO org_template_blueprint_steps (org_id, blueprint_id, step_index, step_prompt_id, brief, created_at)
+				VALUES ($1, $2, $3, $4, $5, now())
+			`, orgID, bpID, i, newPromptID, step.Brief); err != nil {
+				return nil, fmt.Errorf("insert duplicated template step %d: %w", i, err)
+			}
+		}
+		newIDs = append(newIDs, bpID)
+	}
+	return newIDs, nil
+}
+
 func replaceOrgTemplateBlueprintSteps(ctx context.Context, tx *sql.Tx, orgID, blueprintID string, stepPromptIDs, briefs []string) error {
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM org_template_blueprint_steps WHERE org_id = $1 AND blueprint_id = $2`,

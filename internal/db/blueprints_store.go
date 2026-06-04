@@ -2,9 +2,134 @@ package db
 
 import (
 	"context"
+	"errors"
+	"sort"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// Blueprint-duplication sentinel errors. DuplicatePrompts (+ the org-template
+// mirror) returns one of these for the handler to translate into a clean
+// status code rather than a raw 500.
+var (
+	// ErrDuplicateNoPrompts is returned when the prompt-id set is empty after
+	// de-duplication — there is nothing to copy.
+	ErrDuplicateNoPrompts = errors.New("db: duplicate requires at least one prompt id")
+	// ErrDuplicatePromptNotFound is returned when a supplied prompt id does not
+	// resolve to a (non-deleted) blueprint step in the acting scope. Copy-only +
+	// auto-wrap guarantee every live prompt is exactly one blueprint's step, so a
+	// miss means the id is unknown, soft-deleted, or out of scope.
+	ErrDuplicatePromptNotFound = errors.New("db: a prompt id did not resolve to a blueprint step")
+	// ErrDuplicateCrossTeam is returned when the resolved blueprints span more
+	// than the acting team — the endpoint is third-party-callable, so a mixed-
+	// scope id set is rejected rather than trusted.
+	ErrDuplicateCrossTeam = errors.New("db: duplicate prompt set spans more than the acting team")
+)
+
+// DuplicationStep is one selected prompt resolved to its place in a source
+// blueprint, carrying everything the deep-copy needs. It is scope-neutral
+// (no team/org field): the team-scoped impl validates team membership
+// separately, and the org-template mirror has no team dimension.
+type DuplicationStep struct {
+	BlueprintID    string // source blueprint the prompt is a step of
+	BlueprintName  string // source blueprint name (full-run copy naming)
+	BlueprintTotal int    // total steps in the source blueprint (full vs partial)
+	StepIndex      int    // 0-based position in the source blueprint
+	Brief          string // per-step authored text, carried onto the copy
+	PromptName     string
+	PromptBody     string
+	PromptModel    string
+	PromptTools    string // allowed_tools
+}
+
+// DuplicationRun is one output blueprint: a maximal run of consecutive steps
+// from a single source blueprint, with the derived (hybrid) name and the
+// ordered steps to deep-copy.
+type DuplicationRun struct {
+	Name  string
+	Steps []DuplicationStep // ordered by source step_index
+}
+
+// PartitionDuplicationRuns is the shared resolve-output stage both store impls
+// run after reading the selected prompts: it groups the resolved steps by
+// source blueprint, sorts by step_index, and partitions each group into
+// maximal runs of consecutive indexes (a gap starts a new run). Duplicate
+// selections of the same step collapse, so the result is order- and
+// dup-independent — the output structure is reconstructed from step_index, not
+// input order. Output order is deterministic: source blueprints sorted by id,
+// runs by their first step_index.
+//
+// Naming is hybrid: a run that covers a whole source blueprint becomes
+// "{source name} (copy)"; a partial run is named after its first (copied)
+// prompt, consistent with auto-wrap / split.
+func PartitionDuplicationRuns(steps []DuplicationStep) []DuplicationRun {
+	byBlueprint := make(map[string][]DuplicationStep, len(steps))
+	order := make([]string, 0, len(steps))
+	for _, s := range steps {
+		if _, seen := byBlueprint[s.BlueprintID]; !seen {
+			order = append(order, s.BlueprintID)
+		}
+		byBlueprint[s.BlueprintID] = append(byBlueprint[s.BlueprintID], s)
+	}
+	sort.Strings(order)
+
+	var runs []DuplicationRun
+	for _, bpID := range order {
+		group := byBlueprint[bpID]
+		sort.Slice(group, func(i, j int) bool { return group[i].StepIndex < group[j].StepIndex })
+		// Collapse duplicate selections of the same step.
+		dedup := make([]DuplicationStep, 0, len(group))
+		for i, s := range group {
+			if i > 0 && s.StepIndex == group[i-1].StepIndex {
+				continue
+			}
+			dedup = append(dedup, s)
+		}
+		// Partition into maximal consecutive runs (no step_index gaps).
+		start := 0
+		for i := 1; i <= len(dedup); i++ {
+			if i == len(dedup) || dedup[i].StepIndex != dedup[i-1].StepIndex+1 {
+				runs = append(runs, newDuplicationRun(dedup[start:i]))
+				start = i
+			}
+		}
+	}
+	return runs
+}
+
+// newDuplicationRun derives a run's name and copies its step slice. A run that
+// spans the whole source blueprint (its length equals the blueprint's total
+// step count) is a full clone → "{source name} (copy)"; a partial run is named
+// after its first copied prompt.
+func newDuplicationRun(steps []DuplicationStep) DuplicationRun {
+	name := steps[0].PromptName
+	if len(steps) == steps[0].BlueprintTotal {
+		name = steps[0].BlueprintName + " (copy)"
+	}
+	cp := make([]DuplicationStep, len(steps))
+	copy(cp, steps)
+	return DuplicationRun{Name: name, Steps: cp}
+}
+
+// DedupPreserveOrder returns ids with later duplicates removed, preserving
+// first-seen order. Shared by both DuplicatePrompts impls so a caller passing
+// the same prompt id twice (or the same prompt via two ids — impossible under
+// copy-only, but cheap to guard) copies it once.
+func DedupPreserveOrder(ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
 
 // BlueprintStore owns the blueprint primitive and its in-flight tables:
 //
@@ -150,6 +275,33 @@ type BlueprintStore interface {
 	// is a no-op) and supplies newName (defaulted to the new step-0 prompt's
 	// name, consistent with auto-wrap).
 	SplitAt(ctx context.Context, orgID string, id string, atIndex int, newBlueprintID, newName string) (string, error)
+
+	// DuplicatePrompts deep-copies a flat set of prompt ids into new,
+	// trigger-less blueprint(s), atomically. Prompts are the duplication
+	// primitive: each resolves to exactly one (blueprint_id, step_index) under
+	// copy-only, so the endpoint derives the output structure rather than taking
+	// blueprint ids or ranges. The rule (induced contiguous runs): resolve each
+	// id → (blueprint, step_index), group by blueprint, sort by index, partition
+	// into maximal runs of consecutive indexes, and clone each run into one new
+	// blueprint with its prompts deep-copied in order and step_index re-densified
+	// 0-based (see PartitionDuplicationRuns). One id → a 1-step blueprint; a whole
+	// blueprint's ids → a full clone; a gap in the selection → separate copies
+	// with no edge between them.
+	//
+	// Each duplicated prompt is a brand-new prompts row (new UUID; copied name /
+	// body / model / allowed_tools; source="user"; system_slug NULL) so a copy of
+	// a system/imported prompt becomes an independent user prompt — editing a copy
+	// never touches the source. The step brief is carried onto the clone. Copies
+	// are always trigger-less; the source's trigger is untouched (this method
+	// never reads or writes event_handlers). Originals are left intact.
+	//
+	// Same-team assertion: every resolved blueprint must belong to teamID (the
+	// acting team) — a mixed-scope id set returns ErrDuplicateCrossTeam rather
+	// than being trusted. An id that resolves to no live blueprint step returns
+	// ErrDuplicatePromptNotFound; an empty set returns ErrDuplicateNoPrompts.
+	// Returns the new blueprint ids in deterministic order (source blueprint id,
+	// then run start). All work runs in one transaction.
+	DuplicatePrompts(ctx context.Context, orgID, teamID string, promptIDs []string) ([]string, error)
 
 	// --- Runs -----------------------------------------------------------
 

@@ -415,6 +415,85 @@ func (s *blueprintStore) SplitAt(ctx context.Context, orgID, id string, atIndex 
 	return newBlueprintID, nil
 }
 
+func (s *blueprintStore) DuplicatePrompts(ctx context.Context, orgID, teamID string, promptIDs []string) ([]string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	ids := db.DedupPreserveOrder(promptIDs)
+	if len(ids) == 0 {
+		return nil, db.ErrDuplicateNoPrompts
+	}
+	var newIDs []string
+	err := inTx(ctx, s.q, func(q queryer) error {
+		// Resolve each prompt id → its step + prompt payload. Copy-only means a
+		// live prompt is a step of at most one non-deleted blueprint, so a single
+		// row resolves it.
+		resolved := make([]db.DuplicationStep, 0, len(ids))
+		for _, pid := range ids {
+			var (
+				st   db.DuplicationStep
+				team string
+			)
+			err := q.QueryRowContext(ctx, `
+				SELECT bs.blueprint_id, b.name, b.team_id, bs.step_index, bs.brief,
+				       p.name, p.body, p.model, p.allowed_tools,
+				       (SELECT COUNT(*) FROM blueprint_steps bs2 WHERE bs2.blueprint_id = bs.blueprint_id)
+				FROM blueprint_steps bs
+				JOIN blueprints b ON b.id = bs.blueprint_id
+				JOIN prompts p ON p.id = bs.step_prompt_id
+				WHERE bs.step_prompt_id = ? AND b.deleted_at IS NULL
+			`, pid).Scan(&st.BlueprintID, &st.BlueprintName, &team, &st.StepIndex, &st.Brief,
+				&st.PromptName, &st.PromptBody, &st.PromptModel, &st.PromptTools, &st.BlueprintTotal)
+			if errors.Is(err, sql.ErrNoRows) {
+				return db.ErrDuplicatePromptNotFound
+			}
+			if err != nil {
+				return fmt.Errorf("resolve prompt %s: %w", pid, err)
+			}
+			if teamID != "" && team != teamID {
+				return db.ErrDuplicateCrossTeam
+			}
+			resolved = append(resolved, st)
+		}
+
+		now := time.Now().UTC()
+		for _, run := range db.PartitionDuplicationRuns(resolved) {
+			bpID := uuid.New().String()
+			// New blueprint: trigger-less, user source, local sentinel team.
+			if _, err := q.ExecContext(ctx, `
+				INSERT INTO blueprints (id, name, source, usage_count, team_id, creator_user_id, created_at, updated_at)
+				VALUES (?, ?, 'user', 0, ?, ?, ?, ?)
+			`, bpID, run.Name, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, now, now); err != nil {
+				return fmt.Errorf("create duplicated blueprint: %w", err)
+			}
+			for i, step := range run.Steps {
+				// Deep-copy the prompt into a fresh, independent user row
+				// (system_slug NULL — a copy of a system/imported prompt decouples).
+				newPromptID := uuid.New().String()
+				if _, err := q.ExecContext(ctx, `
+					INSERT INTO prompts (id, name, body, source, allowed_tools, model, usage_count, team_id, creator_user_id, created_at, updated_at)
+					VALUES (?, ?, ?, 'user', ?, ?, 0, ?, ?, ?, ?)
+				`, newPromptID, step.PromptName, step.PromptBody, step.PromptTools, step.PromptModel,
+					runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, now, now); err != nil {
+					return fmt.Errorf("copy prompt: %w", err)
+				}
+				if _, err := q.ExecContext(ctx, `
+					INSERT INTO blueprint_steps (blueprint_id, step_index, step_prompt_id, brief, created_at)
+					VALUES (?, ?, ?, ?, ?)
+				`, bpID, i, newPromptID, step.Brief, now); err != nil {
+					return fmt.Errorf("insert duplicated step %d: %w", i, err)
+				}
+			}
+			newIDs = append(newIDs, bpID)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return newIDs, nil
+}
+
 // --- Runs ----------------------------------------------------------------
 
 func (s *blueprintStore) CreateRun(ctx context.Context, orgID string, br domain.BlueprintRun) (string, error) {

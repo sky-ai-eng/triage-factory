@@ -32,6 +32,46 @@ func TestBlueprintStore_SQLite_Conformance(t *testing.T) {
 	})
 }
 
+// TestBlueprintStore_SQLite_DuplicationConformance runs the shared
+// DuplicatePrompts deep-copy suite against the SQLite impl. Prompts are seeded
+// via the store (Create for user, SeedOrUpdate for system) so the
+// system-has-no-creator + slug invariants are honored without raw INSERTs.
+func TestBlueprintStore_SQLite_DuplicationConformance(t *testing.T) {
+	dbtest.RunBlueprintDuplicationConformance(t, func(t *testing.T) (db.BlueprintStore, string, string, dbtest.DuplicationPromptSeeder, dbtest.DuplicationPromptGetter) {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		stores := sqlitestore.New(conn)
+		ctx := context.Background()
+		org, team := runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID
+		seed := func(t *testing.T, p domain.Prompt) string {
+			t.Helper()
+			if p.Source == "system" {
+				id, err := stores.Prompts.SeedOrUpdate(ctx, org, team, p)
+				if err != nil {
+					t.Fatalf("seed system prompt: %v", err)
+				}
+				return id
+			}
+			if p.ID == "" {
+				p.ID = uuid.New().String()
+			}
+			if err := stores.Prompts.Create(ctx, org, team, p); err != nil {
+				t.Fatalf("create prompt: %v", err)
+			}
+			return p.ID
+		}
+		getPrompt := func(t *testing.T, id string) domain.Prompt {
+			t.Helper()
+			pr, err := stores.Prompts.GetSystem(ctx, org, id)
+			if err != nil || pr == nil {
+				t.Fatalf("getPrompt %s: (%v, %v)", id, pr, err)
+			}
+			return *pr
+		}
+		return stores.Blueprints, org, team, seed, getPrompt
+	})
+}
+
 // insertPromptForBlueprintTest seeds a prompt row directly. PromptStore.Create
 // exists but takes the full create-shape; for FK-only seeding we want a
 // minimal raw INSERT, matching the pattern other sqlite_test files use

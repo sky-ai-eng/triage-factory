@@ -1,8 +1,10 @@
 package db_test
 
 import (
+	"errors"
 	"testing"
 
+	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
@@ -279,5 +281,100 @@ func TestOrgTemplate_MultiStepBlueprint_DeepCopy(t *testing.T) {
 	}
 	if len(stepsAfter) != 1 {
 		t.Errorf("materialize re-run re-added a team-removed step: %d steps, want 1 (existing team blueprints' steps must stay untouched)", len(stepsAfter))
+	}
+}
+
+// TestOrgTemplate_DuplicateBlueprintPrompts pins the org-template mirror of
+// blueprint duplication: a flat set of template prompt ids deep-copies into a
+// new trigger-less template blueprint following the induced-contiguous-runs
+// rule. Full run → "{src} (copy)"; copied prompts are fresh user rows (system
+// source flips to user); briefs carry; originals untouched. Empty set rejected.
+func TestOrgTemplate_DuplicateBlueprintPrompts(t *testing.T) {
+	conn := openInMemorySQLite(t)
+	stores := sqlitestore.New(conn)
+	ctx := t.Context()
+	org := runmode.LocalDefaultOrg
+	if err := db.BootstrapNewOrg(ctx, stores, org, db.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+		t.Fatalf("BootstrapNewOrg: %v", err)
+	}
+	tmpl := stores.OrgTemplate
+
+	slug := func() string { return "tmpl-" + uuid.New().String() }
+	bpID := uuid.New().String()
+	if err := tmpl.CreateBlueprint(ctx, org, domain.Blueprint{ID: bpID, SystemSlug: slug(), Name: "Src", Source: "user"}); err != nil {
+		t.Fatalf("CreateBlueprint: %v", err)
+	}
+	p0, p1 := uuid.New().String(), uuid.New().String()
+	if err := tmpl.CreatePrompt(ctx, org, domain.Prompt{ID: p0, SystemSlug: slug(), Name: "P0", Body: "b0", Source: "user"}); err != nil {
+		t.Fatalf("CreatePrompt p0: %v", err)
+	}
+	// A system-source template prompt to prove the copy decouples to user.
+	if err := tmpl.CreatePrompt(ctx, org, domain.Prompt{ID: p1, SystemSlug: slug(), Name: "P1", Body: "b1", Source: "system"}); err != nil {
+		t.Fatalf("CreatePrompt p1: %v", err)
+	}
+	if err := tmpl.ReplaceBlueprintSteps(ctx, org, bpID, []string{p0, p1}, []string{"br0", "br1"}); err != nil {
+		t.Fatalf("ReplaceBlueprintSteps: %v", err)
+	}
+
+	newIDs, err := tmpl.DuplicateBlueprintPrompts(ctx, org, []string{p0, p1})
+	if err != nil {
+		t.Fatalf("DuplicateBlueprintPrompts: %v", err)
+	}
+	if len(newIDs) != 1 {
+		t.Fatalf("full-run template duplicate produced %d blueprints, want 1", len(newIDs))
+	}
+	bp, err := tmpl.GetBlueprint(ctx, org, newIDs[0])
+	if err != nil || bp == nil {
+		t.Fatalf("GetBlueprint(new) = (%v, %v)", bp, err)
+	}
+	if bp.Name != "Src (copy)" {
+		t.Errorf("template clone name = %q, want %q", bp.Name, "Src (copy)")
+	}
+	steps, err := tmpl.ListBlueprintSteps(ctx, org, newIDs[0])
+	if err != nil {
+		t.Fatalf("ListBlueprintSteps(new): %v", err)
+	}
+	if len(steps) != 2 {
+		t.Fatalf("new template blueprint has %d steps, want 2", len(steps))
+	}
+	wantBody := []string{"b0", "b1"}
+	wantBrief := []string{"br0", "br1"}
+	for i, st := range steps {
+		if st.StepIndex != i {
+			t.Errorf("step %d index = %d, want %d", i, st.StepIndex, i)
+		}
+		if st.StepPromptID == p0 || st.StepPromptID == p1 {
+			t.Errorf("step %d reuses a source template prompt id; want a fresh copy", i)
+		}
+		if st.Brief != wantBrief[i] {
+			t.Errorf("step %d brief = %q, want %q", i, st.Brief, wantBrief[i])
+		}
+		cp, err := tmpl.GetPrompt(ctx, org, st.StepPromptID)
+		if err != nil || cp == nil {
+			t.Fatalf("GetPrompt(copy %d): (%v, %v)", i, cp, err)
+		}
+		if cp.Body != wantBody[i] {
+			t.Errorf("copied template prompt %d body = %q, want %q", i, cp.Body, wantBody[i])
+		}
+		if cp.Source != "user" {
+			t.Errorf("copied template prompt %d source = %q, want user", i, cp.Source)
+		}
+		owner, ok, err := tmpl.BlueprintStepPromptOwner(ctx, org, st.StepPromptID)
+		if err != nil || !ok || owner != newIDs[0] {
+			t.Fatalf("BlueprintStepPromptOwner(%s) = (%q, %v, %v), want (%s, true, nil)", st.StepPromptID, owner, ok, err, newIDs[0])
+		}
+	}
+
+	// Originals untouched: the source template prompt p1 is still a system prompt.
+	src, err := tmpl.GetPrompt(ctx, org, p1)
+	if err != nil || src == nil {
+		t.Fatalf("GetPrompt(src p1): (%v, %v)", src, err)
+	}
+	if src.Source != "system" {
+		t.Errorf("source template prompt source = %q, want system (unchanged)", src.Source)
+	}
+
+	if _, err := tmpl.DuplicateBlueprintPrompts(ctx, org, nil); !errors.Is(err, db.ErrDuplicateNoPrompts) {
+		t.Errorf("DuplicateBlueprintPrompts(nil) err = %v, want ErrDuplicateNoPrompts", err)
 	}
 }

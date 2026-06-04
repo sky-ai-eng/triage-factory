@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -532,6 +533,94 @@ func (s *Server) handleBlueprintSplit(w http.ResponseWriter, r *http.Request) {
 		Upstream:   blueprintWithSteps{Blueprint: upstream, Steps: upSteps},
 		Downstream: blueprintWithSteps{Blueprint: downstream, Steps: downSteps},
 	})
+}
+
+// --- Blueprint duplication (deep-copy) -----------------------------------
+
+type duplicateBlueprintsRequest struct {
+	// PromptIDs is a flat set; the endpoint derives the output structure (the
+	// induced contiguous runs) from each prompt's resolved (blueprint, index).
+	// Callers never pass blueprint ids or ranges.
+	PromptIDs []string `json:"prompt_ids"`
+	// TeamID is the acting team the write picker supplied (see resolveActingTeam);
+	// optional, defaulted by resolution. The store rejects a prompt set that
+	// resolves outside it.
+	TeamID string `json:"team_id"`
+}
+
+// handleBlueprintDuplicate deep-copies a flat set of prompt ids into new
+// trigger-less blueprint(s) following the induced-contiguous-runs rule, in one
+// transaction. Originals are untouched. Returns each new blueprint with its
+// ordered step list so the caller can render/locate the copies.
+func (s *Server) handleBlueprintDuplicate(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+
+	var req duplicateBlueprintsRequest
+	if !decodeJSON(w, r, &req, "") {
+		return
+	}
+	if len(req.PromptIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "prompt_ids is required"})
+		return
+	}
+
+	var (
+		out        []blueprintWithSteps
+		failStatus int
+		failMsg    string
+	)
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		teamID, e := resolveActingTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+		if e != nil {
+			return e
+		}
+		newIDs, e := tx.Blueprints.DuplicatePrompts(r.Context(), orgID, teamID, req.PromptIDs)
+		if e != nil {
+			switch {
+			case errors.Is(e, db.ErrDuplicateNoPrompts):
+				failStatus, failMsg = http.StatusBadRequest, "prompt_ids is required"
+				return nil
+			case errors.Is(e, db.ErrDuplicatePromptNotFound):
+				failStatus, failMsg = http.StatusNotFound, "a prompt id does not resolve to a blueprint step"
+				return nil
+			case errors.Is(e, db.ErrDuplicateCrossTeam):
+				failStatus, failMsg = http.StatusUnprocessableEntity, "prompt_ids span more than one team"
+				return nil
+			}
+			return e
+		}
+		out = make([]blueprintWithSteps, 0, len(newIDs))
+		for _, id := range newIDs {
+			bp, ge := tx.Blueprints.Get(r.Context(), orgID, id)
+			if ge != nil {
+				return ge
+			}
+			steps, ge := tx.Blueprints.ListSteps(r.Context(), orgID, id)
+			if ge != nil {
+				return ge
+			}
+			if steps == nil {
+				steps = []domain.BlueprintStep{}
+			}
+			out = append(out, blueprintWithSteps{Blueprint: bp, Steps: steps})
+		}
+		return nil
+	}); err != nil {
+		if writeIfActingTeamError(w, err) {
+			return
+		}
+		internalError(w, "blueprints", err)
+		return
+	}
+	if failMsg != "" {
+		writeJSON(w, failStatus, map[string]string{"error": failMsg})
+		return
+	}
+	writeJSON(w, http.StatusCreated, out)
 }
 
 // --- Blueprint runs (multi-step instances) -------------------------------
