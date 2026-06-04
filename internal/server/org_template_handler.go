@@ -65,6 +65,8 @@ func templateBlueprintTriggered(ctx context.Context, tx db.TxStores, orgID, blue
 //	DELETE /api/org-template/blueprints/{id}             — delete (cascades steps + triggers)
 //	GET    /api/org-template/blueprints/{id}/steps       — list steps
 //	PUT    /api/org-template/blueprints/{id}/steps       — replace steps
+//	POST   /api/org-template/blueprints/{id}/merge       — absorb a trigger-less source onto the tail
+//	POST   /api/org-template/blueprints/{id}/split       — partition at an index into two halves
 //	GET    /api/org-template/event-handlers[?kind=]      — list
 //	POST   /api/org-template/event-handlers              — create
 //	PATCH  /api/org-template/event-handlers/{id}         — partial update
@@ -591,6 +593,197 @@ func (s *Server) handleOrgTemplateBlueprintStepsPut(w http.ResponseWriter, r *ht
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- blueprint composition (merge / split) --------------------------
+//
+// The template mirror of the team-scope composition endpoints. Same atomic
+// gestures the canvas calls — merge absorbs a trigger-less source onto a host's
+// tail; split partitions a blueprint at an index into the trigger-retaining
+// upstream and a new trigger-less downstream — over the org_template_blueprints
+// tables, org-admin gated. Request/response shapes are shared with the team
+// handlers (mergeBlueprintRequest / blueprintWithSteps / blueprintSplitResponse).
+
+func (s *Server) handleOrgTemplateBlueprintMerge(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := s.requireOrgTemplate(w, r)
+	if !ok {
+		return
+	}
+	hostID := r.PathValue("id")
+
+	var req mergeBlueprintRequest
+	if !decodeJSON(w, r, &req, "") {
+		return
+	}
+	if req.SourceBlueprintID == "" {
+		badRequest(w, "source_blueprint_id is required")
+		return
+	}
+	if req.SourceBlueprintID == hostID {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "cannot merge a blueprint into itself"})
+		return
+	}
+
+	var (
+		host, source *domain.Blueprint
+		merged       *domain.Blueprint
+		steps        []domain.BlueprintStep
+		failStatus   int
+		failMsg      string
+	)
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		if host, e = tx.OrgTemplate.GetBlueprint(r.Context(), orgID, hostID); e != nil {
+			return e
+		}
+		if source, e = tx.OrgTemplate.GetBlueprint(r.Context(), orgID, req.SourceBlueprintID); e != nil {
+			return e
+		}
+		if host == nil || source == nil {
+			return nil // resolved to 404 below
+		}
+		// Source must be trigger-less. Unreachable from the canvas (you can only
+		// connect a tail into a trigger-less entry), but the endpoint asserts it
+		// rather than corrupting state. The ≤1-trigger-per-blueprint partial-unique
+		// is the hard backstop.
+		triggered, e := templateBlueprintTriggered(r.Context(), tx, orgID, req.SourceBlueprintID)
+		if e != nil {
+			return e
+		}
+		if triggered {
+			failStatus, failMsg = http.StatusUnprocessableEntity, "the absorbed blueprint has its own event trigger; detach it first"
+			return nil
+		}
+		// Cap: the merged blueprint must stay editable via the normal steps-PUT.
+		hostSteps, e := tx.OrgTemplate.ListBlueprintSteps(r.Context(), orgID, hostID)
+		if e != nil {
+			return e
+		}
+		sourceSteps, e := tx.OrgTemplate.ListBlueprintSteps(r.Context(), orgID, req.SourceBlueprintID)
+		if e != nil {
+			return e
+		}
+		if len(hostSteps)+len(sourceSteps) > maxBlueprintSteps {
+			failStatus, failMsg = http.StatusUnprocessableEntity, "merged blueprint would exceed "+strconv.Itoa(maxBlueprintSteps)+" steps"
+			return nil
+		}
+		if e := tx.OrgTemplate.MergeBlueprints(r.Context(), orgID, hostID, req.SourceBlueprintID); e != nil {
+			return e
+		}
+		if merged, e = tx.OrgTemplate.GetBlueprint(r.Context(), orgID, hostID); e != nil {
+			return e
+		}
+		steps, e = tx.OrgTemplate.ListBlueprintSteps(r.Context(), orgID, hostID)
+		return e
+	}); err != nil {
+		internalError(w, "org_template", err)
+		return
+	}
+	if host == nil {
+		notFound(w, "template blueprint")
+		return
+	}
+	if source == nil {
+		notFound(w, "source template blueprint")
+		return
+	}
+	if failMsg != "" {
+		writeJSON(w, failStatus, map[string]string{"error": failMsg})
+		return
+	}
+	if steps == nil {
+		steps = []domain.BlueprintStep{}
+	}
+	writeJSON(w, http.StatusOK, blueprintWithSteps{Blueprint: merged, Steps: steps})
+}
+
+func (s *Server) handleOrgTemplateBlueprintSplit(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := s.requireOrgTemplate(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+
+	var req splitBlueprintRequest
+	if !decodeJSON(w, r, &req, "") {
+		return
+	}
+	if req.AtStepIndex == nil {
+		badRequest(w, "at_step_index is required")
+		return
+	}
+	atIndex := *req.AtStepIndex
+
+	newID := uuid.New().String()
+	newSlug := newTemplateSlug()
+	var (
+		bp                   *domain.Blueprint
+		upstream, downstream *domain.Blueprint
+		upSteps, downSteps   []domain.BlueprintStep
+		failStatus           int
+		failMsg              string
+	)
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		if bp, e = tx.OrgTemplate.GetBlueprint(r.Context(), orgID, id); e != nil || bp == nil {
+			return e
+		}
+		steps, e := tx.OrgTemplate.ListBlueprintSteps(r.Context(), orgID, id)
+		if e != nil {
+			return e
+		}
+		// 0 < k < N: a split that keeps one side empty is a no-op.
+		if atIndex <= 0 || atIndex >= len(steps) {
+			failStatus, failMsg = http.StatusUnprocessableEntity, "at_step_index must split the blueprint into two non-empty halves"
+			return nil
+		}
+		// The downstream name defaults to its new step-0 prompt's name (the prompt
+		// at the original boundary index), consistent with auto-wrap.
+		newName := ""
+		if p, e := tx.OrgTemplate.GetPrompt(r.Context(), orgID, steps[atIndex].StepPromptID); e != nil {
+			return e
+		} else if p != nil {
+			newName = p.Name
+		}
+		if newName == "" {
+			newName = "Untitled blueprint"
+		}
+		if _, e := tx.OrgTemplate.SplitBlueprint(r.Context(), orgID, id, atIndex, newID, newSlug, newName); e != nil {
+			return e
+		}
+		if upstream, e = tx.OrgTemplate.GetBlueprint(r.Context(), orgID, id); e != nil {
+			return e
+		}
+		if downstream, e = tx.OrgTemplate.GetBlueprint(r.Context(), orgID, newID); e != nil {
+			return e
+		}
+		if upSteps, e = tx.OrgTemplate.ListBlueprintSteps(r.Context(), orgID, id); e != nil {
+			return e
+		}
+		downSteps, e = tx.OrgTemplate.ListBlueprintSteps(r.Context(), orgID, newID)
+		return e
+	}); err != nil {
+		internalError(w, "org_template", err)
+		return
+	}
+	if bp == nil {
+		notFound(w, "template blueprint")
+		return
+	}
+	if failMsg != "" {
+		writeJSON(w, failStatus, map[string]string{"error": failMsg})
+		return
+	}
+	if upSteps == nil {
+		upSteps = []domain.BlueprintStep{}
+	}
+	if downSteps == nil {
+		downSteps = []domain.BlueprintStep{}
+	}
+	writeJSON(w, http.StatusOK, blueprintSplitResponse{
+		Upstream:   blueprintWithSteps{Blueprint: upstream, Steps: upSteps},
+		Downstream: blueprintWithSteps{Blueprint: downstream, Steps: downSteps},
+	})
 }
 
 // --- event handlers -------------------------------------------------

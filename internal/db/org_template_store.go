@@ -118,6 +118,21 @@ type OrgTemplateStore interface {
 	// are positional and may be empty. Each step_prompt_id must reference a
 	// template prompt in the same org (same-org composite FK).
 	ReplaceBlueprintSteps(ctx context.Context, orgID, blueprintID string, stepPromptIDs, briefs []string) error
+	// MergeBlueprints absorbs the source template blueprint's steps onto the
+	// tail of the host and removes the now-empty source, atomically (the
+	// template mirror of BlueprintStore.MergeInto). The caller validates that
+	// the source is trigger-less and that the merged length is in range. Unlike
+	// the team table the template hard-deletes the source (the template is not
+	// re-seeded on boot, so a delete sticks); the steps are reparented first, so
+	// nothing cascades when the empty source row is dropped.
+	MergeBlueprints(ctx context.Context, orgID, hostID, sourceID string) error
+	// SplitBlueprint partitions a template blueprint at atIndex into the
+	// upstream (kept) half and a new trigger-less downstream blueprint,
+	// atomically (the template mirror of BlueprintStore.SplitAt). Steps
+	// [0,atIndex) stay; [atIndex,N) move to newBlueprintID, re-densified 0-based.
+	// The caller supplies the new id + system_slug (a generated tmpl-<uuid>) +
+	// name; the caller validates 0 < atIndex < N.
+	SplitBlueprint(ctx context.Context, orgID, id string, atIndex int, newBlueprintID, newSlug, newName string) (string, error)
 	// CountBlueprintStepReferences returns the number of distinct template
 	// blueprints that step through the given template prompt. The prompt-delete
 	// handler uses it to refuse (409) deleting a prompt still in use — surfacing

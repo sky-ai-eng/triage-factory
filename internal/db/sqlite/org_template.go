@@ -586,6 +586,75 @@ func (s *orgTemplateStore) ReplaceBlueprintSteps(ctx context.Context, orgID, blu
 	})
 }
 
+func (s *orgTemplateStore) MergeBlueprints(ctx context.Context, orgID, hostID, sourceID string) error {
+	return inTx(ctx, s.q, func(q queryer) error {
+		var hostLen int
+		if err := q.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM org_template_blueprint_steps WHERE org_id = ? AND blueprint_id = ?`,
+			orgID, hostID).Scan(&hostLen); err != nil {
+			return fmt.Errorf("count host template steps: %w", err)
+		}
+		// Append source's steps after the host's, densely (host_len + i) — a
+		// range disjoint from the host's, so no PK collision; step_prompt_id is
+		// untouched so the copy-only unique index holds.
+		if _, err := q.ExecContext(ctx, `
+			UPDATE org_template_blueprint_steps
+			SET blueprint_id = ?, step_index = step_index + ?
+			WHERE org_id = ? AND blueprint_id = ?
+		`, hostID, hostLen, orgID, sourceID); err != nil {
+			return fmt.Errorf("reparent source template steps: %w", err)
+		}
+		// Hard-delete the now-stepless source (template mirror — no soft-delete).
+		res, err := q.ExecContext(ctx,
+			`DELETE FROM org_template_blueprints WHERE org_id = ? AND id = ?`, orgID, sourceID)
+		if err != nil {
+			return fmt.Errorf("delete source template blueprint: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return fmt.Errorf("template blueprint %s not found", sourceID)
+		}
+		if _, err := q.ExecContext(ctx,
+			`UPDATE org_template_blueprints SET updated_at = ? WHERE org_id = ? AND id = ?`,
+			time.Now().UTC(), orgID, hostID); err != nil {
+			return fmt.Errorf("bump host updated_at: %w", err)
+		}
+		return nil
+	})
+}
+
+func (s *orgTemplateStore) SplitBlueprint(ctx context.Context, orgID, id string, atIndex int, newBlueprintID, newSlug, newName string) (string, error) {
+	err := inTx(ctx, s.q, func(q queryer) error {
+		now := time.Now().UTC()
+		if _, err := q.ExecContext(ctx, `
+			INSERT INTO org_template_blueprints (id, org_id, system_slug, name, source, created_at, updated_at)
+			VALUES (?, ?, ?, ?, 'user', ?, ?)
+		`, newBlueprintID, orgID, newSlug, newName, now, now); err != nil {
+			return fmt.Errorf("create downstream template blueprint: %w", err)
+		}
+		// Peel steps [atIndex, N) onto the new blueprint, re-densified 0-based.
+		if _, err := q.ExecContext(ctx, `
+			UPDATE org_template_blueprint_steps
+			SET blueprint_id = ?, step_index = step_index - ?
+			WHERE org_id = ? AND blueprint_id = ? AND step_index >= ?
+		`, newBlueprintID, atIndex, orgID, id, atIndex); err != nil {
+			return fmt.Errorf("reparent tail template steps: %w", err)
+		}
+		if _, err := q.ExecContext(ctx,
+			`UPDATE org_template_blueprints SET updated_at = ? WHERE org_id = ? AND id = ?`, now, orgID, id); err != nil {
+			return fmt.Errorf("bump upstream updated_at: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return newBlueprintID, nil
+}
+
 func (s *orgTemplateStore) CountBlueprintStepReferences(ctx context.Context, orgID, stepPromptID string) (int, error) {
 	var n int
 	err := s.q.QueryRowContext(ctx, `

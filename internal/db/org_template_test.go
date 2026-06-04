@@ -281,3 +281,88 @@ func TestOrgTemplate_MultiStepBlueprint_DeepCopy(t *testing.T) {
 		t.Errorf("materialize re-run re-added a team-removed step: %d steps, want 1 (existing team blueprints' steps must stay untouched)", len(stepsAfter))
 	}
 }
+
+// TestOrgTemplate_MergeAndSplit pins the template mirror of the canvas
+// composition gestures: MergeBlueprints absorbs a trigger-less source onto a
+// host's tail and retires it (dense indices, copy-only owner moves with the
+// step), and SplitBlueprint peels the tail onto a new trigger-less downstream
+// blueprint (re-densified 0-based). These back the org-template merge/split
+// endpoints the binding canvas calls at template scope.
+func TestOrgTemplate_MergeAndSplit(t *testing.T) {
+	conn := openInMemorySQLite(t)
+	stores := sqlitestore.New(conn)
+	ctx := t.Context()
+	org := runmode.LocalDefaultOrg
+	if err := db.BootstrapNewOrg(ctx, stores, org, db.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+		t.Fatalf("BootstrapNewOrg: %v", err)
+	}
+	ot := stores.OrgTemplate
+
+	mustPrompt := func(id, slug, name string) {
+		t.Helper()
+		if err := ot.CreatePrompt(ctx, org, domain.Prompt{ID: id, SystemSlug: slug, Name: name, Body: "b", Source: "user"}); err != nil {
+			t.Fatalf("CreatePrompt %s: %v", id, err)
+		}
+	}
+	mustBP := func(id, slug, name string) {
+		t.Helper()
+		if err := ot.CreateBlueprint(ctx, org, domain.Blueprint{ID: id, SystemSlug: slug, Name: name, Source: "user"}); err != nil {
+			t.Fatalf("CreateBlueprint %s: %v", id, err)
+		}
+	}
+	mustPrompt("ms-h", "ms-h-slug", "Host Step")
+	mustPrompt("ms-s", "ms-s-slug", "Source Step")
+	mustBP("ms-host", "ms-host-slug", "Host")
+	mustBP("ms-src", "ms-src-slug", "Source")
+	if err := ot.ReplaceBlueprintSteps(ctx, org, "ms-host", []string{"ms-h"}, nil); err != nil {
+		t.Fatalf("ReplaceBlueprintSteps host: %v", err)
+	}
+	if err := ot.ReplaceBlueprintSteps(ctx, org, "ms-src", []string{"ms-s"}, nil); err != nil {
+		t.Fatalf("ReplaceBlueprintSteps source: %v", err)
+	}
+
+	// --- Merge source onto the host's tail ---
+	if err := ot.MergeBlueprints(ctx, org, "ms-host", "ms-src"); err != nil {
+		t.Fatalf("MergeBlueprints: %v", err)
+	}
+	steps, err := ot.ListBlueprintSteps(ctx, org, "ms-host")
+	if err != nil {
+		t.Fatalf("ListBlueprintSteps host after merge: %v", err)
+	}
+	if len(steps) != 2 || steps[0].StepPromptID != "ms-h" || steps[1].StepPromptID != "ms-s" {
+		t.Fatalf("merged steps = %+v; want [ms-h, ms-s]", steps)
+	}
+	if steps[0].StepIndex != 0 || steps[1].StepIndex != 1 {
+		t.Fatalf("merged step indices not dense: %+v", steps)
+	}
+	if bp, err := ot.GetBlueprint(ctx, org, "ms-src"); err != nil || bp != nil {
+		t.Fatalf("source after merge = (%v, %v); want (nil, nil) — retired", bp, err)
+	}
+
+	// --- Split the merged host back at the boundary ---
+	newID, err := ot.SplitBlueprint(ctx, org, "ms-host", 1, "ms-down", "ms-down-slug", "Downstream")
+	if err != nil {
+		t.Fatalf("SplitBlueprint: %v", err)
+	}
+	if newID != "ms-down" {
+		t.Fatalf("SplitBlueprint returned %q; want ms-down", newID)
+	}
+	upSteps, err := ot.ListBlueprintSteps(ctx, org, "ms-host")
+	if err != nil {
+		t.Fatalf("ListBlueprintSteps upstream: %v", err)
+	}
+	if len(upSteps) != 1 || upSteps[0].StepPromptID != "ms-h" {
+		t.Fatalf("upstream steps = %+v; want [ms-h]", upSteps)
+	}
+	downSteps, err := ot.ListBlueprintSteps(ctx, org, "ms-down")
+	if err != nil {
+		t.Fatalf("ListBlueprintSteps downstream: %v", err)
+	}
+	if len(downSteps) != 1 || downSteps[0].StepPromptID != "ms-s" || downSteps[0].StepIndex != 0 {
+		t.Fatalf("downstream steps = %+v; want [ms-s] at index 0 (re-densified)", downSteps)
+	}
+	// The copy-only owner moved with the step onto the new downstream blueprint.
+	if owner, ok, err := ot.BlueprintStepPromptOwner(ctx, org, "ms-s"); err != nil || !ok || owner != "ms-down" {
+		t.Fatalf("owner(ms-s) = (%q, %v, %v); want (ms-down, true, nil)", owner, ok, err)
+	}
+}

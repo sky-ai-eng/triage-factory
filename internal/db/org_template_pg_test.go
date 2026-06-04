@@ -261,3 +261,93 @@ func TestOrgTemplate_Postgres_MultiStepDeepCopy(t *testing.T) {
 		t.Errorf("materialize re-run re-added a team-removed step: step count = %d, want 1 (existing team blueprints' steps must stay untouched)", stepsAfterRerun)
 	}
 }
+
+// TestOrgTemplate_Postgres_MergeAndSplit pins the org-template composition
+// mechanics on the real two-pool store: an org admin merges a trigger-less
+// source onto a host's tail (the source retires, indices stay dense, the
+// copy-only owner moves with the step) and splits it back at the boundary into
+// a new trigger-less downstream blueprint — all on the app pool under org-admin
+// RLS, in one transaction.
+//
+// Skips when Docker is unavailable (pgtest harness).
+func TestOrgTemplate_Postgres_MergeAndSplit(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	orgA, ownerA, founderTeamA := pgtest.SeedOrgWithUser(t, h, "orgA-compose")
+	stores := pgstore.New(h.AdminDB, h.AppDB)
+	ctx := context.Background()
+	if err := db.BootstrapNewOrg(ctx, stores, orgA, founderTeamA, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+		t.Fatalf("BootstrapNewOrg: %v", err)
+	}
+
+	hostPrompt := uuid.New().String()
+	srcPrompt := uuid.New().String()
+	hostBP := uuid.New().String()
+	srcBP := uuid.New().String()
+	downBP := uuid.New().String()
+
+	// All composition runs on the app pool with the admin's claims (RLS allows),
+	// in one transaction — merge/split share it via withTemplateTx's *sql.Tx case.
+	if err := h.WithUser(t, ownerA, orgA, func(tx *sql.Tx) error {
+		st := pgstore.NewForTx(tx).OrgTemplate
+		if e := st.CreatePrompt(ctx, orgA, domain.Prompt{ID: hostPrompt, SystemSlug: "compose-h", Name: "Host Step", Body: "h", Source: "user"}); e != nil {
+			return e
+		}
+		if e := st.CreatePrompt(ctx, orgA, domain.Prompt{ID: srcPrompt, SystemSlug: "compose-s", Name: "Source Step", Body: "s", Source: "user"}); e != nil {
+			return e
+		}
+		if e := st.CreateBlueprint(ctx, orgA, domain.Blueprint{ID: hostBP, SystemSlug: "compose-h-bp", Name: "Host", Source: "user"}); e != nil {
+			return e
+		}
+		if e := st.CreateBlueprint(ctx, orgA, domain.Blueprint{ID: srcBP, SystemSlug: "compose-s-bp", Name: "Source", Source: "user"}); e != nil {
+			return e
+		}
+		if e := st.ReplaceBlueprintSteps(ctx, orgA, hostBP, []string{hostPrompt}, nil); e != nil {
+			return e
+		}
+		if e := st.ReplaceBlueprintSteps(ctx, orgA, srcBP, []string{srcPrompt}, nil); e != nil {
+			return e
+		}
+
+		// Merge source onto the host's tail.
+		if e := st.MergeBlueprints(ctx, orgA, hostBP, srcBP); e != nil {
+			return e
+		}
+		steps, e := st.ListBlueprintSteps(ctx, orgA, hostBP)
+		if e != nil {
+			return e
+		}
+		if len(steps) != 2 || steps[0].StepPromptID != hostPrompt || steps[1].StepPromptID != srcPrompt {
+			t.Fatalf("merged steps = %+v; want [host, source]", steps)
+		}
+		if src, e := st.GetBlueprint(ctx, orgA, srcBP); e != nil || src != nil {
+			t.Fatalf("source after merge = (%v, %v); want (nil, nil) — retired", src, e)
+		}
+
+		// Split back at the boundary.
+		if _, e := st.SplitBlueprint(ctx, orgA, hostBP, 1, downBP, "compose-down-bp", "Downstream"); e != nil {
+			return e
+		}
+		up, e := st.ListBlueprintSteps(ctx, orgA, hostBP)
+		if e != nil {
+			return e
+		}
+		if len(up) != 1 || up[0].StepPromptID != hostPrompt {
+			t.Fatalf("upstream steps = %+v; want [host]", up)
+		}
+		down, e := st.ListBlueprintSteps(ctx, orgA, downBP)
+		if e != nil {
+			return e
+		}
+		if len(down) != 1 || down[0].StepPromptID != srcPrompt || down[0].StepIndex != 0 {
+			t.Fatalf("downstream steps = %+v; want [source] at index 0", down)
+		}
+		if owner, ok, e := st.BlueprintStepPromptOwner(ctx, orgA, srcPrompt); e != nil || !ok || owner != downBP {
+			t.Fatalf("owner(source) = (%q, %v, %v); want (downstream, true, nil)", owner, ok, e)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("compose template blueprints: %v", err)
+	}
+}

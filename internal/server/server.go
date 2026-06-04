@@ -700,6 +700,8 @@ func (s *Server) routes() {
 	s.apiMutating("DELETE /api/org-template/blueprints/{id}", s.handleOrgTemplateBlueprintDelete)
 	s.api("GET /api/org-template/blueprints/{id}/steps", s.handleOrgTemplateBlueprintStepsGet)
 	s.apiMutating("PUT /api/org-template/blueprints/{id}/steps", s.handleOrgTemplateBlueprintStepsPut)
+	s.apiMutating("POST /api/org-template/blueprints/{id}/merge", s.handleOrgTemplateBlueprintMerge)
+	s.apiMutating("POST /api/org-template/blueprints/{id}/split", s.handleOrgTemplateBlueprintSplit)
 	s.api("GET /api/org-template/event-handlers", s.handleOrgTemplateHandlersList)
 	s.apiMutating("POST /api/org-template/event-handlers", s.handleOrgTemplateHandlerCreate)
 	s.apiMutating("PUT /api/org-template/event-handlers/reorder", s.handleOrgTemplateHandlerReorder)

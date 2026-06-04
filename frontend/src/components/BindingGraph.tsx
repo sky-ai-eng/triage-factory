@@ -948,13 +948,9 @@ function BindingGraphInner({
         return
       }
 
-      // Merge. The atomic endpoint is team-scope only — the org
-      // template has no composition endpoints, so refuse there with a clear
-      // affordance rather than 404-ing.
-      if (template) {
-        toast.error('Merging blueprints isn’t available in the org template editor yet')
-        return
-      }
+      // Merge the trigger-less downstream chain onto this tail. The atomic
+      // endpoint exists at both scopes (team + org template), so the URL is
+      // scope-derived like every other call.
       try {
         const res = await fetch(
           `${blueprintsBase(template)}/${encodeURIComponent(plan.host)}/merge`,
@@ -998,13 +994,9 @@ function BindingGraphInner({
     [fetchAll, template],
   )
 
-  // Split the blueprint before the given step index. Team-scope only.
+  // Split the blueprint before the given step index. Available at both scopes.
   const doSplit = useCallback(
     async (blueprintId: string, atStepIndex: number) => {
-      if (template) {
-        toast.error('Splitting blueprints isn’t available in the org template editor yet')
-        return
-      }
       try {
         const res = await fetch(
           `${blueprintsBase(template)}/${encodeURIComponent(blueprintId)}/split`,
