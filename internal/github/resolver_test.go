@@ -81,9 +81,10 @@ func testPEM(t *testing.T) string {
 // tokens and records what the returned client subsequently sends, so a test
 // can assert which credential (App token vs PAT) the resolver handed back.
 type ghTestServer struct {
-	srv       *httptest.Server
-	mintCalls int32
-	lastProbe string // Authorization header seen on the /probe call
+	srv          *httptest.Server
+	mintCalls    int32
+	lastProbe    string   // Authorization header seen on the /probe call
+	installRepos []string // full names returned by /installation/repositories
 }
 
 func newGHTestServer(t *testing.T) *ghTestServer {
@@ -102,6 +103,17 @@ func newGHTestServer(t *testing.T) *ghTestServer {
 		g.lastProbe = r.Header.Get("Authorization")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("[]"))
+	})
+	mux.HandleFunc("/api/v3/installation/repositories", func(w http.ResponseWriter, _ *http.Request) {
+		repos := make([]map[string]any, 0, len(g.installRepos))
+		for _, name := range g.installRepos {
+			repos = append(repos, map[string]any{"full_name": name})
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"total_count":  len(repos),
+			"repositories": repos,
+		})
 	})
 	g.srv = httptest.NewServer(mux)
 	t.Cleanup(g.srv.Close)
@@ -171,6 +183,85 @@ func TestResolver_Tier1_AppInstallationToken(t *testing.T) {
 	}
 	if gh.mintCalls != 1 {
 		t.Errorf("mint called %d times after a cached resolution, want 1", gh.mintCalls)
+	}
+}
+
+// ClientForRepo: the org's App is installed on the account AND the repo is in
+// the installation's grant → the minted App token is used.
+func TestResolver_ClientForRepo_AppCoversRepo(t *testing.T) {
+	gh := newGHTestServer(t)
+	gh.installRepos = []string{"acme/widget", "acme/gadget"}
+	r := NewResolver(
+		&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
+		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
+		&fakeOrgs{base: gh.srv.URL},
+		&fakeAgents{},
+		nil,
+	)
+
+	client, err := r.ClientForRepo(context.Background(), "org-1", "acme", "widget")
+	if err != nil {
+		t.Fatalf("ClientForRepo: %v", err)
+	}
+	if _, err := client.Get("/probe"); err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if gh.lastProbe != "Bearer ghs_minted" {
+		t.Errorf("client carried %q, want the minted App token", gh.lastProbe)
+	}
+}
+
+// ClientForRepo: the App is installed on the account but the repo is NOT in the
+// grant (a "Selected repositories" install). Resolving on the owner alone would
+// hand back an App token that 403s on this repo; ClientForRepo detects the gap
+// up front and falls through to the PAT.
+func TestResolver_ClientForRepo_AppDoesNotCoverRepo_FallsBackToPAT(t *testing.T) {
+	gh := newGHTestServer(t)
+	gh.installRepos = []string{"acme/widget"} // "acme/other" is not granted
+	r := NewResolver(
+		&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
+		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
+		&fakeOrgs{base: gh.srv.URL},
+		&fakeAgents{},
+		nil,
+	)
+
+	client, err := r.ClientForRepo(context.Background(), "org-1", "acme", "other")
+	if err != nil {
+		t.Fatalf("ClientForRepo: %v", err)
+	}
+	if _, err := client.Get("/probe"); err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if gh.lastProbe != "Bearer ghp_test" {
+		t.Errorf("client carried %q, want the PAT fallback for an uncovered repo", gh.lastProbe)
+	}
+}
+
+// ClientForRepo with no App falls straight through to the PAT, exactly like
+// ClientFor — the repo-grain check only adds work when an App is installed.
+func TestResolver_ClientForRepo_NoApp_PAT(t *testing.T) {
+	gh := newGHTestServer(t)
+	r := NewResolver(
+		&fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_test"}},
+		&fakeApps{app: nil},
+		&fakeOrgs{base: gh.srv.URL},
+		&fakeAgents{},
+		nil,
+	)
+
+	client, err := r.ClientForRepo(context.Background(), "org-1", "acme", "widget")
+	if err != nil {
+		t.Fatalf("ClientForRepo: %v", err)
+	}
+	if _, err := client.Get("/probe"); err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if gh.lastProbe != "Bearer ghp_test" {
+		t.Errorf("client carried %q, want the PAT", gh.lastProbe)
+	}
+	if gh.mintCalls != 0 {
+		t.Errorf("mint was called %d times for a PAT-only org", gh.mintCalls)
 	}
 }
 

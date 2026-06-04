@@ -1,5 +1,8 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
-import { RotateCw } from 'lucide-react'
+import { RotateCw, ExternalLink } from 'lucide-react'
+import { useOptionalAuth } from '../contexts/AuthContext'
+import { useActiveOrgId } from '../contexts/OrgContext'
+import { LOCAL_DEFAULT_ORG_ID, getGitHubAppStatus, getGitHubAppInstallURL } from '../lib/githubApp'
 
 interface GitHubRepo {
   full_name: string
@@ -51,6 +54,43 @@ export default function RepoPickerModal({
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [checked, setChecked] = useState<Set<string>>(new Set(selected))
+
+  // Under a GitHub App, the picker lists the repos the App is installed on
+  // (GET /installation/repositories) — not arbitrary user repos — so the copy
+  // and empty state change, and we offer a deep-link to install the App on
+  // more repositories. PAT-only orgs keep the original copy. The org-scoped App
+  // endpoints take the id in the path; local mode uses the sentinel org.
+  const auth = useOptionalAuth()
+  const isLocal = auth === null
+  const activeOrgId = useActiveOrgId()
+  const orgId = isLocal ? LOCAL_DEFAULT_ORG_ID : activeOrgId
+  const [appMode, setAppMode] = useState(false)
+  const [installUrl, setInstallUrl] = useState('')
+
+  useEffect(() => {
+    if (!orgId) return
+    let cancelled = false
+    getGitHubAppStatus(orgId)
+      .then((status) => {
+        if (cancelled) return
+        // App mode = the org runs on its own registered App with at least one
+        // installation, which is exactly when the backend sources the picker
+        // from installation repositories.
+        const inApp = !!status.app && status.installations.length > 0
+        setAppMode(inApp)
+        if (inApp) {
+          getGitHubAppInstallURL(orgId)
+            .then((url) => {
+              if (!cancelled) setInstallUrl(url)
+            })
+            .catch(() => {})
+        }
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [orgId])
 
   const fetchRepos = useCallback(async () => {
     setLoading(true)
@@ -106,9 +146,21 @@ export default function RepoPickerModal({
           Select Repositories
         </h2>
         <p className="text-[13px] text-text-tertiary mt-1 leading-relaxed">
-          Choose which repos to watch. PRs from these repos appear in your triage queue, and Jira
-          tickets are matched to these repos for delegation.
+          {appMode
+            ? 'These are the repositories your GitHub App is installed on. Choose which to watch — PRs from them appear in your triage queue, and Jira tickets are matched to them for delegation.'
+            : 'Choose which repos to watch. PRs from these repos appear in your triage queue, and Jira tickets are matched to these repos for delegation.'}
         </p>
+        {appMode && installUrl && (
+          <a
+            href={installUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 text-[12px] font-medium text-accent hover:text-accent/80 transition-colors mt-2"
+          >
+            Install the App on more repositories
+            <ExternalLink size={12} />
+          </a>
+        )}
       </div>
 
       {/* Search */}
@@ -159,9 +211,26 @@ export default function RepoPickerModal({
         )}
 
         {!loading && !error && filtered.length === 0 && (
-          <p className="text-[13px] text-text-tertiary text-center py-8">
-            {search ? `No repos match "${search}"` : 'No repositories found'}
-          </p>
+          <div className="flex flex-col items-center justify-center gap-3 py-8">
+            <p className="text-[13px] text-text-tertiary text-center">
+              {search
+                ? `No repos match "${search}"`
+                : appMode
+                  ? "Your GitHub App isn't installed on any repositories yet."
+                  : 'No repositories found'}
+            </p>
+            {!search && appMode && installUrl && (
+              <a
+                href={installUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-[12px] font-medium text-accent hover:text-accent/80 transition-colors"
+              >
+                Install the App on repositories
+                <ExternalLink size={12} />
+              </a>
+            )}
+          </div>
         )}
 
         {!loading &&

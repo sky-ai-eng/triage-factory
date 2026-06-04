@@ -36,6 +36,11 @@ func (f *fakeResolver) ClientFor(ctx context.Context, orgID, target string) (*gh
 	return f.client, f.err
 }
 
+func (f *fakeResolver) ClientForRepo(ctx context.Context, orgID, owner, repo string) (*ghclient.Client, error) {
+	f.calls = append(f.calls, resolverCall{orgID: orgID, target: owner})
+	return f.client, f.err
+}
+
 func (f *fakeResolver) TokenFor(ctx context.Context, orgID, target string) (githubapp.Token, error) {
 	if f.err != nil {
 		return githubapp.Token{}, f.err

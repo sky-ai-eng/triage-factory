@@ -36,6 +36,13 @@ func (f *fakeResolver) ClientFor(ctx context.Context, orgID, target string) (*gh
 	return f.client, nil
 }
 
+// ClientForRepo satisfies the ghclient.Resolver interface. The poller's
+// cycle resolves account-grain via ClientFor; this repo-aware door is unused
+// here, so it just delegates to keep the fake compiling against the interface.
+func (f *fakeResolver) ClientForRepo(ctx context.Context, orgID, owner, repo string) (*ghclient.Client, error) {
+	return f.ClientFor(ctx, orgID, owner)
+}
+
 // TokenFor satisfies the ghclient.Resolver interface. The poller
 // never calls it (it works through *Client), so a zero Token is enough to
 // keep the fake compiling against the interface.

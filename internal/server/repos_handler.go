@@ -1,8 +1,12 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -13,41 +17,82 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 )
 
-// handleGitHubRepos returns all repositories the authenticated user has access to.
+// handleGitHubRepos returns the repositories the Settings picker offers. The
+// source is tier-aware:
+//
+//   - App org (own App registered + active + ≥1 installation): the union of
+//     each installation's repositories (GET /installation/repositories). A
+//     GitHub App installation token can't call GET /user/repos — it 4xxs — and
+//     under an App the only repos worth offering are the ones the App is
+//     installed on.
+//   - PAT-only org (no App / no installations): the authenticated user's repos
+//     (GET /user/repos) — identical to the pre-App behavior.
 func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 	orgID := OrgIDFrom(r.Context())
 	userID := ClaimsFrom(r.Context()).Subject
-	// Credentials + per-org base URL read through the app pool inside
-	// WithTx so SecretStore decrypts under the user's claims and
-	// org_settings_select RLS is enforced — same shape the rest of
-	// the post-SKY-355 settings surface uses.
+
+	// Decide App-vs-PAT here rather than widening the resolver (which
+	// deliberately hides which tier resolved): this handler is the one consumer
+	// that must branch, so it reads the App registration + installations
+	// itself. Both reads use the System door (the orgID is already authorized
+	// by middleware); a read error degrades to the PAT path rather than
+	// blanking the picker.
 	var (
-		creds  auth.Credentials
-		orgSet domain.OrgSettings
+		app   *domain.OrgGitHubApp
+		insts []domain.OrgGitHubAppInstallation
 	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
-		var lerr error
-		orgSet, lerr = tx.Orgs.GetSettings(r.Context(), orgID)
-		return lerr
-	}); err != nil {
-		internalError(w, "repos", err)
-		return
-	}
-	if creds.GitHubPAT == "" || creds.GitHubURL == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub not configured"})
-		return
-	}
-	baseURL := orgSet.GitHubBaseURL
-	if baseURL == "" {
-		baseURL = creds.GitHubURL
+	if s.githubApps != nil {
+		app, _ = s.githubApps.GetForOrgSystem(r.Context(), orgID)
+		insts, _ = s.githubApps.ListInstallationsForOrgSystem(r.Context(), orgID)
 	}
 
-	client := ghclient.NewClient(baseURL, creds.GitHubPAT)
-	repos, err := client.ListUserRepos()
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch repos: " + err.Error()})
-		return
+	var repos []ghclient.UserRepo
+	if app != nil && app.Active && len(insts) > 0 {
+		var err error
+		repos, err = s.installationReposUnion(r.Context(), orgID, insts)
+		if err != nil {
+			if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub not configured"})
+				return
+			}
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch repos: " + err.Error()})
+			return
+		}
+	} else {
+		// PAT path — identical to the pre-App behavior. Credentials + per-org
+		// base URL read through the app pool inside WithTx so SecretStore
+		// decrypts under the user's claims and org_settings_select RLS is
+		// enforced — same shape the rest of the post-SKY-355 settings surface
+		// uses.
+		var (
+			creds  auth.Credentials
+			orgSet domain.OrgSettings
+		)
+		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+			creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
+			var lerr error
+			orgSet, lerr = tx.Orgs.GetSettings(r.Context(), orgID)
+			return lerr
+		}); err != nil {
+			internalError(w, "repos", err)
+			return
+		}
+		if creds.GitHubPAT == "" || creds.GitHubURL == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub not configured"})
+			return
+		}
+		baseURL := orgSet.GitHubBaseURL
+		if baseURL == "" {
+			baseURL = creds.GitHubURL
+		}
+
+		client := ghclient.NewClient(baseURL, creds.GitHubPAT)
+		var err error
+		repos, err = client.ListUserRepos()
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch repos: " + err.Error()})
+			return
+		}
 	}
 
 	// Warm the reachable-repo enumeration cache (SKY-409) so the
@@ -58,14 +103,10 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 	// that rather than the full UserRepo slice. TTL-bounded and evicted on
 	// SetOnGitHubChanged.
 	//
-	// NB: this is warmed from ListUserRepos (PAT only), so the cached set is
-	// PAT-derived. That matches what the picker shows today (also PAT only),
-	// so the hot-path gate can't reject a repo the user could actually have
-	// selected. The cold-path fan-out additionally probes App-installation
-	// clients, so a repo reachable *only* via an App install would pass a
-	// cache-miss PUT but be rejected by a cache-hit one. Harmless until the
-	// picker itself sources App repos — at which point this warm must union
-	// the same App sources. Tracked in SKY-410.
+	// NB: warmed from whatever source produced `repos` — the App
+	// installation-repos union for App orgs, ListUserRepos for PAT-only orgs.
+	// Either way the cached set is exactly what the picker just showed, so the
+	// hot-path gate can't reject a repo the user could actually have selected.
 	slugs := make(map[string]struct{}, len(repos))
 	for _, repo := range repos {
 		if repo.FullName != "" {
@@ -75,6 +116,65 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 	s.reachableRepoCachePut(orgID, userID, slugs)
 
 	writeJSON(w, http.StatusOK, repos)
+}
+
+// installationReposUnion lists each installation's repositories through the
+// credential resolver (one tier-1 App-token client per installation account)
+// and returns their union, deduped by lowercased full name and sorted stably
+// by full name. This is the App-org replacement for ListUserRepos: an
+// installation token can't call GET /user/repos, and the union is exactly the
+// set of repos the org's App can act on.
+//
+// Per-installation failures are isolated — a bad mint or list on one account
+// must not blank the whole picker, so they're logged and skipped while the
+// rest still contribute. ErrNoGitHubCredentials is only surfaced when the
+// resolver produced no client for any installation (genuine "not configured").
+func (s *Server) installationReposUnion(ctx context.Context, orgID string, insts []domain.OrgGitHubAppInstallation) ([]ghclient.UserRepo, error) {
+	if s.ghResolver == nil {
+		return nil, ghclient.ErrNoGitHubCredentials
+	}
+
+	byName := make(map[string]ghclient.UserRepo)
+	resolvedAny := false
+	for _, inst := range insts {
+		client, err := s.ghResolver.ClientFor(ctx, orgID, inst.AccountLogin)
+		if err != nil {
+			if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+				continue
+			}
+			// Real DB/vault/RLS failure — propagate so the handler can 502
+			// rather than silently returning a partial union.
+			return nil, err
+		}
+		resolvedAny = true
+
+		repos, err := client.ListInstallationRepos()
+		if err != nil {
+			log.Printf("[repos] org %s: list installation repos for %s: %v", orgID, inst.AccountLogin, err)
+			continue
+		}
+		for _, repo := range repos {
+			if repo.FullName == "" {
+				continue
+			}
+			key := strings.ToLower(repo.FullName)
+			if _, ok := byName[key]; !ok {
+				byName[key] = repo
+			}
+		}
+	}
+	if !resolvedAny {
+		return nil, ghclient.ErrNoGitHubCredentials
+	}
+
+	out := make([]ghclient.UserRepo, 0, len(byName))
+	for _, repo := range byName {
+		out = append(out, repo)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return strings.ToLower(out[i].FullName) < strings.ToLower(out[j].FullName)
+	})
+	return out, nil
 }
 
 // handleRepoProfiles returns all configured repo profiles from the DB.

@@ -125,10 +125,12 @@ func (s *Server) handleDashboardPRStatus(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// parts[0] is the repo owner — the GitHub account the resolver uses to
-	// pick the org's App installation (tier 1) when one is installed there,
-	// falling back to the org PAT (tier 3).
-	client, err := s.ghResolver.ClientFor(r.Context(), orgID, parts[0])
+	// Repo-scoped read: decide the credential tier on the whole owner/repo,
+	// not just the owner. A "Selected repositories" App install mints a token
+	// for any repo under parts[0] but 403s on repos outside the grant, so a
+	// bare-owner resolve would skip the PAT that would have worked. ClientForRepo
+	// falls through to the PAT when the App doesn't cover this repo.
+	client, err := s.ghResolver.ClientForRepo(r.Context(), orgID, parts[0], parts[1])
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub not configured"})
@@ -180,9 +182,10 @@ func (s *Server) handleDashboardPRDraft(w http.ResponseWriter, r *http.Request) 
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
-	// parts[0] is the repo owner — selects the org's App installation
-	// (tier 1) for that account, else the org PAT (tier 3).
-	client, err := s.ghResolver.ClientFor(r.Context(), orgID, parts[0])
+	// Repo-scoped mutation: resolve on the whole owner/repo so a selective App
+	// install that doesn't cover this repo falls through to the PAT instead of
+	// minting a token that 403s on the draft toggle (see handleDashboardPRStatus).
+	client, err := s.ghResolver.ClientForRepo(r.Context(), orgID, parts[0], parts[1])
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub not configured"})
