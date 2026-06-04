@@ -13,17 +13,6 @@ interface GitHubRepo {
   private: boolean
 }
 
-// isHttpUrl guards a backend-supplied URL before it is used as an href, so a
-// non-http(s) scheme (e.g. javascript:) can never become a clickable link.
-function isHttpUrl(url: string): boolean {
-  try {
-    const { protocol } = new URL(url)
-    return protocol === 'http:' || protocol === 'https:'
-  } catch {
-    return false
-  }
-}
-
 interface Props {
   /** Initially selected repo full_names */
   selected: string[]
@@ -90,14 +79,12 @@ export default function RepoPickerModal({
         const inApp = !!status.app && status.installations.length > 0
         setAppMode(inApp)
         if (inApp) {
+          // getGitHubAppInstallURL validates the scheme (http/https only) at
+          // the source and rejects anything else, so installUrl is safe to use
+          // directly as an href below.
           getGitHubAppInstallURL(orgId)
             .then((url) => {
-              // The install URL is backend-derived from the org's GitHub base
-              // URL; gate on an http(s) scheme before it ever becomes an href
-              // so a misconfigured/hostile base URL can't smuggle in a
-              // javascript: link. Both render sites read installUrl directly,
-              // so validating once at the source keeps them safe.
-              if (!cancelled && isHttpUrl(url)) setInstallUrl(url)
+              if (!cancelled) setInstallUrl(url)
             })
             .catch(() => {})
         }

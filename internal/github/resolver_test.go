@@ -85,7 +85,9 @@ type ghTestServer struct {
 	srv          *httptest.Server
 	mintCalls    int32
 	lastProbe    string   // Authorization header seen on the /probe call
-	installRepos []string // full names returned by /installation/repositories
+	installRepos []string // full names the repo-access probe treats as granted
+	repoProbes   int32    // count of GET /repos/{owner}/{repo} coverage probes
+	repoProbe5xx bool     // when true, the coverage probe returns 500 (indeterminate)
 }
 
 func newGHTestServer(t *testing.T) *ghTestServer {
@@ -110,6 +112,11 @@ func newGHTestServer(t *testing.T) *ghTestServer {
 	// grant (installRepos), else 404 like an installation token sees for a
 	// repo outside its "Selected repositories" scope.
 	mux.HandleFunc("/api/v3/repos/", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&g.repoProbes, 1)
+		if g.repoProbe5xx {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		name := strings.TrimPrefix(r.URL.Path, "/api/v3/repos/")
 		for _, granted := range g.installRepos {
 			if granted == name {
@@ -240,6 +247,65 @@ func TestResolver_ClientForRepo_AppDoesNotCoverRepo_FallsBackToPAT(t *testing.T)
 	}
 	if gh.lastProbe != "Bearer ghp_test" {
 		t.Errorf("client carried %q, want the PAT fallback for an uncovered repo", gh.lastProbe)
+	}
+}
+
+// ClientForRepo: the App is installed but the coverage probe is indeterminate
+// (GitHub 5xx). The contract is fail-open — return the minted App client rather
+// than discarding it for the PAT — and the indeterminate result must NOT be
+// cached, so a transient outage can't pin a wrong coverage answer.
+func TestResolver_ClientForRepo_CoverageProbeIndeterminate_FailsOpen(t *testing.T) {
+	gh := newGHTestServer(t)
+	gh.repoProbe5xx = true // GET /repos/{owner}/{repo} → 500
+	r := NewResolver(
+		&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
+		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
+		&fakeOrgs{base: gh.srv.URL},
+		&fakeAgents{},
+		nil,
+	)
+
+	client, err := r.ClientForRepo(context.Background(), "org-1", "acme", "widget")
+	if err != nil {
+		t.Fatalf("ClientForRepo: %v", err)
+	}
+	if _, err := client.Get("/probe"); err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if gh.lastProbe != "Bearer ghs_minted" {
+		t.Errorf("client carried %q, want the minted App token (fail-open on indeterminate)", gh.lastProbe)
+	}
+
+	// A second resolution must re-probe (the indeterminate result wasn't
+	// cached), not serve a stale decision.
+	if _, err := r.ClientForRepo(context.Background(), "org-1", "acme", "widget"); err != nil {
+		t.Fatalf("second ClientForRepo: %v", err)
+	}
+	if got := atomic.LoadInt32(&gh.repoProbes); got != 2 {
+		t.Errorf("coverage probes = %d, want 2 (indeterminate must not be cached)", got)
+	}
+}
+
+// ClientForRepo memoizes a conclusive coverage answer: two resolutions for the
+// same repo probe GitHub only once.
+func TestResolver_ClientForRepo_CachesCoverage(t *testing.T) {
+	gh := newGHTestServer(t)
+	gh.installRepos = []string{"acme/widget"}
+	r := NewResolver(
+		&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
+		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
+		&fakeOrgs{base: gh.srv.URL},
+		&fakeAgents{},
+		nil,
+	)
+
+	for i := 0; i < 3; i++ {
+		if _, err := r.ClientForRepo(context.Background(), "org-1", "acme", "widget"); err != nil {
+			t.Fatalf("ClientForRepo #%d: %v", i, err)
+		}
+	}
+	if got := atomic.LoadInt32(&gh.repoProbes); got != 1 {
+		t.Errorf("coverage probes = %d, want 1 (decision should be memoized)", got)
 	}
 }
 

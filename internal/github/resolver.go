@@ -74,11 +74,12 @@ type Resolver interface {
 }
 
 type resolver struct {
-	secrets db.SecretStore
-	apps    db.GitHubAppsStore
-	orgs    db.OrgsStore
-	agents  db.AgentStore
-	cache   TokenCache
+	secrets  db.SecretStore
+	apps     db.GitHubAppsStore
+	orgs     db.OrgsStore
+	agents   db.AgentStore
+	cache    TokenCache
+	coverage *repoCoverageCache
 }
 
 // NewResolver builds a Resolver. A nil cache gets a fresh in-memory one.
@@ -86,7 +87,7 @@ func NewResolver(secrets db.SecretStore, apps db.GitHubAppsStore, orgs db.OrgsSt
 	if cache == nil {
 		cache = NewMemoryTokenCache()
 	}
-	return &resolver{secrets: secrets, apps: apps, orgs: orgs, agents: agents, cache: cache}
+	return &resolver{secrets: secrets, apps: apps, orgs: orgs, agents: agents, cache: cache, coverage: newRepoCoverageCache()}
 }
 
 func (r *resolver) ClientFor(ctx context.Context, orgID, target string) (*Client, error) {
@@ -131,15 +132,24 @@ func (r *resolver) ClientForRepo(ctx context.Context, orgID, owner, repo string)
 	// Coverage is probed up front rather than via a 403-retry — 403 is
 	// ambiguous and the grant is knowable ahead of time. A single
 	// GET /repos/{owner}/{repo} on the installation token answers it (200 →
-	// covered, 404/403 → not in grant), which is far cheaper than paginating
-	// the whole installation repo set per request.
+	// covered, 404/403 → not in grant), far cheaper than paginating the whole
+	// installation repo set; the conclusive answer is memoized (repoCoverageTTL)
+	// so the per-card dashboard path doesn't re-probe every request.
 	if client, ok := r.tier1AppClient(ctx, orgID, owner, base); ok {
-		reachable, conclusive := client.CheckRepoAccess(ctx, owner, repo)
-		if reachable || !conclusive {
-			// Covered, or coverage indeterminate (5xx / transport error) — in
-			// the unknown case prefer the App client we already minted, the
-			// same one owner-grain ClientFor would have returned, over
-			// discarding a working credential on a guess.
+		covered, cached := r.coverage.get(orgID, owner, repo)
+		if !cached {
+			reachable, conclusive := client.CheckRepoAccess(ctx, owner, repo)
+			if !conclusive {
+				// Indeterminate (5xx / transport error) — fail open with the
+				// minted App client (the same one owner-grain ClientFor would
+				// return) and don't cache, so a transient outage can't pin a
+				// wrong coverage answer.
+				return client, nil
+			}
+			covered = reachable
+			r.coverage.set(orgID, owner, repo, covered)
+		}
+		if covered {
 			return client, nil
 		}
 		// Conclusively not covered: installed on this account but this repo

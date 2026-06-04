@@ -29,6 +29,13 @@ func newAppRepoStub(t *testing.T, reposByInstall map[string][]string) *httptest.
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v3/app/installations/", func(w http.ResponseWriter, r *http.Request) {
+		// The real endpoint is POST /app/installations/{id}/access_tokens —
+		// reject other methods so a regression that issues the wrong verb fails
+		// the test instead of silently minting.
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		// Path: /api/v3/app/installations/{id}/access_tokens — pull {id}.
 		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 		var id string
@@ -45,6 +52,10 @@ func newAppRepoStub(t *testing.T, reposByInstall map[string][]string) *httptest.
 		})
 	})
 	mux.HandleFunc("/api/v3/installation/repositories", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		id := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ghs_")
 		names := reposByInstall[id]
 		repos := make([]map[string]any, 0, len(names))

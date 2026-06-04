@@ -41,7 +41,24 @@ export async function getGitHubAppInstallURL(orgId: string): Promise<string> {
   const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github-app/install-url`)
   if (!res.ok) throw new Error(await readError(res, 'Failed to load install URL'))
   const body = (await res.json()) as { url: string }
+  // The URL is backend-derived from the org's GitHub base URL. Reject any
+  // non-http(s) scheme here, at the single source, so neither an <a href>
+  // (RepoPickerModal) nor window.open (Settings) can ever be handed a
+  // javascript: link from a misconfigured base URL.
+  if (!isHttpUrl(body.url)) {
+    throw new Error('GitHub App install URL has an unsupported scheme')
+  }
   return body.url
+}
+
+// isHttpUrl reports whether url parses and uses an http(s) scheme.
+function isHttpUrl(url: string): boolean {
+  try {
+    const { protocol } = new URL(url)
+    return protocol === 'http:' || protocol === 'https:'
+  } catch {
+    return false
+  }
 }
 
 // startGitHubAppRegistration kicks off the manifest flow with a top-level

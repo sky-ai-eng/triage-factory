@@ -158,6 +158,10 @@ func (s *Server) handleDashboardPRDraft(w http.ResponseWriter, r *http.Request) 
 	}
 
 	repoParam := r.URL.Query().Get("repo")
+	if repoParam == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repo query parameter required (owner/repo)"})
+		return
+	}
 	parts := strings.SplitN(repoParam, "/", 2)
 	if len(parts) != 2 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repo must be owner/repo"})
