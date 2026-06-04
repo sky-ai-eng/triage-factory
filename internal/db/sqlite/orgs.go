@@ -47,6 +47,10 @@ func (s *orgsStore) GetOrgSystem(ctx context.Context, orgID string) (*domain.Org
 	return s.GetOrg(ctx, orgID)
 }
 
+func (s *orgsStore) CreateLocalTenant(ctx context.Context) error {
+	return db.SeedLocalTenantRows(ctx, s.q)
+}
+
 func (s *orgsStore) ListActiveSystem(ctx context.Context) ([]string, error) {
 	rows, err := s.q.QueryContext(ctx, `SELECT id FROM orgs ORDER BY id ASC`)
 	if err != nil {

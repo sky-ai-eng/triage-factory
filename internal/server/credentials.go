@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
@@ -192,10 +193,34 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
+
+	// First-run detection keys on tenant existence, not GitHub creds.
+	// "configured" now means "a provisioned tenant exists" — the local
+	// shim hands every request the LocalDefault* org id regardless of
+	// whether that org row actually exists, so probe the row directly.
+	// No tenant ⇒ the user hasn't run "Start your Triage Factory" yet and
+	// the AuthGate routes them to the first-run screen; GitHub-creds-
+	// present is now a later config step, surfaced via the github/jira
+	// fields below rather than gating first-run. GetOrgSystem reads org
+	// metadata without claims (a cheap existence probe); in multi mode an
+	// active org always exists, so configured is always true there and
+	// the field is unused (multi gates via AuthContext).
+	org, err := s.orgs.GetOrgSystem(r.Context(), orgID)
+	if err != nil {
+		log.Printf("[setup] integrations status tenant probe: %v", err)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"configured": false,
+			"error":      "failed to load integrations status",
+		})
+		return
+	}
+	tenantExists := org != nil
+
 	// SecretStore.Load + repo count both inside the same WithTx so
 	// vault_decrypt sees request.jwt.claims and repos_select RLS runs
 	// under the user's identity. Local mode collapses to one SQLite
-	// tx with the same shape.
+	// tx with the same shape. These feed the config-step fields
+	// (github/jira/github_repos), not the first-run gate.
 	var (
 		creds     auth.Credentials
 		credsErr  error
@@ -227,9 +252,8 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// GitHub is mandatory — configured requires GitHub creds + at least one repo
 	result := map[string]any{
-		"configured":   creds.GitHubPAT != "" && creds.GitHubURL != "" && repoCount > 0,
+		"configured":   tenantExists,
 		"github":       creds.GitHubPAT != "",
 		"jira":         creds.JiraPAT != "",
 		"github_repos": repoCount,
@@ -244,6 +268,67 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 	}
 
 	writeJSON(w, http.StatusOK, result)
+}
+
+// handleSetupStart is the local-mode "Start your Triage Factory"
+// provision action (POST /api/setup/start). On a tenant-less install it
+// runs the shared BootstrapLocalOrg chain: create the synthetic tenant
+// rows, then seed the org template + materialize the founder team's
+// agent + prompts + blueprints + handlers — the same create→bootstrap
+// path multi-mode fires on org-create, with auth skipped and identity
+// auto-filled to the runmode.LocalDefault* sentinels.
+//
+// No-op once a tenant already exists. This is the load-bearing
+// non-resurrection guarantee: the materializer is INSERT-OR-IGNORE keyed
+// on (org, team, system_slug), so re-running it would re-create a
+// shipped default the user has since deleted. Gating the whole action on
+// "no tenant yet" means a deleted shipped default stays deleted across
+// restarts and double-clicks — "tenant exists ⇒ already provisioned &
+// seeded." (Crash-mid-provision recovery is BootstrapLocalOrg's own
+// re-entrancy concern, exercised by re-invoking the function directly;
+// the user-facing endpoint deliberately doesn't re-seed an existing
+// tenant.)
+//
+// Local-mode only — multi-mode provisions per signup through
+// auth_provision.go and has no synthetic tenant to create.
+func (s *Server) handleSetupStart(w http.ResponseWriter, r *http.Request) {
+	if runmode.Current() != runmode.ModeLocal {
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": "setup/start is local-mode only; multi-mode provisions tenants on org creation",
+		})
+		return
+	}
+
+	// No-op when already provisioned — never re-run the seeders against an
+	// existing tenant (that would resurrect user-deleted shipped defaults).
+	org, err := s.orgs.GetOrgSystem(r.Context(), runmode.LocalDefaultOrgID)
+	if err != nil {
+		log.Printf("[setup] setup/start tenant probe: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to provision local workspace",
+		})
+		return
+	}
+	if org == nil {
+		if err := db.BootstrapLocalOrg(r.Context(), s.allStores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+			log.Printf("[setup] BootstrapLocalOrg failed: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "failed to provision local workspace",
+			})
+			return
+		}
+	}
+
+	// Return the provisioned tenant. The IDs are the stable sentinels, but
+	// echoing them keeps the response shape parallel to multi-mode's
+	// org-create response and gives the onboarding UI something to confirm
+	// against. already_provisioned distinguishes the no-op re-call.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"provisioned":         true,
+		"already_provisioned": org != nil,
+		"org_id":              runmode.LocalDefaultOrgID,
+		"team_id":             runmode.LocalDefaultTeamID,
+	})
 }
 
 // DELETE /api/integrations — clears all integration credentials (GitHub

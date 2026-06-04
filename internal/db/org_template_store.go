@@ -24,15 +24,16 @@ import (
 // inherits and never touches a team that already exists (consistent with the
 // CLAUDE.md tracking-changes invariant).
 //
-// # Multi-mode only
+// # Both modes
 //
-// The template is a multi-tenant concept. Local mode (N=1) has one team and
-// never seeds or reads a template — seedDefaultPrompts continues to seed the
-// sole team straight from the shipped lists. The SQLite impl is wired so the
-// db-package bootstrap + conformance tests can exercise the store without a
-// Postgres container, but production local-mode never reaches it (the HTTP
-// surface is org-admin + multi-mode gated, and BootstrapNewOrg/NewTeam are the
-// multi-mode org/team-create paths).
+// The template is a multi-tenant concept that local mode now reuses at N=1:
+// the local provision action (db.BootstrapLocalOrg, fired by POST
+// /api/setup/start) runs the same SeedFromShipped → MaterializeIntoTeam chain
+// multi-mode uses, so the sole local team is seeded *through* the template
+// rather than straight from the shipped lists. The template's editor HTTP
+// surface stays org-admin + multi-mode gated, but the seed path is shared —
+// "tenant exists ⇒ provisioned & seeded through the template" holds in both
+// modes.
 //
 // # Pool split (Postgres)
 //
@@ -52,7 +53,7 @@ type OrgTemplateStore interface {
 	// shippedPrompts + shippedBlueprints (passed in so internal/db stays free
 	// of the internal/ai dependency — callers supply ai.ShippedPrompts() /
 	// ai.ShippedBlueprints()) plus the in-package db.ShippedEventHandlers.
-	// Three-phase like SeedTeamDefaults: prompts first (capturing system_slug →
+	// Three-phase: prompts first (capturing system_slug →
 	// template prompt id), then blueprints + their steps (resolving each step's
 	// prompt slug via the phase-1 map), then handlers resolving each trigger's
 	// blueprint slug via the phase-2 map. Rules seed enabled, triggers disabled
@@ -63,8 +64,8 @@ type OrgTemplateStore interface {
 
 	// MaterializeIntoTeam copies the org's current template into teamID's
 	// prompts + blueprints (+ blueprint_steps) + event_handlers (and
-	// system_prompt_versions for system rows), reproducing what SeedTeamDefaults
-	// would have written from the shipped lists — only the source rows differ.
+	// system_prompt_versions for system rows) — the per-team copy every new
+	// team (and the founder team) gets seeded from.
 	// Three-phase: each template prompt becomes a team prompt copy (new random
 	// UUID, same system_slug + source + content); each template blueprint is
 	// deep-copied into a team blueprint (same system_slug + source + name) with

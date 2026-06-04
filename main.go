@@ -203,10 +203,10 @@ func bootstrapBareClones(database *sql.DB, repos db.RepoStore) {
 // bootstrapLocalGitHubIdentity populates the local synthetic user's
 // host-scoped GitHub identity row (user_github_identities, SKY-396) by
 // deriving the login from the configured PAT+URL, bound to the org's host.
-// Runs at startup before seedDefaultPrompts so the SQLite Seed
-// substitution sees the populated value when it wires
-// author_in/reviewer_in/commenter_in allowlists into shipped event
-// handler predicates.
+// Runs at startup only when a tenant already exists (a prior provision) —
+// it writes the users row, which provisioning created. The config step
+// (handleIntegrationsSetup) is the other write path, capturing the login
+// when the PAT is first entered.
 //
 // No-op when (a) an identity row already exists for the host, (b)
 // credentials are absent (Settings UI capture is the alternate write
@@ -248,10 +248,10 @@ func bootstrapLocalGitHubIdentity(users db.UsersStore, secrets db.SecretStore) e
 // from the same /rest/api/2/myself response, so the capture is one
 // round-trip per boot.
 //
-// Runs at startup before seedDefaultPrompts so the SQLite Seed
-// substitution can fill `assignee_in: []` placeholders on shipped
-// jira-assigned / jira-became-atomic handler predicates with the
-// local user's account ID.
+// Runs at startup only when a tenant already exists (it writes the users
+// row that provisioning created), keeping the shipped jira-assigned /
+// jira-became-atomic predicates' assignee allowlists bound to the local
+// user's account ID across restarts.
 //
 // No-op when (a) the row already has both columns populated,
 // (b) credentials are absent, or (c) ValidateJira fails. The Settings
@@ -437,13 +437,11 @@ func main() {
 		if err := db.Migrate(database, "sqlite3"); err != nil {
 			log.Fatalf("failed to migrate database: %v", err)
 		}
-		// Fail fast if the migration's seeded UUIDs drifted from the
-		// runmode constants — every team_id/creator_user_id DEFAULT
-		// clause in the SQLite baseline embeds these literally, so a
-		// mismatch would silently produce orphan rows.
-		if err := db.AssertLocalSentinels(database); err != nil {
-			log.Fatalf("%v", err)
-		}
+		// No tenant rows exist on a fresh local DB anymore — provisioning
+		// is the explicit "Start your Triage Factory" action
+		// (db.BootstrapLocalOrg via POST /api/setup/start), not a boot- or
+		// migration-time side effect. The server, pollers, scorer, router,
+		// and spawner all start and idle cleanly with zero tenant rows.
 		stores = sqlitestore.New(database)
 	case runmode.ModeMulti:
 		// Multi-mode boot wires two Postgres pools against the same
@@ -694,64 +692,44 @@ func main() {
 
 	// events_catalog is seeded by the v1.11.0 baseline migration in both
 	// backends — no boot-time seed call needed. New event types ship via
-	// a new forward migration. Prompts are seeded inside seedDefaultPrompts
-	// before EventHandlers.Seed runs so the FK from event_handlers.prompt_id
-	// → prompts.id resolves on the trigger rows.
+	// a new forward migration.
 	//
-	// Populate the local user's GitHub identity before seeding event
-	// handlers so the SQLite Seed substitution sees the local user's login
-	// when it wires allowlist placeholders on shipped predicates.
-	if err := bootstrapLocalGitHubIdentity(stores.Users, stores.Secrets); err != nil {
-		log.Printf("[bootstrap] github identity: %v (continuing — Settings will capture on next save)", err)
-	}
-	if err := bootstrapLocalJiraIdentity(stores.Users, stores.Secrets); err != nil {
-		log.Printf("[bootstrap] users.jira_identity: %v (continuing — Settings will capture on next save)", err)
-	}
-	// Local mode only: shipped prompts + handlers materialize against
-	// the synthetic (LocalDefaultOrg, LocalDefaultTeamID) pair, neither
-	// of which has a real row in multi-mode Postgres — the event_handlers
-	// insert would FK-fail on first boot. Multi-mode tenants get the
-	// shipped content seeded by the org-create / team-create flows
-	// (D14), which run against real orgs and teams.
+	// Nothing provisions or seeds a tenant at boot anymore. A fresh local
+	// DB has zero tenant rows until the user fires the explicit "Start
+	// your Triage Factory" action (POST /api/setup/start →
+	// db.BootstrapLocalOrg), which creates the synthetic org/team/user +
+	// materializes the shipped defaults through the same org-template
+	// chain multi-mode uses. So the shipped prompts/handlers + the local
+	// agent identity are seeded by that action, not here — and a user's
+	// deletion of a shipped default is durable across restarts.
+	//
+	// The local user's GitHub + Jira identity capture (derive login /
+	// account-id from the stored PAT) only makes sense once a tenant
+	// exists to write the users row onto. Gate the whole local post-
+	// migrate fixup block on tenant existence: on a tenant-less boot
+	// these no-op; on a boot after a prior provision they repopulate the
+	// users row + import any new SKILL.md prompts. The config step
+	// (handleIntegrationsSetup) also captures the GitHub identity when
+	// the PAT is first entered, so this is a best-effort refresh, not the
+	// only write path.
 	if runmode.Current() == runmode.ModeLocal {
-		seedDefaultPrompts(stores.Prompts, stores.Blueprints, stores.EventHandlers)
-	}
-
-	// Bootstrap the local-mode agent identity (SKY-260 D-Agent). One
-	// agents row + one team_agents row for the synthetic LocalDefaultOrg
-	// / LocalDefaultTeamID pair. Idempotent (INSERT OR IGNORE) — re-runs
-	// across boots leave existing rows intact, preserving any user-
-	// disable on team_agents.enabled.
-	//
-	// Fatal on failure: post-SKY-261 the agents row is load-bearing for
-	// the entire claim flow (stampAgentClaim's GetForOrg, the drain
-	// path's claim_changed guard, runs.actor_agent_id stamping). The
-	// idempotent INSERT means the only legitimate failure mode is a
-	// DB connection issue — and Migrate() above already fatals on
-	// that. Continuing past a bootstrap failure produces a silently-
-	// broken auto-delegation state where the user wouldn't see an
-	// error, just notice things never fire. Better to surface the
-	// failure at startup.
-	//
-	// Local mode only: multi-mode bootstraps a real agents row per org
-	// via the admin org-create flow (SKY-257). There is no synthetic
-	// org in multi mode for this row to attach to.
-	if runmode.Current() == runmode.ModeLocal {
-		if err := db.BootstrapLocalAgent(context.Background(), stores); err != nil {
-			log.Fatalf("[bootstrap] local agent: %v (auto-delegation depends on this; refusing to start)", err)
+		if org, err := stores.Orgs.GetOrgSystem(context.Background(), runmode.LocalDefaultOrgID); err != nil {
+			log.Printf("[bootstrap] check local tenant: %v (skipping identity/skill fixup)", err)
+		} else if org != nil {
+			if err := bootstrapLocalGitHubIdentity(stores.Users, stores.Secrets); err != nil {
+				log.Printf("[bootstrap] github identity: %v (continuing — Settings will capture on next save)", err)
+			}
+			if err := bootstrapLocalJiraIdentity(stores.Users, stores.Secrets); err != nil {
+				log.Printf("[bootstrap] users.jira_identity: %v (continuing — Settings will capture on next save)", err)
+			}
+			// Auto-import Claude Code skill files as prompts. The importer's
+			// store calls run as the boot process with no user identity,
+			// which works against SQLite (no RLS). Multi-mode users import
+			// prompts via the request-driven CRUD surface (the handler has
+			// claims), and SKILL.md files live on the user's machine, not
+			// the server's — so this is local-only by construction.
+			skills.ImportAll(context.Background(), database, stores.Prompts)
 		}
-	}
-
-	// Auto-import Claude Code skill files as prompts. Local mode
-	// only: the importer's store calls run as the boot process with
-	// no user identity, which works against SQLite (no RLS) but
-	// would fail against Postgres tf_app for lack of claims. Multi-
-	// mode users will import prompts via the request-driven CRUD
-	// surface, where the handler has claims; auto-import on boot
-	// doesn't make sense there anyway because SKILL.md files live
-	// on the user's machine, not the server's.
-	if runmode.Current() == runmode.ModeLocal {
-		skills.ImportAll(context.Background(), database, stores.Prompts)
 	}
 
 	// Event bus — central pub/sub replacing direct callbacks

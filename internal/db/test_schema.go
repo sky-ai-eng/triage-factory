@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/hex"
 	"fmt"
@@ -57,6 +58,19 @@ func buildSchemaBundle() (string, error) {
 		return "", fmt.Errorf("migrate template: %w", err)
 	}
 
+	// Seed the synthetic local tenant into the template so the dump
+	// below captures it. Production no longer provisions at boot or in
+	// the migration (provisioning is the explicit "Start your Triage
+	// Factory" action via BootstrapLocalOrg) — but the vast majority of
+	// store + handler tests assume a provisioned local install as their
+	// fixture (inserting agents / team_agents / org_settings / etc. that
+	// FK to these rows). BootstrapSchemaForTest therefore represents a
+	// provisioned install; tests that want the genuine tenant-less boot
+	// state use Migrate directly instead.
+	if err := SeedLocalTenantRows(context.Background(), template); err != nil {
+		return "", fmt.Errorf("seed local tenant into template: %w", err)
+	}
+
 	var b strings.Builder
 
 	// DDL in sqlite_master rowid order so any dependency ordering
@@ -87,21 +101,24 @@ func buildSchemaBundle() (string, error) {
 	// Seed rows preserved across the bundle:
 	//   - goose_db_version  — a follow-up Migrate sees head.
 	//   - events_catalog    — FK target for event_handlers.event_type;
-	//     many tests INSERT against it.
-	//   - tenancy sentinels — the v1.11.0 baseline inserts five rows
-	//     into orgs/teams/users/org_memberships/memberships. Resource
-	//     tables carry org_id/team_id/creator_user_id columns with
-	//     NOT NULL DEFAULT pointing at these sentinel UUIDs. The
-	//     agents + team_agents tables declare FKs to orgs/teams/agents,
-	//     so tests that INSERT into them need the parent rows present.
+	//     many tests INSERT against it. Seeded by the baseline migration.
+	//   - instance_config   — singleton row (id=1); seeded by the baseline.
+	//   - tenancy sentinels — orgs/teams/users/org_memberships/memberships
+	//     + org_settings/team_settings, seeded into the template above by
+	//     SeedLocalTenantRows (production provisions these via the explicit
+	//     BootstrapLocalOrg action, not the migration). Resource tables
+	//     carry org_id/team_id/creator_user_id columns with NOT NULL
+	//     DEFAULT pointing at these sentinel UUIDs. The agents + team_agents
+	//     tables declare FKs to orgs/teams/agents, so tests that INSERT
+	//     into them need the parent rows present.
 	//
 	// agents + team_agents are included in the dump list defensively.
-	// They're empty in the template (the SKY-260 migration creates the
-	// table but BootstrapLocalAgent — the function that populates the
-	// row — runs at main.go startup, not during Migrate). The
-	// dumpTableInserts call produces zero INSERTs for empty tables,
-	// so listing them is a no-op today; the list documents intent in
-	// case a future migration starts seeding default agent rows.
+	// They're empty in the template (SeedLocalTenantRows seeds the bare
+	// tenant — orgs/teams/users/memberships/settings — but not the agent,
+	// which the provision action's BootstrapLocalOrg chain creates). The
+	// dumpTableInserts call produces zero INSERTs for empty tables, so
+	// listing them is a no-op today; the list documents intent in case a
+	// future fixture starts seeding default agent rows.
 	for _, table := range []string{
 		"goose_db_version", "events_catalog",
 		"orgs", "teams", "users", "org_memberships", "memberships",

@@ -36,6 +36,18 @@ type OrgsStore interface {
 	// without JWT-claims context. SQLite collapses to GetOrg.
 	GetOrgSystem(ctx context.Context, orgID string) (*domain.Org, error)
 
+	// CreateLocalTenant idempotently inserts the synthetic local-mode
+	// tenant rows (orgs / users / org_memberships / teams(Default) /
+	// memberships / org_settings / team_settings) for the
+	// runmode.LocalDefault* sentinels. It is the local "Start your
+	// Triage Factory" provision action's first step, before
+	// BootstrapNewOrg seeds the template + materializes the team.
+	// Re-entrant (INSERT OR IGNORE) so a re-run reaches the same end
+	// state. Local-mode only: the Postgres impl returns
+	// ErrNotApplicableInLocal — multi-mode creates real tenant rows per
+	// signup in auth_provision.go.
+	CreateLocalTenant(ctx context.Context) error
+
 	// ListActiveSystem returns the IDs of every active org in
 	// ascending id order. "Active" means deleted_at IS NULL in
 	// Postgres; SQLite has no soft-delete column, so the local-mode

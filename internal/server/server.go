@@ -352,10 +352,11 @@ func (s *Server) agentEnabledForTeam(ctx context.Context, orgID, userID, teamID 
 			return fmt.Errorf("team_agents lookup: %w", e)
 		}
 		if ta == nil {
-			// team_agents row missing — treat as disabled. Production
-			// installs always have the row via BootstrapLocalAgent /
-			// team-create bootstrap; a missing row at runtime means
-			// something went sideways.
+			// team_agents row missing — treat as disabled. Provisioned
+			// installs always have the row (BootstrapLocalOrg /
+			// team-create bootstrap); a missing row at runtime means
+			// either the tenant was never provisioned or something went
+			// sideways.
 			teamMissing = true
 			return nil
 		}
@@ -522,6 +523,10 @@ func (s *Server) routes() {
 	// need to be logged in to manage your integration credentials.
 	s.apiMutating("POST /api/integrations/setup", s.handleIntegrationsSetup)
 	s.api("GET /api/integrations/status", s.handleIntegrationsStatus)
+	// Local-mode "Start your Triage Factory" provision action — creates
+	// the synthetic tenant + materializes shipped defaults via the shared
+	// bootstrap chain. Idempotent; no-op once a tenant exists.
+	s.apiMutating("POST /api/setup/start", s.handleSetupStart)
 	// DELETE on the collection = nuke all integration credentials.
 	// Targeted clears (Jira only) get explicit subpaths.
 	s.apiMutating("DELETE /api/integrations", s.handleIntegrationsClear)

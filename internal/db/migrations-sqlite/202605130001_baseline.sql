@@ -1253,56 +1253,25 @@ CREATE UNIQUE INDEX events_id_org_unique           ON events           (id, org_
 CREATE UNIQUE INDEX pending_reviews_id_org_unique  ON pending_reviews  (id, org_id);
 CREATE UNIQUE INDEX curator_requests_id_org_unique ON curator_requests (id, org_id);
 
--- === Tenancy seed rows ===================================================
--- INSERT OR IGNORE is intentional: the application also writes to these
--- tables (via runmode.LocalDefaultOrg / LocalDefaultUserID), so the
--- seed is idempotent — not legacy compatibility. These IDs are
--- referenced as DEFAULT values across many tables above.
-INSERT OR IGNORE INTO orgs (id, slug, name) VALUES
-    ('00000000-0000-0000-0000-000000000001', 'local', 'Local');
-
-INSERT OR IGNORE INTO teams (id, org_id, slug, name) VALUES
-    ('00000000-0000-0000-0000-000000000010',
-     '00000000-0000-0000-0000-000000000001',
-     'default',
-     'Default');
-
-INSERT OR IGNORE INTO users (id, display_name) VALUES
-    ('00000000-0000-0000-0000-000000000100', 'You');
-
-INSERT OR IGNORE INTO org_memberships (user_id, org_id, role) VALUES
-    ('00000000-0000-0000-0000-000000000100',
-     '00000000-0000-0000-0000-000000000001',
-     'owner');
-
-INSERT OR IGNORE INTO memberships (user_id, team_id, role) VALUES
-    ('00000000-0000-0000-0000-000000000100',
-     '00000000-0000-0000-0000-000000000010',
-     'admin');
-
--- Settings rows for the local sentinel org + team. Listing only the
--- PK lets every other column take its NOT NULL DEFAULT from above —
--- a tiny formal restatement of the schema defaults, so the application
--- never has to special-case "row exists but it's a row of defaults" vs
--- "no row at all." The team_settings seed flips auto_delegate_enabled
--- to 1: the schema default is 0 (multi-mode's "new teams require
--- explicit opt-in" rule), but local mode is the auto-delegate happy
--- path and the deleted internal/config.Default() always reported
--- AutoDelegateEnabled=true in this scope. Keeping the schema default
--- conservative (false) for multi-mode is the right call; local mode
--- overrides on the way in via this seed.
+-- === System registries (NOT tenant data) =================================
+-- No tenancy seed rows here anymore: provisioning the synthetic local
+-- org/team/user/memberships/settings is an explicit, user-triggered
+-- action ("Start your Triage Factory" → db.BootstrapLocalOrg), not a
+-- migration- or boot-time side effect. A fresh local DB boots with zero
+-- tenant rows; deleted shipped defaults stay deleted across restarts
+-- because nothing re-seeds at boot. Multi-mode never seeded tenant rows
+-- in its baseline either — both modes now create tenants only via a
+-- deliberate provision action through the shared BootstrapNewOrg chain.
+--
+-- What stays seeded below is system-registry data, identical for every
+-- install and not owned by any tenant: instance_config (a singleton) and
+-- events_catalog (the event-type registry the events FK targets).
 --
 -- instance_config is a singleton (id=1 enforced by CHECK). The seed
--- below materializes the row so the boot-time read in main.go always
--- finds it instead of degrading to sql.ErrNoRows; column DEFAULTs
--- supply server_port and server_takeover_dir.
+-- materializes the row so the boot-time read in main.go always finds it
+-- instead of degrading to sql.ErrNoRows; column DEFAULTs supply
+-- server_port and server_takeover_dir.
 INSERT OR IGNORE INTO instance_config (id) VALUES (1);
-
-INSERT OR IGNORE INTO org_settings (org_id) VALUES
-    ('00000000-0000-0000-0000-000000000001');
-
-INSERT OR IGNORE INTO team_settings (team_id, auto_delegate_enabled) VALUES
-    ('00000000-0000-0000-0000-000000000010', 1);
 
 -- events_catalog seed (system-managed event type registry). Mirrors the
 -- equivalent INSERT block in the Postgres baseline; both must stay in

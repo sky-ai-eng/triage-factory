@@ -10,42 +10,55 @@ import (
 
 // Bootstrap functions for agent identity (SKY-260 D-Agent).
 //
-// All three entry points share one property: they're idempotent. The
-// org / team / local bootstrap can run at every startup or every
-// handler call without changing user state — INSERT-OR-IGNORE
-// semantics live in the AgentStore + TeamAgentStore impls.
+// All entry points share one property: they're idempotent. The org /
+// team / local bootstrap can run at every signup, handler call, or
+// explicit provision action without changing user state — INSERT-OR-
+// IGNORE semantics live in the AgentStore + TeamAgentStore impls and
+// the OrgTemplate copy.
 //
 // Callers:
 //
-//   - BootstrapLocalAgent — main.go startup, runs alongside
-//     seedDefaultPrompts. Existing v1.10.1 → current installs pick up
-//     the agents + team_agents rows on first post-upgrade boot.
+//   - BootstrapLocalOrg — the local "Start your Triage Factory"
+//     provision action (POST /api/setup/start). Creates the synthetic
+//     tenant rows, then runs the shared BootstrapNewOrg chain. Nothing
+//     provisions at boot anymore.
 //   - BootstrapAgentForOrg — multi-mode org-create handler (D7
 //     SKY-251), runs after the orgs row inserts + before any team is
 //     created for that org.
 //   - BootstrapTeamAgent — multi-mode team-create handler (also D7),
 //     runs after each new teams row inserts.
 
-// BootstrapLocalAgent inserts the synthetic local-mode agent + the
-// local-mode team_agents row. Safe to call at every startup. Returns
-// nil if the rows already exist; returns the underlying store error
-// otherwise.
+// BootstrapLocalOrg is the local-mode analog of multi's "create the
+// tenant rows + BootstrapNewOrg" signup path. It idempotently creates
+// the synthetic orgs / users / org_memberships / teams(Default) /
+// memberships / org_settings / team_settings(auto_delegate_enabled=1)
+// rows for the runmode.LocalDefault* sentinels (via
+// OrgsStore.CreateLocalTenant), then runs the shared BootstrapNewOrg
+// chain to seed the org template + materialize the founder team's
+// agent + prompts + blueprints + handlers.
 //
-// In local mode the agent's credential FKs stay NULL — the PAT lives
-// in the OS keychain, not in agents.github_pat_user_id (there's no
-// users table to FK into). The agents row is metadata that becomes
-// load-bearing when D-Claims wires claimed_by_agent_id +
-// actor_agent_id; until then, the spawner continues to read PATs
-// from the keychain directly.
-func BootstrapLocalAgent(ctx context.Context, stores Stores) error {
-	agentID, err := stores.Agents.Create(ctx, runmode.LocalDefaultOrg, domain.Agent{
-		DisplayName: "Triage Factory Bot",
-	})
-	if err != nil {
-		return fmt.Errorf("bootstrap local agent: %w", err)
+// This is the ONE shared provision operation, triggered by a deliberate
+// user action: multi fires it via the admin's create-org flow,
+// local fires it via "Start your Triage Factory". The only differences
+// are what fires it and what identity is auto-filled (local hardcodes
+// the LocalDefault* sentinels); the seed path is identical. Nothing
+// runs it at boot — a fresh local DB has zero tenant rows until the
+// user provisions.
+//
+// Fully re-entrant: re-running after a partial provision (or after the
+// user already provisioned) reaches the same end state — the tenant-row
+// inserts are INSERT OR IGNORE and BootstrapNewOrg's seeders skip via
+// ON CONFLICT, so a previously deleted shipped default is never
+// resurrected. shippedPrompts + shippedBlueprints are passed in (rather
+// than read from internal/ai) so internal/db stays free of the ai
+// dependency — the caller supplies ai.ShippedPrompts() /
+// ai.ShippedBlueprints().
+func BootstrapLocalOrg(ctx context.Context, stores Stores, shippedPrompts []domain.Prompt, shippedBlueprints []domain.SeedBlueprint) error {
+	if err := stores.Orgs.CreateLocalTenant(ctx); err != nil {
+		return fmt.Errorf("bootstrap local org: create tenant rows: %w", err)
 	}
-	if err := stores.TeamAgents.AddForTeam(ctx, runmode.LocalDefaultOrg, LocalDefaultTeamID, agentID); err != nil {
-		return fmt.Errorf("bootstrap local team_agents: %w", err)
+	if err := BootstrapNewOrg(ctx, stores, runmode.LocalDefaultOrg, LocalDefaultTeamID, shippedPrompts, shippedBlueprints); err != nil {
+		return fmt.Errorf("bootstrap local org: %w", err)
 	}
 	return nil
 }
@@ -93,69 +106,6 @@ func BootstrapTeamAgent(ctx context.Context, stores Stores, orgID, teamID string
 	}
 	if err := stores.TeamAgents.AddForTeam(ctx, orgID, teamID, agent.ID); err != nil {
 		return fmt.Errorf("bootstrap team_agents: %w", err)
-	}
-	return nil
-}
-
-// SeedTeamDefaults seeds a team's own copies of the shipped prompts,
-// blueprints, and event handlers in three phases:
-//
-//	(1) seed each prompt copy, capturing system_slug → the team's
-//	    prompt-copy UUID;
-//	(2) seed each blueprint header + its steps (resolving each step's prompt
-//	    slug via the phase-1 map), capturing system_slug → the team's
-//	    blueprint-copy UUID;
-//	(3) seed the handlers, resolving each trigger's blueprint slug via the
-//	    phase-2 map so the trigger→blueprint same-team FK
-//	    ((blueprint_id, team_id) → blueprints(id, team_id)) is satisfied.
-//
-// Idempotent: re-runs no-op via the (org_id, team_id, system_slug) unique keys
-// on prompts + blueprints + event_handlers (steps re-write to the same dense
-// 0..N-1 list). shippedPrompts + shippedBlueprints are passed in (rather than
-// imported from internal/ai) so internal/db stays free of the ai dependency —
-// callers supply ai.ShippedPrompts() / ai.ShippedBlueprints().
-//
-// Must run OUTSIDE any caller WithTx: SeedOrUpdate + EventHandlers.Seed route
-// through the Postgres admin pool (the system_prompt_versions sidecar +
-// claims-less system rows) and refuse to run inside an app-pool tx.
-func SeedTeamDefaults(ctx context.Context, prompts PromptStore, blueprints BlueprintStore, handlers EventHandlerStore, orgID, teamID string, shippedPrompts []domain.Prompt, shippedBlueprints []domain.SeedBlueprint) error {
-	promptIDsBySlug := make(map[string]string, len(shippedPrompts))
-	for _, p := range shippedPrompts {
-		id, err := prompts.SeedOrUpdate(ctx, orgID, teamID, p)
-		if err != nil {
-			return fmt.Errorf("seed team defaults: prompt %s: %w", p.SystemSlug, err)
-		}
-		if p.SystemSlug != "" {
-			promptIDsBySlug[p.SystemSlug] = id
-		}
-	}
-
-	blueprintIDsBySlug := make(map[string]string, len(shippedBlueprints))
-	for _, b := range shippedBlueprints {
-		bpID, err := blueprints.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
-			SystemSlug: b.SystemSlug, Name: b.Name, Source: "system",
-		})
-		if err != nil {
-			return fmt.Errorf("seed team defaults: blueprint %s: %w", b.SystemSlug, err)
-		}
-		stepPromptIDs := make([]string, 0, len(b.StepPromptSlugs))
-		for _, slug := range b.StepPromptSlugs {
-			pid, ok := promptIDsBySlug[slug]
-			if !ok || pid == "" {
-				return fmt.Errorf("seed team defaults: blueprint %s step prompt slug %q not seeded (seed prompts before blueprints)", b.SystemSlug, slug)
-			}
-			stepPromptIDs = append(stepPromptIDs, pid)
-		}
-		if err := blueprints.ReplaceSteps(ctx, orgID, bpID, stepPromptIDs, nil); err != nil {
-			return fmt.Errorf("seed team defaults: blueprint %s steps: %w", b.SystemSlug, err)
-		}
-		if b.SystemSlug != "" {
-			blueprintIDsBySlug[b.SystemSlug] = bpID
-		}
-	}
-
-	if err := handlers.Seed(ctx, orgID, teamID, blueprintIDsBySlug); err != nil {
-		return fmt.Errorf("seed team defaults: event handlers: %w", err)
 	}
 	return nil
 }

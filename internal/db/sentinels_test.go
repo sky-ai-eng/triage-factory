@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"testing"
 
@@ -14,12 +15,15 @@ import (
 // org_id / team_id / creator_user_id columns and the runmode
 // constants those literals are meant to mirror.
 //
-// AssertLocalSentinels only verifies the seeded orgs/teams/users
-// rows exist. It does NOT catch the case where a DEFAULT literal
-// on (e.g.) tasks.team_id silently drifts to a different UUID
-// while the seeded teams row stays at LocalDefaultTeamID — there's
-// no FK on these columns in the SQLite baseline, so the drift
-// produces orphan rows that no other check notices.
+// These DEFAULT literals are load-bearing in local mode: a resource row
+// inserted without an explicit org_id/team_id (the N=1 happy path) takes
+// the sentinel from the column DEFAULT, and the store impls then look it
+// up by runmode.LocalDefaultOrgID. There's no FK on these columns in the
+// SQLite baseline, so a DEFAULT literal that drifts from the runtime
+// constant produces orphan rows that no other check notices — this test
+// is the gate. (It runs against the migrated, tenant-less schema and
+// never needs the tenant rows themselves, since the probed columns have
+// no org/team FK.)
 //
 // Strategy: insert minimal probe rows that exercise every column's
 // DEFAULT clause, then read back and assert the column landed on
@@ -29,6 +33,13 @@ func TestMigrationDefaults_MatchRuntimeConstants(t *testing.T) {
 	d := openMigrationsTestDB(t)
 	if err := Migrate(d, "sqlite3"); err != nil {
 		t.Fatalf("Migrate: %v", err)
+	}
+	// Provision the local tenant so the FK-bearing probe columns
+	// (runs.creator_user_id → users) resolve. The migration no longer
+	// seeds tenant rows; this test exercises the DEFAULT literals against
+	// a provisioned install, which is the state those defaults serve.
+	if err := SeedLocalTenantRows(context.Background(), d); err != nil {
+		t.Fatalf("SeedLocalTenantRows: %v", err)
 	}
 
 	// Each probe: (table, columns to set explicitly, defaulted column

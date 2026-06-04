@@ -40,6 +40,15 @@ func (s *orgsStore) GetOrgSystem(ctx context.Context, orgID string) (*domain.Org
 	return getOrg(ctx, s.admin, orgID)
 }
 
+// CreateLocalTenant is local-mode only — multi-mode provisions real
+// tenant rows per signup in auth_provision.go, never the synthetic
+// LocalDefault* sentinels. Returns ErrNotApplicableInLocal so a
+// stray multi-mode caller fails loudly rather than minting sentinel
+// rows in a hosted tenant.
+func (s *orgsStore) CreateLocalTenant(ctx context.Context) error {
+	return db.ErrNotApplicableInLocal
+}
+
 func getOrg(ctx context.Context, q queryer, orgID string) (*domain.Org, error) {
 	var (
 		o          domain.Org

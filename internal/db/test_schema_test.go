@@ -43,12 +43,32 @@ func TestBootstrapSchemaForTest_MatchesMigrate(t *testing.T) {
 		t.Fatalf("table set differs.\ncached: %v\nreal:   %v", tablesCached, tablesReal)
 	}
 
-	// 3. Row count per table must match. This is the regression guard
-	//    the helper's docstring promises: any future migration that
-	//    inserts default rows into a new table will trip this.
+	// 3. Row count per table must match — EXCEPT for the synthetic local
+	//    tenant tables, which BootstrapSchemaForTest deliberately seeds as
+	//    a fixture (production no longer provisions at boot or in the
+	//    migration; provisioning is the explicit BootstrapLocalOrg action).
+	//    So the real (Migrate-only) path has zero tenant rows while the
+	//    cached fixture has exactly one of each. We assert that expected
+	//    divergence explicitly here rather than ignoring it, and keep the
+	//    strict equality guard for every other table — a future migration
+	//    that starts seeding some OTHER table still trips this.
+	fixtureSeededTenantTables := map[string]bool{
+		"orgs": true, "teams": true, "users": true,
+		"org_memberships": true, "memberships": true,
+		"org_settings": true, "team_settings": true,
+	}
 	for _, table := range tablesReal {
 		gotCount := countRows(t, cached, table)
 		wantCount := countRows(t, real, table)
+		if fixtureSeededTenantTables[table] {
+			if gotCount != 1 {
+				t.Errorf("fixture tenant table %s: cached bootstrap has %d row(s); want exactly 1 (SeedLocalTenantRows)", table, gotCount)
+			}
+			if wantCount != 0 {
+				t.Errorf("fixture tenant table %s: real Migrate has %d row(s); want 0 (boot/migration provisions nothing)", table, wantCount)
+			}
+			continue
+		}
 		if gotCount != wantCount {
 			t.Errorf("table %s: cached bootstrap has %d row(s), real has %d. "+
 				"If a new migration started seeding rows into this table, "+

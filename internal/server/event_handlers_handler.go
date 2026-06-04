@@ -432,9 +432,11 @@ func (s *Server) handleEventHandlerUpdate(w http.ResponseWriter, r *http.Request
 
 // DELETE /api/event-handlers/{id}
 //
-// User rows hard-delete; system rows soft-disable in place (Seed runs
-// on every boot with INSERT-OR-IGNORE, so a hard delete would
-// resurrect the row).
+// Hard-deletes unconditionally — system rows included. Nothing re-seeds
+// at boot anymore (provisioning is the one-time explicit BootstrapLocalOrg
+// action, and its materializer only runs against a fresh tenant), so a
+// deleted shipped default is durable. No source branch, no soft-disable
+// fallback, no resurrection marker.
 func (s *Server) handleEventHandlerDelete(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
@@ -444,7 +446,6 @@ func (s *Server) handleEventHandlerDelete(w http.ResponseWriter, r *http.Request
 	id := r.PathValue("id")
 
 	var existing *domain.EventHandler
-	var disabled bool
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		existing, e = tx.EventHandlers.Get(r.Context(), orgID, id)
@@ -454,13 +455,6 @@ func (s *Server) handleEventHandlerDelete(w http.ResponseWriter, r *http.Request
 		if existing == nil {
 			return nil
 		}
-		if existing.Source == domain.EventHandlerSourceSystem {
-			if e := tx.EventHandlers.SetEnabled(r.Context(), orgID, id, false); e != nil {
-				return e
-			}
-			disabled = true
-			return nil
-		}
 		return tx.EventHandlers.Delete(r.Context(), orgID, id)
 	}); err != nil {
 		internalError(w, "event_handlers", err)
@@ -468,13 +462,6 @@ func (s *Server) handleEventHandlerDelete(w http.ResponseWriter, r *http.Request
 	}
 	if existing == nil {
 		notFound(w, "event handler")
-		return
-	}
-	if disabled {
-		writeJSON(w, http.StatusOK, map[string]string{
-			"status": "disabled",
-			"reason": "system handlers cannot be deleted (they would be resurrected on next boot); disabled instead",
-		})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})

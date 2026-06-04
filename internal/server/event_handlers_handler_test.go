@@ -287,6 +287,43 @@ func TestHandleEventHandlerDelete_UserRowHardDeletes(t *testing.T) {
 	}
 }
 
+// TestHandleEventHandlerDelete_SystemRowHardDeletes pins the post-SKY-436
+// behavior: a shipped (system) handler hard-deletes unconditionally — no
+// soft-disable fallback, no resurrection. Nothing re-seeds at boot, so the
+// deletion is durable.
+func TestHandleEventHandlerDelete_SystemRowHardDeletes(t *testing.T) {
+	s := newTestServer(t)
+	// Insert a system-source handler directly (newTestServer seeds the
+	// tenant but no handlers; provisioning would, but a single row keeps
+	// the test focused). source='system' requires creator_user_id NULL.
+	const id = "sys-handler-del"
+	if _, err := s.db.Exec(`
+		INSERT INTO event_handlers
+			(id, org_id, team_id, kind, event_type, source, system_slug, name, default_priority, sort_order, enabled, creator_user_id)
+		VALUES (?, ?, ?, 'rule', 'github:pr:opened', 'system', 'system-test-del', 'Shipped Rule', 0.5, 0, 1, NULL)
+	`, id, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID); err != nil {
+		t.Fatalf("seed system handler: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodDelete, "/api/event-handlers/"+id, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var got map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got["status"] != "deleted" {
+		t.Errorf("status=%v want deleted (system rows now hard-delete)", got["status"])
+	}
+	// The row is gone, not merely disabled.
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM event_handlers WHERE id = ?`, id).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("system handler row count=%d after delete; want 0 (hard delete, not soft-disable)", n)
+	}
+}
+
 // --- POST /api/event-handlers/{id}/promote -------------------------------
 
 func TestHandleEventHandlerPromote_RuleToTrigger(t *testing.T) {

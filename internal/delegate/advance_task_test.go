@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -269,11 +268,22 @@ func setupAdvanceFixture(t *testing.T, suffix string) (*Spawner, *sql.DB, string
 	t.Helper()
 	database := newTakeoverTestDB(t)
 	// Bot claim writes require an agents row to satisfy the FK on
-	// claimed_by_agent_id. newTakeoverTestDB doesn't seed one; the
-	// production codepath (BootstrapLocalAgent in main) does. Same
-	// helper, same idempotent insert.
-	if err := db.BootstrapLocalAgent(context.Background(), sqlitestore.New(database)); err != nil {
-		t.Fatalf("bootstrap local agent: %v", err)
+	// claimed_by_agent_id. newTakeoverTestDB seeds the tenant (orgs/teams)
+	// via BootstrapSchemaForTest but not the agent — production seeds that
+	// through the explicit provision action (BootstrapLocalOrg). Insert
+	// the sentinel agent + team_agents rows directly so the test reaches
+	// the claim logic under test.
+	if _, err := database.Exec(
+		`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Triage Factory Bot')`,
+		runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID,
+	); err != nil {
+		t.Fatalf("seed local agent: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT OR IGNORE INTO team_agents (team_id, agent_id, enabled) VALUES (?, ?, 1)`,
+		runmode.LocalDefaultTeamID, runmode.LocalDefaultAgentID,
+	); err != nil {
+		t.Fatalf("seed local team_agents: %v", err)
 	}
 	runID := "r-adv-" + suffix
 	seedRun(t, database, runID, "sess-"+suffix, "/tmp/wt-adv-"+suffix)
