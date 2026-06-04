@@ -58,7 +58,7 @@ func BootstrapLocalOrg(ctx context.Context, stores Stores, shippedPrompts []doma
 	if err := stores.Orgs.CreateLocalTenant(ctx); err != nil {
 		return fmt.Errorf("bootstrap local org: create tenant rows: %w", err)
 	}
-	if err := BootstrapNewOrg(ctx, stores, runmode.LocalDefaultOrg, LocalDefaultTeamID, shippedPrompts, shippedBlueprints); err != nil {
+	if err := BootstrapNewOrg(ctx, stores, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, shippedPrompts, shippedBlueprints); err != nil {
 		return fmt.Errorf("bootstrap local org: %w", err)
 	}
 	return nil

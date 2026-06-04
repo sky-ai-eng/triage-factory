@@ -216,6 +216,21 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 	}
 	tenantExists := org != nil
 
+	// First-run fast path: with no tenant, the github/jira/repo fields are
+	// unused (they belong to the post-provision config step) and the gate
+	// only needs configured=false. Short-circuit before touching the
+	// keychain + repo query — the first-run screen may poll this on a loop.
+	if !tenantExists {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"configured":   false,
+			"github":       false,
+			"jira":         false,
+			"github_repos": 0,
+			"env_provided": auth.EnvProvided(),
+		})
+		return
+	}
+
 	// SecretStore.Load + repo count both inside the same WithTx so
 	// vault_decrypt sees request.jwt.claims and repos_select RLS runs
 	// under the user's identity. Local mode collapses to one SQLite
