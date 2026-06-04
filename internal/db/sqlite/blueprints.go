@@ -189,8 +189,8 @@ func (s *blueprintStore) Rename(ctx context.Context, orgID, id, name string) err
 	}
 	_, err := s.q.ExecContext(ctx, `
 		UPDATE blueprints SET name = ?, updated_at = ?
-		WHERE id = ? AND deleted_at IS NULL
-	`, name, time.Now().UTC(), id)
+		WHERE org_id = ? AND id = ? AND deleted_at IS NULL
+	`, name, time.Now().UTC(), orgID, id)
 	return err
 }
 
@@ -283,6 +283,36 @@ func (s *blueprintStore) ListSteps(ctx context.Context, orgID, blueprintID strin
 	}
 	defer rows.Close()
 
+	var out []domain.BlueprintStep
+	for rows.Next() {
+		var st domain.BlueprintStep
+		if err := rows.Scan(&st.BlueprintID, &st.StepIndex, &st.StepPromptID, &st.Brief, &st.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, st)
+	}
+	return out, rows.Err()
+}
+
+// ListAllSteps returns every step of the local team's request-facing blueprints
+// in one read (the canvas's bulk steps fetch). The blueprints join mirrors
+// List's gate (hidden = 0, deleted_at IS NULL); teamID is ignored in single-team
+// local mode.
+func (s *blueprintStore) ListAllSteps(ctx context.Context, orgID, _ string) ([]domain.BlueprintStep, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT bs.blueprint_id, bs.step_index, bs.step_prompt_id, bs.brief, bs.created_at
+		FROM blueprint_steps bs
+		JOIN blueprints b ON b.id = bs.blueprint_id
+		WHERE b.hidden = 0 AND b.deleted_at IS NULL
+		ORDER BY bs.blueprint_id, bs.step_index
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query all blueprint steps: %w", err)
+	}
+	defer rows.Close()
 	var out []domain.BlueprintStep
 	for rows.Next() {
 		var st domain.BlueprintStep

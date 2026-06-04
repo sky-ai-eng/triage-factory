@@ -297,6 +297,58 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		}
 	})
 
+	t.Run("ListAllSteps_GroupsAndExcludesDeleted", func(t *testing.T) {
+		store, orgID, teamID, seedPrompt := factory(t)
+		ctx := context.Background()
+		bpA, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "all-a", Name: "A", Source: "system"})
+		if err != nil {
+			t.Fatalf("seed A: %v", err)
+		}
+		bpB, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "all-b", Name: "B", Source: "system"})
+		if err != nil {
+			t.Fatalf("seed B: %v", err)
+		}
+		bpDel, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "all-del", Name: "Del", Source: "system"})
+		if err != nil {
+			t.Fatalf("seed Del: %v", err)
+		}
+		a1, a2 := seedPrompt(t, "all-a1"), seedPrompt(t, "all-a2")
+		b1 := seedPrompt(t, "all-b1")
+		d1 := seedPrompt(t, "all-d1")
+		if err := store.ReplaceSteps(ctx, orgID, bpA, []string{a1, a2}, nil); err != nil {
+			t.Fatalf("steps A: %v", err)
+		}
+		if err := store.ReplaceSteps(ctx, orgID, bpB, []string{b1}, nil); err != nil {
+			t.Fatalf("steps B: %v", err)
+		}
+		if err := store.ReplaceSteps(ctx, orgID, bpDel, []string{d1}, nil); err != nil {
+			t.Fatalf("steps Del: %v", err)
+		}
+		// Soft-deleted blueprints' steps must be excluded from the bulk read.
+		if err := store.Delete(ctx, orgID, bpDel); err != nil {
+			t.Fatalf("delete Del: %v", err)
+		}
+
+		all, err := store.ListAllSteps(ctx, orgID, teamID)
+		if err != nil {
+			t.Fatalf("ListAllSteps: %v", err)
+		}
+		got := map[string][]string{}
+		for _, st := range all {
+			got[st.BlueprintID] = append(got[st.BlueprintID], st.StepPromptID)
+		}
+		// Within a blueprint the order is step_index-ascending.
+		if len(got[bpA]) != 2 || got[bpA][0] != a1 || got[bpA][1] != a2 {
+			t.Errorf("bpA steps = %v, want [%s %s]", got[bpA], a1, a2)
+		}
+		if len(got[bpB]) != 1 || got[bpB][0] != b1 {
+			t.Errorf("bpB steps = %v, want [%s]", got[bpB], b1)
+		}
+		if _, present := got[bpDel]; present {
+			t.Errorf("soft-deleted blueprint's steps leaked into ListAllSteps: %v", got[bpDel])
+		}
+	})
+
 	t.Run("MergeInto_AppendsSourceStepsAndRetiresSource", func(t *testing.T) {
 		store, orgID, teamID, seedPrompt := factory(t)
 		ctx := context.Background()

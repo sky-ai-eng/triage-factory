@@ -490,6 +490,29 @@ func (s *Server) handleOrgTemplateBlueprintDelete(w http.ResponseWriter, r *http
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
+// handleOrgTemplateBlueprintStepsAll is the template mirror of
+// handleBlueprintStepsAll — every template blueprint's steps in one read for the
+// canvas's bulk fetch.
+func (s *Server) handleOrgTemplateBlueprintStepsAll(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := s.requireOrgTemplate(w, r)
+	if !ok {
+		return
+	}
+	var steps []domain.BlueprintStep
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		steps, e = tx.OrgTemplate.ListAllBlueprintSteps(r.Context(), orgID)
+		return e
+	}); err != nil {
+		internalError(w, "org_template", err)
+		return
+	}
+	if steps == nil {
+		steps = []domain.BlueprintStep{}
+	}
+	writeJSON(w, http.StatusOK, steps)
+}
+
 func (s *Server) handleOrgTemplateBlueprintStepsGet(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := s.requireOrgTemplate(w, r)
 	if !ok {

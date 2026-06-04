@@ -199,6 +199,32 @@ func (s *Server) handleBlueprintUpdate(w http.ResponseWriter, r *http.Request) {
 
 // --- Blueprint steps -----------------------------------------------------
 
+// handleBlueprintStepsAll returns every step of the scope's blueprints in one
+// read — the binding canvas's bulk fetch, which avoids an N+1 of
+// GET .../{id}/steps over the blueprint list. Always an array; the client
+// groups by blueprint_id.
+func (s *Server) handleBlueprintStepsAll(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	teamID := singleTeamParam(r)
+	var steps []domain.BlueprintStep
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		steps, e = tx.Blueprints.ListAllSteps(r.Context(), orgID, teamID)
+		return e
+	}); err != nil {
+		internalError(w, "blueprints", err)
+		return
+	}
+	if steps == nil {
+		steps = []domain.BlueprintStep{}
+	}
+	writeJSON(w, http.StatusOK, steps)
+}
+
 // handleBlueprintStepsGet returns the ordered step list for a blueprint.
 // Always returns an array (never null) so frontend code can iterate without a
 // nil check.

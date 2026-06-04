@@ -237,6 +237,13 @@ type BlueprintStore interface {
 	// (not error) when the blueprint has no steps configured.
 	ListSteps(ctx context.Context, orgID string, blueprintID string) ([]domain.BlueprintStep, error)
 
+	// ListAllSteps returns every step of teamID's non-deleted blueprints in one
+	// read, ordered by (blueprint_id, step_index) — the binding canvas's bulk
+	// alternative to ListSteps-per-blueprint (avoids an N+1 over the blueprint
+	// list). Soft-deleted blueprints' steps are excluded (the canvas only renders
+	// listed blueprints). Caller groups by blueprint_id.
+	ListAllSteps(ctx context.Context, orgID, teamID string) ([]domain.BlueprintStep, error)
+
 	// CountStepReferences returns the number of distinct non-deleted blueprints
 	// that reference the given prompt as a step. Request-facing, so it filters
 	// blueprints.deleted_at IS NULL. With the copy-only unique index this is

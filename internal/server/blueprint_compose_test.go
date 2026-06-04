@@ -306,3 +306,39 @@ func TestEventHandlerPromote_OntoTriggeredBlueprintConflicts(t *testing.T) {
 		t.Fatalf("promote onto triggered blueprint: expected 409, got %d: %s", prom.Code, prom.Body.String())
 	}
 }
+
+// GET /api/blueprint-steps returns every blueprint's steps in one read, grouped
+// by blueprint_id and excluding retired (merged-away) blueprints — the canvas's
+// bulk fetch that replaced the per-blueprint N+1.
+func TestBlueprintStepsAll_BulkGroupedAndExcludesRetired(t *testing.T) {
+	s := newTestServer(t)
+	host, hp := createWrappedBlueprint(t, s, "Alpha")
+	source, sp := createWrappedBlueprint(t, s, "Beta")
+
+	// Merge Beta onto Alpha's tail → Alpha = [hp, sp], Beta retired.
+	if rec := doJSON(t, s, http.MethodPost, "/api/blueprints/"+host+"/merge", map[string]any{
+		"source_blueprint_id": source,
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("merge: %d: %s", rec.Code, rec.Body.String())
+	}
+
+	got := doJSON(t, s, http.MethodGet, "/api/blueprint-steps", nil)
+	if got.Code != http.StatusOK {
+		t.Fatalf("bulk steps: %d: %s", got.Code, got.Body.String())
+	}
+	var steps []map[string]any
+	if err := json.Unmarshal(got.Body.Bytes(), &steps); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	byBp := map[string][]string{}
+	for _, st := range steps {
+		bp, _ := st["blueprint_id"].(string)
+		byBp[bp] = append(byBp[bp], st["step_prompt_id"].(string))
+	}
+	if len(byBp[host]) != 2 || byBp[host][0] != hp || byBp[host][1] != sp {
+		t.Errorf("Alpha steps = %v, want [%s %s]", byBp[host], hp, sp)
+	}
+	if _, present := byBp[source]; present {
+		t.Errorf("retired blueprint %s leaked steps into the bulk read: %v", source, byBp[source])
+	}
+}

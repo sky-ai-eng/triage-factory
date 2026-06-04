@@ -113,6 +113,10 @@ type OrgTemplateStore interface {
 	DeleteBlueprint(ctx context.Context, orgID, id string) error
 	// ListBlueprintSteps returns the ordered step list for a template blueprint.
 	ListBlueprintSteps(ctx context.Context, orgID, blueprintID string) ([]domain.BlueprintStep, error)
+	// ListAllBlueprintSteps returns every step of the org's template blueprints
+	// in one read, ordered by (blueprint_id, step_index) — the template mirror of
+	// BlueprintStore.ListAllSteps, backing the binding canvas's bulk steps fetch.
+	ListAllBlueprintSteps(ctx context.Context, orgID string) ([]domain.BlueprintStep, error)
 	// ReplaceBlueprintSteps replaces the entire step list for a template
 	// blueprint in one transaction. step_index is densely packed 0..N-1; briefs
 	// are positional and may be empty. Each step_prompt_id must reference a

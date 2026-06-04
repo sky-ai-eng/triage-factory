@@ -508,12 +508,17 @@ function BindingGraphInner({
     const blueprintsURL = `${blueprintsBase(template)}${teamQuery ? `?${teamQuery}` : ''}`
     const promptsURL = `${promptsBase(template)}${teamQuery ? `?${teamQuery}` : ''}`
     const triggersURL = `${handlersBase(template)}?kind=trigger${teamQuery ? `&${teamQuery}` : ''}`
+    // One bulk steps read for the whole scope (grouped client-side) rather than
+    // a GET .../{id}/steps per blueprint — folded into the parallel fetch below
+    // so the canvas loads in a single round-trip.
+    const stepsURL = `${template ? '/api/org-template/blueprint-steps' : '/api/blueprint-steps'}${teamQuery ? `?${teamQuery}` : ''}`
     try {
-      const [etRes, bpRes, promptRes, tRes] = await Promise.all([
+      const [etRes, bpRes, promptRes, tRes, stepsRes] = await Promise.all([
         fetch('/api/event-types').then((r) => parseOrThrow(r, 'event-types')),
         fetch(blueprintsURL).then((r) => parseOrThrow(r, 'blueprints')),
         fetch(promptsURL).then((r) => parseOrThrow(r, 'prompts')),
         fetch(triggersURL).then((r) => parseOrThrow(r, 'triggers')),
+        fetch(stepsURL).then((r) => parseOrThrow(r, 'blueprint-steps')),
       ])
       setEventTypes(etRes)
       setTriggers(tRes)
@@ -521,33 +526,30 @@ function BindingGraphInner({
       const blueprintList = bpRes as Blueprint[]
       const promptById = new Map((promptRes as Prompt[]).map((p): [string, Prompt] => [p.id, p]))
 
-      // Fetch each blueprint's steps (N+1 over the handful of blueprints — a bulk
-      // "blueprints-with-steps" read is a tracked, optional optimization).
-      const stepsURL = (id: string) => `${blueprintsBase(template)}/${encodeURIComponent(id)}/steps`
-      const stepLists = await Promise.all(
-        blueprintList.map((b) =>
-          fetch(stepsURL(b.id))
-            .then((r) => parseOrThrow(r, 'blueprint-steps'))
-            .then((steps) => ({ blueprintId: b.id, steps: steps as BlueprintStep[] })),
-        ),
-      )
+      // Group the scope's steps (one bulk read) by blueprint_id.
+      const stepsByBp = new Map<string, BlueprintStep[]>()
+      for (const st of stepsRes as BlueprintStep[]) {
+        const arr = stepsByBp.get(st.blueprint_id)
+        if (arr) arr.push(st)
+        else stepsByBp.set(st.blueprint_id, [st])
+      }
 
       // One node per blueprint step (= a prompt). Because prompts are copy-only
-      // — a prompt belongs to exactly one blueprint, so every step
-      // prompt is a member of exactly one box — no shared-prompt-across-boxes
-      // collision. firstPrompt: blueprint → its entry prompt; stepsByBlueprint:
-      // ordered prompt ids; stepObjs: full step rows (for the reorder PUT).
+      // — a prompt belongs to exactly one blueprint, so every step prompt is a
+      // member of exactly one box — no shared-prompt-across-boxes collision.
+      // firstPrompt: blueprint → its entry prompt; stepsByBlueprint: ordered
+      // prompt ids; stepObjs: full step rows (for the reorder PUT).
       const firstPrompt: Record<string, string> = {}
       const stepsByBlueprint: Record<string, string[]> = {}
       const stepObjs: Record<string, BlueprintStep[]> = {}
       const nodeList: Prompt[] = []
       const seen = new Set<string>()
-      for (const { blueprintId, steps } of stepLists) {
-        const ordered = [...steps].sort((a, b) => a.step_index - b.step_index)
-        stepObjs[blueprintId] = ordered
-        stepsByBlueprint[blueprintId] = ordered.map((s) => s.step_prompt_id)
+      for (const b of blueprintList) {
+        const ordered = [...(stepsByBp.get(b.id) ?? [])].sort((x, y) => x.step_index - y.step_index)
+        stepObjs[b.id] = ordered
+        stepsByBlueprint[b.id] = ordered.map((s) => s.step_prompt_id)
         if (ordered.length > 0) {
-          firstPrompt[blueprintId] = ordered[0].step_prompt_id
+          firstPrompt[b.id] = ordered[0].step_prompt_id
         }
         for (const step of ordered) {
           if (seen.has(step.step_prompt_id)) continue
@@ -581,15 +583,31 @@ function BindingGraphInner({
     fetchAll()
   }, [fetchAll])
 
+  // Close any open context menu when the scope changes — a held-open edge/box
+  // menu would otherwise carry a stale trigger / blueprint reference from the
+  // previous team or template.
+  useEffect(() => {
+    setEdgeMenu(null)
+    setBoxMenu(null)
+  }, [template, teamId])
+
   // Remove event from canvas
   const removeEvent = useCallback(
-    (eventTypeId: string) => {
+    async (eventTypeId: string) => {
       const toDelete = triggersRef.current.filter((t) => t.event_type === eventTypeId)
-      Promise.all(
-        toDelete.map((t) =>
-          fetch(`${handlersBase(template)}/${encodeURIComponent(t.id)}`, { method: 'DELETE' }),
-        ),
-      ).then(() => {
+      try {
+        const results = await Promise.all(
+          toDelete.map((t) =>
+            fetch(`${handlersBase(template)}/${encodeURIComponent(t.id)}`, { method: 'DELETE' }),
+          ),
+        )
+        const failed = results.find((r) => !r.ok)
+        if (failed) {
+          toast.error(await readError(failed, 'Failed to remove event'))
+          return
+        }
+        // Drop the node + its saved position only once the backend confirms the
+        // triggers are gone — otherwise the canvas would diverge from the server.
         setActiveEventIds((prev) => {
           const next = new Set(prev)
           next.delete(eventTypeId)
@@ -599,7 +617,9 @@ function BindingGraphInner({
         delete layout.eventPositions[eventTypeId]
         saveLayout(storageKeyRef.current, layout)
         fetchAll()
-      })
+      } catch (err) {
+        toast.error(`Failed to remove event: ${err instanceof Error ? err.message : String(err)}`)
+      }
     },
     [fetchAll, template],
   )
@@ -1046,16 +1066,20 @@ function BindingGraphInner({
       // Capture trigger info before deletion for the forgiving banner callback.
       const deleted = triggersRef.current.find((t) => t.id === triggerId)
       try {
-        await fetch(`${handlersBase(template)}/${encodeURIComponent(triggerId)}`, {
+        const res = await fetch(`${handlersBase(template)}/${encodeURIComponent(triggerId)}`, {
           method: 'DELETE',
         })
+        if (!res.ok) {
+          toast.error(await readError(res, 'Failed to remove trigger'))
+          return
+        }
         await fetchAll()
         // Notify parent so it can check coverage and show the forgiving banner.
         if (deleted) {
           onTriggerDeletedRef.current?.(deleted.event_type)
         }
-      } catch {
-        // ignore
+      } catch (err) {
+        toast.error(`Failed to remove trigger: ${err instanceof Error ? err.message : String(err)}`)
       }
     },
     [fetchAll, template],

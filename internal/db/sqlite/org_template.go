@@ -559,6 +559,28 @@ func (s *orgTemplateStore) ListBlueprintSteps(ctx context.Context, orgID, bluepr
 	return out, rows.Err()
 }
 
+func (s *orgTemplateStore) ListAllBlueprintSteps(ctx context.Context, orgID string) ([]domain.BlueprintStep, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT blueprint_id, step_index, step_prompt_id, brief, created_at
+		FROM org_template_blueprint_steps
+		WHERE org_id = ?
+		ORDER BY blueprint_id, step_index ASC
+	`, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("query all org_template blueprint steps: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.BlueprintStep
+	for rows.Next() {
+		var st domain.BlueprintStep
+		if err := rows.Scan(&st.BlueprintID, &st.StepIndex, &st.StepPromptID, &st.Brief, &st.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, st)
+	}
+	return out, rows.Err()
+}
+
 func (s *orgTemplateStore) ReplaceBlueprintSteps(ctx context.Context, orgID, blueprintID string, stepPromptIDs, briefs []string) error {
 	if len(briefs) != 0 && len(briefs) != len(stepPromptIDs) {
 		return fmt.Errorf("briefs length %d must match stepPromptIDs length %d", len(briefs), len(stepPromptIDs))
