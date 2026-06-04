@@ -43,9 +43,9 @@ type OrgsStore interface {
 	// Triage Factory" provision action's first step, before
 	// BootstrapNewOrg seeds the template + materializes the team.
 	// Re-entrant (INSERT OR IGNORE) so a re-run reaches the same end
-	// state. Local-mode only: the Postgres impl returns
-	// ErrNotApplicableInLocal — multi-mode creates real tenant rows per
-	// signup in auth_provision.go.
+	// state. Local-mode only: the Postgres (multi-mode) impl returns a
+	// clear "not supported in multi mode" error — multi-mode provisions
+	// real tenant rows per signup in auth_provision.go.
 	CreateLocalTenant(ctx context.Context) error
 
 	// ListActiveSystem returns the IDs of every active org in
