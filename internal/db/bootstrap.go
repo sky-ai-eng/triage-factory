@@ -45,11 +45,11 @@ import (
 // runs it at boot — a fresh local DB has zero tenant rows until the
 // user provisions.
 //
-// Fully re-entrant: re-running after a partial provision (or after the
-// user already provisioned) reaches the same end state — the tenant-row
-// inserts are INSERT OR IGNORE and BootstrapNewOrg's seeders skip via
-// ON CONFLICT, so a previously deleted shipped default is never
-// resurrected. shippedPrompts + shippedBlueprints are passed in (rather
+// Fully re-entrant for crash-mid-provision recovery: re-running after a
+// partial provision reaches the same end state. Note: if called after a user
+// deletes shipped defaults, the seed/materialize steps can re-create them;
+// /api/setup/start avoids that by no-op'ing once a tenant exists. shippedPrompts +
+// shippedBlueprints are passed in (rather
 // than read from internal/ai) so internal/db stays free of the ai
 // dependency — the caller supplies ai.ShippedPrompts() /
 // ai.ShippedBlueprints().
