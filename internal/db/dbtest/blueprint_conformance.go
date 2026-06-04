@@ -410,3 +410,234 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		}
 	})
 }
+
+// --- Duplication conformance ---------------------------------------------
+//
+// DuplicatePrompts deep-copies prompt rows, so its conformance needs to read
+// prompts back (body fidelity, source flip) — beyond the BlueprintStore-only
+// surface RunBlueprintStoreConformance carries. It gets its own richer factory
+// + entry point rather than widening the shared one and churning every call
+// site.
+
+// DuplicationPromptSeeder seeds one prompt owned by the conformance team and
+// returns its id. The backend owns the INSERT against its own schema; p.ID may
+// be empty (the seeder mints one). Source "system" rows must satisfy each
+// dialect's "system has no creator" CHECK — the seeder handles that.
+type DuplicationPromptSeeder func(t *testing.T, p domain.Prompt) string
+
+// DuplicationPromptGetter reads a prompt by id so the suite can assert deep-copy
+// fidelity (copied body, source flipped to user). It returns the row's
+// name / body / model / allowed_tools / source.
+type DuplicationPromptGetter func(t *testing.T, id string) domain.Prompt
+
+// BlueprintDuplicationFactory wires the duplication suite against one backend.
+type BlueprintDuplicationFactory func(t *testing.T) (store db.BlueprintStore, orgID, teamID string, seedPrompt DuplicationPromptSeeder, getPrompt DuplicationPromptGetter)
+
+// RunBlueprintDuplicationConformance exercises BlueprintStore.DuplicatePrompts
+// against any backend: full-blueprint clone, non-contiguous split, contiguous
+// sub-run re-densify, and the system→user source flip — asserting originals are
+// untouched and step_prompt_id uniqueness holds for every new step.
+func RunBlueprintDuplicationConformance(t *testing.T, factory BlueprintDuplicationFactory) {
+	t.Helper()
+
+	// seedRun creates a source blueprint with the given prompts as ordered steps
+	// (briefs[i] paired positionally) and returns the blueprint id + prompt ids.
+	seedRun := func(t *testing.T, store db.BlueprintStore, orgID, teamID, slug string, prompts []domain.Prompt, seed DuplicationPromptSeeder, briefs []string) (string, []string) {
+		t.Helper()
+		ctx := context.Background()
+		bpID, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: slug, Name: slug, Source: "system"})
+		if err != nil {
+			t.Fatalf("seed blueprint %s: %v", slug, err)
+		}
+		ids := make([]string, len(prompts))
+		for i, p := range prompts {
+			ids[i] = seed(t, p)
+		}
+		if err := store.ReplaceSteps(ctx, orgID, bpID, ids, briefs); err != nil {
+			t.Fatalf("ReplaceSteps %s: %v", slug, err)
+		}
+		return bpID, ids
+	}
+
+	t.Run("DuplicateFullBlueprint", func(t *testing.T) {
+		store, orgID, teamID, seed, getPrompt := factory(t)
+		ctx := context.Background()
+		srcID, srcPrompts := seedRun(t, store, orgID, teamID, "dup-full",
+			[]domain.Prompt{
+				{Name: "Map", Body: "map the surface", Model: "opus", Source: "user"},
+				{Name: "Write", Body: "write the review", Source: "user"},
+			}, seed, []string{"brief-a", "brief-b"})
+
+		newIDs, err := store.DuplicatePrompts(ctx, orgID, teamID, srcPrompts)
+		if err != nil {
+			t.Fatalf("DuplicatePrompts: %v", err)
+		}
+		if len(newIDs) != 1 {
+			t.Fatalf("full-blueprint duplicate produced %d blueprints, want 1", len(newIDs))
+		}
+		bp, err := store.Get(ctx, orgID, newIDs[0])
+		if err != nil || bp == nil {
+			t.Fatalf("Get(new) = (%v, %v), want a row", bp, err)
+		}
+		if bp.Name != "dup-full (copy)" {
+			t.Errorf("full clone name = %q, want %q", bp.Name, "dup-full (copy)")
+		}
+		steps, err := store.ListSteps(ctx, orgID, newIDs[0])
+		if err != nil {
+			t.Fatalf("ListSteps(new): %v", err)
+		}
+		if len(steps) != 2 {
+			t.Fatalf("new blueprint has %d steps, want 2", len(steps))
+		}
+		wantBody := []string{"map the surface", "write the review"}
+		wantBrief := []string{"brief-a", "brief-b"}
+		wantModel := []string{"opus", ""}
+		for i, st := range steps {
+			if st.StepIndex != i {
+				t.Errorf("step %d index = %d, want %d", i, st.StepIndex, i)
+			}
+			if st.StepPromptID == srcPrompts[i] {
+				t.Errorf("step %d reuses source prompt id %s; want a fresh copy", i, st.StepPromptID)
+			}
+			if st.Brief != wantBrief[i] {
+				t.Errorf("step %d brief = %q, want %q", i, st.Brief, wantBrief[i])
+			}
+			cp := getPrompt(t, st.StepPromptID)
+			if cp.Body != wantBody[i] {
+				t.Errorf("copied prompt %d body = %q, want %q", i, cp.Body, wantBody[i])
+			}
+			if cp.Model != wantModel[i] {
+				t.Errorf("copied prompt %d model = %q, want %q", i, cp.Model, wantModel[i])
+			}
+			if cp.Source != "user" {
+				t.Errorf("copied prompt %d source = %q, want user", i, cp.Source)
+			}
+			// step_prompt_id uniqueness: each new prompt resolves to the new blueprint.
+			owner, ok, err := store.StepPromptOwner(ctx, orgID, st.StepPromptID)
+			if err != nil || !ok || owner != newIDs[0] {
+				t.Fatalf("StepPromptOwner(%s) = (%q, %v, %v), want (%s, true, nil)", st.StepPromptID, owner, ok, err, newIDs[0])
+			}
+		}
+		// Originals untouched: source blueprint still has its two original steps.
+		srcSteps, err := store.ListSteps(ctx, orgID, srcID)
+		if err != nil {
+			t.Fatalf("ListSteps(src): %v", err)
+		}
+		if len(srcSteps) != 2 || srcSteps[0].StepPromptID != srcPrompts[0] || srcSteps[1].StepPromptID != srcPrompts[1] {
+			t.Fatalf("source steps mutated: %+v", srcSteps)
+		}
+	})
+
+	t.Run("NonContiguousSelectionYieldsSeparateBlueprints", func(t *testing.T) {
+		store, orgID, teamID, seed, _ := factory(t)
+		ctx := context.Background()
+		_, p := seedRun(t, store, orgID, teamID, "dup-gap",
+			[]domain.Prompt{
+				{Name: "P0", Body: "b0", Source: "user"},
+				{Name: "P1", Body: "b1", Source: "user"},
+				{Name: "P2", Body: "b2", Source: "user"},
+			}, seed, nil)
+
+		// Select index 0 and 2 (gap at 1) → two separate 1-step blueprints, no edge.
+		newIDs, err := store.DuplicatePrompts(ctx, orgID, teamID, []string{p[0], p[2]})
+		if err != nil {
+			t.Fatalf("DuplicatePrompts: %v", err)
+		}
+		if len(newIDs) != 2 {
+			t.Fatalf("non-contiguous selection produced %d blueprints, want 2", len(newIDs))
+		}
+		for _, id := range newIDs {
+			steps, err := store.ListSteps(ctx, orgID, id)
+			if err != nil {
+				t.Fatalf("ListSteps(%s): %v", id, err)
+			}
+			if len(steps) != 1 || steps[0].StepIndex != 0 {
+				t.Fatalf("blueprint %s steps = %+v, want one 0-indexed step (no spurious adjacency)", id, steps)
+			}
+		}
+	})
+
+	t.Run("ContiguousSubRunReDensifies", func(t *testing.T) {
+		store, orgID, teamID, seed, getPrompt := factory(t)
+		ctx := context.Background()
+		_, p := seedRun(t, store, orgID, teamID, "dup-subrun",
+			[]domain.Prompt{
+				{Name: "P0", Body: "b0", Source: "user"},
+				{Name: "P1", Body: "b1", Source: "user"},
+				{Name: "P2", Body: "b2", Source: "user"},
+				{Name: "P3", Body: "b3", Source: "user"},
+			}, seed, []string{"br0", "br1", "br2", "br3"})
+
+		// Sub-run [1..2] → one blueprint re-densified 0-based, partial name = P1.
+		newIDs, err := store.DuplicatePrompts(ctx, orgID, teamID, []string{p[1], p[2]})
+		if err != nil {
+			t.Fatalf("DuplicatePrompts: %v", err)
+		}
+		if len(newIDs) != 1 {
+			t.Fatalf("sub-run produced %d blueprints, want 1", len(newIDs))
+		}
+		bp, _ := store.Get(ctx, orgID, newIDs[0])
+		if bp == nil || bp.Name != "P1" {
+			t.Fatalf("partial-run name = %v, want P1 (first copied prompt)", bp)
+		}
+		steps, err := store.ListSteps(ctx, orgID, newIDs[0])
+		if err != nil {
+			t.Fatalf("ListSteps: %v", err)
+		}
+		if len(steps) != 2 || steps[0].StepIndex != 0 || steps[1].StepIndex != 1 {
+			t.Fatalf("sub-run steps = %+v, want re-densified [0,1]", steps)
+		}
+		if steps[0].Brief != "br1" || steps[1].Brief != "br2" {
+			t.Errorf("sub-run briefs = [%q,%q], want [br1,br2]", steps[0].Brief, steps[1].Brief)
+		}
+		if b := getPrompt(t, steps[0].StepPromptID).Body; b != "b1" {
+			t.Errorf("sub-run step 0 body = %q, want b1", b)
+		}
+		if b := getPrompt(t, steps[1].StepPromptID).Body; b != "b2" {
+			t.Errorf("sub-run step 1 body = %q, want b2", b)
+		}
+	})
+
+	t.Run("SystemPromptCopiedAsUser", func(t *testing.T) {
+		store, orgID, teamID, seed, getPrompt := factory(t)
+		ctx := context.Background()
+		_, p := seedRun(t, store, orgID, teamID, "dup-sys",
+			[]domain.Prompt{
+				{Name: "Shipped", Body: "shipped body", Source: "system", SystemSlug: "system-dup-step"},
+			}, seed, nil)
+
+		newIDs, err := store.DuplicatePrompts(ctx, orgID, teamID, []string{p[0]})
+		if err != nil {
+			t.Fatalf("DuplicatePrompts: %v", err)
+		}
+		if len(newIDs) != 1 {
+			t.Fatalf("produced %d blueprints, want 1", len(newIDs))
+		}
+		steps, err := store.ListSteps(ctx, orgID, newIDs[0])
+		if err != nil || len(steps) != 1 {
+			t.Fatalf("ListSteps = (%+v, %v), want one step", steps, err)
+		}
+		cp := getPrompt(t, steps[0].StepPromptID)
+		if cp.Source != "user" {
+			t.Errorf("copied prompt source = %q, want user (decoupled from system)", cp.Source)
+		}
+		if cp.SystemSlug != "" {
+			t.Errorf("copied prompt system_slug = %q, want empty", cp.SystemSlug)
+		}
+		if cp.Body != "shipped body" {
+			t.Errorf("copied prompt body = %q, want 'shipped body'", cp.Body)
+		}
+		// The source prompt is untouched: still a system prompt.
+		src := getPrompt(t, p[0])
+		if src.Source != "system" {
+			t.Errorf("source prompt source = %q, want system (unchanged)", src.Source)
+		}
+	})
+
+	t.Run("EmptySetRejected", func(t *testing.T) {
+		store, orgID, teamID, _, _ := factory(t)
+		if _, err := store.DuplicatePrompts(context.Background(), orgID, teamID, nil); err == nil {
+			t.Fatal("DuplicatePrompts(nil) returned nil error, want ErrDuplicateNoPrompts")
+		}
+	})
+}

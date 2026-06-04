@@ -680,6 +680,71 @@ func (s *orgTemplateStore) BlueprintStepPromptOwner(ctx context.Context, orgID, 
 	return blueprintID, true, nil
 }
 
+func (s *orgTemplateStore) DuplicateBlueprintPrompts(ctx context.Context, orgID string, promptIDs []string) ([]string, error) {
+	ids := db.DedupPreserveOrder(promptIDs)
+	if len(ids) == 0 {
+		return nil, db.ErrDuplicateNoPrompts
+	}
+	var newIDs []string
+	err := inTx(ctx, s.q, func(q queryer) error {
+		resolved := make([]db.DuplicationStep, 0, len(ids))
+		for _, pid := range ids {
+			var st db.DuplicationStep
+			err := q.QueryRowContext(ctx, `
+				SELECT bs.blueprint_id, b.name, bs.step_index, bs.brief,
+				       p.name, p.body, p.model, p.allowed_tools,
+				       (SELECT COUNT(*) FROM org_template_blueprint_steps bs2
+				        WHERE bs2.org_id = ? AND bs2.blueprint_id = bs.blueprint_id)
+				FROM org_template_blueprint_steps bs
+				JOIN org_template_blueprints b ON b.id = bs.blueprint_id AND b.org_id = bs.org_id
+				JOIN org_template_prompts p ON p.id = bs.step_prompt_id AND p.org_id = bs.org_id
+				WHERE bs.org_id = ? AND bs.step_prompt_id = ?
+			`, orgID, orgID, pid).Scan(&st.BlueprintID, &st.BlueprintName, &st.StepIndex, &st.Brief,
+				&st.PromptName, &st.PromptBody, &st.PromptModel, &st.PromptTools, &st.BlueprintTotal)
+			if errors.Is(err, sql.ErrNoRows) {
+				return db.ErrDuplicatePromptNotFound
+			}
+			if err != nil {
+				return fmt.Errorf("resolve template prompt %s: %w", pid, err)
+			}
+			resolved = append(resolved, st)
+		}
+
+		now := time.Now().UTC()
+		for _, run := range db.PartitionDuplicationRuns(resolved) {
+			bpID := uuid.New().String()
+			if _, err := q.ExecContext(ctx, `
+				INSERT INTO org_template_blueprints (id, org_id, system_slug, name, source, created_at, updated_at)
+				VALUES (?, ?, ?, ?, 'user', ?, ?)
+			`, bpID, orgID, "tmpl-"+uuid.New().String(), run.Name, now, now); err != nil {
+				return fmt.Errorf("create duplicated template blueprint: %w", err)
+			}
+			for i, step := range run.Steps {
+				newPromptID := uuid.New().String()
+				if _, err := q.ExecContext(ctx, `
+					INSERT INTO org_template_prompts (id, org_id, system_slug, name, body, source, allowed_tools, model, created_at, updated_at)
+					VALUES (?, ?, ?, ?, ?, 'user', ?, ?, ?, ?)
+				`, newPromptID, orgID, "tmpl-"+uuid.New().String(), step.PromptName, step.PromptBody,
+					step.PromptTools, step.PromptModel, now, now); err != nil {
+					return fmt.Errorf("copy template prompt: %w", err)
+				}
+				if _, err := q.ExecContext(ctx, `
+					INSERT INTO org_template_blueprint_steps (org_id, blueprint_id, step_index, step_prompt_id, brief, created_at)
+					VALUES (?, ?, ?, ?, ?, ?)
+				`, orgID, bpID, i, newPromptID, step.Brief, now); err != nil {
+					return fmt.Errorf("insert duplicated template step %d: %w", i, err)
+				}
+			}
+			newIDs = append(newIDs, bpID)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return newIDs, nil
+}
+
 func scanOrgTemplateBlueprint(scanFn func(dst ...any) error) (domain.Blueprint, error) {
 	var b domain.Blueprint
 	var slug sql.NullString

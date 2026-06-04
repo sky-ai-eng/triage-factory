@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -784,6 +785,74 @@ func (s *Server) handleOrgTemplateBlueprintSplit(w http.ResponseWriter, r *http.
 		Upstream:   blueprintWithSteps{Blueprint: upstream, Steps: upSteps},
 		Downstream: blueprintWithSteps{Blueprint: downstream, Steps: downSteps},
 	})
+}
+
+// handleOrgTemplateBlueprintDuplicate is the org-template mirror of
+// handleBlueprintDuplicate: it deep-copies a flat set of template prompt ids
+// into new trigger-less template blueprint(s) following the induced-contiguous-
+// runs rule, in one transaction, against the org_template_* tables.
+func (s *Server) handleOrgTemplateBlueprintDuplicate(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := s.requireOrgTemplate(w, r)
+	if !ok {
+		return
+	}
+	var req duplicateBlueprintsRequest
+	if !decodeJSON(w, r, &req, "") {
+		return
+	}
+	if len(req.PromptIDs) == 0 {
+		badRequest(w, "prompt_ids is required")
+		return
+	}
+
+	var (
+		out        []blueprintWithSteps
+		failStatus int
+		failMsg    string
+	)
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		newIDs, e := tx.OrgTemplate.DuplicateBlueprintPrompts(r.Context(), orgID, req.PromptIDs)
+		if e != nil {
+			switch {
+			case errors.Is(e, db.ErrDuplicateNoPrompts):
+				failStatus, failMsg = http.StatusBadRequest, "prompt_ids is required"
+				return nil
+			case errors.Is(e, db.ErrDuplicatePromptNotFound):
+				failStatus, failMsg = http.StatusNotFound, "a prompt id does not resolve to a template blueprint step"
+				return nil
+			}
+			return e
+		}
+		out = make([]blueprintWithSteps, 0, len(newIDs))
+		for _, id := range newIDs {
+			bp, ge := tx.OrgTemplate.GetBlueprint(r.Context(), orgID, id)
+			if ge != nil {
+				return ge
+			}
+			if bp == nil {
+				// Just INSERTed in this tx — a nil read is a store inconsistency,
+				// not a 404. Fail the tx rather than emit "blueprint": null.
+				return fmt.Errorf("duplicated template blueprint %s not readable after insert", id)
+			}
+			steps, ge := tx.OrgTemplate.ListBlueprintSteps(r.Context(), orgID, id)
+			if ge != nil {
+				return ge
+			}
+			if steps == nil {
+				steps = []domain.BlueprintStep{}
+			}
+			out = append(out, blueprintWithSteps{Blueprint: bp, Steps: steps})
+		}
+		return nil
+	}); err != nil {
+		internalError(w, "org_template", err)
+		return
+	}
+	if failMsg != "" {
+		writeJSON(w, failStatus, map[string]string{"error": failMsg})
+		return
+	}
+	writeJSON(w, http.StatusCreated, out)
 }
 
 // --- event handlers -------------------------------------------------

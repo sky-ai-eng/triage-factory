@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -37,6 +38,93 @@ func TestBlueprintStore_Postgres_Conformance(t *testing.T) {
 		}
 		return stores.Blueprints, orgID, teamID, seedPrompt
 	})
+}
+
+// TestBlueprintStore_Postgres_DuplicationConformance runs the shared
+// DuplicatePrompts deep-copy suite against the Postgres impl. Both pools wire
+// to AdminDB; prompts are seeded through the store so the
+// system-has-no-creator + slug invariants hold.
+func TestBlueprintStore_Postgres_DuplicationConformance(t *testing.T) {
+	h := pgtest.Shared(t)
+	dbtest.RunBlueprintDuplicationConformance(t, func(t *testing.T) (db.BlueprintStore, string, string, dbtest.DuplicationPromptSeeder, dbtest.DuplicationPromptGetter) {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID := seedPgOrgForBlueprints(t, h)
+		seedPgDefaultTeam(t, h, orgID, userID)
+		teamID := firstTeamForOrg(t, h, orgID)
+		stores := pgstore.New(h.AdminDB, h.AdminDB)
+		ctx := context.Background()
+		seed := func(t *testing.T, p domain.Prompt) string {
+			t.Helper()
+			if p.Source == "system" {
+				id, err := stores.Prompts.SeedOrUpdate(ctx, orgID, teamID, p)
+				if err != nil {
+					t.Fatalf("seed system prompt: %v", err)
+				}
+				return id
+			}
+			if p.ID == "" {
+				p.ID = uuid.New().String()
+			}
+			if err := stores.Prompts.Create(ctx, orgID, teamID, p); err != nil {
+				t.Fatalf("create prompt: %v", err)
+			}
+			return p.ID
+		}
+		getPrompt := func(t *testing.T, id string) domain.Prompt {
+			t.Helper()
+			pr, err := stores.Prompts.GetSystem(ctx, orgID, id)
+			if err != nil || pr == nil {
+				t.Fatalf("getPrompt %s: (%v, %v)", id, pr, err)
+			}
+			return *pr
+		}
+		return stores.Blueprints, orgID, teamID, seed, getPrompt
+	})
+}
+
+// TestBlueprintStore_Postgres_DuplicatePrompts_CrossTeamRejected pins the
+// same-team assertion: a prompt-id set whose blueprints span two teams in the
+// org is rejected with ErrDuplicateCrossTeam rather than silently copied.
+// Multi-team is only realizable on Postgres (SQLite is N=1).
+func TestBlueprintStore_Postgres_DuplicatePrompts_CrossTeamRejected(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	orgID, userID := seedPgOrgForBlueprints(t, h)
+	teamA := seedPgDefaultTeam(t, h, orgID, userID)
+	teamB := seedPgNamedTeam(t, h, orgID, userID, "team-b")
+	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	ctx := context.Background()
+
+	// One blueprint + step prompt per team.
+	bpA := "dup-xteam-a-" + orgID[:8]
+	bpB := "dup-xteam-b-" + orgID[:8]
+	pA := "dup-xteam-pa-" + orgID[:8]
+	pB := "dup-xteam-pb-" + orgID[:8]
+	seedPgBlueprintInTeam(t, h, orgID, userID, teamA, bpA)
+	seedPgBlueprintInTeam(t, h, orgID, userID, teamB, bpB)
+	seedPgPromptInTeam(t, h, orgID, userID, teamA, pA)
+	seedPgPromptInTeam(t, h, orgID, userID, teamB, pB)
+	if err := stores.Blueprints.ReplaceSteps(ctx, orgID, bpA, []string{pA}, nil); err != nil {
+		t.Fatalf("ReplaceSteps A: %v", err)
+	}
+	if err := stores.Blueprints.ReplaceSteps(ctx, orgID, bpB, []string{pB}, nil); err != nil {
+		t.Fatalf("ReplaceSteps B: %v", err)
+	}
+
+	// Acting team A, but the set mixes in team B's prompt → cross-team reject.
+	if _, err := stores.Blueprints.DuplicatePrompts(ctx, orgID, teamA, []string{pA, pB}); !errors.Is(err, db.ErrDuplicateCrossTeam) {
+		t.Fatalf("mixed-team duplicate err = %v, want ErrDuplicateCrossTeam", err)
+	}
+	// Team A's prompt alone duplicates fine.
+	newIDs, err := stores.Blueprints.DuplicatePrompts(ctx, orgID, teamA, []string{pA})
+	if err != nil {
+		t.Fatalf("same-team duplicate: %v", err)
+	}
+	if len(newIDs) != 1 {
+		t.Fatalf("same-team duplicate produced %d blueprints, want 1", len(newIDs))
+	}
 }
 
 // TestBlueprintStore_Postgres_ReplaceAndListSteps pins the dialect-aware
@@ -556,6 +644,49 @@ func seedPgPrompt(t *testing.T, h *pgtest.Harness, orgID, userID, id string) {
 		VALUES ($1, $2, $3::uuid, $4, $5, 'body', 'user', '[]'::jsonb, now(), now())
 	`, id, orgID, teamID, userID, id); err != nil {
 		t.Fatalf("seed prompt %s: %v", id, err)
+	}
+}
+
+// seedPgNamedTeam creates a second team (+ admin membership) in an org so the
+// cross-team duplication guard has two real teams to span.
+func seedPgNamedTeam(t *testing.T, h *pgtest.Harness, orgID, userID, slug string) string {
+	t.Helper()
+	teamID := uuid.New().String()
+	if _, err := h.AdminDB.Exec(
+		`INSERT INTO teams (id, org_id, slug, name) VALUES ($1, $2, $3, $4)`,
+		teamID, orgID, slug+"-"+teamID[:8], slug,
+	); err != nil {
+		t.Fatalf("seed named team %s: %v", slug, err)
+	}
+	if _, err := h.AdminDB.Exec(
+		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'admin')`,
+		userID, teamID,
+	); err != nil {
+		t.Fatalf("seed membership in %s: %v", teamID, err)
+	}
+	return teamID
+}
+
+// seedPgPromptInTeam / seedPgBlueprintInTeam insert into an explicit team
+// (vs ensurePgTeamForOrg's "first team") so a single org can hold rows in two
+// teams for the cross-team guard.
+func seedPgPromptInTeam(t *testing.T, h *pgtest.Harness, orgID, userID, teamID, id string) {
+	t.Helper()
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO prompts (id, org_id, team_id, creator_user_id, name, body, source, allowed_tools, created_at, updated_at)
+		VALUES ($1, $2, $3::uuid, $4, $5, 'body', 'user', '', now(), now())
+	`, id, orgID, teamID, userID, id); err != nil {
+		t.Fatalf("seed prompt %s in team %s: %v", id, teamID, err)
+	}
+}
+
+func seedPgBlueprintInTeam(t *testing.T, h *pgtest.Harness, orgID, userID, teamID, id string) {
+	t.Helper()
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO blueprints (id, org_id, team_id, creator_user_id, name, source, created_at, updated_at)
+		VALUES ($1, $2, $3::uuid, $4, $5, 'user', now(), now())
+	`, id, orgID, teamID, userID, id); err != nil {
+		t.Fatalf("seed blueprint %s in team %s: %v", id, teamID, err)
 	}
 }
 

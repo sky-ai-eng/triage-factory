@@ -682,6 +682,7 @@ func (s *Server) routes() {
 	s.apiMutating("PUT /api/blueprints/{id}/steps", s.handleBlueprintStepsPut)
 	s.apiMutating("POST /api/blueprints/{id}/merge", s.handleBlueprintMerge)
 	s.apiMutating("POST /api/blueprints/{id}/split", s.handleBlueprintSplit)
+	s.apiMutating("POST /api/blueprints/duplicate", s.handleBlueprintDuplicate)
 	s.api("GET /api/blueprint-runs/{id}", s.handleBlueprintRunGet)
 	s.apiMutating("POST /api/blueprint-runs/{id}/cancel", s.handleBlueprintRunCancel)
 
@@ -695,6 +696,7 @@ func (s *Server) routes() {
 	s.apiMutating("DELETE /api/org-template/prompts/{id}", s.handleOrgTemplatePromptDelete)
 	s.api("GET /api/org-template/blueprints", s.handleOrgTemplateBlueprintsList)
 	s.apiMutating("POST /api/org-template/blueprints", s.handleOrgTemplateBlueprintCreate)
+	s.apiMutating("POST /api/org-template/blueprints/duplicate", s.handleOrgTemplateBlueprintDuplicate)
 	s.api("GET /api/org-template/blueprints/{id}", s.handleOrgTemplateBlueprintGet)
 	s.apiMutating("PUT /api/org-template/blueprints/{id}", s.handleOrgTemplateBlueprintPut)
 	s.apiMutating("DELETE /api/org-template/blueprints/{id}", s.handleOrgTemplateBlueprintDelete)

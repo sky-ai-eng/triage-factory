@@ -147,6 +147,20 @@ type OrgTemplateStore interface {
 	// the prompt). ok=false when the prompt is not a step in any blueprint.
 	BlueprintStepPromptOwner(ctx context.Context, orgID, stepPromptID string) (blueprintID string, ok bool, err error)
 
+	// DuplicateBlueprintPrompts is the org-template mirror of
+	// BlueprintStore.DuplicatePrompts: it deep-copies a flat set of template
+	// prompt ids into new trigger-less template blueprint(s) following the same
+	// induced-contiguous-runs rule (PartitionDuplicationRuns), in one
+	// transaction. Each duplicated prompt is a fresh org_template_prompts row
+	// (new id + tmpl-slug; copied name / body / model / allowed_tools;
+	// source="user") and each new blueprint a fresh org_template_blueprints row;
+	// the step brief is carried. Scope is the org (no team dimension): same-org
+	// is enforced by org_id in every WHERE, so an out-of-org id simply fails to
+	// resolve (ErrDuplicatePromptNotFound). An empty set returns
+	// ErrDuplicateNoPrompts. Returns the new blueprint ids in deterministic
+	// order.
+	DuplicateBlueprintPrompts(ctx context.Context, orgID string, promptIDs []string) ([]string, error)
+
 	// --- template handlers CRUD (app pool, org-admin RLS) ---
 
 	// ListHandlers returns the org's template handlers. kind="" returns both;
