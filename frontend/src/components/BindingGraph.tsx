@@ -1146,7 +1146,10 @@ function BindingGraphInner({
       // Serialize duplications: a second Cmd+D / paste before the first fetchAll
       // resolves would race two refetches + pendingSelect writes (last-resolved
       // wins the selection). The guard makes the gesture a no-op while in flight.
-      if (duplicatingRef.current) return
+      if (duplicatingRef.current) {
+        toast.info('Duplication in progress…')
+        return
+      }
       const origOrdered = orderSelectedPromptIds(
         promptIds,
         blueprintStepsRef.current,
@@ -1249,6 +1252,7 @@ function BindingGraphInner({
     const clip = clipboardRef.current
     if (!clip || clip.promptIds.length === 0) return false
     if (clip.scopeKey !== storageKeyRef.current) return false
+    if (duplicatingRef.current) return false
     void duplicatePromptIds(clip.promptIds)
     return true
   }, [duplicatePromptIds])
