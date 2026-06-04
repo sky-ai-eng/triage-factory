@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, type DragEvent } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, type DragEvent } from 'react'
 import {
   ReactFlow,
   Background,
@@ -15,6 +15,7 @@ import {
   applyNodeChanges,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
+import { Layers, MoreVertical } from 'lucide-react'
 import type { Blueprint, BlueprintStep, Prompt, TriggerHandler } from '../types'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
@@ -35,7 +36,7 @@ interface EventType {
 }
 
 interface GraphProps {
-  // The editor scope (SKY-381): a single team's prompts+triggers, or the org
+  // The editor scope: a single team's prompts+triggers, or the org
   // template. Picks the endpoint set; everything downstream is identical. For
   // team scope, teamId '' means solo/local (the server resolves the sole team).
   scope: BindingScope
@@ -97,6 +98,10 @@ function PromptNode({
       onClick={data.onClick}
       className="bg-white/90 backdrop-blur border border-border-subtle rounded-lg px-3 py-2.5 min-w-[200px] max-w-[240px] shadow-sm hover:border-accent/30 hover:shadow-md transition-all cursor-pointer"
     >
+      {/* Target (left): a prompt's single input — an event (it becomes a
+          blueprint's entry) OR an upstream step. Source (right): its single
+          step-output to the next step. The ≤1-in/≤1-out invariant is enforced
+          in onConnect, not by the handles (which would silently swallow). */}
       <Handle
         type="target"
         position={Position.Left}
@@ -118,6 +123,60 @@ function PromptNode({
       {data.usageCount > 0 && (
         <div className="text-[9px] text-text-tertiary mt-1">Used {data.usageCount}x</div>
       )}
+      <Handle
+        type="source"
+        position={Position.Right}
+        className="!w-2.5 !h-2.5 !bg-accent !border-2 !border-white"
+      />
+    </div>
+  )
+}
+
+// BlueprintBoxNode is the procedural bounding box drawn around a multi-step
+// blueprint's prompts (decision 4). It is a *decorative background element*,
+// NOT a ReactFlow group/parent node: the member prompt nodes stay free-floating
+// and independently draggable, and this box's rect is recomputed from their
+// measured positions on every change (see computeBoxNodes). It is
+// non-selectable / non-connectable / non-draggable, sits behind the nodes, and
+// is click-through (pointerEvents:none) except its title + edit affordance, so
+// panning over it still reaches the canvas. The faint fill keeps the sequence
+// edges that run between members visible through it.
+function BlueprintBoxNode({
+  data,
+}: {
+  data: {
+    name: string
+    blueprintId: string
+    stepCount: number
+    onBoxEdit: (blueprintId: string, clientX: number, clientY: number) => void
+  }
+}) {
+  return (
+    <div
+      className="w-full h-full rounded-2xl border border-border-subtle/80 bg-accent/[0.025]"
+      style={{ pointerEvents: 'none' }}
+    >
+      {/* Title (top-left) — faint, the blueprint's name. */}
+      <div
+        className="absolute left-3 top-2 flex items-center gap-1.5 max-w-[70%]"
+        style={{ pointerEvents: 'auto' }}
+      >
+        <Layers size={12} className="text-text-tertiary shrink-0" />
+        <span className="text-[11px] font-semibold text-text-tertiary truncate">{data.name}</span>
+        <span className="text-[10px] text-text-tertiary/60 shrink-0">· {data.stepCount} steps</span>
+      </div>
+      {/* Edit button (top-right) — opens the blueprint details popup. */}
+      <button
+        onClick={(e) => {
+          e.stopPropagation()
+          data.onBoxEdit(data.blueprintId, e.clientX, e.clientY)
+        }}
+        title="Blueprint details"
+        className="absolute right-1.5 top-1.5 w-6 h-6 rounded-md flex items-center justify-center text-text-tertiary hover:text-text-secondary hover:bg-black/[0.04] transition-colors"
+        style={{ pointerEvents: 'auto' }}
+      >
+        <MoreVertical size={14} />
+      </button>
     </div>
   )
 }
@@ -125,7 +184,15 @@ function PromptNode({
 const nodeTypes = {
   eventType: EventTypeNode,
   prompt: PromptNode,
+  blueprintBox: BlueprintBoxNode,
 }
+
+// Box geometry. The box hugs its member prompt nodes with room at the top for
+// the title row. Fallback dims cover the first render before ReactFlow has
+// measured the nodes; the box snaps to true size on the following dimensions
+// change.
+const BOX_PAD = { left: 22, right: 22, top: 38, bottom: 22 }
+const FALLBACK_NODE = { width: 220, height: 84 }
 
 // --- Sidebar ---
 
@@ -225,6 +292,95 @@ function saveLayout(key: string, layout: SavedLayout) {
   }
 }
 
+// --- Connection planning ---
+// Every connect gesture is resolved against blueprint membership (decision 5 —
+// always render/route from blueprint_id, never infer boxes from the live edge
+// graph) into one concrete plan, or a refusal with a user-facing reason. This
+// is the single place the linear + single-input invariant (decision 7) lives.
+
+type ConnPlan =
+  | { ok: false; reason: string }
+  // event → a blueprint's entry prompt: bind/replace a trigger.
+  | { ok: true; kind: 'trigger'; eventType: string; blueprintId: string }
+  // tail of one chain → entry of a trigger-less chain: atomic merge.
+  | { ok: true; kind: 'merge'; host: string; source: string }
+
+interface Membership {
+  // step-0 prompt id per blueprint (the event-edge target / chain entry).
+  firstPrompt: Record<string, string>
+  // ordered step prompt ids per blueprint.
+  steps: Record<string, string[]>
+  // prompt id → its owning blueprint (1:1 — prompts are copy-only).
+  promptToBlueprint: Record<string, string>
+  // blueprint ids that already have an event trigger.
+  triggered: Set<string>
+}
+
+function planConnection(c: Connection, m: Membership): ConnPlan {
+  const source = c.source ?? ''
+  const target = c.target ?? ''
+  if (!target.startsWith('p:')) {
+    return { ok: false, reason: 'A connection has to end on a prompt' }
+  }
+  const targetPid = target.slice(2)
+  const targetBp = m.promptToBlueprint[targetPid]
+  if (!targetBp) {
+    return { ok: false, reason: 'That prompt is not part of a blueprint' }
+  }
+  // A prompt takes a single input. The only free input slot is a chain's entry
+  // (step 0) that isn't already triggered — a mid-chain prompt already has its
+  // upstream step edge, a triggered entry already has its event.
+  const targetIsEntry = m.firstPrompt[targetBp] === targetPid
+  const targetTriggered = m.triggered.has(targetBp)
+  if (!targetIsEntry) {
+    return {
+      ok: false,
+      reason: 'That prompt already has an input — a step takes a single incoming edge',
+    }
+  }
+
+  if (source.startsWith('et:')) {
+    if (targetTriggered) {
+      return {
+        ok: false,
+        reason: 'This blueprint already has a trigger — a blueprint is fired by exactly one event',
+      }
+    }
+    return { ok: true, kind: 'trigger', eventType: source.slice(3), blueprintId: targetBp }
+  }
+
+  if (source.startsWith('p:')) {
+    const srcPid = source.slice(2)
+    const srcBp = m.promptToBlueprint[srcPid]
+    if (!srcBp) {
+      return { ok: false, reason: 'That prompt is not part of a blueprint' }
+    }
+    if (srcBp === targetBp) {
+      return { ok: false, reason: 'A blueprint can’t wire into itself' }
+    }
+    // A step has a single output: only a chain's tail (last step) has a free
+    // outgoing slot to extend onward.
+    const srcSteps = m.steps[srcBp] ?? []
+    const srcIsTail = srcSteps.length > 0 && srcSteps[srcSteps.length - 1] === srcPid
+    if (!srcIsTail) {
+      return {
+        ok: false,
+        reason: 'Only a blueprint’s last step can extend onward — a step has a single output',
+      }
+    }
+    // Merge absorbs the trigger-less downstream chain onto this tail.
+    if (targetTriggered) {
+      return {
+        ok: false,
+        reason: 'Detach the downstream blueprint’s trigger before merging it in',
+      }
+    }
+    return { ok: true, kind: 'merge', host: srcBp, source: targetBp }
+  }
+
+  return { ok: false, reason: 'Unsupported connection' }
+}
+
 // --- Inner Graph ---
 
 function BindingGraphInner({
@@ -234,7 +390,7 @@ function BindingGraphInner({
   onTriggerClick,
   onTriggerDeleted,
 }: GraphProps) {
-  // The graph is scoped to one team OR the org template (SKY-381). For team
+  // The graph is scoped to one team OR the org template. For team
   // scope it shows that team's prompts + triggers and stamps new triggers with
   // it; because only the active team's prompts are ever on the canvas, a
   // connect can't bind another team's prompt (the trigger's team always
@@ -246,18 +402,25 @@ function BindingGraphInner({
   const [eventTypes, setEventTypes] = useState<EventType[]>([])
   const [prompts, setPrompts] = useState<Prompt[]>([])
   const [triggers, setTriggers] = useState<TriggerHandler[]>([])
-  // Each canvas node is a prompt (a blueprint step); a trigger fires a
-  // blueprint. blueprintFirstPrompt maps a blueprint id → its step-0 prompt id
-  // so an event edge targets the first prompt of the blueprint it fires.
+  const [blueprints, setBlueprints] = useState<Blueprint[]>([])
+  // blueprintFirstPrompt maps a blueprint id → its step-0 prompt id so an event
+  // edge targets the entry of the blueprint it fires; blueprintSteps holds each
+  // blueprint's ordered step prompt ids (drives the procedural boxes + the
+  // prompt→prompt sequence edges).
   const [blueprintFirstPrompt, setBlueprintFirstPrompt] = useState<Record<string, string>>({})
+  const [blueprintSteps, setBlueprintSteps] = useState<Record<string, string[]>>({})
   const [nodes, setNodes] = useState<Node[]>([])
   const [loading, setLoading] = useState(true)
   const [activeEventIds, setActiveEventIds] = useState<Set<string>>(new Set())
-  const [confirmPopup, setConfirmPopup] = useState<{
-    x: number
-    y: number
-    triggerId: string
-  } | null>(null)
+  // Edge context menu (shift-click an edge). For a trigger edge it offers edit
+  // (→ the trigger config panel) + remove; for a sequence edge, split-here.
+  const [edgeMenu, setEdgeMenu] = useState<
+    | { x: number; y: number; kind: 'trigger'; trigger: TriggerHandler }
+    | { x: number; y: number; kind: 'sequence'; blueprintId: string; atStepIndex: number }
+    | null
+  >(null)
+  // Blueprint details popup (the box's edit button).
+  const [boxMenu, setBoxMenu] = useState<{ x: number; y: number; blueprintId: string } | null>(null)
   // Persisted layout, keyed per scope (team vs template, and per team) so the
   // canvases don't overwrite each other's node positions. storageKeyRef keeps
   // the key fresh for the save callbacks (which have empty/narrow dep arrays),
@@ -273,13 +436,43 @@ function BindingGraphInner({
   }, [storageKey])
   const { screenToFlowPosition } = useReactFlow()
 
-  // Refs so callbacks don't go stale
+  // Derived membership maps. Kept as memos (for the edge builder + render) and
+  // mirrored to refs (so the connect/reorder/box callbacks read fresh values
+  // without going stale on their narrow dep arrays).
+  const blueprintNames = useMemo(
+    () => Object.fromEntries(blueprints.map((b) => [b.id, b.name])),
+    [blueprints],
+  )
+  const promptToBlueprint = useMemo(() => {
+    const m: Record<string, string> = {}
+    for (const [bpId, ids] of Object.entries(blueprintSteps)) {
+      for (const pid of ids) m[pid] = bpId
+    }
+    return m
+  }, [blueprintSteps])
+  const triggeredBlueprints = useMemo(
+    () => new Set(triggers.map((t) => t.blueprint_id)),
+    [triggers],
+  )
+
+  // Refs so callbacks don't go stale.
   const triggersRef = useRef(triggers)
   triggersRef.current = triggers
-  // Inverse of blueprintFirstPrompt (step-0 prompt id → blueprint id), in a ref
-  // so the connect gesture can resolve a dropped prompt back to the blueprint it
-  // fronts without going stale.
-  const blueprintByFirstPromptRef = useRef<Record<string, string>>({})
+  const firstPromptRef = useRef(blueprintFirstPrompt)
+  firstPromptRef.current = blueprintFirstPrompt
+  const blueprintStepsRef = useRef(blueprintSteps)
+  blueprintStepsRef.current = blueprintSteps
+  const blueprintNamesRef = useRef(blueprintNames)
+  blueprintNamesRef.current = blueprintNames
+  const promptToBlueprintRef = useRef(promptToBlueprint)
+  promptToBlueprintRef.current = promptToBlueprint
+  const triggeredRef = useRef(triggeredBlueprints)
+  triggeredRef.current = triggeredBlueprints
+  // Full step objects per blueprint (carry the per-step brief), needed to
+  // reconstruct a PUT-steps body on reorder without dropping briefs.
+  const stepObjsRef = useRef<Record<string, BlueprintStep[]>>({})
+  const nodesRef = useRef<Node[]>(nodes)
+  nodesRef.current = nodes
   const onPromptClickRef = useRef(onPromptClick)
   onPromptClickRef.current = onPromptClick
   const onTriggerClickRef = useRef(onTriggerClick)
@@ -308,12 +501,10 @@ function BindingGraphInner({
     // unfiltered, the solo/local case); template scope is org-scoped (no
     // team_id). event-types is a system registry — never scoped.
     const teamQuery = !template && teamId ? `team_id=${encodeURIComponent(teamId)}` : ''
-    // The canvas renders PROMPTS (a blueprint's steps), not blueprints: a node is
-    // one blueprint step, carrying a real prompt id so clicking it opens the
-    // PromptDrawer (/api/prompts/{id}). The blueprint is just the grouping an
-    // event fires; the box drawn around its prompts is a separate ticket. We need
-    // the blueprint list + each blueprint's steps to learn the step → prompt
-    // mapping (and which prompt is step 0 — the event-edge target), plus the
+    // The canvas renders PROMPTS (a blueprint's steps) as nodes, with a
+    // procedural box drawn around each multi-step blueprint. We need the
+    // blueprint list + each blueprint's steps (the step→prompt mapping, the
+    // entry prompt, and the order that draws the sequence edges), plus the
     // prompt list for titles + bodies. Both scopes are symmetric — team from
     // /api/*, template from /api/org-template/*.
     const blueprintsURL = `${blueprintsBase(template)}${teamQuery ? `?${teamQuery}` : ''}`
@@ -329,33 +520,36 @@ function BindingGraphInner({
       setEventTypes(etRes)
       setTriggers(tRes)
 
-      const blueprints = bpRes as Blueprint[]
+      const blueprintList = bpRes as Blueprint[]
       const promptById = new Map((promptRes as Prompt[]).map((p): [string, Prompt] => [p.id, p]))
 
       // Fetch each blueprint's steps (N+1 over the handful of blueprints — a bulk
       // "blueprints-with-steps" read is a tracked, optional optimization).
       const stepsURL = (id: string) => `${blueprintsBase(template)}/${encodeURIComponent(id)}/steps`
       const stepLists = await Promise.all(
-        blueprints.map((b) =>
+        blueprintList.map((b) =>
           fetch(stepsURL(b.id))
             .then((r) => parseOrThrow(r, 'blueprint-steps'))
             .then((steps) => ({ blueprintId: b.id, steps: steps as BlueprintStep[] })),
         ),
       )
 
-      // One node per blueprint step (= a prompt), deduped by prompt id so a
-      // prompt reused across blueprints doesn't collide on the React Flow node
-      // id. firstPrompt: blueprint → its step-0 prompt (the event-edge target);
-      // byFirstPrompt is the inverse the connect gesture resolves through.
+      // One node per blueprint step (= a prompt). Because prompts are copy-only
+      // — a prompt belongs to exactly one blueprint, so every step
+      // prompt is a member of exactly one box — no shared-prompt-across-boxes
+      // collision. firstPrompt: blueprint → its entry prompt; stepsByBlueprint:
+      // ordered prompt ids; stepObjs: full step rows (for the reorder PUT).
       const firstPrompt: Record<string, string> = {}
-      const byFirstPrompt: Record<string, string> = {}
+      const stepsByBlueprint: Record<string, string[]> = {}
+      const stepObjs: Record<string, BlueprintStep[]> = {}
       const nodeList: Prompt[] = []
       const seen = new Set<string>()
       for (const { blueprintId, steps } of stepLists) {
         const ordered = [...steps].sort((a, b) => a.step_index - b.step_index)
+        stepObjs[blueprintId] = ordered
+        stepsByBlueprint[blueprintId] = ordered.map((s) => s.step_prompt_id)
         if (ordered.length > 0) {
           firstPrompt[blueprintId] = ordered[0].step_prompt_id
-          byFirstPrompt[ordered[0].step_prompt_id] = blueprintId
         }
         for (const step of ordered) {
           if (seen.has(step.step_prompt_id)) continue
@@ -365,8 +559,10 @@ function BindingGraphInner({
         }
       }
       setPrompts(nodeList)
+      setBlueprints(blueprintList)
       setBlueprintFirstPrompt(firstPrompt)
-      blueprintByFirstPromptRef.current = byFirstPrompt
+      setBlueprintSteps(stepsByBlueprint)
+      stepObjsRef.current = stepObjs
 
       const saved = layoutRef.current
       const boundIds = new Set((tRes as TriggerHandler[]).map((t) => t.event_type))
@@ -410,12 +606,81 @@ function BindingGraphInner({
     [fetchAll, template],
   )
 
-  // Rebuild nodes when data changes
+  // Open the blueprint details popup at the edit button's location.
+  const onBoxEdit = useCallback((blueprintId: string, clientX: number, clientY: number) => {
+    setBoxMenu({ x: clientX, y: clientY, blueprintId })
+  }, [])
+
+  // Recompute the procedural boxes from the current member node geometry. A box
+  // is drawn only at ≥2 steps (decision 3); it hugs its members with a header
+  // gap on top, sits behind the nodes, and is click-through. Reads membership
+  // from refs so it stays cheap + stale-free inside onNodesChange.
+  const computeBoxNodes = useCallback(
+    (nonBox: Node[]): Node[] => {
+      const byNodeId = new Map<string, Node>()
+      for (const n of nonBox) {
+        if (n.type === 'prompt') byNodeId.set(n.id, n)
+      }
+      const boxes: Node[] = []
+      for (const [bpId, promptIds] of Object.entries(blueprintStepsRef.current)) {
+        if (promptIds.length < 2) continue
+        let minX = Infinity
+        let minY = Infinity
+        let maxX = -Infinity
+        let maxY = -Infinity
+        let found = 0
+        for (const pid of promptIds) {
+          const node = byNodeId.get(`p:${pid}`)
+          if (!node) continue
+          found++
+          const w = node.measured?.width ?? FALLBACK_NODE.width
+          const h = node.measured?.height ?? FALLBACK_NODE.height
+          const { x, y } = node.position
+          if (x < minX) minX = x
+          if (y < minY) minY = y
+          if (x + w > maxX) maxX = x + w
+          if (y + h > maxY) maxY = y + h
+        }
+        // Need at least two placed members for a meaningful box.
+        if (found < 2) continue
+        boxes.push({
+          id: `bp:${bpId}`,
+          type: 'blueprintBox',
+          position: { x: minX - BOX_PAD.left, y: minY - BOX_PAD.top },
+          data: {
+            name: blueprintNamesRef.current[bpId] ?? 'Blueprint',
+            blueprintId: bpId,
+            stepCount: promptIds.length,
+            onBoxEdit,
+          },
+          draggable: false,
+          selectable: false,
+          connectable: false,
+          deletable: false,
+          // Behind the nodes; the faint fill keeps inner edges visible (decision 4).
+          zIndex: 0,
+          style: {
+            width: maxX - minX + BOX_PAD.left + BOX_PAD.right,
+            height: maxY - minY + BOX_PAD.top + BOX_PAD.bottom,
+            pointerEvents: 'none',
+          },
+        })
+      }
+      return boxes
+    },
+    [onBoxEdit],
+  )
+
+  // Rebuild nodes when data changes. Prompt nodes default to a left→right layout
+  // in step order (so a chain reads naturally and the box hugs a row), stacked
+  // per blueprint; saved positions always win. Boxes are prepended so that, at
+  // equal z-index, they paint beneath the prompt nodes.
   useEffect(() => {
     const layout = layoutRef.current
+    const promptMap = new Map(prompts.map((p): [string, Prompt] => [p.id, p]))
+
     const eventNodes: Node[] = []
     let defaultY = 40
-
     for (const et of eventTypes) {
       if (!activeEventIds.has(et.id)) continue
       const pos = layout.eventPositions[et.id] || { x: 240, y: defaultY }
@@ -436,136 +701,281 @@ function BindingGraphInner({
       defaultY += 70
     }
 
-    let promptDefaultY = 40
-    const promptNodes: Node[] = prompts.map((p) => {
-      const pos = layout.promptPositions[p.id] || { x: 600, y: promptDefaultY }
-      if (!layout.promptPositions[p.id]) {
-        layout.promptPositions[p.id] = pos
-      }
-      promptDefaultY += 90
-      return {
-        id: `p:${p.id}`,
-        type: 'prompt',
-        position: pos,
-        data: {
-          label: p.name,
-          source: p.source,
-          usageCount: p.usage_count,
-          bodyPreview: p.body.slice(0, 80) + (p.body.length > 80 ? '...' : ''),
-          onClick: () => onPromptClickRef.current?.(p.id),
-        },
-      }
-    })
-
-    setNodes([...eventNodes, ...promptNodes])
-  }, [eventTypes, prompts, activeEventIds, removeEvent])
-
-  // Build edges
-  const edges: Edge[] = triggers
-    // Drop triggers whose blueprint has no resolvable step-0 prompt so we never
-    // emit an edge pointing at a node that isn't on the canvas.
-    .filter((t) => activeEventIds.has(t.event_type) && blueprintFirstPrompt[t.blueprint_id])
-    .map((t) => ({
-      id: t.id,
-      source: `et:${t.event_type}`,
-      // The event wires to the blueprint's first step (a prompt node).
-      target: `p:${blueprintFirstPrompt[t.blueprint_id]}`,
-      type: 'default',
-      animated: t.enabled,
-      style: {
-        stroke: t.enabled ? 'var(--color-accent)' : 'var(--color-text-tertiary)',
-        strokeWidth: t.enabled ? 2 : 1,
-        strokeDasharray: t.enabled ? undefined : '5 5',
-        opacity: t.enabled ? 1 : 0.5,
-      },
-      markerEnd: {
-        type: MarkerType.ArrowClosed,
-        color: t.enabled ? 'var(--color-accent)' : 'var(--color-text-tertiary)',
-      },
-      label: t.enabled ? 'auto' : 'disabled',
-      labelStyle: {
-        fontSize: 9,
-        fill: t.enabled ? 'var(--color-accent)' : 'var(--color-text-tertiary)',
-        fontWeight: 600,
-      },
-      labelBgStyle: { fill: 'white', fillOpacity: 0.8 },
-    }))
-
-  // Handle node changes (dragging) — apply to state + persist positions
-  const onNodesChange = useCallback((changes: NodeChange[]) => {
-    setNodes((nds) => applyNodeChanges(changes, nds))
-
-    // Persist position changes
-    const layout = layoutRef.current
-    let dirty = false
-    for (const change of changes) {
-      if (change.type === 'position' && !change.dragging && change.position) {
-        const id = change.id
-        if (id.startsWith('et:')) {
-          layout.eventPositions[id.replace('et:', '')] = change.position
-          dirty = true
-        } else if (id.startsWith('p:')) {
-          layout.promptPositions[id.replace('p:', '')] = change.position
-          dirty = true
+    const promptNodes: Node[] = []
+    const seen = new Set<string>()
+    let row = 0
+    for (const bp of blueprints) {
+      const ids = blueprintSteps[bp.id] ?? []
+      const baseY = 40 + row * 150
+      ids.forEach((pid, i) => {
+        if (seen.has(pid)) return
+        seen.add(pid)
+        const p = promptMap.get(pid)
+        if (!p) return
+        const def = { x: 560 + i * 300, y: baseY }
+        const pos = layout.promptPositions[pid] || def
+        if (!layout.promptPositions[pid]) {
+          layout.promptPositions[pid] = pos
         }
+        promptNodes.push({
+          id: `p:${pid}`,
+          type: 'prompt',
+          position: pos,
+          data: {
+            label: p.name,
+            source: p.source,
+            usageCount: p.usage_count,
+            bodyPreview: p.body.slice(0, 80) + (p.body.length > 80 ? '...' : ''),
+            onClick: () => onPromptClickRef.current?.(p.id),
+          },
+        })
+      })
+      row++
+    }
+
+    const nonBox = [...eventNodes, ...promptNodes]
+    setNodes([...computeBoxNodes(nonBox), ...nonBox])
+  }, [
+    eventTypes,
+    prompts,
+    blueprints,
+    blueprintSteps,
+    activeEventIds,
+    removeEvent,
+    computeBoxNodes,
+  ])
+
+  // Build edges: event → entry prompt (trigger) and prompt → prompt (sequence).
+  const edges: Edge[] = useMemo(() => {
+    // Only wire to prompts that are actually on the canvas — a step whose prompt
+    // is absent (e.g. mid-fetch or a deleted prompt) gets no dangling edge.
+    const presentPrompts = new Set(prompts.map((p) => p.id))
+    const triggerEdges: Edge[] = triggers
+      // Drop triggers whose blueprint has no resolvable entry prompt so we never
+      // emit an edge pointing at a node that isn't on the canvas.
+      .filter(
+        (t) =>
+          activeEventIds.has(t.event_type) &&
+          blueprintFirstPrompt[t.blueprint_id] &&
+          presentPrompts.has(blueprintFirstPrompt[t.blueprint_id]),
+      )
+      .map((t) => ({
+        id: t.id,
+        source: `et:${t.event_type}`,
+        target: `p:${blueprintFirstPrompt[t.blueprint_id]}`,
+        type: 'default',
+        animated: t.enabled,
+        data: { kind: 'trigger' },
+        style: {
+          stroke: t.enabled ? 'var(--color-accent)' : 'var(--color-text-tertiary)',
+          strokeWidth: t.enabled ? 2 : 1,
+          strokeDasharray: t.enabled ? undefined : '5 5',
+          opacity: t.enabled ? 1 : 0.5,
+        },
+        markerEnd: {
+          type: MarkerType.ArrowClosed,
+          color: t.enabled ? 'var(--color-accent)' : 'var(--color-text-tertiary)',
+        },
+        label: t.enabled ? 'auto' : 'disabled',
+        labelStyle: {
+          fontSize: 9,
+          fill: t.enabled ? 'var(--color-accent)' : 'var(--color-text-tertiary)',
+          fontWeight: 600,
+        },
+        labelBgStyle: { fill: 'white', fillOpacity: 0.8 },
+      }))
+
+    const sequenceEdges: Edge[] = []
+    for (const [bpId, ids] of Object.entries(blueprintSteps)) {
+      for (let i = 0; i < ids.length - 1; i++) {
+        if (!presentPrompts.has(ids[i]) || !presentPrompts.has(ids[i + 1])) continue
+        sequenceEdges.push({
+          id: `seq:${bpId}:${i}`,
+          source: `p:${ids[i]}`,
+          target: `p:${ids[i + 1]}`,
+          type: 'smoothstep',
+          // Disconnecting this edge splits the blueprint before step i+1.
+          data: { kind: 'sequence', blueprintId: bpId, atStepIndex: i + 1 },
+          style: { stroke: 'var(--color-text-tertiary)', strokeWidth: 1.5 },
+          markerEnd: { type: MarkerType.ArrowClosed, color: 'var(--color-text-tertiary)' },
+        })
       }
     }
-    if (dirty) saveLayout(storageKeyRef.current, layout)
-  }, [])
+    return [...sequenceEdges, ...triggerEdges]
+  }, [triggers, activeEventIds, blueprintFirstPrompt, blueprintSteps, prompts])
 
-  // Connect event -> prompt (creates a new trigger). The canvas nodes are
-  // prompts, but a trigger fires a blueprint, so resolve the dropped prompt back
-  // to the blueprint it fronts.
+  // Persist a reordered step list (drag-to-reorder within a box → PUT steps).
+  const persistReorder = useCallback(
+    async (blueprintId: string, orderedPromptIds: string[]) => {
+      const briefByPrompt = new Map(
+        (stepObjsRef.current[blueprintId] ?? []).map((s) => [s.step_prompt_id, s.brief]),
+      )
+      const steps = orderedPromptIds.map((pid) => ({
+        step_prompt_id: pid,
+        brief: briefByPrompt.get(pid) ?? '',
+      }))
+      try {
+        const res = await fetch(
+          `${blueprintsBase(template)}/${encodeURIComponent(blueprintId)}/steps`,
+          {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ steps }),
+          },
+        )
+        if (!res.ok) {
+          toast.error(await readError(res, 'Failed to reorder steps'))
+        }
+      } catch (err) {
+        toast.error(`Failed to reorder steps: ${err instanceof Error ? err.message : String(err)}`)
+      } finally {
+        // Re-render from the backend's truth either way (success applies the new
+        // order; failure reverts to the persisted order).
+        fetchAll()
+      }
+    },
+    [template, fetchAll],
+  )
+
+  // After a drag ends, if the dragged prompt's blueprint members now sort into a
+  // different order along the flow axis, persist the reorder. Spatial order is
+  // the gesture: nudging without crossing a sibling is a no-op.
+  const maybeReorder = useCallback(
+    (nonBox: Node[], draggedNodeId: string) => {
+      const pid = draggedNodeId.slice(2)
+      const bp = promptToBlueprintRef.current[pid]
+      if (!bp) return
+      const stepIds = blueprintStepsRef.current[bp] ?? []
+      if (stepIds.length < 2) return
+      const members = stepIds.map((id) => nonBox.find((n) => n.id === `p:${id}`))
+      if (members.some((n) => !n)) return
+      const sorted = [...(members as Node[])].sort(
+        (a, b) => a.position.x - b.position.x || a.position.y - b.position.y,
+      )
+      const newOrder = sorted.map((n) => n.id.slice(2))
+      if (newOrder.join('|') === stepIds.join('|')) return
+      persistReorder(bp, newOrder)
+    },
+    [persistReorder],
+  )
+
+  // Handle node changes (dragging) — apply, persist positions, recompute boxes,
+  // and detect a reorder on drag-end.
+  const onNodesChange = useCallback(
+    (changes: NodeChange[]) => {
+      const applied = applyNodeChanges(changes, nodesRef.current)
+
+      // Persist position changes.
+      const layout = layoutRef.current
+      let dirty = false
+      for (const change of changes) {
+        if (change.type === 'position' && !change.dragging && change.position) {
+          const id = change.id
+          if (id.startsWith('et:')) {
+            layout.eventPositions[id.replace('et:', '')] = change.position
+            dirty = true
+          } else if (id.startsWith('p:')) {
+            layout.promptPositions[id.replace('p:', '')] = change.position
+            dirty = true
+          }
+        }
+      }
+      if (dirty) saveLayout(storageKeyRef.current, layout)
+
+      // Recompute boxes from the updated member geometry.
+      const nonBox = applied.filter((n) => n.type !== 'blueprintBox')
+      const next = [...computeBoxNodes(nonBox), ...nonBox]
+      nodesRef.current = next
+      setNodes(next)
+
+      // Reorder detection on drag-end.
+      for (const change of changes) {
+        if (change.type === 'position' && change.dragging === false && change.id.startsWith('p:')) {
+          maybeReorder(nonBox, change.id)
+        }
+      }
+    },
+    [computeBoxNodes, maybeReorder],
+  )
+
+  // Connect: route the gesture (decision 7 enforcement lives in planConnection).
+  // event → entry prompt creates/updates a trigger; tail → trigger-less entry is
+  // an atomic merge. Both re-render from the resulting membership.
   const onConnect = useCallback(
     async (connection: Connection) => {
-      const eventType = connection.source?.replace('et:', '')
-      const promptId = connection.target?.replace('p:', '')
-      if (!eventType || !promptId) return
       // Wait for the scope to resolve. For team scope before /api/teams loads,
       // teamId is '' and posting it would 400 (ambiguous); for template scope,
       // scopeReady gates on org-admin + multi. The gesture no-ops rather than
       // failing silently — the edge simply doesn't stick (edges derive from
-      // triggers).
+      // backend state, not the live graph).
       if (!scopeReady) return
 
-      // Resolve the dropped prompt to the blueprint it heads. Today every prompt
-      // node is a 1-step blueprint's sole (step-0) prompt, so this is a clean
-      // 1:1 lookup; wiring into a multi-step blueprint's interior is a routing
-      // constraint owned by a follow-up ticket.
-      const blueprintId = blueprintByFirstPromptRef.current[promptId]
-      if (!blueprintId) {
-        toast.error('That prompt is not a blueprint entry point — cannot bind an event to it')
+      const plan = planConnection(connection, {
+        firstPrompt: firstPromptRef.current,
+        steps: blueprintStepsRef.current,
+        promptToBlueprint: promptToBlueprintRef.current,
+        triggered: triggeredRef.current,
+      })
+      if (!plan.ok) {
+        toast.error(plan.reason)
         return
       }
 
-      // Team scope stamps the acting team; template scope is org-scoped (no
-      // team_id — the row lands on the org template).
-      const body: Record<string, unknown> = {
-        kind: 'trigger',
-        blueprint_id: blueprintId,
-        event_type: eventType,
+      if (plan.kind === 'trigger') {
+        // Team scope stamps the acting team; template scope is org-scoped.
+        const body: Record<string, unknown> = {
+          kind: 'trigger',
+          blueprint_id: plan.blueprintId,
+          event_type: plan.eventType,
+        }
+        if (!template) body.team_id = teamId
+        try {
+          const res = await fetch(handlersBase(template), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          })
+          if (!res.ok) {
+            toast.error(await readError(res, 'Failed to create trigger'))
+            return
+          }
+          fetchAll()
+        } catch (err) {
+          toast.error(
+            `Failed to create trigger: ${err instanceof Error ? err.message : String(err)}`,
+          )
+        }
+        return
       }
-      if (!template) {
-        body.team_id = teamId
+
+      // Merge. The atomic endpoint is team-scope only — the org
+      // template has no composition endpoints, so refuse there with a clear
+      // affordance rather than 404-ing.
+      if (template) {
+        toast.error('Merging blueprints isn’t available in the org template editor yet')
+        return
       }
       try {
-        const res = await fetch(handlersBase(template), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        })
+        const res = await fetch(
+          `${blueprintsBase(template)}/${encodeURIComponent(plan.host)}/merge`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source_blueprint_id: plan.source }),
+          },
+        )
         if (!res.ok) {
-          // Surface the rejection instead of swallowing it — otherwise the
-          // dragged edge just vanishes with no explanation.
-          toast.error(await readError(res, 'Failed to create trigger'))
+          toast.error(await readError(res, 'Failed to merge blueprints'))
           return
         }
         fetchAll()
       } catch (err) {
-        toast.error(`Failed to create trigger: ${err instanceof Error ? err.message : String(err)}`)
+        toast.error(
+          `Failed to merge blueprints: ${err instanceof Error ? err.message : String(err)}`,
+        )
       }
     },
-    [fetchAll, template, teamId, scopeReady],
+    [scopeReady, template, teamId, fetchAll],
   )
 
   const doDeleteTrigger = useCallback(
@@ -588,17 +998,60 @@ function BindingGraphInner({
     [fetchAll, template],
   )
 
-  // Click edge to open config panel; shift-click to open delete confirmation
+  // Split the blueprint before the given step index. Team-scope only.
+  const doSplit = useCallback(
+    async (blueprintId: string, atStepIndex: number) => {
+      if (template) {
+        toast.error('Splitting blueprints isn’t available in the org template editor yet')
+        return
+      }
+      try {
+        const res = await fetch(
+          `${blueprintsBase(template)}/${encodeURIComponent(blueprintId)}/split`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ at_step_index: atStepIndex }),
+          },
+        )
+        if (!res.ok) {
+          toast.error(await readError(res, 'Failed to split blueprint'))
+          return
+        }
+        fetchAll()
+      } catch (err) {
+        toast.error(
+          `Failed to split blueprint: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+    },
+    [template, fetchAll],
+  )
+
+  // Click an edge: plain click on a trigger edge opens its config; shift-click
+  // any edge opens a contextual menu (trigger: edit/remove; sequence: split).
   const onEdgeClick: EdgeMouseHandler = useCallback((event, edge) => {
+    const mouseEvent = event as unknown as MouseEvent
+    const kind = (edge.data as { kind?: string } | undefined)?.kind
+    if (kind === 'sequence') {
+      if (event.shiftKey) {
+        const data = edge.data as { blueprintId: string; atStepIndex: number }
+        setEdgeMenu({
+          x: mouseEvent.clientX,
+          y: mouseEvent.clientY,
+          kind: 'sequence',
+          blueprintId: data.blueprintId,
+          atStepIndex: data.atStepIndex,
+        })
+      }
+      return
+    }
+    // Trigger edge — resolve the backing trigger by edge id.
     const trigger = triggersRef.current.find((t) => t.id === edge.id)
     if (!trigger) return
-
     if (event.shiftKey) {
-      // Shift-click: show delete confirm
-      const mouseEvent = event as unknown as MouseEvent
-      setConfirmPopup({ x: mouseEvent.clientX, y: mouseEvent.clientY, triggerId: trigger.id })
+      setEdgeMenu({ x: mouseEvent.clientX, y: mouseEvent.clientY, kind: 'trigger', trigger })
     } else {
-      // Regular click: open trigger config panel
       onTriggerClickRef.current?.(trigger)
     }
   }, [])
@@ -625,6 +1078,12 @@ function BindingGraphInner({
     [screenToFlowPosition],
   )
 
+  // Resolve the blueprint + its trigger for the details popup at click time so
+  // it always reflects the latest fetch.
+  const boxMenuTrigger = boxMenu
+    ? triggers.find((t) => t.blueprint_id === boxMenu.blueprintId)
+    : undefined
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full text-text-tertiary text-sm">
@@ -649,36 +1108,95 @@ function BindingGraphInner({
         minZoom={0.4}
         maxZoom={1.5}
         defaultEdgeOptions={{ type: 'default' }}
+        // Deletions go through explicit affordances (prompt drawer, the edge
+        // shift-click menu, the event node's ✕) — not a stray Backspace that
+        // would only desync the canvas from the backend until the next fetch.
+        deleteKeyCode={null}
       >
         <Background color="var(--color-border-subtle)" gap={20} size={1} />
       </ReactFlow>
 
-      {/* Confirm delete popup */}
-      {confirmPopup && (
+      {/* Edge context menu (shift-click) */}
+      {edgeMenu && (
         <>
-          <div className="fixed inset-0 z-50" onClick={() => setConfirmPopup(null)} />
+          <div className="fixed inset-0 z-50" onClick={() => setEdgeMenu(null)} />
           <div
-            className="fixed z-50 bg-surface-raised/95 backdrop-blur-xl border border-border-glass rounded-xl shadow-xl shadow-black/10 px-4 py-3 w-[220px]"
-            style={{ left: confirmPopup.x - 110, top: confirmPopup.y - 80 }}
+            className="fixed z-50 bg-surface-raised/95 backdrop-blur-xl border border-border-glass rounded-xl shadow-xl shadow-black/10 p-1.5 w-[200px]"
+            style={{ left: edgeMenu.x - 100, top: edgeMenu.y - 12 }}
           >
-            <p className="text-[12px] text-text-primary font-medium mb-3">Remove this trigger?</p>
-            <div className="flex items-center justify-end gap-2">
-              <button
-                onClick={() => setConfirmPopup(null)}
-                className="text-[11px] text-text-tertiary hover:text-text-secondary font-medium px-2.5 py-1 rounded-md transition-colors"
-              >
-                Cancel
-              </button>
+            {edgeMenu.kind === 'trigger' ? (
+              <>
+                <button
+                  onClick={() => {
+                    onTriggerClickRef.current?.(edgeMenu.trigger)
+                    setEdgeMenu(null)
+                  }}
+                  className="w-full text-left text-[12px] text-text-secondary hover:text-text-primary hover:bg-black/[0.04] font-medium px-2.5 py-1.5 rounded-lg transition-colors"
+                >
+                  Edit trigger config
+                </button>
+                <button
+                  onClick={() => {
+                    doDeleteTrigger(edgeMenu.trigger.id)
+                    setEdgeMenu(null)
+                  }}
+                  className="w-full text-left text-[12px] text-red-500 hover:bg-red-50 font-medium px-2.5 py-1.5 rounded-lg transition-colors"
+                >
+                  Remove trigger
+                </button>
+              </>
+            ) : (
+              <>
+                <div className="px-2.5 pt-1.5 pb-1 text-[10px] text-text-tertiary leading-snug">
+                  Split into two blueprints at this boundary.
+                </div>
+                <button
+                  onClick={() => {
+                    doSplit(edgeMenu.blueprintId, edgeMenu.atStepIndex)
+                    setEdgeMenu(null)
+                  }}
+                  className="w-full text-left text-[12px] text-text-secondary hover:text-text-primary hover:bg-black/[0.04] font-medium px-2.5 py-1.5 rounded-lg transition-colors"
+                >
+                  Split here
+                </button>
+              </>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* Blueprint details popup (box edit button) */}
+      {boxMenu && (
+        <>
+          <div className="fixed inset-0 z-50" onClick={() => setBoxMenu(null)} />
+          <div
+            className="fixed z-50 bg-surface-raised/95 backdrop-blur-xl border border-border-glass rounded-xl shadow-xl shadow-black/10 p-3 w-[240px]"
+            style={{ left: boxMenu.x - 220, top: boxMenu.y + 6 }}
+          >
+            <div className="flex items-center gap-1.5 mb-0.5">
+              <Layers size={13} className="text-text-tertiary shrink-0" />
+              <span className="text-[13px] font-semibold text-text-primary truncate">
+                {blueprintNames[boxMenu.blueprintId] ?? 'Blueprint'}
+              </span>
+            </div>
+            <div className="text-[11px] text-text-tertiary mb-2.5">
+              {(blueprintSteps[boxMenu.blueprintId]?.length ?? 0) + ' steps · composed on canvas'}
+            </div>
+            {boxMenuTrigger ? (
               <button
                 onClick={() => {
-                  doDeleteTrigger(confirmPopup.triggerId)
-                  setConfirmPopup(null)
+                  onTriggerClickRef.current?.(boxMenuTrigger)
+                  setBoxMenu(null)
                 }}
-                className="text-[11px] font-semibold text-white bg-red-500 hover:bg-red-600 px-3 py-1 rounded-md transition-colors"
+                className="w-full text-left text-[12px] text-text-secondary hover:text-text-primary hover:bg-black/[0.04] font-medium px-2.5 py-1.5 rounded-lg border border-border-subtle transition-colors"
               >
-                Remove
+                Edit trigger config
               </button>
-            </div>
+            ) : (
+              <p className="text-[11px] text-text-tertiary leading-snug">
+                No trigger yet — wire an event to this blueprint’s first step to fire it.
+              </p>
+            )}
           </div>
         </>
       )}
