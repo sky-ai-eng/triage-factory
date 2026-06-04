@@ -621,21 +621,32 @@ func (s *orgTemplateStore) ReplaceBlueprintSteps(ctx context.Context, orgID, blu
 	if len(briefs) != 0 && len(briefs) != len(stepPromptIDs) {
 		return fmt.Errorf("briefs length %d must match stepPromptIDs length %d", len(briefs), len(stepPromptIDs))
 	}
+	return s.runInTx(ctx, func(tx *sql.Tx) error {
+		return replaceOrgTemplateBlueprintSteps(ctx, tx, orgID, blueprintID, stepPromptIDs, briefs)
+	})
+}
+
+// runInTx runs fn against a *sql.Tx, composing onto the caller's transaction
+// when s.app is already a *sql.Tx (inside WithTx) or opening + committing a
+// fresh one when it's a *sql.DB (standalone call). Shared by the org-template
+// store's multi-statement writes (ReplaceBlueprintSteps, DuplicateBlueprintPrompts)
+// so the type-assertion lives in one place.
+func (s *orgTemplateStore) runInTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	switch v := s.app.(type) {
 	case *sql.Tx:
-		return replaceOrgTemplateBlueprintSteps(ctx, v, orgID, blueprintID, stepPromptIDs, briefs)
+		return fn(v)
 	case *sql.DB:
 		tx, err := v.BeginTx(ctx, nil)
 		if err != nil {
 			return err
 		}
 		defer func() { _ = tx.Rollback() }()
-		if err := replaceOrgTemplateBlueprintSteps(ctx, tx, orgID, blueprintID, stepPromptIDs, briefs); err != nil {
+		if err := fn(tx); err != nil {
 			return err
 		}
 		return tx.Commit()
 	default:
-		return errors.New("postgres org_template ReplaceBlueprintSteps: unexpected queryer type")
+		return errors.New("postgres org_template: unexpected queryer type")
 	}
 }
 
@@ -670,30 +681,12 @@ func (s *orgTemplateStore) DuplicateBlueprintPrompts(ctx context.Context, orgID 
 		return nil, db.ErrDuplicateNoPrompts
 	}
 	var newIDs []string
-	run := func(tx *sql.Tx) error {
+	if err := s.runInTx(ctx, func(tx *sql.Tx) error {
 		list, err := duplicateOrgTemplateBlueprintPrompts(ctx, tx, orgID, ids)
 		newIDs = list
 		return err
-	}
-	switch v := s.app.(type) {
-	case *sql.Tx:
-		if err := run(v); err != nil {
-			return nil, err
-		}
-	case *sql.DB:
-		tx, err := v.BeginTx(ctx, nil)
-		if err != nil {
-			return nil, err
-		}
-		defer func() { _ = tx.Rollback() }()
-		if err := run(tx); err != nil {
-			return nil, err
-		}
-		if err := tx.Commit(); err != nil {
-			return nil, err
-		}
-	default:
-		return nil, errors.New("postgres org_template DuplicateBlueprintPrompts: unexpected queryer type")
+	}); err != nil {
+		return nil, err
 	}
 	return newIDs, nil
 }

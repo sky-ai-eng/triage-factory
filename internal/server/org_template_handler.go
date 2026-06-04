@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -634,6 +635,11 @@ func (s *Server) handleOrgTemplateBlueprintDuplicate(w http.ResponseWriter, r *h
 			bp, ge := tx.OrgTemplate.GetBlueprint(r.Context(), orgID, id)
 			if ge != nil {
 				return ge
+			}
+			if bp == nil {
+				// Just INSERTed in this tx — a nil read is a store inconsistency,
+				// not a 404. Fail the tx rather than emit "blueprint": null.
+				return fmt.Errorf("duplicated template blueprint %s not readable after insert", id)
 			}
 			steps, ge := tx.OrgTemplate.ListBlueprintSteps(r.Context(), orgID, id)
 			if ge != nil {

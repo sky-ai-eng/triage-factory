@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -598,6 +599,11 @@ func (s *Server) handleBlueprintDuplicate(w http.ResponseWriter, r *http.Request
 			bp, ge := tx.Blueprints.Get(r.Context(), orgID, id)
 			if ge != nil {
 				return ge
+			}
+			if bp == nil {
+				// Just INSERTed in this tx — a nil read is a store inconsistency,
+				// not a 404. Fail the tx rather than emit "blueprint": null.
+				return fmt.Errorf("duplicated blueprint %s not readable after insert", id)
 			}
 			steps, ge := tx.Blueprints.ListSteps(r.Context(), orgID, id)
 			if ge != nil {

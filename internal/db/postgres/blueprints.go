@@ -420,7 +420,7 @@ func (s *blueprintStore) DuplicatePrompts(ctx context.Context, orgID, teamID str
 				FROM blueprint_steps bs
 				JOIN blueprints b ON b.id = bs.blueprint_id AND b.org_id = bs.org_id
 				JOIN prompts p ON p.id = bs.step_prompt_id AND p.org_id = bs.org_id
-				WHERE bs.org_id = $1 AND bs.step_prompt_id = $2 AND b.deleted_at IS NULL
+				WHERE bs.org_id = $1 AND bs.step_prompt_id = $2 AND b.deleted_at IS NULL AND p.deleted_at IS NULL
 			`, orgID, pid).Scan(&st.BlueprintID, &st.BlueprintName, &team, &st.StepIndex, &st.Brief,
 				&st.PromptName, &st.PromptBody, &st.PromptModel, &st.PromptTools, &st.BlueprintTotal)
 			if errors.Is(err, sql.ErrNoRows) {
