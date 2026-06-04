@@ -417,7 +417,9 @@ function orderSelectedPromptIds(
   const out: string[] = []
   for (const bpId of [...byBlueprint.keys()].sort()) {
     const steps = stepsByBlueprint[bpId] ?? []
-    for (const idx of [...new Set(byBlueprint.get(bpId)!)].sort((a, b) => a - b)) {
+    // The outer `seen` set already collapses repeated prompt ids, so each index
+    // appears once per blueprint — just sort by index.
+    for (const idx of byBlueprint.get(bpId)!.sort((a, b) => a - b)) {
       out.push(steps[idx])
     }
   }
@@ -534,6 +536,9 @@ function BindingGraphInner({
   // duplicate so the freshly-pasted copies come back selected and immediately
   // wireable. Read + cleared in the node-build effect.
   const pendingSelectRef = useRef<Set<string>>(new Set())
+  // True while a duplicate request is in flight, so a rapid second gesture (Cmd+D
+  // held, double paste) doesn't race two refetches/selections.
+  const duplicatingRef = useRef(false)
 
   const fetchAll = useCallback(async () => {
     // Hold in the loading state until the scope resolves. For team scope, a
@@ -1138,12 +1143,17 @@ function BindingGraphInner({
   const duplicatePromptIds = useCallback(
     async (promptIds: string[]) => {
       if (!scopeReady) return
+      // Serialize duplications: a second Cmd+D / paste before the first fetchAll
+      // resolves would race two refetches + pendingSelect writes (last-resolved
+      // wins the selection). The guard makes the gesture a no-op while in flight.
+      if (duplicatingRef.current) return
       const origOrdered = orderSelectedPromptIds(
         promptIds,
         blueprintStepsRef.current,
         promptToBlueprintRef.current,
       )
       if (origOrdered.length === 0) return
+      duplicatingRef.current = true
       // Team scope stamps the acting team; template scope is org-scoped.
       const body: Record<string, unknown> = { prompt_ids: origOrdered }
       if (!template) body.team_id = teamId
@@ -1165,6 +1175,15 @@ function BindingGraphInner({
           for (const s of [...bp.steps].sort((a, b) => a.step_index - b.step_index)) {
             newOrdered.push(s.step_prompt_id)
           }
+        }
+        // The position map relies on origOrdered[k] ↔ newOrdered[k]. A length
+        // mismatch (e.g. a prompt deleted between copy and paste, so the endpoint
+        // partitions a smaller set) means the tail copies fall back to the default
+        // grid; warn rather than seed positions against misaligned indices.
+        if (newOrdered.length !== origOrdered.length) {
+          console.warn(
+            `BindingGraph duplicate: expected ${origOrdered.length} copies, got ${newOrdered.length} — placement seeded only for the aligned prefix`,
+          )
         }
         // Pre-seed each copy's layout position at its original + offset so it
         // renders offset (and distinct) on the refetch rather than at the default
@@ -1189,6 +1208,8 @@ function BindingGraphInner({
         toast.success(`Duplicated ${count} prompt${count === 1 ? '' : 's'}`)
       } catch (err) {
         toast.error(`Failed to duplicate: ${err instanceof Error ? err.message : String(err)}`)
+      } finally {
+        duplicatingRef.current = false
       }
     },
     [scopeReady, template, teamId, fetchAll],
@@ -1216,7 +1237,9 @@ function BindingGraphInner({
     const ids = selectedPromptIds()
     if (ids.length === 0) return false
     clipboardRef.current = { scopeKey: storageKeyRef.current, promptIds: ids }
-    toast.success(`Copied ${ids.length} prompt${ids.length === 1 ? '' : 's'}`)
+    // "to canvas clipboard" — this is page-local, not the system clipboard, so a
+    // Cmd+V in another app won't paste these.
+    toast.success(`Copied ${ids.length} prompt${ids.length === 1 ? '' : 's'} to canvas clipboard`)
     return true
   }, [selectedPromptIds])
 
@@ -1509,14 +1532,17 @@ function BindingGraphInner({
               {(blueprintSteps[boxMenu.blueprintId]?.length ?? 0) + ' steps · composed on canvas'}
             </div>
             {/* Duplicate the whole blueprint — passes all its step prompt ids to the
-                same endpoint, yielding a trigger-less full copy. */}
+                same endpoint, yielding a trigger-less full copy. Disabled for a
+                step-less blueprint (shouldn't exist, but reachable on stale data),
+                where there'd be nothing to copy and the gesture would silently no-op. */}
             <button
               onClick={() => {
                 const ids = blueprintSteps[boxMenu.blueprintId] ?? []
                 setBoxMenu(null)
                 void duplicatePromptIds(ids)
               }}
-              className="w-full flex items-center gap-1.5 text-left text-[12px] text-text-secondary hover:text-text-primary hover:bg-black/[0.04] font-medium px-2.5 py-1.5 rounded-lg border border-border-subtle transition-colors mb-1.5"
+              disabled={(blueprintSteps[boxMenu.blueprintId]?.length ?? 0) === 0}
+              className="w-full flex items-center gap-1.5 text-left text-[12px] text-text-secondary hover:text-text-primary hover:bg-black/[0.04] disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-text-secondary disabled:cursor-not-allowed font-medium px-2.5 py-1.5 rounded-lg border border-border-subtle transition-colors mb-1.5"
             >
               <Copy size={12} className="shrink-0" />
               Duplicate blueprint
