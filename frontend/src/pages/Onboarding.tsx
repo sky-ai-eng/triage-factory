@@ -39,16 +39,39 @@ export default function Onboarding() {
     }
   }, [auth.status, auth.orgs, navigate])
 
-  // Hold a loading state until auth resolves. This page lives outside
-  // MultiAuthGate, so without the guard the create-enabled UI would flash
-  // before me (and org_creation_enabled) are known, and the unauth case
-  // would render for a frame before the redirect effect above fires.
-  if (auth.status !== 'authed' || !auth.me) {
+  // This page lives outside MultiAuthGate and manages its own auth
+  // observations, so it handles loading/error/unauth itself rather than
+  // flashing the create-enabled UI before me (and org_creation_enabled)
+  // are known.
+  if (auth.status === 'loading') {
     return (
       <div className="min-h-screen bg-surface flex items-center justify-center">
         <p className="text-text-tertiary text-sm">Loading...</p>
       </div>
     )
+  }
+  if (auth.status === 'error') {
+    // Unlike 'unauth' (which the effect above redirects to /login), an
+    // error has no redirect — surface it with a retry instead of an
+    // indefinite spinner.
+    return (
+      <div className="min-h-screen bg-surface flex items-center justify-center">
+        <div className="text-center space-y-3">
+          <p className="text-text-secondary text-sm">{auth.error ?? 'Failed to load session'}</p>
+          <button
+            type="button"
+            onClick={() => void auth.refresh()}
+            className="text-accent text-sm underline"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    )
+  }
+  // unauth: the redirect effect above fires within a frame.
+  if (auth.status !== 'authed' || !auth.me) {
+    return null
   }
 
   const accountLabel = auth.me.display_name || auth.me.email || 'this account'
