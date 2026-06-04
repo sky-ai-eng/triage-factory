@@ -125,6 +125,47 @@ func TestSetupStart_ProvisionsAndSeeds(t *testing.T) {
 	}
 }
 
+// TestSetupStart_PartialProvisionRecovery pins that setup/start completes a
+// crash-mid-provision state (CreateLocalTenant committed, binary died before
+// BootstrapNewOrg ran) without requiring a clean-slate reinstall. The endpoint
+// must not treat "org row exists, no agent" as "already_provisioned".
+func TestSetupStart_PartialProvisionRecovery(t *testing.T) {
+	keyring.MockInit()
+	s, database := newTenantlessServer(t)
+
+	// Simulate crash-mid-provision: tenant rows committed, agent never created.
+	stores := sqlitestore.New(database)
+	if err := stores.Orgs.CreateLocalTenant(t.Context()); err != nil {
+		t.Fatalf("CreateLocalTenant (partial): %v", err)
+	}
+	if n := countTable(t, database, "agents"); n != 0 {
+		t.Fatalf("partial state has %d agent rows; want 0", n)
+	}
+
+	// Endpoint must complete the provision, not return already_provisioned.
+	rec := doJSON(t, s, http.MethodPost, "/api/setup/start", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("setup/start after partial: got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp["provisioned"] != true {
+		t.Errorf("provisioned=%v; want true", resp["provisioned"])
+	}
+	if resp["already_provisioned"] != false {
+		t.Errorf("already_provisioned=%v; want false (completed a partial, not a no-op)", resp["already_provisioned"])
+	}
+
+	// Full provision now complete.
+	for _, table := range []string{"agents", "team_agents"} {
+		if n := countTable(t, database, table); n != 1 {
+			t.Errorf("%s=%d after partial provision recovery; want 1", table, n)
+		}
+	}
+}
+
 // TestSetupStart_NonResurrection is the durability guarantee the whole
 // ticket exists for: provision, delete a shipped (system) handler, then
 // re-call setup/start. Because the endpoint no-ops once a tenant exists,

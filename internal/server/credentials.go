@@ -293,16 +293,16 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 // path multi-mode fires on org-create, with auth skipped and identity
 // auto-filled to the runmode.LocalDefault* sentinels.
 //
-// No-op once a tenant already exists. This is the load-bearing
-// non-resurrection guarantee: the materializer is INSERT-OR-IGNORE keyed
-// on (org, team, system_slug), so re-running it would re-create a
-// shipped default the user has since deleted. Gating the whole action on
-// "no tenant yet" means a deleted shipped default stays deleted across
-// restarts and double-clicks — "tenant exists ⇒ already provisioned &
-// seeded." (Crash-mid-provision recovery is BootstrapLocalOrg's own
-// re-entrancy concern, exercised by re-invoking the function directly;
-// the user-facing endpoint deliberately doesn't re-seed an existing
-// tenant.)
+// Non-resurrection guarantee: no-ops once the tenant is *fully*
+// provisioned. "Fully provisioned" means the org row exists AND the
+// agents row exists (the first step of BootstrapNewOrg). If the org
+// row exists but the agents row doesn't, the binary crashed mid-provision
+// after CreateLocalTenant committed but before BootstrapNewOrg ran.
+// In that partial state the user hasn't performed any actions yet (the
+// onboarding screen never completed), so re-running BootstrapLocalOrg is
+// safe — there are no user-deleted shipped defaults to resurrect. Once
+// the agent row exists, it signals "the user may have made changes" and
+// the endpoint stops re-seeding to preserve those changes.
 //
 // Local-mode only — multi-mode provisions per signup through
 // auth_provision.go and has no synthetic tenant to create.
@@ -314,8 +314,6 @@ func (s *Server) handleSetupStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// No-op when already provisioned — never re-run the seeders against an
-	// existing tenant (that would resurrect user-deleted shipped defaults).
 	org, err := s.orgs.GetOrgSystem(r.Context(), runmode.LocalDefaultOrgID)
 	if err != nil {
 		log.Printf("[setup] setup/start tenant probe: %v", err)
@@ -324,23 +322,50 @@ func (s *Server) handleSetupStart(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if org == nil {
-		if err := db.BootstrapLocalOrg(r.Context(), s.allStores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
-			log.Printf("[setup] BootstrapLocalOrg failed: %v", err)
+
+	// Non-resurrection guard: once the agents row exists, BootstrapNewOrg
+	// completed at least through its first step, meaning the user may have
+	// made changes to shipped defaults. Stop here rather than re-seeding.
+	//
+	// If the org row exists but no agents row, this is a crash-mid-provision
+	// state — fall through to re-run BootstrapLocalOrg.
+	if org != nil {
+		agent, err := s.allStores.Agents.GetForOrg(r.Context(), runmode.LocalDefaultOrg)
+		if err != nil {
+			log.Printf("[setup] setup/start agent probe: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{
 				"error": "failed to provision local workspace",
 			})
 			return
 		}
+		if agent != nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"provisioned":         true,
+				"already_provisioned": true,
+				"org_id":              runmode.LocalDefaultOrgID,
+				"team_id":             runmode.LocalDefaultTeamID,
+			})
+			return
+		}
+		// org exists, no agent: partial provision; fall through to complete it.
+	}
+
+	if err := db.BootstrapLocalOrg(r.Context(), s.allStores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+		log.Printf("[setup] BootstrapLocalOrg failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to provision local workspace",
+		})
+		return
 	}
 
 	// Return the provisioned tenant. The IDs are the stable sentinels, but
 	// echoing them keeps the response shape parallel to multi-mode's
 	// org-create response and gives the onboarding UI something to confirm
-	// against. already_provisioned distinguishes the no-op re-call.
+	// against. already_provisioned=false signals "we just provisioned it
+	// (fresh install or partial-provision recovery)".
 	writeJSON(w, http.StatusOK, map[string]any{
 		"provisioned":         true,
-		"already_provisioned": org != nil,
+		"already_provisioned": false,
 		"org_id":              runmode.LocalDefaultOrgID,
 		"team_id":             runmode.LocalDefaultTeamID,
 	})

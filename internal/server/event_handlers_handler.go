@@ -27,8 +27,7 @@ import (
 //                                                       trigger-style "send
 //                                                       the full mutable set"
 //                                                       calls — same handler)
-//   DELETE /api/event-handlers/{id}                   — hard delete; system
-//                                                       rows soft-disable
+//   DELETE /api/event-handlers/{id}                   — hard delete (system rows included)
 //   POST   /api/event-handlers/{id}/toggle            — flip enabled bit
 //   POST   /api/event-handlers/{id}/promote           — rule → trigger
 //   PUT    /api/event-handlers/reorder                — rules-only sort_order

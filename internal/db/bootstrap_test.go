@@ -69,7 +69,7 @@ func TestBootstrapLocalOrg_FreshInstall(t *testing.T) {
 	if agent.DisplayName != "Triage Factory Bot" {
 		t.Errorf("DisplayName=%q want Triage Factory Bot", agent.DisplayName)
 	}
-	ta, err := stores.TeamAgents.GetForTeam(ctx, runmode.LocalDefaultOrg, db.LocalDefaultTeamID, agent.ID)
+	ta, err := stores.TeamAgents.GetForTeam(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, agent.ID)
 	if err != nil {
 		t.Fatalf("GetForTeam: %v", err)
 	}
@@ -164,14 +164,14 @@ func TestBootstrapLocalOrg_PreservesUserDisable(t *testing.T) {
 		t.Fatal("no agent after provision")
 	}
 	// User disables the bot.
-	if err := stores.TeamAgents.SetEnabled(ctx, runmode.LocalDefaultOrg, db.LocalDefaultTeamID, agent.ID, false); err != nil {
+	if err := stores.TeamAgents.SetEnabled(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, agent.ID, false); err != nil {
 		t.Fatalf("SetEnabled false: %v", err)
 	}
 	// Re-provision.
 	if err := db.BootstrapLocalOrg(ctx, stores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
 		t.Fatalf("second provision: %v", err)
 	}
-	ta, _ := stores.TeamAgents.GetForTeam(ctx, runmode.LocalDefaultOrg, db.LocalDefaultTeamID, agent.ID)
+	ta, _ := stores.TeamAgents.GetForTeam(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, agent.ID)
 	if ta == nil {
 		t.Fatal("team_agents row vanished")
 	}
@@ -214,7 +214,7 @@ func TestBootstrapNewTeam_SeedsPerTeamDefaults(t *testing.T) {
 	// Org-create seeds the agent + the org template + the founder's (sentinel)
 	// team. The 2nd team then copies the same template.
 	if err := db.BootstrapNewOrg(ctx, stores,
-		runmode.LocalDefaultOrg, db.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints(),
+		runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints(),
 	); err != nil {
 		t.Fatalf("BootstrapNewOrg: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestBootstrapNewOrg_SeedsFullStack(t *testing.T) {
 	ctx := t.Context()
 
 	if err := db.BootstrapNewOrg(ctx, stores,
-		runmode.LocalDefaultOrg, db.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints(),
+		runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints(),
 	); err != nil {
 		t.Fatalf("BootstrapNewOrg: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestBootstrapNewOrg_SeedsFullStack(t *testing.T) {
 	if err != nil || agent == nil {
 		t.Fatalf("GetForOrg: agent=%v err=%v", agent, err)
 	}
-	ta, err := stores.TeamAgents.GetForTeam(ctx, runmode.LocalDefaultOrg, db.LocalDefaultTeamID, agent.ID)
+	ta, err := stores.TeamAgents.GetForTeam(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, agent.ID)
 	if err != nil {
 		t.Fatalf("GetForTeam: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestBootstrapNewOrg_SeedsFullStack(t *testing.T) {
 
 	// Prompts seeded. The id is a random UUID per team copy now (SKY-380),
 	// so resolve by system_slug rather than by id.
-	got, err := stores.Prompts.GetBySystemSlug(ctx, runmode.LocalDefaultOrg, db.LocalDefaultTeamID, "system-pr-review")
+	got, err := stores.Prompts.GetBySystemSlug(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, "system-pr-review")
 	if err != nil {
 		t.Fatalf("Get prompt: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestOrgTemplate_ForwardOnly(t *testing.T) {
 
 	// Org-create: agent + template + founder's (sentinel) team materialized
 	// from the template-as-shipped.
-	if err := db.BootstrapNewOrg(ctx, stores, org, db.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapNewOrg(ctx, stores, org, runmode.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
 		t.Fatalf("BootstrapNewOrg: %v", err)
 	}
 
@@ -399,10 +399,10 @@ func TestOrgTemplate_ForwardOnly(t *testing.T) {
 	}
 
 	// The EXISTING team is untouched (forward-only).
-	if got := count(db.LocalDefaultTeamID, customSlug); got != 0 {
+	if got := count(runmode.LocalDefaultTeamID, customSlug); got != 0 {
 		t.Errorf("existing team gained %d copies of a prompt added to the template after it was created; want 0 (forward-only)", got)
 	}
-	if triggerEnabled(db.LocalDefaultTeamID, enabledSlug) {
+	if triggerEnabled(runmode.LocalDefaultTeamID, enabledSlug) {
 		t.Errorf("existing team's trigger became enabled after a template edit; want still-disabled (forward-only)")
 	}
 }
