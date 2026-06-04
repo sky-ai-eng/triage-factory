@@ -168,118 +168,86 @@ func ModeFromEnv(s string) (Mode, error) {
 	}
 }
 
-// JoinPolicy names the rule the multi-mode signup callback applies
-// when a new user lands with zero org memberships. Set once at
-// startup from TF_DEFAULT_JOIN_POLICY via InitJoinPolicyFromEnv,
-// never reassigned outside tests. SKY-345.
+// Org-creation policy. A single boolean knob — TF_PREVENT_ORG_CREATION
+// — that governs whether a self-service user who lands authenticated
+// with zero org memberships may create their own org.
 //
-// Local mode ignores the env var entirely — local installs use the
-// pre-seeded LocalDefaultOrg sentinel and never run the multi-mode
-// signup callback.
-type JoinPolicy string
-
-const (
-	// JoinPolicyPersonalOrgOnSignup creates a personal org + default
-	// team + admin membership on first signup. Default when
-	// TF_DEFAULT_JOIN_POLICY is unset; the right behavior for hosted
-	// SaaS and unconfigured self-hosts.
-	JoinPolicyPersonalOrgOnSignup JoinPolicy = "personal-org-on-signup"
-
-	// JoinPolicyAutoJoinDefault adds the new user to the instance's
-	// existing "Default" org (id = LocalDefaultOrgID) as a member,
-	// on its default team. For small self-hosts where everyone shares
-	// one org. If the Default org doesn't exist yet, the first signup
-	// creates it and joins as admin; subsequent signups join as
-	// members.
-	JoinPolicyAutoJoinDefault JoinPolicy = "auto-join-default"
-
-	// JoinPolicyInviteOnly does nothing on signup — the user lands at
-	// /no-orgs and stays there until an admin adds them to an org.
-	// For strict enterprise self-hosts gated on admin action.
-	JoinPolicyInviteOnly JoinPolicy = "invite-only"
-)
-
-// currentJoinPolicy + joinPolicyInitialized + joinPolicyMu mirror the
-// mode-state machinery above. Reads through JoinPolicyCurrent() take
-// an RLock; SetJoinPolicyForTest snapshots both fields and restores
-// via t.Cleanup. Default is JoinPolicyPersonalOrgOnSignup so an
-// unconfigured install does the right thing.
+// This replaces the earlier three-way join-policy enum
+// (TF_DEFAULT_JOIN_POLICY). The product has exactly one onboarding
+// entry for every zero-membership user — the "create your org / wait
+// for an invite" landing — and signup never provisions a tenant
+// silently. Org creation is always a deliberate user action (the
+// onboarding "Start your Factory" CTA → the create-org flow). This
+// flag only toggles whether that page's create affordance is enabled:
+// the default (creation allowed) is right for hosted SaaS and
+// unconfigured self-hosts, while a locked-down self-host sets
+// TF_PREVENT_ORG_CREATION=true to gate access on an admin invite,
+// leaving only the "wait for an invite" path.
+//
+// Local mode ignores the knob entirely: a local install is N=1 with a
+// pre-provisioned sentinel org and never renders the onboarding entry.
 var (
-	currentJoinPolicy     JoinPolicy = JoinPolicyPersonalOrgOnSignup
-	joinPolicyInitialized bool
-	joinPolicyMu          sync.RWMutex
+	// orgCreationPrevented is the parsed TF_PREVENT_ORG_CREATION value.
+	// false (the default) means self-service org creation is allowed.
+	orgCreationPrevented   bool
+	orgCreationInitialized bool
+	orgCreationMu          sync.RWMutex
 )
 
-// JoinPolicyCurrent returns the active join policy. Safe from any
-// goroutine. Always returns a valid value — the default is
-// JoinPolicyPersonalOrgOnSignup even before InitJoinPolicyFromEnv
-// runs, so callers that check it during boot (or in local-mode tests
-// that never init it) get a sensible answer.
-func JoinPolicyCurrent() JoinPolicy {
-	joinPolicyMu.RLock()
-	defer joinPolicyMu.RUnlock()
-	return currentJoinPolicy
+// OrgCreationEnabled reports whether self-service users may create
+// their own org. Safe from any goroutine. Defaults to true even before
+// InitOrgCreationFromEnv runs, so callers during boot (and local-mode
+// tests that never init it) get the permissive default.
+func OrgCreationEnabled() bool {
+	orgCreationMu.RLock()
+	defer orgCreationMu.RUnlock()
+	return !orgCreationPrevented
 }
 
-// InitJoinPolicy sets the process-wide join policy. Same idempotency
-// contract as Init: first call with a valid policy sets state and
-// returns nil; subsequent call with the same value is a no-op;
-// subsequent call with a different value returns an error without
-// mutating state.
-func InitJoinPolicy(p JoinPolicy) error {
-	if p != JoinPolicyPersonalOrgOnSignup &&
-		p != JoinPolicyAutoJoinDefault &&
-		p != JoinPolicyInviteOnly {
-		return fmt.Errorf("unknown join policy %q (want %q, %q, or %q)",
-			p, JoinPolicyPersonalOrgOnSignup, JoinPolicyAutoJoinDefault, JoinPolicyInviteOnly)
-	}
-	joinPolicyMu.Lock()
-	defer joinPolicyMu.Unlock()
-	if joinPolicyInitialized {
-		if currentJoinPolicy == p {
+// InitOrgCreationPrevented sets the process-wide org-creation toggle.
+// Same idempotency contract as Init: first call sets state and returns
+// nil; a subsequent call with the same value is a no-op; a subsequent
+// call with a different value returns an error without mutating state.
+func InitOrgCreationPrevented(prevented bool) error {
+	orgCreationMu.Lock()
+	defer orgCreationMu.Unlock()
+	if orgCreationInitialized {
+		if orgCreationPrevented == prevented {
 			return nil
 		}
-		return fmt.Errorf("join policy already initialized as %q; cannot re-init as %q", currentJoinPolicy, p)
+		return fmt.Errorf("org-creation policy already initialized as prevented=%t; cannot re-init as prevented=%t", orgCreationPrevented, prevented)
 	}
-	currentJoinPolicy = p
-	joinPolicyInitialized = true
+	orgCreationPrevented = prevented
+	orgCreationInitialized = true
 	return nil
 }
 
-// InitJoinPolicyFromEnv reads TF_DEFAULT_JOIN_POLICY from the
-// environment and initializes the join policy accordingly. Empty /
-// unset → JoinPolicyPersonalOrgOnSignup (the safe default).
+// InitOrgCreationFromEnv reads TF_PREVENT_ORG_CREATION from the
+// environment and initializes the toggle. Empty / unset → creation
+// allowed (the safe default for hosted SaaS + unconfigured self-hosts).
 //
-// Only meaningful in multi mode — local mode bootstrap is fully
-// determined by the existing sentinel-org seed and never consults
-// this knob. main.go gates the call accordingly.
-func InitJoinPolicyFromEnv() error {
-	p, err := JoinPolicyFromEnv(os.Getenv("TF_DEFAULT_JOIN_POLICY"))
+// Only meaningful in multi mode — local mode never consults it. main.go
+// gates the call accordingly.
+func InitOrgCreationFromEnv() error {
+	prevented, err := ParsePreventOrgCreation(os.Getenv("TF_PREVENT_ORG_CREATION"))
 	if err != nil {
 		return err
 	}
-	return InitJoinPolicy(p)
+	return InitOrgCreationPrevented(prevented)
 }
 
-// JoinPolicyFromEnv parses a TF_DEFAULT_JOIN_POLICY env-var string
-// into a JoinPolicy. Empty maps to the default
-// (JoinPolicyPersonalOrgOnSignup); known values map to their
-// constants; anything else errors. The match is exact, not
-// case-insensitive — the values are dashed kebab strings written by
-// operators into .env files, and silently accepting "Personal-Org-On-Signup"
-// would hide drift between docs and code.
-func JoinPolicyFromEnv(s string) (JoinPolicy, error) {
-	switch s {
-	case "":
-		return JoinPolicyPersonalOrgOnSignup, nil
-	case string(JoinPolicyPersonalOrgOnSignup):
-		return JoinPolicyPersonalOrgOnSignup, nil
-	case string(JoinPolicyAutoJoinDefault):
-		return JoinPolicyAutoJoinDefault, nil
-	case string(JoinPolicyInviteOnly):
-		return JoinPolicyInviteOnly, nil
+// ParsePreventOrgCreation parses a TF_PREVENT_ORG_CREATION env-var
+// string into a bool. Empty maps to false (creation allowed). Accepts
+// the usual boolean spellings (case-insensitive, whitespace-trimmed);
+// anything else errors so a typo in .env surfaces loudly at boot rather
+// than silently degrading to the wrong default.
+func ParsePreventOrgCreation(s string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "0", "false", "f", "no", "n", "off":
+		return false, nil
+	case "1", "true", "t", "yes", "y", "on":
+		return true, nil
 	default:
-		return "", fmt.Errorf("unknown TF_DEFAULT_JOIN_POLICY=%q (want %q, %q, or %q)",
-			s, JoinPolicyPersonalOrgOnSignup, JoinPolicyAutoJoinDefault, JoinPolicyInviteOnly)
+		return false, fmt.Errorf("unknown TF_PREVENT_ORG_CREATION=%q (want a boolean, e.g. true or false)", s)
 	}
 }

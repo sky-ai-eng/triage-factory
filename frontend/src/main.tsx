@@ -25,7 +25,7 @@ import Factory from './pages/Factory'
 import Projects from './pages/Projects'
 import ProjectDetail from './pages/ProjectDetail'
 import Login from './pages/Login'
-import NoOrgs from './pages/NoOrgs'
+import Onboarding from './pages/Onboarding'
 import ConnectGitHub from './pages/ConnectGitHub'
 import Shell from './Shell'
 import AuthGate, { RequireGitHubIdentity } from './AuthGate'
@@ -38,7 +38,7 @@ import { OrgProvider, useActiveOrgId } from './contexts/OrgContext'
  * Top-level router branches on deployment_mode (read once from
  * /api/config). Local mode keeps the existing flat route table.
  * Multi mode mounts an org-prefixed shell route plus /login,
- * /no-orgs, and a RootRedirect for bare / and unknown paths.
+ * /onboarding, and a RootRedirect for bare / and unknown paths.
  *
  * AuthProvider + OrgProvider only wrap the multi-mode tree —
  * AuthContext is undefined in local mode, which is what
@@ -103,7 +103,10 @@ function MultiRoutes() {
       <OrgProvider>
         <Routes>
           <Route path="/login" element={<Login />} />
-          <Route path="/no-orgs" element={<NoOrgs />} />
+          {/* Unified zero-membership onboarding entry (create-or-invite).
+              /no-orgs is kept as a redirect for any stale links. */}
+          <Route path="/onboarding" element={<Onboarding />} />
+          <Route path="/no-orgs" element={<Navigate to="/onboarding" replace />} />
           {/* Local-mode keychain wizard isn't reachable in multi
               mode — integration creds live in per-org Vault (D5)
               and are configured via the admin UI (D14). */}

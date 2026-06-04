@@ -366,10 +366,12 @@ export interface MeResponse {
    *  when the session has no active org (zero memberships, or the
    *  previously-selected org membership was revoked). */
   active_org_id?: string
-  /** Instance-level TF_DEFAULT_JOIN_POLICY (SKY-345). Drives the
-   *  /no-orgs rare-state copy when the user has zero memberships.
-   *  Absent in local mode, where signup-policy doesn't apply. */
-  join_policy?: 'personal-org-on-signup' | 'auto-join-default' | 'invite-only'
+  /** Whether self-service users may create their own org (the inverse
+   *  of the instance's TF_PREVENT_ORG_CREATION). Drives the onboarding
+   *  entry: when false, the "create your org" affordance is disabled and
+   *  the page shows the invite-only "ask your admin" state. Always true
+   *  in local mode (N=1, never renders onboarding). */
+  org_creation_enabled?: boolean
 }
 
 /** GET /api/orgs/{org}/identity/github — the onboarding gate's status read.

@@ -15,7 +15,7 @@ import { useGitHubIdentity } from './hooks/useGitHubIdentity'
  *   loading → spinner
  *   error   → error panel with retry button
  *   unauth  → redirect to /login?return_to=<current>
- *   authed + 0 orgs   → redirect to /no-orgs
+ *   authed + 0 orgs   → redirect to /onboarding (create-or-invite entry)
  *   authed + N orgs, URL has unknown org_id → redirect to /orgs/<active> (preserve tail)
  *   authed + N orgs, URL not under /orgs/:id → redirect to /orgs/<active>
  *   authed + N orgs, URL under /orgs/:id → render children
@@ -69,8 +69,14 @@ function MultiAuthGate({ children }: { children: React.ReactNode }) {
     const params = target !== '/' ? '?return_to=' + encodeURIComponent(target) : ''
     return <Navigate to={'/login' + params} replace />
   }
+  // Zero-membership users land on the unified onboarding entry — a
+  // single "create your org / wait for an invite" page. There's no
+  // policy branch here: the page itself enables or disables the create
+  // affordance based on me.org_creation_enabled (TF_PREVENT_ORG_CREATION).
+  // Signup provisions nothing, so this is the steady-state first-run
+  // landing, not a rare error state.
   if (auth.orgs.length === 0) {
-    return <Navigate to="/no-orgs" replace />
+    return <Navigate to="/onboarding" replace />
   }
   // URL has an org_id the user is not a member of — swap it for the
   // active org while preserving the rest of the path.

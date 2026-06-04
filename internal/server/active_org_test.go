@@ -63,10 +63,8 @@ func TestActiveOrg_OAuthCallback_DefaultsToEarliestMembership(t *testing.T) {
 // to one.
 func TestActiveOrg_OAuthCallback_NoMembershipsStoresNull(t *testing.T) {
 	r := newAuthRig(t)
-	// SKY-345: pin invite-only so the callback's auto-provisioning
-	// stays a no-op — the test scenario IS a user landing with zero
-	// memberships, which only happens under invite-only after SKY-345.
-	runmode.SetJoinPolicyForTest(t, runmode.JoinPolicyInviteOnly)
+	// Signup provisions nothing, so a fresh user with no seedOrg always
+	// lands with zero memberships — no join-policy pinning needed.
 	userID := r.seedUser()
 	// Deliberately no seedOrg.
 
@@ -125,9 +123,8 @@ func TestActiveOrg_Middleware_PopulatesOrgIDFromSession(t *testing.T) {
 // an org are expected to 409; that policy is a D9-core concern.
 func TestActiveOrg_Middleware_NullActiveOrgLeavesCtxKeyEmpty(t *testing.T) {
 	r := newAuthRig(t)
-	// SKY-345: invite-only keeps the callback from auto-provisioning,
-	// preserving the zero-membership scenario this test exercises.
-	runmode.SetJoinPolicyForTest(t, runmode.JoinPolicyInviteOnly)
+	// Signup provisions nothing, so a fresh user with no seedOrg lands
+	// with active_org_id NULL — the zero-membership scenario this exercises.
 	userID := r.seedUser()
 	// No seedOrg — session will land with active_org_id NULL.
 

@@ -589,13 +589,12 @@ func main() {
 			log.Fatalf("%v", err)
 		}
 
-		// SKY-345: read the signup join policy. Unset → personal-org-on-signup
-		// (right default for hosted SaaS + unconfigured self-hosts). Any
-		// unknown value fatals here so a typo in .env (`personal_org_signup`
-		// instead of `personal-org-on-signup`) surfaces loudly at boot
-		// instead of silently degrading to a wrong-default behavior on
-		// every fresh signup.
-		if err := runmode.InitJoinPolicyFromEnv(); err != nil {
+		// Read the org-creation toggle. Unset → creation allowed (right
+		// default for hosted SaaS + unconfigured self-hosts); a locked-down
+		// self-host sets TF_PREVENT_ORG_CREATION=true to gate access on an
+		// admin invite. A non-boolean value fatals here so a typo in .env
+		// surfaces loudly at boot instead of silently degrading.
+		if err := runmode.InitOrgCreationFromEnv(); err != nil {
 			log.Fatalf("%v", err)
 		}
 

@@ -51,26 +51,22 @@ func SetForTest(t TestT, m Mode) {
 	})
 }
 
-// SetJoinPolicyForTest swaps the process join policy for the duration
-// of t and restores the previous (currentJoinPolicy, joinPolicyInitialized)
-// pair via t.Cleanup. Same caveats as SetForTest — data-race-free but
-// not safe for overlapping parallel tests that mutate the same global.
-func SetJoinPolicyForTest(t TestT, p JoinPolicy) {
+// SetOrgCreationEnabledForTest swaps the process org-creation toggle
+// for the duration of t and restores the previous (orgCreationPrevented,
+// orgCreationInitialized) pair via t.Cleanup. Same caveats as SetForTest
+// — data-race-free but not safe for overlapping parallel tests that
+// mutate the same global.
+func SetOrgCreationEnabledForTest(t TestT, enabled bool) {
 	t.Helper()
-	if p != JoinPolicyPersonalOrgOnSignup &&
-		p != JoinPolicyAutoJoinDefault &&
-		p != JoinPolicyInviteOnly {
-		t.Fatalf("runmode.SetJoinPolicyForTest: unknown join policy %q", p)
-	}
-	joinPolicyMu.Lock()
-	prev, prevInit := currentJoinPolicy, joinPolicyInitialized
-	currentJoinPolicy = p
-	joinPolicyInitialized = true
-	joinPolicyMu.Unlock()
+	orgCreationMu.Lock()
+	prev, prevInit := orgCreationPrevented, orgCreationInitialized
+	orgCreationPrevented = !enabled
+	orgCreationInitialized = true
+	orgCreationMu.Unlock()
 	t.Cleanup(func() {
-		joinPolicyMu.Lock()
-		currentJoinPolicy = prev
-		joinPolicyInitialized = prevInit
-		joinPolicyMu.Unlock()
+		orgCreationMu.Lock()
+		orgCreationPrevented = prev
+		orgCreationInitialized = prevInit
+		orgCreationMu.Unlock()
 	})
 }

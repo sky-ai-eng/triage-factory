@@ -22,7 +22,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	tfdb "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -276,42 +275,19 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// SKY-345: apply the configured join policy when the user has
-	// zero memberships. provisionUserOrgs is idempotent against retry
-	// (advisory lock + inside-tx zero-membership check), so a callback
-	// double-fire never produces duplicate personal orgs. Returns the
-	// active-org id the session should default to; uuid.NullUUID stays
-	// invalid when the policy is invite-only and no auto-join happened.
-	//
-	// Errors here fail the signup loudly — half-provisioned state would
-	// be worse than a single retry-able 500 (the next callback re-runs
-	// the dance cleanly).
-	provResult, err := s.provisionUserOrgs(r.Context(), userUUID, claims)
+	// Signup provisions nothing. Org creation is a deliberate user
+	// action (the onboarding "Start your Factory" CTA → the create-org
+	// flow), so the callback never mints a tenant. Resolve which org the
+	// session should default to — the user's earliest existing
+	// membership, or NULL for a first-time user, who lands at the
+	// zero-membership onboarding entry. Whether that screen's create
+	// affordance is enabled is governed separately by
+	// runmode.OrgCreationEnabled() (TF_PREVENT_ORG_CREATION).
+	defaultOrg, err := s.lookupEarliestMembership(r.Context(), s.db, userUUID)
 	if err != nil {
-		log.Printf("[auth] provision orgs for user %s: %v", userUUID, err)
+		log.Printf("[auth] resolve active org for user %s: %v", userUUID, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
-	}
-	defaultOrg := provResult.activeOrgID
-
-	// Seed the shipped defaults (agent + prompts + blueprints + handlers +
-	// team_agents) for a freshly-created org. Runs AFTER provisionUserOrgs has
-	// committed its transaction: the seeders route through the admin pool and
-	// refuse to run inside a WithTx, so they can't join the provisioning tx.
-	// Idempotent + log-and-continue — a signed-in user with an un-seeded
-	// org is usable (auto-delegation just won't fire until a bootstrap
-	// re-run repairs it), whereas failing the callback here would strand a
-	// user who already has a committed org + membership. (SKY-378 — D7/D14
-	// org-create bootstrap follow-through.)
-	if provResult.bootstrapOrgID.Valid && provResult.bootstrapTeamID.Valid {
-		if berr := tfdb.BootstrapNewOrg(r.Context(), s.allStores,
-			provResult.bootstrapOrgID.UUID.String(),
-			provResult.bootstrapTeamID.UUID.String(),
-			ai.ShippedPrompts(), ai.ShippedBlueprints(),
-		); berr != nil {
-			log.Printf("[auth] org %s provisioned but bootstrap failed (shipped prompts/blueprints/rules/bot may be missing): %v",
-				provResult.bootstrapOrgID.UUID, berr)
-		}
 	}
 
 	// Trust the JWT's exp claim. The exchange response also carries
@@ -551,11 +527,12 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		JiraDisplayName string   `json:"jira_display_name,omitempty"`
 		Orgs            []orgRow `json:"orgs"`
 		ActiveOrgID     string   `json:"active_org_id,omitempty"`
-		// JoinPolicy surfaces the instance's TF_DEFAULT_JOIN_POLICY so
-		// the frontend's /no-orgs rare-state page can render the right
-		// copy (admin-gated vs catch-all) without a second round trip.
-		// SKY-345.
-		JoinPolicy string `json:"join_policy,omitempty"`
+		// OrgCreationEnabled surfaces the instance's TF_PREVENT_ORG_CREATION
+		// toggle (inverted) so the frontend onboarding entry can decide
+		// whether to enable the "create your org" affordance or show the
+		// invite-only "ask your admin" state, without a second round trip.
+		// Not omitempty — false is a meaningful value the gate must see.
+		OrgCreationEnabled bool `json:"org_creation_enabled"`
 	}
 
 	// Local-mode shim path: withSession injects a synthetic claim
@@ -584,9 +561,10 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 				Role: "owner",
 			}},
 			ActiveOrgID: runmode.LocalDefaultOrgID,
-			// Local mode never reads TF_DEFAULT_JOIN_POLICY; omit the
-			// field so the frontend doesn't reason about a policy that
-			// doesn't apply.
+			// Local mode is N=1 with a pre-provisioned org and never
+			// renders the onboarding entry, so the value is moot; report
+			// the permissive default for shape consistency.
+			OrgCreationEnabled: true,
 		}
 		// s.users is wired by New(). The middleware-shim unit test
 		// constructs a bare &Server{} to exercise the sentinel path
@@ -614,7 +592,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	var resp response
 	resp.Orgs = []orgRow{}
 	resp.Email = claims.Email
-	resp.JoinPolicy = string(runmode.JoinPolicyCurrent())
+	resp.OrgCreationEnabled = runmode.OrgCreationEnabled()
 	if sess := SessionFrom(r.Context()); sess != nil && sess.ActiveOrgID.Valid {
 		resp.ActiveOrgID = sess.ActiveOrgID.UUID.String()
 	}
