@@ -68,11 +68,11 @@ func TestBlueprintDuplicate_FullBlueprintAtomic(t *testing.T) {
 
 	// Originals untouched: source blueprint still has its 3 steps with the
 	// original prompt ids.
-srcSteps := doJSON(t, s, http.MethodGet, "/api/blueprints/"+src+"/steps", nil)
-var got composeSteps
-if err := json.Unmarshal(srcSteps.Body.Bytes(), &got); err != nil {
-	t.Fatalf("decode source steps: %v", err)
-}
+	srcSteps := doJSON(t, s, http.MethodGet, "/api/blueprints/"+src+"/steps", nil)
+	var got composeSteps
+	if err := json.Unmarshal(srcSteps.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode source steps: %v", err)
+	}
 	if len(got) != 3 || got[0]["step_prompt_id"] != p[0] || got[2]["step_prompt_id"] != p[2] {
 		t.Fatalf("source mutated by duplicate: %+v", got)
 	}
@@ -124,21 +124,21 @@ func TestBlueprintDuplicate_CopyIsTriggerlessSourceUntouched(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("duplicate triggered: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
-var out []blueprintWithStepsView
-if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-	t.Fatalf("decode: %v", err)
-}
+	var out []blueprintWithStepsView
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if len(out) != 1 {
 		t.Fatalf("duplicate produced %d blueprints, want 1", len(out))
 	}
 	copyID, _ := out[0].Blueprint["id"].(string)
 
 	// The source's trigger is intact; the copy has none.
-handlers := doJSON(t, s, http.MethodGet, "/api/event-handlers", nil)
-var hs []map[string]any
-if err := json.Unmarshal(handlers.Body.Bytes(), &hs); err != nil {
-	t.Fatalf("decode handlers: %v", err)
-}
+	handlers := doJSON(t, s, http.MethodGet, "/api/event-handlers", nil)
+	var hs []map[string]any
+	if err := json.Unmarshal(handlers.Body.Bytes(), &hs); err != nil {
+		t.Fatalf("decode handlers: %v", err)
+	}
 	var srcTriggered, copyTriggered bool
 	for _, h := range hs {
 		if h["kind"] != "trigger" {
