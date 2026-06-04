@@ -1205,7 +1205,10 @@ function BindingGraphInner({
           <div className="fixed inset-0 z-50" onClick={() => setEdgeMenu(null)} />
           <div
             className="fixed z-50 bg-surface-raised/95 backdrop-blur-xl border border-border-glass rounded-xl shadow-xl shadow-black/10 p-1.5 w-[200px]"
-            style={{ left: edgeMenu.x - 100, top: edgeMenu.y - 12 }}
+            style={{
+              left: Math.max(8, Math.min(edgeMenu.x - 100, window.innerWidth - 208)),
+              top: edgeMenu.y - 12,
+            }}
           >
             {edgeMenu.kind === 'trigger' ? (
               <>
@@ -1254,7 +1257,10 @@ function BindingGraphInner({
           <div className="fixed inset-0 z-50" onClick={() => setBoxMenu(null)} />
           <div
             className="fixed z-50 bg-surface-raised/95 backdrop-blur-xl border border-border-glass rounded-xl shadow-xl shadow-black/10 p-3 w-[260px]"
-            style={{ left: boxMenu.x - 240, top: boxMenu.y + 6 }}
+            style={{
+              left: Math.max(8, Math.min(boxMenu.x - 240, window.innerWidth - 268)),
+              top: boxMenu.y + 6,
+            }}
           >
             {/* Rename — the blueprint's name is its own, not the entry prompt's. */}
             <label className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-tertiary mb-1">

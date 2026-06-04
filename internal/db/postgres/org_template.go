@@ -672,10 +672,15 @@ func (s *orgTemplateStore) runInTx(ctx context.Context, fn func(*sql.Tx) error) 
 	}
 }
 
-// withTemplateTx runs fn in a transaction over the app pool. When s.app is
-// already a *sql.Tx (inside WithTx) it runs inline so the work shares the
-// caller's tx; given a *sql.DB it opens a short-lived tx for atomicity. Mirrors
-// the dispatch ReplaceBlueprintSteps does inline; merge/split need the same.
+// withTemplateTx runs fn in a transaction over the app pool. The dispatch turns
+// on what s.app concretely is. Inside a handler's s.tx.WithTx(...) closure the
+// WithTx machinery hands the closure a TxStores whose stores are bound to the
+// open *sql.Tx — so the orgTemplateStore reached via tx.OrgTemplate has s.app ==
+// that transaction, and running fn inline makes merge/split share the handler's
+// tx (atomic with its GetBlueprint reads and the post-write re-read). Called
+// directly with no enclosing WithTx (a conformance test), s.app is the *sql.DB
+// pool, so we open a short-lived tx for atomicity. Mirrors the dispatch
+// ReplaceBlueprintSteps does inline.
 func (s *orgTemplateStore) withTemplateTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	switch v := s.app.(type) {
 	case *sql.Tx:
