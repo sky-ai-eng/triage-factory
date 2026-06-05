@@ -3,16 +3,16 @@ import { useNavigate } from 'react-router-dom'
 import RepoPickerModal, { type GitHubRepo } from '../components/RepoPickerModal'
 import GitHubTeamSelector, { type GitHubTeamCandidate } from '../components/GitHubTeamSelector'
 import CarryOverList from '../components/CarryOverList'
-import JiraStatusRule, { type JiraStatusRuleValue } from '../components/JiraStatusRule'
 import GitHubAccessGroup from './settings/GitHubAccessGroup'
 import JiraAccessGroup from './settings/JiraAccessGroup'
+import JiraProjectRulesGroup from './settings/JiraProjectRulesGroup'
+import {
+  saveTeamJiraProjects,
+  teamProjectsBlocked,
+  type JiraProjectConfig,
+} from './settings/teamConfig'
 import { LOCAL_DEFAULT_ORG_ID } from '../lib/githubApp'
 import { useAuthStatus } from '../hooks/useAuthStatus'
-
-interface JiraStatus {
-  id: string
-  name: string
-}
 
 // Setup flow steps:
 //   github → repos → github-teams → integrations → jira-config → jira-carry-over
@@ -20,8 +20,12 @@ interface JiraStatus {
 // The org-level credential steps (github, integrations) render the SAME
 // shared field groups as the Settings page and the org-create configure
 // step — GitHubAccessGroup (local PAT path) and JiraAccessGroup — so there's
-// no bespoke re-implementation to drift. The team-level steps (repos,
-// github-teams, jira-config, jira-carry-over) are unchanged.
+// no bespoke re-implementation to drift. The team-level steps render shared
+// groups too: jira-config is JiraProjectRulesGroup (the same per-project rule
+// editor as the Settings team tab + TeamConfigure), and repos / github-teams
+// reuse RepoPickerModal / GitHubTeamSelector (which the team groups also
+// wrap). jira-carry-over is the shared CarryOverList. The wizard owns only
+// the step chrome + per-step persistence.
 //
 // github-teams (SKY-411) lands between repo selection and integrations: it
 // makes the GitHub-team → TF-team mapping exist *before* the first poll so a
@@ -49,25 +53,12 @@ export default function Setup() {
   const [cachedRepos, setCachedRepos] = useState<GitHubRepo[] | undefined>(undefined)
   const [selectedRepos, setSelectedRepos] = useState<string[]>([])
 
-  // Jira state
+  // Jira state. Credentials (url/pat) drive the integrations step's shared
+  // JiraAccessGroup; the per-project tracking rules are edited via the shared
+  // JiraProjectRulesGroup and persisted on the jira-config step's Continue.
   const [jiraConnected, setJiraConnected] = useState(false)
-  const [jiraForm, setJiraForm] = useState<{
-    url: string
-    pat: string
-    projects: string
-    pickup: JiraStatusRuleValue
-    in_progress: JiraStatusRuleValue
-    done: JiraStatusRuleValue
-  }>({
-    url: '',
-    pat: '',
-    projects: '',
-    pickup: { members: [] },
-    in_progress: { members: [] },
-    done: { members: [] },
-  })
-  const [jiraStatuses, setJiraStatuses] = useState<JiraStatus[]>([])
-  const [statusesLoading, setStatusesLoading] = useState(false)
+  const [jiraForm, setJiraForm] = useState<{ url: string; pat: string }>({ url: '', pat: '' })
+  const [jiraProjects, setJiraProjects] = useState<JiraProjectConfig[]>([])
   const [jiraConfigured, setJiraConfigured] = useState(false)
 
   const [error, setError] = useState('')
@@ -238,70 +229,21 @@ export default function Setup() {
     finishSetup()
   }
 
-  // --- Step 5: Jira config (projects + statuses) ---
-  const fetchStatuses = async () => {
-    const projects = jiraForm.projects
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
-    if (projects.length === 0) return
-    setStatusesLoading(true)
-    setError('')
-    try {
-      const params = projects.map((p) => `project=${encodeURIComponent(p)}`).join('&')
-      const res = await fetch(`/api/jira/statuses?${params}`)
-      if (res.ok) {
-        setJiraStatuses(await res.json())
-      } else {
-        const data = await res.json()
-        setError(data.error || 'Failed to fetch statuses')
-      }
-    } catch {
-      setError('Could not fetch Jira statuses')
-    } finally {
-      setStatusesLoading(false)
-    }
-  }
-
-  const canSaveJiraConfig =
-    jiraForm.projects
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean).length > 0 &&
-    jiraForm.pickup.members.length > 0 &&
-    jiraForm.in_progress.members.length > 0 &&
-    !!jiraForm.in_progress.canonical &&
-    jiraForm.done.members.length > 0 &&
-    !!jiraForm.done.canonical
+  // --- Step 5: Jira config (per-project tracking rules) ---
+  // The shared JiraProjectRulesGroup owns the project list, the status fetch,
+  // and the per-project rule pickers; the wizard only needs the validity gate
+  // and the persist-on-Continue. Save is allowed once there's at least one
+  // fully-configured project and no half-configured one (connected is always
+  // true on this step — it's only reached with Jira connected).
+  const canSaveJiraConfig = !teamProjectsBlocked(jiraProjects, true)
 
   const saveJiraConfig = async () => {
     setError('')
     setLoading(true)
     try {
-      // Setup configures all listed projects with the same rule triple —
-      // heterogeneous workflows are configured later in Settings (SKY-272).
-      // For the common single-project setup this still works fine: one
-      // project gets the rules the user just picked.
-      const projects = jiraForm.projects
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean)
-        .map((key) => ({
-          key,
-          pickup: jiraForm.pickup,
-          in_progress: jiraForm.in_progress,
-          done: jiraForm.done,
-        }))
-      const res = await fetch('/api/settings/team/default', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jira_projects: projects,
-        }),
-      })
+      const res = await saveTeamJiraProjects('default', jiraProjects)
       if (!res.ok) {
-        const data = await res.json()
-        setError(data.error || 'Failed to save Jira config')
+        setError(res.error)
         return
       }
       setStep('jira-carry-over')
@@ -319,9 +261,6 @@ export default function Setup() {
     setError('')
     setStep('integrations')
   }
-
-  const updateJira = (field: string) => (e: React.ChangeEvent<HTMLInputElement>) =>
-    setJiraForm((f) => ({ ...f, [field]: e.target.value }))
 
   if (authStatus.loading) {
     return (
@@ -447,10 +386,10 @@ export default function Setup() {
         </div>
       )}
 
-      {/* Step 5: Jira config (projects + statuses) */}
+      {/* Step 5: Jira config (per-project tracking rules, shared group) */}
       {step === 'jira-config' && (
-        <div className={cardClass}>
-          <div>
+        <div className="w-full max-w-lg space-y-4">
+          <div className="px-1">
             <h1 className="text-[22px] font-semibold text-text-primary tracking-tight">
               Configure Jira
             </h1>
@@ -459,67 +398,7 @@ export default function Setup() {
             </p>
           </div>
 
-          {/* Grayed-out instance field */}
-          <div className="space-y-3">
-            <div>
-              <span className="text-[11px] text-text-tertiary mb-1.5 block">Instance</span>
-              <input type="url" value={jiraForm.url} disabled className={inputDisabledClass} />
-            </div>
-
-            <div>
-              <span className="text-[11px] text-text-tertiary mb-1.5 block">
-                Projects (comma-separated)
-              </span>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  placeholder="PROJ, INFRA"
-                  value={jiraForm.projects}
-                  onChange={updateJira('projects')}
-                  className={inputClass + ' flex-1'}
-                />
-                <button
-                  type="button"
-                  onClick={fetchStatuses}
-                  disabled={statusesLoading || !jiraForm.projects.trim()}
-                  className="shrink-0 text-[11px] text-accent hover:text-accent/80 disabled:opacity-40 border border-accent/20 rounded-xl px-3 py-2 transition-colors"
-                >
-                  {statusesLoading ? 'Loading...' : 'Fetch Statuses'}
-                </button>
-              </div>
-            </div>
-
-            {jiraStatuses.length > 0 && (
-              <div className="space-y-4">
-                <JiraStatusRule
-                  label="Pickup"
-                  description="Poll for unassigned tickets in these states."
-                  allStatuses={jiraStatuses}
-                  value={jiraForm.pickup}
-                  onChange={(v) => setJiraForm((f) => ({ ...f, pickup: v }))}
-                  requireCanonical={false}
-                />
-                <JiraStatusRule
-                  label="In progress"
-                  description="Count as actively being worked on."
-                  allStatuses={jiraStatuses}
-                  value={jiraForm.in_progress}
-                  onChange={(v) => setJiraForm((f) => ({ ...f, in_progress: v }))}
-                  requireCanonical={true}
-                  canonicalPrompt="Claim →"
-                />
-                <JiraStatusRule
-                  label="Done"
-                  description="Count as complete (add every variant — e.g. Resolved + Verified)."
-                  allStatuses={jiraStatuses}
-                  value={jiraForm.done}
-                  onChange={(v) => setJiraForm((f) => ({ ...f, done: v }))}
-                  requireCanonical={true}
-                  canonicalPrompt="Complete →"
-                />
-              </div>
-            )}
-          </div>
+          <JiraProjectRulesGroup value={jiraProjects} onChange={setJiraProjects} connected />
 
           <ErrorBanner error={error} />
 
@@ -558,15 +437,6 @@ export default function Setup() {
 }
 
 // --- Shared styles ---
-
-const cardClass =
-  'w-full max-w-lg backdrop-blur-xl bg-surface-raised border border-border-glass rounded-2xl p-8 space-y-6 shadow-lg shadow-black/[0.04]'
-
-const inputClass =
-  'w-full bg-white/50 border border-border-subtle rounded-xl px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/40 transition-colors'
-
-const inputDisabledClass =
-  'w-full bg-black/[0.03] border border-border-subtle rounded-xl px-4 py-2.5 text-[13px] text-text-tertiary cursor-not-allowed'
 
 const primaryBtnClass =
   'flex-1 bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors'

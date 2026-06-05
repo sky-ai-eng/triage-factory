@@ -1,7 +1,5 @@
-import { useState, useEffect } from 'react'
-import { ChevronDown, ChevronRight, Lock, Trash2 } from 'lucide-react'
-import GitHubGroupsEditor from '../components/GitHubGroupsEditor'
-import JiraStatusRule, { type JiraStatusRuleValue } from '../components/JiraStatusRule'
+import { useState, useEffect, useRef } from 'react'
+import { Lock } from 'lucide-react'
 import SettingsTabs, { type SettingsTab } from '../components/SettingsTabs'
 import { toast } from '../components/Toast/toastStore'
 import { readError } from '../lib/api'
@@ -11,80 +9,74 @@ import { useOptionalAuth } from '../contexts/AuthContext'
 import { useActiveOrgId } from '../contexts/OrgContext'
 import { computeAccess } from './settings/access'
 import TeamManagementSection from '../components/TeamManagementSection'
-import { Section, Field, inputClass } from './settings/primitives'
+import { Section, Field } from './settings/primitives'
 import GitHubAccessGroup from './settings/GitHubAccessGroup'
 import JiraAccessGroup from './settings/JiraAccessGroup'
 import PollerTimingGroup from './settings/PollerTimingGroup'
 import ModelGroup from './settings/ModelGroup'
+import ReposGroup from './settings/ReposGroup'
+import GitHubTeamGroup from './settings/GitHubTeamGroup'
+import JiraProjectRulesGroup from './settings/JiraProjectRulesGroup'
+import TeamSettingsGroup from './settings/TeamSettingsGroup'
 import { saveOrgConfig, type OrgSettingsData } from './settings/orgConfig'
+import {
+  fetchTeamRepos,
+  fetchTeamSettings,
+  saveTeamGitHubGroups,
+  saveTeamRepos,
+  saveTeamSettings,
+  teamProjectsBlocked,
+  type GitHubGroup,
+  type JiraProjectConfig,
+  type TeamConfigForm,
+  type TeamSettingsData,
+} from './settings/teamConfig'
 
-interface JiraStatus {
-  id: string
-  name: string
-}
-
-// JiraProjectConfig mirrors the backend wire shape for a single
-// project's rules. SKY-272 collapsed three global rule fields into
-// this per-project array so teams with heterogeneous workflows can
-// configure each project independently.
-interface JiraProjectConfig {
-  key: string
-  pickup: JiraStatusRuleValue
-  in_progress: JiraStatusRuleValue
-  done: JiraStatusRuleValue
-}
-
-interface TeamSettingsData {
-  team_settings: {
-    JiraProjects: string[]
-    AIReprioritizeThreshold: number
-    AIPreferenceUpdateInterval: number
-    DefaultModel: string
-    AutoDelegateEnabled: boolean
-  }
-  jira_projects: JiraProjectConfig[]
-  member_count: number
-  role: string
-}
-
+// SettingsData holds the org-scope baseline (GitHub/Jira access + the model
+// cap) plus the Jira connection state. Team-scope baselines live in
+// teamBaseline so the two permission domains' change-detection stay
+// independent.
 interface SettingsData {
   github: {
-    enabled: boolean
     base_url: string
     has_token: boolean
     poll_interval: string
     clone_protocol: 'ssh' | 'https'
   }
   jira: {
-    enabled: boolean
     base_url: string
     has_token: boolean
     poll_interval: string
-    projects: JiraProjectConfig[]
-  }
-  ai: {
-    model: string
-    reprioritize_threshold: number
-    preference_update_interval: number
-    auto_delegate_enabled: boolean
   }
   max_llm_model_tier: string
 }
 
-const emptyProject = (key = ''): JiraProjectConfig => ({
-  key,
-  pickup: { members: [] },
-  in_progress: { members: [] },
-  done: { members: [] },
-})
+// TeamBaseline is the last-saved (or last-loaded) snapshot of the team
+// slices, compared against the live form so a save touches only the slices
+// that actually changed — a settings-only edit doesn't re-PUT repos (which
+// would re-trigger profiling) or re-replace the GitHub-team mappings.
+type TeamBaseline = Pick<
+  TeamConfigForm,
+  'default_model' | 'auto_delegate_enabled' | 'jira_projects' | 'repos' | 'github_groups'
+>
 
-const projectIsComplete = (p: JiraProjectConfig): boolean =>
-  p.key.trim() !== '' &&
-  p.pickup.members.length > 0 &&
-  p.in_progress.members.length > 0 &&
-  !!p.in_progress.canonical &&
-  p.done.members.length > 0 &&
-  !!p.done.canonical
+const normProjects = (p: JiraProjectConfig[]): JiraProjectConfig[] =>
+  p.map((x) => ({ ...x, key: x.key.trim() })).filter((x) => x.key !== '')
+
+const sameRepos = (a: string[], b: string[]): boolean => {
+  if (a.length !== b.length) return false
+  const sb = new Set(b)
+  return a.every((x) => sb.has(x))
+}
+
+const groupKeys = (g: GitHubGroup[]): string[] =>
+  g.map((x) => `${x.org_login.toLowerCase()}/${x.team_slug.toLowerCase()}`).sort()
+
+const sameGroups = (a: GitHubGroup[], b: GitHubGroup[]): boolean => {
+  const ka = groupKeys(a)
+  const kb = groupKeys(b)
+  return ka.length === kb.length && ka.every((x, i) => x === kb[i])
+}
 
 export default function Settings() {
   // useOptionalAuth is null in local mode (no AuthProvider mounted), which
@@ -102,6 +94,12 @@ export default function Settings() {
   const orgId = isLocal ? LOCAL_DEFAULT_ORG_ID : activeOrgId
 
   const [data, setData] = useState<SettingsData | null>(null)
+  const [teamBaseline, setTeamBaseline] = useState<TeamBaseline | null>(null)
+  // False until the team-repos GET lands. A failed load leaves form.repos []
+  // — indistinguishable from "tracks nothing" — so editing is suppressed and
+  // change-detection treats repos as unchanged, never PUTting [] back over a
+  // set we just failed to read (the Repos page guards the same way).
+  const [reposLoaded, setReposLoaded] = useState(false)
   const [orgMemberCount, setOrgMemberCount] = useState(1)
   const [teamMemberCount, setTeamMemberCount] = useState(1)
   const [teamRole, setTeamRole] = useState('')
@@ -121,10 +119,14 @@ export default function Settings() {
     github_poll_interval: string
     github_clone_protocol: 'ssh' | 'https'
     jira_poll_interval: string
-    jira_projects: JiraProjectConfig[]
-    ai_model: string
-    ai_auto_delegate_enabled: boolean
     max_llm_model_tier: string
+    default_model: string
+    auto_delegate_enabled: boolean
+    ai_reprioritize_threshold: number
+    ai_preference_update_interval: number
+    jira_projects: JiraProjectConfig[]
+    repos: string[]
+    github_groups: GitHubGroup[]
   }>({
     github_enabled: true,
     github_url: '',
@@ -135,23 +137,16 @@ export default function Settings() {
     github_poll_interval: '5m0s',
     github_clone_protocol: 'ssh',
     jira_poll_interval: '5m0s',
-    jira_projects: [],
-    ai_model: 'sonnet',
-    ai_auto_delegate_enabled: true,
     max_llm_model_tier: '',
+    default_model: 'sonnet',
+    auto_delegate_enabled: true,
+    ai_reprioritize_threshold: 0,
+    ai_preference_update_interval: 0,
+    jira_projects: [],
+    repos: [],
+    github_groups: [],
   })
   const [saving, setSaving] = useState(false)
-  // Statuses keyed by project key so each project's picker pulls from
-  // the right per-project status list. The "Fetch Statuses" button
-  // refreshes the union for all configured projects.
-  const [jiraStatusesByProject, setJiraStatusesByProject] = useState<Record<string, JiraStatus[]>>(
-    {},
-  )
-  const [statusesLoading, setStatusesLoading] = useState(false)
-  // Per-project expand/collapse state. For the common N=1 case the
-  // first project stays expanded so the UX matches the pre-SKY-272
-  // flow; additional projects start collapsed.
-  const [expandedKeys, setExpandedKeys] = useState<Record<string, boolean>>({})
   const [jiraConnected, setJiraConnected] = useState(false)
   const [theme, setThemeState] = useState<ThemeMode>(() => getStoredTheme())
 
@@ -168,240 +163,170 @@ export default function Settings() {
   useEffect(() => {
     Promise.all([
       fetch('/api/settings/org').then((r) => (r.ok ? r.json() : null)),
-      fetch('/api/settings/team/default').then((r) => (r.ok ? r.json() : null)),
-    ]).then(([org, team]: [OrgSettingsData | null, TeamSettingsData | null]) => {
-      if (!org || !team) return
-      const projects = team.jira_projects && team.jira_projects.length > 0 ? team.jira_projects : []
-      const merged: SettingsData = {
-        github: {
-          enabled: org.has_github_pat,
-          base_url: org.github_base_url || '',
-          has_token: org.has_github_pat,
-          poll_interval: org.github_poll_interval,
-          clone_protocol: org.github_clone_protocol === 'https' ? 'https' : 'ssh',
-        },
-        jira: {
-          enabled: org.has_jira_pat,
-          base_url: org.jira_base_url || '',
-          has_token: org.has_jira_pat,
-          poll_interval: org.jira_poll_interval,
-          projects,
-        },
-        ai: {
-          model: team.team_settings.DefaultModel,
-          reprioritize_threshold: team.team_settings.AIReprioritizeThreshold,
-          preference_update_interval: team.team_settings.AIPreferenceUpdateInterval,
-          auto_delegate_enabled: team.team_settings.AutoDelegateEnabled,
-        },
-        max_llm_model_tier: org.max_llm_model_tier || '',
-      }
-      setData(merged)
-      setOrgMemberCount(org.member_count ?? 1)
-      setTeamMemberCount(team.member_count ?? 1)
-      setTeamRole(team.role ?? '')
-      setForm({
-        github_enabled: true,
-        github_url: merged.github.base_url,
-        github_pat: '',
-        jira_enabled: merged.jira.enabled,
-        jira_url: merged.jira.base_url,
-        jira_pat: '',
-        github_poll_interval: merged.github.poll_interval,
-        github_clone_protocol: merged.github.clone_protocol,
-        jira_poll_interval: merged.jira.poll_interval,
-        jira_projects: projects,
-        ai_model: merged.ai.model,
-        ai_auto_delegate_enabled: merged.ai.auto_delegate_enabled,
-        max_llm_model_tier: merged.max_llm_model_tier,
-      })
-      const initialExpanded: Record<string, boolean> = {}
-      if (projects.length === 1) {
-        initialExpanded[projects[0].key] = true
-      }
-      setExpandedKeys(initialExpanded)
-      if (merged.jira.has_token && merged.jira.base_url) {
-        setJiraConnected(true)
-        const keys = projects.map((p) => p.key).filter(Boolean)
-        if (keys.length > 0) {
-          fetchJiraStatuses(keys)
+      fetchTeamSettings('default'),
+      fetchTeamRepos('default'),
+    ]).then(
+      ([org, team, repos]: [OrgSettingsData | null, TeamSettingsData | null, string[] | null]) => {
+        if (!org || !team) return
+        const projects = team.jira_projects ?? []
+        const reposVal = repos ?? []
+        const merged: SettingsData = {
+          github: {
+            base_url: org.github_base_url || '',
+            has_token: org.has_github_pat,
+            poll_interval: org.github_poll_interval,
+            clone_protocol: org.github_clone_protocol === 'https' ? 'https' : 'ssh',
+          },
+          jira: {
+            base_url: org.jira_base_url || '',
+            has_token: org.has_jira_pat,
+            poll_interval: org.jira_poll_interval,
+          },
+          max_llm_model_tier: org.max_llm_model_tier || '',
         }
-      }
-    })
-    // fetchJiraStatuses intentionally omitted — this effect is a one-shot
-    // mount loader.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+        setData(merged)
+        setReposLoaded(repos !== null)
+        setOrgMemberCount(org.member_count ?? 1)
+        setTeamMemberCount(team.member_count ?? 1)
+        setTeamRole(team.role ?? '')
+        setForm((f) => ({
+          ...f,
+          github_url: merged.github.base_url,
+          github_pat: '',
+          jira_enabled: merged.jira.has_token,
+          jira_url: merged.jira.base_url,
+          jira_pat: '',
+          github_poll_interval: merged.github.poll_interval,
+          github_clone_protocol: merged.github.clone_protocol,
+          jira_poll_interval: merged.jira.poll_interval,
+          max_llm_model_tier: merged.max_llm_model_tier,
+          default_model: team.team_settings.DefaultModel || 'sonnet',
+          auto_delegate_enabled: team.team_settings.AutoDelegateEnabled,
+          ai_reprioritize_threshold: team.team_settings.AIReprioritizeThreshold,
+          ai_preference_update_interval: team.team_settings.AIPreferenceUpdateInterval,
+          jira_projects: projects,
+          repos: reposVal,
+          // github_groups seeds via GitHubTeamGroup's onLoaded once it fetches
+          // the org's candidate teams.
+        }))
+        setTeamBaseline({
+          default_model: team.team_settings.DefaultModel || 'sonnet',
+          auto_delegate_enabled: team.team_settings.AutoDelegateEnabled,
+          jira_projects: projects,
+          repos: reposVal,
+          github_groups: [],
+        })
+        if (merged.jira.has_token && merged.jira.base_url) {
+          setJiraConnected(true)
+        }
+      },
+    )
   }, [])
 
-  // fetchJiraStatuses queries the backend for statuses across the
-  // given project list. The backend intersects across projects, so
-  // the returned list is the safe set to offer in EVERY project's
-  // picker (a status not in every project would fail TransitionTo).
-  // Mirrors today's behavior — per-project status autocomplete is v2.
-  const fetchJiraStatuses = async (projectKeys?: string[]) => {
-    setStatusesLoading(true)
-    try {
-      const keys = projectKeys || form.jira_projects.map((p) => p.key.trim()).filter(Boolean)
-      if (keys.length === 0) return
-      const params = keys.map((p) => `project=${encodeURIComponent(p)}`).join('&')
-      const res = await fetch(`/api/jira/statuses?${params}`)
-      if (res.ok) {
-        const statuses: JiraStatus[] = await res.json()
-        // Same status list applies to every queried project; mirror
-        // it under each key so the per-project pickers can read by key.
-        const next: Record<string, JiraStatus[]> = {}
-        for (const k of keys) {
-          next[k] = statuses
-        }
-        setJiraStatusesByProject((current) => ({ ...current, ...next }))
-      }
-    } catch {
-      // Non-critical
-    } finally {
-      setStatusesLoading(false)
-    }
-  }
-
-  // Jira connect/disconnect live in JiraAccessGroup now; these callbacks
-  // own the team-scope follow-up the shared group can't see. On a connect
-  // against a different instance URL, the prior team project/status config
+  // Jira connect/disconnect live in JiraAccessGroup (org scope); these
+  // callbacks own the team-scope follow-up the shared group can't see. On a
+  // connect against a different instance URL, the prior team project config
   // no longer maps, so it's wiped; disconnect clears it outright.
   const onJiraConnected = (url: string) => {
     if (data && data.jira.base_url && data.jira.base_url !== url) {
       setForm((f) => ({ ...f, jira_projects: [] }))
-      setJiraStatusesByProject({})
     }
     setJiraConnected(true)
   }
 
   const onJiraDisconnected = () => {
     setJiraConnected(false)
-    setJiraStatusesByProject({})
     setForm((f) => ({ ...f, jira_enabled: false, jira_projects: [] }))
   }
 
   // Spread a shared field-group patch into the flat form state. The group
-  // patches are keyed by the org_settings field names, so this is a plain
-  // merge — no per-field mapping.
+  // patches are keyed by the same field names the form uses, so this is a
+  // plain merge — no per-field mapping.
   const patchForm = (patch: Partial<typeof form>) => setForm((f) => ({ ...f, ...patch }))
 
-  const update = (field: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
-    setForm((f) => ({ ...f, [field]: e.target.value }))
-
-  // updateProject swaps the project at index i with the produced patch.
-  // Centralized so each picker doesn't re-derive the splice.
-  const updateProject = (i: number, patch: Partial<JiraProjectConfig>) => {
-    setForm((f) => {
-      const next = f.jira_projects.slice()
-      next[i] = { ...next[i], ...patch }
-      return { ...f, jira_projects: next }
-    })
+  // GitHubTeamGroup seeds the saved mappings up once it has loaded the org's
+  // candidate teams; capture them as both the live value and the baseline so
+  // an untouched GitHub-teams panel never counts as a change. Guarded to fire
+  // once per page load: in the tabbed layout the team groups unmount on a tab
+  // switch and remount on return, so an unguarded seed would re-fetch and
+  // clobber unsaved toggles with the server's set.
+  const groupsSeededRef = useRef(false)
+  const seedGitHubGroups = (groups: GitHubGroup[]) => {
+    if (groupsSeededRef.current) return
+    groupsSeededRef.current = true
+    setForm((f) => ({ ...f, github_groups: groups }))
+    setTeamBaseline((b) => (b ? { ...b, github_groups: groups } : b))
   }
 
-  const addProject = () => {
-    // New section is appended at index === current length, so we stamp
-    // idx_${length} into expandedKeys — that's the same key isExpanded
-    // will read on the next render. Using a synthesized __new_... token
-    // would never be reached by isExpanded and the new section would
-    // render collapsed (the bug this comment guards against).
-    const newIndex = form.jira_projects.length
-    setForm((f) => ({ ...f, jira_projects: [...f.jira_projects, emptyProject('')] }))
-    setExpandedKeys((m) => ({ ...m, [`idx_${newIndex}`]: true }))
-  }
+  // ---- Change detection (per slice, against the loaded/last-saved snapshot).
+  const normalizedProjects = normProjects(form.jira_projects)
+  const teamSettingsChanged =
+    form.default_model !== teamBaseline?.default_model ||
+    form.auto_delegate_enabled !== teamBaseline?.auto_delegate_enabled ||
+    JSON.stringify(normalizedProjects) !== JSON.stringify(teamBaseline?.jira_projects ?? [])
+  // Only a *loaded* repo set can be considered changed — see reposLoaded.
+  const reposChanged = reposLoaded && !sameRepos(form.repos, teamBaseline?.repos ?? [])
+  const groupsChanged = !sameGroups(form.github_groups, teamBaseline?.github_groups ?? [])
+  const teamChanged = teamSettingsChanged || reposChanged || groupsChanged
 
-  const removeProject = (i: number) => {
-    setForm((f) => {
-      const next = f.jira_projects.slice()
-      next.splice(i, 1)
-      return { ...f, jira_projects: next }
-    })
-    // Shift expandedKeys down for every index above the removed slot —
-    // otherwise idx_${i} still maps to the entry that was at i+1, which
-    // is now at i. Drop the highest-index entry since it no longer
-    // exists.
-    setExpandedKeys((m) => {
-      const next: Record<string, boolean> = {}
-      for (const [k, v] of Object.entries(m)) {
-        if (!k.startsWith('idx_')) {
-          next[k] = v
-          continue
-        }
-        const idx = Number(k.slice('idx_'.length))
-        if (Number.isNaN(idx)) {
-          next[k] = v
-        } else if (idx < i) {
-          next[k] = v
-        } else if (idx > i) {
-          next[`idx_${idx - 1}`] = v
-        }
-        // idx === i: dropped along with the removed project.
+  const orgChanged =
+    !!form.github_pat ||
+    !!form.jira_pat ||
+    form.github_url !== (data?.github.base_url ?? '') ||
+    form.github_poll_interval !== data?.github.poll_interval ||
+    form.github_clone_protocol !== data?.github.clone_protocol ||
+    form.jira_url !== (data?.jira.base_url ?? '') ||
+    form.jira_poll_interval !== data?.jira.poll_interval ||
+    form.max_llm_model_tier !== (data?.max_llm_model_tier ?? '')
+
+  // saveTeamScope writes only the team slices that changed, in a deliberate
+  // order (settings → repos → github-groups), folding each saved slice back
+  // into the baseline so the next change-detection compares against current
+  // state. Settings + repos + github-groups are separate endpoints with no
+  // spanning transaction, so a later failure leaves the earlier writes
+  // committed — it stops and surfaces the error rather than pressing on.
+  const saveTeamScope = async (): Promise<boolean> => {
+    if (teamSettingsChanged) {
+      const res = await saveTeamSettings('default', form)
+      if (!res.ok) {
+        toast.error(res.error)
+        return false
       }
-      return next
-    })
-  }
-
-  // Section expansion uses the project's index because the key field
-  // is user-editable during the same render and would otherwise lose
-  // its open/closed state every keystroke.
-  const toggleExpanded = (i: number) => {
-    const id = `idx_${i}`
-    setExpandedKeys((m) => ({ ...m, [id]: !m[id] }))
-  }
-
-  const isExpanded = (i: number): boolean => {
-    const id = `idx_${i}`
-    if (id in expandedKeys) return expandedKeys[id]
-    // Fallback for projects that came from initial load: keyed by
-    // project.key.
-    const key = form.jira_projects[i]?.key
-    return key ? expandedKeys[key] === true : false
-  }
-
-  // saveTeam / saveOrg each POST a single scope and fold the saved values
-  // back into `data` so the next change-detection compares against current
-  // state, not the stale mount snapshot. They're independent permission
-  // domains on separate endpoints — there's no transaction spanning both.
-  const saveTeam = async (): Promise<boolean> => {
-    const projects = form.jira_projects
-      .map((p) => ({ ...p, key: p.key.trim() }))
-      .filter((p) => p.key !== '')
-    const res = await fetch('/api/settings/team/default', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ai_model: form.ai_model,
-        ai_auto_delegate_enabled: form.ai_auto_delegate_enabled,
-        jira_projects: projects,
-      }),
-    })
-    if (!res.ok) {
-      toast.error(await readError(res, 'Failed to save team settings'))
-      return false
+      if (res.warning) toast.info(res.warning)
+      setTeamBaseline((b) =>
+        b
+          ? {
+              ...b,
+              default_model: form.default_model,
+              auto_delegate_enabled: form.auto_delegate_enabled,
+              jira_projects: normalizedProjects,
+            }
+          : b,
+      )
     }
-    const body = (await res.json().catch(() => null)) as { warning?: string } | null
-    setData((d) =>
-      d
-        ? {
-            ...d,
-            jira: { ...d.jira, projects },
-            ai: {
-              ...d.ai,
-              model: form.ai_model,
-              auto_delegate_enabled: form.ai_auto_delegate_enabled,
-            },
-          }
-        : d,
-    )
-    // The org cap can clamp the team default; the save still succeeds, the
-    // warning just tells the team the effective model differs from the pick.
-    if (body?.warning) toast.info(body.warning)
+    if (reposChanged) {
+      const res = await saveTeamRepos('default', form.repos)
+      if (!res.ok) {
+        toast.error(res.error)
+        return false
+      }
+      setTeamBaseline((b) => (b ? { ...b, repos: form.repos } : b))
+    }
+    if (groupsChanged) {
+      const res = await saveTeamGitHubGroups('default', form.github_groups)
+      if (!res.ok) {
+        toast.error(res.error)
+        return false
+      }
+      setTeamBaseline((b) => (b ? { ...b, github_groups: form.github_groups } : b))
+    }
     return true
   }
 
   // saveOrg persists the org-level field group through the shared
   // saveOrgConfig helper (the same POST /api/settings/org path the
   // create-configure step and Setup use), then folds the saved values back
-  // into `data` so the next change-detection compares against current
-  // state, not the stale mount snapshot.
+  // into `data` so the next change-detection compares against current state.
   const saveOrg = async (): Promise<boolean> => {
     const result = await saveOrgConfig({
       github_url: form.github_url,
@@ -438,19 +363,19 @@ export default function Settings() {
           }
         : d,
     )
-    // Lowering the cap below the default team's preference still saves;
-    // the warning surfaces that its effective model dropped.
+    // Lowering the cap below the default team's preference still saves; the
+    // warning surfaces that its effective model dropped.
     if (result.warning) toast.info(result.warning)
     return true
   }
 
-  // runSave drives the requested scope(s). Team runs first: its validation
-  // is pure server-side (project rules, dup keys) with no external calls,
-  // so it fails before the org POST's PAT/SSH work commits anything.
+  // runSave drives the requested scope(s). Team runs first: its validation is
+  // pure server-side (project rules, dup keys) with no external calls, so it
+  // fails before the org POST's PAT/SSH work commits anything.
   const runSave = async (scopes: SettingsTab[]) => {
     setSaving(true)
     try {
-      if (scopes.includes('team') && !(await saveTeam())) return
+      if (scopes.includes('team') && !(await saveTeamScope())) return
       if (scopes.includes('workspace') && !(await saveOrg())) return
       toast.success('Settings saved')
       setForm((f) => ({ ...f, github_pat: '', jira_pat: '' }))
@@ -466,22 +391,6 @@ export default function Settings() {
   // half-commit and we skip a no-op round trip.
   const saveAll = (e: React.FormEvent) => {
     e.preventDefault()
-    const projects = form.jira_projects
-      .map((p) => ({ ...p, key: p.key.trim() }))
-      .filter((p) => p.key !== '')
-    const teamChanged =
-      form.ai_model !== data?.ai.model ||
-      form.ai_auto_delegate_enabled !== data?.ai.auto_delegate_enabled ||
-      JSON.stringify(projects) !== JSON.stringify(data?.jira.projects ?? [])
-    const orgChanged =
-      !!form.github_pat ||
-      !!form.jira_pat ||
-      form.github_url !== (data?.github.base_url ?? '') ||
-      form.github_poll_interval !== data?.github.poll_interval ||
-      form.github_clone_protocol !== data?.github.clone_protocol ||
-      form.jira_url !== (data?.jira.base_url ?? '') ||
-      form.jira_poll_interval !== data?.jira.poll_interval ||
-      form.max_llm_model_tier !== (data?.max_llm_model_tier ?? '')
     const scopes: SettingsTab[] = []
     if (teamChanged) scopes.push('team')
     if (orgChanged) scopes.push('workspace')
@@ -500,15 +409,9 @@ export default function Settings() {
     )
   }
 
-  // Save button is disabled when Jira is connected but any tracked
-  // project has incomplete rules — same gating as the pre-SKY-272
-  // form, just applied per project. This gates the team scope (projects).
-  const incompleteProjects = jiraConnected
-    ? form.jira_projects.filter((p) => p.key.trim() !== '' && !projectIsComplete(p)).length
-    : 0
-  const hasAnyValidProject =
-    !jiraConnected || form.jira_projects.some((p) => p.key.trim() !== '' && projectIsComplete(p))
-  const teamSaveBlocked = jiraConnected && (!hasAnyValidProject || incompleteProjects > 0)
+  // Save is blocked (team scope) when Jira is connected but a tracked project
+  // has incomplete rules — same gating as before, now via the shared helper.
+  const teamSaveBlocked = teamProjectsBlocked(form.jira_projects, jiraConnected)
 
   // ---- Section renderers (closures over current state; no prop drilling).
 
@@ -554,170 +457,48 @@ export default function Settings() {
     />
   )
 
-  const renderJiraProjects = () => (
-    <Section>
-      <h2 className="text-[13px] font-medium text-text-secondary mb-4">Jira projects</h2>
-      {!jiraConnected ? (
-        <p className="text-[12px] text-text-tertiary italic">
-          Connect Jira under Workspace settings before configuring tracked projects.
-        </p>
-      ) : (
-        <div className="space-y-2">
-          {form.jira_projects.length === 0 && (
-            <p className="text-[12px] text-text-tertiary italic">
-              No Jira projects configured. Click &ldquo;Add project&rdquo; to start.
-            </p>
-          )}
-          {form.jira_projects.map((project, i) => {
-            const statuses = jiraStatusesByProject[project.key] || []
-            const complete = projectIsComplete(project)
-            const expanded = isExpanded(i)
-            return (
-              <div key={i} className="rounded-xl border border-border-subtle bg-white/40">
-                <div className="flex items-center gap-2 px-3 py-2">
-                  <button
-                    type="button"
-                    onClick={() => toggleExpanded(i)}
-                    className="text-text-tertiary hover:text-text-secondary"
-                    aria-label={expanded ? 'Collapse project' : 'Expand project'}
-                  >
-                    {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                  </button>
-                  <input
-                    type="text"
-                    placeholder="PROJ"
-                    value={project.key}
-                    onChange={(e) => updateProject(i, { key: e.target.value })}
-                    className="flex-1 bg-transparent border-0 focus:outline-none text-[13px] font-medium text-text-primary placeholder-text-tertiary"
-                  />
-                  {project.key.trim() !== '' && (
-                    <span
-                      className={`text-[10px] uppercase tracking-wide ${
-                        complete ? 'text-claim' : 'text-snooze'
-                      }`}
-                    >
-                      {complete ? 'Ready' : 'Needs rules'}
-                    </span>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => removeProject(i)}
-                    className="text-text-tertiary hover:text-dismiss"
-                    aria-label="Remove project"
-                  >
-                    <Trash2 size={14} />
-                  </button>
-                </div>
-
-                {expanded && (
-                  <div className="px-4 pb-4 pt-1 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <p className="text-[11px] text-text-tertiary">
-                        {statuses.length > 0
-                          ? `${statuses.length} statuses available`
-                          : 'Click Fetch Statuses to load options'}
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => fetchJiraStatuses([project.key].filter(Boolean))}
-                        disabled={statusesLoading || !project.key.trim()}
-                        className="shrink-0 text-[11px] text-accent hover:text-accent/80 disabled:opacity-40 border border-accent/20 rounded-xl px-3 py-1 transition-colors"
-                      >
-                        {statusesLoading ? 'Loading...' : 'Fetch Statuses'}
-                      </button>
-                    </div>
-
-                    {statuses.length > 0 && (
-                      <div className="space-y-4 pt-1">
-                        <JiraStatusRule
-                          label="Pickup"
-                          description="Poll for unassigned tickets in these states."
-                          allStatuses={statuses}
-                          value={project.pickup}
-                          onChange={(v) => updateProject(i, { pickup: v })}
-                          requireCanonical={false}
-                        />
-                        <JiraStatusRule
-                          label="In progress"
-                          description="Count as actively being worked on."
-                          allStatuses={statuses}
-                          value={project.in_progress}
-                          onChange={(v) => updateProject(i, { in_progress: v })}
-                          requireCanonical={true}
-                          canonicalPrompt="Claim →"
-                        />
-                        <JiraStatusRule
-                          label="Done"
-                          description="Count as complete (add every variant — e.g. Resolved + Verified)."
-                          allStatuses={statuses}
-                          value={project.done}
-                          onChange={(v) => updateProject(i, { done: v })}
-                          requireCanonical={true}
-                          canonicalPrompt="Complete →"
-                        />
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )
-          })}
-          <button
-            type="button"
-            onClick={addProject}
-            className="w-full text-[12px] text-accent hover:text-accent/80 border border-dashed border-accent/30 rounded-xl px-3 py-2 transition-colors"
-          >
-            + Add project
-          </button>
-        </div>
-      )}
-    </Section>
-  )
-
-  const renderAI = () => (
-    <Section>
-      <h2 className="text-[13px] font-medium text-text-secondary mb-4">AI</h2>
-      <div className="space-y-3">
-        <Field label="Delegation model">
-          <select value={form.ai_model} onChange={update('ai_model')} className={inputClass}>
-            <option value="haiku">Haiku (fast, cheap)</option>
-            <option value="sonnet">Sonnet (balanced)</option>
-            <option value="opus">Opus (most capable)</option>
-          </select>
-        </Field>
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="text-[13px] text-text-primary">Auto-delegation</p>
-            <p className="text-[11px] text-text-tertiary mt-0.5">
-              Automatically delegate tasks when matching triggers fire
-            </p>
-          </div>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={form.ai_auto_delegate_enabled}
-            onClick={() =>
-              setForm((f) => ({ ...f, ai_auto_delegate_enabled: !f.ai_auto_delegate_enabled }))
-            }
-            className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-              form.ai_auto_delegate_enabled ? 'bg-accent' : 'bg-black/[0.08]'
-            }`}
-          >
-            <span
-              className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-sm transform transition-transform ${
-                form.ai_auto_delegate_enabled ? 'translate-x-4' : 'translate-x-0'
-              }`}
-            />
-          </button>
-        </div>
-      </div>
-    </Section>
-  )
-
   // Workspace (org) scope: a hard ceiling over every team's model choice.
-  // The team default lives in renderAI (team scope); this caps it.
+  // The team default lives in TeamSettingsGroup (team scope); this caps it.
   const renderModelCap = () => (
     <ModelGroup value={{ max_llm_model_tier: form.max_llm_model_tier }} onChange={patchForm} />
+  )
+
+  // ---- Team-scope groups (shared with TeamConfigure + Setup). Controlled —
+  // the container owns the form + the per-slice saves.
+  const renderRepos = () => (
+    <ReposGroup
+      value={form.repos}
+      onChange={(repos) => patchForm({ repos })}
+      canEdit={reposLoaded && isTeamAdmin}
+    />
+  )
+
+  const renderGitHubTeams = () => (
+    <GitHubTeamGroup
+      value={form.github_groups}
+      onChange={(github_groups) => patchForm({ github_groups })}
+      teamId="default"
+      canEdit={isTeamAdmin}
+      onLoaded={seedGitHubGroups}
+    />
+  )
+
+  const renderJiraProjects = () => (
+    <JiraProjectRulesGroup
+      value={form.jira_projects}
+      onChange={(jira_projects) => patchForm({ jira_projects })}
+      connected={jiraConnected}
+    />
+  )
+
+  const renderTeamSettings = () => (
+    <TeamSettingsGroup
+      value={{
+        default_model: form.default_model,
+        auto_delegate_enabled: form.auto_delegate_enabled,
+      }}
+      onChange={patchForm}
+    />
   )
 
   const renderAppearance = () => (
@@ -808,10 +589,9 @@ export default function Settings() {
     </Section>
   )
 
-  // "Add team" (org admin, hosted-only). Org-scope settings; hidden in
-  // local mode and for non-admins. The entry point a solo hosted user
-  // uses to create a 2nd team, which then flips the count-gated selectors
-  // on across the app.
+  // "Add team" (org admin, hosted-only). Org-scope settings; hidden in local
+  // mode and for non-admins. The entry point a solo hosted user uses to
+  // create a 2nd team, which then flips the count-gated selectors on.
   const renderTeams = () => {
     if (isLocal || !isOrgAdmin) return null
     return <TeamManagementSection />
@@ -830,8 +610,10 @@ export default function Settings() {
   )
   const teamSections = (
     <>
-      {renderAI()}
+      {renderRepos()}
+      {renderGitHubTeams()}
       {renderJiraProjects()}
+      {renderTeamSettings()}
     </>
   )
 
@@ -844,12 +626,13 @@ export default function Settings() {
         </h1>
         <form onSubmit={saveAll} className="space-y-5">
           {renderGitHubAccess()}
-          <GitHubGroupsEditor teamId="default" canEdit={isTeamAdmin} />
           {renderJiraAccess()}
           {renderPollerTiming()}
-          {renderJiraProjects()}
-          {renderAI()}
           {renderModelCap()}
+          {renderRepos()}
+          {renderGitHubTeams()}
+          {renderJiraProjects()}
+          {renderTeamSettings()}
           {renderAppearance()}
           <button
             type="submit"
@@ -860,11 +643,10 @@ export default function Settings() {
           </button>
         </form>
         {/* These sit OUTSIDE the settings <form>: TeamManagementSection
-            renders its own <form> (Add team), and nesting forms is
-            invalid HTML — the inner submit would bubble as the outer
-            Save Settings. renderIntegrations / renderDanger are
-            self-contained sections with their own actions too, so they
-            belong outside the save form regardless. */}
+            renders its own <form> (Add team), and nesting forms is invalid
+            HTML — the inner submit would bubble as the outer Save Settings.
+            renderIntegrations / renderDanger are self-contained sections with
+            their own actions too. */}
         <div className="space-y-5 mt-5">
           {/* Hosted solo (N=1) admins can still grow past one team. */}
           {renderTeams()}
@@ -899,7 +681,6 @@ export default function Settings() {
           >
             {teamSections}
           </fieldset>
-          <GitHubGroupsEditor teamId="default" canEdit={isTeamAdmin} />
           <button
             type="button"
             onClick={() => void runSave(['team'])}
@@ -934,9 +715,9 @@ export default function Settings() {
   )
 }
 
-// ReadOnlyNotice explains why a scope's fields are disabled. Per SKY-358 we
-// disable (not hide) the fields and surface the policy, so a non-admin sees
-// what exists and who can change it rather than a missing tab.
+// ReadOnlyNotice explains why a scope's fields are disabled. We disable (not
+// hide) the fields and surface the policy, so a non-admin sees what exists
+// and who can change it rather than a missing tab.
 function ReadOnlyNotice({ scope }: { scope: 'team' | 'workspace' }) {
   const who = scope === 'team' ? 'team admins' : 'workspace (org) admins'
   return (

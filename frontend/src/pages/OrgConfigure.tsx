@@ -20,7 +20,9 @@ import {
  * org, so the same org-scoped endpoints the Settings page uses resolve to
  * the new org. The founder wires GitHub + Jira access, poller cadence, and
  * the model cap through the *same* shared field groups as Settings — no
- * parallel implementation — then lands in the factory.
+ * parallel implementation — then continues to the team configure step
+ * (repos / GitHub-team mappings / Jira rules / team settings) before landing
+ * in the factory. "I'll configure later" short-circuits straight to the app.
  *
  * This route sits OUTSIDE RequireGitHubIdentity (like ConnectGitHub): it's
  * exactly where GitHub access gets configured, so gating it on GitHub
@@ -72,6 +74,13 @@ export default function OrgConfigure() {
 
   const goToApp = () => navigate(orgId ? '/orgs/' + orgId : '/', { replace: true })
 
+  // After org config, hand off to the team configure step (the next link in
+  // the create→configure chain). "default" is the alias the team endpoints
+  // resolve to the org's freshly-bootstrapped Default team, so we don't need
+  // its UUID here.
+  const goToTeamConfigure = () =>
+    navigate(orgId ? `/orgs/${orgId}/teams/default/configure` : '/', { replace: true })
+
   const finish = async () => {
     setSaving(true)
     try {
@@ -81,7 +90,7 @@ export default function OrgConfigure() {
         return
       }
       if (result.warning) toast.info(result.warning)
-      goToApp()
+      goToTeamConfigure()
     } catch (err) {
       toast.error(`Could not save configuration: ${(err as Error).message}`)
     } finally {

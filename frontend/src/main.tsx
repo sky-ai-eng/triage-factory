@@ -27,6 +27,7 @@ import ProjectDetail from './pages/ProjectDetail'
 import Login from './pages/Login'
 import Onboarding from './pages/Onboarding'
 import OrgConfigure from './pages/OrgConfigure'
+import TeamConfigure from './pages/TeamConfigure'
 import ConnectGitHub from './pages/ConnectGitHub'
 import Shell from './Shell'
 import AuthGate, { RequireGitHubIdentity } from './AuthGate'
@@ -133,6 +134,20 @@ function MultiRoutes() {
             element={
               <AuthGate mode="multi">
                 <OrgConfigure />
+              </AuthGate>
+            }
+          />
+          {/* Create-time team configure step — the second half of "Create
+              your first team" and the tail of onboarding (org-configure
+              routes here on Finish). Outside RequireGitHubIdentity for the
+              same reason as configure: it's where repos + GitHub-team
+              mappings get set up. Declared before the shell layout so the
+              static /teams/:team_id/configure suffix wins. */}
+          <Route
+            path="/orgs/:org_id/teams/:team_id/configure"
+            element={
+              <AuthGate mode="multi">
+                <TeamConfigure />
               </AuthGate>
             }
           />
