@@ -99,14 +99,15 @@ func seedSQLiteRunsForStats(t *testing.T, conn *sql.DB, promptID string, statusB
 		t.Fatalf("seed task: %v", err)
 	}
 
+	blueprintRunID := seedBlueprintRunForRun(t, conn, taskID)
 	ids := make([]string, 0, len(statusByOffset))
 	for i, status := range statusByOffset {
 		runID := uuid.New().String()
 		startedAt := now.AddDate(0, 0, -i)
 		if _, err := conn.Exec(`
-			INSERT INTO runs (id, task_id, prompt_id, status, started_at, total_cost_usd, duration_ms)
-			VALUES (?, ?, ?, ?, ?, 0.01, 100)
-		`, runID, taskID, promptID, status, startedAt); err != nil {
+			INSERT INTO runs (id, task_id, prompt_id, status, started_at, total_cost_usd, duration_ms, blueprint_run_id)
+			VALUES (?, ?, ?, ?, ?, 0.01, 100, ?)
+		`, runID, taskID, promptID, status, startedAt, blueprintRunID); err != nil {
 			t.Fatalf("seed run %d: %v", i, err)
 		}
 		ids = append(ids, runID)

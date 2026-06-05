@@ -356,6 +356,14 @@ func TestTryAutoDelegate_PerTeamBotGate(t *testing.T) {
 		Enabled:                true,
 	}
 	createTriggerForTestRouting(t, database, trigger)
+	// createTriggerForTestRouting remaps BlueprintID to the wrapping blueprint's
+	// id in the DB, but the local struct still holds the prompt id. This test
+	// calls tryAutoDelegate directly (bypassing HandleEvent's re-read from the
+	// handler store), so resolve the real blueprint id onto the local trigger —
+	// the spawner mints a blueprint_run whose blueprint_id FK needs it.
+	if err := database.QueryRow(`SELECT blueprint_id FROM event_handlers WHERE id = ?`, "trigger-gate").Scan(&trigger.BlueprintID); err != nil {
+		t.Fatalf("resolve trigger blueprint id: %v", err)
+	}
 
 	stub := &stubDelegator{db: database}
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())

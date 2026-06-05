@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
@@ -18,7 +17,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -218,159 +216,49 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 		log.Printf("[delegate] warning: failed to increment usage for blueprint %s: %v", blueprint.ID, e)
 	}
 
-	// Multi-step blueprint → the orchestrator: one blueprint_run row, step
-	// advancement driven by each step run's terminal runs.outcome.
-	if len(steps) > 1 {
-		return s.delegateBlueprint(orgID, task, blueprint, steps, triggerType, triggerID, creatorUserID, ghClient, model)
-	}
-
-	// 1-step blueprint → today's single-prompt path on that step's prompt:
-	// no blueprint_run row, completion envelope closes the task.
-	resolved, err := s.resolvePrompt(orgID, task, steps[0].StepPromptID, triggerType, creatorUserID)
-	if err != nil {
-		return "", err
-	}
-	promptID := resolved.ID
-	mission := resolved.Body
-	if resolved.Model != "" {
-		model = resolved.Model
-	}
-	extraTools := s.collectExtraTools(resolved.AllowedTools)
-
-	var incErr error
-	if triggerType == "manual" {
-		incErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			return ts.Prompts.IncrementUsage(bgCtx, orgID, promptID)
-		})
-	} else {
-		incErr = s.prompts.IncrementUsageSystem(bgCtx, orgID, promptID)
-	}
-	if incErr != nil {
-		log.Printf("[delegate] warning: failed to increment usage for prompt %s: %v", promptID, incErr)
-	}
-
-	// Stamp actor_agent_id at run start. Prefer the task's stamped
-	// claim (set by router on trigger match, or by the user-delegate
-	// handler when the user drags a queued task to the bot). Falls
-	// back to GetForOrg for unclaimed tasks and manual runs. Stays
-	// empty (NULL on the row) only in the seam between db init and
-	// agent bootstrap, which is transient.
-	actorAgentID := task.ClaimedByAgentID
-	if actorAgentID == "" && s.agents != nil {
-		if a, err := s.agents.GetForOrgSystem(context.Background(), orgID); err == nil && a != nil {
-			actorAgentID = a.ID
-		}
-	}
-
-	runID := uuid.New().String()
-	runRow := domain.AgentRun{
-		ID:                runID,
+	// One dispatch path: mint the blueprint_run, then run the orchestrator
+	// (which loops once for a 1-step blueprint — N=1 is no longer a special
+	// path). The blueprint_run is the firing unit and the crash-consistent
+	// commit point of a delegation, so it's created synchronously here, before
+	// the orchestrator goroutine does any worktree setup — that's where the
+	// relocated replay fence lives. worktree_path is filled in after setup.
+	blueprintRunID := uuid.New().String()
+	brRow := domain.BlueprintRun{
+		ID:                blueprintRunID,
+		BlueprintID:       blueprint.ID,
 		TaskID:            task.ID,
-		PromptID:          promptID,
-		Status:            "initializing",
-		Model:             model,
-		TriggerType:       triggerType,
+		TriggerType:       domain.BlueprintTriggerType(triggerType),
 		TriggerID:         triggerID,
 		TriggeringEventID: opts.TriggeringEventID,
-		ActorAgentID:      actorAgentID,
-		CreatorUserID:     creatorUserID,
+		Status:            domain.BlueprintRunStatusRunning,
 	}
-	// Route by trigger type, mirroring the IncrementUsage split above.
-	// Manual inserts wrap in SyntheticClaimsWithTx so runs_insert's RLS
-	// check (creator_user_id = tf.current_user_id()) sees the correct
-	// identity; event-triggered inserts stay on the admin pool because
-	// the router has no user identity to project.
-	//
-	// Event-triggered runs go through CreateIfNotFiredSystem, the
-	// (triggering_event_id, trigger_id) fenced insert (SKY-424). On a
-	// replayed event whose first run already committed, no row inserts and
-	// we return ErrAlreadyFired so the router skips cleanly instead of
-	// spawning a duplicate agent. The run insert is the crash-consistent
-	// commit point: anything before it (blueprint/prompt resolution, usage
-	// bumps) is cheap and idempotent enough to re-run on a fenced replay.
-	var createErr error
+	// Event-triggered firings go through the fenced insert: a replayed
+	// (triggering_event_id, trigger_id) under the at-least-once router queue
+	// returns ErrAlreadyFired, so the router skips cleanly instead of minting a
+	// duplicate blueprint_run — closing the latent gap that multi-step chains
+	// were never replay-fenced. Manual delegations write under the user's
+	// synthetic claims so blueprint_runs_insert RLS sees the creator; they carry
+	// no triggering_event_id and never fence (multiple manual runs of one task
+	// stay allowed). Everything before this insert (blueprint/step resolution,
+	// usage bumps) is cheap and idempotent enough to re-run on a fenced replay.
 	if triggerType == "manual" {
-		createErr = s.tx.SyntheticClaimsWithTx(context.Background(), orgID, creatorUserID, func(ts db.TxStores) error {
-			return ts.AgentRuns.Create(context.Background(), orgID, runRow)
-		})
+		if err := s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
+			_, e := ts.Blueprints.CreateRun(bgCtx, orgID, brRow)
+			return e
+		}); err != nil {
+			return "", fmt.Errorf("create blueprint run: %w", err)
+		}
 	} else {
-		inserted, err := s.agentRuns.CreateIfNotFiredSystem(context.Background(), orgID, runRow)
+		inserted, err := s.blueprints.CreateRunIfNotFiredSystem(bgCtx, orgID, brRow)
 		if err != nil {
-			createErr = err
-		} else if !inserted {
+			return "", fmt.Errorf("create blueprint run: %w", err)
+		}
+		if !inserted {
 			return "", ErrAlreadyFired
 		}
 	}
-	if createErr != nil {
-		return "", fmt.Errorf("create agent run: %w", createErr)
-	}
-	s.broadcastRunUpdate(orgID, runID, "initializing")
 
-	ctx, cancel := context.WithCancel(context.Background())
-	s.mu.Lock()
-	s.cancels[runID] = cancel
-	s.mu.Unlock()
-
-	go func() {
-		startTime := time.Now()
-		defer func() {
-			s.mu.Lock()
-			delete(s.cancels, runID)
-			// takenOver is intentionally NOT deleted here — Takeover
-			// is still running its copy/finalize work in another
-			// goroutine and reads wasTakenOver() up to the very last
-			// step. Leaving the entry set forever costs a few bytes
-			// per takeover and avoids subtle TOCTOU races.
-			s.mu.Unlock()
-			cancel()
-			// Drain the per-entity firing queue. Fires after every
-			// terminal status (completed, failed, cancelled,
-			// task_unsolvable, pending_approval, taken_over) since
-			// this defer runs unconditionally on goroutine exit.
-			// notifyDrainer itself filters out manual runs — manual
-			// is decoupled from the queue per SKY-189.
-			s.notifyDrainer(orgID, triggerType, task.EntityID)
-		}()
-
-		// Phase 1: set up worktree + build config based on task source
-		var cfg runConfig
-		var setupErr error
-
-		switch task.EntitySource {
-		case "github":
-			cfg, setupErr = s.setupGitHub(ctx, orgID, runID, task, ghClient)
-		case "jira":
-			cfg, setupErr = s.setupJira(ctx, orgID, runID, task, ghClient)
-		default:
-			setupErr = fmt.Errorf("unsupported task source: %s", task.EntitySource)
-		}
-		cfg.orgID = orgID
-
-		if setupErr != nil {
-			if ctx.Err() != nil {
-				s.handleCancelled(orgID, runID, startTime, cfg.wtPath, triggerType, creatorUserID)
-				return
-			}
-			s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, setupErr.Error())
-			return
-		}
-
-		cfg.extraAllowedTools = extraTools
-
-		// Phase 2: run the agent
-		// Announce the run start once setup is done — the agent is about to
-		// actually execute work. Distinguish auto-fired (event trigger) from
-		// user-initiated (manual) so the user can tell at a glance whether
-		// they kicked this off or automation did.
-		verb := "Run started"
-		if triggerType == "event" {
-			verb = "Auto-fired"
-		}
-		toast.Info(s.wsHub, orgID, fmt.Sprintf("%s: %s (%s)", verb, truncateToastMsg(task.Title, 80), shortRunID(runID)))
-		s.runAgent(ctx, runID, task, mission, cfg, startTime, model, triggerType, creatorUserID)
-	}()
-
-	return runID, nil
+	return s.delegateBlueprint(orgID, task, blueprint, steps, blueprintRunID, triggerType, triggerID, creatorUserID, ghClient, model), nil
 }
 
 // ownerForTask extracts the GitHub account a task targets, for the

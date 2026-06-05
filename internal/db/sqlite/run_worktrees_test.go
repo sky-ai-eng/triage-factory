@@ -104,9 +104,10 @@ func seedSQLiteRunForWorktree(t *testing.T, conn *sql.DB, suffix string) string 
 		t.Fatalf("seed task: %v", err)
 	}
 	runID := uuid.New().String()
+	blueprintRunID := seedBlueprintRunForRun(t, conn, taskID)
 	if _, err := conn.Exec(`
-		INSERT INTO runs (id, task_id, prompt_id, status, model) VALUES (?, ?, 'p_run_worktree', 'running', 'm')
-	`, runID, taskID); err != nil {
+		INSERT INTO runs (id, task_id, prompt_id, status, model, blueprint_run_id) VALUES (?, ?, 'p_run_worktree', 'running', 'm', ?)
+	`, runID, taskID, blueprintRunID); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	return runID

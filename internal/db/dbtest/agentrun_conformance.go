@@ -53,6 +53,16 @@ type AgentRunSeeder struct {
 	// trigger_id as distinct (the fence would silently not engage).
 	EventHandler func(t *testing.T, eventType string) string
 
+	// BlueprintRun mints a blueprint + blueprint_run pair against the
+	// given taskID and returns the blueprint_run id. Every runs row now
+	// carries a NOT NULL blueprint_run_id FK (a single prompt is a
+	// 1-step blueprint), so the conformance suite stages one of these
+	// per run it creates and sets domain.AgentRun.BlueprintRunID. Each
+	// call mints a fresh independent blueprint_run — that matches the
+	// real firing model (one delegation = one blueprint_run) and keeps
+	// multi-run-per-task subtests realistic.
+	BlueprintRun func(t *testing.T, taskID string) string
+
 	// StampAgentClaim sets the task's claimed_by_agent_id directly.
 	// Used to set up the MarkTakenOver atomic-flip preconditions:
 	// the takeover only flips the task claim when the bot still
@@ -108,6 +118,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		runID := uuid.New().String()
 		if err := store.Create(ctx, orgID, domain.AgentRun{
 			ID: runID, TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: "running", Model: "claude-test",
+			BlueprintRunID: seed.BlueprintRun(t, taskID),
 		}); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
@@ -137,12 +148,13 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 		runID := uuid.New().String()
 		if err := store.Create(ctx, orgID, domain.AgentRun{
-			ID:          runID,
-			TaskID:      taskID,
-			PromptID:    agentRunTestPrompt(t),
-			Status:      "running",
-			Model:       "claude-test",
-			TriggerType: "event",
+			ID:             runID,
+			TaskID:         taskID,
+			PromptID:       agentRunTestPrompt(t),
+			Status:         "running",
+			Model:          "claude-test",
+			TriggerType:    "event",
+			BlueprintRunID: seed.BlueprintRun(t, taskID),
 			// CreatorUserID intentionally empty — the CHECK
 			// forces NULL for event-triggered runs and the
 			// store impl must accept that.
@@ -191,6 +203,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 				TriggerType:       "event",
 				TriggerID:         trigID,
 				TriggeringEventID: eventID,
+				BlueprintRunID:    seed.BlueprintRun(t, taskID),
 			}
 		}
 
@@ -251,11 +264,12 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 
 		for i := 0; i < 2; i++ {
 			if err := store.Create(ctx, orgID, domain.AgentRun{
-				ID:       uuid.New().String(),
-				TaskID:   taskID,
-				PromptID: agentRunTestPrompt(t),
-				Status:   "running",
-				Model:    "claude-test",
+				ID:             uuid.New().String(),
+				TaskID:         taskID,
+				PromptID:       agentRunTestPrompt(t),
+				Status:         "running",
+				Model:          "claude-test",
+				BlueprintRunID: seed.BlueprintRun(t, taskID),
 				// TriggerType defaults to manual; TriggeringEventID empty → NULL.
 			}); err != nil {
 				t.Fatalf("manual run %d: %v", i, err)
@@ -513,6 +527,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		runID := uuid.New().String()
 		if err := store.Create(ctx, orgID, domain.AgentRun{
 			ID: runID, TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: "running", Model: "m",
+			BlueprintRunID: seed.BlueprintRun(t, taskID),
 		}); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
@@ -564,6 +579,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		runID := uuid.New().String()
 		if err := store.Create(ctx, orgID, domain.AgentRun{
 			ID: runID, TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: "running", Model: "m",
+			BlueprintRunID: seed.BlueprintRun(t, taskID),
 		}); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
@@ -594,6 +610,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		first := uuid.New().String()
 		if err := store.Create(ctx, orgID, domain.AgentRun{
 			ID: first, TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: "running", Model: "m",
+			BlueprintRunID: seed.BlueprintRun(t, taskID),
 		}); err != nil {
 			t.Fatalf("Create first: %v", err)
 		}
@@ -601,6 +618,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		second := uuid.New().String()
 		if err := store.Create(ctx, orgID, domain.AgentRun{
 			ID: second, TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: "running", Model: "m",
+			BlueprintRunID: seed.BlueprintRun(t, taskID),
 		}); err != nil {
 			t.Fatalf("Create second: %v", err)
 		}
@@ -631,6 +649,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if err := store.Create(ctx, orgID, domain.AgentRun{
 			ID: manualID, TaskID: taskID, PromptID: agentRunTestPrompt(t),
 			Status: "running", Model: "m", TriggerType: "manual",
+			BlueprintRunID: seed.BlueprintRun(t, taskID),
 		}); err != nil {
 			t.Fatalf("Create manual: %v", err)
 		}
@@ -638,6 +657,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if err := store.Create(ctx, orgID, domain.AgentRun{
 			ID: eventID, TaskID: taskID, PromptID: agentRunTestPrompt(t),
 			Status: "running", Model: "m", TriggerType: "event",
+			BlueprintRunID: seed.BlueprintRun(t, taskID),
 		}); err != nil {
 			t.Fatalf("Create event: %v", err)
 		}
@@ -672,8 +692,8 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			t.Errorf("ActiveIDs with no runs: %v, want []", ids)
 		}
 		// One running + one terminal → has=true, ids=[running].
-		runRun := seedAgentRunForTaskTest(t, store, orgID, taskID, "running")
-		_ = seedAgentRunForTaskTest(t, store, orgID, taskID, "completed")
+		runRun := seedAgentRunForTaskTest(t, store, orgID, taskID, "running", seed)
+		_ = seedAgentRunForTaskTest(t, store, orgID, taskID, "completed", seed)
 		if has, _ := store.HasActiveForTask(ctx, orgID, taskID); !has {
 			t.Error("HasActive with running: false, want true")
 		}
@@ -701,7 +721,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 
 		// Manual run — must NOT trip the gate.
-		_ = seedAgentRunForTaskTest(t, store, orgID, taskID, "running")
+		_ = seedAgentRunForTaskTest(t, store, orgID, taskID, "running", seed)
 		if has, _ := store.HasActiveAutoRunForEntity(ctx, orgID, ent); has {
 			t.Error("manual run tripped the auto-run gate; gate must be event-only")
 		}
@@ -711,6 +731,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if err := store.Create(ctx, orgID, domain.AgentRun{
 			ID: eventRunID, TaskID: taskID, PromptID: agentRunTestPrompt(t),
 			Status: "running", Model: "m", TriggerType: "event",
+			BlueprintRunID: seed.BlueprintRun(t, taskID),
 		}); err != nil {
 			t.Fatalf("Create event-triggered: %v", err)
 		}
@@ -741,7 +762,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			t.Errorf("with no pending: id=%q, want empty", id)
 		}
 		// Seed one pending_approval run.
-		runID := seedAgentRunForTaskTest(t, store, orgID, taskID, "pending_approval")
+		runID := seedAgentRunForTaskTest(t, store, orgID, taskID, "pending_approval", seed)
 		id, _ = store.PendingApprovalIDForTask(ctx, orgID, taskID)
 		if id != runID {
 			t.Errorf("PendingApprovalID = %q, want %q", id, runID)
@@ -887,11 +908,11 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		taskB := seed.Task(t, entB, domain.EventGitHubPROpened, evB)
 
 		// A has a run in awaiting_input; B has only a running run.
-		runA := seedAgentRunForTaskTest(t, store, orgID, taskA, "running")
+		runA := seedAgentRunForTaskTest(t, store, orgID, taskA, "running", seed)
 		if _, err := store.MarkAwaitingInput(ctx, orgID, runA); err != nil {
 			t.Fatalf("park A: %v", err)
 		}
-		_ = seedAgentRunForTaskTest(t, store, orgID, taskB, "running")
+		_ = seedAgentRunForTaskTest(t, store, orgID, taskB, "running", seed)
 
 		got, err := store.EntitiesWithAwaitingInput(ctx, orgID, []string{entA, entB})
 		if err != nil {
@@ -1079,6 +1100,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		for _, id := range []string{runNoRow, runNullContent, runEmpty, runWhitespace, runPopulated} {
 			if err := store.Create(ctx, orgID, domain.AgentRun{
 				ID: id, TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: "running", Model: "m",
+				BlueprintRunID: seed.BlueprintRun(t, taskID),
 			}); err != nil {
 				t.Fatalf("Create %s: %v", id, err)
 			}
@@ -1117,17 +1139,20 @@ func seedAgentRunForTest(t *testing.T, store db.AgentRunStore, orgID string, see
 	ent := seed.Entity(t, "seed-"+status+"-"+strconv.FormatInt(time.Now().UnixNano(), 36))
 	ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 	taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-	return seedAgentRunForTaskTest(t, store, orgID, taskID, status)
+	return seedAgentRunForTaskTest(t, store, orgID, taskID, status, seed)
 }
 
 // seedAgentRunForTaskTest creates a run on an existing task, used
-// by tests that need multiple runs on the same parent.
-func seedAgentRunForTaskTest(t *testing.T, store db.AgentRunStore, orgID, taskID, status string) string {
+// by tests that need multiple runs on the same parent. Each run gets
+// its own freshly-minted blueprint_run (runs.blueprint_run_id is NOT
+// NULL); independent firings on a shared task is the realistic shape.
+func seedAgentRunForTaskTest(t *testing.T, store db.AgentRunStore, orgID, taskID, status string, seed AgentRunSeeder) string {
 	t.Helper()
 	id := uuid.New().String()
 	ctx := context.Background()
 	if err := store.Create(ctx, orgID, domain.AgentRun{
 		ID: id, TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: status, Model: "m",
+		BlueprintRunID: seed.BlueprintRun(t, taskID),
 	}); err != nil {
 		t.Fatalf("Create %s: %v", status, err)
 	}

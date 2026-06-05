@@ -166,6 +166,33 @@ func newPgAgentRunSeeder(conn *sql.DB, orgID, userID, agentID, promptID string) 
 			}
 			return id
 		},
+		BlueprintRun: func(t *testing.T, taskID string) string {
+			t.Helper()
+			// runs.blueprint_run_id is NOT NULL — every run needs a parent
+			// blueprint_run. Mint a fresh blueprint + blueprint_run per
+			// call. Postgres requires org_id on both; blueprint_runs with
+			// trigger_type='manual' also needs a non-NULL creator_user_id
+			// (blueprint_runs_creator_matches_trigger_type CHECK). team_id
+			// resolves from the org's sole seeded team, mirroring the other
+			// seeders.
+			bpID := uuid.New().String()
+			if _, err := conn.Exec(`
+				INSERT INTO blueprints (id, org_id, creator_user_id, team_id, name, source)
+				VALUES ($1, $2, $3,
+				        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
+				        'Conformance BP', 'user')
+			`, bpID, orgID, userID); err != nil {
+				t.Fatalf("seed blueprint: %v", err)
+			}
+			brID := uuid.New().String()
+			if _, err := conn.Exec(`
+				INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path)
+				VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt')
+			`, brID, orgID, userID, bpID, taskID); err != nil {
+				t.Fatalf("seed blueprint_run: %v", err)
+			}
+			return brID
+		},
 		SetRunMemory: func(t *testing.T, runID, entityID, content string) {
 			t.Helper()
 			memID := uuid.New().String()
@@ -236,7 +263,8 @@ func TestAgentRunStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		}
 		if err := stores.AgentRuns.Create(ctx, orgID, domain.AgentRun{
 			ID: runID, TaskID: taskID, PromptID: promptID, Status: "running", Model: "m",
-			CreatorUserID: userID,
+			CreatorUserID:  userID,
+			BlueprintRunID: seedPgBlueprintRun(t, h, orgID, userID, taskID),
 		}); err != nil {
 			t.Fatalf("Create run: %v", err)
 		}
@@ -312,12 +340,13 @@ func TestAgentRunStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	`, taskA, orgA, alice, entityA, eventA); err != nil {
 		t.Fatalf("task: %v", err)
 	}
+	blueprintRunA := seedPgBlueprintRun(t, h, orgA, alice, taskA)
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO runs (id, org_id, task_id, team_id, prompt_id, status, model, creator_user_id, trigger_type)
+		INSERT INTO runs (id, org_id, task_id, team_id, prompt_id, status, model, creator_user_id, trigger_type, blueprint_run_id)
 		VALUES ($1, $2, $3,
 		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
-		        'p_rls_A', 'running', 'm', $4, 'manual')
-	`, runA, orgA, taskA, alice); err != nil {
+		        'p_rls_A', 'running', 'm', $4, 'manual', $5)
+	`, runA, orgA, taskA, alice, blueprintRunA); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	ctx := context.Background()
@@ -364,6 +393,9 @@ func TestAgentRunStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 				ID: newRunID, TaskID: taskA, PromptID: "p_rls_A",
 				Status: "running", Model: "m",
 				TriggerType: "manual", CreatorUserID: bob,
+				// Valid FK target in orgA so the rejection is the
+				// runs_insert WITH CHECK, not a missing blueprint_run.
+				BlueprintRunID: blueprintRunA,
 			})
 		})
 		pgtest.AssertRLSViolation(t, err)
@@ -434,7 +466,8 @@ func TestAgentRunStore_Postgres_Create_UnderAppPoolRLS(t *testing.T) {
 	eventRunID := uuid.New().String()
 	if err := stores.AgentRuns.Create(context.Background(), orgID, domain.AgentRun{
 		ID: eventRunID, TaskID: taskID, PromptID: "p_rls_test", Status: "running", Model: "m",
-		TriggerType: "event",
+		TriggerType:    "event",
+		BlueprintRunID: seedPgBlueprintRun(t, h, orgID, userID, taskID),
 		// CreatorUserID empty — CHECK requires NULL for event runs.
 	}); err != nil {
 		t.Fatalf("event-triggered Create under app-pool wiring: %v", err)
@@ -461,11 +494,13 @@ func TestAgentRunStore_Postgres_Create_UnderAppPoolRLS(t *testing.T) {
 	// the sentinel filter, the manual path lands with the real
 	// claimed user.
 	manualRunID := uuid.New().String()
+	manualBlueprintRun := seedPgBlueprintRun(t, h, orgID, userID, taskID)
 	if err := stores.Tx.WithTx(context.Background(), orgID, userID, func(tx db.TxStores) error {
 		return tx.AgentRuns.Create(context.Background(), orgID, domain.AgentRun{
 			ID: manualRunID, TaskID: taskID, PromptID: "p_rls_test", Status: "running", Model: "m",
-			TriggerType:   "manual",
-			CreatorUserID: runmode.LocalDefaultUserID, // the sentinel the pre-store spawner still passes
+			TriggerType:    "manual",
+			BlueprintRunID: manualBlueprintRun,
+			CreatorUserID:  runmode.LocalDefaultUserID, // the sentinel the pre-store spawner still passes
 		})
 	}); err != nil {
 		t.Fatalf("manual Create with sentinel under app-pool: %v", err)
@@ -544,10 +579,12 @@ func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.
 	// via Create at goroutine spawn time, before the goroutine
 	// reaches any of the lifecycle writes under test.
 	runID := uuid.New().String()
+	lcBlueprintRun := seedPgBlueprintRun(t, h, orgID, userID, taskID)
 	if err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		return tx.AgentRuns.Create(ctx, orgID, domain.AgentRun{
 			ID: runID, TaskID: taskID, PromptID: "p_lc_test", Status: "running", Model: "m",
 			TriggerType: "manual", CreatorUserID: userID,
+			BlueprintRunID: lcBlueprintRun,
 		})
 	}); err != nil {
 		t.Fatalf("seed run: %v", err)
@@ -650,6 +687,35 @@ func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.
 	if failed {
 		t.Errorf("MarkFailedIfActiveSystem on terminal row: flipped=true, want false (guard)")
 	}
+}
+
+// seedPgBlueprintRun mints a blueprint + blueprint_run pointed at the
+// given task so a standalone `runs` insert can satisfy the now NOT-NULL
+// runs.blueprint_run_id FK (→ blueprint_runs(id)). Mirrors the
+// conformance seeder's BlueprintRun, but exposed as a plain helper for
+// the RLS/cross-org tests that seed runs outside the conformance suite.
+// Postgres requires org_id on both rows; trigger_type='manual' also
+// requires a non-NULL creator_user_id (blueprint_runs_creator_matches_trigger_type
+// CHECK).
+func seedPgBlueprintRun(t *testing.T, h *pgtest.Harness, orgID, userID, taskID string) string {
+	t.Helper()
+	bpID := uuid.New().String()
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO blueprints (id, org_id, creator_user_id, team_id, name, source)
+		VALUES ($1, $2, $3,
+		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
+		        'Conformance BP', 'user')
+	`, bpID, orgID, userID); err != nil {
+		t.Fatalf("seed blueprint: %v", err)
+	}
+	brID := uuid.New().String()
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path)
+		VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt')
+	`, brID, orgID, userID, bpID, taskID); err != nil {
+		t.Fatalf("seed blueprint_run: %v", err)
+	}
+	return brID
 }
 
 // seedPgAgentRunPromptIn is a small variant that inserts a prompt

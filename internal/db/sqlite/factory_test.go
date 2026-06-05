@@ -115,10 +115,11 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 		Run: func(t *testing.T, taskID, status string) string {
 			t.Helper()
 			id := uuid.New().String()
+			blueprintRunID := seedBlueprintRunForRun(t, conn, taskID)
 			if _, err := conn.Exec(`
-				INSERT INTO runs (id, task_id, prompt_id, status, trigger_type)
-				VALUES (?, ?, ?, ?, 'manual')
-			`, id, taskID, factoryTestPromptID, status); err != nil {
+				INSERT INTO runs (id, task_id, prompt_id, status, trigger_type, blueprint_run_id)
+				VALUES (?, ?, ?, ?, 'manual', ?)
+			`, id, taskID, factoryTestPromptID, status, blueprintRunID); err != nil {
 				t.Fatalf("seed run: %v", err)
 			}
 			return id

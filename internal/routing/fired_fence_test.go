@@ -19,13 +19,14 @@ import (
 )
 
 // fenceStubDelegator mirrors the production spawner's event-path fence
-// (delegate.Spawner.Delegate → AgentRunStore.CreateIfNotFiredSystem,
-// SKY-424): it inserts a real run row fenced on (triggering_event_id,
-// trigger_id) and returns delegate.ErrAlreadyFired when the fence trips.
-// This lets the router integration tests exercise the real ErrAlreadyFired
-// handling in tryAutoDelegate without standing up a worktree + agent. A
-// manual call (TriggerType != "event") inserts unconditionally, matching
-// the spawner's manual branch.
+// (delegate.Spawner.Delegate → BlueprintStore.CreateRunIfNotFiredSystem): the
+// relocated replay fence lives on blueprint_runs, so it mints a blueprint_run
+// fenced on (triggering_event_id, trigger_id) + a linked run row, and returns
+// delegate.ErrAlreadyFired when the fence trips. This lets the router
+// integration tests exercise the real ErrAlreadyFired handling in
+// tryAutoDelegate without standing up a worktree + agent. A manual call
+// (TriggerType != "event") inserts unconditionally, matching the spawner's
+// manual branch.
 type fenceStubDelegator struct {
 	db    *sql.DB
 	calls int64
@@ -33,39 +34,7 @@ type fenceStubDelegator struct {
 
 func (s *fenceStubDelegator) Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error) {
 	atomic.AddInt64(&s.calls, 1)
-	runID := uuid.New().String()
-	// opts.ExplicitBlueprintID is a blueprint id; the run row's prompt_id FK
-	// needs a real prompt, so resolve the blueprint's first step prompt.
-	promptID := opts.ExplicitBlueprintID
-	if promptID != "" {
-		if steps, err := sqlitestore.New(s.db).Blueprints.ListSteps(context.Background(), runmode.LocalDefaultOrg, opts.ExplicitBlueprintID); err == nil && len(steps) > 0 {
-			promptID = steps[0].StepPromptID
-		}
-	}
-	run := domain.AgentRun{
-		ID:                runID,
-		TaskID:            task.ID,
-		PromptID:          promptID,
-		Status:            "running",
-		Model:             "stub",
-		TriggerType:       opts.TriggerType,
-		TriggerID:         opts.TriggerID,
-		TriggeringEventID: opts.TriggeringEventID,
-	}
-	if opts.TriggerType == "event" {
-		inserted, err := sqlitestore.New(s.db).AgentRuns.CreateIfNotFiredSystem(context.Background(), runmode.LocalDefaultOrg, run)
-		if err != nil {
-			return "", err
-		}
-		if !inserted {
-			return "", delegate.ErrAlreadyFired
-		}
-		return runID, nil
-	}
-	if err := sqlitestore.New(s.db).AgentRuns.Create(context.Background(), runmode.LocalDefaultOrg, run); err != nil {
-		return "", err
-	}
-	return runID, nil
+	return stubDelegateRun(s.db, task, opts)
 }
 
 func (s *fenceStubDelegator) Cancel(orgID, runID, userID string) error { return nil }
@@ -231,18 +200,40 @@ func TestDrainEntity_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
 	stub := &fenceStubDelegator{db: database}
 
-	// A run for (eventID, triggerID) already committed.
-	inserted, err := sqlitestore.New(database).AgentRuns.CreateIfNotFiredSystem(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
-		ID:                uuid.New().String(),
+	// A blueprint_run for (eventID, triggerID) already committed (the relocated
+	// fence's firing unit), plus its step run — the prior firing that the drain
+	// must detect as already-fired. Resolve the trigger's real blueprint id (the
+	// trigger seed remapped it to a wrapping blueprint).
+	var blueprintID string
+	if err := database.QueryRow(`SELECT blueprint_id FROM event_handlers WHERE id = ?`, triggerID).Scan(&blueprintID); err != nil {
+		t.Fatalf("resolve blueprint id: %v", err)
+	}
+	priorBlueprintRunID := uuid.New().String()
+	inserted, err := sqlitestore.New(database).Blueprints.CreateRunIfNotFiredSystem(t.Context(), runmode.LocalDefaultOrg, domain.BlueprintRun{
+		ID:                priorBlueprintRunID,
+		BlueprintID:       blueprintID,
 		TaskID:            taskID,
-		PromptID:          "p-drain",
-		Status:            "completed",
-		TriggerType:       "event",
+		TriggerType:       domain.BlueprintTriggerEvent,
 		TriggerID:         triggerID,
 		TriggeringEventID: eventID,
+		Status:            domain.BlueprintRunStatusRunning,
+		WorktreePath:      "/tmp/wt-prior",
 	})
 	if err != nil || !inserted {
-		t.Fatalf("seed prior run: inserted=%v err=%v", inserted, err)
+		t.Fatalf("seed prior blueprint_run: inserted=%v err=%v", inserted, err)
+	}
+	stepIdx := 0
+	if err := sqlitestore.New(database).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
+		ID:                 uuid.New().String(),
+		TaskID:             taskID,
+		PromptID:           "p-drain",
+		Status:             "completed",
+		TriggerType:        "event",
+		TriggerID:          triggerID,
+		BlueprintRunID:     priorBlueprintRunID,
+		BlueprintStepIndex: &stepIdx,
+	}); err != nil {
+		t.Fatalf("seed prior run: %v", err)
 	}
 
 	// Queue a firing carrying the same triggering event.

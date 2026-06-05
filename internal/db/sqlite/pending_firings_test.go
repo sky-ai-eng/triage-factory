@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
@@ -166,25 +165,25 @@ func newSQLitePendingFiringsSeeder(conn *sql.DB) dbtest.PendingFiringsSeeder {
 		}
 	}
 
-	// runForTask inserts a manual-trigger run row so MarkFired's
-	// fired_run_id FK to runs(id) is satisfied. The conformance
-	// suite doesn't probe gate semantics here — those live in
-	// AgentRunStore's own tests.
+	// runForTask inserts a blueprint + blueprint_run row so MarkFired's
+	// fired_run_id FK to blueprint_runs(id) is satisfied — the firing unit is
+	// the blueprint_run now. The conformance suite doesn't probe gate semantics
+	// here.
 	runForTask := func(t *testing.T, taskID string) string {
 		t.Helper()
-		runID := "r-" + uuid.New().String()[:8]
-		promptID := "p-run-" + runID
-		if _, err := conn.Exec(`INSERT INTO prompts (id, name, body, source, creator_user_id, team_id) VALUES (?, 'r', 'x', 'user', ?, ?)`,
-			promptID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
-			t.Fatalf("seed run prompt: %v", err)
+		bpID := "bp-pf-" + uuid.New().String()[:8]
+		if _, err := conn.Exec(`INSERT INTO blueprints (id, name, source, team_id, creator_user_id) VALUES (?, 'bp', 'user', ?, ?)`,
+			bpID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID); err != nil {
+			t.Fatalf("seed blueprint: %v", err)
 		}
+		brID := "bpr-pf-" + uuid.New().String()[:8]
 		if _, err := conn.Exec(`
-			INSERT INTO runs (id, task_id, prompt_id, trigger_type, status, started_at, creator_user_id)
-			VALUES (?, ?, ?, 'manual', 'running', ?, ?)
-		`, runID, taskID, promptID, time.Now(), runmode.LocalDefaultUserID); err != nil {
-			t.Fatalf("seed run: %v", err)
+			INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, worktree_path)
+			VALUES (?, ?, ?, 'manual', 'running', '/tmp/wt')
+		`, brID, bpID, taskID); err != nil {
+			t.Fatalf("seed blueprint_run: %v", err)
 		}
-		return runID
+		return brID
 	}
 
 	return dbtest.PendingFiringsSeeder{

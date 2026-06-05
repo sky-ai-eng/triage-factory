@@ -86,20 +86,35 @@ func TestMaterializePriorMemories_WritesPriors(t *testing.T) {
 		t.Fatalf("task: %v", err)
 	}
 	ensureTestPrompt(t, database, domain.Prompt{ID: "p1", Name: "T", Body: "x", Source: "user"})
+	// Every run belongs to a blueprint_run now, so the prior memory is
+	// namespaced by its blueprint_run_id. Seed that row (runs.blueprint_run_id is
+	// NOT NULL and the run_memory FK needs it).
+	const priorBlueprintRunID = "bpr-prior"
+	if err := stores.Blueprints.Create(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Blueprint{
+		ID: "bp-prior", Name: "BP", Source: "user", TeamID: runmode.LocalDefaultTeamID,
+	}); err != nil {
+		t.Fatalf("blueprint: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, worktree_path) VALUES (?, 'bp-prior', ?, 'manual', '/tmp/wt')`,
+		priorBlueprintRunID, task.ID,
+	); err != nil {
+		t.Fatalf("blueprint_run: %v", err)
+	}
 	if err := stores.AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
-		ID: "prior-run", TaskID: task.ID, PromptID: "p1", Status: "completed", Model: "m",
+		ID: "prior-run", TaskID: task.ID, PromptID: "p1", Status: "completed", Model: "m", BlueprintRunID: priorBlueprintRunID,
 	}); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if err := stores.TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrg, "prior-run", entity.ID, "", "what i did last time"); err != nil {
+	if err := stores.TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrg, "prior-run", entity.ID, priorBlueprintRunID, "what i did last time"); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
 
 	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrg, cwd, entity.ID, "current-run")
 
-	// prior-run had no blueprint run, so its namespace is its own id — the
-	// file lands under <run_id>/<run_id>.md, never at the top level.
-	priorPath := filepath.Join(cwd, "_scratch", "entity-memory", "prior-run", "prior-run.md")
+	// The prior's namespace is its blueprint_run_id — the file lands under
+	// <blueprint_run_id>/<run_id>.md, never at the top level.
+	priorPath := filepath.Join(cwd, "_scratch", "entity-memory", priorBlueprintRunID, "prior-run.md")
 	body, err := os.ReadFile(priorPath)
 	if err != nil {
 		t.Fatalf("expected materialized prior at %s: %v", priorPath, err)

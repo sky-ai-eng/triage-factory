@@ -25,6 +25,7 @@ func TestAgentRunStore_SQLite_LookupOrgForRunSystem_ReturnsSentinelOrgID(t *test
 	runID := "run-lookup-1"
 	if err := stores.AgentRuns.Create(context.Background(), runmode.LocalDefaultOrg, domain.AgentRun{
 		ID: runID, TaskID: taskID, PromptID: "p_agentrun_test", Status: "running", Model: "m",
+		BlueprintRunID: seeder.BlueprintRun(t, taskID),
 	}); err != nil {
 		t.Fatalf("create run: %v", err)
 	}

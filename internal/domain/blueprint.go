@@ -76,15 +76,24 @@ type BlueprintStep struct {
 // (A 1-step blueprint runs through the single-prompt path and produces no
 // BlueprintRun row.)
 type BlueprintRun struct {
-	ID            string               `json:"id"`
-	BlueprintID   string               `json:"blueprint_id"`
-	TaskID        string               `json:"task_id"`
-	TriggerType   BlueprintTriggerType `json:"trigger_type"`
-	TriggerID     string               `json:"trigger_id,omitempty"`
-	Status        BlueprintRunStatus   `json:"status"`
-	AbortReason   string               `json:"abort_reason,omitempty"`
-	AbortedAtStep *int                 `json:"aborted_at_step,omitempty"`
-	WorktreePath  string               `json:"worktree_path"`
-	StartedAt     time.Time            `json:"started_at"`
-	CompletedAt   *time.Time           `json:"completed_at,omitempty"`
+	ID          string               `json:"id"`
+	BlueprintID string               `json:"blueprint_id"`
+	TaskID      string               `json:"task_id"`
+	TriggerType BlueprintTriggerType `json:"trigger_type"`
+	TriggerID   string               `json:"trigger_id,omitempty"`
+	// TriggeringEventID is the event instance that fired this blueprint run,
+	// for event-triggered runs; empty for manual. Paired with TriggerID it
+	// drives the replay fence: the firing path mints the blueprint_run via
+	// CreateRunIfNotFiredSystem, whose (triggering_event_id, trigger_id) unique
+	// index returns ErrAlreadyFired on an at-least-once event replay. The
+	// blueprint_run is the firing unit, so the fence lives here rather than on
+	// the per-step runs. Forward-only provenance — not read back into the run
+	// projection.
+	TriggeringEventID string             `json:"triggering_event_id,omitempty"`
+	Status            BlueprintRunStatus `json:"status"`
+	AbortReason       string             `json:"abort_reason,omitempty"`
+	AbortedAtStep     *int               `json:"aborted_at_step,omitempty"`
+	WorktreePath      string             `json:"worktree_path"`
+	StartedAt         time.Time          `json:"started_at"`
+	CompletedAt       *time.Time         `json:"completed_at,omitempty"`
 }

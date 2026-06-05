@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -32,6 +33,30 @@ func newTestDB(t *testing.T) *sql.DB {
 		t.Fatalf("bootstrap schema: %v", err)
 	}
 	return database
+}
+
+// seedBlueprintRun mints a fresh blueprint + blueprint_run for taskID
+// and returns its id. runs.blueprint_run_id is NOT NULL, so every
+// seeded run needs a parent blueprint_run. SQLite blueprint_runs has no
+// org_id/creator_user_id columns; org_id on blueprints takes its
+// local-sentinel DEFAULT.
+func seedBlueprintRun(t *testing.T, database *sql.DB, taskID string) string {
+	t.Helper()
+	bpID := uuid.New().String()
+	if _, err := database.Exec(`
+		INSERT INTO blueprints (id, name, source, team_id, creator_user_id)
+		VALUES (?, 'Test BP', 'user', ?, ?)
+	`, bpID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("seed blueprint: %v", err)
+	}
+	brID := uuid.New().String()
+	if _, err := database.Exec(`
+		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, worktree_path)
+		VALUES (?, ?, ?, 'manual', 'running', '/tmp/wt')
+	`, brID, bpID, taskID); err != nil {
+		t.Fatalf("seed blueprint_run: %v", err)
+	}
+	return brID
 }
 
 // seedFooterRun installs the entity → event → task → prompt → run
@@ -67,6 +92,7 @@ func seedFooterRun(t *testing.T, database *sql.DB, fix runFooterFixture) {
 	if err := sqlitestore.New(database).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
 		ID: fix.ID, TaskID: task.ID, PromptID: "footer-test-prompt",
 		Status: "running", Model: fix.Model, StartedAt: fix.StartedAt,
+		BlueprintRunID: seedBlueprintRun(t, database, task.ID),
 	}); err != nil {
 		t.Fatalf("create run: %v", err)
 	}

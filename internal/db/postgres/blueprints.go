@@ -541,14 +541,14 @@ func (s *blueprintStore) createRunEventTriggered(ctx context.Context, orgID stri
 	triggerID, abortReason, completedAt := blueprintRunArgs(br)
 	if _, err := s.admin.ExecContext(ctx, `
 		INSERT INTO blueprint_runs
-			(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id,
+			(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
 			 status, worktree_path, abort_reason, completed_at, started_at)
 		VALUES (
 			$1, $2, NULL,
-			$3, $4, $5, $6,
-			$7, $8, $9, $10, now()
+			$3, $4, $5, $6, $7,
+			$8, $9, $10, $11, now()
 		)
-	`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, br.Status, br.WorktreePath, abortReason, completedAt); err != nil {
+	`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), br.Status, br.WorktreePath, abortReason, completedAt); err != nil {
 		return "", fmt.Errorf("insert blueprint_run (event): %w", err)
 	}
 	return br.ID, nil
@@ -558,18 +558,77 @@ func (s *blueprintStore) createRunManual(ctx context.Context, orgID string, br d
 	triggerID, abortReason, completedAt := blueprintRunArgs(br)
 	if _, err := s.app.ExecContext(ctx, `
 		INSERT INTO blueprint_runs
-			(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id,
+			(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
 			 status, worktree_path, abort_reason, completed_at, started_at)
 		VALUES (
 			$1, $2,
 			COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
-			$3, $4, $5, $6,
-			$7, $8, $9, $10, now()
+			$3, $4, $5, $6, $7,
+			$8, $9, $10, $11, now()
 		)
-	`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, br.Status, br.WorktreePath, abortReason, completedAt); err != nil {
+	`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), br.Status, br.WorktreePath, abortReason, completedAt); err != nil {
 		return "", fmt.Errorf("insert blueprint_run (manual): %w", err)
 	}
 	return br.ID, nil
+}
+
+// CreateRunIfNotFiredSystem is the event-path fenced insert (admin pool): ON
+// CONFLICT against blueprint_runs_event_trigger_fence makes a replayed
+// (triggering_event_id, trigger_id) a clean no-op (inserted=false).
+func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID string, br domain.BlueprintRun) (bool, error) {
+	if br.TriggeringEventID == "" || br.TriggerID == "" {
+		return false, db.ErrBlueprintRunFenceRequiresEventAndTrigger
+	}
+	if br.ID == "" {
+		br.ID = uuid.New().String()
+	}
+	if br.Status == "" {
+		br.Status = domain.BlueprintRunStatusRunning
+	}
+	res, err := s.admin.ExecContext(ctx, `
+		INSERT INTO blueprint_runs
+			(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
+			 status, worktree_path, started_at)
+		VALUES (
+			$1, $2, NULL,
+			$3, $4, 'event', $5, $6,
+			$7, $8, now()
+		)
+		ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
+	`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID, br.Status, br.WorktreePath)
+	if err != nil {
+		return false, fmt.Errorf("insert blueprint_run (fenced): %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (s *blueprintStore) SetRunWorktreePathSystem(ctx context.Context, orgID, id, worktreePath string) error {
+	_, err := s.admin.ExecContext(ctx,
+		`UPDATE blueprint_runs SET worktree_path = $3 WHERE org_id = $1 AND id = $2`, orgID, id, worktreePath)
+	return err
+}
+
+func (s *blueprintStore) ActiveRunForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error) {
+	if !isValidUUID(taskID) {
+		return nil, nil
+	}
+	var id string
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT id FROM blueprint_runs
+		WHERE org_id = $1 AND task_id = $2 AND status = 'running'
+		ORDER BY started_at DESC LIMIT 1
+	`, orgID, taskID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return getBlueprintRun(ctx, s.admin, orgID, id)
 }
 
 func blueprintRunArgs(br domain.BlueprintRun) (triggerID, abortReason, completedAt any) {

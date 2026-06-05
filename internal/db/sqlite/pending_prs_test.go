@@ -114,10 +114,11 @@ func newSQLitePendingPRSeeder(conn *sql.DB) dbtest.PendingPRSeeder {
 			`, taskID, entityID, eventID, time.Now().UTC(), runmode.LocalDefaultTeamID); err != nil {
 				t.Fatalf("seed task: %v", err)
 			}
+			blueprintRunID := seedBlueprintRunForRun(t, conn, taskID)
 			if _, err := conn.Exec(`
-				INSERT INTO runs (id, task_id, prompt_id, status, model, trigger_type, team_id)
-				VALUES (?, ?, 'p_pending_pr_test', 'running', 'm', 'manual', ?)
-			`, runID, taskID, runmode.LocalDefaultTeamID); err != nil {
+				INSERT INTO runs (id, task_id, prompt_id, status, model, trigger_type, team_id, blueprint_run_id)
+				VALUES (?, ?, 'p_pending_pr_test', 'running', 'm', 'manual', ?, ?)
+			`, runID, taskID, runmode.LocalDefaultTeamID, blueprintRunID); err != nil {
 				t.Fatalf("seed run: %v", err)
 			}
 			return runID

@@ -154,13 +154,31 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 		},
 		Run: func(t *testing.T, taskID, status string) string {
 			t.Helper()
-			id := uuid.New().String()
+			// runs.blueprint_run_id is NOT NULL — mint a 1-step blueprint_run for
+			// the task first (the firing unit), then link the run to it.
+			bpID := uuid.New().String()
 			if _, err := conn.Exec(`
-				INSERT INTO runs (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, trigger_type, status)
+				INSERT INTO blueprints (id, org_id, creator_user_id, team_id, source, name, created_at, updated_at)
 				VALUES ($1, $2, $3,
 				        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
-				        'team', $4, $5, 'manual', $6)
-			`, id, orgID, userID, taskID, promptID, status); err != nil {
+				        'user', 'BP', now(), now())
+			`, bpID, orgID, userID); err != nil {
+				t.Fatalf("seed blueprint: %v", err)
+			}
+			brID := uuid.New().String()
+			if _, err := conn.Exec(`
+				INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at)
+				VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt', now())
+			`, brID, orgID, userID, bpID, taskID); err != nil {
+				t.Fatalf("seed blueprint_run: %v", err)
+			}
+			id := uuid.New().String()
+			if _, err := conn.Exec(`
+				INSERT INTO runs (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, trigger_type, status, blueprint_run_id)
+				VALUES ($1, $2, $3,
+				        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
+				        'team', $4, $5, 'manual', $6, $7)
+			`, id, orgID, userID, taskID, promptID, status, brID); err != nil {
 				t.Fatalf("seed run: %v", err)
 			}
 			return id

@@ -107,9 +107,19 @@ func TestMigrationDefaults_MatchRuntimeConstants(t *testing.T) {
 					runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID); err != nil {
 					t.Fatalf("seed prompt: %v", err)
 				}
+				// runs.blueprint_run_id is NOT NULL — seed the blueprint chain.
+				if _, err := tx.Exec(`INSERT INTO blueprints (id, team_id, name, source, creator_user_id)
+				                      VALUES ('probe-bp-r', ?, 'bp', 'user', ?)`,
+					runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID); err != nil {
+					t.Fatalf("seed blueprint: %v", err)
+				}
+				if _, err := tx.Exec(`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, worktree_path)
+				                      VALUES ('probe-bp-run-r', 'probe-bp-r', 'probe-task-r', 'manual', 'running', '/tmp/wt')`); err != nil {
+					t.Fatalf("seed blueprint_run: %v", err)
+				}
 			},
-			probe: `INSERT INTO runs (id, task_id, prompt_id, trigger_type, creator_user_id)
-			        VALUES ('probe-run', 'probe-task-r', 'probe-prompt-r', 'manual', ?)`,
+			probe: `INSERT INTO runs (id, task_id, prompt_id, trigger_type, creator_user_id, blueprint_run_id)
+			        VALUES ('probe-run', 'probe-task-r', 'probe-prompt-r', 'manual', ?, 'probe-bp-run-r')`,
 			probeArgs:      []any{runmode.LocalDefaultUserID},
 			readBackQuery:  `SELECT org_id || '|' || team_id FROM runs WHERE id = 'probe-run'`,
 			readBackColumn: "org_id|team_id",

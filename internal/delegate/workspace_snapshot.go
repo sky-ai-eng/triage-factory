@@ -59,11 +59,10 @@ type snapshotManifest struct {
 }
 
 // snapshotKey is the storage key for a parked workspace's snapshot blob. keyID
-// is the blueprint_run_id for a blueprint step — so every step of one blueprint
-// shares the one workspace blob — or the run_id for a standalone run. It is
-// exactly the value memoryNamespace yields and the value the on-disk worktree
-// directory is named after, so the key, the namespace, and the dir name stay in
-// lockstep.
+// is the blueprint_run_id — every run is a blueprint step now, so every step of
+// one blueprint shares the one workspace blob. It is exactly the value
+// memoryNamespace yields and the value the on-disk worktree directory is named
+// after, so the key, the namespace, and the dir name stay in lockstep.
 func snapshotKey(orgID, keyID string) string {
 	return orgID + "/" + keyID + "/workspace.tar"
 }

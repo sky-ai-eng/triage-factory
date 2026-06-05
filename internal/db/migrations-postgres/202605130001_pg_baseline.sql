@@ -1254,7 +1254,7 @@ CREATE TABLE public.runs (
     num_turns integer,
     total_cost_usd real,
     actor_agent_id uuid,
-    blueprint_run_id uuid,
+    blueprint_run_id uuid NOT NULL,
     blueprint_step_index integer,
     triggering_event_id uuid,
     CONSTRAINT runs_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL)))),
@@ -2882,8 +2882,12 @@ ALTER TABLE ONLY public.pending_firings
 -- Name: pending_firings pending_firings_fired_run_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
+-- fired_run_id records the blueprint_run a firing produced (the firing unit is
+-- the blueprint_run now), so it references blueprint_runs, not runs — the
+-- spawner returns the blueprint_run id synchronously at fire time, before any
+-- step run row exists.
 ALTER TABLE ONLY public.pending_firings
-    ADD CONSTRAINT pending_firings_fired_run_id_org_id_fkey FOREIGN KEY (fired_run_id, org_id) REFERENCES public.runs(id, org_id);
+    ADD CONSTRAINT pending_firings_fired_run_id_org_id_fkey FOREIGN KEY (fired_run_id, org_id) REFERENCES public.blueprint_runs(id, org_id);
 
 
 --
@@ -5359,6 +5363,11 @@ CREATE TABLE public.blueprint_runs (
     task_id uuid NOT NULL,
     trigger_type text NOT NULL,
     trigger_id uuid,
+    -- triggering_event_id is the event instance that auto-fired this blueprint
+    -- run (NULL for manual). The blueprint_run is the firing unit, so the replay
+    -- fence (blueprint_runs_event_trigger_fence below) lives here, relocated off
+    -- runs. Step runs are not separately fenced (orchestrator-internal).
+    triggering_event_id uuid,
     status text DEFAULT 'running'::text NOT NULL,
     abort_reason text,
     aborted_at_step integer,
@@ -5389,7 +5398,11 @@ ALTER TABLE ONLY public.blueprint_runs
 CREATE INDEX idx_blueprint_steps_step_prompt ON public.blueprint_steps (step_prompt_id, org_id);
 CREATE INDEX idx_blueprint_runs_task   ON public.blueprint_runs (task_id, org_id);
 CREATE INDEX idx_blueprint_runs_status ON public.blueprint_runs (status) WHERE (status = 'running'::text);
-CREATE INDEX idx_runs_blueprint        ON public.runs (blueprint_run_id, blueprint_step_index) WHERE (blueprint_run_id IS NOT NULL);
+CREATE INDEX idx_runs_blueprint        ON public.runs (blueprint_run_id, blueprint_step_index);
+-- Replay fence (relocated from runs): one event firing one trigger materializes
+-- at most one blueprint_run. Partial WHERE triggering_event_id IS NOT NULL so
+-- manual blueprint runs (NULL) never participate.
+CREATE UNIQUE INDEX blueprint_runs_event_trigger_fence ON public.blueprint_runs (triggering_event_id, trigger_id) WHERE (triggering_event_id IS NOT NULL);
 
 ALTER TABLE ONLY public.blueprint_steps
     ADD CONSTRAINT blueprint_steps_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
@@ -5417,6 +5430,11 @@ ALTER TABLE ONLY public.blueprint_runs
     ADD CONSTRAINT blueprint_runs_task_fkey            FOREIGN KEY (task_id, org_id)         REFERENCES public.tasks(id, org_id);
 ALTER TABLE ONLY public.blueprint_runs
     ADD CONSTRAINT blueprint_runs_trigger_fkey         FOREIGN KEY (trigger_id, org_id)      REFERENCES public.event_handlers(id, org_id);
+-- Composite FK mirrors runs.triggering_event_id. NULL triggering_event_id
+-- (manual blueprint runs) skips the check; org_id is pinned so a cross-org
+-- event reference is impossible.
+ALTER TABLE ONLY public.blueprint_runs
+    ADD CONSTRAINT blueprint_runs_triggering_event_id_org_id_fkey FOREIGN KEY (triggering_event_id, org_id) REFERENCES public.events(id, org_id);
 
 ALTER TABLE ONLY public.runs
     ADD CONSTRAINT runs_blueprint_run_fkey FOREIGN KEY (blueprint_run_id, org_id) REFERENCES public.blueprint_runs(id, org_id);

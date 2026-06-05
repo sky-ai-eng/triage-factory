@@ -42,7 +42,7 @@ func TestEnsureWorkspace_WarmPath_NoRehydrate(t *testing.T) {
 	marker := filepath.Join(wtPath, "_scratch", "ci-logs", "warm-marker.txt")
 	writeFile(t, marker, "warm")
 
-	run := &domain.AgentRun{ID: runID, WorktreePath: wtPath}
+	run := &domain.AgentRun{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
 	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrg, run, owner, repo, "")
 	if err != nil {
 		t.Fatalf("ensureWorkspace (warm): %v", err)
@@ -109,7 +109,7 @@ func TestEnsureWorkspace_ColdPath_RehydratesFromSnapshot(t *testing.T) {
 	gitT(t, bareDir, "worktree", "prune")
 	gitT(t, bareDir, "branch", "-D", "feature")
 
-	run := &domain.AgentRun{ID: runID, WorktreePath: wtPath}
+	run := &domain.AgentRun{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
 	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrg, run, owner, repo, "")
 	if err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
@@ -169,7 +169,7 @@ func TestEnsureWorkspace_ColdPath_DetachedHead(t *testing.T) {
 	gitT(t, bareDir, "worktree", "prune")
 	gitT(t, bareDir, "branch", "-D", "feature")
 
-	run := &domain.AgentRun{ID: runID, WorktreePath: wtPath}
+	run := &domain.AgentRun{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
 	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrg, run, owner, repo, "")
 	if err != nil {
 		t.Fatalf("ensureWorkspace (detached): %v", err)
@@ -218,7 +218,7 @@ func TestEnsureWorkspace_ColdPath_NeverPushedBranchNoCommits(t *testing.T) {
 	gitT(t, bareDir, "worktree", "prune")
 	gitT(t, bareDir, "branch", "-D", "feature")
 
-	run := &domain.AgentRun{ID: runID, WorktreePath: wtPath}
+	run := &domain.AgentRun{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
 	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrg, run, owner, repo, "")
 	if err != nil {
 		t.Fatalf("ensureWorkspace (never-pushed branch): %v", err)

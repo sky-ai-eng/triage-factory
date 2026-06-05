@@ -32,7 +32,8 @@ func seedYieldedRun(t *testing.T, s *Server, req *domain.YieldRequest) string {
 		t.Fatalf("prompt: %v", err)
 	}
 	runID := "run-yielded"
-	if err := sqlitestore.New(s.db).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{ID: runID, TaskID: task.ID, PromptID: "p", Status: "running", Model: "m"}); err != nil {
+	blueprintRunID := seedBlueprintRunSQLite(t, s.db, task.ID)
+	if err := sqlitestore.New(s.db).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{ID: runID, TaskID: task.ID, PromptID: "p", Status: "running", Model: "m", BlueprintRunID: blueprintRunID}); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if _, err := sqlitestore.New(s.db).AgentRuns.InsertYieldRequest(t.Context(), runmode.LocalDefaultOrg, runID, req); err != nil {

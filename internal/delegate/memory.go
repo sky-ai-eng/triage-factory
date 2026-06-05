@@ -28,17 +28,17 @@ import (
 const maxCompletionRetries = 3
 
 // memoryNamespace is the folder under _scratch/entity-memory/ that groups a
-// run's memory file. It's the blueprint_run_id when the run belongs to a
-// blueprint run — so every step of one workflow shares a folder and step N+1
-// reads step N's memory as its handoff — else the run's own id (the N=1 case,
-// until blueprint_run becomes universal). Both the write path (the agent's own
+// run's memory file: the blueprint_run_id its run belongs to, so every step of
+// one blueprint shares a folder and step N+1 reads step N's memory as its
+// handoff. Every run is a blueprint step now (a single prompt is a 1-step
+// blueprint), so there is no run-id fallback — the value is always the
+// blueprint_run_id. The runID arg is retained so call sites read uniformly and a
+// future change can't silently mis-key. Both the write path (the agent's own
 // file) and the read path (materialized priors) resolve through this, so the
 // tree is uniformly foldered with no top-level .md files.
 func memoryNamespace(blueprintRunID, runID string) string {
-	if blueprintRunID != "" {
-		return blueprintRunID
-	}
-	return runID
+	_ = runID
+	return blueprintRunID
 }
 
 // memoryFileExists returns true iff the agent wrote

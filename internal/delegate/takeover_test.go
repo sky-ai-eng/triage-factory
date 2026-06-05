@@ -47,9 +47,33 @@ func newTakeoverTestDB(t *testing.T) *sql.DB {
 	return database
 }
 
+// seedRunBlueprint mints a blueprint + blueprint_run for taskID and returns the
+// blueprint_run id, so run fixtures can satisfy runs.blueprint_run_id NOT NULL.
+// The suffix keeps ids unique + deterministic per fixture; the ids are distinct
+// from makeRunBlueprintStep's ("bp-"/"bpr-") so a test can re-point a run onto a
+// specific blueprint_run without colliding with the one seedRun attached.
+func seedRunBlueprint(t *testing.T, database *sql.DB, suffix, taskID string) string {
+	t.Helper()
+	bpID := "seedbp-" + suffix
+	if err := sqlitestore.New(database).Blueprints.Create(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Blueprint{
+		ID: bpID, Name: bpID, Source: "user", TeamID: runmode.LocalDefaultTeamID,
+	}); err != nil {
+		t.Fatalf("seed blueprint: %v", err)
+	}
+	brID := "seedbpr-" + suffix
+	if _, err := database.Exec(
+		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, worktree_path) VALUES (?, ?, ?, 'manual', ?)`,
+		brID, bpID, taskID, "/tmp/wt-"+brID); err != nil {
+		t.Fatalf("seed blueprint_run: %v", err)
+	}
+	return brID
+}
+
 // seedRun inserts a run with the requested fields and returns its ID.
 // We bypass the spawner's Delegate flow because the validation tests
-// don't need a real goroutine — only a row in the runs table.
+// don't need a real goroutine — only a row in the runs table. Every run is a
+// blueprint step now (runs.blueprint_run_id NOT NULL), so it mints a 1-step
+// blueprint_run and links the run to it.
 func seedRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath string) {
 	t.Helper()
 	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#"+runID, "pr", "T", "https://example.com/"+runID)
@@ -69,13 +93,17 @@ func seedRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath stri
 		t.Fatalf("create task: %v", err)
 	}
 	ensureTestPrompt(t, database, domain.Prompt{ID: "test-prompt", Name: "T", Body: "x", Source: "user"})
+	brID := seedRunBlueprint(t, database, runID, task.ID)
+	stepIdx := 0
 	if err := sqlitestore.New(database).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
-		ID:           runID,
-		TaskID:       task.ID,
-		PromptID:     "test-prompt",
-		Status:       "running",
-		Model:        "claude-sonnet-4-6",
-		WorktreePath: worktreePath,
+		ID:                 runID,
+		TaskID:             task.ID,
+		PromptID:           "test-prompt",
+		Status:             "running",
+		Model:              "claude-sonnet-4-6",
+		WorktreePath:       worktreePath,
+		BlueprintRunID:     brID,
+		BlueprintStepIndex: &stepIdx,
 	}); err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -106,9 +134,12 @@ func seedJiraRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath 
 		t.Fatalf("create task: %v", err)
 	}
 	ensureTestPrompt(t, database, domain.Prompt{ID: "test-prompt", Name: "T", Body: "x", Source: "user"})
+	brID := seedRunBlueprint(t, database, runID, task.ID)
+	stepIdx := 0
 	if err := sqlitestore.New(database).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
 		ID: runID, TaskID: task.ID, PromptID: "test-prompt",
 		Status: "running", Model: "claude-sonnet-4-6", WorktreePath: worktreePath,
+		BlueprintRunID: brID, BlueprintStepIndex: &stepIdx,
 	}); err != nil {
 		t.Fatalf("create run: %v", err)
 	}

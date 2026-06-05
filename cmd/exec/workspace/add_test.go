@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -88,6 +89,30 @@ func newTestDB(t *testing.T) (db.Stores, *db.DB) {
 	return sqlitestore.New(conn), &db.DB{Conn: conn}
 }
 
+// seedBlueprintRun mints a fresh blueprint + blueprint_run for taskID
+// and returns its id. runs.blueprint_run_id is NOT NULL, so every
+// seeded run needs a parent blueprint_run. SQLite blueprint_runs has no
+// org_id/creator_user_id columns; org_id on blueprints takes its
+// local-sentinel DEFAULT.
+func seedBlueprintRun(t *testing.T, conn *sql.DB, taskID string) string {
+	t.Helper()
+	bpID := uuid.New().String()
+	if _, err := conn.Exec(`
+		INSERT INTO blueprints (id, name, source, team_id, creator_user_id)
+		VALUES (?, 'Test BP', 'user', ?, ?)
+	`, bpID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("seed blueprint: %v", err)
+	}
+	brID := uuid.New().String()
+	if _, err := conn.Exec(`
+		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, worktree_path)
+		VALUES (?, ?, ?, 'manual', 'running', '/tmp/wt')
+	`, brID, bpID, taskID); err != nil {
+		t.Fatalf("seed blueprint_run: %v", err)
+	}
+	return brID
+}
+
 func seedJiraRun(t *testing.T, database *db.DB, runID, issueKey string) {
 	t.Helper()
 	entity, _, err := sqlitestore.New(database.Conn).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", issueKey, "issue", "T-"+issueKey, "https://x/"+issueKey)
@@ -112,6 +137,7 @@ func seedJiraRun(t *testing.T, database *db.DB, runID, issueKey string) {
 	if err := sqlitestore.New(database.Conn).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
 		ID: runID, TaskID: task.ID, PromptID: "p-" + runID,
 		Status: "running", Model: "m",
+		BlueprintRunID: seedBlueprintRun(t, database.Conn, task.ID),
 	}); err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -141,6 +167,7 @@ func seedGitHubRun(t *testing.T, database *db.DB, runID string) {
 	if err := sqlitestore.New(database.Conn).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
 		ID: runID, TaskID: task.ID, PromptID: "p-" + runID,
 		Status: "running", Model: "m",
+		BlueprintRunID: seedBlueprintRun(t, database.Conn, task.ID),
 	}); err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -785,7 +812,8 @@ func seedEventTriggeredJiraRun(t *testing.T, database *db.DB, runID, issueKey st
 	if err := sqlitestore.New(database.Conn).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
 		ID: runID, TaskID: task.ID, PromptID: "p-" + runID,
 		Status: "running", Model: "m",
-		TriggerType: "event",
+		TriggerType:    "event",
+		BlueprintRunID: seedBlueprintRun(t, database.Conn, task.ID),
 	}); err != nil {
 		t.Fatalf("run: %v", err)
 	}

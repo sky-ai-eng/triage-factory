@@ -437,123 +437,81 @@ func (s *Spawner) updateStatus(orgID, runID, status string) {
 		log.Printf("[delegate] warning: failed to update status for run %s: %v", runID, err)
 	}
 	s.broadcastRunUpdate(orgID, runID, status)
-	// Transient progress states never close a task; pass an empty outcome.
-	s.advanceTaskFromRunStatus(orgID, runID, status, "")
+	// Board placement is no longer mirrored per-run from transient status here:
+	// the blueprint orchestrator drives the aggregate column via
+	// recomputeTaskBoardColumn at its transition points (blueprint start, step
+	// start, park, resume). updateStatus stays a pure run-status + WS helper.
 }
 
-// advanceTaskFromRunStatus is SKY-330's bot-side auto-progression:
-// when a bot-claimed task's run transitions through lifecycle
-// stages, mirror the change onto the task's status so the board
-// column placement follows the work. User-claimed tasks transition
-// manually — this helper short-circuits on non-bot claims.
+// recomputeTaskBoardColumn is the blueprint-era board placement rule: a task's
+// live column (tasks.status) is a recomputed aggregate over its active
+// blueprint_run's step runs, never a mirror of one run. For a bot-claimed task
+// with an active blueprint_run it sets in_review ("needs 👀") if any of that
+// run's runs is parked (awaiting_input OR pending_approval — one column for both
+// human-interaction points), else in_progress, writing tasks.status only when it
+// changes and pushing a WS nudge so peer boards follow.
 //
-// Mapping:
-//   - any active stage (initializing/cloning/fetching/.../running) → in_progress
-//   - pending_approval                                              → in_review
-//   - completed                                                     → done (close_reason=run_completed)
-//   - failed / cancelled / task_unsolvable / taken_over             → no transition (user decides)
+// Terminal columns are NOT owned here — terminateBlueprint closes the task
+// (done) on a clean finish and leaves it open for attention on abort/fail. This
+// helper deliberately no-ops when there is no active blueprint_run.
 //
-// All failures here are logged-not-fatal — the run state has already
-// been persisted and broadcast; failing the task transition would
-// leave the system in a recoverable state (next poll / next event
-// reconciles).
-// outcome is the parsed terminal-envelope outcome (empty for transient
-// states): an `abort` completion suppresses the close so the task stays open
-// for a human, parity with processCompletion's inline disposition — a run can
-// complete (status='completed') while deliberately leaving its task open.
-func (s *Spawner) advanceTaskFromRunStatus(orgID, runID, runStatus, outcome string) {
-	if s.tasks == nil {
-		return
-	}
-	if s.isBlueprintRunID(runID) {
-		return
-	}
-	target, isClose := targetTaskStatusForRunStatus(runStatus)
-	if target == "" {
-		return
-	}
-	// abort completes the run but leaves the task open — never close on it.
-	if isClose && outcome == string(domain.RunOutcomeAbort) {
+// The rule has no step-count gate: a 1-step and a multi-step blueprint move
+// identically, bouncing in_progress ↔ in_review across however many
+// human-interaction points the blueprint has, and the aggregate-over-runs shape
+// is parallel-ready by construction (more concurrent runs just feed it). Takeover
+// is column-neutral: it flips the claim to the user, so the bot-claim guard below
+// short-circuits and the column doesn't move.
+//
+// All failures are logged-not-fatal — the run state is already persisted and
+// broadcast; a failed board write leaves a recoverable state the next transition
+// reconciles.
+func (s *Spawner) recomputeTaskBoardColumn(orgID, taskID string) {
+	if s.tasks == nil || s.blueprints == nil {
 		return
 	}
 	ctx := context.Background()
-	run, err := s.agentRuns.GetSystem(ctx, orgID, runID)
-	if err != nil || run == nil || run.TaskID == "" {
-		return
-	}
-	// Chain step: the chain orchestrator owns task lifecycle (it
-	// closes the task only when the chain itself terminates). A
-	// pending_approval / completed mid-chain step must not flip the
-	// task to in_review / done — the next step is about to run.
-	// processCompletion's inline 'completed' path has the same
-	// guard at run.go:435.
-	if run.BlueprintRunID != "" {
-		return
-	}
-	task, err := s.tasks.GetSystem(ctx, orgID, run.TaskID)
+	task, err := s.tasks.GetSystem(ctx, orgID, taskID)
 	if err != nil || task == nil {
 		return
 	}
-	// Only mirror onto bot-claimed tasks. A user takeover may have
-	// flipped the claim while this run was in flight; in that case
-	// the user owns the lifecycle and we leave their card alone.
+	// Only place bot-claimed tasks. A user takeover flips the claim to the user,
+	// who owns the lifecycle from then on — leave their card alone.
 	if task.ClaimedByAgentID == "" {
 		return
 	}
-	// Idempotent: skip the write (and the WS broadcast) when the
-	// task is already at the target state. Prevents repeat updateStatus
-	// calls for the same run state from flooding the bus.
-	if task.Status == target {
-		return
-	}
-	// Terminal-already check: a closed task should never re-open
-	// based on a late run event. Run completions that arrive after
-	// a user-driven close are silently ignored.
+	// A closed/dismissed task is terminal — a late transition must not reopen it.
 	if task.Status == "done" || task.Status == "dismissed" {
 		return
 	}
-	// Re-delegation guard: if a newer active run exists for the
-	// same task (the user re-delegated while this run was in flight),
-	// an older run reaching pending_approval / completed must not
-	// flip the task — the newer run is still working. processCompletion's
-	// inline 'completed' path at run.go:438 has the same check; the
-	// helper mirrors it so the two paths don't drift. Active-stage
-	// targets (in_progress) are idempotent against the newer run's
-	// own writes so the guard is harmless there too.
-	hasOtherActive, _ := s.agentRuns.HasOtherActiveRunForTaskSystem(ctx, orgID, task.ID, runID)
-	if hasOtherActive {
+	// The active blueprint_run is the unit the board tracks. None → no live work
+	// to place; the terminal column belongs to terminateBlueprint, so leave the
+	// task as-is. When the task was re-delegated, the latest running blueprint_run
+	// drives the column, so a stale older run's transitions resolve against the
+	// newer run's state rather than clobbering it.
+	br, err := s.blueprints.ActiveRunForTaskSystem(ctx, orgID, taskID)
+	if err != nil || br == nil {
 		return
 	}
-	if isClose {
-		if err := s.tasks.CloseSystem(ctx, orgID, task.ID, "run_completed", ""); err != nil {
-			log.Printf("[delegate] warning: failed to close task %s for completed run %s: %v", task.ID, runID, err)
-			return
-		}
-	} else {
-		if err := s.tasks.SetStatusSystem(ctx, orgID, task.ID, target); err != nil {
-			log.Printf("[delegate] warning: failed to advance task %s to %q for run %s: %v", task.ID, target, runID, err)
-			return
+	runs, err := s.blueprints.RunsForBlueprintSystem(ctx, orgID, br.ID)
+	if err != nil {
+		return
+	}
+	target := "in_progress"
+	for _, r := range runs {
+		if r.Status == "awaiting_input" || r.Status == "pending_approval" {
+			target = "in_review"
+			break
 		}
 	}
-	s.broadcastTaskUpdate(orgID, task.ID, target)
-}
-
-// targetTaskStatusForRunStatus returns the task status a given run
-// status should produce, plus whether the transition is a close
-// (callers route to Close for the close_reason metadata). Empty
-// target means no transition (e.g. failed, cancelled — user picks
-// next step).
-func targetTaskStatusForRunStatus(runStatus string) (target string, isClose bool) {
-	switch runStatus {
-	case "initializing", "cloning", "fetching", "worktree_created", "agent_starting", "running":
-		return "in_progress", false
-	case "pending_approval":
-		return "in_review", false
-	case "completed":
-		return "done", true
-	default:
-		return "", false
+	// Idempotent: skip the write + WS broadcast when already at the target.
+	if task.Status == target {
+		return
 	}
+	if err := s.tasks.SetStatusSystem(ctx, orgID, taskID, target); err != nil {
+		log.Printf("[delegate] warning: failed to set board column %q for task %s: %v", target, taskID, err)
+		return
+	}
+	s.broadcastTaskUpdate(orgID, taskID, target)
 }
 
 // broadcastTaskUpdate emits a SKY-330 task_updated WS event so the

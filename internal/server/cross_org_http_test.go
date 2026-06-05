@@ -180,16 +180,46 @@ func seedRunInOrg(t *testing.T, r *authRig, orgID, userID uuid.UUID, suffix stri
 	`, promptID, orgID, userID, promptID); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}
+	blueprintRunID := seedBlueprintRunInOrg(t, r, orgID, userID, taskID)
 	runID := uuid.NewString()
 	if _, err := r.h.AdminDB.Exec(`
-		INSERT INTO runs (id, org_id, task_id, team_id, prompt_id, status, model, creator_user_id, trigger_type)
+		INSERT INTO runs (id, org_id, task_id, team_id, prompt_id, status, model, creator_user_id, trigger_type, blueprint_run_id)
 		VALUES ($1, $2, $3,
 		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
-		        $4, 'running', 'm', $5, 'manual')
-	`, runID, orgID, taskID, promptID, userID); err != nil {
+		        $4, 'running', 'm', $5, 'manual', $6)
+	`, runID, orgID, taskID, promptID, userID, blueprintRunID); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	return runID
+}
+
+// seedBlueprintRunInOrg mints a blueprint + manual blueprint_run for the
+// given task in the given org via the admin pool, returning the
+// blueprint_run id. runs.blueprint_run_id is NOT NULL and FKs
+// blueprint_runs(id, org_id), so every multi-tenant run fixture needs a
+// parent blueprint_run first. Manual trigger_type requires
+// creator_user_id NOT NULL (blueprint_runs_creator_matches_trigger_type).
+// The blueprint and blueprint_run inherit the task's team (first team in
+// the org), matching how seedTaskInOrg / seedRunInOrg resolve team_id.
+func seedBlueprintRunInOrg(t *testing.T, r *authRig, orgID, userID uuid.UUID, taskID string) string {
+	t.Helper()
+	blueprintID := uuid.NewString()
+	if _, err := r.h.AdminDB.Exec(`
+		INSERT INTO blueprints (id, org_id, creator_user_id, team_id, name, source)
+		VALUES ($1, $2, $3,
+		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
+		        'cross-org seed blueprint', 'user')
+	`, blueprintID, orgID, userID); err != nil {
+		t.Fatalf("seed blueprint: %v", err)
+	}
+	blueprintRunID := uuid.NewString()
+	if _, err := r.h.AdminDB.Exec(`
+		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path)
+		VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt-test')
+	`, blueprintRunID, orgID, userID, blueprintID, taskID); err != nil {
+		t.Fatalf("seed blueprint_run: %v", err)
+	}
+	return blueprintRunID
 }
 
 // postWithSid fires a POST with the sid cookie + same-origin Origin

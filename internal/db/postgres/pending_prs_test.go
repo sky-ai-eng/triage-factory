@@ -275,9 +275,25 @@ func newPgPendingPRSeeder(h *pgtest.Harness, stores db.Stores, orgID, userID, pr
 			`, taskID, orgID, userID, entityID, eventID); err != nil {
 				t.Fatalf("seed task: %v", err)
 			}
+			// runs.blueprint_run_id is NOT NULL — mint a 1-step blueprint_run.
+			bpID := uuid.New().String()
+			if _, err := conn.Exec(`
+				INSERT INTO blueprints (id, org_id, creator_user_id, team_id, source, name, created_at, updated_at)
+				VALUES ($1, $2, $3, (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1), 'user', 'BP', now(), now())
+			`, bpID, orgID, userID); err != nil {
+				t.Fatalf("seed blueprint: %v", err)
+			}
+			brID := uuid.New().String()
+			if _, err := conn.Exec(`
+				INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at)
+				VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt', now())
+			`, brID, orgID, userID, bpID, taskID); err != nil {
+				t.Fatalf("seed blueprint_run: %v", err)
+			}
 			if err := stores.AgentRuns.Create(context.Background(), orgID, domain.AgentRun{
 				ID: runID, TaskID: taskID, PromptID: promptID,
 				Status: "running", Model: "m", CreatorUserID: userID,
+				BlueprintRunID: brID,
 			}); err != nil {
 				t.Fatalf("seed run: %v", err)
 			}

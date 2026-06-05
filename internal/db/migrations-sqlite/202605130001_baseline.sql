@@ -840,9 +840,11 @@ CREATE TABLE runs (
                        CHECK (visibility IN ('private','team','org')),
     actor_agent_id  TEXT REFERENCES agents(id) ON DELETE SET NULL,
     -- blueprint_run_id / blueprint_step_index link a step run back to its
-    -- parent multi-step blueprint instance. NULL on 1-step blueprint runs.
-    -- See the Blueprints section below for the parent table.
-    blueprint_run_id     TEXT REFERENCES blueprint_runs(id),
+    -- parent blueprint instance. NOT NULL: every run is a step of a
+    -- blueprint_run now (a single prompt is a 1-step blueprint), so the
+    -- execution model is uniform and the per-run namespace/workspace keys
+    -- never fall back to the run id. See the Blueprints section below.
+    blueprint_run_id     TEXT NOT NULL REFERENCES blueprint_runs(id),
     blueprint_step_index INTEGER,
     -- triggering_event_id is the event instance that auto-fired this run
     -- (SKY-424). NULL for manual runs and blueprint-step runs. The
@@ -920,6 +922,14 @@ CREATE TABLE blueprint_runs (
     task_id         TEXT NOT NULL REFERENCES tasks(id),
     trigger_type    TEXT NOT NULL DEFAULT 'manual',
     trigger_id      TEXT REFERENCES event_handlers(id),
+    -- triggering_event_id is the event instance that auto-fired this blueprint
+    -- run. NULL for manual runs. The blueprint_run is the firing unit, so the
+    -- replay fence lives here (relocated off runs): the
+    -- blueprint_runs_event_trigger_fence partial unique index below makes
+    -- (triggering_event_id, trigger_id) at-most-once, so a replayed event under
+    -- the at-least-once router queue can't mint a second blueprint_run. Step
+    -- runs are not separately fenced (orchestrator-internal).
+    triggering_event_id TEXT REFERENCES events(id),
     -- 'running' | 'completed' | 'aborted' | 'failed' | 'cancelled'
     status          TEXT NOT NULL DEFAULT 'running',
     abort_reason    TEXT,
@@ -930,6 +940,10 @@ CREATE TABLE blueprint_runs (
 );
 CREATE INDEX idx_blueprint_runs_task   ON blueprint_runs(task_id);
 CREATE INDEX idx_blueprint_runs_status ON blueprint_runs(status);
+-- Replay fence (relocated from runs): one event firing one trigger materializes
+-- at most one blueprint_run. Partial WHERE triggering_event_id IS NOT NULL so
+-- manual blueprint runs (NULL) never participate.
+CREATE UNIQUE INDEX blueprint_runs_event_trigger_fence ON blueprint_runs (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL;
 
 -- === Task <-> event mapping + firing queue ===============================
 CREATE TABLE task_events (
@@ -953,7 +967,12 @@ CREATE TABLE pending_firings (
     skip_reason         TEXT,
     queued_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     drained_at          DATETIME,
-    fired_run_id        TEXT REFERENCES runs(id),
+    -- fired_run_id records the blueprint_run a firing produced. The firing unit
+    -- is the blueprint_run now (every delegation mints one before any step run
+    -- exists), so this references blueprint_runs(id), not runs(id) — the
+    -- spawner returns the blueprint_run id synchronously at fire time, long
+    -- before the first step run row is created.
+    fired_run_id        TEXT REFERENCES blueprint_runs(id),
     org_id              TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'
 );
 CREATE INDEX        idx_pending_firings_entity_pending ON pending_firings(entity_id, queued_at) WHERE status = 'pending';

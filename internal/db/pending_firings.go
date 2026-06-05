@@ -55,10 +55,11 @@ type PendingFiringsStore interface {
 	// observe and double-fire the same row).
 	PopForEntity(ctx context.Context, orgID, entityID string) (*domain.PendingFiring, error)
 
-	// MarkFired transitions a pending firing to 'fired' and records
-	// the run that resulted from it. Guarded by status='pending' so a
-	// duplicate drain that lost the per-entity mutex race can't flip
-	// a terminal row.
+	// MarkFired transitions a pending firing to 'fired' and records the
+	// blueprint_run that resulted from it (runID is a blueprint_run id — the
+	// firing unit — which fired_run_id FKs to blueprint_runs). Guarded by
+	// status='pending' so a duplicate drain that lost the per-entity mutex race
+	// can't flip a terminal row.
 	MarkFired(ctx context.Context, orgID string, firingID int64, runID string) error
 
 	// MarkSkipped transitions a pending firing to 'skipped_stale'

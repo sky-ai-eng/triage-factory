@@ -3,12 +3,12 @@ package routing
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -35,28 +35,63 @@ func (s *stubDelegator) Delegate(task domain.Task, opts delegate.DelegateOpts) (
 	s.mu.Lock()
 	s.lastTaskTeamID = teamIDValue(&task)
 	s.mu.Unlock()
-	runID := fmt.Sprintf("stub-run-%d", time.Now().UnixNano())
+	return stubDelegateRun(s.db, task, opts)
+}
+
+// stubDelegateRun mirrors the production Delegate path for the router tests: it
+// mints a blueprint_run (fenced on (triggering_event_id, trigger_id) for event
+// triggers — the relocated replay fence) and a linked run row (runs.blueprint_run_id
+// is NOT NULL). Returns the blueprint_run id, or delegate.ErrAlreadyFired when an
+// event replay trips the fence. No worktree/agent is stood up — only the DB rows
+// the router's ErrAlreadyFired + run-count assertions read.
+func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateOpts) (string, error) {
+	store := sqlitestore.New(database)
 	// opts.ExplicitBlueprintID is a blueprint id; the run row's prompt_id FK
 	// needs a real prompt, so resolve the blueprint's first step prompt.
 	promptID := opts.ExplicitBlueprintID
 	if promptID != "" {
-		if steps, err := sqlitestore.New(s.db).Blueprints.ListSteps(context.Background(), runmode.LocalDefaultOrg, opts.ExplicitBlueprintID); err == nil && len(steps) > 0 {
+		if steps, err := store.Blueprints.ListSteps(context.Background(), runmode.LocalDefaultOrg, opts.ExplicitBlueprintID); err == nil && len(steps) > 0 {
 			promptID = steps[0].StepPromptID
 		}
 	}
-	if err := sqlitestore.New(s.db).AgentRuns.Create(context.Background(), runmode.LocalDefaultOrg, domain.AgentRun{
-		ID:            runID,
-		TaskID:        task.ID,
-		PromptID:      promptID,
-		Status:        "running",
-		Model:         "stub",
-		TriggerType:   opts.TriggerType,
-		TriggerID:     opts.TriggerID,
-		CreatorUserID: opts.CreatorUserID,
+	brID := uuid.New().String()
+	br := domain.BlueprintRun{
+		ID:                brID,
+		BlueprintID:       opts.ExplicitBlueprintID,
+		TaskID:            task.ID,
+		TriggerType:       domain.BlueprintTriggerType(opts.TriggerType),
+		TriggerID:         opts.TriggerID,
+		TriggeringEventID: opts.TriggeringEventID,
+		Status:            domain.BlueprintRunStatusRunning,
+		WorktreePath:      "/tmp/wt-" + brID,
+	}
+	if opts.TriggerType == "event" {
+		inserted, err := store.Blueprints.CreateRunIfNotFiredSystem(context.Background(), runmode.LocalDefaultOrg, br)
+		if err != nil {
+			return "", err
+		}
+		if !inserted {
+			return "", delegate.ErrAlreadyFired
+		}
+	} else if _, err := store.Blueprints.CreateRun(context.Background(), runmode.LocalDefaultOrg, br); err != nil {
+		return "", err
+	}
+	stepIdx := 0
+	if err := store.AgentRuns.Create(context.Background(), runmode.LocalDefaultOrg, domain.AgentRun{
+		ID:                 uuid.New().String(),
+		TaskID:             task.ID,
+		PromptID:           promptID,
+		Status:             "running",
+		Model:              "stub",
+		TriggerType:        opts.TriggerType,
+		TriggerID:          opts.TriggerID,
+		CreatorUserID:      opts.CreatorUserID,
+		BlueprintRunID:     brID,
+		BlueprintStepIndex: &stepIdx,
 	}); err != nil {
 		return "", err
 	}
-	return runID, nil
+	return brID, nil
 }
 
 func (s *stubDelegator) Cancel(orgID, runID, userID string) error { return nil }

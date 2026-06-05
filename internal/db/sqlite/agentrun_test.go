@@ -129,6 +129,29 @@ func newSQLiteAgentRunSeeder(conn *sql.DB) dbtest.AgentRunSeeder {
 			}
 			return id
 		},
+		BlueprintRun: func(t *testing.T, taskID string) string {
+			t.Helper()
+			// runs.blueprint_run_id is NOT NULL — a single prompt is a
+			// 1-step blueprint, so every run needs a parent blueprint_run.
+			// Mint a fresh blueprint + blueprint_run per call. SQLite
+			// blueprint_runs has no org_id/creator_user_id columns; org_id
+			// on blueprints takes its local-sentinel DEFAULT.
+			bpID := uuid.New().String()
+			if _, err := conn.Exec(`
+				INSERT INTO blueprints (id, name, source, team_id, creator_user_id)
+				VALUES (?, 'Conformance BP', 'user', ?, ?)
+			`, bpID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID); err != nil {
+				t.Fatalf("seed blueprint: %v", err)
+			}
+			brID := uuid.New().String()
+			if _, err := conn.Exec(`
+				INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, worktree_path)
+				VALUES (?, ?, ?, 'manual', 'running', '/tmp/wt')
+			`, brID, bpID, taskID); err != nil {
+				t.Fatalf("seed blueprint_run: %v", err)
+			}
+			return brID
+		},
 		SetRunMemory: func(t *testing.T, runID, entityID, content string) {
 			t.Helper()
 			memID := uuid.New().String()
@@ -178,6 +201,7 @@ func TestAgentRunStore_SQLite_MarkTakenOver_SavepointRollbackInsideTx(t *testing
 	runID := "test-run-savepoint"
 	if err := stores.AgentRuns.Create(ctx, runmode.LocalDefaultOrg, domain.AgentRun{
 		ID: runID, TaskID: taskID, PromptID: "p_agentrun_test", Status: "running", Model: "m",
+		BlueprintRunID: seed.BlueprintRun(t, taskID),
 	}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}

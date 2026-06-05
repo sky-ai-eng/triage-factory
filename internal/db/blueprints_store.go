@@ -24,6 +24,12 @@ var (
 	// than the acting team — the endpoint is third-party-callable, so a mixed-
 	// scope id set is rejected rather than trusted.
 	ErrDuplicateCrossTeam = errors.New("db: duplicate prompt set spans more than the acting team")
+	// ErrBlueprintRunFenceRequiresEventAndTrigger is returned by
+	// CreateRunIfNotFiredSystem when TriggeringEventID or TriggerID is empty.
+	// Both bind to SQL NULL, which the partial unique fence index treats as
+	// distinct — the fence would silently not engage. The event path always
+	// supplies both, so an empty value is a programming error surfaced loud.
+	ErrBlueprintRunFenceRequiresEventAndTrigger = errors.New("db: CreateRunIfNotFiredSystem requires non-empty TriggeringEventID and TriggerID")
 )
 
 // DuplicationStep is one selected prompt resolved to its place in a source
@@ -319,7 +325,40 @@ type BlueprintStore interface {
 	// --- Runs -----------------------------------------------------------
 
 	// CreateRun inserts a new blueprint instance row. TriggerType is required.
+	// Manual delegations use this path (no triggering_event_id, so the replay
+	// fence never engages). Event-triggered delegations use
+	// CreateRunIfNotFiredSystem instead.
 	CreateRun(ctx context.Context, orgID string, br domain.BlueprintRun) (string, error)
+
+	// CreateRunIfNotFiredSystem is the event-path fenced insert: it writes
+	// triggering_event_id and relies on the blueprint_runs_event_trigger_fence
+	// partial unique index to make (triggering_event_id, trigger_id) at-most-once.
+	// Returns inserted=false (no error) when a blueprint_run for this
+	// (event, trigger) already committed — the at-least-once router queue
+	// replayed an event whose first firing already minted the blueprint_run.
+	// The blueprint_run insert is the crash-consistent commit point of a
+	// delegation, so the firing path mints it before the orchestrator goroutine
+	// does any expensive worktree setup. Routes through the admin pool (event
+	// runs carry no JWT claims) and forces trigger_type='event'
+	// (creator_user_id NULL per the schema CHECK).
+	//
+	// Precondition: br.TriggeringEventID and br.TriggerID must be non-empty —
+	// both are part of the fence key, and an empty value binds NULL (which the
+	// partial index treats as distinct, silently skipping the fence). Impls
+	// reject that with ErrBlueprintRunFenceRequiresEventAndTrigger.
+	CreateRunIfNotFiredSystem(ctx context.Context, orgID string, br domain.BlueprintRun) (inserted bool, err error)
+
+	// SetRunWorktreePathSystem fills in a blueprint_run's worktree_path after
+	// the shared worktree is built. The row is created up front (before setup,
+	// so the replay fence commits before expensive work) with an empty path;
+	// this stamps the resolved path so the resume/cancel cleanup machinery can
+	// reconstruct the worktree later.
+	SetRunWorktreePathSystem(ctx context.Context, orgID, id, worktreePath string) error
+
+	// ActiveRunForTaskSystem returns the most recent still-running blueprint_run
+	// for a task, or (nil, nil) when none is active. The board-column aggregate
+	// (recomputeTaskBoardColumn) reads it to place a task with live work.
+	ActiveRunForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error)
 
 	// GetRun returns a blueprint run by id, or (nil, nil) when not found.
 	GetRun(ctx context.Context, orgID string, id string) (*domain.BlueprintRun, error)

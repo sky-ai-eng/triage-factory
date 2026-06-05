@@ -382,11 +382,10 @@ func (s *Spawner) processCompletion(
 		return true
 	}
 
-	// Is this a step inside a multi-step blueprint? Single/terminal runs
-	// (no blueprint_run_id) own their own task disposition below; blueprint
-	// steps persist outcome/status only and leave advancement to the
-	// orchestrator. Derived from the caller-supplied blueprint_run_id.
-	isBlueprintStep := blueprintRunID != ""
+	// Every run is a step of a blueprint_run now (a single prompt is a 1-step
+	// blueprint), so this helper never owns task disposition: it persists
+	// outcome/status only and leaves advancement + task close to the orchestrator
+	// (runBlueprint / terminateBlueprint). blueprintRunID is always non-empty here.
 
 	resultSummary := ""
 	status := "completed"
@@ -411,14 +410,11 @@ func (s *Spawner) processCompletion(
 			outcome = string(domain.RunOutcomeAbort)
 		}
 	}
-	// Fallback after the outcome gate exhausted its retries: a single/
-	// terminal run with no recognizable outcome defaults to finish (parity
-	// with today's "completed on unparseable"); a blueprint step keeps a
-	// NULL outcome and is left for the orchestrator (decideBlueprintStep
-	// reads a non-final NULL as no-outcome→abort).
-	if !completion.IsError && outcome == "" && !isBlueprintStep {
-		outcome = string(domain.RunOutcomeFinish)
-	}
+	// No single-run finish fallback here: a run that completes with no
+	// recognizable outcome keeps a NULL outcome and is left for the orchestrator.
+	// decideBlueprintStep maps a NULL outcome on the final (or only) step to
+	// finish — the same close-on-clean-completion behavior — and a NULL on a
+	// non-final step to no-outcome→abort.
 
 	// Detached context: the run's ctx may have been cancelled (user
 	// cancel mid-stream) but the terminal write still needs to record.
@@ -461,15 +457,17 @@ func (s *Spawner) processCompletion(
 		}
 	}
 
-	// Multi-step external-action coercion: a blueprint step that took a
-	// terminal external action (queued a review or PR for human approval)
-	// ends the blueprint — there's nothing for a follow-on step to do once
-	// the work is awaiting a human. Coerce continue→finish before the
-	// terminal write so the post-approval resume (ResumeBlueprintAfterApproval)
-	// reads finish and terminates the blueprint completed. Replaces the
-	// synthetic --final verdict the chain path inserted. An explicit
-	// abort/finish the step already chose is left untouched.
-	if isBlueprintStep && hasPending && domain.RunOutcome(outcome) == domain.RunOutcomeContinue {
+	// External-action coercion: a step that took a terminal external action
+	// (queued a review or PR for human approval) ends the blueprint — there's
+	// nothing for a follow-on step to do once the work is awaiting a human, and
+	// the post-approval resume (ResumeBlueprintAfterApproval) finalizes only on a
+	// finish outcome. Coerce anything-but-abort → finish before the terminal
+	// write: continue (hand-off is moot), a missing outcome (gate exhausted —
+	// the old single-run finish fallback that's now gone), and finish itself
+	// (no-op) all resolve to finish. An explicit abort is the one exception — the
+	// agent deliberately stopped, so the task stays open even with a queued
+	// action. Replaces the synthetic --final verdict the chain path inserted.
+	if hasPending && domain.RunOutcome(outcome) != domain.RunOutcomeAbort {
 		outcome = string(domain.RunOutcomeFinish)
 	}
 
@@ -530,65 +528,16 @@ func (s *Spawner) processCompletion(
 		}
 	}
 
-	if status == "completed" && outcome != string(domain.RunOutcomeAbort) {
-		// Three guards prevent a stale completion from flipping the task:
-		//
-		// 1. abort outcome: handled by the outer condition — an abort
-		//    leaves the task open (its reason is in runs.outcome_reason)
-		//    rather than closing it. finish/continue/fallback all close.
-		//
-		// 2. Blueprint step: the blueprint orchestrator owns task lifecycle —
-		//    individual step completions must not close the task.
-		//
-		// 3. Re-delegation race: a newer run already exists on this task
-		//    (the user re-delegated while this run was in flight). The
-		//    newer run's CreateAgentRun row is already in the DB by the
-		//    time the old run reaches processCompletion, so the EXISTS
-		//    check is deterministic. Blueprint step runs are excluded from
-		//    the active-run check because the blueprint orchestrator creates
-		//    them sequentially (step N+1's row doesn't exist yet when
-		//    step N completes).
-		if isBlueprintStep {
-			// Blueprint step — skip; terminateBlueprint handles task closure.
-		} else {
-			hasOtherActiveRun, _ := s.agentRuns.HasOtherActiveRunForTaskSystem(bgCtx, orgID, task.ID, runID)
-			if !hasOtherActiveRun {
-				// SKY-330: route through Close/CloseSystem (not the
-				// raw SetStatus primitive) so close_reason and
-				// closed_at land alongside the status flip. Pre-330
-				// this wrote status='done' with NULL close_reason —
-				// the Done column's 7-day cap (closed_at >= now-7d)
-				// would silently exclude these otherwise. Sister fix
-				// to advanceTaskFromRunStatus's CloseSystem path; the
-				// idempotent skip there means this is the only call
-				// site that writes the close_reason here.
-				var setErr error
-				if triggerType == "manual" {
-					setErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-						return ts.Tasks.Close(bgCtx, orgID, task.ID, "run_completed", "")
-					})
-				} else {
-					setErr = s.tasks.CloseSystem(bgCtx, orgID, task.ID, "run_completed", "")
-				}
-				if setErr != nil {
-					log.Printf("[delegate] warning: failed to close task %s: %v", task.ID, setErr)
-				} else {
-					// Peer Board sessions need a task_updated nudge
-					// to move the card to the Done column.
-					s.broadcastTaskUpdate(orgID, task.ID, "done")
-				}
-			}
-		}
-	}
+	// Task disposition (close on finish, leave-open on abort) is the
+	// orchestrator's job now, not the step's: runBlueprint reads this run's
+	// terminal runs.outcome and routes through terminateBlueprint, which owns the
+	// terminal column. A step completion must never close the task here — the
+	// next step may be about to run.
 	s.broadcastRunUpdate(orgID, runID, status)
-	// Mirror the run's terminal status onto the task. The inline
-	// 'completed' path above already closed the task (so the helper's
-	// idempotent check skips it) — EXCEPT on abort, where the inline path
-	// deliberately left the task open; passing the outcome keeps the
-	// helper from closing it on the 'completed'→'done' mapping. The helper
-	// also handles the pending_approval branch by setting
-	// task.status='in_review'. failed / cancelled map to no target → no-op.
-	s.advanceTaskFromRunStatus(orgID, runID, status, outcome)
+	// Recompute the aggregate board column. A pending_approval flip lands the
+	// task in in_review here; a plain completion keeps it in_progress until the
+	// orchestrator advances (next step) or terminates (done / leave-open).
+	s.recomputeTaskBoardColumn(orgID, task.ID)
 
 	// Toast the terminal state. Success cases auto-hide; failed/unsolvable
 	// show as an error toast so the user notices even if they've clicked
@@ -602,15 +551,10 @@ func (s *Spawner) processCompletion(
 		toast.Warning(s.wsHub, orgID, fmt.Sprintf("Run %s — task unsolvable: %s", shortRunID(runID), truncateToastMsg(resultSummary, 140)))
 	}
 
-	// Single-run terminal cleanup: a standalone run that reached a terminal
-	// state (not parked, not a blueprint step) drops any snapshot it wrote on
-	// an earlier yield/approval so durable storage doesn't orphan a blob.
-	// Idempotent — a no-op when no snapshot exists. Blueprint-step snapshots are
-	// keyed by blueprint_run_id and owned by terminateBlueprint; parked runs
-	// keep their snapshot for the eventual resume.
-	if !parked && blueprintRunID == "" {
-		s.discardWorkspaceSnapshot(bgCtx, orgID, runID)
-	}
+	// Workspace-snapshot cleanup is owned by terminateBlueprint, keyed by
+	// blueprint_run_id (the shared workspace's key) — every run is a blueprint
+	// step now, so there is no standalone run_id-keyed snapshot to drop here. A
+	// parked run keeps its snapshot for the eventual resume.
 	return parked
 }
 

@@ -188,6 +188,9 @@ func (s *Spawner) ResumeAfterYield(orgID, runID, agentMessage, userID string) er
 		return ErrYieldNotResumable
 	}
 	s.broadcastRunUpdate(orgID, runID, "running")
+	// The parked step is running again → bounce the aggregate board column back
+	// to in_progress (no-op if a sibling run is still parked).
+	s.recomputeTaskBoardColumn(orgID, taskCopy.ID)
 
 	go func() {
 		defer func() {
@@ -281,7 +284,16 @@ func (s *Spawner) ResumeAfterYield(orgID, runID, agentMessage, userID string) er
 			return
 		}
 
-		s.processCompletion(ctx, orgID, runID, blueprintRunID, taskCopy, outcome.Completion, cwd, sessionID, model, owner, repo, "manual", userID, extraTools)
+		parked := s.processCompletion(ctx, orgID, runID, blueprintRunID, taskCopy, outcome.Completion, cwd, sessionID, model, owner, repo, "manual", userID, extraTools)
+		// The resumed step reached a terminal state (it didn't yield or queue an
+		// approval again) → hand back to the blueprint orchestrator to finalize:
+		// for a 1-step / final step this terminates the blueprint (finish→close,
+		// abort→leave open), restoring parity with the pre-collapse single-prompt
+		// yield-resume. A non-final step's mid-blueprint advance is the epic's
+		// resume work and stays unimplemented (terminated with a clear reason).
+		if !parked {
+			s.ResumeBlueprintAfterYield(orgID, runID, userID)
+		}
 	}()
 	return nil
 }

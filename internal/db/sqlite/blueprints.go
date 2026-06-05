@@ -563,12 +563,72 @@ func (s *blueprintStore) CreateRun(ctx context.Context, orgID string, br domain.
 		completedAt = br.CompletedAt.UTC()
 	}
 	if _, err := s.q.ExecContext(ctx, `
-		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, trigger_id, status, worktree_path, abort_reason, completed_at, started_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-	`, br.ID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, br.Status, br.WorktreePath, abortReason, completedAt); err != nil {
+		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id, status, worktree_path, abort_reason, completed_at, started_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	`, br.ID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), br.Status, br.WorktreePath, abortReason, completedAt); err != nil {
 		return "", fmt.Errorf("insert blueprint_run: %w", err)
 	}
 	return br.ID, nil
+}
+
+// CreateRunIfNotFiredSystem is the event-path fenced insert: ON CONFLICT against
+// the blueprint_runs_event_trigger_fence partial unique index makes a replayed
+// (triggering_event_id, trigger_id) a clean no-op (inserted=false). SQLite has a
+// single connection, so there is no admin/app split; the contract matches the
+// Postgres impl.
+func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID string, br domain.BlueprintRun) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	if br.TriggeringEventID == "" || br.TriggerID == "" {
+		return false, db.ErrBlueprintRunFenceRequiresEventAndTrigger
+	}
+	if br.ID == "" {
+		br.ID = uuid.New().String()
+	}
+	if br.Status == "" {
+		br.Status = domain.BlueprintRunStatusRunning
+	}
+	res, err := s.q.ExecContext(ctx, `
+		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id, status, worktree_path, started_at)
+		VALUES (?, ?, ?, 'event', ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
+	`, br.ID, br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID, br.Status, br.WorktreePath)
+	if err != nil {
+		return false, fmt.Errorf("insert blueprint_run (fenced): %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (s *blueprintStore) SetRunWorktreePathSystem(ctx context.Context, orgID, id, worktreePath string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `UPDATE blueprint_runs SET worktree_path = ? WHERE id = ?`, worktreePath, id)
+	return err
+}
+
+func (s *blueprintStore) ActiveRunForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	var id string
+	err := s.q.QueryRowContext(ctx, `
+		SELECT id FROM blueprint_runs
+		WHERE task_id = ? AND status = 'running'
+		ORDER BY started_at DESC LIMIT 1
+	`, taskID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s.GetRun(ctx, orgID, id)
 }
 
 func (s *blueprintStore) GetRun(ctx context.Context, orgID, id string) (*domain.BlueprintRun, error) {

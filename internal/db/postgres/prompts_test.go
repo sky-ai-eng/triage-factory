@@ -268,14 +268,31 @@ func seedPgRunsForStats(t *testing.T, conn *sql.DB, orgID, userID, promptID stri
 		t.Fatalf("seed task: %v", err)
 	}
 
+	// runs.blueprint_run_id is NOT NULL — mint one blueprint_run for the task
+	// that all these runs link to (the runs are step/retry rows for prompt stats).
+	bpID := uuid.New().String()
+	if _, err := conn.Exec(`
+		INSERT INTO blueprints (id, org_id, creator_user_id, team_id, source, name, created_at, updated_at)
+		VALUES ($1, $2, $3, (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1), 'user', 'BP', now(), now())
+	`, bpID, orgID, userID); err != nil {
+		t.Fatalf("seed blueprint: %v", err)
+	}
+	brID := uuid.New().String()
+	if _, err := conn.Exec(`
+		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at)
+		VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt', now())
+	`, brID, orgID, userID, bpID, taskID); err != nil {
+		t.Fatalf("seed blueprint_run: %v", err)
+	}
+
 	ids := make([]string, 0, len(statusByOffset))
 	for i, status := range statusByOffset {
 		runID := uuid.New().String()
 		startedAt := now.AddDate(0, 0, -i)
 		if _, err := conn.Exec(`
-			INSERT INTO runs (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, status, started_at, total_cost_usd, duration_ms)
-			VALUES ($1, $2, $3, (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1), 'team', $4, $5, $6, $7, 0.01, 100)
-		`, runID, orgID, userID, taskID, promptID, status, startedAt); err != nil {
+			INSERT INTO runs (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, status, started_at, total_cost_usd, duration_ms, blueprint_run_id)
+			VALUES ($1, $2, $3, (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1), 'team', $4, $5, $6, $7, 0.01, 100, $8)
+		`, runID, orgID, userID, taskID, promptID, status, startedAt, brID); err != nil {
 			t.Fatalf("seed run %d: %v", i, err)
 		}
 		ids = append(ids, runID)

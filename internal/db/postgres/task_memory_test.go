@@ -327,13 +327,29 @@ func seedPgRunForTaskMemory(t *testing.T, h *pgtest.Harness, orgID, userID, prom
 		t.Fatalf("seed task: %v", err)
 	}
 
+	// runs.blueprint_run_id is NOT NULL — mint a 1-step blueprint_run for the task.
+	bpID := uuid.New().String()
+	if _, err := conn.Exec(`
+		INSERT INTO blueprints (id, org_id, creator_user_id, team_id, source, name, created_at, updated_at)
+		VALUES ($1, $2, $3, (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1), 'user', 'BP', now(), now())
+	`, bpID, orgID, userID); err != nil {
+		t.Fatalf("seed blueprint: %v", err)
+	}
+	brID := uuid.New().String()
+	if _, err := conn.Exec(`
+		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at)
+		VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt', now())
+	`, brID, orgID, userID, bpID, taskID); err != nil {
+		t.Fatalf("seed blueprint_run: %v", err)
+	}
+
 	runID := uuid.New().String()
 	if _, err := conn.Exec(`
-		INSERT INTO runs (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, trigger_type, status)
+		INSERT INTO runs (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, trigger_type, status, blueprint_run_id)
 		VALUES ($1, $2, $3,
 		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
-		        'team', $4, $5, 'manual', 'completed')
-	`, runID, orgID, userID, taskID, promptID); err != nil {
+		        'team', $4, $5, 'manual', 'completed', $6)
+	`, runID, orgID, userID, taskID, promptID, brID); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	return runID, entityID

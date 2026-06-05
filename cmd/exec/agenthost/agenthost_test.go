@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -40,10 +41,34 @@ func newTestDB(t *testing.T) (db.Stores, *sql.DB) {
 	return sqlitestore.New(conn), conn
 }
 
+// seedBlueprintRun mints a fresh blueprint + blueprint_run for taskID
+// and returns the blueprint_run id. runs.blueprint_run_id is NOT NULL,
+// so every seeded run needs a parent blueprint_run. SQLite
+// blueprint_runs has no org_id/creator_user_id columns; org_id on
+// blueprints takes its local-sentinel DEFAULT.
+func seedBlueprintRun(t *testing.T, conn *sql.DB, taskID string) string {
+	t.Helper()
+	bpID := uuid.New().String()
+	if _, err := conn.Exec(`
+		INSERT INTO blueprints (id, name, source, team_id, creator_user_id)
+		VALUES (?, 'Test BP', 'user', ?, ?)
+	`, bpID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("seed blueprint: %v", err)
+	}
+	brID := uuid.New().String()
+	if _, err := conn.Exec(`
+		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, worktree_path)
+		VALUES (?, ?, ?, 'manual', 'running', '/tmp/wt')
+	`, brID, bpID, taskID); err != nil {
+		t.Fatalf("seed blueprint_run: %v", err)
+	}
+	return brID
+}
+
 // seedAgentRun inserts an entity → event → task → run chain through
 // the real store APIs so the FK constraints are honored. trigger is
 // "manual" (creator set) or "event" (creator empty).
-func seedAgentRun(t *testing.T, stores db.Stores, runID, creator, trigger string) {
+func seedAgentRun(t *testing.T, stores db.Stores, conn *sql.DB, runID, creator, trigger string) {
 	t.Helper()
 	ctx := context.Background()
 	orgID := runmode.LocalDefaultOrgID
@@ -69,8 +94,9 @@ func seedAgentRun(t *testing.T, stores db.Stores, runID, creator, trigger string
 	run := domain.AgentRun{
 		ID: runID, TaskID: task.ID, PromptID: "p-" + runID,
 		Status: "running", Model: "claude-test",
-		TriggerType:   trigger,
-		CreatorUserID: creator,
+		TriggerType:    trigger,
+		CreatorUserID:  creator,
+		BlueprintRunID: seedBlueprintRun(t, conn, task.ID),
 	}
 	if err := stores.AgentRuns.Create(ctx, orgID, run); err != nil {
 		t.Fatalf("seed run: %v", err)
@@ -322,8 +348,8 @@ func TestServer_ConcurrentSockets_NoCrossContamination(t *testing.T) {
 // Postgres RLS. SQLite collapses the branches but the SAME shape
 // under test is what runs against Postgres.
 func TestLocalClient_RoutingByTriggerType_Manual(t *testing.T) {
-	stores, _ := newTestDB(t)
-	seedAgentRun(t, stores, "run-1", runmode.LocalDefaultUserID, "manual")
+	stores, conn := newTestDB(t)
+	seedAgentRun(t, stores, conn, "run-1", runmode.LocalDefaultUserID, "manual")
 
 	info := RunInfo{
 		OrgID:            runmode.LocalDefaultOrg,
@@ -360,9 +386,9 @@ func TestLocalClient_RoutingByTriggerType_Manual(t *testing.T) {
 }
 
 func TestLocalClient_RoutingByTriggerType_Event(t *testing.T) {
-	stores, _ := newTestDB(t)
+	stores, conn := newTestDB(t)
 	// Event-triggered: no creator_user_id.
-	seedAgentRun(t, stores, "run-2", "", "event")
+	seedAgentRun(t, stores, conn, "run-2", "", "event")
 
 	info := RunInfo{
 		OrgID:            runmode.LocalDefaultOrg,
@@ -401,8 +427,8 @@ func TestLocalClient_RoutingByTriggerType_Event(t *testing.T) {
 // here uses a non-default socket-path constant via env override so
 // the test doesn't depend on /run/tf.sock's actual absence.
 func TestAutoDetect_NoSocket_LocalClient(t *testing.T) {
-	stores, _ := newTestDB(t)
-	seedAgentRun(t, stores, "run-3", runmode.LocalDefaultUserID, "manual")
+	stores, conn := newTestDB(t)
+	seedAgentRun(t, stores, conn, "run-3", runmode.LocalDefaultUserID, "manual")
 
 	// AutoDetect reads TRIAGE_FACTORY_RUN_ID at lookup time; set it
 	// to our seeded run.

@@ -1,269 +1,185 @@
 package delegate
 
 import (
-	"context"
 	"database/sql"
 	"testing"
 
-	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// SKY-330: advanceTaskFromRunStatus mirrors run-state lifecycle changes
-// onto the bot-claimed task's status field so the board's columns
-// reflect where the work is. These tests pin the state machine
-// directly — the matrix below covers every branch the helper exposes,
-// without needing a real Claude process running.
+// recomputeTaskBoardColumn is the blueprint-era board placement rule: a
+// bot-claimed task's live column is a recomputed aggregate over its active
+// blueprint_run's step runs — in_review if any run is parked (awaiting_input or
+// pending_approval), else in_progress. Terminal columns (done / leave-open) are
+// owned by terminateBlueprint, not this helper. These tests pin the aggregate
+// directly by mutating run state and invoking the recompute, without spawning a
+// real agent.
 //
-// Test seeds reuse the takeover-test fixture: seedRun creates the
-// entity + event + task + run chain with status='running'. We then
-// stamp the bot claim (or skip / replace it) per case and invoke
-// advanceTaskFromRunStatus with the run-status we want to test.
+// setupAdvanceFixture seeds an entity + event + task + a 1-step blueprint_run
+// whose single run starts 'running' (see seedRun → seedRunBlueprint).
 
-func TestAdvanceTaskFromRunStatus_RunningSetsInProgress(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "ip")
+func TestRecomputeBoard_RunningSetsInProgress(t *testing.T) {
+	s, database, _, taskID := setupAdvanceFixture(t, "ip")
 	stampBotClaim(t, database, taskID)
 
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "running", "")
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
 
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
-		t.Errorf("task.status = %q, want in_progress", got)
+		t.Errorf("task.status = %q, want in_progress (an unparked active run)", got)
 	}
 }
 
-// initializing also maps to in_progress (active-stage bucket). The
-// spawner's Delegate path broadcasts initializing directly without
-// going through updateStatus, so this helper is rarely the path
-// initializing arrives via — but if it does, the mapping must still
-// land. The Claimed column projection handles the more common
-// "claimed-queued + initializing" window via the store-level
-// claimed-derivation update sibling to this test.
-func TestAdvanceTaskFromRunStatus_InitializingSetsInProgress(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "init")
+// A parked run — yield (awaiting_input) — moves the aggregate to in_review.
+func TestRecomputeBoard_AwaitingInputSetsInReview(t *testing.T) {
+	s, database, runID, taskID := setupAdvanceFixture(t, "ai")
 	stampBotClaim(t, database, taskID)
+	setRunStatus(t, database, runID, "awaiting_input")
 
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "initializing", "")
-
-	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
-		t.Errorf("task.status = %q, want in_progress", got)
-	}
-}
-
-func TestAdvanceTaskFromRunStatus_PendingApprovalSetsInReview(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "ir")
-	stampBotClaim(t, database, taskID)
-
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "pending_approval", "")
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
 
 	if got := readTaskStatus(t, database, taskID); got != "in_review" {
-		t.Errorf("task.status = %q, want in_review", got)
+		t.Errorf("task.status = %q, want in_review (yield parks → needs 👀)", got)
 	}
 }
 
-// completed must land via CloseSystem (not raw SetStatus) so
-// close_reason='run_completed' and closed_at are populated — the Done
-// column's 7-day cap reads closed_at and excludes NULLs after the
-// SKY-330 tighten.
-func TestAdvanceTaskFromRunStatus_CompletedClosesWithReason(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "done")
+// pending_approval is the other parked state and lands in the same column —
+// one "needs 👀" column for both human-interaction points.
+func TestRecomputeBoard_PendingApprovalSetsInReview(t *testing.T) {
+	s, database, runID, taskID := setupAdvanceFixture(t, "pa")
 	stampBotClaim(t, database, taskID)
+	setRunStatus(t, database, runID, "pending_approval")
 
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "completed", "")
-
-	var status, closeReason string
-	var closedAt sql.NullTime
-	if err := database.QueryRow(
-		`SELECT status, COALESCE(close_reason, ''), closed_at FROM tasks WHERE id = ?`,
-		taskID,
-	).Scan(&status, &closeReason, &closedAt); err != nil {
-		t.Fatalf("scan: %v", err)
-	}
-	if status != "done" {
-		t.Errorf("status = %q, want done", status)
-	}
-	if closeReason != "run_completed" {
-		t.Errorf("close_reason = %q, want run_completed", closeReason)
-	}
-	if !closedAt.Valid {
-		t.Error("closed_at not set; Done column's 7-day cap will exclude this row")
-	}
-}
-
-// Terminal run states the helper deliberately ignores. Failure /
-// cancellation leave the task in its current status so the user
-// decides next steps (re-prompt, take over, dismiss) via the
-// assignee picker.
-func TestAdvanceTaskFromRunStatus_FailedNoOp(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "failed")
-	stampBotClaim(t, database, taskID)
-	// Park the task at in_progress so we can prove "failed" doesn't
-	// move it to done or anywhere else.
-	if _, err := database.Exec(`UPDATE tasks SET status = 'in_progress' WHERE id = ?`, taskID); err != nil {
-		t.Fatalf("park: %v", err)
-	}
-
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "failed", "")
-
-	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
-		t.Errorf("status = %q, want in_progress (failed must not transition)", got)
-	}
-}
-
-func TestAdvanceTaskFromRunStatus_CancelledNoOp(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "cancelled")
-	stampBotClaim(t, database, taskID)
-	if _, err := database.Exec(`UPDATE tasks SET status = 'in_review' WHERE id = ?`, taskID); err != nil {
-		t.Fatalf("park: %v", err)
-	}
-
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "cancelled", "")
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
 
 	if got := readTaskStatus(t, database, taskID); got != "in_review" {
-		t.Errorf("status = %q, want in_review (cancelled must not transition)", got)
+		t.Errorf("task.status = %q, want in_review (pending_approval → needs 👀)", got)
 	}
 }
 
-func TestAdvanceTaskFromRunStatus_TaskUnsolvableNoOp(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "unsolvable")
+// Bouncing across multiple human-interaction points: in_progress → in_review
+// (park) → in_progress (resume) → in_review (park again). The aggregate follows
+// the run state each time, no step-count gate.
+func TestRecomputeBoard_BouncesAcrossInteractionPoints(t *testing.T) {
+	s, database, runID, taskID := setupAdvanceFixture(t, "bounce")
 	stampBotClaim(t, database, taskID)
-	if _, err := database.Exec(`UPDATE tasks SET status = 'in_progress' WHERE id = ?`, taskID); err != nil {
-		t.Fatalf("park: %v", err)
+
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
+	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
+		t.Fatalf("initial: status = %q, want in_progress", got)
 	}
 
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "task_unsolvable", "")
+	setRunStatus(t, database, runID, "awaiting_input")
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
+	if got := readTaskStatus(t, database, taskID); got != "in_review" {
+		t.Fatalf("after yield: status = %q, want in_review", got)
+	}
 
+	setRunStatus(t, database, runID, "running")
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
-		t.Errorf("status = %q, want in_progress (task_unsolvable must not transition)", got)
+		t.Fatalf("after resume: status = %q, want in_progress", got)
+	}
+
+	setRunStatus(t, database, runID, "pending_approval")
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
+	if got := readTaskStatus(t, database, taskID); got != "in_review" {
+		t.Fatalf("after second park: status = %q, want in_review", got)
 	}
 }
 
-// User takeover replaced the bot claim while the run was in flight —
-// the user owns the lifecycle now, and the spawner's mirror must
-// leave their card alone even if a stale run event arrives.
-func TestAdvanceTaskFromRunStatus_UserClaimedTaskIgnored(t *testing.T) {
+// Multi-step parity: a blueprint_run with several step runs shows ONE card.
+// An earlier step completed + the current step parked → in_review (any parked).
+// All-unparked → in_progress. Same rule as 1-step; more runs just feed it.
+func TestRecomputeBoard_MultiStepAggregate(t *testing.T) {
+	s, database, runID, taskID := setupAdvanceFixture(t, "multi")
+	stampBotClaim(t, database, taskID)
+	brID := blueprintRunIDForRun(t, database, runID)
+	// Step 0 (the seeded run) completed; add step 1, currently running.
+	setRunStatus(t, database, runID, "completed")
+	addStepRun(t, database, brID, taskID, "step1-multi", 1, "running")
+
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
+	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
+		t.Errorf("all-unparked: status = %q, want in_progress", got)
+	}
+
+	// Now step 1 parks → in_review (any parked run flips the aggregate).
+	setRunStatus(t, database, "step1-multi", "pending_approval")
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
+	if got := readTaskStatus(t, database, taskID); got != "in_review" {
+		t.Errorf("step parked: status = %q, want in_review", got)
+	}
+}
+
+// Takeover is column-neutral: a user-claimed task is owned by the user, so the
+// recompute leaves their card alone even with a parked run.
+func TestRecomputeBoard_UserClaimedTaskNeutral(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "user-claim")
 	stampUserClaim(t, database, taskID)
+	setRunStatus(t, database, runID, "pending_approval")
 
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "pending_approval", "")
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
 
 	if got := readTaskStatus(t, database, taskID); got != "queued" {
-		t.Errorf("status = %q, want queued (user-claimed task must not auto-advance)", got)
+		t.Errorf("status = %q, want queued (user-claimed task must not auto-move)", got)
 	}
 }
 
-// Unclaimed task — same idea, the spawner mustn't mirror state onto
-// rows it doesn't own. This shouldn't happen in production (a run
-// without a claim means the claim was cleared mid-flight, e.g. by
-// requeue) but the helper guards anyway.
-func TestAdvanceTaskFromRunStatus_UnclaimedTaskIgnored(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "unclaimed")
+// Unclaimed task — the spawner mustn't place rows it doesn't own.
+func TestRecomputeBoard_UnclaimedTaskNeutral(t *testing.T) {
+	s, database, _, taskID := setupAdvanceFixture(t, "unclaimed")
 
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "completed", "")
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
 
 	if got := readTaskStatus(t, database, taskID); got != "queued" {
-		t.Errorf("status = %q, want queued (unclaimed task must not be closed)", got)
+		t.Errorf("status = %q, want queued (unclaimed task must not move)", got)
 	}
 }
 
-// Already-terminal task: a late run event arrives after the task
-// reached done/dismissed via a user swipe or requeue cleanup. The
-// helper short-circuits so a late completion doesn't re-open or
-// re-close the row.
-func TestAdvanceTaskFromRunStatus_AlreadyTerminalIgnored(t *testing.T) {
+// Already-terminal task: a late transition must not reopen a done/dismissed row.
+func TestRecomputeBoard_AlreadyTerminalNeutral(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "already-done")
 	stampBotClaim(t, database, taskID)
 	if _, err := database.Exec(`UPDATE tasks SET status = 'dismissed' WHERE id = ?`, taskID); err != nil {
 		t.Fatalf("park: %v", err)
 	}
+	setRunStatus(t, database, runID, "pending_approval")
 
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "completed", "")
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
 
 	if got := readTaskStatus(t, database, taskID); got != "dismissed" {
 		t.Errorf("status = %q, want dismissed (terminal task must not flip)", got)
 	}
 }
 
-// Re-delegation race: an older run reaches pending_approval or
-// completed AFTER a newer run is already active on the same task.
-// processCompletion's inline 'completed' path has a
-// HasOtherActiveRunForTaskSystem guard so the older run doesn't
-// clobber the newer one's lifecycle; this mirror has to share that
-// guard or the same stale-run problem walks the task to in_review/
-// done while the newer run is still working.
-func TestAdvanceTaskFromRunStatus_StaleRunNoOpWhenNewerActive(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "stale-completed")
+// No active blueprint_run: the live column is owned by no one here —
+// terminateBlueprint owns the terminal column, so recompute is a no-op and
+// leaves the task where it is.
+func TestRecomputeBoard_NoActiveBlueprintRunNeutral(t *testing.T) {
+	s, database, runID, taskID := setupAdvanceFixture(t, "noactive")
 	stampBotClaim(t, database, taskID)
-	// Park the task in in_progress (the newer run's state).
 	if _, err := database.Exec(`UPDATE tasks SET status = 'in_progress' WHERE id = ?`, taskID); err != nil {
 		t.Fatalf("park: %v", err)
 	}
-	// Seed a second active run on the same task. Use a unique run id
-	// + session id to avoid colliding with the original fixture.
-	if _, err := database.Exec(`
-		INSERT INTO runs (id, task_id, prompt_id, status, trigger_type, session_id, worktree_path)
-		VALUES (?, ?, 'test-prompt', 'running', 'manual', 'sess-newer', '/tmp/wt-newer')
-	`, "r-newer", taskID); err != nil {
-		t.Fatalf("seed newer run: %v", err)
+	// Terminate the blueprint_run so there is no active run for the task.
+	brID := blueprintRunIDForRun(t, database, runID)
+	if _, err := database.Exec(`UPDATE blueprint_runs SET status = 'completed' WHERE id = ?`, brID); err != nil {
+		t.Fatalf("complete blueprint_run: %v", err)
 	}
+	setRunStatus(t, database, runID, "completed")
 
-	// The OLDER run (runID from the fixture) reaches completed.
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "completed", "")
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
 
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
-		t.Errorf("status = %q, want in_progress (stale completed run must not close a task with a newer active run)", got)
-	}
-
-	// Same scenario for pending_approval: older run produces a
-	// review while the newer run keeps working. The task must not
-	// jump to in_review.
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "pending_approval", "")
-	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
-		t.Errorf("status = %q, want in_progress (stale pending_approval must not move task to in_review)", got)
-	}
-}
-
-// Blueprint steps: the blueprint orchestrator owns task lifecycle for the
-// whole blueprint. Mid-blueprint step terminals must not flip the task —
-// terminateBlueprint handles closure when the blueprint itself terminates.
-func TestAdvanceTaskFromRunStatus_ChainStepIgnored(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "chain-step")
-	stampBotClaim(t, database, taskID)
-	// Seed a blueprint + blueprint_runs row first (FK requirements), then
-	// point the existing run at it so advanceTaskFromRunStatus's
-	// blueprint-step guard trips.
-	if err := sqlitestore.New(database).Blueprints.Create(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Blueprint{
-		ID: "bp-abc", Name: "bp-abc", Source: "user", TeamID: runmode.LocalDefaultTeamID,
-	}); err != nil {
-		t.Fatalf("seed blueprint: %v", err)
-	}
-	if _, err := database.Exec(
-		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, worktree_path)
-		 VALUES (?, ?, ?, 'manual', ?)`,
-		"chain-abc", "bp-abc", taskID, "/tmp/wt-chain",
-	); err != nil {
-		t.Fatalf("seed blueprint_runs: %v", err)
-	}
-	if _, err := database.Exec(
-		`UPDATE runs SET blueprint_run_id = ? WHERE id = ?`,
-		"chain-abc", runID,
-	); err != nil {
-		t.Fatalf("set blueprint_run_id: %v", err)
-	}
-
-	s.advanceTaskFromRunStatus(runmode.LocalDefaultOrg, runID, "pending_approval", "")
-
-	if got := readTaskStatus(t, database, taskID); got != "queued" {
-		t.Errorf("status = %q, want queued (chain step terminal must not flip the task; chain orchestrator owns it)", got)
+		t.Errorf("status = %q, want in_progress (no active blueprint_run → recompute is a no-op)", got)
 	}
 }
 
 // --- helpers ---
 
-// setupAdvanceFixture creates a fresh spawner + seeded run+task pair
-// and returns the run/task ids so each test can mutate the claim or
-// pre-state independently. Wraps seedRun (already covers the
-// entity/event/task/run chain) with a unique suffix per test.
+// setupAdvanceFixture creates a fresh spawner + seeded run+task pair (with its
+// 1-step blueprint_run) and returns the run/task ids so each test can mutate run
+// state or the claim independently.
 func setupAdvanceFixture(t *testing.T, suffix string) (*Spawner, *sql.DB, string, string) {
 	t.Helper()
 	database := newTakeoverTestDB(t)
@@ -324,10 +240,31 @@ func readTaskStatus(t *testing.T, database *sql.DB, taskID string) string {
 	return status
 }
 
-// Ensure the helper signature still matches what the targetTaskStatusForRunStatus
-// pure function expects — if someone changes the helper's signature, the
-// build will catch it here rather than at the call site.
-var _ = func() {
-	_, _ = targetTaskStatusForRunStatus("running")
-	_ = context.Background
+func setRunStatus(t *testing.T, database *sql.DB, runID, status string) {
+	t.Helper()
+	if _, err := database.Exec(`UPDATE runs SET status = ? WHERE id = ?`, status, runID); err != nil {
+		t.Fatalf("set run status: %v", err)
+	}
+}
+
+func blueprintRunIDForRun(t *testing.T, database *sql.DB, runID string) string {
+	t.Helper()
+	var brID string
+	if err := database.QueryRow(`SELECT blueprint_run_id FROM runs WHERE id = ?`, runID).Scan(&brID); err != nil {
+		t.Fatalf("read blueprint_run_id: %v", err)
+	}
+	return brID
+}
+
+// addStepRun appends another step run to an existing blueprint_run so the
+// multi-step aggregate can be exercised.
+func addStepRun(t *testing.T, database *sql.DB, blueprintRunID, taskID, runID string, stepIndex int, status string) {
+	t.Helper()
+	if _, err := database.Exec(`
+		INSERT INTO runs (id, task_id, prompt_id, status, trigger_type, team_id, visibility,
+		                  creator_user_id, worktree_path, blueprint_run_id, blueprint_step_index)
+		VALUES (?, ?, 'test-prompt', ?, 'manual', ?, 'team', ?, '/tmp/wt-step', ?, ?)
+	`, runID, taskID, status, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, blueprintRunID, stepIndex); err != nil {
+		t.Fatalf("add step run: %v", err)
+	}
 }

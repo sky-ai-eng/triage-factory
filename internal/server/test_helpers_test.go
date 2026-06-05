@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -114,4 +115,43 @@ func seedConfiguredRepo(t *testing.T, s *Server, owner, repo string) {
 	}); err != nil {
 		t.Fatalf("seed configured repo %s/%s: %v", owner, repo, err)
 	}
+}
+
+// blueprintRunSeq makes the blueprint / blueprint_run IDs minted by
+// seedBlueprintRunSQLite unique across calls within a single test
+// process, so a fixture invoked more than once doesn't collide on the
+// blueprints / blueprint_runs primary keys.
+var blueprintRunSeq int
+
+// seedBlueprintRunSQLite mints a blueprint + blueprint_run for the given
+// task on the local-default org/team and returns the blueprint_run id.
+// runs.blueprint_run_id is NOT NULL, so every fixture that inserts a row
+// into runs must first create a blueprint_run for that task and point the
+// run at it. SQLite's blueprint_runs has no org_id/creator_user_id, but
+// worktree_path is NOT NULL.
+func seedBlueprintRunSQLite(t *testing.T, database *sql.DB, taskID string) string {
+	t.Helper()
+	blueprintRunSeq++
+	blueprintID := "bp_" + taskID
+	blueprintRunID := "br_" + taskID
+	if blueprintRunSeq > 1 {
+		suffix := strconv.Itoa(blueprintRunSeq)
+		blueprintID += "_" + suffix
+		blueprintRunID += "_" + suffix
+	}
+	if _, err := database.Exec(
+		`INSERT INTO blueprints (id, name, source, org_id, team_id, creator_user_id)
+		 VALUES (?, 'Test Blueprint', 'user', ?, ?, ?)`,
+		blueprintID, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID,
+	); err != nil {
+		t.Fatalf("seed blueprint: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, worktree_path)
+		 VALUES (?, ?, ?, 'manual', 'running', '/tmp/wt-test')`,
+		blueprintRunID, blueprintID, taskID,
+	); err != nil {
+		t.Fatalf("seed blueprint_run: %v", err)
+	}
+	return blueprintRunID
 }

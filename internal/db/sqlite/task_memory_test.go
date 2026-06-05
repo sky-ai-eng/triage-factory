@@ -107,10 +107,13 @@ func seedSQLiteRunForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (runI
 	`, taskID, entityID, eventType, eventID); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
+	// runs.blueprint_run_id is NOT NULL — mint a blueprint + blueprint_run
+	// for this task so the run row satisfies the FK.
+	blueprintRunID := seedBlueprintRunForRun(t, conn, taskID)
 	runID = uuid.New().String()
 	if _, err := conn.Exec(`
-		INSERT INTO runs (id, task_id, prompt_id, status) VALUES (?, ?, 'p_task_memory', 'completed')
-	`, runID, taskID); err != nil {
+		INSERT INTO runs (id, task_id, prompt_id, status, blueprint_run_id) VALUES (?, ?, 'p_task_memory', 'completed', ?)
+	`, runID, taskID, blueprintRunID); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	return runID, entityID

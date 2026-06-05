@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
@@ -283,19 +284,19 @@ func loadTask(t *testing.T, s *Spawner, taskID string) domain.Task {
 	return *tk
 }
 
-// TestProcessCompletion_FinishClosesTask: a single/terminal run emitting
-// finish persists outcome=finish and closes the task — today's single-prompt
-// behavior, now keyed on the outcome.
-func TestProcessCompletion_FinishClosesTask(t *testing.T) {
+// TestProcessCompletion_FinishRecordsOutcome: a step emitting finish persists
+// outcome=finish + status=completed. processCompletion no longer closes the task
+// — task disposition is the orchestrator's (terminateBlueprint, exercised in
+// TestTerminateBlueprint_CompletedClosesTask). The aggregate column stays
+// in_progress until the orchestrator terminates the blueprint.
+func TestProcessCompletion_FinishRecordsOutcome(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "finish")
-	// Bot-claim the task so the close flows through BOTH the inline
-	// disposition and advanceTaskFromRunStatus (the auto-progression path
-	// an event-triggered run takes in production).
 	stampBotClaim(t, database, taskID)
+	bpr := blueprintRunIDForRun(t, database, runID)
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, "", task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, bpr, task,
 		res(`{"outcome":"finish","summary":"shipped it"}`), cwd, "", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
 
 	run := loadRun(t, s, runID)
@@ -305,26 +306,23 @@ func TestProcessCompletion_FinishClosesTask(t *testing.T) {
 	if run.Outcome != "finish" {
 		t.Errorf("run.outcome = %q, want finish", run.Outcome)
 	}
-	if got := readTaskStatus(t, database, taskID); got != "done" {
-		t.Errorf("task.status = %q, want done (finish closes the task)", got)
+	if got := readTaskStatus(t, database, taskID); got == "done" {
+		t.Errorf("task.status = %q; processCompletion must not close the task (terminateBlueprint does)", got)
 	}
 }
 
-// TestProcessCompletion_AbortLeavesTaskOpen: an abort persists
-// outcome=abort + the reason in outcome_reason (distinct from result_summary)
-// and leaves the task open.
+// TestProcessCompletion_AbortLeavesTaskOpen: an abort persists outcome=abort +
+// the reason in outcome_reason (distinct from result_summary) and never closes
+// the task.
 func TestProcessCompletion_AbortLeavesTaskOpen(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "abort")
-	// Bot-claim the task: without the abort guard in
-	// advanceTaskFromRunStatus, a bot-claimed task would auto-close on the
-	// 'completed' status even though the inline path left it open. This
-	// claim is what makes the regression real.
 	stampBotClaim(t, database, taskID)
+	bpr := blueprintRunIDForRun(t, database, runID)
 	task := loadTask(t, s, taskID)
 	before := readTaskStatus(t, database, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, "", task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, bpr, task,
 		res(`{"outcome":"abort","summary":"investigated the failure","reason":"needs a human to rotate the token"}`),
 		cwd, "", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
 
@@ -346,19 +344,17 @@ func TestProcessCompletion_AbortLeavesTaskOpen(t *testing.T) {
 	}
 }
 
-// TestProcessCompletion_AbortMissingReason_StillLeavesTaskOpen: the agent
-// chose abort but never supplied a reason and there's no session to
-// re-prompt. The run must NOT degrade to the finish fallback (which would
-// close the task) — it stays an abort with an empty reason, task left open.
+// TestProcessCompletion_AbortMissingReason_StillLeavesTaskOpen: the agent chose
+// abort but never supplied a reason and there's no session to re-prompt. The run
+// must NOT degrade to finish — it stays an abort with an empty reason.
 func TestProcessCompletion_AbortMissingReason_StillLeavesTaskOpen(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "abort-noreason")
-	// Bot-claim so both the inline path and advanceTaskFromRunStatus are
-	// exercised — the finish fallback would have closed a bot-claimed task.
 	stampBotClaim(t, database, taskID)
+	bpr := blueprintRunIDForRun(t, database, runID)
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, "", task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, bpr, task,
 		res(`{"outcome":"abort","summary":"stopped, couldn't proceed"}`),
 		cwd, "", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
 
@@ -377,11 +373,12 @@ func TestProcessCompletion_AbortMissingReason_StillLeavesTaskOpen(t *testing.T) 
 // TestProcessCompletion_YieldParks: a yield envelope parks the run in
 // awaiting_input rather than completing.
 func TestProcessCompletion_YieldParks(t *testing.T) {
-	s, _, runID, taskID := setupAdvanceFixture(t, "yield")
+	s, database, runID, taskID := setupAdvanceFixture(t, "yield")
+	bpr := blueprintRunIDForRun(t, database, runID)
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, "", task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, bpr, task,
 		res(`{"outcome":"yield","summary":"need a decision","yield":{"type":"confirmation","message":"Proceed?"}}`),
 		cwd, "sess-yield", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
 
@@ -391,27 +388,68 @@ func TestProcessCompletion_YieldParks(t *testing.T) {
 	}
 }
 
-// TestProcessCompletion_UnparseableFallsBackToFinish: a single/terminal run
-// whose envelope never carries a valid outcome (and can't be gate-retried
-// because no session id) falls back to finish — parity with today's
-// "completed on unparseable".
-func TestProcessCompletion_UnparseableFallsBackToFinish(t *testing.T) {
+// TestProcessCompletion_UnparseableLeavesOutcomeNull: a step whose envelope
+// never carries a valid outcome (and can't be gate-retried because there's no
+// session id) keeps a NULL outcome — the orchestrator's decideBlueprintStep maps
+// a NULL on the final/only step to finish (TestDecideBlueprintStep), not
+// processCompletion. The old single-run finish fallback is gone.
+func TestProcessCompletion_UnparseableLeavesOutcomeNull(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "fallback")
+	bpr := blueprintRunIDForRun(t, database, runID)
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, "", task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, bpr, task,
 		res(`this is not a JSON envelope`), cwd, "", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
 
 	run := loadRun(t, s, runID)
 	if run.Status != "completed" {
 		t.Errorf("run.status = %q, want completed", run.Status)
 	}
-	if run.Outcome != "finish" {
-		t.Errorf("run.outcome = %q, want finish (single/terminal fallback)", run.Outcome)
+	if run.Outcome != "" {
+		t.Errorf("run.outcome = %q, want \"\" (NULL — no single-run finish fallback)", run.Outcome)
 	}
+}
+
+// TestTerminateBlueprint_CompletedClosesTask pins the orchestrator-owned close:
+// finalizing a blueprint_run as completed closes its task (done +
+// close_reason=run_completed), the finish→close parity the per-step
+// processCompletion no longer owns.
+func TestTerminateBlueprint_CompletedClosesTask(t *testing.T) {
+	s, database, runID, taskID := setupAdvanceFixture(t, "terminate-done")
+	stampBotClaim(t, database, taskID)
+	bpr := blueprintRunIDForRun(t, database, runID)
+
+	s.terminateBlueprint(runmode.LocalDefaultOrg, bpr, taskID, "manual", runmode.LocalDefaultUserID,
+		time.Now(), runConfig{orgID: runmode.LocalDefaultOrg}, domain.BlueprintRunStatusCompleted, "", nil, true)
+
 	if got := readTaskStatus(t, database, taskID); got != "done" {
-		t.Errorf("task.status = %q, want done", got)
+		t.Errorf("task.status = %q, want done (terminateBlueprint closes on completed)", got)
+	}
+	var closeReason string
+	if err := database.QueryRow(`SELECT COALESCE(close_reason, '') FROM tasks WHERE id = ?`, taskID).Scan(&closeReason); err != nil {
+		t.Fatalf("scan close_reason: %v", err)
+	}
+	if closeReason != "run_completed" {
+		t.Errorf("close_reason = %q, want run_completed", closeReason)
+	}
+}
+
+// TestTerminateBlueprint_AbortLeavesTaskOpen: a non-completed terminal (abort)
+// leaves the task open for human attention.
+func TestTerminateBlueprint_AbortLeavesTaskOpen(t *testing.T) {
+	s, database, runID, taskID := setupAdvanceFixture(t, "terminate-abort")
+	stampBotClaim(t, database, taskID)
+	if _, err := database.Exec(`UPDATE tasks SET status = 'in_progress' WHERE id = ?`, taskID); err != nil {
+		t.Fatalf("park: %v", err)
+	}
+	bpr := blueprintRunIDForRun(t, database, runID)
+
+	s.terminateBlueprint(runmode.LocalDefaultOrg, bpr, taskID, "manual", runmode.LocalDefaultUserID,
+		time.Now(), runConfig{orgID: runmode.LocalDefaultOrg}, domain.BlueprintRunStatusAborted, "needs a human", nil, true)
+
+	if got := readTaskStatus(t, database, taskID); got == "done" {
+		t.Errorf("task.status = %q; abort must leave the task open", got)
 	}
 }
 

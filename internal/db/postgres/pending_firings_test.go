@@ -254,27 +254,27 @@ func newPgPendingFiringsSeeder(h *pgtest.Harness, orgID, userID string) dbtest.P
 		}
 	}
 
-	// runForTask inserts a manual-trigger run row so MarkFired's
-	// fired_run_id FK to runs(id) is satisfied. The conformance
-	// suite doesn't probe gate semantics here — those live in
-	// AgentRunStore's own tests.
+	// runForTask inserts a blueprint + blueprint_run row so MarkFired's
+	// fired_run_id FK to blueprint_runs(id) is satisfied — the firing unit is
+	// the blueprint_run now. The conformance suite doesn't probe gate semantics
+	// here — those live in AgentRunStore's own tests.
 	runForTask := func(t *testing.T, taskID string) string {
 		t.Helper()
-		runID := uuid.New().String()
-		promptID := uuid.New().String()
+		bpID := uuid.New().String()
 		if _, err := conn.Exec(`
-			INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, allowed_tools, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, 'Run Prompt', 'x', 'user', '', now(), now())
-		`, promptID, orgID, userID, teamID); err != nil {
-			t.Fatalf("seed run prompt: %v", err)
+			INSERT INTO blueprints (id, org_id, creator_user_id, team_id, source, name, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, 'user', 'BP', now(), now())
+		`, bpID, orgID, userID, teamID); err != nil {
+			t.Fatalf("seed blueprint: %v", err)
 		}
+		brID := uuid.New().String()
 		if _, err := conn.Exec(`
-			INSERT INTO runs (id, org_id, task_id, prompt_id, trigger_type, status, model, team_id, visibility, creator_user_id, started_at)
-			VALUES ($1, $2, $3, $4, 'manual', 'running', 'm', $5, 'team', $6, now())
-		`, runID, orgID, taskID, promptID, teamID, userID); err != nil {
-			t.Fatalf("seed run: %v", err)
+			INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at)
+			VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt', now())
+		`, brID, orgID, userID, bpID, taskID); err != nil {
+			t.Fatalf("seed blueprint_run: %v", err)
 		}
-		return runID
+		return brID
 	}
 
 	return dbtest.PendingFiringsSeeder{
