@@ -223,13 +223,23 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	// the orchestrator goroutine does any worktree setup — that's where the
 	// relocated replay fence lives. worktree_path is filled in after setup.
 	blueprintRunID := uuid.New().String()
+	// triggering_event_id is event-path-only: it's half the replay-fence key, so
+	// a manual run that carried one would participate in the
+	// (triggering_event_id, trigger_id) unique index and could either trip a
+	// spurious UNIQUE violation or stamp misleading provenance. The DelegateOpts
+	// contract says manual never sets it, but pin that here rather than trust the
+	// caller — only the event path threads it onto the row.
+	triggeringEventID := ""
+	if triggerType == "event" {
+		triggeringEventID = opts.TriggeringEventID
+	}
 	brRow := domain.BlueprintRun{
 		ID:                blueprintRunID,
 		BlueprintID:       blueprint.ID,
 		TaskID:            task.ID,
 		TriggerType:       domain.BlueprintTriggerType(triggerType),
 		TriggerID:         triggerID,
-		TriggeringEventID: opts.TriggeringEventID,
+		TriggeringEventID: triggeringEventID,
 		Status:            domain.BlueprintRunStatusRunning,
 	}
 	// Event-triggered firings go through the fenced insert: a replayed
