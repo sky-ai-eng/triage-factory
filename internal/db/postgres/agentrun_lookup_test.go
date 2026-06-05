@@ -53,9 +53,10 @@ func TestAgentRunStore_Postgres_LookupOrgForRunSystem_ReturnsRealOrgID(t *testin
 	`, taskID, orgID, userID, entityID, eventID); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
+	brID := seedPgBlueprintRun(t, h, orgID, userID, taskID)
 	if err := stores.AgentRuns.Create(ctx, orgID, domain.AgentRun{
 		ID: runID, TaskID: taskID, PromptID: promptID, Status: "running", Model: "m",
-		CreatorUserID: userID,
+		CreatorUserID: userID, BlueprintRunID: brID,
 	}); err != nil {
 		t.Fatalf("Create run: %v", err)
 	}

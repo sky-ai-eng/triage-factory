@@ -967,11 +967,12 @@ func TestProjectKnowledge_RunValidation(t *testing.T) {
 	bobEntity := seedEntity(t, h, bobOrg, "github", "octo/repo#99")
 	bobTask := seedTask(t, h, bobOrg, bob, bobEntity, "github:pr:opened")
 	bobPrompt := seedPrompt(t, h, bobOrg, bob, "p1")
+	bobBR := seedBlueprintRun(t, h, bobOrg, bob, bobTask)
 	var bobRun string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO runs (org_id, creator_user_id, team_id, task_id, prompt_id)
-		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, $4) RETURNING id
-	`, bobOrg, bob, bobTask, bobPrompt).Scan(&bobRun); err != nil {
+		INSERT INTO runs (org_id, creator_user_id, team_id, task_id, prompt_id, blueprint_run_id)
+		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, $4, $5) RETURNING id
+	`, bobOrg, bob, bobTask, bobPrompt, bobBR).Scan(&bobRun); err != nil {
 		t.Fatalf("seed bob run: %v", err)
 	}
 
@@ -1635,11 +1636,12 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 	`, orgA, alice, teamA, entityA, evtID).Scan(&taskID); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
+	bpRun := seedBlueprintRun(t, h, orgA, alice, taskID)
 	var runID string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO runs (org_id, creator_user_id, team_id, visibility, task_id, prompt_id)
-		VALUES ($1, $2, $3, 'private', $4, $5) RETURNING id
-	`, orgA, alice, teamA, taskID, prompt).Scan(&runID); err != nil {
+		INSERT INTO runs (org_id, creator_user_id, team_id, visibility, task_id, prompt_id, blueprint_run_id)
+		VALUES ($1, $2, $3, 'private', $4, $5, $6) RETURNING id
+	`, orgA, alice, teamA, taskID, prompt, bpRun).Scan(&runID); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	// Seed one child row per parent kind we care about.
@@ -1958,10 +1960,11 @@ func TestRLS_PendingReviewsInheritParentVisibility(t *testing.T) {
 	`, orgA, alice, teamA, entityA, evtID).Scan(&taskID); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
+	bpRun := seedBlueprintRun(t, h, orgA, alice, taskID)
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO runs (org_id, creator_user_id, team_id, visibility, task_id, prompt_id)
-		VALUES ($1, $2, $3, 'private', $4, $5) RETURNING id
-	`, orgA, alice, teamA, taskID, prompt).Scan(&runID); err != nil {
+		INSERT INTO runs (org_id, creator_user_id, team_id, visibility, task_id, prompt_id, blueprint_run_id)
+		VALUES ($1, $2, $3, 'private', $4, $5, $6) RETURNING id
+	`, orgA, alice, teamA, taskID, prompt, bpRun).Scan(&runID); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	if err := h.AdminDB.QueryRow(`
@@ -2363,6 +2366,22 @@ func seedBlueprint(t *testing.T, h *Harness, orgID, creatorID, name string) stri
 	return id
 }
 
+// seedBlueprintRun mints a blueprint + blueprint_run for taskID so a runs row
+// can satisfy runs.blueprint_run_id (NOT NULL → blueprint_runs(id)). Returns the
+// blueprint_run id. Admin-pool insert (creator routing isn't under test here).
+func seedBlueprintRun(t *testing.T, h *Harness, orgID, creatorID, taskID string) string {
+	t.Helper()
+	bpID := seedBlueprint(t, h, orgID, creatorID, "bp-"+taskID[:8])
+	var id string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO blueprint_runs (org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path)
+		VALUES ($1, $2, $3, $4, 'manual', 'running', '/tmp/wt') RETURNING id
+	`, orgID, creatorID, bpID, taskID).Scan(&id); err != nil {
+		t.Fatalf("seed blueprint_run: %v", err)
+	}
+	return id
+}
+
 func seedProject(t *testing.T, h *Harness, orgID, creatorID, name string) string {
 	t.Helper()
 	var id string
@@ -2707,11 +2726,12 @@ func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 	taskID := seedTask(t, h, orgA, alice, entityA, "github:pr:opened")
 	promptID := seedPrompt(t, h, orgA, alice, "p1")
 	projectID := seedProject(t, h, orgA, alice, "proj-a")
+	bpRun := seedBlueprintRun(t, h, orgA, alice, taskID)
 	var runID string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO runs (org_id, creator_user_id, team_id, task_id, prompt_id)
-		VALUES ($1, $2, $3, $4, $5) RETURNING id
-	`, orgA, alice, teamA, taskID, promptID).Scan(&runID); err != nil {
+		INSERT INTO runs (org_id, creator_user_id, team_id, task_id, prompt_id, blueprint_run_id)
+		VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
+	`, orgA, alice, teamA, taskID, promptID, bpRun).Scan(&runID); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	var ehID string
