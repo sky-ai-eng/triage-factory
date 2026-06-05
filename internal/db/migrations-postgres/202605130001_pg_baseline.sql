@@ -5852,5 +5852,210 @@ GRANT ALL ON TABLE public.event_queue TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.event_queue TO tf_app;
 
 
+--
+-- SKY-442: per-user secret scope. Mirrors the vault_*_org_secret quartet
+-- (defined above), adding a p_user_id dimension and a user-scoped RLS
+-- gate. Vault name convention: 'org/<org_id>/user/<user_id>/<key>'. The
+-- claims-checked trio gates on BOTH p_org_id = tf.current_org_id() AND
+-- p_user_id = tf.current_user_id() so a handler running as user A can
+-- never read user B's token; the _system variant trusts explicit args
+-- (admin pool only). Custodies the Jira "act as yourself" credential.
+--
+
+--
+-- Name: vault_put_user_secret(uuid, uuid, text, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- +goose StatementBegin
+CREATE FUNCTION public.vault_put_user_secret(p_org_id uuid, p_user_id uuid, p_key text, p_secret text, p_description text DEFAULT NULL::text) RETURNS uuid
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+  v_full_name TEXT := 'org/' || p_org_id::text || '/user/' || p_user_id::text || '/' || p_key;
+  v_existing  UUID;
+  -- vault.secrets.description is NOT NULL; coalesce NULL → '' so callers
+  -- can pass NULL ergonomically.
+  v_desc      TEXT := COALESCE(p_description, '');
+BEGIN
+  -- DEFINER + arbitrary p_org_id/p_user_id would let any tf_app caller
+  -- read/write ANY user's secrets; gate on the JWT-claims org AND user
+  -- so the wrapper only ever touches the active session's own credential.
+  -- NULL p_org_id/p_user_id or NULL current_org_id()/current_user_id()
+  -- would slip past IS DISTINCT FROM (both-NULL is "not distinct"). Refuse
+  -- explicitly so a claims-less session can't sneak through.
+  IF p_org_id IS NULL OR p_user_id IS NULL OR tf.current_org_id() IS NULL OR tf.current_user_id() IS NULL THEN
+    RAISE EXCEPTION 'Vault access denied: missing org/user context (p_org_id, p_user_id, or request.jwt.claims is NULL)'
+      USING ERRCODE = '42501';
+  END IF;
+  IF p_org_id <> tf.current_org_id() THEN
+    RAISE EXCEPTION 'cross-org Vault access denied: p_org_id=% does not match request.jwt.claims.org_id', p_org_id
+      USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id <> tf.current_user_id() THEN
+    RAISE EXCEPTION 'cross-user Vault access denied: p_user_id=% does not match request.jwt.claims.sub', p_user_id
+      USING ERRCODE = '42501';
+  END IF;
+  SELECT id INTO v_existing FROM vault.decrypted_secrets WHERE name = v_full_name;
+  IF v_existing IS NOT NULL THEN
+    PERFORM vault.update_secret(v_existing, p_secret, v_full_name, v_desc);
+    RETURN v_existing;
+  END IF;
+  RETURN vault.create_secret(p_secret, v_full_name, v_desc);
+END;
+$$;
+-- +goose StatementEnd
+
+
+--
+-- Name: vault_get_user_secret(uuid, uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- +goose StatementBegin
+CREATE FUNCTION public.vault_get_user_secret(p_org_id uuid, p_user_id uuid, p_key text) RETURNS text
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+  v_full_name TEXT := 'org/' || p_org_id::text || '/user/' || p_user_id::text || '/' || p_key;
+  v_secret    TEXT;
+BEGIN
+  IF p_org_id IS NULL OR p_user_id IS NULL OR tf.current_org_id() IS NULL OR tf.current_user_id() IS NULL THEN
+    RAISE EXCEPTION 'Vault access denied: missing org/user context (p_org_id, p_user_id, or request.jwt.claims is NULL)'
+      USING ERRCODE = '42501';
+  END IF;
+  IF p_org_id <> tf.current_org_id() THEN
+    RAISE EXCEPTION 'cross-org Vault access denied: p_org_id=% does not match request.jwt.claims.org_id', p_org_id
+      USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id <> tf.current_user_id() THEN
+    RAISE EXCEPTION 'cross-user Vault access denied: p_user_id=% does not match request.jwt.claims.sub', p_user_id
+      USING ERRCODE = '42501';
+  END IF;
+  SELECT decrypted_secret INTO v_secret
+    FROM vault.decrypted_secrets
+   WHERE name = v_full_name;
+  RETURN v_secret;
+END;
+$$;
+-- +goose StatementEnd
+
+
+--
+-- Name: vault_get_user_secret_system(uuid, uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- +goose StatementBegin
+CREATE FUNCTION public.vault_get_user_secret_system(p_org_id uuid, p_user_id uuid, p_key text) RETURNS text
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+  v_full_name TEXT := 'org/' || p_org_id::text || '/user/' || p_user_id::text || '/' || p_key;
+  v_secret    TEXT;
+BEGIN
+  -- System/background read path (write-actor resolver acting as a user).
+  -- No current_org_id()/current_user_id() check: p_org_id + p_user_id are
+  -- trusted (the EXECUTE grant restricts this to the admin/system pool —
+  -- tf_app has none, so a request handler can't reach it; those use the
+  -- claims-checked vault_get_user_secret instead). Same name convention:
+  -- 'org/<org_id>/user/<user_id>/<key>'. A NULL org/user is a caller bug,
+  -- not a privilege failure — refuse explicitly rather than silently
+  -- looking up a malformed name.
+  IF p_org_id IS NULL OR p_user_id IS NULL THEN
+    RAISE EXCEPTION 'system Vault access denied: p_org_id or p_user_id is NULL'
+      USING ERRCODE = '22004';
+  END IF;
+  SELECT decrypted_secret INTO v_secret
+    FROM vault.decrypted_secrets
+   WHERE name = v_full_name;
+  RETURN v_secret;
+END;
+$$;
+-- +goose StatementEnd
+
+
+--
+-- Name: vault_delete_user_secret(uuid, uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- +goose StatementBegin
+CREATE FUNCTION public.vault_delete_user_secret(p_org_id uuid, p_user_id uuid, p_key text) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+  v_full_name TEXT := 'org/' || p_org_id::text || '/user/' || p_user_id::text || '/' || p_key;
+  v_existing  UUID;
+BEGIN
+  IF p_org_id IS NULL OR p_user_id IS NULL OR tf.current_org_id() IS NULL OR tf.current_user_id() IS NULL THEN
+    RAISE EXCEPTION 'Vault access denied: missing org/user context (p_org_id, p_user_id, or request.jwt.claims is NULL)'
+      USING ERRCODE = '42501';
+  END IF;
+  IF p_org_id <> tf.current_org_id() THEN
+    RAISE EXCEPTION 'cross-org Vault access denied: p_org_id=% does not match request.jwt.claims.org_id', p_org_id
+      USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id <> tf.current_user_id() THEN
+    RAISE EXCEPTION 'cross-user Vault access denied: p_user_id=% does not match request.jwt.claims.sub', p_user_id
+      USING ERRCODE = '42501';
+  END IF;
+  SELECT id INTO v_existing FROM vault.decrypted_secrets WHERE name = v_full_name;
+  IF v_existing IS NULL THEN
+    RETURN FALSE;
+  END IF;
+  DELETE FROM vault.secrets WHERE id = v_existing;
+  RETURN TRUE;
+END;
+$$;
+-- +goose StatementEnd
+
+
+--
+-- Name: FUNCTION vault_put_user_secret(p_org_id uuid, p_user_id uuid, p_key text, p_secret text, p_description text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.vault_put_user_secret(p_org_id uuid, p_user_id uuid, p_key text, p_secret text, p_description text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.vault_put_user_secret(p_org_id uuid, p_user_id uuid, p_key text, p_secret text, p_description text) FROM anon, authenticated, service_role;
+GRANT ALL ON FUNCTION public.vault_put_user_secret(p_org_id uuid, p_user_id uuid, p_key text, p_secret text, p_description text) TO postgres;
+GRANT ALL ON FUNCTION public.vault_put_user_secret(p_org_id uuid, p_user_id uuid, p_key text, p_secret text, p_description text) TO tf_app;
+
+
+--
+-- Name: FUNCTION vault_get_user_secret(p_org_id uuid, p_user_id uuid, p_key text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.vault_get_user_secret(p_org_id uuid, p_user_id uuid, p_key text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.vault_get_user_secret(p_org_id uuid, p_user_id uuid, p_key text) FROM anon, authenticated, service_role;
+GRANT ALL ON FUNCTION public.vault_get_user_secret(p_org_id uuid, p_user_id uuid, p_key text) TO postgres;
+GRANT ALL ON FUNCTION public.vault_get_user_secret(p_org_id uuid, p_user_id uuid, p_key text) TO tf_app;
+
+
+--
+-- Name: FUNCTION vault_get_user_secret_system(p_org_id uuid, p_user_id uuid, p_key text); Type: ACL; Schema: public; Owner: -
+--
+
+-- System/admin pool ONLY. Deliberately NOT granted to tf_app: the app
+-- pool must stay on the claims-checked vault_get_user_secret. The admin
+-- pool connects as supabase_admin (superuser, owns this function) and
+-- executes it regardless of grant; postgres is granted to mirror the
+-- sibling vault_* ACLs. tf_app lacking EXECUTE here is the load-bearing
+-- guardrail — pinned by the pgtest "tf_app denied" assertion. This is
+-- the per-user mirror of vault_get_org_secret_system's grant matrix.
+REVOKE ALL ON FUNCTION public.vault_get_user_secret_system(p_org_id uuid, p_user_id uuid, p_key text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.vault_get_user_secret_system(p_org_id uuid, p_user_id uuid, p_key text) FROM anon, authenticated, service_role;
+GRANT ALL ON FUNCTION public.vault_get_user_secret_system(p_org_id uuid, p_user_id uuid, p_key text) TO postgres;
+
+
+--
+-- Name: FUNCTION vault_delete_user_secret(p_org_id uuid, p_user_id uuid, p_key text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.vault_delete_user_secret(p_org_id uuid, p_user_id uuid, p_key text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.vault_delete_user_secret(p_org_id uuid, p_user_id uuid, p_key text) FROM anon, authenticated, service_role;
+GRANT ALL ON FUNCTION public.vault_delete_user_secret(p_org_id uuid, p_user_id uuid, p_key text) TO postgres;
+GRANT ALL ON FUNCTION public.vault_delete_user_secret(p_org_id uuid, p_user_id uuid, p_key text) TO tf_app;
+
+
 -- +goose Down
 SELECT 'down not supported';

@@ -206,3 +206,176 @@ func TestSecretStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 		t.Errorf("Delete with non-local orgID succeeded; want error")
 	}
 }
+
+// TestSecretStore_SQLite_PerUserKeychainRoundTrip pins the local-mode
+// per-user SecretStore contract (SKY-442): PutUser → keychain entry,
+// GetUser → same value, rotation overwrites, DeleteUser → ok=true then
+// ok=false, and a missing key reads back "". Local mode is N=1 (one
+// user), so there's no cross-user RLS to enforce here — that gate lives
+// in the Postgres impl; this leg only proves the keychain delegation +
+// user-namespaced key behave like the per-org methods.
+func TestSecretStore_SQLite_PerUserKeychainRoundTrip(t *testing.T) {
+	keyring.MockInit()
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrg
+	const userID = "11111111-1111-1111-1111-111111111111"
+
+	// Consumer composes a host-scoped key (the store treats it opaquely).
+	const key = "jira_token/jira.example.com"
+
+	if err := stores.Secrets.PutUser(ctx, org, userID, key, "pat-v1", "DC PAT"); err != nil {
+		t.Fatalf("PutUser: %v", err)
+	}
+
+	got, err := stores.Secrets.GetUser(ctx, org, userID, key)
+	if err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+	if got != "pat-v1" {
+		t.Errorf("GetUser got=%q want pat-v1", got)
+	}
+
+	// Rotation: PutUser on the same key overwrites the stored value.
+	if err := stores.Secrets.PutUser(ctx, org, userID, key, "pat-v2", ""); err != nil {
+		t.Fatalf("PutUser rotation: %v", err)
+	}
+	got, err = stores.Secrets.GetUser(ctx, org, userID, key)
+	if err != nil {
+		t.Fatalf("GetUser after rotation: %v", err)
+	}
+	if got != "pat-v2" {
+		t.Errorf("after rotation got=%q want pat-v2", got)
+	}
+
+	// GetUserSystem returns the same value as GetUser — single bag, no RLS.
+	sysGot, err := stores.Secrets.GetUserSystem(ctx, org, userID, key)
+	if err != nil {
+		t.Fatalf("GetUserSystem: %v", err)
+	}
+	if sysGot != "pat-v2" {
+		t.Errorf("GetUserSystem got=%q want pat-v2 (== GetUser)", sysGot)
+	}
+
+	// Missing key: GetUser returns "" without an error.
+	got, err = stores.Secrets.GetUser(ctx, org, userID, "nonexistent")
+	if err != nil {
+		t.Fatalf("GetUser missing: %v", err)
+	}
+	if got != "" {
+		t.Errorf("missing key got=%q want empty", got)
+	}
+
+	// DeleteUser returns ok=true on a present key and ok=false on an
+	// already-absent key — mirrors the per-org Delete contract.
+	ok, err := stores.Secrets.DeleteUser(ctx, org, userID, key)
+	if err != nil {
+		t.Fatalf("DeleteUser: %v", err)
+	}
+	if !ok {
+		t.Errorf("DeleteUser ok=false for present key; want true")
+	}
+	ok, err = stores.Secrets.DeleteUser(ctx, org, userID, key)
+	if err != nil {
+		t.Fatalf("DeleteUser (idempotent): %v", err)
+	}
+	if ok {
+		t.Errorf("DeleteUser on already-absent key ok=true; want false")
+	}
+
+	got, err = stores.Secrets.GetUser(ctx, org, userID, key)
+	if err != nil {
+		t.Fatalf("GetUser after delete: %v", err)
+	}
+	if got != "" {
+		t.Errorf("after DeleteUser got=%q want empty", got)
+	}
+}
+
+// TestSecretStore_SQLite_PerUserKeyNamespacing pins that per-user keys
+// don't collide with per-org keys (or other users' keys) in the single
+// local keychain bag — the user-namespaced key ("user/<userID>/<key>")
+// keeps the bags disjoint. A regression that dropped the namespace would
+// let a per-org Put clobber a same-key per-user secret, or leak one
+// user's value to another.
+func TestSecretStore_SQLite_PerUserKeyNamespacing(t *testing.T) {
+	keyring.MockInit()
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrg
+	const (
+		userA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+		userB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+		key   = "jira_token"
+	)
+
+	// Same key written at org scope, user-A scope, and user-B scope must
+	// all coexist as distinct values.
+	if err := stores.Secrets.Put(ctx, org, key, "org-value", ""); err != nil {
+		t.Fatalf("Put (org): %v", err)
+	}
+	if err := stores.Secrets.PutUser(ctx, org, userA, key, "user-a-value", ""); err != nil {
+		t.Fatalf("PutUser (A): %v", err)
+	}
+	if err := stores.Secrets.PutUser(ctx, org, userB, key, "user-b-value", ""); err != nil {
+		t.Fatalf("PutUser (B): %v", err)
+	}
+
+	orgGot, err := stores.Secrets.Get(ctx, org, key)
+	if err != nil {
+		t.Fatalf("Get (org): %v", err)
+	}
+	aGot, err := stores.Secrets.GetUser(ctx, org, userA, key)
+	if err != nil {
+		t.Fatalf("GetUser (A): %v", err)
+	}
+	bGot, err := stores.Secrets.GetUser(ctx, org, userB, key)
+	if err != nil {
+		t.Fatalf("GetUser (B): %v", err)
+	}
+	if orgGot != "org-value" || aGot != "user-a-value" || bGot != "user-b-value" {
+		t.Errorf("namespacing collision: org=%q userA=%q userB=%q; want distinct org-value/user-a-value/user-b-value", orgGot, aGot, bGot)
+	}
+
+	// Deleting user A's key leaves the org key and user B's key intact.
+	if _, err := stores.Secrets.DeleteUser(ctx, org, userA, key); err != nil {
+		t.Fatalf("DeleteUser (A): %v", err)
+	}
+	if v, _ := stores.Secrets.Get(ctx, org, key); v != "org-value" {
+		t.Errorf("org key disturbed by per-user delete: got=%q want org-value", v)
+	}
+	if v, _ := stores.Secrets.GetUser(ctx, org, userB, key); v != "user-b-value" {
+		t.Errorf("user B key disturbed by user A delete: got=%q want user-b-value", v)
+	}
+}
+
+// TestSecretStore_SQLite_PerUserRejectsNonLocalOrg pins the same
+// safety net as the per-org variant: a real UUID passed into the
+// local-mode store is a caller bug (forgot to extract the request
+// orgID), and every per-user method rejects it upfront rather than
+// silently writing to the shared keychain bag.
+func TestSecretStore_SQLite_PerUserRejectsNonLocalOrg(t *testing.T) {
+	keyring.MockInit()
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+
+	const (
+		realOrgUUID = "9b3c1f2d-0000-4000-8000-000000000001"
+		userID      = "11111111-1111-1111-1111-111111111111"
+	)
+	if err := stores.Secrets.PutUser(ctx, realOrgUUID, userID, "k", "v", ""); err == nil {
+		t.Errorf("PutUser with non-local orgID succeeded; want error")
+	}
+	if _, err := stores.Secrets.GetUser(ctx, realOrgUUID, userID, "k"); err == nil {
+		t.Errorf("GetUser with non-local orgID succeeded; want error")
+	}
+	if _, err := stores.Secrets.GetUserSystem(ctx, realOrgUUID, userID, "k"); err == nil {
+		t.Errorf("GetUserSystem with non-local orgID succeeded; want error")
+	}
+	if _, err := stores.Secrets.DeleteUser(ctx, realOrgUUID, userID, "k"); err == nil {
+		t.Errorf("DeleteUser with non-local orgID succeeded; want error")
+	}
+}

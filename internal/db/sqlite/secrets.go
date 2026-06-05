@@ -9,8 +9,12 @@ import (
 
 // secretStore is the SQLite-mode impl of db.SecretStore. Local mode
 // keeps long-lived credentials in the OS keychain (no DB row), so the
-// store delegates each Put/Get/Delete to internal/auth's keyed
-// keychain helpers.
+// store delegates each Put/Get/Delete — and the per-user
+// PutUser/GetUser/DeleteUser — to internal/auth's keyed keychain
+// helpers. The per-user methods namespace their keychain key
+// ("user/<userID>/<key>") so they don't collide with per-org keys in
+// the single local bag; local mode is N=1 (one user), so there's no
+// cross-user RLS to enforce — that gate only exists in the Postgres impl.
 //
 // # Why route through SecretStore at all in local mode
 //
@@ -77,6 +81,62 @@ func (*secretStore) Delete(_ context.Context, orgID, key string) (bool, error) {
 		return false, nil
 	}
 	if err := auth.DeleteSecret(key); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// userKeychainKey namespaces a per-user secret inside the single local
+// keychain bag. Multi mode gets a real RLS gate (vault_*_user_secret);
+// local mode is N=1 (one user), so the namespace is purely cosmetic —
+// it keeps per-user keys from colliding with per-org ones in the same
+// bag and mirrors the multi-mode Vault name shape
+// ("org/<org>/user/<user>/<key>" vs the local "user/<user>/<key>",
+// orgID being the implicit LocalDefaultOrg sentinel).
+func userKeychainKey(userID, key string) string {
+	return "user/" + userID + "/" + key
+}
+
+func (*secretStore) PutUser(_ context.Context, orgID, userID, key, value, _ string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	return auth.PutSecret(userKeychainKey(userID, key), value)
+}
+
+func (*secretStore) GetUser(_ context.Context, orgID, userID, key string) (string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", err
+	}
+	return auth.GetSecret(userKeychainKey(userID, key))
+}
+
+// GetUserSystem == GetUser in local mode. There's a single user and a
+// single keychain bag with no RLS and no claims, so the system path and
+// the claims-checked path collapse onto the same keychain helper — the
+// cross-user distinction only exists in multi mode's Postgres impl.
+// assertLocalOrg still fires so a stray real UUID surfaces as a caller bug.
+func (*secretStore) GetUserSystem(_ context.Context, orgID, userID, key string) (string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", err
+	}
+	return auth.GetSecret(userKeychainKey(userID, key))
+}
+
+func (*secretStore) DeleteUser(_ context.Context, orgID, userID, key string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	// Same env-overlay-aware probe as Delete: HasKeychainEntry bypasses
+	// the TRIAGE_FACTORY_* overlay so DeleteUser reports ok=false when
+	// only an env-supplied value exists (DeleteSecret can't remove env
+	// vars). Per-user keys aren't in the well-known envKeys set today,
+	// but routing through the same probe keeps the contract identical.
+	uk := userKeychainKey(userID, key)
+	if !auth.HasKeychainEntry(uk) {
+		return false, nil
+	}
+	if err := auth.DeleteSecret(uk); err != nil {
 		return false, err
 	}
 	return true, nil
