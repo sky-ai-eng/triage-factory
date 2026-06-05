@@ -137,6 +137,16 @@ export default function GitHubTeamGroup({
         disabled={!canEdit}
         emptyLabel="No GitHub teams found. Connect GitHub and configure repositories whose org exposes teams, then reopen this panel."
       />
+
+      {/* Mirror ReposGroup's reassurance: a failed load leaves the selection
+          unseeded (undefined), so a save skips it rather than clearing the
+          stored mappings. Say so, since the checklist's error alone doesn't. */}
+      {loadError && (
+        <p className="text-[12px] text-amber-600 italic mt-2">
+          Couldn&rsquo;t load GitHub teams — existing mappings will be left unchanged. Retry above
+          to edit them.
+        </p>
+      )}
     </Section>
   )
 }

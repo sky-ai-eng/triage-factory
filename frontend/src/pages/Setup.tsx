@@ -232,9 +232,10 @@ export default function Setup() {
   // --- Step 5: Jira config (per-project tracking rules) ---
   // The shared JiraProjectRulesGroup owns the project list, the status fetch,
   // and the per-project rule pickers; the wizard only needs the validity gate
-  // and the persist-on-Continue. Save is allowed once there's at least one
-  // fully-configured project and no half-configured one (connected is always
-  // true on this step — it's only reached with Jira connected).
+  // and the persist-on-Continue. Continue is blocked only by a partially-
+  // configured project (a key with incomplete rules); zero projects is a valid
+  // choice, so the step can be continued without adding one (connected is
+  // always true here — it's only reached with Jira connected).
   const canSaveJiraConfig = !teamProjectsBlocked(jiraProjects, true)
 
   const saveJiraConfig = async () => {
