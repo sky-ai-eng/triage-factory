@@ -122,6 +122,14 @@ export default function TeamConfigure({ isLocal = false }: { isLocal?: boolean }
 
   const projectsBlocked = teamProjectsBlocked(form.jira_projects, jiraConnected)
 
+  // A team must track at least one repo before the founder can finish — an
+  // empty repo set means nothing surfaces in the queue. An unloaded slice
+  // (repos undefined, e.g. the GET failed) reads as empty here, which also
+  // blocks Finish rather than saving against a slice we never read (which
+  // saveTeamConfig would silently skip). reposLoaded distinguishes the two
+  // for the hint below.
+  const reposBlocked = (form.repos ?? []).length === 0
+
   const finish = async () => {
     setSaving(true)
     try {
@@ -193,22 +201,22 @@ export default function TeamConfigure({ isLocal = false }: { isLocal?: boolean }
           onChange={patchForm}
         />
 
-        <div className="flex gap-3">
-          <button
-            type="button"
-            onClick={goToApp}
-            className="flex-1 bg-white/50 hover:bg-white/80 border border-border-subtle text-text-secondary font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
-          >
-            I&rsquo;ll configure later
-          </button>
+        <div className="space-y-2">
           <button
             type="button"
             onClick={finish}
-            disabled={saving || projectsBlocked}
-            className="flex-1 bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
+            disabled={saving || projectsBlocked || reposBlocked}
+            className="w-full bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
           >
             {saving ? 'Saving…' : 'Finish setup'}
           </button>
+          {reposBlocked && (
+            <p className="text-[12px] text-text-tertiary text-center">
+              {reposLoaded
+                ? 'Add at least one repository for this team to watch before finishing.'
+                : 'Could not load tracked repositories — reload before finishing setup.'}
+            </p>
+          )}
         </div>
       </div>
     </div>

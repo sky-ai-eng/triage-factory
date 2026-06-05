@@ -223,11 +223,14 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 	// keychain + repo query — the first-run screen may poll this on a loop.
 	if !tenantExists {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"configured":   false,
-			"github":       false,
-			"jira":         false,
-			"github_repos": 0,
-			"env_provided": auth.EnvProvided(),
+			"configured":     false,
+			"github":         false,
+			"github_ready":   false,
+			"jira":           false,
+			"github_repos":   0,
+			"env_provided":   auth.EnvProvided(),
+			"setup_complete": false,
+			"setup_step":     "org",
 		})
 		return
 	}
@@ -238,15 +241,26 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 	// tx with the same shape. These feed the config-step fields
 	// (github/jira/github_repos), not the first-run gate.
 	var (
-		creds     auth.Credentials
-		credsErr  error
-		repoCount int
+		creds         auth.Credentials
+		credsErr      error
+		repoCount     int
+		appRegistered bool
 	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		creds, credsErr = integrations.Load(r.Context(), tx.Secrets, orgID)
 		var e error
 		repoCount, e = tx.Repos.CountConfigured(r.Context(), orgID)
-		return e
+		if e != nil {
+			return e
+		}
+		// GitHub access can be satisfied by a registered GitHub App (the
+		// multi-mode path) rather than a PAT, so the setup-complete gate must
+		// count an App as "GitHub configured." Best-effort: a read failure
+		// here leaves appRegistered false and the PAT signal still stands.
+		if app, ae := tx.GitHubApps.GetForOrg(r.Context(), orgID); ae == nil && app != nil {
+			appRegistered = app.ClientID != ""
+		}
+		return nil
 	}); err != nil {
 		// Status endpoint returns 200 with configured=false so the
 		// frontend renders a sensible "not connected" UI even when
@@ -268,12 +282,32 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Setup is complete once GitHub access is configured (PAT or registered
+	// App; the env overlay folds into creds.GitHubPAT) AND the org tracks at
+	// least one repo. ReplaceForTeam writes a repo_profiles skeleton row in
+	// the same tx it records the team's tracked repos, so repoCount is a
+	// durable signal here — it doesn't lag behind the (async) profiling pass.
+	// Jira stays optional. setup_step tells the gate which configure screen
+	// an incomplete founder resumes on.
+	githubReady := creds.GitHubPAT != "" || appRegistered
+	setupComplete := githubReady && repoCount >= 1
+	setupStep := "done"
+	switch {
+	case !githubReady:
+		setupStep = "org"
+	case repoCount == 0:
+		setupStep = "team"
+	}
+
 	result := map[string]any{
-		"configured":   tenantExists,
-		"github":       creds.GitHubPAT != "",
-		"jira":         creds.JiraPAT != "",
-		"github_repos": repoCount,
-		"env_provided": auth.EnvProvided(),
+		"configured":     tenantExists,
+		"github":         creds.GitHubPAT != "",
+		"github_ready":   githubReady,
+		"jira":           creds.JiraPAT != "",
+		"github_repos":   repoCount,
+		"env_provided":   auth.EnvProvided(),
+		"setup_complete": setupComplete,
+		"setup_step":     setupStep,
 	}
 
 	if creds.GitHubURL != "" {

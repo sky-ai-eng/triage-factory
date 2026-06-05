@@ -1,8 +1,9 @@
 import { Navigate, useLocation } from 'react-router-dom'
 import { useAuthStatus } from './hooks/useAuthStatus'
-import { useAuth } from './contexts/AuthContext'
-import { useOrgContext } from './contexts/OrgContext'
+import { useAuth, useOptionalAuth } from './contexts/AuthContext'
+import { useOrgContext, useActiveOrgId } from './contexts/OrgContext'
 import { useGitHubIdentity } from './hooks/useGitHubIdentity'
+import { LOCAL_DEFAULT_ORG_ID } from './lib/githubApp'
 
 /**
  * AuthGate routes between the local-mode first-run/provision flow and the
@@ -140,6 +141,71 @@ export function RequireGitHubIdentity({ children }: { children: React.ReactNode 
     return <Navigate to={'/orgs/' + activeOrgId + '/connect-github' + rt} replace />
   }
   return <>{children}</>
+}
+
+/**
+ * SetupPendingNotice is the holding screen a non-admin sees when their org
+ * hasn't finished first-run configuration. They can't action GitHub access
+ * or tracked repos (admin-only), so we never route them into the configure
+ * flow — we tell them who can. An admin completing setup flips the org to
+ * setup_complete and the gate lets everyone in on the next poll.
+ */
+function SetupPendingNotice() {
+  return (
+    <div className="min-h-screen bg-surface flex items-center justify-center px-4">
+      <div className="max-w-md text-center space-y-3">
+        <h1 className="text-[18px] font-semibold text-text-primary tracking-tight">
+          Setup isn&rsquo;t finished
+        </h1>
+        <p className="text-[13px] text-text-tertiary leading-relaxed">
+          Contact your org administrator to finish setup before continuing. Once GitHub access and
+          tracked repositories are configured, this organization will open for everyone.
+        </p>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * RequireSetupComplete is the first-run completeness gate. It wraps the app
+ * shell (NOT the configure routes — those must stay reachable for an
+ * incomplete founder, so gating them here would loop) and blocks rendering
+ * until the active org is setup_complete (GitHub access configured AND ≥1
+ * tracked repo). An admin/owner of an incomplete org is routed to the
+ * configure step the server reports (setup_step); a non-admin gets the
+ * holding screen since they can't action the missing config.
+ *
+ * Composed inside AuthGate (so the tenant/membership checks already passed)
+ * and, in multi, outside RequireGitHubIdentity (org-level GitHub setup is a
+ * prerequisite of the per-user Connect step, so it's checked first).
+ *
+ * `isLocal` selects the org-id base for the redirect: local has no
+ * OrgContext (useActiveOrgId returns null), so it uses the sentinel id and
+ * is always treated as admin (N=1, the single user owns the install).
+ */
+export function RequireSetupComplete({
+  children,
+  isLocal = false,
+}: {
+  children: React.ReactNode
+  isLocal?: boolean
+}) {
+  const auth = useOptionalAuth()
+  const activeOrgId = useActiveOrgId()
+  const { setup_complete, setup_step, loading } = useAuthStatus(activeOrgId ?? undefined)
+
+  if (loading) return <Loading />
+  if (setup_complete) return <>{children}</>
+
+  // Incomplete. Local is always the implicit admin; multi reads the caller's
+  // role on the active org (owner/admin may configure, everyone else waits).
+  const role = auth?.orgs.find((o) => o.id === activeOrgId)?.role
+  const isAdmin = isLocal || role === 'owner' || role === 'admin'
+  if (!isAdmin) return <SetupPendingNotice />
+
+  const base = isLocal ? '/orgs/' + LOCAL_DEFAULT_ORG_ID : '/orgs/' + activeOrgId
+  const target = setup_step === 'team' ? base + '/teams/default/configure' : base + '/configure'
+  return <Navigate to={target} replace />
 }
 
 export default function AuthGate({

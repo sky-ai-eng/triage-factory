@@ -50,6 +50,10 @@ export default function OrgConfigure({ isLocal = false }: { isLocal?: boolean })
     github_clone_protocol: isLocal ? 'ssh' : 'https',
   })
   const [hasGitHubPat, setHasGitHubPat] = useState(false)
+  // githubReady folds the stored PAT, the env overlay, AND a registered
+  // GitHub App together (the server's setup predicate), so an App-configured
+  // org isn't false-blocked from finishing just because no PAT is stored.
+  const [githubReady, setGithubReady] = useState(false)
   const [jiraConnected, setJiraConnected] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -58,6 +62,16 @@ export default function OrgConfigure({ isLocal = false }: { isLocal?: boolean })
   // the bootstrap already set (base URLs, intervals). Tokens stay blank.
   useEffect(() => {
     let cancelled = false
+    // Separate from the settings read: integrations/status reports
+    // github_ready (PAT | env | registered App), the signal the Finish
+    // guard needs to avoid false-blocking an App-configured org that has no
+    // stored PAT. Best-effort — a failure leaves the PAT/typed signals.
+    fetch('/api/integrations/status')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && data) setGithubReady(!!data.github_ready)
+      })
+      .catch(() => {})
     fetchOrgSettings().then((org) => {
       if (cancelled) return
       if (org) {
@@ -81,8 +95,11 @@ export default function OrgConfigure({ isLocal = false }: { isLocal?: boolean })
 
   const patchForm = (patch: Partial<OrgConfigForm>) => setForm((f) => ({ ...f, ...patch }))
 
-  // Local mode's app is the flat route table (root '/'); multi is org-scoped.
-  const goToApp = () => navigate(isLocal ? '/' : orgId ? '/orgs/' + orgId : '/', { replace: true })
+  // GitHub access is mandatory — it's the spine of every downstream feature,
+  // so the founder can't skip past it. Block Finish until GitHub is set up by
+  // any means: a stored PAT / env overlay (hasGitHubPat), a freshly typed PAT
+  // (saved on Finish), or a registered App (githubReady). Jira stays optional.
+  const githubBlocked = !hasGitHubPat && !githubReady && form.github_pat.trim() === ''
 
   // After org config, hand off to the team configure step (the next link in
   // the create→configure chain). "default" is the alias the team endpoints
@@ -170,22 +187,20 @@ export default function OrgConfigure({ isLocal = false }: { isLocal?: boolean })
 
         <ModelGroup value={{ max_llm_model_tier: form.max_llm_model_tier }} onChange={patchForm} />
 
-        <div className="flex gap-3">
-          <button
-            type="button"
-            onClick={goToApp}
-            className="flex-1 bg-white/50 hover:bg-white/80 border border-border-subtle text-text-secondary font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
-          >
-            I&rsquo;ll configure later
-          </button>
+        <div className="space-y-2">
           <button
             type="button"
             onClick={finish}
-            disabled={saving}
-            className="flex-1 bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
+            disabled={saving || githubBlocked}
+            className="w-full bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
           >
             {saving ? 'Saving…' : 'Finish setup'}
           </button>
+          {githubBlocked && (
+            <p className="text-[12px] text-text-tertiary text-center">
+              Connect GitHub to continue — it&rsquo;s required before you can use Triage Factory.
+            </p>
+          )}
         </div>
       </div>
     </div>

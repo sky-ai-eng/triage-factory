@@ -129,3 +129,67 @@ func TestHandleIntegrationsDeleteJira_SurfacesJiraOnlyWarning(t *testing.T) {
 		t.Errorf("expected warning on env-overlay Jira clear, body=%+v", body)
 	}
 }
+
+// TestIntegrationsStatus_SetupCompleteGate pins the mandatory-configuration
+// gate the AuthGate keys on: a provisioned-but-unconfigured org is NOT
+// setup_complete, and setup_step walks org → team → done as GitHub access
+// and a tracked repo land. This is the server-authoritative signal that
+// makes "I'll configure later" unreachable — the frontend can't fake it.
+func TestIntegrationsStatus_SetupCompleteGate(t *testing.T) {
+	keyring.MockInit()
+	s := newTestServer(t)
+	ctx := t.Context()
+	org := runmode.LocalDefaultOrgID
+
+	getStatus := func() map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/integrations/status", nil)
+		rec := httptest.NewRecorder()
+		s.mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status: got=%d want=200, body=%s", rec.Code, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode status: %v", err)
+		}
+		return body
+	}
+
+	// Provisioned tenant, no GitHub creds, no repos → incomplete, resume at org.
+	st := getStatus()
+	if st["setup_complete"] != false {
+		t.Errorf("setup_complete=%v on a fresh org; want false", st["setup_complete"])
+	}
+	if st["setup_step"] != "org" {
+		t.Errorf("setup_step=%v with no GitHub; want org", st["setup_step"])
+	}
+
+	// GitHub configured (PAT) but still no tracked repo → resume at team.
+	if err := integrations.Save(ctx, s.secrets, org, auth.Credentials{
+		GitHubURL: "https://github.com",
+		GitHubPAT: "ghp-test",
+	}); err != nil {
+		t.Fatalf("Save creds: %v", err)
+	}
+	st = getStatus()
+	if st["github_ready"] != true {
+		t.Errorf("github_ready=%v after PAT saved; want true", st["github_ready"])
+	}
+	if st["setup_complete"] != false {
+		t.Errorf("setup_complete=%v with GitHub but no repos; want false", st["setup_complete"])
+	}
+	if st["setup_step"] != "team" {
+		t.Errorf("setup_step=%v with GitHub and no repos; want team", st["setup_step"])
+	}
+
+	// A tracked repo lands → setup is complete, gate opens.
+	seedConfiguredRepo(t, s, "acme", "widgets")
+	st = getStatus()
+	if st["setup_complete"] != true {
+		t.Errorf("setup_complete=%v with GitHub + a repo; want true", st["setup_complete"])
+	}
+	if st["setup_step"] != "done" {
+		t.Errorf("setup_step=%v when complete; want done", st["setup_step"])
+	}
+}

@@ -31,7 +31,7 @@ import OrgConfigure from './pages/OrgConfigure'
 import TeamConfigure from './pages/TeamConfigure'
 import ConnectGitHub from './pages/ConnectGitHub'
 import Shell from './Shell'
-import AuthGate, { RequireGitHubIdentity } from './AuthGate'
+import AuthGate, { RequireGitHubIdentity, RequireSetupComplete } from './AuthGate'
 import ToastProvider from './components/Toast/ToastProvider'
 import { useDeploymentConfig } from './hooks/useDeploymentConfig'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
@@ -114,7 +114,9 @@ function LocalRoutes() {
       <Route
         element={
           <AuthGate mode="local">
-            <Shell />
+            <RequireSetupComplete isLocal>
+              <Shell />
+            </RequireSetupComplete>
           </AuthGate>
         }
       >
@@ -191,9 +193,11 @@ function MultiRoutes() {
             path="/orgs/:org_id"
             element={
               <AuthGate mode="multi">
-                <RequireGitHubIdentity>
-                  <Shell />
-                </RequireGitHubIdentity>
+                <RequireSetupComplete>
+                  <RequireGitHubIdentity>
+                    <Shell />
+                  </RequireGitHubIdentity>
+                </RequireSetupComplete>
               </AuthGate>
             }
           >
