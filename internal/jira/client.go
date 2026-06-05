@@ -149,7 +149,7 @@ func (cfg Config) NewAPIRequest(ctx context.Context, method, path string, body i
 type Client struct {
 	cfg     Config
 	http    *http.Client
-	selfMu  sync.Mutex
+	selfMu  sync.RWMutex
 	selfVal *currentUserResponse
 }
 
@@ -752,6 +752,19 @@ type currentUserResponse struct {
 // cancelled/expired ctx from one request — would otherwise poison identity
 // resolution for every later caller. The next call simply retries.
 func (c *Client) currentUser(ctx context.Context) (*currentUserResponse, error) {
+	// Fast path: once cached, concurrent callers read under the read lock
+	// and never contend on (or duplicate) the /myself fetch.
+	c.selfMu.RLock()
+	cached := c.selfVal
+	c.selfMu.RUnlock()
+	if cached != nil {
+		return cached, nil
+	}
+
+	// Slow path: hold the write lock for the one-time fetch, re-checking
+	// after acquiring it in case another caller populated the cache while we
+	// waited. Holding it across the fetch also collapses a concurrent first-
+	// call stampede into a single /myself round-trip.
 	c.selfMu.Lock()
 	defer c.selfMu.Unlock()
 	if c.selfVal != nil {
