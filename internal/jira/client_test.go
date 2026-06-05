@@ -1,7 +1,9 @@
 package jira
 
 import (
+	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -115,7 +117,7 @@ func TestDataCenterPATRequest(t *testing.T) {
 	srv, rec := captureServer(t, `{"key":"PROJ-1"}`)
 	c := NewClient(DataCenterPAT(srv.URL, "tok-123"))
 
-	if _, err := c.GetIssue("PROJ-1"); err != nil {
+	if _, err := c.GetIssue(t.Context(), "PROJ-1"); err != nil {
 		t.Fatalf("GetIssue: %v", err)
 	}
 	auth, path := rec.read()
@@ -133,7 +135,7 @@ func TestCloudAPITokenRequest(t *testing.T) {
 	srv, rec := captureServer(t, `{"key":"PROJ-1"}`)
 	c := NewClient(CloudAPIToken(srv.URL, "me@acme.com", "tok-123"))
 
-	if _, err := c.GetIssue("PROJ-1"); err != nil {
+	if _, err := c.GetIssue(t.Context(), "PROJ-1"); err != nil {
 		t.Fatalf("GetIssue: %v", err)
 	}
 	auth, path := rec.read()
@@ -173,10 +175,29 @@ func TestNewAPIRequest(t *testing.T) {
 func TestNilAuthSchemeErrors(t *testing.T) {
 	bare := Config{BaseURL: "https://jira.example.com", Deployment: DeploymentDataCenter, APIVersion: APIv2}
 
-	if _, err := NewClient(bare).GetIssue("PROJ-1"); err == nil {
+	if _, err := NewClient(bare).GetIssue(t.Context(), "PROJ-1"); err == nil {
 		t.Error("GetIssue with nil auth scheme: got nil error, want one")
 	}
 	if _, err := bare.NewAPIRequest(t.Context(), http.MethodGet, "myself", nil); err == nil {
 		t.Error("NewAPIRequest with nil auth scheme: got nil error, want one")
+	}
+}
+
+// TestContextCancellation proves the request methods honor their context: a
+// cancelled ctx aborts the call. This is the whole point of threading ctx
+// into get/put/post/postJSON via http.NewRequestWithContext.
+func TestContextCancellation(t *testing.T) {
+	srv, _ := captureServer(t, `{"key":"PROJ-1"}`)
+	c := NewClient(DataCenterPAT(srv.URL, "tok"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelled before the request is issued
+
+	_, err := c.GetIssue(ctx, "PROJ-1")
+	if err == nil {
+		t.Fatal("expected error from cancelled context, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error = %v, want it to wrap context.Canceled", err)
 	}
 }

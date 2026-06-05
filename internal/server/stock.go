@@ -564,15 +564,15 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 			// available tickets the state check is a no-op (they're
 			// unassigned by definition), but GetClaimState is cheap and keeps
 			// one code path for both branches.
-			state := client.GetClaimState(a.IssueKey)
+			state := client.GetClaimState(r.Context(), a.IssueKey)
 			if state == nil || !state.AssignedToSelf {
-				if err := client.AssignToSelf(a.IssueKey); err != nil {
+				if err := client.AssignToSelf(r.Context(), a.IssueKey); err != nil {
 					failed = append(failed, stockFailure{a.IssueKey, a.Action, "assign: " + err.Error()})
 					continue
 				}
 			}
 			if state == nil || !projectRule.InProgressContains(state.StatusName) {
-				if err := client.TransitionTo(a.IssueKey, projectRule.InProgressCanonical); err != nil {
+				if err := client.TransitionTo(r.Context(), a.IssueKey, projectRule.InProgressCanonical); err != nil {
 					failed = append(failed, stockFailure{a.IssueKey, a.Action, "transition: " + err.Error()})
 					continue
 				}
@@ -633,9 +633,9 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 			// Done.Members=[Resolved,Verified] is already done from TF's
 			// perspective; transitioning to Resolved would be a no-op at best
 			// and a workflow violation at worst.
-			state := client.GetClaimState(a.IssueKey)
+			state := client.GetClaimState(r.Context(), a.IssueKey)
 			if state == nil || !projectRule.DoneContains(state.StatusName) {
-				if err := client.TransitionTo(a.IssueKey, projectRule.DoneCanonical); err != nil {
+				if err := client.TransitionTo(r.Context(), a.IssueKey, projectRule.DoneCanonical); err != nil {
 					failed = append(failed, stockFailure{a.IssueKey, a.Action, "transition: " + err.Error()})
 					continue
 				}

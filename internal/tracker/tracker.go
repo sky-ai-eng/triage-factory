@@ -856,7 +856,9 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 	fields := []string{"summary", "description", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment", "subtasks", "created", "updated"}
 
 	for _, q := range queries {
-		issues, err := client.SearchIssues(q.jql, fields, 100)
+		// Background context: the tracker is a background poller with no
+		// request-scoped deadline, matching its entity-store calls below.
+		issues, err := client.SearchIssues(context.Background(), q.jql, fields, 100)
 		if err != nil {
 			log.Printf("[tracker] Jira discovery query failed: %v", err)
 			continue
@@ -896,7 +898,7 @@ func (t *Tracker) batchFetchJira(client *jiraclient.Client, baseURL string, keys
 		batch := keys[i:end]
 
 		jql := fmt.Sprintf("key IN (%s)", strings.Join(batch, ", "))
-		issues, err := client.SearchIssues(jql, fields, jiraBatchSize)
+		issues, err := client.SearchIssues(context.Background(), jql, fields, jiraBatchSize)
 		if err != nil {
 			return nil, fmt.Errorf("batch fetch keys %d-%d: %w", i, end, err)
 		}

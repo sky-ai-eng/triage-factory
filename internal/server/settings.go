@@ -402,7 +402,7 @@ func (s *Server) handleJiraStatuses(w http.ResponseWriter, r *http.Request) {
 	var counts map[string]int            // status name → number of projects it appears in
 	var canonical map[string]jira.Status // status name → first-seen Status object
 	for i, proj := range projects {
-		projectStatuses, err := client.ProjectStatuses(proj)
+		projectStatuses, err := client.ProjectStatuses(r.Context(), proj)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch statuses for " + proj + ": " + err.Error()})
 			return

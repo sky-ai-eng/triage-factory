@@ -147,11 +147,10 @@ func (cfg Config) NewAPIRequest(ctx context.Context, method, path string, body i
 // Client wraps the Jira REST API. The API version and auth scheme are
 // carried by cfg — see Config and the named constructors.
 type Client struct {
-	cfg      Config
-	http     *http.Client
-	selfOnce sync.Once
-	selfVal  *currentUserResponse
-	selfErr  error
+	cfg     Config
+	http    *http.Client
+	selfMu  sync.Mutex
+	selfVal *currentUserResponse
 }
 
 // NewClient builds a Client from a Config. Construct the Config with a named
@@ -177,9 +176,9 @@ type Status struct {
 
 // ProjectStatuses returns all unique statuses available in a project,
 // deduplicated across issue types.
-func (c *Client) ProjectStatuses(projectKey string) ([]Status, error) {
+func (c *Client) ProjectStatuses(ctx context.Context, projectKey string) ([]Status, error) {
 	url := c.apiURL("project/%s/statuses", projectKey)
-	body, err := c.get(url)
+	body, err := c.get(ctx, url)
 	if err != nil {
 		return nil, err
 	}
@@ -206,11 +205,11 @@ func (c *Client) ProjectStatuses(projectKey string) ([]Status, error) {
 }
 
 // AssignToSelf assigns the issue to the authenticated user (currentUser).
-func (c *Client) AssignToSelf(issueKey string) error {
+func (c *Client) AssignToSelf(ctx context.Context, issueKey string) error {
 	url := c.apiURL("issue/%s/assignee", issueKey)
 	// Setting name to "-1" assigns to the current user in Jira Server/DC.
 	// For Jira Cloud, we need accountId. We'll try the myself endpoint first.
-	myself, err := c.currentUser()
+	myself, err := c.currentUser(ctx)
 	if err != nil {
 		return fmt.Errorf("get current user: %w", err)
 	}
@@ -224,36 +223,36 @@ func (c *Client) AssignToSelf(issueKey string) error {
 		payload["name"] = myself.Name
 	}
 
-	return c.put(url, payload)
+	return c.put(ctx, url, payload)
 }
 
 // Unassign removes the assignee from an issue.
-func (c *Client) Unassign(issueKey string) error {
+func (c *Client) Unassign(ctx context.Context, issueKey string) error {
 	url := c.apiURL("issue/%s/assignee", issueKey)
 	// Detect Cloud vs Server the same way AssignToSelf does.
-	myself, err := c.currentUser()
+	myself, err := c.currentUser(ctx)
 	if err != nil {
 		return fmt.Errorf("get current user: %w", err)
 	}
 	if myself.AccountID != "" {
 		// Jira Cloud: null accountId clears assignee
-		return c.put(url, map[string]*string{"accountId": nil})
+		return c.put(ctx, url, map[string]*string{"accountId": nil})
 	}
 	// Jira Server/DC: null name clears assignee
-	return c.put(url, map[string]*string{"name": nil})
+	return c.put(ctx, url, map[string]*string{"name": nil})
 }
 
 // TransitionTo transitions an issue to the target status name.
 // It finds the appropriate transition by matching the target status name.
-func (c *Client) TransitionTo(issueKey, targetStatusName string) error {
-	transitions, err := c.getTransitions(issueKey)
+func (c *Client) TransitionTo(ctx context.Context, issueKey, targetStatusName string) error {
+	transitions, err := c.getTransitions(ctx, issueKey)
 	if err != nil {
 		return err
 	}
 
 	for _, t := range transitions {
 		if strings.EqualFold(t.To.Name, targetStatusName) {
-			return c.doTransition(issueKey, t.ID)
+			return c.doTransition(ctx, issueKey, t.ID)
 		}
 	}
 
@@ -275,11 +274,11 @@ type ClaimState struct {
 // GetClaimState fetches the current assignee and status of an issue and
 // checks whether the assignee is the authenticated user. Returns nil on
 // any error — callers treat failure as "unknown, proceed normally".
-func (c *Client) GetClaimState(issueKey string) *ClaimState {
+func (c *Client) GetClaimState(ctx context.Context, issueKey string) *ClaimState {
 	// Fetch only assignee + status to minimize payload. The ?fields param
 	// works identically on Cloud and Server/DC.
 	url := c.apiURL("issue/%s?fields=assignee,status", issueKey)
-	body, err := c.get(url)
+	body, err := c.get(ctx, url)
 	if err != nil {
 		log.Printf("[jira] claim guard: failed to fetch %s: %v", issueKey, err)
 		return nil
@@ -290,7 +289,7 @@ func (c *Client) GetClaimState(issueKey string) *ClaimState {
 		return nil
 	}
 
-	myself, err := c.currentUser()
+	myself, err := c.currentUser(ctx)
 	if err != nil {
 		log.Printf("[jira] claim guard: failed to get current user: %v", err)
 		return nil
@@ -382,8 +381,8 @@ type Priority struct {
 }
 
 // ListPriorities returns all priority levels configured on the instance.
-func (c *Client) ListPriorities() ([]Priority, error) {
-	body, err := c.get(c.apiURL("priority"))
+func (c *Client) ListPriorities(ctx context.Context) ([]Priority, error) {
+	body, err := c.get(ctx, c.apiURL("priority"))
 	if err != nil {
 		return nil, err
 	}
@@ -395,9 +394,9 @@ func (c *Client) ListPriorities() ([]Priority, error) {
 }
 
 // GetIssue fetches a single issue by key.
-func (c *Client) GetIssue(issueKey string) (*Issue, error) {
+func (c *Client) GetIssue(ctx context.Context, issueKey string) (*Issue, error) {
 	url := c.apiURL("issue/%s", issueKey)
-	body, err := c.get(url)
+	body, err := c.get(ctx, url)
 	if err != nil {
 		return nil, err
 	}
@@ -411,12 +410,12 @@ func (c *Client) GetIssue(issueKey string) (*Issue, error) {
 // GetChildIssues returns all child issues of a parent (subtasks + epic children).
 // On Cloud, parent = KEY covers both. On Server/DC, we also query the Epic Link
 // custom field. Results are deduplicated by key.
-func (c *Client) GetChildIssues(parentKey string) ([]Issue, error) {
+func (c *Client) GetChildIssues(ctx context.Context, parentKey string) ([]Issue, error) {
 	seen := map[string]bool{}
 	var result []Issue
 
 	// Query 1: direct parent relationship (Cloud + Server/DC subtasks)
-	issues, err := c.SearchIssues(fmt.Sprintf("parent = %s ORDER BY created ASC", parentKey), nil, 100)
+	issues, err := c.SearchIssues(ctx, fmt.Sprintf("parent = %s ORDER BY created ASC", parentKey), nil, 100)
 	if err != nil {
 		return nil, err
 	}
@@ -428,11 +427,11 @@ func (c *Client) GetChildIssues(parentKey string) ([]Issue, error) {
 	}
 
 	// Query 2: Epic Link (Server/DC epic children)
-	epicField, err := c.epicLinkField()
+	epicField, err := c.epicLinkField(ctx)
 	if err != nil {
 		log.Printf("[jira] warning: epic link field discovery failed: %v", err)
 	} else if epicField != "" {
-		epicIssues, err := c.SearchIssues(fmt.Sprintf("cf[%s] = %s ORDER BY created ASC", extractFieldID(epicField), parentKey), nil, 100)
+		epicIssues, err := c.SearchIssues(ctx, fmt.Sprintf("cf[%s] = %s ORDER BY created ASC", extractFieldID(epicField), parentKey), nil, 100)
 		if err != nil {
 			log.Printf("[jira] warning: epic link query failed for %s: %v", parentKey, err)
 		} else {
@@ -498,7 +497,7 @@ func walkADF(node map[string]any, sb *strings.Builder) {
 
 // SearchIssues runs a JQL query and returns matching issues.
 // If fields is nil, DefaultSearchFields is used. Pass []string{"*all"} for everything.
-func (c *Client) SearchIssues(jql string, fields []string, maxResults int) ([]Issue, error) {
+func (c *Client) SearchIssues(ctx context.Context, jql string, fields []string, maxResults int) ([]Issue, error) {
 	if fields == nil {
 		fields = DefaultSearchFields
 	}
@@ -512,7 +511,7 @@ func (c *Client) SearchIssues(jql string, fields []string, maxResults int) ([]Is
 		"maxResults": maxResults,
 		"fields":     fields,
 	}
-	respBody, err := c.postJSON(url, payload)
+	respBody, err := c.postJSON(ctx, url, payload)
 	if err != nil {
 		return nil, err
 	}
@@ -532,20 +531,20 @@ func extractFieldID(field string) string {
 }
 
 // AddComment posts a comment on an issue.
-func (c *Client) AddComment(issueKey, body string) error {
+func (c *Client) AddComment(ctx context.Context, issueKey, body string) error {
 	url := c.apiURL("issue/%s/comment", issueKey)
-	return c.post(url, map[string]string{"body": body})
+	return c.post(ctx, url, map[string]string{"body": body})
 }
 
 // GetTransitions returns the available workflow transitions for an issue.
-func (c *Client) GetTransitions(issueKey string) ([]Transition, error) {
-	return c.getTransitions(issueKey)
+func (c *Client) GetTransitions(ctx context.Context, issueKey string) ([]Transition, error) {
+	return c.getTransitions(ctx, issueKey)
 }
 
 // ListIssueTypes returns the issue types available in a project.
-func (c *Client) ListIssueTypes(projectKey string) ([]IssueType, error) {
+func (c *Client) ListIssueTypes(ctx context.Context, projectKey string) ([]IssueType, error) {
 	url := c.apiURL("project/%s", projectKey)
-	body, err := c.get(url)
+	body, err := c.get(ctx, url)
 	if err != nil {
 		return nil, err
 	}
@@ -559,7 +558,7 @@ func (c *Client) ListIssueTypes(projectKey string) ([]IssueType, error) {
 }
 
 // CreateIssue creates a new issue. parentKey and priority are optional (pass empty to skip).
-func (c *Client) CreateIssue(projectKey, issueType, summary, description, parentKey, priority string) (string, error) {
+func (c *Client) CreateIssue(ctx context.Context, projectKey, issueType, summary, description, parentKey, priority string) (string, error) {
 	fields := map[string]any{
 		"project":   map[string]string{"key": projectKey},
 		"issuetype": map[string]string{"name": issueType},
@@ -578,17 +577,17 @@ func (c *Client) CreateIssue(projectKey, issueType, summary, description, parent
 
 	payload := map[string]any{"fields": fields}
 	createURL := c.apiURL("issue")
-	respBody, err := c.postJSON(createURL, payload)
+	respBody, err := c.postJSON(ctx, createURL, payload)
 
 	// If parent field failed on Server/DC, retry with Epic Link
 	if err != nil && parentKey != "" {
 		if strings.Contains(err.Error(), "gh.epic.error") || strings.Contains(err.Error(), "parent") {
 			delete(fields, "parent")
-			epicField, epicErr := c.epicLinkField()
+			epicField, epicErr := c.epicLinkField(ctx)
 			if epicErr == nil && epicField != "" {
 				fields[epicField] = parentKey
 				payload = map[string]any{"fields": fields}
-				respBody, err = c.postJSON(createURL, payload)
+				respBody, err = c.postJSON(ctx, createURL, payload)
 			}
 		}
 	}
@@ -606,9 +605,9 @@ func (c *Client) CreateIssue(projectKey, issueType, summary, description, parent
 }
 
 // SetPriority updates the priority of an issue.
-func (c *Client) SetPriority(issueKey, priority string) error {
+func (c *Client) SetPriority(ctx context.Context, issueKey, priority string) error {
 	url := c.apiURL("issue/%s", issueKey)
-	return c.put(url, map[string]any{"fields": map[string]any{
+	return c.put(ctx, url, map[string]any{"fields": map[string]any{
 		"priority": map[string]string{"name": priority},
 	}})
 }
@@ -640,7 +639,7 @@ func (u UpdateIssueFields) IsEmpty() bool {
 // UpdateIssue mutates an existing issue. Only fields explicitly set on
 // `fields` are touched; everything else is preserved. Returns an error
 // if no fields were provided.
-func (c *Client) UpdateIssue(issueKey string, f UpdateIssueFields) error {
+func (c *Client) UpdateIssue(ctx context.Context, issueKey string, f UpdateIssueFields) error {
 	if f.IsEmpty() {
 		return fmt.Errorf("no fields to update")
 	}
@@ -676,17 +675,17 @@ func (c *Client) UpdateIssue(issueKey string, f UpdateIssueFields) error {
 	}
 
 	url := c.apiURL("issue/%s", issueKey)
-	return c.put(url, payload)
+	return c.put(ctx, url, payload)
 }
 
 // SetParent links an existing issue under a parent.
 // Tries fields.parent first (works for Cloud + Server/DC subtasks).
 // Falls back to Epic Link custom field on Server/DC if parent is an Epic.
-func (c *Client) SetParent(issueKey, parentKey string) error {
+func (c *Client) SetParent(ctx context.Context, issueKey, parentKey string) error {
 	url := c.apiURL("issue/%s", issueKey)
 
 	// Try native parent field first
-	err := c.put(url, map[string]any{"fields": map[string]any{
+	err := c.put(ctx, url, map[string]any{"fields": map[string]any{
 		"parent": map[string]string{"key": parentKey},
 	}})
 	if err == nil {
@@ -695,9 +694,9 @@ func (c *Client) SetParent(issueKey, parentKey string) error {
 
 	// Fall back to Epic Link if the parent field failed
 	if strings.Contains(err.Error(), "gh.epic.error") || strings.Contains(err.Error(), "parent") {
-		epicField, epicErr := c.epicLinkField()
+		epicField, epicErr := c.epicLinkField(ctx)
 		if epicErr == nil && epicField != "" {
-			return c.put(url, map[string]any{"fields": map[string]any{
+			return c.put(ctx, url, map[string]any{"fields": map[string]any{
 				epicField: parentKey,
 			}})
 		}
@@ -709,8 +708,8 @@ func (c *Client) SetParent(issueKey, parentKey string) error {
 // epicLinkField discovers the custom field ID for Epic Link on Server/DC.
 // It looks for the field with schema type "com.pyxis.greenhopper.jira:gh-epic-link".
 // Returns empty string (not an error) if not found.
-func (c *Client) epicLinkField() (string, error) {
-	body, err := c.get(c.apiURL("field"))
+func (c *Client) epicLinkField(ctx context.Context) (string, error) {
+	body, err := c.get(ctx, c.apiURL("field"))
 	if err != nil {
 		return "", err
 	}
@@ -740,26 +739,33 @@ type currentUserResponse struct {
 	AccountID string `json:"accountId"` // Jira Cloud
 }
 
-func (c *Client) currentUser() (*currentUserResponse, error) {
-	c.selfOnce.Do(func() {
-		body, err := c.get(c.apiURL("myself"))
-		if err != nil {
-			c.selfErr = err
-			return
-		}
-		var user currentUserResponse
-		if err := json.Unmarshal(body, &user); err != nil {
-			c.selfErr = fmt.Errorf("parse myself: %w", err)
-			return
-		}
-		c.selfVal = &user
-	})
-	return c.selfVal, c.selfErr
+// currentUser resolves and caches the authenticated user's identity
+// (accountId on Cloud, name on Server/DC). The result is cached for the
+// client's lifetime on first success. Failures are deliberately NOT cached:
+// because ctx now flows in, caching a transient error — especially a
+// cancelled/expired ctx from one request — would otherwise poison identity
+// resolution for every later caller. The next call simply retries.
+func (c *Client) currentUser(ctx context.Context) (*currentUserResponse, error) {
+	c.selfMu.Lock()
+	defer c.selfMu.Unlock()
+	if c.selfVal != nil {
+		return c.selfVal, nil
+	}
+	body, err := c.get(ctx, c.apiURL("myself"))
+	if err != nil {
+		return nil, err
+	}
+	var user currentUserResponse
+	if err := json.Unmarshal(body, &user); err != nil {
+		return nil, fmt.Errorf("parse myself: %w", err)
+	}
+	c.selfVal = &user
+	return c.selfVal, nil
 }
 
-func (c *Client) getTransitions(issueKey string) ([]Transition, error) {
+func (c *Client) getTransitions(ctx context.Context, issueKey string) ([]Transition, error) {
 	url := c.apiURL("issue/%s/transitions", issueKey)
-	body, err := c.get(url)
+	body, err := c.get(ctx, url)
 	if err != nil {
 		return nil, err
 	}
@@ -773,16 +779,16 @@ func (c *Client) getTransitions(issueKey string) ([]Transition, error) {
 	return result.Transitions, nil
 }
 
-func (c *Client) doTransition(issueKey, transitionID string) error {
+func (c *Client) doTransition(ctx context.Context, issueKey, transitionID string) error {
 	url := c.apiURL("issue/%s/transitions", issueKey)
 	payload := map[string]any{
 		"transition": map[string]string{"id": transitionID},
 	}
-	return c.post(url, payload)
+	return c.post(ctx, url, payload)
 }
 
-func (c *Client) get(url string) ([]byte, error) {
-	req, err := http.NewRequest("GET", url, nil)
+func (c *Client) get(ctx context.Context, url string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -807,12 +813,12 @@ func (c *Client) get(url string) ([]byte, error) {
 	return body, nil
 }
 
-func (c *Client) put(url string, payload any) error {
+func (c *Client) put(ctx context.Context, url string, payload any) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest("PUT", url, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, "PUT", url, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
@@ -834,12 +840,12 @@ func (c *Client) put(url string, payload any) error {
 	return nil
 }
 
-func (c *Client) postJSON(url string, payload any) ([]byte, error) {
+func (c *Client) postJSON(ctx context.Context, url string, payload any) ([]byte, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest("POST", url, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
@@ -864,12 +870,12 @@ func (c *Client) postJSON(url string, payload any) ([]byte, error) {
 	return body, nil
 }
 
-func (c *Client) post(url string, payload any) error {
+func (c *Client) post(ctx context.Context, url string, payload any) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest("POST", url, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}

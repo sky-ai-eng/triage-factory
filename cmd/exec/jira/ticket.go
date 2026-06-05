@@ -1,6 +1,7 @@
 package jira
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -125,7 +126,7 @@ func ticketView(client *jiraclient.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: jira ticket view <key>")
 	}
-	issue, err := client.GetIssue(args[0])
+	issue, err := client.GetIssue(context.Background(), args[0])
 	exitOnErr(err)
 	printJSON(issue)
 }
@@ -139,7 +140,7 @@ func ticketTransition(client *jiraclient.Client, args []string) {
 	if status == "" {
 		exitErr("--status is required")
 	}
-	err := client.TransitionTo(key, status)
+	err := client.TransitionTo(context.Background(), key, status)
 	exitOnErr(err)
 	printJSON(map[string]any{"ok": true, "key": key, "status": status})
 }
@@ -148,7 +149,7 @@ func ticketListTransitions(client *jiraclient.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: jira ticket list-transitions <key>")
 	}
-	transitions, err := client.GetTransitions(args[0])
+	transitions, err := client.GetTransitions(context.Background(), args[0])
 	exitOnErr(err)
 	printJSON(transitions)
 }
@@ -162,7 +163,7 @@ func ticketComment(client *jiraclient.Client, args []string) {
 	if body == "" {
 		exitErr("--body is required")
 	}
-	err := client.AddComment(key, body)
+	err := client.AddComment(context.Background(), key, body)
 	exitOnErr(err)
 	printJSON(map[string]any{"ok": true, "key": key})
 }
@@ -171,7 +172,7 @@ func ticketAssign(client *jiraclient.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: jira ticket assign <key>")
 	}
-	err := client.AssignToSelf(args[0])
+	err := client.AssignToSelf(context.Background(), args[0])
 	exitOnErr(err)
 	printJSON(map[string]any{"ok": true, "key": args[0], "assigned": "self"})
 }
@@ -180,7 +181,7 @@ func ticketUnassign(client *jiraclient.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: jira ticket unassign <key>")
 	}
-	err := client.Unassign(args[0])
+	err := client.Unassign(context.Background(), args[0])
 	exitOnErr(err)
 	printJSON(map[string]any{"ok": true, "key": args[0], "assigned": nil})
 }
@@ -203,7 +204,7 @@ func ticketCreate(client *jiraclient.Client, args []string) {
 		exitErr("--summary is required")
 	}
 
-	key, err := client.CreateIssue(project, issueType, summary, description, parentKey, priority)
+	key, err := client.CreateIssue(context.Background(), project, issueType, summary, description, parentKey, priority)
 	exitOnErr(err)
 	printJSON(map[string]any{"ok": true, "key": key})
 }
@@ -243,7 +244,7 @@ func ticketEdit(client *jiraclient.Client, args []string) {
 		exitErr("at least one of --summary, --description, --priority, --type, --add-label, --remove-label is required")
 	}
 
-	err = client.UpdateIssue(key, fields)
+	err = client.UpdateIssue(context.Background(), key, fields)
 	exitOnErr(err)
 	printJSON(map[string]any{"ok": true, "key": key})
 }
@@ -257,7 +258,7 @@ func ticketSetParent(client *jiraclient.Client, args []string) {
 	if parentKey == "" {
 		exitErr("--parent is required")
 	}
-	err := client.SetParent(key, parentKey)
+	err := client.SetParent(context.Background(), key, parentKey)
 	exitOnErr(err)
 	printJSON(map[string]any{"ok": true, "key": key, "parent": parentKey})
 }
@@ -266,7 +267,7 @@ func ticketListChildren(client *jiraclient.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: jira ticket list-children <key>")
 	}
-	children, err := client.GetChildIssues(args[0])
+	children, err := client.GetChildIssues(context.Background(), args[0])
 	exitOnErr(err)
 	if children == nil {
 		children = []jiraclient.Issue{}
@@ -296,7 +297,7 @@ func ticketSearch(client *jiraclient.Client, args []string) {
 		maxResults = v
 	}
 
-	issues, err := client.SearchIssues(jql, fields, maxResults)
+	issues, err := client.SearchIssues(context.Background(), jql, fields, maxResults)
 	exitOnErr(err)
 	if issues == nil {
 		issues = []jiraclient.Issue{}
@@ -305,7 +306,7 @@ func ticketSearch(client *jiraclient.Client, args []string) {
 }
 
 func ticketListPriorities(client *jiraclient.Client) {
-	priorities, err := client.ListPriorities()
+	priorities, err := client.ListPriorities(context.Background())
 	exitOnErr(err)
 	printJSON(priorities)
 }
@@ -319,7 +320,7 @@ func ticketSetPriority(client *jiraclient.Client, args []string) {
 	if priority == "" {
 		exitErr("--priority is required")
 	}
-	err := client.SetPriority(key, priority)
+	err := client.SetPriority(context.Background(), key, priority)
 	exitOnErr(err)
 	printJSON(map[string]any{"ok": true, "key": key, "priority": priority})
 }
@@ -328,7 +329,7 @@ func ticketListTypes(client *jiraclient.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: jira ticket list-types <project>")
 	}
-	types, err := client.ListIssueTypes(args[0])
+	types, err := client.ListIssueTypes(context.Background(), args[0])
 	exitOnErr(err)
 	printJSON(types)
 }
