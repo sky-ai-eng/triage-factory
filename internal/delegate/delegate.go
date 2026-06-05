@@ -185,9 +185,9 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	}
 
 	// Resolve the blueprint to fire + its ordered steps under the right pool
-	// for the trigger type. Execution parity branches on step count, not on a
-	// kind discriminator: a 1-step blueprint runs the single-prompt path; a
-	// multi-step blueprint runs the orchestrator.
+	// for the trigger type. There is one execution path now: every blueprint —
+	// 1-step or multi-step — mints a blueprint_run and runs through the
+	// orchestrator (it just loops once for a 1-step). No step-count branch.
 	blueprint, err := s.resolveBlueprint(orgID, opts.ExplicitBlueprintID, triggerType, creatorUserID)
 	if err != nil {
 		return "", err

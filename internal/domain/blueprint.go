@@ -70,11 +70,11 @@ type BlueprintStep struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
-// BlueprintRun is the in-flight instance for a multi-step blueprint. One row
-// per delegateBlueprint call. Owns the shared worktree across all steps.
-// Per-step state lives on the runs table linked back via runs.blueprint_run_id.
-// (A 1-step blueprint runs through the single-prompt path and produces no
-// BlueprintRun row.)
+// BlueprintRun is the in-flight instance for a blueprint. One row per
+// delegation — every blueprint, including a 1-step one, mints exactly one (a
+// single prompt is a 1-step blueprint; there is no separate single-prompt
+// path). Owns the shared worktree across all steps. Per-step state lives on the
+// runs table linked back via runs.blueprint_run_id (NOT NULL).
 type BlueprintRun struct {
 	ID          string               `json:"id"`
 	BlueprintID string               `json:"blueprint_id"`
