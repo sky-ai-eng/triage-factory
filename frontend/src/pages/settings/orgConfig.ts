@@ -1,9 +1,9 @@
 // Shared types + persistence helpers for the org-level configuration
 // surface (GitHub + Jira access, poller timing, model cap). The same
-// helpers back the Settings workspace tab, the org-create configure step,
-// and the local Setup wizard — every surface round-trips the identical
-// org_settings shape via the existing endpoints, so there is no parallel
-// persistence path to drift.
+// helpers back the Settings workspace tab and the create-time OrgConfigure
+// step (both modes) — every surface round-trips the identical org_settings
+// shape via the existing endpoints, so there is no parallel persistence path
+// to drift.
 
 import { readError } from '../../lib/api'
 

@@ -1,8 +1,8 @@
 // Shared types + persistence helpers for the team-level configuration
 // surface (tracked repos, GitHub-team mappings, Jira project rules, team
 // settings). The team mirror of orgConfig.ts: the same helpers back the
-// Settings team tab, the create-time TeamConfigure step, and the local
-// Setup wizard, so no surface grows its own parallel persistence path.
+// Settings team tab and the create-time TeamConfigure step (both modes), so
+// no surface grows its own parallel persistence path.
 //
 // Key difference from org: team config spans MULTIPLE endpoints, not the
 // single POST /api/settings/org. The team-settings + Jira rules ride one

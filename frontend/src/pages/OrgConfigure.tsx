@@ -88,8 +88,17 @@ export default function OrgConfigure({ isLocal = false }: { isLocal?: boolean })
   // the create→configure chain). "default" is the alias the team endpoints
   // resolve to the org's freshly-bootstrapped Default team, so we don't need
   // its UUID here.
-  const goToTeamConfigure = () =>
-    navigate(orgId ? `/orgs/${orgId}/teams/default/configure` : '/', { replace: true })
+  const goToTeamConfigure = () => {
+    if (!orgId) {
+      // Unreachable in practice — both mounting routes supply :org_id — but a
+      // missing id would otherwise silently drop the founder into the app,
+      // skipping the team-configure step. Surface it rather than fail quietly.
+      console.error('OrgConfigure: missing org_id, cannot continue to team configure')
+      navigate('/', { replace: true })
+      return
+    }
+    navigate(`/orgs/${orgId}/teams/default/configure`, { replace: true })
+  }
 
   const finish = async () => {
     setSaving(true)

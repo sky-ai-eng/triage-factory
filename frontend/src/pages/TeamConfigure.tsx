@@ -106,7 +106,15 @@ export default function TeamConfigure({ isLocal = false }: { isLocal?: boolean }
   // always in multi — go straight to the app.
   const finishDestination = () => {
     if (isLocal && jiraConnected) {
-      navigate(orgId ? `/orgs/${orgId}/carry-over` : '/', { replace: true })
+      if (!orgId) {
+        // Unreachable in practice — the mounting route supplies :org_id — but
+        // a missing id would otherwise silently skip the carry-over step.
+        // Surface it rather than fail quietly; fall through to the app.
+        console.error('TeamConfigure: missing org_id, cannot continue to Jira carry-over')
+        goToApp()
+        return
+      }
+      navigate(`/orgs/${orgId}/carry-over`, { replace: true })
       return
     }
     goToApp()
