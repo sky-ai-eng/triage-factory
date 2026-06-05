@@ -256,7 +256,9 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 
 	var nextStepName string
 	if stepIdx+1 < len(steps) {
-		if np, err := s.prompts.GetSystem(context.Background(), orgID, steps[stepIdx+1].StepPromptID); err == nil && np != nil {
+		// Pre-agent read → honor ctx so a shutdown cancels it; a cancelled/failed
+		// read just leaves nextStepName empty (the mission falls back to "step N").
+		if np, err := s.prompts.GetSystem(ctx, orgID, steps[stepIdx+1].StepPromptID); err == nil && np != nil {
 			nextStepName = np.Name
 		}
 	}
@@ -324,8 +326,12 @@ func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, ste
 
 	// Sequence-level cancel: a cancel requested while the step was running ends
 	// the blueprint without enqueuing the next step. Re-read the signal — it may
-	// have been raised after the claim.
-	if fresh, err := s.blueprints.GetRunSystem(context.Background(), orgID, br.ID); err == nil && fresh != nil {
+	// have been raised after the claim. On a read error we proceed with the
+	// pre-agent br: a cancel raised in this narrow window could then be missed and
+	// enqueue one extra step (the documented claim-window trade-off), so log it.
+	if fresh, err := s.blueprints.GetRunSystem(context.Background(), orgID, br.ID); err != nil {
+		log.Printf("[dispatch] reactor: refresh blueprint_run %s for cancel check failed; proceeding with pre-agent state (a cancel in this window may enqueue one extra step): %v", br.ID, err)
+	} else if fresh != nil {
 		br = fresh
 	}
 	if br.Status != domain.BlueprintRunStatusRunning {

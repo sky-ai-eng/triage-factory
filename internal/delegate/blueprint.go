@@ -307,7 +307,15 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 	// reactor, so we drive terminateBlueprint ourselves below.
 	var anyActive bool
 	stepIDs, err := s.blueprints.ActiveStepRunIDsSystem(context.Background(), orgID, blueprintRunID)
-	if err == nil {
+	if err != nil {
+		// Couldn't enumerate the active step runs, so we can't target their
+		// subprocess kills — the cancel_requested signal above still stops the
+		// queue from advancing and we finalize the blueprint below, but a
+		// currently-running subprocess will run to completion (then short-circuit
+		// in the reactor on the non-running blueprint). Log so that wasteful run
+		// is diagnosable.
+		log.Printf("[blueprint] CancelBlueprint: list active step runs for %s failed; a live subprocess may run to completion: %v", blueprintRunID, err)
+	} else {
 		s.mu.Lock()
 		for _, runID := range stepIDs {
 			if cancel, ok := s.cancels[runID]; ok {
