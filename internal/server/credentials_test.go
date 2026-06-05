@@ -141,20 +141,7 @@ func TestIntegrationsStatus_SetupCompleteGate(t *testing.T) {
 	ctx := t.Context()
 	org := runmode.LocalDefaultOrgID
 
-	getStatus := func() map[string]any {
-		t.Helper()
-		req := httptest.NewRequest(http.MethodGet, "/api/integrations/status", nil)
-		rec := httptest.NewRecorder()
-		s.mux.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status: got=%d want=200, body=%s", rec.Code, rec.Body.String())
-		}
-		var body map[string]any
-		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-			t.Fatalf("decode status: %v", err)
-		}
-		return body
-	}
+	getStatus := func() map[string]any { return getIntegrationsStatus(t, s) }
 
 	// Provisioned tenant, no GitHub creds, no repos → incomplete, resume at org.
 	st := getStatus()
@@ -191,5 +178,98 @@ func TestIntegrationsStatus_SetupCompleteGate(t *testing.T) {
 	}
 	if st["setup_step"] != "done" {
 		t.Errorf("setup_step=%v when complete; want done", st["setup_step"])
+	}
+}
+
+// getIntegrationsStatus GETs /api/integrations/status and decodes the body.
+func getIntegrationsStatus(t *testing.T, s *Server) map[string]any {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/integrations/status", nil)
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got=%d want=200, body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	return body
+}
+
+// seedGitHubApp inserts an org_github_apps row for the local org so tests can
+// exercise the App-based GitHub access path (the multi-mode alternative to a
+// PAT). `active` toggles the row's active flag — an inactive App must not
+// count as configured GitHub access.
+func seedLocalGitHubApp(t *testing.T, s *Server, clientID string, active bool) {
+	t.Helper()
+	act := 0
+	if active {
+		act = 1
+	}
+	if _, err := s.db.ExecContext(t.Context(), `
+		INSERT INTO org_github_apps (
+			org_id, app_id, slug, client_id,
+			client_secret_ref, pem_ref, webhook_secret_ref, active
+		) VALUES (?, ?, 'tf-app', ?, 'cs', 'pem', 'wh', ?)
+		ON CONFLICT(org_id) DO UPDATE SET
+			client_id = excluded.client_id,
+			active    = excluded.active
+	`, runmode.LocalDefaultOrgID, "app-"+clientID, clientID, act); err != nil {
+		t.Fatalf("seed org_github_apps: %v", err)
+	}
+}
+
+// TestIntegrationsStatus_SetupCompleteGate_AppPath pins that a registered,
+// active GitHub App satisfies the GitHub step on its own — no PAT — so an
+// App-based (multi-mode) org walks the same team → done progression. Guards
+// the appRegistered branch the PAT-path test never touches.
+func TestIntegrationsStatus_SetupCompleteGate_AppPath(t *testing.T) {
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	// Active App, no PAT: github (PAT-only display) stays false, but
+	// github_ready is true off the App alone. No repo yet → resume at team.
+	seedLocalGitHubApp(t, s, "client-xyz", true)
+	st := getIntegrationsStatus(t, s)
+	if st["github"] != false {
+		t.Errorf("github=%v with an App but no PAT; want false (PAT-only signal)", st["github"])
+	}
+	if st["github_ready"] != true {
+		t.Errorf("github_ready=%v with an active App; want true", st["github_ready"])
+	}
+	if st["setup_complete"] != false {
+		t.Errorf("setup_complete=%v with an App but no repo; want false", st["setup_complete"])
+	}
+	if st["setup_step"] != "team" {
+		t.Errorf("setup_step=%v with an App and no repo; want team", st["setup_step"])
+	}
+
+	// A tracked repo completes setup via the App path.
+	seedConfiguredRepo(t, s, "acme", "widgets")
+	st = getIntegrationsStatus(t, s)
+	if st["setup_complete"] != true {
+		t.Errorf("setup_complete=%v with App + repo; want true", st["setup_complete"])
+	}
+	if st["setup_step"] != "done" {
+		t.Errorf("setup_step=%v when complete; want done", st["setup_step"])
+	}
+}
+
+// TestIntegrationsStatus_InactiveAppNotReady pins that an inactive App row
+// (a stale registration left by an uninstall/reinstall cycle) does NOT count
+// as configured GitHub access — GetForOrg doesn't filter on active, so the
+// status handler must, or a deactivated App would falsely complete setup.
+func TestIntegrationsStatus_InactiveAppNotReady(t *testing.T) {
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	seedLocalGitHubApp(t, s, "client-xyz", false)
+	st := getIntegrationsStatus(t, s)
+	if st["github_ready"] != false {
+		t.Errorf("github_ready=%v with only an INACTIVE App; want false", st["github_ready"])
+	}
+	if st["setup_step"] != "org" {
+		t.Errorf("setup_step=%v with only an inactive App; want org", st["setup_step"])
 	}
 }

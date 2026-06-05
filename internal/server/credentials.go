@@ -268,16 +268,20 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		// instead of leaking it in the response body.
 		log.Printf("[setup] integrations status read: %v", err)
 		writeJSON(w, http.StatusOK, map[string]any{
-			"configured": false,
-			"error":      "failed to load integrations status",
+			"configured":     false,
+			"error":          "failed to load integrations status",
+			"setup_complete": false,
+			"setup_step":     "org",
 		})
 		return
 	}
 	if credsErr != nil {
 		log.Printf("[setup] integrations status creds load: %v", credsErr)
 		writeJSON(w, http.StatusOK, map[string]any{
-			"configured": false,
-			"error":      "failed to load credentials",
+			"configured":     false,
+			"error":          "failed to load credentials",
+			"setup_complete": false,
+			"setup_step":     "org",
 		})
 		return
 	}
