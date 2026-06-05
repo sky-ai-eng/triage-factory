@@ -114,6 +114,18 @@ func (cfg Config) apiURL(format string, args ...any) string {
 	return cfg.restURL(fmt.Sprintf(format, args...))
 }
 
+// authorize applies the configured auth scheme to req. A Config built
+// without a named constructor (DataCenterPAT / CloudAPIToken) has a nil
+// scheme; because Config's other fields are exported and can be set by hand,
+// surface that as a clear error rather than a nil-pointer panic.
+func (cfg Config) authorize(req *http.Request) error {
+	if cfg.auth == nil {
+		return fmt.Errorf("jira: Config has no auth scheme — build it with DataCenterPAT or CloudAPIToken")
+	}
+	cfg.auth.apply(req)
+	return nil
+}
+
 // NewAPIRequest builds an *http.Request against
 // {BaseURL}/rest/api/{APIVersion}/{path} with this Config's Content-Type and
 // Authorization header applied. body may be nil. It is the seam external
@@ -126,7 +138,9 @@ func (cfg Config) NewAPIRequest(ctx context.Context, method, path string, body i
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	cfg.auth.apply(req)
+	if err := cfg.authorize(req); err != nil {
+		return nil, err
+	}
 	return req, nil
 }
 
@@ -263,7 +277,7 @@ type ClaimState struct {
 // any error — callers treat failure as "unknown, proceed normally".
 func (c *Client) GetClaimState(issueKey string) *ClaimState {
 	// Fetch only assignee + status to minimize payload. The ?fields param
-	// works identically on Cloud and Server/DC (v2 REST API).
+	// works identically on Cloud and Server/DC.
 	url := c.apiURL("issue/%s?fields=assignee,status", issueKey)
 	body, err := c.get(url)
 	if err != nil {
@@ -772,7 +786,9 @@ func (c *Client) get(url string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.cfg.auth.apply(req)
+	if err := c.cfg.authorize(req); err != nil {
+		return nil, err
+	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.http.Do(req)
@@ -800,7 +816,9 @@ func (c *Client) put(url string, payload any) error {
 	if err != nil {
 		return err
 	}
-	c.cfg.auth.apply(req)
+	if err := c.cfg.authorize(req); err != nil {
+		return err
+	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.http.Do(req)
@@ -825,7 +843,9 @@ func (c *Client) postJSON(url string, payload any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.cfg.auth.apply(req)
+	if err := c.cfg.authorize(req); err != nil {
+		return nil, err
+	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.http.Do(req)
@@ -853,7 +873,9 @@ func (c *Client) post(url string, payload any) error {
 	if err != nil {
 		return err
 	}
-	c.cfg.auth.apply(req)
+	if err := c.cfg.authorize(req); err != nil {
+		return err
+	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.http.Do(req)

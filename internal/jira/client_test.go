@@ -165,3 +165,18 @@ func TestNewAPIRequest(t *testing.T) {
 		t.Errorf("Content-Type = %q, want application/json", got)
 	}
 }
+
+// TestNilAuthSchemeErrors verifies that a Config assembled by hand (only its
+// exported fields set, so auth is nil) fails with a clear error instead of a
+// nil-pointer panic — both on the client request path and the NewAPIRequest
+// seam.
+func TestNilAuthSchemeErrors(t *testing.T) {
+	bare := Config{BaseURL: "https://jira.example.com", Deployment: DeploymentDataCenter, APIVersion: APIv2}
+
+	if _, err := NewClient(bare).GetIssue("PROJ-1"); err == nil {
+		t.Error("GetIssue with nil auth scheme: got nil error, want one")
+	}
+	if _, err := bare.NewAPIRequest(t.Context(), http.MethodGet, "myself", nil); err == nil {
+		t.Error("NewAPIRequest with nil auth scheme: got nil error, want one")
+	}
+}
