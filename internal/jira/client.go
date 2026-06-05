@@ -120,7 +120,7 @@ func (cfg Config) apiURL(format string, args ...any) string {
 // surface that as a clear error rather than a nil-pointer panic.
 func (cfg Config) authorize(req *http.Request) error {
 	if cfg.auth == nil {
-		return fmt.Errorf("jira: Config has no auth scheme — build it with DataCenterPAT or CloudAPIToken")
+		return fmt.Errorf("jira: Config has no auth scheme - build it with DataCenterPAT or CloudAPIToken")
 	}
 	cfg.auth.apply(req)
 	return nil
