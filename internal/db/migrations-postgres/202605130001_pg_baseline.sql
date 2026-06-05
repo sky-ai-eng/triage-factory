@@ -2879,18 +2879,6 @@ ALTER TABLE ONLY public.pending_firings
 
 
 --
--- Name: pending_firings pending_firings_fired_run_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
--- fired_run_id records the blueprint_run a firing produced (the firing unit is
--- the blueprint_run now), so it references blueprint_runs, not runs — the
--- spawner returns the blueprint_run id synchronously at fire time, before any
--- step run row exists.
-ALTER TABLE ONLY public.pending_firings
-    ADD CONSTRAINT pending_firings_fired_run_id_org_id_fkey FOREIGN KEY (fired_run_id, org_id) REFERENCES public.blueprint_runs(id, org_id);
-
-
---
 -- Name: pending_firings pending_firings_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -5435,6 +5423,13 @@ ALTER TABLE ONLY public.blueprint_runs
 -- event reference is impossible.
 ALTER TABLE ONLY public.blueprint_runs
     ADD CONSTRAINT blueprint_runs_triggering_event_id_org_id_fkey FOREIGN KEY (triggering_event_id, org_id) REFERENCES public.events(id, org_id);
+
+-- fired_run_id records the blueprint_run a firing produced (the firing unit is
+-- the blueprint_run now), so it references blueprint_runs, not runs — the
+-- spawner returns the blueprint_run id synchronously at fire time, before any
+-- step run row exists. Must live after blueprint_runs is created.
+ALTER TABLE ONLY public.pending_firings
+    ADD CONSTRAINT pending_firings_fired_run_id_org_id_fkey FOREIGN KEY (fired_run_id, org_id) REFERENCES public.blueprint_runs(id, org_id);
 
 ALTER TABLE ONLY public.runs
     ADD CONSTRAINT runs_blueprint_run_fkey FOREIGN KEY (blueprint_run_id, org_id) REFERENCES public.blueprint_runs(id, org_id);
