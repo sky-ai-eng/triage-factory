@@ -280,7 +280,11 @@ func (c *Client) GetClaimState(ctx context.Context, issueKey string) *ClaimState
 	url := c.apiURL("issue/%s?fields=assignee,status", issueKey)
 	body, err := c.get(ctx, url)
 	if err != nil {
-		log.Printf("[jira] claim guard: failed to fetch %s: %v", issueKey, err)
+		// A cancelled/expired ctx (e.g. the requesting client disconnected)
+		// is expected, not a failure worth logging — suppress the noise.
+		if ctx.Err() == nil {
+			log.Printf("[jira] claim guard: failed to fetch %s: %v", issueKey, err)
+		}
 		return nil
 	}
 	var issue Issue
@@ -291,7 +295,9 @@ func (c *Client) GetClaimState(ctx context.Context, issueKey string) *ClaimState
 
 	myself, err := c.currentUser(ctx)
 	if err != nil {
-		log.Printf("[jira] claim guard: failed to get current user: %v", err)
+		if ctx.Err() == nil {
+			log.Printf("[jira] claim guard: failed to get current user: %v", err)
+		}
 		return nil
 	}
 

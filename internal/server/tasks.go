@@ -665,8 +665,8 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 					// Detached from the request: this claim guard outlives the
 					// swipe response, so it uses a background context rather than
 					// r.Context(), which is cancelled once the handler returns.
-					ctx := context.Background()
-					state := s.jiraClient.GetClaimState(ctx, issueKey)
+					bgCtx := context.Background()
+					state := s.jiraClient.GetClaimState(bgCtx, issueKey)
 
 					needAssign := state == nil || !state.AssignedToSelf
 					needTransition := state == nil || !slices.Contains(ipMembers, state.StatusName)
@@ -677,13 +677,13 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 					}
 
 					if needAssign {
-						if err := s.jiraClient.AssignToSelf(ctx, issueKey); err != nil {
+						if err := s.jiraClient.AssignToSelf(bgCtx, issueKey); err != nil {
 							log.Printf("[jira] failed to assign %s: %v", issueKey, err)
 							return
 						}
 					}
 					if needTransition {
-						if err := s.jiraClient.TransitionTo(ctx, issueKey, ipCanonical); err != nil {
+						if err := s.jiraClient.TransitionTo(bgCtx, issueKey, ipCanonical); err != nil {
 							log.Printf("[jira] failed to transition %s to %q: %v", issueKey, ipCanonical, err)
 						}
 					}
@@ -1310,8 +1310,8 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 	go func(issueKey, originalStatus string, ipMembers []string) {
 		// Detached from the request (see handleSwipe's claim guard): the
 		// revert outlives the undo response, so use a background context.
-		ctx := context.Background()
-		state := s.jiraClient.GetClaimState(ctx, issueKey)
+		bgCtx := context.Background()
+		state := s.jiraClient.GetClaimState(bgCtx, issueKey)
 
 		// Three assignee cases:
 		//   - assigned to someone else -> skip undo entirely (manual reassignment)
@@ -1342,11 +1342,11 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 		}
 
 		if state == nil || state.AssignedToSelf {
-			if err := s.jiraClient.Unassign(ctx, issueKey); err != nil {
+			if err := s.jiraClient.Unassign(bgCtx, issueKey); err != nil {
 				log.Printf("[jira] failed to unassign %s on requeue: %v", issueKey, err)
 			}
 		}
-		if err := s.jiraClient.TransitionTo(ctx, issueKey, originalStatus); err != nil {
+		if err := s.jiraClient.TransitionTo(bgCtx, issueKey, originalStatus); err != nil {
 			log.Printf("[jira] failed to transition %s back to %q on requeue: %v", issueKey, originalStatus, err)
 		}
 	}(task.EntitySourceID, task.SourceStatus, inProgressMembers)
