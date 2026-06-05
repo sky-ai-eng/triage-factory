@@ -122,19 +122,35 @@ func (s *Spawner) drainRunQueue(ctx context.Context) {
 // rehydrate the shared workspace, materialize the step skill, run the agent,
 // then hand the terminal state to the reactor. Failures before the agent runs
 // requeue the run (transient) or fail it out (poison) without wedging the queue.
+//
+// Context split: the pre-agent setup reads honor the dispatcher ctx so a
+// shutdown (or a future timeout) cancels them cleanly — a ctx-cancelled read
+// returns early and leaves the claimed run 'running' for the next boot's
+// reconcile to re-queue, never failing the blueprint on a clean shutdown. The
+// terminal/reactor writes below deliberately stay on a detached
+// context.Background(): once the agent has run, the blueprint MUST be advanced
+// or finalized to avoid stranding it, so those must not be abortable by a
+// shutdown mid-finalize (the same detached-terminal-write convention the rest of
+// the spawner follows).
 func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) {
 	orgID := run.OrgID
 	startTime := time.Now()
 
-	br, err := s.blueprints.GetRunSystem(context.Background(), orgID, run.BlueprintRunID)
+	br, err := s.blueprints.GetRunSystem(ctx, orgID, run.BlueprintRunID)
 	if err != nil || br == nil {
+		if ctx.Err() != nil {
+			return // dispatcher shutting down — leave the claimed run for boot reconcile
+		}
 		// The owning blueprint_run is gone — nothing to drive. Fail the orphaned
 		// run so it leaves the queue rather than re-claiming forever.
 		s.failClaimedRun(orgID, run, fmt.Sprintf("load blueprint_run: %v", err))
 		return
 	}
-	task, err := s.tasks.GetSystem(context.Background(), orgID, run.TaskID)
+	task, err := s.tasks.GetSystem(ctx, orgID, run.TaskID)
 	if err != nil || task == nil {
+		if ctx.Err() != nil {
+			return
+		}
 		s.terminateBlueprint(orgID, br.ID, run.TaskID, run.TriggerType, run.CreatorUserID, startTime,
 			runConfig{orgID: orgID}, domain.BlueprintRunStatusFailed, fmt.Sprintf("load task: %v", err), run.BlueprintStepIndex, true)
 		return
@@ -143,7 +159,8 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 	// A cancel raced in between the claim and now (the claim filters
 	// cancel_requested, but the window is non-zero), or the blueprint is already
 	// terminal: don't run the agent. Mark this claimed step cancelled and
-	// finalize the blueprint if it's still running.
+	// finalize the blueprint if it's still running. Detached writes — this is a
+	// terminal disposition, not abortable by shutdown.
 	if br.Status != domain.BlueprintRunStatusRunning || br.CancelRequested {
 		if _, mErr := s.agentRuns.MarkCancelledIfActiveSystem(context.Background(), orgID, run.ID, "user_cancelled", "Blueprint cancelled by user"); mErr != nil {
 			log.Printf("[dispatch] warning: mark raced-cancel step %s cancelled: %v", run.ID, mErr)
@@ -157,8 +174,11 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 		return
 	}
 
-	steps, err := s.blueprints.ListStepsSystem(context.Background(), orgID, br.BlueprintID)
+	steps, err := s.blueprints.ListStepsSystem(ctx, orgID, br.BlueprintID)
 	if err != nil || len(steps) == 0 {
+		if ctx.Err() != nil {
+			return
+		}
 		s.terminateBlueprint(orgID, br.ID, task.ID, run.TriggerType, run.CreatorUserID, startTime,
 			runConfig{orgID: orgID}, domain.BlueprintRunStatusFailed, "load blueprint steps", run.BlueprintStepIndex, true)
 		return
@@ -174,8 +194,11 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 	}
 	step := steps[stepIdx]
 
-	stepPrompt, err := s.prompts.GetSystem(context.Background(), orgID, step.StepPromptID)
+	stepPrompt, err := s.prompts.GetSystem(ctx, orgID, step.StepPromptID)
 	if err != nil || stepPrompt == nil {
+		if ctx.Err() != nil {
+			return
+		}
 		s.terminateBlueprint(orgID, br.ID, task.ID, run.TriggerType, run.CreatorUserID, startTime,
 			runConfig{orgID: orgID}, domain.BlueprintRunStatusFailed, fmt.Sprintf("step %d prompt fetch failed", stepIdx), run.BlueprintStepIndex, true)
 		return
@@ -183,7 +206,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 
 	// Resolve the run's GitHub client (per-org/owner seam). model is already on
 	// the claimed row (captured at Delegate time, stable across the blueprint).
-	gh := s.resolveGHClient(context.Background(), orgID, ownerForTask(*task))
+	gh := s.resolveGHClient(ctx, orgID, ownerForTask(*task))
 
 	// The blueprint_run is live on this step → place the task in_progress before
 	// any (possibly slow) workspace setup, so the board reflects the work
@@ -255,7 +278,10 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 	s.mu.Unlock()
 	stepCancel()
 
-	// Re-read the step run for its terminal status, then react.
+	// Re-read the step run for its terminal status, then react. Detached ctx on
+	// purpose: the agent has run, so we must read its terminal and advance/finalize
+	// the blueprint even if the dispatcher is shutting down — skipping the reactor
+	// here would strand the blueprint 'running' with no queued next step.
 	stepRun, err := s.agentRuns.GetSystem(context.Background(), orgID, run.ID)
 	if err != nil || stepRun == nil {
 		s.terminateBlueprint(orgID, br.ID, task.ID, run.TriggerType, run.CreatorUserID, startTime, cfg,

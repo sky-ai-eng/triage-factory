@@ -3,6 +3,7 @@ package delegate
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"testing"
 	"time"
 
@@ -43,7 +44,7 @@ func reactorFixture(t *testing.T, suffix string, nSteps int, step0Status, step0O
 	}
 	promptIDs := make([]string, nSteps)
 	for i := 0; i < nSteps; i++ {
-		pid := suffix + "-p" + string(rune('0'+i))
+		pid := fmt.Sprintf("%s-p%d", suffix, i)
 		ensureTestPrompt(t, database, domain.Prompt{ID: pid, Name: pid, Body: "b", Source: "user"})
 		promptIDs[i] = pid
 	}
