@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import { RotateCw, ExternalLink } from 'lucide-react'
 import { useOptionalAuth } from '../contexts/AuthContext'
 import { useActiveOrgId } from '../contexts/OrgContext'
@@ -340,7 +341,11 @@ export default function RepoPickerModal({
     )
   }
 
-  return (
+  // Portal to <body>: the overlay is position:fixed, but the field groups
+  // render inside a Section whose `backdrop-blur-xl` establishes a containing
+  // block for fixed descendants — without the portal the "modal" is trapped
+  // and clipped inside the Repositories card instead of covering the viewport.
+  return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-sm"
       onClick={onClose}
@@ -351,6 +356,7 @@ export default function RepoPickerModal({
       >
         {content}
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

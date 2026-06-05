@@ -194,7 +194,7 @@ export default function OrgConfigure({ isLocal = false }: { isLocal?: boolean })
             disabled={saving || githubBlocked}
             className="w-full bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
           >
-            {saving ? 'Saving…' : 'Finish setup'}
+            {saving ? 'Saving…' : 'Continue to team setup'}
           </button>
           {githubBlocked && (
             <p className="text-[12px] text-text-tertiary text-center">
