@@ -258,7 +258,7 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		// count an App as "GitHub configured." Best-effort: a read failure
 		// here leaves appRegistered false and the PAT signal still stands.
 		if app, ae := tx.GitHubApps.GetForOrg(r.Context(), orgID); ae == nil && app != nil {
-			appRegistered = app.ClientID != ""
+			appRegistered = app.Active && app.ClientID != ""
 		}
 		return nil
 	}); err != nil {
