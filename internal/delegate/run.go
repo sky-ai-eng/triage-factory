@@ -671,19 +671,15 @@ func (s *Spawner) persistYield(orgID, runID string, req *domain.YieldRequest, co
 		flipped = f
 	}
 	if !flipped {
-		// Terminal status was already set by a racing path (cancel,
-		// takeover). The yield_request message is recorded for
-		// transcript completeness but the run ends in whatever
-		// terminal state the racing path chose; no toast or
-		// broadcast needed (the racing path already broadcast).
-		//
-		// The snapshot taken just above won't be read (the run won't resume),
-		// so drop it rather than orphan the blob. Standalone runs only —
-		// blueprint steps are owned by terminateBlueprint, which the
-		// orchestrator drives once it sees the racing terminal status.
-		if blueprintRunID == "" {
-			s.discardWorkspaceSnapshot(bgCtx, orgID, runID)
-		}
+		// Terminal status was already set by a racing path (cancel, takeover).
+		// The yield_request message is recorded for transcript completeness but
+		// the run ends in whatever terminal state the racing path chose; no toast
+		// or broadcast needed (the racing path already broadcast). The snapshot
+		// taken just above won't be read (the run won't resume), but it's keyed by
+		// blueprint_run_id and dropped by the blueprint-level terminal path — the
+		// orchestrator sees the racing terminal status and calls terminateBlueprint,
+		// or the DB-only cancel runs finalizeParkedBlueprintOnCancel — so there's
+		// nothing to discard here.
 		return nil
 	}
 	s.broadcastRunUpdate(orgID, runID, "awaiting_input")
