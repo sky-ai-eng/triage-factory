@@ -144,3 +144,38 @@ func TestCancel_AlreadyTerminal_NoDrain(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 }
+
+// TestCancel_AwaitingInputStep_FinalizesBlueprintRun pins the fix for the
+// orphaned-blueprint_run leak: cancelling a yield-parked step through the
+// DB-only path (no live orchestrator goroutine) must also finalize the owning
+// blueprint_run, not just the run row. Pre-fix the blueprint_run stuck in
+// 'running' forever (and its snapshot orphaned). seedRun links the run to a
+// 1-step blueprint_run "seedbpr-<runID>".
+func TestCancel_AwaitingInputStep_FinalizesBlueprintRun(t *testing.T) {
+	database := newTakeoverTestDB(t)
+	seedRun(t, database, "r-step", "sess-step", "/tmp/wt-rs")
+	if _, err := database.Exec(`UPDATE runs SET status = 'awaiting_input' WHERE id = 'r-step'`); err != nil {
+		t.Fatalf("park run: %v", err)
+	}
+
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6", "")
+
+	// User-initiated cancel.
+	if err := s.Cancel(runmode.LocalDefaultOrg, "r-step", runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+
+	var runStatus, bpStatus string
+	if err := database.QueryRow(`SELECT status FROM runs WHERE id = 'r-step'`).Scan(&runStatus); err != nil {
+		t.Fatalf("read run status: %v", err)
+	}
+	if runStatus != "cancelled" {
+		t.Errorf("run status = %q, want cancelled", runStatus)
+	}
+	if err := database.QueryRow(`SELECT status FROM blueprint_runs WHERE id = 'seedbpr-r-step'`).Scan(&bpStatus); err != nil {
+		t.Fatalf("read blueprint_run status: %v", err)
+	}
+	if bpStatus != "cancelled" {
+		t.Errorf("blueprint_run status = %q, want cancelled (a cancelled parked step must not strand the blueprint_run in 'running')", bpStatus)
+	}
+}

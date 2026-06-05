@@ -656,6 +656,58 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 	return nil
 }
 
+// finalizeParkedBlueprintOnCancel finalizes the owning blueprint_run when a step
+// run is cancelled through the spawner's DB-only path (Cancel with no live
+// orchestrator goroutine — the step had parked, so the orchestrator already
+// returned and nothing else will mark the blueprint_run terminal). Without this,
+// cancelling a yield-parked step would mark only the run cancelled and strand the
+// blueprint_run in 'running' (and its shared-workspace snapshot in the blob
+// store).
+//
+// It does NOT drain the per-entity queue: the drainer's manual short-circuit
+// keys off the run's trigger type, which the caller (Cancel) already passes to
+// notifyDrainer — folding the drain in here (via terminateBlueprint) would
+// couple it to the write-pool routing and drain a manual run that must not.
+// So this finalizes the blueprint row + worktree + snapshot only:
+//
+//   - marks the blueprint_run cancelled, routed by userID exactly like
+//     CancelBlueprint — a user cancel (non-empty) under the user's synthetic
+//     claims, a system cancel (empty — router cleanup / drain sweep) through the
+//     admin pool;
+//   - runs the shared-worktree cleanup;
+//   - discards the blueprint_run-keyed snapshot (idempotent — a no-op when
+//     terminateBlueprint already dropped it, or when none was taken).
+//
+// This path only runs with no live goroutine, so the blueprint is sequentially
+// paused (no other step is executing) and finalizing the whole blueprint_run on
+// the single cancelled step is correct.
+func (s *Spawner) finalizeParkedBlueprintOnCancel(ctx context.Context, orgID string, run *domain.AgentRun, userID string) {
+	if s.blueprints == nil || run.BlueprintRunID == "" {
+		return
+	}
+	if cr, err := s.blueprints.GetRunSystem(ctx, orgID, run.BlueprintRunID); err == nil && cr != nil &&
+		cr.Status == domain.BlueprintRunStatusRunning {
+		reason := "user_cancelled"
+		if userID == "" {
+			reason = "system_cancelled"
+		}
+		if userID != "" {
+			_, _ = s.markBlueprintRunStatusAsUser(ctx, orgID, userID, cr.ID, domain.BlueprintRunStatusCancelled, reason, run.BlueprintStepIndex)
+		} else {
+			_, _ = s.blueprints.MarkRunStatusSystem(ctx, orgID, cr.ID, domain.BlueprintRunStatusCancelled, reason, run.BlueprintStepIndex)
+		}
+		// Reconstruct just enough cfg for the worktree cleanup (mirrors
+		// CancelBlueprint / ResumeBlueprintAfterApproval — owner/repo/prNumber
+		// aren't persisted on blueprint_runs, so CleanupPRConfig is skipped).
+		cfg := runConfig{orgID: orgID, wtPath: cr.WorktreePath}
+		if task, _ := s.tasks.GetSystem(ctx, orgID, cr.TaskID); task != nil && task.EntitySource == "github" {
+			cfg.hasWT = true
+		}
+		s.runBlueprintWorktreeCleanup(cr.ID, cfg)
+	}
+	s.discardWorkspaceSnapshot(ctx, orgID, run.BlueprintRunID)
+}
+
 // markBlueprintRunStatusAsUser writes a blueprint_run status transition under
 // the given user's synthetic claims. Used by user-initiated CancelBlueprint
 // / Resume* paths that need to attribute the write to the requesting
