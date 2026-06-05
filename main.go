@@ -273,7 +273,7 @@ func bootstrapLocalJiraIdentity(users db.UsersStore, secrets db.SecretStore) err
 	if existingID != "" && existingName != "" {
 		return nil
 	}
-	jiraUser, err := auth.ValidateJira(ctx, creds.JiraURL, creds.JiraPAT)
+	jiraUser, err := auth.ValidateJira(ctx, jira.DataCenterPAT(creds.JiraURL, creds.JiraPAT))
 	if err != nil {
 		log.Printf("[bootstrap] derive users.jira_identity from PAT: %v (continuing — Settings will capture next save)", err)
 		return nil
@@ -1248,7 +1248,7 @@ func main() {
 
 		// Also refresh Jira client in case it's configured
 		if creds.JiraPAT != "" && creds.JiraURL != "" {
-			srv.SetJiraClient(jira.NewClient(creds.JiraURL, creds.JiraPAT))
+			srv.SetJiraClient(jira.NewClient(jira.DataCenterPAT(creds.JiraURL, creds.JiraPAT)))
 		} else {
 			srv.SetJiraClient(nil)
 		}
@@ -1274,7 +1274,7 @@ func main() {
 		pollerMgr.PollSoon("jira", orgID) // apply now, don't wait out the interval
 
 		if creds.JiraPAT != "" && creds.JiraURL != "" {
-			srv.SetJiraClient(jira.NewClient(creds.JiraURL, creds.JiraPAT))
+			srv.SetJiraClient(jira.NewClient(jira.DataCenterPAT(creds.JiraURL, creds.JiraPAT)))
 		} else {
 			srv.SetJiraClient(nil)
 		}
@@ -1373,7 +1373,7 @@ func main() {
 		}
 
 		if creds.JiraPAT != "" && creds.JiraURL != "" {
-			srv.SetJiraClient(jira.NewClient(creds.JiraURL, creds.JiraPAT))
+			srv.SetJiraClient(jira.NewClient(jira.DataCenterPAT(creds.JiraURL, creds.JiraPAT)))
 		}
 	} else {
 		// Multi mode: start the process-global poller so per-org discovery

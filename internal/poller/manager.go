@@ -719,7 +719,7 @@ func (m *Manager) runJiraCycle() {
 		if baseURL == "" {
 			baseURL = creds.JiraURL
 		}
-		client := jiraclient.NewClient(creds.JiraURL, creds.JiraPAT)
+		client := jiraclient.NewClient(jiraclient.DataCenterPAT(creds.JiraURL, creds.JiraPAT))
 		projects := toTrackerJiraRules(rules)
 		if _, err := m.trackerForOrg(orgID).RefreshJira(client, baseURL, projects); err != nil {
 			log.Printf("[jira] org %s: tracker error: %v", orgID, err)

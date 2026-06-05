@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -104,7 +105,7 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 
 	// Validate Jira if provided
 	if req.JiraURL != "" && req.JiraPAT != "" {
-		jiraUser, err := auth.ValidateJira(r.Context(), req.JiraURL, req.JiraPAT)
+		jiraUser, err := auth.ValidateJira(r.Context(), jira.DataCenterPAT(req.JiraURL, req.JiraPAT))
 		if err != nil {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 				"error": "Jira: " + err.Error(),

@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/jira"
 )
 
 var httpClient = &http.Client{Timeout: 10 * time.Second}
@@ -102,17 +104,16 @@ func ValidateGitHub(ctx context.Context, baseURL, pat string) (*GitHubUser, erro
 	return &user, nil
 }
 
-// ValidateJira checks the PAT against the Jira API and returns the user info.
-func ValidateJira(ctx context.Context, baseURL, pat string) (*JiraUser, error) {
-	baseURL = strings.TrimRight(baseURL, "/")
-	apiURL := baseURL + "/rest/api/2/myself"
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+// ValidateJira checks the configured credential against the Jira API and
+// returns the user info. The auth scheme (Basic/Bearer) and REST API version
+// come from cfg, so a DC PAT and a Cloud API token each validate against the
+// same /myself endpoint they will use at request time. Build cfg with
+// jira.DataCenterPAT or jira.CloudAPIToken.
+func ValidateJira(ctx context.Context, cfg jira.Config) (*JiraUser, error) {
+	req, err := cfg.NewAPIRequest(ctx, http.MethodGet, "myself", nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+pat)
-	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {

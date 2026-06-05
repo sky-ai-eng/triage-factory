@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -542,7 +543,7 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 				badRequest(w, "Jira URL is required before setting a PAT")
 				return
 			}
-			jiraUser, err := auth.ValidateJira(r.Context(), url, *req.JiraPAT)
+			jiraUser, err := auth.ValidateJira(r.Context(), jira.DataCenterPAT(url, *req.JiraPAT))
 			if err != nil {
 				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 					"error": "Jira: " + err.Error(),

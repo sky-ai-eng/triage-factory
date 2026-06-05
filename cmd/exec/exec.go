@@ -159,7 +159,7 @@ func Handle(args []string) {
 			fmt.Fprintln(os.Stderr, "Jira not configured. Run triagefactory and complete setup first.")
 			os.Exit(1)
 		}
-		jClient := jiraclient.NewClient(jURL, jPAT)
+		jClient := jiraclient.NewClient(jiraclient.DataCenterPAT(jURL, jPAT))
 		jiraexec.Handle(jClient, cmdArgs)
 
 	case "workspace":

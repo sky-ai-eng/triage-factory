@@ -303,7 +303,7 @@ func (s *Server) handleJiraConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jiraUser, err := auth.ValidateJira(r.Context(), req.URL, req.PAT)
+	jiraUser, err := auth.ValidateJira(r.Context(), jira.DataCenterPAT(req.URL, req.PAT))
 	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
@@ -394,7 +394,7 @@ func (s *Server) handleJiraStatuses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := jira.NewClient(creds.JiraURL, creds.JiraPAT)
+	client := jira.NewClient(jira.DataCenterPAT(creds.JiraURL, creds.JiraPAT))
 
 	// Intersect statuses across all projects — only return statuses that
 	// exist in every project. A union would let users pick a status that

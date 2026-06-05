@@ -412,7 +412,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := jira.NewClient(creds.JiraURL, creds.JiraPAT)
+	client := jira.NewClient(jira.DataCenterPAT(creds.JiraURL, creds.JiraPAT))
 
 	applied := 0
 	queued := 0 // number of queue actions applied — gates the scorer trigger
