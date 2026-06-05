@@ -43,6 +43,10 @@ export default function TeamConfigure() {
   const [form, setForm] = useState<TeamConfigForm>(emptyTeamConfig())
   const [jiraConnected, setJiraConnected] = useState(false)
   const [loaded, setLoaded] = useState(false)
+  // False when the team-repos GET failed (form.repos stays undefined). Drives
+  // ReposGroup's "couldn't load — left unchanged" state so the empty picker
+  // doesn't read as "you picked none".
+  const [reposLoaded, setReposLoaded] = useState(false)
   const [saving, setSaving] = useState(false)
 
   // Seed from the team's current state (the bootstrap set defaults) so the
@@ -65,6 +69,7 @@ export default function TeamConfigure() {
             repos: repos ?? undefined,
             github_groups: f.github_groups,
           }))
+          setReposLoaded(repos !== null)
           if (repos === null) {
             toast.error('Could not load tracked repositories — they will be left unchanged.')
           }
@@ -135,7 +140,11 @@ export default function TeamConfigure() {
             lives only in the form + saver. A user edit here makes the slice
             defined, so an intentional pick is saved even if its initial load
             had failed — only an untouched, never-loaded slice is skipped. */}
-        <ReposGroup value={form.repos ?? []} onChange={(repos) => patchForm({ repos })} />
+        <ReposGroup
+          value={form.repos ?? []}
+          onChange={(repos) => patchForm({ repos })}
+          loaded={reposLoaded}
+        />
 
         <GitHubTeamGroup
           value={form.github_groups ?? []}

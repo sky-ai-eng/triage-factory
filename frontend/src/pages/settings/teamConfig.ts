@@ -112,15 +112,13 @@ export const projectIsComplete = (p: JiraProjectConfig): boolean =>
   !!p.done.canonical
 
 // teamProjectsBlocked reports whether the team's Jira project rules should
-// block a save: only when Jira is connected, and then only if there's no
-// valid project or any keyed project is incomplete. Disconnected Jira can't
-// have project rules, so it never blocks.
+// block a save. Zero tracked projects is a valid choice — a Jira-connected
+// org can still have a team that tracks no Jira project — so it does NOT
+// block; only a partially-filled project (a key with incomplete rules) does,
+// since that can't be persisted. Disconnected Jira never blocks (no rules).
 export function teamProjectsBlocked(projects: JiraProjectConfig[], connected: boolean): boolean {
   if (!connected) return false
-  const keyed = projects.filter((p) => p.key.trim() !== '')
-  const anyValid = keyed.some(projectIsComplete)
-  const anyIncomplete = keyed.some((p) => !projectIsComplete(p))
-  return !anyValid || anyIncomplete
+  return projects.some((p) => p.key.trim() !== '' && !projectIsComplete(p))
 }
 
 // emptyTeamConfig leaves repos/github_groups undefined (unloaded) — a save
@@ -288,6 +286,10 @@ export async function saveTeamConfig(teamId: string, form: TeamConfigForm): Prom
     if (!groups.ok) {
       return { ok: false, error: partialFailure(saved, 'GitHub team mappings', groups.error) }
     }
+    // Kept consistent with the slices above even though it's last and the
+    // success path doesn't read `saved` — a future fourth slice's partial
+    // message would otherwise silently omit it.
+    saved.push('GitHub team mappings')
   }
 
   return { ok: true, warning: settings.warning }

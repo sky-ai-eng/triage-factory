@@ -37,7 +37,10 @@ export default function JiraProjectRulesGroup({
   // right per-project list. The backend intersects across the queried
   // projects, so the same list is mirrored under each requested key.
   const [statusesByProject, setStatusesByProject] = useState<Record<string, JiraStatus[]>>({})
-  const [statusesLoading, setStatusesLoading] = useState(false)
+  // The (trimmed) project keys whose status fetch is in flight. Per-key rather
+  // than a single boolean so fetching project A then B doesn't re-enable B's
+  // button when A's request settles first.
+  const [loadingKeys, setLoadingKeys] = useState<Set<string>>(new Set())
   // Per-project expand/collapse keyed by index (the key field is editable
   // mid-render, so keying on it would drop open/closed state every
   // keystroke). For the common N=1 case the sole project starts expanded.
@@ -72,10 +75,10 @@ export default function JiraProjectRulesGroup({
   // lookup uses (raw call-site keys would store under a key the picker's
   // trimmed lookup can't find).
   const fetchJiraStatuses = async (projectKeys?: string[]) => {
-    setStatusesLoading(true)
+    const keys = (projectKeys ?? value.map((p) => p.key)).map((k) => k.trim()).filter(Boolean)
+    if (keys.length === 0) return
+    setLoadingKeys((prev) => new Set([...prev, ...keys]))
     try {
-      const keys = (projectKeys ?? value.map((p) => p.key)).map((k) => k.trim()).filter(Boolean)
-      if (keys.length === 0) return
       const params = keys.map((p) => `project=${encodeURIComponent(p)}`).join('&')
       const res = await fetch(`/api/jira/statuses?${params}`)
       if (res.ok) {
@@ -87,7 +90,11 @@ export default function JiraProjectRulesGroup({
     } catch {
       // Non-critical — the picker just shows no options until a retry.
     } finally {
-      setStatusesLoading(false)
+      setLoadingKeys((prev) => {
+        const n = new Set(prev)
+        for (const k of keys) n.delete(k)
+        return n
+      })
     }
   }
 
@@ -203,10 +210,10 @@ export default function JiraProjectRulesGroup({
                       <button
                         type="button"
                         onClick={() => fetchJiraStatuses([key].filter(Boolean))}
-                        disabled={statusesLoading || !key}
+                        disabled={loadingKeys.has(key) || !key}
                         className="shrink-0 text-[11px] text-accent hover:text-accent/80 disabled:opacity-40 border border-accent/20 rounded-xl px-3 py-1 transition-colors"
                       >
-                        {statusesLoading ? 'Loading...' : 'Fetch Statuses'}
+                        {loadingKeys.has(key) ? 'Loading...' : 'Fetch Statuses'}
                       </button>
                     </div>
 

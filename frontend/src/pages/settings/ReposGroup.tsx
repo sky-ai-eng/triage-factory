@@ -20,10 +20,16 @@ export default function ReposGroup({
   value,
   onChange,
   canEdit = true,
+  loaded = true,
 }: {
   value: string[]
   onChange: (repos: string[]) => void
   canEdit?: boolean
+  // false = the team's current repos couldn't be loaded. The empty `value` is
+  // then "unknown", not "you picked none" — and a save deliberately leaves
+  // repos untouched — so suppress editing and say so, rather than rendering a
+  // blank selection that reads as a deliberate clear.
+  loaded?: boolean
 }) {
   const [pickerOpen, setPickerOpen] = useState(false)
 
@@ -31,7 +37,7 @@ export default function ReposGroup({
     <Section>
       <div className="flex items-center justify-between mb-1">
         <h2 className="text-[13px] font-medium text-text-secondary">Repositories</h2>
-        {canEdit && (
+        {canEdit && loaded && (
           <button
             type="button"
             onClick={() => setPickerOpen(true)}
@@ -47,7 +53,12 @@ export default function ReposGroup({
         delegation.
       </p>
 
-      {value.length === 0 ? (
+      {!loaded ? (
+        <p className="text-[12px] text-amber-600 italic">
+          Couldn&rsquo;t load this team&rsquo;s repositories — they&rsquo;ll be left unchanged.
+          Reload to edit them.
+        </p>
+      ) : value.length === 0 ? (
         <p className="text-[12px] text-text-tertiary italic">No repositories selected yet.</p>
       ) : (
         <div className="flex flex-wrap gap-1.5">

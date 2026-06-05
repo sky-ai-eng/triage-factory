@@ -503,7 +503,8 @@ export default function Settings() {
     <ReposGroup
       value={form.repos}
       onChange={(repos) => patchForm({ repos })}
-      canEdit={reposLoaded && isTeamAdmin}
+      canEdit={isTeamAdmin}
+      loaded={reposLoaded}
     />
   )
 
