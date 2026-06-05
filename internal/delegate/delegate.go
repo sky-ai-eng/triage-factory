@@ -17,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -157,7 +158,10 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	if task.TeamID != nil {
 		teamID = *task.TeamID
 	}
-	ghClient, defaultModel := s.resolveRunCredentials(context.Background(), orgID, ownerForTask(task), teamID)
+	// model is captured here and stamped onto every enqueued step so the whole
+	// blueprint runs on one model; the GitHub client is resolved per-claim by the
+	// dispatcher (the queue path defers all workspace setup off this call).
+	_, defaultModel := s.resolveRunCredentials(context.Background(), orgID, ownerForTask(task), teamID)
 
 	// Compute trigger type + creator user up front so resolvePrompt
 	// can route by them (manual delegations must honor prompts_select
@@ -268,7 +272,31 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 		}
 	}
 
-	return s.delegateBlueprint(orgID, task, blueprint, steps, blueprintRunID, triggerType, triggerID, creatorUserID, ghClient, model), nil
+	// Enqueue the first step. The blueprint advances entirely through the run
+	// queue from here: the dispatcher claims this step, builds the shared
+	// workspace, runs the agent, and the reactor enqueues each next step (or
+	// finalizes). No in-process for-loop holds the sequencing — blueprint_runs
+	// does (current_step_index), so a crash mid-flight is recoverable. The
+	// blueprint_run was just committed (the replay fence point); if the enqueue
+	// fails, mark it failed so it doesn't strand non-terminal.
+	if err := s.enqueueBlueprintStep(bgCtx, orgID, blueprintRunID, task, steps[0], model, triggerType, creatorUserID); err != nil {
+		if _, mErr := s.blueprints.MarkRunStatusSystem(bgCtx, orgID, blueprintRunID, domain.BlueprintRunStatusFailed, "enqueue first step: "+err.Error(), nil); mErr != nil {
+			log.Printf("[delegate] warning: mark blueprint_run %s failed after enqueue error: %v", blueprintRunID, mErr)
+		}
+		return "", fmt.Errorf("enqueue first step: %w", err)
+	}
+
+	verb := "Blueprint started"
+	if triggerType == "event" {
+		verb = "Auto-fired blueprint"
+	}
+	toast.Info(s.wsHub, orgID, fmt.Sprintf("%s: %s (%s)",
+		verb, truncateToastMsg(blueprint.Name, 60), shortRunID(blueprintRunID)))
+
+	// The blueprint_run is live → place the task in_progress immediately.
+	s.recomputeTaskBoardColumn(orgID, task.ID)
+	s.wakeDispatcher()
+	return blueprintRunID, nil
 }
 
 // ownerForTask extracts the GitHub account a task targets, for the

@@ -1135,6 +1135,15 @@ func main() {
 	// process lifetime, matching the drain sweeper above.
 	go eventRouter.RunEventQueue(context.Background(), eventWake, routing.DefaultEventScanInterval, routing.DefaultEventPruneInterval, routing.DefaultEventPruneAge)
 
+	// The run-queue dispatcher — the queue-driven orchestrator's worker. It
+	// drains the run queue the spawner enqueues blueprint steps onto: claim a
+	// queued step, build/rehydrate the shared workspace, run the agent, and let
+	// the reactor advance the blueprint_run. On boot it reconciles runs left
+	// mid-flight by a crash (the startup-reconcile that closes the
+	// stranded-non-terminal gap). Background context for the process lifetime,
+	// matching the workers above; one dispatcher (horizontal executors later).
+	go spawner.RunDispatcher(context.Background(), delegate.DefaultRunScanInterval)
+
 	// Tracks per-source "announce next poll completion as a toast". Set when
 	// a config change triggers a poller restart; cleared after the first
 	// post-restart completion fires the toast. Prevents every-minute spam

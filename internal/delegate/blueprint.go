@@ -11,12 +11,8 @@ import (
 
 	_ "embed" // powers blueprintStepNonterminalPrompt
 
-	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
-	"github.com/sky-ai-eng/triage-factory/internal/skills"
-	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -29,308 +25,6 @@ import (
 //
 //go:embed prompts/blueprint-step-nonterminal.txt
 var blueprintStepNonterminalPrompt string
-
-// delegateBlueprint spawns the orchestrator goroutine for a blueprint_run the
-// caller (Delegate) has already minted through the replay fence. It sets up the
-// shared worktree, stamps the resolved worktree_path back onto the row, and
-// walks the step list. The returned id is the blueprint_run id — the UI / API
-// surfaces this as "the blueprint that was kicked off".
-//
-// Failures inside the goroutine (worktree setup failure, db write errors)
-// terminate the blueprint with a matching abort_reason rather than surfacing an
-// error to the caller — the caller already holds the blueprint_run id and the
-// UI subscribes to the row by id, so a synchronous error wouldn't be reflected
-// anywhere visible.
-func (s *Spawner) delegateBlueprint(orgID string, task domain.Task, blueprint *domain.Blueprint, steps []domain.BlueprintStep, blueprintRunID, triggerType, triggerID, creatorUserID string, gh *ghclient.Client, model string) string {
-	ctx, cancel := context.WithCancel(context.Background())
-	s.mu.Lock()
-	s.cancels[blueprintRunID] = cancel
-	s.mu.Unlock()
-	// Mark this id as a blueprint_run so the setup phase's status helpers
-	// don't broadcast agent_run_update events for a non-existent runs row.
-	s.markBlueprintRunID(blueprintRunID)
-
-	// The blueprint_run is live → place the task in_progress immediately (a
-	// no-op for non-bot-claimed tasks). The aggregate column then bounces
-	// in_progress ↔ in_review as steps park and resume, and terminateBlueprint
-	// owns the terminal column.
-	s.recomputeTaskBoardColumn(orgID, task.ID)
-
-	go func() {
-		startTime := time.Now()
-		defer func() {
-			s.mu.Lock()
-			delete(s.cancels, blueprintRunID)
-			s.mu.Unlock()
-			cancel()
-			s.unmarkBlueprintRunID(blueprintRunID)
-		}()
-
-		// Build the shared worktree exactly once; every step reuses the result.
-		var cfg runConfig
-		var setupErr error
-		switch task.EntitySource {
-		case "github":
-			cfg, setupErr = s.setupGitHub(ctx, orgID, blueprintRunID, task, gh)
-		case "jira":
-			cfg, setupErr = s.setupJira(ctx, orgID, blueprintRunID, task, gh)
-		default:
-			setupErr = fmt.Errorf("unsupported task source: %s", task.EntitySource)
-		}
-		cfg.orgID = orgID
-		if setupErr != nil {
-			// The blueprint_run row already exists (created in Delegate, still
-			// 'running'); transition it to failed. skipCleanup — there is no
-			// finished worktree to reclaim on a setup failure.
-			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg,
-				domain.BlueprintRunStatusFailed, setupErr.Error(), nil, true)
-			return
-		}
-
-		// Stamp the resolved worktree path onto the row now that setup ran (it
-		// was created with an empty path so the fence could commit first).
-		if err := s.blueprints.SetRunWorktreePathSystem(context.Background(), orgID, blueprintRunID, cfg.wtPath); err != nil {
-			log.Printf("[blueprint] warning: set worktree_path for blueprint_run %s: %v", blueprintRunID, err)
-		}
-
-		verb := "Blueprint started"
-		if triggerType == "event" {
-			verb = "Auto-fired blueprint"
-		}
-		toast.Info(s.wsHub, orgID, fmt.Sprintf("%s: %s (%s)",
-			verb, truncateToastMsg(blueprint.Name, 60), shortRunID(blueprintRunID)))
-
-		s.runBlueprint(ctx, orgID, blueprintRunID, task, blueprint, steps, cfg, startTime, model, triggerType, creatorUserID)
-	}()
-
-	return blueprintRunID
-}
-
-// runBlueprint orchestrates a blueprint prompt against one task. It owns the
-// shared worktree (built once via setupGitHub / setupJira) and walks
-// the ordered step list, creating one runs row per step. After each
-// step terminates, it reads the step run's terminal `runs.outcome` and
-// decides whether to advance, finish, or abort (see decideBlueprintStep).
-//
-// Yield mid-blueprint and pending_approval mid-blueprint are handled
-// separately via ResumeBlueprintAfterYield / ResumeBlueprintAfterApproval —
-// the orchestrator returns early when the step lands in awaiting_input
-// or pending_approval, leaving blueprint_runs.status='running' and the
-// shared worktree on disk for the eventual resume.
-func (s *Spawner) runBlueprint(
-	ctx context.Context,
-	orgID, blueprintRunID string,
-	task domain.Task,
-	blueprint *domain.Blueprint,
-	steps []domain.BlueprintStep,
-	cfg runConfig,
-	startTime time.Time,
-	model string,
-	triggerType string,
-	creatorUserID string,
-) {
-	if len(steps) == 0 {
-		s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusFailed,
-			"blueprint has no steps", nil, false)
-		return
-	}
-
-	for i, step := range steps {
-		if ctx.Err() != nil {
-			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusCancelled,
-				"cancelled", &step.StepIndex, false)
-			return
-		}
-
-		stepPrompt, err := s.prompts.GetSystem(ctx, orgID, step.StepPromptID)
-		if err != nil || stepPrompt == nil {
-			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusFailed,
-				fmt.Sprintf("step %d prompt fetch failed", i), &step.StepIndex, false)
-			return
-		}
-
-		// Wipe any prior step's materialized skill so step N+1 only
-		// sees its own SKILL.md.
-		if err := skills.WipeBlueprintSkills(cfg.wtPath); err != nil {
-			log.Printf("[blueprint] run %s step %d: wipe skills: %v", blueprintRunID, i, err)
-		}
-		slug := skills.SlugForBlueprintStep(i, stepPrompt.Name)
-		if err := skills.MaterializeStepSkill(cfg.wtPath, slug, stepPrompt, step.Brief); err != nil {
-			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusFailed,
-				fmt.Sprintf("materialize step %d skill: %s", i, err.Error()), &step.StepIndex, false)
-			return
-		}
-
-		// Create the per-step run row. prompt_id points at the leaf
-		// step prompt (so per-step stats stay accurate); blueprint_run_id
-		// + blueprint_step_index thread it back to the blueprint instance.
-		stepRunID := uuid.New().String()
-		stepIdxCopy := i
-		// Step runs inherit the blueprint's creator: manual blueprint steps
-		// attribute to the user who initiated the blueprint (not the org
-		// owner the createManual COALESCE would otherwise fall back to);
-		// event-triggered blueprint steps stay creator-less (the
-		// trigger_type='event' + creator_user_id IS NULL CHECK is what
-		// the createEventTriggered routing satisfies).
-		//
-		// Routing mirrors Delegate's run insert: manual goes through
-		// SyntheticClaimsWithTx so runs_insert's RLS check sees the
-		// step's creator; event-triggered stays on the admin pool.
-		stepRow := domain.AgentRun{
-			ID:                 stepRunID,
-			TaskID:             task.ID,
-			PromptID:           stepPrompt.ID,
-			Status:             "initializing",
-			Model:              model,
-			TriggerType:        triggerType,
-			CreatorUserID:      creatorUserID,
-			BlueprintRunID:     blueprintRunID,
-			BlueprintStepIndex: &stepIdxCopy,
-			WorktreePath:       cfg.wtPath,
-		}
-		var stepCreateErr error
-		if triggerType == "manual" {
-			stepCreateErr = s.tx.SyntheticClaimsWithTx(context.Background(), orgID, creatorUserID, func(ts db.TxStores) error {
-				return ts.AgentRuns.Create(context.Background(), orgID, stepRow)
-			})
-		} else {
-			stepCreateErr = s.agentRuns.Create(context.Background(), orgID, stepRow)
-		}
-		if stepCreateErr != nil {
-			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusFailed,
-				fmt.Sprintf("create step %d run: %s", i, stepCreateErr.Error()), &step.StepIndex, false)
-			return
-		}
-		s.broadcastRunUpdate(orgID, stepRunID, "initializing")
-		// A step is starting → the blueprint's board column is in_progress
-		// (unless a prior step is parked, which the aggregate also handles).
-		s.recomputeTaskBoardColumn(orgID, task.ID)
-		var incErr error
-		if triggerType == "manual" {
-			incErr = s.tx.SyntheticClaimsWithTx(ctx, orgID, creatorUserID, func(ts db.TxStores) error {
-				return ts.Prompts.IncrementUsage(ctx, orgID, stepPrompt.ID)
-			})
-		} else {
-			incErr = s.prompts.IncrementUsageSystem(ctx, orgID, stepPrompt.ID)
-		}
-		if incErr != nil {
-			log.Printf("[blueprint] warning: failed to increment usage for step prompt %s: %v", stepPrompt.ID, incErr)
-		}
-
-		// Per-step cancel handle so Cancel(stepRunID) cancels just the
-		// active step. The blueprint ctx itself stays alive across steps.
-		stepCtx, stepCancel := context.WithCancel(ctx)
-		s.mu.Lock()
-		s.cancels[stepRunID] = stepCancel
-		s.mu.Unlock()
-
-		stepCfg := cfg
-		stepCfg.isBlueprintStep = true
-		stepCfg.blueprintRunID = blueprintRunID
-		stepCfg.blueprintStep = i
-		// Position is one bit, system-injected: only non-terminal steps
-		// get the contract fragment that offers `continue`. The terminal
-		// step (and the N=1 single-prompt case) append nothing and complete
-		// via the default `finish`, exactly like a single-prompt run. No
-		// numeric index reaches the agent.
-		stepCfg.appendSysPrompt = nonterminalStepSysPrompt(i, len(steps))
-		stepCfg.extraAllowedTools = s.collectExtraTools(stepPrompt.AllowedTools)
-
-		var nextStepName string
-		if i+1 < len(steps) {
-			if np, err := s.prompts.GetSystem(ctx, orgID, steps[i+1].StepPromptID); err == nil && np != nil {
-				nextStepName = np.Name
-			}
-		}
-		mission := buildBlueprintStepWrapperPrompt(task, step, stepPrompt, slug, len(steps), nextStepName)
-
-		toast.Info(s.wsHub, orgID, fmt.Sprintf("Blueprint step %d/%d: %s (%s)",
-			i+1, len(steps), truncateToastMsg(stepPrompt.Name, 60), shortRunID(stepRunID)))
-
-		s.runAgent(stepCtx, stepRunID, task, mission, stepCfg, time.Now(), model, triggerType, creatorUserID)
-
-		// Clear the cancel handle now that the step has returned.
-		s.mu.Lock()
-		delete(s.cancels, stepRunID)
-		s.mu.Unlock()
-		stepCancel()
-
-		// Re-read the run row to learn its terminal status. runAgent's
-		// return is unconditional — completion / failure / cancellation
-		// / pending_approval / yield all come back through here.
-		stepRun, err := s.agentRuns.GetSystem(context.Background(), orgID, stepRunID)
-		if err != nil || stepRun == nil {
-			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusFailed,
-				fmt.Sprintf("read step %d run after agent: %v", i, err), &step.StepIndex, false)
-			return
-		}
-
-		// Yield / pending_approval mid-blueprint: leave the blueprint in
-		// 'running' and the worktree on disk. The corresponding resume
-		// hook (ResumeBlueprintAfterYield / ResumeBlueprintAfterApproval) will
-		// pick up where we left off.
-		if stepRun.Status == "awaiting_input" || stepRun.Status == "pending_approval" {
-			log.Printf("[blueprint] run %s step %d paused at status=%s; blueprint remains running", blueprintRunID, i, stepRun.Status)
-			// Parked step → the aggregate column is in_review ("needs 👀").
-			s.recomputeTaskBoardColumn(orgID, task.ID)
-			return
-		}
-
-		if stepRun.Status == "cancelled" {
-			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusCancelled,
-				"step cancelled", &step.StepIndex, false)
-			return
-		}
-		if stepRun.Status == "failed" || stepRun.Status == "task_unsolvable" {
-			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusFailed,
-				"step "+stepRun.Status, &step.StepIndex, false)
-			return
-		}
-		if stepRun.Status != "completed" {
-			// Defensive: any unexpected non-terminal status (taken_over
-			// is the most likely candidate) ends the blueprint in failed
-			// state. taken_over runs are owned by the user from here on,
-			// so the blueprint can't sensibly continue.
-			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusFailed,
-				"step ended with status "+stepRun.Status, &step.StepIndex, false)
-			return
-		}
-
-		// The step completed; interpret its terminal envelope outcome
-		// (runs.outcome, persisted by processCompletion) to decide the
-		// next move. continue advances; finish / last-step continue end
-		// the blueprint completed and close the task; abort leaves it
-		// open; a missing outcome on a non-final step is the floor after
-		// the outcome gate exhausted its retries → abort no-outcome.
-		isFinal := i == len(steps)-1
-		decision, abortReason := decideBlueprintStep(stepRun.Outcome, isFinal)
-		switch decision {
-		case blueprintStepAdvance:
-			// Fall through to the next loop iteration.
-		case blueprintStepFinish:
-			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusCompleted,
-				"", &step.StepIndex, false)
-			return
-		case blueprintStepAbort:
-			reason := abortReason
-			if reason == "" {
-				// Explicit abort: copy the agent's "why I stopped" from
-				// runs.outcome_reason into blueprint_runs.abort_reason.
-				reason = stepRun.OutcomeReason
-			}
-			s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusAborted,
-				reason, &step.StepIndex, false)
-			return
-		}
-	}
-
-	// Unreachable in practice — decideBlueprintStep never returns
-	// blueprintStepAdvance for the final step, so the last iteration always
-	// terminates above. Kept as a defensive net so a future edit that adds a
-	// loop-continue path can't strand the blueprint in 'running'.
-	s.terminateBlueprint(orgID, blueprintRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.BlueprintRunStatusCompleted,
-		"", nil, false)
-}
 
 // blueprintStepOutcome is the orchestrator's decision after a completed
 // blueprint step, derived from the step's runs.outcome and its position.
@@ -594,17 +288,23 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 		return nil
 	}
 
-	// Cancel any cancel handles registered by the orchestrator for this
-	// blueprint. The orchestrator stores per-step cancels under the step
-	// run_id; we sweep all active step runs and cancel them. We also
-	// cancel the blueprint's own ctx so the setup phase and inter-step
-	// checks see the cancellation.
+	// Raise the DB sequence-cancel signal first (decision #3). From here the
+	// claim stops handing out this blueprint's queued steps, and the dispatcher's
+	// reactor finalizes the blueprint 'cancelled' instead of enqueuing the next
+	// step. This is the durable half of the cancel; the in-memory subprocess kill
+	// below is the active half.
+	if _, err := s.blueprints.RequestRunCancelSystem(context.Background(), orgID, blueprintRunID); err != nil {
+		log.Printf("[blueprint] CancelBlueprint: raise cancel signal for %s: %v", blueprintRunID, err)
+	}
+
+	// Kill the active step's subprocess, if one is running. The dispatcher
+	// registers a per-step cancel under the step run_id; sweep every active step
+	// run and cancel its handle.
 	//
-	// anyActive tracks whether at least one orchestrator-owned context
-	// got canceled. If nothing was active — the blueprint is paused on a
-	// pending_approval or awaiting_input step — the orchestrator
-	// goroutine has already exited, so no later path will run cleanup.
-	// In that case we drive terminateBlueprint ourselves below.
+	// anyActive tracks whether at least one live subprocess got killed. If
+	// nothing was active — the blueprint is paused on a yield/approval step, or a
+	// queued step that was never claimed — no dispatcher goroutine will run the
+	// reactor, so we drive terminateBlueprint ourselves below.
 	var anyActive bool
 	stepIDs, err := s.blueprints.ActiveStepRunIDsSystem(context.Background(), orgID, blueprintRunID)
 	if err == nil {
@@ -615,21 +315,23 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 				anyActive = true
 			}
 		}
-		// Also cancel the blueprint-level context registered at delegateBlueprint.
-		if blueprintCancel, ok := s.cancels[blueprintRunID]; ok {
-			blueprintCancel()
-			anyActive = true
-		}
 		s.mu.Unlock()
 	}
 
 	if anyActive {
-		// Orchestrator goroutine is still alive — it will observe the
-		// cancellation, the step's runAgent will return, and the loop
-		// will call terminateBlueprint (which marks the blueprint cancelled and
-		// runs cleanup). Avoid double-marking here so terminateBlueprint's
-		// MarkRunStatus succeeds.
+		// A step subprocess is being killed — its runAgent will return cancelled
+		// and the reactor (seeing cancel_requested) will terminateBlueprint. Avoid
+		// double-marking here so the reactor's MarkRunStatus wins.
 		return nil
+	}
+
+	// No live subprocess: a queued-not-started step (cancels with zero work) or a
+	// parked step. Mark every still-active step run cancelled so nothing lingers
+	// in the queue, then finalize the blueprint ourselves.
+	for _, runID := range stepIDs {
+		if _, mErr := s.agentRuns.MarkCancelledIfActiveSystem(context.Background(), orgID, runID, "user_cancelled", "Blueprint cancelled by user"); mErr != nil {
+			log.Printf("[blueprint] CancelBlueprint: mark step run %s cancelled: %v", runID, mErr)
+		}
 	}
 
 	// Paused blueprint: rebuild just enough cfg for terminateBlueprint's worktree

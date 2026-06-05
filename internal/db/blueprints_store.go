@@ -401,9 +401,9 @@ type BlueprintStore interface {
 	//
 	// These mirror the per-method shape of the corresponding app-pool methods
 	// but route through the admin pool (BYPASSRLS) in Postgres. They exist for
-	// the blueprint orchestrator goroutine — the long-running loop in
-	// delegateBlueprint / runBlueprint / terminateBlueprint that drives a
-	// multi-step blueprint through its step list with no JWT-claims in scope.
+	// the queue-driven orchestrator — the dispatcher + reactor that claim,
+	// run, and advance a blueprint through its step list with no JWT-claims in
+	// scope (delegate/dispatch.go).
 	//
 	// CreateRun has no System counterpart — it routes internally on the
 	// supplied BlueprintRun.TriggerType.

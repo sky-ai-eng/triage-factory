@@ -25,7 +25,7 @@ func newRunQueueStore(conn *sql.DB) db.RunQueueStore {
 var _ db.RunQueueStore = (*runQueueStore)(nil)
 
 // runQueueClaimCols is the column list ClaimNextRun returns.
-const runQueueClaimCols = `id::text, task_id::text, COALESCE(prompt_id, ''), status, COALESCE(model, ''),
+const runQueueClaimCols = `id::text, org_id::text, task_id::text, COALESCE(prompt_id, ''), status, COALESCE(model, ''),
 	COALESCE(worktree_path, ''), trigger_type, COALESCE(trigger_id::text, ''),
 	COALESCE(creator_user_id::text, ''), COALESCE(blueprint_run_id::text, ''), blueprint_step_index, attempts`
 
@@ -134,7 +134,7 @@ func scanPgClaimedRun(row *sql.Row) (*domain.AgentRun, error) {
 		r       domain.AgentRun
 		stepIdx sql.NullInt64
 	)
-	err := row.Scan(&r.ID, &r.TaskID, &r.PromptID, &r.Status, &r.Model,
+	err := row.Scan(&r.ID, &r.OrgID, &r.TaskID, &r.PromptID, &r.Status, &r.Model,
 		&r.WorktreePath, &r.TriggerType, &r.TriggerID,
 		&r.CreatorUserID, &r.BlueprintRunID, &stepIdx, &r.Attempts)
 	if err == sql.ErrNoRows {

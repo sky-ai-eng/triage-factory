@@ -27,7 +27,7 @@ var _ db.RunQueueStore = (*runQueueStore)(nil)
 
 // runQueueClaimCols is the column list ClaimNextRun returns, shared with the
 // scan helper. team_id/visibility are left at their row defaults on enqueue.
-const runQueueClaimCols = `id, task_id, COALESCE(prompt_id, ''), status, COALESCE(model, ''),
+const runQueueClaimCols = `id, org_id, task_id, COALESCE(prompt_id, ''), status, COALESCE(model, ''),
 	COALESCE(worktree_path, ''), trigger_type, COALESCE(trigger_id, ''),
 	COALESCE(creator_user_id, ''), COALESCE(blueprint_run_id, ''), blueprint_step_index, attempts`
 
@@ -125,7 +125,7 @@ func scanSqliteClaimedRun(row *sql.Row) (*domain.AgentRun, error) {
 		r       domain.AgentRun
 		stepIdx sql.NullInt64
 	)
-	err := row.Scan(&r.ID, &r.TaskID, &r.PromptID, &r.Status, &r.Model,
+	err := row.Scan(&r.ID, &r.OrgID, &r.TaskID, &r.PromptID, &r.Status, &r.Model,
 		&r.WorktreePath, &r.TriggerType, &r.TriggerID,
 		&r.CreatorUserID, &r.BlueprintRunID, &stepIdx, &r.Attempts)
 	if err == sql.ErrNoRows {
