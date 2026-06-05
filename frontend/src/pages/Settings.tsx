@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { Lock } from 'lucide-react'
 import SettingsTabs, { type SettingsTab } from '../components/SettingsTabs'
 import { toast } from '../components/Toast/toastStore'
@@ -94,6 +94,10 @@ export default function Settings() {
   const orgId = isLocal ? LOCAL_DEFAULT_ORG_ID : activeOrgId
 
   const [data, setData] = useState<SettingsData | null>(null)
+  // Non-null when the initial load failed (rejected fetch, or org/team
+  // resolved null). Rendered in place of the loading spinner so a failure
+  // surfaces with a Retry instead of hanging on "Loading settings…".
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [teamBaseline, setTeamBaseline] = useState<TeamBaseline | null>(null)
   // False until the team-repos GET lands. A failed load leaves form.repos []
   // — indistinguishable from "tracks nothing" — so editing is suppressed and
@@ -160,68 +164,85 @@ export default function Settings() {
   })
   const { isN1, isOrgAdmin, isTeamAdmin } = access
 
-  useEffect(() => {
+  const loadSettings = useCallback(() => {
+    setLoadError(null)
     Promise.all([
       fetch('/api/settings/org').then((r) => (r.ok ? r.json() : null)),
       fetchTeamSettings('default'),
       fetchTeamRepos('default'),
-    ]).then(
-      ([org, team, repos]: [OrgSettingsData | null, TeamSettingsData | null, string[] | null]) => {
-        if (!org || !team) return
-        const projects = team.jira_projects ?? []
-        const reposVal = repos ?? []
-        const merged: SettingsData = {
-          github: {
-            base_url: org.github_base_url || '',
-            has_token: org.has_github_pat,
-            poll_interval: org.github_poll_interval,
-            clone_protocol: org.github_clone_protocol === 'https' ? 'https' : 'ssh',
-          },
-          jira: {
-            base_url: org.jira_base_url || '',
-            has_token: org.has_jira_pat,
-            poll_interval: org.jira_poll_interval,
-          },
-          max_llm_model_tier: org.max_llm_model_tier || '',
-        }
-        setData(merged)
-        setReposLoaded(repos !== null)
-        setOrgMemberCount(org.member_count ?? 1)
-        setTeamMemberCount(team.member_count ?? 1)
-        setTeamRole(team.role ?? '')
-        setForm((f) => ({
-          ...f,
-          github_url: merged.github.base_url,
-          github_pat: '',
-          jira_enabled: merged.jira.has_token,
-          jira_url: merged.jira.base_url,
-          jira_pat: '',
-          github_poll_interval: merged.github.poll_interval,
-          github_clone_protocol: merged.github.clone_protocol,
-          jira_poll_interval: merged.jira.poll_interval,
-          max_llm_model_tier: merged.max_llm_model_tier,
-          default_model: team.team_settings.DefaultModel || 'sonnet',
-          auto_delegate_enabled: team.team_settings.AutoDelegateEnabled,
-          ai_reprioritize_threshold: team.team_settings.AIReprioritizeThreshold,
-          ai_preference_update_interval: team.team_settings.AIPreferenceUpdateInterval,
-          jira_projects: projects,
-          repos: reposVal,
-          // github_groups seeds via GitHubTeamGroup's onLoaded once it fetches
-          // the org's candidate teams.
-        }))
-        setTeamBaseline({
-          default_model: team.team_settings.DefaultModel || 'sonnet',
-          auto_delegate_enabled: team.team_settings.AutoDelegateEnabled,
-          jira_projects: projects,
-          repos: reposVal,
-          github_groups: [],
-        })
-        if (merged.jira.has_token && merged.jira.base_url) {
-          setJiraConnected(true)
-        }
-      },
-    )
+    ])
+      .then(
+        ([org, team, repos]: [
+          OrgSettingsData | null,
+          TeamSettingsData | null,
+          string[] | null,
+        ]) => {
+          if (!org || !team) {
+            setLoadError('Could not load settings. Check your connection and try again.')
+            return
+          }
+          const projects = team.jira_projects ?? []
+          const reposVal = repos ?? []
+          const merged: SettingsData = {
+            github: {
+              base_url: org.github_base_url || '',
+              has_token: org.has_github_pat,
+              poll_interval: org.github_poll_interval,
+              clone_protocol: org.github_clone_protocol === 'https' ? 'https' : 'ssh',
+            },
+            jira: {
+              base_url: org.jira_base_url || '',
+              has_token: org.has_jira_pat,
+              poll_interval: org.jira_poll_interval,
+            },
+            max_llm_model_tier: org.max_llm_model_tier || '',
+          }
+          setData(merged)
+          setReposLoaded(repos !== null)
+          setOrgMemberCount(org.member_count ?? 1)
+          setTeamMemberCount(team.member_count ?? 1)
+          setTeamRole(team.role ?? '')
+          setForm((f) => ({
+            ...f,
+            github_url: merged.github.base_url,
+            github_pat: '',
+            jira_enabled: merged.jira.has_token,
+            jira_url: merged.jira.base_url,
+            jira_pat: '',
+            github_poll_interval: merged.github.poll_interval,
+            github_clone_protocol: merged.github.clone_protocol,
+            jira_poll_interval: merged.jira.poll_interval,
+            max_llm_model_tier: merged.max_llm_model_tier,
+            default_model: team.team_settings.DefaultModel || 'sonnet',
+            auto_delegate_enabled: team.team_settings.AutoDelegateEnabled,
+            ai_reprioritize_threshold: team.team_settings.AIReprioritizeThreshold,
+            ai_preference_update_interval: team.team_settings.AIPreferenceUpdateInterval,
+            jira_projects: projects,
+            repos: reposVal,
+            // github_groups seeds via GitHubTeamGroup's onLoaded once it fetches
+            // the org's candidate teams.
+          }))
+          setTeamBaseline({
+            default_model: team.team_settings.DefaultModel || 'sonnet',
+            auto_delegate_enabled: team.team_settings.AutoDelegateEnabled,
+            jira_projects: projects,
+            repos: reposVal,
+            github_groups: [],
+          })
+          if (merged.jira.has_token && merged.jira.base_url) {
+            setJiraConnected(true)
+          }
+        },
+      )
+      .catch(() => {
+        // A rejected fetch (network error) must not hang on "Loading settings…".
+        setLoadError('Could not load settings. Check your connection and try again.')
+      })
   }, [])
+
+  useEffect(() => {
+    loadSettings()
+  }, [loadSettings])
 
   // Jira connect/disconnect live in JiraAccessGroup (org scope); these
   // callbacks own the team-scope follow-up the shared group can't see. On a
@@ -403,8 +424,21 @@ export default function Settings() {
 
   if (!data) {
     return (
-      <div className="flex items-center justify-center min-h-[50vh]">
-        <p className="text-text-tertiary text-[13px]">Loading settings...</p>
+      <div className="flex flex-col items-center justify-center min-h-[50vh] gap-3">
+        {loadError ? (
+          <>
+            <p className="text-text-secondary text-[13px]">{loadError}</p>
+            <button
+              type="button"
+              onClick={loadSettings}
+              className="text-accent text-[13px] underline"
+            >
+              Retry
+            </button>
+          </>
+        ) : (
+          <p className="text-text-tertiary text-[13px]">Loading settings...</p>
+        )}
       </div>
     )
   }

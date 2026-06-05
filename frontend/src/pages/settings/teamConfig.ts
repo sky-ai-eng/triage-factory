@@ -49,8 +49,15 @@ export interface TeamConfigForm {
   ai_reprioritize_threshold: number
   ai_preference_update_interval: number
   jira_projects: JiraProjectConfig[]
-  repos: string[]
-  github_groups: GitHubGroup[]
+  // repos and github_groups load from their own endpoints (separate from the
+  // team-settings GET), so they carry a third state: `undefined` means "not
+  // loaded yet / load failed" — distinct from `[]` ("loaded, genuinely
+  // empty"). saveTeamConfig skips an `undefined` slice rather than PUTting an
+  // empty set over data it never read, so a flaky load can't wipe a team's
+  // repos or mappings. This makes the no-wipe invariant hold by construction
+  // for every consumer instead of each one re-implementing a load guard.
+  repos?: string[]
+  github_groups?: GitHubGroup[]
 }
 
 // TeamSettingsData mirrors the GET /api/settings/team/{id} response.
@@ -116,20 +123,21 @@ export function teamProjectsBlocked(projects: JiraProjectConfig[], connected: bo
   return !anyValid || anyIncomplete
 }
 
+// emptyTeamConfig leaves repos/github_groups undefined (unloaded) — a save
+// from this state writes neither, rather than wiping them with [].
 export const emptyTeamConfig = (): TeamConfigForm => ({
   default_model: 'sonnet',
   auto_delegate_enabled: true,
   ai_reprioritize_threshold: 0,
   ai_preference_update_interval: 0,
   jira_projects: [],
-  repos: [],
-  github_groups: [],
 })
 
 // teamConfigFromSettings seeds the team-settings + Jira-rules slice of the
 // form from a team GET. Repos and GitHub-team mappings come from their own
-// endpoints, so the container patches those in separately (they default to
-// empty here).
+// endpoints, so they stay undefined here (unloaded) and the container patches
+// them in once their own fetches land — keeping them undefined until then is
+// what lets saveTeamConfig skip a slice that never loaded.
 export function teamConfigFromSettings(data: TeamSettingsData): TeamConfigForm {
   return {
     default_model: data.team_settings.DefaultModel || 'sonnet',
@@ -137,8 +145,6 @@ export function teamConfigFromSettings(data: TeamSettingsData): TeamConfigForm {
     ai_reprioritize_threshold: data.team_settings.AIReprioritizeThreshold,
     ai_preference_update_interval: data.team_settings.AIPreferenceUpdateInterval,
     jira_projects: data.jira_projects ?? [],
-    repos: [],
-    github_groups: [],
   }
 }
 
@@ -241,32 +247,46 @@ export async function saveTeamGitHubGroups(
   return { ok: true }
 }
 
-// saveTeamConfig orchestrates the full team save across all three endpoints,
-// the create-step's "Finish" path. Order is deliberate: team settings first
+// partialFailure builds a "<saved> saved, but <failed> did not — <err>"
+// message from the slices that already committed, so the user knows exactly
+// what landed and what to retry rather than reading a bare "failed".
+function partialFailure(saved: string[], failed: string, err: string): string {
+  const phrase =
+    saved.length <= 1
+      ? saved.join('')
+      : `${saved.slice(0, -1).join(', ')} and ${saved[saved.length - 1]}`
+  return `${phrase} saved, but ${failed} did not — ${err}`
+}
+
+// saveTeamConfig orchestrates the team save across the endpoints, the
+// create-step's "Finish" path. Order is deliberate: team settings first
 // (pure server-side validation — project rules, dup keys — with no external
 // calls, so a bad rule fails before the repos PUT does any reachability work
 // or profiling), then repos, then GitHub-team mappings.
 //
-// On a mid-sequence failure the earlier writes are already committed, so the
-// error names exactly what landed and what didn't rather than a bare
-// "failed" that leaves the user guessing which half to redo.
+// A slice left `undefined` (never loaded / load failed) is skipped, not
+// written — that's the no-wipe guarantee. On a mid-sequence failure the
+// earlier writes are already committed (separate endpoints, no spanning
+// transaction), so the error names exactly which slices landed.
 export async function saveTeamConfig(teamId: string, form: TeamConfigForm): Promise<SaveResult> {
+  const saved: string[] = []
+
   const settings = await saveTeamSettings(teamId, form)
   if (!settings.ok) return settings
+  saved.push('Team settings')
 
-  const repos = await saveTeamRepos(teamId, form.repos)
-  if (!repos.ok) {
-    return {
-      ok: false,
-      error: `Team settings saved, but tracked repositories did not — ${repos.error}`,
+  if (form.repos !== undefined) {
+    const repos = await saveTeamRepos(teamId, form.repos)
+    if (!repos.ok) {
+      return { ok: false, error: partialFailure(saved, 'tracked repositories', repos.error) }
     }
+    saved.push('tracked repositories')
   }
 
-  const groups = await saveTeamGitHubGroups(teamId, form.github_groups)
-  if (!groups.ok) {
-    return {
-      ok: false,
-      error: `Team settings and repositories saved, but GitHub team mappings did not — ${groups.error}`,
+  if (form.github_groups !== undefined) {
+    const groups = await saveTeamGitHubGroups(teamId, form.github_groups)
+    if (!groups.ok) {
+      return { ok: false, error: partialFailure(saved, 'GitHub team mappings', groups.error) }
     }
   }
 

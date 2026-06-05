@@ -50,8 +50,11 @@ export default function JiraProjectRulesGroup({
   useEffect(() => {
     if (seeded.current) return
     seeded.current = true
-    if (value.length === 1 && value[0].key) {
-      setExpandedKeys({ [value[0].key]: true })
+    // Expand the lone project. Key on idx_0 (not the project key) to match the
+    // rest of the component — keying on the editable project key would drop
+    // the open state the moment the user edits that key.
+    if (value.length === 1) {
+      setExpandedKeys({ idx_0: true })
     }
     if (connected) {
       const keys = value.map((p) => p.key).filter(Boolean)
@@ -64,11 +67,14 @@ export default function JiraProjectRulesGroup({
   // fetchJiraStatuses queries the backend for statuses across the given
   // projects. The returned list is the intersection (a status not in every
   // queried project would fail TransitionTo), so it's mirrored under each
-  // requested key.
+  // requested key. Keys are trimmed here regardless of source, so the query is
+  // well-formed and the results are stored under the same trimmed key the
+  // lookup uses (raw call-site keys would store under a key the picker's
+  // trimmed lookup can't find).
   const fetchJiraStatuses = async (projectKeys?: string[]) => {
     setStatusesLoading(true)
     try {
-      const keys = projectKeys || value.map((p) => p.key.trim()).filter(Boolean)
+      const keys = (projectKeys ?? value.map((p) => p.key)).map((k) => k.trim()).filter(Boolean)
       if (keys.length === 0) return
       const params = keys.map((p) => `project=${encodeURIComponent(p)}`).join('&')
       const res = await fetch(`/api/jira/statuses?${params}`)
@@ -125,13 +131,7 @@ export default function JiraProjectRulesGroup({
     setExpandedKeys((m) => ({ ...m, [id]: !m[id] }))
   }
 
-  const isExpanded = (i: number): boolean => {
-    const id = `idx_${i}`
-    if (id in expandedKeys) return expandedKeys[id]
-    // Fallback for projects seeded at load (keyed by project.key).
-    const key = value[i]?.key
-    return key ? expandedKeys[key] === true : false
-  }
+  const isExpanded = (i: number): boolean => expandedKeys[`idx_${i}`] === true
 
   return (
     <Section>
@@ -148,7 +148,11 @@ export default function JiraProjectRulesGroup({
             </p>
           )}
           {value.map((project, i) => {
-            const statuses = statusesByProject[project.key] || []
+            // Trimmed key drives the status lookup, the fetch arg, and the
+            // disabled gate, so whitespace a user types around a key can't
+            // desync them (fetchJiraStatuses stores under the trimmed key).
+            const key = project.key.trim()
+            const statuses = statusesByProject[key] || []
             const complete = projectIsComplete(project)
             const expanded = isExpanded(i)
             return (
@@ -198,8 +202,8 @@ export default function JiraProjectRulesGroup({
                       </p>
                       <button
                         type="button"
-                        onClick={() => fetchJiraStatuses([project.key].filter(Boolean))}
-                        disabled={statusesLoading || !project.key.trim()}
+                        onClick={() => fetchJiraStatuses([key].filter(Boolean))}
+                        disabled={statusesLoading || !key}
                         className="shrink-0 text-[11px] text-accent hover:text-accent/80 disabled:opacity-40 border border-accent/20 rounded-xl px-3 py-1 transition-colors"
                       >
                         {statusesLoading ? 'Loading...' : 'Fetch Statuses'}

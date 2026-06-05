@@ -52,22 +52,35 @@ export default function TeamConfigure() {
   // project-rules group only shows once org Jira is connected.
   useEffect(() => {
     let cancelled = false
-    Promise.all([fetchTeamSettings(team), fetchTeamRepos(team), fetchOrgSettings()]).then(
-      ([settings, repos, org]) => {
+    Promise.all([fetchTeamSettings(team), fetchTeamRepos(team), fetchOrgSettings()])
+      .then(([settings, repos, org]) => {
         if (cancelled) return
         if (settings) {
+          // fetchTeamRepos returns null when its GET failed — keep repos
+          // undefined in that case (not []), so Finish leaves the team's
+          // tracked repos untouched instead of wiping them. github_groups
+          // likewise stays undefined until GitHubTeamGroup's onLoaded seeds it.
           setForm((f) => ({
             ...teamConfigFromSettings(settings),
-            repos: repos ?? [],
+            repos: repos ?? undefined,
             github_groups: f.github_groups,
           }))
+          if (repos === null) {
+            toast.error('Could not load tracked repositories — they will be left unchanged.')
+          }
         } else {
           toast.error('Could not load your team settings. Showing defaults — verify before saving.')
         }
         setJiraConnected(!!org && org.has_jira_pat && !!org.jira_base_url)
         setLoaded(true)
-      },
-    )
+      })
+      .catch(() => {
+        // A rejected fetch (network error) must not leave the founder stuck on
+        // "Loading…". Fall through to the form on defaults and flag it.
+        if (cancelled) return
+        toast.error('Could not load your team settings. Showing defaults — verify before saving.')
+        setLoaded(true)
+      })
     return () => {
       cancelled = true
     }
@@ -118,10 +131,14 @@ export default function TeamConfigure() {
           </p>
         </div>
 
-        <ReposGroup value={form.repos} onChange={(repos) => patchForm({ repos })} />
+        {/* The groups render a plain array; the undefined ("unloaded") state
+            lives only in the form + saver. A user edit here makes the slice
+            defined, so an intentional pick is saved even if its initial load
+            had failed — only an untouched, never-loaded slice is skipped. */}
+        <ReposGroup value={form.repos ?? []} onChange={(repos) => patchForm({ repos })} />
 
         <GitHubTeamGroup
-          value={form.github_groups}
+          value={form.github_groups ?? []}
           onChange={(github_groups) => patchForm({ github_groups })}
           teamId={team}
           includeMembership
