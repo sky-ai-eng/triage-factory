@@ -854,6 +854,13 @@ CREATE TABLE runs (
     -- delegated run. Forward-only provenance — written by the event path's
     -- CreateIfNotFiredSystem, not read back into the run projection.
     triggering_event_id  TEXT REFERENCES events(id),
+    -- Run-queue claim columns (mirror event_queue). A blueprint step is
+    -- enqueued as a run row in status='queued'; the dispatcher claims it
+    -- (queued -> running) stamping claimed_at and bumping attempts. Both stay
+    -- NULL/0 for the legacy never-queued shape; the queue path and the
+    -- startup reconcile read them.
+    claimed_at           DATETIME,
+    attempts             INTEGER NOT NULL DEFAULT 0,
     -- Pair trigger_type with creator_user_id nullability so the
     -- seeder can't drift back to lying.
     CONSTRAINT runs_creator_matches_trigger_type CHECK (
@@ -877,6 +884,10 @@ CREATE INDEX        idx_runs_blueprint      ON runs(blueprint_run_id, blueprint_
 -- blueprint-step runs (NULL) never participate — multiple manual runs of one
 -- task stay allowed, and two distinct event instances still fire independently.
 CREATE UNIQUE INDEX runs_event_trigger_fence ON runs (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL;
+-- Claim index for the run queue: the dispatcher claims the globally-oldest
+-- 'queued' run (FIFO by started_at, id). Partial so it only spans the small
+-- set of unclaimed work, mirroring idx_event_queue_pending.
+CREATE INDEX idx_runs_queued ON runs(started_at, id) WHERE status = 'queued';
 
 -- === Blueprint steps + runs ==============================================
 -- blueprint_steps is the ordered step list for a blueprint (length >= 1).
@@ -932,6 +943,18 @@ CREATE TABLE blueprint_runs (
     triggering_event_id TEXT REFERENCES events(id),
     -- 'running' | 'completed' | 'aborted' | 'failed' | 'cancelled'
     status          TEXT NOT NULL DEFAULT 'running',
+    -- Durable sequencing for the queue-driven reactor: current_step_index is
+    -- the 0-based step the blueprint is on (the step that is queued / running /
+    -- parked). The reactor bumps it as it enqueues the next step, so the
+    -- sequencing lives in the row rather than on a goroutine stack and a
+    -- mid-flight blueprint resumes by re-enqueuing this step at boot.
+    current_step_index INTEGER NOT NULL DEFAULT 0,
+    -- cancel_requested is the DB sequence-cancel signal: a user/system cancel
+    -- sets it, the claim never claims a queued step of a cancel-requested
+    -- blueprint, and the reactor finalizes the blueprint 'cancelled' instead of
+    -- enqueuing the next step. The active subprocess kill stays in-memory
+    -- (s.cancels); this only stops the *sequence* from advancing.
+    cancel_requested   INTEGER NOT NULL DEFAULT 0,
     abort_reason    TEXT,
     aborted_at_step INTEGER,
     worktree_path   TEXT NOT NULL,

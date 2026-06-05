@@ -154,6 +154,14 @@ type Stores struct {
 	// worker run as background goroutines with no per-user identity.
 	EventQueue EventQueueStore
 
+	// RunQueue owns the run queue — the work list the delegation dispatcher
+	// drains to drive blueprints through their steps (sibling of EventQueue).
+	// A blueprint step is enqueued as a runs row in status='queued'; a worker
+	// claims it, runs the agent, and the reactor advances the blueprint_run.
+	// A system-service store (admin pool in Postgres): the dispatcher runs as
+	// a background worker with no per-user identity.
+	RunQueue RunQueueStore
+
 	// TaskMemory owns the run_memory table — per-run agent narrative
 	// + human verdict, read back by the delegate spawner to
 	// materialize prior context into fresh worktrees. Holds both

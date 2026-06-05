@@ -1257,6 +1257,12 @@ CREATE TABLE public.runs (
     blueprint_run_id uuid NOT NULL,
     blueprint_step_index integer,
     triggering_event_id uuid,
+    -- Run-queue claim columns (mirror event_queue). A blueprint step is
+    -- enqueued as a run row in status='queued'; the dispatcher claims it
+    -- (queued -> running) via FOR UPDATE SKIP LOCKED, stamping claimed_at and
+    -- bumping attempts. Both stay NULL/0 for the legacy never-queued shape.
+    claimed_at timestamp with time zone,
+    attempts integer DEFAULT 0 NOT NULL,
     CONSTRAINT runs_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL)))),
     CONSTRAINT runs_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
     CONSTRAINT runs_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text])))
@@ -5357,6 +5363,16 @@ CREATE TABLE public.blueprint_runs (
     -- runs. Step runs are not separately fenced (orchestrator-internal).
     triggering_event_id uuid,
     status text DEFAULT 'running'::text NOT NULL,
+    -- Durable sequencing for the queue-driven reactor: current_step_index is
+    -- the 0-based step the blueprint is on, bumped as the reactor enqueues the
+    -- next step, so a mid-flight blueprint resumes by re-enqueuing this step at
+    -- boot rather than relying on a goroutine stack.
+    current_step_index integer DEFAULT 0 NOT NULL,
+    -- cancel_requested is the DB sequence-cancel signal: the claim skips queued
+    -- steps of a cancel-requested blueprint and the reactor finalizes it
+    -- 'cancelled' instead of advancing. The active-subprocess kill stays
+    -- in-memory (s.cancels).
+    cancel_requested boolean DEFAULT false NOT NULL,
     abort_reason text,
     aborted_at_step integer,
     worktree_path text NOT NULL,
@@ -5387,6 +5403,10 @@ CREATE INDEX idx_blueprint_steps_step_prompt ON public.blueprint_steps (step_pro
 CREATE INDEX idx_blueprint_runs_task   ON public.blueprint_runs (task_id, org_id);
 CREATE INDEX idx_blueprint_runs_status ON public.blueprint_runs (status) WHERE (status = 'running'::text);
 CREATE INDEX idx_runs_blueprint        ON public.runs (blueprint_run_id, blueprint_step_index);
+-- Claim index for the run queue: the dispatcher claims the globally-oldest
+-- 'queued' run (FIFO by started_at, id) under FOR UPDATE SKIP LOCKED. Partial so
+-- it only spans unclaimed work, mirroring idx_event_queue_pending.
+CREATE INDEX idx_runs_queued ON public.runs (started_at, id) WHERE (status = 'queued'::text);
 -- Replay fence (relocated from runs): one event firing one trigger materializes
 -- at most one blueprint_run. Partial WHERE triggering_event_id IS NOT NULL so
 -- manual blueprint runs (NULL) never participate.

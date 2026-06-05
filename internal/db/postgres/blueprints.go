@@ -657,17 +657,20 @@ func getBlueprintRun(ctx context.Context, q queryer, orgID, id string) (*domain.
 		return nil, nil
 	}
 	var (
-		br            domain.BlueprintRun
-		triggerID     sql.NullString
-		abortReason   sql.NullString
-		abortedAtStep sql.NullInt64
-		completedAt   sql.NullTime
+		br              domain.BlueprintRun
+		triggerID       sql.NullString
+		abortReason     sql.NullString
+		abortedAtStep   sql.NullInt64
+		completedAt     sql.NullTime
+		cancelRequested bool
 	)
 	err := q.QueryRowContext(ctx, `
 		SELECT id, blueprint_id, task_id, trigger_type, trigger_id, status,
+		       current_step_index, cancel_requested,
 		       abort_reason, aborted_at_step, worktree_path, started_at, completed_at
 		FROM blueprint_runs WHERE org_id = $1 AND id = $2
 	`, orgID, id).Scan(&br.ID, &br.BlueprintID, &br.TaskID, &br.TriggerType, &triggerID, &br.Status,
+		&br.CurrentStepIndex, &cancelRequested,
 		&abortReason, &abortedAtStep, &br.WorktreePath, &br.StartedAt, &completedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -675,6 +678,7 @@ func getBlueprintRun(ctx context.Context, q queryer, orgID, id string) (*domain.
 	if err != nil {
 		return nil, err
 	}
+	br.CancelRequested = cancelRequested
 	if triggerID.Valid {
 		br.TriggerID = triggerID.String
 	}
@@ -770,6 +774,34 @@ func markBlueprintRunStatus(ctx context.Context, q queryer, orgID, id string, st
 		WHERE org_id = $4 AND id = $5
 		  AND status IN ('running','pending_approval','awaiting_input')
 	`, string(status), reasonArg, stepArg, orgID, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (s *blueprintStore) SetRunCurrentStepSystem(ctx context.Context, orgID, id string, stepIndex int) error {
+	if !isValidUUID(id) {
+		return nil
+	}
+	_, err := s.admin.ExecContext(ctx,
+		`UPDATE blueprint_runs SET current_step_index = $1 WHERE org_id = $2 AND id = $3`,
+		stepIndex, orgID, id)
+	return err
+}
+
+func (s *blueprintStore) RequestRunCancelSystem(ctx context.Context, orgID, id string) (bool, error) {
+	if !isValidUUID(id) {
+		return false, nil
+	}
+	res, err := s.admin.ExecContext(ctx, `
+		UPDATE blueprint_runs SET cancel_requested = true
+		WHERE org_id = $1 AND id = $2 AND status = 'running' AND cancel_requested = false
+	`, orgID, id)
 	if err != nil {
 		return false, err
 	}

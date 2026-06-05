@@ -95,6 +95,12 @@ type AgentRun struct {
 
 	BlueprintRunID     string `json:"blueprint_run_id,omitempty"`     // FK to blueprint_runs.id — populated for runs that are a step inside a multi-step blueprint
 	BlueprintStepIndex *int   `json:"blueprint_step_index,omitempty"` // 0-based step index within the blueprint; nil for non-blueprint-step runs
+
+	// Attempts is the run-queue claim counter: how many times the dispatcher
+	// has claimed this run row (mirrors event_queue.attempts). Bumped by
+	// RunQueueStore.ClaimNextRun; the dispatcher reads it to fail a poison run
+	// out of the queue once it crosses the retry budget. 0 for never-queued runs.
+	Attempts int `json:"attempts,omitempty"`
 }
 
 // AgentMessage represents a single message within an agent run.

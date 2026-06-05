@@ -373,6 +373,22 @@ type BlueprintStore interface {
 	// updated, (false, nil) when the guard rejected the write.
 	MarkRunStatus(ctx context.Context, orgID string, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (changed bool, err error)
 
+	// SetRunCurrentStepSystem stamps the blueprint_run's durable
+	// current_step_index — the queue-driven reactor's sequencing pointer,
+	// bumped as it enqueues each next step so a mid-flight blueprint resumes by
+	// re-enqueuing this step at boot. Admin pool (reactor has no JWT claims).
+	SetRunCurrentStepSystem(ctx context.Context, orgID, id string, stepIndex int) error
+
+	// RequestRunCancelSystem raises the DB sequence-cancel signal
+	// (cancel_requested = true) on a still-running blueprint_run, so the claim
+	// stops handing out its queued steps and the reactor finalizes it
+	// 'cancelled' instead of advancing. Idempotent; returns (true, nil) when it
+	// flipped a running row, (false, nil) when the blueprint was already
+	// terminal (nothing to cancel). The active-subprocess kill is separate
+	// (in-memory s.cancels). Admin pool — callers also route the user-attributed
+	// terminal write through their own pool.
+	RequestRunCancelSystem(ctx context.Context, orgID, id string) (changed bool, err error)
+
 	// RunsForBlueprint returns every step run linked to a blueprint instance,
 	// ordered by blueprint_step_index ASC, started_at ASC.
 	RunsForBlueprint(ctx context.Context, orgID string, blueprintRunID string) ([]domain.AgentRun, error)

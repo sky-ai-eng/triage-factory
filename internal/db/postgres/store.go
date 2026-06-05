@@ -191,6 +191,10 @@ func New(admin, app *sql.DB) db.Stores {
 		// the admin *sql.DB directly. event_queue_all RLS is
 		// defense-in-depth (admin bypasses it).
 		EventQueue: newEventQueueStore(admin),
+		// RunQueue is admin-pool only: the dispatcher is a system worker with
+		// no JWT-claims context. The claim uses FOR UPDATE SKIP LOCKED so a
+		// future multi-worker dispatcher never double-claims a queued run.
+		RunQueue: newRunQueueStore(admin),
 		// TaskMemory wires both pools: app for request-handler
 		// equivalents (review/PR submit, swipe-discard cleanup,
 		// factory + run-summary reads) and admin for the delegate

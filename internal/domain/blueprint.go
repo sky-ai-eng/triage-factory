@@ -91,9 +91,19 @@ type BlueprintRun struct {
 	// projection.
 	TriggeringEventID string             `json:"triggering_event_id,omitempty"`
 	Status            BlueprintRunStatus `json:"status"`
-	AbortReason       string             `json:"abort_reason,omitempty"`
-	AbortedAtStep     *int               `json:"aborted_at_step,omitempty"`
-	WorktreePath      string             `json:"worktree_path"`
-	StartedAt         time.Time          `json:"started_at"`
-	CompletedAt       *time.Time         `json:"completed_at,omitempty"`
+	// CurrentStepIndex is the 0-based step the blueprint is on — the durable
+	// sequencing the queue-driven reactor advances (replacing the goroutine
+	// stack's loop index). A mid-flight blueprint resumes by re-enqueuing this
+	// step at boot.
+	CurrentStepIndex int `json:"current_step_index"`
+	// CancelRequested is the DB sequence-cancel signal: when set, the claim
+	// skips this blueprint's queued steps and the reactor finalizes it
+	// 'cancelled' instead of advancing. The active-subprocess kill is separate
+	// (in-memory s.cancels).
+	CancelRequested bool       `json:"cancel_requested,omitempty"`
+	AbortReason     string     `json:"abort_reason,omitempty"`
+	AbortedAtStep   *int       `json:"aborted_at_step,omitempty"`
+	WorktreePath    string     `json:"worktree_path"`
+	StartedAt       time.Time  `json:"started_at"`
+	CompletedAt     *time.Time `json:"completed_at,omitempty"`
 }

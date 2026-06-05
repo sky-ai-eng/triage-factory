@@ -59,6 +59,9 @@ func New(conn *sql.DB) db.Stores {
 		// EventQueue holds the connection directly (it self-manages the
 		// Enqueue transaction); single-worker drain in local mode.
 		EventQueue: newEventQueueStore(conn),
+		// RunQueue holds the connection directly; single-worker dispatcher
+		// in local mode (no claim contention, so a plain claim suffices).
+		RunQueue: newRunQueueStore(conn),
 		// TaskMemory wires both args to conn — SQLite has one
 		// connection so the dual-pool constructor collapses; the
 		// `...System` variants forward to the non-System bodies.
