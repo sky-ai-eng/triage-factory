@@ -346,8 +346,8 @@ export default function Settings() {
 
   // saveOrg persists the org-level field group through the shared
   // saveOrgConfig helper (the same POST /api/settings/org path the
-  // create-configure step and Setup use), then folds the saved values back
-  // into `data` so the next change-detection compares against current state.
+  // create-configure step uses), then folds the saved values back into
+  // `data` so the next change-detection compares against current state.
   const saveOrg = async (): Promise<boolean> => {
     const result = await saveOrgConfig({
       github_url: form.github_url,
@@ -451,7 +451,7 @@ export default function Settings() {
 
   // GitHub access (org scope): base URL + PAT + clone protocol, plus the
   // App-registration alternative — all shared with the create-configure
-  // step and (PAT path) the local Setup wizard.
+  // step (and, in local mode, the first-run OrgConfigure step).
   const renderGitHubAccess = () => (
     <GitHubAccessGroup
       value={{
@@ -497,7 +497,7 @@ export default function Settings() {
     <ModelGroup value={{ max_llm_model_tier: form.max_llm_model_tier }} onChange={patchForm} />
   )
 
-  // ---- Team-scope groups (shared with TeamConfigure + Setup). Controlled —
+  // ---- Team-scope groups (shared with TeamConfigure). Controlled —
   // the container owns the form + the per-slice saves.
   const renderRepos = () => (
     <ReposGroup
@@ -615,7 +615,10 @@ export default function Settings() {
         onClick={async () => {
           if (!confirm('Clear all stored tokens? You will need to re-authenticate.')) return
           await fetch('/api/integrations', { method: 'DELETE' })
-          window.location.href = '/setup'
+          // Reload Settings so the cleared state is reflected — credentials
+          // are re-entered here via the GitHub/Jira access groups (the legacy
+          // /setup wizard is retired); the tenant itself still exists.
+          window.location.reload()
         }}
         className="text-[13px] text-dismiss hover:text-dismiss/80 border border-dismiss/20 hover:border-dismiss/30 rounded-xl px-4 py-2 transition-colors"
       >

@@ -5,10 +5,11 @@ import { useOrgContext } from './contexts/OrgContext'
 import { useGitHubIdentity } from './hooks/useGitHubIdentity'
 
 /**
- * AuthGate routes between the existing local-mode keychain setup
- * flow and the multi-mode cookie-session flow.
+ * AuthGate routes between the local-mode first-run/provision flow and the
+ * multi-mode cookie-session flow.
  *
- *   Local mode → LocalAuthGate (existing /api/integrations/status)
+ *   Local mode → LocalAuthGate (/api/integrations/status; !configured →
+ *                the "Start your Triage Factory" provision screen)
  *   Multi mode → MultiAuthGate (uses AuthContext)
  *
  * Multi-mode states:
@@ -20,9 +21,9 @@ import { useGitHubIdentity } from './hooks/useGitHubIdentity'
  *   authed + N orgs, URL not under /orgs/:id → redirect to /orgs/<active>
  *   authed + N orgs, URL under /orgs/:id → render children
  *
- * Multi mode also blocks the /setup local-mode keychain wizard —
- * keychain creds aren't a thing in multi mode (they live in Vault
- * per-org via D5).
+ * Multi mode also redirects stale /setup bookmarks to / — the local
+ * first-run/config flow isn't a thing in multi mode (integration creds
+ * live in per-org Vault via D5).
  */
 
 function Loading() {
@@ -36,7 +37,10 @@ function Loading() {
 function LocalAuthGate({ children }: { children: React.ReactNode }) {
   const { configured, loading } = useAuthStatus()
   if (loading) return <Loading />
-  if (!configured) return <Navigate to="/setup" replace />
+  // No provisioned tenant yet → the first-run "Start your Triage Factory"
+  // screen, which fires POST /api/setup/start and then routes into the shared
+  // configure flow. (configured = a tenant exists, not "GitHub creds set".)
+  if (!configured) return <Navigate to="/start" replace />
   return <>{children}</>
 }
 

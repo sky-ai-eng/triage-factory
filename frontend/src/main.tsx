@@ -11,7 +11,8 @@ import './index.css'
 import { watchSystemTheme } from './lib/theme'
 
 watchSystemTheme()
-import Setup from './pages/Setup'
+import StartFactory from './pages/StartFactory'
+import JiraCarryOver from './pages/JiraCarryOver'
 import Cards from './pages/Cards'
 import Board from './pages/Board'
 import RunDetail from './pages/RunDetail'
@@ -74,7 +75,42 @@ function RootRedirect() {
 function LocalRoutes() {
   return (
     <Routes>
-      <Route path="/setup" element={<Setup />} />
+      {/* First-run provision trigger. Unguarded — it's the !configured target
+          LocalAuthGate redirects to (a gate here would loop). On Start it
+          provisions the sentinel tenant and routes into the configure flow. */}
+      <Route path="/start" element={<StartFactory />} />
+      {/* Create-time configure steps — the SAME pages multi uses, wrapped in
+          the local gate and flagged isLocal (SSH toggle + PAT, no App panel).
+          Routed with the sentinel org id; team_id is the "default" alias the
+          team endpoints resolve to the local Default team. Declared before the
+          shell layout so the static /configure + /carry-over suffixes win. */}
+      <Route
+        path="/orgs/:org_id/configure"
+        element={
+          <AuthGate mode="local">
+            <OrgConfigure isLocal />
+          </AuthGate>
+        }
+      />
+      <Route
+        path="/orgs/:org_id/teams/:team_id/configure"
+        element={
+          <AuthGate mode="local">
+            <TeamConfigure isLocal />
+          </AuthGate>
+        }
+      />
+      {/* Jira carry-over — the final local first-run step (migrated from the
+          retired Setup wizard), reached from TeamConfigure on Finish when
+          Jira is connected. */}
+      <Route
+        path="/orgs/:org_id/carry-over"
+        element={
+          <AuthGate mode="local">
+            <JiraCarryOver />
+          </AuthGate>
+        }
+      />
       <Route
         element={
           <AuthGate mode="local">
@@ -109,8 +145,8 @@ function MultiRoutes() {
               /no-orgs is kept as a redirect for any stale links. */}
           <Route path="/onboarding" element={<Onboarding />} />
           <Route path="/no-orgs" element={<Navigate to="/onboarding" replace />} />
-          {/* Local-mode keychain wizard isn't reachable in multi
-              mode — integration creds live in per-org Vault (D5)
+          {/* Redirect for stale /setup bookmarks — the legacy local setup
+              wizard is retired; integration creds live in per-org Vault (D5)
               and are configured via the admin UI (D14). */}
           <Route path="/setup" element={<Navigate to="/" replace />} />
           {/* Onboarding gate page — its own route so it sits OUTSIDE

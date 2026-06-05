@@ -27,15 +27,20 @@ import {
  *
  * It sits OUTSIDE RequireGitHubIdentity (like OrgConfigure / ConnectGitHub):
  * the repo + GitHub-team pickers want GitHub configured, but the gate would
- * loop the founder who's mid-setup. Multi-mode only (its sole mounter is
- * MultiRoutes), and intentionally skippable — everything here is reachable
- * later from Settings.
+ * loop the founder who's mid-setup. Intentionally skippable — everything here
+ * is reachable later from Settings.
  *
  * The {team_id} segment is usually the literal "default" (the alias the team
  * endpoints resolve to the org's Default team), so OrgConfigure can route
  * here without first resolving the team's UUID.
+ *
+ * `isLocal` selects the post-Finish destination: multi lands in the
+ * org-scoped app; local, when Jira is connected, routes to the Jira
+ * carry-over step (the migrated final local first-run step) and otherwise
+ * straight into the app. Local mounts under <AuthGate mode="local">, multi
+ * under <AuthGate mode="multi">.
  */
-export default function TeamConfigure() {
+export default function TeamConfigure({ isLocal = false }: { isLocal?: boolean }) {
   const navigate = useNavigate()
   const { org_id: orgId, team_id: teamId } = useParams<{ org_id: string; team_id: string }>()
   const team = teamId ?? 'default'
@@ -93,7 +98,19 @@ export default function TeamConfigure() {
 
   const patchForm = (patch: Partial<TeamConfigForm>) => setForm((f) => ({ ...f, ...patch }))
 
-  const goToApp = () => navigate(orgId ? '/orgs/' + orgId : '/', { replace: true })
+  // Local mode's app is the flat route table (root '/'); multi is org-scoped.
+  const goToApp = () => navigate(isLocal ? '/' : orgId ? '/orgs/' + orgId : '/', { replace: true })
+
+  // After a successful local save, offer Jira carry-over when Jira is
+  // connected (the migrated final local first-run step); otherwise — and
+  // always in multi — go straight to the app.
+  const finishDestination = () => {
+    if (isLocal && jiraConnected) {
+      navigate(orgId ? `/orgs/${orgId}/carry-over` : '/', { replace: true })
+      return
+    }
+    goToApp()
+  }
 
   const projectsBlocked = teamProjectsBlocked(form.jira_projects, jiraConnected)
 
@@ -106,7 +123,7 @@ export default function TeamConfigure() {
         return
       }
       if (result.warning) toast.info(result.warning)
-      goToApp()
+      finishDestination()
     } catch (err) {
       toast.error(`Could not save configuration: ${(err as Error).message}`)
     } finally {

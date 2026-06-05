@@ -5,7 +5,7 @@ interface AuthStatus {
   // explicit "Start your Triage Factory" provision action). It no longer
   // means "GitHub creds present" — those moved to a later config step,
   // surfaced via the github/jira/github_repos fields below. No tenant ⇒
-  // first-run; the AuthGate routes to /setup.
+  // first-run; the AuthGate routes to the "Start your Triage Factory" screen.
   configured: boolean
   github: boolean
   jira: boolean

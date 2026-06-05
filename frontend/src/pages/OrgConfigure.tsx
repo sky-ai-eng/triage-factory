@@ -15,30 +15,39 @@ import {
 
 /**
  * OrgConfigure is the create-time configure step — the second half of
- * "Start your Factory". By the time the founder lands here the org already
- * exists with default settings (POST /api/orgs) and is the session's active
- * org, so the same org-scoped endpoints the Settings page uses resolve to
- * the new org. The founder wires GitHub + Jira access, poller cadence, and
- * the model cap through the *same* shared field groups as Settings — no
+ * "Start your Factory" (multi) / "Start your Triage Factory" (local). By the
+ * time the founder lands here the tenant already exists with default settings
+ * (POST /api/orgs in multi, POST /api/setup/start in local) and is the
+ * session's active org, so the same org-scoped endpoints the Settings page
+ * uses resolve to it. The founder wires GitHub + Jira access, poller cadence,
+ * and the model cap through the *same* shared field groups as Settings — no
  * parallel implementation — then continues to the team configure step
  * (repos / GitHub-team mappings / Jira rules / team settings) before landing
  * in the factory. "I'll configure later" short-circuits straight to the app.
  *
  * This route sits OUTSIDE RequireGitHubIdentity (like ConnectGitHub): it's
  * exactly where GitHub access gets configured, so gating it on GitHub
- * identity would be a loop. Multi-mode only (its sole mounter is
- * MultiRoutes). It's intentionally skippable — everything here is also
- * reachable later from Settings.
+ * identity would be a loop. It's intentionally skippable — everything here is
+ * also reachable later from Settings.
+ *
+ * `isLocal` flips the two mode divergences the shared GitHub group exposes:
+ * the SSH clone toggle (local can clone over SSH; multi hardwires HTTPS) and
+ * the GitHub App registration panel (multi-only — local uses a PAT). Local
+ * mounts it under <AuthGate mode="local"> (single-user machine = implicit
+ * admin); multi under <AuthGate mode="multi"> (real session + admin RLS).
+ * env-provided creds need no special handling here — /api/settings/org
+ * reflects the env overlay, so the base URL prefills and the token field
+ * shows "leave blank to keep current".
  */
-export default function OrgConfigure() {
+export default function OrgConfigure({ isLocal = false }: { isLocal?: boolean }) {
   const navigate = useNavigate()
   const { org_id: orgId } = useParams<{ org_id: string }>()
 
-  // Multi mode hardwires HTTPS clone, so the GitHub group hides the toggle
-  // and we seed https rather than the local-default ssh.
+  // Multi mode hardwires HTTPS clone (no SSH machinery in the container);
+  // local defaults to SSH and lets the user flip via the GitHub group.
   const [form, setForm] = useState<OrgConfigForm>({
     ...emptyOrgConfig(),
-    github_clone_protocol: 'https',
+    github_clone_protocol: isLocal ? 'ssh' : 'https',
   })
   const [hasGitHubPat, setHasGitHubPat] = useState(false)
   const [jiraConnected, setJiraConnected] = useState(false)
@@ -72,7 +81,8 @@ export default function OrgConfigure() {
 
   const patchForm = (patch: Partial<OrgConfigForm>) => setForm((f) => ({ ...f, ...patch }))
 
-  const goToApp = () => navigate(orgId ? '/orgs/' + orgId : '/', { replace: true })
+  // Local mode's app is the flat route table (root '/'); multi is org-scoped.
+  const goToApp = () => navigate(isLocal ? '/' : orgId ? '/orgs/' + orgId : '/', { replace: true })
 
   // After org config, hand off to the team configure step (the next link in
   // the create→configure chain). "default" is the alias the team endpoints
@@ -127,8 +137,9 @@ export default function OrgConfigure() {
           }}
           onChange={patchForm}
           hasToken={hasGitHubPat}
-          isLocal={false}
+          isLocal={isLocal}
           orgId={orgId ?? null}
+          showAppPanel={!isLocal}
         />
 
         <JiraAccessGroup
