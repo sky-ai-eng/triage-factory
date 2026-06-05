@@ -192,7 +192,11 @@ export function RequireSetupComplete({
 }) {
   const auth = useOptionalAuth()
   const activeOrgId = useActiveOrgId()
-  const { setup_complete, setup_step, loading } = useAuthStatus(activeOrgId ?? undefined)
+  // Poll while blocked so the gate self-heals: a non-admin on the holding
+  // screen is admitted automatically once an admin finishes setup (the hook
+  // stops polling the moment a response reports setup_complete). 15s is brisk
+  // enough to feel automatic without hammering the endpoint.
+  const { setup_complete, setup_step, loading } = useAuthStatus(activeOrgId ?? undefined, 15000)
 
   if (loading) return <Loading />
   if (setup_complete) return <>{children}</>

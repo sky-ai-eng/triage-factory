@@ -30,7 +30,16 @@ interface AuthStatus {
 // orgKey lets a multi-mode caller refetch when the active org changes (the
 // endpoint resolves the session's active org, so a switch must re-poll).
 // Local mode (N=1, no switching) omits it.
-export function useAuthStatus(orgKey?: string): AuthStatus {
+//
+// pollMs, when set, re-polls on that interval so a gate blocking on an
+// incomplete org self-heals: a non-admin parked on the "setup isn't
+// finished" screen is admitted automatically once an admin completes setup,
+// rather than having to refresh by hand. Polling stops the moment a response
+// reports setup_complete (nothing left to watch) and pauses while the tab is
+// hidden — but a tab becoming visible again triggers an immediate refetch so
+// returning to a backgrounded tab is snappy rather than waiting out the
+// interval.
+export function useAuthStatus(orgKey?: string, pollMs?: number): AuthStatus {
   const [status, setStatus] = useState<AuthStatus>({
     configured: false,
     github: false,
@@ -40,18 +49,50 @@ export function useAuthStatus(orgKey?: string): AuthStatus {
 
   useEffect(() => {
     let cancelled = false
-    fetch('/api/integrations/status')
-      .then((res) => res.json())
-      .then((data) => {
-        if (!cancelled) setStatus({ ...data, loading: false })
-      })
-      .catch(() => {
-        if (!cancelled) setStatus((s) => ({ ...s, loading: false }))
-      })
+    let timer: ReturnType<typeof setInterval> | undefined
+
+    const stopPolling = () => {
+      if (timer) {
+        clearInterval(timer)
+        timer = undefined
+      }
+    }
+
+    const load = () => {
+      fetch('/api/integrations/status')
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (cancelled || !data) return
+          setStatus({ ...data, loading: false })
+          // Once the org is fully configured the gate admits the user, so
+          // there's nothing left to poll for — drop the interval.
+          if (data.setup_complete) stopPolling()
+        })
+        .catch(() => {
+          if (!cancelled) setStatus((s) => ({ ...s, loading: false }))
+        })
+    }
+
+    load()
+    if (pollMs && pollMs > 0) {
+      // Skip the tick while the tab is backgrounded; the visibility handler
+      // below covers the catch-up fetch when it returns to the foreground.
+      timer = setInterval(() => {
+        if (!document.hidden) load()
+      }, pollMs)
+    }
+
+    const onVisible = () => {
+      if (!document.hidden && !cancelled) load()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+
     return () => {
       cancelled = true
+      stopPolling()
+      document.removeEventListener('visibilitychange', onVisible)
     }
-  }, [orgKey])
+  }, [orgKey, pollMs])
 
   return status
 }
