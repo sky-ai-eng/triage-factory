@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -230,7 +231,11 @@ func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 
 	var prompt *domain.Prompt
 	var status string
-	var conflictErr string
+	// orphaned is set when fragmenting a multi-step blueprint leaves the steps
+	// after the deleted prompt as a new, trigger-less blueprint (head / mid
+	// delete) — the canvas surfaces a toast so the now-untriggered downstream
+	// doesn't go unnoticed.
+	var orphaned bool
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		prompt, e = tx.Prompts.Get(r.Context(), orgID, id)
@@ -244,11 +249,14 @@ func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 		// Delete-pairing under copy-only prompts. Every new prompt is auto-wrapped
 		// as a 1-step blueprint, so a bare prompt-delete would hit the
 		// blueprint_steps RESTRICT FK. Resolve the prompt's owning blueprint:
-		//   - owner is a ≥2-step blueprint (a real composition) → 409, remove it
-		//     there first.
 		//   - owner is a 1-step blueprint this prompt solely constitutes (the
 		//     auto-wrap case) → soft-delete that blueprint alongside the prompt so
 		//     the wrapper doesn't linger.
+		//   - owner is a ≥2-step blueprint (a real composition) → fragment the
+		//     chain per the split rule (DeleteStep): the component still headed by
+		//     the original entry keeps the trigger + id; every other component
+		//     becomes a new trigger-less blueprint; a head delete additionally
+		//     detaches the trigger (its target entry prompt is the one going away).
 		//   - no owner (prompt removed from all blueprints already) → just delete
 		//     the prompt.
 		ownerID, owned, e := tx.Blueprints.StepPromptOwner(r.Context(), orgID, id)
@@ -260,12 +268,56 @@ func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 			if e != nil {
 				return e
 			}
-			if len(steps) > 1 {
-				conflictErr = "This prompt is a step in a multi-step blueprint. Remove it from that blueprint first."
-				return nil
-			}
-			if e := tx.Blueprints.Delete(r.Context(), orgID, ownerID); e != nil {
-				return e
+			if len(steps) == 1 {
+				// Sole-owner pair-delete (auto-wrap case): retire the wrapper.
+				if e := tx.Blueprints.Delete(r.Context(), orgID, ownerID); e != nil {
+					return e
+				}
+			} else {
+				stepIndex := indexOfStep(steps, id)
+				if stepIndex < 0 {
+					// StepPromptOwner said this blueprint owns the prompt, so the
+					// step must be present — a miss is a store inconsistency.
+					return fmt.Errorf("prompt %s not found among steps of owning blueprint %s", id, ownerID)
+				}
+				// Head delete: the trigger fired into the entry prompt that's going
+				// away, so detach it (the downstream wasn't authored as the trigger's
+				// target). User triggers hard-delete; system triggers disable (they
+				// re-seed every boot).
+				if stepIndex == 0 {
+					triggers, te := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, ownerID)
+					if te != nil {
+						return te
+					}
+					for _, t := range triggers {
+						if t.Source == domain.EventHandlerSourceSystem {
+							if de := tx.EventHandlers.SetEnabled(r.Context(), orgID, t.ID, false); de != nil {
+								return de
+							}
+						} else if de := tx.EventHandlers.Delete(r.Context(), orgID, t.ID); de != nil {
+							return de
+						}
+					}
+				}
+				// The downstream blueprint (head / mid) is named after its new
+				// step-0 prompt — the step just past the deleted one — consistent
+				// with SplitAt / auto-wrap. Tail delete mints no downstream.
+				downstreamName := ""
+				if stepIndex < len(steps)-1 {
+					if p, ge := tx.Prompts.Get(r.Context(), orgID, steps[stepIndex+1].StepPromptID); ge != nil {
+						return ge
+					} else if p != nil {
+						downstreamName = p.Name
+					}
+					if downstreamName == "" {
+						downstreamName = "Untitled blueprint"
+					}
+				}
+				downstreamID, de := tx.Blueprints.DeleteStep(r.Context(), orgID, ownerID, stepIndex, downstreamName)
+				if de != nil {
+					return de
+				}
+				orphaned = downstreamID != ""
 			}
 		}
 
@@ -293,11 +345,17 @@ func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "prompt")
 		return
 	}
-	if conflictErr != "" {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": conflictErr})
-		return
+	writeJSON(w, http.StatusOK, map[string]any{"status": status, "orphaned_blueprint": orphaned})
+}
+
+// indexOfStep returns the position of the step whose prompt is promptID, or -1.
+func indexOfStep(steps []domain.BlueprintStep, promptID string) int {
+	for i := range steps {
+		if steps[i].StepPromptID == promptID {
+			return i
+		}
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": status})
+	return -1
 }
 
 func (s *Server) handlePromptStats(w http.ResponseWriter, r *http.Request) {

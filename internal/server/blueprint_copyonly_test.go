@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 )
@@ -165,10 +166,123 @@ func TestPromptDelete_MultiStepBlueprintConflicts(t *testing.T) {
 		t.Fatalf("steps PUT: expected 204, got %d: %s", put.Code, put.Body.String())
 	}
 
-	// Deleting a prompt that's part of a multi-step blueprint 409s.
-	del := doJSON(t, s, http.MethodDelete, "/api/prompts/"+p1, nil)
-	if del.Code != http.StatusConflict {
-		t.Fatalf("delete step-of-composition: expected 409, got %d: %s", del.Code, del.Body.String())
+	// Deleting a prompt that's part of a multi-step blueprint no longer 409s —
+	// the chain fragments per the split rule. Deleting the entry (p1, head) drops
+	// it and leaves the remaining step as a new, trigger-less blueprint.
+	code, orphaned := deletePrompt(t, s, p1)
+	if code != http.StatusOK {
+		t.Fatalf("delete step-of-composition: expected 200 (split), got %d", code)
+	}
+	if !orphaned {
+		t.Errorf("head delete should report an orphaned downstream blueprint")
+	}
+	// p1 is gone; p2 survives in a fresh blueprint (not the retired original).
+	if g := doJSON(t, s, http.MethodGet, "/api/prompts/"+p1, nil); g.Code != http.StatusNotFound {
+		t.Fatalf("deleted prompt GET: expected 404, got %d", g.Code)
+	}
+	if down := ownerBlueprintOf(t, s, p2); down == "" || down == bp {
+		t.Fatalf("p2 should live in a new blueprint after the head split, got owner %q (original %s)", down, bp)
+	}
+	// The original blueprint is retired (request-facing steps 404).
+	if g := doJSON(t, s, http.MethodGet, "/api/blueprints/"+bp+"/steps", nil); g.Code != http.StatusNotFound {
+		t.Fatalf("retired blueprint steps GET: expected 404, got %d", g.Code)
+	}
+}
+
+// --- C2: multi-step prompt-delete split semantics ------------------------
+
+func TestPromptDelete_TailKeepsTriggerAndId(t *testing.T) {
+	s := newTestServer(t)
+	bp, ps := createChainBlueprint(t, s, "TailChain", 3)
+	attachTrigger(t, s, bp, "github:pr:ci_check_failed")
+
+	code, orphaned := deletePrompt(t, s, ps[2]) // tail
+	if code != http.StatusOK {
+		t.Fatalf("tail delete: expected 200, got %d", code)
+	}
+	if orphaned {
+		t.Errorf("tail delete should not orphan a downstream blueprint")
+	}
+	// The blueprint keeps its id, [p0,p1] densely, and its trigger.
+	if got := stepPromptIDs(t, s, bp); !equalStrings(got, ps[:2]) {
+		t.Errorf("tail-deleted blueprint steps = %v, want %v", got, ps[:2])
+	}
+	if n := len(triggersForBlueprint(t, s, bp)); n != 1 {
+		t.Errorf("blueprint trigger count after tail delete = %d, want 1 (retained)", n)
+	}
+	if g := doJSON(t, s, http.MethodGet, "/api/prompts/"+ps[2], nil); g.Code != http.StatusNotFound {
+		t.Fatalf("deleted tail prompt GET: expected 404, got %d", g.Code)
+	}
+}
+
+func TestPromptDelete_HeadDetachesTrigger(t *testing.T) {
+	s := newTestServer(t)
+	bp, ps := createChainBlueprint(t, s, "HeadChain", 3)
+	attachTrigger(t, s, bp, "github:pr:ci_check_failed")
+
+	code, orphaned := deletePrompt(t, s, ps[0]) // head
+	if code != http.StatusOK {
+		t.Fatalf("head delete: expected 200, got %d", code)
+	}
+	if !orphaned {
+		t.Errorf("head delete should report an orphaned downstream blueprint")
+	}
+	// The original blueprint_id retires with the entry prompt; its (user) trigger
+	// is hard-deleted, not left dangling on a soft-deleted blueprint.
+	if g := doJSON(t, s, http.MethodGet, "/api/blueprints/"+bp+"/steps", nil); g.Code != http.StatusNotFound {
+		t.Fatalf("retired blueprint steps GET: expected 404, got %d", g.Code)
+	}
+	if n := len(triggersForBlueprint(t, s, bp)); n != 0 {
+		t.Errorf("original blueprint trigger count after head delete = %d, want 0 (detached)", n)
+	}
+	// The remaining steps are a new, trigger-less blueprint, re-densified.
+	down := ownerBlueprintOf(t, s, ps[1])
+	if down == "" || down == bp {
+		t.Fatalf("p1 owner after head split = %q, want a fresh blueprint (original %s)", down, bp)
+	}
+	if got := stepPromptIDs(t, s, down); !equalStrings(got, ps[1:]) {
+		t.Errorf("downstream steps = %v, want %v", got, ps[1:])
+	}
+	if n := len(triggersForBlueprint(t, s, down)); n != 0 {
+		t.Errorf("downstream blueprint trigger count = %d, want 0 (trigger-less)", n)
+	}
+	if g := doJSON(t, s, http.MethodGet, "/api/prompts/"+ps[0], nil); g.Code != http.StatusNotFound {
+		t.Fatalf("deleted head prompt GET: expected 404, got %d", g.Code)
+	}
+}
+
+func TestPromptDelete_MidSplitsDownstreamTriggerless(t *testing.T) {
+	s := newTestServer(t)
+	bp, ps := createChainBlueprint(t, s, "MidChain", 4)
+	attachTrigger(t, s, bp, "github:pr:ci_check_failed")
+
+	code, orphaned := deletePrompt(t, s, ps[1]) // mid (index 1)
+	if code != http.StatusOK {
+		t.Fatalf("mid delete: expected 200, got %d", code)
+	}
+	if !orphaned {
+		t.Errorf("mid delete should report an orphaned downstream blueprint")
+	}
+	// Upstream keeps its id, [p0], and its trigger.
+	if got := stepPromptIDs(t, s, bp); !equalStrings(got, ps[:1]) {
+		t.Errorf("upstream steps after mid delete = %v, want %v", got, ps[:1])
+	}
+	if n := len(triggersForBlueprint(t, s, bp)); n != 1 {
+		t.Errorf("upstream trigger count after mid delete = %d, want 1 (retained)", n)
+	}
+	// Downstream is a new trigger-less blueprint holding [p2,p3], re-densified.
+	down := ownerBlueprintOf(t, s, ps[2])
+	if down == "" || down == bp {
+		t.Fatalf("p2 owner after mid split = %q, want a fresh blueprint (original %s)", down, bp)
+	}
+	if got := stepPromptIDs(t, s, down); !equalStrings(got, ps[2:]) {
+		t.Errorf("downstream steps = %v, want %v", got, ps[2:])
+	}
+	if n := len(triggersForBlueprint(t, s, down)); n != 0 {
+		t.Errorf("downstream trigger count = %d, want 0 (trigger-less)", n)
+	}
+	if g := doJSON(t, s, http.MethodGet, "/api/prompts/"+ps[1], nil); g.Code != http.StatusNotFound {
+		t.Fatalf("deleted mid prompt GET: expected 404, got %d", g.Code)
 	}
 }
 
@@ -214,4 +328,124 @@ func createBareBlueprint(t *testing.T, s *Server, name string) string {
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &b)
 	return b.ID
+}
+
+// createChainBlueprint builds a bare blueprint stepping through n fresh bare
+// prompts and returns the blueprint id + the ordered step prompt ids.
+func createChainBlueprint(t *testing.T, s *Server, name string, n int) (blueprintID string, promptIDs []string) {
+	t.Helper()
+	bp := createBareBlueprint(t, s, name)
+	steps := make([]map[string]any, 0, n)
+	promptIDs = make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		p := createBarePrompt(t, s, fmt.Sprintf("%s-%d", name, i))
+		promptIDs = append(promptIDs, p)
+		steps = append(steps, map[string]any{"step_prompt_id": p})
+	}
+	if put := doJSON(t, s, http.MethodPut, "/api/blueprints/"+bp+"/steps", map[string]any{"steps": steps}); put.Code != http.StatusNoContent {
+		t.Fatalf("createChainBlueprint %s steps PUT: %d: %s", name, put.Code, put.Body.String())
+	}
+	return bp, promptIDs
+}
+
+// attachTrigger wires a user trigger to blueprintID for eventType and returns
+// the trigger id.
+func attachTrigger(t *testing.T, s *Server, blueprintID, eventType string) string {
+	t.Helper()
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
+		"kind":                     "trigger",
+		"event_type":               eventType,
+		"blueprint_id":             blueprintID,
+		"breaker_threshold":        3,
+		"min_autonomy_suitability": 0.0,
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("attachTrigger to %s: %d: %s", blueprintID, rec.Code, rec.Body.String())
+	}
+	var tr struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &tr)
+	return tr.ID
+}
+
+// triggersForBlueprint returns the trigger handlers bound to blueprintID.
+func triggersForBlueprint(t *testing.T, s *Server, blueprintID string) []map[string]any {
+	t.Helper()
+	rec := doJSON(t, s, http.MethodGet, "/api/event-handlers?kind=trigger", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list triggers: %d: %s", rec.Code, rec.Body.String())
+	}
+	var all []map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &all)
+	var out []map[string]any
+	for _, h := range all {
+		if h["blueprint_id"] == blueprintID {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+// stepPromptIDs returns the ordered step prompt ids of a request-visible
+// blueprint.
+func stepPromptIDs(t *testing.T, s *Server, blueprintID string) []string {
+	t.Helper()
+	rec := doJSON(t, s, http.MethodGet, "/api/blueprints/"+blueprintID+"/steps", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("steps GET %s: %d: %s", blueprintID, rec.Code, rec.Body.String())
+	}
+	var steps []map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &steps)
+	out := make([]string, len(steps))
+	for i, st := range steps {
+		out[i], _ = st["step_prompt_id"].(string)
+	}
+	return out
+}
+
+// ownerBlueprintOf resolves which request-visible blueprint holds promptID as a
+// step via the bulk steps read (so a freshly-minted downstream blueprint is
+// locatable without knowing its id).
+func ownerBlueprintOf(t *testing.T, s *Server, promptID string) string {
+	t.Helper()
+	rec := doJSON(t, s, http.MethodGet, "/api/blueprint-steps", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bulk steps: %d: %s", rec.Code, rec.Body.String())
+	}
+	var steps []map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &steps)
+	for _, st := range steps {
+		if st["step_prompt_id"] == promptID {
+			id, _ := st["blueprint_id"].(string)
+			return id
+		}
+	}
+	return ""
+}
+
+// deletePrompt issues DELETE /api/prompts/{id} and decodes the status code +
+// the orphaned_blueprint signal.
+func deletePrompt(t *testing.T, s *Server, promptID string) (code int, orphaned bool) {
+	t.Helper()
+	rec := doJSON(t, s, http.MethodDelete, "/api/prompts/"+promptID, nil)
+	var body struct {
+		Status            string `json:"status"`
+		OrphanedBlueprint bool   `json:"orphaned_blueprint"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	return rec.Code, body.OrphanedBlueprint
+}
+
+// equalStrings reports whether two string slices are element-wise equal.
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

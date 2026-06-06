@@ -295,6 +295,40 @@ type BlueprintStore interface {
 	// name, consistent with auto-wrap).
 	SplitAt(ctx context.Context, orgID string, id string, atIndex int, newBlueprintID, newName string) (string, error)
 
+	// DeleteStep removes the step at stepIndex from a multi-step blueprint
+	// (the count must be >= 2), fragmenting the chain per the split rule in one
+	// transaction. The deleted step's own row is preserved on a soft-deleted
+	// 1-step blueprint — mirroring the sole-owner pair-delete, so the caller's
+	// companion prompt soft-delete leaves the copy-only step-prompt unique index
+	// satisfied (the prompt still resolves to exactly one — soft-deleted — owning
+	// blueprint). The three observable cases, by position:
+	//
+	//   - head (stepIndex == 0): steps [1, N) move to a new trigger-less
+	//     blueprint (newName), re-densified 0-based; the original blueprint —
+	//     now holding only the deleted entry step — is soft-deleted. The
+	//     original's trigger is the caller's to detach (EventHandlers is a
+	//     separate store); the original blueprint_id retires with the entry
+	//     prompt. Returns the new downstream id.
+	//   - tail (stepIndex == N-1): the deleted step moves to a fresh
+	//     soft-deleted 1-step blueprint; the original keeps steps [0, N-1) with
+	//     its trigger + id. Returns "".
+	//   - mid (0 < stepIndex < N-1): the original keeps steps [0, stepIndex)
+	//     with its trigger + id; steps [stepIndex+1, N) move to a new
+	//     trigger-less blueprint (newName), re-densified 0-based; the deleted
+	//     step moves to a fresh soft-deleted 1-step blueprint. Returns the new
+	//     downstream id.
+	//
+	// step_index stays densely packed 0-based on every surviving blueprint. Like
+	// SplitAt this only ever reparents onto freshly created empty blueprints, so
+	// no in-place step_index shift can transiently collide the (blueprint_id,
+	// step_index) primary key. newName is the downstream blueprint's name (its
+	// new step-0 prompt's name, consistent with SplitAt / auto-wrap); it is
+	// ignored for a tail delete (no downstream is minted). The internal
+	// isolation blueprint id is minted by the store (it is never surfaced — a
+	// soft-deleted audit wrapper). Returns the new downstream blueprint id
+	// (head / mid) or "" (tail).
+	DeleteStep(ctx context.Context, orgID, blueprintID string, stepIndex int, newName string) (downstreamID string, err error)
+
 	// DuplicatePrompts deep-copies a flat set of prompt ids into new,
 	// trigger-less blueprint(s), atomically. Prompts are the duplication
 	// primitive: each resolves to exactly one (blueprint_id, step_index) under

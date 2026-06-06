@@ -402,19 +402,63 @@ func (s *blueprintStore) MergeInto(ctx context.Context, orgID, hostID, sourceID 
 	})
 }
 
+// insertTriggerlessBlueprintPG creates a fresh, trigger-less user blueprint,
+// deriving its team (and the same-team FK target) from srcBlueprintID so the
+// reparented steps' (blueprint_id, team_id) FK still resolves. Mirrors Create's
+// COALESCE(current_user_id, org owner) creator default. Shared by SplitAt and
+// DeleteStep.
+func insertTriggerlessBlueprintPG(ctx context.Context, q queryer, orgID, id, name, srcBlueprintID string) error {
+	_, err := q.ExecContext(ctx, `
+		INSERT INTO blueprints (id, org_id, creator_user_id, team_id, name, source, usage_count, created_at, updated_at)
+		SELECT $1, $2,
+			COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
+			b.team_id, $3, 'user', 0, now(), now()
+		FROM blueprints b WHERE b.id = $4 AND b.org_id = $2
+	`, id, orgID, name, srcBlueprintID)
+	return err
+}
+
+// softDeleteBlueprintTxPG stamps deleted_at inside an open tx (mirrors
+// Delete / MergeInto). Errors when the row is missing or already deleted.
+func softDeleteBlueprintTxPG(ctx context.Context, q queryer, orgID, id string) error {
+	res, err := q.ExecContext(ctx,
+		`UPDATE blueprints SET deleted_at = now() WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL`, orgID, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("blueprint %s not found or already deleted", id)
+	}
+	return nil
+}
+
+// insertIsolationBlueprintPG creates the born-soft-deleted 1-step blueprint that
+// holds the deleted step's row, named after that step's prompt (the name is
+// never surfaced — the wrapper is soft-deleted on creation). Team is derived
+// from srcBlueprintID so the reparented step's same-team FK resolves.
+func insertIsolationBlueprintPG(ctx context.Context, q queryer, orgID, id, srcBlueprintID string, stepIndex int) error {
+	_, err := q.ExecContext(ctx, `
+		INSERT INTO blueprints (id, org_id, creator_user_id, team_id, name, source, usage_count, created_at, updated_at, deleted_at)
+		SELECT $1, $2,
+			COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
+			b.team_id, p.name, 'user', 0, now(), now(), now()
+		FROM blueprints b
+		JOIN blueprint_steps bs ON bs.blueprint_id = b.id AND bs.org_id = b.org_id
+		JOIN prompts p ON p.id = bs.step_prompt_id AND p.org_id = bs.org_id
+		WHERE b.id = $3 AND b.org_id = $2 AND bs.step_index = $4
+	`, id, orgID, srcBlueprintID, stepIndex)
+	return err
+}
+
 func (s *blueprintStore) SplitAt(ctx context.Context, orgID, id string, atIndex int, newBlueprintID, newName string) (string, error) {
 	err := s.runInTx(ctx, func(tx queryer) error {
-		// Create the new trigger-less downstream blueprint, deriving its team
-		// from the blueprint being split so both halves share a team (and the
-		// reparented steps' (blueprint_id, team_id) FK still resolves). Mirrors
-		// Create's COALESCE(current_user_id, org owner) creator default.
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO blueprints (id, org_id, creator_user_id, team_id, name, source, usage_count, created_at, updated_at)
-			SELECT $1, $2,
-				COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
-				b.team_id, $3, 'user', 0, now(), now()
-			FROM blueprints b WHERE b.id = $4 AND b.org_id = $2
-		`, newBlueprintID, orgID, newName, id); err != nil {
+		// Create the new trigger-less downstream blueprint (team derived from the
+		// blueprint being split so both halves share a team).
+		if err := insertTriggerlessBlueprintPG(ctx, tx, orgID, newBlueprintID, newName, id); err != nil {
 			return fmt.Errorf("create downstream blueprint: %w", err)
 		}
 		// Peel steps [atIndex, N) onto the new blueprint, re-densified 0-based.
@@ -431,6 +475,81 @@ func (s *blueprintStore) SplitAt(ctx context.Context, orgID, id string, atIndex 
 		return "", err
 	}
 	return newBlueprintID, nil
+}
+
+func (s *blueprintStore) DeleteStep(ctx context.Context, orgID, blueprintID string, stepIndex int, newName string) (string, error) {
+	var downstreamID string
+	err := s.runInTx(ctx, func(tx queryer) error {
+		var n int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM blueprint_steps WHERE org_id = $1 AND blueprint_id = $2`,
+			orgID, blueprintID).Scan(&n); err != nil {
+			return fmt.Errorf("count steps: %w", err)
+		}
+		if n < 2 {
+			return fmt.Errorf("DeleteStep requires a multi-step blueprint, got %d step(s)", n)
+		}
+		if stepIndex < 0 || stepIndex >= n {
+			return fmt.Errorf("step index %d out of range [0,%d)", stepIndex, n)
+		}
+		switch {
+		case stepIndex == 0:
+			// Head: peel [1,N) onto a fresh trigger-less downstream blueprint,
+			// leaving the original holding only the deleted entry step; soft-delete
+			// it (the caller detaches its trigger separately).
+			downstreamID = uuid.New().String()
+			if err := insertTriggerlessBlueprintPG(ctx, tx, orgID, downstreamID, newName, blueprintID); err != nil {
+				return fmt.Errorf("create downstream blueprint: %w", err)
+			}
+			if err := reparentBlueprintStepsPG(ctx, tx, orgID, blueprintID, downstreamID, -1, 1); err != nil {
+				return fmt.Errorf("reparent downstream steps: %w", err)
+			}
+			if err := softDeleteBlueprintTxPG(ctx, tx, orgID, blueprintID); err != nil {
+				return err
+			}
+		case stepIndex == n-1:
+			// Tail: isolate the last step onto a fresh soft-deleted 1-step
+			// blueprint; the original keeps [0,N-1) with its trigger + id.
+			isolationID := uuid.New().String()
+			if err := insertIsolationBlueprintPG(ctx, tx, orgID, isolationID, blueprintID, stepIndex); err != nil {
+				return fmt.Errorf("create isolation blueprint: %w", err)
+			}
+			if err := reparentBlueprintStepsPG(ctx, tx, orgID, blueprintID, isolationID, -stepIndex, stepIndex); err != nil {
+				return fmt.Errorf("isolate deleted step: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE blueprints SET updated_at = now() WHERE org_id = $1 AND id = $2`, orgID, blueprintID); err != nil {
+				return fmt.Errorf("bump upstream updated_at: %w", err)
+			}
+		default:
+			// Mid: the original keeps [0,stepIndex) with its trigger + id; peel
+			// [stepIndex+1,N) onto a fresh trigger-less downstream blueprint, then
+			// isolate the deleted step onto a fresh soft-deleted 1-step blueprint.
+			downstreamID = uuid.New().String()
+			if err := insertTriggerlessBlueprintPG(ctx, tx, orgID, downstreamID, newName, blueprintID); err != nil {
+				return fmt.Errorf("create downstream blueprint: %w", err)
+			}
+			if err := reparentBlueprintStepsPG(ctx, tx, orgID, blueprintID, downstreamID, -(stepIndex + 1), stepIndex+1); err != nil {
+				return fmt.Errorf("reparent downstream steps: %w", err)
+			}
+			isolationID := uuid.New().String()
+			if err := insertIsolationBlueprintPG(ctx, tx, orgID, isolationID, blueprintID, stepIndex); err != nil {
+				return fmt.Errorf("create isolation blueprint: %w", err)
+			}
+			if err := reparentBlueprintStepsPG(ctx, tx, orgID, blueprintID, isolationID, -stepIndex, stepIndex); err != nil {
+				return fmt.Errorf("isolate deleted step: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE blueprints SET updated_at = now() WHERE org_id = $1 AND id = $2`, orgID, blueprintID); err != nil {
+				return fmt.Errorf("bump upstream updated_at: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return downstreamID, nil
 }
 
 func (s *blueprintStore) DuplicatePrompts(ctx context.Context, orgID, teamID string, promptIDs []string) ([]string, error) {
