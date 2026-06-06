@@ -2691,7 +2691,7 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
       },
       resolve: () => ({
         alpha: Math.PI / 2,
-        beta: 0.55,
+        beta: 1.0,
         radius: 270, // ≈ the camera's tightest zoom (lowerRadiusLimit)
         target: ciFailedMergerCenter.clone(),
         hold: 9,
