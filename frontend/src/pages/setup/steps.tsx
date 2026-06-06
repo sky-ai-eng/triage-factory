@@ -136,11 +136,11 @@ async function persistOrg(state: WizardState): Promise<void> {
 // the first team step — and the slice merges into shared wizard state, so the
 // later team steps (GitHub teams, Jira projects, default model) read the same
 // form without re-fetching. GitHub-team mappings load separately, via
-// GitHubTeamGroup's own fetch + onLoaded. `teamLoaded: true` marks the seed
-// succeeded; if the team-settings GET throws, the flag stays false and the
-// persist-bearing team steps refuse to write the empty default form over real
-// settings. A failed repos GET (null) keeps repos undefined (unloaded) rather
-// than [], so a save skips it instead of wiping the team's tracked repos.
+  // succeeded; if the team-settings GET throws, the flag stays false and the
+  // persist-bearing team steps refuse to write the empty default form over real
+  // settings. A failed repos GET (null) keeps repos undefined (unloaded) rather
+  // than [], so callers can distinguish "unloaded" from "loaded but empty" and
+  // avoid treating a fetch failure as "tracks nothing".
 async function loadTeam(teamId: string): Promise<Partial<WizardState>> {
   const [settings, repos] = await Promise.all([fetchTeamSettings(teamId), fetchTeamRepos(teamId)])
   if (!settings) throw new Error('Could not load team settings')
