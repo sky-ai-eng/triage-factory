@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -11,15 +12,28 @@ import (
 )
 
 // githubAPIBase derives the REST API base from a user-facing GitHub URL,
-// mirroring internal/github.NewClient + the server's same-named helper.
-// Empty or the public host maps to api.github.com; a GHES base gets the
-// /api/v3 suffix.
+// mirroring internal/github.APIBase (kept as a private copy because importing
+// internal/github here would form a cycle — the resolver imports internal/db).
+// Empty or the public host maps to api.github.com; a *.ghe.com data-residency
+// tenant maps to its api.* subdomain; any other (GHES) base gets the /api/v3
+// suffix. Keep this in lockstep with internal/github.APIBase.
 func githubAPIBase(base string) string {
 	base = strings.TrimRight(base, "/")
 	if base == "" || base == "https://github.com" {
 		return "https://api.github.com"
 	}
-	return base + "/api/v3"
+	u, err := url.Parse(base)
+	if err != nil || u.Host == "" {
+		return base + "/api/v3"
+	}
+	switch {
+	case u.Hostname() == "github.com":
+		return "https://api.github.com"
+	case strings.HasSuffix(u.Hostname(), ".ghe.com"):
+		return u.Scheme + "://api." + u.Host
+	default:
+		return base + "/api/v3"
+	}
 }
 
 // DiscoverAppInstallations reads the org's App PEM via SecretStore.GetSystem

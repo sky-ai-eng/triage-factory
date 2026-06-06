@@ -114,6 +114,19 @@ func (cfg Config) apiURL(format string, args ...any) string {
 	return cfg.restURL(fmt.Sprintf(format, args...))
 }
 
+// ReachabilityURL returns a no-auth probe URL on the same host a Client would
+// use, for the setup wizard's URL-only reachability sub-step (split from the
+// credential sub-step): {base}/rest/api/2/serverInfo. The endpoint exists on
+// both Cloud and Data Center, and the probe only needs the host to *answer* —
+// any HTTP status (including a 401 on a Cloud site that gates serverInfo
+// behind auth) proves reachability — so the response is irrelevant. v2 is
+// hard-wired (not cfg.APIVersion) because reachability is creds-free and so
+// has no Config; v2 is served by every Jira backend. Kept here so the REST
+// path shape stays owned by this package.
+func ReachabilityURL(baseURL string) string {
+	return fmt.Sprintf("%s/rest/api/2/serverInfo", strings.TrimRight(baseURL, "/"))
+}
+
 // authorize applies the configured auth scheme to req. A Config built
 // without a named constructor (DataCenterPAT / CloudAPIToken) has a nil
 // scheme; because Config's other fields are exported and can be set by hand,

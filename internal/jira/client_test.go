@@ -112,6 +112,19 @@ func TestAPIURLVersion(t *testing.T) {
 	}
 }
 
+func TestReachabilityURL(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"https://jira.example.com", "https://jira.example.com/rest/api/2/serverInfo"},
+		{"https://jira.example.com/", "https://jira.example.com/rest/api/2/serverInfo"},
+		{"https://acme.atlassian.net", "https://acme.atlassian.net/rest/api/2/serverInfo"},
+	}
+	for _, tt := range tests {
+		if got := ReachabilityURL(tt.in); got != tt.want {
+			t.Errorf("ReachabilityURL(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
 // TestDataCenterPATRequest exercises the full client path: Bearer auth header
 // and a /rest/api/2/ URL on the wire.
 func TestDataCenterPATRequest(t *testing.T) {

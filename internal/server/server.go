@@ -640,9 +640,13 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/skills/import", s.handleSkillsImport)
 	s.api("GET /api/github/repos", s.handleGitHubRepos)
 	s.apiMutating("POST /api/github/preflight-ssh", s.handleGitHubPreflightSSH)
+	// URL-only host reachability (the wizard's URL sub-step) — no auth sent,
+	// distinct from the creds stage (auth.ValidateGitHub / /api/jira/connect).
+	s.apiMutating("POST /api/github/reachability", s.handleGitHubReachability)
 	s.api("GET /api/repos", s.handleRepoProfiles)
 	s.apiMutating("PATCH /api/repos/{owner}/{repo}", s.handleRepoUpdate)
 	s.api("GET /api/repos/{owner}/{repo}/branches", s.handleRepoBranches)
+	s.apiMutating("POST /api/jira/reachability", s.handleJiraReachability)
 	s.apiMutating("POST /api/jira/connect", s.handleJiraConnect)
 	s.api("GET /api/jira/statuses", s.handleJiraStatuses)
 	s.api("GET /api/jira/stock", s.handleJiraStockGet)
