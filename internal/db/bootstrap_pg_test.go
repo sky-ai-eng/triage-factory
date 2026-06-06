@@ -2,8 +2,11 @@ package db_test
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
@@ -62,5 +65,47 @@ func TestBootstrapNewOrg_Postgres_TwoPool(t *testing.T) {
 	}
 	if !ta.Enabled {
 		t.Error("team_agents.enabled=false; want true so auto-delegation can fire")
+	}
+}
+
+// TestAppPoolRead_NoClaims_WrapsPermErr is the SKY-387 deliverable-D
+// guard: an app-pool store read reached without the SET ROLE tf_app +
+// JWT-claims ceremony (the exact shape of the SKY-385 bug — a
+// system/bootstrap caller hitting an app-pool method) must surface the
+// actionable, *System-naming error from wrapAppPoolPermErr, not the raw
+// "permission denied for table agents" 42501.
+//
+// Like the two-pool regression guard above, the load-bearing detail is
+// the wiring: pgstore.New(admin=AdminDB, app=AppDB) with AppDB the
+// grant-less `authenticator` pool. GetForOrg goes to the app pool; with
+// no claims tx the bare authenticator has no table grant and Postgres
+// raises 42501 — the runtime failure mode the wrap translates.
+func TestAppPoolRead_NoClaims_WrapsPermErr(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	orgID, _, _ := pgtest.SeedOrgWithUser(t, h, "sky387")
+
+	stores := pgstore.New(h.AdminDB, h.AppDB)
+
+	_, err := stores.Agents.GetForOrg(context.Background(), orgID)
+	if err == nil {
+		t.Fatal("expected permission-denied error from a bare app-pool GetForOrg, got nil")
+	}
+
+	// The underlying *pgconn.PgError (42501) is preserved via %w, so
+	// SQLSTATE-inspecting callers still see it.
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+		t.Fatalf("want wrapped SQLSTATE 42501, got %v", err)
+	}
+
+	// ...and the message is self-explaining: names the callsite and points
+	// at the *System fix.
+	if !strings.Contains(err.Error(), "agents.GetForOrg") {
+		t.Errorf("error does not name the callsite: %v", err)
+	}
+	if !strings.Contains(err.Error(), "*System variant") {
+		t.Errorf("error does not point at the *System fix: %v", err)
 	}
 }

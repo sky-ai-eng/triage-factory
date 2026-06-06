@@ -54,7 +54,8 @@ const pgAgentColumns = `id, display_name, default_model, default_autonomy_suitab
        created_at, updated_at`
 
 func (s *agentStore) GetForOrg(ctx context.Context, orgID string) (*domain.Agent, error) {
-	return getAgentForOrg(ctx, s.app, orgID)
+	a, err := getAgentForOrg(ctx, s.app, orgID)
+	return a, wrapAppPoolPermErr(err, "agents.GetForOrg")
 }
 
 func (s *agentStore) GetForOrgSystem(ctx context.Context, orgID string) (*domain.Agent, error) {

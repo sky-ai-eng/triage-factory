@@ -66,7 +66,8 @@ func (s *gitHubAppsStore) GetForOrg(ctx context.Context, orgID string) (*domain.
 	if !isValidUUID(orgID) {
 		return nil, nil
 	}
-	return scanGitHubApp(s.app.QueryRowContext(ctx, selectGitHubAppCols, orgID))
+	app, err := scanGitHubApp(s.app.QueryRowContext(ctx, selectGitHubAppCols, orgID))
+	return app, wrapAppPoolPermErr(err, "github_apps.GetForOrg")
 }
 
 func (s *gitHubAppsStore) GetForOrgSystem(ctx context.Context, orgID string) (*domain.OrgGitHubApp, error) {
@@ -99,7 +100,8 @@ func (s *gitHubAppsStore) CreateForOrg(ctx context.Context, app domain.OrgGitHub
 }
 
 func (s *gitHubAppsStore) ListInstallationsForOrg(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
-	return listInstallations(ctx, s.app, orgID)
+	insts, err := listInstallations(ctx, s.app, orgID)
+	return insts, wrapAppPoolPermErr(err, "github_apps.ListInstallationsForOrg")
 }
 
 func (s *gitHubAppsStore) ListInstallationsForOrgSystem(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {

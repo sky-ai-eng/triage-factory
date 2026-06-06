@@ -52,7 +52,8 @@ const pgTeamAgentColumns = `team_id, agent_id, enabled, per_team_model,
        per_team_autonomy_suitability, added_at`
 
 func (s *teamAgentStore) GetForTeam(ctx context.Context, orgID, teamID, agentID string) (*domain.TeamAgent, error) {
-	return getTeamAgent(ctx, s.app, teamID, agentID)
+	ta, err := getTeamAgent(ctx, s.app, teamID, agentID)
+	return ta, wrapAppPoolPermErr(err, "team_agents.GetForTeam")
 }
 
 func (s *teamAgentStore) GetForTeamSystem(ctx context.Context, orgID, teamID, agentID string) (*domain.TeamAgent, error) {
@@ -152,7 +153,7 @@ func (s *teamAgentStore) ListForOrg(ctx context.Context, orgID, agentID string) 
 		ORDER BY added_at ASC
 	`, agentID)
 	if err != nil {
-		return nil, err
+		return nil, wrapAppPoolPermErr(err, "team_agents.ListForOrg")
 	}
 	defer rows.Close()
 

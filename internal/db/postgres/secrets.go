@@ -83,7 +83,7 @@ func (s *secretStore) Get(ctx context.Context, orgID, key string) (string, error
 		`SELECT public.vault_get_org_secret($1::uuid, $2::text)`,
 		orgID, key,
 	).Scan(&got); err != nil {
-		return "", err
+		return "", wrapAppPoolPermErr(err, "secrets.Get")
 	}
 	if !got.Valid {
 		return "", nil
@@ -155,7 +155,7 @@ func (s *secretStore) GetUser(ctx context.Context, orgID, userID, key string) (s
 		`SELECT public.vault_get_user_secret($1::uuid, $2::uuid, $3::text)`,
 		orgID, userID, key,
 	).Scan(&got); err != nil {
-		return "", err
+		return "", wrapAppPoolPermErr(err, "secrets.GetUser")
 	}
 	if !got.Valid {
 		return "", nil
