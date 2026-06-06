@@ -85,6 +85,55 @@ func TestBlueprintDelete_NotFound(t *testing.T) {
 	}
 }
 
+// TestBlueprintDelete_SoftDeletesStepPromptsBySource proves the cascade
+// dispatches per step-prompt source: a user step prompt gets deleted_at stamped
+// (Delete), a system/imported one is hidden (Hide) and keeps deleted_at NULL so
+// the ...System reads still resolve it. createChainBlueprint mints user prompts,
+// so we flip one step prompt's source to "system" before deleting — exercising
+// the Hide branch the user-only tests above never reach.
+func TestBlueprintDelete_SoftDeletesStepPromptsBySource(t *testing.T) {
+	s := newTestServer(t)
+	bp, ps := createChainBlueprint(t, s, "MixedSources", 2)
+	userPrompt, systemPrompt := ps[0], ps[1]
+
+	// Flip the second step prompt to system source so the cascade routes it
+	// through Hide instead of Delete. System prompts carry no creator (the
+	// prompts_system_has_no_creator CHECK), so null it in the same UPDATE.
+	if _, err := s.db.Exec(`UPDATE prompts SET source = 'system', creator_user_id = NULL WHERE id = ?`, systemPrompt); err != nil {
+		t.Fatalf("set step prompt source=system: %v", err)
+	}
+
+	del := doJSON(t, s, http.MethodDelete, "/api/blueprints/"+bp, nil)
+	if del.Code != http.StatusOK {
+		t.Fatalf("delete blueprint: expected 200, got %d: %s", del.Code, del.Body.String())
+	}
+
+	// User step prompt → Delete: deleted_at stamped, not hidden.
+	if n := countRows(t, s, `SELECT COUNT(*) FROM prompts WHERE id = ? AND deleted_at IS NOT NULL AND hidden = 0`, userPrompt); n != 1 {
+		t.Errorf("user step prompt (deleted_at stamped, not hidden) rows = %d, want 1", n)
+	}
+	// System step prompt → Hide: hidden, deleted_at NULL. The row survives so the
+	// ...System reads still resolve it (hidden filters List, not the resolve path).
+	if n := countRows(t, s, `SELECT COUNT(*) FROM prompts WHERE id = ? AND hidden = 1 AND deleted_at IS NULL`, systemPrompt); n != 1 {
+		t.Errorf("system step prompt (hidden, deleted_at NULL) rows = %d, want 1", n)
+	}
+	// Header soft-deleted regardless of step-prompt sources.
+	if n := countRows(t, s, `SELECT COUNT(*) FROM blueprints WHERE id = ? AND deleted_at IS NOT NULL`, bp); n != 1 {
+		t.Errorf("blueprint header rows with deleted_at = %d, want 1", n)
+	}
+
+	// Both step prompts lose their canvas presence: the bulk steps read excludes a
+	// soft-deleted blueprint's steps, so neither resolves to an owning blueprint —
+	// even the hidden system prompt, which (unlike the deleted_at-stamped user
+	// prompt) stays individually GET-able since Get filters deleted_at, not hidden.
+	if owner := ownerBlueprintOf(t, s, userPrompt); owner != "" {
+		t.Errorf("user step prompt still on canvas after delete, owner = %q", owner)
+	}
+	if owner := ownerBlueprintOf(t, s, systemPrompt); owner != "" {
+		t.Errorf("system step prompt still on canvas after delete, owner = %q", owner)
+	}
+}
+
 // countRows runs a COUNT(*) query against the server's raw DB handle. The
 // blueprint-delete cascade mixes soft-deletes (header, step prompts) with a hard
 // delete (trigger), so the tests assert at the row level — the request-facing
