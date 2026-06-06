@@ -298,10 +298,13 @@ type BlueprintStore interface {
 	// DeleteStep removes the step at stepIndex from a multi-step blueprint
 	// (the count must be >= 2), fragmenting the chain per the split rule in one
 	// transaction. The deleted step's own row is preserved on a soft-deleted
-	// 1-step blueprint — mirroring the sole-owner pair-delete, so the caller's
-	// companion prompt soft-delete leaves the copy-only step-prompt unique index
-	// satisfied (the prompt still resolves to exactly one — soft-deleted — owning
-	// blueprint). The three observable cases, by position:
+	// 1-step blueprint — mirroring the sole-owner pair-delete: the prompt keeps
+	// exactly one blueprint_steps row, so the copy-only step-prompt unique index
+	// stays satisfied when the caller soft-deletes the companion prompt. This is
+	// a physical row invariant, not a resolution one — StepPromptOwner joins
+	// through deleted_at IS NULL, so it reports the deleted prompt as unowned
+	// (ok=false), exactly as it does after the sole-owner delete. The three
+	// observable cases, by position:
 	//
 	//   - head (stepIndex == 0): steps [1, N) move to a new trigger-less
 	//     blueprint (newName), re-densified 0-based; the original blueprint —
