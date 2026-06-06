@@ -142,14 +142,21 @@ function PromptNode({
 // blueprint's prompts (decision 4). It is a *decorative grouping element*, NOT a
 // ReactFlow group/parent node: the member prompt nodes stay free-floating and
 // independently draggable, and this box's rect is recomputed from their measured
-// positions on every change (see computeBoxNodes). It is non-selectable /
-// non-connectable and sits behind the nodes, but IS draggable — grabbing the box
-// (its padding ring, header, or the gaps between cards) moves the whole
-// blueprint, translated onto every member in onNodesChange. The kebab carries
-// `nodrag` so clicking it opens the details popup instead of starting a drag.
-// The faint fill keeps the sequence edges that run between members visible.
+// positions on every change (see computeBoxNodes). It sits behind the nodes.
+//
+// Pointer events: the box's ReactFlow wrapper is rendered `pointer-events: none`
+// (set via node.style in computeBoxNodes) so its interior is *click-through* —
+// a shift-click on a sequence edge that runs inside the box now reaches the edge
+// instead of being swallowed by the box's rect. Interactivity (whole-blueprint
+// drag + box selection) lives only on the chrome elements below, which re-enable
+// pointer events; events they receive bubble up to the (otherwise inert) wrapper,
+// driving ReactFlow's own drag + select machinery. The kebab carries `nodrag`
+// (and stops propagation) so clicking it opens the details popup rather than
+// starting a drag or selecting the box. The faint fill keeps the inner sequence
+// edges visible.
 function BlueprintBoxNode({
   data,
+  selected,
 }: {
   data: {
     name: string
@@ -157,27 +164,41 @@ function BlueprintBoxNode({
     stepCount: number
     onBoxEdit: (blueprintId: string, clientX: number, clientY: number) => void
   }
+  selected?: boolean
 }) {
   return (
-    <div className="w-full h-full rounded-2xl border border-border-subtle bg-accent/[0.04] cursor-grab active:cursor-grabbing">
-      {/* Title (top-left) — faint, the blueprint's name. */}
-      <div className="absolute left-3 top-2 flex items-center gap-1.5 max-w-[70%]">
+    <div
+      className={`relative w-full h-full rounded-2xl border bg-accent/[0.04] transition-colors ${
+        selected ? 'border-accent ring-2 ring-accent/30' : 'border-border-subtle'
+      }`}
+    >
+      {/* Header (top edge): the blueprint's name + the primary drag/select
+          handle. `pr-8` clears the kebab so a long name truncates before it. */}
+      <div className="pointer-events-auto absolute inset-x-0 top-0 flex h-[30px] items-center gap-1.5 pl-3 pr-8 cursor-grab active:cursor-grabbing">
         <Layers size={12} className="text-text-tertiary shrink-0" />
         <span className="text-[11px] font-semibold text-text-tertiary truncate">{data.name}</span>
         <span className="text-[10px] text-text-tertiary/60 shrink-0">· {data.stepCount} steps</span>
       </div>
       {/* Edit button (top-right) — opens the blueprint details popup. `nodrag`
-          keeps a click from starting a box drag. */}
+          keeps a click from starting a box drag; stopPropagation keeps it from
+          selecting the box. */}
       <button
         onClick={(e) => {
           e.stopPropagation()
           data.onBoxEdit(data.blueprintId, e.clientX, e.clientY)
         }}
         title="Blueprint details"
-        className="nodrag absolute right-1.5 top-1.5 w-6 h-6 rounded-md flex items-center justify-center text-text-tertiary hover:text-text-secondary hover:bg-black/[0.04] transition-colors cursor-pointer"
+        className="nodrag pointer-events-auto absolute right-1.5 top-1.5 w-6 h-6 rounded-md flex items-center justify-center text-text-tertiary hover:text-text-secondary hover:bg-black/[0.04] transition-colors cursor-pointer"
       >
         <MoreVertical size={14} />
       </button>
+      {/* Border strips (left/right/bottom; the header covers the top edge) — grab
+          any edge to drag or click to select the whole blueprint. They live in
+          the box's padding gutter, narrower than it so they stay clear of both
+          the member prompt cards and the inner sequence edges. */}
+      <div className="pointer-events-auto absolute left-0 top-[30px] bottom-0 w-2.5 cursor-grab active:cursor-grabbing" />
+      <div className="pointer-events-auto absolute right-0 top-[30px] bottom-0 w-2.5 cursor-grab active:cursor-grabbing" />
+      <div className="pointer-events-auto absolute inset-x-0 bottom-0 h-2.5 cursor-grab active:cursor-grabbing" />
     </div>
   )
 }
@@ -426,6 +447,29 @@ function orderSelectedPromptIds(
   return out
 }
 
+// --- Deletion ---
+// A canvas deletion (single Delete or a bulk selection) resolved to concrete
+// backend operations, partitioned by element type. Edges aren't first-class
+// here — a sequence/trigger edge is removed as a *consequence* of deleting the
+// prompt (split semantics) or blueprint (cascade) it belongs to, or directly via
+// the shift-click edge menu — so a plan is just the blueprints + prompts to
+// delete. Member prompts of a blueprint that's also being deleted are dropped
+// from `prompts` (the blueprint delete cascades them).
+interface DeletePlan {
+  blueprints: { id: string; name: string }[]
+  prompts: { id: string; name: string; blueprintId: string; stepIndex: number }[]
+}
+
+// A short "2 blueprints and 1 prompt" phrase for the confirm dialog title.
+function summarizeDeletePlan(plan: DeletePlan): string {
+  const parts: string[] = []
+  const b = plan.blueprints.length
+  const p = plan.prompts.length
+  if (b) parts.push(`${b} blueprint${b === 1 ? '' : 's'}`)
+  if (p) parts.push(`${p} prompt${p === 1 ? '' : 's'}`)
+  return parts.join(' and ')
+}
+
 // --- Inner Graph ---
 
 function BindingGraphInner({
@@ -474,6 +518,10 @@ function BindingGraphInner({
   // blueprint + its step count. Reset whenever the menu opens or closes so a
   // stale "armed" state never carries to the next blueprint.
   const [boxDeleteConfirm, setBoxDeleteConfirm] = useState(false)
+  // A pending bulk/blueprint deletion awaiting confirmation. Set by onBeforeDelete
+  // when the Delete-key target needs a confirm (any blueprint, or >1 element);
+  // the dialog names what's affected and runs executeDeletePlan on confirm.
+  const [deleteConfirm, setDeleteConfirm] = useState<DeletePlan | null>(null)
   // Persisted layout, keyed per scope (team vs template, and per team) so the
   // canvases don't overwrite each other's node positions. storageKeyRef keeps
   // the key fresh for the save callbacks (which have empty/narrow dep arrays),
@@ -544,6 +592,9 @@ function BindingGraphInner({
   // True while a duplicate request is in flight, so a rapid second gesture (Cmd+D
   // held, double paste) doesn't race two refetches/selections.
   const duplicatingRef = useRef(false)
+  // True while a delete batch is in flight, so a held/double Delete (or a
+  // double-click of the confirm dialog's Delete) doesn't dispatch twice.
+  const deletingRef = useRef(false)
 
   const fetchAll = useCallback(async () => {
     // Hold in the loading state until the scope resolves. For team scope, a
@@ -650,13 +701,14 @@ function BindingGraphInner({
     fetchAll()
   }, [fetchAll])
 
-  // Close any open context menu when the scope changes — a held-open edge/box
-  // menu would otherwise carry a stale trigger / blueprint reference from the
-  // previous team or template.
+  // Close any open context menu / pending delete when the scope changes — a
+  // held-open edge/box menu or confirm dialog would otherwise carry a stale
+  // trigger / blueprint reference from the previous team or template.
   useEffect(() => {
     setEdgeMenu(null)
     setBoxMenu(null)
     setBoxDeleteConfirm(false)
+    setDeleteConfirm(null)
   }, [template, teamId])
 
   // Remove event from canvas
@@ -727,30 +779,105 @@ function BindingGraphInner({
     [template, fetchAll],
   )
 
-  // Delete a whole blueprint. The server soft-deletes the box + its copy-only
-  // step prompts and detaches the bound trigger; on success the canvas refetch
-  // drops the box and its prompt nodes. Scope-derived URL like rename/duplicate —
-  // both the team and org-template families expose the DELETE.
-  const deleteBlueprint = useCallback(
-    async (blueprintId: string) => {
+  // Delete a whole blueprint (server soft-deletes the box + its copy-only step
+  // prompts and detaches the bound trigger). Core does the request + error toast
+  // only — no UI side effects, no refetch — so it composes inside a bulk batch
+  // (one refetch at the end). Scope-derived URL like rename/duplicate; both the
+  // team and org-template families expose the DELETE.
+  const deleteBlueprintCore = useCallback(
+    async (blueprintId: string): Promise<boolean> => {
       try {
         const res = await fetch(`${blueprintsBase(template)}/${encodeURIComponent(blueprintId)}`, {
           method: 'DELETE',
         })
         if (!res.ok) {
           toast.error(await readError(res, 'Failed to delete blueprint'))
-          return
+          return false
         }
-        setBoxMenu(null)
-        setBoxDeleteConfirm(false)
-        fetchAll()
+        return true
       } catch (err) {
         toast.error(
           `Failed to delete blueprint: ${err instanceof Error ? err.message : String(err)}`,
         )
+        return false
       }
     },
-    [template, fetchAll],
+    [template],
+  )
+
+  // Delete a prompt (split semantics: a mid-blueprint prompt fragments its
+  // chain; the steps after it become a new untriggered blueprint, flagged by
+  // `orphaned_blueprint`). Core does the request + error toast only; the caller
+  // surfaces the orphaned toast + refetch so it composes inside a bulk batch.
+  const deletePromptCore = useCallback(
+    async (promptId: string): Promise<{ ok: boolean; orphaned: boolean }> => {
+      try {
+        const res = await fetch(`${promptsBase(template)}/${encodeURIComponent(promptId)}`, {
+          method: 'DELETE',
+        })
+        if (!res.ok) {
+          toast.error(await readError(res, 'Failed to delete prompt'))
+          return { ok: false, orphaned: false }
+        }
+        const body = (await res.json().catch(() => null)) as { orphaned_blueprint?: boolean } | null
+        return { ok: true, orphaned: !!body?.orphaned_blueprint }
+      } catch (err) {
+        toast.error(`Failed to delete prompt: ${err instanceof Error ? err.message : String(err)}`)
+        return { ok: false, orphaned: false }
+      }
+    },
+    [template],
+  )
+
+  // Whole-blueprint delete from the box details popup (kept as its own affordance
+  // with the popup's inline two-stage confirm). Refetches on success.
+  const deleteBlueprint = useCallback(
+    async (blueprintId: string) => {
+      if (!(await deleteBlueprintCore(blueprintId))) return
+      setBoxMenu(null)
+      setBoxDeleteConfirm(false)
+      fetchAll()
+    },
+    [deleteBlueprintCore, fetchAll],
+  )
+
+  // Run a resolved deletion plan: blueprints first (their cascade removes member
+  // prompts), then standalone prompts — grouped by blueprint and deleted
+  // tail-first (descending step index) so deleting several steps of one blueprint
+  // in a batch drops trailing steps without spawning intermediate untriggered
+  // downstream blueprints (a head/mid delete orphans; a tail delete doesn't).
+  // One refetch at the end reconciles the canvas with server state.
+  const executeDeletePlan = useCallback(
+    async (plan: DeletePlan) => {
+      if (deletingRef.current) return
+      deletingRef.current = true
+      try {
+        for (const bp of plan.blueprints) {
+          await deleteBlueprintCore(bp.id)
+        }
+        const byBlueprint = new Map<string, DeletePlan['prompts']>()
+        for (const p of plan.prompts) {
+          const arr = byBlueprint.get(p.blueprintId)
+          if (arr) arr.push(p)
+          else byBlueprint.set(p.blueprintId, [p])
+        }
+        let orphaned = false
+        for (const group of byBlueprint.values()) {
+          for (const p of [...group].sort((a, b) => b.stepIndex - a.stepIndex)) {
+            const r = await deletePromptCore(p.id)
+            if (r.orphaned) orphaned = true
+          }
+        }
+        if (orphaned) {
+          toast.info('Steps after a deleted prompt are now an untriggered blueprint.')
+        }
+      } finally {
+        deletingRef.current = false
+        setDeleteConfirm(null)
+        await fetchAll()
+      }
+    },
+    [deleteBlueprintCore, deletePromptCore, fetchAll],
   )
 
   // Recompute the procedural boxes from the current member node geometry. A box
@@ -798,13 +925,14 @@ function BindingGraphInner({
             onBoxEdit,
           },
           // Draggable so the box moves the whole blueprint (onNodesChange
-          // translates the box's delta onto its members); never selected /
-          // connected. Behind the nodes; the faint fill keeps inner edges
-          // visible (decision 4).
+          // translates the box's delta onto its members). Selectable + deletable
+          // so it's a Delete-key target (→ whole-blueprint delete). Behind the
+          // nodes (zIndex 0, not elevated on select — see elevateNodesOnSelect)
+          // so a selected box never paints over its own prompts/edges.
           draggable: true,
-          selectable: false,
+          selectable: true,
           connectable: false,
-          deletable: false,
+          deletable: true,
           zIndex: 0,
           // We compute the exact rect, so hand ReactFlow the dimensions as
           // already-"measured". Otherwise it renders the node visibility:hidden
@@ -813,7 +941,10 @@ function BindingGraphInner({
           width,
           height,
           measured: { width, height },
-          style: { width, height },
+          // pointer-events:none makes the wrapper (and thus the box interior)
+          // click-through to the inner edges/prompts; the chrome elements in
+          // BlueprintBoxNode re-enable events for drag + selection.
+          style: { width, height, pointerEvents: 'none' },
         })
       }
       return boxes
@@ -905,6 +1036,11 @@ function BindingGraphInner({
   ])
 
   // Build edges: event → entry prompt (trigger) and prompt → prompt (sequence).
+  // Every edge is deletable:false — an edge isn't a first-class deletion target;
+  // it's removed as a consequence of deleting its incident prompt (split) or
+  // blueprint (cascade), or directly via the shift-click edge menu (split /
+  // remove trigger). Marking them non-deletable keeps the Delete key (and any
+  // node-incident edges ReactFlow auto-collects) from ever removing an edge.
   const edges: Edge[] = useMemo(() => {
     // Only wire to prompts that are actually on the canvas — a step whose prompt
     // is absent (e.g. mid-fetch or a deleted prompt) gets no dangling edge.
@@ -925,6 +1061,7 @@ function BindingGraphInner({
         type: 'default',
         animated: t.enabled,
         data: { kind: 'trigger' },
+        deletable: false,
         style: {
           stroke: t.enabled ? 'var(--color-accent)' : 'var(--color-text-tertiary)',
           strokeWidth: t.enabled ? 2 : 1,
@@ -957,6 +1094,7 @@ function BindingGraphInner({
           type: 'default',
           // Disconnecting this edge splits the blueprint before step i+1.
           data: { kind: 'sequence', blueprintId: bpId, atStepIndex: i + 1 },
+          deletable: false,
           style: { stroke: 'var(--color-text-tertiary)', strokeWidth: 1.5 },
           markerEnd: { type: MarkerType.ArrowClosed, color: 'var(--color-text-tertiary)' },
         })
@@ -1028,6 +1166,14 @@ function BindingGraphInner({
       // member prompt nodes and drop the box's own change — the box is recomputed
       // from its members, so it re-hugs them at the new spot. The delta tracks
       // ReactFlow's drag exactly (box pos = minX(members) − pad), so no drift.
+      // Members that already carry their own position change this batch (a
+      // multi-selection that includes both the box and some of its prompts, where
+      // ReactFlow moves each selected node directly) are skipped here so they
+      // don't get the delta applied twice.
+      const directlyMoved = new Set<string>()
+      for (const c of changes) {
+        if (c.type === 'position' && c.id.startsWith('p:')) directlyMoved.add(c.id)
+      }
       const memberMoves: NodeChange[] = []
       for (const c of changes) {
         if (c.type === 'position' && c.id.startsWith('bp:') && c.position) {
@@ -1037,6 +1183,7 @@ function BindingGraphInner({
           const dy = c.position.y - box.position.y
           if (dx === 0 && dy === 0) continue
           for (const pid of blueprintStepsRef.current[c.id.slice(3)] ?? []) {
+            if (directlyMoved.has(`p:${pid}`)) continue
             const node = nodesRef.current.find((n) => n.id === `p:${pid}`)
             if (!node) continue
             memberMoves.push({
@@ -1072,9 +1219,18 @@ function BindingGraphInner({
       }
       if (dirty) saveLayout(storageKeyRef.current, layout)
 
-      // Recompute boxes from the updated member geometry.
+      // Recompute boxes from the updated member geometry. computeBoxNodes mints
+      // fresh box nodes (geometry only), so carry over each box's selected state
+      // from `applied` (which has any select change already applied) — otherwise
+      // a box would deselect itself on the next drag/select cycle.
       const nonBox = applied.filter((n) => n.type !== 'blueprintBox')
-      const next = [...computeBoxNodes(nonBox), ...nonBox]
+      const boxSelected = new Map(
+        applied.filter((n) => n.type === 'blueprintBox').map((n) => [n.id, !!n.selected]),
+      )
+      const boxes = computeBoxNodes(nonBox).map((b) =>
+        boxSelected.get(b.id) ? { ...b, selected: true } : b,
+      )
+      const next = [...boxes, ...nonBox]
       nodesRef.current = next
       setNodes(next)
 
@@ -1411,6 +1567,61 @@ function BindingGraphInner({
     }
   }, [])
 
+  // Delete key (and any future deleteElements call) routes through here. This is
+  // the single async gate that sees the whole selection at once: it resolves the
+  // selected nodes into a typed DeletePlan, runs it immediately for a single
+  // prompt, or stages the confirm dialog for a blueprint / bulk selection — then
+  // ALWAYS returns false so ReactFlow never optimistically removes anything. The
+  // canvas is derived from server state, so the plan's API calls + the refetch
+  // in executeDeletePlan are what actually update it. Edges are deletable:false
+  // and never reach here as targets; ReactFlow does fold node-incident edges into
+  // the payload, but we dispatch by node and ignore those (the prompt/blueprint
+  // delete already removes the edge server-side) — that's the redundant-split
+  // guard, by construction.
+  const onBeforeDelete = useCallback(
+    async ({ nodes }: { nodes: Node[]; edges: Edge[] }): Promise<boolean> => {
+      if (deletingRef.current) return false
+      const blueprintIds = new Set<string>()
+      const blueprints: DeletePlan['blueprints'] = []
+      for (const n of nodes) {
+        if (!n.id.startsWith('bp:')) continue
+        const id = n.id.slice(3)
+        if (blueprintIds.has(id)) continue
+        blueprintIds.add(id)
+        blueprints.push({ id, name: (n.data as { name?: string }).name ?? 'Blueprint' })
+      }
+      const prompts: DeletePlan['prompts'] = []
+      for (const n of nodes) {
+        if (!n.id.startsWith('p:')) continue
+        const pid = n.id.slice(2)
+        const bp = promptToBlueprintRef.current[pid]
+        // Skip a prompt whose blueprint is also being deleted — that delete
+        // cascades its copy-only step prompts, so deleting the prompt separately
+        // would race / 404.
+        if (bp && blueprintIds.has(bp)) continue
+        const stepIndex = bp ? (blueprintStepsRef.current[bp] ?? []).indexOf(pid) : -1
+        prompts.push({
+          id: pid,
+          name: (n.data as { label?: string }).label ?? 'this prompt',
+          blueprintId: bp ?? '',
+          stepIndex,
+        })
+      }
+      const plan: DeletePlan = { blueprints, prompts }
+      const total = blueprints.length + prompts.length
+      if (total === 0) return false
+      // Per the project decision: any blueprint deletion, or any bulk (>1)
+      // deletion, confirms first; a single prompt deletes immediately.
+      if (blueprints.length > 0 || total > 1) {
+        setDeleteConfirm(plan)
+      } else {
+        void executeDeletePlan(plan)
+      }
+      return false
+    },
+    [executeDeletePlan],
+  )
+
   // Handle drop from sidebar
   const onDragOver = useCallback((e: DragEvent) => {
     e.preventDefault()
@@ -1439,6 +1650,8 @@ function BindingGraphInner({
     ? triggers.find((t) => t.blueprint_id === boxMenu.blueprintId)
     : undefined
 
+  const deleteSummary = deleteConfirm ? summarizeDeletePlan(deleteConfirm) : ''
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full text-text-tertiary text-sm">
@@ -1457,21 +1670,29 @@ function BindingGraphInner({
         onNodesChange={onNodesChange}
         onConnect={onConnect}
         onEdgeClick={onEdgeClick}
+        onBeforeDelete={onBeforeDelete}
         fitView
         fitViewOptions={{ padding: 0.4 }}
         proOptions={{ hideAttribution: true }}
         minZoom={0.4}
         maxZoom={1.5}
         defaultEdgeOptions={{ type: 'default' }}
-        // Multi-select prompt nodes for duplication: Shift+drag the pane for a
-        // marquee, Shift/Cmd/Ctrl-click to add to the selection. The selected set
-        // backs Cmd/Ctrl+D and C/V (see the keydown effect).
+        // Multi-select prompt nodes + blueprint boxes: Shift+drag the pane for a
+        // marquee, Shift/Cmd/Ctrl-click to add to the selection. Plain drag still
+        // pans (panOnDrag defaults to true, which also makes an explicit
+        // selectionOnDrag a no-op — see the xyflow precedence — so the selection
+        // key is what drives the marquee). The selected set backs Cmd/Ctrl+D and
+        // C/V (see the keydown effect) and the Delete key (see onBeforeDelete).
         selectionKeyCode="Shift"
         multiSelectionKeyCode={['Meta', 'Control', 'Shift']}
-        // Deletions go through explicit affordances (prompt drawer, the edge
-        // shift-click menu, the event node's ✕) — not a stray Backspace that
-        // would only desync the canvas from the backend until the next fetch.
-        deleteKeyCode={null}
+        // Delete/Backspace removes the selection; onBeforeDelete intercepts it,
+        // dispatches the right per-type backend op, and returns false so nothing
+        // is removed optimistically (the canvas re-derives from the refetch).
+        deleteKeyCode={['Delete', 'Backspace']}
+        // Don't elevate a selected node's z-index — the blueprint box lives at
+        // zIndex 0 behind its prompts/edges, and elevating it on selection would
+        // float it over them, swallowing their clicks.
+        elevateNodesOnSelect={false}
       >
         <Background color="var(--color-border-subtle)" gap={20} size={1} />
       </ReactFlow>
@@ -1646,6 +1867,63 @@ function BindingGraphInner({
                   Delete blueprint
                 </button>
               )}
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Bulk / blueprint delete confirmation (Delete key). Names everything the
+          plan removes; a single prompt delete skips this and runs immediately. */}
+      {deleteConfirm && (
+        <>
+          <div
+            className="fixed inset-0 z-[60] bg-black/20"
+            onClick={() => setDeleteConfirm(null)}
+          />
+          <div className="fixed z-[60] left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[360px] bg-surface-raised/95 backdrop-blur-xl border border-border-glass rounded-xl shadow-xl shadow-black/10 p-4">
+            <div className="flex items-center gap-2 mb-2.5">
+              <Trash2 size={14} className="text-red-500 shrink-0" />
+              <h3 className="text-[13px] font-semibold text-text-primary">
+                Delete {deleteSummary}?
+              </h3>
+            </div>
+            <ul className="text-[12px] text-text-secondary space-y-1 mb-3 max-h-[180px] overflow-y-auto">
+              {deleteConfirm.blueprints.map((b) => (
+                <li key={`bp:${b.id}`} className="flex items-center gap-1.5">
+                  <Layers size={11} className="text-text-tertiary shrink-0" />
+                  <span className="truncate">
+                    <span className="font-medium text-text-primary">{b.name}</span>
+                    <span className="text-text-tertiary"> — blueprint &amp; its steps</span>
+                  </span>
+                </li>
+              ))}
+              {deleteConfirm.prompts.map((p) => (
+                <li key={`p:${p.id}`} className="flex items-center gap-1.5 pl-[18px]">
+                  <span className="truncate">
+                    <span className="font-medium text-text-primary">{p.name}</span>
+                    <span className="text-text-tertiary"> — prompt</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <p className="text-[11px] text-text-tertiary leading-snug mb-3">
+              {deleteConfirm.prompts.length > 0 &&
+                'Deleting a prompt mid-blueprint splits the steps after it into a new untriggered blueprint. '}
+              This can’t be undone.
+            </p>
+            <div className="flex items-center justify-end gap-1.5">
+              <button
+                onClick={() => setDeleteConfirm(null)}
+                className="text-[11px] font-medium text-text-secondary hover:text-text-primary px-3 py-1.5 rounded-md border border-border-subtle transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void executeDeletePlan(deleteConfirm)}
+                className="text-[11px] font-semibold text-white bg-red-500 hover:bg-red-600 px-3 py-1.5 rounded-md transition-colors"
+              >
+                Delete
+              </button>
             </div>
           </div>
         </>
