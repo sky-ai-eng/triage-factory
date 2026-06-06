@@ -21,7 +21,7 @@ import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useActiveOrgId } from '../../contexts/OrgContext'
 import { LOCAL_DEFAULT_ORG_ID } from '../../lib/githubApp'
 import { WIZARD_SECTIONS, type WizardState } from './types'
-import { WIZARD_STEPS, initialWizardState } from './steps'
+import { WIZARD_STEPS, initialWizardState, jiraActive } from './steps'
 import { useWizard } from './useWizard'
 import { isStepVisible } from './resume'
 import { CollapsedStepBar, SectionDivider } from './parts'
@@ -53,12 +53,16 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
   const onFinish = useCallback(
     (state: WizardState) => {
       // Local first-run preserves the Jira carry-over step: when Jira is the
-      // connected tracker, finishing lands on the carry-over deck (the migrated
-      // final local first-run step) before the app. A GitHub-only local install
-      // skips it, and multi has no carry-over step yet — both go straight in.
-      // In local mode orgId is always the sentinel, so route to it directly
-      // rather than gating on the (string | null) orgId.
-      if (isLocal && state.jiraConnected) {
+      // ACTIVE tracker (chosen in the Trackers step AND connected), finishing
+      // lands on the carry-over deck (the migrated final local first-run step)
+      // before the app. Keyed on jiraActive — not bare jiraConnected — so a
+      // user who connects Jira then switches the picker back to None isn't sent
+      // there against their choice (same test that gates the Jira-projects
+      // step). A GitHub-only local install skips it, and multi has no carry-over
+      // step yet — both go straight in. In local mode orgId is always the
+      // sentinel, so route to it directly rather than gating on the
+      // (string | null) orgId.
+      if (isLocal && jiraActive(state)) {
         navigate(`/orgs/${LOCAL_DEFAULT_ORG_ID}/carry-over`, { replace: true })
         return
       }

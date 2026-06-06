@@ -136,13 +136,17 @@ export function useWizard(
         // Advance to the next step that applies; an omitted step (e.g. Jira
         // projects without a Jira tracker) is skipped. No visible step after
         // this one ⇒ this was the last step, so finish.
+        //
+        // Both nextVisibleIndex and onFinish read `state` — the click-time
+        // snapshot, taken BEFORE this persist() ran; a patch() made inside
+        // persist() isn't reflected here yet. So a step's persist() must not
+        // flip a field that drives step visibility (would mis-route
+        // nextVisibleIndex) or one onFinish keys on (would mislead the finish
+        // branch). Safe today: both visibility and the carry-over branch key on
+        // `tracker` + `jiraConnected`, set by the early Trackers step, never by
+        // a final step.
         const next = nextVisibleIndex(steps, state, activeIndex)
         if (next === -1) {
-          // `state` is the click-time snapshot (pre-persist): a patch() made
-          // inside this step's persist() isn't reflected here yet. onFinish
-          // only reads fields set by earlier steps (jiraConnected, from the
-          // tracker step), never the final step's own slice, so the snapshot is
-          // safe — keep any finish-relevant signal upstream of the last step.
           onFinish(state)
           return
         }

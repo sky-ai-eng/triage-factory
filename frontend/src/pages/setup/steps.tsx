@@ -230,8 +230,10 @@ const trackersStep: WizardStep = {
 // switches the tracker back to None shouldn't see (or save) a Jira interval,
 // even though the connection itself persists until explicitly disconnected.
 // 30s–5m (the shared group's option set). Always satisfiable — defaults
-// exist — so it never blocks the stack.
-const jiraActive = (s: WizardState) => s.tracker === 'jira' && s.jiraConnected
+// exist — so it never blocks the stack. Exported because the same "Jira is
+// the active tracker" test gates the Jira-projects step's visibility and the
+// wizard's carry-over finish branch — one definition, no drift.
+export const jiraActive = (s: WizardState) => s.tracker === 'jira' && s.jiraConnected
 
 const pollerStep: WizardStep = {
   id: 'org-poller',
