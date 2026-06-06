@@ -51,6 +51,14 @@ type teamGitHubGroupsResponse struct {
 	// Role is the caller's role in this team ("admin"/"member"/""), so
 	// the editor can disable Save for non-admins without a second call.
 	Role string `json:"role"`
+	// CredentialsMissing is true when the team tracks repos but NOT ONE of
+	// their owners had a resolvable GitHub credential (no App install and no
+	// org PAT). Without this flag an empty candidate list is ambiguous — a
+	// genuine "no teams" reads identical to "your GitHub credential is gone."
+	// The setup wizard surfaces it as "reconnect GitHub" rather than a
+	// silent empty checklist; the Settings editor can do the same. Omitted
+	// (false) in the common healthy case.
+	CredentialsMissing bool `json:"credentials_missing,omitempty"`
 }
 
 func (s *Server) handleTeamGitHubGroupsGet(w http.ResponseWriter, r *http.Request) {
@@ -92,8 +100,9 @@ func (s *Server) handleTeamGitHubGroupsGet(w http.ResponseWriter, r *http.Reques
 	// candidate list, no per-user pre-check. Best-effort: a membership
 	// fetch failure leaves every Mine=false, never blanks the candidates.
 	candidates := []gitHubGroupCandidateJSON{}
+	credsMissing := false
 	if role != "" {
-		candidates = s.gitHubGroupCandidates(r.Context(), orgID, userID)
+		candidates, credsMissing = s.gitHubGroupCandidates(r.Context(), orgID, userID)
 		if r.URL.Query().Get("include_membership") == "true" {
 			s.annotateGitHubGroupMembership(r.Context(), orgID, userID, candidates)
 		}
@@ -110,9 +119,10 @@ func (s *Server) handleTeamGitHubGroupsGet(w http.ResponseWriter, r *http.Reques
 	}
 
 	resp := teamGitHubGroupsResponse{
-		Groups:     toGitHubGroupJSON(groups),
-		Candidates: candidates,
-		Role:       role,
+		Groups:             toGitHubGroupJSON(groups),
+		Candidates:         candidates,
+		Role:               role,
+		CredentialsMissing: credsMissing,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -181,7 +191,15 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 // isn't in), are skipped. Returns nil when nothing is configured / the
 // repo list can't be read — the editor degrades to "edit existing
 // mappings only."
-func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID, userID string) []gitHubGroupCandidateJSON {
+//
+// The second return value (credsMissing) disambiguates the empty-candidate
+// case: it is true when the team tracks repos but EVERY owner failed to
+// resolve a credential with ErrNoGitHubCredentials — i.e. the org's GitHub
+// access is gone, not "these orgs simply have no teams." A single owner that
+// did resolve a credential flips it back to false (the access works; that
+// owner just had nothing to import). Callers surface credsMissing as a
+// reconnect prompt instead of a silent empty list.
+func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID, userID string) ([]gitHubGroupCandidateJSON, bool) {
 	var repos []domain.RepoProfile
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -189,20 +207,32 @@ func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID, userID string
 		return e
 	}); err != nil {
 		log.Printf("[github-groups] load configured repos: %v", err)
-		return nil
+		return nil, false
 	}
 
+	owners := distinctRepoOwners(repos)
 	out := []gitHubGroupCandidateJSON{}
-	for _, owner := range distinctRepoOwners(repos) {
+	// Track whether the only thing standing between us and candidates is
+	// missing credentials. Starts true once there's at least one owner, and
+	// is cleared the moment any owner resolves a credential (regardless of
+	// whether that owner had teams) — a working credential proves access
+	// isn't the problem.
+	credsMissing := len(owners) > 0
+	for _, owner := range owners {
 		client, err := s.ghResolver.ClientFor(ctx, orgID, owner)
 		if err != nil {
 			// ErrNoGitHubCredentials just means this owner has no App
-			// install and the org has no PAT — expected, skip quietly.
+			// install and the org has no PAT — expected, skip quietly but
+			// leave credsMissing set so an all-missing run can surface it.
 			if !errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 				log.Printf("[github-groups] resolve GitHub client for %s: %v", owner, err)
+				// A non-creds resolve failure is an opaque infra error, not a
+				// "reconnect GitHub" state — don't claim creds are missing.
+				credsMissing = false
 			}
 			continue
 		}
+		credsMissing = false
 		teams, err := client.ListOrgTeamsDetailed(owner)
 		if err != nil {
 			// The owner may be a user account (no teams) or one the org
@@ -223,7 +253,7 @@ func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID, userID string
 			})
 		}
 	}
-	return out
+	return out, credsMissing
 }
 
 // annotateGitHubGroupMembership flags each candidate the requesting user

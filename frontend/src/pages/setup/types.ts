@@ -36,12 +36,29 @@ export const WIZARD_SECTIONS: WizardSection[] = [
 // repos, …) rather than inventing parallel shapes, so the wizard keeps
 // round-tripping the identical org_settings / team_settings forms the
 // Settings page and the create-time pages already use.
+// The tracker a workspace opts into at the org level — one at a time. "none"
+// is a legitimate end state (GitHub-only); "linear" is a disabled
+// "coming soon" placeholder (no poller, no credentials) so the value can be
+// selected for display but never persists a connection.
+export type TrackerKind = 'none' | 'jira' | 'linear'
+
 export interface WizardState {
   org: OrgConfigForm
   // Carried so a re-typed-token step never clobbers a stored PAT: presence is
   // tracked separately from the (always-blank-on-load) org.github_pat field,
   // mirroring orgConfig's "leave blank to keep current" contract.
   hasGitHubPat: boolean
+  // GitHub access is satisfied by ANY means — a stored/typed PAT or a
+  // registered App — so the GitHub step reads the server's folded github_ready
+  // signal rather than re-deriving it. Drives the step's isComplete (GitHub is
+  // mandatory) independent of which access method the user picked.
+  githubReady: boolean
+  // Whether the org currently has a working Jira connection (PAT + base URL).
+  // Gates the poller step's Jira interval and the team Jira-projects step.
+  jiraConnected: boolean
+  // Which tracker the user selected in the Trackers step. Seeded from
+  // jiraConnected on load (a connected org resumes on "Jira").
+  tracker: TrackerKind
   team: TeamConfigForm
 }
 

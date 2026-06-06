@@ -30,11 +30,14 @@ import {
  * identity would be a loop. It's intentionally skippable — everything here is
  * also reachable later from Settings.
  *
- * `isLocal` flips the two mode divergences the shared GitHub group exposes:
- * the SSH clone toggle (local can clone over SSH; multi hardwires HTTPS) and
- * the GitHub App registration panel (multi-only — local uses a PAT). Local
- * mounts it under <AuthGate mode="local"> (single-user machine = implicit
- * admin); multi under <AuthGate mode="multi"> (real session + admin RLS).
+ * `isLocal` flips the one remaining mode divergence the shared GitHub group
+ * exposes: the SSH clone toggle (local can clone over SSH; multi hardwires
+ * HTTPS). The GitHub App registration panel now shows in BOTH modes (App is
+ * mode-agnostic — the routes work in local, requireOrgAdmin auto-grants there,
+ * and creds store via the keychain), so it's no longer gated on isLocal; App
+ * is the default access method everywhere, PAT the alternate. Local mounts it
+ * under <AuthGate mode="local"> (single-user machine = implicit admin); multi
+ * under <AuthGate mode="multi"> (real session + admin RLS).
  * env-provided creds need no special handling here — /api/settings/org
  * reflects the env overlay, so the base URL prefills and the token field
  * shows "leave blank to keep current".
@@ -165,7 +168,6 @@ export default function OrgConfigure({ isLocal = false }: { isLocal?: boolean })
           hasToken={hasGitHubPat}
           isLocal={isLocal}
           orgId={orgId ?? null}
-          showAppPanel={!isLocal}
         />
 
         <JiraAccessGroup

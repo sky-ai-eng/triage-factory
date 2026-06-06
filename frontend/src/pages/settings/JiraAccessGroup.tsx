@@ -23,6 +23,11 @@ interface JiraAccessValue {
  *
  * Multi-mode Jira OAuth (3LO/2LO) is unbuilt; until it lands the only
  * connect affordance is this PAT path, which works in both modes.
+ *
+ * showBaseUrl (default true) mirrors GitHubAccessGroup: the setup wizard
+ * confirms the Jira URL in its own reachability sub-step and feeds it in via
+ * `value.jira_url`, so it suppresses the field here and renders this group as
+ * the PAT-auth sub-step alone — no forked connect logic.
  */
 export default function JiraAccessGroup({
   value,
@@ -30,12 +35,14 @@ export default function JiraAccessGroup({
   connected,
   onConnected,
   onDisconnected,
+  showBaseUrl = true,
 }: {
   value: JiraAccessValue
   onChange: (patch: Partial<JiraAccessValue>) => void
   connected: boolean
   onConnected?: (url: string) => void
   onDisconnected?: () => void
+  showBaseUrl?: boolean
 }) {
   const [connecting, setConnecting] = useState(false)
   const [connectError, setConnectError] = useState<string | null>(null)
@@ -127,15 +134,17 @@ export default function JiraAccessGroup({
       {!connected ? (
         /* Stage 1: Connect credentials */
         <div className="space-y-3">
-          <Field label="Base URL">
-            <input
-              type="url"
-              placeholder="https://jira.yourcompany.com"
-              value={value.jira_url}
-              onChange={(e) => onChange({ jira_url: e.target.value })}
-              className={inputClass}
-            />
-          </Field>
+          {showBaseUrl && (
+            <Field label="Base URL">
+              <input
+                type="url"
+                placeholder="https://jira.yourcompany.com"
+                value={value.jira_url}
+                onChange={(e) => onChange({ jira_url: e.target.value })}
+                className={inputClass}
+              />
+            </Field>
+          )}
           <Field label="Personal Access Token">
             <input
               type="password"

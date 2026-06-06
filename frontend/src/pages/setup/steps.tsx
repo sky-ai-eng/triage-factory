@@ -1,18 +1,22 @@
-// The shell's trivial-but-real proof steps. They exist to exercise the whole
-// step contract end to end — load() seeds from the server, isComplete() drives
-// resume, persist() round-trips a real settings endpoint, collapsedSummary()
-// fills the confirmation bar — using the *simplest* existing shared field
-// groups, one per divider section. The real organization steps (GitHub,
-// Trackers, poller) and team steps (repos, GitHub teams, Jira projects) drop
-// into this same array in later tickets; they compose the heavier shared
-// groups but need no new host plumbing.
+// The wizard's step registry. The shell shipped two trivial proof steps; this
+// fleshes out the four ORGANIZATION steps — GitHub (mandatory), Trackers
+// (optional), Poller timings, and the org max model tier — composing the
+// existing shared field groups into the same step contract with no new host
+// plumbing. The team section keeps its trivial proof step (delegation
+// defaults) until the team-steps ticket replaces it.
 //
-// Reuse rule: these compose ModelGroup / TeamSettingsGroup — no parallel
-// field UIs. Persistence rides the existing session-scoped settings endpoints
-// via the orgConfig / teamConfig helpers, so there is no new wizard-only
-// persistence path to drift.
+// Reuse rule: every step composes a shared group (GitHubAccessGroup /
+// GitHubAppPanel via GitHubStep, JiraAccessGroup via TrackersStep,
+// PollerTimingGroup, ModelGroup, TeamSettingsGroup) — no parallel field UIs.
+// Org persistence rides the single session-scoped POST /api/settings/org via
+// saveOrgConfig, so there is no wizard-only persistence path to drift. Steps
+// whose creds are connected mid-step (GitHub, Jira) persist at their own
+// Connect action; the framework's per-step persist is then a no-op advance.
 
+import GitHubStep from './GitHubStep'
+import TrackersStep from './TrackersStep'
 import ModelGroup from '../settings/ModelGroup'
+import PollerTimingGroup from '../settings/PollerTimingGroup'
 import TeamSettingsGroup from '../settings/TeamSettingsGroup'
 import {
   emptyOrgConfig,
@@ -30,41 +34,161 @@ import type { WizardState, WizardStep } from './types'
 
 // Fresh wizard state before any load lands. Reuses the same empty-form
 // factories the Settings/create pages use, so the shell starts from the
-// identical baseline shape.
+// identical baseline shape; the org-step flags default to "not connected".
 export const initialWizardState = (): WizardState => ({
   org: emptyOrgConfig(),
   hasGitHubPat: false,
+  githubReady: false,
+  jiraConnected: false,
+  tracker: 'none',
   team: emptyTeamConfig(),
 })
 
-const ORG_TIER_LABELS: Record<string, string> = {
+const TIER_LABELS: Record<string, string> = {
   haiku: 'Haiku',
   sonnet: 'Sonnet',
   opus: 'Opus',
 }
 
-const TEAM_MODEL_LABELS: Record<string, string> = {
-  haiku: 'Haiku',
-  sonnet: 'Sonnet',
-  opus: 'Opus',
+// hostOf renders a base URL's host for a collapsed-bar summary.
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host || url
+  } catch {
+    return url.replace(/^https?:\/\//, '')
+  }
 }
 
-// Organization settings · workspace model cap. The simplest org-scoped field
-// group: an optional ceiling over every team's model. isComplete is always
-// true (no cap is a legitimate end state), so this is the "optional,
-// always-satisfiable" archetype — it never blocks the stack. Loading the full
-// org form (not just the tier) is deliberate: persist round-trips the same
-// org_settings shape, so seeding from the GET keeps base URL / intervals /
-// the stored PAT untouched when only the tier changes.
+// intervalLabel renders a Go duration like "5m0s" / "30s" compactly: trim the
+// dangling "0s" only when it follows a minutes part ("5m0s" → "5m"), so a
+// sub-minute value like "30s" is left intact (a naive /0s$/ would mangle it to
+// "3s").
+function intervalLabel(d: string): string {
+  return d.replace(/m0s$/, 'm')
+}
+
+// fetchGitHubReady reads the server's folded GitHub-ready signal (PAT | env |
+// registered App) + the Jira connection state from the integrations status
+// endpoint. Best-effort: a failure leaves both false, and the org GET still
+// seeds the URL/PAT-presence fields, so the step degrades to "not connected"
+// rather than blocking the load.
+async function fetchIntegrationsState(): Promise<{ githubReady: boolean; jiraConnected: boolean }> {
+  try {
+    const res = await fetch('/api/integrations/status')
+    if (!res.ok) return { githubReady: false, jiraConnected: false }
+    const data = (await res.json()) as { github_ready?: boolean; jira?: boolean; jira_url?: string }
+    return {
+      githubReady: !!data.github_ready,
+      jiraConnected: !!data.jira && !!data.jira_url,
+    }
+  } catch {
+    return { githubReady: false, jiraConnected: false }
+  }
+}
+
+// loadOrg is shared by every org step: it seeds the full org form plus the
+// folded GitHub/Jira connection signals. Loading the whole form (not just one
+// field) keeps each step's persist round-tripping the same org_settings shape,
+// so saving the tier never clobbers the base URL / intervals / stored PAT.
+async function loadOrg(): Promise<Partial<WizardState>> {
+  const [org, integrations] = await Promise.all([fetchOrgSettings(), fetchIntegrationsState()])
+  if (!org) throw new Error('Could not load organization settings')
+  return {
+    org: orgConfigFromSettings(org),
+    hasGitHubPat: org.has_github_pat,
+    githubReady: integrations.githubReady,
+    jiraConnected: integrations.jiraConnected,
+    tracker: integrations.jiraConnected ? 'jira' : 'none',
+  }
+}
+
+// Step 1 · GitHub (mandatory). The backbone: a two-stage URL → access flow
+// (App default / PAT) that the GitHubStep body owns. isComplete is the server's
+// github_ready signal — satisfied by a PAT or a registered App — so the
+// mandatory step blocks the stack until GitHub is connected by any means.
+const githubStep: WizardStep = {
+  id: 'org-github',
+  section: 'org',
+  title: 'GitHub',
+  load: loadOrg,
+  isComplete: (s) => s.githubReady,
+  validate: (s) => (s.githubReady ? null : 'Connect GitHub to continue — it’s required.'),
+  // Creds are persisted at the step's own Connect action (PAT) or via App
+  // registration; advancing is then a no-op.
+  persist: async () => {},
+  collapsedSummary: (s) =>
+    s.githubReady
+      ? `Connected · ${hostOf(s.org.github_url || 'https://github.com')}`
+      : 'Not connected',
+  render: (ctx) => <GitHubStep {...ctx} />,
+}
+
+// Step 2 · Trackers (optional). None / Jira / Linear (Linear "coming soon").
+// Jira connects mid-step via JiraAccessGroup, so persist is a no-op; the only
+// gate is "don't advance with Jira picked but not connected."
+const trackersStep: WizardStep = {
+  id: 'org-trackers',
+  section: 'org',
+  title: 'Trackers',
+  // No load of its own — it reads the org/Jira state the GitHub step already
+  // seeded onto shared wizard state. Optional, so None / connected-Jira are
+  // complete; only a Jira picked-but-not-connected is incomplete (so it shows
+  // no false check and can't be skipped past), which validate also blocks.
+  isComplete: (s) => !(s.tracker === 'jira' && !s.jiraConnected),
+  validate: (s) =>
+    s.tracker === 'jira' && !s.jiraConnected ? 'Connect Jira to continue, or choose None.' : null,
+  persist: async () => {},
+  collapsedSummary: (s) => {
+    if (s.tracker === 'jira') return s.jiraConnected ? 'Jira ✓' : 'Jira (not connected)'
+    return 'No tracker'
+  },
+  render: (ctx) => <TrackersStep {...ctx} />,
+}
+
+// Step 3 · Poller timings. GitHub cadence always; Jira cadence only when a Jira
+// tracker is connected. 30s–5m (the shared group's option set). Always
+// satisfiable — defaults exist — so it never blocks the stack.
+const pollerStep: WizardStep = {
+  id: 'org-poller',
+  section: 'org',
+  // Loads the full org form (like every org step that persists it): a failed
+  // org GET marks THIS step load-failed too, so the host shows its retry and
+  // blocks advancing — never saving the empty default form over real settings
+  // just because the GitHub step's load was the one that failed.
+  load: loadOrg,
+  title: 'Poller timings',
+  isComplete: () => true,
+  persist: async ({ state }) => {
+    const result = await saveOrgConfig(state.org)
+    if (!result.ok) throw new Error(result.error)
+  },
+  collapsedSummary: (s) =>
+    s.jiraConnected
+      ? `GitHub ${intervalLabel(s.org.github_poll_interval)} · Jira ${intervalLabel(
+          s.org.jira_poll_interval,
+        )}`
+      : `GitHub every ${intervalLabel(s.org.github_poll_interval)}`,
+  render: ({ state, patch }) => (
+    <PollerTimingGroup
+      value={{
+        github_poll_interval: state.org.github_poll_interval,
+        jira_poll_interval: state.org.jira_poll_interval,
+      }}
+      onChange={(p) => patch({ org: { ...state.org, ...p } })}
+      showJira={state.jiraConnected}
+    />
+  ),
+}
+
+// Step 4 · Org max model tier. The shared ModelTierSelector (via ModelGroup) —
+// a card row, not a dropdown — that the team-default-model step reuses.
+// Optional (no cap is a legitimate end state), so it never blocks the stack.
 const orgModelStep: WizardStep = {
   id: 'org-model',
   section: 'org',
-  title: 'Workspace model cap',
-  load: async () => {
-    const org = await fetchOrgSettings()
-    if (!org) throw new Error('Could not load organization settings')
-    return { org: orgConfigFromSettings(org), hasGitHubPat: org.has_github_pat }
-  },
+  // See pollerStep: loads the org form so a failed GET blocks persist here too.
+  load: loadOrg,
+  title: 'Max model tier',
   isComplete: () => true,
   persist: async ({ state }) => {
     const result = await saveOrgConfig(state.org)
@@ -72,7 +196,7 @@ const orgModelStep: WizardStep = {
   },
   collapsedSummary: (s) =>
     s.org.max_llm_model_tier
-      ? `Capped at ${ORG_TIER_LABELS[s.org.max_llm_model_tier] ?? s.org.max_llm_model_tier}`
+      ? `Capped at ${TIER_LABELS[s.org.max_llm_model_tier] ?? s.org.max_llm_model_tier}`
       : 'No model cap',
   render: ({ state, patch }) => (
     <ModelGroup
@@ -82,12 +206,11 @@ const orgModelStep: WizardStep = {
   ),
 }
 
-// Team settings · delegation defaults. The team mirror: the first team's
-// default delegation model + auto-delegation toggle, via the shared
-// TeamSettingsGroup. isComplete requires a chosen model (the seeded default is
-// "sonnet", so a returning team reads complete). persist writes only the
-// team-settings slice, leaving tracked repos / GitHub-team mappings — which
-// the real team steps own — untouched.
+// Team settings · delegation defaults. The trivial team-section proof step the
+// shell shipped — the team-steps ticket replaces it with repos / GitHub teams /
+// Jira projects / team default model. Kept here so the team section divider has
+// a step and resume still lands somewhere. isComplete requires a chosen model
+// (seeded default "sonnet", so a returning team reads complete).
 const teamModelStep: WizardStep = {
   id: 'team-model',
   section: 'team',
@@ -104,7 +227,7 @@ const teamModelStep: WizardStep = {
     if (!result.ok) throw new Error(result.error)
   },
   collapsedSummary: (s) =>
-    `${TEAM_MODEL_LABELS[s.team.default_model] ?? s.team.default_model} · auto-delegate ${
+    `${TIER_LABELS[s.team.default_model] ?? s.team.default_model} · auto-delegate ${
       s.team.auto_delegate_enabled ? 'on' : 'off'
     }`,
   render: ({ state, patch }) => (
@@ -120,4 +243,10 @@ const teamModelStep: WizardStep = {
 
 // Ordered registry. Section grouping is derived from each step's `section`;
 // the host inserts a divider above the first step of each section.
-export const WIZARD_STEPS: WizardStep[] = [orgModelStep, teamModelStep]
+export const WIZARD_STEPS: WizardStep[] = [
+  githubStep,
+  trackersStep,
+  pollerStep,
+  orgModelStep,
+  teamModelStep,
+]

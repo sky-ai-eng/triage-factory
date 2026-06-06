@@ -90,6 +90,12 @@ export interface TeamGitHubGroupsData {
   groups: GitHubGroup[]
   candidates: GitHubTeamCandidate[]
   role: string
+  // True when the team tracks repos but no owner had a resolvable GitHub
+  // credential — an empty `candidates` then means "reconnect GitHub", not
+  // "these orgs have no teams." Omitted (false) in the healthy case. The
+  // GitHub-teams step surfaces it as a reconnect prompt rather than a silent
+  // empty checklist.
+  credentials_missing?: boolean
 }
 
 export const emptyProject = (key = ''): JiraProjectConfig => ({

@@ -19,8 +19,13 @@ interface GitHubAccessValue {
  *
  * The PAT here is the simple default; the App-registration alternative
  * renders below via GitHubAppPanel when an orgId is available and the
- * caller opts in (showAppPanel). Setup's local PAT path passes showAppPanel
- * false.
+ * caller opts in (showAppPanel).
+ *
+ * showBaseUrl (default true) lets a surface that owns the base URL elsewhere
+ * suppress the field here without forking the group: the setup wizard
+ * confirms the URL in its own reachability sub-step, then renders this group
+ * in PAT-only mode (showBaseUrl false, showAppPanel false) so the App vs PAT
+ * choice reads as two tabs rather than one stacked panel.
  */
 export default function GitHubAccessGroup({
   value,
@@ -29,6 +34,7 @@ export default function GitHubAccessGroup({
   isLocal,
   orgId,
   showAppPanel = true,
+  showBaseUrl = true,
 }: {
   value: GitHubAccessValue
   onChange: (patch: Partial<GitHubAccessValue>) => void
@@ -36,6 +42,7 @@ export default function GitHubAccessGroup({
   isLocal: boolean
   orgId: string | null
   showAppPanel?: boolean
+  showBaseUrl?: boolean
 }) {
   const [sshTestState, setSshTestState] = useState<
     { kind: 'idle' } | { kind: 'running' } | { kind: 'ok' } | { kind: 'fail'; stderr: string }
@@ -68,15 +75,17 @@ export default function GitHubAccessGroup({
       <Section>
         <h2 className="text-[13px] font-medium text-text-secondary mb-4">GitHub</h2>
         <div className="space-y-3">
-          <Field label="Base URL">
-            <input
-              type="url"
-              placeholder="https://github.com"
-              value={value.github_url}
-              onChange={(e) => onChange({ github_url: e.target.value })}
-              className={inputClass}
-            />
-          </Field>
+          {showBaseUrl && (
+            <Field label="Base URL">
+              <input
+                type="url"
+                placeholder="https://github.com"
+                value={value.github_url}
+                onChange={(e) => onChange({ github_url: e.target.value })}
+                className={inputClass}
+              />
+            </Field>
+          )}
           <Field label={`Token${hasToken ? ' (leave blank to keep current)' : ''}`}>
             <input
               type="password"
