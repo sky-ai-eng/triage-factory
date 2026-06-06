@@ -347,7 +347,13 @@ const githubTeamsStep: WizardStep = {
     const result = await saveTeamGitHubGroups(teamId, state.team.github_groups)
     if (!result.ok) throw new Error(result.error)
   },
-  collapsedSummary: (s) => `Bound GH teams: ${(s.team.github_groups ?? []).length}`,
+  // Mappings load lazily (GitHubTeamGroup's onLoaded), so before the step is
+  // visited github_groups is undefined — show a neutral dash rather than a
+  // misleading "0" the user never chose, until a real count is known.
+  collapsedSummary: (s) =>
+    s.team.github_groups === undefined
+      ? 'Bound GH teams: —'
+      : `Bound GH teams: ${s.team.github_groups.length}`,
   render: ({ state, teamId, patch }) => (
     <GitHubTeamGroup
       value={state.team.github_groups ?? []}
