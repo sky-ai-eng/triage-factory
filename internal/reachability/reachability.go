@@ -88,18 +88,21 @@ func Probe(ctx context.Context, probeURL string) Result {
 	return res
 }
 
-// classify turns a transport-level error into a short reason. The buckets that
-// matter for the wizard: name resolution (typo'd host), timeout (firewalled /
-// wrong network — the GHES-behind-a-VPC signal), then the bare underlying
-// cause for everything else (e.g. "connect: connection refused", "tls: …").
+// classify turns a transport-level error into a short reason. DNS is checked
+// before the general timeout bucket on purpose: *net.DNSError satisfies
+// net.Error, so a resolver timeout would otherwise be mis-bucketed as
+// "connection timed out" when the real cause is name resolution. Order: name
+// resolution (unresolvable host) → timeout (firewalled / wrong network — the
+// GHES-behind-a-VPC signal) → the bare underlying cause for everything else
+// (e.g. "connect: connection refused", "tls: …").
 func classify(err error) string {
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return "connection timed out — host did not respond"
-	}
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) {
 		return "could not resolve host"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "connection timed out — host did not respond"
 	}
 	// Unwrap the *url.Error envelope so the reason is the bare cause rather
 	// than the noisy `Get "https://…": …` wrapper.

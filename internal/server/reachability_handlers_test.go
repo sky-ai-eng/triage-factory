@@ -112,3 +112,41 @@ func TestHandleJiraReachability_BadURL(t *testing.T) {
 		t.Errorf("malformed jira url: status = %d, want 400", code)
 	}
 }
+
+// TestNormalizeReachabilityURL pins the validator the handlers gate on. It is
+// the hermetic half of the *.ghe.com chain: this confirms a data-residency
+// host passes through untouched (a full handler probe of api.<tenant>.ghe.com
+// would force a flaky external DNS lookup), while internal/github.APIBase's
+// own table covers octocorp.ghe.com -> api.octocorp.ghe.com.
+func TestNormalizeReachabilityURL(t *testing.T) {
+	good := []struct{ in, want string }{
+		{"https://github.com", "https://github.com"},
+		{"https://github.com/", "https://github.com"},                 // trailing slash trimmed
+		{"  https://github.com  ", "https://github.com"},              // surrounding space trimmed
+		{"https://octocorp.ghe.com", "https://octocorp.ghe.com"},      // ghe.com not rejected/mangled
+		{"https://ghes.acme.com:8443", "https://ghes.acme.com:8443"},  // explicit port kept
+		{"https://jira.acme.com/jira", "https://jira.acme.com/jira"},  // Jira context path preserved
+		{"https://jira.acme.com/jira/", "https://jira.acme.com/jira"}, // ...slash still trimmed
+	}
+	for _, tt := range good {
+		if got, ok := normalizeReachabilityURL(tt.in); !ok || got != tt.want {
+			t.Errorf("normalizeReachabilityURL(%q) = (%q, %v), want (%q, true)", tt.in, got, ok, tt.want)
+		}
+	}
+
+	bad := []string{
+		"",
+		"   ",
+		"example.com",                    // no scheme
+		"ftp://example.com",              // wrong scheme
+		"https://",                       // no host
+		"https://host.example.com?x=1",   // query
+		"https://host.example.com#frag",  // fragment
+		"https://user:pass@host.example", // userinfo
+	}
+	for _, in := range bad {
+		if got, ok := normalizeReachabilityURL(in); ok {
+			t.Errorf("normalizeReachabilityURL(%q) = (%q, true), want rejected", in, got)
+		}
+	}
+}

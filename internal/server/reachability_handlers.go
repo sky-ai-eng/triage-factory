@@ -70,8 +70,11 @@ func (s *Server) handleJiraReachability(w http.ResponseWriter, r *http.Request) 
 // rejected as bad input (a 400 at the handler) rather than flowing into a
 // malformed derived probe URL — e.g. without this, "https://host?x=1" would
 // become "https://host?x=1/api/v3" and surface a confusing 200 + unreachable
-// instead of "fix your URL". A path is preserved: Jira Data Center can live
-// under a context path.
+// instead of "fix your URL". A path is preserved because Jira Data Center can
+// live under a context path. For a GitHub base a path is unusual — GHES mounts
+// the API at the host root, so it flows into APIBase's /api/v3 suffix — but the
+// reachability verdict is host-level (the probe only asks whether that host
+// answers), so an odd path can't produce a wrong reachable/unreachable result.
 func normalizeReachabilityURL(raw string) (string, bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {

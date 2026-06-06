@@ -105,6 +105,14 @@ func TestClassify(t *testing.T) {
 		t.Errorf("DNS error classified %q, want %q", got, "could not resolve host")
 	}
 
+	// A resolver timeout is still a name-resolution failure — DNS is checked
+	// before the general timeout bucket, so this must NOT read "timed out"
+	// even though *net.DNSError also satisfies net.Error with Timeout()==true.
+	dnsTimeout := &url.Error{Op: "Get", URL: "https://x", Err: &net.DNSError{IsTimeout: true, Name: "x"}}
+	if got := classify(dnsTimeout); got != "could not resolve host" {
+		t.Errorf("DNS timeout classified %q, want %q", got, "could not resolve host")
+	}
+
 	to := &url.Error{Op: "Get", URL: "https://x", Err: timeoutErr{}}
 	if got := classify(to); !strings.Contains(got, "timed out") {
 		t.Errorf("timeout error classified %q, want it to mention 'timed out'", got)
