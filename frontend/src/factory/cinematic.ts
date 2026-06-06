@@ -135,7 +135,7 @@ export function pickNextShot(
 
 const TRANSITION_SEC = 1.4 // ease between consecutive shots
 const RESTORE_SEC = 1.1 // ease back to the user's pose on exit
-const FADE_SEC = 0.5 // each half of a fade-to-black cut (out, then in) — a mellow dip
+const FADE_SEC = 0.6 // each half of a fade-to-black cut (out, then in) — a mellow dip
 const COOLDOWN_K = 3 // a shot can't replay until K others have run
 // Global tempo multiplier applied to every shot's `hold`. The deck holds
 // are the design-intent durations; this dials the whole tour's pace from
