@@ -237,8 +237,10 @@ func (s *Server) handleBlueprintDelete(w http.ResponseWriter, r *http.Request) {
 		// Soft-delete each step prompt while the blueprint is still live (ListSteps
 		// keys off blueprint_steps, which persist regardless). A copy-only prompt
 		// belongs to this blueprint alone, so its retirement takes the prompt with
-		// it. A nil read means the prompt is already soft-deleted (or out of
-		// scope) — nothing to pair.
+		// it. A nil read means the prompt is already deleted_at-stamped or not
+		// visible under RLS — nothing to pair. (Get filters deleted_at IS NULL but
+		// not hidden, so a Hide-d system/imported prompt is still returned here and
+		// re-hidden idempotently below.)
 		steps, e := tx.Blueprints.ListSteps(r.Context(), orgID, id)
 		if e != nil {
 			return e
