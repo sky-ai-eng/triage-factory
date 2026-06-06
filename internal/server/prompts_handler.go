@@ -282,19 +282,17 @@ func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 				}
 				// Head delete: the trigger fired into the entry prompt that's going
 				// away, so detach it (the downstream wasn't authored as the trigger's
-				// target). User triggers hard-delete; system triggers disable (they
-				// re-seed every boot).
+				// target). Hard-delete unconditionally — system rows included —
+				// matching handleEventHandlerDelete: nothing re-seeds at boot anymore
+				// (provisioning's materializer runs once per fresh tenant), so a
+				// deleted shipped default is durable.
 				if stepIndex == 0 {
 					triggers, te := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, ownerID)
 					if te != nil {
 						return te
 					}
 					for _, t := range triggers {
-						if t.Source == domain.EventHandlerSourceSystem {
-							if de := tx.EventHandlers.SetEnabled(r.Context(), orgID, t.ID, false); de != nil {
-								return de
-							}
-						} else if de := tx.EventHandlers.Delete(r.Context(), orgID, t.ID); de != nil {
+						if de := tx.EventHandlers.Delete(r.Context(), orgID, t.ID); de != nil {
 							return de
 						}
 					}

@@ -104,8 +104,11 @@ type EventHandlerStore interface {
 	// shipped on every boot via Seed.
 	SetEnabled(ctx context.Context, orgID string, id string, enabled bool) error
 
-	// Delete hard-deletes a handler. Handlers gate this on
-	// source='user' — system rows go through SetEnabled(false).
+	// Delete hard-deletes a handler unconditionally — system rows included.
+	// Nothing re-seeds at boot anymore (provisioning's materializer runs once
+	// per fresh tenant via Bootstrap*), so a deleted shipped default is durable;
+	// there is no soft-disable-instead-of-delete fallback for system rows. The
+	// "disable, don't delete" convention was a relic of boot-time re-seeding.
 	Delete(ctx context.Context, orgID string, id string) error
 
 	// Reorder updates sort_order for each rule based on its position
