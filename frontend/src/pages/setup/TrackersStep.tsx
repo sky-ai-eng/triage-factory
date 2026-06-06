@@ -1,21 +1,17 @@
-// The Trackers step body (optional step 2). Trackers are the issue/work
-// integrations — Jira and Linear — distinct from GitHub (the backbone). The
-// choice is org-level and one-at-a-time: None, Jira, or Linear. Linear is a
-// disabled "coming soon" placeholder (no poller, no credentials, no ingestion —
-// explicitly out of scope), so it can be looked at but never selected.
+// The Trackers step body (optional) — now just the org-level tracker picker:
+// None, Jira, or Linear, one at a time. Trackers are the issue/work
+// integrations, distinct from GitHub (the backbone). Linear is a disabled
+// "coming soon" placeholder (no poller, no credentials, no ingestion — out of
+// scope), so it can be looked at but never selected.
 //
-// Jira, when chosen, runs the same two-stage shape as GitHub: a URL
-// reachability sub-step → the PAT-auth sub-step (the shared JiraAccessGroup in
-// showBaseUrl=false mode; OAuth is still blocked, PAT-only). The step is
-// optional, so None is a valid end state — but a half-picked Jira (selected,
-// not connected) is caught by the step's validate so it can't silently advance.
+// When Jira is chosen it expands into its own atomic steps — a Jira URL step
+// and a Jira access step (JiraStep.tsx), gated visible on tracker === 'jira' —
+// rather than hosting the URL + connect inline here, so every step is one
+// action (the same shape as GitHub's URL/access split).
 
-import { useRef, useState } from 'react'
+import { useRef } from 'react'
 import { Clock } from 'lucide-react'
-import JiraAccessGroup from '../settings/JiraAccessGroup'
-import { checkJiraReachability } from '../../lib/reachability'
 import { nextRadioIndex } from '../../lib/rovingRadio'
-import ReachabilitySubStep from './ReachabilitySubStep'
 import type { StepContext, TrackerKind } from './types'
 
 interface TrackerCard {
@@ -32,10 +28,6 @@ const CARDS: TrackerCard[] = [
 ]
 
 export default function TrackersStep({ state, patch }: StepContext) {
-  // The Jira URL is "confirmed" once it has probed reachable. A connected org
-  // skips to the connected state; otherwise the reachability sub-step leads.
-  const [jiraUrlConfirmed, setJiraUrlConfirmed] = useState(() => state.jiraConnected)
-
   const btnRefs = useRef<(HTMLButtonElement | null)[]>([])
   const selectedIndex = CARDS.findIndex((c) => c.kind === state.tracker)
 
@@ -113,43 +105,6 @@ export default function TrackersStep({ state, patch }: StepContext) {
           )
         })}
       </div>
-
-      {state.tracker === 'jira' && (
-        <div className="space-y-3 border-t border-border-subtle pt-3">
-          <ReachabilitySubStep
-            label="Jira URL"
-            prefill=""
-            value={state.org.jira_url}
-            confirmed={jiraUrlConfirmed}
-            check={checkJiraReachability}
-            onConfirm={(url) => {
-              patch({ org: { ...state.org, jira_url: url } })
-              setJiraUrlConfirmed(true)
-            }}
-            onEdit={() => setJiraUrlConfirmed(false)}
-            helpText="Your Jira Cloud or Data Center base URL."
-          />
-
-          {jiraUrlConfirmed && (
-            <JiraAccessGroup
-              value={{ jira_url: state.org.jira_url, jira_pat: state.org.jira_pat }}
-              onChange={(p) => patch({ org: { ...state.org, ...p } })}
-              connected={state.jiraConnected}
-              onConnected={(url) =>
-                patch({ jiraConnected: true, org: { ...state.org, jira_url: url, jira_pat: '' } })
-              }
-              onDisconnected={() => {
-                patch({ jiraConnected: false, org: { ...state.org, jira_url: '', jira_pat: '' } })
-                // Re-open the reachability sub-step: the URL was just cleared,
-                // so the collapsed "✓ Jira URL" bar would otherwise show an
-                // empty host.
-                setJiraUrlConfirmed(false)
-              }}
-              showBaseUrl={false}
-            />
-          )}
-        </div>
-      )}
     </div>
   )
 }

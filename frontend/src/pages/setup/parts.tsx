@@ -4,6 +4,48 @@
 // own the focus ref and the expand/collapse animation.
 
 import { Check } from 'lucide-react'
+import { inputClass } from '../settings/primitives'
+
+// UrlField is the base-URL input shared by the GitHub and Jira URL steps: a
+// controlled field bound straight to wizard state (no local draft), so the
+// step's Continue reads the typed value from state and runs the reachability
+// probe itself — there is no separate "Verify" button. `invalid` turns the box
+// red when the active step carries a probe error; the message itself renders
+// once in the host's shared error line, so the field only owns the red border.
+export function UrlField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  helpText,
+  invalid,
+}: {
+  label: string
+  value: string
+  onChange: (value: string) => void
+  placeholder?: string
+  helpText?: string
+  invalid?: boolean
+}) {
+  return (
+    <div className="space-y-2">
+      <label className="block">
+        <span className="mb-1.5 block text-[11px] text-text-tertiary">{label}</span>
+        <input
+          type="url"
+          value={value}
+          placeholder={placeholder || 'https://…'}
+          onChange={(e) => onChange(e.target.value)}
+          aria-invalid={invalid || undefined}
+          className={`${inputClass}${
+            invalid ? ' !border-[var(--color-dismiss)] focus:!border-[var(--color-dismiss)]' : ''
+          }`}
+        />
+      </label>
+      {helpText && <p className="text-[11px] leading-relaxed text-text-tertiary">{helpText}</p>}
+    </div>
+  )
+}
 
 // SectionDivider labels a group of steps ("Organization settings" / "Team
 // settings (first team)"). Rendered as the group's heading so the collapsed
@@ -36,28 +78,32 @@ function StepMarker({ number, complete }: { number: number; complete: boolean })
   )
 }
 
-// CollapsedStepBar renders any non-active step: a compact bar with the marker,
-// the step title, and — once complete — the summary of what was saved. A
-// reachable step (already done, or earlier than the active one) is a button
-// that re-expands it for editing; an unfinished upcoming step is an inert,
-// dimmed row so the user can see the road ahead without skipping into it.
+// CollapsedStepBar renders a completed step that has receded above the active
+// one: a compact bar with the marker, the title, and the summary of what was
+// saved, as a button that re-expands it for editing. Only steps at or before
+// the active step are ever rendered (nothing below the active step shows), so
+// every collapsed bar is a reachable, editable one — there is no inert
+// "upcoming" variant.
 export function CollapsedStepBar({
   number,
   title,
   summary,
   complete,
-  editable,
   onEdit,
 }: {
   number: number
   title: string
   summary: string
   complete: boolean
-  editable: boolean
   onEdit: () => void
 }) {
-  const inner = (
-    <>
+  return (
+    <button
+      type="button"
+      onClick={onEdit}
+      aria-label={`${title} — completed. Edit.`}
+      className="group flex w-full items-center gap-2.5 rounded-xl border border-border-subtle bg-surface-raised/60 px-4 py-2.5 text-left transition-colors hover:border-accent/40 hover:bg-surface-raised"
+    >
       <StepMarker number={number} complete={complete} />
       <span className="text-[13px] font-medium text-text-secondary">{title}</span>
       {complete && (
@@ -65,41 +111,9 @@ export function CollapsedStepBar({
           {summary}
         </span>
       )}
-      {editable && (
-        <span className="ml-auto text-[11px] text-text-tertiary transition-colors group-hover:text-accent">
-          Edit
-        </span>
-      )}
-    </>
-  )
-
-  const base =
-    'flex w-full items-center gap-2.5 rounded-xl border px-4 py-2.5 text-left transition-colors'
-
-  if (editable) {
-    return (
-      <button
-        type="button"
-        onClick={onEdit}
-        aria-label={`${title} — completed. Edit.`}
-        className={`${base} group border-border-subtle bg-surface-raised/60 hover:border-accent/40 hover:bg-surface-raised`}
-      >
-        {inner}
-      </button>
-    )
-  }
-  // Disabled <button> (not a bare <div>): aria-label only maps reliably onto an
-  // element with a role, and this keeps the upcoming step consistent with the
-  // editable variant. `disabled` keeps it out of the tab order (nothing to do
-  // here yet) while still exposing the name to assistive tech.
-  return (
-    <button
-      type="button"
-      disabled
-      aria-label={`${title} — not yet completed`}
-      className={`${base} cursor-default border-transparent bg-black/[0.02] opacity-55`}
-    >
-      {inner}
+      <span className="ml-auto text-[11px] text-text-tertiary transition-colors group-hover:text-accent">
+        Edit
+      </span>
     </button>
   )
 }

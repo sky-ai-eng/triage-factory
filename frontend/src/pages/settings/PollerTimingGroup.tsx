@@ -11,33 +11,42 @@ interface PollerTimingValue {
  * so they round-trip via POST /api/settings/org like the rest of the org
  * config. The Jira interval is suppressed (showJira false) on surfaces where
  * Jira isn't connected yet, since the cadence is meaningless without it.
+ *
+ * showGitHub (default true) mirrors showJira for the inverse case: the setup
+ * wizard splits the cadences into a GitHub poll step and a separate Jira poll
+ * step (shown only once Jira is connected), so the Jira step renders this group
+ * with showGitHub=false to show the Jira control alone.
  */
 export default function PollerTimingGroup({
   value,
   onChange,
+  showGitHub = true,
   showJira = true,
 }: {
   value: PollerTimingValue
   onChange: (patch: Partial<PollerTimingValue>) => void
+  showGitHub?: boolean
   showJira?: boolean
 }) {
   return (
     <Section>
       <h2 className="text-[13px] font-medium text-text-secondary mb-4">Poller timing</h2>
       <div className="space-y-3">
-        <Field label="GitHub poll interval">
-          <select
-            value={value.github_poll_interval}
-            onChange={(e) => onChange({ github_poll_interval: e.target.value })}
-            className={inputClass}
-          >
-            {POLL_INTERVAL_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </Field>
+        {showGitHub && (
+          <Field label="GitHub poll interval">
+            <select
+              value={value.github_poll_interval}
+              onChange={(e) => onChange({ github_poll_interval: e.target.value })}
+              className={inputClass}
+            >
+              {POLL_INTERVAL_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
         {showJira && (
           <Field label="Jira poll interval">
             <select

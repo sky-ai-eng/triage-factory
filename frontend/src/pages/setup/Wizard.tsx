@@ -131,9 +131,20 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
 
         <div className="space-y-6">
           {WIZARD_SECTIONS.map((section) => {
+            // Only steps up to and including the active one render — the active
+            // card plus the completed bars that have receded above it. Nothing
+            // below the active step is shown (no "road ahead"), and because this
+            // keys on activeIndex, going Back re-hides the forward steps too. A
+            // section with no reached steps yet (the team section while still in
+            // org config) collapses away entirely.
             const entries = wiz.steps
               .map((step, index) => ({ step, index }))
-              .filter(({ step }) => step.section === section.id && isStepVisible(step, wiz.state))
+              .filter(
+                ({ step, index }) =>
+                  step.section === section.id &&
+                  index <= activeIndex &&
+                  isStepVisible(step, wiz.state),
+              )
             if (entries.length === 0) return null
             return (
               <section key={section.id} aria-labelledby={`setup-section-${section.id}`}>
@@ -178,7 +189,6 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                             title={step.title}
                             summary={step.collapsedSummary(wiz.state)}
                             complete={complete}
-                            editable={wiz.canEdit(index)}
                             onEdit={() => wiz.goTo(index)}
                           />
                         )}
@@ -209,7 +219,12 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                                     </button>
                                   </div>
                                 ) : (
-                                  step.render({ ...identity, state: wiz.state, patch: wiz.patch })
+                                  step.render({
+                                    ...identity,
+                                    state: wiz.state,
+                                    patch: wiz.patch,
+                                    error: wiz.error,
+                                  })
                                 )}
 
                                 {wiz.error && (

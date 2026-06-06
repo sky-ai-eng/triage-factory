@@ -60,9 +60,24 @@ export interface WizardState {
   // signal rather than re-deriving it. Drives the step's isComplete (GitHub is
   // mandatory) independent of which access method the user picked.
   githubReady: boolean
+  // The GitHub URL passed its reachability probe this session. The URL step
+  // (now its own stack entry) sets it on a successful Continue; it satisfies
+  // that step's isComplete so the access step can follow. A connected org
+  // (githubReady) implies a previously-confirmed URL, so it's seeded from
+  // githubReady on load.
+  githubUrlConfirmed: boolean
+  // Which access method the GitHub access step is showing — App (default) or
+  // PAT. Lifted out of the step body into shared state so the step's Continue
+  // (which now performs the PAT connect, no separate button) can branch on it
+  // from persist(). Seeded to 'pat' for a returning org with a stored token.
+  githubAccessTab: 'app' | 'pat'
   // Whether the org currently has a working Jira connection (PAT + base URL).
   // Gates the poller step's Jira interval and the team Jira-projects step.
   jiraConnected: boolean
+  // The Jira URL passed its reachability probe this session — the Jira mirror
+  // of githubUrlConfirmed, satisfying the Jira URL step so the Jira access step
+  // can follow. Seeded from jiraConnected on load.
+  jiraUrlConfirmed: boolean
   // Which tracker the user selected in the Trackers step. Seeded from
   // jiraConnected on load (a connected org resumes on "Jira").
   tracker: TrackerKind
@@ -97,6 +112,12 @@ export type LoadContext = WizardIdentity
 export interface StepContext extends WizardIdentity {
   state: WizardState
   patch: (patch: Partial<WizardState>) => void
+  // The active step's current inline error (a failed validate/persist), or
+  // null. Threaded in for render only so a field can paint itself invalid (the
+  // URL box turning red on a failed reachability probe) while the message
+  // itself still renders once in the host's shared error line. Absent on the
+  // persist path — persist surfaces errors by rejecting, not by reading this.
+  error?: string | null
 }
 
 // The step contract. Trivial or real, every step implements this so the host
