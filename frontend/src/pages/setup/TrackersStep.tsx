@@ -10,10 +10,11 @@
 // optional, so None is a valid end state — but a half-picked Jira (selected,
 // not connected) is caught by the step's validate so it can't silently advance.
 
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Clock } from 'lucide-react'
 import JiraAccessGroup from '../settings/JiraAccessGroup'
 import { checkJiraReachability } from '../../lib/reachability'
+import { nextRadioIndex } from '../../lib/rovingRadio'
 import ReachabilitySubStep from './ReachabilitySubStep'
 import type { StepContext, TrackerKind } from './types'
 
@@ -35,10 +36,27 @@ export default function TrackersStep({ state, patch }: StepContext) {
   // skips to the connected state; otherwise the reachability sub-step leads.
   const [jiraUrlConfirmed, setJiraUrlConfirmed] = useState(() => state.jiraConnected)
 
+  const btnRefs = useRef<(HTMLButtonElement | null)[]>([])
+  const selectedIndex = CARDS.findIndex((c) => c.kind === state.tracker)
+
   const select = (kind: TrackerKind) => {
     if (kind === 'linear') return
     patch({ tracker: kind })
   }
+
+  // Arrow keys move selection across the enabled cards, skipping the disabled
+  // "coming soon" Linear card.
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    const next = nextRadioIndex(e.key, selectedIndex, CARDS.length, (i) => !CARDS[i].disabled)
+    if (next === null) return
+    e.preventDefault()
+    select(CARDS[next].kind)
+    btnRefs.current[next]?.focus()
+  }
+
+  // Roving tabIndex: one tab stop — the selected card, or the first card when
+  // nothing is selected — and arrows move from there.
+  const tabbable = selectedIndex < 0 ? 0 : selectedIndex
 
   return (
     <div className="space-y-4">
@@ -46,17 +64,26 @@ export default function TrackersStep({ state, patch }: StepContext) {
         Optionally connect an issue tracker. You can skip this and add one later in Settings.
       </p>
 
-      <div role="radiogroup" aria-label="Issue tracker" className="grid gap-2 sm:grid-cols-3">
-        {CARDS.map((card) => {
+      <div
+        role="radiogroup"
+        aria-label="Issue tracker"
+        onKeyDown={onKeyDown}
+        className="grid gap-2 sm:grid-cols-3"
+      >
+        {CARDS.map((card, i) => {
           const selected = state.tracker === card.kind
           return (
             <button
               key={card.kind}
+              ref={(el) => {
+                btnRefs.current[i] = el
+              }}
               type="button"
               role="radio"
               aria-checked={selected}
               aria-disabled={card.disabled}
               disabled={card.disabled}
+              tabIndex={i === tabbable ? 0 : -1}
               onClick={() => select(card.kind)}
               className={`flex flex-col items-start gap-1 rounded-xl border px-3.5 py-3 text-left transition-colors ${
                 card.disabled

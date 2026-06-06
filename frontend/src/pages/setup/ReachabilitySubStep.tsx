@@ -12,7 +12,7 @@
 import { useEffect, useState } from 'react'
 import { Check, Pencil } from 'lucide-react'
 import { inputClass } from '../settings/primitives'
-import { reachabilityMessage, type ReachabilityResult } from '../../lib/reachability'
+import { hostOf, reachabilityMessage, type ReachabilityResult } from '../../lib/reachability'
 
 export default function ReachabilitySubStep({
   label,
@@ -125,14 +125,4 @@ export default function ReachabilitySubStep({
       </button>
     </div>
   )
-}
-
-// hostOf renders the host (no scheme) for the collapsed bar, falling back to
-// the raw string if it can't be parsed.
-function hostOf(url: string): string {
-  try {
-    return new URL(url).host || url
-  } catch {
-    return url.replace(/^https?:\/\//, '')
-  }
 }

@@ -15,6 +15,7 @@
 
 import GitHubStep from './GitHubStep'
 import TrackersStep from './TrackersStep'
+import { hostOf } from '../../lib/reachability'
 import ModelGroup from '../settings/ModelGroup'
 import PollerTimingGroup from '../settings/PollerTimingGroup'
 import TeamSettingsGroup from '../settings/TeamSettingsGroup'
@@ -49,15 +50,6 @@ const TIER_LABELS: Record<string, string> = {
   haiku: 'Haiku',
   sonnet: 'Sonnet',
   opus: 'Opus',
-}
-
-// hostOf renders a base URL's host for a collapsed-bar summary.
-function hostOf(url: string): string {
-  try {
-    return new URL(url).host || url
-  } catch {
-    return url.replace(/^https?:\/\//, '')
-  }
 }
 
 // intervalLabel renders a Go duration like "5m0s" / "30s" compactly: trim the
@@ -133,7 +125,7 @@ const githubStep: WizardStep = {
   title: 'GitHub',
   load: loadOrg,
   isComplete: (s) => s.githubReady,
-  validate: (s) => (s.githubReady ? null : 'Connect GitHub to continue — it’s required.'),
+  validate: (s) => (s.githubReady ? null : 'GitHub is required — connect it to continue.'),
   // Creds are persisted at the step's own Connect action (PAT) or via App
   // registration; advancing is then a no-op.
   persist: async () => {},
@@ -166,9 +158,14 @@ const trackersStep: WizardStep = {
   render: (ctx) => <TrackersStep {...ctx} />,
 }
 
-// Step 3 · Poller timings. GitHub cadence always; Jira cadence only when a Jira
-// tracker is connected. 30s–5m (the shared group's option set). Always
-// satisfiable — defaults exist — so it never blocks the stack.
+// Step 3 · Poller timings. GitHub cadence always; the Jira cadence only when
+// Jira is the chosen tracker AND connected — a user who connects Jira then
+// switches the tracker back to None shouldn't see (or save) a Jira interval,
+// even though the connection itself persists until explicitly disconnected.
+// 30s–5m (the shared group's option set). Always satisfiable — defaults
+// exist — so it never blocks the stack.
+const jiraActive = (s: WizardState) => s.tracker === 'jira' && s.jiraConnected
+
 const pollerStep: WizardStep = {
   id: 'org-poller',
   section: 'org',
@@ -178,7 +175,7 @@ const pollerStep: WizardStep = {
   isComplete: () => true,
   persist: ({ state }) => persistOrg(state),
   collapsedSummary: (s) =>
-    s.jiraConnected
+    jiraActive(s)
       ? `GitHub ${intervalLabel(s.org.github_poll_interval)} · Jira ${intervalLabel(
           s.org.jira_poll_interval,
         )}`
@@ -190,7 +187,7 @@ const pollerStep: WizardStep = {
         jira_poll_interval: state.org.jira_poll_interval,
       }}
       onChange={(p) => patch({ org: { ...state.org, ...p } })}
-      showJira={state.jiraConnected}
+      showJira={jiraActive(state)}
     />
   ),
 }

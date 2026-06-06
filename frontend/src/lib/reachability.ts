@@ -60,7 +60,24 @@ async function probe(path: string, url: string): Promise<ReachabilityResult> {
   if (!res.ok) {
     return { reachable: false, reason: 'network', status: res.status }
   }
-  return (await res.json().catch(() => ({ reachable: false }))) as ReachabilityResult
+  // A parse failure on a 200 means the server reached us but sent a garbled
+  // body — tag it `network` so the message doesn't claim the *host* was
+  // unreachable (the default-case copy), which would be misleading.
+  return (await res
+    .json()
+    .catch(() => ({ reachable: false, reason: 'network' }))) as ReachabilityResult
+}
+
+// hostOf renders the host (no scheme) for a confirmed-URL summary, falling
+// back to the raw string (scheme stripped) when it can't be parsed. Lives here
+// so the reachability sub-step's collapsed bar and the wizard's collapsed-step
+// summaries render a base URL identically.
+export function hostOf(url: string): string {
+  try {
+    return new URL(url).host || url
+  } catch {
+    return url.replace(/^https?:\/\//, '')
+  }
 }
 
 export const checkGitHubReachability = (url: string): Promise<ReachabilityResult> =>
