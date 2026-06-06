@@ -15,6 +15,11 @@ section is the gate before this ships.
 Status: **proposal**. No code written yet. Parent context: the SKY-254 sandbox
 epic (`internal/sandbox`).
 
+> This is one worked instance of the broader **sandbox fleet** model
+> (`docs/specs/sandbox-fleet/`): a "browser" profile is just one configurable
+> sandbox type among many. Read that doc for the general profile/egress/resource
+> framing; this one is the concrete Chromium recipe.
+
 ---
 
 ## 1. Goal and non-goals
