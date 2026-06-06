@@ -85,3 +85,18 @@ export const checkGitHubReachability = (url: string): Promise<ReachabilityResult
 
 export const checkJiraReachability = (url: string): Promise<ReachabilityResult> =>
   probe('/api/jira/reachability', url)
+
+// isHttpUrl is the cheap, synchronous URL-format gate the wizard's URL steps
+// run in validate() — instant feedback for obviously-malformed input before
+// spending a network round-trip on the reachability probe. It mirrors the
+// backend's normalizeReachabilityURL contract: must parse, be http(s), and
+// carry a host (the backend additionally 400s on userinfo/query/fragment, which
+// the probe surfaces as invalid_url).
+export function isHttpUrl(raw: string): boolean {
+  try {
+    const u = new URL(raw.trim())
+    return (u.protocol === 'http:' || u.protocol === 'https:') && u.host !== ''
+  } catch {
+    return false
+  }
+}

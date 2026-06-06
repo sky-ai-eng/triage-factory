@@ -35,6 +35,7 @@ export default function GitHubAccessGroup({
   orgId,
   showAppPanel = true,
   showBaseUrl = true,
+  showHeading = true,
 }: {
   value: GitHubAccessValue
   onChange: (patch: Partial<GitHubAccessValue>) => void
@@ -43,6 +44,10 @@ export default function GitHubAccessGroup({
   orgId: string | null
   showAppPanel?: boolean
   showBaseUrl?: boolean
+  // The setup wizard renders this under its own "GitHub access" step heading
+  // and an App/PAT tab switcher, so the group's own "GitHub" title is redundant
+  // there — suppress it. Default true keeps the Settings tab labelled.
+  showHeading?: boolean
 }) {
   const [sshTestState, setSshTestState] = useState<
     { kind: 'idle' } | { kind: 'running' } | { kind: 'ok' } | { kind: 'fail'; stderr: string }
@@ -73,7 +78,9 @@ export default function GitHubAccessGroup({
   return (
     <>
       <Section>
-        <h2 className="text-[13px] font-medium text-text-secondary mb-4">GitHub</h2>
+        {showHeading && (
+          <h2 className="text-[13px] font-medium text-text-secondary mb-4">GitHub</h2>
+        )}
         <div className="space-y-3">
           {showBaseUrl && (
             <Field label="Base URL">

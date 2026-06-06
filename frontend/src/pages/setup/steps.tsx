@@ -31,6 +31,7 @@ import TrackersStep from './TrackersStep'
 import { JiraUrlStep, JiraAccessStep } from './JiraStep'
 import {
   hostOf,
+  isHttpUrl,
   checkGitHubReachability,
   checkJiraReachability,
   reachabilityMessage,
@@ -136,11 +137,11 @@ async function loadOrg(): Promise<Partial<WizardState>> {
     orgLoaded: true,
     hasGitHubPat: org.has_github_pat,
     githubReady: integrations.githubReady,
-    // Confirmed if connected OR a base URL is already stored — the URL step
-    // saves the base URL on Continue, so once it has run (e.g. before leaving
-    // for GitHub App registration), the redirect back resumes past it rather
-    // than forcing a re-confirm of an unchanged host.
-    githubUrlConfirmed: integrations.githubReady || org.github_base_url.trim() !== '',
+    // Seeded only from a live connection — NOT from a stored base URL. A stored
+    // URL must not pre-satisfy the step, or Continue would skip the probe and
+    // advance any value unchecked. An unconnected org always re-probes on
+    // Continue (the URL step's whole job), connected resumes past it.
+    githubUrlConfirmed: integrations.githubReady,
     githubAccessTab: org.has_github_pat ? 'pat' : 'app',
     jiraConnected: integrations.jiraConnected,
     jiraUrlConfirmed: integrations.jiraConnected,
@@ -226,13 +227,20 @@ const githubUrlStep: WizardStep = {
   title: 'GitHub URL',
   load: loadOrg,
   isComplete: (s) => s.githubReady || s.githubUrlConfirmed,
+  // Instant format check first (no round-trip for obviously-bad input); the
+  // network probe is in persist. A connected org skips both — its URL is proven.
   validate: (s) => {
-    if (s.githubReady || s.githubUrlConfirmed) return null
-    return s.org.github_url.trim() === '' ? 'Enter your GitHub URL.' : null
+    if (s.githubReady) return null
+    const url = s.org.github_url.trim()
+    if (url === '') return 'Enter your GitHub URL.'
+    if (!isHttpUrl(url)) return 'Enter a valid URL, including https://.'
+    return null
   },
   persist: async ({ state, patch }) => {
-    // A connected/confirmed URL needs no re-probe — advancing is a no-op.
-    if (state.githubReady || state.githubUrlConfirmed) return
+    // Always probe on Continue (the step's whole job) unless already connected —
+    // a stored/previously-confirmed URL must not let an edited value through
+    // unchecked.
+    if (state.githubReady) return
     const result = await checkGitHubReachability(state.org.github_url)
     if (!result.reachable) throw new Error(reachabilityMessage(result))
     // Persist the base URL now (blank PAT = keep current): the App-registration
@@ -338,11 +346,15 @@ const jiraUrlStep: WizardStep = {
   visible: (s) => s.tracker === 'jira',
   isComplete: (s) => s.jiraConnected || s.jiraUrlConfirmed,
   validate: (s) => {
-    if (s.jiraConnected || s.jiraUrlConfirmed) return null
-    return s.org.jira_url.trim() === '' ? 'Enter your Jira URL.' : null
+    if (s.jiraConnected) return null
+    const url = s.org.jira_url.trim()
+    if (url === '') return 'Enter your Jira URL.'
+    if (!isHttpUrl(url)) return 'Enter a valid URL, including https://.'
+    return null
   },
   persist: async ({ state, patch }) => {
-    if (state.jiraConnected || state.jiraUrlConfirmed) return
+    // Always probe on Continue unless already connected — same rule as GitHub.
+    if (state.jiraConnected) return
     const result = await checkJiraReachability(state.org.jira_url)
     if (!result.reachable) throw new Error(reachabilityMessage(result))
     patch({ jiraUrlConfirmed: true })

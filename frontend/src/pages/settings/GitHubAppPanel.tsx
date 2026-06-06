@@ -25,7 +25,16 @@ import { Section, Field, inputClass } from './primitives'
  * rather than fetch the wrong org. A focus-refetch failure keeps any
  * already-loaded data instead of flipping the panel to an error.
  */
-export default function GitHubAppPanel({ orgId }: { orgId: string | null }) {
+export default function GitHubAppPanel({
+  orgId,
+  showHeading = true,
+}: {
+  orgId: string | null
+  // Suppressed in the setup wizard, which already labels the step "GitHub
+  // access" and shows an App/PAT tab switcher above this panel. Default true
+  // keeps the Settings tab labelled.
+  showHeading?: boolean
+}) {
   // Discriminated so the panel can tell "still resolving" / "load failed"
   // apart from "no app registered" — a load failure must NOT render the
   // registration form.
@@ -89,7 +98,9 @@ export default function GitHubAppPanel({ orgId }: { orgId: string | null }) {
 
   return (
     <Section>
-      <h2 className="text-[13px] font-medium text-text-secondary mb-1">GitHub access</h2>
+      {showHeading && (
+        <h2 className="text-[13px] font-medium text-text-secondary mb-1">GitHub access</h2>
+      )}
       <p className="text-[11px] text-text-tertiary mb-4 leading-relaxed">
         A GitHub App is an alternative to the Personal Access Token above — it polls under its own
         bot identity and supports multiple installations. The PAT keeps working as the simpler

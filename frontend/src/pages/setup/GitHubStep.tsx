@@ -86,7 +86,7 @@ export function GitHubAccessStep({ orgId, isLocal, state, patch }: StepContext) 
 
       {tab === 'app' ? (
         orgId ? (
-          <GitHubAppPanel orgId={orgId} />
+          <GitHubAppPanel orgId={orgId} showHeading={false} />
         ) : (
           <p className="text-[12px] italic text-text-tertiary">Resolving your workspace…</p>
         )
@@ -103,6 +103,7 @@ export function GitHubAccessStep({ orgId, isLocal, state, patch }: StepContext) 
           orgId={orgId}
           showAppPanel={false}
           showBaseUrl={false}
+          showHeading={false}
         />
       )}
     </div>
