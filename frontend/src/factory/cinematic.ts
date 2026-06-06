@@ -348,7 +348,10 @@ export class CinematicDirector {
       )
       return
     }
-    this.camera.alpha = base.alpha + (m.driftAlpha ?? 0) * e
+    // Wrap to [0, 2π). In reduced-motion mode this branch holds forever
+    // (hold: Infinity), so an unwrapped alpha would grow without bound
+    // over a long kiosk session; 2π ≡ 0 visually, so the wrap is seamless.
+    this.camera.alpha = wrapTwoPi(base.alpha + (m.driftAlpha ?? 0) * e)
     this.camera.beta = clamp(base.beta + (m.craneBeta ?? 0) * e, BETA_MIN, BETA_MAX)
     this.camera.radius = clamp(base.radius, RADIUS_MIN, RADIUS_MAX)
     const target = base.target.clone()
@@ -388,4 +391,11 @@ function lerpAngle(a: number, b: number, t: number): number {
   if (d > Math.PI) d -= tau
   if (d < -Math.PI) d += tau
   return a + d * t
+}
+
+/** Wrap an angle into [0, 2π) so a continuous drift can't grow it
+ *  without bound (2π ≡ 0, so wrapping never moves the camera). */
+function wrapTwoPi(a: number): number {
+  const tau = Math.PI * 2
+  return ((a % tau) + tau) % tau
 }

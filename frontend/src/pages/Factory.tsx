@@ -112,6 +112,7 @@ export default function Factory() {
     if (!container) return
     let cancelled = false
     let unsubClick: (() => void) | null = null
+    let unsubEnd: (() => void) | null = null
     createIsoScene(container).then((scene) => {
       if (cancelled) {
         scene.destroy()
@@ -119,10 +120,16 @@ export default function Factory() {
       }
       sceneRef.current = scene
       unsubClick = scene.onStationClick(setPicked)
+      // The director eases the camera back to the pre-entry pose on exit
+      // and fires onEnd only once that restore completes — so we drop the
+      // HUD/letterbox/catcher then, never mid-move, and never while the
+      // camera controls are still detached.
+      unsubEnd = scene.onCinematicEnd(() => setCinematic(false))
     })
     return () => {
       cancelled = true
       unsubClick?.()
+      unsubEnd?.()
       sceneRef.current?.destroy()
       sceneRef.current = null
     }
@@ -229,8 +236,11 @@ export default function Factory() {
   }, [])
 
   const exitCinematic = useCallback(() => {
+    // Only kick off the eased restore here — the `cinematic` flag is
+    // cleared by onCinematicEnd (scene-creation effect) once the camera
+    // has fully glided home, so the HUD/letterbox/catcher stay up through
+    // the move and controls aren't live while still detached.
     sceneRef.current?.exitCinematic()
-    setCinematic(false)
   }, [])
 
   // While cinematic, any key or wheel exits (click is handled by the
