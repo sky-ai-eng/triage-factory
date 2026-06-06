@@ -165,6 +165,16 @@ export class CinematicDirector {
   private holdPose: Pose
   private motion: ShotMotion | null = null
   private holdDuration = 0 // motion.hold * HOLD_SCALE, computed per shot
+  private fadeElapsed = 0 // time within the current fade-to-black overlay
+  // The next shot, chosen when the current hold ends but only swapped in
+  // at the fully-black midpoint of the fade — so the camera keeps moving
+  // on both sides of the cut (no visible start/stop).
+  private pending: {
+    motion: ShotMotion
+    holdPose: Pose
+    holdDuration: number
+    wide: boolean
+  } | null = null
   private enterPose: Pose | null = null
   private recent: string[] = []
   private reduced = false
@@ -217,20 +227,34 @@ export class CinematicDirector {
     return () => this.endListeners.delete(cb)
   }
 
-  /** Begin the tour from wherever the camera currently sits. `reduced`
-   *  collapses the whole thing to a single slow establishing drift with
-   *  no cuts (prefers-reduced-motion). */
+  /** Begin the tour from wherever the camera currently sits. Non-reduced:
+   *  fade in from the user's view (Forza-style). `reduced` instead glides
+   *  gently into a single slow establishing drift with no fade-to-black
+   *  cut (prefers-reduced-motion). */
   enter(reduced: boolean): void {
     if (this.active) return
     this.reduced = reduced
     this.enterPose = this.snapshot()
     this.recent = []
     this.lastWasWide = false
+    this.fadeElapsed = 0
+    this.elapsed = 0
     this.setFade(0)
-    // Entry glides from the user's live view into the first shot (symmetric
-    // with the restore on exit) — fade-to-black cuts are reserved for
-    // between cinematic shots.
-    this.startNextFrom(this.enterPose, true)
+    const first = this.nextChoice()
+    this.noteShown(first.id)
+    if (reduced) {
+      // Reduced motion: glide gently into the single establishing drift —
+      // no fade-to-black cut.
+      this.startPose = this.enterPose
+      this.commitShot(first)
+      this.phase = 'transition'
+    } else {
+      // Fade in: the user's (static) view darkens, then the first shot is
+      // already drifting as it fades back up.
+      this.pending = first
+      this.motion = null // nothing is drifting during the entry fade-out
+      this.phase = 'fadeOut'
+    }
     if (!this.observer) {
       this.observer = this.scene.onBeforeRenderObservable.add(() => this.tick())
     }
@@ -247,6 +271,8 @@ export class CinematicDirector {
     // ever added, route its completion through the same restore→onEnd path.
     if (this.phase === 'idle' || this.phase === 'restore') return
     this.setFade(0) // clear any in-flight fade; the restore is a plain glide
+    this.pending = null
+    this.fadeElapsed = 0
     this.startPose = this.snapshot()
     this.elapsed = 0
     this.phase = 'restore'
@@ -285,30 +311,32 @@ export class CinematicDirector {
         this.elapsed = 0
       }
     } else if (this.phase === 'fadeOut') {
-      // Darken in place; the camera holds its end-of-shot pose.
+      // Screen darkens while the CURRENT shot keeps drifting (elapsed is
+      // not reset), so the end of the shot overlaps the start of the fade.
       this.elapsed += dt
-      this.setFade(Math.min(1, this.elapsed / FADE_SEC))
-      if (this.elapsed >= FADE_SEC) {
-        // Fully black — cut to the new shot, then fade back up over it.
-        this.applyPose(this.holdPose)
+      this.applyHoldMotion(this.elapsed)
+      this.fadeElapsed += dt
+      this.setFade(Math.min(1, this.fadeElapsed / FADE_SEC))
+      if (this.fadeElapsed >= FADE_SEC) {
+        this.commitPending() // cut to the next shot under full black
         this.phase = 'fadeIn'
-        this.elapsed = 0
+        this.fadeElapsed = 0
       }
     } else if (this.phase === 'fadeIn') {
+      // Screen brightens while the NEW shot is already drifting (its motion
+      // started at the black midpoint), so the fade overlaps the shot start.
       this.elapsed += dt
-      this.setFade(Math.max(0, 1 - this.elapsed / FADE_SEC))
-      if (this.elapsed >= FADE_SEC) {
+      this.applyHoldMotion(this.elapsed)
+      this.fadeElapsed += dt
+      this.setFade(Math.max(0, 1 - this.fadeElapsed / FADE_SEC))
+      if (this.fadeElapsed >= FADE_SEC) {
         this.setFade(0)
-        this.phase = 'hold'
-        this.elapsed = 0
+        this.phase = 'hold' // elapsed carries over — the shot keeps drifting
       }
     } else if (this.phase === 'hold') {
       this.elapsed += dt
       this.applyHoldMotion(this.elapsed)
-      if (this.motion && this.elapsed >= this.holdDuration) {
-        // Advance — fade-cut to the next shot (or glide, if it's wide).
-        this.startNextFrom(this.snapshot(), false)
-      }
+      if (this.motion && this.elapsed >= this.holdDuration) this.advance()
     } else if (this.phase === 'restore') {
       this.elapsed += dt
       this.applyLerp(this.startPose, this.enterPose!, smootherstep(this.elapsed / RESTORE_SEC))
@@ -316,24 +344,76 @@ export class CinematicDirector {
     }
   }
 
-  private startNextFrom(from: Pose, forceGlide: boolean): void {
+  /** Current hold finished — choose the next shot and either glide into it
+   *  (wide shots) or fade-cut to it (everything else). */
+  private advance(): void {
+    const next = this.nextChoice()
+    this.noteShown(next.id)
+    if (next.wide) {
+      // Glide into wide shots — an eased, visible move from the current pose.
+      this.startPose = this.snapshot()
+      this.commitShot(next)
+      this.phase = 'transition'
+    } else {
+      // Fade cut: keep the current shot drifting through the fade-out, then
+      // swap to `next` at full black (commitPending). elapsed is NOT reset,
+      // so the leaving shot's motion runs on into the fade.
+      this.pending = next
+      this.fadeElapsed = 0
+      this.phase = 'fadeOut'
+    }
+  }
+
+  /** Pick + resolve the next shot and precompute its hold pose/duration. */
+  private nextChoice(): {
+    motion: ShotMotion
+    holdPose: Pose
+    holdDuration: number
+    id: string
+    wide: boolean
+  } {
     const { motion, id, wide } = this.reduced ? this.reducedHold() : this.nextHold()
+    return {
+      motion,
+      id,
+      wide,
+      holdDuration: motion.hold * HOLD_SCALE,
+      holdPose: {
+        alpha: motion.alpha,
+        beta: motion.beta,
+        radius: motion.radius,
+        target: motion.target.clone(),
+      },
+    }
+  }
+
+  /** Make a chosen shot the current one and restart its motion clock. */
+  private commitShot(next: {
+    motion: ShotMotion
+    holdPose: Pose
+    holdDuration: number
+    wide: boolean
+  }): void {
+    this.motion = next.motion
+    this.holdPose = next.holdPose
+    this.holdDuration = next.holdDuration
+    this.lastWasWide = next.wide
+    this.elapsed = 0
+  }
+
+  /** At the fully-black midpoint of a fade, swap in the pending shot and
+   *  snap the camera to it (the jump is invisible under full black). */
+  private commitPending(): void {
+    if (this.pending) {
+      this.commitShot(this.pending)
+      this.pending = null
+    }
+    this.applyPose(this.holdPose)
+  }
+
+  private noteShown(id: string): void {
     this.recent.push(id)
     while (this.recent.length > COOLDOWN_K) this.recent.shift()
-    this.motion = motion
-    this.holdDuration = motion.hold * HOLD_SCALE
-    this.startPose = from
-    this.holdPose = {
-      alpha: motion.alpha,
-      beta: motion.beta,
-      radius: motion.radius,
-      target: motion.target.clone(),
-    }
-    this.lastWasWide = wide
-    this.elapsed = 0
-    // Glide (visible eased move) into wide shots and on entry; otherwise a
-    // fade-to-black cut between shots.
-    this.phase = wide || forceGlide ? 'transition' : 'fadeOut'
   }
 
   private nextHold(): { motion: ShotMotion; id: string; wide: boolean } {
