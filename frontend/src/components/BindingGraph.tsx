@@ -598,6 +598,14 @@ function BindingGraphInner({
   // True while a delete batch is in flight, so a held/double Delete (or a
   // double-click of the confirm dialog's Delete) doesn't dispatch twice.
   const deletingRef = useRef(false)
+  // Mirror of deleteConfirm so onBeforeDelete (narrow deps, doesn't close over
+  // the state) can early-return while the dialog is already open — a focused
+  // Cancel button isn't in xyflow's key-guard list, so Delete/Backspace would
+  // otherwise re-fire onBeforeDelete and redundantly re-stage the same plan.
+  // Mirrored on render (the file's stale-free idiom) so it tracks the single
+  // source of truth through every setter, not just the staging one.
+  const deleteConfirmRef = useRef(deleteConfirm)
+  deleteConfirmRef.current = deleteConfirm
 
   const fetchAll = useCallback(async () => {
     // Hold in the loading state until the scope resolves. For team scope, a
@@ -1585,7 +1593,9 @@ function BindingGraphInner({
   // guard, by construction.
   const onBeforeDelete = useCallback(
     async ({ nodes }: { nodes: Node[]; edges: Edge[] }): Promise<boolean> => {
-      if (deletingRef.current) return false
+      // A delete is mid-run, or the confirm dialog is already open for a prior
+      // press (the focused buttons don't filter Delete/Backspace) — ignore.
+      if (deletingRef.current || deleteConfirmRef.current) return false
       const blueprintIds = new Set<string>()
       const blueprints: DeletePlan['blueprints'] = []
       for (const n of nodes) {
