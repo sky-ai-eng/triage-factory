@@ -492,8 +492,8 @@ func (s *blueprintStore) DeleteStep(ctx context.Context, orgID, blueprintID stri
 		if stepIndex < 0 || stepIndex >= n {
 			return fmt.Errorf("step index %d out of range [0,%d)", stepIndex, n)
 		}
-		switch {
-		case stepIndex == 0:
+		switch stepIndex {
+		case 0:
 			// Head: peel [1,N) onto a fresh trigger-less downstream blueprint,
 			// leaving the original holding only the deleted entry step; soft-delete
 			// it (the caller detaches its trigger separately).
@@ -507,7 +507,7 @@ func (s *blueprintStore) DeleteStep(ctx context.Context, orgID, blueprintID stri
 			if err := softDeleteBlueprintTxPG(ctx, tx, orgID, blueprintID); err != nil {
 				return err
 			}
-		case stepIndex == n-1:
+		case n - 1:
 			// Tail: isolate the last step onto a fresh soft-deleted 1-step
 			// blueprint; the original keeps [0,N-1) with its trigger + id.
 			isolationID := uuid.New().String()
