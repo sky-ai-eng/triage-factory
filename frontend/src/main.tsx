@@ -29,6 +29,7 @@ import Login from './pages/Login'
 import Onboarding from './pages/Onboarding'
 import OrgConfigure from './pages/OrgConfigure'
 import TeamConfigure from './pages/TeamConfigure'
+import Wizard from './pages/setup/Wizard'
 import ConnectGitHub from './pages/ConnectGitHub'
 import Shell from './Shell'
 import AuthGate, { RequireGitHubIdentity, RequireSetupComplete } from './AuthGate'
@@ -111,6 +112,18 @@ function LocalRoutes() {
           </AuthGate>
         }
       />
+      {/* The setup wizard — the single create-time flow the mandatory-setup
+          gate redirects incomplete users to. Outside RequireSetupComplete
+          (gating it here would loop the very user it's meant to onboard); the
+          local gate still requires a provisioned tenant. */}
+      <Route
+        path="/setup"
+        element={
+          <AuthGate mode="local">
+            <Wizard isLocal />
+          </AuthGate>
+        }
+      />
       <Route
         element={
           <AuthGate mode="local">
@@ -147,10 +160,19 @@ function MultiRoutes() {
               /no-orgs is kept as a redirect for any stale links. */}
           <Route path="/onboarding" element={<Onboarding />} />
           <Route path="/no-orgs" element={<Navigate to="/onboarding" replace />} />
-          {/* Redirect for stale /setup bookmarks — the legacy local setup
-              wizard is retired; integration creds live in per-org Vault (D5)
-              and are configured via the admin UI (D14). */}
-          <Route path="/setup" element={<Navigate to="/" replace />} />
+          {/* The setup wizard — the single create-time flow the mandatory-setup
+              gate redirects incomplete users to. Outside RequireSetupComplete /
+              RequireGitHubIdentity (gating it would loop the user it onboards);
+              wrapped only in the authed+org-resolved gate. The wizard reads the
+              active org from OrgContext, so the path stays a bare /setup. */}
+          <Route
+            path="/setup"
+            element={
+              <AuthGate mode="multi">
+                <Wizard />
+              </AuthGate>
+            }
+          />
           {/* Onboarding gate page — its own route so it sits OUTSIDE
               RequireGitHubIdentity (the check it exists to satisfy);
               gated only by auth + org resolution. Declared before the

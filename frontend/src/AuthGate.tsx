@@ -3,7 +3,6 @@ import { useAuthStatus } from './hooks/useAuthStatus'
 import { useAuth, useOptionalAuth } from './contexts/AuthContext'
 import { useOrgContext, useActiveOrgId } from './contexts/OrgContext'
 import { useGitHubIdentity } from './hooks/useGitHubIdentity'
-import { LOCAL_DEFAULT_ORG_ID } from './lib/githubApp'
 
 /**
  * AuthGate routes between the local-mode first-run/provision flow and the
@@ -89,11 +88,11 @@ function MultiAuthGate({ children }: { children: React.ReactNode }) {
     const tail = (location.pathname.replace(/^\/orgs\/[^/]+/, '') || '/') + location.search
     return <Navigate to={'/orgs/' + activeOrgId + tail} replace />
   }
-  // Authed + has orgs. The router only mounts MultiAuthGate under
-  // /orgs/:org_id/* so by definition we're on an org-scoped path.
-  // The activeOrgId might still be null briefly between auth
-  // resolution and OrgContext picking — render loading until both
-  // line up.
+  // Authed + has orgs. MultiAuthGate mounts under /orgs/:org_id/* (org in the
+  // path) and the bare /setup wizard (org resolved from OrgContext —
+  // server-active / localStorage / first-org), so either way an active org is
+  // expected. It might still be null briefly between auth resolution and
+  // OrgContext picking — render loading until both line up.
   if (!activeOrgId) {
     return <Loading />
   }
@@ -171,17 +170,19 @@ function SetupPendingNotice() {
  * shell (NOT the configure routes — those must stay reachable for an
  * incomplete founder, so gating them here would loop) and blocks rendering
  * until the active org is setup_complete (GitHub access configured AND ≥1
- * tracked repo). An admin/owner of an incomplete org is routed to the
- * configure step the server reports (setup_step); a non-admin gets the
- * holding screen since they can't action the missing config.
+ * tracked repo). An admin/owner of an incomplete org is routed to the single
+ * /setup wizard, which resumes on the first incomplete step (computed
+ * client-side); a non-admin gets the holding screen since they can't action
+ * the missing config. The gate no longer needs setup_step — one redirect
+ * target, not two.
  *
  * Composed inside AuthGate (so the tenant/membership checks already passed)
  * and, in multi, outside RequireGitHubIdentity (org-level GitHub setup is a
  * prerequisite of the per-user Connect step, so it's checked first).
  *
- * `isLocal` selects the org-id base for the redirect: local has no
- * OrgContext (useActiveOrgId returns null), so it uses the sentinel id and
- * is always treated as admin (N=1, the single user owns the install).
+ * `isLocal` only selects admin treatment now (the redirect target is a
+ * constant /setup): local has no OrgContext and is always treated as admin
+ * (N=1, the single user owns the install).
  */
 export function RequireSetupComplete({
   children,
@@ -196,7 +197,7 @@ export function RequireSetupComplete({
   // screen is admitted automatically once an admin finishes setup (the hook
   // stops polling the moment a response reports setup_complete). 15s is brisk
   // enough to feel automatic without hammering the endpoint.
-  const { setup_complete, setup_step, loading } = useAuthStatus(activeOrgId ?? undefined, 15000)
+  const { setup_complete, loading } = useAuthStatus(activeOrgId ?? undefined, 15000)
 
   if (loading) return <Loading />
   if (setup_complete) return <>{children}</>
@@ -207,9 +208,9 @@ export function RequireSetupComplete({
   const isAdmin = isLocal || role === 'owner' || role === 'admin'
   if (!isAdmin) return <SetupPendingNotice />
 
-  const base = isLocal ? '/orgs/' + LOCAL_DEFAULT_ORG_ID : '/orgs/' + activeOrgId
-  const target = setup_step === 'team' ? base + '/teams/default/configure' : base + '/configure'
-  return <Navigate to={target} replace />
+  // Both modes resume in the single /setup wizard; it computes the first
+  // incomplete step from the GETs it already makes, so there's one target.
+  return <Navigate to="/setup" replace />
 }
 
 export default function AuthGate({
