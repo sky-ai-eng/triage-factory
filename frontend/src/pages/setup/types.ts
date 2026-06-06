@@ -157,6 +157,13 @@ export interface WizardStep {
   // error inline; the user stays on the step.
   persist: (ctx: StepContext) => Promise<void>
 
+  // When true, pressing Enter while focus is in a text input within the active
+  // step triggers Continue (advance). Enabled on the URL steps, where the field
+  // is the only input and Continue (the reachability probe) is the sole action;
+  // left off where the step body owns a competing submit — the access steps'
+  // Connect / Register — so Enter there doesn't fire the wrong action.
+  advanceOnEnter?: boolean
+
   // Compact label for the collapsed confirmation bar (e.g. "Capped at Sonnet").
   collapsedSummary: (state: WizardState) => string
 

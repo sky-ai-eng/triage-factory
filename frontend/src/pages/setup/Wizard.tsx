@@ -73,20 +73,34 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
 
   const wiz = useWizard(WIZARD_STEPS, identity, initialWizardState, onFinish)
 
-  // Esc re-expands the previous step — the keyboard mirror of the Back button.
-  // Gated on canGoBack (is there a prior visible step), not the raw index, so
-  // it stays in lockstep with the Back button's enabled state.
-  const { back, advance, activeIndex, busy, canGoBack } = wiz
+  // Keyboard mirrors of the footer buttons. Esc re-expands the previous step
+  // (gated on canGoBack so it stays in lockstep with the Back button). Enter
+  // triggers Continue, but only on a step that opts in (advanceOnEnter) and only
+  // from a text input — so pressing it in the URL field probes + advances, while
+  // it never hijacks the access steps' own Connect / Register buttons.
+  const { back, advance, activeIndex, busy, canGoBack, steps } = wiz
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && canGoBack && !busy) {
+      if (busy) return
+      if (e.key === 'Escape' && canGoBack) {
         e.preventDefault()
         back()
+        return
+      }
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+        const step = steps[activeIndex]
+        const target = e.target as HTMLElement | null
+        const inTextInput =
+          target instanceof HTMLInputElement && target.type !== 'button' && target.type !== 'submit'
+        if (step?.advanceOnEnter && inTextInput) {
+          e.preventDefault()
+          advance()
+        }
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [back, canGoBack, busy])
+  }, [back, advance, canGoBack, busy, steps, activeIndex])
 
   // As a step becomes active, move focus to its heading and bring the card to
   // center. scrollIntoView honors reduced motion (instant vs. smooth).

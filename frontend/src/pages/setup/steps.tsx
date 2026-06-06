@@ -225,6 +225,7 @@ const githubUrlStep: WizardStep = {
   id: 'org-github-url',
   section: 'org',
   title: 'GitHub URL',
+  advanceOnEnter: true,
   load: loadOrg,
   isComplete: (s) => s.githubReady || s.githubUrlConfirmed,
   // Instant format check first (no round-trip for obviously-bad input); the
@@ -343,6 +344,7 @@ const jiraUrlStep: WizardStep = {
   id: 'org-jira-url',
   section: 'org',
   title: 'Jira URL',
+  advanceOnEnter: true,
   visible: (s) => s.tracker === 'jira',
   isComplete: (s) => s.jiraConnected || s.jiraUrlConfirmed,
   validate: (s) => {
