@@ -35,9 +35,18 @@ const probeTimeout = 10 * time.Second
 // and is good external-citizen behavior.
 const userAgent = "triage-factory-reachability"
 
-// client is the shared probe client. No credential is ever attached. Redirects
-// are followed (a 301 http→https still proves the host is reachable).
-var client = &http.Client{Timeout: probeTimeout}
+// client is the shared probe client. No credential is ever attached, and
+// redirects are NOT followed: a 3xx already proves the host answered, so the
+// initial response is the verdict. Chasing the Location would only re-point
+// the probe at a possibly-unrelated (internal) host — needless SSRF surface,
+// and it could flip the verdict based on where the redirect leads rather than
+// whether the host the operator entered is reachable.
+var client = &http.Client{
+	Timeout: probeTimeout,
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
 
 // Result is the verdict for one probe. Reachable is the load-bearing bit;
 // Status carries the HTTP status the host answered with (0 when unreachable);

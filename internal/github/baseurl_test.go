@@ -29,6 +29,8 @@ func TestAPIBase(t *testing.T) {
 		// not the GHES /api/v3 path mount.
 		{"https://octocorp.ghe.com", "https://api.octocorp.ghe.com"},
 		{"https://octocorp.ghe.com/", "https://api.octocorp.ghe.com"},
+		// An already-api.* ghe.com host must not be double-prefixed.
+		{"https://api.octocorp.ghe.com", "https://api.octocorp.ghe.com"},
 		// Defensive: a github.com base carrying a port still resolves public.
 		{"https://github.com:443", "https://api.github.com"},
 	}

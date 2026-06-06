@@ -63,19 +63,29 @@ func (s *Server) handleJiraReachability(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, reachability.Probe(r.Context(), jira.ReachabilityURL(base)))
 }
 
-// normalizeReachabilityURL validates a user-entered base URL for a probe: it
-// must parse, use http or https, and carry a host. Returns the
-// trailing-slash-trimmed URL. A bad value is rejected at the handler (400) —
-// the reachable/unreachable verdict is reserved for well-formed hosts, so a
-// typo reads as "fix your URL", not "host down".
+// normalizeReachabilityURL validates a user-entered base URL for a probe and
+// returns its canonical form (scheme://host[/path], trailing slash trimmed). A
+// base URL must parse, use http or https, and carry a host — and must NOT
+// carry credentials (userinfo), a query, or a fragment. Those forms are
+// rejected as bad input (a 400 at the handler) rather than flowing into a
+// malformed derived probe URL — e.g. without this, "https://host?x=1" would
+// become "https://host?x=1/api/v3" and surface a confusing 200 + unreachable
+// instead of "fix your URL". A path is preserved: Jira Data Center can live
+// under a context path.
 func normalizeReachabilityURL(raw string) (string, bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", false
 	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+	if err != nil || u.Host == "" {
 		return "", false
 	}
-	return strings.TrimRight(raw, "/"), true
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", false
+	}
+	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return "", false
+	}
+	return strings.TrimRight(u.Scheme+"://"+u.Host+u.Path, "/"), true
 }

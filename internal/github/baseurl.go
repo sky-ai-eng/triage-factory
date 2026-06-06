@@ -52,12 +52,19 @@ func APIBase(base string) string {
 		// public host, preserving the historical behavior for odd inputs.
 		return base + "/api/v3"
 	}
+	host := u.Hostname()
 	switch {
-	case u.Hostname() == "github.com":
+	case host == "github.com":
 		return "https://api.github.com"
-	case strings.HasSuffix(u.Hostname(), ".ghe.com"):
-		// Data residency: API host is api.<tenant>.ghe.com. Built from u.Host
-		// (not Hostname) so an explicit port — rare but valid — is preserved.
+	case strings.HasSuffix(host, ".ghe.com"):
+		// Data residency: the API host is api.<tenant>.ghe.com. Built from
+		// u.Host (not host) so an explicit port — rare but valid — is kept. If
+		// the caller already handed us that api.* host (a stored API base, or a
+		// paste of the wrong field), return it as-is rather than double-prefix
+		// it into api.api.<tenant>.ghe.com.
+		if strings.HasPrefix(host, "api.") {
+			return u.Scheme + "://" + u.Host
+		}
 		return u.Scheme + "://api." + u.Host
 	default:
 		return base + "/api/v3"

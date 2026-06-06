@@ -34,6 +34,34 @@ func TestProbe_ReachableAnyStatus(t *testing.T) {
 	}
 }
 
+// TestProbe_DoesNotFollowRedirect proves a 3xx is the verdict itself: the host
+// answered (reachable), and the probe does NOT chase the Location into another
+// (possibly internal) host.
+func TestProbe_DoesNotFollowRedirect(t *testing.T) {
+	var followed bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/elsewhere" {
+			followed = true
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Location", "/elsewhere")
+		w.WriteHeader(http.StatusFound) // 302
+	}))
+	defer srv.Close()
+
+	res := Probe(context.Background(), srv.URL)
+	if !res.Reachable {
+		t.Errorf("Reachable=false on a 302, want true (host answered)")
+	}
+	if res.Status != http.StatusFound {
+		t.Errorf("Status = %d, want 302 (redirect not followed)", res.Status)
+	}
+	if followed {
+		t.Errorf("probe followed the redirect to /elsewhere; it must not")
+	}
+}
+
 // TestProbe_UnreachableConnRefused points at a server that has been closed, so
 // nothing listens — a pure-loopback connection refused, no DNS needed.
 func TestProbe_UnreachableConnRefused(t *testing.T) {

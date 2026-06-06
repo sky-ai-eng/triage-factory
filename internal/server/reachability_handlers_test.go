@@ -73,7 +73,10 @@ func TestHandleGitHubReachability_BadURL(t *testing.T) {
 		`{"url":""}`,
 		`{"url":"not a url"}`,
 		`{"url":"ftp://example.com"}`,
-		`{"url":"example.com"}`, // no scheme
+		`{"url":"example.com"}`,                        // no scheme
+		`{"url":"https://host.example.com?x=1"}`,       // query has no place in a base URL
+		`{"url":"https://host.example.com#frag"}`,      // fragment likewise
+		`{"url":"https://user:pass@host.example.com"}`, // embedded credentials
 	} {
 		if code, _ := postReachability(t, s.handleGitHubReachability, body); code != http.StatusBadRequest {
 			t.Errorf("body %s: status = %d, want 400", body, code)

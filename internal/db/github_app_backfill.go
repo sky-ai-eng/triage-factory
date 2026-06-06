@@ -26,10 +26,16 @@ func githubAPIBase(base string) string {
 	if err != nil || u.Host == "" {
 		return base + "/api/v3"
 	}
+	host := u.Hostname()
 	switch {
-	case u.Hostname() == "github.com":
+	case host == "github.com":
 		return "https://api.github.com"
-	case strings.HasSuffix(u.Hostname(), ".ghe.com"):
+	case strings.HasSuffix(host, ".ghe.com"):
+		// An already-api.* host (a stored API base) must not be double-prefixed
+		// into api.api.<tenant>.ghe.com — keep in lockstep with APIBase.
+		if strings.HasPrefix(host, "api.") {
+			return u.Scheme + "://" + u.Host
+		}
 		return u.Scheme + "://api." + u.Host
 	default:
 		return base + "/api/v3"
