@@ -580,6 +580,65 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		}
 	})
 
+	// n=2 is the smallest multi-step blueprint — head and tail are the only
+	// positions (no middle), and each surviving side is a 1-step blueprint, so
+	// the index shifts have no buffer. Worth pinning as the boundary regression.
+	t.Run("DeleteStep_MinSizeHead", func(t *testing.T) {
+		store, orgID, teamID, seedPrompt := factory(t)
+		ctx := context.Background()
+		bp, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "del-min-head", Name: "MinHead", Source: "system"})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		p0, p1 := seedPrompt(t, "dmh-0"), seedPrompt(t, "dmh-1")
+		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1}, nil); err != nil {
+			t.Fatalf("ReplaceSteps: %v", err)
+		}
+		down, err := store.DeleteStep(ctx, orgID, bp, 0, "Downstream")
+		if err != nil {
+			t.Fatalf("DeleteStep: %v", err)
+		}
+		if down == "" {
+			t.Fatalf("2-step head delete minted no downstream blueprint; want one")
+		}
+		// Original retires; the lone remaining step is the new downstream at index 0.
+		if got, err := store.Get(ctx, orgID, bp); err != nil || got != nil {
+			t.Fatalf("Get(original) after 2-step head delete = (%v, %v), want (nil, nil)", got, err)
+		}
+		assertDenseSteps(t, store, orgID, down, []string{p1})
+		if _, ok, err := store.StepPromptOwner(ctx, orgID, p0); err != nil || ok {
+			t.Fatalf("StepPromptOwner(deleted entry) = (_, %v, %v), want (_, false, nil)", ok, err)
+		}
+	})
+
+	t.Run("DeleteStep_MinSizeTail", func(t *testing.T) {
+		store, orgID, teamID, seedPrompt := factory(t)
+		ctx := context.Background()
+		bp, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "del-min-tail", Name: "MinTail", Source: "system"})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		p0, p1 := seedPrompt(t, "dmt-0"), seedPrompt(t, "dmt-1")
+		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1}, nil); err != nil {
+			t.Fatalf("ReplaceSteps: %v", err)
+		}
+		down, err := store.DeleteStep(ctx, orgID, bp, 1, "")
+		if err != nil {
+			t.Fatalf("DeleteStep: %v", err)
+		}
+		if down != "" {
+			t.Fatalf("2-step tail delete minted a downstream blueprint %q; want none", down)
+		}
+		// Original keeps its lone surviving step at index 0, request-visible.
+		assertDenseSteps(t, store, orgID, bp, []string{p0})
+		if got, err := store.Get(ctx, orgID, bp); err != nil || got == nil {
+			t.Fatalf("Get(original) after 2-step tail delete = (%v, %v), want a row", got, err)
+		}
+		if _, ok, err := store.StepPromptOwner(ctx, orgID, p1); err != nil || ok {
+			t.Fatalf("StepPromptOwner(deleted) = (_, %v, %v), want (_, false, nil)", ok, err)
+		}
+	})
+
 	t.Run("DeleteStep_RejectsSingleStep", func(t *testing.T) {
 		store, orgID, teamID, seedPrompt := factory(t)
 		ctx := context.Background()

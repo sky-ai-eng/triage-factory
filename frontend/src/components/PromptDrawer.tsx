@@ -357,8 +357,10 @@ export default function PromptDrawer({
       // the chain: the steps after it become a new, trigger-less blueprint. The
       // server flags that so we can surface it — the downstream half no longer
       // fires on its own. (The canvas refetch via onDeleted re-renders the split.)
-      const body = (await res.json().catch(() => null)) as { orphaned_blueprint?: boolean } | null
-      if (body?.orphaned_blueprint) {
+      const deleteResp = (await res.json().catch(() => null)) as {
+        orphaned_blueprint?: boolean
+      } | null
+      if (deleteResp?.orphaned_blueprint) {
         toast.info('Steps after the deleted prompt are now an untriggered blueprint.')
       }
       onDeleted?.()

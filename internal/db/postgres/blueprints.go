@@ -408,14 +408,27 @@ func (s *blueprintStore) MergeInto(ctx context.Context, orgID, hostID, sourceID 
 // COALESCE(current_user_id, org owner) creator default. Shared by SplitAt and
 // DeleteStep.
 func insertTriggerlessBlueprintPG(ctx context.Context, q queryer, orgID, id, name, srcBlueprintID string) error {
-	_, err := q.ExecContext(ctx, `
+	res, err := q.ExecContext(ctx, `
 		INSERT INTO blueprints (id, org_id, creator_user_id, team_id, name, source, usage_count, created_at, updated_at)
 		SELECT $1, $2,
 			COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
 			b.team_id, $3, 'user', 0, now(), now()
 		FROM blueprints b WHERE b.id = $4 AND b.org_id = $2
 	`, id, orgID, name, srcBlueprintID)
-	return err
+	if err != nil {
+		return err
+	}
+	// The SELECT derives team_id from the source blueprint; a 0-row insert means
+	// srcBlueprintID is absent (or out of org). Guard so a missing source surfaces
+	// here rather than as a cryptic FK error on the follow-up reparent.
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("triggerless blueprint: source %s not found", srcBlueprintID)
+	}
+	return nil
 }
 
 // softDeleteBlueprintTxPG stamps deleted_at inside an open tx (mirrors
@@ -441,7 +454,7 @@ func softDeleteBlueprintTxPG(ctx context.Context, q queryer, orgID, id string) e
 // never surfaced — the wrapper is soft-deleted on creation). Team is derived
 // from srcBlueprintID so the reparented step's same-team FK resolves.
 func insertIsolationBlueprintPG(ctx context.Context, q queryer, orgID, id, srcBlueprintID string, stepIndex int) error {
-	_, err := q.ExecContext(ctx, `
+	res, err := q.ExecContext(ctx, `
 		INSERT INTO blueprints (id, org_id, creator_user_id, team_id, name, source, usage_count, created_at, updated_at, deleted_at)
 		SELECT $1, $2,
 			COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
@@ -451,7 +464,20 @@ func insertIsolationBlueprintPG(ctx context.Context, q queryer, orgID, id, srcBl
 		JOIN prompts p ON p.id = bs.step_prompt_id AND p.org_id = bs.org_id
 		WHERE b.id = $3 AND b.org_id = $2 AND bs.step_index = $4
 	`, id, orgID, srcBlueprintID, stepIndex)
-	return err
+	if err != nil {
+		return err
+	}
+	// The SELECT resolves the deleted step's prompt; a 0-row insert means that
+	// step is missing. The caller validates it exists, so this guards against a
+	// cryptic FK error on the follow-up reparent rather than an expected path.
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("isolation blueprint: step %d of %s not found", stepIndex, srcBlueprintID)
+	}
+	return nil
 }
 
 func (s *blueprintStore) SplitAt(ctx context.Context, orgID, id string, atIndex int, newBlueprintID, newName string) (string, error) {

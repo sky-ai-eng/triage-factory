@@ -488,13 +488,27 @@ func (s *blueprintStore) SplitAt(ctx context.Context, orgID, id string, atIndex 
 // require a non-empty name). srcBlueprintID/stepIndex address the step the
 // caller is about to reparent onto it.
 func insertIsolationBlueprintTx(ctx context.Context, q queryer, id, srcBlueprintID string, stepIndex int, now time.Time) error {
-	_, err := q.ExecContext(ctx, `
+	res, err := q.ExecContext(ctx, `
 		INSERT INTO blueprints (id, name, source, usage_count, team_id, creator_user_id, created_at, updated_at, deleted_at)
 		SELECT ?, p.name, 'user', 0, ?, ?, ?, ?, ?
 		FROM blueprint_steps bs JOIN prompts p ON p.id = bs.step_prompt_id
 		WHERE bs.blueprint_id = ? AND bs.step_index = ?
 	`, id, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, now, now, now, srcBlueprintID, stepIndex)
-	return err
+	if err != nil {
+		return err
+	}
+	// The SELECT resolves the deleted step's prompt; a 0-row insert means that
+	// step is missing. The caller validates it exists, so this is a guard
+	// against a cryptic FK error on the follow-up reparent rather than an
+	// expected path.
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("isolation blueprint: step %d of %s not found", stepIndex, srcBlueprintID)
+	}
+	return nil
 }
 
 func (s *blueprintStore) DeleteStep(ctx context.Context, orgID, blueprintID string, stepIndex int, newName string) (string, error) {
