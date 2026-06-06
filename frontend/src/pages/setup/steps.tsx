@@ -1,9 +1,10 @@
 // The wizard's step registry — one atomic action per stack entry. The
-// ORGANIZATION steps (GitHub URL → GitHub access → GitHub poll interval →
-// Trackers → [Jira URL → Jira access → Jira poll interval, shown only when Jira
-// is the chosen/connected tracker] → org max model tier) and the four TEAM
-// steps for the first team (Repositories, GitHub teams, Jira projects, team
-// default model), composing the existing shared field groups into the same step
+// ORGANIZATION steps (GitHub URL → GitHub access method → GitHub App | PAT
+// config [whichever method was chosen] → GitHub poll interval → Trackers →
+// [Jira URL → Jira access → Jira poll interval, shown only when Jira is the
+// chosen/connected tracker] → org max model tier) and the four TEAM steps for
+// the first team (Repositories, GitHub teams, Jira projects, team default
+// model), composing the existing shared field groups into the same step
 // contract with no new host plumbing.
 //
 // The split is deliberate: each integration's URL, access, and cadence are
@@ -26,7 +27,13 @@
 // steps connect on Continue (PAT) or via an external launch (App register), so
 // their per-step persist either performs the connect or is a no-op advance.
 
-import { GitHubUrlStep, GitHubAccessStep, DEFAULT_GITHUB_URL } from './GitHubStep'
+import {
+  GitHubUrlStep,
+  GitHubModeStep,
+  GitHubAppStep,
+  GitHubPatStep,
+  DEFAULT_GITHUB_URL,
+} from './GitHubStep'
 import TrackersStep from './TrackersStep'
 import { JiraUrlStep, JiraAccessStep } from './JiraStep'
 import {
@@ -263,40 +270,64 @@ const githubUrlStep: WizardStep = {
   render: (ctx) => <GitHubUrlStep {...ctx} />,
 }
 
-// Step · GitHub access (mandatory). App (default) / PAT switcher. Continue
-// performs the PAT connect (saveOrgConfig validates creds + base URL and
-// surfaces the server's error) — there is no separate Connect button. The App
-// tab advances once the App is registered+installed (github_ready); its own
-// external Register launch lives in GitHubAppPanel, which a redirect can't fold
-// into Continue. isComplete is the server's github_ready signal, so the
-// mandatory backbone blocks the stack until GitHub is connected by any means.
-const githubAccessStep: WizardStep = {
-  id: 'org-github-access',
+// Step · GitHub access method (the mode picker). App (default) vs PAT, as its
+// own step in the flow; the choice gates the two config steps below. Always
+// complete — a method is always selected — so it never blocks; the mandatory
+// GitHub gate lives on whichever config step is visible.
+const githubModeStep: WizardStep = {
+  id: 'org-github-mode',
   section: 'org',
   title: 'GitHub access',
+  isComplete: () => true,
+  persist: async () => {},
+  collapsedSummary: (s) => (s.githubAccessTab === 'pat' ? 'Personal access token' : 'GitHub App'),
+  render: (ctx) => <GitHubModeStep {...ctx} />,
+}
+
+// connectedSummary — shared by the App / PAT config steps: the connected host,
+// or "Not connected".
+const connectedSummary = (s: WizardState) =>
+  s.githubReady ? `Connected · ${hostOf(s.org.github_url || DEFAULT_GITHUB_URL)}` : 'Not connected'
+
+// Step · GitHub App (mandatory, visible when App is the chosen method). The App
+// registration is GitHubAppPanel's external Register launch (a redirect can't
+// fold into Continue), so persist is a no-op — Continue just advances once the
+// App is registered+installed (github_ready), which validate gates.
+const githubAppStep: WizardStep = {
+  id: 'org-github-app',
+  section: 'org',
+  title: 'GitHub App',
+  visible: (s) => s.githubAccessTab === 'app',
+  isComplete: (s) => s.githubReady,
+  validate: (s) => (s.githubReady ? null : 'Register and install your GitHub App to continue.'),
+  persist: async () => {},
+  collapsedSummary: connectedSummary,
+  render: (ctx) => <GitHubAppStep {...ctx} />,
+}
+
+// Step · Personal access token (mandatory, visible when PAT is the chosen
+// method). No separate Connect button — Continue performs the connect:
+// saveOrgConfig POSTs the org form; the backend validates the PAT against the
+// base URL and 422s on a bad token. A freshly-entered token is trusted on a
+// successful save; an empty field relied on a *stored* token, which the save
+// does NOT re-validate, so confirm against the server's github_ready signal
+// rather than optimistically marking connected.
+const githubPatStep: WizardStep = {
+  id: 'org-github-pat',
+  section: 'org',
+  title: 'Personal access token',
+  visible: (s) => s.githubAccessTab === 'pat',
   isComplete: (s) => s.githubReady,
   validate: (s) => {
     if (s.githubReady) return null
-    if (s.githubAccessTab === 'app') return 'Register and install your GitHub App to continue.'
     return !s.hasGitHubPat && s.org.github_pat.trim() === ''
       ? 'Enter a personal access token to connect.'
       : null
   },
   persist: async ({ state, patch }) => {
-    // Already connected (PAT, App, or a prior run) ⇒ advance. Otherwise this is
-    // the PAT path: saveOrgConfig POSTs the full org form; the backend
-    // validates the PAT against the base URL and returns a clear error on a bad
-    // token — exactly the creds error the old candidate path swallowed.
     if (state.githubReady) return
     const result = await saveOrgConfig(state.org)
     if (!result.ok) throw new Error(result.error)
-    // A freshly-entered token IS validated by the save (the backend 422s on a
-    // bad PAT), so it's safe to claim connected. An empty field relied on a
-    // *stored* token, which saveOrgConfig does NOT re-validate — confirm against
-    // the server's folded github_ready signal rather than optimistically marking
-    // connected, so a stored-but-expired token (or a failed integrations-status
-    // load that left githubReady false despite hasGitHubPat) can't finish the
-    // wizard with no working connection.
     if (state.org.github_pat.trim() === '') {
       const { githubReady } = await fetchIntegrationsState()
       if (!githubReady) {
@@ -305,11 +336,8 @@ const githubAccessStep: WizardStep = {
     }
     patch({ githubReady: true, hasGitHubPat: true, org: { ...state.org, github_pat: '' } })
   },
-  collapsedSummary: (s) =>
-    s.githubReady
-      ? `Connected · ${hostOf(s.org.github_url || DEFAULT_GITHUB_URL)}`
-      : 'Not connected',
-  render: (ctx) => <GitHubAccessStep {...ctx} />,
+  collapsedSummary: connectedSummary,
+  render: (ctx) => <GitHubPatStep {...ctx} />,
 }
 
 // Step · GitHub poll interval. Sits right after the GitHub steps so each
@@ -609,7 +637,9 @@ const teamModelStep: WizardStep = {
 // Jira-projects step is conditionally omitted via its `visible` predicate.
 export const WIZARD_STEPS: WizardStep[] = [
   githubUrlStep,
-  githubAccessStep,
+  githubModeStep,
+  githubAppStep,
+  githubPatStep,
   githubPollerStep,
   trackersStep,
   jiraUrlStep,

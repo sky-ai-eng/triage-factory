@@ -42,6 +42,10 @@ export const WIZARD_SECTIONS: WizardSection[] = [
 // selected for display but never persists a connection.
 export type TrackerKind = 'none' | 'jira' | 'linear'
 
+// The GitHub access method an org connects with — its own picker step, gating
+// the App vs PAT config steps. App is the default in both modes.
+export type GitHubAccessMode = 'app' | 'pat'
+
 export interface WizardState {
   org: OrgConfigForm
   // True once the org form has been seeded from the server (the GitHub step's
@@ -66,11 +70,11 @@ export interface WizardState {
   // (githubReady) implies a previously-confirmed URL, so it's seeded from
   // githubReady on load.
   githubUrlConfirmed: boolean
-  // Which access method the GitHub access step is showing — App (default) or
-  // PAT. Lifted out of the step body into shared state so the step's Continue
-  // (which now performs the PAT connect, no separate button) can branch on it
-  // from persist(). Seeded to 'pat' for a returning org with a stored token.
-  githubAccessTab: 'app' | 'pat'
+  // Which access method is selected — App (default) or PAT. Set in the mode
+  // picker step; gates the App / PAT config steps' visibility, and the PAT
+  // step's Continue (which performs the connect) reads it. Seeded to 'pat' for a
+  // returning org with a stored token.
+  githubAccessTab: GitHubAccessMode
   // Whether the org currently has a working Jira connection (PAT + base URL).
   // Gates the poller step's Jira interval and the team Jira-projects step.
   jiraConnected: boolean
