@@ -101,7 +101,7 @@ export function CollapsedStepBar({
     <button
       type="button"
       onClick={onEdit}
-      aria-label={`${title} — completed. Edit.`}
+      aria-label={complete ? `${title} — completed. Edit.` : `${title} — in progress. Edit.`}
       className="group flex w-full items-center gap-2.5 rounded-xl border border-border-subtle bg-surface-raised/60 px-4 py-2.5 text-left transition-colors hover:border-accent/40 hover:bg-surface-raised"
     >
       <StepMarker number={number} complete={complete} />

@@ -100,3 +100,13 @@ export function isHttpUrl(raw: string): boolean {
     return false
   }
 }
+
+// normalizeBaseUrl trims surrounding whitespace and trailing slashes from a
+// user-entered base URL, so the value we probe, persist, and later connect with
+// is one canonical form. The backend stores org_settings.github_base_url /
+// jira_base_url verbatim (and the reachability probe trims only internally), so
+// without this an untrimmed value would pass the probe yet get persisted with
+// stray whitespace/slash and break identity lookups or the App/PAT/Jira flows.
+export function normalizeBaseUrl(raw: string): string {
+  return raw.trim().replace(/\/+$/, '')
+}

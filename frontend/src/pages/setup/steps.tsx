@@ -32,6 +32,7 @@ import { JiraUrlStep, JiraAccessStep } from './JiraStep'
 import {
   hostOf,
   isHttpUrl,
+  normalizeBaseUrl,
   checkGitHubReachability,
   checkJiraReachability,
   reachabilityMessage,
@@ -242,15 +243,21 @@ const githubUrlStep: WizardStep = {
     // a stored/previously-confirmed URL must not let an edited value through
     // unchecked.
     if (state.githubReady) return
-    const result = await checkGitHubReachability(state.org.github_url)
+    // Normalize (trim + drop trailing slash) before probing AND persisting, and
+    // write the clean value back to state — the backend stores the base URL
+    // verbatim, so a stray space/slash that the probe tolerates would otherwise
+    // be saved and break the App/PAT host derivation downstream.
+    const url = normalizeBaseUrl(state.org.github_url)
+    const result = await checkGitHubReachability(url)
     if (!result.reachable) throw new Error(reachabilityMessage(result))
     // Persist the base URL now (blank PAT = keep current): the App-registration
     // path reads the stored host, and the PAT path re-saves URL+creds together
     // at the access step. Round-trips the same org form loadOrg seeded, so the
     // intervals / model cap / stored PAT are untouched.
-    const save = await saveOrgConfig(state.org)
+    const nextOrg = { ...state.org, github_url: url }
+    const save = await saveOrgConfig(nextOrg)
     if (!save.ok) throw new Error(save.error)
-    patch({ githubUrlConfirmed: true })
+    patch({ org: nextOrg, githubUrlConfirmed: true })
   },
   collapsedSummary: (s) => `GitHub URL: ${hostOf(s.org.github_url || DEFAULT_GITHUB_URL)}`,
   render: (ctx) => <GitHubUrlStep {...ctx} />,
@@ -283,6 +290,19 @@ const githubAccessStep: WizardStep = {
     if (state.githubReady) return
     const result = await saveOrgConfig(state.org)
     if (!result.ok) throw new Error(result.error)
+    // A freshly-entered token IS validated by the save (the backend 422s on a
+    // bad PAT), so it's safe to claim connected. An empty field relied on a
+    // *stored* token, which saveOrgConfig does NOT re-validate — confirm against
+    // the server's folded github_ready signal rather than optimistically marking
+    // connected, so a stored-but-expired token (or a failed integrations-status
+    // load that left githubReady false despite hasGitHubPat) can't finish the
+    // wizard with no working connection.
+    if (state.org.github_pat.trim() === '') {
+      const { githubReady } = await fetchIntegrationsState()
+      if (!githubReady) {
+        throw new Error('Couldn’t verify your stored GitHub token. Re-enter it to reconnect.')
+      }
+    }
     patch({ githubReady: true, hasGitHubPat: true, org: { ...state.org, github_pat: '' } })
   },
   collapsedSummary: (s) =>
@@ -357,9 +377,12 @@ const jiraUrlStep: WizardStep = {
   persist: async ({ state, patch }) => {
     // Always probe on Continue unless already connected — same rule as GitHub.
     if (state.jiraConnected) return
-    const result = await checkJiraReachability(state.org.jira_url)
+    // Normalize + write back so the value the access step's connect sends (and
+    // the collapsed summary shows) is the canonical, trimmed URL.
+    const url = normalizeBaseUrl(state.org.jira_url)
+    const result = await checkJiraReachability(url)
     if (!result.reachable) throw new Error(reachabilityMessage(result))
-    patch({ jiraUrlConfirmed: true })
+    patch({ jiraUrlConfirmed: true, org: { ...state.org, jira_url: url } })
   },
   collapsedSummary: (s) => `Jira URL: ${hostOf(s.org.jira_url)}`,
   render: (ctx) => <JiraUrlStep {...ctx} />,
