@@ -35,11 +35,16 @@ export const DEFAULT_GITHUB_URL = 'https://github.com'
 // error line.
 export function GitHubUrlStep({ state, patch, error }: StepContext) {
   return (
-    <div className="space-y-4">
-      <p className="text-[13px] leading-relaxed text-text-secondary">
-        GitHub is the backbone — Triage Factory polls your organization&rsquo;s repositories for the
-        PRs and reviews it surfaces. Confirm where your GitHub lives, then connect.
-      </p>
+    <div className="space-y-5">
+      <div className="space-y-1.5">
+        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+          Where does your GitHub live?
+        </h2>
+        <p className="text-[13px] leading-relaxed text-text-tertiary">
+          GitHub is the backbone — Triage Factory polls your organization&rsquo;s repositories for
+          the PRs and reviews it surfaces.
+        </p>
+      </div>
       <UrlField
         label="GitHub URL"
         value={state.org.github_url}

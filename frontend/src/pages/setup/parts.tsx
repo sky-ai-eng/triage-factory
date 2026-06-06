@@ -4,7 +4,8 @@
 // own the focus ref and the expand/collapse animation.
 
 import { Check } from 'lucide-react'
-import { inputClass } from '../settings/primitives'
+import { motion } from 'motion/react'
+import { glassSliver, glassField } from './glassStyle'
 
 // UrlField is the base-URL input shared by the GitHub and Jira URL steps: a
 // controlled field bound straight to wizard state (no local draft), so the
@@ -30,15 +31,19 @@ export function UrlField({
   return (
     <div className="space-y-2">
       <label className="block">
-        <span className="mb-1.5 block text-[11px] text-text-tertiary">{label}</span>
+        <span className="mb-2 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+          {label}
+        </span>
         <input
           type="url"
           value={value}
           placeholder={placeholder || 'https://…'}
           onChange={(e) => onChange(e.target.value)}
           aria-invalid={invalid || undefined}
-          className={`${inputClass}${
-            invalid ? ' !border-[var(--color-dismiss)] focus:!border-[var(--color-dismiss)]' : ''
+          className={`${glassField}${
+            invalid
+              ? ' !border-[var(--color-dismiss)] focus:!border-[var(--color-dismiss)] focus:!shadow-[0_0_0_4px_rgba(168,69,69,0.16)]'
+              : ''
           }`}
         />
       </label>
@@ -85,12 +90,16 @@ function StepMarker({ number, complete }: { number: number; complete: boolean })
 // every collapsed bar is a reachable, editable one — there is no inert
 // "upcoming" variant.
 export function CollapsedStepBar({
+  id,
   number,
   title,
   summary,
   complete,
   onEdit,
 }: {
+  // Step id — used for the shared layoutId so the title morphs continuously
+  // between this collapsed sliver and the active step's heading (the distill).
+  id: string
   number: number
   title: string
   summary: string
@@ -102,10 +111,15 @@ export function CollapsedStepBar({
       type="button"
       onClick={onEdit}
       aria-label={complete ? `${title} — completed. Edit.` : `${title} — in progress. Edit.`}
-      className="group flex w-full items-center gap-2.5 rounded-xl border border-border-subtle bg-surface-raised/60 px-4 py-2.5 text-left transition-colors hover:border-accent/40 hover:bg-surface-raised"
+      className={`group flex w-full items-center gap-2.5 px-4 py-2.5 text-left hover:border-accent/30 ${glassSliver}`}
     >
       <StepMarker number={number} complete={complete} />
-      <span className="text-[13px] font-medium text-text-secondary">{title}</span>
+      <motion.span
+        layoutId={`setup-title-${id}`}
+        className="text-[12px] font-medium uppercase tracking-wide text-text-secondary"
+      >
+        {title}
+      </motion.span>
       {complete && (
         <span className="truncate text-[12px] text-text-tertiary" title={summary}>
           {summary}

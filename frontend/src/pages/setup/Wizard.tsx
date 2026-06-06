@@ -25,6 +25,8 @@ import { WIZARD_STEPS, initialWizardState, jiraActive } from './steps'
 import { useWizard } from './useWizard'
 import { isStepVisible } from './resume'
 import { CollapsedStepBar, SectionDivider } from './parts'
+import { GlassBackdrop, SpecularEdge } from './glass'
+import { glassSurface, bodyEase } from './glassStyle'
 
 function Loading() {
   return (
@@ -130,15 +132,15 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
     : ''
 
   return (
-    <div className="min-h-screen bg-surface px-4 py-12">
-      <div className="mx-auto max-w-2xl">
-        <header className="mb-8 space-y-1.5">
-          <h1 className="text-[22px] font-semibold tracking-tight text-text-primary">
+    <div className="relative min-h-screen px-4 py-16">
+      <GlassBackdrop />
+      <div className="mx-auto max-w-xl">
+        <header className="mb-10 space-y-2">
+          <h1 className="text-[27px] font-semibold tracking-tight text-text-primary">
             Set up Triage Factory
           </h1>
-          <p className="text-[13px] leading-relaxed text-text-tertiary">
-            A few steps to get your workspace ready. Each step saves as you go — you can change any
-            of it later in Settings.
+          <p className="text-[14px] leading-relaxed text-text-tertiary">
+            A few steps to get your workspace ready. Each one saves as you go.
           </p>
         </header>
 
@@ -166,7 +168,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
             return (
               <section key={section.id} aria-labelledby={`setup-section-${section.id}`}>
                 <SectionDivider id={`setup-section-${section.id}`} title={section.title} />
-                <ol className="space-y-2">
+                <ol className="space-y-2.5">
                   {entries.map(({ step, index }) => {
                     const isActive = index === activeIndex
                     const complete = wiz.isStepComplete(index)
@@ -180,28 +182,29 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                       <li
                         key={step.id}
                         ref={isActive ? cardRef : undefined}
-                        className={
-                          isActive
-                            ? 'rounded-2xl border border-accent/30 bg-surface-raised shadow-sm shadow-black/[0.04]'
-                            : undefined
-                        }
+                        className={isActive ? glassSurface : undefined}
                       >
                         {isActive ? (
-                          <div className="flex items-center gap-2.5 px-5 pt-4">
-                            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent text-[10px] font-semibold text-white">
-                              {displayNumber(step)}
-                            </span>
-                            <h3
-                              ref={headingRef}
-                              tabIndex={-1}
-                              aria-current="step"
-                              className="text-[14px] font-semibold text-text-primary outline-none"
-                            >
-                              {step.title}
-                            </h3>
-                          </div>
+                          <>
+                            <SpecularEdge />
+                            <div className="flex items-center gap-3 px-7 pt-6">
+                              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-accent text-[11px] font-semibold text-white shadow-[0_4px_12px_-3px_var(--color-accent)]">
+                                {displayNumber(step)}
+                              </span>
+                              <motion.h3
+                                layoutId={`setup-title-${step.id}`}
+                                ref={headingRef}
+                                tabIndex={-1}
+                                aria-current="step"
+                                className="text-[13px] font-medium uppercase tracking-wide text-text-tertiary outline-none"
+                              >
+                                {step.title}
+                              </motion.h3>
+                            </div>
+                          </>
                         ) : (
                           <CollapsedStepBar
+                            id={step.id}
                             number={displayNumber(step)}
                             title={step.title}
                             summary={step.collapsedSummary(wiz.state)}
@@ -214,13 +217,19 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                           {isActive && (
                             <motion.div
                               key="body"
-                              initial={reduce ? false : { height: 0, opacity: 0 }}
-                              animate={{ height: 'auto', opacity: 1 }}
-                              exit={reduce ? { opacity: 0 } : { height: 0, opacity: 0 }}
-                              transition={{ duration: reduce ? 0 : 0.25, ease: 'easeOut' }}
+                              initial={
+                                reduce ? false : { height: 0, opacity: 0, filter: 'blur(10px)' }
+                              }
+                              animate={{ height: 'auto', opacity: 1, filter: 'blur(0px)' }}
+                              exit={
+                                reduce
+                                  ? { opacity: 0 }
+                                  : { height: 0, opacity: 0, filter: 'blur(6px)' }
+                              }
+                              transition={reduce ? { duration: 0 } : bodyEase}
                               style={{ overflow: 'hidden' }}
                             >
-                              <div className="space-y-4 px-5 pb-5 pt-3">
+                              <div className="space-y-5 px-7 pb-6 pt-4">
                                 {wiz.activeLoadFailed ? (
                                   <div className="space-y-3">
                                     <p className="text-[13px] text-text-secondary">
@@ -266,7 +275,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                                     type="button"
                                     onClick={advance}
                                     disabled={busy || wiz.activeLoadFailed}
-                                    className="rounded-xl bg-accent px-5 py-2.5 text-[13px] font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-40"
+                                    className="rounded-full bg-accent px-6 py-2.5 text-[13px] font-medium text-white shadow-[0_10px_28px_-10px_var(--color-accent)] transition-all hover:bg-accent/90 hover:shadow-[0_12px_32px_-8px_var(--color-accent)] disabled:opacity-40 disabled:shadow-none"
                                   >
                                     {busy
                                       ? 'Saving…'
