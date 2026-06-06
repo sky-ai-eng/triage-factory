@@ -15,7 +15,7 @@ import {
   applyNodeChanges,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { Copy, Layers, MoreVertical, Trash2 } from 'lucide-react'
+import { Copy, FileText, Layers, MoreVertical, Trash2 } from 'lucide-react'
 import type { Blueprint, BlueprintStep, Prompt, TriggerHandler } from '../types'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
@@ -522,6 +522,9 @@ function BindingGraphInner({
   // when the Delete-key target needs a confirm (any blueprint, or >1 element);
   // the dialog names what's affected and runs executeDeletePlan on confirm.
   const [deleteConfirm, setDeleteConfirm] = useState<DeletePlan | null>(null)
+  // Drives the confirm dialog's in-flight UI (disabled buttons + "Deleting…").
+  // deletingRef is the synchronous re-entrancy guard; this is the render signal.
+  const [isDeleting, setIsDeleting] = useState(false)
   // Persisted layout, keyed per scope (team vs template, and per team) so the
   // canvases don't overwrite each other's node positions. storageKeyRef keeps
   // the key fresh for the save callbacks (which have empty/narrow dep arrays),
@@ -851,6 +854,7 @@ function BindingGraphInner({
     async (plan: DeletePlan) => {
       if (deletingRef.current) return
       deletingRef.current = true
+      setIsDeleting(true)
       try {
         for (const bp of plan.blueprints) {
           await deleteBlueprintCore(bp.id)
@@ -873,6 +877,7 @@ function BindingGraphInner({
         }
       } finally {
         deletingRef.current = false
+        setIsDeleting(false)
         setDeleteConfirm(null)
         await fetchAll()
       }
@@ -1622,6 +1627,18 @@ function BindingGraphInner({
     [executeDeletePlan],
   )
 
+  // Escape cancels the confirm dialog (modal convention), unless a delete is
+  // already in flight — the batch is mid-run and can't be unwound. Wired only
+  // while the dialog is open so it shadows nothing else.
+  useEffect(() => {
+    if (!deleteConfirm) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !deletingRef.current) setDeleteConfirm(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [deleteConfirm])
+
   // Handle drop from sidebar
   const onDragOver = useCallback((e: DragEvent) => {
     e.preventDefault()
@@ -1651,6 +1668,22 @@ function BindingGraphInner({
     : undefined
 
   const deleteSummary = deleteConfirm ? summarizeDeletePlan(deleteConfirm) : ''
+  // Only warn about the split-into-untriggered-blueprint outcome when a selected
+  // prompt actually leaves a later step behind — i.e. a step past it survives the
+  // batch. Deleting only tail steps (or a whole contiguous run) orphans nothing.
+  const deleteMightOrphan =
+    !!deleteConfirm &&
+    deleteConfirm.prompts.some((p) => {
+      if (p.stepIndex < 0) return false
+      const steps = blueprintSteps[p.blueprintId] ?? []
+      const selected = new Set(
+        deleteConfirm.prompts.filter((q) => q.blueprintId === p.blueprintId).map((q) => q.id),
+      )
+      for (let i = p.stepIndex + 1; i < steps.length; i++) {
+        if (!selected.has(steps[i])) return true
+      }
+      return false
+    })
 
   if (loading) {
     return (
@@ -1691,7 +1724,9 @@ function BindingGraphInner({
         deleteKeyCode={['Delete', 'Backspace']}
         // Don't elevate a selected node's z-index — the blueprint box lives at
         // zIndex 0 behind its prompts/edges, and elevating it on selection would
-        // float it over them, swallowing their clicks.
+        // float it over them, swallowing their clicks. This also applies to
+        // prompt nodes (a selected one won't rise above an overlapping sibling),
+        // which is fine — prompts aren't expected to overlap.
         elevateNodesOnSelect={false}
       >
         <Background color="var(--color-border-subtle)" gap={20} size={1} />
@@ -1878,7 +1913,9 @@ function BindingGraphInner({
         <>
           <div
             className="fixed inset-0 z-[60] bg-black/20"
-            onClick={() => setDeleteConfirm(null)}
+            onClick={() => {
+              if (!isDeleting) setDeleteConfirm(null)
+            }}
           />
           <div
             role="dialog"
@@ -1904,7 +1941,8 @@ function BindingGraphInner({
                 </li>
               ))}
               {deleteConfirm.prompts.map((p) => (
-                <li key={`p:${p.id}`} className="flex items-center gap-1.5 pl-[18px]">
+                <li key={`p:${p.id}`} className="flex items-center gap-1.5">
+                  <FileText size={11} className="text-text-tertiary shrink-0" />
                   <span className="truncate">
                     <span className="font-medium text-text-primary">{p.name}</span>
                     <span className="text-text-tertiary"> — prompt</span>
@@ -1913,22 +1951,25 @@ function BindingGraphInner({
               ))}
             </ul>
             <p className="text-[11px] text-text-tertiary leading-snug mb-3">
-              {deleteConfirm.prompts.length > 0 &&
+              {deleteMightOrphan &&
                 'Deleting a prompt mid-blueprint splits the steps after it into a new untriggered blueprint. '}
               This can’t be undone.
             </p>
             <div className="flex items-center justify-end gap-1.5">
               <button
+                autoFocus
                 onClick={() => setDeleteConfirm(null)}
-                className="text-[11px] font-medium text-text-secondary hover:text-text-primary px-3 py-1.5 rounded-md border border-border-subtle transition-colors"
+                disabled={isDeleting}
+                className="text-[11px] font-medium text-text-secondary hover:text-text-primary disabled:opacity-50 px-3 py-1.5 rounded-md border border-border-subtle transition-colors"
               >
                 Cancel
               </button>
               <button
                 onClick={() => void executeDeletePlan(deleteConfirm)}
-                className="text-[11px] font-semibold text-white bg-red-500 hover:bg-red-600 px-3 py-1.5 rounded-md transition-colors"
+                disabled={isDeleting}
+                className="text-[11px] font-semibold text-white bg-red-500 hover:bg-red-600 disabled:opacity-60 px-3 py-1.5 rounded-md transition-colors"
               >
-                Delete
+                {isDeleting ? 'Deleting…' : 'Delete'}
               </button>
             </div>
           </div>
