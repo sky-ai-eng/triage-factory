@@ -2586,12 +2586,11 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
   // machinery actually sits, not the geometric floor center.
   const actionCenter = new Vector3(FLOOR_SIZE / 2, FLOOR_SIZE / 2 - 800, 0)
 
-  // S1 vertical overpass — tallest/longest arch; the hero close-up.
-  const s1BridgeCenter = worldXY(
-    BRIDGE_COL + 0.5,
-    BRIDGE_NORTH_ROW + BRIDGE_CELL_COUNT / 2,
-    BRIDGE_PEAK_HEIGHT / 2,
-  )
+  // CI Passed station. This shot was originally the S1 bridge close-up,
+  // but at a low angle it read as the splitter junction at the bridge's
+  // foot, so it now frames CI Passed — just east of those splitters.
+  // (The over/under crossing remains the dedicated bridge shot.)
+  const ciPassedCenter = stationCenter(CI_PASSED, 30)
   // Over/under crossing — one belt passes under the span, one over.
   const crossingCenter = worldXY(
     (BRIDGE_UNDER_POLE_1_COL + OVER_BRIDGE_MERGER_COL) / 2 + 0.5,
@@ -2601,42 +2600,60 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
 
   // A belt-truck shot: the camera holds a low angle while the target
   // glides end→end along a long run at a steady ~220 wu/s.
-  const truckShot = (id: string, from: Vector3, to: Vector3): Shot => ({
-    id,
-    base: 7,
-    region: {
+  const truckShot = (id: string, from: Vector3, to: Vector3): Shot => {
+    const region = {
       cx: (from.x + to.x) / 2,
       cy: (from.y + to.y) / 2,
       halfX: Math.abs(to.x - from.x) / 2 + FLOOR_CELL,
       halfY: Math.abs(to.y - from.y) / 2 + FLOOR_CELL,
-    },
-    resolve: () => ({
-      alpha: Math.PI / 2,
-      beta: 0.6,
-      radius: 720,
-      target: from.clone(),
-      targetTo: to.clone(),
-      hold: Math.min(11, Math.max(6, Vector3.Distance(from, to) / 220)),
-    }),
-  })
+    }
+    return {
+      id,
+      base: 7,
+      region,
+      resolve: () => {
+        // Don't ride an empty belt. A truck shot is only worth it when
+        // chips are actually traveling the run — otherwise it's a slow
+        // pan over a dead conveyor. (Static structures like the bridges
+        // read fine empty; a motion shot needs motion.) Declining here
+        // makes the director re-pick something with life in it.
+        const live = chipController
+          .collectChipXY()
+          .some(
+            (c) =>
+              Math.abs(c.x - region.cx) <= region.halfX &&
+              Math.abs(c.y - region.cy) <= region.halfY,
+          )
+        if (!live) return null
+        return {
+          alpha: Math.PI / 2,
+          beta: 0.6,
+          radius: 720,
+          target: from.clone(),
+          targetTo: to.clone(),
+          hold: Math.min(11, Math.max(6, Vector3.Distance(from, to) / 220)),
+        }
+      },
+    }
+  }
 
   const cinematicDeck: Shot[] = [
     {
-      id: 's1-bridge',
-      base: 10,
+      id: 'ci-passed',
+      base: 7,
       region: {
-        cx: s1BridgeCenter.x,
-        cy: s1BridgeCenter.y,
-        halfX: 1.5 * FLOOR_CELL,
-        halfY: (BRIDGE_CELL_COUNT / 2 + 1) * FLOOR_CELL,
+        cx: ciPassedCenter.x,
+        cy: ciPassedCenter.y,
+        halfX: 2.5 * FLOOR_CELL,
+        halfY: 2.5 * FLOOR_CELL,
       },
       resolve: () => ({
-        alpha: Math.PI / 2 + 0.6,
-        beta: 0.78,
-        radius: 430,
-        target: s1BridgeCenter.clone(),
-        hold: 6.5,
-        driftAlpha: 0.05,
+        alpha: Math.PI / 2 + 0.4,
+        beta: 0.7,
+        radius: 380,
+        target: ciPassedCenter.clone(),
+        hold: 6,
+        driftAlpha: 0.04,
       }),
     },
     {
@@ -2651,7 +2668,7 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
       resolve: () => ({
         alpha: Math.PI / 2 - 0.5,
         beta: 0.72,
-        radius: 560,
+        radius: 480,
         target: crossingCenter.clone(),
         hold: 7,
         driftAlpha: 0.04,
@@ -2737,7 +2754,7 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
         return {
           alpha: Math.PI / 2 + 0.4,
           beta: 0.72,
-          radius: 410,
+          radius: 360,
           target: stationCenter(best.spec, 20),
           hold: 5.5,
           driftAlpha: 0.05,
