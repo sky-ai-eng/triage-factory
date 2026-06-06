@@ -2691,11 +2691,11 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
       },
       resolve: () => ({
         alpha: Math.PI / 2,
-        beta: 1.0,
+        beta: 1.1,
         radius: 270, // ≈ the camera's tightest zoom (lowerRadiusLimit)
         target: ciFailedMergerCenter.clone(),
         hold: 9,
-        driftAlpha: 0.05, // slow L→R sweep — flip the sign to reverse
+        driftAlpha: -0.05, // slow sweep (reversed)
       }),
     },
     truckShot(
