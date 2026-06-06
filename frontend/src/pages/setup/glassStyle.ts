@@ -6,18 +6,10 @@
 
 import type { Transition } from 'motion/react'
 
-// glassSurface is the active step's frosted panel: translucent fill + glass
-// edge + a real backdrop blur so the ambient orbs refract through it. Pair with
-// <SpecularEdge/> (glass.tsx) for the light-catching top highlight.
-export const glassSurface =
-  'relative overflow-hidden rounded-[1.75rem] border border-[var(--color-border-glass)] ' +
-  'bg-[var(--color-surface-overlay)] shadow-[0_24px_70px_-30px_rgba(0,0,0,0.32)] backdrop-blur-2xl'
-
-// glassSliver is a completed step receded above the active one: thinner, more
-// translucent, a lighter blur (perf — many can stack) than the active surface.
-export const glassSliver =
-  'rounded-2xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/70 ' +
-  'backdrop-blur-md transition-colors'
+// No per-step card/surface: the flow is flush on the ambient backdrop, content
+// flowing item to item (completed steps recede into thin flush rows, the active
+// step is content in space). The only frosted element is the input field —
+// glass belongs on the affordance you touch, not as a container around content.
 
 // glassField is the soft inset-glass input shared by the URL steps.
 export const glassField =

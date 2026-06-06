@@ -25,8 +25,8 @@ import { WIZARD_STEPS, initialWizardState, jiraActive } from './steps'
 import { useWizard } from './useWizard'
 import { isStepVisible } from './resume'
 import { CollapsedStepBar, SectionDivider } from './parts'
-import { GlassBackdrop, SpecularEdge } from './glass'
-import { glassSurface, bodyEase } from './glassStyle'
+import { GlassBackdrop } from './glass'
+import { bodyEase } from './glassStyle'
 
 function Loading() {
   return (
@@ -168,7 +168,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
             return (
               <section key={section.id} aria-labelledby={`setup-section-${section.id}`}>
                 <SectionDivider id={`setup-section-${section.id}`} title={section.title} />
-                <ol className="space-y-2.5">
+                <ol className="space-y-4">
                   {entries.map(({ step, index }) => {
                     const isActive = index === activeIndex
                     const complete = wiz.isStepComplete(index)
@@ -179,29 +179,22 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                     // swaps between the active heading and the collapsed bar; the
                     // body only mounts while active.
                     return (
-                      <li
-                        key={step.id}
-                        ref={isActive ? cardRef : undefined}
-                        className={isActive ? glassSurface : undefined}
-                      >
+                      <li key={step.id} ref={isActive ? cardRef : undefined}>
                         {isActive ? (
-                          <>
-                            <SpecularEdge />
-                            <div className="flex items-center gap-3 px-7 pt-6">
-                              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-accent text-[11px] font-semibold text-white shadow-[0_4px_12px_-3px_var(--color-accent)]">
-                                {displayNumber(step)}
-                              </span>
-                              <motion.h3
-                                layoutId={`setup-title-${step.id}`}
-                                ref={headingRef}
-                                tabIndex={-1}
-                                aria-current="step"
-                                className="text-[13px] font-medium uppercase tracking-wide text-text-tertiary outline-none"
-                              >
-                                {step.title}
-                              </motion.h3>
-                            </div>
-                          </>
+                          <div className="flex items-center gap-2.5">
+                            <span className="text-[11px] font-semibold tabular-nums text-accent">
+                              {String(displayNumber(step)).padStart(2, '0')}
+                            </span>
+                            <motion.h3
+                              layoutId={`setup-title-${step.id}`}
+                              ref={headingRef}
+                              tabIndex={-1}
+                              aria-current="step"
+                              className="text-[12px] font-medium uppercase tracking-[0.12em] text-text-tertiary outline-none"
+                            >
+                              {step.title}
+                            </motion.h3>
+                          </div>
                         ) : (
                           <CollapsedStepBar
                             id={step.id}
@@ -229,7 +222,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                               transition={reduce ? { duration: 0 } : bodyEase}
                               style={{ overflow: 'hidden' }}
                             >
-                              <div className="space-y-5 px-7 pb-6 pt-4">
+                              <div className="space-y-6 pt-4">
                                 {wiz.activeLoadFailed ? (
                                   <div className="space-y-3">
                                     <p className="text-[13px] text-text-secondary">

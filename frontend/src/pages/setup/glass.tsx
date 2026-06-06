@@ -1,7 +1,7 @@
 // glass.tsx — the Liquid Glass components for the setup flow (SKY-457): the
-// ambient backdrop the frosted surfaces refract, and the specular edge. The
-// shared material class strings + motion easing live in glassStyle.ts (a
-// non-component module, so this stays component-only for react-refresh).
+// ambient backdrop the flush flow sits on. The shared material class strings +
+// motion easing live in glassStyle.ts (a non-component module, so this stays
+// component-only for react-refresh).
 //
 // Material is built from the existing theme tokens: --color-surface-overlay
 // (the translucent glass fill, already light/dark-aware) over --color-border-
@@ -11,21 +11,6 @@
 // both themes.
 
 import { motion, useReducedMotion } from 'motion/react'
-
-// SpecularEdge is the 1px highlight line catching light along a glass panel's
-// top — inline-styled so it survives dark mode (where it's the panel's main
-// edge cue). Render as the first child of a `relative` glass surface.
-export function SpecularEdge() {
-  return (
-    <div
-      aria-hidden
-      className="pointer-events-none absolute inset-x-7 top-0 h-px"
-      style={{
-        background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.7), transparent)',
-      }}
-    />
-  )
-}
 
 // GlassBackdrop is the fixed, full-bleed ambient layer behind the wizard: two
 // large, slowly drifting warm orbs (clay + faint gold) over the surface, so the

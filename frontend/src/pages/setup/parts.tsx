@@ -5,7 +5,7 @@
 
 import { Check } from 'lucide-react'
 import { motion } from 'motion/react'
-import { glassSliver, glassField } from './glassStyle'
+import { glassField } from './glassStyle'
 
 // UrlField is the base-URL input shared by the GitHub and Jira URL steps: a
 // controlled field bound straight to wizard state (no local draft), so the
@@ -66,29 +66,28 @@ export function SectionDivider({ title, id }: { title: string; id: string }) {
   )
 }
 
-// StepMarker is the leading dot of a bar: a green check once complete, else
-// the (1-based) step number in a neutral circle.
+// StepMarker leads a collapsed row: a check once complete, else the 2-digit
+// step number — matching the active step's "01" treatment, no circle chrome.
 function StepMarker({ number, complete }: { number: number; complete: boolean }) {
-  if (complete) {
-    return (
-      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--color-claim)]/15 text-[var(--color-claim)]">
-        <Check size={12} strokeWidth={3} aria-hidden />
-      </span>
-    )
-  }
   return (
-    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-black/[0.05] text-[10px] font-medium text-text-tertiary">
-      {number}
+    <span className="flex w-5 shrink-0 justify-center">
+      {complete ? (
+        <Check size={13} strokeWidth={3} className="text-[var(--color-claim)]" aria-hidden />
+      ) : (
+        <span className="text-[11px] font-semibold tabular-nums text-text-tertiary">
+          {String(number).padStart(2, '0')}
+        </span>
+      )}
     </span>
   )
 }
 
 // CollapsedStepBar renders a completed step that has receded above the active
-// one: a compact bar with the marker, the title, and the summary of what was
-// saved, as a button that re-expands it for editing. Only steps at or before
-// the active step are ever rendered (nothing below the active step shows), so
-// every collapsed bar is a reachable, editable one — there is no inert
-// "upcoming" variant.
+// one: a thin, flush row — no card/pill chrome — with the marker, the title,
+// and the summary of what was saved, that re-expands on click. Only steps at or
+// before the active step are ever rendered (nothing below the active step
+// shows), so every row is reachable and editable; there is no inert "upcoming"
+// variant.
 export function CollapsedStepBar({
   id,
   number,
@@ -98,7 +97,7 @@ export function CollapsedStepBar({
   onEdit,
 }: {
   // Step id — used for the shared layoutId so the title morphs continuously
-  // between this collapsed sliver and the active step's heading (the distill).
+  // between this collapsed row and the active step's heading (the distill).
   id: string
   number: number
   title: string
@@ -111,21 +110,21 @@ export function CollapsedStepBar({
       type="button"
       onClick={onEdit}
       aria-label={complete ? `${title} — completed. Edit.` : `${title} — in progress. Edit.`}
-      className={`group flex w-full items-center gap-2.5 px-4 py-2.5 text-left hover:border-accent/30 ${glassSliver}`}
+      className="group flex w-full items-center gap-2.5 py-1 text-left"
     >
       <StepMarker number={number} complete={complete} />
       <motion.span
         layoutId={`setup-title-${id}`}
-        className="text-[12px] font-medium uppercase tracking-wide text-text-secondary"
+        className="text-[12px] font-medium uppercase tracking-[0.12em] text-text-tertiary transition-colors group-hover:text-text-secondary"
       >
         {title}
       </motion.span>
       {complete && (
-        <span className="truncate text-[12px] text-text-tertiary" title={summary}>
-          {summary}
+        <span className="truncate text-[12px] text-text-tertiary/80" title={summary}>
+          · {summary}
         </span>
       )}
-      <span className="ml-auto text-[11px] text-text-tertiary transition-colors group-hover:text-accent">
+      <span className="ml-auto text-[11px] text-text-tertiary opacity-0 transition-opacity group-hover:text-accent group-hover:opacity-100">
         Edit
       </span>
     </button>
