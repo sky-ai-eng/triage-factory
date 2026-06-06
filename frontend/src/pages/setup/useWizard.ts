@@ -69,8 +69,13 @@ export function useWizard(
   // Bumped by retry() to re-run the load effect after a failure.
   const [reloadNonce, setReloadNonce] = useState(0)
 
-  // Latest state for the stable goTo guard (it checks isComplete without
-  // wanting to recreate on every keystroke).
+  // The latest wizard state, readable synchronously — for the goTo/back guards
+  // and for advance() after an await, where the render-bound `state` closure
+  // can be stale. Kept current in two places: here on every render, AND
+  // synchronously inside patch() (below). The patch path is what matters for
+  // advance(): a useState setter doesn't run its updater synchronously at the
+  // call site, so without the in-patch write a persist-time patch wouldn't be
+  // visible until a render that hasn't happened yet.
   const stateRef = useRef(state)
   stateRef.current = state
 
@@ -83,7 +88,16 @@ export function useWizard(
   const busyRef = useRef(false)
 
   const patch = useCallback((p: Partial<WizardState>) => {
-    setState((s) => ({ ...s, ...p }))
+    // Advance stateRef synchronously (not only on the next render) so a patch
+    // made inside a step's persist() is observable the instant that await
+    // resolves — see the stateRef note above. Merging off stateRef.current
+    // (not React's `s`) chains correctly across batched patches, and feeding
+    // the same object to setState keeps the ref and the rendered state
+    // identical. Done here at the call site, not in a setState updater, since
+    // updaters run during render (and double-run under StrictMode).
+    const next = { ...stateRef.current, ...p }
+    stateRef.current = next
+    setState(next)
     // A field edit clears a stale persist/validation error for the step.
     setError(null)
   }, [])
@@ -141,9 +155,10 @@ export function useWizard(
         // Advance to the next step that applies; an omitted step (e.g. Jira
         // projects without a Jira tracker) is skipped. No visible step after
         // this one ⇒ this was the last step, so finish. Read visibility off
-        // stateRef (not the captured `state`) in case persist patched something
-        // that changes which steps apply — stateRef is never staler than the
-        // closure, so this can't skip to or past the wrong step.
+        // stateRef, which patch() keeps in sync synchronously, so a persist
+        // that patched visibility-affecting state (e.g. jiraConnected) is
+        // reflected here — the closure `state` and a not-yet-flushed render
+        // would both still be stale.
         const next = nextVisibleIndex(steps, stateRef.current, activeIndex)
         if (next === -1) {
           onFinish()
