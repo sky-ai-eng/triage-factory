@@ -480,13 +480,13 @@ func (s *Spawner) ResumeBlueprintAfterYield(orgID, stepRunID, userID string) {
 	}
 
 	// isFinal = this is the last step (and therefore the only step for N=1).
-	// Defaults to true when the index or step list can't be resolved, so an
-	// unknown position never advances into the unbuilt mid-blueprint resume.
+	// Read off the plan frozen at mint (cr.StepPlan), not the live steps, so a
+	// mid-flight edit can't change a yielded run's terminal disposition.
+	// Defaults to true when the index or plan can't be resolved, so an unknown
+	// position never advances into the unbuilt mid-blueprint resume.
 	isFinal := true
-	if stepIdx != nil {
-		if steps, err := s.blueprints.ListStepsSystem(context.Background(), orgID, cr.BlueprintID); err == nil && len(steps) > 0 {
-			isFinal = *stepIdx >= len(steps)-1
-		}
+	if stepIdx != nil && len(cr.StepPlan) > 0 {
+		isFinal = *stepIdx >= len(cr.StepPlan)-1
 	}
 
 	status, reason := blueprintTerminalForResumedStep(stepRun, isFinal)

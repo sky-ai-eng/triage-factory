@@ -214,8 +214,8 @@ func seedBlueprintRunInOrg(t *testing.T, r *authRig, orgID, userID uuid.UUID, ta
 	}
 	blueprintRunID := uuid.NewString()
 	if _, err := r.h.AdminDB.Exec(`
-		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path)
-		VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt-test')
+		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, step_plan)
+		VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt-test', '[]')
 	`, blueprintRunID, orgID, userID, blueprintID, taskID); err != nil {
 		t.Fatalf("seed blueprint_run: %v", err)
 	}

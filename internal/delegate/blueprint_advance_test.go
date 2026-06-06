@@ -184,8 +184,8 @@ func makeRunBlueprintStep(t *testing.T, database *sql.DB, runID, taskID string) 
 		t.Fatalf("seed blueprint: %v", err)
 	}
 	if _, err := database.Exec(
-		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, worktree_path)
-		 VALUES (?, ?, ?, 'manual', ?)`,
+		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, worktree_path, step_plan)
+		 VALUES (?, ?, ?, 'manual', ?, '[]')`,
 		"bpr-"+runID, "bp-"+runID, taskID, "/tmp/wt-"+runID,
 	); err != nil {
 		t.Fatalf("seed blueprint_runs: %v", err)

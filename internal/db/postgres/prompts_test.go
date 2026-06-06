@@ -279,8 +279,8 @@ func seedPgRunsForStats(t *testing.T, conn *sql.DB, orgID, userID, promptID stri
 	}
 	brID := uuid.New().String()
 	if _, err := conn.Exec(`
-		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at)
-		VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt', now())
+		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at, step_plan)
+		VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt', now(), '[]')
 	`, brID, orgID, userID, bpID, taskID); err != nil {
 		t.Fatalf("seed blueprint_run: %v", err)
 	}

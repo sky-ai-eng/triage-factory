@@ -157,8 +157,8 @@ func seedSQLiteBlueprintRunForTaskMemory(t *testing.T, conn *sql.DB, suffix stri
 	}
 	blueprintRunID = uuid.New().String()
 	if _, err := conn.Exec(`
-		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, worktree_path)
-		VALUES (?, ?, ?, 'manual', ?)
+		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, worktree_path, step_plan)
+		VALUES (?, ?, ?, 'manual', ?, '[]')
 	`, blueprintRunID, blueprintID, taskID, "/tmp/wt-"+blueprintRunID); err != nil {
 		t.Fatalf("seed blueprint_run: %v", err)
 	}

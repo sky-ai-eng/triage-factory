@@ -337,8 +337,8 @@ func seedPgRunForTaskMemory(t *testing.T, h *pgtest.Harness, orgID, userID, prom
 	}
 	brID := uuid.New().String()
 	if _, err := conn.Exec(`
-		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at)
-		VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt', now())
+		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at, step_plan)
+		VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt', now(), '[]')
 	`, brID, orgID, userID, bpID, taskID); err != nil {
 		t.Fatalf("seed blueprint_run: %v", err)
 	}
@@ -401,8 +401,8 @@ func seedPgBlueprintRunForTaskMemory(t *testing.T, h *pgtest.Harness, orgID, use
 
 	blueprintRunID := uuid.New().String()
 	if _, err := conn.Exec(`
-		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, worktree_path)
-		VALUES ($1, $2, $3, $4, $5, 'manual', $6)
+		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, worktree_path, step_plan)
+		VALUES ($1, $2, $3, $4, $5, 'manual', $6, '[]')
 	`, blueprintRunID, orgID, userID, blueprintID, taskID, "/tmp/wt-"+blueprintRunID); err != nil {
 		t.Fatalf("seed blueprint_run: %v", err)
 	}

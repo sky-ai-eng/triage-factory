@@ -96,7 +96,7 @@ func TestMaterializePriorMemories_WritesPriors(t *testing.T) {
 		t.Fatalf("blueprint: %v", err)
 	}
 	if _, err := database.Exec(
-		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, worktree_path) VALUES (?, 'bp-prior', ?, 'manual', '/tmp/wt')`,
+		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, worktree_path, step_plan) VALUES (?, 'bp-prior', ?, 'manual', '/tmp/wt', '[]')`,
 		priorBlueprintRunID, task.ID,
 	); err != nil {
 		t.Fatalf("blueprint_run: %v", err)
@@ -160,7 +160,7 @@ func TestMaterializePriorMemories_BlueprintSiblingsShareFolder(t *testing.T) {
 		t.Fatalf("blueprint: %v", err)
 	}
 	if _, err := database.Exec(
-		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, worktree_path) VALUES (?, 'bp1', ?, 'manual', '/tmp/wt')`,
+		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, worktree_path, step_plan) VALUES (?, 'bp1', ?, 'manual', '/tmp/wt', '[]')`,
 		blueprintRunID, task.ID,
 	); err != nil {
 		t.Fatalf("blueprint_run: %v", err)

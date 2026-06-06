@@ -62,7 +62,7 @@ func seedRunBlueprint(t *testing.T, database *sql.DB, suffix, taskID string) str
 	}
 	brID := "seedbpr-" + suffix
 	if _, err := database.Exec(
-		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, worktree_path) VALUES (?, ?, ?, 'manual', ?)`,
+		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, worktree_path, step_plan) VALUES (?, ?, ?, 'manual', ?, '[]')`,
 		brID, bpID, taskID, "/tmp/wt-"+brID); err != nil {
 		t.Fatalf("seed blueprint_run: %v", err)
 	}

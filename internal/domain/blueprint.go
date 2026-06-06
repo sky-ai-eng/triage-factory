@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // BlueprintRunStatus is the lifecycle state of a BlueprintRun.
 type BlueprintRunStatus string
@@ -70,6 +73,59 @@ type BlueprintStep struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+// BlueprintPlanStep is one step of the resolved plan frozen onto a
+// BlueprintRun at mint (BlueprintRun.StepPlan). It snapshots the step's
+// prompt content — not just ids — so an in-flight run executes the plan it
+// was minted with, immune to later edits of the blueprint's steps or the
+// step prompts' bodies. Edits are forward-only: they govern subsequent
+// firings, never a run already in flight.
+//
+// It carries everything the dispatcher/reactor/resume need to sequence a
+// step without re-reading blueprint_steps/prompts:
+//
+//   - StepIndex / Brief reconstruct the BlueprintStep (Step).
+//   - PromptID is kept (despite the frozen content) for the step's usage
+//     increment, the runs row's prompt_id, and skill-slug stability.
+//   - PromptName / PromptBody / Source / AllowedTools / Model reconstruct the
+//     *Prompt (Prompt). Source is load-bearing: MaterializeStepSkill writes an
+//     imported skill verbatim but synthesizes frontmatter for a user/system
+//     prompt, so dropping it would change what an imported-skill step runs.
+type BlueprintPlanStep struct {
+	StepIndex    int    `json:"step_index"`
+	PromptID     string `json:"prompt_id"`
+	PromptName   string `json:"prompt_name"`
+	PromptBody   string `json:"prompt_body"`
+	Source       string `json:"source"`
+	AllowedTools string `json:"allowed_tools"`
+	Model        string `json:"model"`
+	Brief        string `json:"brief"`
+}
+
+// Prompt reconstructs the *Prompt the dispatcher hands to MaterializeStepSkill
+// / collectExtraTools from the frozen plan step, so the in-flight sequencing
+// path never re-reads the prompts table.
+func (p BlueprintPlanStep) Prompt() *Prompt {
+	return &Prompt{
+		ID:           p.PromptID,
+		Name:         p.PromptName,
+		Body:         p.PromptBody,
+		Source:       p.Source,
+		AllowedTools: p.AllowedTools,
+		Model:        p.Model,
+	}
+}
+
+// Step reconstructs the BlueprintStep (the wrapper-prompt + enqueue inputs)
+// from the frozen plan step. blueprintID is the owning run's blueprint_id.
+func (p BlueprintPlanStep) Step(blueprintID string) BlueprintStep {
+	return BlueprintStep{
+		BlueprintID:  blueprintID,
+		StepIndex:    p.StepIndex,
+		StepPromptID: p.PromptID,
+		Brief:        p.Brief,
+	}
+}
+
 // BlueprintRun is the in-flight instance for a blueprint. One row per
 // delegation — every blueprint, including a 1-step one, mints exactly one (a
 // single prompt is a 1-step blueprint; there is no separate single-prompt
@@ -100,10 +156,45 @@ type BlueprintRun struct {
 	// skips this blueprint's queued steps and the reactor finalizes it
 	// 'cancelled' instead of advancing. The active-subprocess kill is separate
 	// (in-memory s.cancels).
-	CancelRequested bool       `json:"cancel_requested,omitempty"`
-	AbortReason     string     `json:"abort_reason,omitempty"`
-	AbortedAtStep   *int       `json:"aborted_at_step,omitempty"`
-	WorktreePath    string     `json:"worktree_path"`
-	StartedAt       time.Time  `json:"started_at"`
-	CompletedAt     *time.Time `json:"completed_at,omitempty"`
+	CancelRequested bool   `json:"cancel_requested,omitempty"`
+	AbortReason     string `json:"abort_reason,omitempty"`
+	AbortedAtStep   *int   `json:"aborted_at_step,omitempty"`
+	// StepPlan is the resolved step list frozen at mint (the step_plan JSON
+	// column). The dispatcher/reactor/resume sequence off this snapshot, not
+	// the live blueprint_steps/prompts, so an in-flight run is insulated from
+	// edits to its blueprint. json:"-" keeps the snapshotted prompt bodies out
+	// of the API run projection — it is a persistence/runtime field carried via
+	// MarshalStepPlan/UnmarshalStepPlan, not part of the public envelope.
+	StepPlan     []BlueprintPlanStep `json:"-"`
+	WorktreePath string              `json:"worktree_path"`
+	StartedAt    time.Time           `json:"started_at"`
+	CompletedAt  *time.Time          `json:"completed_at,omitempty"`
+}
+
+// MarshalStepPlan serializes a frozen step plan for the blueprint_runs.step_plan
+// column. An empty plan marshals to "[]" so the NOT NULL column always holds
+// valid JSON — never SQL NULL, never the literal "null".
+func MarshalStepPlan(plan []BlueprintPlanStep) (string, error) {
+	if len(plan) == 0 {
+		return "[]", nil
+	}
+	b, err := json.Marshal(plan)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// UnmarshalStepPlan parses a blueprint_runs.step_plan blob back into the frozen
+// plan. An empty string (defensive — the column is NOT NULL) yields a nil plan
+// rather than an error.
+func UnmarshalStepPlan(raw string) ([]BlueprintPlanStep, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	var plan []BlueprintPlanStep
+	if err := json.Unmarshal([]byte(raw), &plan); err != nil {
+		return nil, err
+	}
+	return plan, nil
 }

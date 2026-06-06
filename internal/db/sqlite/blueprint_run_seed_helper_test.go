@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -27,10 +28,19 @@ func seedBlueprintRunForRun(t *testing.T, conn *sql.DB, taskID string) string {
 		t.Fatalf("seed blueprint: %v", err)
 	}
 	blueprintRunID := uuid.New().String()
+	// step_plan is NOT NULL — stamp a minimal one-step frozen plan so the FK
+	// fixture satisfies the constraint. These fixtures never dispatch, so the
+	// plan content is inert; it just has to be valid JSON.
+	stepPlan, err := domain.MarshalStepPlan([]domain.BlueprintPlanStep{
+		{StepIndex: 0, PromptID: "seed-step", PromptName: "seed", PromptBody: "x", Source: "user"},
+	})
+	if err != nil {
+		t.Fatalf("marshal seed step plan: %v", err)
+	}
 	if _, err := conn.Exec(`
-		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, worktree_path)
-		VALUES (?, ?, ?, 'manual', 'running', ?)
-	`, blueprintRunID, blueprintID, taskID, "/tmp/wt-"+blueprintRunID); err != nil {
+		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, worktree_path, step_plan)
+		VALUES (?, ?, ?, 'manual', 'running', ?, ?)
+	`, blueprintRunID, blueprintID, taskID, "/tmp/wt-"+blueprintRunID, stepPlan); err != nil {
 		t.Fatalf("seed blueprint_run: %v", err)
 	}
 	return blueprintRunID

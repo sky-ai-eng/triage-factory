@@ -113,8 +113,8 @@ func TestMigrationDefaults_MatchRuntimeConstants(t *testing.T) {
 					runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID); err != nil {
 					t.Fatalf("seed blueprint: %v", err)
 				}
-				if _, err := tx.Exec(`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, worktree_path)
-				                      VALUES ('probe-bp-run-r', 'probe-bp-r', 'probe-task-r', 'manual', 'running', '/tmp/wt')`); err != nil {
+				if _, err := tx.Exec(`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, worktree_path, step_plan)
+				                      VALUES ('probe-bp-run-r', 'probe-bp-r', 'probe-task-r', 'manual', 'running', '/tmp/wt', '[]')`); err != nil {
 					t.Fatalf("seed blueprint_run: %v", err)
 				}
 			},

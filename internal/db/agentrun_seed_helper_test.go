@@ -28,8 +28,8 @@ func mintBlueprintRunForTest(t *testing.T, database *sql.DB, taskID string) stri
 		t.Fatalf("mintBlueprintRunForTest: insert blueprint: %v", err)
 	}
 	if _, err := database.Exec(`
-		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, worktree_path)
-		VALUES (?, ?, ?, 'manual', 'running', '/tmp/wt')
+		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, worktree_path, step_plan)
+		VALUES (?, ?, ?, 'manual', 'running', '/tmp/wt', '[]')
 	`, bpRunID, bpID, nullIfEmpty(taskID)); err != nil {
 		t.Fatalf("mintBlueprintRunForTest: insert blueprint_run: %v", err)
 	}

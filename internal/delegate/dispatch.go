@@ -87,6 +87,9 @@ func (s *Spawner) RunDispatcher(ctx context.Context, scanInterval time.Duration)
 // re-running its current step. Dormant runs (awaiting_input, pending_approval)
 // are left parked — they resume through their own paths, not the queue.
 func (s *Spawner) reconcileRunQueue(ctx context.Context) {
+	// No step-plan handling needed: a re-queued mid-flight run is re-claimed by
+	// dispatchClaimedRun, which reads the plan frozen on its blueprint_run (off
+	// br.StepPlan), so the resumed step runs the same program it was minted with.
 	n, err := s.runQueue.ResetProcessingRuns(ctx)
 	if err != nil {
 		log.Printf("[dispatch] boot reconcile: reset in-flight runs: %v", err)
@@ -174,35 +177,28 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 		return
 	}
 
-	steps, err := s.blueprints.ListStepsSystem(ctx, orgID, br.BlueprintID)
-	if err != nil || len(steps) == 0 {
-		if ctx.Err() != nil {
-			return
-		}
+	// Sequence off the plan frozen at mint (br.StepPlan), not the live
+	// blueprint_steps/prompts — an edit to the blueprint mid-flight must not
+	// change what this run executes. The step + prompt are reconstructed from
+	// the snapshot, so nothing on this path re-reads blueprint_steps/prompts.
+	plan := br.StepPlan
+	if len(plan) == 0 {
 		s.terminateBlueprint(orgID, br.ID, task.ID, run.TriggerType, run.CreatorUserID, startTime,
-			runConfig{orgID: orgID}, domain.BlueprintRunStatusFailed, "load blueprint steps", run.BlueprintStepIndex, true)
+			runConfig{orgID: orgID}, domain.BlueprintRunStatusFailed, "blueprint run has empty step plan", run.BlueprintStepIndex, true)
 		return
 	}
 	stepIdx := 0
 	if run.BlueprintStepIndex != nil {
 		stepIdx = *run.BlueprintStepIndex
 	}
-	if stepIdx < 0 || stepIdx >= len(steps) {
+	if stepIdx < 0 || stepIdx >= len(plan) {
 		s.terminateBlueprint(orgID, br.ID, task.ID, run.TriggerType, run.CreatorUserID, startTime,
 			runConfig{orgID: orgID}, domain.BlueprintRunStatusFailed, fmt.Sprintf("step index %d out of range", stepIdx), run.BlueprintStepIndex, true)
 		return
 	}
-	step := steps[stepIdx]
-
-	stepPrompt, err := s.prompts.GetSystem(ctx, orgID, step.StepPromptID)
-	if err != nil || stepPrompt == nil {
-		if ctx.Err() != nil {
-			return
-		}
-		s.terminateBlueprint(orgID, br.ID, task.ID, run.TriggerType, run.CreatorUserID, startTime,
-			runConfig{orgID: orgID}, domain.BlueprintRunStatusFailed, fmt.Sprintf("step %d prompt fetch failed", stepIdx), run.BlueprintStepIndex, true)
-		return
-	}
+	planStep := plan[stepIdx]
+	step := planStep.Step(br.BlueprintID)
+	stepPrompt := planStep.Prompt()
 
 	// Resolve the run's GitHub client (per-org/owner seam). model is already on
 	// the claimed row (captured at Delegate time, stable across the blueprint).
@@ -251,21 +247,19 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 	}
 
 	// Position bit + tool extensions, exactly as the old loop set them.
-	cfg.appendSysPrompt = nonterminalStepSysPrompt(stepIdx, len(steps))
+	cfg.appendSysPrompt = nonterminalStepSysPrompt(stepIdx, len(plan))
 	cfg.extraAllowedTools = s.collectExtraTools(stepPrompt.AllowedTools)
 
+	// Next-step name comes from the frozen plan too — no live prompt read; an
+	// empty name (impossible from a well-formed plan) falls back to "step N".
 	var nextStepName string
-	if stepIdx+1 < len(steps) {
-		// Pre-agent read → honor ctx so a shutdown cancels it; a cancelled/failed
-		// read just leaves nextStepName empty (the mission falls back to "step N").
-		if np, err := s.prompts.GetSystem(ctx, orgID, steps[stepIdx+1].StepPromptID); err == nil && np != nil {
-			nextStepName = np.Name
-		}
+	if stepIdx+1 < len(plan) {
+		nextStepName = plan[stepIdx+1].PromptName
 	}
-	mission := buildBlueprintStepWrapperPrompt(*task, step, stepPrompt, slug, len(steps), nextStepName)
+	mission := buildBlueprintStepWrapperPrompt(*task, step, stepPrompt, slug, len(plan), nextStepName)
 
 	toast.Info(s.wsHub, orgID, fmt.Sprintf("Blueprint step %d/%d: %s (%s)",
-		stepIdx+1, len(steps), truncateToastMsg(stepPrompt.Name, 60), shortRunID(run.ID)))
+		stepIdx+1, len(plan), truncateToastMsg(stepPrompt.Name, 60), shortRunID(run.ID)))
 
 	// Per-step cancel handle so CancelBlueprint can SIGKILL the active subprocess.
 	stepCtx, stepCancel := context.WithCancel(ctx)
@@ -362,13 +356,16 @@ func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, ste
 		return
 	}
 
-	steps, err := s.blueprints.ListStepsSystem(context.Background(), orgID, br.BlueprintID)
-	if err != nil || len(steps) == 0 {
+	// Advance off the frozen plan (br was just refreshed via GetRunSystem, so its
+	// StepPlan is the snapshot taken at mint), never the live blueprint_steps —
+	// editing the blueprint mid-flight must not redirect a running execution.
+	plan := br.StepPlan
+	if len(plan) == 0 {
 		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
-			domain.BlueprintRunStatusFailed, "load steps for advance", &stepIdx, false)
+			domain.BlueprintRunStatusFailed, "blueprint run has empty step plan", &stepIdx, false)
 		return
 	}
-	isFinal := stepIdx >= len(steps)-1
+	isFinal := stepIdx >= len(plan)-1
 	decision, abortReason := decideBlueprintStep(stepRun.Outcome, isFinal)
 	switch decision {
 	case blueprintStepAdvance:
@@ -386,7 +383,7 @@ func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, ste
 		if err := s.blueprints.SetRunCurrentStepSystem(context.Background(), orgID, br.ID, next); err != nil {
 			log.Printf("[dispatch] warning: set current_step_index for blueprint_run %s: %v", br.ID, err)
 		}
-		if err := s.enqueueBlueprintStep(context.Background(), orgID, br.ID, *task, steps[next], stepRun.Model, triggerType, creatorUserID); err != nil {
+		if err := s.enqueueBlueprintStep(context.Background(), orgID, br.ID, *task, plan[next].Step(br.BlueprintID), stepRun.Model, triggerType, creatorUserID); err != nil {
 			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
 				domain.BlueprintRunStatusFailed, fmt.Sprintf("enqueue step %d: %v", next, err), &stepIdx, false)
 			return

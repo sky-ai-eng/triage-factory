@@ -164,8 +164,8 @@ func seedPgRunQueueFixture(t *testing.T, h *pgtest.Harness, orgID, userID string
 	taskID = seedPgTask(t, h, orgID, userID)
 	brID = uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at)
-		VALUES ($1, $2, $3, $4, $5, 'manual', 'running', $6, now())
+		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at, step_plan)
+		VALUES ($1, $2, $3, $4, $5, 'manual', 'running', $6, now(), '[]')
 	`, brID, orgID, userID, bpID, taskID, "/tmp/wt-"+brID); err != nil {
 		t.Fatalf("seed blueprint_run: %v", err)
 	}

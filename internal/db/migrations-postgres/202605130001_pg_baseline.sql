@@ -5373,6 +5373,16 @@ CREATE TABLE public.blueprint_runs (
     -- 'cancelled' instead of advancing. The active-subprocess kill stays
     -- in-memory (s.cancels).
     cancel_requested boolean DEFAULT false NOT NULL,
+    -- step_plan is the resolved step list frozen at mint: a JSON array of
+    -- {step_index, prompt_id, prompt_name, prompt_body, source, allowed_tools,
+    -- model, brief}, one entry per step. The dispatcher/reactor/resume sequence
+    -- off this snapshot rather than re-reading blueprint_steps/prompts, so an
+    -- in-flight run executes the plan it was minted with — edits to the
+    -- blueprint (ReplaceSteps/SplitAt/MergeInto, a prompt-body edit, a future
+    -- prompt-delete) are forward-only and can't mutate a running execution.
+    -- Snapshots full prompt content, not just ids, so body edits can't leak in.
+    -- Stored as text (JSON payload), mirroring the SQLite baseline.
+    step_plan text NOT NULL,
     abort_reason text,
     aborted_at_step integer,
     worktree_path text NOT NULL,

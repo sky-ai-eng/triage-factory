@@ -51,10 +51,19 @@ func reactorFixture(t *testing.T, suffix string, nSteps int, step0Status, step0O
 	if err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, promptIDs, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
+	// Freeze the plan onto the run exactly as the mint path does — the reactor
+	// now sequences off br.StepPlan, so an empty plan would fail the advance.
+	plan := make([]domain.BlueprintPlanStep, nSteps)
+	for i := 0; i < nSteps; i++ {
+		plan[i] = domain.BlueprintPlanStep{
+			StepIndex: i, PromptID: promptIDs[i], PromptName: promptIDs[i],
+			PromptBody: "b", Source: "user",
+		}
+	}
 	brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 		ID: "rbpr-" + suffix, BlueprintID: bpID, TaskID: task.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
-		WorktreePath: "/tmp/wt-" + suffix,
+		WorktreePath: "/tmp/wt-" + suffix, StepPlan: plan,
 	})
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)

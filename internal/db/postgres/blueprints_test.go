@@ -217,6 +217,9 @@ func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 		TaskID:       taskID,
 		TriggerType:  domain.BlueprintTriggerManual,
 		WorktreePath: "/tmp/wt-pg-blueprint",
+		StepPlan: []domain.BlueprintPlanStep{
+			{StepIndex: 0, PromptID: stepPromptID, PromptName: "Step", PromptBody: "do the step", Source: "user", Brief: "b0"},
+		},
 	})
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
@@ -234,6 +237,13 @@ func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 	}
 	if cr.Status != domain.BlueprintRunStatusRunning {
 		t.Errorf("status = %q, want running", cr.Status)
+	}
+	// The frozen step plan round-trips through the step_plan column.
+	if len(cr.StepPlan) != 1 {
+		t.Fatalf("round-tripped step plan length = %d, want 1", len(cr.StepPlan))
+	}
+	if cr.StepPlan[0].PromptID != stepPromptID || cr.StepPlan[0].PromptBody != "do the step" {
+		t.Errorf("round-tripped step plan[0] = %+v, want frozen prompt %s body 'do the step'", cr.StepPlan[0], stepPromptID)
 	}
 
 	// Seed a step run, persist a terminal outcome the way processCompletion

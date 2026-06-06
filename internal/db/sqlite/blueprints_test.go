@@ -192,6 +192,61 @@ func TestBlueprintStore_SQLite_RunsForBlueprint_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestBlueprintStore_SQLite_StepPlanRoundTrip pins the frozen step plan column:
+// the plan serialized at CreateRun deserializes field-faithfully on GetRun
+// (full prompt content, not just ids), and an empty plan round-trips as empty
+// rather than tripping the NOT NULL column.
+func TestBlueprintStore_SQLite_StepPlanRoundTrip(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	blueprints := sqlitestore.New(conn).Blueprints
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrg
+
+	task := seedEntityEventTask(t, conn, "stepplan-rt")
+	insertBlueprintForTest(t, conn, "sp-bp", "Plan BP")
+
+	plan := []domain.BlueprintPlanStep{
+		{StepIndex: 0, PromptID: "sp-p0", PromptName: "Map", PromptBody: "map the surface", Source: "user", AllowedTools: "Bash,Read", Model: "opus", Brief: "brief-0"},
+		{StepIndex: 1, PromptID: "sp-p1", PromptName: "Write", PromptBody: "write the review", Source: "imported", Brief: "brief-1"},
+	}
+	if _, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+		ID: "sp-bpr", BlueprintID: "sp-bp", TaskID: task.ID,
+		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
+		WorktreePath: "/tmp/wt-sp", StepPlan: plan,
+	}); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	got, err := blueprints.GetRun(ctx, org, "sp-bpr")
+	if err != nil || got == nil {
+		t.Fatalf("GetRun = (%v, %v)", got, err)
+	}
+	if len(got.StepPlan) != len(plan) {
+		t.Fatalf("round-tripped plan length = %d, want %d", len(got.StepPlan), len(plan))
+	}
+	for i := range plan {
+		if got.StepPlan[i] != plan[i] {
+			t.Errorf("step %d round-trip = %+v, want %+v", i, got.StepPlan[i], plan[i])
+		}
+	}
+
+	// An empty plan must satisfy NOT NULL and read back empty, not error.
+	if _, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+		ID: "sp-bpr-empty", BlueprintID: "sp-bp", TaskID: task.ID,
+		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
+		WorktreePath: "/tmp/wt-sp-empty",
+	}); err != nil {
+		t.Fatalf("CreateRun (empty plan): %v", err)
+	}
+	empty, err := blueprints.GetRun(ctx, org, "sp-bpr-empty")
+	if err != nil || empty == nil {
+		t.Fatalf("GetRun (empty) = (%v, %v)", empty, err)
+	}
+	if len(empty.StepPlan) != 0 {
+		t.Errorf("empty plan round-trip = %+v, want empty", empty.StepPlan)
+	}
+}
+
 // TestBlueprintStore_SQLite_RunsForBlueprint_SurfacesOutcome pins the channel
 // that replaced the old per-step verdict: a step run's terminal runs.outcome
 // (and outcome_reason) round-trips through RunsForBlueprint, which is what the

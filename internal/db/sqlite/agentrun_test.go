@@ -145,8 +145,8 @@ func newSQLiteAgentRunSeeder(conn *sql.DB) dbtest.AgentRunSeeder {
 			}
 			brID := uuid.New().String()
 			if _, err := conn.Exec(`
-				INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, worktree_path)
-				VALUES (?, ?, ?, 'manual', 'running', '/tmp/wt')
+				INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, worktree_path, step_plan)
+				VALUES (?, ?, ?, 'manual', 'running', '/tmp/wt', '[]')
 			`, brID, bpID, taskID); err != nil {
 				t.Fatalf("seed blueprint_run: %v", err)
 			}

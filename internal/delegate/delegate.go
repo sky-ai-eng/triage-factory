@@ -237,6 +237,31 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	if triggerType == "event" {
 		triggeringEventID = opts.TriggeringEventID
 	}
+	// Freeze the resolved step plan onto the blueprint_run at mint: snapshot
+	// each step's full prompt content (not just ids) so the
+	// dispatcher/reactor/resume sequence off this plan and an in-flight run is
+	// insulated from later edits to the blueprint's steps or its step prompts'
+	// bodies. Edits are forward-only — they govern the next firing, never this
+	// one. resolvePrompt honors the per-trigger RLS routing exactly as
+	// resolveBlueprint/resolveBlueprintSteps did, so a manual delegation still
+	// can't snapshot a prompt it can't see.
+	stepPlan := make([]domain.BlueprintPlanStep, len(steps))
+	for i, st := range steps {
+		p, err := s.resolvePrompt(orgID, task, st.StepPromptID, triggerType, creatorUserID)
+		if err != nil {
+			return "", fmt.Errorf("resolve step %d prompt for blueprint %q: %w", st.StepIndex, blueprint.Name, err)
+		}
+		stepPlan[i] = domain.BlueprintPlanStep{
+			StepIndex:    st.StepIndex,
+			PromptID:     p.ID,
+			PromptName:   p.Name,
+			PromptBody:   p.Body,
+			Source:       p.Source,
+			AllowedTools: p.AllowedTools,
+			Model:        p.Model,
+			Brief:        st.Brief,
+		}
+	}
 	brRow := domain.BlueprintRun{
 		ID:                blueprintRunID,
 		BlueprintID:       blueprint.ID,
@@ -245,6 +270,7 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 		TriggerID:         triggerID,
 		TriggeringEventID: triggeringEventID,
 		Status:            domain.BlueprintRunStatusRunning,
+		StepPlan:          stepPlan,
 	}
 	// Event-triggered firings go through the fenced insert: a replayed
 	// (triggering_event_id, trigger_id) under the at-least-once router queue

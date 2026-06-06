@@ -539,16 +539,20 @@ func (s *blueprintStore) CreateRun(ctx context.Context, orgID string, br domain.
 
 func (s *blueprintStore) createRunEventTriggered(ctx context.Context, orgID string, br domain.BlueprintRun) (string, error) {
 	triggerID, abortReason, completedAt := blueprintRunArgs(br)
+	stepPlan, err := domain.MarshalStepPlan(br.StepPlan)
+	if err != nil {
+		return "", fmt.Errorf("marshal step plan: %w", err)
+	}
 	if _, err := s.admin.ExecContext(ctx, `
 		INSERT INTO blueprint_runs
 			(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
-			 status, worktree_path, abort_reason, completed_at, started_at)
+			 status, worktree_path, abort_reason, completed_at, started_at, step_plan)
 		VALUES (
 			$1, $2, NULL,
 			$3, $4, $5, $6, $7,
-			$8, $9, $10, $11, now()
+			$8, $9, $10, $11, now(), $12
 		)
-	`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), br.Status, br.WorktreePath, abortReason, completedAt); err != nil {
+	`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), br.Status, br.WorktreePath, abortReason, completedAt, stepPlan); err != nil {
 		return "", fmt.Errorf("insert blueprint_run (event): %w", err)
 	}
 	return br.ID, nil
@@ -556,17 +560,21 @@ func (s *blueprintStore) createRunEventTriggered(ctx context.Context, orgID stri
 
 func (s *blueprintStore) createRunManual(ctx context.Context, orgID string, br domain.BlueprintRun) (string, error) {
 	triggerID, abortReason, completedAt := blueprintRunArgs(br)
+	stepPlan, err := domain.MarshalStepPlan(br.StepPlan)
+	if err != nil {
+		return "", fmt.Errorf("marshal step plan: %w", err)
+	}
 	if _, err := s.app.ExecContext(ctx, `
 		INSERT INTO blueprint_runs
 			(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
-			 status, worktree_path, abort_reason, completed_at, started_at)
+			 status, worktree_path, abort_reason, completed_at, started_at, step_plan)
 		VALUES (
 			$1, $2,
 			COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
 			$3, $4, $5, $6, $7,
-			$8, $9, $10, $11, now()
+			$8, $9, $10, $11, now(), $12
 		)
-	`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), br.Status, br.WorktreePath, abortReason, completedAt); err != nil {
+	`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), br.Status, br.WorktreePath, abortReason, completedAt, stepPlan); err != nil {
 		return "", fmt.Errorf("insert blueprint_run (manual): %w", err)
 	}
 	return br.ID, nil
@@ -585,17 +593,21 @@ func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID st
 	if br.Status == "" {
 		br.Status = domain.BlueprintRunStatusRunning
 	}
+	stepPlan, err := domain.MarshalStepPlan(br.StepPlan)
+	if err != nil {
+		return false, fmt.Errorf("marshal step plan: %w", err)
+	}
 	res, err := s.admin.ExecContext(ctx, `
 		INSERT INTO blueprint_runs
 			(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
-			 status, worktree_path, started_at)
+			 status, worktree_path, started_at, step_plan)
 		VALUES (
 			$1, $2, NULL,
 			$3, $4, 'event', $5, $6,
-			$7, $8, now()
+			$7, $8, now(), $9
 		)
 		ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
-	`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID, br.Status, br.WorktreePath)
+	`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID, br.Status, br.WorktreePath, stepPlan)
 	if err != nil {
 		return false, fmt.Errorf("insert blueprint_run (fenced): %w", err)
 	}
@@ -663,20 +675,24 @@ func getBlueprintRun(ctx context.Context, q queryer, orgID, id string) (*domain.
 		abortedAtStep   sql.NullInt64
 		completedAt     sql.NullTime
 		cancelRequested bool
+		stepPlanRaw     string
 	)
 	err := q.QueryRowContext(ctx, `
 		SELECT id, blueprint_id, task_id, trigger_type, trigger_id, status,
-		       current_step_index, cancel_requested,
+		       current_step_index, cancel_requested, step_plan,
 		       abort_reason, aborted_at_step, worktree_path, started_at, completed_at
 		FROM blueprint_runs WHERE org_id = $1 AND id = $2
 	`, orgID, id).Scan(&br.ID, &br.BlueprintID, &br.TaskID, &br.TriggerType, &triggerID, &br.Status,
-		&br.CurrentStepIndex, &cancelRequested,
+		&br.CurrentStepIndex, &cancelRequested, &stepPlanRaw,
 		&abortReason, &abortedAtStep, &br.WorktreePath, &br.StartedAt, &completedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	if br.StepPlan, err = domain.UnmarshalStepPlan(stepPlanRaw); err != nil {
+		return nil, fmt.Errorf("unmarshal step plan for blueprint_run %s: %w", id, err)
 	}
 	br.CancelRequested = cancelRequested
 	if triggerID.Valid {

@@ -186,8 +186,8 @@ func newPgAgentRunSeeder(conn *sql.DB, orgID, userID, agentID, promptID string) 
 			}
 			brID := uuid.New().String()
 			if _, err := conn.Exec(`
-				INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path)
-				VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt')
+				INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, step_plan)
+				VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt', '[]')
 			`, brID, orgID, userID, bpID, taskID); err != nil {
 				t.Fatalf("seed blueprint_run: %v", err)
 			}
@@ -710,8 +710,8 @@ func seedPgBlueprintRun(t *testing.T, h *pgtest.Harness, orgID, userID, taskID s
 	}
 	brID := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path)
-		VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt')
+		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, step_plan)
+		VALUES ($1, $2, $3, $4, $5, 'manual', 'running', '/tmp/wt', '[]')
 	`, brID, orgID, userID, bpID, taskID); err != nil {
 		t.Fatalf("seed blueprint_run: %v", err)
 	}

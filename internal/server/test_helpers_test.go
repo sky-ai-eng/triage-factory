@@ -147,8 +147,8 @@ func seedBlueprintRunSQLite(t *testing.T, database *sql.DB, taskID string) strin
 		t.Fatalf("seed blueprint: %v", err)
 	}
 	if _, err := database.Exec(
-		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, worktree_path)
-		 VALUES (?, ?, ?, 'manual', 'running', '/tmp/wt-test')`,
+		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, status, worktree_path, step_plan)
+		 VALUES (?, ?, ?, 'manual', 'running', '/tmp/wt-test', '[]')`,
 		blueprintRunID, blueprintID, taskID,
 	); err != nil {
 		t.Fatalf("seed blueprint_run: %v", err)
