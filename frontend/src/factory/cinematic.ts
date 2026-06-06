@@ -141,6 +141,10 @@ const COOLDOWN_K = 3 // a shot can't replay until K others have run
 // are the design-intent durations; this dials the whole tour's pace from
 // one place.
 const HOLD_SCALE = 1.33
+// NB for deck tuners: a shot's motion runs through the fades on both sides,
+// so `hold` × HOLD_SCALE is total drift time, not the fully-bright on-screen
+// hold — that's ~holdDuration − FADE_SEC (the rest of the motion is spent
+// mid-fade). Shots therefore feel slightly shorter than their nominal hold.
 const DT_CAP = 0.05 // clamp per-frame advance so a tab-wake hitch can't jump the camera
 
 // Aesthetic clamps — kept inside the camera's own limits (beta
@@ -404,11 +408,14 @@ export class CinematicDirector {
   /** At the fully-black midpoint of a fade, swap in the pending shot and
    *  snap the camera to it (the jump is invisible under full black). */
   private commitPending(): void {
+    // applyPose is only meaningful once commitShot has swapped holdPose to
+    // the new shot, so it lives inside the guard: a (currently impossible)
+    // null-pending fadeOut then can't snap the camera back to the old pose.
     if (this.pending) {
       this.commitShot(this.pending)
       this.pending = null
+      this.applyPose(this.holdPose)
     }
-    this.applyPose(this.holdPose)
   }
 
   private noteShown(id: string): void {
@@ -423,8 +430,10 @@ export class CinematicDirector {
     const pool = this.lastWasWide ? this.deck.filter((s) => !s.wide) : this.deck
     const excluded: string[] = []
     // Up to pool.length tries to satisfy resolve() (a shot may decline,
-    // e.g. a truck over an empty belt). Wide shots never decline, so this
-    // terminates.
+    // e.g. a truck over an empty belt). The bound is `<=` on purpose: the
+    // one extra round is where everything has been excluded and pickNextShot
+    // falls back to a cooldown-ignoring uniform pick, so we never stall.
+    // Wide shots never decline, so this still terminates.
     for (let i = 0; i <= pool.length; i++) {
       const shot = pickNextShot(pool, chips, [...this.recent, ...excluded], this.rng)
       if (!shot) break

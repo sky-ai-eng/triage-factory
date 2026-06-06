@@ -1401,6 +1401,12 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
   canvas.style.height = '100%'
   canvas.style.display = 'block'
   canvas.style.touchAction = 'none'
+  // Explicit z-order so the fade overlay (z-index 1) reliably paints above
+  // the canvas. A GPU-composited WebGL layer can otherwise ignore a static
+  // sibling's stacking on some browser/GPU combos; `relative` with no
+  // offsets keeps layout identical but puts the canvas in the z-order.
+  canvas.style.position = 'relative'
+  canvas.style.zIndex = '0'
   container.appendChild(canvas)
 
   // Black overlay the cinematic director fades through for its
