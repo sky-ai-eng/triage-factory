@@ -331,6 +331,7 @@ const githubPollerStep: WizardStep = {
       }}
       onChange={(p) => patch({ org: { ...state.org, ...p } })}
       showJira={false}
+      showHeading={false}
     />
   ),
 }
@@ -428,6 +429,7 @@ const jiraPollerStep: WizardStep = {
       }}
       onChange={(p) => patch({ org: { ...state.org, ...p } })}
       showGitHub={false}
+      showHeading={false}
     />
   ),
 }

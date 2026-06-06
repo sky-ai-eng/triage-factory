@@ -60,10 +60,15 @@ export function JiraAccessStep({ state, patch }: StepContext) {
         })
       }
       onDisconnected={() =>
+        // JiraAccessGroup blanks jira_url via its onChange immediately before
+        // this fires; rebuild org from this render's state (which still holds
+        // the URL) and drop only the PAT, so a same-session reconnect keeps the
+        // URL pre-filled. jiraUrlConfirmed:false re-opens the URL step to
+        // re-probe before reconnecting.
         patch({
           jiraConnected: false,
           jiraUrlConfirmed: false,
-          org: { ...state.org, jira_url: '', jira_pat: '' },
+          org: { ...state.org, jira_pat: '' },
         })
       }
       showBaseUrl={false}

@@ -16,21 +16,29 @@ interface PollerTimingValue {
  * wizard splits the cadences into a GitHub poll step and a separate Jira poll
  * step (shown only once Jira is connected), so the Jira step renders this group
  * with showGitHub=false to show the Jira control alone.
+ *
+ * showHeading (default true) suppresses the "Poller timing" title in the wizard,
+ * where each cadence is its own step already labelled "GitHub poll interval" /
+ * "Jira poll interval"; Settings keeps it (multiple sections on one page).
  */
 export default function PollerTimingGroup({
   value,
   onChange,
   showGitHub = true,
   showJira = true,
+  showHeading = true,
 }: {
   value: PollerTimingValue
   onChange: (patch: Partial<PollerTimingValue>) => void
   showGitHub?: boolean
   showJira?: boolean
+  showHeading?: boolean
 }) {
   return (
     <Section>
-      <h2 className="text-[13px] font-medium text-text-secondary mb-4">Poller timing</h2>
+      {showHeading && (
+        <h2 className="text-[13px] font-medium text-text-secondary mb-4">Poller timing</h2>
+      )}
       <div className="space-y-3">
         {showGitHub && (
           <Field label="GitHub poll interval">
