@@ -21,9 +21,11 @@ import { useGitHubIdentity } from './hooks/useGitHubIdentity'
  *   authed + N orgs, URL not under /orgs/:id → redirect to /orgs/<active>
  *   authed + N orgs, URL under /orgs/:id → render children
  *
- * Multi mode also redirects stale /setup bookmarks to / — the local
- * first-run/config flow isn't a thing in multi mode (integration creds
- * live in per-org Vault via D5).
+ * /setup is a live route in BOTH modes — the single create-time wizard the
+ * mandatory-setup gate redirects incomplete users to. In multi it sits
+ * outside /orgs/:id and resolves its org from OrgContext (server-active /
+ * localStorage / first-org), so MultiAuthGate admits it via the
+ * org-resolved branch rather than redirecting it away.
  */
 
 function Loading() {
@@ -38,8 +40,8 @@ function LocalAuthGate({ children }: { children: React.ReactNode }) {
   const { configured, loading } = useAuthStatus()
   if (loading) return <Loading />
   // No provisioned tenant yet → the first-run "Start your factory"
-  // screen, which fires POST /api/setup/start and then routes into the shared
-  // configure flow. (configured = a tenant exists, not "GitHub creds set".)
+  // screen, which fires POST /api/setup/start and then routes into the
+  // /setup wizard. (configured = a tenant exists, not "GitHub creds set".)
   if (!configured) return <Navigate to="/start" replace />
   return <>{children}</>
 }

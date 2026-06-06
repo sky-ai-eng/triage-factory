@@ -48,9 +48,9 @@ interface Props {
 // GitHubTeamChecklist is the shared body for BOTH GitHub-team → TF-team
 // mapping surfaces: the onboarding wizard (GitHubTeamSelector) and the
 // controlled team-config group (GitHubTeamGroup, used in the Settings team
-// tab + TeamConfigure). It owns every behavior common to the two — search, a
-// selected/unselected/all filter, a bounded scrollable list, the badges
-// (your team / member count / noisy / stale), and the loading / error /
+// tab + the setup wizard's team steps). It owns every behavior common to the
+// two — search, a selected/unselected/all filter, a bounded scrollable list,
+// the badges (your team / member count / noisy / stale), and the loading / error /
 // empty states — so the wrappers differ only in chrome (header copy, footer
 // vs. controlled value) and how they seed the selection.
 //

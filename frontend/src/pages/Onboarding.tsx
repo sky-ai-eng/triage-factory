@@ -14,8 +14,8 @@ import { apiJSON, HttpError } from '../lib/apiClient'
  *   - creation allowed (default) → "Create your organization": a single
  *     org-name field + the "Start your Factory" CTA, plus a passive "or
  *     wait for an invite" note. Submitting POSTs /api/orgs (create with
- *     default settings; the configure step is a follow-up ticket), then
- *     refreshes /me — the membership-appears effect below routes in.
+ *     default settings), then refreshes /me — the membership-appears effect
+ *     below routes into the /setup wizard.
  *   - creation prevented → the invite-only state: "ask your admin",
  *     no create affordance.
  *
@@ -29,10 +29,10 @@ export default function Onboarding() {
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   // Set to the id of an org this session just created, so the
-  // membership-appears effect routes the founder into the create-time
-  // configure step rather than straight into the (unconfigured) app. An
-  // invite-driven membership (createdOrgId still null) routes into the app
-  // as before — that org is already configured by its own admin.
+  // membership-appears effect routes the founder into the /setup wizard
+  // rather than straight into the (unconfigured) app. An invite-driven
+  // membership (createdOrgId still null) routes into the app as before —
+  // that org is already configured by its own admin.
   const [createdOrgId, setCreatedOrgId] = useState<string | null>(null)
 
   async function handleCreate(e: React.FormEvent) {
@@ -80,12 +80,13 @@ export default function Onboarding() {
 
   // When a membership appears (e.g. an admin adds the user to an org, or
   // the create-org flow completes), route onward without a reload. A
-  // just-created org goes to its configure step (GitHub/Jira/poller/model);
-  // an invite-driven membership goes straight into the app.
+  // just-created org goes to the /setup wizard (the single create-time flow,
+  // org resolved from OrgContext's server-active pick); an invite-driven
+  // membership goes straight into the app.
   useEffect(() => {
     if (auth.status !== 'authed' || auth.orgs.length === 0) return
     if (createdOrgId && auth.orgs.some((o) => o.id === createdOrgId)) {
-      navigate('/orgs/' + createdOrgId + '/configure', { replace: true })
+      navigate('/setup', { replace: true })
       return
     }
     navigate('/orgs/' + auth.orgs[0].id, { replace: true })

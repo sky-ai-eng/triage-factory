@@ -20,7 +20,7 @@ import { useNavigate } from 'react-router-dom'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useActiveOrgId } from '../../contexts/OrgContext'
 import { LOCAL_DEFAULT_ORG_ID } from '../../lib/githubApp'
-import { WIZARD_SECTIONS } from './types'
+import { WIZARD_SECTIONS, type WizardState } from './types'
 import { WIZARD_STEPS, initialWizardState } from './steps'
 import { useWizard } from './useWizard'
 import { isStepVisible } from './resume'
@@ -50,9 +50,20 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
   // team), so the wizard never needs the team UUID up front.
   const identity = useMemo(() => ({ orgId, teamId: 'default', isLocal }), [orgId, isLocal])
 
-  const onFinish = useCallback(() => {
-    navigate(isLocal ? '/' : orgId ? `/orgs/${orgId}` : '/', { replace: true })
-  }, [navigate, isLocal, orgId])
+  const onFinish = useCallback(
+    (state: WizardState) => {
+      // Local first-run preserves the Jira carry-over step: when Jira is the
+      // connected tracker, finishing lands on the carry-over deck (the migrated
+      // final local first-run step) before the app. A GitHub-only local install
+      // skips it, and multi has no carry-over step yet — both go straight in.
+      if (isLocal && state.jiraConnected && orgId) {
+        navigate(`/orgs/${orgId}/carry-over`, { replace: true })
+        return
+      }
+      navigate(isLocal ? '/' : orgId ? `/orgs/${orgId}` : '/', { replace: true })
+    },
+    [navigate, isLocal, orgId],
+  )
 
   const wiz = useWizard(WIZARD_STEPS, identity, initialWizardState, onFinish)
 

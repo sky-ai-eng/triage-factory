@@ -14,8 +14,8 @@ interface JiraStatus {
  * the list of tracked projects and, per project, the pickup / in-progress /
  * done status rules. A controlled component — the container owns the
  * projects array (`value`) and the actual POST /api/settings/team/{id} — so
- * the same editor serves the team Settings tab, the create-time
- * TeamConfigure step, and the local Setup wizard.
+ * the same editor serves the team Settings tab and the setup wizard's
+ * team steps.
  *
  * It owns only its own presentational state: per-project expand/collapse and
  * the fetched status options (loaded on demand from /api/jira/statuses,

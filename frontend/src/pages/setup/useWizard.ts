@@ -51,7 +51,7 @@ export function useWizard(
   steps: WizardStep[],
   identity: WizardIdentity,
   makeInitialState: () => WizardState,
-  onFinish: () => void,
+  onFinish: (state: WizardState) => void,
 ): WizardController {
   const { orgId, teamId, isLocal } = identity
 
@@ -138,7 +138,7 @@ export function useWizard(
         // this one ⇒ this was the last step, so finish.
         const next = nextVisibleIndex(steps, state, activeIndex)
         if (next === -1) {
-          onFinish()
+          onFinish(state)
           return
         }
         setActiveIndex(next)

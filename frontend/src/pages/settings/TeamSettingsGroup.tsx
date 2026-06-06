@@ -9,9 +9,8 @@ interface TeamSettingsValue {
  * TeamSettingsGroup is the team-scope AI field group: the delegation model
  * default and the auto-delegation toggle. A controlled component — the
  * container owns the form state and the POST /api/settings/team/{id} — so
- * the same group serves the team Settings tab, the create-time TeamConfigure
- * step, and (forthcoming) the local Setup wizard without a parallel
- * implementation.
+ * the same group serves the team Settings tab and the setup wizard's team
+ * steps without a parallel implementation.
  *
  * The team's AI thresholds (reprioritize threshold / preference-update
  * interval) are part of the same team_settings payload and round-trip

@@ -7,8 +7,8 @@ import RepoPickerModal from '../../components/RepoPickerModal'
  * ReposGroup is the team-scope tracked-repositories field group. A
  * controlled component: the container owns the selected slugs (`value`) and
  * the actual PUT /api/settings/team/{id}/repos, so the same group serves the
- * team Settings tab, the create-time TeamConfigure step, and the local Setup
- * wizard. It shows the current selection and opens the shared
+ * team Settings tab and the setup wizard's team steps. It shows the current
+ * selection and opens the shared
  * RepoPickerModal (which lists the org's GitHub repos) to edit it; picking
  * reports the new set up via onChange — this group never persists on its own.
  *

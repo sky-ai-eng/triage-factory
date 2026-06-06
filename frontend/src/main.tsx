@@ -27,8 +27,6 @@ import Projects from './pages/Projects'
 import ProjectDetail from './pages/ProjectDetail'
 import Login from './pages/Login'
 import Onboarding from './pages/Onboarding'
-import OrgConfigure from './pages/OrgConfigure'
-import TeamConfigure from './pages/TeamConfigure'
 import Wizard from './pages/setup/Wizard'
 import ConnectGitHub from './pages/ConnectGitHub'
 import Shell from './Shell'
@@ -78,32 +76,12 @@ function LocalRoutes() {
     <Routes>
       {/* First-run provision trigger. Unguarded — it's the !configured target
           LocalAuthGate redirects to (a gate here would loop). On Start it
-          provisions the sentinel tenant and routes into the configure flow. */}
+          provisions the sentinel tenant and routes into the /setup wizard. */}
       <Route path="/start" element={<StartFactory />} />
-      {/* Create-time configure steps — the SAME pages multi uses, wrapped in
-          the local gate and flagged isLocal (SSH toggle + PAT, no App panel).
-          Routed with the sentinel org id; team_id is the "default" alias the
-          team endpoints resolve to the local Default team. Declared before the
-          shell layout so the static /configure + /carry-over suffixes win. */}
-      <Route
-        path="/orgs/:org_id/configure"
-        element={
-          <AuthGate mode="local">
-            <OrgConfigure isLocal />
-          </AuthGate>
-        }
-      />
-      <Route
-        path="/orgs/:org_id/teams/:team_id/configure"
-        element={
-          <AuthGate mode="local">
-            <TeamConfigure isLocal />
-          </AuthGate>
-        }
-      />
       {/* Jira carry-over — the final local first-run step (migrated from the
-          retired Setup wizard), reached from TeamConfigure on Finish when
-          Jira is connected. */}
+          retired Setup wizard), reached from the /setup wizard's Finish when
+          Jira is the connected tracker. Declared before the shell layout so
+          the static /carry-over suffix wins. */}
       <Route
         path="/orgs/:org_id/carry-over"
         element={
@@ -182,32 +160,6 @@ function MultiRoutes() {
             element={
               <AuthGate mode="multi">
                 <ConnectGitHub />
-              </AuthGate>
-            }
-          />
-          {/* Create-time configure step (the second half of "Start your
-              Factory"). Outside RequireGitHubIdentity for the same reason
-              as connect-github — it's where GitHub access gets set up, so
-              gating it on GitHub identity would loop. */}
-          <Route
-            path="/orgs/:org_id/configure"
-            element={
-              <AuthGate mode="multi">
-                <OrgConfigure />
-              </AuthGate>
-            }
-          />
-          {/* Create-time team configure step — the second half of "Create
-              your first team" and the tail of onboarding (org-configure
-              routes here on Finish). Outside RequireGitHubIdentity for the
-              same reason as configure: it's where repos + GitHub-team
-              mappings get set up. Declared before the shell layout so the
-              static /teams/:team_id/configure suffix wins. */}
-          <Route
-            path="/orgs/:org_id/teams/:team_id/configure"
-            element={
-              <AuthGate mode="multi">
-                <TeamConfigure />
               </AuthGate>
             }
           />

@@ -450,8 +450,8 @@ export default function Settings() {
   // ---- Section renderers (closures over current state; no prop drilling).
 
   // GitHub access (org scope): base URL + PAT + clone protocol, plus the
-  // App-registration alternative — all shared with the create-configure
-  // step (and, in local mode, the first-run OrgConfigure step).
+  // App-registration alternative — all shared with the setup wizard's
+  // GitHub step.
   const renderGitHubAccess = () => (
     <GitHubAccessGroup
       value={{
@@ -497,8 +497,8 @@ export default function Settings() {
     <ModelGroup value={{ max_llm_model_tier: form.max_llm_model_tier }} onChange={patchForm} />
   )
 
-  // ---- Team-scope groups (shared with TeamConfigure). Controlled —
-  // the container owns the form + the per-slice saves.
+  // ---- Team-scope groups (shared with the setup wizard's team steps).
+  // Controlled — the container owns the form + the per-slice saves.
   const renderRepos = () => (
     <ReposGroup
       value={form.repos}

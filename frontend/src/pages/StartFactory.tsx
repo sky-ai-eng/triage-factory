@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuthStatus } from '../hooks/useAuthStatus'
-import { LOCAL_DEFAULT_ORG_ID } from '../lib/githubApp'
 
 /**
  * StartFactory is the local-mode first-run landing — the local analog of
@@ -10,9 +9,9 @@ import { LOCAL_DEFAULT_ORG_ID } from '../lib/githubApp'
  * unconfigured user here. There's no org-name field: local provisions the
  * fixed synthetic sentinel tenant, so the only input is the deliberate
  * "Start your factory" action that fires POST /api/setup/start
- * (idempotent — see handleSetupStart). On success we route into the shared
- * OrgConfigure → TeamConfigure flow; the configure route's own LocalAuthGate
- * re-reads /api/integrations/status and now sees configured=true.
+ * (idempotent — see handleSetupStart). On success we route into the /setup
+ * wizard; the wizard route's own LocalAuthGate re-reads
+ * /api/integrations/status and now sees configured=true.
  *
  * Local-mode only — multi mounts Onboarding instead (org creation is a
  * named-org POST, not a single sentinel provision).
@@ -44,9 +43,9 @@ export default function StartFactory() {
         setError(data.error || 'Failed to start Triage Factory')
         return
       }
-      // Provisioned. Route into the org-configure step; its LocalAuthGate
-      // re-reads status and now admits us (configured=true).
-      navigate(`/orgs/${LOCAL_DEFAULT_ORG_ID}/configure`, { replace: true })
+      // Provisioned. Route into the setup wizard; its LocalAuthGate re-reads
+      // status and now admits us (configured=true).
+      navigate('/setup', { replace: true })
     } catch {
       setError('Could not connect to server')
     } finally {

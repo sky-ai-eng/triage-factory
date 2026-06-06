@@ -26,8 +26,8 @@ function keyToGroup(
  * group: which GitHub teams route their CODEOWNERS review requests to this
  * Triage Factory team. A controlled component — the container owns the
  * selected mappings (`value`) and the PUT /api/settings/team/{id}/github-
- * groups — so the same group serves the team Settings tab, the create-time
- * TeamConfigure step, and the local Setup wizard.
+ * groups — so the same group serves the team Settings tab and the setup
+ * wizard's team steps.
  *
  * It self-fetches the org-wide candidate list (the GET also re-triggers the
  * server's deletion reconcile) and renders the shared GitHubTeamChecklist
