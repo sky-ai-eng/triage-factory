@@ -1407,7 +1407,9 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
   // Forza-style cut transitions. Above the canvas, non-interactive; the
   // director owns its opacity (0 clear … 1 black). Inline-styled to match
   // the canvas — this layer is scene-managed, not React-managed.
+  if (getComputedStyle(container).position === 'static') container.style.position = 'relative'
   const fadeOverlay = document.createElement('div')
+  fadeOverlay.setAttribute('aria-hidden', 'true')
   fadeOverlay.style.position = 'absolute'
   fadeOverlay.style.inset = '0'
   fadeOverlay.style.background = '#000'
