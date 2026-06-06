@@ -102,9 +102,9 @@ export default function GitHubAppPanel({
         <h2 className="text-[13px] font-medium text-text-secondary mb-1">GitHub access</h2>
       )}
       <p className="text-[11px] text-text-tertiary mb-4 leading-relaxed">
-        A GitHub App is an alternative to the Personal Access Token above — it polls under its own
-        bot identity and supports multiple installations. The PAT keeps working as the simpler
-        default; you don&rsquo;t need both.
+        A GitHub App connects Triage Factory to your organization under its own bot identity and
+        supports multiple installations. A Personal Access Token is the simpler alternative — you
+        don&rsquo;t need both.
       </p>
 
       {ghAppState.kind === 'loading' && (

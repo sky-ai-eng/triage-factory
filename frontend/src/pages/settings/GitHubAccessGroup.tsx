@@ -112,10 +112,12 @@ export default function GitHubAccessGroup({
                 classic PAT
               </a>{' '}
               with <code className="text-text-secondary">repo</code> and{' '}
-              <code className="text-text-secondary">read:org</code> scopes.{' '}
-              <code className="text-text-secondary">read:org</code> is needed to resolve your team
-              memberships so review requests sent to your teams (e.g. CODEOWNERS) surface as tasks —
-              without it, only PRs that request you individually will show up.
+              <code className="text-text-secondary">read:org</code> scopes — the token Triage
+              Factory&rsquo;s bots poll your organization with.{' '}
+              <code className="text-text-secondary">read:org</code> lets them resolve your
+              organization&rsquo;s team memberships so review requests routed to teams (e.g.
+              CODEOWNERS) surface as tasks — without it, only PRs that name a reviewer directly are
+              visible.
             </p>
           </Field>
           {/* Clone protocol is local-mode-only: multi-mode deployments

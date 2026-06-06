@@ -37,8 +37,8 @@ export function GitHubUrlStep({ state, patch, error }: StepContext) {
   return (
     <div className="space-y-4">
       <p className="text-[13px] leading-relaxed text-text-secondary">
-        GitHub is the backbone — Triage Factory polls your repos for the PRs and reviews it
-        surfaces. Confirm where your GitHub lives, then connect.
+        GitHub is the backbone — Triage Factory polls your organization&rsquo;s repositories for the
+        PRs and reviews it surfaces. Confirm where your GitHub lives, then connect.
       </p>
       <UrlField
         label="GitHub URL"
@@ -59,6 +59,12 @@ export function GitHubAccessStep({ orgId, isLocal, state, patch }: StepContext) 
   const tab = state.githubAccessTab
   return (
     <div className="space-y-3">
+      <p className="text-[13px] leading-relaxed text-text-secondary">
+        How Triage Factory connects to your organization&rsquo;s GitHub — the identity its bots poll
+        repositories and open pull requests under. This is the org-wide connection, not your
+        personal GitHub access.
+      </p>
+
       {state.githubReady && (
         <div className="flex items-center gap-2 rounded-xl border border-claim/15 bg-claim/[0.06] px-4 py-2.5">
           <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-claim" />
