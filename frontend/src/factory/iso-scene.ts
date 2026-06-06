@@ -1403,6 +1403,19 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
   canvas.style.touchAction = 'none'
   container.appendChild(canvas)
 
+  // Black overlay the cinematic director fades through for its
+  // Forza-style cut transitions. Above the canvas, non-interactive; the
+  // director owns its opacity (0 clear … 1 black). Inline-styled to match
+  // the canvas — this layer is scene-managed, not React-managed.
+  const fadeOverlay = document.createElement('div')
+  fadeOverlay.style.position = 'absolute'
+  fadeOverlay.style.inset = '0'
+  fadeOverlay.style.background = '#000'
+  fadeOverlay.style.opacity = '0'
+  fadeOverlay.style.pointerEvents = 'none'
+  fadeOverlay.style.zIndex = '1'
+  container.appendChild(fadeOverlay)
+
   const initialRect = container.getBoundingClientRect()
   const dpr = window.devicePixelRatio || 1
   canvas.width = initialRect.width * dpr
@@ -2736,6 +2749,7 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
       id: 'establishing',
       base: 5,
       region: null,
+      wide: true,
       resolve: () => ({
         alpha: Math.PI / 2,
         beta: 0.52,
@@ -2749,6 +2763,7 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
       id: 'blueprint',
       base: 5,
       region: null,
+      wide: true,
       resolve: () => ({
         alpha: Math.PI / 2,
         beta: 0.18,
@@ -2787,8 +2802,14 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
     },
   ]
 
-  const cinematic = new CinematicDirector(renderer.camera, renderer.scene, cinematicDeck, () =>
-    chipController.collectChipXY(),
+  const cinematic = new CinematicDirector(
+    renderer.camera,
+    renderer.scene,
+    cinematicDeck,
+    () => chipController.collectChipXY(),
+    (opacity) => {
+      fadeOverlay.style.opacity = String(opacity)
+    },
   )
   // Re-attach user camera controls once the camera has fully eased back
   // to the pre-entry pose (fires on every exit, manual or self).
@@ -2805,6 +2826,7 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
       cinematic.dispose()
       ro.disconnect()
       renderer.destroy()
+      fadeOverlay.remove()
       canvas.remove()
     },
     resetView: () => renderer.resetView(),

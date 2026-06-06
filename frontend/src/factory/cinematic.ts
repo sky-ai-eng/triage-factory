@@ -77,6 +77,9 @@ export interface Shot {
   /** Resolve the concrete move. Returns null to decline (e.g. the
    *  station shot when nothing has an active run); the director re-picks. */
   resolve: () => ShotMotion | null
+  /** Wide establishing/overview shots. The director glides INTO these
+   *  (no fade-to-black) and never lets one follow another. */
+  wide?: boolean
 }
 
 // ─── Selection policy ────────────────────────────────────────────────
@@ -132,6 +135,7 @@ export function pickNextShot(
 
 const TRANSITION_SEC = 1.4 // ease between consecutive shots
 const RESTORE_SEC = 1.1 // ease back to the user's pose on exit
+const FADE_SEC = 0.25 // each half of a fade-to-black cut (out, then in)
 const COOLDOWN_K = 3 // a shot can't replay until K others have run
 const DT_CAP = 0.05 // clamp per-frame advance so a tab-wake hitch can't jump the camera
 
@@ -142,7 +146,10 @@ const BETA_MAX = 1.5
 const RADIUS_MIN = 270 // ~ the camera's lowerRadiusLimit — the tightest zoom it allows
 const RADIUS_MAX = 2800
 
-type Phase = 'idle' | 'transition' | 'hold' | 'restore'
+// 'transition' = a visible eased glide (entry, into-wide, restore).
+// 'fadeOut'/'fadeIn' = the two halves of a fade-to-black cut, with the
+// camera snapped to the new shot at the fully-black midpoint.
+type Phase = 'idle' | 'transition' | 'fadeOut' | 'fadeIn' | 'hold' | 'restore'
 
 export class CinematicDirector {
   private observer: Observer<Scene> | null = null
@@ -156,6 +163,9 @@ export class CinematicDirector {
   private enterPose: Pose | null = null
   private recent: string[] = []
   private reduced = false
+  // Whether the shot we're currently in is a wide one, so the next pick
+  // can forbid wide→wide.
+  private lastWasWide = false
   // Reused for every per-frame camera-target write so a hold — especially
   // the reduced-motion infinite hold — doesn't allocate a Vector3 each
   // frame. Safe because the camera's target setter copies the value and
@@ -169,6 +179,8 @@ export class CinematicDirector {
   private readonly scene: Scene
   private readonly deck: Shot[]
   private readonly getChips: () => { x: number; y: number }[]
+  /** Sets the fade-to-black overlay opacity (0 clear … 1 fully black). */
+  private readonly setFade: (opacity: number) => void
   private readonly rng: () => number
 
   constructor(
@@ -176,12 +188,14 @@ export class CinematicDirector {
     scene: Scene,
     deck: Shot[],
     getChips: () => { x: number; y: number }[],
+    setFade: (opacity: number) => void,
     rng: () => number = Math.random,
   ) {
     this.camera = camera
     this.scene = scene
     this.deck = deck
     this.getChips = getChips
+    this.setFade = setFade
     this.rng = rng
     this.startPose = this.snapshot()
     this.holdPose = this.snapshot()
@@ -206,7 +220,12 @@ export class CinematicDirector {
     this.reduced = reduced
     this.enterPose = this.snapshot()
     this.recent = []
-    this.startNextFrom(this.enterPose)
+    this.lastWasWide = false
+    this.setFade(0)
+    // Entry glides from the user's live view into the first shot (symmetric
+    // with the restore on exit) — fade-to-black cuts are reserved for
+    // between cinematic shots.
+    this.startNextFrom(this.enterPose, true)
     if (!this.observer) {
       this.observer = this.scene.onBeforeRenderObservable.add(() => this.tick())
     }
@@ -222,6 +241,7 @@ export class CinematicDirector {
     // therefore can't strand controls detached. If a self-exiting shot is
     // ever added, route its completion through the same restore→onEnd path.
     if (this.phase === 'idle' || this.phase === 'restore') return
+    this.setFade(0) // clear any in-flight fade; the restore is a plain glide
     this.startPose = this.snapshot()
     this.elapsed = 0
     this.phase = 'restore'
@@ -259,12 +279,30 @@ export class CinematicDirector {
         this.phase = 'hold'
         this.elapsed = 0
       }
+    } else if (this.phase === 'fadeOut') {
+      // Darken in place; the camera holds its end-of-shot pose.
+      this.elapsed += dt
+      this.setFade(Math.min(1, this.elapsed / FADE_SEC))
+      if (this.elapsed >= FADE_SEC) {
+        // Fully black — cut to the new shot, then fade back up over it.
+        this.applyPose(this.holdPose)
+        this.phase = 'fadeIn'
+        this.elapsed = 0
+      }
+    } else if (this.phase === 'fadeIn') {
+      this.elapsed += dt
+      this.setFade(Math.max(0, 1 - this.elapsed / FADE_SEC))
+      if (this.elapsed >= FADE_SEC) {
+        this.setFade(0)
+        this.phase = 'hold'
+        this.elapsed = 0
+      }
     } else if (this.phase === 'hold') {
       this.elapsed += dt
       this.applyHoldMotion(this.elapsed)
       if (this.motion && this.elapsed >= this.motion.hold) {
-        // Advance — the next shot eases from the current (drifted) pose.
-        this.startNextFrom(this.snapshot())
+        // Advance — fade-cut to the next shot (or glide, if it's wide).
+        this.startNextFrom(this.snapshot(), false)
       }
     } else if (this.phase === 'restore') {
       this.elapsed += dt
@@ -273,8 +311,8 @@ export class CinematicDirector {
     }
   }
 
-  private startNextFrom(from: Pose): void {
-    const { motion, id } = this.reduced ? this.reducedHold() : this.nextHold()
+  private startNextFrom(from: Pose, forceGlide: boolean): void {
+    const { motion, id, wide } = this.reduced ? this.reducedHold() : this.nextHold()
     this.recent.push(id)
     while (this.recent.length > COOLDOWN_K) this.recent.shift()
     this.motion = motion
@@ -285,31 +323,38 @@ export class CinematicDirector {
       radius: motion.radius,
       target: motion.target.clone(),
     }
+    this.lastWasWide = wide
     this.elapsed = 0
-    this.phase = 'transition'
+    // Glide (visible eased move) into wide shots and on entry; otherwise a
+    // fade-to-black cut between shots.
+    this.phase = wide || forceGlide ? 'transition' : 'fadeOut'
   }
 
-  private nextHold(): { motion: ShotMotion; id: string } {
+  private nextHold(): { motion: ShotMotion; id: string; wide: boolean } {
     const chips = this.getChips()
+    // Wide shots never transition into one another — drop them from the
+    // pool when the shot we're leaving was itself wide.
+    const pool = this.lastWasWide ? this.deck.filter((s) => !s.wide) : this.deck
     const excluded: string[] = []
-    // Up to deck.length tries to satisfy resolve() (a shot may decline,
-    // e.g. station-detail when nothing is running). Wide shots never
-    // decline, so this terminates.
-    for (let i = 0; i <= this.deck.length; i++) {
-      const shot = pickNextShot(this.deck, chips, [...this.recent, ...excluded], this.rng)
+    // Up to pool.length tries to satisfy resolve() (a shot may decline,
+    // e.g. a truck over an empty belt). Wide shots never decline, so this
+    // terminates.
+    for (let i = 0; i <= pool.length; i++) {
+      const shot = pickNextShot(pool, chips, [...this.recent, ...excluded], this.rng)
       if (!shot) break
       const motion = shot.resolve()
-      if (motion) return { motion, id: shot.id }
+      if (motion) return { motion, id: shot.id, wide: shot.wide ?? false }
       excluded.push(shot.id)
     }
-    return { motion: this.fallbackMotion(), id: 'fallback' }
+    return { motion: this.fallbackMotion(), id: 'fallback', wide: false }
   }
 
-  private reducedHold(): { motion: ShotMotion; id: string } {
+  private reducedHold(): { motion: ShotMotion; id: string; wide: boolean } {
     const est = this.deck.find((s) => s.id === 'establishing') ?? this.deck[0]
     const m = est?.resolve() ?? this.fallbackMotion()
     return {
       id: 'establishing',
+      wide: true,
       motion: {
         alpha: m.alpha,
         beta: m.beta,
@@ -334,6 +379,16 @@ export class CinematicDirector {
       hold: 6,
       driftAlpha: 0.02,
     }
+  }
+
+  /** Snap the camera to a pose — used at the fully-black midpoint of a
+   *  fade cut, where the jump is invisible. */
+  private applyPose(p: Pose): void {
+    this.camera.alpha = p.alpha
+    this.camera.beta = clamp(p.beta, BETA_MIN, BETA_MAX)
+    this.camera.radius = clamp(p.radius, RADIUS_MIN, RADIUS_MAX)
+    this.targetScratch.copyFrom(p.target)
+    this.camera.target = this.targetScratch
   }
 
   private applyLerp(a: Pose, b: Pose, t: number): void {
