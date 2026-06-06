@@ -124,6 +124,17 @@ export class SnapshotChipController {
     }
   }
 
+  /** World x/y of every chip currently in transit. Cinematic mode
+   *  reads this to score how much live motion sits inside a candidate
+   *  shot's framing box — the "watch where the work is" weighting. */
+  collectChipXY(): { x: number; y: number }[] {
+    const out: { x: number; y: number }[] = []
+    for (const chip of this.chips.values()) {
+      out.push({ x: chip.root.position.x, y: chip.root.position.y })
+    }
+    return out
+  }
+
   destroy(): void {
     for (const chip of this.chips.values()) this.disposeChip(chip)
     this.chips.clear()

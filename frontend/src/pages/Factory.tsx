@@ -10,6 +10,7 @@ import {
   type DragEndEvent,
   type DragStartEvent,
 } from '@dnd-kit/core'
+import { Clapperboard } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import PromptPicker from '../components/PromptPicker'
 import TeamScopeSelect from '../components/TeamScopeSelect'
@@ -51,6 +52,23 @@ const REFETCH_DEBOUNCE_MS = 250
 // time, so there's never more than one runs-drop target on the page.
 const RUNS_DROP_ID = 'factory-runs-drop'
 
+// Cinematic auto-attract: idle this long (ms) with the factory tab
+// focused and nothing modal open → the camera engages itself (kiosk /
+// wall-display attract-mode). Checked once a second.
+const CINEMATIC_IDLE_MS = 45_000
+const CINEMATIC_IDLE_CHECK_MS = 1_000
+
+// prefers-reduced-motion gates auto-attract off entirely and tells the
+// scene director to collapse to a single slow drift. Read live so a
+// mid-session OS setting change is respected.
+function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  )
+}
+
 // In-flight delegate request: dropping a queued entity onto the runs
 // tray populates this; the prompt picker reads it; on prompt selection
 // it's POSTed to /api/factory/delegate. Cleared on close/cancel.
@@ -66,6 +84,7 @@ export default function Factory() {
   const [picked, setPicked] = useState<ClickedStationInfo | null>(null)
   const [pendingDelegate, setPendingDelegate] = useState<PendingDelegate | null>(null)
   const [draggingEntity, setDraggingEntity] = useState<FactoryEntity | null>(null)
+  const [cinematic, setCinematic] = useState(false)
 
   // multi-team. teamFilter is the per-page read scope (narrows the
   // entity belt via ?team_id); delegateTeam is the acting team the
@@ -196,6 +215,77 @@ export default function Factory() {
     })
   }, [pickedId])
 
+  // ─── Cinematic mode ───────────────────────────────────────────────
+  // A camera-driven ambient showcase: the scene director takes over the
+  // camera (factory/cinematic.ts) while React drops the HUD, frames a
+  // letterbox, and watches for the exit gesture. Entry is the
+  // clapperboard button or an idle auto-attract.
+  const enterCinematic = useCallback(() => {
+    const scene = sceneRef.current
+    if (!scene) return
+    setPicked(null) // close any open drawer so it slides away with the HUD
+    scene.enterCinematic(prefersReducedMotion())
+    setCinematic(true)
+  }, [])
+
+  const exitCinematic = useCallback(() => {
+    sceneRef.current?.exitCinematic()
+    setCinematic(false)
+  }, [])
+
+  // While cinematic, any key or wheel exits (click is handled by the
+  // full-viewport catcher in the render). pointermove deliberately does
+  // NOT exit — a jittery wall-display mouse shouldn't yank the camera.
+  useEffect(() => {
+    if (!cinematic) return
+    const onKey = () => exitCinematic()
+    const onWheel = () => exitCinematic()
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('wheel', onWheel, { passive: true })
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('wheel', onWheel)
+    }
+  }, [cinematic, exitCinematic])
+
+  // Idle auto-attract. A 1Hz tick checks time since the last real
+  // interaction; once it crosses the threshold — tab visible, reduced-
+  // motion off, nothing modal open — the camera engages itself. The
+  // guard snapshot keeps the interval closure cheap and current.
+  // Seeded in the effect below (not here) — Date.now() during render is
+  // impure and the idle clock should start at mount anyway.
+  const lastInteractionRef = useRef(0)
+  const cinematicGuardsRef = useRef({ active: false, busy: false })
+  useEffect(() => {
+    cinematicGuardsRef.current = {
+      active: cinematic,
+      busy: picked != null || pendingDelegate != null || draggingEntity != null,
+    }
+  }, [cinematic, picked, pendingDelegate, draggingEntity])
+
+  useEffect(() => {
+    lastInteractionRef.current = Date.now() // start the idle clock at mount
+    const bump = () => {
+      lastInteractionRef.current = Date.now()
+    }
+    const events: (keyof WindowEventMap)[] = ['pointermove', 'pointerdown', 'keydown', 'wheel']
+    for (const e of events) window.addEventListener(e, bump, { passive: true })
+    document.addEventListener('visibilitychange', bump)
+    const id = window.setInterval(() => {
+      if (prefersReducedMotion()) return
+      if (document.visibilityState !== 'visible') return
+      const g = cinematicGuardsRef.current
+      if (g.active || g.busy) return
+      if (Date.now() - lastInteractionRef.current < CINEMATIC_IDLE_MS) return
+      enterCinematic()
+    }, CINEMATIC_IDLE_CHECK_MS)
+    return () => {
+      for (const e of events) window.removeEventListener(e, bump)
+      document.removeEventListener('visibilitychange', bump)
+      window.clearInterval(id)
+    }
+  }, [enterCinematic])
+
   // 8px activation distance keeps click-to-open-PR (single click on a
   // queued row's anchor) distinct from a drag — same threshold pattern
   // Board.tsx uses for its task-card sortable.
@@ -309,18 +399,63 @@ export default function Factory() {
         {/* Per-page team filter — narrows the entity belt.
             Gated on ≥2 teams so solo users get no empty overlay box. */}
         {teams.length >= 2 && (
-          <div className="absolute top-4 left-4 rounded-md bg-white/92 px-1 py-0.5 shadow">
+          <div
+            className={`absolute top-4 left-4 rounded-md bg-white/92 px-1 py-0.5 shadow transition-opacity duration-300 ${
+              cinematic ? 'pointer-events-none opacity-0' : 'opacity-100'
+            }`}
+          >
             <TeamScopeSelect value={teamFilter} onChange={setTeamFilter} />
           </div>
         )}
-        <button
-          type="button"
-          onClick={() => sceneRef.current?.resetView()}
-          className="absolute bottom-4 right-4 rounded-md bg-white/92 px-3 py-2 text-[11px] font-semibold text-text-primary shadow transition hover:bg-white"
+        <div
+          className={`absolute right-4 bottom-4 flex items-center gap-2 transition-opacity duration-300 ${
+            cinematic ? 'pointer-events-none opacity-0' : 'opacity-100'
+          }`}
         >
-          Reset view
-        </button>
+          <button
+            type="button"
+            onClick={enterCinematic}
+            title="Cinematic mode"
+            aria-label="Cinematic mode"
+            className="rounded-md bg-white/92 p-2 text-text-primary shadow transition hover:bg-white"
+          >
+            <Clapperboard className="h-4 w-4" strokeWidth={2} aria-hidden />
+          </button>
+          <button
+            type="button"
+            onClick={() => sceneRef.current?.resetView()}
+            className="rounded-md bg-white/92 px-3 py-2 text-[11px] font-semibold text-text-primary shadow transition hover:bg-white"
+          >
+            Reset view
+          </button>
+        </div>
         <StationDrawer info={picked} />
+        {/* Letterbox bars — filmic frame; non-interactive so clicks fall
+            through to the exit catcher beneath. */}
+        <div
+          className={`pointer-events-none absolute inset-x-0 top-0 z-50 bg-black transition-transform duration-500 ease-out ${
+            cinematic ? 'translate-y-0' : '-translate-y-full'
+          }`}
+          style={{ height: '8vh' }}
+          aria-hidden
+        />
+        <div
+          className={`pointer-events-none absolute inset-x-0 bottom-0 z-50 bg-black transition-transform duration-500 ease-out ${
+            cinematic ? 'translate-y-0' : 'translate-y-full'
+          }`}
+          style={{ height: '8vh' }}
+          aria-hidden
+        />
+        {/* Exit catcher — full-viewport layer that swallows the first
+            click (so it exits instead of orbiting) and hides the cursor
+            for immersion. Key/wheel exits are wired in an effect. */}
+        {cinematic && (
+          <div
+            className="absolute inset-0 z-40 cursor-none"
+            onPointerDown={exitCinematic}
+            aria-hidden
+          />
+        )}
       </div>
       <DragOverlay dropAnimation={null}>
         {draggingEntity ? (

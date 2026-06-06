@@ -42,6 +42,7 @@
 import { Vector3 } from '@babylonjs/core'
 
 import { BELT_WORLD_SPEED } from './iso-belt'
+import { CinematicDirector, type Shot } from './cinematic'
 import { hashHue } from './iso-items'
 import { placeEntity } from './place-entity'
 import { DEFAULT_PORT_RECESS_DEPTH } from './iso-port'
@@ -1380,6 +1381,18 @@ export interface IsoSceneHandle {
    *  either a station (driving tray counts) or a transit (driving
    *  chip meshes). Backend is the source of truth for both. */
   applySnapshot: (snapshot: FactorySnapshot) => void
+  /** Enter ambient cinematic mode — the camera detaches from user
+   *  input and begins an eased, auto-advancing scenic tour. `reduced`
+   *  (from prefers-reduced-motion) collapses it to a single slow drift. */
+  enterCinematic: (reduced?: boolean) => void
+  /** Leave cinematic mode — the camera eases back to the pose held
+   *  before entering, then user controls re-attach. No-op when not
+   *  active. */
+  exitCinematic: () => void
+  /** Fires once the camera has fully eased back after an exit, so the
+   *  HUD doesn't return mid-move. (The V1 director never self-exits.)
+   *  Returns an unsubscribe. */
+  onCinematicEnd: (cb: () => void) => () => void
 }
 
 export async function createIsoScene(container: HTMLDivElement): Promise<IsoSceneHandle> {
@@ -2559,6 +2572,183 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
 
   const reconcileObserver = renderer.scene.onBeforeRenderObservable.add(reconcile)
 
+  // ─── Cinematic mode ────────────────────────────────────────────
+  // Ambient shot-director (factory/cinematic.ts). The deck is authored
+  // against this floor's grid constants: the subject is the
+  // architecture — the two hero bridges, the long belt runs, the loop,
+  // the review cluster — and live chip motion only *weights* which
+  // scenic shot comes next (it never picks the shot, never gets chased).
+  const worldXY = (col: number, row: number, z = 0): Vector3 =>
+    new Vector3(col * FLOOR_CELL, row * FLOOR_CELL, z)
+  const stationCenter = (s: Station, z = 0): Vector3 => new Vector3(s.x + s.w / 2, s.y + s.d / 2, z)
+  // Floor center shifted south to match the camera's home target
+  // (INITIAL_TARGET_Y_OFFSET = -800 in iso-renderer) — where the
+  // machinery actually sits, not the geometric floor center.
+  const actionCenter = new Vector3(FLOOR_SIZE / 2, FLOOR_SIZE / 2 - 800, 0)
+
+  // S1 vertical overpass — tallest/longest arch; the hero close-up.
+  const s1BridgeCenter = worldXY(
+    BRIDGE_COL + 0.5,
+    BRIDGE_NORTH_ROW + BRIDGE_CELL_COUNT / 2,
+    BRIDGE_PEAK_HEIGHT / 2,
+  )
+  // Over/under crossing — one belt passes under the span, one over.
+  const crossingCenter = worldXY(
+    (BRIDGE_UNDER_POLE_1_COL + OVER_BRIDGE_MERGER_COL) / 2 + 0.5,
+    (BRIDGE_UNDER_POLE_1_ROW + OVER_BRIDGE_MERGER_ROW) / 2 + 0.5,
+    14,
+  )
+
+  // A belt-truck shot: the camera holds a low angle while the target
+  // glides end→end along a long run at a steady ~220 wu/s.
+  const truckShot = (id: string, from: Vector3, to: Vector3): Shot => ({
+    id,
+    base: 7,
+    region: {
+      cx: (from.x + to.x) / 2,
+      cy: (from.y + to.y) / 2,
+      halfX: Math.abs(to.x - from.x) / 2 + FLOOR_CELL,
+      halfY: Math.abs(to.y - from.y) / 2 + FLOOR_CELL,
+    },
+    resolve: () => ({
+      alpha: Math.PI / 2,
+      beta: 0.32,
+      radius: 1000,
+      target: from.clone(),
+      targetTo: to.clone(),
+      hold: Math.min(11, Math.max(6, Vector3.Distance(from, to) / 220)),
+    }),
+  })
+
+  const cinematicDeck: Shot[] = [
+    {
+      id: 's1-bridge',
+      base: 10,
+      region: {
+        cx: s1BridgeCenter.x,
+        cy: s1BridgeCenter.y,
+        halfX: 1.5 * FLOOR_CELL,
+        halfY: (BRIDGE_CELL_COUNT / 2 + 1) * FLOOR_CELL,
+      },
+      resolve: () => ({
+        alpha: Math.PI / 2 + 0.6,
+        beta: 0.22,
+        radius: 540,
+        target: s1BridgeCenter.clone(),
+        hold: 6.5,
+        driftAlpha: 0.05,
+      }),
+    },
+    {
+      id: 'crossing',
+      base: 10,
+      region: {
+        cx: crossingCenter.x,
+        cy: crossingCenter.y,
+        halfX: 2.5 * FLOOR_CELL,
+        halfY: 3.5 * FLOOR_CELL,
+      },
+      resolve: () => ({
+        alpha: Math.PI / 2 - 0.5,
+        beta: 0.28,
+        radius: 680,
+        target: crossingCenter.clone(),
+        hold: 7,
+        driftAlpha: 0.04,
+      }),
+    },
+    truckShot(
+      'truck-rfr',
+      worldXY(RFR_SPLITTER_COL + 0.5, RFR_SPLITTER_ROW + 0.5),
+      worldXY(RFR_POLE2_COL + 0.5, RFR_POLE2_ROW + 0.5),
+    ),
+    truckShot(
+      'truck-loop',
+      worldXY(LOOP_POLE2_COL + 0.5, LOOP_POLE2_ROW + 0.5),
+      worldXY(LOOP_POLE3_COL + 0.5, LOOP_POLE3_ROW + 0.5),
+    ),
+    truckShot(
+      'truck-mc',
+      worldXY(MC_FOOT_MERGER_COL + 0.5, MC_FOOT_MERGER_ROW + 0.5),
+      worldXY(CR_MERGER_COL + 0.5, CR_MERGER_ROW + 0.5),
+    ),
+    {
+      id: 'review-crane',
+      base: 6,
+      region: {
+        cx: stationCenter(REVIEW_REQUESTED).x,
+        cy: stationCenter(REVIEW_REQUESTED).y,
+        halfX: 3 * FLOOR_CELL,
+        halfY: 3 * FLOOR_CELL,
+      },
+      resolve: () => ({
+        alpha: Math.PI / 2 + 0.3,
+        beta: 0.25,
+        radius: 900,
+        target: stationCenter(REVIEW_REQUESTED, 0),
+        hold: 6.5,
+        craneBeta: 0.05, // 0.25 → ~0.58 over the hold
+        driftAlpha: 0.03,
+      }),
+    },
+    {
+      id: 'establishing',
+      base: 5,
+      region: null,
+      resolve: () => ({
+        alpha: Math.PI / 2,
+        beta: 0.36,
+        radius: 2400,
+        target: actionCenter.clone(),
+        hold: 8,
+        driftAlpha: 0.02,
+      }),
+    },
+    {
+      id: 'blueprint',
+      base: 5,
+      region: null,
+      resolve: () => ({
+        alpha: Math.PI / 2,
+        beta: 0.09,
+        radius: 2600,
+        target: actionCenter.clone(),
+        hold: 9,
+        driftTargetX: 16,
+      }),
+    },
+    {
+      id: 'station-detail',
+      base: 3,
+      region: null,
+      resolve: () => {
+        // Frame the station doing the most agent work — gated on active
+        // runs, never queued piles (a heap is not a spectacle).
+        let best: StationRow | null = null
+        for (const row of stationsByEvent.values()) {
+          if ((row.data.runCount ?? 0) <= 0) continue
+          if (!best || row.data.runCount > best.data.runCount) best = row
+        }
+        if (!best) return null
+        return {
+          alpha: Math.PI / 2 + 0.4,
+          beta: 0.5,
+          radius: 470,
+          target: stationCenter(best.spec, 0),
+          hold: 5.5,
+          driftAlpha: 0.05,
+        }
+      },
+    },
+  ]
+
+  const cinematic = new CinematicDirector(renderer.camera, renderer.scene, cinematicDeck, () =>
+    chipController.collectChipXY(),
+  )
+  // Re-attach user camera controls once the camera has fully eased back
+  // to the pre-entry pose (fires on every exit, manual or self).
+  cinematic.onEnd(() => renderer.camera.attachControl(true))
+
   const ro = new ResizeObserver(() => {
     renderer.resize()
   })
@@ -2567,6 +2757,7 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
   return {
     destroy: () => {
       renderer.scene.onBeforeRenderObservable.remove(reconcileObserver)
+      cinematic.dispose()
       ro.disconnect()
       renderer.destroy()
       canvas.remove()
@@ -2633,6 +2824,15 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
       // hasn't seen anything yet).
       reconcile()
     },
+    enterCinematic: (reduced = false) => {
+      // Detach user input so a stray pointer/wheel can't fight the
+      // director. The React exit-catcher overlay is the primary guard;
+      // this is the backstop. Re-attached via cinematic.onEnd above.
+      renderer.camera.detachControl()
+      cinematic.enter(reduced)
+    },
+    exitCinematic: () => cinematic.exit(),
+    onCinematicEnd: (cb) => cinematic.onEnd(cb),
   }
 }
 
