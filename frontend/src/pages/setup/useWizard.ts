@@ -40,8 +40,6 @@ export interface WizardController {
   // not the raw index, so a future omitted step 0 can't leave an
   // enabled-but-dead Back button (back() is a no-op with no prior visible step).
   canGoBack: boolean
-  // Whether step i can be reopened by clicking its collapsed bar.
-  canEdit: (index: number) => boolean
   // validate → persist the active step, then advance (or finish on the last).
   advance: () => void
   // Re-expand the previous step (the Back / Esc affordance).
@@ -214,11 +212,6 @@ export function useWizard(
     [steps, state],
   )
 
-  const canEdit = useCallback(
-    (index: number) => index < activeIndex || !!steps[index]?.isComplete(state),
-    [activeIndex, steps, state],
-  )
-
   const activeStep = steps[activeIndex]
   return {
     phase,
@@ -236,7 +229,6 @@ export function useWizard(
     // step. This is what flips the primary action to "Finish".
     isLastStep: nextVisibleIndex(steps, state, activeIndex) === -1,
     canGoBack: prevVisibleIndex(steps, state, activeIndex) !== -1,
-    canEdit,
     advance,
     back,
     goTo,

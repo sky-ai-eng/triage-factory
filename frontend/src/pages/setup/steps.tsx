@@ -385,7 +385,10 @@ const jiraUrlStep: WizardStep = {
     if (!result.reachable) throw new Error(reachabilityMessage(result))
     patch({ jiraUrlConfirmed: true, org: { ...state.org, jira_url: url } })
   },
-  collapsedSummary: (s) => `Jira URL: ${hostOf(s.org.jira_url)}`,
+  // Jira has no default URL (unlike github.com), so guard the empty case — a
+  // disconnect can leave the bar momentarily without a host — rather than
+  // rendering a bare "Jira URL:".
+  collapsedSummary: (s) => `Jira URL: ${s.org.jira_url.trim() ? hostOf(s.org.jira_url) : '—'}`,
   render: (ctx) => <JiraUrlStep {...ctx} />,
 }
 

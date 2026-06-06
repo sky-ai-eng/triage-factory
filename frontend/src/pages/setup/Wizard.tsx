@@ -78,10 +78,13 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
   // triggers Continue, but only on a step that opts in (advanceOnEnter) and only
   // from a text input — so pressing it in the URL field probes + advances, while
   // it never hijacks the access steps' own Connect / Register buttons.
-  const { back, advance, activeIndex, busy, canGoBack, steps } = wiz
+  const { back, advance, activeIndex, busy, canGoBack, steps, activeLoadFailed } = wiz
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (busy) return
+      // Mirror the Continue button's disabled condition (busy || activeLoadFailed)
+      // so the keyboard path can't fire while a save is in flight or the active
+      // step's load failed (showing the Retry UI in place of the fields).
+      if (busy || activeLoadFailed) return
       if (e.key === 'Escape' && canGoBack) {
         e.preventDefault()
         back()
@@ -100,7 +103,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [back, advance, canGoBack, busy, steps, activeIndex])
+  }, [back, advance, canGoBack, busy, activeLoadFailed, steps, activeIndex])
 
   // As a step becomes active, move focus to its heading and bring the card to
   // center. scrollIntoView honors reduced motion (instant vs. smooth).
