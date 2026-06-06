@@ -1880,7 +1880,13 @@ function BindingGraphInner({
             className="fixed inset-0 z-[60] bg-black/20"
             onClick={() => setDeleteConfirm(null)}
           />
-          <div className="fixed z-[60] left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[360px] bg-surface-raised/95 backdrop-blur-xl border border-border-glass rounded-xl shadow-xl shadow-black/10 p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Delete ${deleteSummary}?`}
+            className="fixed z-[60] left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[360px] bg-surface-raised/95 backdrop-blur-xl border border-border-glass rounded-xl shadow-xl shadow-black/10 p-4"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="flex items-center gap-2 mb-2.5">
               <Trash2 size={14} className="text-red-500 shrink-0" />
               <h3 className="text-[13px] font-semibold text-text-primary">
