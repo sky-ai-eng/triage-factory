@@ -56,8 +56,10 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
       // connected tracker, finishing lands on the carry-over deck (the migrated
       // final local first-run step) before the app. A GitHub-only local install
       // skips it, and multi has no carry-over step yet — both go straight in.
-      if (isLocal && state.jiraConnected && orgId) {
-        navigate(`/orgs/${orgId}/carry-over`, { replace: true })
+      // In local mode orgId is always the sentinel, so route to it directly
+      // rather than gating on the (string | null) orgId.
+      if (isLocal && state.jiraConnected) {
+        navigate(`/orgs/${LOCAL_DEFAULT_ORG_ID}/carry-over`, { replace: true })
         return
       }
       navigate(isLocal ? '/' : orgId ? `/orgs/${orgId}` : '/', { replace: true })

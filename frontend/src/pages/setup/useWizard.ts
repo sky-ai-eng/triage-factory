@@ -138,6 +138,11 @@ export function useWizard(
         // this one ⇒ this was the last step, so finish.
         const next = nextVisibleIndex(steps, state, activeIndex)
         if (next === -1) {
+          // `state` is the click-time snapshot (pre-persist): a patch() made
+          // inside this step's persist() isn't reflected here yet. onFinish
+          // only reads fields set by earlier steps (jiraConnected, from the
+          // tracker step), never the final step's own slice, so the snapshot is
+          // safe — keep any finish-relevant signal upstream of the last step.
           onFinish(state)
           return
         }
