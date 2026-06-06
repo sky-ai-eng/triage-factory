@@ -63,6 +63,14 @@ export function useWizard(
   const stateRef = useRef(state)
   stateRef.current = state
 
+  // Synchronous re-entrancy guard for advance(). setBusy(true) only lands on
+  // the next render, so a fast double-click / Enter-repeat could fire advance()
+  // twice (and start two persist() calls) before the button disables. The ref
+  // blocks the second call immediately; it mirrors the `busy` state that drives
+  // the disabled UI and gates back()/goTo() so navigation can't run mid-save.
+  // Cleared in advance()'s finally.
+  const busyRef = useRef(false)
+
   const patch = useCallback((p: Partial<WizardState>) => {
     setState((s) => ({ ...s, ...p }))
     // A field edit clears a stale persist/validation error for the step.
@@ -105,7 +113,7 @@ export function useWizard(
 
   const advance = useCallback(() => {
     const step = steps[activeIndex]
-    if (!step || busy) return
+    if (!step || busyRef.current) return
     // Don't persist a step whose existing state we failed to read.
     if (loadStatus[step.id] === 'error') return
     const validationError = step.validate?.(state) ?? null
@@ -113,6 +121,7 @@ export function useWizard(
       setError(validationError)
       return
     }
+    busyRef.current = true
     setBusy(true)
     setError(null)
     void (async () => {
@@ -126,18 +135,23 @@ export function useWizard(
       } catch (e) {
         setError((e as Error)?.message || 'Could not save. Please try again.')
       } finally {
+        busyRef.current = false
         setBusy(false)
       }
     })()
-  }, [steps, activeIndex, busy, loadStatus, state, orgId, teamId, isLocal, patch, onFinish])
+  }, [steps, activeIndex, loadStatus, state, orgId, teamId, isLocal, patch, onFinish])
 
   const back = useCallback(() => {
+    // No navigating away from a step whose save is in flight.
+    if (busyRef.current) return
     setError(null)
     setActiveIndex((i) => Math.max(0, i - 1))
   }, [])
 
   const goTo = useCallback(
     (i: number) => {
+      // No navigating away from a step whose save is in flight.
+      if (busyRef.current) return
       if (i < 0 || i >= steps.length) return
       setError(null)
       setActiveIndex((cur) => {

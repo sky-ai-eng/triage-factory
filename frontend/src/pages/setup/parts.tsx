@@ -88,12 +88,18 @@ export function CollapsedStepBar({
       </button>
     )
   }
+  // Disabled <button> (not a bare <div>): aria-label only maps reliably onto an
+  // element with a role, and this keeps the upcoming step consistent with the
+  // editable variant. `disabled` keeps it out of the tab order (nothing to do
+  // here yet) while still exposing the name to assistive tech.
   return (
-    <div
+    <button
+      type="button"
+      disabled
       aria-label={`${title} — not yet completed`}
-      className={`${base} border-transparent bg-black/[0.02] opacity-55`}
+      className={`${base} cursor-default border-transparent bg-black/[0.02] opacity-55`}
     >
       {inner}
-    </div>
+    </button>
   )
 }
