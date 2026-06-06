@@ -15,7 +15,7 @@ import {
   applyNodeChanges,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { Copy, Layers, MoreVertical } from 'lucide-react'
+import { Copy, Layers, MoreVertical, Trash2 } from 'lucide-react'
 import type { Blueprint, BlueprintStep, Prompt, TriggerHandler } from '../types'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
@@ -469,6 +469,11 @@ function BindingGraphInner({
   // Draft for the blueprint rename field in the details popup, seeded from the
   // current name when the popup opens.
   const [boxNameDraft, setBoxNameDraft] = useState('')
+  // Two-stage guard for the box menu's destructive Delete action — false shows
+  // the "Delete blueprint" button, true swaps in an inline confirm naming the
+  // blueprint + its step count. Reset whenever the menu opens or closes so a
+  // stale "armed" state never carries to the next blueprint.
+  const [boxDeleteConfirm, setBoxDeleteConfirm] = useState(false)
   // Persisted layout, keyed per scope (team vs template, and per team) so the
   // canvases don't overwrite each other's node positions. storageKeyRef keeps
   // the key fresh for the save callbacks (which have empty/narrow dep arrays),
@@ -651,6 +656,7 @@ function BindingGraphInner({
   useEffect(() => {
     setEdgeMenu(null)
     setBoxMenu(null)
+    setBoxDeleteConfirm(false)
   }, [template, teamId])
 
   // Remove event from canvas
@@ -689,6 +695,7 @@ function BindingGraphInner({
   // Open the blueprint details popup at the edit button's location.
   const onBoxEdit = useCallback((blueprintId: string, clientX: number, clientY: number) => {
     setBoxNameDraft(blueprintNamesRef.current[blueprintId] ?? '')
+    setBoxDeleteConfirm(false)
     setBoxMenu({ x: clientX, y: clientY, blueprintId })
   }, [])
 
@@ -714,6 +721,32 @@ function BindingGraphInner({
       } catch (err) {
         toast.error(
           `Failed to rename blueprint: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+    },
+    [template, fetchAll],
+  )
+
+  // Delete a whole blueprint. The server soft-deletes the box + its copy-only
+  // step prompts and detaches the bound trigger; on success the canvas refetch
+  // drops the box and its prompt nodes. Scope-derived URL like rename/duplicate —
+  // both the team and org-template families expose the DELETE.
+  const deleteBlueprint = useCallback(
+    async (blueprintId: string) => {
+      try {
+        const res = await fetch(`${blueprintsBase(template)}/${encodeURIComponent(blueprintId)}`, {
+          method: 'DELETE',
+        })
+        if (!res.ok) {
+          toast.error(await readError(res, 'Failed to delete blueprint'))
+          return
+        }
+        setBoxMenu(null)
+        setBoxDeleteConfirm(false)
+        fetchAll()
+      } catch (err) {
+        toast.error(
+          `Failed to delete blueprint: ${err instanceof Error ? err.message : String(err)}`,
         )
       }
     },
@@ -1498,7 +1531,13 @@ function BindingGraphInner({
       {/* Blueprint details popup (box edit button) */}
       {boxMenu && (
         <>
-          <div className="fixed inset-0 z-50" onClick={() => setBoxMenu(null)} />
+          <div
+            className="fixed inset-0 z-50"
+            onClick={() => {
+              setBoxMenu(null)
+              setBoxDeleteConfirm(false)
+            }}
+          />
           <div
             className="fixed z-50 bg-surface-raised/95 backdrop-blur-xl border border-border-glass rounded-xl shadow-xl shadow-black/10 p-3 w-[260px]"
             style={{
@@ -1566,6 +1605,48 @@ function BindingGraphInner({
                 No trigger yet — wire an event to this blueprint’s first step to fire it.
               </p>
             )}
+            {/* Delete the whole blueprint — soft-deletes the box + its step
+                prompts and detaches the trigger server-side; the canvas refetch
+                drops the box and its nodes. Two-stage so an accidental click in
+                the rename/duplicate menu can't destroy a blueprint: the confirm
+                names it and how many steps go with it. */}
+            <div className="mt-2.5 pt-2.5 border-t border-border-subtle">
+              {boxDeleteConfirm ? (
+                <div className="space-y-1.5">
+                  <p className="text-[11px] text-text-secondary leading-snug">
+                    Delete{' '}
+                    <span className="font-semibold text-text-primary">
+                      {blueprintNames[boxMenu.blueprintId] ?? 'this blueprint'}
+                    </span>{' '}
+                    and its {blueprintSteps[boxMenu.blueprintId]?.length ?? 0} step
+                    {(blueprintSteps[boxMenu.blueprintId]?.length ?? 0) === 1 ? '' : 's'}? This
+                    can’t be undone.
+                  </p>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={() => setBoxDeleteConfirm(false)}
+                      className="flex-1 text-[11px] font-medium text-text-secondary hover:text-text-primary px-2.5 py-1 rounded-md border border-border-subtle transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={() => void deleteBlueprint(boxMenu.blueprintId)}
+                      className="flex-1 text-[11px] font-semibold text-white bg-red-500 hover:bg-red-600 px-2.5 py-1 rounded-md transition-colors"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setBoxDeleteConfirm(true)}
+                  className="w-full flex items-center gap-1.5 text-left text-[12px] text-text-tertiary hover:text-red-500 font-medium px-2.5 py-1.5 rounded-lg transition-colors"
+                >
+                  <Trash2 size={12} className="shrink-0" />
+                  Delete blueprint
+                </button>
+              )}
+            </div>
           </div>
         </>
       )}

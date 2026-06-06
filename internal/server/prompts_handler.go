@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -322,19 +323,9 @@ func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 		// System and imported prompts are soft-deleted via Hide; user prompts via
 		// Delete (also soft — runs.prompt_id is RESTRICT). Both leave the row +
 		// its runs so historical timelines still resolve the prompt.
-		if prompt.Source == "system" || prompt.Source == "imported" {
-			if e := tx.Prompts.Hide(r.Context(), orgID, id); e != nil {
-				return e
-			}
-			status = "hidden"
-			return nil
-		}
-
-		if e := tx.Prompts.Delete(r.Context(), orgID, id); e != nil {
-			return e
-		}
-		status = "deleted"
-		return nil
+		var de error
+		status, de = softDeletePromptBySource(r.Context(), tx, orgID, prompt)
+		return de
 	}); err != nil {
 		internalError(w, "prompts", err)
 		return
@@ -344,6 +335,28 @@ func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": status, "orphaned_blueprint": orphaned})
+}
+
+// softDeletePromptBySource soft-deletes a prompt according to its source and
+// returns the resulting status. System / imported prompts are hidden (kept out
+// of the re-import set); user (and any other) prompts get deleted_at stamped.
+// Both are soft — runs.prompt_id and blueprint_steps.step_prompt_id are RESTRICT
+// FKs, and historical timelines resolve the prompt via the ...System reads — so
+// the row survives as audit. Shared by the prompt-delete delete-pairing (a
+// prompt taking its sole-owner blueprint) and the blueprint-delete cascade (a
+// blueprint taking its step prompts), the two halves of the same pairing, so the
+// source dispatch lives in one place. The caller must have already fetched p.
+func softDeletePromptBySource(ctx context.Context, tx db.TxStores, orgID string, p *domain.Prompt) (status string, err error) {
+	if p.Source == "system" || p.Source == "imported" {
+		if e := tx.Prompts.Hide(ctx, orgID, p.ID); e != nil {
+			return "", e
+		}
+		return "hidden", nil
+	}
+	if e := tx.Prompts.Delete(ctx, orgID, p.ID); e != nil {
+		return "", e
+	}
+	return "deleted", nil
 }
 
 // indexOfStep returns the position of the step whose prompt is promptID, or -1.

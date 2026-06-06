@@ -692,6 +692,7 @@ func (s *Server) routes() {
 	s.api("GET /api/blueprints", s.handleBlueprintsList)
 	s.apiMutating("POST /api/blueprints", s.handleBlueprintCreate)
 	s.apiMutating("PUT /api/blueprints/{id}", s.handleBlueprintUpdate)
+	s.apiMutating("DELETE /api/blueprints/{id}", s.handleBlueprintDelete)
 	s.api("GET /api/blueprint-steps", s.handleBlueprintStepsAll)
 	s.api("GET /api/blueprints/{id}/steps", s.handleBlueprintStepsGet)
 	s.apiMutating("PUT /api/blueprints/{id}/steps", s.handleBlueprintStepsPut)

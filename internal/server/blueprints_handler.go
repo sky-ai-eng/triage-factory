@@ -197,6 +197,89 @@ func (s *Server) handleBlueprintUpdate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, updated)
 }
 
+// handleBlueprintDelete soft-deletes a whole blueprint and cascades, in one tx.
+// Mirrors handleOrgTemplateBlueprintDelete's shape (team-scoped, mutating, RLS
+// under the acting team), but the team-scope cascade is richer because team
+// blueprints carry copy-only step prompts and a bound trigger:
+//
+//   - The header is soft-deleted (Blueprints.Delete stamps deleted_at). The row
+//     and its blueprint_steps stay as durable audit so the ...System reads keep
+//     resolving the name for in-flight runs (which execute their frozen plan,
+//     not the live steps) and past-run timelines; request-facing List/Get filter
+//     deleted_at IS NULL.
+//   - Its step prompts are soft-deleted too. Prompts are copy-only (1:1 with
+//     their blueprint), so leaving them behind orphans rows with no canvas
+//     presence. We resolve the steps and soft-delete each via the shared
+//     source-dispatch — the other half of the prompt-delete sole-owner pairing.
+//   - The bound trigger is detached: every handler ListForBlueprint resolves is
+//     hard-deleted unconditionally, system rows included, matching
+//     handleEventHandlerDelete and the prompt head-delete path. Nothing re-seeds
+//     at boot, so a deleted shipped default is durable.
+//
+// 404 by re-read (Get filters soft-deleted) when the blueprint is missing or
+// already deleted.
+func (s *Server) handleBlueprintDelete(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	id := r.PathValue("id")
+
+	var found bool
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		existing, e := tx.Blueprints.Get(r.Context(), orgID, id)
+		if e != nil || existing == nil {
+			return e
+		}
+		found = true
+
+		// Soft-delete each step prompt while the blueprint is still live (ListSteps
+		// keys off blueprint_steps, which persist regardless). A copy-only prompt
+		// belongs to this blueprint alone, so its retirement takes the prompt with
+		// it. A nil read means the prompt is already soft-deleted (or out of
+		// scope) — nothing to pair.
+		steps, e := tx.Blueprints.ListSteps(r.Context(), orgID, id)
+		if e != nil {
+			return e
+		}
+		for _, st := range steps {
+			p, ge := tx.Prompts.Get(r.Context(), orgID, st.StepPromptID)
+			if ge != nil {
+				return ge
+			}
+			if p == nil {
+				continue
+			}
+			if _, de := softDeletePromptBySource(r.Context(), tx, orgID, p); de != nil {
+				return de
+			}
+		}
+
+		// Detach the bound trigger(s) — hard-delete, system rows included.
+		triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, id)
+		if e != nil {
+			return e
+		}
+		for _, tr := range triggers {
+			if de := tx.EventHandlers.Delete(r.Context(), orgID, tr.ID); de != nil {
+				return de
+			}
+		}
+
+		// Retire the header last (audit row + steps stay; deleted_at stamped).
+		return tx.Blueprints.Delete(r.Context(), orgID, id)
+	}); err != nil {
+		internalError(w, "blueprints", err)
+		return
+	}
+	if !found {
+		notFound(w, "blueprint")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
 // --- Blueprint steps -----------------------------------------------------
 
 // handleBlueprintStepsAll returns every step of the scope's blueprints in one
