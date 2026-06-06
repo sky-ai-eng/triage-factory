@@ -50,32 +50,38 @@ import (
 func TestBootstrapUsesAdminPoolStoreCalls(t *testing.T) {
 	bootstrapFiles := []string{"bootstrap.go"}
 
-	// adminWrites is the allowlist of non-`*System` store methods that are
+	// adminWrites is the allowlist of non-`*System` store calls that are
 	// known to route through the admin pool (and carry the inTx guard that
-	// refuses an admin-escape from inside a caller's tx). Extending this
-	// list is a CONSCIOUS act: only add a method here after confirming its
-	// Postgres impl actually targets s.admin (see the per-store "Pool
-	// split" doc comments in internal/db/postgres/*.go). Adding an
-	// app-pool read here would defeat the whole guard — see the SKY-387
-	// invariant documented above.
-	adminWrites := map[string]string{
+	// refuses an admin-escape from inside a caller's tx). Keyed by the
+	// fully-qualified `<Store>.<Method>` pair, NOT the bare method name: an
+	// admin-pool write is a property of one specific store's
+	// implementation, not of a method name. `Create` is admin-routed on
+	// agentStore but app-routed on, e.g., orgTemplateStore.CreatePrompt's
+	// peers — pinning the pair stops a future stores.<OtherStore>.Create()
+	// (or any reused name) from passing on the strength of a name match
+	// alone. Extending this list is a CONSCIOUS act: only add a pair here
+	// after confirming that store's impl actually targets s.admin (see the
+	// per-store "Pool split" doc comments in internal/db/postgres/*.go).
+	// Adding an app-pool read here would defeat the whole guard — see the
+	// SKY-387 invariant documented above.
+	adminWrites := map[string]bool{
 		// agentStore.Create — admin-pool INSERT, inTx-guarded (agents.go).
-		"Create": "Agents.Create",
+		"Agents.Create": true,
 		// teamAgentStore.AddForTeam — admin-pool INSERT, inTx-guarded
 		// (team_agents.go).
-		"AddForTeam": "TeamAgents.AddForTeam",
+		"TeamAgents.AddForTeam": true,
 		// orgTemplateStore.SeedFromShipped — admin-pool tx, inTx-guarded
 		// (org_template.go). Replaced the old direct Prompts.SeedOrUpdate /
 		// EventHandlers.Seed bootstrap writes when SKY-381 routed seeding
 		// through the org template.
-		"SeedFromShipped": "OrgTemplate.SeedFromShipped",
+		"OrgTemplate.SeedFromShipped": true,
 		// orgTemplateStore.MaterializeIntoTeam — admin-pool tx, inTx-guarded
 		// (org_template.go).
-		"MaterializeIntoTeam": "OrgTemplate.MaterializeIntoTeam",
+		"OrgTemplate.MaterializeIntoTeam": true,
 		// orgsStore.CreateLocalTenant — local-mode (SQLite N=1) only; the
 		// Postgres impl returns an explicit "not supported in multi mode"
 		// error and never touches the app pool (orgs.go).
-		"CreateLocalTenant": "Orgs.CreateLocalTenant",
+		"Orgs.CreateLocalTenant": true,
 	}
 
 	fset := token.NewFileSet()
@@ -110,7 +116,7 @@ func TestBootstrapUsesAdminPoolStoreCalls(t *testing.T) {
 				if strings.HasSuffix(method, "System") {
 					return true
 				}
-				if _, ok := adminWrites[method]; ok {
+				if adminWrites[store+"."+method] {
 					return true
 				}
 
