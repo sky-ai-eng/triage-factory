@@ -15,7 +15,7 @@
 // buttons, an aria-live region announces step changes, and prefers-reduced-
 // motion swaps the recede animation for an instant collapse.
 
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useActiveOrgId } from '../../contexts/OrgContext'
@@ -116,6 +116,16 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
     headingRef.current?.focus()
     cardRef.current?.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'center' })
   }, [wiz.phase, activeIndex, reduce])
+
+  // The body wrapper needs overflow:hidden while its height animates (0 → auto),
+  // but at rest that clip box hugs the flush content and crops the Continue
+  // pill's glow at the bottom-right. So clip only during the expand, then let
+  // overflow go visible once settled. Derived (not reset via an effect): the
+  // body is settled only for the step whose enter animation last completed, so a
+  // new active step reads unsettled until its own animation finishes. Reduced
+  // motion has no expand animation, so overflow is visible immediately below.
+  const [settledIndex, setSettledIndex] = useState<number | null>(null)
+  const bodySettled = settledIndex === activeIndex
 
   if (wiz.phase === 'loading') return <Loading />
 
@@ -220,7 +230,8 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                                   : { height: 0, opacity: 0, filter: 'blur(6px)' }
                               }
                               transition={reduce ? { duration: 0 } : bodyEase}
-                              style={{ overflow: 'hidden' }}
+                              onAnimationComplete={() => setSettledIndex(activeIndex)}
+                              style={{ overflow: reduce || bodySettled ? 'visible' : 'hidden' }}
                             >
                               <div className="space-y-6 pt-4">
                                 {wiz.activeLoadFailed ? (
