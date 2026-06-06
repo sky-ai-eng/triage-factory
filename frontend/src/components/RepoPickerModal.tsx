@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { RotateCw, ExternalLink } from 'lucide-react'
 import { useOptionalAuth } from '../contexts/AuthContext'
@@ -36,6 +36,22 @@ interface Props {
    * the component's internal repo-list fetch `loading`.
    */
   saving?: boolean
+  /**
+   * Hide the footer (the selected-count + Save/Continue/Back buttons). For
+   * hosts that drive navigation and persistence themselves — the setup wizard
+   * embeds the picker inline and uses its own Continue/Back, so the picker's
+   * footer would just duplicate them. Pair with onSelectionChange to read the
+   * live selection.
+   */
+  hideFooter?: boolean
+  /**
+   * Fired with the full selection whenever it changes — and once on mount with
+   * the seed. Lets a host that hides the footer mirror the selection into its
+   * own state (the wizard persists from there on its own Continue). Re-reporting
+   * the seed is idempotent for the wizard (it patches the same value it passed
+   * in), so the host stays in sync without a separate read.
+   */
+  onSelectionChange?: (repos: string[]) => void
 }
 
 export type { GitHubRepo }
@@ -49,12 +65,27 @@ export default function RepoPickerModal({
   cachedRepos,
   onReposFetched,
   saving = false,
+  hideFooter = false,
+  onSelectionChange,
 }: Props) {
   const [repos, setRepos] = useState<GitHubRepo[]>(cachedRepos ?? [])
   const [loading, setLoading] = useState(!cachedRepos)
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [checked, setChecked] = useState<Set<string>>(new Set(selected))
+
+  // Report the live selection up to a footer-less host (the setup wizard) so it
+  // can mirror the picks into its own state and persist them on its own
+  // Continue. Held in a ref so this doesn't depend on a callback identity that
+  // changes each render. Idempotent by design: re-reporting the seed (on mount,
+  // or after the host re-renders) just re-sets the same value, and the host
+  // never persists an empty set without an explicit pick — so this can't loop
+  // or silently wipe an unloaded selection.
+  const onSelectionChangeRef = useRef(onSelectionChange)
+  onSelectionChangeRef.current = onSelectionChange
+  useEffect(() => {
+    onSelectionChangeRef.current?.(Array.from(checked))
+  }, [checked])
 
   // Under a GitHub App, the picker lists the repos the App is installed on
   // (GET /installation/repositories) — not arbitrary user repos — so the copy
@@ -295,47 +326,53 @@ export default function RepoPickerModal({
           })}
       </div>
 
-      {/* Footer */}
-      <div className="px-6 py-4 border-t border-border-subtle flex items-center justify-between">
-        <span className="text-[12px] text-text-tertiary">
-          {checked.size} repo{checked.size !== 1 ? 's' : ''} selected
-        </span>
-        <div className="flex gap-3">
-          {inline && onBack && (
+      {/* Footer — omitted when the host (the setup wizard) drives its own
+          navigation + persistence and just reads the selection via
+          onSelectionChange. A standing selected-count keeps the host honest. */}
+      {!hideFooter && (
+        <div className="px-6 py-4 border-t border-border-subtle flex items-center justify-between">
+          <span className="text-[12px] text-text-tertiary">
+            {checked.size} repo{checked.size !== 1 ? 's' : ''} selected
+          </span>
+          <div className="flex gap-3">
+            {inline && onBack && (
+              <button
+                type="button"
+                onClick={onBack}
+                className="text-[13px] text-text-secondary hover:text-text-primary bg-white/50 hover:bg-white/80 border border-border-subtle rounded-xl px-4 py-2 transition-colors"
+              >
+                Back
+              </button>
+            )}
+            {!inline && (
+              <button
+                type="button"
+                onClick={onClose}
+                className="text-[13px] text-text-secondary hover:text-text-primary border border-border-subtle rounded-xl px-4 py-2 transition-colors"
+              >
+                Cancel
+              </button>
+            )}
             <button
               type="button"
-              onClick={onBack}
-              className="text-[13px] text-text-secondary hover:text-text-primary bg-white/50 hover:bg-white/80 border border-border-subtle rounded-xl px-4 py-2 transition-colors"
+              onClick={() => onSave(Array.from(checked))}
+              disabled={checked.size === 0 || saving}
+              className="flex items-center gap-1.5 bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-5 py-2 text-[13px] transition-colors"
             >
-              Back
+              {saving && <RotateCw size={13} className="animate-spin" />}
+              {saving ? 'Saving…' : inline ? 'Continue' : 'Save'}
             </button>
-          )}
-          {!inline && (
-            <button
-              type="button"
-              onClick={onClose}
-              className="text-[13px] text-text-secondary hover:text-text-primary border border-border-subtle rounded-xl px-4 py-2 transition-colors"
-            >
-              Cancel
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={() => onSave(Array.from(checked))}
-            disabled={checked.size === 0 || saving}
-            className="flex items-center gap-1.5 bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-5 py-2 text-[13px] transition-colors"
-          >
-            {saving && <RotateCw size={13} className="animate-spin" />}
-            {saving ? 'Saving…' : inline ? 'Continue' : 'Save'}
-          </button>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   )
 
   if (inline) {
+    // Full width so it fills the host card it sits in (the wizard step), rather
+    // than the narrower standalone-card width the overlay variant uses.
     return (
-      <div className="w-full max-w-lg backdrop-blur-xl bg-surface-raised border border-border-glass rounded-2xl shadow-lg shadow-black/[0.04] overflow-hidden">
+      <div className="w-full backdrop-blur-xl bg-surface-raised border border-border-glass rounded-2xl shadow-lg shadow-black/[0.04] overflow-hidden">
         {content}
       </div>
     )

@@ -5,7 +5,13 @@
 // returns) and the stack/keyboard/focus concerns live there, not here.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { allComplete, resumeIndex } from './resume'
+import {
+  allComplete,
+  isStepVisible,
+  nextVisibleIndex,
+  prevVisibleIndex,
+  resumeIndex,
+} from './resume'
 import type { WizardIdentity, WizardState, WizardStep } from './types'
 
 export interface WizardController {
@@ -127,11 +133,15 @@ export function useWizard(
     void (async () => {
       try {
         await step.persist({ orgId, teamId, isLocal, state, patch })
-        if (activeIndex >= steps.length - 1) {
+        // Advance to the next step that applies; an omitted step (e.g. Jira
+        // projects without a Jira tracker) is skipped. No visible step after
+        // this one ⇒ this was the last step, so finish.
+        const next = nextVisibleIndex(steps, state, activeIndex)
+        if (next === -1) {
           onFinish()
           return
         }
-        setActiveIndex(activeIndex + 1)
+        setActiveIndex(next)
       } catch (e) {
         setError((e as Error)?.message || 'Could not save. Please try again.')
       } finally {
@@ -145,14 +155,21 @@ export function useWizard(
     // No navigating away from a step whose save is in flight.
     if (busyRef.current) return
     setError(null)
-    setActiveIndex((i) => Math.max(0, i - 1))
-  }, [])
+    // Re-expand the previous step that applies, skipping any omitted one.
+    setActiveIndex((i) => {
+      const prev = prevVisibleIndex(steps, stateRef.current, i)
+      return prev === -1 ? i : prev
+    })
+  }, [steps])
 
   const goTo = useCallback(
     (i: number) => {
       // No navigating away from a step whose save is in flight.
       if (busyRef.current) return
       if (i < 0 || i >= steps.length) return
+      // An omitted step has no collapsed bar to click, but guard anyway so a
+      // stale index can never land on one.
+      if (!isStepVisible(steps[i], stateRef.current)) return
       setError(null)
       setActiveIndex((cur) => {
         if (i === cur) return cur
@@ -189,7 +206,10 @@ export function useWizard(
     error,
     activeLoadFailed: !!activeStep && loadStatus[activeStep.id] === 'error',
     canFinish: allComplete(steps, state),
-    isLastStep: activeIndex === steps.length - 1,
+    // The last step is the one with no visible step after it — not necessarily
+    // the final array slot, since the trailing region may include an omitted
+    // step. This is what flips the primary action to "Finish".
+    isLastStep: nextVisibleIndex(steps, state, activeIndex) === -1,
     canEdit,
     advance,
     back,

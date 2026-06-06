@@ -67,6 +67,13 @@ export interface WizardState {
   // jiraConnected on load (a connected org resumes on "Jira").
   tracker: TrackerKind
   team: TeamConfigForm
+  // True once the team form has been seeded from the server (the Repositories
+  // step's load). The team mirror of orgLoaded: the team GET runs ONCE — on the
+  // first team step — and seeds shared state for every team step (GitHub teams,
+  // Jira projects, default model) that round-trips the same team form. The flag
+  // lets the later team steps' persist refuse to write the empty default form
+  // when that single load failed, instead of clobbering real settings.
+  teamLoaded: boolean
 }
 
 // Identity the host resolves once and threads to every step. The org/team
@@ -107,6 +114,15 @@ export interface WizardStep {
   // the host renders a retry in its place rather than risk persisting over
   // state it never read.
   load?: (ctx: LoadContext) => Promise<Partial<WizardState>>
+
+  // Whether this step applies at all under the current state. A step whose
+  // predicate returns false is omitted entirely — no collapsed bar, skipped by
+  // resume and by Continue/Back navigation, and excluded from the "all steps
+  // complete" tally — rather than shown as inert. Omitted (undefined) means
+  // always visible. Evaluated live, so a step gated on an upstream choice (the
+  // Jira-projects step on a connected Jira tracker) appears/disappears as that
+  // choice changes mid-flow, without rebuilding the step list.
+  visible?: (state: WizardState) => boolean
 
   // Is this step already satisfied by the current state? Drives both resume
   // (open on the first incomplete step) and the collapsed bar's check.

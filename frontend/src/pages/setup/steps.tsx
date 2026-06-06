@@ -1,24 +1,35 @@
-// The wizard's step registry. The shell shipped two trivial proof steps; this
-// fleshes out the four ORGANIZATION steps — GitHub (mandatory), Trackers
-// (optional), Poller timings, and the org max model tier — composing the
-// existing shared field groups into the same step contract with no new host
-// plumbing. The team section keeps its trivial proof step (delegation
-// defaults) until the team-steps ticket replaces it.
+// The wizard's step registry — all eight real steps. The four ORGANIZATION
+// steps (GitHub mandatory, Trackers optional, Poller timings, org max model
+// tier) and the four TEAM steps for the first team (Repositories, GitHub teams,
+// Jira projects, team default model), composing the existing shared field
+// groups into the same step contract with no new host plumbing.
+//
+// The team steps are ordered repos-first on purpose: persisting the tracked
+// repos is what makes the GitHub-teams candidate list enumerable (candidates
+// are built from the org's persisted repo-owners), the structural fix for the
+// always-empty-teams bug. The Jira-projects step is gated via its `visible`
+// predicate — omitted entirely unless a Jira tracker was configured in step 2.
 //
 // Reuse rule: every step composes a shared group (GitHubAccessGroup /
 // GitHubAppPanel via GitHubStep, JiraAccessGroup via TrackersStep,
-// PollerTimingGroup, ModelGroup, TeamSettingsGroup) — no parallel field UIs.
-// Org persistence rides the single session-scoped POST /api/settings/org via
-// saveOrgConfig, so there is no wizard-only persistence path to drift. Steps
+// PollerTimingGroup, ModelGroup, the RepoPickerModal, GitHubTeamGroup,
+// JiraProjectRulesGroup, and the shared ModelTierSelector) — no parallel field
+// UIs. Org persistence rides the single session-scoped POST /api/settings/org;
+// team persistence rides the existing per-team repos / github-groups PUTs and
+// the team-settings POST — no wizard-only persistence path to drift. Steps
 // whose creds are connected mid-step (GitHub, Jira) persist at their own
 // Connect action; the framework's per-step persist is then a no-op advance.
 
 import GitHubStep from './GitHubStep'
 import TrackersStep from './TrackersStep'
 import { hostOf } from '../../lib/reachability'
+import { toast } from '../../components/Toast/toastStore'
+import RepoPickerModal from '../../components/RepoPickerModal'
 import ModelGroup from '../settings/ModelGroup'
+import ModelTierSelector, { type ModelTierOption } from '../settings/ModelTierSelector'
 import PollerTimingGroup from '../settings/PollerTimingGroup'
-import TeamSettingsGroup from '../settings/TeamSettingsGroup'
+import GitHubTeamGroup from '../settings/GitHubTeamGroup'
+import JiraProjectRulesGroup from '../settings/JiraProjectRulesGroup'
 import {
   emptyOrgConfig,
   fetchOrgSettings,
@@ -27,9 +38,13 @@ import {
 } from '../settings/orgConfig'
 import {
   emptyTeamConfig,
+  fetchTeamRepos,
   fetchTeamSettings,
+  saveTeamGitHubGroups,
+  saveTeamRepos,
   saveTeamSettings,
   teamConfigFromSettings,
+  teamProjectsBlocked,
 } from '../settings/teamConfig'
 import type { WizardState, WizardStep } from './types'
 
@@ -44,6 +59,7 @@ export const initialWizardState = (): WizardState => ({
   jiraConnected: false,
   tracker: 'none',
   team: emptyTeamConfig(),
+  teamLoaded: false,
 })
 
 const TIER_LABELS: Record<string, string> = {
@@ -114,6 +130,56 @@ async function persistOrg(state: WizardState): Promise<void> {
   const result = await saveOrgConfig(state.org)
   if (!result.ok) throw new Error(result.error)
 }
+
+// loadTeam seeds the team form (default model, Jira project rules, thresholds)
+// plus the tracked-repo set. It runs ONCE — as the Repositories step's load,
+// the first team step — and the slice merges into shared wizard state, so the
+// later team steps (GitHub teams, Jira projects, default model) read the same
+// form without re-fetching. GitHub-team mappings load separately, via
+// GitHubTeamGroup's own fetch + onLoaded. `teamLoaded: true` marks the seed
+// succeeded; if the team-settings GET throws, the flag stays false and the
+// persist-bearing team steps refuse to write the empty default form over real
+// settings. A failed repos GET (null) keeps repos undefined (unloaded) rather
+// than [], so a save skips it instead of wiping the team's tracked repos.
+async function loadTeam(teamId: string): Promise<Partial<WizardState>> {
+  const [settings, repos] = await Promise.all([fetchTeamSettings(teamId), fetchTeamRepos(teamId)])
+  if (!settings) throw new Error('Could not load team settings')
+  return {
+    team: { ...teamConfigFromSettings(settings), repos: repos ?? undefined },
+    teamLoaded: true,
+  }
+}
+
+// persistTeamSettings is the shared save for the team steps that round-trip the
+// whole team form via POST /api/settings/team/{id} (Jira projects, default
+// model). It refuses to write when the team load (the Repositories step's)
+// failed — `state.team` would be the empty default form, and saving it would
+// clobber the stored model / project rules. Returns the backend's model-cap
+// clamp notice (if any) so the caller can surface it. The repos and
+// GitHub-team mappings ride their own PUT endpoints, persisted by their own
+// steps; this writes only the team-settings payload.
+async function persistTeamSettings(
+  teamId: string,
+  state: WizardState,
+): Promise<string | undefined> {
+  if (!state.teamLoaded) {
+    throw new Error(
+      'Team settings didn’t load — reopen the Repositories step and retry before saving.',
+    )
+  }
+  const result = await saveTeamSettings(teamId, state.team)
+  if (!result.ok) throw new Error(result.error)
+  return result.warning
+}
+
+// The team default-model options: the three concrete tiers (no "no cap" — a
+// team always delegates with *some* model). Rendered by the same shared
+// ModelTierSelector the org max-tier step uses, so the two read identically.
+const TEAM_MODEL_OPTIONS: ModelTierOption[] = [
+  { value: 'haiku', label: 'Haiku', hint: 'Fastest, cheapest' },
+  { value: 'sonnet', label: 'Sonnet', hint: 'Balanced' },
+  { value: 'opus', label: 'Opus', hint: 'Most capable' },
+]
 
 // Step 1 · GitHub (mandatory). The backbone: a two-stage URL → access flow
 // (App default / PAT) that the GitHubStep body owns. isComplete is the server's
@@ -215,47 +281,154 @@ const orgModelStep: WizardStep = {
   ),
 }
 
-// Team settings · delegation defaults. The trivial team-section proof step the
-// shell shipped — the team-steps ticket replaces it with repos / GitHub teams /
-// Jira projects / team default model. Kept here so the team section divider has
-// a step and resume still lands somewhere. isComplete requires a chosen model
-// (seeded default "sonnet", so a returning team reads complete).
-const teamModelStep: WizardStep = {
-  id: 'team-model',
+// Step 5 · Repositories (first team step). Embeds the shared RepoPickerModal
+// inline (footer hidden — the wizard owns Continue/Back) and runs the single
+// team load. Persisting the repo set writes repo_profiles, which is BOTH half
+// of the backend's setup-complete gate (GitHub + ≥1 repo) AND what makes the
+// next step's GitHub-team candidates enumerable — the structural fix for the
+// always-empty-teams bug: candidates are built from persisted repo-owners, so
+// repos must land before the teams step reads them. Mandatory: a team that
+// watches nothing surfaces nothing.
+const reposStep: WizardStep = {
+  id: 'team-repos',
   section: 'team',
-  title: 'Delegation defaults',
-  load: async ({ teamId }) => {
-    const settings = await fetchTeamSettings(teamId)
-    if (!settings) throw new Error('Could not load team settings')
-    return { team: teamConfigFromSettings(settings) }
-  },
-  isComplete: (s) => s.team.default_model.trim() !== '',
-  validate: (s) => (s.team.default_model.trim() === '' ? 'Choose a delegation model.' : null),
+  title: 'Repositories',
+  load: ({ teamId }) => loadTeam(teamId),
+  isComplete: (s) => (s.team.repos ?? []).length > 0,
+  validate: (s) =>
+    (s.team.repos ?? []).length === 0
+      ? 'Pick at least one repository for this team to watch.'
+      : null,
   persist: async ({ state, teamId }) => {
-    const result = await saveTeamSettings(teamId, state.team)
+    const result = await saveTeamRepos(teamId, state.team.repos ?? [])
     if (!result.ok) throw new Error(result.error)
   },
-  collapsedSummary: (s) =>
-    `${TIER_LABELS[s.team.default_model] ?? s.team.default_model} · auto-delegate ${
-      s.team.auto_delegate_enabled ? 'on' : 'off'
-    }`,
-  render: ({ state, patch }) => (
-    <TeamSettingsGroup
-      value={{
-        default_model: state.team.default_model,
-        auto_delegate_enabled: state.team.auto_delegate_enabled,
-      }}
-      onChange={(p) => patch({ team: { ...state.team, ...p } })}
+  collapsedSummary: (s) => `Tracked repos: ${(s.team.repos ?? []).length}`,
+  render: ({ state, patch }) => {
+    const count = (state.team.repos ?? []).length
+    return (
+      <div className="space-y-2">
+        <RepoPickerModal
+          inline
+          hideFooter
+          selected={state.team.repos ?? []}
+          onSelectionChange={(repos) => patch({ team: { ...state.team, repos } })}
+          // Footer hidden, so neither fires — the wizard's Continue persists and
+          // advances. Required by the prop contract; intentional no-ops.
+          onSave={() => {}}
+          onClose={() => {}}
+        />
+        <p className="text-[12px] text-text-tertiary">
+          {count} {count === 1 ? 'repository' : 'repositories'} selected.
+        </p>
+      </div>
+    )
+  },
+}
+
+// Step 6 · GitHub teams. The shared GitHubTeamGroup, now enumerable because the
+// repos step persisted repo-owners first (it self-fetches candidates from the
+// org's configured repos). Optional — a team can watch repos without mapping
+// any GitHub team — so it never blocks the stack. No load of its own: the group
+// seeds the selection up via onLoaded after its own fetch.
+const githubTeamsStep: WizardStep = {
+  id: 'team-github-teams',
+  section: 'team',
+  title: 'GitHub teams',
+  isComplete: () => true,
+  persist: async ({ state, teamId }) => {
+    // Skip when the mapping never loaded (the group's fetch failed) so a flaky
+    // load can't wipe stored mappings with []. A user edit makes the slice
+    // defined, so an intentional pick still saves.
+    if (state.team.github_groups === undefined) return
+    const result = await saveTeamGitHubGroups(teamId, state.team.github_groups)
+    if (!result.ok) throw new Error(result.error)
+  },
+  collapsedSummary: (s) => `Bound GH teams: ${(s.team.github_groups ?? []).length}`,
+  render: ({ state, teamId, patch }) => (
+    <GitHubTeamGroup
+      value={state.team.github_groups ?? []}
+      onChange={(github_groups) => patch({ team: { ...state.team, github_groups } })}
+      teamId={teamId}
+      includeMembership
+      onLoaded={(github_groups) => patch({ team: { ...state.team, github_groups } })}
     />
   ),
 }
 
+// Step 7 · Jira projects. The shared JiraProjectRulesGroup — the per-project
+// pickup/in-progress/done status rules. Gated: omitted entirely unless a Jira
+// tracker was configured (step 2). No load of its own — the rules came in with
+// the team load. Optional (zero tracked projects is valid); only a half-filled
+// project (a key with incomplete rules) blocks, which validate also catches.
+const jiraProjectsStep: WizardStep = {
+  id: 'team-jira-projects',
+  section: 'team',
+  title: 'Jira projects',
+  visible: (s) => jiraActive(s),
+  isComplete: (s) => !teamProjectsBlocked(s.team.jira_projects, s.jiraConnected),
+  validate: (s) =>
+    teamProjectsBlocked(s.team.jira_projects, s.jiraConnected)
+      ? 'Finish or remove the partially-configured Jira project before continuing.'
+      : null,
+  persist: async ({ state, teamId }) => {
+    await persistTeamSettings(teamId, state)
+  },
+  collapsedSummary: (s) =>
+    `Tracked Jira projects: ${s.team.jira_projects.filter((p) => p.key.trim() !== '').length}`,
+  render: ({ state, patch }) => (
+    <JiraProjectRulesGroup
+      value={state.team.jira_projects}
+      onChange={(jira_projects) => patch({ team: { ...state.team, jira_projects } })}
+      connected={state.jiraConnected}
+    />
+  ),
+}
+
+// Step 8 · Team default model. The same shared ModelTierSelector the org
+// max-tier step uses (step 4), team-scoped — the model this team delegates
+// with by default, clamped down to the workspace cap if it exceeds it. No load
+// of its own — reads the repos step's seeded team form; persistTeamSettings
+// guards against saving when that load failed. isComplete requires a chosen
+// model (seeded default "sonnet", so a returning team reads complete).
+const teamModelStep: WizardStep = {
+  id: 'team-model',
+  section: 'team',
+  title: 'Team default model',
+  isComplete: (s) => s.team.default_model.trim() !== '',
+  validate: (s) => (s.team.default_model.trim() === '' ? 'Choose a default model.' : null),
+  persist: async ({ state, teamId }) => {
+    const warning = await persistTeamSettings(teamId, state)
+    if (warning) toast.info(warning)
+  },
+  collapsedSummary: (s) =>
+    `Default model: ${TIER_LABELS[s.team.default_model] ?? s.team.default_model}`,
+  render: ({ state, patch }) => (
+    <div className="space-y-3">
+      <p className="text-[13px] leading-relaxed text-text-secondary">
+        The model this team delegates with by default. Capped by the workspace max tier — a higher
+        pick is clamped down to it.
+      </p>
+      <ModelTierSelector
+        value={state.team.default_model}
+        onChange={(default_model) => patch({ team: { ...state.team, default_model } })}
+        options={TEAM_MODEL_OPTIONS}
+        ariaLabel="Team default model"
+      />
+    </div>
+  ),
+}
+
 // Ordered registry. Section grouping is derived from each step's `section`;
-// the host inserts a divider above the first step of each section.
+// the host inserts a divider above the first step of each section. The
+// Jira-projects step is conditionally omitted via its `visible` predicate.
 export const WIZARD_STEPS: WizardStep[] = [
   githubStep,
   trackersStep,
   pollerStep,
   orgModelStep,
+  reposStep,
+  githubTeamsStep,
+  jiraProjectsStep,
   teamModelStep,
 ]

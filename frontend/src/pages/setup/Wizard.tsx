@@ -23,6 +23,7 @@ import { LOCAL_DEFAULT_ORG_ID } from '../../lib/githubApp'
 import { WIZARD_SECTIONS } from './types'
 import { WIZARD_STEPS, initialWizardState } from './steps'
 import { useWizard } from './useWizard'
+import { isStepVisible } from './resume'
 import { CollapsedStepBar, SectionDivider } from './parts'
 
 function Loading() {
@@ -80,10 +81,16 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
 
   if (wiz.phase === 'loading') return <Loading />
 
-  const total = wiz.steps.length
+  // Number and count by the steps that currently apply, so an omitted step
+  // (e.g. Jira projects without a Jira tracker) leaves no gap in the sequence.
+  // `displayNumber` maps a full-array index to its 1-based position among the
+  // visible steps.
+  const visibleSteps = wiz.steps.filter((step) => isStepVisible(step, wiz.state))
+  const total = visibleSteps.length
+  const displayNumber = (step: (typeof wiz.steps)[number]) => visibleSteps.indexOf(step) + 1
   const activeStep = wiz.steps[activeIndex]
   const announcement = activeStep
-    ? `Step ${activeIndex + 1} of ${total}: ${activeStep.title}${wiz.canFinish ? ' (all steps complete)' : ''}`
+    ? `Step ${displayNumber(activeStep)} of ${total}: ${activeStep.title}${wiz.canFinish ? ' (all steps complete)' : ''}`
     : ''
 
   return (
@@ -107,7 +114,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
           {WIZARD_SECTIONS.map((section) => {
             const entries = wiz.steps
               .map((step, index) => ({ step, index }))
-              .filter(({ step }) => step.section === section.id)
+              .filter(({ step }) => step.section === section.id && isStepVisible(step, wiz.state))
             if (entries.length === 0) return null
             return (
               <section key={section.id} aria-labelledby={`setup-section-${section.id}`}>
@@ -135,7 +142,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                         {isActive ? (
                           <div className="flex items-center gap-2.5 px-5 pt-4">
                             <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent text-[10px] font-semibold text-white">
-                              {index + 1}
+                              {displayNumber(step)}
                             </span>
                             <h3
                               ref={headingRef}
@@ -148,7 +155,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                           </div>
                         ) : (
                           <CollapsedStepBar
-                            number={index + 1}
+                            number={displayNumber(step)}
                             title={step.title}
                             summary={step.collapsedSummary(wiz.state)}
                             complete={complete}
