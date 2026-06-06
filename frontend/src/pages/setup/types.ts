@@ -44,6 +44,13 @@ export type TrackerKind = 'none' | 'jira' | 'linear'
 
 export interface WizardState {
   org: OrgConfigForm
+  // True once the org form has been seeded from the server (the GitHub step's
+  // load). The org-form GET runs ONCE — on the GitHub step — and seeds shared
+  // state for every org step; the later org steps (poller, model) read it
+  // rather than re-fetching. This flag lets those steps' persist refuse to
+  // write the empty default form if that single load failed, instead of
+  // clobbering real settings with defaults.
+  orgLoaded: boolean
   // Carried so a re-typed-token step never clobbers a stored PAT: presence is
   // tracked separately from the (always-blank-on-load) org.github_pat field,
   // mirroring orgConfig's "leave blank to keep current" contract.

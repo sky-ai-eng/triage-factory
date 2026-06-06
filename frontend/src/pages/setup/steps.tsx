@@ -37,6 +37,7 @@ import type { WizardState, WizardStep } from './types'
 // identical baseline shape; the org-step flags default to "not connected".
 export const initialWizardState = (): WizardState => ({
   org: emptyOrgConfig(),
+  orgLoaded: false,
   hasGitHubPat: false,
   githubReady: false,
   jiraConnected: false,
@@ -86,20 +87,40 @@ async function fetchIntegrationsState(): Promise<{ githubReady: boolean; jiraCon
   }
 }
 
-// loadOrg is shared by every org step: it seeds the full org form plus the
-// folded GitHub/Jira connection signals. Loading the whole form (not just one
-// field) keeps each step's persist round-tripping the same org_settings shape,
-// so saving the tier never clobbers the base URL / intervals / stored PAT.
+// loadOrg seeds the full org form plus the folded GitHub/Jira connection
+// signals. It runs ONCE — as the GitHub step's load — and the slice it returns
+// is merged into shared wizard state, so every later org step (Trackers,
+// poller, model) reads the same org form without re-fetching. Loading the
+// whole form (not just one field) keeps each step's persist round-tripping the
+// same org_settings shape, so saving the tier never clobbers the base URL /
+// intervals / stored PAT. `orgLoaded: true` marks the seed succeeded; if this
+// throws, the flag stays false and the persist-bearing steps refuse to write
+// the empty default form over real settings.
 async function loadOrg(): Promise<Partial<WizardState>> {
   const [org, integrations] = await Promise.all([fetchOrgSettings(), fetchIntegrationsState()])
   if (!org) throw new Error('Could not load organization settings')
   return {
     org: orgConfigFromSettings(org),
+    orgLoaded: true,
     hasGitHubPat: org.has_github_pat,
     githubReady: integrations.githubReady,
     jiraConnected: integrations.jiraConnected,
     tracker: integrations.jiraConnected ? 'jira' : 'none',
   }
+}
+
+// persistOrg is the shared save for the org steps that round-trip the whole
+// org form (poller, model). It refuses to write when the single org load
+// (the GitHub step's) failed — `state.org` would be the empty default form,
+// and saving it would clobber the stored base URL / intervals / cap. The
+// GitHub step shows a retry when its load fails, so this guard only trips if
+// the user reaches a later org step while that load is still broken.
+async function persistOrg(state: WizardState): Promise<void> {
+  if (!state.orgLoaded) {
+    throw new Error('Settings didn’t load — reopen the GitHub step and retry before saving.')
+  }
+  const result = await saveOrgConfig(state.org)
+  if (!result.ok) throw new Error(result.error)
 }
 
 // Step 1 · GitHub (mandatory). The backbone: a two-stage URL → access flow
@@ -151,17 +172,11 @@ const trackersStep: WizardStep = {
 const pollerStep: WizardStep = {
   id: 'org-poller',
   section: 'org',
-  // Loads the full org form (like every org step that persists it): a failed
-  // org GET marks THIS step load-failed too, so the host shows its retry and
-  // blocks advancing — never saving the empty default form over real settings
-  // just because the GitHub step's load was the one that failed.
-  load: loadOrg,
+  // No load of its own — it reads the org form the GitHub step seeded onto
+  // shared state. persistOrg guards against saving when that load failed.
   title: 'Poller timings',
   isComplete: () => true,
-  persist: async ({ state }) => {
-    const result = await saveOrgConfig(state.org)
-    if (!result.ok) throw new Error(result.error)
-  },
+  persist: ({ state }) => persistOrg(state),
   collapsedSummary: (s) =>
     s.jiraConnected
       ? `GitHub ${intervalLabel(s.org.github_poll_interval)} · Jira ${intervalLabel(
@@ -186,14 +201,11 @@ const pollerStep: WizardStep = {
 const orgModelStep: WizardStep = {
   id: 'org-model',
   section: 'org',
-  // See pollerStep: loads the org form so a failed GET blocks persist here too.
-  load: loadOrg,
+  // No load of its own — reads the GitHub step's seeded org form; persistOrg
+  // guards against saving when that load failed.
   title: 'Max model tier',
   isComplete: () => true,
-  persist: async ({ state }) => {
-    const result = await saveOrgConfig(state.org)
-    if (!result.ok) throw new Error(result.error)
-  },
+  persist: ({ state }) => persistOrg(state),
   collapsedSummary: (s) =>
     s.org.max_llm_model_tier
       ? `Capped at ${TIER_LABELS[s.org.max_llm_model_tier] ?? s.org.max_llm_model_tier}`

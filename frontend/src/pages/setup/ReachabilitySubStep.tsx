@@ -9,7 +9,7 @@
 // case becomes a confirm); Jira prefills nothing (every Jira host is bespoke).
 // The probe fn is injected so the same chrome drives both endpoints.
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Check, Pencil } from 'lucide-react'
 import { inputClass } from '../settings/primitives'
 import { reachabilityMessage, type ReachabilityResult } from '../../lib/reachability'
@@ -43,6 +43,15 @@ export default function ReachabilitySubStep({
   const [draft, setDraft] = useState(value || prefill)
   const [checking, setChecking] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Re-seed the input from the parent's value while the field is open. The
+  // parent can clear `value` as it re-opens — e.g. a Jira disconnect blanks
+  // jira_url and drops confirmed — and the draft would otherwise keep showing
+  // the stale URL. `value` only changes on a confirm (never mid-typing, which
+  // updates the local draft alone), so this can't clobber what the user types.
+  useEffect(() => {
+    if (!confirmed) setDraft(value || prefill)
+  }, [confirmed, value, prefill])
 
   if (confirmed) {
     return (

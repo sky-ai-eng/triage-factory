@@ -76,6 +76,11 @@ export default function GitHubStep({ orgId, isLocal, state, patch }: StepContext
         return
       }
       patch({ githubReady: true, hasGitHubPat: true, org: { ...state.org, github_pat: '' } })
+    } catch (err) {
+      // saveOrgConfig rejects (vs. returning {ok:false}) when the fetch itself
+      // throws — offline / server unreachable. Surface it rather than letting
+      // finally silently re-enable the button with no feedback.
+      setConnectError((err as Error)?.message || 'Could not reach the server. Try again.')
     } finally {
       setConnecting(false)
     }
