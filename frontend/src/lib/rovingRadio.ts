@@ -21,6 +21,12 @@ export function nextRadioIndex(
   const backward = PREV_KEYS.has(key)
   if ((!forward && !backward) || count === 0) return null
   const delta = forward ? 1 : -1
+  // No-selection (current = -1) is unreachable via both current callers — each
+  // default-selects an item — so this is just a defensive origin: walk from 0,
+  // and since the `i !== current` guard compares against -1 (not start), every
+  // index including 0 is eligible. The exact landing in that case is incidental
+  // and unreached; documented only so a future caller without a default knows
+  // the start is a fallback, not a meaningful "selected" position.
   const start = current < 0 ? 0 : current
   // Walk one full loop in the chosen direction, returning the first enabled
   // landing spot. Bounded by count so an all-disabled group can't spin.
