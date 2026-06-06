@@ -121,9 +121,9 @@ export default function Factory() {
       sceneRef.current = scene
       unsubClick = scene.onStationClick(setPicked)
       // The director eases the camera back to the pre-entry pose on exit
-      // and fires onEnd only once that restore completes — so we drop the
-      // HUD/letterbox/catcher then, never mid-move, and never while the
-      // camera controls are still detached.
+      // and fires onEnd only once that restore completes — so we restore
+      // the HUD/catcher then, never mid-move, and never while the camera
+      // controls are still detached.
       unsubEnd = scene.onCinematicEnd(() => setCinematic(false))
     })
     return () => {
@@ -224,9 +224,9 @@ export default function Factory() {
 
   // ─── Cinematic mode ───────────────────────────────────────────────
   // A camera-driven ambient showcase: the scene director takes over the
-  // camera (factory/cinematic.ts) while React drops the HUD, frames a
-  // letterbox, and watches for the exit gesture. Entry is the
-  // clapperboard button or an idle auto-attract.
+  // camera (factory/cinematic.ts) while React drops the HUD and watches
+  // for the exit gesture. Entry is the clapperboard button or an idle
+  // auto-attract.
   const enterCinematic = useCallback(() => {
     const scene = sceneRef.current
     if (!scene) return
@@ -238,8 +238,8 @@ export default function Factory() {
   const exitCinematic = useCallback(() => {
     // Only kick off the eased restore here — the `cinematic` flag is
     // cleared by onCinematicEnd (scene-creation effect) once the camera
-    // has fully glided home, so the HUD/letterbox/catcher stay up through
-    // the move and controls aren't live while still detached.
+    // has fully glided home, so the HUD/catcher stay up through the move
+    // and controls aren't live while still detached.
     sceneRef.current?.exitCinematic()
   }, [])
 
@@ -440,31 +440,11 @@ export default function Factory() {
           </button>
         </div>
         <StationDrawer info={picked} />
-        {/* Letterbox bars — filmic frame; non-interactive so clicks fall
-            through to the exit catcher beneath. */}
-        <div
-          className={`pointer-events-none absolute inset-x-0 top-0 z-50 bg-black transition-transform duration-500 ease-out ${
-            cinematic ? 'translate-y-0' : '-translate-y-full'
-          }`}
-          style={{ height: '8vh' }}
-          aria-hidden
-        />
-        <div
-          className={`pointer-events-none absolute inset-x-0 bottom-0 z-50 bg-black transition-transform duration-500 ease-out ${
-            cinematic ? 'translate-y-0' : 'translate-y-full'
-          }`}
-          style={{ height: '8vh' }}
-          aria-hidden
-        />
         {/* Exit catcher — full-viewport layer that swallows the first
-            click (so it exits instead of orbiting) and hides the cursor
-            for immersion. Key/wheel exits are wired in an effect. */}
+            click (so it exits instead of orbiting). The cursor stays
+            visible; key/wheel exits are wired in an effect. */}
         {cinematic && (
-          <div
-            className="absolute inset-0 z-40 cursor-none"
-            onPointerDown={exitCinematic}
-            aria-hidden
-          />
+          <div className="absolute inset-0 z-40" onPointerDown={exitCinematic} aria-hidden />
         )}
       </div>
       <DragOverlay dropAnimation={null}>
