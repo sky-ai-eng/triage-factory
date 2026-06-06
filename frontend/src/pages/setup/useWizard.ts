@@ -35,6 +35,11 @@ export interface WizardController {
   // Every step is satisfied — the active step's primary action becomes Finish.
   canFinish: boolean
   isLastStep: boolean
+  // There is a visible step before the active one — drives the Back / Esc
+  // affordance's enabled state. Keyed on "is there a previous visible step",
+  // not the raw index, so a future omitted step 0 can't leave an
+  // enabled-but-dead Back button (back() is a no-op with no prior visible step).
+  canGoBack: boolean
   // Whether step i can be reopened by clicking its collapsed bar.
   canEdit: (index: number) => boolean
   // validate → persist the active step, then advance (or finish on the last).
@@ -135,8 +140,11 @@ export function useWizard(
         await step.persist({ orgId, teamId, isLocal, state, patch })
         // Advance to the next step that applies; an omitted step (e.g. Jira
         // projects without a Jira tracker) is skipped. No visible step after
-        // this one ⇒ this was the last step, so finish.
-        const next = nextVisibleIndex(steps, state, activeIndex)
+        // this one ⇒ this was the last step, so finish. Read visibility off
+        // stateRef (not the captured `state`) in case persist patched something
+        // that changes which steps apply — stateRef is never staler than the
+        // closure, so this can't skip to or past the wrong step.
+        const next = nextVisibleIndex(steps, stateRef.current, activeIndex)
         if (next === -1) {
           onFinish()
           return
@@ -210,6 +218,7 @@ export function useWizard(
     // the final array slot, since the trailing region may include an omitted
     // step. This is what flips the primary action to "Finish".
     isLastStep: nextVisibleIndex(steps, state, activeIndex) === -1,
+    canGoBack: prevVisibleIndex(steps, state, activeIndex) !== -1,
     canEdit,
     advance,
     back,

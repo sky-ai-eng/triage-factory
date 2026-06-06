@@ -57,17 +57,19 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
   const wiz = useWizard(WIZARD_STEPS, identity, initialWizardState, onFinish)
 
   // Esc re-expands the previous step — the keyboard mirror of the Back button.
-  const { back, advance, activeIndex, busy } = wiz
+  // Gated on canGoBack (is there a prior visible step), not the raw index, so
+  // it stays in lockstep with the Back button's enabled state.
+  const { back, advance, activeIndex, busy, canGoBack } = wiz
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && activeIndex > 0 && !busy) {
+      if (e.key === 'Escape' && canGoBack && !busy) {
         e.preventDefault()
         back()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [back, activeIndex, busy])
+  }, [back, canGoBack, busy])
 
   // As a step becomes active, move focus to its heading and bring the card to
   // center. scrollIntoView honors reduced motion (instant vs. smooth).
@@ -206,7 +208,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                                   <button
                                     type="button"
                                     onClick={back}
-                                    disabled={activeIndex === 0 || busy}
+                                    disabled={!canGoBack || busy}
                                     className="rounded-xl px-3 py-2 text-[13px] font-medium text-text-tertiary transition-colors hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-40"
                                   >
                                     Back
