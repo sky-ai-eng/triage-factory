@@ -2612,8 +2612,8 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
     },
     resolve: () => ({
       alpha: Math.PI / 2,
-      beta: 0.32,
-      radius: 1000,
+      beta: 0.6,
+      radius: 720,
       target: from.clone(),
       targetTo: to.clone(),
       hold: Math.min(11, Math.max(6, Vector3.Distance(from, to) / 220)),
@@ -2632,8 +2632,8 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
       },
       resolve: () => ({
         alpha: Math.PI / 2 + 0.6,
-        beta: 0.22,
-        radius: 540,
+        beta: 0.78,
+        radius: 430,
         target: s1BridgeCenter.clone(),
         hold: 6.5,
         driftAlpha: 0.05,
@@ -2650,8 +2650,8 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
       },
       resolve: () => ({
         alpha: Math.PI / 2 - 0.5,
-        beta: 0.28,
-        radius: 680,
+        beta: 0.72,
+        radius: 560,
         target: crossingCenter.clone(),
         hold: 7,
         driftAlpha: 0.04,
@@ -2683,11 +2683,11 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
       },
       resolve: () => ({
         alpha: Math.PI / 2 + 0.3,
-        beta: 0.25,
-        radius: 900,
+        beta: 0.45,
+        radius: 640,
         target: stationCenter(REVIEW_REQUESTED, 0),
         hold: 6.5,
-        craneBeta: 0.05, // 0.25 → ~0.58 over the hold
+        craneBeta: 0.06, // 0.45 → ~0.84 over the hold
         driftAlpha: 0.03,
       }),
     },
@@ -2697,8 +2697,8 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
       region: null,
       resolve: () => ({
         alpha: Math.PI / 2,
-        beta: 0.36,
-        radius: 2400,
+        beta: 0.52,
+        radius: 1600,
         target: actionCenter.clone(),
         hold: 8,
         driftAlpha: 0.02,
@@ -2710,8 +2710,8 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
       region: null,
       resolve: () => ({
         alpha: Math.PI / 2,
-        beta: 0.09,
-        radius: 2600,
+        beta: 0.18,
+        radius: 1900,
         target: actionCenter.clone(),
         hold: 9,
         driftTargetX: 16,
@@ -2736,9 +2736,9 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
         if (!best) return null
         return {
           alpha: Math.PI / 2 + 0.4,
-          beta: 0.5,
-          radius: 470,
-          target: stationCenter(best.spec, 0),
+          beta: 0.72,
+          radius: 410,
+          target: stationCenter(best.spec, 20),
           hold: 5.5,
           driftAlpha: 0.05,
         }
