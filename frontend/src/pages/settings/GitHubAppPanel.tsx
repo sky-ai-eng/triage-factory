@@ -7,7 +7,7 @@ import {
   startGitHubAppRegistration,
   type GitHubAppStatus,
 } from '../../lib/githubApp'
-import { Section, Field, inputClass } from './primitives'
+import { Section, Field, inputClass, glassInputClass } from './primitives'
 
 /**
  * GitHubAppPanel is the org/workspace-scope "GitHub access" block — the
@@ -28,13 +28,18 @@ import { Section, Field, inputClass } from './primitives'
 export default function GitHubAppPanel({
   orgId,
   showHeading = true,
+  bare = false,
 }: {
   orgId: string | null
   // Suppressed in the setup wizard, which already labels the step "GitHub
   // access" and shows an App/PAT tab switcher above this panel. Default true
   // keeps the Settings tab labelled.
   showHeading?: boolean
+  // The setup wizard composes this flush (no Section card, glass fields) so it
+  // matches the rest of the flow; Settings keeps the carded default.
+  bare?: boolean
 }) {
+  const fieldCls = bare ? glassInputClass : inputClass
   // Discriminated so the panel can tell "still resolving" / "load failed"
   // apart from "no app registered" — a load failure must NOT render the
   // registration form.
@@ -96,8 +101,8 @@ export default function GitHubAppPanel({
   const status = ghAppState.kind === 'loaded' ? ghAppState.status : null
   const app = status?.app ?? null
 
-  return (
-    <Section>
+  const inner = (
+    <>
       {showHeading && (
         <h2 className="text-[13px] font-medium text-text-secondary mb-1">GitHub access</h2>
       )}
@@ -240,7 +245,7 @@ export default function GitHubAppPanel({
                 placeholder={ghAppOwnerType === 'org' ? 'your-org' : 'your-username'}
                 value={ghAppOwnerLogin}
                 onChange={(e) => setGhAppOwnerLogin(e.target.value)}
-                className={inputClass}
+                className={fieldCls}
               />
             </Field>
             <button
@@ -257,6 +262,8 @@ export default function GitHubAppPanel({
             </p>
           </div>
         ))}
-    </Section>
+    </>
   )
+
+  return bare ? inner : <Section>{inner}</Section>
 }

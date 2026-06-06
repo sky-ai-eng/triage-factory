@@ -22,8 +22,7 @@
 
 import GitHubAccessGroup from '../settings/GitHubAccessGroup'
 import GitHubAppPanel from '../settings/GitHubAppPanel'
-import { nextRadioIndex } from '../../lib/rovingRadio'
-import { useRef } from 'react'
+import { ChevronRight } from 'lucide-react'
 import { UrlField } from './parts'
 import type { StepContext, GitHubAccessMode } from './types'
 
@@ -77,18 +76,14 @@ const MODE_CARDS: ModeCard[] = [
 ]
 
 // GitHubModeStep body — the access-method picker. Two flush panels side by side
-// (a hairline between, no box), the selected one marked by accent text + a thin
-// accent bar; the unchosen one stays muted. Arrow keys move the radiogroup. The
-// choice rides state.githubAccessTab, which gates the App / PAT config steps.
-export function GitHubModeStep({ state, patch }: StepContext) {
-  const btnRefs = useRef<(HTMLButtonElement | null)[]>([])
-  const selectedIndex = MODE_CARDS.findIndex((c) => c.kind === state.githubAccessTab)
-  const onKeyDown = (e: React.KeyboardEvent) => {
-    const next = nextRadioIndex(e.key, selectedIndex, MODE_CARDS.length, () => true)
-    if (next === null) return
-    e.preventDefault()
-    patch({ githubAccessTab: MODE_CARDS[next].kind })
-    btnRefs.current[next]?.focus()
+// (a hairline between, no box). It's action-on-click, not select-then-Continue:
+// it opens with neither chosen, and clicking a panel records the choice AND
+// advances to that method's config step (the step is selfAdvancing, so there's
+// no Continue button). A chevron fades in on hover to signal it moves you on.
+export function GitHubModeStep({ state, patch, advance }: StepContext) {
+  const choose = (kind: GitHubAccessMode) => {
+    patch({ githubAccessTab: kind })
+    advance?.()
   }
   return (
     <div className="space-y-5">
@@ -102,42 +97,33 @@ export function GitHubModeStep({ state, patch }: StepContext) {
           GitHub access.
         </p>
       </div>
-      <div
-        role="radiogroup"
-        aria-label="GitHub access method"
-        onKeyDown={onKeyDown}
-        className="grid grid-cols-2 divide-x divide-[var(--color-border-subtle)]"
-      >
+      <div className="grid grid-cols-2 divide-x divide-[var(--color-border-subtle)]">
         {MODE_CARDS.map((card, i) => {
           const selected = state.githubAccessTab === card.kind
           return (
             <button
               key={card.kind}
-              ref={(el) => {
-                btnRefs.current[i] = el
-              }}
               type="button"
-              role="radio"
-              aria-checked={selected}
-              tabIndex={i === Math.max(selectedIndex, 0) ? 0 : -1}
-              onClick={() => patch({ githubAccessTab: card.kind })}
-              className={`group relative flex flex-col gap-1 px-4 py-3 text-left outline-none first:pl-0 last:pr-0 ${
+              onClick={() => choose(card.kind)}
+              className={`group flex flex-col gap-1 text-left outline-none ${
                 i === 0 ? 'pr-5' : 'pl-5'
               }`}
             >
-              <span
-                className={`text-[14px] font-medium transition-colors ${
-                  selected ? 'text-accent' : 'text-text-secondary group-hover:text-text-primary'
-                }`}
-              >
-                {card.title}
+              <span className="flex items-center gap-1.5">
+                <span
+                  className={`text-[14px] font-medium transition-colors ${
+                    selected ? 'text-accent' : 'text-text-secondary group-hover:text-text-primary'
+                  }`}
+                >
+                  {card.title}
+                </span>
+                <ChevronRight
+                  size={14}
+                  aria-hidden
+                  className="text-accent opacity-0 transition-opacity group-hover:opacity-100"
+                />
               </span>
               <span className="text-[11px] leading-snug text-text-tertiary">{card.detail}</span>
-              <span
-                className={`absolute -bottom-px left-0 right-0 h-px transition-colors ${
-                  selected ? 'bg-accent' : 'bg-transparent'
-                } ${i === 0 ? 'right-5' : 'left-5'}`}
-              />
             </button>
           )
         })}
@@ -151,7 +137,7 @@ export function GitHubModeStep({ state, patch }: StepContext) {
 // flush overhaul to follow.
 export function GitHubAppStep({ orgId }: StepContext) {
   return orgId ? (
-    <GitHubAppPanel orgId={orgId} showHeading={false} />
+    <GitHubAppPanel orgId={orgId} showHeading={false} bare />
   ) : (
     <p className="text-[12px] italic text-text-tertiary">Resolving your workspace…</p>
   )
@@ -175,6 +161,7 @@ export function GitHubPatStep({ orgId, isLocal, state, patch }: StepContext) {
       showAppPanel={false}
       showBaseUrl={false}
       showHeading={false}
+      bare
     />
   )
 }

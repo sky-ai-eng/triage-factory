@@ -70,11 +70,12 @@ export interface WizardState {
   // (githubReady) implies a previously-confirmed URL, so it's seeded from
   // githubReady on load.
   githubUrlConfirmed: boolean
-  // Which access method is selected — App (default) or PAT. Set in the mode
-  // picker step; gates the App / PAT config steps' visibility, and the PAT
-  // step's Continue (which performs the connect) reads it. Seeded to 'pat' for a
-  // returning org with a stored token.
-  githubAccessTab: GitHubAccessMode
+  // Which access method is selected — App, PAT, or null (nothing chosen yet).
+  // The mode picker step starts unselected (null) and advances on click; the
+  // choice gates the App / PAT config steps' visibility, and the PAT step's
+  // Continue (the connect) reads it. Seeded non-null for a returning org (PAT if
+  // a token is stored, else App when already connected), null for a fresh org.
+  githubAccessTab: GitHubAccessMode | null
   // Whether the org currently has a working Jira connection (PAT + base URL).
   // Gates the poller step's Jira interval and the team Jira-projects step.
   jiraConnected: boolean
@@ -122,6 +123,11 @@ export interface StepContext extends WizardIdentity {
   // itself still renders once in the host's shared error line. Absent on the
   // persist path — persist surfaces errors by rejecting, not by reading this.
   error?: string | null
+  // Advance the wizard (validate → persist → next). Threaded in for render only,
+  // for a self-advancing step (the GitHub mode picker) whose in-body action
+  // both records the choice and moves on — no Continue button. Absent on the
+  // persist path.
+  advance?: () => void
 }
 
 // The step contract. Trivial or real, every step implements this so the host
@@ -167,6 +173,11 @@ export interface WizardStep {
   // left off where the step body owns a competing submit — the access steps'
   // Connect / Register — so Enter there doesn't fire the wrong action.
   advanceOnEnter?: boolean
+
+  // When true, the host renders no Continue button — the step's in-body action
+  // advances the flow itself (the GitHub mode picker: click App/PAT → move on).
+  // Back is still shown so the step is escapable.
+  selfAdvancing?: boolean
 
   // Compact label for the collapsed confirmation bar (e.g. "Capped at Sonnet").
   collapsedSummary: (state: WizardState) => string

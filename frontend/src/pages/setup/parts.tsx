@@ -3,8 +3,7 @@
 // active (expanded) step's heading + body live in Wizard.tsx, where they can
 // own the focus ref and the expand/collapse animation.
 
-import { motion } from 'motion/react'
-import { glassField } from './glassStyle'
+import { glassInputClass } from '../settings/primitives'
 
 // UrlField is the base-URL input shared by the GitHub and Jira URL steps: a
 // controlled field bound straight to wizard state (no local draft), so the
@@ -39,7 +38,7 @@ export function UrlField({
           placeholder={placeholder || 'https://…'}
           onChange={(e) => onChange(e.target.value)}
           aria-invalid={invalid || undefined}
-          className={`${glassField}${
+          className={`${glassInputClass}${
             invalid
               ? ' !border-[var(--color-dismiss)] focus:!border-[var(--color-dismiss)] focus:!shadow-[0_0_0_4px_rgba(168,69,69,0.16)]'
               : ''
@@ -72,15 +71,11 @@ export function SectionDivider({ title, id }: { title: string; id: string }) {
 // ever rendered (nothing below the active step shows), so every row is reachable
 // and editable; there is no inert "upcoming" variant.
 export function CollapsedStepBar({
-  id,
   title,
   summary,
   complete,
   onEdit,
 }: {
-  // Step id — used for the shared layoutId so the title morphs continuously
-  // between this collapsed row and the active step's heading (the distill).
-  id: string
   title: string
   summary: string
   complete: boolean
@@ -93,12 +88,9 @@ export function CollapsedStepBar({
       aria-label={complete ? `${title} — completed. Edit.` : `${title} — in progress. Edit.`}
       className="group flex w-full items-baseline gap-2.5 py-1 text-left"
     >
-      <motion.span
-        layoutId={`setup-title-${id}`}
-        className="text-[12px] font-medium uppercase tracking-[0.12em] text-text-tertiary transition-colors group-hover:text-text-secondary"
-      >
+      <span className="text-[12px] font-medium uppercase tracking-[0.12em] text-text-tertiary transition-colors group-hover:text-text-secondary">
         {title}
-      </motion.span>
+      </span>
       {complete && (
         <span className="truncate text-[12px] text-text-tertiary/80" title={summary}>
           · {summary}

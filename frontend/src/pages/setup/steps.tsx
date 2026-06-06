@@ -78,7 +78,7 @@ export const initialWizardState = (): WizardState => ({
   hasGitHubPat: false,
   githubReady: false,
   githubUrlConfirmed: false,
-  githubAccessTab: 'app',
+  githubAccessTab: null,
   jiraConnected: false,
   jiraUrlConfirmed: false,
   tracker: 'none',
@@ -150,7 +150,10 @@ async function loadOrg(): Promise<Partial<WizardState>> {
     // advance any value unchecked. An unconnected org always re-probes on
     // Continue (the URL step's whole job), connected resumes past it.
     githubUrlConfirmed: integrations.githubReady,
-    githubAccessTab: org.has_github_pat ? 'pat' : 'app',
+    // A returning org pre-selects its method (PAT if a token is stored, else App
+    // when already connected); a fresh org starts unselected so the picker opens
+    // with neither chosen and advances on the first click.
+    githubAccessTab: org.has_github_pat ? 'pat' : integrations.githubReady ? 'app' : null,
     jiraConnected: integrations.jiraConnected,
     jiraUrlConfirmed: integrations.jiraConnected,
     tracker: integrations.jiraConnected ? 'jira' : 'none',
@@ -270,17 +273,24 @@ const githubUrlStep: WizardStep = {
   render: (ctx) => <GitHubUrlStep {...ctx} />,
 }
 
-// Step · GitHub access method (the mode picker). App (default) vs PAT, as its
-// own step in the flow; the choice gates the two config steps below. Always
-// complete — a method is always selected — so it never blocks; the mandatory
-// GitHub gate lives on whichever config step is visible.
+// Step · GitHub access method (the mode picker). App vs PAT, as its own step;
+// it starts unselected and advances on click (selfAdvancing — no Continue
+// button), the in-body action both recording the choice and moving on. Complete
+// once a method is chosen; the mandatory GitHub gate lives on whichever config
+// step the choice makes visible.
 const githubModeStep: WizardStep = {
   id: 'org-github-mode',
   section: 'org',
   title: 'GitHub access',
-  isComplete: () => true,
+  selfAdvancing: true,
+  isComplete: (s) => s.githubAccessTab !== null,
   persist: async () => {},
-  collapsedSummary: (s) => (s.githubAccessTab === 'pat' ? 'Personal access token' : 'GitHub App'),
+  collapsedSummary: (s) =>
+    s.githubAccessTab === 'pat'
+      ? 'Personal access token'
+      : s.githubAccessTab === 'app'
+        ? 'GitHub App'
+        : 'Not chosen',
   render: (ctx) => <GitHubModeStep {...ctx} />,
 }
 

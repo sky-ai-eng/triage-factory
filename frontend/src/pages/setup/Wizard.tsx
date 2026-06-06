@@ -212,18 +212,16 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                         </span>
 
                         {isActive ? (
-                          <motion.h3
-                            layoutId={`setup-title-${step.id}`}
+                          <h3
                             ref={headingRef}
                             tabIndex={-1}
                             aria-current="step"
                             className="text-[12px] font-medium uppercase tracking-[0.12em] text-text-tertiary outline-none"
                           >
                             {step.title}
-                          </motion.h3>
+                          </h3>
                         ) : (
                           <CollapsedStepBar
-                            id={step.id}
                             title={step.title}
                             summary={step.collapsedSummary(wiz.state)}
                             complete={complete}
@@ -268,6 +266,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                                     state: wiz.state,
                                     patch: wiz.patch,
                                     error: wiz.error,
+                                    advance,
                                   })
                                 )}
 
@@ -294,14 +293,18 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                             >
                               Back
                             </button>
-                            <button
-                              type="button"
-                              onClick={advance}
-                              disabled={busy || wiz.activeLoadFailed}
-                              className="rounded-full bg-accent px-6 py-2.5 text-[13px] font-medium text-white shadow-[0_10px_28px_-10px_var(--color-accent)] transition-all hover:bg-accent/90 hover:shadow-[0_12px_32px_-8px_var(--color-accent)] disabled:opacity-40 disabled:shadow-none"
-                            >
-                              {busy ? 'Saving…' : wiz.isLastStep ? 'Finish setup' : 'Continue'}
-                            </button>
+                            {/* A self-advancing step (the mode picker) advances
+                                from its own in-body action — no Continue. */}
+                            {!step.selfAdvancing && (
+                              <button
+                                type="button"
+                                onClick={advance}
+                                disabled={busy || wiz.activeLoadFailed}
+                                className="rounded-full bg-accent px-6 py-2.5 text-[13px] font-medium text-white shadow-[0_10px_28px_-10px_var(--color-accent)] transition-all hover:bg-accent/90 hover:shadow-[0_12px_32px_-8px_var(--color-accent)] disabled:opacity-40 disabled:shadow-none"
+                              >
+                                {busy ? 'Saving…' : wiz.isLastStep ? 'Finish setup' : 'Continue'}
+                              </button>
+                            )}
                           </div>
                         )}
                       </li>
