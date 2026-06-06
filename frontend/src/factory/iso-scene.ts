@@ -2597,6 +2597,9 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
     (BRIDGE_UNDER_POLE_1_ROW + OVER_BRIDGE_MERGER_ROW) / 2 + 0.5,
     14,
   )
+  // Merger just east of CI Failed, where its output meets the loop-back
+  // traffic — the subject of a tight, slowly rotating close-up.
+  const ciFailedMergerCenter = worldXY(LOOP_MERGER_COL + 0.5, LOOP_MERGER_ROW + 0.5, 12)
 
   // A belt-truck shot: the camera holds a low angle while the target
   // glides end→end along a long run at a steady ~220 wu/s.
@@ -2672,6 +2675,27 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
         target: crossingCenter.clone(),
         hold: 7,
         driftAlpha: 0.04,
+      }),
+    },
+    {
+      // Ultra close-up on the merger just east of CI Failed, orbiting
+      // slowly L→R. Tightest zoom the camera allows; reads as a detailed
+      // junction even when idle, so it helps fill the quiet-floor rotation.
+      id: 'ci-failed-merger',
+      base: 8,
+      region: {
+        cx: ciFailedMergerCenter.x,
+        cy: ciFailedMergerCenter.y,
+        halfX: 2 * FLOOR_CELL,
+        halfY: 2 * FLOOR_CELL,
+      },
+      resolve: () => ({
+        alpha: Math.PI / 2,
+        beta: 0.55,
+        radius: 270, // ≈ the camera's tightest zoom (lowerRadiusLimit)
+        target: ciFailedMergerCenter.clone(),
+        hold: 9,
+        driftAlpha: 0.05, // slow L→R sweep — flip the sign to reverse
       }),
     },
     truckShot(

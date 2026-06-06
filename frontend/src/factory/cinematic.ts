@@ -139,7 +139,7 @@ const DT_CAP = 0.05 // clamp per-frame advance so a tab-wake hitch can't jump th
 // 0.001..~π/2, radius 266..5000) so we never fight Babylon's bounds.
 const BETA_MIN = 0.05
 const BETA_MAX = 1.5
-const RADIUS_MIN = 300
+const RADIUS_MIN = 270 // ~ the camera's lowerRadiusLimit — the tightest zoom it allows
 const RADIUS_MAX = 2800
 
 type Phase = 'idle' | 'transition' | 'hold' | 'restore'
