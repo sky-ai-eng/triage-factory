@@ -2723,7 +2723,11 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
       region: null,
       resolve: () => {
         // Frame the station doing the most agent work — gated on active
-        // runs, never queued piles (a heap is not a spectacle).
+        // runs, never queued piles (a heap is not a spectacle). runCount
+        // is refreshed every frame by the reconciler (registered on
+        // onBeforeRender before the director's tick, so it's current here);
+        // a frame of staleness would be harmless either way since runs
+        // turn over on the order of seconds.
         let best: StationRow | null = null
         for (const row of stationsByEvent.values()) {
           if ((row.data.runCount ?? 0) <= 0) continue

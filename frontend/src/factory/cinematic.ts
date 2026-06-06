@@ -156,6 +156,11 @@ export class CinematicDirector {
   private enterPose: Pose | null = null
   private recent: string[] = []
   private reduced = false
+  // Reused for every per-frame camera-target write so a hold — especially
+  // the reduced-motion infinite hold — doesn't allocate a Vector3 each
+  // frame. Safe because the camera's target setter copies the value and
+  // snapshot() clones before storing, so nothing aliases this instance.
+  private readonly targetScratch = new Vector3()
 
   // Explicit field declarations + assignment rather than constructor
   // parameter properties — the project builds with `erasableSyntaxOnly`,
@@ -211,6 +216,11 @@ export class CinematicDirector {
    *  onEnd listeners fire only once that restore completes, so the HUD
    *  doesn't pop back while the camera is still moving. */
   exit(): void {
+    // No-op when idle or already restoring. In V1 no shot self-exits, so
+    // the director is idle only while camera controls are attached (enter
+    // detaches; the onEnd after a restore re-attaches) — a stray exit()
+    // therefore can't strand controls detached. If a self-exiting shot is
+    // ever added, route its completion through the same restore→onEnd path.
     if (this.phase === 'idle' || this.phase === 'restore') return
     this.startPose = this.snapshot()
     this.elapsed = 0
@@ -330,7 +340,8 @@ export class CinematicDirector {
     this.camera.alpha = lerpAngle(a.alpha, b.alpha, t)
     this.camera.beta = clamp(lerp(a.beta, b.beta, t), BETA_MIN, BETA_MAX)
     this.camera.radius = clamp(lerp(a.radius, b.radius, t), RADIUS_MIN, RADIUS_MAX)
-    this.camera.target = Vector3.Lerp(a.target, b.target, t)
+    Vector3.LerpToRef(a.target, b.target, t, this.targetScratch)
+    this.camera.target = this.targetScratch
   }
 
   private applyHoldMotion(e: number): void {
@@ -341,11 +352,13 @@ export class CinematicDirector {
       this.camera.alpha = base.alpha
       this.camera.beta = clamp(base.beta, BETA_MIN, BETA_MAX)
       this.camera.radius = clamp(base.radius, RADIUS_MIN, RADIUS_MAX)
-      this.camera.target = Vector3.Lerp(
+      Vector3.LerpToRef(
         base.target,
         m.targetTo,
         smootherstep(Math.min(1, e / m.hold)),
+        this.targetScratch,
       )
+      this.camera.target = this.targetScratch
       return
     }
     // Wrap to [0, 2π). In reduced-motion mode this branch holds forever
@@ -354,9 +367,14 @@ export class CinematicDirector {
     this.camera.alpha = wrapTwoPi(base.alpha + (m.driftAlpha ?? 0) * e)
     this.camera.beta = clamp(base.beta + (m.craneBeta ?? 0) * e, BETA_MIN, BETA_MAX)
     this.camera.radius = clamp(base.radius, RADIUS_MIN, RADIUS_MAX)
-    const target = base.target.clone()
-    target.x += (m.driftTargetX ?? 0) * e
-    this.camera.target = target
+    // driftTargetX is a world-space delta and is deliberately NOT wrapped
+    // or clamped here (the director stays scene-agnostic — it has no floor
+    // bounds). The only infinite hold is reducedHold, which carries just a
+    // wrapped alpha drift, so x can't run away; any shot using driftTargetX
+    // must keep a finite hold (the deck's `blueprint` does).
+    this.targetScratch.copyFrom(base.target)
+    this.targetScratch.x += (m.driftTargetX ?? 0) * e
+    this.camera.target = this.targetScratch
   }
 
   private finishExit(): void {
