@@ -135,8 +135,12 @@ export function pickNextShot(
 
 const TRANSITION_SEC = 1.4 // ease between consecutive shots
 const RESTORE_SEC = 1.1 // ease back to the user's pose on exit
-const FADE_SEC = 0.25 // each half of a fade-to-black cut (out, then in)
+const FADE_SEC = 0.5 // each half of a fade-to-black cut (out, then in) — a mellow dip
 const COOLDOWN_K = 3 // a shot can't replay until K others have run
+// Global tempo multiplier applied to every shot's `hold`. The deck holds
+// are the design-intent durations; this dials the whole tour's pace from
+// one place.
+const HOLD_SCALE = 1.33
 const DT_CAP = 0.05 // clamp per-frame advance so a tab-wake hitch can't jump the camera
 
 // Aesthetic clamps — kept inside the camera's own limits (beta
@@ -160,6 +164,7 @@ export class CinematicDirector {
   private startPose: Pose
   private holdPose: Pose
   private motion: ShotMotion | null = null
+  private holdDuration = 0 // motion.hold * HOLD_SCALE, computed per shot
   private enterPose: Pose | null = null
   private recent: string[] = []
   private reduced = false
@@ -300,7 +305,7 @@ export class CinematicDirector {
     } else if (this.phase === 'hold') {
       this.elapsed += dt
       this.applyHoldMotion(this.elapsed)
-      if (this.motion && this.elapsed >= this.motion.hold) {
+      if (this.motion && this.elapsed >= this.holdDuration) {
         // Advance — fade-cut to the next shot (or glide, if it's wide).
         this.startNextFrom(this.snapshot(), false)
       }
@@ -316,6 +321,7 @@ export class CinematicDirector {
     this.recent.push(id)
     while (this.recent.length > COOLDOWN_K) this.recent.shift()
     this.motion = motion
+    this.holdDuration = motion.hold * HOLD_SCALE
     this.startPose = from
     this.holdPose = {
       alpha: motion.alpha,
@@ -410,7 +416,7 @@ export class CinematicDirector {
       Vector3.LerpToRef(
         base.target,
         m.targetTo,
-        smootherstep(Math.min(1, e / m.hold)),
+        smootherstep(Math.min(1, e / this.holdDuration)),
         this.targetScratch,
       )
       this.camera.target = this.targetScratch
