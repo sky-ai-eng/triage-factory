@@ -3,7 +3,6 @@
 // active (expanded) step's heading + body live in Wizard.tsx, where they can
 // own the focus ref and the expand/collapse animation.
 
-import { Check } from 'lucide-react'
 import { motion } from 'motion/react'
 import { glassField } from './glassStyle'
 
@@ -66,31 +65,14 @@ export function SectionDivider({ title, id }: { title: string; id: string }) {
   )
 }
 
-// StepMarker leads a collapsed row: a check once complete, else the 2-digit
-// step number — matching the active step's "01" treatment, no circle chrome.
-function StepMarker({ number, complete }: { number: number; complete: boolean }) {
-  return (
-    <span className="flex w-5 shrink-0 justify-center">
-      {complete ? (
-        <Check size={13} strokeWidth={3} className="text-[var(--color-claim)]" aria-hidden />
-      ) : (
-        <span className="text-[11px] font-semibold tabular-nums text-text-tertiary">
-          {String(number).padStart(2, '0')}
-        </span>
-      )}
-    </span>
-  )
-}
-
 // CollapsedStepBar renders a completed step that has receded above the active
-// one: a thin, flush row — no card/pill chrome — with the marker, the title,
-// and the summary of what was saved, that re-expands on click. Only steps at or
-// before the active step are ever rendered (nothing below the active step
-// shows), so every row is reachable and editable; there is no inert "upcoming"
-// variant.
+// one: a thin, flush row — no card/pill chrome, and no marker (the wizard's
+// gutter thread owns the marker) — with the title and the summary of what was
+// saved, that re-expands on click. Only steps at or before the active step are
+// ever rendered (nothing below the active step shows), so every row is reachable
+// and editable; there is no inert "upcoming" variant.
 export function CollapsedStepBar({
   id,
-  number,
   title,
   summary,
   complete,
@@ -99,7 +81,6 @@ export function CollapsedStepBar({
   // Step id — used for the shared layoutId so the title morphs continuously
   // between this collapsed row and the active step's heading (the distill).
   id: string
-  number: number
   title: string
   summary: string
   complete: boolean
@@ -110,9 +91,8 @@ export function CollapsedStepBar({
       type="button"
       onClick={onEdit}
       aria-label={complete ? `${title} — completed. Edit.` : `${title} — in progress. Edit.`}
-      className="group flex w-full items-center gap-2.5 py-1 text-left"
+      className="group flex w-full items-baseline gap-2.5 py-1 text-left"
     >
-      <StepMarker number={number} complete={complete} />
       <motion.span
         layoutId={`setup-title-${id}`}
         className="text-[12px] font-medium uppercase tracking-[0.12em] text-text-tertiary transition-colors group-hover:text-text-secondary"
