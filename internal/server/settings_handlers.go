@@ -499,7 +499,13 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Jira PAT: nil = don't touch, "" = clear, non-empty = validate + set.
+	// Jira PAT (PAT_1, the org bot credential): nil = don't touch, "" = clear,
+	// non-empty = validate + set. We validate to reject a bad token, but we do
+	// NOT bind the caller's Jira identity here — saving the org credential is an
+	// access concern, not an identity one. Per-user Jira access (the stored
+	// credential + derived identity) is captured only by the dedicated bind
+	// surface (POST .../identity/jira/pat), so access and identity stay
+	// independent even when the same token is used.
 	if req.JiraPAT != nil {
 		if *req.JiraPAT == "" {
 			creds.JiraPAT = ""
@@ -509,8 +515,7 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 				badRequest(w, "Jira URL is required before setting a PAT")
 				return
 			}
-			jiraUser, err := auth.ValidateJira(r.Context(), jira.DataCenterPAT(url, *req.JiraPAT))
-			if err != nil {
+			if _, err := auth.ValidateJira(r.Context(), jira.DataCenterPAT(url, *req.JiraPAT)); err != nil {
 				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 					"error": "Jira: " + err.Error(),
 					"field": "jira_pat",
@@ -518,11 +523,6 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			creds.JiraPAT = *req.JiraPAT
-			if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-				return tx.Users.SetJiraIdentity(r.Context(), userID, jiraUser.StableID(), jiraUser.DisplayName)
-			}); err != nil {
-				log.Printf("[settings/org] failed to persist users.jira_identity: %v", err)
-			}
 		}
 	}
 
@@ -554,10 +554,9 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 		// field. integrations.Save skips empty strings, so zeroing a
 		// creds field without an explicit clear would leave the old
 		// value in the store.
-		// On URL clear: nuke creds + identity bridge so the user row
-		// doesn't keep a stale github_username / jira_account_id after
-		// disconnect. The old monolithic handler did this; the split
-		// handler has to reproduce the sweep.
+		// These clears touch ONLY the org access credentials (PAT_1). Per-user
+		// identity is deliberately never swept on an org disconnect — it's owned
+		// by its own capture surface (see the per-branch notes below).
 		if req.GitHubBaseURL != nil && *req.GitHubBaseURL == "" {
 			if err := integrations.ClearGitHub(r.Context(), tx.Secrets, orgID); err != nil {
 				return fmt.Errorf("clear GitHub secrets: %w", err)
@@ -583,15 +582,15 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 			}
 			creds.JiraURL = ""
 			creds.JiraPAT = ""
-			if err := tx.Users.SetJiraIdentity(r.Context(), userID, "", ""); err != nil {
-				return fmt.Errorf("clear jira_identity: %w", err)
-			}
+			// Per-user Jira access (the user's own stored credential + derived
+			// identity) is deliberately left intact: it's owned by the dedicated
+			// bind surface, not the org credential, and is custodied under a
+			// separate per-user secret key. Disconnecting the org's Jira access
+			// doesn't unmake the user's own binding — it's cleared only by its own
+			// surface, never as a side effect of an org-access change.
 		} else if req.JiraPAT != nil && *req.JiraPAT == "" {
 			if _, err := tx.Secrets.Delete(r.Context(), orgID, integrations.KeyJiraPAT); err != nil {
 				return fmt.Errorf("clear Jira PAT: %w", err)
-			}
-			if err := tx.Users.SetJiraIdentity(r.Context(), userID, "", ""); err != nil {
-				return fmt.Errorf("clear jira_identity: %w", err)
 			}
 		}
 		if err := integrations.Save(r.Context(), tx.Secrets, orgID, creds); err != nil {

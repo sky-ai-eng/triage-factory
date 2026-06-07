@@ -2,17 +2,14 @@ package app
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"path/filepath"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
-	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
@@ -22,16 +19,15 @@ import (
 
 // runStartupTasks performs the one-time boot side effects, in order:
 // register the clone-result callback (before any clone can fire), sweep
-// orphaned worktrees, and (local only) repopulate the user's identity +
-// import skill files. All of this runs before the background workers and
-// the first poll.
+// orphaned worktrees, and (local only) import skill files. All of this runs
+// before the background workers and the first poll.
 func (a *App) runStartupTasks(ctx context.Context) {
 	if a.local() {
 		a.wireCloneStatusCallback()
 	}
 	a.cleanupWorktrees(ctx)
 	if a.local() {
-		a.localIdentityAndSkillFixup(ctx)
+		a.importLocalSkills(ctx)
 	}
 }
 
@@ -107,23 +103,20 @@ func (a *App) cleanupWorktrees(ctx context.Context) {
 	})
 }
 
-// localIdentityAndSkillFixup repopulates the local user's Jira identity and
-// imports any new Claude Code skill files as prompts. Gated on tenant
-// existence: on a tenant-less boot it no-ops; after a prior provision it
-// refreshes the users row. GitHub identity (PAT_2) is deliberately NOT
-// bootstrapped from the org PAT here — per-user identity is captured only
-// through the setup wizard's User step / the Connect gate page.
-func (a *App) localIdentityAndSkillFixup(ctx context.Context) {
+// importLocalSkills imports any new Claude Code skill files as prompts. Gated
+// on tenant existence: on a tenant-less boot it no-ops; after a prior provision
+// it imports against the provisioned org. Per-user identity — GitHub (PAT_2)
+// and Jira (access + derived identity) alike — is deliberately NOT bootstrapped
+// from the org PAT here: it's captured only through the setup wizard's User
+// step / the Connect gate page, never derived from the org's access credential.
+func (a *App) importLocalSkills(ctx context.Context) {
 	org, err := a.stores.Orgs.GetOrgSystem(ctx, runmode.LocalDefaultOrgID)
 	if err != nil {
-		log.Printf("[bootstrap] check local tenant: %v (skipping identity/skill fixup)", err)
+		log.Printf("[bootstrap] check local tenant: %v (skipping skill import)", err)
 		return
 	}
 	if org == nil {
 		return
-	}
-	if err := bootstrapLocalJiraIdentity(a.stores.Users, a.stores.Secrets); err != nil {
-		log.Printf("[bootstrap] users.jira_identity: %v (continuing — Settings will capture on next save)", err)
 	}
 	// SKILL.md files live on the user's machine, not the server's, so this
 	// is local-only by construction.
@@ -238,39 +231,4 @@ func bootstrapBareClones(repos db.RepoStore) {
 		})
 	}
 	worktree.BootstrapBareClones(context.Background(), targets)
-}
-
-// bootstrapLocalJiraIdentity populates users.jira_account_id and
-// users.jira_display_name on the local synthetic user row by deriving them
-// from the configured Jira PAT+URL (one /myself round-trip per boot). No-op
-// when the row is already populated, credentials are absent, or ValidateJira
-// fails. There is intentionally no GitHub analog — see localIdentityAndSkillFixup.
-func bootstrapLocalJiraIdentity(users db.UsersStore, secrets db.SecretStore) error {
-	if runmode.Current() != runmode.ModeLocal {
-		return nil
-	}
-	ctx := context.Background()
-
-	creds, _ := integrations.Load(ctx, secrets, runmode.LocalDefaultOrgID)
-	if creds.JiraPAT == "" || creds.JiraURL == "" {
-		return nil
-	}
-	existingID, existingName, err := users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID)
-	if err != nil {
-		return fmt.Errorf("read users.jira_identity: %w", err)
-	}
-	if existingID != "" && existingName != "" {
-		return nil
-	}
-	jiraUser, err := auth.ValidateJira(ctx, jira.DataCenterPAT(creds.JiraURL, creds.JiraPAT))
-	if err != nil {
-		log.Printf("[bootstrap] derive users.jira_identity from PAT: %v (continuing — Settings will capture next save)", err)
-		return nil
-	}
-	accountID := jiraUser.StableID()
-	if err := users.SetJiraIdentity(ctx, runmode.LocalDefaultUserID, accountID, jiraUser.DisplayName); err != nil {
-		return fmt.Errorf("persist users.jira_identity: %w", err)
-	}
-	log.Printf("[bootstrap] users.jira_identity: derived account=%q name=%q from credentials", accountID, jiraUser.DisplayName)
-	return nil
 }

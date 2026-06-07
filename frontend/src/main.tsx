@@ -29,8 +29,13 @@ import Login from './pages/Login'
 import Onboarding from './pages/Onboarding'
 import Wizard from './pages/setup/Wizard'
 import ConnectGitHub from './pages/ConnectGitHub'
+import ConnectJira from './pages/ConnectJira'
 import Shell from './Shell'
-import AuthGate, { RequireGitHubIdentity, RequireSetupComplete } from './AuthGate'
+import AuthGate, {
+  RequireGitHubIdentity,
+  RequireJiraIdentity,
+  RequireSetupComplete,
+} from './AuthGate'
 import ToastProvider from './components/Toast/ToastProvider'
 import { useDeploymentConfig } from './hooks/useDeploymentConfig'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
@@ -115,12 +120,27 @@ function LocalRoutes() {
           </AuthGate>
         }
       />
+      {/* Jira identity gate page — its own route OUTSIDE RequireJiraIdentity
+          (the check it satisfies) so there's no loop. The backstop for a local
+          user whose Jira credential is missing/stale; the wizard's User step is
+          the first-run capture. Declared before the shell layout so the static
+          /connect-jira suffix wins. */}
+      <Route
+        path="/orgs/:org_id/connect-jira"
+        element={
+          <AuthGate mode="local">
+            <ConnectJira />
+          </AuthGate>
+        }
+      />
       <Route
         element={
           <AuthGate mode="local">
             <RequireSetupComplete isLocal>
               <RequireGitHubIdentity isLocal>
-                <Shell />
+                <RequireJiraIdentity isLocal>
+                  <Shell />
+                </RequireJiraIdentity>
               </RequireGitHubIdentity>
             </RequireSetupComplete>
           </AuthGate>
@@ -178,13 +198,27 @@ function MultiRoutes() {
               </AuthGate>
             }
           />
+          {/* Jira onboarding gate page — its own route so it sits OUTSIDE
+              RequireJiraIdentity (the check it exists to satisfy); gated only by
+              auth + org resolution. Declared before the shell layout so the
+              static /connect-jira suffix wins. */}
+          <Route
+            path="/orgs/:org_id/connect-jira"
+            element={
+              <AuthGate mode="multi">
+                <ConnectJira />
+              </AuthGate>
+            }
+          />
           <Route
             path="/orgs/:org_id"
             element={
               <AuthGate mode="multi">
                 <RequireSetupComplete>
                   <RequireGitHubIdentity>
-                    <Shell />
+                    <RequireJiraIdentity>
+                      <Shell />
+                    </RequireJiraIdentity>
                   </RequireGitHubIdentity>
                 </RequireSetupComplete>
               </AuthGate>

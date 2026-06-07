@@ -3,6 +3,7 @@ import { useAuthStatus } from './hooks/useAuthStatus'
 import { useAuth, useOptionalAuth } from './contexts/AuthContext'
 import { useOrgContext, useActiveOrgId } from './contexts/OrgContext'
 import { useGitHubIdentity } from './hooks/useGitHubIdentity'
+import { useJiraIdentity } from './hooks/useJiraIdentity'
 import { LOCAL_DEFAULT_ORG_ID } from './lib/githubApp'
 
 /**
@@ -153,6 +154,75 @@ export function RequireGitHubIdentity({
     const target = location.pathname + location.search
     const rt = target && target !== '/' ? '?return_to=' + encodeURIComponent(target) : ''
     return <Navigate to={'/orgs/' + orgId + '/connect-github' + rt} replace />
+  }
+  return <>{children}</>
+}
+
+/**
+ * RequireJiraIdentity is the Jira sibling of RequireGitHubIdentity, composed
+ * inside the shell *after* it (order: org access → GitHub identity → Jira
+ * identity). It blocks the app until the user has a stored per-user Jira
+ * credential for the active org's Jira host, redirecting to the Connect page
+ * (its own route, NOT behind this gate, so there's no loop) otherwise.
+ *
+ * Unlike GitHub, Jira is an OPTIONAL tracker: a GitHub-only org has no Jira to
+ * bind, so the gate self-disables there. It reads the org-level Jira-configured
+ * signal — the `jira` flag from /api/integrations/status (a stored org Jira PAT,
+ * the same source the setup wizard's tracker uses) — and gates only when Jira
+ * is actually configured. While that signal is loading it holds a spinner;
+ * once it resolves to not-configured it renders straight through.
+ *
+ * "Couldn't read the status" (TF-side error) is held as a retryable panel
+ * rather than rendered through — the gate must not silently admit an unbound
+ * user on a transient failure, mirroring RequireGitHubIdentity. The bind
+ * failure shapes (bad token, host-unreachable) surface on the Connect page.
+ *
+ * Runs in BOTH modes. Multi resolves the active org from OrgContext; local has
+ * no OrgContext, so it passes `isLocal` and the gate keys on the sentinel org.
+ */
+export function RequireJiraIdentity({
+  children,
+  isLocal = false,
+}: {
+  children: React.ReactNode
+  isLocal?: boolean
+}) {
+  const ctxOrgId = useActiveOrgId()
+  const orgId = isLocal ? LOCAL_DEFAULT_ORG_ID : ctxOrgId
+  const location = useLocation()
+  // Org-level "this org tracks Jira" signal — a GitHub-only org is never gated
+  // on Jira. Same source the setup wizard reads (a stored org Jira PAT).
+  const { jira: jiraConfigured, loading: statusLoading } = useAuthStatus(orgId ?? undefined)
+  // Only probe the user's binding once we know the org tracks Jira; for a
+  // GitHub-only org there's nothing to read, so the hook stays idle (null).
+  const { state, refresh } = useJiraIdentity(jiraConfigured ? orgId : null)
+
+  if (!orgId || statusLoading) {
+    return <Loading />
+  }
+  // GitHub-only org → no Jira gate.
+  if (!jiraConfigured) {
+    return <>{children}</>
+  }
+  if (state.status === 'loading') {
+    return <Loading />
+  }
+  if (state.status === 'error') {
+    return (
+      <div className="min-h-screen bg-surface flex items-center justify-center">
+        <div className="text-center space-y-3">
+          <p className="text-text-secondary text-sm">Couldn&apos;t check your Jira connection.</p>
+          <button type="button" onClick={refresh} className="text-accent text-sm underline">
+            Retry
+          </button>
+        </div>
+      </div>
+    )
+  }
+  if (!state.data.connected) {
+    const target = location.pathname + location.search
+    const rt = target && target !== '/' ? '?return_to=' + encodeURIComponent(target) : ''
+    return <Navigate to={'/orgs/' + orgId + '/connect-jira' + rt} replace />
   }
   return <>{children}</>
 }

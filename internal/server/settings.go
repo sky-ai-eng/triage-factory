@@ -310,12 +310,17 @@ func (s *Server) handleJiraConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// One WithTx for the whole read + write window: credentials go
-	// through tx.Secrets (Postgres vault writes need claims set),
-	// org_settings goes through tx.Orgs (org_settings_update RLS
-	// gates on admin), and SKY-270's Jira identity write goes through
-	// tx.Users. All-or-nothing so creds + settings + identity can't
-	// land in a partial state. The earlier "manual rollback via
-	// ClearJira" pattern collapses to plain tx rollback semantics.
+	// through tx.Secrets (Postgres vault writes need claims set) and
+	// org_settings goes through tx.Orgs (org_settings_update RLS gates on
+	// admin). All-or-nothing so creds + settings can't land in a partial
+	// state. The earlier "manual rollback via ClearJira" pattern collapses
+	// to plain tx rollback semantics.
+	//
+	// This is org-level Jira ACCESS (PAT_1) only — it deliberately does NOT
+	// write the caller's per-user Jira identity. That is captured solely by
+	// the dedicated bind surface (POST .../identity/jira/pat), so org access
+	// and user identity stay independent even when the same token connects
+	// the org.
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		creds, err := integrations.Load(r.Context(), tx.Secrets, orgID)
 		if err != nil {
@@ -333,12 +338,6 @@ func (s *Server) handleJiraConnect(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
 			return fmt.Errorf("save org settings: %w", err)
-		}
-		// SKY-270: persist the captured Jira identity on the users
-		// row. Bundled in the same tx so the connect either fully
-		// lands (creds + URL + identity) or fully rolls back.
-		if err := tx.Users.SetJiraIdentity(r.Context(), userID, jiraUser.StableID(), jiraUser.DisplayName); err != nil {
-			return fmt.Errorf("persist users.jira_identity: %w", err)
 		}
 		return nil
 	}); err != nil {
