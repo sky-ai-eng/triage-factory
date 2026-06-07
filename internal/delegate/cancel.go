@@ -59,12 +59,12 @@ func (s *Spawner) Cancel(orgID, runID, userID string) error {
 		return fmt.Errorf("no active run %s", runID)
 	}
 
-	s.mu.Lock()
-	cancel, ok := s.cancels[runID]
-	s.mu.Unlock()
-
-	if ok {
-		cancel()
+	// Route the hard-kill through the control seam: at N=1 it resolves the
+	// registered ctx cancel from s.cancels; horizontal scaling swaps it for
+	// a DB-signal to the executor that owns the run. A found handle SIGKILLs
+	// the live process (the goroutine then writes the terminal cancelled
+	// status when it observes ctx.Err()).
+	if s.controller.Cancel(runID) {
 		return nil
 	}
 

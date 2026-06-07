@@ -108,6 +108,14 @@ type AgentRun struct {
 	// call. Empty on rows hydrated by the per-org Get paths, which already
 	// carry org in their call args.
 	OrgID string `json:"-"`
+
+	// ExecutorID names the executor instance that owns this run's live
+	// process while it runs — stamped when the run goes live, NULL/empty
+	// otherwise. At N=1 it's a single per-process instance id; the
+	// forward-compat ownership hook horizontal scaling turns into the
+	// lease the control plane signals an owning executor through. Empty
+	// string === SQL NULL.
+	ExecutorID string `json:"-"`
 }
 
 // AgentMessage represents a single message within an agent run.

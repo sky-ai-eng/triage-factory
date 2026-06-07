@@ -100,11 +100,19 @@ func (s *Spawner) reconcileRunQueue(ctx context.Context) {
 	}
 }
 
-// drainRunQueue claims and dispatches queued runs until the queue is empty (or
-// ctx is cancelled). Unlike the event-queue worker, each claimed run runs its
-// agent inline before the next claim — a single dispatcher processes one step at
-// a time, matching the pre-queue single-goroutine sequencing.
+// drainRunQueue claims queued runs and hands each to a goroutine, bounded by
+// the process-wide concurrency semaphore, until the queue is empty (or ctx is
+// cancelled). Each claimed run executes — setup, agent, reactor — off the
+// dispatcher, so the loop keeps claiming the next run without waiting for the
+// previous one to finish. The claim is FOR UPDATE SKIP LOCKED, so this is the
+// same mechanism a future N-worker dispatcher uses; the semaphore is what keeps
+// a burst of queued steps from fanning into an unbounded number of agent
+// subprocesses on one host.
 func (s *Spawner) drainRunQueue(ctx context.Context) {
+	// Capture the semaphore once and use it for both acquire and release so a
+	// startup-time SetMaxConcurrentRuns can't strand a token on a replaced
+	// channel.
+	sem := s.semaphore()
 	for {
 		if ctx.Err() != nil {
 			return
@@ -117,7 +125,20 @@ func (s *Spawner) drainRunQueue(ctx context.Context) {
 		if run == nil {
 			return // queue drained
 		}
-		s.dispatchClaimedRun(ctx, run)
+		// Acquire a concurrency slot before handing the claimed run to a
+		// goroutine. Blocks here when at capacity (the claimed run stays
+		// reserved 'running'); a shutdown breaks the wait and leaves the run
+		// for boot reconcile to re-queue, the same convention the pre-agent
+		// setup reads follow.
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+		go func() {
+			defer func() { <-sem }()
+			s.dispatchClaimedRun(ctx, run)
+		}()
 	}
 }
 

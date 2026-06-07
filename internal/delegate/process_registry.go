@@ -1,0 +1,190 @@
+// The live-process registry and the control-indirection seam.
+//
+// Every run executes as a long-lived agentproc.LiveRun (see run.go); while
+// it runs, its handle lives in s.procs, keyed by run id, so a control
+// request arriving on a later HTTP turn can reach the process the
+// delegation goroutine spawned. The RunController interface is the seam
+// between a control request (interrupt / steer / cancel) and that process:
+// at N=1 the in-process impl resolves the handle here; horizontal scaling
+// swaps it for a DB-signal to the executor that owns the run's lease
+// (runs.executor_id), with no change at the call sites.
+
+package delegate
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+)
+
+// DefaultMaxConcurrentRuns is the conservative process-wide cap on how
+// many runs execute off the dispatcher at once, so a burst of queued steps
+// doesn't fan into an unbounded number of agent subprocesses. Tunable via
+// SetMaxConcurrentRuns before the dispatcher starts.
+const DefaultMaxConcurrentRuns = 4
+
+// DefaultIdleHibernateTimeout is how long a live run may go quiet (no
+// stream activity) before it hibernates to a durable resume. Capacity-
+// driven, not a cache TTL — a warm-but-idle process holds an execution
+// slot, not the server-side prompt cache. Tunable via
+// SetIdleHibernateTimeout (tests inject a short value).
+const DefaultIdleHibernateTimeout = 5 * time.Minute
+
+// liveRunHandle wraps a run's live agent process plus the identity a
+// control op needs to reach it. Held in s.procs for the lifetime of the
+// run's live execution; the driver registers it when the process spawns
+// and deregisters it when the process closes (terminal, hibernation, or
+// cancel).
+type liveRunHandle struct {
+	lr    *agentproc.LiveRun
+	runID string
+	orgID string
+}
+
+// registerProc records a run's live process handle so control ops can
+// reach it across HTTP turns. Mirrors the cancels-map registration the
+// dispatcher and ResumeAfterYield already do, under the same s.mu.
+func (s *Spawner) registerProc(orgID, runID string, lr *agentproc.LiveRun) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.procs[runID] = &liveRunHandle{lr: lr, runID: runID, orgID: orgID}
+}
+
+// getProc returns the live handle for a run, or nil when the run has no
+// live process (never started, already hibernated, or terminated).
+func (s *Spawner) getProc(runID string) *liveRunHandle {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.procs[runID]
+}
+
+// deregisterProc drops a run's live handle once the process is gone.
+// Idempotent.
+func (s *Spawner) deregisterProc(runID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.procs, runID)
+}
+
+// stampExecutor records this spawner instance's executor identity on the
+// run row when the run goes live (an unguarded system write — the run
+// goroutine holds no JWT claims). Best-effort: a failure is logged, not
+// fatal, because executor ownership is a forward-compat hook, not a
+// correctness gate at N=1.
+func (s *Spawner) stampExecutor(orgID, runID string) {
+	if s.agentRuns == nil {
+		return
+	}
+	if err := s.agentRuns.SetExecutorSystem(context.Background(), orgID, runID, s.executorID); err != nil {
+		log.Printf("[delegate] warning: stamp executor %s on run %s: %v", s.executorID, runID, err)
+	}
+}
+
+// SetMaxConcurrentRuns resizes the off-dispatcher concurrency cap. Call
+// once at startup before RunDispatcher runs; the in-flight goroutines
+// close over the channel they acquired from, so a startup-time resize is
+// safe. A value below 1 is clamped to 1.
+func (s *Spawner) SetMaxConcurrentRuns(n int) {
+	if n < 1 {
+		n = 1
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.runSem = make(chan struct{}, n)
+}
+
+// semaphore returns the current concurrency-cap channel. Callers capture
+// it once and use the captured value for both acquire and release so a
+// startup-time SetMaxConcurrentRuns can't strand a token on a replaced
+// channel.
+func (s *Spawner) semaphore() chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.runSem
+}
+
+// SetIdleHibernateTimeout overrides the idle-hibernation threshold. Tests
+// inject a short value to drive the idle path deterministically.
+func (s *Spawner) SetIdleHibernateTimeout(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.idleHibernateTimeout = d
+}
+
+// idleTimeout returns the effective idle-hibernation threshold, falling
+// back to the default when unset.
+func (s *Spawner) idleTimeout() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.idleHibernateTimeout > 0 {
+		return s.idleHibernateTimeout
+	}
+	return DefaultIdleHibernateTimeout
+}
+
+// RunController routes a live-process control op to wherever the run's
+// process actually lives. Interrupt and Steer drive the warm process;
+// Cancel signals the hard-kill ctx. At N=1 the in-process impl resolves
+// the target from s.procs / s.cancels; horizontal scaling replaces it with
+// a DB-signal to the executor that owns the run's lease, leaving the
+// callers (Cancel, and P3's interrupt/steer endpoints) unchanged.
+type RunController interface {
+	// Interrupt stops the run's current turn, leaving the process alive
+	// for further input. Errors when the run has no live process.
+	Interrupt(ctx context.Context, runID string) error
+	// Steer delivers a free-form user message to a live run. Errors when
+	// the run has no live process.
+	Steer(ctx context.Context, runID, text string) error
+	// Cancel signals the run's process to terminate (SIGKILL via the
+	// registered ctx cancel). Reports whether a live handle was found; a
+	// false result means the run has no in-process goroutine and the
+	// caller must take the DB-only terminal path.
+	Cancel(runID string) (found bool)
+}
+
+// inProcessController is the N=1 RunController: every run's process lives
+// in this same process, so the lookups are direct map reads.
+type inProcessController struct{ s *Spawner }
+
+func (c inProcessController) Interrupt(ctx context.Context, runID string) error {
+	h := c.s.getProc(runID)
+	if h == nil {
+		return fmt.Errorf("run %s has no live process to interrupt", runID)
+	}
+	return h.lr.Interrupt(ctx)
+}
+
+func (c inProcessController) Steer(ctx context.Context, runID, text string) error {
+	h := c.s.getProc(runID)
+	if h == nil {
+		return fmt.Errorf("run %s has no live process to steer", runID)
+	}
+	return h.lr.Send(ctx, text)
+}
+
+func (c inProcessController) Cancel(runID string) bool {
+	c.s.mu.Lock()
+	cancel, ok := c.s.cancels[runID]
+	c.s.mu.Unlock()
+	if ok {
+		cancel()
+	}
+	return ok
+}
+
+// Interrupt stops a live run's current turn through the control seam,
+// leaving the process alive for further input. The P3 message/pause
+// endpoints call this; routing through s.controller is what keeps the
+// horizontal-scaling swap additive.
+func (s *Spawner) Interrupt(ctx context.Context, runID string) error {
+	return s.controller.Interrupt(ctx, runID)
+}
+
+// Steer delivers a free-form user message to a live run through the
+// control seam. The P3 message endpoint calls this.
+func (s *Spawner) Steer(ctx context.Context, runID, text string) error {
+	return s.controller.Steer(ctx, runID, text)
+}

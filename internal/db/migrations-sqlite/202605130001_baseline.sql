@@ -861,6 +861,13 @@ CREATE TABLE runs (
     -- startup reconcile read them.
     claimed_at           DATETIME,
     attempts             INTEGER NOT NULL DEFAULT 0,
+    -- executor_id records which executor instance owns a run's live
+    -- process while it is running. Stamped when the run goes live; NULL
+    -- for queued / never-live / terminal-parked rows. At N=1 it's a
+    -- single per-process instance id (forward-compat ownership hook for
+    -- horizontal scaling, where it becomes the lease the control plane
+    -- signals through). Not a status — purely the run→executor pointer.
+    executor_id          TEXT,
     -- Pair trigger_type with creator_user_id nullability so the
     -- seeder can't drift back to lying.
     CONSTRAINT runs_creator_matches_trigger_type CHECK (

@@ -290,6 +290,13 @@ func setRunSession(ctx context.Context, q queryer, orgID, runID, sessionID strin
 	return err
 }
 
+func (s *agentRunStore) SetExecutorSystem(ctx context.Context, orgID, runID, executorID string) error {
+	_, err := s.admin.ExecContext(ctx, `
+		UPDATE runs SET executor_id = $1 WHERE org_id = $2 AND id = $3
+	`, nullIfEmpty(executorID), orgID, runID)
+	return err
+}
+
 func (s *agentRunStore) SetStatus(ctx context.Context, orgID, runID, status string) error {
 	return setRunStatus(ctx, s.q, orgID, runID, status)
 }
@@ -556,6 +563,7 @@ const pgRunColumns = `
 	COALESCE(r.actor_agent_id::text, ''),
 	COALESCE(r.trigger_type, ''),
 	COALESCE(r.creator_user_id::text, ''),
+	COALESCE(r.executor_id, ''),
 	r.blueprint_run_id, r.blueprint_step_index,
 	(NULLIF(BTRIM(rm.agent_content, E' \t\n\r'), '') IS NULL) AS memory_missing
 `
@@ -1075,7 +1083,7 @@ func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
 	if err := row.Scan(
 		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
-		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &blueprintRunID, &blueprintStep,
+		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.ExecutorID, &blueprintRunID, &blueprintStep,
 		&r.MemoryMissing,
 	); err != nil {
 		return err
@@ -1093,7 +1101,7 @@ func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
 	if err := rows.Scan(
 		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
-		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &blueprintRunID, &blueprintStep,
+		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.ExecutorID, &blueprintRunID, &blueprintStep,
 		&r.MemoryMissing,
 	); err != nil {
 		return err

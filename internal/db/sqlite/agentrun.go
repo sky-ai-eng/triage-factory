@@ -206,6 +206,14 @@ func (s *agentRunStore) SetWorktreePath(ctx context.Context, orgID, runID, path 
 	return err
 }
 
+func (s *agentRunStore) SetExecutorSystem(ctx context.Context, orgID, runID, executorID string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `UPDATE runs SET executor_id = ? WHERE id = ?`, nullIfEmpty(executorID), runID)
+	return err
+}
+
 func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
@@ -464,6 +472,7 @@ const sqliteRunColumns = `
 	r.result_summary, r.outcome, r.outcome_reason, r.session_id, r.actor_agent_id,
 	COALESCE(r.trigger_type, ''),
 	r.creator_user_id,
+	r.executor_id,
 	r.blueprint_run_id, r.blueprint_step_index,
 	(NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing
 `
@@ -1024,18 +1033,18 @@ func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
 	var completedAt sql.NullTime
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
-	var stopReason, worktreePath, model, resultSummary, outcome, outcomeReason, sessionID, actorAgentID, blueprintRunID, creatorUserID sql.NullString
+	var stopReason, worktreePath, model, resultSummary, outcome, outcomeReason, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
 
 	if err := row.Scan(
 		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
-		&resultSummary, &outcome, &outcomeReason, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &blueprintRunID, &blueprintStep,
+		&resultSummary, &outcome, &outcomeReason, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &executorID, &blueprintRunID, &blueprintStep,
 		&r.MemoryMissing,
 	); err != nil {
 		return err
 	}
 	finalizeAgentRun(r, completedAt, costUSD, durationMs, numTurns, blueprintStep,
-		model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, sessionID, actorAgentID, blueprintRunID, creatorUserID)
+		model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID)
 	return nil
 }
 
@@ -1043,24 +1052,24 @@ func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
 	var completedAt sql.NullTime
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
-	var stopReason, worktreePath, model, resultSummary, outcome, outcomeReason, sessionID, actorAgentID, blueprintRunID, creatorUserID sql.NullString
+	var stopReason, worktreePath, model, resultSummary, outcome, outcomeReason, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
 
 	if err := rows.Scan(
 		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
-		&resultSummary, &outcome, &outcomeReason, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &blueprintRunID, &blueprintStep,
+		&resultSummary, &outcome, &outcomeReason, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &executorID, &blueprintRunID, &blueprintStep,
 		&r.MemoryMissing,
 	); err != nil {
 		return err
 	}
 	finalizeAgentRun(r, completedAt, costUSD, durationMs, numTurns, blueprintStep,
-		model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, sessionID, actorAgentID, blueprintRunID, creatorUserID)
+		model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID)
 	return nil
 }
 
 func finalizeAgentRun(r *domain.AgentRun, completedAt sql.NullTime, costUSD sql.NullFloat64,
 	durationMs, numTurns, blueprintStep sql.NullInt64,
-	model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, sessionID, actorAgentID, blueprintRunID, creatorUserID sql.NullString) {
+	model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID sql.NullString) {
 	r.Model = model.String
 	r.StopReason = stopReason.String
 	r.WorktreePath = worktreePath.String
@@ -1070,6 +1079,7 @@ func finalizeAgentRun(r *domain.AgentRun, completedAt sql.NullTime, costUSD sql.
 	r.SessionID = sessionID.String
 	r.ActorAgentID = actorAgentID.String
 	r.CreatorUserID = creatorUserID.String
+	r.ExecutorID = executorID.String
 	if blueprintRunID.Valid {
 		r.BlueprintRunID = blueprintRunID.String
 	}

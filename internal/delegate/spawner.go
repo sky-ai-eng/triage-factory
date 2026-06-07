@@ -12,7 +12,9 @@ import (
 	"database/sql"
 	"log"
 	"sync"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -134,6 +136,40 @@ type Spawner struct {
 	takenOver             map[string]bool                                   // runIDs claimed by Takeover. Sticky-on for the rest of the goroutine's lifetime even after rollback — clearing the entry would let late-firing goroutine gates race the takeover/abort lifecycle. Suppresses every cleanup path in runAgent so Takeover/abortTakeover own the row's terminal state.
 	waitForClassification func(ctx context.Context, orgID, entityID string) // SKY-220 hook: blocks until the project classifier has decided this entity, or a timeout/ctx-cancel elapses. orgID scopes the classification read to the run's tenant (SKY-392 — the read goes through the org-scoped admin-pool store, not a raw query). Nil-safe (test setups skip it). Wired in main.go via SetWaitForClassification — keeps internal/delegate from importing internal/projectclassify.
 
+	// procs holds the live agent process handle for each run currently
+	// executing as a LiveRun, keyed by run id. It survives across HTTP
+	// turns because the spawner is the startup singleton, so a control op
+	// (interrupt/steer/cancel) arriving on a later request can still
+	// reach the process a delegation goroutine spawned. Distinct from
+	// cancels (the hard-kill ctx) and takenOver — a live run holds both a
+	// procs and a cancels entry at once. Guarded by s.mu; see the
+	// register/get/deregister accessors in process_registry.go.
+	procs map[string]*liveRunHandle
+	// controller routes the live-process control ops (interrupt, steer,
+	// cancel-kill) to wherever the run's process lives. At N=1 it's the
+	// in-process impl that resolves the handle from procs/cancels; the
+	// seam horizontal scaling swaps for a DB-signal to the owning
+	// executor. Set once in NewSpawner.
+	controller RunController
+	// executorID is this spawner instance's executor identity, generated
+	// once at construction and stamped onto runs.executor_id when a run
+	// goes live. At N=1 there is one executor per process; on restart a
+	// fresh id re-stamps re-claimed runs. The run→executor ownership hook
+	// horizontal scaling builds the lease layer on.
+	executorID string
+	// runSem bounds how many runs execute off the dispatcher at once — a
+	// process-wide cap so a burst of queued steps doesn't fan into an
+	// unbounded number of agent subprocesses. Sized in NewSpawner
+	// (DefaultMaxConcurrentRuns) and replaceable via SetMaxConcurrentRuns
+	// before the dispatcher starts. Each drain acquires a slot before
+	// claiming and the run goroutine releases it on terminal.
+	runSem chan struct{}
+	// idleHibernateTimeout is how long a live run may go quiet (no stream
+	// activity) before it hibernates to a durable resume. Zero means use
+	// DefaultIdleHibernateTimeout; tests inject a short value via
+	// SetIdleHibernateTimeout. Read through idleTimeout().
+	idleHibernateTimeout time.Duration
+
 	agentToolsOnce  sync.Once
 	agentToolsCache string
 
@@ -159,7 +195,7 @@ type Spawner struct {
 // subset of stores can pass partial db.Stores{} — every field is a
 // nil-safe interface.
 func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, wsHub *websocket.Hub, model, takeoverDir string) *Spawner {
-	return &Spawner{
+	s := &Spawner{
 		database:     database,
 		prompts:      stores.Prompts,
 		agents:       stores.Agents,
@@ -183,7 +219,12 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		cancels:      make(map[string]context.CancelFunc),
 		dispatchWake: make(chan struct{}, 1),
 		takenOver:    make(map[string]bool),
+		procs:        make(map[string]*liveRunHandle),
+		executorID:   uuid.New().String(),
+		runSem:       make(chan struct{}, DefaultMaxConcurrentRuns),
 	}
+	s.controller = inProcessController{s: s}
+	return s
 }
 
 // useSSHCloneProtocol reports whether this run should clone over SSH. The
