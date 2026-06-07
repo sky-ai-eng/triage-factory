@@ -597,5 +597,3 @@ func (r *Router) revertTaskStatus(orgID, taskID, status string) {
 		Data:  map[string]any{"task_id": taskID, "status": status},
 	})
 }
-
-// --- Post-scoring re-derive (SKY-181) ------------------------------------

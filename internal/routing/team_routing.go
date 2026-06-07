@@ -13,15 +13,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// handlerTeamID resolves the team a matched event_handler routes its
-// tasks to. Post-SKY-295 every handler is team-scoped — user-source
-// rows carry the user's team, system-source rows are materialized
-// into each team at boot / team-create time. An empty TeamID here
-// indicates a pre-SKY-295 org-visibility row that survived a partial
-// migration or a test fixture that bypassed the materialization
-// path; we log it once per call but fall back to
-// runmode.LocalDefaultTeamID so the router keeps functioning. In
-// steady state this branch is unreachable.
 // handlerScopeMatchesEvent reports whether handler h's team is allowed
 // to act on evt given the team's tracking scope — the team↔repo gate
 // (SKY-375, GitHub) and team↔project gate (SKY-376, Jira). It is the
@@ -125,6 +116,15 @@ func (r *Router) teamTracksEventProject(evt domain.Event, teamID string) bool {
 	return tracks
 }
 
+// handlerTeamID resolves the team a matched event_handler routes its
+// tasks to. Post-SKY-295 every handler is team-scoped — user-source
+// rows carry the user's team, system-source rows are materialized
+// into each team at boot / team-create time. An empty TeamID here
+// indicates a pre-SKY-295 org-visibility row that survived a partial
+// migration or a test fixture that bypassed the materialization
+// path; we log it once per call but fall back to
+// runmode.LocalDefaultTeamID so the router keeps functioning. In
+// steady state this branch is unreachable.
 func handlerTeamID(h domain.EventHandler) string {
 	if h.TeamID != "" {
 		return h.TeamID

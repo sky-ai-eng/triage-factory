@@ -177,5 +177,3 @@ func derefFloatDefault(p *float64, def float64) float64 {
 	}
 	return *p
 }
-
-// --- Inline close checks --------------------------------------------------

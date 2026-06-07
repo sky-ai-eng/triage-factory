@@ -57,7 +57,7 @@ type Router struct {
 	firings      dbpkg.PendingFiringsStore   // SKY-289: per-entity firing queue + active-run gate
 	events       dbpkg.EventStore            // SKY-305: admin-pool RecordSystem + GetMetadataSystem for the background subscriber
 	eventQueue   dbpkg.EventQueueStore       // durable router queue the drain worker claims from; set post-construction via SetEventQueue (nil → worker is a no-op)
-	orgs         dbpkg.OrgsStore             // per-org iteration for the drain sweeper; nil-safe, falls back to N=1 sentinel when unset
+	orgs         dbpkg.OrgsStore             // per-org iteration for the drain sweeper; required (RunDrainSweeper dereferences it directly)
 	teams        dbpkg.TeamsStore            // per-team auto_delegate_enabled kill-switch read post-internal/config deletion
 	teamRepos    dbpkg.TeamGitHubReposStore  // team↔repo tracking gate; nil-safe — gate is skipped (no filtering) when unset
 	jiraRules    dbpkg.JiraStatusRulesStore  // team↔project tracking gate; nil-safe — Jira gate skipped when unset
@@ -88,8 +88,9 @@ type Router struct {
 // behavior). users is nil-safe too — the SKY-270 inline-close gate
 // degrades to "treat every reassignment as away-from-me" when missing,
 // which over-closes (acceptable: user can reopen via the next poll).
-// orgs is nil-safe — the drain sweeper collapses to a single-org pass
-// over the local sentinel when missing, matching pre-D9 behavior.
+// orgs is required — the drain sweeper (RunDrainSweeper) iterates it per
+// org and dereferences it directly, so a nil orgs is a startup wiring bug
+// that panics there, not a degraded mode.
 // teamRepos is nil-safe — the SKY-375 team↔repo gate is skipped (no
 // handler is dropped) when missing, matching pre-SKY-375 behavior where
 // repos were org-global and every team implicitly tracked them all.

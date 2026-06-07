@@ -358,5 +358,3 @@ func (r *Router) closeCheckJiraReassigned(orgID string, evt domain.Event, entity
 	}
 	return closed
 }
-
-// --- Predicate matching ---

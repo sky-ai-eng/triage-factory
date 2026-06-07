@@ -35,7 +35,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	}
 	orgID := evt.OrgID
 
-	// Step 1: ensure the event is persisted. In production the ingestor wrote
+	// Ensure the event is persisted. In production the ingestor wrote
 	// the events row at enqueue (the durable outbox) and the drain worker
 	// loaded it via EventStore.GetSystem, so evt.ID is already set. As a safety
 	// net for a caller that hands us an unpersisted event (no id — e.g. a
@@ -50,7 +50,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 		evt.ID = id
 	}
 
-	// Steps 2-4: entity-lifecycle gates — terminating events close the entity,
+	// Entity-lifecycle gates — terminating events close the entity,
 	// system events and closed entities create no task.
 	entityID, ok := r.routableEntity(orgID, evt)
 	if !ok {
@@ -65,28 +65,28 @@ func (r *Router) HandleEvent(evt domain.Event) {
 		r.ws.Broadcast(websocket.Event{Type: "tasks_updated", OrgID: orgID, Data: map[string]any{}})
 	}
 
-	// Step 5: match event_handlers (rules + triggers) for this event.
+	// Match event_handlers (rules + triggers) for this event.
 	matchedRules, matchedTriggers := r.matchHandlers(orgID, evt)
 	if len(matchedRules) == 0 && len(matchedTriggers) == 0 {
 		// Nothing matched — event is recorded but no task created.
 		return
 	}
 
-	// Step 7a: resolve the task's owner team, visibility set, firing order, and
+	// Resolve the task's owner team, visibility set, firing order, and
 	// creation-seed priority.
 	routing, ok := r.resolveTeamRouting(orgID, evt, entityID, matchedRules, matchedTriggers)
 	if !ok {
 		return
 	}
 
-	// Step 7b: find or create the single task for this (entity, event_type,
+	// Find or create the single task for this (entity, event_type,
 	// dedup_key); record visibility + lifecycle and enqueue scoring.
 	task, ok := r.upsertTaskForEvent(orgID, evt, entityID, routing)
 	if !ok {
 		return
 	}
 
-	// Step 9: auto-delegate matching triggers in priority order.
+	// Auto-delegate matching triggers in priority order.
 	r.fireMatchedTriggers(orgID, evt, entityID, task, routing)
 }
 
@@ -377,7 +377,7 @@ func (r *Router) upsertTaskForEvent(orgID string, evt domain.Event, entityID str
 		}
 	}
 
-	// Step 8: enqueue AI scoring (always — produces UI metadata regardless) and
+	// Enqueue AI scoring (always — produces UI metadata regardless) and
 	// broadcast the task update to the frontend.
 	r.scorer.Trigger(orgID)
 	r.ws.Broadcast(websocket.Event{Type: "tasks_updated", OrgID: orgID, Data: map[string]any{}})
