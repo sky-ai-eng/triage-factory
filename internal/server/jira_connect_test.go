@@ -228,6 +228,34 @@ func TestJiraIdentityStatus_ConfiguredHostNoCredential(t *testing.T) {
 	}
 }
 
+// TestJiraIdentityStatus_NoJiraConfigured_EmptyHost pins the contract the
+// RequireJiraIdentity gate keys "GitHub-only org → no Jira gate" off: with no
+// jira_base_url configured, the status read reports host="" (and connected=false)
+// on a 200 — NOT an error. The gate derives "is Jira configured" from this same
+// fetch (host==""), so a real read failure stays distinguishable from a
+// GitHub-only org and the gate can fail closed on the former.
+func TestJiraIdentityStatus_NoJiraConfigured_EmptyHost(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	// Deliberately do NOT seed a Jira host — a GitHub-only org.
+
+	rec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status endpoint=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var out jiraIdentityStatusResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Host != "" {
+		t.Errorf("host = %q, want empty for a GitHub-only org (no jira_base_url)", out.Host)
+	}
+	if out.Connected {
+		t.Errorf("connected=true with no Jira configured: %+v", out)
+	}
+}
+
 // TestJiraIdentityPAT_BadToken_Returns422 pins the "your action" failure shape:
 // a token the host rejects is a 422 (not the infra 502), and no credential is
 // stored.

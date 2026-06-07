@@ -166,16 +166,22 @@ export function RequireGitHubIdentity({
  * (its own route, NOT behind this gate, so there's no loop) otherwise.
  *
  * Unlike GitHub, Jira is an OPTIONAL tracker: a GitHub-only org has no Jira to
- * bind, so the gate self-disables there. It reads the org-level Jira-configured
- * signal — the `jira` flag from /api/integrations/status (a stored org Jira PAT,
- * the same source the setup wizard's tracker uses) — and gates only when Jira
- * is actually configured. While that signal is loading it holds a spinner;
- * once it resolves to not-configured it renders straight through.
+ * bind, so the gate self-disables there. Both signals come from the SAME read,
+ * /identity/jira (useJiraIdentity): `host` is the org's configured Jira host
+ * (empty ⇒ GitHub-only org, nothing to gate) and `connected` is whether this
+ * user has bound a credential. One source of truth, so "is Jira configured" and
+ * "is the user bound" can never disagree across a two-endpoint window. In every
+ * real org state an empty host is equivalent to "no org Jira PAT" — the org's
+ * Jira URL and PAT are set and cleared together.
  *
- * "Couldn't read the status" (TF-side error) is held as a retryable panel
- * rather than rendered through — the gate must not silently admit an unbound
- * user on a transient failure, mirroring RequireGitHubIdentity. The bind
- * failure shapes (bad token, host-unreachable) surface on the Connect page.
+ * Fail-closed: a status-read error is held as a retryable panel, checked BEFORE
+ * the configured/connected branches, so a transient failure is never rendered
+ * through (which would silently skip the Jira check or admit an unbound user).
+ * This is why the configured-signal is read off this same fetch rather than the
+ * `jira` flag from /api/integrations/status — useAuthStatus has no error state,
+ * so a failed read there is indistinguishable from "GitHub-only" and the gate
+ * would fall open. The bind failure shapes (bad token, host-unreachable) surface
+ * on the Connect page itself.
  *
  * Runs in BOTH modes. Multi resolves the active org from OrgContext; local has
  * no OrgContext, so it passes `isLocal` and the gate keys on the sentinel org.
@@ -190,23 +196,13 @@ export function RequireJiraIdentity({
   const ctxOrgId = useActiveOrgId()
   const orgId = isLocal ? LOCAL_DEFAULT_ORG_ID : ctxOrgId
   const location = useLocation()
-  // Org-level "this org tracks Jira" signal — a GitHub-only org is never gated
-  // on Jira. Same source the setup wizard reads (a stored org Jira PAT).
-  const { jira: jiraConfigured, loading: statusLoading } = useAuthStatus(orgId ?? undefined)
-  // Only probe the user's binding once we know the org tracks Jira; for a
-  // GitHub-only org there's nothing to read, so the hook stays idle (null).
-  const { state, refresh } = useJiraIdentity(jiraConfigured ? orgId : null)
+  const { state, refresh } = useJiraIdentity(orgId)
 
-  if (!orgId || statusLoading) {
+  if (!orgId || state.status === 'loading') {
     return <Loading />
   }
-  // GitHub-only org → no Jira gate.
-  if (!jiraConfigured) {
-    return <>{children}</>
-  }
-  if (state.status === 'loading') {
-    return <Loading />
-  }
+  // Fail-closed: hold a transient read error rather than rendering through (a
+  // render-through would both skip the Jira check and leak the unbound app).
   if (state.status === 'error') {
     return (
       <div className="min-h-screen bg-surface flex items-center justify-center">
@@ -218,6 +214,10 @@ export function RequireJiraIdentity({
         </div>
       </div>
     )
+  }
+  // No Jira host configured for this org → GitHub-only, no Jira gate.
+  if (state.data.host === '') {
+    return <>{children}</>
   }
   if (!state.data.connected) {
     const target = location.pathname + location.search
