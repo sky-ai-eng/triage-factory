@@ -10,10 +10,10 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
 
-// buildRunCredentials wires the per-org run-credential seam (SKY-389)
-// shared by every AI feature. Both modes resolve a run's LLM key + default
-// model through these, so the event → router → task → delegation chain
-// stops branching on mode.
+// buildRunCredentials wires the per-org run-credential seam shared by
+// every AI feature. Both modes resolve a run's LLM key + default model
+// through these, so the event → router → task → delegation chain stops
+// branching on mode.
 //
 //   - runSecrets reads a run's per-org LLM credential. Multi mode uses the
 //     system/admin door (these runs are claims-free background work, and

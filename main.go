@@ -63,7 +63,11 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	defer a.Close()
+	defer func() {
+		if cerr := a.Close(); cerr != nil {
+			fmt.Fprintln(os.Stderr, "triagefactory: close:", cerr)
+		}
+	}()
 
 	fmt.Printf("Triage Factory running at %s\n", cfg.BrowserURL)
 	// One-shot PATH hint so `triagefactory resume` works from any terminal.

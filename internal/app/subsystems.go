@@ -28,9 +28,10 @@ func (a *App) buildInfra() {
 }
 
 // buildAI constructs the AI scoring manager and the project classifier.
-// Both resolve per-run LLM credentials through the SKY-389 seam wired in
-// buildRunCredentials. Neither starts background work here — the classifier
-// is started in startWorkers, the scorer reacts to its trigger channel.
+// Both resolve per-run LLM credentials through the run-credential seam
+// wired in buildRunCredentials. Neither starts background work here — the
+// classifier is started in startWorkers; the scorer reacts to its trigger
+// channel.
 func (a *App) buildAI() {
 	a.scorer = ai.NewManager(a.database, a.stores.Scores, a.stores.Entities, a.runSecrets, ai.RunnerCallbacks{
 		OnScoringStarted: func(orgID string, taskIDs []string) {
@@ -65,9 +66,9 @@ func (a *App) buildAI() {
 	a.srv.SetScorerTrigger(a.scorer.Trigger)
 	log.Println("[ai] scorer manager ready (per-org runners, model: haiku)")
 
-	// Project classifier (SKY-220): per-poll, classify newly-discovered
-	// entities against existing projects via per-project Haiku quorum vote.
-	// Sticky — only fires on entities with classified_at IS NULL.
+	// Project classifier: per-poll, classify newly-discovered entities
+	// against existing projects via per-project Haiku quorum vote. Sticky —
+	// only fires on entities with classified_at IS NULL.
 	a.classifier = projectclassify.NewRunner(a.stores.Entities, a.stores.Projects, a.stores.Orgs, a.runSecrets)
 	log.Println("[classify] project classifier ready (model: haiku)")
 }
@@ -78,7 +79,7 @@ func (a *App) buildAI() {
 // (the router takes the spawner as its delegator). The spawner↔router
 // back-edge is closed later in wire.
 func (a *App) buildExecution() error {
-	// Per-run credentials resolve through the SKY-389 seam, not a
+	// Per-run credentials resolve through the run-credential seam, not a
 	// process-global hot-swap.
 	a.spawner = delegate.NewSpawner(a.database, a.stores, nil, a.wsHub, "", a.storedTakeoverDir)
 	a.spawner.SetRunCredentialResolvers(a.ghResolver, a.runSecrets, a.modelFor)
@@ -98,13 +99,13 @@ func (a *App) buildExecution() error {
 	a.spawner.SetStorage(blobStore)
 	a.srv.SetSpawner(a.spawner)
 
-	// SKY-220: before reading entity.project_id for KB injection, the
-	// spawner blocks until classified_at is set (or the timeout elapses).
+	// Before reading entity.project_id for KB injection, the spawner blocks
+	// until classified_at is set (or the timeout elapses).
 	a.spawner.SetWaitForClassification(func(ctx context.Context, orgID, entityID string) {
 		projectclassify.WaitFor(ctx, a.classifier, orgID, entityID, projectclassify.DefaultWaitTimeout)
 	})
 
-	// Curator runtime (SKY-216) — per-project chat sessions. Sweep stranded
+	// Curator runtime — per-project chat sessions. Sweep stranded
 	// turns from a previous process first: a binary restart killed every
 	// per-project goroutine + subprocess, so any queued/running row is by
 	// definition stranded — cancelling it makes the user re-send rather than

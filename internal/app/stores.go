@@ -23,8 +23,8 @@ import (
 // migrated before the multi branch could reject.
 //
 // Multi mode is unreachable end-to-end until the v1 multi-tenant epic
-// (SKY-242) completes; the error on an unknown mode makes that explicit
-// instead of surfacing later as a pile of confusing SQL failures.
+// completes; the error on an unknown mode makes that explicit instead of
+// surfacing later as a pile of confusing SQL failures.
 func (a *App) openStores(ctx context.Context) error {
 	switch runmode.Current() {
 	case runmode.ModeLocal:

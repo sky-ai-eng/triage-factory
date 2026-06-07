@@ -72,8 +72,8 @@ func (r *reloader) onGitHubChanged(orgID string) {
 	}
 
 	// Local mode: N=1, so there's no fleet to stampede. The spawner +
-	// curator + profiler resolve per-(org, owner) through the SKY-389 seam,
-	// so a config change is picked up on the next run without a hot-swap.
+	// curator + profiler resolve per-(org, owner) through the run-credential
+	// seam, so a config change is picked up on the next run without a hot-swap.
 	r.pollerMgr.StopAll()
 
 	ctx := context.Background()

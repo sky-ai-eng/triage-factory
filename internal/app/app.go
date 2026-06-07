@@ -56,7 +56,7 @@ type App struct {
 	bus   *eventbus.Bus
 	wsHub *websocket.Hub
 
-	// Per-org run-credential seam (SKY-389): shared by every AI feature.
+	// Per-org run-credential seam shared by every AI feature.
 	ghResolver ghclient.Resolver
 	runSecrets agentproc.SecretsReader
 	modelFor   func(ctx context.Context, orgID, teamID string) string
