@@ -237,10 +237,13 @@ async function runStreamingInput(options) {
       case "interrupt":
         try {
           await q.interrupt()
+          // Only signal the interrupt once it actually landed — emitting
+          // unconditionally would make the Go reader mislabel the next
+          // result as error_during_execution even when interrupt threw.
+          emit({ type: "control", subtype: "interrupted" })
         } catch (err) {
           process.stderr.write(`wrapper: interrupt failed: ${err?.stack ?? err}\n`)
         }
-        emit({ type: "control", subtype: "interrupted" })
         break
 
       case "set_mode":
