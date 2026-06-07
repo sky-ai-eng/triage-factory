@@ -198,6 +198,15 @@ function JiraIdentitySection({ orgId }: { orgId: string | null }) {
   const connected = state.status === 'ready' && state.data.connected
   const host = state.status === 'ready' ? state.data.host : 'Jira'
 
+  // Jira is an optional tracker, so — unlike the always-shown GitHub section —
+  // only surface this when the org actually has a Jira host configured. A
+  // GitHub-only org reports host="" from the status endpoint; rendering anyway
+  // would print the dangling "acts as you on " copy with an empty host. While
+  // loading or on a read error we also render nothing (we can't yet tell), so
+  // the broken copy never flashes. The wizard gates the sibling step the same
+  // way (visible: jiraActive).
+  if (!(state.status === 'ready' && state.data.host !== '')) return null
+
   return (
     <SettingsSection title="Jira identity" summary={summary}>
       <div className="space-y-3">

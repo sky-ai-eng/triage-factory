@@ -274,3 +274,30 @@ func TestJiraIdentityPAT_NoJiraHost_Returns422(t *testing.T) {
 		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
 	}
 }
+
+// TestJiraIdentityPAT_EmptyAccount_Returns422 covers the guard for a 200 from
+// /myself that carries no stable identifier (neither accountId nor key): a
+// token that authenticates but yields no account is a 422, and no credential is
+// stored (the StableID() check precedes the store).
+func TestJiraIdentityPAT_EmptyAccount_Returns422(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	// Valid 200 but an empty body — StableID() resolves to "".
+	jiraStub := jiraMyselfStub(t, `{}`, nil)
+	seedLocalOrgJiraHost(t, s, jiraStub.URL)
+
+	rec := doJSON(t, s, "POST",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira/pat",
+		map[string]any{"pat": "tok"})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
+	}
+	// No account ⇒ no credential stored (and no identity bound).
+	stored, _ := s.secrets.GetUserSystem(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "jira_token/"+jiraStub.URL)
+	if stored != "" {
+		t.Errorf("credential stored despite empty account: %q", stored)
+	}
+}
