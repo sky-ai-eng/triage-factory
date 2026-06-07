@@ -417,5 +417,3 @@ Only after this passes on a real Machine should the profile ship.
 - `docs/specs/sky-254-perf-benchmark/results.md` — gVisor overhead numbers (§7).
 - `docs/isolation-tiers.md` — the tier model the §6 upcharge slots into.
 - `internal/sandbox/doc.go` — Property-A/B invariants the loopback scope preserves.
-</content>
-</invoke>

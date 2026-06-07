@@ -302,4 +302,3 @@ proxy + denylist are shipped and reviewed.
   mechanics (`ConfigureProxies`, `applyEgressPolicy`) this builds on.
 - `internal/sandbox/doc.go` — the Property-A/B credential invariants §7 lives
   inside.
-</content>
