@@ -24,7 +24,7 @@ import {
   emptyFilter,
   type ColumnFilterState,
 } from '../components/board/columnFilter'
-import { motion, AnimatePresence } from 'motion/react'
+import { GlassBackdrop } from './setup/glass'
 import {
   DndContext,
   DragOverlay,
@@ -770,9 +770,12 @@ export default function Board() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-[70vh]">
-        <p className="text-[13px] text-text-tertiary">Loading board...</p>
-      </div>
+      <>
+        <GlassBackdrop />
+        <div className="flex items-center justify-center min-h-[70vh]">
+          <p className="text-[13px] text-text-tertiary">Loading board…</p>
+        </div>
+      </>
     )
   }
 
@@ -809,6 +812,7 @@ export default function Board() {
       onDragOver={handleDragOver}
       onDragEnd={handleDragEnd}
     >
+      <GlassBackdrop />
       <HeldTakeoversBanner />
 
       {/* Per-page team filter. Renders nothing at ≤1 team. */}
@@ -820,13 +824,25 @@ export default function Board() {
 
       {/* SKY-330: horizontal-scroll container for 5 columns. Default
           scroll position (set on mount) shows Claimed → In Review;
-          user scrolls left for Queued, right for Done. */}
-      <div ref={scrollRef} className="overflow-x-auto pb-4">
+          user scrolls left for Queued, right for Done. The horizontal
+          mask dissolves columns into the page at the left/right edges
+          instead of hard-cutting them — the "Her" edge fade. */}
+      <div
+        ref={scrollRef}
+        className="overflow-x-auto pb-4"
+        style={{
+          maskImage:
+            'linear-gradient(to right, transparent 0, #000 2.5rem, #000 calc(100% - 2.5rem), transparent 100%)',
+          WebkitMaskImage:
+            'linear-gradient(to right, transparent 0, #000 2.5rem, #000 calc(100% - 2.5rem), transparent 100%)',
+        }}
+      >
         <div className="flex gap-6 min-h-[70vh] px-1">
-          {ALL_COLUMNS.map((colId) => (
+          {ALL_COLUMNS.map((colId, i) => (
             <BoardColumn
               key={colId}
               id={colId}
+              index={i}
               title={COLUMN_TITLES[colId]}
               totalCount={totalCounts[colId]}
               filteredCount={filtered[colId].length}
@@ -1140,9 +1156,3 @@ function SortableAgentCard({
 function EmptyColumn({ children }: { children: React.ReactNode }) {
   return <p className="text-[12px] text-text-tertiary text-center py-12">{children}</p>
 }
-
-// AnimatePresence import retained for future motion polish on column
-// transitions / card enter-exit animations. Currently unused in this
-// minimal redesign — the existing motion/react dep stays in the tree.
-void AnimatePresence
-void motion
