@@ -64,6 +64,11 @@ export default function SettingsSection({
   }
 
   const toggle = () => {
+    // A save is in flight: don't let the header collapse the section (which
+    // would fire onCancel/discard and reset the draft) while the request is
+    // still committing the pre-cancel values — the footer Cancel is disabled
+    // for the same reason, so the header mustn't be a backdoor around it.
+    if (saving) return
     if (expanded) {
       if (!guardDiscard()) return
       onCancel?.()
@@ -91,7 +96,7 @@ export default function SettingsSection({
         type="button"
         onClick={toggle}
         aria-expanded={expanded}
-        className="group flex w-full items-center gap-2.5 py-4 text-left"
+        className={`group flex w-full items-center gap-2.5 py-4 text-left ${saving ? 'cursor-default' : ''}`}
       >
         <ChevronRight
           size={15}

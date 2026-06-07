@@ -43,6 +43,7 @@ export default function GitHubTeamGroup({
   canEdit = true,
   includeMembership = false,
   onLoaded,
+  refreshSignal = 0,
   bare = false,
 }: {
   value: GitHubGroup[]
@@ -56,6 +57,12 @@ export default function GitHubTeamGroup({
   // Fired once after the first successful load with the seed selection, so
   // the container can seed its form state (and a change-detection baseline).
   onLoaded?: (groups: GitHubGroup[]) => void
+  // Bumped by the container to re-fetch the candidate list — e.g. after a
+  // Repositories save changed the tracked-owner set — WITHOUT re-seeding the
+  // selection. seededRef stays true across the refetch, so onLoaded never
+  // fires again and the user's unsaved mapping edits are preserved (a repo
+  // save must not flush in-progress GitHub-team edits in a sibling section).
+  refreshSignal?: number
   // The setup wizard composes this flush (no Section card, glass search +
   // filter); Settings keeps the carded default.
   bare?: boolean
@@ -106,6 +113,20 @@ export default function GitHubTeamGroup({
   useEffect(() => {
     void load()
   }, [load])
+
+  // Candidate-only refresh: when the container bumps refreshSignal, refetch
+  // the candidate list but keep the current selection. load() re-runs with
+  // seededRef already true, so its onLoaded seed is skipped — `value` (the
+  // unsaved selection) is untouched while candidates refresh. The leading
+  // guard skips the mount run, which the effect above already covers.
+  const refreshedOnce = useRef(false)
+  useEffect(() => {
+    if (!refreshedOnce.current) {
+      refreshedOnce.current = true
+      return
+    }
+    void load()
+  }, [refreshSignal, load])
 
   const selected = useMemo(
     () => new Set(value.map((g) => keyOf(g.org_login, g.team_slug))),

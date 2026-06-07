@@ -324,9 +324,11 @@ export default function TeamSettings({
             onCancel={() => setGroups(groupsBaseline)}
           >
             <GitHubTeamGroup
-              // Remount on a repos save so candidates refetch against the new
-              // tracked-owner set; also remount on a team switch.
-              key={`${teamId}-${reposVersion}`}
+              // Key on teamId only — a team switch reseeds (also goes through
+              // the loading gate). A repos save bumps refreshSignal instead of
+              // the key, so candidates refetch against the new tracked-owner set
+              // WITHOUT remounting and clobbering unsaved mapping edits here.
+              key={teamId}
               value={groups}
               onChange={setGroups}
               teamId={teamId}
@@ -335,6 +337,7 @@ export default function TeamSettings({
                 setGroups(seed)
                 setGroupsBaseline(seed)
               }}
+              refreshSignal={reposVersion}
               bare
             />
           </SettingsSection>
