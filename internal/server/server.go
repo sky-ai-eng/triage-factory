@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -430,11 +431,31 @@ func New(database *sql.DB, stores db.Stores, takeoverDir string, serverPort int)
 	return s
 }
 
-// ListenAndServe starts the HTTP server on the given address. The mux
-// is wrapped in withSecurityHeaders so every response carries the
-// standard set (HSTS conditionally, CSP, X-Frame-Options, etc.).
+// ListenAndServe starts the HTTP server with no shutdown signal wired.
+// Kept for callers (and tests) that don't need graceful shutdown; it
+// delegates to ListenAndServeContext with a never-cancelled context.
 func (s *Server) ListenAndServe(addr string) error {
-	return http.ListenAndServe(addr, s.withSecurityHeaders(s.mux))
+	return s.ListenAndServeContext(context.Background(), addr)
+}
+
+// ListenAndServeContext starts the HTTP server on the given address and
+// shuts it down gracefully when ctx is cancelled (SIGINT/SIGTERM at the
+// process boundary). The mux is wrapped in withSecurityHeaders so every
+// response carries the standard set (HSTS conditionally, CSP,
+// X-Frame-Options, etc.). Returns nil on a clean ctx-driven shutdown; a
+// non-ErrServerClosed listen error otherwise.
+func (s *Server) ListenAndServeContext(ctx context.Context, addr string) error {
+	httpSrv := &http.Server{Addr: addr, Handler: s.withSecurityHeaders(s.mux)}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = httpSrv.Shutdown(shutdownCtx)
+	}()
+	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }
 
 // api mounts a read-only /api/* route through withSession so identity

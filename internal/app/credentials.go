@@ -1,0 +1,75 @@
+package app
+
+import (
+	"context"
+	"log"
+
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+)
+
+// buildRunCredentials wires the per-org run-credential seam (SKY-389)
+// shared by every AI feature. Both modes resolve a run's LLM key + default
+// model through these, so the event → router → task → delegation chain
+// stops branching on mode.
+//
+//   - runSecrets reads a run's per-org LLM credential. Multi mode uses the
+//     system/admin door (these runs are claims-free background work, and
+//     the orgID always originates from the run/entity/task, never user
+//     input). Local mode keeps it nil → the agent runs unsandboxed and
+//     inherits the host's ambient Claude subscription.
+//   - modelFor resolves the run's team default model (per-(org, team),
+//     capped by the org max tier). A prompt's own Model still overrides it.
+//   - ghResolver picks the right GitHub credential (App-installation token
+//     → org PAT) per (org, target). Shared by the poller, spawner, curator,
+//     and repo profiler.
+func (a *App) buildRunCredentials() {
+	if !a.local() {
+		a.runSecrets = agentproc.NewSystemSecretsReader(a.stores.Secrets)
+	}
+	a.modelFor = func(ctx context.Context, orgID, teamID string) string {
+		return resolveAIModelForTeam(ctx, a.stores, orgID, teamID)
+	}
+	a.ghResolver = ghclient.NewResolver(a.stores.Secrets, a.stores.GitHubApps, a.stores.Orgs, a.stores.Agents, nil)
+}
+
+// resolveAIModelForTeam looks up the model a specific team uses for
+// delegation, clamped by the org's max-tier cap (domain.EffectiveModel).
+//
+// teamID is the run's owning team. A multi-team org can have teams with
+// different DefaultModel settings, so resolving from the run's own team
+// (not the org default) honors each team's choice. An empty teamID falls
+// back to the org's default team.
+//
+// Falls back to the shipped default model on any error so a transient DB
+// hiccup doesn't silently clear the spawner+curator credentials.
+func resolveAIModelForTeam(ctx context.Context, stores db.Stores, orgID, teamID string) string {
+	fallback := domain.DefaultTeamSettings().DefaultModel
+	if teamID == "" {
+		var err error
+		teamID, err = stores.Teams.GetDefaultForOrgSystem(ctx, orgID)
+		if err != nil || teamID == "" {
+			if err != nil {
+				log.Printf("[app] resolve default team for org %s: %v (using default model %q)", orgID, err, fallback)
+			}
+			return fallback
+		}
+	}
+	teamSet, err := stores.Teams.GetSettingsSystem(ctx, teamID)
+	if err != nil {
+		log.Printf("[app] read team settings %s: %v (using default model %q)", teamID, err, fallback)
+		return fallback
+	}
+
+	var maxTier string
+	if orgSet, err := stores.Orgs.GetSettingsSystem(ctx, orgID); err != nil {
+		log.Printf("[app] read org settings %s: %v (applying no model cap)", orgID, err)
+	} else {
+		maxTier = orgSet.MaxLLMModelTier
+	}
+
+	model, _ := domain.EffectiveModel(teamSet.DefaultModel, maxTier)
+	return model
+}
