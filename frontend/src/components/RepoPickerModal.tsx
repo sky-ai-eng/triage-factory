@@ -287,6 +287,8 @@ export default function RepoPickerModal({
               <button
                 key={repo.full_name}
                 type="button"
+                role="checkbox"
+                aria-checked={isChecked}
                 onClick={() => toggle(repo.full_name)}
                 className={`w-full flex items-start gap-3 px-3 py-2.5 text-left rounded-xl transition-colors hover:bg-black/[0.02] ${
                   isChecked ? 'bg-accent/[0.04]' : ''

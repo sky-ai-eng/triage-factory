@@ -3,7 +3,9 @@
 // active (expanded) step's heading + body live in Wizard.tsx, where they can
 // own the focus ref and the expand/collapse animation.
 
+import { useRef } from 'react'
 import { ChevronRight } from 'lucide-react'
+import { nextRadioIndex } from '../../lib/rovingRadio'
 import { glassInputClass } from '../settings/primitives'
 
 // ChoiceCards is the flush two-panel picker shared by the GitHub access-method,
@@ -23,10 +25,27 @@ export function ChoiceCards<T extends string>({
   onChoose: (kind: T) => void
   ariaLabel?: string
 }) {
+  const btnRefs = useRef<(HTMLButtonElement | null)[]>([])
+  // Roving tabIndex: focus enters on the current choice, or the first option
+  // when nothing's been picked yet.
+  const selectedIndex = options.findIndex((o) => o.kind === selected)
+  const tabbable = selectedIndex < 0 ? 0 : selectedIndex
+  // Arrow keys move *focus* between the options, not selection: choosing here
+  // advances the wizard (selfAdvancing), so an arrow press must never commit +
+  // advance. The user lands focus, then activates with Enter/Space (native
+  // button → onClick → onChoose).
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    const current = btnRefs.current.findIndex((b) => b === document.activeElement)
+    const next = nextRadioIndex(e.key, current, options.length)
+    if (next === null) return
+    e.preventDefault()
+    btnRefs.current[next]?.focus()
+  }
   return (
     <div
       role="radiogroup"
       aria-label={ariaLabel}
+      onKeyDown={onKeyDown}
       className="grid grid-cols-2 divide-x divide-[var(--color-border-subtle)]"
     >
       {options.map((opt, i) => {
@@ -34,11 +53,15 @@ export function ChoiceCards<T extends string>({
         return (
           <button
             key={opt.kind}
+            ref={(el) => {
+              btnRefs.current[i] = el
+            }}
             type="button"
             role="radio"
             aria-checked={isSelected}
+            tabIndex={i === tabbable ? 0 : -1}
             onClick={() => onChoose(opt.kind)}
-            className={`group flex flex-col gap-1 text-left outline-none ${i === 0 ? 'pr-5' : 'pl-5'}`}
+            className={`group flex flex-col gap-1 rounded-lg text-left outline-none transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent/50 ${i === 0 ? 'pr-5' : 'pl-5'}`}
           >
             <span className="flex items-center gap-1.5">
               <span

@@ -139,7 +139,11 @@ export function useWizard(
     if (!step || busyRef.current) return
     // Don't persist a step whose existing state we failed to read.
     if (loadStatus[step.id] === 'error') return
-    const validationError = step.validate?.(state) ?? null
+    // Read off stateRef, not the render-bound `state` closure: a selfAdvancing
+    // step calls patch() then advance() in the same handler, so `state` here is
+    // still pre-patch while stateRef.current already carries the choice. (For a
+    // Continue-driven step the two are identical — stateRef is never staler.)
+    const validationError = step.validate?.(stateRef.current) ?? null
     if (validationError) {
       setError(validationError)
       return
@@ -149,7 +153,7 @@ export function useWizard(
     setError(null)
     void (async () => {
       try {
-        await step.persist({ orgId, teamId, isLocal, state, patch })
+        await step.persist({ orgId, teamId, isLocal, state: stateRef.current, patch })
         // Advance to the next step that applies; an omitted step (e.g. Jira
         // projects without a Jira tracker) is skipped. No visible step after
         // this one ⇒ this was the last step, so finish. Read visibility (and
@@ -172,7 +176,9 @@ export function useWizard(
         setBusy(false)
       }
     })()
-  }, [steps, activeIndex, loadStatus, state, orgId, teamId, isLocal, patch, onFinish])
+    // advance reads stateRef.current (kept in sync on every render + in patch),
+    // not the `state` closure, so it needn't recreate on every keystroke.
+  }, [steps, activeIndex, loadStatus, orgId, teamId, isLocal, patch, onFinish])
 
   const back = useCallback(() => {
     // No navigating away from a step whose save is in flight.

@@ -17,7 +17,9 @@ import { motion, useReducedMotion } from 'motion/react'
 // frosted panels have something to refract — glass over a flat fill reads as
 // mud. Honors prefers-reduced-motion by holding the orbs still.
 export function GlassBackdrop() {
-  const reduce = useReducedMotion()
+  // !! coerces the null first-render value to false so the orbs don't briefly
+  // animate before the media query resolves for prefers-reduced-motion users.
+  const reduce = !!useReducedMotion()
   const drift = (x: number[], y: number[], duration: number) =>
     reduce
       ? {}

@@ -35,8 +35,12 @@ export default function ModelTierSelector({
   const isCap = options.some((o) => o.value === '')
   // Tier cells in ascending order (the no-cap end isn't a tier).
   const tiers = options.filter((o) => o.value !== '')
-  // Where the ceiling sits among the tiers: no cap ("") ⇒ above every tier.
-  const capTierIndex = value === '' ? tiers.length : tiers.findIndex((o) => o.value === value)
+  // Where the ceiling sits among the tiers: no cap ("") ⇒ above every tier. An
+  // unrecognized tier (a server-side value the UI doesn't list yet) findIndex's
+  // to -1; treat that as no cap too, so the ladder doesn't ghost every row and
+  // misread as fully disabled.
+  const knownTierIndex = tiers.findIndex((o) => o.value === value)
+  const capTierIndex = value === '' || knownTierIndex < 0 ? tiers.length : knownTierIndex
 
   const selectedIndex = options.findIndex((o) => o.value === value)
   const tabbable = selectedIndex < 0 ? 0 : selectedIndex

@@ -527,11 +527,11 @@ const jiraPollerStep: WizardStep = {
   ),
 }
 
-// Step 4 · Org max model tier — the ceiling ladder. Action-on-click
-// (selfAdvancing): picking a cap records it and advances. Optional (no cap is a
-// legitimate end state), so it never blocks. No load of its own — reads the
-// GitHub step's seeded org form; persistOrg guards against saving when that load
-// failed.
+// Step 4 · Org max model tier — the ceiling ladder. Keeps an explicit Continue
+// (not selfAdvancing): picking a cap records it, but the user confirms with
+// Continue — "no cap" is a legitimate end state, so the step is always complete
+// and never blocks. No load of its own — reads the GitHub step's seeded org
+// form; persistOrg guards against saving when that load failed.
 const orgModelStep: WizardStep = {
   id: 'org-model',
   section: 'org',
