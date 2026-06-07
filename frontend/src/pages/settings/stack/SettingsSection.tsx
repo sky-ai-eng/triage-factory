@@ -33,8 +33,12 @@ export interface SettingsSectionProps {
   // Extra block on Save beyond `dirty` (e.g. a half-filled Jira project rule).
   saveDisabled?: boolean
   saveLabel?: string
-  // Returns true when the save landed, so the shell collapses the section.
-  onSave?: () => Promise<boolean> | void
+  // A form section's save: resolves true when the save landed (the shell then
+  // collapses the section), false on failure (stays open). Omit entirely for an
+  // action section — that's what makes it footer-less. Deliberately not
+  // `… | void`: a void-returning save would read as falsy and silently never
+  // collapse, so the type forces every form section to report its outcome.
+  onSave?: () => Promise<boolean>
   // Reset the draft to baseline. Called by Cancel and by a confirmed discard.
   onCancel?: () => void
   defaultExpanded?: boolean

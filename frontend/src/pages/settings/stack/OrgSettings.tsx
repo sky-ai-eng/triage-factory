@@ -56,8 +56,19 @@ export default function OrgSettings({
   const [loadError, setLoadError] = useState<string | null>(null)
   const [urlError, setUrlError] = useState<string | null>(null)
 
-  // Per-section in-flight flags.
-  const [saving, setSaving] = useState<string | null>(null)
+  // Per-section in-flight keys. A Set (not a single string) so two sections
+  // saving in quick succession each keep their own saving state — otherwise the
+  // second save would clear the first section's lock mid-flight, re-enabling its
+  // collapse/discard while the request still commits the pre-cancel values.
+  const [savingKeys, setSavingKeys] = useState<Set<string>>(() => new Set())
+  const isSaving = (k: string) => savingKeys.has(k)
+  const setSavingKey = (k: string, on: boolean) =>
+    setSavingKeys((s) => {
+      const n = new Set(s)
+      if (on) n.add(k)
+      else n.delete(k)
+      return n
+    })
 
   const patch = useCallback((p: Partial<WizardState>) => {
     setDraft((d) => ({ ...d, ...p }))
@@ -87,7 +98,7 @@ export default function OrgSettings({
   // never round-trips); a section that owns it passes the typed value in `slice`.
   const commitOrgSlice = useCallback(
     async (key: string, slice: Partial<OrgConfigForm>, label: string): Promise<boolean> => {
-      setSaving(key)
+      setSavingKey(key, true)
       try {
         const next: OrgConfigForm = {
           ...baseline.org,
@@ -104,7 +115,7 @@ export default function OrgSettings({
         toast.success(`${label} saved`)
         return true
       } finally {
-        setSaving(null)
+        setSavingKey(key, false)
       }
     },
     [baseline.org],
@@ -152,9 +163,12 @@ export default function OrgSettings({
         title="GitHub URL"
         summary={hostOf(baseline.org.github_url || 'github.com')}
         dirty={draft.org.github_url !== baseline.org.github_url}
-        saving={saving === 'gh-url'}
+        saving={isSaving('gh-url')}
         onSave={async () => {
-          setSaving('gh-url')
+          // The outer mark covers the reachability-probe window (before
+          // commitOrgSlice, which marks/unmarks 'gh-url' itself — a Set makes
+          // the overlap idempotent).
+          setSavingKey('gh-url', true)
           setUrlError(null)
           try {
             const url = normalizeBaseUrl(draft.org.github_url)
@@ -166,7 +180,7 @@ export default function OrgSettings({
             patch({ org: { ...draft.org, github_url: url } })
             return await commitOrgSlice('gh-url', { github_url: url }, 'GitHub URL')
           } finally {
-            setSaving(null)
+            setSavingKey('gh-url', false)
           }
         }}
         onCancel={() => {
@@ -211,7 +225,7 @@ export default function OrgSettings({
           title="Personal access token"
           summary={baseline.hasGitHubPat ? 'Token set' : 'No token'}
           dirty={draft.org.github_pat.trim() !== ''}
-          saving={saving === 'gh-pat'}
+          saving={isSaving('gh-pat')}
           onSave={async () => {
             const ok = await commitOrgSlice(
               'gh-pat',
@@ -236,7 +250,7 @@ export default function OrgSettings({
           title="Clone protocol"
           summary={`Clone via ${baseline.org.github_clone_protocol.toUpperCase()}`}
           dirty={draft.org.github_clone_protocol !== baseline.org.github_clone_protocol}
-          saving={saving === 'gh-clone'}
+          saving={isSaving('gh-clone')}
           onSave={() =>
             commitOrgSlice(
               'gh-clone',
@@ -255,7 +269,7 @@ export default function OrgSettings({
         title="GitHub polling"
         summary={`Every ${intervalLabel(baseline.org.github_poll_interval)}`}
         dirty={draft.org.github_poll_interval !== baseline.org.github_poll_interval}
-        saving={saving === 'gh-poll'}
+        saving={isSaving('gh-poll')}
         onSave={() =>
           commitOrgSlice(
             'gh-poll',
@@ -324,7 +338,7 @@ export default function OrgSettings({
           title="Jira polling"
           summary={`Every ${intervalLabel(baseline.org.jira_poll_interval)}`}
           dirty={draft.org.jira_poll_interval !== baseline.org.jira_poll_interval}
-          saving={saving === 'jira-poll'}
+          saving={isSaving('jira-poll')}
           onSave={() =>
             commitOrgSlice(
               'jira-poll',
@@ -361,7 +375,7 @@ export default function OrgSettings({
         title="Model cap"
         summary={capSummary}
         dirty={draft.org.max_llm_model_tier !== baseline.org.max_llm_model_tier}
-        saving={saving === 'model'}
+        saving={isSaving('model')}
         onSave={() =>
           commitOrgSlice('model', { max_llm_model_tier: draft.org.max_llm_model_tier }, 'Model cap')
         }
@@ -390,6 +404,32 @@ export default function OrgSettings({
 
 // SkillsImport — the action body for the Integrations section.
 function SkillsImport() {
+  const [importing, setImporting] = useState(false)
+  const run = async () => {
+    if (importing) return
+    setImporting(true)
+    try {
+      const res = await fetch('/api/skills/import', { method: 'POST' })
+      if (!res.ok) {
+        toast.error(await readError(res, 'Failed to import skills'))
+        return
+      }
+      const result = await res.json()
+      if (result.imported > 0) {
+        toast.success(
+          `Imported ${result.imported} skill${result.imported !== 1 ? 's' : ''} (${result.skipped} already imported)`,
+        )
+      } else {
+        toast.info(
+          `No new skills found (${result.scanned} scanned, ${result.skipped} already imported)`,
+        )
+      }
+    } catch (err) {
+      toast.error(`Failed to import skills: ${(err as Error).message}`)
+    } finally {
+      setImporting(false)
+    }
+  }
   return (
     <div className="flex items-center justify-between gap-4">
       <div>
@@ -400,30 +440,11 @@ function SkillsImport() {
       </div>
       <button
         type="button"
-        onClick={async () => {
-          try {
-            const res = await fetch('/api/skills/import', { method: 'POST' })
-            if (!res.ok) {
-              toast.error(await readError(res, 'Failed to import skills'))
-              return
-            }
-            const result = await res.json()
-            if (result.imported > 0) {
-              toast.success(
-                `Imported ${result.imported} skill${result.imported !== 1 ? 's' : ''} (${result.skipped} already imported)`,
-              )
-            } else {
-              toast.info(
-                `No new skills found (${result.scanned} scanned, ${result.skipped} already imported)`,
-              )
-            }
-          } catch (err) {
-            toast.error(`Failed to import skills: ${(err as Error).message}`)
-          }
-        }}
-        className="shrink-0 rounded-xl border border-accent/20 px-4 py-2 text-[13px] text-accent transition-colors hover:border-accent/30 hover:text-accent/80"
+        onClick={() => void run()}
+        disabled={importing}
+        className="shrink-0 rounded-xl border border-accent/20 px-4 py-2 text-[13px] text-accent transition-colors hover:border-accent/30 hover:text-accent/80 disabled:opacity-40"
       >
-        Import Skills
+        {importing ? 'Importing…' : 'Import Skills'}
       </button>
     </div>
   )
