@@ -8,6 +8,7 @@ import (
 	"io"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 )
 
 // Wire format: length-prefixed JSON frames.
@@ -231,6 +232,89 @@ type buildAgentRunFooterResult struct {
 	Footer string `json:"footer"`
 }
 
+// --- jira (exec jira ticket ...) ---
+//
+// Args/result envelopes for the host-routed Jira surface. The daemon
+// (or the in-process LocalClient) builds the org's bot-attributed Jira
+// client via ForSystem and makes the REST call; these structs are just
+// the wire shapes. The jiraclient result types (Issue, Transition,
+// Priority, IssueType) already carry JSON tags, so they cross the wire
+// unchanged. Method errors (a workflow-rejected transition, a 4xx from
+// the Jira API) surface as the response Error string verbatim, so the
+// agent reads the same actionable message it would in local mode.
+
+type jiraKeyArgs struct {
+	Key string `json:"key"`
+}
+
+type jiraProjectArgs struct {
+	Project string `json:"project"`
+}
+
+type jiraTransitionArgs struct {
+	Key    string `json:"key"`
+	Status string `json:"status"`
+}
+
+type jiraCommentArgs struct {
+	Key  string `json:"key"`
+	Body string `json:"body"`
+}
+
+type jiraCreateIssueArgs struct {
+	Project     string `json:"project"`
+	IssueType   string `json:"issue_type"`
+	Summary     string `json:"summary"`
+	Description string `json:"description"`
+	ParentKey   string `json:"parent_key"`
+	Priority    string `json:"priority"`
+}
+
+type jiraUpdateIssueArgs struct {
+	Key    string                       `json:"key"`
+	Fields jiraclient.UpdateIssueFields `json:"fields"`
+}
+
+type jiraSetParentArgs struct {
+	Key       string `json:"key"`
+	ParentKey string `json:"parent_key"`
+}
+
+type jiraSetPriorityArgs struct {
+	Key      string `json:"key"`
+	Priority string `json:"priority"`
+}
+
+type jiraSearchArgs struct {
+	JQL        string   `json:"jql"`
+	Fields     []string `json:"fields,omitempty"`
+	MaxResults int      `json:"max_results"`
+}
+
+type jiraIssueResult struct {
+	Issue *jiraclient.Issue `json:"issue,omitempty"`
+}
+
+type jiraIssuesResult struct {
+	Issues []jiraclient.Issue `json:"issues"`
+}
+
+type jiraTransitionsResult struct {
+	Transitions []jiraclient.Transition `json:"transitions"`
+}
+
+type jiraCreateIssueResult struct {
+	Key string `json:"key"`
+}
+
+type jiraPrioritiesResult struct {
+	Priorities []jiraclient.Priority `json:"priorities"`
+}
+
+type jiraIssueTypesResult struct {
+	IssueTypes []jiraclient.IssueType `json:"issue_types"`
+}
+
 // emptyArgs is the args type for methods that take no parameters
 // (LookupRun, GetPendingPRByRunID, GetAgentRun, ListRunWorktrees,
 // ListRepos). Using an empty struct rather than json.RawMessage(nil)
@@ -264,4 +348,19 @@ const (
 	methodInsertRunWorktree          = "InsertRunWorktree"
 	methodDeleteRunWorktreeByRepo    = "DeleteRunWorktreeByRepo"
 	methodBuildAgentRunFooter        = "BuildAgentRunFooter"
+
+	methodJiraGetIssue       = "JiraGetIssue"
+	methodJiraTransitionTo   = "JiraTransitionTo"
+	methodJiraGetTransitions = "JiraGetTransitions"
+	methodJiraAddComment     = "JiraAddComment"
+	methodJiraAssignToSelf   = "JiraAssignToSelf"
+	methodJiraUnassign       = "JiraUnassign"
+	methodJiraCreateIssue    = "JiraCreateIssue"
+	methodJiraUpdateIssue    = "JiraUpdateIssue"
+	methodJiraSetParent      = "JiraSetParent"
+	methodJiraGetChildIssues = "JiraGetChildIssues"
+	methodJiraSearchIssues   = "JiraSearchIssues"
+	methodJiraListPriorities = "JiraListPriorities"
+	methodJiraSetPriority    = "JiraSetPriority"
+	methodJiraListIssueTypes = "JiraListIssueTypes"
 )

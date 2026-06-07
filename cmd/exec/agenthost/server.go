@@ -368,6 +368,133 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		}
 		return buildAgentRunFooterResult{Footer: footer}, nil
 
+	// --- jira: build ForSystem host-side, make the REST call, return the
+	// result / error. The per-request LocalClient reads the credential
+	// from this daemon's (host-side, Vault-backed) stores, so nothing
+	// reaches the sandbox but the typed result or the error string. ---
+
+	case methodJiraGetIssue:
+		var a jiraKeyArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		issue, err := client.JiraGetIssue(ctx, a.Key)
+		if err != nil {
+			return nil, err
+		}
+		return jiraIssueResult{Issue: issue}, nil
+
+	case methodJiraTransitionTo:
+		var a jiraTransitionArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, client.JiraTransitionTo(ctx, a.Key, a.Status)
+
+	case methodJiraGetTransitions:
+		var a jiraKeyArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		transitions, err := client.JiraGetTransitions(ctx, a.Key)
+		if err != nil {
+			return nil, err
+		}
+		return jiraTransitionsResult{Transitions: transitions}, nil
+
+	case methodJiraAddComment:
+		var a jiraCommentArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, client.JiraAddComment(ctx, a.Key, a.Body)
+
+	case methodJiraAssignToSelf:
+		var a jiraKeyArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, client.JiraAssignToSelf(ctx, a.Key)
+
+	case methodJiraUnassign:
+		var a jiraKeyArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, client.JiraUnassign(ctx, a.Key)
+
+	case methodJiraCreateIssue:
+		var a jiraCreateIssueArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		key, err := client.JiraCreateIssue(ctx, a.Project, a.IssueType, a.Summary, a.Description, a.ParentKey, a.Priority)
+		if err != nil {
+			return nil, err
+		}
+		return jiraCreateIssueResult{Key: key}, nil
+
+	case methodJiraUpdateIssue:
+		var a jiraUpdateIssueArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, client.JiraUpdateIssue(ctx, a.Key, a.Fields)
+
+	case methodJiraSetParent:
+		var a jiraSetParentArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, client.JiraSetParent(ctx, a.Key, a.ParentKey)
+
+	case methodJiraGetChildIssues:
+		var a jiraKeyArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		issues, err := client.JiraGetChildIssues(ctx, a.Key)
+		if err != nil {
+			return nil, err
+		}
+		return jiraIssuesResult{Issues: issues}, nil
+
+	case methodJiraSearchIssues:
+		var a jiraSearchArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		issues, err := client.JiraSearchIssues(ctx, a.JQL, a.Fields, a.MaxResults)
+		if err != nil {
+			return nil, err
+		}
+		return jiraIssuesResult{Issues: issues}, nil
+
+	case methodJiraListPriorities:
+		priorities, err := client.JiraListPriorities(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return jiraPrioritiesResult{Priorities: priorities}, nil
+
+	case methodJiraSetPriority:
+		var a jiraSetPriorityArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, client.JiraSetPriority(ctx, a.Key, a.Priority)
+
+	case methodJiraListIssueTypes:
+		var a jiraProjectArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		types, err := client.JiraListIssueTypes(ctx, a.Project)
+		if err != nil {
+			return nil, err
+		}
+		return jiraIssueTypesResult{IssueTypes: types}, nil
+
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnknownMethod, method)
 	}

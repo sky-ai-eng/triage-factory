@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 )
 
 // dialTimeout caps how long the client waits for the daemon to accept
@@ -258,4 +259,104 @@ func (c *IPCClient) BuildAgentRunFooter(ctx context.Context, kind string) (strin
 		return "", err
 	}
 	return res.Footer, nil
+}
+
+// --- jira ---
+//
+// Each method is a thin RPC: serialize args, ship one frame to the
+// daemon, decode one frame back. The daemon constructs the ForSystem
+// Jira client host-side and makes the REST call — the sandbox holds no
+// credential. Errors surface as the response Error string (set verbatim
+// from the daemon's err.Error()), so a workflow-rejected transition or a
+// Jira 4xx reaches the caller intact.
+
+func (c *IPCClient) JiraGetIssue(ctx context.Context, key string) (*jiraclient.Issue, error) {
+	var res jiraIssueResult
+	if err := c.call(ctx, methodJiraGetIssue, jiraKeyArgs{Key: key}, &res); err != nil {
+		return nil, err
+	}
+	return res.Issue, nil
+}
+
+func (c *IPCClient) JiraTransitionTo(ctx context.Context, key, status string) error {
+	return c.call(ctx, methodJiraTransitionTo, jiraTransitionArgs{Key: key, Status: status}, nil)
+}
+
+func (c *IPCClient) JiraGetTransitions(ctx context.Context, key string) ([]jiraclient.Transition, error) {
+	var res jiraTransitionsResult
+	if err := c.call(ctx, methodJiraGetTransitions, jiraKeyArgs{Key: key}, &res); err != nil {
+		return nil, err
+	}
+	return res.Transitions, nil
+}
+
+func (c *IPCClient) JiraAddComment(ctx context.Context, key, body string) error {
+	return c.call(ctx, methodJiraAddComment, jiraCommentArgs{Key: key, Body: body}, nil)
+}
+
+func (c *IPCClient) JiraAssignToSelf(ctx context.Context, key string) error {
+	return c.call(ctx, methodJiraAssignToSelf, jiraKeyArgs{Key: key}, nil)
+}
+
+func (c *IPCClient) JiraUnassign(ctx context.Context, key string) error {
+	return c.call(ctx, methodJiraUnassign, jiraKeyArgs{Key: key}, nil)
+}
+
+func (c *IPCClient) JiraCreateIssue(ctx context.Context, project, issueType, summary, description, parentKey, priority string) (string, error) {
+	var res jiraCreateIssueResult
+	if err := c.call(ctx, methodJiraCreateIssue, jiraCreateIssueArgs{
+		Project:     project,
+		IssueType:   issueType,
+		Summary:     summary,
+		Description: description,
+		ParentKey:   parentKey,
+		Priority:    priority,
+	}, &res); err != nil {
+		return "", err
+	}
+	return res.Key, nil
+}
+
+func (c *IPCClient) JiraUpdateIssue(ctx context.Context, key string, fields jiraclient.UpdateIssueFields) error {
+	return c.call(ctx, methodJiraUpdateIssue, jiraUpdateIssueArgs{Key: key, Fields: fields}, nil)
+}
+
+func (c *IPCClient) JiraSetParent(ctx context.Context, key, parentKey string) error {
+	return c.call(ctx, methodJiraSetParent, jiraSetParentArgs{Key: key, ParentKey: parentKey}, nil)
+}
+
+func (c *IPCClient) JiraGetChildIssues(ctx context.Context, key string) ([]jiraclient.Issue, error) {
+	var res jiraIssuesResult
+	if err := c.call(ctx, methodJiraGetChildIssues, jiraKeyArgs{Key: key}, &res); err != nil {
+		return nil, err
+	}
+	return res.Issues, nil
+}
+
+func (c *IPCClient) JiraSearchIssues(ctx context.Context, jql string, fields []string, maxResults int) ([]jiraclient.Issue, error) {
+	var res jiraIssuesResult
+	if err := c.call(ctx, methodJiraSearchIssues, jiraSearchArgs{JQL: jql, Fields: fields, MaxResults: maxResults}, &res); err != nil {
+		return nil, err
+	}
+	return res.Issues, nil
+}
+
+func (c *IPCClient) JiraListPriorities(ctx context.Context) ([]jiraclient.Priority, error) {
+	var res jiraPrioritiesResult
+	if err := c.call(ctx, methodJiraListPriorities, emptyArgs{}, &res); err != nil {
+		return nil, err
+	}
+	return res.Priorities, nil
+}
+
+func (c *IPCClient) JiraSetPriority(ctx context.Context, key, priority string) error {
+	return c.call(ctx, methodJiraSetPriority, jiraSetPriorityArgs{Key: key, Priority: priority}, nil)
+}
+
+func (c *IPCClient) JiraListIssueTypes(ctx context.Context, project string) ([]jiraclient.IssueType, error) {
+	var res jiraIssueTypesResult
+	if err := c.call(ctx, methodJiraListIssueTypes, jiraProjectArgs{Project: project}, &res); err != nil {
+		return nil, err
+	}
+	return res.IssueTypes, nil
 }

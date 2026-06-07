@@ -39,6 +39,7 @@ import (
 	"errors"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 )
 
 // DefaultSocketPath is the in-sandbox bind-mount destination for the
@@ -149,6 +150,32 @@ type Client interface {
 	// without the agent process touching the DB directly. The daemon
 	// reads its own AgentRunStore for the lookup.
 	BuildAgentRunFooter(ctx context.Context, kind string) (string, error)
+
+	// --- jira (exec jira ticket ...) ---
+	//
+	// These route the agent's in-sandbox `exec jira` calls host-side:
+	// the daemon builds the org's system Jira client (ForSystem) and
+	// makes the REST call, so the sandbox never loads a Jira credential
+	// — no keychain read, no dbus. Always bot-attributed; there is no
+	// per-user routing in the jail (user-attributed Jira writes are the
+	// server-side handlers, never the sandbox). LocalClient builds the
+	// same ForSystem client in-process, which is the unchanged local-mode
+	// path. Resolver/API errors propagate verbatim so a workflow-rejected
+	// transition reaches the agent as an actionable message, not "failed."
+	JiraGetIssue(ctx context.Context, key string) (*jiraclient.Issue, error)
+	JiraTransitionTo(ctx context.Context, key, status string) error
+	JiraGetTransitions(ctx context.Context, key string) ([]jiraclient.Transition, error)
+	JiraAddComment(ctx context.Context, key, body string) error
+	JiraAssignToSelf(ctx context.Context, key string) error
+	JiraUnassign(ctx context.Context, key string) error
+	JiraCreateIssue(ctx context.Context, project, issueType, summary, description, parentKey, priority string) (string, error)
+	JiraUpdateIssue(ctx context.Context, key string, fields jiraclient.UpdateIssueFields) error
+	JiraSetParent(ctx context.Context, key, parentKey string) error
+	JiraGetChildIssues(ctx context.Context, key string) ([]jiraclient.Issue, error)
+	JiraSearchIssues(ctx context.Context, jql string, fields []string, maxResults int) ([]jiraclient.Issue, error)
+	JiraListPriorities(ctx context.Context) ([]jiraclient.Priority, error)
+	JiraSetPriority(ctx context.Context, key, priority string) error
+	JiraListIssueTypes(ctx context.Context, project string) ([]jiraclient.IssueType, error)
 
 	// Close releases any resources held by the client. LocalClient is
 	// a no-op (it doesn't own the DB conn — that's exec.Handle's

@@ -2,11 +2,13 @@ package agenthost
 
 import (
 	"context"
+	"errors"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/runident"
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 )
 
 // LocalClient is the in-process implementation of Client. Holds a
@@ -226,4 +228,141 @@ func (c *LocalClient) DeleteRunWorktreeByRepo(ctx context.Context, repoID string
 
 func (c *LocalClient) BuildAgentRunFooter(_ context.Context, kind string) (string, error) {
 	return agentmeta.Build(c.stores.AgentRuns, c.info.OrgID, c.info.RunID, kind), nil
+}
+
+// --- jira ---
+//
+// jiraSystemClient builds the org's bot-attributed Jira client via the
+// ForSystem resolver. The secret store backing it differs by mode but
+// the call site doesn't care: local mode reads the OS keychain on the
+// user's own machine; the daemon (sandbox path) reads the host's
+// Vault-backed store — the host can read the credential the sandboxed
+// agent can't. Either way the agent process never holds the token.
+//
+// A missing credential maps to the same user-facing "not configured"
+// message exec used to print before handing off; every other resolver
+// error (a transient vault/keychain outage) propagates so it isn't
+// misreported as "absent". Over IPC the message crosses as the response
+// Error string, so the agent reads the identical text in both modes.
+func (c *LocalClient) jiraSystemClient(ctx context.Context) (*jiraclient.Client, error) {
+	client, err := jiraclient.NewResolver(c.stores.Secrets, c.stores.Orgs).ForSystem(ctx, c.info.OrgID)
+	if errors.Is(err, jiraclient.ErrNoJiraSystemCredential) {
+		return nil, errors.New("Jira not configured. Run triagefactory and complete setup first.")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return client, nil
+}
+
+func (c *LocalClient) JiraGetIssue(ctx context.Context, key string) (*jiraclient.Issue, error) {
+	client, err := c.jiraSystemClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return client.GetIssue(ctx, key)
+}
+
+func (c *LocalClient) JiraTransitionTo(ctx context.Context, key, status string) error {
+	client, err := c.jiraSystemClient(ctx)
+	if err != nil {
+		return err
+	}
+	return client.TransitionTo(ctx, key, status)
+}
+
+func (c *LocalClient) JiraGetTransitions(ctx context.Context, key string) ([]jiraclient.Transition, error) {
+	client, err := c.jiraSystemClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return client.GetTransitions(ctx, key)
+}
+
+func (c *LocalClient) JiraAddComment(ctx context.Context, key, body string) error {
+	client, err := c.jiraSystemClient(ctx)
+	if err != nil {
+		return err
+	}
+	return client.AddComment(ctx, key, body)
+}
+
+func (c *LocalClient) JiraAssignToSelf(ctx context.Context, key string) error {
+	client, err := c.jiraSystemClient(ctx)
+	if err != nil {
+		return err
+	}
+	return client.AssignToSelf(ctx, key)
+}
+
+func (c *LocalClient) JiraUnassign(ctx context.Context, key string) error {
+	client, err := c.jiraSystemClient(ctx)
+	if err != nil {
+		return err
+	}
+	return client.Unassign(ctx, key)
+}
+
+func (c *LocalClient) JiraCreateIssue(ctx context.Context, project, issueType, summary, description, parentKey, priority string) (string, error) {
+	client, err := c.jiraSystemClient(ctx)
+	if err != nil {
+		return "", err
+	}
+	return client.CreateIssue(ctx, project, issueType, summary, description, parentKey, priority)
+}
+
+func (c *LocalClient) JiraUpdateIssue(ctx context.Context, key string, fields jiraclient.UpdateIssueFields) error {
+	client, err := c.jiraSystemClient(ctx)
+	if err != nil {
+		return err
+	}
+	return client.UpdateIssue(ctx, key, fields)
+}
+
+func (c *LocalClient) JiraSetParent(ctx context.Context, key, parentKey string) error {
+	client, err := c.jiraSystemClient(ctx)
+	if err != nil {
+		return err
+	}
+	return client.SetParent(ctx, key, parentKey)
+}
+
+func (c *LocalClient) JiraGetChildIssues(ctx context.Context, key string) ([]jiraclient.Issue, error) {
+	client, err := c.jiraSystemClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return client.GetChildIssues(ctx, key)
+}
+
+func (c *LocalClient) JiraSearchIssues(ctx context.Context, jql string, fields []string, maxResults int) ([]jiraclient.Issue, error) {
+	client, err := c.jiraSystemClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return client.SearchIssues(ctx, jql, fields, maxResults)
+}
+
+func (c *LocalClient) JiraListPriorities(ctx context.Context) ([]jiraclient.Priority, error) {
+	client, err := c.jiraSystemClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return client.ListPriorities(ctx)
+}
+
+func (c *LocalClient) JiraSetPriority(ctx context.Context, key, priority string) error {
+	client, err := c.jiraSystemClient(ctx)
+	if err != nil {
+		return err
+	}
+	return client.SetPriority(ctx, key, priority)
+}
+
+func (c *LocalClient) JiraListIssueTypes(ctx context.Context, project string) ([]jiraclient.IssueType, error) {
+	client, err := c.jiraSystemClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return client.ListIssueTypes(ctx, project)
 }
