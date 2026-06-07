@@ -104,9 +104,12 @@ func (s *teamsStore) ListForUser(ctx context.Context, orgID string) ([]domain.Te
 	// SQLite is N=1: one synthetic user, so "the user's teams" is just
 	// "every team in the org" — no memberships join needed (and the
 	// local sentinel user isn't enrolled via memberships). The ordering
-	// matches GetDefaultForOrg so teams[0] is the default team.
+	// matches GetDefaultForOrg so teams[0] is the default team. Role is a
+	// constant 'admin': the sole local user owns every team (mirrors the
+	// local-mode short-circuit in requireTeamAdmin), so the settings
+	// surface's admin gate reads true for all of them.
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT id, org_id, slug, name, created_at
+		SELECT id, org_id, slug, name, created_at, 'admin' AS role
 		FROM teams
 		WHERE org_id = ?
 		ORDER BY created_at ASC, id ASC
@@ -118,7 +121,7 @@ func (s *teamsStore) ListForUser(ctx context.Context, orgID string) ([]domain.Te
 	out := []domain.Team{}
 	for rows.Next() {
 		var t domain.Team
-		if err := rows.Scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.CreatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.CreatedAt, &t.Role); err != nil {
 			return nil, fmt.Errorf("scan team: %w", err)
 		}
 		out = append(out, t)

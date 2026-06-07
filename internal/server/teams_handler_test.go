@@ -28,6 +28,11 @@ func TestTeamsList_LocalReturnsSoleTeam(t *testing.T) {
 	if resp.Teams[0].ID != runmode.LocalDefaultTeamID {
 		t.Errorf("team id = %q, want %q", resp.Teams[0].ID, runmode.LocalDefaultTeamID)
 	}
+	// Local N=1: the sole user admins the sole team, so the settings
+	// surface's Team-section gate (role == "admin") reads true.
+	if resp.Teams[0].Role != "admin" {
+		t.Errorf("role = %q, want %q (local sole team)", resp.Teams[0].Role, "admin")
+	}
 	if resp.LastActingTeamID != "" {
 		t.Errorf("last_acting_team_id = %q, want empty (unset)", resp.LastActingTeamID)
 	}

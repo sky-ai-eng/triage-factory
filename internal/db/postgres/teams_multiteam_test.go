@@ -83,11 +83,21 @@ func TestMultiTeam_Postgres(t *testing.T) {
 				t.Errorf("ListForUser returned %d teams, want 2 (A+B)", len(teams))
 			}
 			got := map[string]bool{}
+			roles := map[string]string{}
 			for _, tm := range teams {
 				got[tm.ID] = true
+				roles[tm.ID] = tm.Role
 			}
 			if !got[teamA] || !got[teamB] {
 				t.Errorf("ListForUser = %+v; want both %s and %s", teams, teamA, teamB)
+			}
+			// The founder admins their default team A but joined B as a
+			// plain member — the per-team role the settings surface gates on.
+			if roles[teamA] != "admin" {
+				t.Errorf("team A role = %q; want admin (founder default)", roles[teamA])
+			}
+			if roles[teamB] != "member" {
+				t.Errorf("team B role = %q; want member", roles[teamB])
 			}
 			return nil
 		})

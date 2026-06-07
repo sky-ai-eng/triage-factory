@@ -51,6 +51,11 @@ export interface TeamSummary {
   id: string
   name: string
   slug: string
+  /** The viewer's membership role in this team ("admin" | "member" |
+   *  "viewer"). The settings surface renders the Team section only when the
+   *  viewer admins ≥1 team and filters its selector to those teams. Local /
+   *  N=1 reports "admin" for the sole team. */
+  role: string
 }
 
 // TeamsResponse is GET /api/teams: the viewer's teams in the active org

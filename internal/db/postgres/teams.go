@@ -112,8 +112,12 @@ func (s *teamsStore) ListForUser(ctx context.Context, orgID string) ([]domain.Te
 	// narrows to the caller's own teams — memberships_select lets a user
 	// read their own rows (user_id = current_user_id()), so the join is
 	// RLS-safe and self-scoping without an explicit user_id parameter.
+	// m.role rides along from the same membership join: it's the caller's
+	// own role in each team (the settings surface gates the Team section +
+	// its selector on role='admin'). The join already narrows to the
+	// caller's rows, so this needs no extra predicate.
 	rows, err := s.app.QueryContext(ctx, `
-		SELECT t.id::text, t.org_id::text, t.slug, t.name, t.created_at
+		SELECT t.id::text, t.org_id::text, t.slug, t.name, t.created_at, m.role::text
 		FROM teams t
 		JOIN memberships m ON m.team_id = t.id AND m.user_id = tf.current_user_id()
 		WHERE t.org_id = $1
@@ -176,11 +180,14 @@ func (s *teamsStore) Create(ctx context.Context, orgID, name, slug, creatorUserI
 	return t, nil
 }
 
+// scanTeams reads the ListForUser projection — identity columns plus the
+// caller's per-team role. It's the sole consumer of that 6-column shape;
+// the other team queries (Create, GetDefaultForOrg) scan their own rows.
 func scanTeams(rows *sql.Rows) ([]domain.Team, error) {
 	out := []domain.Team{}
 	for rows.Next() {
 		var t domain.Team
-		if err := rows.Scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.CreatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.CreatedAt, &t.Role); err != nil {
 			return nil, fmt.Errorf("scan team: %w", err)
 		}
 		out = append(out, t)

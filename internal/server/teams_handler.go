@@ -12,11 +12,15 @@ import (
 
 // teamJSON is the wire shape the multi-team selectors enumerate. Slug is
 // included for a stable, human-readable secondary label; the frontend
-// renders name as the primary.
+// renders name as the primary. Role is the caller's membership role in the
+// team ("admin" | "member" | "viewer") — the settings surface renders the
+// Team section only for users who admin ≥1 team and filters its selector to
+// those teams, so a non-admin never sees fields that would 403 on save.
 type teamJSON struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	Slug string `json:"slug"`
+	Role string `json:"role"`
 }
 
 // teamsResponse is GET /api/teams. Teams is the caller's teams in the
@@ -63,7 +67,7 @@ func (s *Server) handleTeamsList(w http.ResponseWriter, r *http.Request) {
 	out := make([]teamJSON, len(teams))
 	validLastActing := ""
 	for i, t := range teams {
-		out[i] = teamJSON{ID: t.ID, Name: t.Name, Slug: t.Slug}
+		out[i] = teamJSON{ID: t.ID, Name: t.Name, Slug: t.Slug, Role: t.Role}
 		if t.ID == lastActing {
 			validLastActing = lastActing
 		}
@@ -160,5 +164,8 @@ func (s *Server) handleTeamCreate(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[teams] new team %s/%s created but bootstrap failed (prompts/rules/bot may be missing): %v", orgID, created.ID, err)
 	}
 
-	writeJSON(w, http.StatusCreated, teamJSON{ID: created.ID, Name: created.Name, Slug: created.Slug})
+	// The creator is enrolled as admin (Teams.Create), so stamp the role on
+	// the response — the settings Team selector lists admin'd teams, and this
+	// lets a freshly-created team surface there without waiting on a refetch.
+	writeJSON(w, http.StatusCreated, teamJSON{ID: created.ID, Name: created.Name, Slug: created.Slug, Role: "admin"})
 }

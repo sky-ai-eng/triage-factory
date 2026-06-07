@@ -18,4 +18,10 @@ type Team struct {
 	Slug      string
 	Name      string
 	CreatedAt time.Time
+	// Role is the requesting user's membership role in this team
+	// ("admin" | "member" | "viewer"), populated by ListForUser so the
+	// settings surface can gate the Team section + its selector to teams
+	// the caller admins. Empty on the lightweight identity paths that
+	// don't carry a per-user relationship.
+	Role string
 }

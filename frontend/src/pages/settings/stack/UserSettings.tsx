@@ -1,0 +1,190 @@
+// The User group of the Settings stack — always rendered, for every role. The
+// first durable home for GitHub-identity management (previously only the setup
+// wizard's User step and the Connect gate page): show the bound @login + host,
+// with a re-Connect / re-enter affordance, reusing the captured-and-discarded
+// PAT_2 path. Plus device-local preferences (theme), which commit immediately.
+
+import { useState } from 'react'
+import { useGitHubIdentity } from '../../../hooks/useGitHubIdentity'
+import { captureGitHubIdentityPat } from '../../../lib/githubIdentity'
+import { getStoredTheme, setTheme, type ThemeMode } from '../../../lib/theme'
+import SettingsSection from './SettingsSection'
+
+export default function UserSettings({ orgId }: { orgId: string | null }) {
+  return (
+    <div className="space-y-2.5">
+      <GitHubIdentitySection orgId={orgId} />
+      <AppearanceSection />
+    </div>
+  )
+}
+
+// GitHubIdentitySection — Connect (one-click OAuth when an App is registered)
+// or the PAT_2 paste; either way the end state is a verified identity row with
+// no token retained. An action section (binds inline), so no Save footer.
+function GitHubIdentitySection({ orgId }: { orgId: string | null }) {
+  const { state, refresh } = useGitHubIdentity(orgId)
+  const [pat, setPat] = useState('')
+  const [capturing, setCapturing] = useState(false)
+  const [patError, setPatError] = useState<string | null>(null)
+  const [reentering, setReentering] = useState(false)
+
+  const summary =
+    state.status === 'ready'
+      ? state.data.connected
+        ? `@${state.data.login} · ${state.data.host}`
+        : 'Not connected'
+      : state.status === 'error'
+        ? 'Status unavailable'
+        : 'Loading…'
+
+  const startConnect = () => {
+    if (!orgId) return
+    window.location.href =
+      '/api/orgs/' +
+      encodeURIComponent(orgId) +
+      '/github/connect/start?return_to=' +
+      encodeURIComponent('/settings')
+  }
+
+  const submitPat = async () => {
+    if (!orgId || pat.trim() === '' || capturing) return
+    setCapturing(true)
+    setPatError(null)
+    try {
+      await captureGitHubIdentityPat(orgId, pat.trim())
+      setPat('')
+      setReentering(false)
+      refresh()
+    } catch (e) {
+      setPatError(e instanceof Error ? e.message : 'Could not verify that token.')
+    } finally {
+      setCapturing(false)
+    }
+  }
+
+  const connected = state.status === 'ready' && state.data.connected
+  const connectAvailable = state.status === 'ready' && state.data.connect_available
+  const host = state.status === 'ready' ? state.data.host : 'GitHub'
+
+  return (
+    <SettingsSection title="GitHub identity" summary={summary}>
+      <div className="space-y-3">
+        <p className="text-[12px] leading-relaxed text-text-tertiary">
+          Triage Factory matches your pull requests and reviews to you by your GitHub username on{' '}
+          <span className="text-text-secondary">{host}</span>. It only reads your username — it
+          never stores your token or gains access to your repositories.
+        </p>
+
+        {connected && !reentering ? (
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-claim/15 bg-claim/[0.06] px-4 py-2.5">
+            <span className="text-[12px] text-claim">
+              Connected as @{state.status === 'ready' ? state.data.login : ''}
+            </span>
+            <button
+              type="button"
+              onClick={() => setReentering(true)}
+              className="text-[11px] text-text-tertiary underline transition-colors hover:text-text-secondary"
+            >
+              Reconnect
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-2.5">
+            {connectAvailable && (
+              <button
+                type="button"
+                onClick={startConnect}
+                className="w-full rounded-xl bg-text-primary px-4 py-2.5 text-[13px] font-medium text-white transition-colors hover:bg-text-primary/90"
+              >
+                Connect GitHub
+              </button>
+            )}
+            <label className="block">
+              <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+                {connectAvailable
+                  ? 'Or paste a personal access token'
+                  : 'Paste a personal access token'}
+              </span>
+              <input
+                type="password"
+                autoComplete="off"
+                value={pat}
+                placeholder="ghp_…"
+                onChange={(e) => {
+                  setPat(e.target.value)
+                  if (patError) setPatError(null)
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void submitPat()
+                }}
+                aria-invalid={!!patError || undefined}
+                className={`w-full rounded-xl border bg-surface px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary transition-colors focus:outline-none focus:ring-2 focus:ring-accent/30 ${
+                  patError ? 'border-dismiss/50' : 'border-border-glass focus:border-accent/40'
+                }`}
+              />
+            </label>
+            {patError && <p className="text-[12px] leading-relaxed text-dismiss">{patError}</p>}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void submitPat()}
+                disabled={pat.trim() === '' || capturing}
+                className="rounded-xl border border-border-glass px-4 py-2 text-[13px] font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary disabled:opacity-40"
+              >
+                {capturing ? 'Verifying…' : 'Verify token'}
+              </button>
+              {connected && reentering && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReentering(false)
+                    setPat('')
+                    setPatError(null)
+                  }}
+                  className="text-[12px] text-text-tertiary transition-colors hover:text-text-secondary"
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </SettingsSection>
+  )
+}
+
+// AppearanceSection — theme. Persists to localStorage immediately, so no Save.
+function AppearanceSection() {
+  const [theme, setThemeState] = useState<ThemeMode>(() => getStoredTheme())
+  return (
+    <SettingsSection title="Appearance" summary={theme[0].toUpperCase() + theme.slice(1)}>
+      <div>
+        <span className="mb-2 block text-[11px] text-text-tertiary">Theme</span>
+        <div className="inline-flex rounded-lg border border-border-glass bg-black/[0.02] p-0.5">
+          {(['light', 'dark', 'auto'] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => {
+                setThemeState(m)
+                setTheme(m)
+              }}
+              className={`rounded-md px-3 py-1 text-[12px] font-medium capitalize transition-colors ${
+                theme === m
+                  ? 'bg-white text-text-primary shadow-sm'
+                  : 'text-text-tertiary hover:text-text-secondary'
+              }`}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
+        <p className="mt-1.5 text-[11px] text-text-tertiary">
+          Auto follows your system preference.
+        </p>
+      </div>
+    </SettingsSection>
+  )
+}
