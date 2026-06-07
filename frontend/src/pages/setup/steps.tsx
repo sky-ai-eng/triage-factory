@@ -1,8 +1,9 @@
 // The wizard's step registry — one atomic action per stack entry. The
-// ORGANIZATION steps (GitHub URL → GitHub access method → GitHub App | PAT
-// config [whichever method was chosen] → GitHub poll interval → Trackers →
-// [Jira URL → Jira access → Jira poll interval, shown only when Jira is the
-// chosen/connected tracker] → org max model tier) and the four TEAM steps for
+// ORGANIZATION steps (GitHub URL → GitHub access method → [App: account type →
+// register | PAT: token → clone protocol (local only)] → GitHub poll interval →
+// Trackers → [Jira URL → Jira access → Jira poll interval, shown only when Jira
+// is the chosen/connected tracker] → org max model tier) and the four TEAM
+// steps for
 // the first team (Repositories, GitHub teams, Jira projects, team default
 // model), composing the existing shared field groups into the same step
 // contract with no new host plumbing.
@@ -30,8 +31,10 @@
 import {
   GitHubUrlStep,
   GitHubModeStep,
+  GitHubAccountTypeStep,
   GitHubAppStep,
   GitHubPatStep,
+  GitHubCloneStep,
   DEFAULT_GITHUB_URL,
 } from './GitHubStep'
 import TrackersStep from './TrackersStep'
@@ -67,7 +70,7 @@ import {
   teamConfigFromSettings,
   teamProjectsBlocked,
 } from '../settings/teamConfig'
-import type { WizardState, WizardStep } from './types'
+import type { LoadContext, WizardState, WizardStep } from './types'
 
 // Fresh wizard state before any load lands. Reuses the same empty-form
 // factories the Settings/create pages use, so the shell starts from the
@@ -79,6 +82,8 @@ export const initialWizardState = (): WizardState => ({
   githubReady: false,
   githubUrlConfirmed: false,
   githubAccessTab: null,
+  githubAppOwnerType: 'user',
+  isLocal: false,
   jiraConnected: false,
   jiraUrlConfirmed: false,
   tracker: 'none',
@@ -135,7 +140,7 @@ async function fetchIntegrationsState(): Promise<{ githubReady: boolean; jiraCon
 // seed from the connection signals: a connected org has, by definition, a
 // previously-confirmed URL and access, so it resumes past those steps; the
 // access tab defaults to PAT for an org with a stored token, else App.
-async function loadOrg(): Promise<Partial<WizardState>> {
+async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
   const [org, integrations] = await Promise.all([fetchOrgSettings(), fetchIntegrationsState()])
   if (!org) throw new Error('Could not load organization settings')
   const orgForm = orgConfigFromSettings(org)
@@ -143,6 +148,7 @@ async function loadOrg(): Promise<Partial<WizardState>> {
   return {
     org: orgForm,
     orgLoaded: true,
+    isLocal: ctx.isLocal,
     hasGitHubPat: org.has_github_pat,
     githubReady: integrations.githubReady,
     // Seeded only from a live connection — NOT from a stored base URL. A stored
@@ -294,6 +300,24 @@ const githubModeStep: WizardStep = {
   render: (ctx) => <GitHubModeStep {...ctx} />,
 }
 
+// Step · App account type (visible when App is the chosen method, before the
+// registration step). Personal vs Organization — which GitHub account the App
+// is registered under — as a flush two-panel picker, action-on-click
+// (selfAdvancing). Always complete (defaults to Personal); the value rides
+// state.githubAppOwnerType into the registration step.
+const githubAccountStep: WizardStep = {
+  id: 'org-github-account',
+  section: 'org',
+  title: 'App account type',
+  visible: (s) => s.githubAccessTab === 'app',
+  selfAdvancing: true,
+  isComplete: () => true,
+  persist: async () => {},
+  collapsedSummary: (s) =>
+    s.githubAppOwnerType === 'org' ? 'Organization account' : 'Personal account',
+  render: (ctx) => <GitHubAccountTypeStep {...ctx} />,
+}
+
 // connectedSummary — shared by the App / PAT config steps: the connected host,
 // or "Not connected".
 const connectedSummary = (s: WizardState) =>
@@ -348,6 +372,23 @@ const githubPatStep: WizardStep = {
   },
   collapsedSummary: connectedSummary,
   render: (ctx) => <GitHubPatStep {...ctx} />,
+}
+
+// Step · Clone protocol (visible when PAT is the chosen method AND local — multi
+// hardwires HTTPS). SSH vs HTTPS for how repos clone to the machine, as a flush
+// two-panel picker, action-on-click (selfAdvancing). Always complete (defaults
+// to SSH); persist saves the org form. Switching to SSH triggers the backend's
+// SSH preflight, which a default-SSH org never hits.
+const githubCloneStep: WizardStep = {
+  id: 'org-github-clone',
+  section: 'org',
+  title: 'Clone protocol',
+  visible: (s) => s.githubAccessTab === 'pat' && s.isLocal,
+  selfAdvancing: true,
+  isComplete: () => true,
+  persist: ({ state }) => persistOrg(state),
+  collapsedSummary: (s) => `Clone via ${s.org.github_clone_protocol.toUpperCase()}`,
+  render: (ctx) => <GitHubCloneStep {...ctx} />,
 }
 
 // Step · GitHub poll interval. Sits right after the GitHub steps so each
@@ -648,8 +689,10 @@ const teamModelStep: WizardStep = {
 export const WIZARD_STEPS: WizardStep[] = [
   githubUrlStep,
   githubModeStep,
+  githubAccountStep,
   githubAppStep,
   githubPatStep,
+  githubCloneStep,
   githubPollerStep,
   trackersStep,
   jiraUrlStep,

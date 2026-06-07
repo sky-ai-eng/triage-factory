@@ -43,6 +43,7 @@ export default function GitHubAccessGroup({
   showAppPanel = true,
   showBaseUrl = true,
   showHeading = true,
+  showCloneProtocol = true,
   bare = false,
 }: {
   value: GitHubAccessValue
@@ -56,6 +57,10 @@ export default function GitHubAccessGroup({
   // and an App/PAT tab switcher, so the group's own "GitHub" title is redundant
   // there — suppress it. Default true keeps the Settings tab labelled.
   showHeading?: boolean
+  // The setup wizard splits the clone-protocol choice into its own step, so the
+  // PAT step renders the token alone (showCloneProtocol false). Default true
+  // keeps Settings showing it inline.
+  showCloneProtocol?: boolean
   // The setup wizard composes this flush (no Section card, glass fields) so it
   // matches the rest of the flow; Settings keeps the carded default.
   bare?: boolean
@@ -131,8 +136,9 @@ export default function GitHubAccessGroup({
         </Field>
         {/* Clone protocol is local-mode-only: multi-mode deployments
               hardwire HTTPS (App-token credential; the container has no SSH
-              machinery), so there's nothing to choose and no SSH to test. */}
-        {isLocal && (
+              machinery), so there's nothing to choose and no SSH to test. The
+              setup wizard splits this into its own step (showCloneProtocol). */}
+        {isLocal && showCloneProtocol && (
           <Field label="Clone protocol">
             <div className="flex items-center gap-3">
               <div className={segmentedWrap(bare)}>

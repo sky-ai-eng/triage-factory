@@ -76,6 +76,12 @@ export interface WizardState {
   // Continue (the connect) reads it. Seeded non-null for a returning org (PAT if
   // a token is stored, else App when already connected), null for a fresh org.
   githubAccessTab: GitHubAccessMode | null
+  // The GitHub App owner type (personal vs org), chosen in its own step when App
+  // is the method; fed into GitHubAppPanel's registration. Defaults to 'user'.
+  githubAppOwnerType: 'user' | 'org'
+  // Whether the wizard is running in local mode — seeded from the load context.
+  // Gates the clone-protocol step (local-only; multi hardwires HTTPS).
+  isLocal: boolean
   // Whether the org currently has a working Jira connection (PAT + base URL).
   // Gates the poller step's Jira interval and the team Jira-projects step.
   jiraConnected: boolean

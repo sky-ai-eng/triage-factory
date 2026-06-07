@@ -3,7 +3,61 @@
 // active (expanded) step's heading + body live in Wizard.tsx, where they can
 // own the focus ref and the expand/collapse animation.
 
+import { ChevronRight } from 'lucide-react'
 import { glassInputClass } from '../settings/primitives'
+
+// ChoiceCards is the flush two-panel picker shared by the GitHub access-method,
+// account-type, and clone-protocol steps: side-by-side options (a hairline
+// between, no box), each a title + a one-line detail, with a chevron that fades
+// in on hover to signal it advances. Action-on-click — the caller's onChoose
+// both records the choice and advances (the step is selfAdvancing), so there's
+// no Continue. The currently-selected option (when revisiting) reads in accent.
+export function ChoiceCards<T extends string>({
+  options,
+  selected,
+  onChoose,
+  ariaLabel,
+}: {
+  options: { kind: T; title: string; detail: string }[]
+  selected: T | null
+  onChoose: (kind: T) => void
+  ariaLabel?: string
+}) {
+  return (
+    <div
+      aria-label={ariaLabel}
+      className="grid grid-cols-2 divide-x divide-[var(--color-border-subtle)]"
+    >
+      {options.map((opt, i) => {
+        const isSelected = selected === opt.kind
+        return (
+          <button
+            key={opt.kind}
+            type="button"
+            onClick={() => onChoose(opt.kind)}
+            className={`group flex flex-col gap-1 text-left outline-none ${i === 0 ? 'pr-5' : 'pl-5'}`}
+          >
+            <span className="flex items-center gap-1.5">
+              <span
+                className={`text-[14px] font-medium transition-colors ${
+                  isSelected ? 'text-accent' : 'text-text-secondary group-hover:text-text-primary'
+                }`}
+              >
+                {opt.title}
+              </span>
+              <ChevronRight
+                size={14}
+                aria-hidden
+                className="text-accent opacity-0 transition-opacity group-hover:opacity-100"
+              />
+            </span>
+            <span className="text-[11px] leading-snug text-text-tertiary">{opt.detail}</span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
 
 // UrlField is the base-URL input shared by the GitHub and Jira URL steps: a
 // controlled field bound straight to wizard state (no local draft), so the

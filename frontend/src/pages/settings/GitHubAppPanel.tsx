@@ -36,6 +36,7 @@ export default function GitHubAppPanel({
   orgId,
   showHeading = true,
   bare = false,
+  ownerType: ownerTypeProp,
 }: {
   orgId: string | null
   // Suppressed in the setup wizard, which already labels the step "GitHub
@@ -45,6 +46,11 @@ export default function GitHubAppPanel({
   // The setup wizard composes this flush (no Section card, glass fields) so it
   // matches the rest of the flow; Settings keeps the carded default.
   bare?: boolean
+  // When provided, the owner type (personal vs org) is controlled from outside
+  // and the internal Account-type toggle is hidden — the setup wizard picks it
+  // in its own prior step. Absent (Settings) ⇒ the toggle is shown and the
+  // choice is internal.
+  ownerType?: 'user' | 'org'
 }) {
   const fieldCls = bare ? glassInputClass : inputClass
   // Discriminated so the panel can tell "still resolving" / "load failed"
@@ -54,7 +60,11 @@ export default function GitHubAppPanel({
     { kind: 'loading' } | { kind: 'error' } | { kind: 'loaded'; status: GitHubAppStatus }
   >({ kind: 'loading' })
   const [ghReloadKey, setGhReloadKey] = useState(0)
-  const [ghAppOwnerType, setGhAppOwnerType] = useState<'user' | 'org'>('user')
+  // Owner type is controlled when ownerTypeProp is set (the wizard's account-type
+  // step), else internal (Settings shows the toggle).
+  const ownerControlled = ownerTypeProp !== undefined
+  const [ownerTypeInternal, setOwnerTypeInternal] = useState<'user' | 'org'>('user')
+  const ghAppOwnerType = ownerTypeProp ?? ownerTypeInternal
   const [ghAppOwnerLogin, setGhAppOwnerLogin] = useState('')
   const [ghAppRegistering, setGhAppRegistering] = useState(false)
   const [ghAppDetailsExpanded, setGhAppDetailsExpanded] = useState(false)
@@ -228,20 +238,22 @@ export default function GitHubAppPanel({
           </div>
         ) : (
           <div className="space-y-3">
-            <Field label="Account type">
-              <div className={segmentedWrap(bare)}>
-                {(['user', 'org'] as const).map((t) => (
-                  <button
-                    key={t}
-                    type="button"
-                    onClick={() => setGhAppOwnerType(t)}
-                    className={segmentedBtn(ghAppOwnerType === t, bare)}
-                  >
-                    {t === 'user' ? 'Personal' : 'Organization'}
-                  </button>
-                ))}
-              </div>
-            </Field>
+            {!ownerControlled && (
+              <Field label="Account type">
+                <div className={segmentedWrap(bare)}>
+                  {(['user', 'org'] as const).map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => setOwnerTypeInternal(t)}
+                      className={segmentedBtn(ghAppOwnerType === t, bare)}
+                    >
+                      {t === 'user' ? 'Personal' : 'Organization'}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+            )}
             <Field label={ghAppOwnerType === 'org' ? 'GitHub organization' : 'GitHub username'}>
               <input
                 type="text"
