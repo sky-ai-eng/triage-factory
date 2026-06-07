@@ -28,10 +28,14 @@ export default function JiraProjectRulesGroup({
   value,
   onChange,
   connected,
+  bare = false,
 }: {
   value: JiraProjectConfig[]
   onChange: (next: JiraProjectConfig[]) => void
   connected: boolean
+  // The setup wizard composes this flush (no Section card, glass project rows);
+  // Settings keeps the carded default.
+  bare?: boolean
 }) {
   // Statuses keyed by project key so each project's picker pulls from the
   // right per-project list. The backend intersects across the queried
@@ -140,9 +144,20 @@ export default function JiraProjectRulesGroup({
 
   const isExpanded = (i: number): boolean => expandedKeys[`idx_${i}`] === true
 
-  return (
-    <Section>
-      <h2 className="text-[13px] font-medium text-text-secondary mb-4">Jira projects</h2>
+  const inner = (
+    <>
+      {bare ? (
+        <div className="mb-4 space-y-1.5">
+          <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+            Jira projects
+          </h2>
+          <p className="text-[13px] leading-relaxed text-text-tertiary">
+            Track Jira projects and map each one&rsquo;s statuses to pickup / in-progress / done.
+          </p>
+        </div>
+      ) : (
+        <h2 className="mb-4 text-[13px] font-medium text-text-secondary">Jira projects</h2>
+      )}
       {!connected ? (
         <p className="text-[12px] text-text-tertiary italic">
           Connect Jira under Workspace settings before configuring tracked projects.
@@ -163,7 +178,14 @@ export default function JiraProjectRulesGroup({
             const complete = projectIsComplete(project)
             const expanded = isExpanded(i)
             return (
-              <div key={i} className="rounded-xl border border-border-subtle bg-white/40">
+              <div
+                key={i}
+                className={`rounded-xl border ${
+                  bare
+                    ? 'border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/50'
+                    : 'border-border-subtle bg-white/40'
+                }`}
+              >
                 <div className="flex items-center gap-2 px-3 py-2">
                   <button
                     type="button"
@@ -261,6 +283,8 @@ export default function JiraProjectRulesGroup({
           </button>
         </div>
       )}
-    </Section>
+    </>
   )
+
+  return bare ? inner : <Section>{inner}</Section>
 }

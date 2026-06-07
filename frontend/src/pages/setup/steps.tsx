@@ -652,6 +652,7 @@ const jiraProjectsStep: WizardStep = {
       value={state.team.jira_projects}
       onChange={(jira_projects) => patch({ team: { ...state.team, jira_projects } })}
       connected={state.jiraConnected}
+      bare
     />
   ),
 }
