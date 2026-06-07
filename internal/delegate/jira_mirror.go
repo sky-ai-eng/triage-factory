@@ -171,11 +171,7 @@ func (s *Spawner) runJiraMirror(orgID, issueKey string, rule domain.JiraProjectS
 
 	client, err := resolver.ForSystem(ctx, orgID)
 	if err != nil {
-		// An org with no Jira service credential is an expected, normal state
-		// (a GitHub-only org, or creds removed mid-flight) — no-op silently
-		// rather than log on every mirrored board transition. A real backend
-		// error still logs so an outage isn't swallowed.
-		if !errors.Is(err, jira.ErrNoJiraSystemCredential) {
+		if shouldLogForSystemErr(err) {
 			log.Printf("[jira] mirror: resolve system client for org %s: %v", orgID, err)
 		}
 		return
@@ -194,24 +190,48 @@ func (s *Spawner) runJiraMirror(orgID, issueKey string, rule domain.JiraProjectS
 		return
 	}
 
-	// In-progress phase. Forward-only: if a concurrent done mirror already moved
-	// the ticket into the Done bucket, do nothing — never drag a terminal ticket
-	// back to In Progress.
-	if state != nil && rule.DoneContains(state.StatusName) {
+	// In-progress phase. We must read the ticket's current status to honor the
+	// forward-only invariant; GetClaimState returns nil on ANY error, so a nil
+	// here is "unknown" — skip rather than risk transitioning a ticket a
+	// concurrent done mirror already moved to Done back to In Progress. Blindly
+	// proceeding (state == nil → assign + transition to In Progress) is exactly
+	// the backward move the per-issue lock exists to prevent. Self-heals: every
+	// board column transition re-fires the mirror, and the failed read logs.
+	if state == nil {
+		log.Printf("[jira] mirror: could not read claim state for %s; skipping in-progress mirror", issueKey)
+		return
+	}
+	// Forward-only: a concurrent done mirror may have already advanced the ticket
+	// into the Done bucket — never drag a terminal ticket back to In Progress.
+	if rule.DoneContains(state.StatusName) {
 		log.Printf("[jira] mirror: %s already advanced to done (%q), skipping in-progress mirror", issueKey, state.StatusName)
 		return
 	}
-	if state == nil || !state.AssignedToSelf {
+	if !state.AssignedToSelf {
 		if err := client.AssignToSelf(ctx, issueKey); err != nil {
+			// Skip the transition too: assign + transition move together (same as
+			// the user-path claim guard), so a failed assign leaves the ticket
+			// untouched — To Do + unassigned — rather than "In Progress but
+			// unassigned". Self-heals on the next board transition's mirror pass.
 			log.Printf("[jira] mirror: assign %s to service account: %v", issueKey, err)
 			return
 		}
 	}
-	if state == nil || !rule.InProgressContains(state.StatusName) {
+	if !rule.InProgressContains(state.StatusName) {
 		if err := client.TransitionTo(ctx, issueKey, rule.InProgressCanonical); err != nil {
 			log.Printf("[jira] mirror: transition %s to %q (in-progress): %v", issueKey, rule.InProgressCanonical, err)
 		}
 	}
+}
+
+// shouldLogForSystemErr reports whether a resolver.ForSystem error is worth
+// logging. ErrNoJiraSystemCredential is an expected, normal state (a GitHub-only
+// org, or creds removed mid-flight), so the mirror no-ops silently rather than
+// logging on every mirrored board transition; any other error is a real failure
+// (e.g. a vault outage) and is logged. errors.Is unwraps, so the wrapped
+// sentinel ForSystem actually returns ("%w: org=...") is still treated as silent.
+func shouldLogForSystemErr(err error) bool {
+	return err != nil && !errors.Is(err, jira.ErrNoJiraSystemCredential)
 }
 
 // keyedMutex hands out a mutex per string key, so callers can serialize work on

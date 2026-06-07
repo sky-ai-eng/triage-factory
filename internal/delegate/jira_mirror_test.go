@@ -1,16 +1,14 @@
 package delegate
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -39,6 +37,11 @@ type recordingJiraServer struct {
 	assignee    string
 	assigns     int
 	transitions []string
+
+	// failClaimState / failAssign inject transient HTTP failures so a test can
+	// exercise the mirror's read-failure and assign-failure paths.
+	failClaimState bool
+	failAssign     bool
 
 	transitionPosted chan struct{}
 }
@@ -92,15 +95,28 @@ func (r *recordingJiraServer) handle(w http.ResponseWriter, req *http.Request) {
 		}
 	case req.Method == http.MethodPut && strings.HasSuffix(path, "/assignee"):
 		r.mu.Lock()
-		r.assignee = r.myselfName
-		r.assigns++
+		fail := r.failAssign
+		if !fail {
+			r.assignee = r.myselfName
+			r.assigns++
+		}
 		r.mu.Unlock()
+		if fail {
+			http.Error(w, `{"err":"assign failed"}`, http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	case req.Method == http.MethodGet && strings.Contains(path, "/issue/"):
-		// GetClaimState: GET issue?fields=assignee,status.
+		// GetClaimState: GET issue?fields=assignee,status. A 5xx makes the
+		// client's GetClaimState return nil ("unknown").
 		r.mu.Lock()
+		fail := r.failClaimState
 		status, assignee := r.status, r.assignee
 		r.mu.Unlock()
+		if fail {
+			http.Error(w, `{"err":"read failed"}`, http.StatusInternalServerError)
+			return
+		}
 		assigneeJSON := "null"
 		if assignee != "" {
 			assigneeJSON = `{"name":"` + assignee + `"}`
@@ -311,38 +327,61 @@ func TestRunJiraMirror_ConcurrentInProgressAndDone_EndsInDone(t *testing.T) {
 	}
 }
 
-// ErrNoJiraSystemCredential is an expected, normal state (a GitHub-only org, or
-// creds removed mid-flight), so the mirror no-ops *silently* — it must not log
-// on every mirrored board transition.
-func TestRunJiraMirror_NoSystemCredential_SilentNoOp(t *testing.T) {
-	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
-
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
-	s.SetJiraResolver(&fakeJiraResolver{sysErr: jira.ErrNoJiraSystemCredential})
-
-	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
-
-	if buf.Len() != 0 {
-		t.Errorf("expected no log for ErrNoJiraSystemCredential, got: %q", buf.String())
+// The mirror stays silent for ErrNoJiraSystemCredential (an expected, normal
+// state: a GitHub-only org, or creds removed mid-flight) and logs every other
+// ForSystem error (a real failure worth surfacing). Tested as a pure decision
+// rather than by capturing the global logger — that races with the package's
+// many goroutine-spawning tests under -race. The wrapped case matters because
+// ForSystem actually returns the sentinel wrapped ("%w: org=...").
+func TestShouldLogForSystemErr(t *testing.T) {
+	if shouldLogForSystemErr(nil) {
+		t.Error("nil error: want no log")
+	}
+	if shouldLogForSystemErr(jira.ErrNoJiraSystemCredential) {
+		t.Error("bare ErrNoJiraSystemCredential: want silent")
+	}
+	if shouldLogForSystemErr(fmt.Errorf("%w: org=acme", jira.ErrNoJiraSystemCredential)) {
+		t.Error("wrapped ErrNoJiraSystemCredential: want silent")
+	}
+	if !shouldLogForSystemErr(errors.New("vault unreachable")) {
+		t.Error("real backend error: want logged")
 	}
 }
 
-// A *real* backend error (vault outage, etc.) is NOT swallowed — it logs, so an
-// outage is diagnosable. Pins the errors.Is distinction against the silent case.
-func TestRunJiraMirror_BackendError_Logs(t *testing.T) {
-	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
-
+// If GetClaimState can't be read (transient error → nil), the in-progress
+// mirror must skip rather than blind-write: blindly transitioning to In Progress
+// could drag a ticket a concurrent done mirror already moved to Done back out of
+// the terminal bucket. The forward-only invariant must not depend on the read
+// succeeding.
+func TestRunJiraMirror_InProgress_SkipsOnUnreadableState(t *testing.T) {
+	fake := newRecordingJiraServer(t, "Done", "bot") // ticket already Done...
+	fake.failClaimState = true                       // ...but the mirror can't read that
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
-	s.SetJiraResolver(&fakeJiraResolver{sysErr: errors.New("vault unreachable")})
+	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
 	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
 
-	if !strings.Contains(buf.String(), "resolve system client") {
-		t.Errorf("expected a log for a real backend error, got: %q", buf.String())
+	if assigns, transitions := fake.snapshot(); assigns != 0 || len(transitions) != 0 {
+		t.Errorf("assigns=%d transitions=%v, want no writes (unreadable state must not regress a possibly-Done ticket)", assigns, transitions)
+	}
+}
+
+// assign + transition move together: a failed AssignToSelf skips the status
+// transition, so the ticket is never left "In Progress but unassigned". It
+// self-heals on the next board transition's mirror pass.
+func TestRunJiraMirror_InProgress_AssignFails_SkipsTransition(t *testing.T) {
+	fake := newRecordingJiraServer(t, "To Do", "") // unassigned → assign needed
+	fake.failAssign = true
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
+
+	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
+
+	if _, transitions := fake.snapshot(); len(transitions) != 0 {
+		t.Errorf("transitions = %v, want none (a failed assign must skip the transition)", transitions)
+	}
+	if got := fake.currentStatus(); got != "To Do" {
+		t.Errorf("status = %q, want To Do (untouched after a failed assign)", got)
 	}
 }
 
