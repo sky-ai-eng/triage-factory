@@ -63,13 +63,17 @@ func newReloader(a *App) *reloader {
 func (r *reloader) onGitHubChanged(orgID string) {
 	log.Println("[server] GitHub config changed, full restart...")
 	r.announce.setPending("github")
-	r.announce.setPending("jira")
 
 	if runmode.Current() != runmode.ModeLocal {
 		log.Printf("[server] GitHub changed for org %s: multi-mode re-dues that org only (no fleet restart)", orgID)
 		r.pollerMgr.PollSoon("github", orgID)
 		return
 	}
+
+	// Local mode also restarts the Jira poller below, so announce its next
+	// completion too. Multi mode took the early return above without touching
+	// Jira, so it must not arm a spurious "first Jira poll" toast.
+	r.announce.setPending("jira")
 
 	// Local mode: N=1, so there's no fleet to stampede. The spawner +
 	// curator + profiler resolve per-(org, owner) through the run-credential
