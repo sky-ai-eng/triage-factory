@@ -123,6 +123,9 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 			return lerr
 		}
 		connected = token != ""
+		if !connected {
+			return nil
+		}
 
 		// Identity (users.jira_account_id / jira_display_name) is single-valued
 		// per user, not host-scoped — derived from the credential at capture
