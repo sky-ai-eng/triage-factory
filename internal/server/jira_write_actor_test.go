@@ -9,9 +9,12 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/zalando/go-keyring"
 )
 
 // recordingJiraResolver is a test double for jira.Resolver that records the
@@ -220,5 +223,55 @@ func TestSwipeClaim_GitHubTask_SkipsJiraResolver(t *testing.T) {
 	}
 	if calls, _, _ := res.snapshot(); calls != 0 {
 		t.Errorf("ForUser called %d times for a GitHub task; want 0", calls)
+	}
+}
+
+// TestStockPost_QueueOnly_SkipsJiraResolver pins SKY-463's queue-only
+// optimization: a stock batch containing only "queue" actions synthesizes
+// events + tasks with no Jira mutation, so it must NOT call ForUser — a pure
+// queue can't be made to depend on secret-store availability. The
+// needsUserClient pre-scan runs before the action loop, so this holds even
+// though no entity is seeded (the queue row fails "entity not found" per-row,
+// which is irrelevant to whether the resolver was consulted).
+func TestStockPost_QueueOnly_SkipsJiraResolver(t *testing.T) {
+	keyring.MockInit() // in-memory keychain — the sandbox has no dbus backend
+	s := newTestServer(t)
+	ctx := t.Context()
+	org := runmode.LocalDefaultOrgID
+
+	// Pass the stock POST gate: org Jira creds + a team status rule + the
+	// user's stored Jira identity.
+	if err := integrations.Save(ctx, s.secrets, org, auth.Credentials{
+		JiraURL: "https://jira.example.com",
+		JiraPAT: "tok",
+	}); err != nil {
+		t.Fatalf("save jira creds: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO jira_project_status_rules
+		   (team_id, project_key, pickup_members, in_progress_members, in_progress_canonical, done_members, done_canonical)
+		 VALUES (?, 'SKY', '["To Do"]', '["In Progress"]', 'In Progress', '["Done"]', 'Done')`,
+		runmode.LocalDefaultTeamID,
+	); err != nil {
+		t.Fatalf("seed jira rule: %v", err)
+	}
+	if err := s.users.SetJiraIdentity(ctx, runmode.LocalDefaultUserID, "acc-1", "Tester"); err != nil {
+		t.Fatalf("set jira identity: %v", err)
+	}
+
+	// userErr makes the point sharp: even if the gate regressed and resolved
+	// up front, queue ignores jiraUserClient — so the 200 below wouldn't move.
+	// The forUserCalls assertion is the load-bearing guard.
+	res := &recordingJiraResolver{userErr: jira.ErrNoJiraUserCredential}
+	s.jiraResolver = res
+
+	rec := doJSON(t, s, http.MethodPost, "/api/jira/stock", map[string]any{
+		"actions": []map[string]string{{"issue_key": "SKY-1", "action": "queue"}},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if calls, _, _ := res.snapshot(); calls != 0 {
+		t.Errorf("ForUser called %d times for a queue-only stock POST; want 0 (queue does no Jira write)", calls)
 	}
 }

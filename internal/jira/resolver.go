@@ -92,12 +92,15 @@ func NewResolver(secrets db.SecretStore, orgs db.OrgsStore) Resolver {
 }
 
 // ForSystem resolves the org's Jira service credential into a DC-PAT client.
-// The base URL is the org's stored jira_url secret (the same value the poller
-// and exec CLI have always used). Returns ErrNoJiraSystemCredential when either
-// the URL or the PAT is absent; a backend read error propagates so a transient
-// vault/keychain outage isn't misreported as "not configured".
+// The base URL is the org's stored jira_url secret, canonicalized through
+// CanonicalHost so the system client talks to the exact same trimmed/validated
+// origin a per-user client does (ForUser) — no drift from a stray trailing
+// slash or whitespace in the stored value. Returns ErrNoJiraSystemCredential
+// when the URL is absent/unusable or the PAT is absent; a backend read error
+// propagates so a transient vault/keychain outage isn't misreported as "not
+// configured".
 func (r *resolver) ForSystem(ctx context.Context, orgID string) (*Client, error) {
-	baseURL, err := r.secrets.GetSystem(ctx, orgID, keyJiraURL)
+	rawURL, err := r.secrets.GetSystem(ctx, orgID, keyJiraURL)
 	if err != nil {
 		return nil, fmt.Errorf("resolve jira url for org %s: %w", orgID, err)
 	}
@@ -105,10 +108,11 @@ func (r *resolver) ForSystem(ctx context.Context, orgID string) (*Client, error)
 	if err != nil {
 		return nil, fmt.Errorf("resolve jira pat for org %s: %w", orgID, err)
 	}
-	if baseURL == "" || pat == "" {
+	host, ok := CanonicalHost(rawURL)
+	if !ok || pat == "" {
 		return nil, fmt.Errorf("%w: org=%s", ErrNoJiraSystemCredential, orgID)
 	}
-	return NewClient(DataCenterPAT(baseURL, pat)), nil
+	return NewClient(DataCenterPAT(host, pat)), nil
 }
 
 // ForUser resolves the acting user's own Jira credential into a DC-PAT client,

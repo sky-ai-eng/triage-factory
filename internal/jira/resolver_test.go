@@ -84,9 +84,10 @@ func TestForSystem_BuildsOrgClient(t *testing.T) {
 // half (URL or PAT) is absent — the poller/exec "not configured" boundary.
 func TestForSystem_MissingCredential(t *testing.T) {
 	cases := map[string]map[string]string{
-		"both empty": {},
-		"url only":   {keyJiraURL: "https://jira.example.com"},
-		"pat only":   {keyJiraPAT: "org-pat"},
+		"both empty":    {},
+		"url only":      {keyJiraURL: "https://jira.example.com"},
+		"pat only":      {keyJiraPAT: "org-pat"},
+		"malformed url": {keyJiraURL: "not-a-url", keyJiraPAT: "org-pat"},
 	}
 	for name, sys := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -110,6 +111,29 @@ func TestForSystem_BackendError(t *testing.T) {
 	}
 	if errors.Is(err, ErrNoJiraSystemCredential) {
 		t.Errorf("a backend read error must not collapse to ErrNoJiraSystemCredential")
+	}
+}
+
+// TestForSystem_CanonicalizesBaseURL proves ForSystem runs the stored jira_url
+// through CanonicalHost, so the system client talks to the same trimmed origin
+// a per-user client would even when the secret carries stray whitespace or a
+// trailing slash. The leading space alone would make http.NewRequest fail if it
+// weren't trimmed.
+func TestForSystem_CanonicalizesBaseURL(t *testing.T) {
+	srv, rec := captureServer(t, `{"key":"PROJ-1"}`)
+	secrets := &fakeSecrets{sys: map[string]string{
+		keyJiraURL: "  " + srv.URL + "/  ",
+		keyJiraPAT: "org-pat",
+	}}
+	c, err := NewResolver(secrets, &fakeOrgs{}).ForSystem(context.Background(), testOrgID)
+	if err != nil {
+		t.Fatalf("ForSystem: %v", err)
+	}
+	if _, err := c.GetIssue(context.Background(), "PROJ-1"); err != nil {
+		t.Fatalf("GetIssue (stored base URL not canonicalized?): %v", err)
+	}
+	if _, path := rec.read(); path != "/rest/api/2/issue/PROJ-1" {
+		t.Errorf("path = %q, want /rest/api/2/issue/PROJ-1 (trailing slash not trimmed)", path)
 	}
 }
 
