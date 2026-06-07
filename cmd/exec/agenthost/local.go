@@ -247,7 +247,7 @@ func (c *LocalClient) BuildAgentRunFooter(_ context.Context, kind string) (strin
 func (c *LocalClient) jiraSystemClient(ctx context.Context) (*jiraclient.Client, error) {
 	client, err := jiraclient.NewResolver(c.stores.Secrets, c.stores.Orgs).ForSystem(ctx, c.info.OrgID)
 	if errors.Is(err, jiraclient.ErrNoJiraSystemCredential) {
-		return nil, errors.New("Jira not configured. Run triagefactory and complete setup first.")
+		return nil, errors.New("Jira not configured; run triagefactory and complete setup first")
 	}
 	if err != nil {
 		return nil, err
