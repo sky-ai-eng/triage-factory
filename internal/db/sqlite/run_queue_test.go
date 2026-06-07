@@ -43,6 +43,13 @@ func TestRunQueueStore_SQLite_EnqueueClaim(t *testing.T) {
 		t.Fatalf("EnqueueRun: %v", err)
 	}
 
+	// Simulate a run that got partway (captured a session) before being
+	// re-queued by a crash reconcile, so the claim must carry session_id back
+	// for runAgent's resume-on-reclaim path.
+	if _, err := conn.Exec(`UPDATE runs SET session_id = 'rq-sess' WHERE id = 'rq-run-0'`); err != nil {
+		t.Fatalf("set session_id: %v", err)
+	}
+
 	got, err := stores.RunQueue.ClaimNextRun(ctx)
 	if err != nil {
 		t.Fatalf("ClaimNextRun: %v", err)
@@ -52,6 +59,9 @@ func TestRunQueueStore_SQLite_EnqueueClaim(t *testing.T) {
 	}
 	if got.ID != "rq-run-0" || got.BlueprintRunID != brID || got.Status != "running" {
 		t.Fatalf("claimed run = %+v", got)
+	}
+	if got.SessionID != "rq-sess" {
+		t.Fatalf("claimed session_id = %q, want rq-sess (resume-on-reclaim plumbing)", got.SessionID)
 	}
 	if got.Attempts != 1 {
 		t.Fatalf("attempts = %d, want 1", got.Attempts)

@@ -97,6 +97,16 @@ type LiveRun struct {
 	stderr    string
 }
 
+// InteractiveSupported reports whether this host can run a LiveRun.
+// Streaming-input mode is not yet wired through the gVisor sandbox (the
+// bidirectional channel is a later phase), so a sandbox-mode host returns
+// false — callers fall back to the one-shot Run there. Mirrors the gate
+// RunInteractive enforces internally, exposed so the delegate layer can
+// pick the execution path before building options.
+func InteractiveSupported() bool {
+	return !shouldSandbox()
+}
+
 // RunInteractive spawns the agent in streaming-input mode and returns a
 // LiveRun the caller steers. The reader loop runs in a background
 // goroutine; the call returns as soon as the subprocess is started.

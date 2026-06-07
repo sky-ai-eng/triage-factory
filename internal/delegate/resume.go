@@ -452,7 +452,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		}
 	}
 
-	apOutcome, runErr := agentproc.Run(ctx, agentproc.RunOptions{
+	baseOpts := agentproc.RunOptions{
 		Cwd:            cwd,
 		Model:          model,
 		SessionID:      sessionID,
@@ -464,26 +464,52 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		OrgID:          orgID,
 		Secrets:        s.getRunSecrets(),
 		StartAgentHost: startAgentHost,
-	}, newRunSink(s, orgID, runID, triggerType, creatorUserID))
+	}
+	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)
 
-	outcome := &ResumeOutcome{}
-	if apOutcome != nil {
-		outcome.Completion = apOutcome.Result
-		outcome.StderrText = apOutcome.Stderr
-		if apOutcome.Result != nil {
-			outcome.Result = parseAgentResult(apOutcome.Result.Result)
-		}
+	// Resume executes as a LiveRun (re-registered in procs, so a resumed run
+	// is interruptible/steerable), falling back to the one-shot sandbox path
+	// in multi mode. idleTimeout 0 disables hibernation: a resume is a
+	// bounded re-invoke — the gate's correction, or a user-answered yield
+	// continuing to a completion — not a fresh long-lived autonomous run, so
+	// it always drives to a terminal result. A nil permission handler keeps
+	// the same allowlist-only autonomous gate as the initial run.
+	var out liveOutcome
+	if agentproc.InteractiveSupported() {
+		out = s.runLiveAndDrive(ctx, liveRunSpec{
+			park: liveParkContext{
+				orgID:         orgID,
+				runID:         runID,
+				namespace:     opts.Namespace,
+				claudeCwd:     cwd,
+				triggerType:   triggerType,
+				creatorUserID: creatorUserID,
+			},
+			opts:        baseOpts,
+			perms:       nil,
+			sink:        sink,
+			idleTimeout: 0,
+		})
+	} else {
+		out = s.runOneShot(ctx, baseOpts, sink)
 	}
 
-	if runErr != nil && (apOutcome == nil || apOutcome.Result == nil) {
-		// agentproc.Run returns ctx.Err() directly when ctx triggered
-		// the kill before any completion was captured; preserve that
-		// shape so the SKY-139 yield-resume goroutine's ctx.Err()
-		// check still routes through markCancelled.
+	outcome := &ResumeOutcome{}
+	outcome.Completion = out.result
+	outcome.StderrText = out.stderr
+	if out.result != nil {
+		outcome.Result = parseAgentResult(out.result.Result)
+	}
+
+	if out.err != nil && out.result == nil {
+		// The driver returns ctx.Err() directly when ctx triggered the kill
+		// before any completion was captured; preserve that shape so the
+		// SKY-139 yield-resume goroutine's ctx.Err() check still routes
+		// through markCancelled.
 		if ctx.Err() != nil {
 			return outcome, ctx.Err()
 		}
-		return outcome, fmt.Errorf("agent runtime resume failed: %w (stderr: %s)", runErr, outcome.StderrText)
+		return outcome, fmt.Errorf("agent runtime resume failed: %w (stderr: %s)", out.err, outcome.StderrText)
 	}
 
 	return outcome, nil

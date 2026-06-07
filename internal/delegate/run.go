@@ -23,6 +23,19 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
+// sessionTranscriptExists reports whether the Claude session transcript for
+// sessionID is on disk for the agent's cwd — the cheap existence check the
+// crash-reclaim resume gates on, so a `--resume` is only attempted when the
+// session JSONL actually survived (a missing one would hard-fail the agent).
+func sessionTranscriptExists(wtPath, sessionID string) bool {
+	p, err := worktree.ClaudeSessionPath(worktree.ResolveClaudeProjectCwd(wtPath), sessionID)
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(p)
+	return err == nil
+}
+
 // runAgent is the generic agent execution loop. Works for any task type.
 //
 // creatorUserID carries the user identity for manual runs; it's the
@@ -30,7 +43,13 @@ import (
 // RLS policies on the writes pass under tf_app. Empty for event-
 // triggered runs (those write through the admin-pool `...System`
 // methods, no JWT-claims context).
-func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model string, triggerType string, creatorUserID string) {
+// priorSessionID is the run row's existing session_id at claim time — empty
+// for a first claim, non-empty when the dispatcher re-claims a run stranded
+// mid-flight by a crash. When present and the session transcript survived
+// alongside the warm worktree, the agent resumes that session instead of
+// starting fresh, so a restart continues the run rather than re-running it
+// from scratch.
+func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model string, triggerType string, creatorUserID string, priorSessionID string) {
 	orgID := cfg.orgID
 	// parked is set true by processCompletion when this run ends in a dormant
 	// state (awaiting_input / pending_approval) rather than terminating. The
@@ -237,10 +256,24 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		}
 	}
 
+	// Crash re-claim: if the run already carries a session from a prior
+	// (crashed) invocation AND that session's transcript survived next to the
+	// warm worktree, resume it rather than starting fresh. buildStepConfig has
+	// already guaranteed the worktree is on disk by now (a host-loss re-claim
+	// fails in ensureWorkspace before reaching here), so the transcript is
+	// present exactly when it's safe to resume; otherwise we fall back to a
+	// fresh session, which is correct, just re-does the step's work.
+	resumeSession := ""
+	if priorSessionID != "" && sessionTranscriptExists(claudeCwd, priorSessionID) {
+		resumeSession = priorSessionID
+		log.Printf("[delegate] run %s re-claimed mid-flight; resuming session %s", runID, priorSessionID)
+	}
+
 	log.Printf("[delegate] claude starting for run %s (cwd: %s)", runID, claudeCwd)
-	outcome, err := agentproc.Run(ctx, agentproc.RunOptions{
+	baseOpts := agentproc.RunOptions{
 		Cwd:            claudeCwd,
 		Model:          model,
+		SessionID:      resumeSession,
 		Message:        prompt,
 		AllowedTools:   agentproc.BuildAllowedToolsWithExtras(selfBin, cfg.extraAllowedTools),
 		MaxTurns:       100,
@@ -250,7 +283,37 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		OrgID:          orgID,
 		Secrets:        s.getRunSecrets(),
 		StartAgentHost: startAgentHost,
-	}, newRunSink(s, orgID, runID, triggerType, creatorUserID))
+	}
+	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)
+
+	// Execute as a long-lived LiveRun off the dispatcher where supported
+	// (local), falling back to the one-shot sandbox path otherwise (multi —
+	// streaming-input isn't wired through gVisor yet). Both produce the same
+	// liveOutcome shape for the shared branching below.
+	var out liveOutcome
+	if agentproc.InteractiveSupported() {
+		out = s.runLiveAndDrive(ctx, liveRunSpec{
+			park: liveParkContext{
+				orgID:         orgID,
+				runID:         runID,
+				taskID:        task.ID,
+				namespace:     namespace,
+				claudeCwd:     claudeCwd,
+				triggerType:   triggerType,
+				creatorUserID: creatorUserID,
+			},
+			opts: baseOpts,
+			// Autonomous run: a nil permission handler makes the wrapper omit
+			// canUseTool, so the allowlist is the sole gate (off-allowlist
+			// tools auto-deny, no prompt) — byte-identical to the headless
+			// one-shot path. P3 wires the browser pass-through handler.
+			perms:       nil,
+			sink:        sink,
+			idleTimeout: s.idleTimeout(),
+		})
+	} else {
+		out = s.runOneShot(ctx, baseOpts, sink)
+	}
 
 	// If Takeover() flipped the takenOver flag while we were streaming,
 	// every code path below — completion ingestion, status updates, fail
@@ -260,21 +323,24 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		return
 	}
 
-	if outcome != nil && outcome.Result != nil {
-		parked = s.processCompletion(ctx, orgID, runID, cfg.blueprintRunID, task, outcome.Result, claudeCwd, outcome.SessionID, model, cfg.owner, cfg.repo, triggerType, creatorUserID, cfg.extraAllowedTools)
+	// Idle hibernation parked the run (awaiting_input, snapshot written) — the
+	// same dormant disposition as a yield, so keep the warm worktree.
+	if out.hibernated {
+		parked = true
 		return
 	}
 
-	if err != nil {
+	if out.result != nil {
+		parked = s.processCompletion(ctx, orgID, runID, cfg.blueprintRunID, task, out.result, claudeCwd, out.sessionID, model, cfg.owner, cfg.repo, triggerType, creatorUserID, cfg.extraAllowedTools)
+		return
+	}
+
+	if out.err != nil {
 		if ctx.Err() != nil {
 			s.handleCancelled(orgID, runID, startTime, cfg.wtPath, triggerType, creatorUserID)
 			return
 		}
-		stderr := ""
-		if outcome != nil {
-			stderr = outcome.Stderr
-		}
-		s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, fmt.Sprintf("%v\nstderr: %s", err, stderr))
+		s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, fmt.Sprintf("%v\nstderr: %s", out.err, out.stderr))
 		return
 	}
 

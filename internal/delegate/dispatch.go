@@ -288,7 +288,10 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 	s.cancels[run.ID] = stepCancel
 	s.mu.Unlock()
 
-	s.runAgent(stepCtx, run.ID, *task, mission, cfg, time.Now(), run.Model, run.TriggerType, run.CreatorUserID)
+	// run.SessionID is empty on a first claim and non-empty when this run was
+	// re-claimed mid-flight by a crash — runAgent resumes it when the warm
+	// session survived, else starts fresh.
+	s.runAgent(stepCtx, run.ID, *task, mission, cfg, time.Now(), run.Model, run.TriggerType, run.CreatorUserID, run.SessionID)
 
 	s.mu.Lock()
 	delete(s.cancels, run.ID)
