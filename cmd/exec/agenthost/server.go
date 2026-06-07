@@ -113,18 +113,21 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 }
 
-// connReadTimeout caps how long the daemon waits for a frame to
-// arrive after accept. A connecting client that never sends a frame
-// is either confused or malicious; either way, no reason to hold the
-// goroutine open.
-const connReadTimeout = 10 * time.Second
+// connIOTimeout bounds a single frame's I/O on a connection — reading
+// the request frame after accept, and writing the response (or error)
+// frame. A client that never sends a frame, or never drains the reply,
+// is confused or malicious; either way, no reason to hold the goroutine
+// open. The dispatch between the read and the write is NOT bounded by
+// this — it gets its own, longer budget (callTimeout) — so a slow DB or
+// upstream API call doesn't trip the frame deadline.
+const connIOTimeout = 10 * time.Second
 
 // handleConn reads one request, dispatches it, writes one response,
 // closes. Any malformed input is responded to with an error frame
 // rather than silently dropped — the client has to know the call
 // failed.
 func (s *Server) handleConn(conn net.Conn) {
-	if err := conn.SetDeadline(time.Now().Add(connReadTimeout)); err != nil {
+	if err := conn.SetDeadline(time.Now().Add(connIOTimeout)); err != nil {
 		log.Printf("[agenthost] set deadline: %v", err)
 		return
 	}
@@ -143,10 +146,10 @@ func (s *Server) handleConn(conn net.Conn) {
 		return
 	}
 
-	// Clear the read deadline now that the request is in hand —
-	// the dispatch below may make DB calls that take longer than
-	// connReadTimeout. We re-arm a write deadline before writing
-	// the response.
+	// Clear the read deadline now that the request is in hand — the
+	// dispatch below may make DB or upstream API calls (e.g. a host-side
+	// Jira request) that take longer than connIOTimeout. We re-arm a
+	// write deadline before writing the response.
 	_ = conn.SetReadDeadline(time.Time{})
 
 	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
@@ -165,7 +168,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		}
 	}
 
-	if err := conn.SetWriteDeadline(time.Now().Add(connReadTimeout)); err != nil {
+	if err := conn.SetWriteDeadline(time.Now().Add(connIOTimeout)); err != nil {
 		log.Printf("[agenthost] set write deadline: %v", err)
 		return
 	}
@@ -175,7 +178,7 @@ func (s *Server) handleConn(conn net.Conn) {
 }
 
 func (s *Server) sendError(conn net.Conn, msg string) {
-	if err := conn.SetWriteDeadline(time.Now().Add(connReadTimeout)); err != nil {
+	if err := conn.SetWriteDeadline(time.Now().Add(connIOTimeout)); err != nil {
 		return
 	}
 	_ = writeFrame(conn, response{Error: msg})
