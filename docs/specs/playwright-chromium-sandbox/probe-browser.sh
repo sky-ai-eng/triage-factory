@@ -181,7 +181,7 @@ spec["root"] = {"path": "rootfs", "readonly": True}
 spec["hostname"] = "tf-sandbox"
 spec.setdefault("mounts", []).append({
     "destination": "/work", "type": "bind",
-    "source": "/src/_scratch/browser-probe/work", "options": ["rbind", "rw"],
+    "source": os.environ.get("WORK_MOUNT_SRC", "/src/_scratch/browser-probe/work"), "options": ["rbind", "rw"],
 })
 # join the pre-created netns (lo up), like production passes netnsPath.
 for ns in spec["linux"]["namespaces"]:
