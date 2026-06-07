@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
+	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/projectclassify"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
@@ -83,6 +84,11 @@ func (a *App) buildExecution() error {
 	// process-global hot-swap.
 	a.spawner = delegate.NewSpawner(a.database, a.stores, nil, a.wsHub, "", a.storedTakeoverDir)
 	a.spawner.SetRunCredentialResolvers(a.ghResolver, a.runSecrets, a.modelFor)
+	// TFAC-300: the board→Jira lifecycle mirror resolves the org's system/bot
+	// Jira credential per write through this resolver (same construction the
+	// server + poller use). A fresh instance is fine — the resolver is stateless,
+	// reading creds fresh each call, so a config-change hot-swap is honored.
+	a.spawner.SetJiraResolver(jira.NewResolver(a.stores.Secrets, a.stores.Orgs))
 	// Hand the full Stores bundle so the sandbox-branch agenthost daemon can
 	// serve the routing-sensitive RPCs the agent's `triagefactory exec`
 	// invocations send. Nil-safe inside the spawner on local/non-sandbox.

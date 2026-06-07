@@ -17,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -71,6 +72,12 @@ type Spawner struct {
 	// every per-org read goes through OrgsStore.GetSettingsSystem
 	// (no JWT claims context on the run goroutine).
 	orgs db.OrgsStore
+	// jiraRules reads the team's per-project Jira status rules under the
+	// admin pool (ListForTeamSystem) for the TFAC-300 board→Jira mirror's
+	// system-context rule lookup. Populated from the Stores bundle in
+	// NewSpawner — a plain store ref like s.tasks, set once and never
+	// mutated, so it needs no mu guard (its sibling seam jiraResolver does).
+	jiraRules db.JiraStatusRulesStore
 	// takeoverDir is the raw instance_config.server_takeover_dir
 	// value read once at boot — may be empty, "~/..." or an
 	// absolute path. The Release path runs it through
@@ -100,6 +107,13 @@ type Spawner struct {
 	ghResolver ghclient.Resolver                            // per-(org, owner) GitHub client source (App token in multi, keychain PAT in local)
 	runSecrets agentproc.SecretsReader                      // per-org LLM-credential reader (nil in local → ambient subscription; system-door reader in multi)
 	modelFor   func(context.Context, string, string) string // per-(org, team) default-model resolver (prompt.Model still overrides per delegation)
+	// jiraResolver routes the TFAC-300 board→Jira mirror under the org's
+	// system/bot credential (ForSystem). Wired post-construction via
+	// SetJiraResolver (the resolver is built in the app composition, not handed
+	// to NewSpawner); nil disables the mirror (tests, local without Jira).
+	// mu-guarded like the credential seam above it — creds hot-swap on config
+	// change, so a client is resolved fresh per write and never cached here.
+	jiraResolver jira.Resolver
 
 	// blobs is the durable blob/object store handle for the blueprint
 	// workspace seam: local mode → an on-disk store under the state root,
@@ -155,6 +169,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		taskMemory:   stores.TaskMemory,
 		runWorktrees: stores.RunWorktrees,
 		orgs:         stores.Orgs,
+		jiraRules:    stores.JiraStatusRules,
 		tx:           stores.Tx,
 		ghClient:     ghClient,
 		wsHub:        wsHub,
@@ -311,6 +326,27 @@ func (s *Spawner) SetRunCredentialResolvers(resolver ghclient.Resolver, secrets 
 	s.ghResolver = resolver
 	s.runSecrets = secrets
 	s.modelFor = modelFor
+}
+
+// SetJiraResolver wires the Jira write-actor resolver so the TFAC-300
+// board→Jira mirror can resolve the org's system/bot credential at each
+// transition. Set once at startup, post-NewSpawner (the resolver is built in
+// the app composition, like the GitHub one). Nil-safe: an unset resolver
+// disables the mirror — tests and local-mode-without-Jira just skip the Jira
+// write. Same post-construction injection shape as SetRunCredentialResolvers.
+func (s *Spawner) SetJiraResolver(r jira.Resolver) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.jiraResolver = r
+}
+
+// getJiraResolver returns the wired Jira resolver, or nil when the mirror is
+// disabled. The lock keeps it race-free against a startup-time SetJiraResolver,
+// matching the credential-seam getters.
+func (s *Spawner) getJiraResolver() jira.Resolver {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.jiraResolver
 }
 
 // SetStorage wires the durable blob store into the spawner. Done
@@ -514,6 +550,15 @@ func (s *Spawner) recomputeTaskBoardColumn(orgID, taskID string) {
 		return
 	}
 	s.broadcastTaskUpdate(orgID, taskID, target)
+
+	// TFAC-300: mirror the board move back onto the Jira ticket under the org's
+	// system/bot credential. Past the idempotency guard, so this fires only on a
+	// real column change — and both in_progress and in_review collapse to the
+	// same InProgress bucket, so bouncing across human-interaction points makes
+	// at most one real Jira move (the rest no-op in the mirror's own membership
+	// skip). task is bot-claimed here (guarded above), so the write is always
+	// bot-attributed by construction.
+	s.mirrorJiraInProgress(orgID, task)
 }
 
 // broadcastTaskUpdate emits a SKY-330 task_updated WS event so the

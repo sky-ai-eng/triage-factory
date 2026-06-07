@@ -135,6 +135,16 @@ func (s *Spawner) terminateBlueprint(
 		if closeErr != nil {
 			log.Printf("[blueprint] close task %s: %v", taskID, closeErr)
 		}
+
+		// TFAC-300: mirror the terminal board move onto the Jira ticket —
+		// transition it into the Done bucket under the system/bot credential.
+		// Only here, in the completed branch: a failed/aborted/cancelled
+		// blueprint never reaches it, so a non-completion never moves the ticket
+		// to Done. mirrorJiraDoneForTask re-checks bot ownership, so a mid-run
+		// user takeover (claim flipped to the user) leaves the terminal Jira
+		// write to the user path. Close above does not clear the claim, so the
+		// ownership re-read still sees the bot.
+		s.mirrorJiraDoneForTask(bgCtx, orgID, taskID)
 	}
 	// Aborted / failed / cancelled blueprints intentionally do NOT mark
 	// the task done — leave it in the queue so a human can inspect the
