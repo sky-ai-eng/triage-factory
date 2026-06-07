@@ -54,7 +54,16 @@ type PermissionDecision struct {
 // is parked on the answer. A nil handler denies every request.
 type PermissionHandler func(PermissionRequest) PermissionDecision
 
-const closeDrainTimeout = 5 * time.Second
+const (
+	// closeDrainTimeout bounds the graceful end→drain phase before we
+	// escalate to SIGKILL.
+	closeDrainTimeout = 5 * time.Second
+	// closeKillTimeout bounds the post-SIGKILL wait. The reader goroutine
+	// closes done, but it can be wedged in a slow Sink or PermissionHandler
+	// (both run on it) where SIGKILL'ing the subprocess won't free it — so
+	// Close returns rather than blocking the caller forever.
+	closeKillTimeout = 5 * time.Second
+)
 
 // LiveRun is a single long-lived streaming-input agent process you can
 // send messages to, interrupt, switch permission modes on, and answer
@@ -75,6 +84,11 @@ type LiveRun struct {
 	done      chan struct{} // closed when the reader loop exits
 	ready     chan struct{} // closed when the wrapper emits control/ready
 	readyOnce sync.Once
+
+	// Close phase bounds; zero falls back to the package consts. Fields
+	// (not just consts) so tests can drive the timeout paths quickly.
+	drainTimeout time.Duration
+	killTimeout  time.Duration
 
 	mu        sync.Mutex
 	termErr   error
@@ -208,13 +222,32 @@ func (l *LiveRun) Close() error {
 	// already be gone, in which case the drain wait returns immediately).
 	_ = l.writeControl(map[string]any{"kind": "end"})
 
+	drain := l.drainTimeout
+	if drain <= 0 {
+		drain = closeDrainTimeout
+	}
+	kill := l.killTimeout
+	if kill <= 0 {
+		kill = closeKillTimeout
+	}
+
 	select {
 	case <-l.done:
-	case <-time.After(closeDrainTimeout):
-		l.cancel() // SIGKILL the process group
-		<-l.done
+		return l.Err()
+	case <-time.After(drain):
 	}
-	return l.Err()
+
+	// Graceful drain timed out — SIGKILL the process group, then wait with
+	// a second bound. If the reader goroutine is blocked in a Sink or
+	// PermissionHandler, SIGKILL won't unblock it, so we return a timeout
+	// error instead of hanging the caller forever.
+	l.cancel()
+	select {
+	case <-l.done:
+		return l.Err()
+	case <-time.After(kill):
+		return fmt.Errorf("live run close timed out after SIGKILL; reader goroutine may be blocked in a sink or permission handler")
+	}
 }
 
 // Done is closed when the run has fully terminated and Err/Result/
