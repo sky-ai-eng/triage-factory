@@ -477,6 +477,10 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	var out liveOutcome
 	if agentproc.InteractiveSupported() {
 		out = s.runLiveAndDrive(ctx, liveRunSpec{
+			// taskID is intentionally omitted: hibernation is disabled on
+			// resumes (idleTimeout 0 below), so hibernatePark — the only
+			// taskID consumer — is unreachable here. (It also degrades safely
+			// to a no-op board recompute if a future change re-enables idle.)
 			park: liveParkContext{
 				orgID:         orgID,
 				runID:         runID,

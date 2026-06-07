@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -49,6 +50,20 @@ func (f *fakeLiveProc) wasClosed() bool {
 	return f.closed
 }
 
+// exit simulates the process terminating on its own (a crash, or a Close
+// from elsewhere) with the given folded result/err, closing Done() so the
+// driver's proc.Done() branch fires.
+func (f *fakeLiveProc) exit(result *agentproc.Result, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.result = result
+	f.err = err
+	if !f.closed {
+		f.closed = true
+		close(f.done)
+	}
+}
+
 // TestDriveLiveRun_TerminalResultClosesAndReturns: a turn-terminal result
 // closes the process (freeing the session for the gate's resume) and is
 // handed back for processCompletion — no hibernation.
@@ -91,6 +106,45 @@ func TestDriveLiveRun_CtxCancelReturnsErr(t *testing.T) {
 	}
 	if !proc.wasClosed() {
 		t.Error("expected the process closed on ctx cancel")
+	}
+}
+
+// TestDriveLiveRun_ProcessExitCarriesResult covers the proc.Done() branch:
+// when the process exits on its own (rather than us closing it off the
+// results channel), the driver hands back the folded result for
+// processCompletion — and does not hibernate.
+func TestDriveLiveRun_ProcessExitCarriesResult(t *testing.T) {
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	proc := newFakeLiveProc("sess")
+	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"exited"}`}
+	proc.exit(want, nil) // process already gone, Done() closed, with a result set
+
+	out := s.driveLiveRun(context.Background(), liveParkContext{}, proc, make(chan *agentproc.Result), make(chan struct{}), time.Minute)
+
+	if out.result != want {
+		t.Errorf("result = %+v, want %+v", out.result, want)
+	}
+	if out.hibernated {
+		t.Error("did not expect hibernation on a process exit")
+	}
+}
+
+// TestDriveLiveRun_ProcessExitCarriesErr is the crash half of the proc.Done()
+// branch: an exit with no result surfaces the process error so the caller
+// routes through failRun.
+func TestDriveLiveRun_ProcessExitCarriesErr(t *testing.T) {
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	proc := newFakeLiveProc("sess")
+	wantErr := errors.New("agent runtime exited with error")
+	proc.exit(nil, wantErr)
+
+	out := s.driveLiveRun(context.Background(), liveParkContext{}, proc, make(chan *agentproc.Result), make(chan struct{}), time.Minute)
+
+	if out.result != nil {
+		t.Errorf("result = %+v, want nil on a crash exit", out.result)
+	}
+	if !errors.Is(out.err, wantErr) {
+		t.Errorf("err = %v, want %v", out.err, wantErr)
 	}
 }
 

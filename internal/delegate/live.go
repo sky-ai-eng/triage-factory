@@ -92,6 +92,11 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 	activity := make(chan struct{}, 64)
 
 	spec.opts.OnResult = func(r *agentproc.Result) {
+		// The driver consumes only the FIRST result and then closes the
+		// process, so a full buffer here means later results arrived for a run
+		// we've already decided to terminate — dropping them is intentional,
+		// not lossy. A future multi-turn driver (P3 steering, which keeps the
+		// process warm past a conversational turn) MUST revisit this drop.
 		select {
 		case results <- r:
 		default:
@@ -122,6 +127,13 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 // activity, so a slow-but-working agent (constant tool/text output) never
 // hibernates — only a genuinely quiet process does. idleTimeout<=0 disables
 // hibernation entirely (the gate's bounded resume always produces a result).
+//
+// The idle window is armed at entry (process spawn). The first stream event —
+// typically system/init, sub-second — resets it, so idleTimeout is effectively
+// the grace a *no-output* process gets before hibernating; keep it well above
+// agent-startup latency (the 5-min default is; a tiny injected value will
+// hibernate before the first turn, which is exactly what the idle test leans
+// on).
 //
 // Pulled out from runLiveAndDrive so it can be driven with a fake proc +
 // hand-fed channels in tests, without spawning a subprocess.
