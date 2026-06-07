@@ -188,6 +188,46 @@ func TestJiraIdentityStatus(t *testing.T) {
 	}
 }
 
+// TestJiraIdentityStatus_ConfiguredHostNoCredential scopes the status reader's
+// "Jira host configured, but this user hasn't bound a credential yet" branch —
+// the common initial state for every new member. It deliberately seeds a STATIC
+// host (no live stub): the status reader never round-trips to Jira (it resolves
+// the URL and reads the secret store), so connected=false must report against a
+// configured host without any server alive. account stays empty (the 0575c1a
+// early-return skips the identity read when not connected).
+func TestJiraIdentityStatus_ConfiguredHostNoCredential(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	const host = "https://jira.corp.example.com"
+	seedLocalOrgJiraHost(t, s, host)
+
+	rec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status endpoint=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var out jiraIdentityStatusResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if out.Connected {
+		t.Errorf("connected=true with no stored credential: %+v", out)
+	}
+	// The resolved host is still reported (the FE needs it for the bind copy),
+	// even though the user isn't connected.
+	if out.Host != host {
+		t.Errorf("host = %q, want the configured host %q", out.Host, host)
+	}
+	if out.Account != "" {
+		t.Errorf("account = %q, want empty when not connected", out.Account)
+	}
+	if out.ConnectAvailable {
+		t.Errorf("connect_available=true, want false: %+v", out)
+	}
+}
+
 // TestJiraIdentityPAT_BadToken_Returns422 pins the "your action" failure shape:
 // a token the host rejects is a 422 (not the infra 502), and no credential is
 // stored.
