@@ -54,7 +54,7 @@ type backfillCandidate struct {
 //
 // Entities already assigned to this project are excluded — there's
 // nothing to backfill for them.
-func (h *backfillHandler) handleBackfillCandidates(w http.ResponseWriter, r *http.Request) {
+func (bf *backfillHandler) handleBackfillCandidates(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
@@ -63,7 +63,7 @@ func (h *backfillHandler) handleBackfillCandidates(w http.ResponseWriter, r *htt
 	projectID := r.PathValue("id")
 	var project *domain.Project
 	var out []backfillCandidate
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := bf.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		project, e = tx.Projects.Get(r.Context(), orgID, projectID)
 		if e != nil {
@@ -165,7 +165,7 @@ type backfillFailure struct {
 // (internal/server/stock.go): per-entity failures are collected into
 // `failed: [{entity_id, error}]` and the call returns 200 with the
 // applied count rather than failing the whole batch on a single row.
-func (h *backfillHandler) handleBackfill(w http.ResponseWriter, r *http.Request) {
+func (bf *backfillHandler) handleBackfill(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
@@ -173,7 +173,7 @@ func (h *backfillHandler) handleBackfill(w http.ResponseWriter, r *http.Request)
 	userID := ClaimsFrom(r.Context()).Subject
 	projectID := r.PathValue("id")
 	var project *domain.Project
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := bf.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		project, e = tx.Projects.Get(r.Context(), orgID, projectID)
 		return e
@@ -217,7 +217,7 @@ func (h *backfillHandler) handleBackfill(w http.ResponseWriter, r *http.Request)
 		// entity row by id, and a stale UI could quietly stamp
 		// classified_at on closed work.
 		var failure *backfillFailure
-		txErr := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		txErr := bf.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 			entity, lookupErr := tx.Entities.Get(r.Context(), orgID, eid)
 			if lookupErr != nil {
 				failure = &backfillFailure{EntityID: eid, Error: "lookup failed: " + lookupErr.Error()}
@@ -263,8 +263,8 @@ func (h *backfillHandler) handleBackfill(w http.ResponseWriter, r *http.Request)
 		assigned = append(assigned, eid)
 	}
 
-	if len(assigned) > 0 && h.ws != nil {
-		h.ws.Broadcast(websocket.Event{
+	if len(assigned) > 0 && bf.ws != nil {
+		bf.ws.Broadcast(websocket.Event{
 			Type:      "entities_assigned_to_project",
 			OrgID:     orgID,
 			ProjectID: projectID,

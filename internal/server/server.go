@@ -721,15 +721,15 @@ func (s *Server) routes() {
 	// Unified event_handlers endpoints (SKY-259). Replace the former
 	// /api/task-rules + /api/triggers split — kind is passed as ?kind=
 	// on list, in the body on create, derived on update.
-	ehh := &eventHandlersHandler{tx: s.tx}
-	s.api("GET /api/event-handlers", ehh.handleEventHandlersList)
-	s.apiMutating("POST /api/event-handlers", ehh.handleEventHandlerCreate)
-	s.apiMutating("PUT /api/event-handlers/reorder", ehh.handleEventHandlerReorder)
-	s.apiMutating("PATCH /api/event-handlers/{id}", ehh.handleEventHandlerUpdate)
-	s.apiMutating("PUT /api/event-handlers/{id}", ehh.handleEventHandlerUpdate)
-	s.apiMutating("DELETE /api/event-handlers/{id}", ehh.handleEventHandlerDelete)
-	s.apiMutating("POST /api/event-handlers/{id}/toggle", ehh.handleEventHandlerToggle)
-	s.apiMutating("POST /api/event-handlers/{id}/promote", ehh.handleEventHandlerPromote)
+	eh := &eventHandlersHandler{tx: s.tx}
+	s.api("GET /api/event-handlers", eh.handleEventHandlersList)
+	s.apiMutating("POST /api/event-handlers", eh.handleEventHandlerCreate)
+	s.apiMutating("PUT /api/event-handlers/reorder", eh.handleEventHandlerReorder)
+	s.apiMutating("PATCH /api/event-handlers/{id}", eh.handleEventHandlerUpdate)
+	s.apiMutating("PUT /api/event-handlers/{id}", eh.handleEventHandlerUpdate)
+	s.apiMutating("DELETE /api/event-handlers/{id}", eh.handleEventHandlerDelete)
+	s.apiMutating("POST /api/event-handlers/{id}/toggle", eh.handleEventHandlerToggle)
+	s.apiMutating("POST /api/event-handlers/{id}/promote", eh.handleEventHandlerPromote)
 	s.api("GET /api/prompts", ph.handlePromptsList)
 	s.apiMutating("POST /api/prompts", ph.handlePromptCreate)
 	s.api("GET /api/prompts/{id}", ph.handlePromptGet)

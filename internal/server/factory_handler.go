@@ -193,7 +193,7 @@ type factorySnapshotJSON struct {
 // active entities into a single payload for the /factory view. All data
 // derived from existing persistence — no new event stream, no state
 // projection — so repeated calls are cheap and idempotent.
-func (h *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
+func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
@@ -221,7 +221,7 @@ func (h *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.Re
 	var pendingTasks []domain.PendingTaskRef
 	var awaitingByEntity map[string]struct{}
 	runAuthors := map[string]string{}
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := fh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		orgSet, _ := tx.Orgs.GetSettings(r.Context(), orgID)
 		ghUsername, _ = tx.Users.GetGitHubLogin(r.Context(), userID, orgSet.GitHubBaseURL)
 

@@ -28,7 +28,7 @@ type dashboardHandler struct {
 }
 
 // handleDashboardStats returns aggregated PR statistics from entity snapshots.
-func (h *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
+func (dh *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
@@ -39,7 +39,7 @@ func (h *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.R
 		username string
 		stats    *domain.DashboardStats
 	)
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := dh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error
 		creds, lerr = integrations.Load(r.Context(), tx.Secrets, orgID)
 		if lerr != nil || creds.GitHubPAT == "" {
@@ -68,7 +68,7 @@ func (h *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.R
 }
 
 // handleDashboardPRs returns open PRs from entity snapshots.
-func (h *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Request) {
+func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
@@ -79,7 +79,7 @@ func (h *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Req
 		username string
 		prs      []domain.PRSummaryRow
 	)
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := dh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error
 		creds, lerr = integrations.Load(r.Context(), tx.Secrets, orgID)
 		if lerr != nil || creds.GitHubPAT == "" {
@@ -111,7 +111,7 @@ func (h *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Req
 
 // handleDashboardPRStatus fetches live CI/review status for a single PR.
 // This stays as a live API call since it's on-demand detail, not aggregated data.
-func (h *dashboardHandler) handleDashboardPRStatus(w http.ResponseWriter, r *http.Request) {
+func (dh *dashboardHandler) handleDashboardPRStatus(w http.ResponseWriter, r *http.Request) {
 	numberStr := r.PathValue("number")
 	number, err := strconv.Atoi(numberStr)
 	if err != nil {
@@ -140,7 +140,7 @@ func (h *dashboardHandler) handleDashboardPRStatus(w http.ResponseWriter, r *htt
 	// for any repo under parts[0] but 403s on repos outside the grant, so a
 	// bare-owner resolve would skip the PAT that would have worked. ClientForRepo
 	// falls through to the PAT when the App doesn't cover this repo.
-	client, err := h.ghResolver.ClientForRepo(r.Context(), orgID, parts[0], parts[1])
+	client, err := dh.ghResolver.ClientForRepo(r.Context(), orgID, parts[0], parts[1])
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub not configured"})
@@ -159,7 +159,7 @@ func (h *dashboardHandler) handleDashboardPRStatus(w http.ResponseWriter, r *htt
 	writeJSON(w, http.StatusOK, status)
 }
 
-func (h *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *http.Request) {
+func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *http.Request) {
 	numberStr := r.PathValue("number")
 	number, err := strconv.Atoi(numberStr)
 	if err != nil {
@@ -199,7 +199,7 @@ func (h *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *http
 	// Repo-scoped mutation: resolve on the whole owner/repo so a selective App
 	// install that doesn't cover this repo falls through to the PAT instead of
 	// minting a token that 403s on the draft toggle (see handleDashboardPRStatus).
-	client, err := h.ghResolver.ClientForRepo(r.Context(), orgID, parts[0], parts[1])
+	client, err := dh.ghResolver.ClientForRepo(r.Context(), orgID, parts[0], parts[1])
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub not configured"})
@@ -230,7 +230,7 @@ func (h *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *http
 	// the audit trail. Revisit if a user reports "my trigger didn't fire
 	// when I dragged the card."
 	sourceID := fmt.Sprintf("%s/%s#%d", parts[0], parts[1], number)
-	if patchErr := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if patchErr := dh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		return patchPRSnapshotDraft(r.Context(), tx.Entities, orgID, sourceID, body.Draft)
 	}); patchErr != nil {
 		log.Printf("[dashboard] warning: failed to patch snapshot for %s after draft toggle: %v", sourceID, patchErr)

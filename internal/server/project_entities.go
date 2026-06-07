@@ -39,7 +39,7 @@ type projectEntity struct {
 // are filtered out at the DB layer. The panel surfaces work that's
 // still in flight; historical context lives elsewhere (entity detail
 // pages, future audit views) so the panel stays scannable.
-func (h *projectEntitiesHandler) handleProjectEntities(w http.ResponseWriter, r *http.Request) {
+func (pe *projectEntitiesHandler) handleProjectEntities(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
@@ -48,7 +48,7 @@ func (h *projectEntitiesHandler) handleProjectEntities(w http.ResponseWriter, r 
 	projectID := r.PathValue("id")
 	var project *domain.Project
 	var entities []domain.ProjectPanelEntity
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := pe.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		project, e = tx.Projects.Get(r.Context(), orgID, projectID)
 		if e != nil {

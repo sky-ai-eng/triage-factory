@@ -22,8 +22,8 @@ type promptsHandler struct {
 	tx db.TxRunner
 }
 
-func (h *promptsHandler) handleEventTypes(w http.ResponseWriter, r *http.Request) {
-	types, err := db.ListEventTypes(h.db)
+func (ph *promptsHandler) handleEventTypes(w http.ResponseWriter, r *http.Request) {
+	types, err := db.ListEventTypes(ph.db)
 	if err != nil {
 		internalError(w, "prompts", err)
 		return
@@ -34,7 +34,7 @@ func (h *promptsHandler) handleEventTypes(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, types)
 }
 
-func (h *promptsHandler) handlePromptsList(w http.ResponseWriter, r *http.Request) {
+func (ph *promptsHandler) handlePromptsList(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
@@ -44,7 +44,7 @@ func (h *promptsHandler) handlePromptsList(w http.ResponseWriter, r *http.Reques
 	// multi-team prompts page; absent/solo returns everything visible.
 	teamID := singleTeamParam(r)
 	var prompts []domain.Prompt
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		prompts, e = tx.Prompts.List(r.Context(), orgID, teamID)
 		return e
@@ -58,7 +58,7 @@ func (h *promptsHandler) handlePromptsList(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, prompts)
 }
 
-func (h *promptsHandler) handlePromptGet(w http.ResponseWriter, r *http.Request) {
+func (ph *promptsHandler) handlePromptGet(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
@@ -66,7 +66,7 @@ func (h *promptsHandler) handlePromptGet(w http.ResponseWriter, r *http.Request)
 	userID := ClaimsFrom(r.Context()).Subject
 	id := r.PathValue("id")
 	var prompt *domain.Prompt
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		prompt, e = tx.Prompts.Get(r.Context(), orgID, id)
 		return e
@@ -115,7 +115,7 @@ func invalidPromptModelError() string {
 	return `model must be "" or one of: ` + strings.Join(allowedPromptModelOverrides, ", ")
 }
 
-func (h *promptsHandler) handlePromptCreate(w http.ResponseWriter, r *http.Request) {
+func (ph *promptsHandler) handlePromptCreate(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
@@ -151,7 +151,7 @@ func (h *promptsHandler) handlePromptCreate(w http.ResponseWriter, r *http.Reque
 
 	userID := ClaimsFrom(r.Context()).Subject
 	var created *domain.Prompt
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		teamID, e := resolveActingTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
@@ -178,7 +178,7 @@ type updatePromptRequest struct {
 	Model string `json:"model"`
 }
 
-func (h *promptsHandler) handlePromptPut(w http.ResponseWriter, r *http.Request) {
+func (ph *promptsHandler) handlePromptPut(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
@@ -204,7 +204,7 @@ func (h *promptsHandler) handlePromptPut(w http.ResponseWriter, r *http.Request)
 	}
 
 	var existing *domain.Prompt
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		existing, e = tx.Prompts.Get(r.Context(), orgID, id)
 		return e
@@ -218,7 +218,7 @@ func (h *promptsHandler) handlePromptPut(w http.ResponseWriter, r *http.Request)
 	}
 
 	var updated *domain.Prompt
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		if e := tx.Prompts.Update(r.Context(), orgID, id, req.Name, req.Body, req.Model); e != nil {
 			return e
 		}
@@ -232,7 +232,7 @@ func (h *promptsHandler) handlePromptPut(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, updated)
 }
 
-func (h *promptsHandler) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
+func (ph *promptsHandler) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
@@ -247,7 +247,7 @@ func (h *promptsHandler) handlePromptDelete(w http.ResponseWriter, r *http.Reque
 	// delete) — the canvas surfaces a toast so the now-untriggered downstream
 	// doesn't go unnoticed.
 	var orphaned bool
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		prompt, e = tx.Prompts.Get(r.Context(), orgID, id)
 		if e != nil {
@@ -379,7 +379,7 @@ func indexOfStep(steps []domain.BlueprintStep, promptID string) int {
 	return -1
 }
 
-func (h *promptsHandler) handlePromptStats(w http.ResponseWriter, r *http.Request) {
+func (ph *promptsHandler) handlePromptStats(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
@@ -387,7 +387,7 @@ func (h *promptsHandler) handlePromptStats(w http.ResponseWriter, r *http.Reques
 	userID := ClaimsFrom(r.Context()).Subject
 	id := r.PathValue("id")
 	var stats *domain.PromptStats
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		stats, e = tx.Prompts.Stats(r.Context(), orgID, id)
 		return e
