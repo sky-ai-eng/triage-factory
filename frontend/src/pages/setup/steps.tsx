@@ -52,6 +52,8 @@ import RepoPickerModal from '../../components/RepoPickerModal'
 import { OrgModelStep, TeamModelStep } from './ModelStep'
 import { UserIdentityStep } from './UserIdentityStep'
 import { captureGitHubIdentityPat } from '../../lib/githubIdentity'
+import { apiJSON } from '../../lib/apiClient'
+import type { GitHubIdentityStatus } from '../../types'
 import PollerTimingGroup from '../settings/PollerTimingGroup'
 import GitHubTeamGroup from '../settings/GitHubTeamGroup'
 import JiraProjectRulesGroup from '../settings/JiraProjectRulesGroup'
@@ -694,19 +696,15 @@ const teamModelStep: WizardStep = {
 // prompting a connected user to reconnect.
 async function loadUserIdentity(ctx: LoadContext): Promise<Partial<WizardState>> {
   if (!ctx.orgId) throw new Error('No organization context for the GitHub identity check.')
-  const res = await fetch(`/api/orgs/${encodeURIComponent(ctx.orgId)}/identity/github`)
-  if (!res.ok) throw new Error('Could not check your GitHub identity.')
-  const data = (await res.json()) as {
-    connected?: boolean
-    login?: string
-    host?: string
-    connect_available?: boolean
-  }
+  // Through apiClient so a stale-session 401 is routed to AuthContext; a hard
+  // failure (HttpError / network) throws, and the host shows a retry rather
+  // than wrongly prompting a connected user to reconnect.
+  const data = await apiJSON<GitHubIdentityStatus>('/identity/github', { org: ctx.orgId })
   return {
-    userIdentityConnected: !!data.connected,
+    userIdentityConnected: data.connected,
     userIdentityLogin: data.login ?? '',
     userIdentityHost: data.host ?? '',
-    userConnectAvailable: !!data.connect_available,
+    userConnectAvailable: data.connect_available,
   }
 }
 

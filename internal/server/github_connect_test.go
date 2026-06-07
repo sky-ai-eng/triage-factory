@@ -709,6 +709,7 @@ func TestGitHubIdentityPAT_BadToken_Returns422(t *testing.T) {
 // rejected before any host round-trip.
 func TestGitHubIdentityPAT_EmptyToken_Returns400(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit() // in-memory keychain — consistent with the sibling PAT tests
 	s := newTestServer(t)
 
 	rec := doJSON(t, s, "POST",
