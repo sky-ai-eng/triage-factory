@@ -17,7 +17,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/zalando/go-keyring"
 )
 
 // TestGitHubConnect_NilDeployConfig_Returns404 pins that the Connect
@@ -585,5 +587,159 @@ func TestGitHubConnect_IdentityPersistsAcrossLoginProvider(t *testing.T) {
 	}
 	if login != "corp-login" || source != "connect_oauth" {
 		t.Errorf("after non-GitHub re-login got (login=%q, source=%q), want the connect_oauth binding intact", login, source)
+	}
+}
+
+// ---- PAT_2 capture-and-discard endpoint (local-mode SQLite) ----
+
+// seedLocalOrgGitHubHost sets the local sentinel org's github_base_url via the
+// store (the value the PAT-capture handler resolves + keys identity under).
+func seedLocalOrgGitHubHost(t *testing.T, s *Server, host string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := s.tx.WithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(tx db.TxStores) error {
+		set, err := tx.Orgs.GetSettings(ctx, runmode.LocalDefaultOrgID)
+		if err != nil {
+			return err
+		}
+		set.GitHubBaseURL = host
+		return tx.Orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, set)
+	}); err != nil {
+		t.Fatalf("seed org github host: %v", err)
+	}
+}
+
+// TestGitHubIdentityPAT_BindsIdentityAndDiscardsToken drives the capture-and-
+// discard path against a stubbed GHES host: the supplied PAT validates (GET
+// /user), the login is bound with source='pat' keyed on the org host, and the
+// token is NOT written into the org credential store — PAT_2 leaves no stored
+// credential, byte-for-byte the Connect end state.
+func TestGitHubIdentityPAT_BindsIdentityAndDiscardsToken(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit() // in-memory keychain — the sandbox has no dbus backend
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	var gotAuth string
+	ghStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/user" {
+			http.NotFound(w, r)
+			return
+		}
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"login":"octo-pat"}`)
+	}))
+	t.Cleanup(ghStub.Close)
+	seedLocalOrgGitHubHost(t, s, ghStub.URL)
+
+	rec := doJSON(t, s, "POST",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/github/pat",
+		map[string]any{"pat": "ghp_secret_token"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+
+	var out githubIdentityCaptureResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Login != "octo-pat" {
+		t.Errorf("login = %q, want octo-pat", out.Login)
+	}
+	if out.Host != ghStub.URL {
+		t.Errorf("host = %q, want %q", out.Host, ghStub.URL)
+	}
+	if gotAuth != "Bearer ghp_secret_token" {
+		t.Errorf("whoami Authorization = %q, want the supplied PAT", gotAuth)
+	}
+
+	login, err := s.users.GetGitHubLogin(ctx, runmode.LocalDefaultUserID, ghStub.URL)
+	if err != nil {
+		t.Fatalf("GetGitHubLogin: %v", err)
+	}
+	if login != "octo-pat" {
+		t.Errorf("stored login = %q, want octo-pat", login)
+	}
+	var source string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT source FROM user_github_identities WHERE user_id = ? AND github_base_url = ?`,
+		runmode.LocalDefaultUserID, ghStub.URL).Scan(&source); err != nil {
+		t.Fatalf("read source: %v", err)
+	}
+	if source != "pat" {
+		t.Errorf("source = %q, want pat", source)
+	}
+
+	// The token is discarded — never written into the org credential store (the
+	// only secret store in play), proving PAT_2 retains no usable credential.
+	creds, _ := integrations.Load(ctx, s.secrets, runmode.LocalDefaultOrgID)
+	if creds.GitHubPAT != "" {
+		t.Errorf("org GitHub PAT = %q, want empty (the user PAT must not be stored)", creds.GitHubPAT)
+	}
+}
+
+// TestGitHubIdentityPAT_BadToken_Returns422 pins the "your action" failure
+// shape: a token the host rejects is a 422 (not the infra 502), and no identity
+// row is written.
+func TestGitHubIdentityPAT_BadToken_Returns422(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	ghStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+	}))
+	t.Cleanup(ghStub.Close)
+	seedLocalOrgGitHubHost(t, s, ghStub.URL)
+
+	rec := doJSON(t, s, "POST",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/github/pat",
+		map[string]any{"pat": "ghp_bad"})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
+	}
+	if login, _ := s.users.GetGitHubLogin(ctx, runmode.LocalDefaultUserID, ghStub.URL); login != "" {
+		t.Errorf("identity row written on a bad token: login=%q", login)
+	}
+}
+
+// TestGitHubIdentityPAT_EmptyToken_Returns400 pins that an empty PAT is
+// rejected before any host round-trip.
+func TestGitHubIdentityPAT_EmptyToken_Returns400(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+
+	rec := doJSON(t, s, "POST",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/github/pat",
+		map[string]any{"pat": "   "})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", rec.Code)
+	}
+}
+
+// TestGitHubIdentityPAT_HostUnreachable_Returns502 pins the infra failure shape:
+// when TF can't reach the host, the response is a 502 (distinct from a bad
+// token) and no identity row is written.
+func TestGitHubIdentityPAT_HostUnreachable_Returns502(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	// Stand a stub up to claim a port, then close it so dials are refused.
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+	seedLocalOrgGitHubHost(t, s, deadURL)
+
+	rec := doJSON(t, s, "POST",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/github/pat",
+		map[string]any{"pat": "ghp_whatever"})
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s, want 502", rec.Code, rec.Body.String())
+	}
+	if login, _ := s.users.GetGitHubLogin(ctx, runmode.LocalDefaultUserID, deadURL); login != "" {
+		t.Errorf("identity row written despite unreachable host: %q", login)
 	}
 }

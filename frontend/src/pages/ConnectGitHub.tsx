@@ -166,6 +166,11 @@ export default function ConnectGitHub() {
       refresh()
     } catch (e) {
       setPatError(e instanceof Error ? e.message : 'Could not verify that token.')
+    } finally {
+      // Always clear the in-flight flag — even on success. If refresh() comes
+      // back connected we navigate away regardless; if it lags (propagation) or
+      // fails, the button must re-enable so the user can retry rather than be
+      // stuck on a disabled "Verifying…".
       setCapturing(false)
     }
   }

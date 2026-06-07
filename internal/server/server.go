@@ -759,7 +759,7 @@ func (s *Server) routes() {
 	// validate → whoami → write user_github_identities → drop the token. The
 	// always-available fallback to Connect (and the only path when no App is
 	// registered). Never stores the token.
-	s.api("POST /api/orgs/{org_id}/identity/github/pat", s.handleGitHubIdentityPAT)
+	s.apiMutating("POST /api/orgs/{org_id}/identity/github/pat", s.handleGitHubIdentityPAT)
 
 	// Per-org GitHub App webhook receiver. Pre-auth (GitHub has no
 	// session) and identified by org_id from the path; the handler
