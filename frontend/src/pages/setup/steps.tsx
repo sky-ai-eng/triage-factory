@@ -49,8 +49,7 @@ import {
 } from '../../lib/reachability'
 import { toast } from '../../components/Toast/toastStore'
 import RepoPickerModal from '../../components/RepoPickerModal'
-import ModelGroup from '../settings/ModelGroup'
-import ModelTierSelector, { type ModelTierOption } from '../settings/ModelTierSelector'
+import { OrgModelStep, TeamModelStep } from './ModelStep'
 import PollerTimingGroup from '../settings/PollerTimingGroup'
 import GitHubTeamGroup from '../settings/GitHubTeamGroup'
 import JiraProjectRulesGroup from '../settings/JiraProjectRulesGroup'
@@ -221,15 +220,6 @@ async function persistTeamSettings(
   if (!result.ok) throw new Error(result.error)
   return result.warning
 }
-
-// The team default-model options: the three concrete tiers (no "no cap" — a
-// team always delegates with *some* model). Rendered by the same shared
-// ModelTierSelector the org max-tier step uses, so the two read identically.
-const TEAM_MODEL_OPTIONS: ModelTierOption[] = [
-  { value: 'haiku', label: 'Haiku', hint: 'Fastest, cheapest' },
-  { value: 'sonnet', label: 'Sonnet', hint: 'Balanced' },
-  { value: 'opus', label: 'Opus', hint: 'Most capable' },
-]
 
 // Step · GitHub URL (mandatory, first org step). The base-URL reachability
 // gate: Continue probes the host (URL-only, no creds) and, on success, saves
@@ -516,27 +506,23 @@ const jiraPollerStep: WizardStep = {
   ),
 }
 
-// Step 4 · Org max model tier. The shared ModelTierSelector (via ModelGroup) —
-// a card row, not a dropdown — that the team-default-model step reuses.
-// Optional (no cap is a legitimate end state), so it never blocks the stack.
+// Step 4 · Org max model tier — the ceiling ladder. Action-on-click
+// (selfAdvancing): picking a cap records it and advances. Optional (no cap is a
+// legitimate end state), so it never blocks. No load of its own — reads the
+// GitHub step's seeded org form; persistOrg guards against saving when that load
+// failed.
 const orgModelStep: WizardStep = {
   id: 'org-model',
   section: 'org',
-  // No load of its own — reads the GitHub step's seeded org form; persistOrg
-  // guards against saving when that load failed.
   title: 'Max model tier',
+  selfAdvancing: true,
   isComplete: () => true,
   persist: ({ state }) => persistOrg(state),
   collapsedSummary: (s) =>
     s.org.max_llm_model_tier
       ? `Capped at ${TIER_LABELS[s.org.max_llm_model_tier] ?? s.org.max_llm_model_tier}`
       : 'No model cap',
-  render: ({ state, patch }) => (
-    <ModelGroup
-      value={{ max_llm_model_tier: state.org.max_llm_model_tier }}
-      onChange={(p) => patch({ org: { ...state.org, ...p } })}
-    />
-  ),
+  render: (ctx) => <OrgModelStep {...ctx} />,
 }
 
 // Step 5 · Repositories (first team step). Embeds the shared RepoPickerModal
@@ -659,6 +645,9 @@ const teamModelStep: WizardStep = {
   id: 'team-model',
   section: 'team',
   title: 'Team default model',
+  // The last step: action-on-click finishes setup (selfAdvancing — no Finish
+  // button), persisting the team form (and surfacing any model-cap clamp).
+  selfAdvancing: true,
   isComplete: (s) => s.team.default_model.trim() !== '',
   validate: (s) => (s.team.default_model.trim() === '' ? 'Choose a default model.' : null),
   persist: async ({ state, teamId }) => {
@@ -667,20 +656,7 @@ const teamModelStep: WizardStep = {
   },
   collapsedSummary: (s) =>
     `Default model: ${TIER_LABELS[s.team.default_model] ?? s.team.default_model}`,
-  render: ({ state, patch }) => (
-    <div className="space-y-3">
-      <p className="text-[13px] leading-relaxed text-text-secondary">
-        The model this team delegates with by default. Capped by the workspace max tier — a higher
-        pick is clamped down to it.
-      </p>
-      <ModelTierSelector
-        value={state.team.default_model}
-        onChange={(default_model) => patch({ team: { ...state.team, default_model } })}
-        options={TEAM_MODEL_OPTIONS}
-        ariaLabel="Team default model"
-      />
-    </div>
-  ),
+  render: (ctx) => <TeamModelStep {...ctx} />,
 }
 
 // Ordered registry. Section grouping is derived from each step's `section`;

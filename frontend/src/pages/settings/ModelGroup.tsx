@@ -1,19 +1,10 @@
 import { Section, Field } from './primitives'
-import ModelTierSelector, { type ModelTierOption } from './ModelTierSelector'
+import ModelTierSelector from './ModelTierSelector'
+import { MODEL_CAP_OPTIONS } from './modelTiers'
 
 interface ModelValue {
   max_llm_model_tier: string
 }
-
-// The workspace-cap options: an explicit "No cap" plus the three tiers. The
-// hints frame the cap as a ceiling. Shared by Settings and the wizard's org
-// max-tier step, so the choice reads identically in both.
-const CAP_OPTIONS: ModelTierOption[] = [
-  { value: '', label: 'No cap', hint: 'Teams choose freely' },
-  { value: 'haiku', label: 'Haiku', hint: 'Fastest, cheapest' },
-  { value: 'sonnet', label: 'Sonnet', hint: 'Balanced' },
-  { value: 'opus', label: 'Opus', hint: 'Most capable' },
-]
 
 /**
  * ModelGroup is the org/workspace-scope model field group. Today it carries
@@ -39,7 +30,7 @@ export default function ModelGroup({
         <ModelTierSelector
           value={value.max_llm_model_tier}
           onChange={(max_llm_model_tier) => onChange({ max_llm_model_tier })}
-          options={CAP_OPTIONS}
+          options={MODEL_CAP_OPTIONS}
           ariaLabel="Maximum model tier (workspace cap)"
         />
         <p className="text-[11px] text-text-tertiary mt-2">

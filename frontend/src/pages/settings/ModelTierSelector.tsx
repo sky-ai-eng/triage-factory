@@ -1,26 +1,22 @@
-// ModelTierSelector is the shared, presentational tier picker — a row of
-// selectable cards rather than a <select> dropdown. It backs the wizard's org
-// "max model tier" step and (per the wizard plan) the team "default model"
-// step, so both surfaces render an identical control from one definition. It's
-// deliberately option-driven: the org cap offers a "No cap" choice, a team
-// default offers the concrete tiers, but the chrome and a11y are the same.
+// ModelTierSelector — a capability *ladder*, not a row of equal cards. The
+// tiers ascend left→right (Haiku → Sonnet → Opus), and the selection reads as a
+// ceiling: a warm fill runs along the track up to the chosen tier, everything
+// above it ghosts out (the clamped region), and a "No cap" (∞) end lifts the
+// ceiling entirely. This maps the data's actual shape — an ordered cap — onto
+// the control, so a team default above the cap *visibly* sits in the ghosted
+// zone.
 //
-// Controlled and value-typed as a plain string so it slots into the existing
-// OrgConfigForm.max_llm_model_tier / TeamConfigForm.default_model fields with
-// no wire-shape change. radiogroup semantics + roving tabIndex + arrow-key
-// navigation make it keyboard- and screen-reader-navigable as one logical
-// control (one tab stop, arrows move selection).
+// Two modes, inferred from the options: a CAP set includes the "" (no cap) end
+// and gets the fill + ghost-above ceiling treatment; a plain PICK set (the team
+// default — concrete tiers only) just highlights the chosen tier. Controlled,
+// value-typed as a plain string, radiogroup + roving tabIndex + arrow keys —
+// the same a11y contract whichever surface composes it.
 
 import { useRef } from 'react'
 import { nextRadioIndex } from '../../lib/rovingRadio'
+import type { ModelTierOption } from './modelTiers'
 
-export interface ModelTierOption {
-  // The persisted value (e.g. "" for no cap, "haiku" | "sonnet" | "opus").
-  value: string
-  label: string
-  // One-line description shown under the label inside the card.
-  hint?: string
-}
+export type { ModelTierOption }
 
 export default function ModelTierSelector({
   value,
@@ -34,11 +30,16 @@ export default function ModelTierSelector({
   ariaLabel: string
 }) {
   const btnRefs = useRef<(HTMLButtonElement | null)[]>([])
-  const selectedIndex = options.findIndex((o) => o.value === value)
-  // Roving tabIndex: exactly one card is a tab stop — the selected one, or the
-  // first when nothing is selected — and arrows move from there.
-  const tabbable = selectedIndex < 0 ? 0 : selectedIndex
 
+  // A CAP set carries the "" (no cap) end — that turns on the ceiling treatment.
+  const isCap = options.some((o) => o.value === '')
+  // Tier cells in ascending order (the no-cap end isn't a tier).
+  const tiers = options.filter((o) => o.value !== '')
+  // Where the ceiling sits among the tiers: no cap ("") ⇒ above every tier.
+  const capTierIndex = value === '' ? tiers.length : tiers.findIndex((o) => o.value === value)
+
+  const selectedIndex = options.findIndex((o) => o.value === value)
+  const tabbable = selectedIndex < 0 ? 0 : selectedIndex
   const onKeyDown = (e: React.KeyboardEvent) => {
     const next = nextRadioIndex(e.key, selectedIndex, options.length)
     if (next === null) return
@@ -52,10 +53,38 @@ export default function ModelTierSelector({
       role="radiogroup"
       aria-label={ariaLabel}
       onKeyDown={onKeyDown}
-      className="grid grid-cols-2 gap-2 sm:grid-cols-4"
+      className="flex items-stretch"
     >
       {options.map((opt, i) => {
+        const isNoCap = opt.value === ''
         const selected = opt.value === value
+        const tierIndex = isNoCap ? -1 : tiers.findIndex((t) => t.value === opt.value)
+
+        let aboveCap = false
+        let filled = false
+        if (isCap) {
+          if (isNoCap) {
+            // The end is "filled" only when it's the active choice (full ceiling).
+            filled = value === ''
+          } else {
+            aboveCap = tierIndex > capTierIndex
+            filled = tierIndex <= capTierIndex // fill up to (and including) the cap
+          }
+        } else {
+          filled = selected
+        }
+
+        const textClass = selected
+          ? 'text-accent'
+          : aboveCap
+            ? 'text-text-tertiary'
+            : 'text-text-secondary'
+        const railClass = selected
+          ? 'bg-accent shadow-[0_0_10px_-1px_var(--color-accent)]'
+          : filled
+            ? 'bg-accent'
+            : 'bg-[var(--color-border-subtle)]'
+
         return (
           <button
             key={opt.value || 'none'}
@@ -67,22 +96,25 @@ export default function ModelTierSelector({
             aria-checked={selected}
             tabIndex={i === tabbable ? 0 : -1}
             onClick={() => onChange(opt.value)}
-            className={`flex flex-col items-start gap-0.5 rounded-xl border px-3.5 py-3 text-left transition-colors ${
-              selected
-                ? 'border-accent/50 bg-accent/[0.06] shadow-sm shadow-black/[0.03]'
-                : 'border-border-subtle bg-white/40 hover:border-accent/30 hover:bg-white/70'
+            className={`group relative flex-1 px-3 pb-3 pt-2 text-left outline-none transition-opacity ${
+              aboveCap ? 'opacity-50' : 'opacity-100'
             }`}
           >
             <span
-              className={`text-[13px] font-medium ${
-                selected ? 'text-accent' : 'text-text-primary'
-              }`}
+              className={`flex items-center gap-1 text-[14px] font-medium transition-colors ${textClass}`}
             >
+              {isNoCap && <span className="text-[15px] leading-none">∞</span>}
               {opt.label}
             </span>
             {opt.hint && (
-              <span className="text-[11px] leading-snug text-text-tertiary">{opt.hint}</span>
+              <span className="mt-0.5 block text-[11px] leading-snug text-text-tertiary">
+                {opt.hint}
+              </span>
             )}
+            <span
+              aria-hidden
+              className={`absolute inset-x-0 bottom-0 h-[2px] transition-colors ${railClass}`}
+            />
           </button>
         )
       })}
