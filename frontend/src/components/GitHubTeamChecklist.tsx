@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import { RotateCw } from 'lucide-react'
 import { keyOf, type GitHubTeamCandidate } from '../lib/githubTeams'
+import { glassInputClass } from '../pages/settings/primitives'
 
 // Teams larger than this get a "broad team — noisy queue" hint. Fixed, not
 // configurable: it's a nudge, not a policy (SKY-411 open-question call).
@@ -43,6 +44,9 @@ interface Props {
    *  cap (Settings — the SKY-388 fix); the onboarding card overrides to
    *  flex-fill within its own max-h-[80vh] envelope. */
   scrollClassName?: string
+  /** Flush variant for the setup wizard: glass search + filter, no carded
+   *  chrome. Default false keeps the Settings look. */
+  bare?: boolean
 }
 
 // GitHubTeamChecklist is the shared body for BOTH GitHub-team → TF-team
@@ -70,6 +74,7 @@ export default function GitHubTeamChecklist({
   emptyLabel,
   className = '',
   scrollClassName = 'max-h-80',
+  bare = false,
 }: Props) {
   const [search, setSearch] = useState('')
   const [mode, setMode] = useState<FilterMode>('all')
@@ -172,12 +177,20 @@ export default function GitHubTeamChecklist({
           placeholder="Search teams..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          className="w-full bg-white/50 border border-border-subtle rounded-xl px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/40 transition-colors"
+          className={
+            bare
+              ? glassInputClass
+              : 'w-full bg-white/50 border border-border-subtle rounded-xl px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/40 transition-colors'
+          }
         />
         <div
           role="tablist"
           aria-label="Team filter"
-          className="flex items-center gap-1 rounded-xl bg-black/[0.03] p-0.5 text-[12px]"
+          className={`flex items-center gap-1 rounded-xl p-0.5 text-[12px] ${
+            bare
+              ? 'border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/50 backdrop-blur-md'
+              : 'bg-black/[0.03]'
+          }`}
         >
           {segments.map((s) => (
             <button
@@ -188,7 +201,9 @@ export default function GitHubTeamChecklist({
               onClick={() => setMode(s.mode)}
               className={`flex-1 rounded-lg px-2.5 py-1.5 font-medium transition-colors ${
                 mode === s.mode
-                  ? 'bg-surface-raised text-text-primary shadow-sm'
+                  ? bare
+                    ? 'bg-accent/[0.12] text-accent shadow-sm'
+                    : 'bg-surface-raised text-text-primary shadow-sm'
                   : 'text-text-tertiary hover:text-text-secondary'
               }`}
             >

@@ -622,6 +622,7 @@ const githubTeamsStep: WizardStep = {
       teamId={teamId}
       includeMembership
       onLoaded={(github_groups) => patch({ team: { ...state.team, github_groups } })}
+      bare
     />
   ),
 }

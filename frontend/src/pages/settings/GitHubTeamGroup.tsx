@@ -43,6 +43,7 @@ export default function GitHubTeamGroup({
   canEdit = true,
   includeMembership = false,
   onLoaded,
+  bare = false,
 }: {
   value: GitHubGroup[]
   onChange: (groups: GitHubGroup[]) => void
@@ -55,6 +56,9 @@ export default function GitHubTeamGroup({
   // Fired once after the first successful load with the seed selection, so
   // the container can seed its form state (and a change-detection baseline).
   onLoaded?: (groups: GitHubGroup[]) => void
+  // The setup wizard composes this flush (no Section card, glass search +
+  // filter); Settings keeps the carded default.
+  bare?: boolean
 }) {
   const [candidates, setCandidates] = useState<GitHubTeamCandidate[]>([])
   const [loading, setLoading] = useState(true)
@@ -116,11 +120,25 @@ export default function GitHubTeamGroup({
     onChange(Array.from(next).map((key) => keyToGroup(key, candidates, value)))
   }
 
-  return (
-    <Section>
-      <div className="mb-3">
-        <h2 className="text-[13px] font-medium text-text-secondary">GitHub teams</h2>
-        <p className="text-[12px] text-text-tertiary mt-1 leading-relaxed">
+  const inner = (
+    <>
+      <div className={bare ? 'mb-4 space-y-1.5' : 'mb-3'}>
+        <h2
+          className={
+            bare
+              ? 'text-[19px] font-medium tracking-tight text-text-primary'
+              : 'text-[13px] font-medium text-text-secondary'
+          }
+        >
+          GitHub teams
+        </h2>
+        <p
+          className={
+            bare
+              ? 'text-[13px] leading-relaxed text-text-tertiary'
+              : 'mt-1 text-[12px] leading-relaxed text-text-tertiary'
+          }
+        >
           Assign GitHub teams to this Triage Factory team. When a pull request requests review from
           one of these GitHub teams (via CODEOWNERS), the work routes to this team&rsquo;s board.
           Names only — no membership or nesting is read.
@@ -135,6 +153,7 @@ export default function GitHubTeamGroup({
         error={loadError}
         onRetry={() => void load()}
         disabled={!canEdit}
+        bare={bare}
         emptyLabel="No GitHub teams found. Connect GitHub and configure repositories whose org exposes teams, then reopen this panel."
       />
 
@@ -142,11 +161,13 @@ export default function GitHubTeamGroup({
           unseeded (undefined), so a save skips it rather than clearing the
           stored mappings. Say so, since the checklist's error alone doesn't. */}
       {loadError && (
-        <p className="text-[12px] text-amber-600 italic mt-2">
+        <p className="mt-2 text-[12px] italic text-amber-600">
           Couldn&rsquo;t load GitHub teams — existing mappings will be left unchanged. Retry above
           to edit them.
         </p>
       )}
-    </Section>
+    </>
   )
+
+  return bare ? inner : <Section>{inner}</Section>
 }
