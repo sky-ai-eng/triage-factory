@@ -386,15 +386,18 @@ func (c *LocalClient) JiraListIssueTypes(ctx context.Context, project string) ([
 // credential the sandboxed agent can't. Either way the agent process never
 // holds a token.
 //
-// A fresh resolver (and its in-memory token cache) is built per call; the
-// per-run call volume is low and this matches the Jira path's
-// resolver-per-call shape. App-or-PAT tier selection lives entirely in the
-// resolver — no gh-specific credential logic here.
+// The resolver is memoized on first build so several GitHub calls within one
+// exec subcommand (e.g. pr start-review's GetPR + GetPRDiff + GetPRFiles)
+// share one in-memory installation-token cache instead of re-minting per
+// call. Safe because LocalClient is single-goroutine (see the type doc). The
+// daemon pre-sets ghResolver to the Server's shared resolver, so this build
+// path is the local-mode CLI's only. App-or-PAT tier selection lives entirely
+// in the resolver — no gh-specific credential logic here.
 func (c *LocalClient) githubResolver() ghclient.Resolver {
-	if c.ghResolver != nil {
-		return c.ghResolver
+	if c.ghResolver == nil {
+		c.ghResolver = ghclient.NewResolver(c.stores.Secrets, c.stores.GitHubApps, c.stores.Orgs, c.stores.Agents, nil)
 	}
-	return ghclient.NewResolver(c.stores.Secrets, c.stores.GitHubApps, c.stores.Orgs, c.stores.Agents, nil)
+	return c.ghResolver
 }
 
 // githubClientForRepo resolves an authenticated client for owner/repo. A

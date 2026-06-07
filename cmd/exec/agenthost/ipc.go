@@ -28,6 +28,13 @@ const dialTimeout = 5 * time.Second
 // timeout error rather than letting the agent stall indefinitely.
 const callTimeout = 30 * time.Second
 
+// downloadCallTimeout is the cap for GithubDownloadArtifact, which streams a
+// log archive host-side and can legitimately run for minutes on a slow link —
+// the underlying github.Client.DownloadArtifact allows 15m. The generic
+// callTimeout would cancel those mid-transfer, so the download method gets its
+// own longer budget on both the client deadline and the daemon dispatch ctx.
+const downloadCallTimeout = 15 * time.Minute
+
 // IPCClient is the unix-socket implementation of Client. Each call
 // opens its own connection and closes it on return — the daemon's
 // handleConn is one-shot (read one frame, write one frame, hang up),
@@ -65,6 +72,13 @@ func (c *IPCClient) Close() error {
 // closes the connection. Matches the server's one-shot handleConn
 // contract — any state on the wire is bounded by a single RPC.
 func (c *IPCClient) call(ctx context.Context, method string, args any, result any) error {
+	return c.callWithin(ctx, callTimeout, method, args, result)
+}
+
+// callWithin is call with an explicit absolute-timeout cap. Most methods use
+// callTimeout via call; the download method passes downloadCallTimeout so a
+// slow archive transfer isn't cancelled at 30s.
+func (c *IPCClient) callWithin(ctx context.Context, timeout time.Duration, method string, args any, result any) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -82,7 +96,7 @@ func (c *IPCClient) call(ctx context.Context, method string, args any, result an
 	// fires first wins. SetDeadline on a unix socket interrupts in-flight
 	// I/O cleanly (returns *net.OpError with Timeout()==true).
 	deadline, ok := ctx.Deadline()
-	deadlineCap := time.Now().Add(callTimeout)
+	deadlineCap := time.Now().Add(timeout)
 	if !ok || deadlineCap.Before(deadline) {
 		deadline = deadlineCap
 	}
@@ -481,7 +495,7 @@ func (c *IPCClient) GithubAPIGet(ctx context.Context, owner, repo, path string) 
 // frame cap bounds what fits this way; realistic CI log archives are a few MB.
 func (c *IPCClient) GithubDownloadArtifact(ctx context.Context, owner, repo, path string, dst io.Writer, maxBytes int64) (int64, error) {
 	var res githubDownloadArtifactResult
-	if err := c.call(ctx, methodGithubDownloadArtifact, githubDownloadArtifactArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Path: path, MaxBytes: maxBytes}, &res); err != nil {
+	if err := c.callWithin(ctx, downloadCallTimeout, methodGithubDownloadArtifact, githubDownloadArtifactArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Path: path, MaxBytes: maxBytes}, &res); err != nil {
 		return 0, err
 	}
 	if _, err := dst.Write(res.Data); err != nil {

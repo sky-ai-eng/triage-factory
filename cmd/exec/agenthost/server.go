@@ -162,7 +162,13 @@ func (s *Server) handleConn(conn net.Conn) {
 	// write deadline before writing the response.
 	_ = conn.SetReadDeadline(time.Time{})
 
-	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
+	// The download method streams a log archive and gets a longer budget so a
+	// slow transfer isn't cancelled at callTimeout — mirrors the client cap.
+	dispatchTimeout := callTimeout
+	if req.Method == methodGithubDownloadArtifact {
+		dispatchTimeout = downloadCallTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), dispatchTimeout)
 	defer cancel()
 
 	result, err := s.dispatch(ctx, req.Method, req.Args)
@@ -669,9 +675,15 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		}
 		// Buffer host-side: the blob can't stream over the one-shot frame,
 		// so collect the (capped) body and hand the bytes back for the
-		// sandbox to write into its worktree.
+		// sandbox to write into its worktree. Clamp the caller's cap to a
+		// frame-safe size so an oversized archive errors cleanly up front
+		// rather than downloading in full and overflowing the response frame.
+		maxBytes := a.MaxBytes
+		if maxBytes > maxIPCArtifactBytes {
+			maxBytes = maxIPCArtifactBytes
+		}
 		var buf bytes.Buffer
-		n, err := client.GithubDownloadArtifact(ctx, a.Owner, a.Repo, a.Path, &buf, a.MaxBytes)
+		n, err := client.GithubDownloadArtifact(ctx, a.Owner, a.Repo, a.Path, &buf, maxBytes)
 		if err != nil {
 			return nil, err
 		}

@@ -34,6 +34,18 @@ import (
 // client sending a 4GB header.
 const maxFrameSize = 16 * 1024 * 1024 // 16 MiB; pending review comments etc. easily fit
 
+// maxIPCArtifactBytes caps a GithubDownloadArtifact body on the IPC path so
+// the buffered blob fits in one response frame. The bytes marshal to a base64
+// JSON string (~4/3 expansion), so the raw cap is held well under
+// maxFrameSize*3/4 (12 MiB) to leave room for the envelope. The daemon clamps
+// the caller's maxBytes (up to 500 MB from gh actions) to this before
+// downloading, so an oversized archive fails fast with a clean "artifact too
+// large" error instead of downloading in full and then blowing the frame.
+// Realistic CI log archives are a few MB; larger ones fall back to per-job
+// logs (smaller) or list-runs discovery. Local mode streams straight to disk
+// and is unaffected — this clamp lives only on the daemon's IPC dispatch.
+const maxIPCArtifactBytes = 11 * 1024 * 1024 // 11 MiB raw → ~14.7 MiB base64
+
 // request is the envelope for every RPC. Method identifies the
 // operation; Args is the method-specific payload (JSON-encoded). The
 // daemon dispatches on Method and unmarshals Args into the matching

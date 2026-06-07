@@ -283,6 +283,30 @@ func TestServer_GithubAPIError_MessagePropagates(t *testing.T) {
 	}
 }
 
+// TestServer_GithubDownloadArtifact_OversizedClampsCleanly proves the IPC
+// frame-fit clamp: a caller cap far above what one response frame can hold
+// (gh actions passes 500 MB) is clamped to maxIPCArtifactBytes daemon-side, so
+// an archive over that limit fails with a clean "artifact too large" error
+// instead of downloading in full and overflowing the frame.
+func TestServer_GithubDownloadArtifact_OversizedClampsCleanly(t *testing.T) {
+	body := make([]byte, maxIPCArtifactBytes+1024)
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer gh.Close()
+
+	client := startGitHubDaemon(t, fakeGitHubResolver{baseURL: gh.URL, token: "org-pat"}, ghInfo())
+
+	var buf bytes.Buffer
+	_, err := client.GithubDownloadArtifact(context.Background(), "o", "r", "/repos/o/r/actions/runs/9/logs", &buf, 500*1024*1024)
+	if err == nil {
+		t.Fatal("expected an oversized-artifact error, got nil")
+	}
+	if !strings.Contains(err.Error(), "too large") {
+		t.Errorf("error %q is not the clean over-cap message — the clamp didn't fire", err.Error())
+	}
+}
+
 // TestLocalClient_GithubAddComment_DirectPath pins the unchanged local path:
 // no socket, the in-process LocalClient builds the client from its own
 // resolver and calls GitHub directly.
