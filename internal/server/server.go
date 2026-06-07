@@ -30,7 +30,6 @@ type Server struct {
 	db            *sql.DB
 	prompts       db.PromptStore
 	swipes        db.SwipeStore
-	dashboard     db.DashboardStore
 	eventHandlers db.EventHandlerStore
 	agents        db.AgentStore     // SKY-261 D-Claims: resolves the org's agent for claim stamps
 	teamAgents    db.TeamAgentStore // SKY-261 D-Claims: re-checks team_agents.enabled on swipe-delegate / factory-delegate
@@ -392,7 +391,6 @@ func New(database *sql.DB, stores db.Stores, takeoverDir string, serverPort int)
 		db:            database,
 		prompts:       stores.Prompts,
 		swipes:        stores.Swipes,
-		dashboard:     stores.Dashboard,
 		eventHandlers: stores.EventHandlers,
 		agents:        stores.Agents,
 		teamAgents:    stores.TeamAgents,
@@ -660,10 +658,11 @@ func (s *Server) routes() {
 	// Treated as GET-equivalent — no CSRF wrap.
 	s.api("GET /api/ws", s.handleWS)
 
-	s.api("GET /api/dashboard/stats", s.handleDashboardStats)
-	s.api("GET /api/dashboard/prs", s.handleDashboardPRs)
-	s.api("GET /api/dashboard/prs/{number}/status", s.handleDashboardPRStatus)
-	s.apiMutating("POST /api/dashboard/prs/{number}/draft", s.handleDashboardPRDraft)
+	dh := &dashboardHandler{tx: s.tx, ghResolver: s.ghResolver}
+	s.api("GET /api/dashboard/stats", dh.handleDashboardStats)
+	s.api("GET /api/dashboard/prs", dh.handleDashboardPRs)
+	s.api("GET /api/dashboard/prs/{number}/status", dh.handleDashboardPRStatus)
+	s.apiMutating("POST /api/dashboard/prs/{number}/draft", dh.handleDashboardPRDraft)
 
 	s.api("GET /api/brief", s.handleBrief)
 	s.api("GET /api/preferences", s.handlePreferences)

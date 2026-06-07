@@ -17,9 +17,19 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 )
 
+// dashboardHandler serves the personal dashboard endpoints: PR stats, the
+// user's open PRs, and live per-PR status / draft toggles. It holds the
+// transactional store runner and the GitHub credential resolver the live
+// per-PR calls use; routes() registers its methods through the
+// api()/apiMutating() middleware wrappers.
+type dashboardHandler struct {
+	tx         db.TxRunner
+	ghResolver ghclient.Resolver
+}
+
 // handleDashboardStats returns aggregated PR statistics from entity snapshots.
-func (s *Server) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (h *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -29,7 +39,7 @@ func (s *Server) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 		username string
 		stats    *domain.DashboardStats
 	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error
 		creds, lerr = integrations.Load(r.Context(), tx.Secrets, orgID)
 		if lerr != nil || creds.GitHubPAT == "" {
@@ -58,8 +68,8 @@ func (s *Server) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDashboardPRs returns open PRs from entity snapshots.
-func (s *Server) handleDashboardPRs(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (h *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -69,7 +79,7 @@ func (s *Server) handleDashboardPRs(w http.ResponseWriter, r *http.Request) {
 		username string
 		prs      []domain.PRSummaryRow
 	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error
 		creds, lerr = integrations.Load(r.Context(), tx.Secrets, orgID)
 		if lerr != nil || creds.GitHubPAT == "" {
@@ -101,7 +111,7 @@ func (s *Server) handleDashboardPRs(w http.ResponseWriter, r *http.Request) {
 
 // handleDashboardPRStatus fetches live CI/review status for a single PR.
 // This stays as a live API call since it's on-demand detail, not aggregated data.
-func (s *Server) handleDashboardPRStatus(w http.ResponseWriter, r *http.Request) {
+func (h *dashboardHandler) handleDashboardPRStatus(w http.ResponseWriter, r *http.Request) {
 	numberStr := r.PathValue("number")
 	number, err := strconv.Atoi(numberStr)
 	if err != nil {
@@ -120,7 +130,7 @@ func (s *Server) handleDashboardPRStatus(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	orgID, ok := s.requireOrg(w, r)
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -130,7 +140,7 @@ func (s *Server) handleDashboardPRStatus(w http.ResponseWriter, r *http.Request)
 	// for any repo under parts[0] but 403s on repos outside the grant, so a
 	// bare-owner resolve would skip the PAT that would have worked. ClientForRepo
 	// falls through to the PAT when the App doesn't cover this repo.
-	client, err := s.ghResolver.ClientForRepo(r.Context(), orgID, parts[0], parts[1])
+	client, err := h.ghResolver.ClientForRepo(r.Context(), orgID, parts[0], parts[1])
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub not configured"})
@@ -149,7 +159,7 @@ func (s *Server) handleDashboardPRStatus(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, status)
 }
 
-func (s *Server) handleDashboardPRDraft(w http.ResponseWriter, r *http.Request) {
+func (h *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *http.Request) {
 	numberStr := r.PathValue("number")
 	number, err := strconv.Atoi(numberStr)
 	if err != nil {
@@ -180,7 +190,7 @@ func (s *Server) handleDashboardPRDraft(w http.ResponseWriter, r *http.Request) 
 	// GitHub while reporting failure to the client, with the local
 	// snapshot patch never reached. Gate org access first; mutate
 	// external + local state only once the request is authorized.
-	orgID, ok := s.requireOrg(w, r)
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -189,7 +199,7 @@ func (s *Server) handleDashboardPRDraft(w http.ResponseWriter, r *http.Request) 
 	// Repo-scoped mutation: resolve on the whole owner/repo so a selective App
 	// install that doesn't cover this repo falls through to the PAT instead of
 	// minting a token that 403s on the draft toggle (see handleDashboardPRStatus).
-	client, err := s.ghResolver.ClientForRepo(r.Context(), orgID, parts[0], parts[1])
+	client, err := h.ghResolver.ClientForRepo(r.Context(), orgID, parts[0], parts[1])
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub not configured"})
@@ -220,7 +230,7 @@ func (s *Server) handleDashboardPRDraft(w http.ResponseWriter, r *http.Request) 
 	// the audit trail. Revisit if a user reports "my trigger didn't fire
 	// when I dragged the card."
 	sourceID := fmt.Sprintf("%s/%s#%d", parts[0], parts[1], number)
-	if patchErr := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if patchErr := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		return patchPRSnapshotDraft(r.Context(), tx.Entities, orgID, sourceID, body.Draft)
 	}); patchErr != nil {
 		log.Printf("[dashboard] warning: failed to patch snapshot for %s after draft toggle: %v", sourceID, patchErr)
