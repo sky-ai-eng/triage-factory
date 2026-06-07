@@ -7,7 +7,14 @@ import {
   startGitHubAppRegistration,
   type GitHubAppStatus,
 } from '../../lib/githubApp'
-import { Section, Field, inputClass, glassInputClass } from './primitives'
+import {
+  Section,
+  Field,
+  inputClass,
+  glassInputClass,
+  segmentedWrap,
+  segmentedBtn,
+} from './primitives'
 
 /**
  * GitHubAppPanel is the org/workspace-scope "GitHub access" block — the
@@ -222,17 +229,13 @@ export default function GitHubAppPanel({
         ) : (
           <div className="space-y-3">
             <Field label="Account type">
-              <div className="inline-flex rounded-lg border border-border-glass bg-black/[0.02] p-0.5">
+              <div className={segmentedWrap(bare)}>
                 {(['user', 'org'] as const).map((t) => (
                   <button
                     key={t}
                     type="button"
                     onClick={() => setGhAppOwnerType(t)}
-                    className={`px-3 py-1 text-[12px] font-medium rounded-md transition-colors ${
-                      ghAppOwnerType === t
-                        ? 'bg-white text-text-primary shadow-sm'
-                        : 'text-text-tertiary hover:text-text-secondary'
-                    }`}
+                    className={segmentedBtn(ghAppOwnerType === t, bare)}
                   >
                     {t === 'user' ? 'Personal' : 'Organization'}
                   </button>

@@ -1,5 +1,12 @@
 import { useState } from 'react'
-import { Section, Field, inputClass, glassInputClass } from './primitives'
+import {
+  Section,
+  Field,
+  inputClass,
+  glassInputClass,
+  segmentedWrap,
+  segmentedBtn,
+} from './primitives'
 import GitHubAppPanel from './GitHubAppPanel'
 import type { CloneProtocol } from './orgConfig'
 
@@ -128,7 +135,7 @@ export default function GitHubAccessGroup({
         {isLocal && (
           <Field label="Clone protocol">
             <div className="flex items-center gap-3">
-              <div className="inline-flex rounded-lg border border-border-glass bg-black/[0.02] p-0.5">
+              <div className={segmentedWrap(bare)}>
                 {(['ssh', 'https'] as const).map((p) => (
                   <button
                     key={p}
@@ -137,11 +144,7 @@ export default function GitHubAccessGroup({
                       onChange({ github_clone_protocol: p })
                       setSshTestState({ kind: 'idle' })
                     }}
-                    className={`px-3 py-1 text-[12px] font-medium rounded-md transition-colors ${
-                      value.github_clone_protocol === p
-                        ? 'bg-white text-text-primary shadow-sm'
-                        : 'text-text-tertiary hover:text-text-secondary'
-                    }`}
+                    className={segmentedBtn(value.github_clone_protocol === p, bare)}
                   >
                     {p.toUpperCase()}
                   </button>
