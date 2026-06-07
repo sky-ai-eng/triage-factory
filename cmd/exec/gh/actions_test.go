@@ -664,7 +664,7 @@ func TestFetchRunsForSHA_HTTPError(t *testing.T) {
 	}
 }
 
-func TestFlagValue(t *testing.T) {
+func TestFlagVal(t *testing.T) {
 	cases := []struct {
 		name string
 		args []string
@@ -679,9 +679,9 @@ func TestFlagValue(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := flagValue(tc.args, tc.flag)
+			got := flagVal(tc.args, tc.flag)
 			if got != tc.want {
-				t.Errorf("flagValue(%v, %q) = %q, want %q", tc.args, tc.flag, got, tc.want)
+				t.Errorf("flagVal(%v, %q) = %q, want %q", tc.args, tc.flag, got, tc.want)
 			}
 		})
 	}

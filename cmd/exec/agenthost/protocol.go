@@ -493,7 +493,6 @@ type githubDownloadArtifactArgs struct {
 
 type githubDownloadArtifactResult struct {
 	Data []byte `json:"data"`
-	N    int64  `json:"n"`
 }
 
 // emptyArgs is the args type for methods that take no parameters

@@ -683,11 +683,10 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 			maxBytes = maxIPCArtifactBytes
 		}
 		var buf bytes.Buffer
-		n, err := client.GithubDownloadArtifact(ctx, a.Owner, a.Repo, a.Path, &buf, maxBytes)
-		if err != nil {
+		if _, err := client.GithubDownloadArtifact(ctx, a.Owner, a.Repo, a.Path, &buf, maxBytes); err != nil {
 			return nil, err
 		}
-		return githubDownloadArtifactResult{Data: buf.Bytes(), N: n}, nil
+		return githubDownloadArtifactResult{Data: buf.Bytes()}, nil
 
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnknownMethod, method)

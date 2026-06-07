@@ -191,6 +191,33 @@ func TestServer_GithubGetPR_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestServer_GithubAPIGet_RoundTrip pins the raw authenticated GET that every
+// actions verb leans on (list-runs, job listings): the daemon resolves the
+// client, makes the GET, and the response body bytes cross back to the sandbox
+// for local parsing — carrying the resolved token.
+func TestServer_GithubAPIGet_RoundTrip(t *testing.T) {
+	rec := &ghRecorder{}
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.record(r)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"workflow_runs":[{"id":7}]}`)
+	}))
+	defer gh.Close()
+
+	client := startGitHubDaemon(t, fakeGitHubResolver{baseURL: gh.URL, token: "org-pat"}, ghInfo())
+
+	data, err := client.GithubAPIGet(context.Background(), "o", "r", "/repos/o/r/actions/runs?head_sha=abc")
+	if err != nil {
+		t.Fatalf("GithubAPIGet: %v", err)
+	}
+	if !strings.Contains(string(data), `"workflow_runs"`) {
+		t.Fatalf("unexpected body over the wire: %q", data)
+	}
+	if got := rec.readAuth(); got != "Bearer org-pat" {
+		t.Errorf("GitHub saw Authorization %q, want Bearer org-pat", got)
+	}
+}
+
 // TestServer_GithubDownloadArtifact_RoundTrip proves the blob comes back over
 // the RPC and lands in the caller's writer with the byte count intact.
 func TestServer_GithubDownloadArtifact_RoundTrip(t *testing.T) {

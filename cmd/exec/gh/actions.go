@@ -115,8 +115,8 @@ type listRun struct {
 // resolves the head SHA before calling the Actions list endpoint; --sha
 // hits the endpoint directly.
 func actionsListRuns(host agenthost.Client, args []string) {
-	prStr := flagValue(args, "--pr")
-	sha := flagValue(args, "--sha")
+	prStr := flagVal(args, "--pr")
+	sha := flagVal(args, "--sha")
 
 	if (prStr == "") == (sha == "") {
 		exitErr("usage: triagefactory exec gh actions list-runs (--pr <N> | --sha <SHA>) [--repo owner/repo]")
@@ -217,18 +217,6 @@ func fetchRunsForSHA(client ghAPI, owner, repo, sha string) ([]listRun, error) {
 		})
 	}
 	return out, nil
-}
-
-// flagValue returns the value following the named flag in args, or "" if the
-// flag is absent. Simple linear scan — the arg lists are tiny and adding a
-// shared helper isn't worth the coordination cost.
-func flagValue(args []string, name string) string {
-	for i, a := range args {
-		if a == name && i+1 < len(args) {
-			return args[i+1]
-		}
-	}
-	return ""
 }
 
 // downloadLogsResult is the JSON envelope emitted on success by

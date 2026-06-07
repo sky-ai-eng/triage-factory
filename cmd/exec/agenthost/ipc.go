@@ -501,5 +501,8 @@ func (c *IPCClient) GithubDownloadArtifact(ctx context.Context, owner, repo, pat
 	if _, err := dst.Write(res.Data); err != nil {
 		return 0, fmt.Errorf("agenthost: write downloaded artifact: %w", err)
 	}
-	return res.N, nil
+	// Report bytes actually written to dst, which is the function's contract.
+	// Equal to the daemon's res.N today, but deriving it from the payload keeps
+	// the count honest if the wire shape ever diverges.
+	return int64(len(res.Data)), nil
 }
