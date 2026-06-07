@@ -28,7 +28,7 @@ var ticketHelp = map[string]string{
 	"edit":             "jira ticket edit <key> [--summary <text>] [--description <text>] [--priority <priority>] [--type <type>] [--add-label <label>] [--remove-label <label>]",
 	"set-parent":       "jira ticket set-parent <key> --parent <parent_key>",
 	"set-priority":     "jira ticket set-priority <key> --priority <priority>",
-	"search":           "jira ticket search --jql <jql> [--fields <f1,f2,...>] [--max <N>]",
+	"search":           "jira ticket search --jql <jql> [--fields <f1,f2,...>] [--max <N>] (default 50)",
 	"list-children":    "jira ticket list-children <key>",
 	"list-types":       "jira ticket list-types <project>",
 	"list-priorities":  "jira ticket list-priorities",
@@ -294,6 +294,12 @@ func ticketSearch(host agenthost.Client, args []string) {
 		v, err := strconv.Atoi(m)
 		if err != nil {
 			exitErr("--max must be a number")
+		}
+		if v <= 0 {
+			// The client coerces a non-positive cap to a default, so an
+			// unguarded `--max 0` would surprise by returning more than the
+			// no-flag default of 50. Reject it with a clear message instead.
+			exitErr("--max must be a positive number")
 		}
 		maxResults = v
 	}

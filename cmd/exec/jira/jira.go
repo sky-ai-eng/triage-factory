@@ -42,7 +42,7 @@ const HelpText = `Jira Ticket Commands:
   jira ticket edit <key> [--summary <text>] [--description <text>] [--priority <p>] [--type <t>] [--add-label <l>] [--remove-label <l>]  Update fields on an existing issue
   jira ticket set-parent <key> --parent <parent_key>           Link issue under a parent
   jira ticket set-priority <key> --priority <priority>         Update issue priority
-  jira ticket search --jql <jql> [--fields <f1,f2,...>] [--max <N>]  Search issues via JQL
+  jira ticket search --jql <jql> [--fields <f1,f2,...>] [--max <N>] (default 50)  Search issues via JQL
   jira ticket list-children <key>                              List child issues (subtasks + epic children)
   jira ticket list-types <project>                             List available issue types
   jira ticket list-priorities                                  List available priority levels`
