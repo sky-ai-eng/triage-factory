@@ -353,9 +353,7 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if jerr != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{
-					"error": "resolve jira credential: " + jerr.Error(),
-				})
+				internalError(w, "tasks", jerr)
 				return
 			}
 			jiraUserClient = c

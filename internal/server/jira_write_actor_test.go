@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -109,6 +110,34 @@ func TestSwipeClaim_JiraTask_NoUserCredential_Returns409(t *testing.T) {
 	}
 	if swipeCount != 0 {
 		t.Errorf("swipe_events = %d, want 0 (refused claim must leave no audit)", swipeCount)
+	}
+}
+
+// TestSwipeClaim_JiraTask_ResolverBackendError_Returns500 pins that a non-
+// ErrNoJiraUserCredential failure (a transient secret-store / backend error)
+// is a 500 routed through internalError — NOT a 409, and NOT the raw wrapped
+// error echoed to the client (internalError redacts in multi-mode) — and the
+// claim does not land.
+func TestSwipeClaim_JiraTask_ResolverBackendError_Returns500(t *testing.T) {
+	s := newTestServer(t)
+	s.jiraResolver = &recordingJiraResolver{userErr: errors.New("vault unreachable: org=secret user=secret")}
+	seedQueuedJiraTask(t, s.db, "e_jira_bkerr", "SKY-9", "t_jira_bkerr")
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_jira_bkerr/swipe",
+		map[string]any{"action": "claim", "hesitation_ms": 0})
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Backend error preempts the claim — no mutation, no audit.
+	var claim sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT claimed_by_user_id FROM tasks WHERE id = 't_jira_bkerr'`,
+	).Scan(&claim); err != nil {
+		t.Fatalf("scan task: %v", err)
+	}
+	if claim.Valid && claim.String != "" {
+		t.Errorf("claimed_by_user_id = %q; want unclaimed (backend error must not mutate)", claim.String)
 	}
 }
 

@@ -416,16 +416,27 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 	// SKY-463: claim (assign + transition) and done (transition) are
 	// user-initiated Jira writes — they must act as the acting user, not the
 	// org service account (AssignToSelf assigns to the token's user). Resolve
-	// the user's Jira client up front; an absent credential
-	// (ErrNoJiraUserCredential) leaves it nil so only the write-bearing actions
-	// fail per-row with a connect prompt, while queue (no Jira mutation, just a
-	// synthesized event + task) still applies.
+	// the acting user's Jira client only when the batch actually contains a
+	// write-bearing action: a queue action synthesizes an event + task with no
+	// Jira mutation, so a queue-only request must not depend on secret-store
+	// availability (a transient token-lookup failure shouldn't 500 a pure
+	// queue). On ErrNoJiraUserCredential the client stays nil and the claim/done
+	// rows fail per-row with a connect prompt; queue rows still apply.
 	var jiraUserClient *jira.Client
-	if c, jerr := s.jiraResolver.ForUser(r.Context(), orgID, userID); jerr == nil {
-		jiraUserClient = c
-	} else if !errors.Is(jerr, jira.ErrNoJiraUserCredential) {
-		internalError(w, "stock", jerr)
-		return
+	needsUserClient := false
+	for _, a := range req.Actions {
+		if a.Action == "claim" || a.Action == "done" {
+			needsUserClient = true
+			break
+		}
+	}
+	if needsUserClient {
+		if c, jerr := s.jiraResolver.ForUser(r.Context(), orgID, userID); jerr == nil {
+			jiraUserClient = c
+		} else if !errors.Is(jerr, jira.ErrNoJiraUserCredential) {
+			internalError(w, "stock", jerr)
+			return
+		}
 	}
 
 	applied := 0
