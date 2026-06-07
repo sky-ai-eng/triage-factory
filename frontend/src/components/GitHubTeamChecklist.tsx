@@ -1,7 +1,7 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import { RotateCw } from 'lucide-react'
 import { keyOf, type GitHubTeamCandidate } from '../lib/githubTeams'
-import { glassInputClass } from '../pages/settings/primitives'
+import SearchField from './SearchField'
 
 // Teams larger than this get a "broad team — noisy queue" hint. Fixed, not
 // configurable: it's a nudge, not a policy (SKY-411 open-question call).
@@ -170,48 +170,81 @@ export default function GitHubTeamChecklist({
   return (
     <div className={`flex flex-col min-h-0 ${className}`}>
       {/* Search + filter — shrink-0 so only the list below scrolls. */}
-      <div className="shrink-0 space-y-2 pb-3">
-        <input
-          type="text"
-          aria-label="Search GitHub teams"
-          placeholder="Search teams..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className={
-            bare
-              ? glassInputClass
-              : 'w-full bg-white/50 border border-border-subtle rounded-xl px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/40 transition-colors'
-          }
-        />
-        <div
-          role="tablist"
-          aria-label="Team filter"
-          className={`flex items-center gap-1 rounded-xl p-0.5 text-[12px] ${
-            bare
-              ? 'border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/50 backdrop-blur-md'
-              : 'bg-black/[0.03]'
-          }`}
-        >
-          {segments.map((s) => (
-            <button
-              key={s.mode}
-              type="button"
-              role="tab"
-              aria-selected={mode === s.mode}
-              onClick={() => setMode(s.mode)}
-              className={`flex-1 rounded-lg px-2.5 py-1.5 font-medium transition-colors ${
-                mode === s.mode
-                  ? bare
-                    ? 'bg-accent/[0.12] text-accent shadow-sm'
-                    : 'bg-surface-raised text-text-primary shadow-sm'
-                  : 'text-text-tertiary hover:text-text-secondary'
-              }`}
-            >
-              {s.label}
-              <span className="ml-1 text-text-tertiary tabular-nums">{s.count}</span>
-            </button>
-          ))}
-        </div>
+      <div className={`shrink-0 pb-3 ${bare ? 'space-y-3.5' : 'space-y-2'}`}>
+        {bare ? (
+          <SearchField
+            value={search}
+            onChange={setSearch}
+            placeholder="Search teams…"
+            ariaLabel="Search GitHub teams"
+          />
+        ) : (
+          <input
+            type="text"
+            aria-label="Search GitHub teams"
+            placeholder="Search teams..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-full bg-white/50 border border-border-subtle rounded-xl px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/40 transition-colors"
+          />
+        )}
+        {bare ? (
+          // Rail-underline filters — borderless, blended (no segmented box).
+          <div
+            role="tablist"
+            aria-label="Team filter"
+            className="flex items-center gap-5 text-[12px]"
+          >
+            {segments.map((s) => {
+              const active = mode === s.mode
+              return (
+                <button
+                  key={s.mode}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => setMode(s.mode)}
+                  className={`relative pb-1.5 font-medium transition-colors ${
+                    active ? 'text-accent' : 'text-text-tertiary hover:text-text-secondary'
+                  }`}
+                >
+                  {s.label}
+                  <span className="ml-1 tabular-nums opacity-70">{s.count}</span>
+                  {active && (
+                    <span
+                      aria-hidden
+                      className="absolute inset-x-0 bottom-0 h-[2px] rounded-full bg-accent"
+                    />
+                  )}
+                </button>
+              )
+            })}
+          </div>
+        ) : (
+          <div
+            role="tablist"
+            aria-label="Team filter"
+            className="flex items-center gap-1 rounded-xl bg-black/[0.03] p-0.5 text-[12px]"
+          >
+            {segments.map((s) => (
+              <button
+                key={s.mode}
+                type="button"
+                role="tab"
+                aria-selected={mode === s.mode}
+                onClick={() => setMode(s.mode)}
+                className={`flex-1 rounded-lg px-2.5 py-1.5 font-medium transition-colors ${
+                  mode === s.mode
+                    ? 'bg-surface-raised text-text-primary shadow-sm'
+                    : 'text-text-tertiary hover:text-text-secondary'
+                }`}
+              >
+                {s.label}
+                <span className="ml-1 text-text-tertiary tabular-nums">{s.count}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* List */}

@@ -4,7 +4,7 @@ import { RotateCw, ExternalLink } from 'lucide-react'
 import { useOptionalAuth } from '../contexts/AuthContext'
 import { useActiveOrgId } from '../contexts/OrgContext'
 import { LOCAL_DEFAULT_ORG_ID, getGitHubAppStatus, getGitHubAppInstallURL } from '../lib/githubApp'
-import { glassInputClass } from '../pages/settings/primitives'
+import SearchField from './SearchField'
 
 interface GitHubRepo {
   full_name: string
@@ -201,17 +201,22 @@ export default function RepoPickerModal({
 
       {/* Search */}
       <div className={inline ? 'pb-3' : 'px-6 pb-3'}>
-        <input
-          type="text"
-          placeholder="Search repos..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className={
-            inline
-              ? glassInputClass
-              : 'w-full bg-white/50 border border-border-subtle rounded-xl px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/40 transition-colors'
-          }
-        />
+        {inline ? (
+          <SearchField
+            value={search}
+            onChange={setSearch}
+            placeholder="Search repos…"
+            ariaLabel="Search repositories"
+          />
+        ) : (
+          <input
+            type="text"
+            placeholder="Search repos..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-full bg-white/50 border border-border-subtle rounded-xl px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/40 transition-colors"
+          />
+        )}
       </div>
 
       {/* List — capped to a sensible height inline (the wizard); the overlay
