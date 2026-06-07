@@ -257,6 +257,17 @@ export default function TeamSettings({
     }
   }
 
+  // Switching teams reloads the selected team's config behind the loading
+  // overlay, which would silently drop unsaved edits in any expanded section —
+  // the TeamSwitch fires outside SettingsSection's collapse guard. Confirm
+  // first when any section is dirty (mirrors the per-section discard guard).
+  const anyDirty = reposDirty || groupsDirty || projectsDirty || defaultsDirty
+  const switchTeam = (id: string) => {
+    if (id === selectedTeamId) return
+    if (anyDirty && !window.confirm('Discard unsaved changes and switch teams?')) return
+    setSelectedTeamId(id)
+  }
+
   if (loadError) {
     return (
       <div className="px-1 py-3 text-[13px] text-text-secondary">
@@ -278,7 +289,7 @@ export default function TeamSettings({
           <span className="text-[11px] uppercase tracking-wide text-text-tertiary">
             Configuring team
           </span>
-          <TeamSwitch teams={adminTeams} value={selectedTeamId} onChange={setSelectedTeamId} />
+          <TeamSwitch teams={adminTeams} value={selectedTeamId} onChange={switchTeam} />
         </div>
       )}
 

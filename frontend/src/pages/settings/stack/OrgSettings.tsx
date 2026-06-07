@@ -75,21 +75,31 @@ export default function OrgSettings({
   }, [])
 
   const load = useCallback(() => {
+    let cancelled = false
     setLoadError(null)
     loadOrg({ orgId, teamId: 'default', isLocal })
       .then((slice) => {
+        if (cancelled) return
         const seeded: WizardState = { ...initialWizardState(), ...slice, isLocal }
         setBaseline(seeded)
         setDraft(seeded)
         setLoaded(true)
       })
-      .catch(() =>
-        setLoadError('Could not load organization settings. Check your connection and try again.'),
-      )
+      .catch(() => {
+        if (cancelled) return
+        setLoadError('Could not load organization settings. Check your connection and try again.')
+      })
+    // Suppress a stale completion if orgId/isLocal change mid-flight (mirrors
+    // TeamSettings.load — near-zero risk here since both are stable once
+    // OrgSettings mounts, but keeps the two load paths consistent).
+    return () => {
+      cancelled = true
+    }
   }, [orgId, isLocal])
 
   useEffect(() => {
-    load()
+    const cancel = load()
+    return cancel
   }, [load])
 
   // commitOrgSlice persists one section's fields merged onto the LIVE baseline
