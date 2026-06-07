@@ -26,17 +26,31 @@
 // assignee + status (GetClaimState) and skips any step the ticket already
 // satisfies. That is what lets it coexist safely with the agent's own
 // cmd/exec/jira verbs — whoever writes first wins, the other no-ops.
+//
+// In-progress and done mirrors run in detached goroutines, so two safeguards
+// keep a slow in-progress mirror from fighting the done mirror for one ticket:
+// per-issue serialization (jiraMirrorLocks) and a forward-only in-progress rule
+// (never transition a ticket already in the Done bucket). See runJiraMirror.
 
 package delegate
 
 import (
 	"context"
+	"errors"
 	"log"
-	"slices"
+	"sync"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/jira"
 )
+
+// jiraMirrorTimeout bounds one mirror operation (resolve + GetClaimState +
+// assign + transition) end to end. The Jira client already caps each HTTP call
+// at 15s; this caps the whole multi-call sequence so a slow ticket can't pin
+// the per-issue mirror lock for long.
+const jiraMirrorTimeout = 30 * time.Second
 
 // lookupJiraRuleForTaskSystem resolves the per-team Jira status rule governing
 // the task's source project, under the admin pool (ListForTeamSystem) — the
@@ -83,7 +97,7 @@ func (s *Spawner) mirrorJiraInProgress(orgID string, task *domain.Task) {
 		log.Printf("[jira] mirror: no in_progress rule for project of %s, skipping", task.EntitySourceID)
 		return
 	}
-	go s.runJiraMirror(orgID, task.EntitySourceID, rule.InProgressCanonical, "in-progress", rule.InProgressMembers, true)
+	go s.runJiraMirror(orgID, task.EntitySourceID, *rule, false)
 }
 
 // mirrorJiraDone mirrors a bot-owned task's clean completion onto its Jira
@@ -99,7 +113,7 @@ func (s *Spawner) mirrorJiraDone(orgID string, task *domain.Task) {
 		log.Printf("[jira] mirror: no done rule for project of %s, skipping", task.EntitySourceID)
 		return
 	}
-	go s.runJiraMirror(orgID, task.EntitySourceID, rule.DoneCanonical, "done", rule.DoneMembers, false)
+	go s.runJiraMirror(orgID, task.EntitySourceID, *rule, true)
 }
 
 // mirrorJiraDoneForTask loads the task and mirrors a clean completion onto its
@@ -126,41 +140,118 @@ func (s *Spawner) mirrorJiraDoneForTask(ctx context.Context, orgID, taskID strin
 
 // runJiraMirror is the detached worker both hooks share. It resolves the org's
 // system/bot Jira client fresh (creds hot-swap on config change, so a client is
-// never cached) and then — skipping any step the ticket already satisfies —
-// assigns the service account (when assign is set) and transitions the ticket
-// into the target bucket. members is the bucket's member set for the
-// idempotency check; bucket is a human-readable label for logs.
-func (s *Spawner) runJiraMirror(orgID, issueKey, canonical, bucket string, members []string, assign bool) {
+// never cached) and then assigns the service account (in-progress only) and
+// transitions the ticket into the target bucket, skipping any step the ticket
+// already satisfies.
+//
+// Two safeguards keep a slow in-progress mirror from clobbering the done mirror
+// for the same ticket:
+//   - Per-issue serialization (jiraMirrorLocks): the in-progress and done
+//     mirrors for one ticket can't interleave or reorder their writes.
+//   - Forward-only in-progress: under that lock it re-reads state and, if a done
+//     mirror has already advanced the ticket into the Done bucket, makes no
+//     in-progress move — so a terminal Done is never dragged back to In
+//     Progress, whichever goroutine won the lock.
+//
+// The whole sequence is bounded by jiraMirrorTimeout so a slow ticket releases
+// the lock rather than pinning it.
+func (s *Spawner) runJiraMirror(orgID, issueKey string, rule domain.JiraProjectStatusRules, done bool) {
 	resolver := s.getJiraResolver()
 	if resolver == nil {
 		return
 	}
-	ctx := context.Background()
+
+	// Serialize before any Jira call so the read→write decision for this ticket
+	// is made under mutual exclusion with the other phase's mirror.
+	unlock := s.jiraMirrorLocks.lock(orgID + "\x00" + issueKey)
+	defer unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), jiraMirrorTimeout)
+	defer cancel()
+
 	client, err := resolver.ForSystem(ctx, orgID)
 	if err != nil {
-		// ErrNoJiraSystemCredential is the expected "org has no service PAT"
-		// case; a backend error is logged either way so an outage isn't silent.
-		log.Printf("[jira] mirror: resolve system client for org %s: %v", orgID, err)
+		// An org with no Jira service credential is an expected, normal state
+		// (a GitHub-only org, or creds removed mid-flight) — no-op silently
+		// rather than log on every mirrored board transition. A real backend
+		// error still logs so an outage isn't swallowed.
+		if !errors.Is(err, jira.ErrNoJiraSystemCredential) {
+			log.Printf("[jira] mirror: resolve system client for org %s: %v", orgID, err)
+		}
 		return
 	}
 
 	state := client.GetClaimState(ctx, issueKey)
-	needAssign := assign && (state == nil || !state.AssignedToSelf)
-	needTransition := state == nil || !slices.Contains(members, state.StatusName)
-	if !needAssign && !needTransition {
-		// A nil state forces needTransition true, so state is non-nil here.
-		log.Printf("[jira] mirror: %s already in %s bucket (%q), skipping", issueKey, bucket, state.StatusName)
+
+	if done {
+		if state != nil && rule.DoneContains(state.StatusName) {
+			log.Printf("[jira] mirror: %s already in done bucket (%q), skipping", issueKey, state.StatusName)
+			return
+		}
+		if err := client.TransitionTo(ctx, issueKey, rule.DoneCanonical); err != nil {
+			log.Printf("[jira] mirror: transition %s to %q (done): %v", issueKey, rule.DoneCanonical, err)
+		}
 		return
 	}
-	if needAssign {
+
+	// In-progress phase. Forward-only: if a concurrent done mirror already moved
+	// the ticket into the Done bucket, do nothing — never drag a terminal ticket
+	// back to In Progress.
+	if state != nil && rule.DoneContains(state.StatusName) {
+		log.Printf("[jira] mirror: %s already advanced to done (%q), skipping in-progress mirror", issueKey, state.StatusName)
+		return
+	}
+	if state == nil || !state.AssignedToSelf {
 		if err := client.AssignToSelf(ctx, issueKey); err != nil {
 			log.Printf("[jira] mirror: assign %s to service account: %v", issueKey, err)
 			return
 		}
 	}
-	if needTransition {
-		if err := client.TransitionTo(ctx, issueKey, canonical); err != nil {
-			log.Printf("[jira] mirror: transition %s to %q (%s): %v", issueKey, canonical, bucket, err)
+	if state == nil || !rule.InProgressContains(state.StatusName) {
+		if err := client.TransitionTo(ctx, issueKey, rule.InProgressCanonical); err != nil {
+			log.Printf("[jira] mirror: transition %s to %q (in-progress): %v", issueKey, rule.InProgressCanonical, err)
 		}
+	}
+}
+
+// keyedMutex hands out a mutex per string key, so callers can serialize work on
+// one key without serializing across unrelated keys. Entries are refcounted and
+// dropped when the last holder releases, so the map doesn't grow unboundedly as
+// Jira issue keys come and go over a long-running process. The zero value is
+// ready to use.
+type keyedMutex struct {
+	mu    sync.Mutex
+	locks map[string]*refMutex
+}
+
+type refMutex struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lock acquires the per-key mutex and returns its unlock func, which the caller
+// must invoke exactly once (defer is the usual shape).
+func (k *keyedMutex) lock(key string) func() {
+	k.mu.Lock()
+	if k.locks == nil {
+		k.locks = make(map[string]*refMutex)
+	}
+	rm := k.locks[key]
+	if rm == nil {
+		rm = &refMutex{}
+		k.locks[key] = rm
+	}
+	rm.refs++
+	k.mu.Unlock()
+
+	rm.mu.Lock()
+	return func() {
+		rm.mu.Unlock()
+		k.mu.Lock()
+		rm.refs--
+		if rm.refs == 0 {
+			delete(k.locks, key)
+		}
+		k.mu.Unlock()
 	}
 }

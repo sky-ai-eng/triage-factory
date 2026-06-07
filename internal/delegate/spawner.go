@@ -114,6 +114,11 @@ type Spawner struct {
 	// mu-guarded like the credential seam above it — creds hot-swap on config
 	// change, so a client is resolved fresh per write and never cached here.
 	jiraResolver jira.Resolver
+	// jiraMirrorLocks serializes the TFAC-300 board→Jira mirror per ticket so a
+	// slow in-progress mirror and the done mirror can't interleave or reorder
+	// their writes against the same issue (which could drag a Done ticket back
+	// to In Progress). Its own keyed lock, independent of mu; zero value ready.
+	jiraMirrorLocks keyedMutex
 
 	// blobs is the durable blob/object store handle for the blueprint
 	// workspace seam: local mode → an on-disk store under the state root,

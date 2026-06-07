@@ -1,12 +1,16 @@
 package delegate
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -118,6 +122,28 @@ func (r *recordingJiraServer) snapshot() (assigns int, transitions []string) {
 	return r.assigns, append([]string(nil), r.transitions...)
 }
 
+// currentStatus reports the ticket's status after any applied transitions —
+// the end-state assertion for the ordering tests.
+func (r *recordingJiraServer) currentStatus() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.status
+}
+
+// mirrorRule is the SKY rule the direct runJiraMirror tests act on:
+// To Do (pickup) / In Progress / Done.
+func mirrorRule() domain.JiraProjectStatusRules {
+	return domain.JiraProjectStatusRules{
+		TeamID:              runmode.LocalDefaultTeamID,
+		ProjectKey:          "SKY",
+		PickupMembers:       []string{"To Do"},
+		InProgressMembers:   []string{"In Progress"},
+		InProgressCanonical: "In Progress",
+		DoneMembers:         []string{"Done"},
+		DoneCanonical:       "Done",
+	}
+}
+
 // waitTransition blocks until the fake has serviced one transition POST, or
 // fails the test on timeout — the deterministic join for a detached mirror.
 func (r *recordingJiraServer) waitTransition(t *testing.T) {
@@ -169,7 +195,7 @@ func TestRunJiraMirror_InProgress_AssignsAndTransitions(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", "In Progress", "in-progress", []string{"In Progress"}, true)
+	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
 
 	assigns, transitions := fake.snapshot()
 	if assigns != 1 {
@@ -187,7 +213,7 @@ func TestRunJiraMirror_Done_TransitionsOnly_NoAssign(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", "Done", "done", []string{"Done"}, false)
+	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), true)
 
 	assigns, transitions := fake.snapshot()
 	if assigns != 0 {
@@ -206,7 +232,7 @@ func TestRunJiraMirror_Idempotent_AlreadyInBucket_NoWrites(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", "In Progress", "in-progress", []string{"In Progress"}, true)
+	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
 
 	assigns, transitions := fake.snapshot()
 	if assigns != 0 || len(transitions) != 0 {
@@ -223,9 +249,9 @@ func TestRunJiraMirror_InReviewCollapsesToInProgress_NoDistinctMove(t *testing.T
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
 	// First in-progress (board in_progress) — assign + transition.
-	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", "In Progress", "in-progress", []string{"In Progress"}, true)
+	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
 	// Board bounces to in_review, which also maps to InProgressCanonical.
-	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", "In Progress", "in-progress", []string{"In Progress"}, true)
+	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
 
 	assigns, transitions := fake.snapshot()
 	if assigns != 1 {
@@ -241,8 +267,83 @@ func TestRunJiraMirror_InReviewCollapsesToInProgress_NoDistinctMove(t *testing.T
 func TestRunJiraMirror_NoResolver_NoOp(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
 	// No SetJiraResolver → getJiraResolver returns nil.
-	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", "In Progress", "in-progress", []string{"In Progress"}, true)
+	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
 	// Reaching here without a panic / outbound call is the assertion.
+}
+
+// Forward-only: a late in-progress mirror must NEVER transition a ticket the
+// done mirror already moved to Done — that would drag the terminal ticket back
+// to In Progress. With the ticket already in the Done bucket the in-progress
+// mirror does nothing (not even an assign).
+func TestRunJiraMirror_InProgress_SkipsWhenAlreadyDone(t *testing.T) {
+	fake := newRecordingJiraServer(t, "Done", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
+
+	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
+
+	if assigns, transitions := fake.snapshot(); assigns != 0 || len(transitions) != 0 {
+		t.Errorf("assigns=%d transitions=%v, want no writes (forward-only: a Done ticket is never moved back)", assigns, transitions)
+	}
+	if got := fake.currentStatus(); got != "Done" {
+		t.Errorf("final status = %q, want Done (unchanged)", got)
+	}
+}
+
+// Concurrent in-progress + done mirrors against one ticket always settle on
+// Done, whichever wins the per-issue lock: in-progress-first runs In Progress
+// then Done; done-first runs Done then the in-progress mirror's forward-only
+// guard skips. Run under -race, this also exercises jiraMirrorLocks.
+func TestRunJiraMirror_ConcurrentInProgressAndDone_EndsInDone(t *testing.T) {
+	fake := newRecordingJiraServer(t, "To Do", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
+	rule := mirrorRule()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", rule, false) }()
+	go func() { defer wg.Done(); s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", rule, true) }()
+	wg.Wait()
+
+	if got := fake.currentStatus(); got != "Done" {
+		t.Errorf("final status = %q, want Done (a late in-progress mirror must not drag the ticket out of Done)", got)
+	}
+}
+
+// ErrNoJiraSystemCredential is an expected, normal state (a GitHub-only org, or
+// creds removed mid-flight), so the mirror no-ops *silently* — it must not log
+// on every mirrored board transition.
+func TestRunJiraMirror_NoSystemCredential_SilentNoOp(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s.SetJiraResolver(&fakeJiraResolver{sysErr: jira.ErrNoJiraSystemCredential})
+
+	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
+
+	if buf.Len() != 0 {
+		t.Errorf("expected no log for ErrNoJiraSystemCredential, got: %q", buf.String())
+	}
+}
+
+// A *real* backend error (vault outage, etc.) is NOT swallowed — it logs, so an
+// outage is diagnosable. Pins the errors.Is distinction against the silent case.
+func TestRunJiraMirror_BackendError_Logs(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s.SetJiraResolver(&fakeJiraResolver{sysErr: errors.New("vault unreachable")})
+
+	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
+
+	if !strings.Contains(buf.String(), "resolve system client") {
+		t.Errorf("expected a log for a real backend error, got: %q", buf.String())
+	}
 }
 
 // --- lookupJiraRuleForTaskSystem ------------------------------------------
