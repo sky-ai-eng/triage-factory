@@ -4,6 +4,7 @@ import { RotateCw, ExternalLink } from 'lucide-react'
 import { useOptionalAuth } from '../contexts/AuthContext'
 import { useActiveOrgId } from '../contexts/OrgContext'
 import { LOCAL_DEFAULT_ORG_ID, getGitHubAppStatus, getGitHubAppInstallURL } from '../lib/githubApp'
+import { glassInputClass } from '../pages/settings/primitives'
 
 interface GitHubRepo {
   full_name: string
@@ -174,11 +175,11 @@ export default function RepoPickerModal({
   }
 
   const content = (
-    <div className="flex flex-col h-full max-h-[80vh]">
+    <div className={`flex flex-col ${inline ? '' : 'h-full max-h-[80vh]'}`}>
       {/* Header */}
-      <div className="px-6 pt-6 pb-4">
-        <h2 className="text-[18px] font-semibold text-text-primary tracking-tight">
-          Select Repositories
+      <div className={inline ? 'pb-4' : 'px-6 pt-6 pb-4'}>
+        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+          Select repositories
         </h2>
         <p className="text-[13px] text-text-tertiary mt-1 leading-relaxed">
           {appMode
@@ -199,18 +200,23 @@ export default function RepoPickerModal({
       </div>
 
       {/* Search */}
-      <div className="px-6 pb-3">
+      <div className={inline ? 'pb-3' : 'px-6 pb-3'}>
         <input
           type="text"
           placeholder="Search repos..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          className="w-full bg-white/50 border border-border-subtle rounded-xl px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/40 transition-colors"
+          className={
+            inline
+              ? glassInputClass
+              : 'w-full bg-white/50 border border-border-subtle rounded-xl px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/40 transition-colors'
+          }
         />
       </div>
 
-      {/* List */}
-      <div className="flex-1 overflow-y-auto px-6 min-h-0">
+      {/* List — capped to a sensible height inline (the wizard); the overlay
+          fills its modal. */}
+      <div className={`overflow-y-auto min-h-0 ${inline ? 'max-h-[22rem]' : 'flex-1 px-6'}`}>
         {loading && (
           <div className="space-y-1 py-2">
             {[1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
@@ -330,7 +336,11 @@ export default function RepoPickerModal({
           navigation + persistence and just reads the selection via
           onSelectionChange. A standing selected-count keeps the host honest. */}
       {!hideFooter && (
-        <div className="px-6 py-4 border-t border-border-subtle flex items-center justify-between">
+        <div
+          className={`flex items-center justify-between border-t border-border-subtle py-4 ${
+            inline ? 'mt-2' : 'px-6'
+          }`}
+        >
           <span className="text-[12px] text-text-tertiary">
             {checked.size} repo{checked.size !== 1 ? 's' : ''} selected
           </span>
@@ -369,13 +379,10 @@ export default function RepoPickerModal({
   )
 
   if (inline) {
-    // Full width so it fills the host card it sits in (the wizard step), rather
-    // than the narrower standalone-card width the overlay variant uses.
-    return (
-      <div className="w-full backdrop-blur-xl bg-surface-raised border border-border-glass rounded-2xl shadow-lg shadow-black/[0.04] overflow-hidden">
-        {content}
-      </div>
-    )
+    // Flush in the wizard — no card chrome, the content flows on the step like
+    // everything else. The list caps its own height (above), so it stays in the
+    // flow rather than ballooning.
+    return <div className="w-full">{content}</div>
   }
 
   // Portal to <body>: the overlay is position:fixed, but the field groups

@@ -536,7 +536,6 @@ const orgModelStep: WizardStep = {
   id: 'org-model',
   section: 'org',
   title: 'Max model tier',
-  selfAdvancing: true,
   isComplete: () => true,
   persist: ({ state }) => persistOrg(state),
   collapsedSummary: (s) =>
@@ -666,9 +665,6 @@ const teamModelStep: WizardStep = {
   id: 'team-model',
   section: 'team',
   title: 'Team default model',
-  // The last step: action-on-click finishes setup (selfAdvancing — no Finish
-  // button), persisting the team form (and surfacing any model-cap clamp).
-  selfAdvancing: true,
   isComplete: (s) => s.team.default_model.trim() !== '',
   validate: (s) => (s.team.default_model.trim() === '' ? 'Choose a default model.' : null),
   persist: async ({ state, teamId }) => {
