@@ -148,7 +148,7 @@ async function fetchIntegrationsState(): Promise<{ githubReady: boolean; jiraCon
 // seed from the connection signals: a connected org has, by definition, a
 // previously-confirmed URL and access, so it resumes past those steps; the
 // access tab defaults to PAT for an org with a stored token, else App.
-async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
+export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
   const [org, integrations] = await Promise.all([fetchOrgSettings(), fetchIntegrationsState()])
   if (!org) throw new Error('Could not load organization settings')
   const orgForm = orgConfigFromSettings(org)
@@ -199,7 +199,7 @@ async function persistOrg(state: WizardState): Promise<void> {
 // settings. A failed repos GET (null) keeps repos undefined (unloaded) rather
 // than [], so callers can distinguish "unloaded" from "loaded but empty" and
 // avoid treating a fetch failure as "tracks nothing".
-async function loadTeam(teamId: string): Promise<Partial<WizardState>> {
+export async function loadTeam(teamId: string): Promise<Partial<WizardState>> {
   const [settings, repos] = await Promise.all([fetchTeamSettings(teamId), fetchTeamRepos(teamId)])
   if (!settings) throw new Error('Could not load team settings')
   return {
@@ -694,7 +694,7 @@ const teamModelStep: WizardStep = {
 // drive the copy, and `connect_available` chooses Connect vs. the PAT_2 paste.
 // Throws on a hard read failure so the host shows a retry rather than wrongly
 // prompting a connected user to reconnect.
-async function loadUserIdentity(ctx: LoadContext): Promise<Partial<WizardState>> {
+export async function loadUserIdentity(ctx: LoadContext): Promise<Partial<WizardState>> {
   if (!ctx.orgId) throw new Error('No organization context for the GitHub identity check.')
   // Through apiClient so a stale-session 401 is routed to AuthContext; a hard
   // failure (HttpError / network) throws, and the host shows a retry rather

@@ -1,15 +1,17 @@
 // The Organization group of the Settings stack — rendered only for org admins.
-// Composes the SAME flush primitives the setup wizard uses (UrlField,
-// ChoiceCards, the `bare` field groups, ModelTierSelector) so Settings and
-// /setup read as one material — no carded field groups, no card-in-card. GitHub
-// is split into its wizard-granular items (URL · access method · clone
-// protocol), each its own collapsible.
+// Each section's BODY is the actual /setup step component (GitHubUrlStep,
+// GitHubModeStep, GitHubAppStep, GitHubPatStep, GitHubCloneStep, OrgModelStep,
+// …) fed a WizardState draft, so Settings and /setup are literally the same
+// components — same visuals, same copy, same granularity (GitHub is split into
+// its individual items: URL · access method · account type · App/token · clone).
 //
-// The org-form sections all persist through the single POST /api/settings/org,
-// so each saves {...baseline, ...ownSlice} against the LIVE baseline: saving one
-// section never flushes another's unsaved edits, and every success folds its
-// slice back into the baseline. Jira connect/disconnect, add-team, integrations
-// and danger commit inline (their own endpoints), so they carry no Save footer.
+// What Settings adds over /setup is the per-section Save model (the approved
+// design): expand a section, edit its draft, Save (or Cancel/discard). The
+// org-form sections all persist through the single POST /api/settings/org, so
+// each saves {...baseline.org, ...ownFields} against the LIVE baseline — saving
+// one never flushes another's unsaved edits. Selector/panel sections (the
+// access-method picker, the App register panel) and connect/disconnect commit
+// no org-form slice, so they carry no Save footer.
 
 import { useCallback, useEffect, useState } from 'react'
 import { toast } from '../../../components/Toast/toastStore'
@@ -20,55 +22,26 @@ import {
   checkGitHubReachability,
   reachabilityMessage,
 } from '../../../lib/reachability'
-import { UrlField, ChoiceCards } from '../../setup/parts'
-import GitHubAccessGroup from '../GitHubAccessGroup'
-import GitHubAppPanel from '../GitHubAppPanel'
+import {
+  GitHubUrlStep,
+  GitHubModeStep,
+  GitHubAccountTypeStep,
+  GitHubAppStep,
+  GitHubPatStep,
+  GitHubCloneStep,
+} from '../../setup/GitHubStep'
+import { OrgModelStep } from '../../setup/ModelStep'
+import { initialWizardState, loadOrg } from '../../setup/steps'
+import type { StepContext, WizardState } from '../../setup/types'
 import PollerTimingGroup from '../PollerTimingGroup'
 import JiraAccessGroup from '../JiraAccessGroup'
-import ModelTierSelector from '../ModelTierSelector'
-import { MODEL_CAP_OPTIONS } from '../modelTiers'
 import TeamManagementSection from '../../../components/TeamManagementSection'
-import {
-  emptyOrgConfig,
-  fetchOrgSettings,
-  orgConfigFromSettings,
-  saveOrgConfig,
-  type CloneProtocol,
-  type OrgConfigForm,
-  type OrgSettingsData,
-} from '../orgConfig'
+import { saveOrgConfig, type OrgConfigForm } from '../orgConfig'
 import SettingsSection from './SettingsSection'
 
 const TIER_LABELS: Record<string, string> = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus' }
 const intervalLabel = (d: string): string => d.replace(/m0s$/, 'm')
-
-type AccessMode = 'app' | 'pat'
-
-const ACCESS_CARDS: { kind: AccessMode; title: string; detail: string }[] = [
-  {
-    kind: 'app',
-    title: 'GitHub App',
-    detail: 'Polls under its own bot identity and supports multiple installations.',
-  },
-  {
-    kind: 'pat',
-    title: 'Personal access token',
-    detail: 'A classic token with repo + read:org scopes — the simpler setup.',
-  },
-]
-
-const CLONE_CARDS: { kind: CloneProtocol; title: string; detail: string }[] = [
-  {
-    kind: 'ssh',
-    title: 'SSH',
-    detail: 'Clone over SSH using your key (an SSH agent must be configured).',
-  },
-  {
-    kind: 'https',
-    title: 'HTTPS',
-    detail: 'Clone over HTTPS using your token — no SSH setup needed.',
-  },
-]
+const noop = () => {}
 
 export default function OrgSettings({
   orgId,
@@ -77,89 +50,73 @@ export default function OrgSettings({
   orgId: string | null
   isLocal: boolean
 }) {
-  const [data, setData] = useState<OrgSettingsData | null>(null)
-  const [baseline, setBaseline] = useState<OrgConfigForm>(emptyOrgConfig)
+  const [draft, setDraft] = useState<WizardState>(initialWizardState)
+  const [baseline, setBaseline] = useState<WizardState>(initialWizardState)
+  const [loaded, setLoaded] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [jiraConnected, setJiraConnected] = useState(false)
-
-  // Per-section drafts.
-  const [ghUrl, setGhUrl] = useState('')
   const [urlError, setUrlError] = useState<string | null>(null)
-  const [savingUrl, setSavingUrl] = useState(false)
 
-  const [accessMode, setAccessMode] = useState<AccessMode>('app')
-  const [ghPat, setGhPat] = useState('')
-  const [savingPat, setSavingPat] = useState(false)
+  // Per-section in-flight flags.
+  const [saving, setSaving] = useState<string | null>(null)
 
-  const [ghClone, setGhClone] = useState<CloneProtocol>('ssh')
-  const [savingClone, setSavingClone] = useState(false)
-
-  const [ghPoll, setGhPoll] = useState('5m0s')
-  const [savingGhPoll, setSavingGhPoll] = useState(false)
-
-  const [jiraUrl, setJiraUrl] = useState('')
-  const [jiraPat, setJiraPat] = useState('')
-
-  const [jiraPoll, setJiraPoll] = useState('5m0s')
-  const [savingJiraPoll, setSavingJiraPoll] = useState(false)
-
-  const [modelCap, setModelCap] = useState('')
-  const [savingCap, setSavingCap] = useState(false)
-
-  const seed = useCallback((form: OrgConfigForm, org: OrgSettingsData) => {
-    setGhUrl(form.github_url)
-    setUrlError(null)
-    setAccessMode(org.has_github_pat ? 'pat' : 'app')
-    setGhPat('')
-    setGhClone(form.github_clone_protocol)
-    setGhPoll(form.github_poll_interval)
-    setJiraUrl(form.jira_url)
-    setJiraPat('')
-    setJiraPoll(form.jira_poll_interval)
-    setModelCap(form.max_llm_model_tier)
+  const patch = useCallback((p: Partial<WizardState>) => {
+    setDraft((d) => ({ ...d, ...p }))
   }, [])
 
   const load = useCallback(() => {
     setLoadError(null)
-    fetchOrgSettings()
-      .then((org) => {
-        if (!org) {
-          setLoadError('Could not load organization settings. Check your connection and try again.')
-          return
-        }
-        const form = orgConfigFromSettings(org)
-        setData(org)
-        setBaseline(form)
-        seed(form, org)
-        setJiraConnected(org.has_jira_pat && !!org.jira_base_url)
+    loadOrg({ orgId, teamId: 'default', isLocal })
+      .then((slice) => {
+        const seeded: WizardState = { ...initialWizardState(), ...slice, isLocal }
+        setBaseline(seeded)
+        setDraft(seeded)
+        setLoaded(true)
       })
       .catch(() =>
         setLoadError('Could not load organization settings. Check your connection and try again.'),
       )
-  }, [seed])
+  }, [orgId, isLocal])
 
   useEffect(() => {
     load()
   }, [load])
 
-  // saveOrgSlice persists one section's fields merged onto the live baseline,
-  // folding the result back in on success. Returns true so the shell collapses.
-  const saveOrgSlice = useCallback(
-    async (slice: Partial<OrgConfigForm>, label: string): Promise<boolean> => {
-      const next: OrgConfigForm = { ...baseline, ...slice, github_pat: slice.github_pat ?? '' }
-      const res = await saveOrgConfig(next)
-      if (!res.ok) {
-        toast.error(res.error)
-        return false
+  // commitOrgSlice persists one section's fields merged onto the LIVE baseline
+  // org form (the single POST /api/settings/org), folding the slice back in on
+  // success. github_pat is always sent blank in the baseline (the stored token
+  // never round-trips); a section that owns it passes the typed value in `slice`.
+  const commitOrgSlice = useCallback(
+    async (key: string, slice: Partial<OrgConfigForm>, label: string): Promise<boolean> => {
+      setSaving(key)
+      try {
+        const next: OrgConfigForm = {
+          ...baseline.org,
+          ...slice,
+          github_pat: slice.github_pat ?? '',
+        }
+        const res = await saveOrgConfig(next)
+        if (!res.ok) {
+          toast.error(res.error)
+          return false
+        }
+        setBaseline((b) => ({ ...b, org: { ...b.org, ...slice, github_pat: '' } }))
+        if (res.warning) toast.info(res.warning)
+        toast.success(`${label} saved`)
+        return true
+      } finally {
+        setSaving(null)
       }
-      // Keep the stored-PAT blank in the baseline (presence is tracked on data).
-      setBaseline({ ...next, github_pat: '' })
-      if (res.warning) toast.info(res.warning)
-      toast.success(`${label} saved`)
-      return true
     },
-    [baseline],
+    [baseline.org],
   )
+
+  // revertOrg resets the named org fields in the draft back to the baseline —
+  // a section's Cancel, scoped so it never touches a neighbour's edits.
+  const revertOrg = (fields: (keyof OrgConfigForm)[]) =>
+    setDraft((d) => ({
+      ...d,
+      org: fields.reduce((o, f) => ({ ...o, [f]: baseline.org[f] }), { ...d.org }),
+    }))
 
   if (loadError) {
     return (
@@ -171,230 +128,231 @@ export default function OrgSettings({
       </div>
     )
   }
-  if (!data) {
+  if (!loaded) {
     return (
       <div className="px-1 py-3 text-[13px] text-text-tertiary">Loading organization settings…</div>
     )
   }
 
-  const capSummary = modelCap ? `Capped at ${TIER_LABELS[modelCap] ?? modelCap}` : 'No cap'
+  // The StepContext every /setup body consumes — the live draft + patch, with
+  // advance a no-op (Settings has no linear flow; selfAdvancing pickers just
+  // record the choice). orgId/teamId/isLocal ride along for the App panel etc.
+  const ctx: StepContext = { orgId, teamId: 'default', isLocal, state: draft, patch, advance: noop }
+
+  const isPat = draft.githubAccessTab === 'pat'
+  const isApp = draft.githubAccessTab === 'app'
+  const capSummary = baseline.org.max_llm_model_tier
+    ? `Capped at ${TIER_LABELS[baseline.org.max_llm_model_tier] ?? baseline.org.max_llm_model_tier}`
+    : 'No cap'
 
   return (
     <div className="divide-y divide-border-subtle">
       {/* ── GitHub URL ── */}
       <SettingsSection
         title="GitHub URL"
-        summary={hostOf(baseline.github_url || 'github.com')}
-        dirty={ghUrl !== baseline.github_url}
-        saving={savingUrl}
+        summary={hostOf(baseline.org.github_url || 'github.com')}
+        dirty={draft.org.github_url !== baseline.org.github_url}
+        saving={saving === 'gh-url'}
         onSave={async () => {
-          setSavingUrl(true)
+          setSaving('gh-url')
           setUrlError(null)
           try {
-            const url = normalizeBaseUrl(ghUrl)
+            const url = normalizeBaseUrl(draft.org.github_url)
             const probe = await checkGitHubReachability(url)
             if (!probe.reachable) {
               setUrlError(reachabilityMessage(probe))
               return false
             }
-            const ok = await saveOrgSlice({ github_url: url }, 'GitHub URL')
-            if (ok) {
-              setGhUrl(url)
-              setData((d) => (d ? { ...d, github_base_url: url } : d))
-            }
-            return ok
+            patch({ org: { ...draft.org, github_url: url } })
+            return await commitOrgSlice('gh-url', { github_url: url }, 'GitHub URL')
           } finally {
-            setSavingUrl(false)
+            setSaving(null)
           }
         }}
         onCancel={() => {
-          setGhUrl(baseline.github_url)
+          revertOrg(['github_url'])
           setUrlError(null)
         }}
       >
-        <UrlField
-          label="GitHub URL"
-          value={ghUrl}
-          onChange={(v) => {
-            setGhUrl(v)
-            if (urlError) setUrlError(null)
-          }}
-          placeholder="https://github.com"
-          helpText="github.com for the common case; a *.ghe.com data-residency subdomain or your GitHub Enterprise Server host otherwise."
-          invalid={!!urlError}
-        />
-        {urlError && <p className="text-[12px] text-dismiss">{urlError}</p>}
+        <GitHubUrlStep {...ctx} error={urlError} />
       </SettingsSection>
 
-      {/* ── GitHub access (App vs PAT) ── */}
+      {/* ── GitHub access method (selector; gates the App/PAT items below) ── */}
       <SettingsSection
         title="GitHub access"
-        summary={data.has_github_pat ? 'Personal access token' : 'GitHub App'}
-        // Only PAT entry persists here; the App panel registers out of band.
-        dirty={accessMode === 'pat' && ghPat.trim() !== ''}
-        saving={savingPat}
-        onSave={
-          accessMode === 'pat'
-            ? async () => {
-                setSavingPat(true)
-                try {
-                  const ok = await saveOrgSlice({ github_pat: ghPat }, 'GitHub token')
-                  if (ok) {
-                    setGhPat('')
-                    setData((d) => (d ? { ...d, has_github_pat: true } : d))
-                  }
-                  return ok
-                } finally {
-                  setSavingPat(false)
-                }
-              }
-            : undefined
-        }
-        onCancel={() => setGhPat('')}
+        summary={isPat ? 'Personal access token' : 'GitHub App'}
       >
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
-          How Triage Factory connects to your organization&rsquo;s GitHub — the identity its bots
-          poll and open pull requests under. This is the org-wide connection, not your personal
-          access.
-        </p>
-        <ChoiceCards
-          ariaLabel="GitHub access method"
-          options={ACCESS_CARDS}
-          selected={accessMode}
-          onChoose={setAccessMode}
-        />
-        {accessMode === 'pat' ? (
-          <GitHubAccessGroup
-            value={{ github_url: ghUrl, github_pat: ghPat, github_clone_protocol: ghClone }}
-            onChange={(p) => {
-              if (p.github_pat !== undefined) setGhPat(p.github_pat)
-            }}
-            hasToken={data.has_github_pat}
-            isLocal={isLocal}
-            orgId={orgId}
-            showAppPanel={false}
-            showBaseUrl={false}
-            showHeading={false}
-            showCloneProtocol={false}
-            bare
-          />
-        ) : (
-          <GitHubAppPanel orgId={orgId} showHeading={false} bare />
-        )}
+        <GitHubModeStep {...ctx} />
       </SettingsSection>
 
-      {/* ── Clone protocol (local only; multi hardwires HTTPS) ── */}
-      {isLocal && (
+      {/* ── App account type (App only; feeds the register panel) ── */}
+      {isApp && (
+        <SettingsSection
+          title="App account type"
+          summary={draft.githubAppOwnerType === 'org' ? 'Organization account' : 'Personal account'}
+        >
+          <GitHubAccountTypeStep {...ctx} />
+        </SettingsSection>
+      )}
+
+      {/* ── GitHub App register (App only; external register, self-managed) ── */}
+      {isApp && (
+        <SettingsSection
+          title="GitHub App"
+          summary={draft.githubReady ? 'Connected' : 'Not registered'}
+        >
+          <GitHubAppStep {...ctx} />
+        </SettingsSection>
+      )}
+
+      {/* ── Personal access token (PAT only) ── */}
+      {isPat && (
+        <SettingsSection
+          title="Personal access token"
+          summary={baseline.hasGitHubPat ? 'Token set' : 'No token'}
+          dirty={draft.org.github_pat.trim() !== ''}
+          saving={saving === 'gh-pat'}
+          onSave={async () => {
+            const ok = await commitOrgSlice(
+              'gh-pat',
+              { github_pat: draft.org.github_pat },
+              'GitHub token',
+            )
+            if (ok) {
+              setDraft((d) => ({ ...d, hasGitHubPat: true, org: { ...d.org, github_pat: '' } }))
+              setBaseline((b) => ({ ...b, hasGitHubPat: true }))
+            }
+            return ok
+          }}
+          onCancel={() => revertOrg(['github_pat'])}
+        >
+          <GitHubPatStep {...ctx} />
+        </SettingsSection>
+      )}
+
+      {/* ── Clone protocol (PAT + local only) ── */}
+      {isPat && isLocal && (
         <SettingsSection
           title="Clone protocol"
-          summary={`Clone via ${baseline.github_clone_protocol.toUpperCase()}`}
-          dirty={ghClone !== baseline.github_clone_protocol}
-          saving={savingClone}
-          onSave={async () => {
-            setSavingClone(true)
-            try {
-              return await saveOrgSlice({ github_clone_protocol: ghClone }, 'Clone protocol')
-            } finally {
-              setSavingClone(false)
-            }
-          }}
-          onCancel={() => setGhClone(baseline.github_clone_protocol)}
+          summary={`Clone via ${baseline.org.github_clone_protocol.toUpperCase()}`}
+          dirty={draft.org.github_clone_protocol !== baseline.org.github_clone_protocol}
+          saving={saving === 'gh-clone'}
+          onSave={() =>
+            commitOrgSlice(
+              'gh-clone',
+              { github_clone_protocol: draft.org.github_clone_protocol },
+              'Clone protocol',
+            )
+          }
+          onCancel={() => revertOrg(['github_clone_protocol'])}
         >
-          <p className="text-[13px] leading-relaxed text-text-tertiary">
-            Only affects how Triage Factory clones repos to this machine — not the API connection.
-          </p>
-          <ChoiceCards
-            ariaLabel="Clone protocol"
-            options={CLONE_CARDS}
-            selected={ghClone}
-            onChoose={setGhClone}
-          />
+          <GitHubCloneStep {...ctx} />
         </SettingsSection>
       )}
 
       {/* ── GitHub polling ── */}
       <SettingsSection
         title="GitHub polling"
-        summary={`Every ${intervalLabel(baseline.github_poll_interval)}`}
-        dirty={ghPoll !== baseline.github_poll_interval}
-        saving={savingGhPoll}
-        onSave={async () => {
-          setSavingGhPoll(true)
-          try {
-            return await saveOrgSlice({ github_poll_interval: ghPoll }, 'GitHub polling')
-          } finally {
-            setSavingGhPoll(false)
-          }
-        }}
-        onCancel={() => setGhPoll(baseline.github_poll_interval)}
+        summary={`Every ${intervalLabel(baseline.org.github_poll_interval)}`}
+        dirty={draft.org.github_poll_interval !== baseline.org.github_poll_interval}
+        saving={saving === 'gh-poll'}
+        onSave={() =>
+          commitOrgSlice(
+            'gh-poll',
+            { github_poll_interval: draft.org.github_poll_interval },
+            'GitHub polling',
+          )
+        }
+        onCancel={() => revertOrg(['github_poll_interval'])}
       >
-        <PollerTimingGroup
-          value={{ github_poll_interval: ghPoll, jira_poll_interval: jiraPoll }}
-          onChange={(p) => {
-            if (p.github_poll_interval !== undefined) setGhPoll(p.github_poll_interval)
-          }}
-          showJira={false}
-          showHeading={false}
-          bare
-        />
+        <div className="space-y-5">
+          <div className="space-y-1.5">
+            <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+              How often should we poll GitHub?
+            </h2>
+            <p className="text-[13px] leading-relaxed text-text-tertiary">
+              More frequent polling surfaces new PRs and reviews sooner; less frequent is lighter on
+              rate limits.
+            </p>
+          </div>
+          <PollerTimingGroup
+            value={{
+              github_poll_interval: draft.org.github_poll_interval,
+              jira_poll_interval: draft.org.jira_poll_interval,
+            }}
+            onChange={(p) => patch({ org: { ...draft.org, ...p } })}
+            showJira={false}
+            bare
+          />
+        </div>
       </SettingsSection>
 
       {/* ── Jira connection (connect/disconnect inline) ── */}
       <SettingsSection
         title="Jira connection"
-        summary={jiraConnected ? `Connected · ${hostOf(baseline.jira_url)}` : 'Not connected'}
+        summary={
+          draft.jiraConnected ? `Connected · ${hostOf(baseline.org.jira_url)}` : 'Not connected'
+        }
       >
         <JiraAccessGroup
-          value={{ jira_url: jiraUrl, jira_pat: jiraPat }}
-          onChange={(p) => {
-            if (p.jira_url !== undefined) setJiraUrl(p.jira_url)
-            if (p.jira_pat !== undefined) setJiraPat(p.jira_pat)
-          }}
-          connected={jiraConnected}
+          value={{ jira_url: draft.org.jira_url, jira_pat: draft.org.jira_pat }}
+          onChange={(p) => patch({ org: { ...draft.org, ...p } })}
+          connected={draft.jiraConnected}
           onConnected={(url) => {
-            setJiraConnected(true)
-            setBaseline((b) => ({ ...b, jira_url: url }))
-            setJiraUrl(url)
-            setJiraPat('')
-            setData((d) => (d ? { ...d, jira_base_url: url, has_jira_pat: true } : d))
+            setDraft((d) => ({
+              ...d,
+              jiraConnected: true,
+              org: { ...d.org, jira_url: url, jira_pat: '' },
+            }))
+            setBaseline((b) => ({ ...b, jiraConnected: true, org: { ...b.org, jira_url: url } }))
           }}
           onDisconnected={() => {
-            setJiraConnected(false)
-            setBaseline((b) => ({ ...b, jira_url: '' }))
-            setJiraUrl('')
-            setJiraPat('')
-            setData((d) => (d ? { ...d, jira_base_url: '', has_jira_pat: false } : d))
+            setDraft((d) => ({
+              ...d,
+              jiraConnected: false,
+              org: { ...d.org, jira_url: '', jira_pat: '' },
+            }))
+            setBaseline((b) => ({ ...b, jiraConnected: false, org: { ...b.org, jira_url: '' } }))
           }}
           bare
         />
       </SettingsSection>
 
       {/* ── Jira polling (only once connected) ── */}
-      {jiraConnected && (
+      {draft.jiraConnected && (
         <SettingsSection
           title="Jira polling"
-          summary={`Every ${intervalLabel(baseline.jira_poll_interval)}`}
-          dirty={jiraPoll !== baseline.jira_poll_interval}
-          saving={savingJiraPoll}
-          onSave={async () => {
-            setSavingJiraPoll(true)
-            try {
-              return await saveOrgSlice({ jira_poll_interval: jiraPoll }, 'Jira polling')
-            } finally {
-              setSavingJiraPoll(false)
-            }
-          }}
-          onCancel={() => setJiraPoll(baseline.jira_poll_interval)}
+          summary={`Every ${intervalLabel(baseline.org.jira_poll_interval)}`}
+          dirty={draft.org.jira_poll_interval !== baseline.org.jira_poll_interval}
+          saving={saving === 'jira-poll'}
+          onSave={() =>
+            commitOrgSlice(
+              'jira-poll',
+              { jira_poll_interval: draft.org.jira_poll_interval },
+              'Jira polling',
+            )
+          }
+          onCancel={() => revertOrg(['jira_poll_interval'])}
         >
-          <PollerTimingGroup
-            value={{ github_poll_interval: ghPoll, jira_poll_interval: jiraPoll }}
-            onChange={(p) => {
-              if (p.jira_poll_interval !== undefined) setJiraPoll(p.jira_poll_interval)
-            }}
-            showGitHub={false}
-            showHeading={false}
-            bare
-          />
+          <div className="space-y-5">
+            <div className="space-y-1.5">
+              <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+                How often should we poll Jira?
+              </h2>
+              <p className="text-[13px] leading-relaxed text-text-tertiary">
+                The cadence for the Jira tracker — independent of the GitHub poll interval.
+              </p>
+            </div>
+            <PollerTimingGroup
+              value={{
+                github_poll_interval: draft.org.github_poll_interval,
+                jira_poll_interval: draft.org.jira_poll_interval,
+              }}
+              onChange={(p) => patch({ org: { ...draft.org, ...p } })}
+              showGitHub={false}
+              bare
+            />
+          </div>
         </SettingsSection>
       )}
 
@@ -402,30 +360,14 @@ export default function OrgSettings({
       <SettingsSection
         title="Model cap"
         summary={capSummary}
-        dirty={modelCap !== baseline.max_llm_model_tier}
-        saving={savingCap}
-        onSave={async () => {
-          setSavingCap(true)
-          try {
-            const ok = await saveOrgSlice({ max_llm_model_tier: modelCap }, 'Model cap')
-            if (ok) setData((d) => (d ? { ...d, max_llm_model_tier: modelCap } : d))
-            return ok
-          } finally {
-            setSavingCap(false)
-          }
-        }}
-        onCancel={() => setModelCap(baseline.max_llm_model_tier)}
+        dirty={draft.org.max_llm_model_tier !== baseline.org.max_llm_model_tier}
+        saving={saving === 'model'}
+        onSave={() =>
+          commitOrgSlice('model', { max_llm_model_tier: draft.org.max_llm_model_tier }, 'Model cap')
+        }
+        onCancel={() => revertOrg(['max_llm_model_tier'])}
       >
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
-          A hard ceiling for the whole workspace. A team default above the cap is clamped down to it
-          — the team is told, but the cap wins.
-        </p>
-        <ModelTierSelector
-          value={modelCap}
-          onChange={setModelCap}
-          options={MODEL_CAP_OPTIONS}
-          ariaLabel="Maximum model tier (workspace cap)"
-        />
+        <OrgModelStep {...ctx} />
       </SettingsSection>
 
       {/* Add-team is hosted-only (POST /api/teams 404s in local). */}

@@ -19,8 +19,9 @@ import { toast } from '../../../components/Toast/toastStore'
 import RepoPickerModal from '../../../components/RepoPickerModal'
 import GitHubTeamGroup from '../GitHubTeamGroup'
 import JiraProjectRulesGroup from '../JiraProjectRulesGroup'
-import ModelTierSelector from '../ModelTierSelector'
-import { MODEL_TIER_OPTIONS } from '../modelTiers'
+import { TeamModelStep } from '../../setup/ModelStep'
+import { initialWizardState } from '../../setup/steps'
+import type { StepContext } from '../../setup/types'
 import {
   emptyTeamConfig,
   fetchTeamRepos,
@@ -360,17 +361,20 @@ export default function TeamSettings({
               setAutoDelegate(baseline.auto_delegate_enabled)
             }}
           >
-            <div className="space-y-2">
-              <span className="text-[11px] uppercase tracking-wide text-text-tertiary">
-                Default delegation model
-              </span>
-              <ModelTierSelector
-                value={defaultModel}
-                onChange={setDefaultModel}
-                options={MODEL_TIER_OPTIONS}
-                ariaLabel="Team default model"
-              />
-            </div>
+            {/* The actual /setup team-model body — same heading + tier ladder. */}
+            <TeamModelStep
+              orgId={null}
+              teamId={teamId}
+              isLocal={isLocal}
+              state={{
+                ...initialWizardState(),
+                team: { ...emptyTeamConfig(), default_model: defaultModel },
+              }}
+              patch={(p: Partial<StepContext['state']>) => {
+                if (p.team?.default_model !== undefined) setDefaultModel(p.team.default_model)
+              }}
+              advance={() => {}}
+            />
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-[13px] text-text-primary">Auto-delegation</p>
