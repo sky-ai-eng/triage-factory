@@ -13,6 +13,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 )
 
+// eventHandlersHandler serves the event-handler (rule + trigger) config
+// endpoints. It holds the transactional store runner the handlers use;
+// routes() registers its methods through the api()/apiMutating() wrappers.
+type eventHandlersHandler struct {
+	tx db.TxRunner
+}
+
 // /api/event-handlers — unified successor to /api/task-rules + /api/triggers
 // (SKY-259). The two frontend pages (rules tab + triggers tab) keep their
 // split UX but hit this one endpoint family with a kind filter.
@@ -33,8 +40,8 @@ import (
 //   PUT    /api/event-handlers/reorder                — rules-only sort_order
 
 // GET /api/event-handlers
-func (s *Server) handleEventHandlersList(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (eh *eventHandlersHandler) handleEventHandlersList(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -50,7 +57,7 @@ func (s *Server) handleEventHandlersList(w http.ResponseWriter, r *http.Request)
 	// multi-team prompts page; absent/solo returns everything visible.
 	teamID := singleTeamParam(r)
 	var handlers []domain.EventHandler
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		handlers, e = tx.EventHandlers.List(r.Context(), orgID, kind, teamID)
 		return e
@@ -100,8 +107,8 @@ type createEventHandlerRequest struct {
 	TeamID string `json:"team_id"`
 }
 
-func (s *Server) handleEventHandlerCreate(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -181,7 +188,7 @@ func (s *Server) handleEventHandlerCreate(w http.ResponseWriter, r *http.Request
 		var blueprint *domain.Blueprint
 		var crossTeamBlueprint bool
 		var blueprintHasTrigger bool
-		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 			var e error
 			blueprint, e = tx.Blueprints.Get(r.Context(), orgID, req.BlueprintID)
 			if e != nil || blueprint == nil {
@@ -252,7 +259,7 @@ func (s *Server) handleEventHandlerCreate(w http.ResponseWriter, r *http.Request
 	}
 
 	var fresh *domain.EventHandler
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		teamID, e := resolveActingTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
@@ -309,8 +316,8 @@ type patchEventHandlerRequest struct {
 	MinAutonomySuitability *float64 `json:"min_autonomy_suitability"`
 }
 
-func (s *Server) handleEventHandlerUpdate(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -323,7 +330,7 @@ func (s *Server) handleEventHandlerUpdate(w http.ResponseWriter, r *http.Request
 	}
 
 	var existing *domain.EventHandler
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		existing, e = tx.EventHandlers.Get(r.Context(), orgID, id)
 		return e
@@ -411,7 +418,7 @@ func (s *Server) handleEventHandlerUpdate(w http.ResponseWriter, r *http.Request
 	}
 
 	var fresh *domain.EventHandler
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		if e := tx.EventHandlers.Update(r.Context(), orgID, updated); e != nil {
 			return e
 		}
@@ -436,8 +443,8 @@ func (s *Server) handleEventHandlerUpdate(w http.ResponseWriter, r *http.Request
 // action, and its materializer only runs against a fresh tenant), so a
 // deleted shipped default is durable. No source branch, no soft-disable
 // fallback, no resurrection marker.
-func (s *Server) handleEventHandlerDelete(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (eh *eventHandlersHandler) handleEventHandlerDelete(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -445,7 +452,7 @@ func (s *Server) handleEventHandlerDelete(w http.ResponseWriter, r *http.Request
 	id := r.PathValue("id")
 
 	var existing *domain.EventHandler
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		existing, e = tx.EventHandlers.Get(r.Context(), orgID, id)
 		if e != nil {
@@ -467,8 +474,8 @@ func (s *Server) handleEventHandlerDelete(w http.ResponseWriter, r *http.Request
 }
 
 // POST /api/event-handlers/{id}/toggle
-func (s *Server) handleEventHandlerToggle(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (eh *eventHandlersHandler) handleEventHandlerToggle(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -481,7 +488,7 @@ func (s *Server) handleEventHandlerToggle(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var existing *domain.EventHandler
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		existing, e = tx.EventHandlers.Get(r.Context(), orgID, id)
 		if e != nil {
@@ -516,8 +523,8 @@ type promoteEventHandlerRequest struct {
 	ScopePredicateJSON     *string  `json:"scope_predicate_json"`
 }
 
-func (s *Server) handleEventHandlerPromote(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -540,7 +547,7 @@ func (s *Server) handleEventHandlerPromote(w http.ResponseWriter, r *http.Reques
 	var existing *domain.EventHandler
 	var blueprint *domain.Blueprint
 	var blueprintHasTrigger bool
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		existing, e = tx.EventHandlers.Get(r.Context(), orgID, id)
 		if e != nil {
@@ -616,7 +623,7 @@ func (s *Server) handleEventHandlerPromote(w http.ResponseWriter, r *http.Reques
 		ScopePredicateJSON:     predicate,
 	}
 	var fresh *domain.EventHandler
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		if e := tx.EventHandlers.Promote(r.Context(), orgID, id, target); e != nil {
 			return e
 		}
@@ -643,8 +650,8 @@ func (s *Server) handleEventHandlerPromote(w http.ResponseWriter, r *http.Reques
 //
 // Rules-only — trigger IDs in the list are silently skipped by the
 // store (sort_order is rule-only by CHECK constraint).
-func (s *Server) handleEventHandlerReorder(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (eh *eventHandlersHandler) handleEventHandlerReorder(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -657,7 +664,7 @@ func (s *Server) handleEventHandlerReorder(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "empty ID list"})
 		return
 	}
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		return tx.EventHandlers.Reorder(r.Context(), orgID, ids)
 	}); err != nil {
 		internalError(w, "event_handlers", err)

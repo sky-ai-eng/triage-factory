@@ -27,31 +27,28 @@ import (
 
 // Server is the main HTTP server for Triage Factory.
 type Server struct {
-	db            *sql.DB
-	prompts       db.PromptStore
-	swipes        db.SwipeStore
-	eventHandlers db.EventHandlerStore
-	agents        db.AgentStore     // SKY-261 D-Claims: resolves the org's agent for claim stamps
-	teamAgents    db.TeamAgentStore // SKY-261 D-Claims: re-checks team_agents.enabled on swipe-delegate / factory-delegate
-	users         db.UsersStore     // display_name + Jira binding on the user row; host-scoped GitHub identity via user_github_identities (SKY-396)
-	blueprints    db.BlueprintStore
-	tasks         db.TaskStore            // SKY-283: task lifecycle, claim, queue + factory snapshot reads
-	factory       db.FactoryReadStore     // SKY-292: factory snapshot reads
-	agentRuns     db.AgentRunStore        // SKY-285: agent run lifecycle + transcript + yields
-	entities      db.EntityStore          // SKY-284: entity reads/writes for dashboard, factory_handler, stock, backfill, project_entities
-	reviews       db.ReviewStore          // SKY-286: pending_reviews CRUD for reviews handler, swipe-discard, agent status payload
-	pendingPRs    db.PendingPRStore       // SKY-287: pending_prs CRUD for pending_prs handler, agent status payload, drag-back-to-queue cleanup
-	repos         db.RepoStore            // SKY-288: repo_profiles CRUD for repos/settings/projects handlers and curator pinned-repo materialization
-	projects      db.ProjectStore         // SKY-290: projects CRUD for projects/curator/backfill/project_entities handlers
-	curatorStore  db.CuratorStore         // curator-runtime CRUD (curator_requests / curator_messages / curator_pending_context) — handler-side writes go through here so Postgres mode honors RLS and uses the right placeholder syntax
-	events        db.EventStore           // SKY-305: events audit log Record/Latest for stock carry-over + factory drag-to-delegate
-	taskMemory    db.TaskMemoryStore      // run_memory writes (human verdict capture on review/PR submit, swipe-discard cleanup)
-	secrets       db.SecretStore          // canonical credential read/write path — local-mode keychain, multi-mode vault
-	teams         db.TeamsStore           // resolves the request org's default team for handlers that synthesize team-scoped rows (tasks, projects, prompts)
-	orgs          db.OrgsStore            // per-org settings (GitHub/Jira base URLs, poll intervals, clone protocol) post-internal/config deletion
-	jiraRules     db.JiraStatusRulesStore // per-team Jira status rules (replaces the deleted config.Jira.Projects view)
-	githubApps    db.GitHubAppsStore      // per-org GitHub App registrations (manifest flow)
-	orgTemplate   db.OrgTemplateStore     // SKY-381: org-admin-editable template new teams are seeded from
+	db           *sql.DB
+	prompts      db.PromptStore
+	swipes       db.SwipeStore
+	agents       db.AgentStore     // SKY-261 D-Claims: resolves the org's agent for claim stamps
+	teamAgents   db.TeamAgentStore // SKY-261 D-Claims: re-checks team_agents.enabled on swipe-delegate / factory-delegate
+	users        db.UsersStore     // display_name + Jira binding on the user row; host-scoped GitHub identity via user_github_identities (SKY-396)
+	blueprints   db.BlueprintStore
+	tasks        db.TaskStore            // SKY-283: task lifecycle, claim, queue + factory snapshot reads
+	agentRuns    db.AgentRunStore        // SKY-285: agent run lifecycle + transcript + yields
+	reviews      db.ReviewStore          // SKY-286: pending_reviews CRUD for reviews handler, swipe-discard, agent status payload
+	pendingPRs   db.PendingPRStore       // SKY-287: pending_prs CRUD for pending_prs handler, agent status payload, drag-back-to-queue cleanup
+	repos        db.RepoStore            // SKY-288: repo_profiles CRUD for repos/settings/projects handlers and curator pinned-repo materialization
+	projects     db.ProjectStore         // SKY-290: projects CRUD for projects/curator/backfill/project_entities handlers
+	curatorStore db.CuratorStore         // curator-runtime CRUD (curator_requests / curator_messages / curator_pending_context) — handler-side writes go through here so Postgres mode honors RLS and uses the right placeholder syntax
+	events       db.EventStore           // SKY-305: events audit log Record/Latest for stock carry-over + factory drag-to-delegate
+	taskMemory   db.TaskMemoryStore      // run_memory writes (human verdict capture on review/PR submit, swipe-discard cleanup)
+	secrets      db.SecretStore          // canonical credential read/write path — local-mode keychain, multi-mode vault
+	teams        db.TeamsStore           // resolves the request org's default team for handlers that synthesize team-scoped rows (tasks, projects, prompts)
+	orgs         db.OrgsStore            // per-org settings (GitHub/Jira base URLs, poll intervals, clone protocol) post-internal/config deletion
+	jiraRules    db.JiraStatusRulesStore // per-team Jira status rules (replaces the deleted config.Jira.Projects view)
+	githubApps   db.GitHubAppsStore      // per-org GitHub App registrations (manifest flow)
+	orgTemplate  db.OrgTemplateStore     // SKY-381: org-admin-editable template new teams are seeded from
 	// takeoverDir is the raw instance_config.server_takeover_dir
 	// value read once at boot — may be empty, "~/..." or an
 	// absolute path. Call sites (handleAgentTakeover, Spawner's
@@ -388,37 +385,34 @@ func (s *Server) agentEnabledForTeam(ctx context.Context, orgID, userID, teamID 
 // ported to a store yet.
 func New(database *sql.DB, stores db.Stores, takeoverDir string, serverPort int) *Server {
 	s := &Server{
-		db:            database,
-		prompts:       stores.Prompts,
-		swipes:        stores.Swipes,
-		eventHandlers: stores.EventHandlers,
-		agents:        stores.Agents,
-		teamAgents:    stores.TeamAgents,
-		users:         stores.Users,
-		blueprints:    stores.Blueprints,
-		tasks:         stores.Tasks,
-		factory:       stores.Factory,
-		agentRuns:     stores.AgentRuns,
-		entities:      stores.Entities,
-		reviews:       stores.Reviews,
-		pendingPRs:    stores.PendingPRs,
-		repos:         stores.Repos,
-		projects:      stores.Projects,
-		events:        stores.Events,
-		taskMemory:    stores.TaskMemory,
-		secrets:       stores.Secrets,
-		curatorStore:  stores.Curator,
-		teams:         stores.Teams,
-		orgs:          stores.Orgs,
-		jiraRules:     stores.JiraStatusRules,
-		githubApps:    stores.GitHubApps,
-		orgTemplate:   stores.OrgTemplate,
-		tx:            stores.Tx,
-		allStores:     stores,
-		takeoverDir:   takeoverDir,
-		serverPort:    serverPort,
-		mux:           http.NewServeMux(),
-		ws:            websocket.NewHub(),
+		db:           database,
+		prompts:      stores.Prompts,
+		swipes:       stores.Swipes,
+		agents:       stores.Agents,
+		teamAgents:   stores.TeamAgents,
+		users:        stores.Users,
+		blueprints:   stores.Blueprints,
+		tasks:        stores.Tasks,
+		agentRuns:    stores.AgentRuns,
+		reviews:      stores.Reviews,
+		pendingPRs:   stores.PendingPRs,
+		repos:        stores.Repos,
+		projects:     stores.Projects,
+		events:       stores.Events,
+		taskMemory:   stores.TaskMemory,
+		secrets:      stores.Secrets,
+		curatorStore: stores.Curator,
+		teams:        stores.Teams,
+		orgs:         stores.Orgs,
+		jiraRules:    stores.JiraStatusRules,
+		githubApps:   stores.GitHubApps,
+		orgTemplate:  stores.OrgTemplate,
+		tx:           stores.Tx,
+		allStores:    stores,
+		takeoverDir:  takeoverDir,
+		serverPort:   serverPort,
+		mux:          http.NewServeMux(),
+		ws:           websocket.NewHub(),
 	}
 	// GitHub credential resolver + its installation-token cache, built from
 	// the same stores. Constructed here (not injected) so a Server is always
@@ -637,10 +631,12 @@ func (s *Server) routes() {
 	s.api("GET /api/projects/{id}/knowledge/{path}", s.handleProjectKnowledgeFile)
 	s.apiMutating("DELETE /api/projects/{id}/knowledge/{path}", s.handleProjectKnowledgeDelete)
 	// Project-creation backfill popup (SKY-220 PR B).
-	s.api("GET /api/projects/{id}/backfill-candidates", s.handleBackfillCandidates)
-	s.apiMutating("POST /api/projects/{id}/backfill", s.handleBackfill)
+	bf := &backfillHandler{tx: s.tx, ws: s.ws}
+	s.api("GET /api/projects/{id}/backfill-candidates", bf.handleBackfillCandidates)
+	s.apiMutating("POST /api/projects/{id}/backfill", bf.handleBackfill)
 	// Project entities panel (SKY-238).
-	s.api("GET /api/projects/{id}/entities", s.handleProjectEntities)
+	pe := &projectEntitiesHandler{tx: s.tx}
+	s.api("GET /api/projects/{id}/entities", pe.handleProjectEntities)
 
 	// Curator chat per project (SKY-216). The Curator package owns the
 	// long-lived CC session lifecycle; these endpoints are the API
@@ -714,7 +710,8 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/pending-prs/{id}/submit", s.handlePendingPRSubmit)
 	s.api("GET /api/agent/runs/{runID}/pending-pr", s.handleRunPendingPR)
 
-	s.api("GET /api/factory/snapshot", s.handleFactorySnapshot)
+	fh := &factoryHandler{tx: s.tx}
+	s.api("GET /api/factory/snapshot", fh.handleFactorySnapshot)
 	s.apiMutating("POST /api/factory/delegate", s.handleFactoryDelegate)
 
 	ph := &promptsHandler{db: s.db, tx: s.tx}
@@ -724,14 +721,15 @@ func (s *Server) routes() {
 	// Unified event_handlers endpoints (SKY-259). Replace the former
 	// /api/task-rules + /api/triggers split — kind is passed as ?kind=
 	// on list, in the body on create, derived on update.
-	s.api("GET /api/event-handlers", s.handleEventHandlersList)
-	s.apiMutating("POST /api/event-handlers", s.handleEventHandlerCreate)
-	s.apiMutating("PUT /api/event-handlers/reorder", s.handleEventHandlerReorder)
-	s.apiMutating("PATCH /api/event-handlers/{id}", s.handleEventHandlerUpdate)
-	s.apiMutating("PUT /api/event-handlers/{id}", s.handleEventHandlerUpdate)
-	s.apiMutating("DELETE /api/event-handlers/{id}", s.handleEventHandlerDelete)
-	s.apiMutating("POST /api/event-handlers/{id}/toggle", s.handleEventHandlerToggle)
-	s.apiMutating("POST /api/event-handlers/{id}/promote", s.handleEventHandlerPromote)
+	ehh := &eventHandlersHandler{tx: s.tx}
+	s.api("GET /api/event-handlers", ehh.handleEventHandlersList)
+	s.apiMutating("POST /api/event-handlers", ehh.handleEventHandlerCreate)
+	s.apiMutating("PUT /api/event-handlers/reorder", ehh.handleEventHandlerReorder)
+	s.apiMutating("PATCH /api/event-handlers/{id}", ehh.handleEventHandlerUpdate)
+	s.apiMutating("PUT /api/event-handlers/{id}", ehh.handleEventHandlerUpdate)
+	s.apiMutating("DELETE /api/event-handlers/{id}", ehh.handleEventHandlerDelete)
+	s.apiMutating("POST /api/event-handlers/{id}/toggle", ehh.handleEventHandlerToggle)
+	s.apiMutating("POST /api/event-handlers/{id}/promote", ehh.handleEventHandlerPromote)
 	s.api("GET /api/prompts", ph.handlePromptsList)
 	s.apiMutating("POST /api/prompts", ph.handlePromptCreate)
 	s.api("GET /api/prompts/{id}", ph.handlePromptGet)

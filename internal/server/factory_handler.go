@@ -10,6 +10,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
+// factoryHandler serves the factory snapshot endpoint, holding the
+// transactional store runner it reads through.
+type factoryHandler struct {
+	tx db.TxRunner
+}
+
 // factoryEntityLimit caps how many active entities we ship per snapshot.
 // The factory view renders each entity as an item on the belt network;
 // at some point the canvas gets visually swamped, but 500 comfortably
@@ -187,8 +193,8 @@ type factorySnapshotJSON struct {
 // active entities into a single payload for the /factory view. All data
 // derived from existing persistence — no new event stream, no state
 // projection — so repeated calls are cheap and idempotent.
-func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (h *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -215,7 +221,7 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 	var pendingTasks []domain.PendingTaskRef
 	var awaitingByEntity map[string]struct{}
 	runAuthors := map[string]string{}
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		orgSet, _ := tx.Orgs.GetSettings(r.Context(), orgID)
 		ghUsername, _ = tx.Users.GetGitHubLogin(r.Context(), userID, orgSet.GitHubBaseURL)
 
