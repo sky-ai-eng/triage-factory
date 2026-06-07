@@ -484,14 +484,15 @@ func TestOrgSettingsPost_GitHubURLClear_PreservesUserIdentity(t *testing.T) {
 	}
 }
 
-// --- SKY-462 Jira access/identity decoupling -------------------------------
+// --- Jira access/identity decoupling ---------------------------------------
 //
 // These mirror the GitHub untangle above for Jira: org-level Jira ACCESS
-// (PAT_1, the bot connection) must never write or clear the *caller's*
-// per-user Jira identity. After SKY-462 the only writer of users.jira_account_id
-// is the dedicated bind surface (POST .../identity/jira/pat); the org connect /
-// settings-save / disconnect paths leave it untouched. We assert that by
-// seeding a distinct identity and proving the org operation didn't disturb it.
+// (PAT_1, the bot connection) must never write or clear the *caller's* per-user
+// Jira identity or credential. The only writer of users.jira_account_id is the
+// dedicated bind surface (POST .../identity/jira/pat); the org connect /
+// settings-save / disconnect paths leave both the identity and the per-user
+// credential untouched. We assert that by seeding a distinct user identity /
+// credential and proving the org operation didn't disturb it.
 
 // TestJiraConnect_DoesNotWriteUserIdentity covers the two-stage Settings connect
 // (POST /api/jira/connect → handleJiraConnect): validating + storing the org's
@@ -587,6 +588,42 @@ func TestOrgSettingsPost_JiraURLClear_PreservesUserIdentity(t *testing.T) {
 	}
 	if accountID != "user-acct" || displayName != "User Name" {
 		t.Errorf("org Jira disconnect wiped the caller's identity: got (%q, %q), want it preserved", accountID, displayName)
+	}
+}
+
+// TestOrgSettingsPost_JiraPatClear_PreservesUserCredential is the credential
+// half of the untangle (the URL-clear test above covers the identity half):
+// clearing the org's Jira PAT (PAT_1) deletes only the org credential key —
+// the user's own stored credential, custodied under the separate per-user
+// "jira_token/<host>" namespace, is untouched. Org access and per-user access
+// are independent.
+func TestOrgSettingsPost_JiraPatClear_PreservesUserCredential(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	ctx := t.Context()
+	const host = "https://jira.example.com"
+
+	// The org has a Jira PAT (the thing we'll clear)...
+	if err := integrations.Save(ctx, s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{JiraURL: host, JiraPAT: "org-pat"}); err != nil {
+		t.Fatalf("seed org creds: %v", err)
+	}
+	// ...and the caller has bound their own per-user credential, as the bind
+	// flow stores it (under the host-scoped per-user key).
+	if err := s.secrets.PutUser(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "jira_token/"+host, "user-token", "Jira user access token"); err != nil {
+		t.Fatalf("seed user credential: %v", err)
+	}
+
+	// Clear the org Jira PAT.
+	postJSONResp(t, s, "/api/settings/org", map[string]any{"jira_pat": ""})
+
+	// The user's per-user credential survives — it lives under a different key.
+	stored, err := s.secrets.GetUserSystem(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "jira_token/"+host)
+	if err != nil {
+		t.Fatalf("GetUserSystem after org PAT clear: %v", err)
+	}
+	if stored != "user-token" {
+		t.Errorf("org Jira PAT clear wiped the user's per-user credential: got %q, want user-token", stored)
 	}
 }
 

@@ -48,13 +48,10 @@ export default function ConnectJira() {
   const [capturing, setCapturing] = useState(false)
   const [patError, setPatError] = useState<string | null>(null)
 
-  const params = new URLSearchParams(location.search)
   const returnTo = useMemo(() => {
-    const rt = params.get('return_to')
+    const rt = new URLSearchParams(location.search).get('return_to')
     if (rt && rt.startsWith('/') && !rt.startsWith('//')) return rt
     return orgId ? '/orgs/' + orgId : '/'
-    // location.search is the only input; params is derived from it.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.search, orgId])
 
   // Active org hasn't resolved yet (rare flash) — hold.
