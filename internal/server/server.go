@@ -75,20 +75,25 @@ type Server struct {
 	// helpers (db.BootstrapNewOrg / db.BootstrapNewTeam) — which take a
 	// db.Stores and must run outside WithTx on the admin pool — can be
 	// invoked from handlers without re-threading every individual store.
-	allStores  db.Stores
-	mux        *http.ServeMux
-	static     fs.FS
-	ws         *websocket.Hub
-	spawner    *delegate.Spawner
-	curator    *curator.Curator
-	ghClient   *ghclient.Client
-	jiraClient *jira.Client
+	allStores db.Stores
+	mux       *http.ServeMux
+	static    fs.FS
+	ws        *websocket.Hub
+	spawner   *delegate.Spawner
+	curator   *curator.Curator
+	ghClient  *ghclient.Client
 	// ghResolver picks the right GitHub credential (org App installation
 	// token → PAT) per request, given the org + target account. Replaces
 	// the raw NewClient(baseURL, pat) construction in the dashboard
 	// handlers. Built in New from the stores, so it's never nil — handlers
 	// don't need a guard.
 	ghResolver ghclient.Resolver
+	// jiraResolver routes Jira writes by provenance (SKY-463): ForSystem for
+	// the org/bot service cred, ForUser for the acting user's own stored
+	// credential. User-initiated board claim / undo / requeue resolve via
+	// ForUser so the write is attributed to the user, not the service account.
+	// Built in New from the stores, so it's never nil — handlers don't guard.
+	jiraResolver jira.Resolver
 	// Change callbacks accept the orgID of the tenant whose integration
 	// creds just rotated, so the closure can re-resolve via SecretStore.
 	// Local mode always passes runmode.LocalDefaultOrgID; multi-mode
@@ -424,6 +429,10 @@ func New(database *sql.DB, stores db.Stores, takeoverDir string, serverPort int)
 	// the dead token from the cache via onInstallationRemoved.
 	ghTokenCache := ghclient.NewMemoryTokenCache()
 	s.ghResolver = ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, ghTokenCache)
+	// Jira write-actor resolver (SKY-463): ForSystem (org/bot cred) +
+	// ForUser (acting user's cred). Constructed here like ghResolver so a
+	// Server is always usable without external wiring.
+	s.jiraResolver = jira.NewResolver(stores.Secrets, stores.Orgs)
 	s.onInstallationRemoved = func(orgID, installationID string) {
 		ghTokenCache.Invalidate(orgID, installationID)
 	}
@@ -927,14 +936,6 @@ func (s *Server) SetEventBus(bus *eventbus.Bus) {
 // Optional — left nil until the credential resolver wires it.
 func (s *Server) SetInstallationRemovedHook(fn func(orgID, installationID string)) {
 	s.onInstallationRemoved = fn
-}
-
-// SetJiraClient sets the Jira client used by claim and undo handlers.
-// Per-project in-progress rules are looked up via config.Load() at the
-// use site (tasks.go) — projects can have different workflows and the
-// right rule depends on the ticket's project_key.
-func (s *Server) SetJiraClient(client *jira.Client) {
-	s.jiraClient = client
 }
 
 // MarkJiraRestarted records the moment the Jira poller was restarted. Clears

@@ -7,11 +7,9 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
-	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
-	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/repoprofile"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -97,8 +95,6 @@ func (r *reloader) onGitHubChanged(orgID string) {
 		r.pollerMgr.PollSoon("github", orgID)
 		r.pollerMgr.PollSoon("jira", orgID)
 	}
-
-	r.refreshJiraClient(creds)
 }
 
 // onJiraChanged restarts only the Jira poller and refreshes the server's
@@ -113,12 +109,11 @@ func (r *reloader) onJiraChanged(orgID string) {
 		return
 	}
 
-	ctx := context.Background()
-	creds, _ := integrations.Load(ctx, r.stores.Secrets, orgID)
-
+	// SKY-463: the server no longer holds a process-global Jira write client —
+	// user writes resolve per-user via jira.Resolver, system reads via the
+	// poller's ForSystem. Restarting the poller is all this callback needs to do.
 	r.pollerMgr.RestartJira()
 	r.pollerMgr.PollSoon("jira", orgID) // apply now, don't wait out the interval
-	r.refreshJiraClient(creds)
 }
 
 // initialPoll starts polling at boot. Local mode additionally wires the
@@ -149,10 +144,8 @@ func (r *reloader) initialPoll(ctx context.Context) {
 		// Not fully configured — start pollers immediately (may be empty).
 		r.pollerMgr.RestartAll()
 	}
-
-	if creds.JiraPAT != "" && creds.JiraURL != "" {
-		r.srv.SetJiraClient(jira.NewClient(jira.DataCenterPAT(creds.JiraURL, creds.JiraPAT)))
-	}
+	// SKY-463: no process-global Jira write client to wire here — the server
+	// resolves Jira clients on demand (per-user writes, ForSystem reads).
 }
 
 // reprofileRestartAndScore runs the local-mode profile→restart→score
@@ -177,14 +170,4 @@ func (r *reloader) reprofileRestartAndScore(orgID string, invalidate, pollSoon b
 		r.scorer.Trigger(orgID)
 		bootstrapBareClones(r.stores.Repos)
 	}()
-}
-
-// refreshJiraClient points the server's request-handler Jira client at the
-// current creds, or clears it when Jira is unconfigured.
-func (r *reloader) refreshJiraClient(creds auth.Credentials) {
-	if creds.JiraPAT != "" && creds.JiraURL != "" {
-		r.srv.SetJiraClient(jira.NewClient(jira.DataCenterPAT(creds.JiraURL, creds.JiraPAT)))
-	} else {
-		r.srv.SetJiraClient(nil)
-	}
 }

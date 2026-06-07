@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -412,7 +413,20 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := jira.NewClient(jira.DataCenterPAT(creds.JiraURL, creds.JiraPAT))
+	// SKY-463: claim (assign + transition) and done (transition) are
+	// user-initiated Jira writes — they must act as the acting user, not the
+	// org service account (AssignToSelf assigns to the token's user). Resolve
+	// the user's Jira client up front; an absent credential
+	// (ErrNoJiraUserCredential) leaves it nil so only the write-bearing actions
+	// fail per-row with a connect prompt, while queue (no Jira mutation, just a
+	// synthesized event + task) still applies.
+	var jiraUserClient *jira.Client
+	if c, jerr := s.jiraResolver.ForUser(r.Context(), orgID, userID); jerr == nil {
+		jiraUserClient = c
+	} else if !errors.Is(jerr, jira.ErrNoJiraUserCredential) {
+		internalError(w, "stock", jerr)
+		return
+	}
 
 	applied := 0
 	queued := 0 // number of queue actions applied — gates the scorer trigger
@@ -550,6 +564,12 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 			queued++
 
 		case "claim":
+			// SKY-463: claim performs Jira writes as the acting user; refuse
+			// (don't act as the bot) when they have no connected Jira.
+			if jiraUserClient == nil {
+				failed = append(failed, stockFailure{a.IssueKey, a.Action, "connect your Jira to act on tickets"})
+				continue
+			}
 			if projectRule == nil || projectRule.InProgressCanonical == "" {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, "in_progress canonical status not configured for this project"})
 				continue
@@ -564,15 +584,15 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 			// available tickets the state check is a no-op (they're
 			// unassigned by definition), but GetClaimState is cheap and keeps
 			// one code path for both branches.
-			state := client.GetClaimState(r.Context(), a.IssueKey)
+			state := jiraUserClient.GetClaimState(r.Context(), a.IssueKey)
 			if state == nil || !state.AssignedToSelf {
-				if err := client.AssignToSelf(r.Context(), a.IssueKey); err != nil {
+				if err := jiraUserClient.AssignToSelf(r.Context(), a.IssueKey); err != nil {
 					failed = append(failed, stockFailure{a.IssueKey, a.Action, "assign: " + err.Error()})
 					continue
 				}
 			}
 			if state == nil || !projectRule.InProgressContains(state.StatusName) {
-				if err := client.TransitionTo(r.Context(), a.IssueKey, projectRule.InProgressCanonical); err != nil {
+				if err := jiraUserClient.TransitionTo(r.Context(), a.IssueKey, projectRule.InProgressCanonical); err != nil {
 					failed = append(failed, stockFailure{a.IssueKey, a.Action, "transition: " + err.Error()})
 					continue
 				}
@@ -624,6 +644,12 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 			claimed++
 
 		case "done":
+			// SKY-463: done transitions the ticket as the acting user; refuse
+			// (don't act as the bot) when they have no connected Jira.
+			if jiraUserClient == nil {
+				failed = append(failed, stockFailure{a.IssueKey, a.Action, "connect your Jira to act on tickets"})
+				continue
+			}
 			if projectRule == nil || projectRule.DoneCanonical == "" {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, "done canonical status not configured for this project"})
 				continue
@@ -633,9 +659,9 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 			// Done.Members=[Resolved,Verified] is already done from TF's
 			// perspective; transitioning to Resolved would be a no-op at best
 			// and a workflow violation at worst.
-			state := client.GetClaimState(r.Context(), a.IssueKey)
+			state := jiraUserClient.GetClaimState(r.Context(), a.IssueKey)
 			if state == nil || !projectRule.DoneContains(state.StatusName) {
-				if err := client.TransitionTo(r.Context(), a.IssueKey, projectRule.DoneCanonical); err != nil {
+				if err := jiraUserClient.TransitionTo(r.Context(), a.IssueKey, projectRule.DoneCanonical); err != nil {
 					failed = append(failed, stockFailure{a.IssueKey, a.Action, "transition: " + err.Error()})
 					continue
 				}

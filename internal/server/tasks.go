@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -297,6 +298,11 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 	// 500 on a state change that already happened.
 	var newStatus string
 
+	// jiraUserClient is resolved in the claim case for Jira-backed tasks
+	// (SKY-463) and consumed by the post-switch claim-sync block. nil for
+	// GitHub tasks and non-claim actions.
+	var jiraUserClient *jira.Client
+
 	switch req.Action {
 	case "claim":
 		// Race-safe claim: branch on the task's current claim state
@@ -329,6 +335,30 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 				"error": "task is closed; claim transitions aren't allowed past close",
 			})
 			return
+		}
+		// SKY-463: a Jira-backed claim assigns the ticket to the claiming
+		// user and transitions it — a write that must act as THAT user, not
+		// the org service account. Resolve the acting user's Jira credential
+		// up front so a user with no connected Jira is refused BEFORE the
+		// claim lands; acting as the bot here would mis-assign the ticket to
+		// the service account. The RequireJiraIdentity gate guarantees
+		// presence in the normal flow, so this 409 is the defense-in-depth
+		// boundary. The resolved client is consumed by the post-switch sync.
+		if task.EntitySource == "jira" {
+			c, jerr := s.jiraResolver.ForUser(r.Context(), orgID, userID)
+			if errors.Is(jerr, jira.ErrNoJiraUserCredential) {
+				writeJSON(w, http.StatusConflict, map[string]string{
+					"error": "connect your Jira to act on tickets",
+				})
+				return
+			}
+			if jerr != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{
+					"error": "resolve jira credential: " + jerr.Error(),
+				})
+				return
+			}
+			jiraUserClient = c
 		}
 		claimChanged := false
 		switch {
@@ -641,7 +671,11 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 	// the in-progress rule — if the user (or an earlier claim) moved it to
 	// "In Review" while canonical is "In Progress", transitioning back to the
 	// canonical would be a spurious status change that would confuse watchers.
-	if req.Action == "claim" && s.jiraClient != nil {
+	// SKY-463: jiraUserClient (resolved in the claim case above) is the acting
+	// user's own Jira client, so AssignToSelf assigns the ticket to the
+	// claimer — not the org service account — and GetClaimState's
+	// AssignedToSelf check is relative to the user. nil for non-Jira tasks.
+	if req.Action == "claim" && jiraUserClient != nil {
 		// Fetch the task and (if Jira-backed) its team's status rules
 		// inside a single WithTx so the rule read goes through the
 		// app-pool ListForTeam — jira_rules_select RLS gates by team
@@ -666,7 +700,7 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 					// swipe response, so it uses a background context rather than
 					// r.Context(), which is cancelled once the handler returns.
 					bgCtx := context.Background()
-					state := s.jiraClient.GetClaimState(bgCtx, issueKey)
+					state := jiraUserClient.GetClaimState(bgCtx, issueKey)
 
 					needAssign := state == nil || !state.AssignedToSelf
 					needTransition := state == nil || !slices.Contains(ipMembers, state.StatusName)
@@ -677,13 +711,13 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 					}
 
 					if needAssign {
-						if err := s.jiraClient.AssignToSelf(bgCtx, issueKey); err != nil {
+						if err := jiraUserClient.AssignToSelf(bgCtx, issueKey); err != nil {
 							log.Printf("[jira] failed to assign %s: %v", issueKey, err)
 							return
 						}
 					}
 					if needTransition {
-						if err := s.jiraClient.TransitionTo(bgCtx, issueKey, ipCanonical); err != nil {
+						if err := jiraUserClient.TransitionTo(bgCtx, issueKey, ipCanonical); err != nil {
 							log.Printf("[jira] failed to transition %s to %q: %v", issueKey, ipCanonical, err)
 						}
 					}
@@ -1286,7 +1320,22 @@ func buildDiscardHumanContent(outcome discardOutcome, kind string) string {
 // progressed out of the in-progress rule) apply equally to both
 // entry points.
 func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID string, task *domain.Task) {
-	if task == nil || task.EntitySource != "jira" || task.SourceStatus == "" || s.jiraClient == nil {
+	if task == nil || task.EntitySource != "jira" || task.SourceStatus == "" {
+		return
+	}
+	// SKY-463: the requeue/undo reversal (unassign + transition back) reverses
+	// the user's own claim, so it must act as that user, not the org service
+	// account. Resolve their Jira client. Best-effort: the task is already
+	// requeued by the time we get here, so a missing/again-unresolvable user
+	// credential is logged and skipped rather than failing the response or
+	// degrading to the bot.
+	jiraUserClient, jerr := s.jiraResolver.ForUser(ctx, orgID, userID)
+	if jerr != nil {
+		if errors.Is(jerr, jira.ErrNoJiraUserCredential) {
+			log.Printf("[jira] requeue revert: no Jira credential for user %s; skipping ticket %s", userID, task.EntitySourceID)
+		} else {
+			log.Printf("[jira] requeue revert: resolve user client for %s: %v (skipping)", task.EntitySourceID, jerr)
+		}
 		return
 	}
 	// Same hot-path note as handleSwipe: requeue/undo is human-paced
@@ -1311,7 +1360,7 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 		// Detached from the request (see handleSwipe's claim guard): the
 		// revert outlives the undo response, so use a background context.
 		bgCtx := context.Background()
-		state := s.jiraClient.GetClaimState(bgCtx, issueKey)
+		state := jiraUserClient.GetClaimState(bgCtx, issueKey)
 
 		// Three assignee cases:
 		//   - assigned to someone else -> skip undo entirely (manual reassignment)
@@ -1342,11 +1391,11 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 		}
 
 		if state == nil || state.AssignedToSelf {
-			if err := s.jiraClient.Unassign(bgCtx, issueKey); err != nil {
+			if err := jiraUserClient.Unassign(bgCtx, issueKey); err != nil {
 				log.Printf("[jira] failed to unassign %s on requeue: %v", issueKey, err)
 			}
 		}
-		if err := s.jiraClient.TransitionTo(bgCtx, issueKey, originalStatus); err != nil {
+		if err := jiraUserClient.TransitionTo(bgCtx, issueKey, originalStatus); err != nil {
 			log.Printf("[jira] failed to transition %s back to %q on requeue: %v", issueKey, originalStatus, err)
 		}
 	}(task.EntitySourceID, task.SourceStatus, inProgressMembers)

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
@@ -38,30 +37,25 @@ import (
 // resolveJiraHost canonicalizes the org's configured Jira base URL into the
 // value the per-user credential is keyed under ("jira_token/<host>") — the
 // SAME value the status reader and the PAT writer compose, so a stored
-// credential reads back under the key it was written with. It trims a trailing
-// slash and requires a real http(s) origin; ok=false on an empty (Jira not
-// configured) or malformed base URL, in which case there's no host to key a
-// lookup off. Unlike resolveGitHubHost there's no github.com-style default —
-// Jira has no canonical host, so an empty config is genuinely "not configured."
+// credential reads back under the key it was written with. ok=false on an
+// empty (Jira not configured) or malformed base URL, in which case there's no
+// host to key a lookup off. Unlike resolveGitHubHost there's no github.com-style
+// default — Jira has no canonical host, so an empty config is genuinely "not
+// configured."
+//
+// SKY-463: the canonicalization itself lives in internal/jira (jira.CanonicalHost)
+// so the bind flow here and the write-actor resolver (jira.Resolver.ForUser)
+// compose the per-user key identically — a single source of truth.
 func resolveJiraHost(orgBase string) (string, bool) {
-	host := strings.TrimRight(strings.TrimSpace(orgBase), "/")
-	if host == "" {
-		return "", false
-	}
-	u, err := url.Parse(host)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return "", false
-	}
-	return host, true
+	return jira.CanonicalHost(orgBase)
 }
 
 // jiraTokenKey is the per-user secret key the Jira access token is custodied
 // under — host-scoped so a user can hold credentials on more than one Jira host
-// (forward-compat; v1 is single-host). The SecretStore treats the key opaquely
-// (host-scoping is the consumer's job, see SecretStore.PutUser), so composing
-// it here keeps the reader and writer in lockstep.
+// (forward-compat; v1 is single-host). Delegates to jira.UserTokenKey so the
+// reader, the writer, and the resolver stay in lockstep.
 func jiraTokenKey(host string) string {
-	return "jira_token/" + host
+	return jira.UserTokenKey(host)
 }
 
 // jiraIdentityStatusResponse is the read-only shape the onboarding gate /

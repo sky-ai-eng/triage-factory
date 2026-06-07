@@ -150,16 +150,25 @@ func Handle(args []string) {
 			jiraexec.Handle(nil, cmdArgs)
 			return
 		}
-		_, _, jURL, jPAT, _, lerr := loadCreds()
-		if lerr != nil {
-			fmt.Fprintf(os.Stderr, "error loading credentials: %v\n", lerr)
+		// SKY-463: agent triage writes on the org/bot service credential —
+		// ForSystem is the canonical system-client constructor (the same org
+		// cred the poller uses). No per-user routing inside the sandbox;
+		// bot-authored writes by design.
+		ctx := context.Background()
+		orgID, oerr := resolveOrgID(ctx)
+		if oerr != nil {
+			fmt.Fprintf(os.Stderr, "error resolving run identity: %v\n", oerr)
 			os.Exit(1)
 		}
-		if jPAT == "" || jURL == "" {
+		jClient, jerr := jiraclient.NewResolver(stores.Secrets, stores.Orgs).ForSystem(ctx, orgID)
+		if errors.Is(jerr, jiraclient.ErrNoJiraSystemCredential) {
 			fmt.Fprintln(os.Stderr, "Jira not configured. Run triagefactory and complete setup first.")
 			os.Exit(1)
 		}
-		jClient := jiraclient.NewClient(jiraclient.DataCenterPAT(jURL, jPAT))
+		if jerr != nil {
+			fmt.Fprintf(os.Stderr, "error loading credentials: %v\n", jerr)
+			os.Exit(1)
+		}
 		jiraexec.Handle(jClient, cmdArgs)
 
 	case "workspace":

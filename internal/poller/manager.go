@@ -685,6 +685,11 @@ func (m *Manager) runJiraCycle() {
 		m.reportError("jira", "", err)
 		return
 	}
+	// SKY-463: ForSystem is the canonical constructor for the org/bot service
+	// client. The poller is read-only (discovery), so it's bot-attributed by
+	// design; routing through the resolver keeps system-client construction in
+	// one place alongside the per-user write path.
+	sysResolver := jiraclient.NewResolver(m.secrets, m.orgs)
 	for _, orgID := range orgIDs {
 		if !m.pollDue("jira", orgID, now) {
 			continue
@@ -719,7 +724,16 @@ func (m *Manager) runJiraCycle() {
 		if baseURL == "" {
 			baseURL = creds.JiraURL
 		}
-		client := jiraclient.NewClient(jiraclient.DataCenterPAT(creds.JiraURL, creds.JiraPAT))
+		// creds load above gates configuration + supplies the baseURL fallback;
+		// ForSystem (reading the same jira_url/jira_pat secrets) builds the
+		// authenticated client. The gate guarantees presence, so ForSystem
+		// won't report ErrNoJiraSystemCredential here — handle errors defensively.
+		client, cerr := sysResolver.ForSystem(ctx, orgID)
+		if cerr != nil {
+			log.Printf("[jira] org %s: resolve system client: %v", orgID, cerr)
+			m.reportError("jira", orgID, cerr)
+			continue
+		}
 		projects := toTrackerJiraRules(rules)
 		if _, err := m.trackerForOrg(orgID).RefreshJira(client, baseURL, projects); err != nil {
 			log.Printf("[jira] org %s: tracker error: %v", orgID, err)
