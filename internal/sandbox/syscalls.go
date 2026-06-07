@@ -10,11 +10,20 @@ package sandbox
 //
 // Reference: https://docs.docker.com/engine/security/seccomp/
 //
-// This is a starting baseline. SKY-254's "Open questions" calls out
-// that the implementing engineer should tighten further if any of
-// these turn out to be unneeded by the Node SDK. The cost of being
-// too permissive is wider attack surface inside the sandbox; the
-// cost of being too strict is opaque agent failures.
+// IMPORTANT — inert under gVisor. Validated empirically (see
+// docs/specs/playwright-chromium-sandbox/probe-seccomp.sh): runsc does
+// NOT apply this OCI container seccomp profile to the sandboxed
+// application. A SCMP_ACT_KILL_PROCESS default with zero allowed
+// syscalls had zero effect — and KILL outranks the RET_TRAP gVisor's
+// systrap uses to intercept syscalls, so it cannot be shadowed; an
+// applied profile would have killed the process on its first syscall.
+// The real syscall boundary is the gVisor Sentry (it services the
+// app's syscalls in user space; they never reach the host kernel) plus
+// gVisor's own internal seccomp confining the Sentry's host syscalls.
+// This profile is retained for OCI completeness and as defense-in-depth
+// for any non-gVisor runtime — NOT as an enforced in-sandbox control.
+// Don't "tighten" it expecting in-sandbox effect under gVisor: it has
+// none. (Customer-facing copy with the same overstatement: TFAC-299.)
 var defaultAllowedSyscalls = []string{
 	"accept", "accept4", "access", "adjtimex", "alarm", "bind", "brk",
 	"capget", "capset", "chdir", "chmod", "chown", "chown32", "clock_adjtime",

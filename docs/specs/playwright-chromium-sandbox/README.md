@@ -6,14 +6,17 @@ artifact — all inside the existing `runsc` (gVisor) sandbox.
 
 This doc is written to be implementable without a second research pass. It
 names the exact files to touch, the exact package/spec/seccomp deltas, the
-container-tier model the feature needs, and a Fly smoke-test plan that mirrors
-`docs/specs/sky-254-runsc-validation/precns-test.sh`. It is **not** validated
-end-to-end — `runsc` can only be exercised on a Fly Machine (Firecracker
-microVM), not in an ordinary container or a dev box, so the "Validation plan"
-section is the gate before this ships.
+container-tier model the feature needs, and a validation plan. That plan has
+now been **run locally against real `runsc`** (release-20260511.0) in a
+`--privileged` container with the host `runsc` bind-mounted — correcting the
+earlier assumption that `runsc` needs a Fly Machine. The probe scripts live
+beside this doc (`probe-browser.sh`, `probe-seccomp.sh`) and mirror
+`docs/specs/sky-254-runsc-validation/precns-test.sh`.
 
-Status: **proposal**. No code written yet. Parent context: the SKY-254 sandbox
-epic (`internal/sandbox`).
+Status: **proposal — locally validated** (results in §8). No product code
+written yet; the §5 deltas are the implementation, and the validation that
+gated them now passes. Parent context: the SKY-254 sandbox epic
+(`internal/sandbox`).
 
 > This is one worked instance of the broader **sandbox fleet** model
 > (`docs/specs/sandbox-fleet/`): a "browser" profile is just one configurable
@@ -218,26 +221,29 @@ Rlimit bumps for the browser profile (leave `base` as-is):
 These should be **profile-conditional** (§6), not a global bump — the base
 profile has no reason to carry browser-sized limits.
 
-### 5.4 Seccomp: `clone`/`clone3` (`internal/sandbox/syscalls.go`) — verify first
+### 5.4 Seccomp: `clone`/`clone3` (`internal/sandbox/syscalls.go`) — RESOLVED: no change needed
 
-`defaultAllowedSyscalls` omits `clone` and `clone3` (only `fork`/`vfork`/
-`execve` are present); default action is `SCMP_ACT_ERRNO`. Chromium fans out
-zygote → renderer/GPU/utility processes via `clone`/`clone3`.
+`defaultAllowedSyscalls` omits `clone`/`clone3`, and Chromium fans out its
+zygote → renderer/GPU/utility processes via `clone`. The open question was
+whether that omission would block Chromium and force the one-line add.
 
-**Verify before changing.** Node's libuv threadpool also needs `clone`, and the
-team has already had functional agent-SDK runs — so empirically clone-based
-*threading* works today. That means one of: (a) `runsc` isn't enforcing this
-OCI app-seccomp list as written, or (b) clone is getting through regardless.
-Either way, do **not** assume — the smoke test in §8 settles it. If the profile
-*is* enforced, the fix is one line:
+**Validated (§8): it doesn't — because `runsc` does not apply the OCI seccomp
+profile to the sandboxed app at all.** Of the two hypotheses, (a) is correct.
+The dispositive test (`probe-seccomp.sh`): a `SCMP_ACT_KILL_PROCESS` default
+with zero allowed syscalls had *zero* effect on the sandboxed process. And
+`KILL_PROCESS` is the highest-precedence seccomp action, so it cannot be
+shadowed by the `RET_TRAP` gVisor's systrap uses to intercept syscalls — if the
+profile were applied, the process would die on its first syscall. It ran to
+completion. Corroborated by gVisor's docs: gVisor's own seccomp confines the
+**Sentry**'s host syscalls; the application's syscalls are serviced by the
+Sentry (user-space kernel) and never filtered against our OCI profile.
 
-```go
-"clone", "clone3",   // Chromium multi-process fan-out (and Node threads).
-```
-
-We deliberately do **not** add `unshare`/`setns`/namespace `CLONE_NEW*` paths:
-`--no-sandbox` means Chromium won't request them, so the namespace-creation
-surface stays closed.
+So **`syscalls.go` needs no change** for this feature — `clone`/`clone3` are a
+non-issue, and the profile is inert in the gVisor path regardless. (A
+consequence worth its own note: the shipped profile is *not* the enforced
+in-sandbox control its comments implied — `syscalls.go`/`spec.go` comments are
+corrected alongside this doc, and the customer-facing security page is tracked
+in TFAC-299.)
 
 ### 5.5 Tool allowlist + orchestration (`internal/agentproc/allowlist.go`)
 
@@ -341,11 +347,24 @@ artifact; size the run wall-clock budget accordingly.
 
 ---
 
-## 8. Validation plan (the gate before shipping)
+## 8. Validation — run locally against real runsc
 
-`runsc` only runs on a Fly Machine, so this must be validated there, mirroring
-`docs/specs/sky-254-runsc-validation/precns-test.sh`. Suggested probe
-(`probe-browser.sh`, to live in this directory once written):
+> **Correction:** the earlier claim that `runsc` "only runs on a Fly Machine" is
+> wrong. The probes below ran locally under real `runsc` (release-20260511.0) in
+> a `--privileged` container with the host `runsc` bind-mounted — the same
+> harness the SKY-395 cross-tenant test uses. Reproduce:
+>
+> ```sh
+> docker run --rm --privileged \
+>   -v "$(git rev-parse --show-toplevel)":/src \
+>   -v /usr/local/bin/runsc:/usr/local/bin/runsc:ro \
+>   -w /src alpine:3.20 \
+>   sh /src/docs/specs/playwright-chromium-sandbox/probe-browser.sh
+> ```
+
+`probe-browser.sh` (beside this doc) builds the browser-profile rootfs and runs
+four staged `runsc` sandboxes over it; `probe-seccomp.sh` settles the
+seccomp-enforcement question. What `probe-browser.sh` does:
 
 1. Build a browser rootfs (alpine + `chromium` + fonts + `playwright`) and an OCI
    bundle, exactly as production would (`ensureRootfs` browser profile).
@@ -359,19 +378,23 @@ artifact; size the run wall-clock budget accordingly.
 4. Assert `/work/shot.png` exists, is non-trivial in size, and (eyeball) renders
    text with real glyphs, not boxes.
 
-**Acceptance checklist:**
+**Acceptance results** (local runsc release-20260511.0, Alpine 3.20 → Chromium
+131.0.6778.108, Playwright pinned 1.49.1):
 
-| Question | How |
+| Question | Result |
 | --- | --- |
-| Does the OCI seccomp even enforce? Is `clone`/`clone3` needed? | Run the screenshot with the *current* profile; if it fails on `clone`, §5.4 is required |
-| Does the apk Chromium + pinned Playwright pair work (no CDP skew)? | Playwright `chromium.launch({executablePath})` + a `page.screenshot()` |
-| Fonts render? | Visual check of the screenshot |
-| `/dev/shm` strategy holds? | Run with `--disable-dev-shm-usage`; then retry with the mounted shm variant |
-| Memory headroom on the target Machine class? | Watch RSS during a multi-tab capture; size the tier |
-| Video path (if in scope)? | `recordVideo` produces a playable file via the apk ffmpeg |
-| gVisor-specific Chromium quirks? | Note any syscall/`/proc` surprises in the run log |
+| Does the OCI seccomp even enforce? Is `clone`/`clone3` needed? | **No / no.** `runsc` does not apply the OCI seccomp profile to the app — dispositive `SCMP_ACT_KILL_PROCESS` test had zero effect (KILL outranks systrap's `RET_TRAP`, can't be shadowed). §5.4 is moot; `syscalls.go` needs no change. |
+| apk Chromium + pinned Playwright (no CDP skew)? | ✅ **with the pin.** Playwright 1.49.x ↔ Chromium 131 launched via `executablePath` + screenshotted cleanly. npm-latest 1.60.0 *would* skew — §5.1's "pin both" is mandatory. |
+| Fonts render? | ✅ crisp `font-noto` glyphs, no tofu (eyeballed). |
+| `/dev/shm` strategy holds? | ✅ `--disable-dev-shm-usage` suffices; no mount needed. |
+| Loopback premise (§3)? | ✅ — but the netns must bring `lo` up (production does, `netns_linux.go`). A self-created empty netns leaves `lo` down → `Network unreachable`. |
+| Memory headroom / rlimits? | ✅ base `NOFILE 1024`/`NPROC 512` sufficed for a single screenshot. The §5.3 bump is for video/many-tabs (untested). |
+| GPU under gVisor? | ✅ Vulkan/EGL init errors are cosmetic; `--headless=new` falls back to SwiftShader and renders. |
+| Video path (`recordVideo` + ffmpeg)? | ⏳ not exercised (screenshots-only probe). |
 
-Only after this passes on a real Machine should the profile ship.
+The §5 deltas are cleared to implement: **strike §5.4** (no seccomp change), the
+`/dev/shm` mount is optional, and the rlimit bump is optional (base sufficed for
+screenshots; revisit for video/many-tabs).
 
 ---
 

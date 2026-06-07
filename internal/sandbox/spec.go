@@ -210,16 +210,20 @@ func hostSSLCertsDir() string {
 }
 
 // defaultSeccompProfile returns the OCI-standard "default action
-// SCMP_ACT_ERRNO, allow the safe set" profile. runsc would apply
-// its own default if Seccomp is nil; we set it explicitly so spec
-// JSON is self-documenting and a future runsc default change
-// doesn't silently weaken our posture.
+// SCMP_ACT_ERRNO, allow the safe set" profile.
 //
-// The architecture is "deny by default, allow the small safe set."
-// This matches Docker's default seccomp profile philosophy. The
-// concrete syscall list is intentionally minimal; SKY-254 ships a
-// starting profile and an open question in the ticket calls for
-// the implementing engineer to tighten as needed.
+// NOTE — not enforced under gVisor. runsc does NOT apply the OCI
+// container seccomp profile to the sandboxed application (validated:
+// docs/specs/playwright-chromium-sandbox/probe-seccomp.sh — a
+// KILL_PROCESS default had zero effect, and KILL can't be shadowed by
+// systrap's interception trap). gVisor's design makes the Sentry the
+// syscall boundary: the app's syscalls are serviced in user space and
+// never reach the host kernel, and gVisor's own internal seccomp
+// confines the Sentry's host syscalls. So this profile is inert in the
+// gVisor path. We still emit it (rather than leaving Seccomp nil) for
+// OCI completeness and so the spec is honest about intent — but it is
+// defense-in-depth for a hypothetical non-gVisor runtime, NOT the
+// enforced in-sandbox control. See defaultAllowedSyscalls for detail.
 func defaultSeccompProfile() *specs.LinuxSeccomp {
 	return &specs.LinuxSeccomp{
 		DefaultAction: specs.ActErrno,
