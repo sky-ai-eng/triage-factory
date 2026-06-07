@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec"
 	"github.com/sky-ai-eng/triage-factory/cmd/install"
@@ -43,7 +44,13 @@ func dispatchCLI(args []string) (handled bool, err error) {
 	case "-v", "--version", "version":
 		fmt.Println(Version)
 	default:
-		return false, nil
+		// A leading flag (e.g. --port) is server-mode config that LoadConfig
+		// parses, so fall through. Anything else is a mistyped subcommand —
+		// surface it instead of silently booting the server.
+		if strings.HasPrefix(args[0], "-") {
+			return false, nil
+		}
+		return true, fmt.Errorf("unknown subcommand %q; run 'triagefactory --help' for usage", args[0])
 	}
 	return true, nil
 }

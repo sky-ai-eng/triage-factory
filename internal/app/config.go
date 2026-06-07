@@ -51,6 +51,12 @@ func LoadConfig(args []string) (Config, error) {
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
+	if fs.NArg() > 0 {
+		// Server mode takes only flags; a leftover positional is a mistake
+		// (and flag parsing stops at the first one, so it would otherwise
+		// silently drop any flags that followed it).
+		return Config{}, fmt.Errorf("unexpected argument %q; run 'triagefactory --help' for usage", fs.Arg(0))
+	}
 
 	cfg.Addr = fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 

@@ -40,6 +40,16 @@ func TestLoadConfig(t *testing.T) {
 			args:    []string{"--bogus"},
 			wantErr: true,
 		},
+		{
+			name:    "leftover positional arg errors",
+			args:    []string{"--port", "8080", "extra"},
+			wantErr: true,
+		},
+		{
+			name:    "bare positional arg errors",
+			args:    []string{"extra"},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
