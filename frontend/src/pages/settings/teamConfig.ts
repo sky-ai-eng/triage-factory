@@ -170,6 +170,19 @@ export async function fetchTeamRepos(teamId: string): Promise<string[] | null> {
   return data.repos ?? []
 }
 
+// fetchTeamGitHubGroups returns just the team's saved GitHub-team mappings (no
+// candidate list), or null on failure — for a container that needs the saved
+// set up front (e.g. a collapsed section's count + change-detection baseline)
+// without mounting the full GitHubTeamGroup checklist. Same null-vs-[] contract
+// as fetchTeamRepos: a failed load must not read as "maps nothing." (The GET
+// also re-triggers the server's deletion reconcile, same as the group's fetch.)
+export async function fetchTeamGitHubGroups(teamId: string): Promise<GitHubGroup[] | null> {
+  const res = await fetch(`${teamPath(teamId)}/github-groups`)
+  if (!res.ok) return null
+  const data = (await res.json()) as TeamGitHubGroupsData
+  return data.groups ?? []
+}
+
 export type SaveResult = { ok: true; warning?: string } | { ok: false; error: string }
 
 // saveTeamSettings persists the team-settings + Jira-rules slice via POST

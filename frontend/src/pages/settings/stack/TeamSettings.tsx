@@ -25,6 +25,7 @@ import type { StepContext } from '../../setup/types'
 import {
   emptyTeamConfig,
   fetchTeamRepos,
+  fetchTeamGitHubGroups,
   fetchTeamSettings,
   saveTeamGitHubGroups,
   saveTeamRepos,
@@ -112,11 +113,12 @@ export default function TeamSettings({
     Promise.all([
       fetchTeamSettings(teamId),
       fetchTeamRepos(teamId),
+      fetchTeamGitHubGroups(teamId),
       fetch('/api/integrations/status')
         .then((r) => (r.ok ? r.json() : null))
         .catch(() => null),
     ])
-      .then(([settings, teamRepos, integ]) => {
+      .then(([settings, teamRepos, teamGroups, integ]) => {
         if (cancelled) return
         if (!settings) {
           setLoadError('Could not load team settings. Check your connection and try again.')
@@ -124,16 +126,22 @@ export default function TeamSettings({
           return
         }
         const form = teamConfigFromSettings(settings)
-        setBaseline(form)
+        // Seed baseline.repos with the separately-loaded set (teamConfigFromSettings
+        // leaves it undefined) so the collapsed summary shows the real count and the
+        // section isn't spuriously dirty — otherwise collapsing fires the discard
+        // guard, whose revert would wipe the selection to [].
+        setBaseline({ ...form, repos: teamRepos ?? undefined })
         setProjects(form.jira_projects)
         setDefaultModel(form.default_model)
         setAutoDelegate(form.auto_delegate_enabled)
         setRepos(teamRepos ?? [])
         setReposLoaded(teamRepos !== null)
         setJiraConnected(!!integ?.jira && !!integ?.jira_url)
-        // github_groups seed up through GitHubTeamGroup's onLoaded.
-        setGroups([])
-        setGroupsBaseline([])
+        // Seed the GitHub-team mappings up front (the GitHubTeamGroup checklist
+        // mounts lazily on expand and would otherwise leave the collapsed count
+        // at 0); the group's onLoaded re-seeds on expand / after a repos save.
+        setGroups(teamGroups ?? [])
+        setGroupsBaseline(teamGroups ?? [])
         setLoading(false)
       })
       .catch(() => {
