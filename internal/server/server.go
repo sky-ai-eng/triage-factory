@@ -446,16 +446,35 @@ func (s *Server) ListenAndServe(addr string) error {
 // non-ErrServerClosed listen error otherwise.
 func (s *Server) ListenAndServeContext(ctx context.Context, addr string) error {
 	httpSrv := &http.Server{Addr: addr, Handler: s.withSecurityHeaders(s.mux)}
+
+	// The watcher shuts the server down on ctx cancel, but must also exit if
+	// the server stops on its own first (e.g. a bind failure) — otherwise a
+	// caller passing context.Background(), like ListenAndServe, would leak it
+	// forever on a Done channel that never closes. serverExited signals that
+	// second path; shutdownDone lets us join the watcher before returning so
+	// none outlives this call.
+	serverExited := make(chan struct{})
+	shutdownDone := make(chan struct{})
 	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = httpSrv.Shutdown(shutdownCtx)
+		defer close(shutdownDone)
+		select {
+		case <-ctx.Done():
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = httpSrv.Shutdown(shutdownCtx)
+		case <-serverExited:
+			// ListenAndServe already returned; nothing to shut down.
+		}
 	}()
-	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
+
+	err := httpSrv.ListenAndServe()
+	close(serverExited)
+	<-shutdownDone
+
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
 	}
-	return nil
+	return err
 }
 
 // api mounts a read-only /api/* route through withSession so identity
