@@ -131,19 +131,14 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 			return fmt.Errorf("store credentials: %w", err)
 		}
 
-		// Capture the GitHub login on the users row when we validated
-		// GitHub. Skip when GitHub wasn't validated (Jira-only setup)
-		// — the dashboard / poller short-circuit on empty username and
-		// Settings can re-capture later.
-		if resp.GitHub != nil && resp.GitHub.Login != "" {
-			// Bind the identity to the org's host explicitly — the host
-			// the PAT just validated against (req.GitHubURL), which is the
-			// same value we persist to org_settings.github_base_url below,
-			// so reads keyed on (user, host) find this row.
-			if err := tx.Users.UpsertGitHubIdentity(r.Context(), userID, req.GitHubURL, resp.GitHub.Login, "pat"); err != nil {
-				return fmt.Errorf("persist github identity: %w", err)
-			}
-		}
+		// NOTE: this is the ORG credential (PAT_1) — the bot token TF
+		// authenticates to GitHub with. It is deliberately NOT bound to the
+		// configuring user's GitHub identity. Per-user identity (PAT_2 / "this
+		// TF user is @login") is captured by its own surface — the setup
+		// wizard's User step / the Connect gate page, writing
+		// user_github_identities directly — so access and identity never get
+		// conflated. The two may carry the same token value, but they are set
+		// and stored independently.
 
 		// Persist base URLs + clone protocol in org_settings so they
 		// survive without keychain access. Read-modify-write inside

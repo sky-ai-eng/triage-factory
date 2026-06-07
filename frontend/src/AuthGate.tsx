@@ -3,6 +3,7 @@ import { useAuthStatus } from './hooks/useAuthStatus'
 import { useAuth, useOptionalAuth } from './contexts/AuthContext'
 import { useOrgContext, useActiveOrgId } from './contexts/OrgContext'
 import { useGitHubIdentity } from './hooks/useGitHubIdentity'
+import { LOCAL_DEFAULT_ORG_ID } from './lib/githubApp'
 
 /**
  * AuthGate routes between the local-mode first-run/provision flow and the
@@ -102,26 +103,38 @@ function MultiAuthGate({ children }: { children: React.ReactNode }) {
 }
 
 /**
- * RequireGitHubIdentity is the onboarding gate, composed *inside* the
- * authed+org-resolved MultiAuthGate and wrapping the app shell. It blocks the
- * app until the user has a host-verified GitHub identity for the active org's
- * host, redirecting to the Connect page (which lives on its own route, NOT
- * behind this gate, so there's no loop) otherwise.
+ * RequireGitHubIdentity is the onboarding gate that blocks the app until the
+ * user has a host-verified GitHub identity for the active org's host,
+ * redirecting to the Connect page (which lives on its own route, NOT behind
+ * this gate, so there's no loop) otherwise.
  *
  * "Couldn't read the status" (TF-side error) is held as a retryable panel
  * rather than rendered through — the gate must not silently admit an
  * unconnected user on a transient failure. The Connect-failure shapes
  * (including host-unreachable) are surfaced on the Connect page itself.
  *
- * Multi-mode only by construction (MultiRoutes is the sole mounter). Local
- * mode binds identity via the PAT setup wizard, so LocalAuthGate covers it.
+ * Runs in BOTH modes. Multi resolves the active org from OrgContext; local has
+ * no OrgContext, so it passes `isLocal` and the gate keys on the sentinel org
+ * (the same id the wizard + the org-scoped endpoints use). Identity is now its
+ * own explicit step in every mode — never derived from the org PAT — so local
+ * is gated exactly like multi.
  */
-export function RequireGitHubIdentity({ children }: { children: React.ReactNode }) {
-  const { activeOrgId } = useOrgContext()
+export function RequireGitHubIdentity({
+  children,
+  isLocal = false,
+}: {
+  children: React.ReactNode
+  isLocal?: boolean
+}) {
+  // useActiveOrgId is null without an OrgProvider (local mode) — safe; the
+  // sentinel overrides it there. Never call useOrgContext here: it throws
+  // outside the provider, which is exactly the local case.
+  const ctxOrgId = useActiveOrgId()
+  const orgId = isLocal ? LOCAL_DEFAULT_ORG_ID : ctxOrgId
   const location = useLocation()
-  const { state, refresh } = useGitHubIdentity(activeOrgId)
+  const { state, refresh } = useGitHubIdentity(orgId)
 
-  if (!activeOrgId || state.status === 'loading') {
+  if (!orgId || state.status === 'loading') {
     return <Loading />
   }
   if (state.status === 'error') {
@@ -139,7 +152,7 @@ export function RequireGitHubIdentity({ children }: { children: React.ReactNode 
   if (!state.data.connected) {
     const target = location.pathname + location.search
     const rt = target && target !== '/' ? '?return_to=' + encodeURIComponent(target) : ''
-    return <Navigate to={'/orgs/' + activeOrgId + '/connect-github' + rt} replace />
+    return <Navigate to={'/orgs/' + orgId + '/connect-github' + rt} replace />
   }
   return <>{children}</>
 }

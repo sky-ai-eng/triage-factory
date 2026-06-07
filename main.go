@@ -200,53 +200,16 @@ func bootstrapBareClones(database *sql.DB, repos db.RepoStore) {
 	worktree.BootstrapBareClones(context.Background(), targets)
 }
 
-// bootstrapLocalGitHubIdentity populates the local synthetic user's
-// host-scoped GitHub identity row (user_github_identities, SKY-396) by
-// deriving the login from the configured PAT+URL, bound to the org's host.
-// Runs at startup only when a tenant already exists (a prior provision) —
-// it writes the users row, which provisioning created. The config step
-// (handleIntegrationsSetup) is the other write path, capturing the login
-// when the PAT is first entered.
-//
-// No-op when (a) an identity row already exists for the host, (b)
-// credentials are absent (Settings UI capture is the alternate write
-// path), or (c) ValidateGitHub fails (PAT invalid / GitHub down — the
-// user can recapture via Settings, or the next boot retries).
-func bootstrapLocalGitHubIdentity(users db.UsersStore, secrets db.SecretStore) error {
-	if runmode.Current() != runmode.ModeLocal {
-		return nil
-	}
-	ctx := context.Background()
-
-	creds, _ := integrations.Load(ctx, secrets, runmode.LocalDefaultOrgID) // secret-store errors are non-fatal — degrade to no-op
-	if creds.GitHubPAT == "" || creds.GitHubURL == "" {
-		return nil
-	}
-	existing, err := users.GetGitHubLogin(ctx, runmode.LocalDefaultUserID, creds.GitHubURL)
-	if err != nil {
-		return fmt.Errorf("read github identity: %w", err)
-	}
-	if existing != "" {
-		return nil
-	}
-	ghUser, err := auth.ValidateGitHub(ctx, creds.GitHubURL, creds.GitHubPAT)
-	if err != nil {
-		log.Printf("[bootstrap] derive github identity from PAT: %v (continuing — Settings will capture next save)", err)
-		return nil
-	}
-	if err := users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, creds.GitHubURL, ghUser.Login, "pat"); err != nil {
-		return fmt.Errorf("persist github identity: %w", err)
-	}
-	log.Printf("[bootstrap] github identity: derived %q from credentials", ghUser.Login)
-	return nil
-}
-
-// bootstrapLocalJiraIdentity is the Jira analog of
-// bootstrapLocalGitHubIdentity. Populates users.jira_account_id and
+// bootstrapLocalJiraIdentity populates users.jira_account_id and
 // users.jira_display_name on the local synthetic user row by
 // deriving them from the configured Jira PAT+URL. Both fields come
 // from the same /rest/api/2/myself response, so the capture is one
 // round-trip per boot.
+//
+// Note: there is intentionally no GitHub analog. Per-user GitHub identity
+// (PAT_2) is captured only through the setup wizard's User step / the Connect
+// gate page, never derived from the org PAT at boot — see internal/server's
+// identity capture handlers.
 //
 // Runs at startup only when a tenant already exists (it writes the users
 // row that provisioning created), keeping the shipped jira-assigned /
@@ -715,9 +678,11 @@ func main() {
 		if org, err := stores.Orgs.GetOrgSystem(context.Background(), runmode.LocalDefaultOrgID); err != nil {
 			log.Printf("[bootstrap] check local tenant: %v (skipping identity/skill fixup)", err)
 		} else if org != nil {
-			if err := bootstrapLocalGitHubIdentity(stores.Users, stores.Secrets); err != nil {
-				log.Printf("[bootstrap] github identity: %v (continuing — Settings will capture on next save)", err)
-			}
+			// GitHub identity (PAT_2) is deliberately NOT bootstrapped from the
+			// org PAT (PAT_1) here — per-user identity is captured only through
+			// the setup wizard's User step / the Connect gate page, never derived
+			// from the org's access credential. Even at N=1 the local user binds
+			// their GitHub login through that step.
 			if err := bootstrapLocalJiraIdentity(stores.Users, stores.Secrets); err != nil {
 				log.Printf("[bootstrap] users.jira_identity: %v (continuing — Settings will capture on next save)", err)
 			}

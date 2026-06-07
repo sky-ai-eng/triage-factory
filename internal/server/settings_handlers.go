@@ -429,13 +429,6 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 
 	orgSet := prevOrgSet
 
-	// Host the GitHub identity (if any) is bound against, captured before the
-	// req.GitHubBaseURL block below overwrites creds.GitHubURL with the request
-	// value. The disconnect paths must delete the row for this original host —
-	// reading creds.GitHubURL there would see "" on a URL-clear and orphan the
-	// real row.
-	origGitHubHost := creds.GitHubURL
-
 	if req.GitHubBaseURL != nil {
 		orgSet.GitHubBaseURL = *req.GitHubBaseURL
 		creds.GitHubURL = *req.GitHubBaseURL
@@ -479,7 +472,13 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 		orgSet.MaxLLMModelTier = tier
 	}
 
-	// GitHub PAT: nil = don't touch, "" = clear, non-empty = validate + set.
+	// GitHub PAT (PAT_1, the org bot credential): nil = don't touch, "" =
+	// clear, non-empty = validate + set. We validate to reject a bad token,
+	// but we do NOT bind the caller's GitHub identity here — saving the org
+	// credential is an access concern, not an identity one. Per-user identity
+	// (PAT_2) is captured only by the dedicated identity surface (the setup
+	// wizard's User step / the Connect gate page → POST .../identity/github*),
+	// so access and identity stay independent even when the same token is used.
 	if req.GitHubPAT != nil {
 		if *req.GitHubPAT == "" {
 			creds.GitHubPAT = ""
@@ -489,8 +488,7 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 				badRequest(w, "GitHub URL is required before setting a PAT")
 				return
 			}
-			ghUser, err := auth.ValidateGitHub(r.Context(), url, *req.GitHubPAT)
-			if err != nil {
+			if _, err := auth.ValidateGitHub(r.Context(), url, *req.GitHubPAT); err != nil {
 				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 					"error": "GitHub: " + err.Error(),
 					"field": "github_pat",
@@ -498,38 +496,6 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			creds.GitHubPAT = *req.GitHubPAT
-			// Bind identity to the host the PAT validated against (`url`).
-			if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-				return tx.Users.UpsertGitHubIdentity(r.Context(), userID, url, ghUser.Login, "pat")
-			}); err != nil {
-				log.Printf("[settings/org] failed to persist github identity: %v", err)
-			}
-		}
-	} else if creds.GitHubPAT != "" {
-		// Backfill: a PAT is already stored but the user has no identity
-		// row for the org's host (legacy install, or a PAT saved through a
-		// path that didn't capture the login). Validate the stored PAT
-		// and recapture the login so identity consumers (/api/me,
-		// predicate helpers) stop treating the user as GitHub-less.
-		// Best-effort: a transient read/validate failure just defers
-		// the backfill to the next save.
-		var stored string
-		if creds.GitHubURL != "" {
-			if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-				var e error
-				stored, e = tx.Users.GetGitHubLogin(r.Context(), userID, creds.GitHubURL)
-				return e
-			}); err != nil {
-				log.Printf("[settings/org] github identity backfill read failed: %v", err)
-			} else if stored == "" {
-				if ghUser, err := auth.ValidateGitHub(r.Context(), creds.GitHubURL, creds.GitHubPAT); err == nil {
-					if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-						return tx.Users.UpsertGitHubIdentity(r.Context(), userID, creds.GitHubURL, ghUser.Login, "pat")
-					}); err != nil {
-						log.Printf("[settings/org] github identity backfill write failed: %v", err)
-					}
-				}
-			}
 		}
 	}
 
@@ -598,23 +564,17 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 			}
 			creds.GitHubURL = ""
 			creds.GitHubPAT = ""
-			// Delete the identity bound to the now-disconnected host. Use the
-			// host captured before the req block above zeroed creds.GitHubURL
-			// — creds.GitHubURL is already "" here, which would no-op the
-			// DELETE and orphan the real row.
-			if err := tx.Users.ClearGitHubIdentity(r.Context(), userID, origGitHubHost); err != nil {
-				return fmt.Errorf("clear github identity: %w", err)
-			}
+			// Per-user GitHub identity (PAT_2) is deliberately left intact:
+			// it's owned by the dedicated identity surface, not the org
+			// credential. Disconnecting the org's GitHub access doesn't unmake
+			// the fact that this user is @login on that host — a leftover row is
+			// harmless (runtime tolerates absent/stale identity) and still valid
+			// if GitHub is reconnected to the same host. Identity is cleared
+			// only by its own surface, never as a side effect of an org-access
+			// change.
 		} else if req.GitHubPAT != nil && *req.GitHubPAT == "" {
 			if _, err := tx.Secrets.Delete(r.Context(), orgID, integrations.KeyGitHubPAT); err != nil {
 				return fmt.Errorf("clear GitHub PAT: %w", err)
-			}
-			// PAT-only clear: drop the identity for the bound host. origGitHubHost
-			// (not creds.GitHubURL) is correct even in the rare case where the URL
-			// is being changed in the same request — the row is keyed on the host
-			// it was captured against, not the new one.
-			if err := tx.Users.ClearGitHubIdentity(r.Context(), userID, origGitHubHost); err != nil {
-				return fmt.Errorf("clear github identity: %w", err)
 			}
 		}
 		if req.JiraBaseURL != nil && *req.JiraBaseURL == "" {

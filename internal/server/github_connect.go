@@ -366,6 +366,105 @@ func (s *Server) handleGitHubIdentityStatus(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+// githubIdentityPATRequest carries a user-supplied PAT for the capture-and-
+// discard identity path (PAT_2). The token proves the caller's login and is
+// then thrown away — never stored.
+type githubIdentityPATRequest struct {
+	PAT string `json:"pat"`
+}
+
+// githubIdentityCaptureResponse is the success shape of the PAT-capture path:
+// the bound login and the host it's keyed under, so the caller can reflect the
+// just-captured identity without re-reading the status endpoint.
+type githubIdentityCaptureResponse struct {
+	Login string `json:"login"`
+	Host  string `json:"host"`
+}
+
+// handleGitHubIdentityPAT binds the caller's GitHub identity from a personal
+// access token they supply, WITHOUT storing the token. It validates the PAT
+// against the org's resolved host (GET /user), writes
+// user_github_identities(source='pat'), and discards the token — the same end
+// state as the Connect OAuth flow, just proven by a token instead of a consent
+// click. This is PAT_2: the per-user identity credential, independent of the
+// org's PAT_1 access credential (they may be the same token; they are captured
+// and stored independently). It's the always-available fallback to Connect, and
+// the only capture path when no GitHub App is registered.
+//
+// POST /api/orgs/{org_id}/identity/github/pat
+func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := s.requireOrgMember(w, r)
+	if !ok {
+		return
+	}
+	var req githubIdentityPATRequest
+	if !decodeJSON(w, r, &req, "") {
+		return
+	}
+	pat := strings.TrimSpace(req.PAT)
+	if pat == "" {
+		badRequest(w, "A GitHub personal access token is required.")
+		return
+	}
+
+	// Resolve the org's host the same way the status reader / Connect writer do,
+	// so the (user, host) key always agrees across surfaces.
+	var orgSet domain.OrgSettings
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var lerr error
+		orgSet, lerr = tx.Orgs.GetSettings(r.Context(), orgID)
+		return lerr
+	}); err != nil {
+		internalError(w, "github-identity", err)
+		return
+	}
+	ghWeb, okHost := resolveGitHubHost(orgSet.GitHubBaseURL)
+	if !okHost {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+			"error": "Your workspace's GitHub URL looks misconfigured. Ask your admin to fix it in Workspace Settings.",
+			"field": "github_pat",
+		})
+		return
+	}
+
+	ghUser, err := auth.ValidateGitHub(r.Context(), ghWeb, pat)
+	if err != nil {
+		// Keep the two failure shapes distinct, like the Connect flow: a host we
+		// couldn't reach (infra) vs. a token the host rejected (your action).
+		if errors.Is(err, auth.ErrGitHubHostUnreachable) {
+			writeJSON(w, http.StatusBadGateway, map[string]string{
+				"error": fmt.Sprintf("Couldn't reach %s. This is a connectivity issue between Triage Factory and your GitHub server, not the token — try again.", ghWeb),
+				"field": "github_pat",
+			})
+			return
+		}
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+			"error": "That token didn't validate against " + ghWeb + ". Double-check it and try again.",
+			"field": "github_pat",
+		})
+		return
+	}
+	if ghUser.Login == "" {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+			"error": "GitHub didn't return a username for that token.",
+			"field": "github_pat",
+		})
+		return
+	}
+
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		return tx.Users.UpsertGitHubIdentity(r.Context(), userID, ghWeb, ghUser.Login, "pat")
+	}); err != nil {
+		internalError(w, "github-identity", err)
+		return
+	}
+	// The token is intentionally not persisted anywhere — it existed only for
+	// the whoami above. Identity captured; org access untouched.
+	log.Printf("[github-identity] bound user=%s login=%s host=%s org=%s source=pat", userID, ghUser.Login, ghWeb, orgID)
+
+	writeJSON(w, http.StatusOK, githubIdentityCaptureResponse{Login: ghUser.Login, Host: ghWeb})
+}
+
 // redirectConnect bounces a failed/aborted Connect flow back to the FE gate
 // page with an error code (and the original return_to so a retry resumes the
 // right destination). errCode "" means a bare redirect with no error banner.

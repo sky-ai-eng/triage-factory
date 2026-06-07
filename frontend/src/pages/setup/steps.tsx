@@ -50,6 +50,8 @@ import {
 import { toast } from '../../components/Toast/toastStore'
 import RepoPickerModal from '../../components/RepoPickerModal'
 import { OrgModelStep, TeamModelStep } from './ModelStep'
+import { UserIdentityStep } from './UserIdentityStep'
+import { captureGitHubIdentityPat } from '../../lib/githubIdentity'
 import PollerTimingGroup from '../settings/PollerTimingGroup'
 import GitHubTeamGroup from '../settings/GitHubTeamGroup'
 import JiraProjectRulesGroup from '../settings/JiraProjectRulesGroup'
@@ -88,6 +90,11 @@ export const initialWizardState = (): WizardState => ({
   tracker: 'none',
   team: emptyTeamConfig(),
   teamLoaded: false,
+  userIdentityConnected: false,
+  userIdentityLogin: '',
+  userIdentityHost: '',
+  userConnectAvailable: false,
+  userGitHubPat: '',
 })
 
 const TIER_LABELS: Record<string, string> = {
@@ -678,6 +685,75 @@ const teamModelStep: WizardStep = {
   render: (ctx) => <TeamModelStep {...ctx} />,
 }
 
+// loadUserIdentity reads the caller's GitHub identity-binding status for the
+// active org's host (the same endpoint the RequireGitHubIdentity gate polls).
+// It seeds the User step: `connected` resumes it complete (a github.com login
+// already has an identity via login_claim — zero extra clicks), `login`/`host`
+// drive the copy, and `connect_available` chooses Connect vs. the PAT_2 paste.
+// Throws on a hard read failure so the host shows a retry rather than wrongly
+// prompting a connected user to reconnect.
+async function loadUserIdentity(ctx: LoadContext): Promise<Partial<WizardState>> {
+  if (!ctx.orgId) throw new Error('No organization context for the GitHub identity check.')
+  const res = await fetch(`/api/orgs/${encodeURIComponent(ctx.orgId)}/identity/github`)
+  if (!res.ok) throw new Error('Could not check your GitHub identity.')
+  const data = (await res.json()) as {
+    connected?: boolean
+    login?: string
+    host?: string
+    connect_available?: boolean
+  }
+  return {
+    userIdentityConnected: !!data.connected,
+    userIdentityLogin: data.login ?? '',
+    userIdentityHost: data.host ?? '',
+    userConnectAvailable: !!data.connect_available,
+  }
+}
+
+// Step · Your GitHub identity (the sole User-section step). Captures the
+// signed-in user's own @login on the org's host — PAT_2, independent of the
+// org's PAT_1 credential. Connect (one click) when an App is registered, else a
+// PAT_2 paste; either way the end state is a verified user_github_identities
+// row with no token retained. The Connect button (in the body) is an external
+// OAuth redirect that returns to /setup; the PAT path is this step's Continue,
+// which validates the token, records the login, and discards it. Mandatory: the
+// wizard can't finish until a host-verified identity exists — the in-flow mirror
+// of the RequireGitHubIdentity gate.
+const userIdentityStep: WizardStep = {
+  id: 'user-github-identity',
+  section: 'user',
+  title: 'Your GitHub identity',
+  advanceOnEnter: true,
+  load: loadUserIdentity,
+  isComplete: (s) => s.userIdentityConnected,
+  validate: (s) =>
+    s.userIdentityConnected || s.userGitHubPat.trim() !== ''
+      ? null
+      : 'Connect your GitHub, or paste a personal access token, to finish.',
+  persist: async ({ state, orgId, patch }) => {
+    // Already bound (Connect return, or a github.com login_claim) — nothing to
+    // do; Continue just finishes.
+    if (state.userIdentityConnected) return
+    if (!orgId) throw new Error('No organization context.')
+    const pat = state.userGitHubPat.trim()
+    if (pat === '') {
+      throw new Error('Connect your GitHub, or paste a personal access token, to finish.')
+    }
+    // Capture-and-discard: validates the token, reads the login, stores the
+    // identity row, drops the token. On success mark connected + clear the draft.
+    const result = await captureGitHubIdentityPat(orgId, pat)
+    patch({
+      userIdentityConnected: true,
+      userIdentityLogin: result.login,
+      userIdentityHost: result.host,
+      userGitHubPat: '',
+    })
+  },
+  collapsedSummary: (s) =>
+    s.userIdentityConnected ? `GitHub: @${s.userIdentityLogin}` : 'Not connected',
+  render: (ctx) => <UserIdentityStep {...ctx} />,
+}
+
 // Ordered registry. Section grouping is derived from each step's `section`;
 // the host inserts a divider above the first step of each section. The
 // Jira-projects step is conditionally omitted via its `visible` predicate.
@@ -698,4 +774,5 @@ export const WIZARD_STEPS: WizardStep[] = [
   githubTeamsStep,
   jiraProjectsStep,
   teamModelStep,
+  userIdentityStep,
 ]

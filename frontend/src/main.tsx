@@ -102,11 +102,26 @@ function LocalRoutes() {
           </AuthGate>
         }
       />
+      {/* Identity gate page — its own route OUTSIDE RequireGitHubIdentity (the
+          check it satisfies) so there's no loop. The backstop for a local user
+          whose identity is missing/stale outside the wizard; the wizard's User
+          step is the first-run capture. Declared before the shell layout so the
+          static /connect-github suffix wins. */}
+      <Route
+        path="/orgs/:org_id/connect-github"
+        element={
+          <AuthGate mode="local">
+            <ConnectGitHub />
+          </AuthGate>
+        }
+      />
       <Route
         element={
           <AuthGate mode="local">
             <RequireSetupComplete isLocal>
-              <Shell />
+              <RequireGitHubIdentity isLocal>
+                <Shell />
+              </RequireGitHubIdentity>
             </RequireSetupComplete>
           </AuthGate>
         }

@@ -1,7 +1,7 @@
-import { useMemo } from 'react'
-import { Navigate, useLocation } from 'react-router-dom'
-import { useActiveOrgId } from '../contexts/OrgContext'
+import { useMemo, useState } from 'react'
+import { Navigate, useLocation, useParams } from 'react-router-dom'
 import { useGitHubIdentity } from '../hooks/useGitHubIdentity'
+import { captureGitHubIdentityPat } from '../lib/githubIdentity'
 
 /**
  * ConnectGitHub is the blocking onboarding gate: "Connect your GitHub to
@@ -10,20 +10,26 @@ import { useGitHubIdentity } from '../hooks/useGitHubIdentity'
  * the personal dashboard, routing a task back to you). Team reads work without
  * it; this only blocks until a host-verified login is bound.
  *
- * Satisfiable by Connect (one consent click against the org's host, github.com
- * OR GHES) — or, for an org admin, by pasting a PAT in Workspace Settings,
- * which captures the same identity. There is deliberately no voluntary skip:
- * a skip would silently rebuild the half-onboarded population the gate exists
- * to eliminate. The runtime still tolerates an absent row (drift after a
- * rename, etc.) — the hard gate is at onboarding, soft tolerance at runtime.
+ * It is the backstop for the setup wizard's User step (the first-run capture):
+ * a returning or drifted user (renamed, left the org), or a second member who
+ * joined after first-run, lands here. Satisfiable two ways, both ending in the
+ * same state (a verified identity row, no token retained):
+ *   - Connect — one consent click against the org's host (github.com OR GHES),
+ *     when a GitHub App is registered.
+ *   - PAT_2 paste — always available, and the only path when no App exists.
+ * The org PAT (PAT_1) is deliberately NOT a capture path here: access and
+ * identity are independent, so there is no "ask your admin to save a token"
+ * shortcut — every user binds their own identity. There is no voluntary skip.
  *
- * Two failure shapes are kept distinct, per the gate's contract:
- *   - "not connected yet" — your action (the default state: click Connect).
+ * Two Connect failure shapes are kept distinct, per the gate's contract:
+ *   - "not connected yet" — your action (the default state: Connect / paste).
  *   - "host unreachable"  — infra (TF's backend couldn't reach the host).
  * Collapsing them would blame the user for a network problem.
  *
- * Rendered outside RequireGitHubIdentity (its own route) so it isn't gated by
- * the very check it satisfies — no redirect loop.
+ * Runs in BOTH modes — the org id comes from the route param (/orgs/:org_id/
+ * connect-github), so it needs no OrgContext (absent in local mode). Rendered
+ * outside RequireGitHubIdentity (its own route) so it isn't gated by the very
+ * check it satisfies — no redirect loop.
  */
 
 function Card({ children }: { children: React.ReactNode }) {
@@ -78,9 +84,16 @@ function errorBanner(
 }
 
 export default function ConnectGitHub() {
-  const orgId = useActiveOrgId()
+  const { org_id: orgId } = useParams<{ org_id: string }>()
   const location = useLocation()
-  const { state, refresh } = useGitHubIdentity(orgId)
+  const { state, refresh } = useGitHubIdentity(orgId ?? null)
+
+  // PAT_2 fallback state — always available (the only path when no App is
+  // registered). On success we refresh(), which re-reads identity → connected →
+  // navigates to returnTo below.
+  const [pat, setPat] = useState('')
+  const [capturing, setCapturing] = useState(false)
+  const [patError, setPatError] = useState<string | null>(null)
 
   const params = new URLSearchParams(location.search)
   const errorCode = params.get('error')
@@ -143,6 +156,20 @@ export default function ConnectGitHub() {
       encodeURIComponent(returnTo)
   }
 
+  const submitPat = async () => {
+    if (pat.trim() === '' || capturing) return
+    setCapturing(true)
+    setPatError(null)
+    try {
+      await captureGitHubIdentityPat(orgId, pat.trim())
+      // Re-read status; the connected branch above then redirects to returnTo.
+      refresh()
+    } catch (e) {
+      setPatError(e instanceof Error ? e.message : 'Could not verify that token.')
+      setCapturing(false)
+    }
+  }
+
   return (
     <Card>
       <div className="space-y-1.5">
@@ -168,7 +195,7 @@ export default function ConnectGitHub() {
         </div>
       )}
 
-      {connect_available ? (
+      {connect_available && (
         <button
           type="button"
           onClick={startConnect}
@@ -177,17 +204,50 @@ export default function ConnectGitHub() {
           <GitHubMark />
           Connect GitHub
         </button>
-      ) : (
-        <div className="rounded-xl bg-surface border border-border-glass px-4 py-3 text-[12px] text-text-tertiary leading-relaxed">
-          Your workspace admin needs to finish setting up GitHub access before you can connect. Once
-          a GitHub App is registered for this workspace, this step will be one click. An admin can
-          also bind your identity by saving a GitHub token in Workspace Settings.
-        </div>
       )}
 
+      {/* PAT_2 fallback — always offered, and the sole capture path when no App
+          is registered (connect_available=false). */}
+      <div className="space-y-2">
+        <label className="block">
+          <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+            {connect_available
+              ? 'Or paste a personal access token'
+              : 'Paste a personal access token'}
+          </span>
+          <input
+            type="password"
+            autoComplete="off"
+            value={pat}
+            placeholder="ghp_…"
+            onChange={(e) => {
+              setPat(e.target.value)
+              if (patError) setPatError(null)
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void submitPat()
+            }}
+            aria-invalid={!!patError || undefined}
+            className={`w-full rounded-xl border bg-surface px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 transition-colors ${
+              patError ? 'border-dismiss/50' : 'border-border-glass focus:border-accent/40'
+            }`}
+          />
+        </label>
+        {patError && <p className="text-[12px] text-dismiss leading-relaxed">{patError}</p>}
+        <button
+          type="button"
+          onClick={() => void submitPat()}
+          disabled={pat.trim() === '' || capturing}
+          className="w-full rounded-xl border border-border-glass px-4 py-2.5 text-[13px] font-medium text-text-secondary hover:text-text-primary hover:border-accent/40 disabled:opacity-40 disabled:hover:border-border-glass transition-colors"
+        >
+          {capturing ? 'Verifying…' : 'Verify token'}
+        </button>
+      </div>
+
       <p className="text-[11px] text-text-tertiary leading-relaxed">
-        Connecting only reads your GitHub username — it doesn&apos;t grant Triage Factory access to
-        your repositories. Repository access is configured separately by your admin.
+        Either way, Triage Factory only reads your GitHub username — it doesn&apos;t store your
+        token or gain access to your repositories. Repository access is configured separately by
+        your admin.
       </p>
     </Card>
   )

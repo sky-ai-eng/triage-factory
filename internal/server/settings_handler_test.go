@@ -448,19 +448,20 @@ func postJSONResp(t *testing.T, s *Server, path string, body any) map[string]str
 	return resp
 }
 
-// TestOrgSettingsPost_GitHubURLClear_DropsIdentityForOriginalHost is a
-// regression test (SKY-396): clearing the GitHub URL must delete the identity
-// row keyed on the host that was configured *before* the request blanked
-// creds.GitHubURL. The disconnect branch reading creds.GitHubURL directly
-// would see "" (already overwritten upstream) and orphan the real row.
-func TestOrgSettingsPost_GitHubURLClear_DropsIdentityForOriginalHost(t *testing.T) {
+// TestOrgSettingsPost_GitHubURLClear_PreservesUserIdentity asserts the
+// access/identity decoupling (SKY-458): clearing the org's GitHub URL is an
+// access change (PAT_1), and it must NOT touch the user's per-user GitHub
+// identity (PAT_2). Identity is owned solely by its own capture surface (the
+// setup wizard's User step / the Connect gate page), never mutated as a side
+// effect of an org-credential save. A leftover row is durable + harmless (the
+// runtime tolerates absent/stale identity) and is still valid if GitHub is
+// reconnected to the same host.
+func TestOrgSettingsPost_GitHubURLClear_PreservesUserIdentity(t *testing.T) {
 	keyring.MockInit() // in-memory keychain — the sandbox has no dbus backend
 	s := newTestServer(t)
 	ctx := t.Context()
 	const host = "https://github.example.com"
 
-	// URL only (no PAT) so the stored-PAT backfill path — which would make a
-	// live ValidateGitHub call — stays inert; the identity is seeded directly.
 	if err := integrations.Save(ctx, s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{GitHubURL: host}); err != nil {
 		t.Fatalf("seed creds: %v", err)
 	}
@@ -471,15 +472,15 @@ func TestOrgSettingsPost_GitHubURLClear_DropsIdentityForOriginalHost(t *testing.
 		t.Fatalf("precondition: GetGitHubLogin = %q, want octocat", login)
 	}
 
-	// Disconnect: clear the GitHub URL.
+	// Disconnect the org's GitHub access: clear the GitHub URL.
 	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": ""})
 
 	login, err := s.users.GetGitHubLogin(ctx, runmode.LocalDefaultUserID, host)
 	if err != nil {
 		t.Fatalf("GetGitHubLogin after clear: %v", err)
 	}
-	if login != "" {
-		t.Errorf("identity for %s survived URL disconnect (orphaned): login=%q", host, login)
+	if login != "octocat" {
+		t.Errorf("identity for %s should survive an org-access disconnect, got login=%q", host, login)
 	}
 }
 

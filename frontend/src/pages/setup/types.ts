@@ -14,9 +14,10 @@ import type { ReactNode } from 'react'
 import type { OrgConfigForm } from '../settings/orgConfig'
 import type { TeamConfigForm } from '../settings/teamConfig'
 
-// The two divider sections the stack groups steps under. Organization
-// settings come first (org-wide config), then the first team's settings.
-export type SectionId = 'org' | 'team'
+// The three divider sections the stack groups steps under, in order:
+// org-wide config, then the first team's settings, then the signed-in user's
+// own settings (their GitHub identity). Setup reads Org → Team → User.
+export type SectionId = 'org' | 'team' | 'user'
 
 export interface WizardSection {
   id: SectionId
@@ -28,6 +29,7 @@ export interface WizardSection {
 export const WIZARD_SECTIONS: WizardSection[] = [
   { id: 'org', title: 'Organization settings' },
   { id: 'team', title: 'Team settings (first team)' },
+  { id: 'user', title: 'User settings' },
 ]
 
 // The shared, mutable wizard state. Deliberately thin in the shell: the
@@ -100,6 +102,27 @@ export interface WizardState {
   // lets the later team steps' persist refuse to write the empty default form
   // when that single load failed, instead of clobbering real settings.
   teamLoaded: boolean
+
+  // ── User settings (the third section) ──
+  // The signed-in user's own GitHub identity on the org's host — captured as a
+  // step distinct from the org credential (PAT_1). These seed from the
+  // identity-status endpoint and drive the User step.
+  //
+  // Whether a host-verified login is already bound for the active org's host.
+  // Satisfies the User step (the in-flow mirror of the RequireGitHubIdentity
+  // gate). A github.com GoTrue login already has one (login_claim), so the step
+  // resumes complete in that common case.
+  userIdentityConnected: boolean
+  // The bound login, when connected (for the confirmation + collapsed summary).
+  userIdentityLogin: string
+  // The org host the identity is keyed under (for the explanatory copy).
+  userIdentityHost: string
+  // Whether Connect (one-click OAuth) is offerable — true once the org has a
+  // registered GitHub App. When false, the PAT_2 paste is the capture path.
+  userConnectAvailable: boolean
+  // The draft PAT_2 the user pastes when capturing identity by token. Captured
+  // (validated → whoami → discarded) on the User step's Continue, then cleared.
+  userGitHubPat: string
 }
 
 // Identity the host resolves once and threads to every step. The org/team

@@ -11,10 +11,15 @@
 - **Local purpose:** Cleanup of worktrees from crashed runs; preserves `~/.claude/projects/` JSONLs for any run still flagged `taken_over` so the user can `triagefactory resume`. Runs **unconditionally** in both modes.
 - **Multi-mode:** Wrong shape. In multi mode the lookup returns nothing (no runs ever exist under the synthetic org), and `worktree.CleanupWithOptions` proceeds with an empty preserve set — so taken-over runs in **real** tenant orgs would have their `~/.claude/projects/` entries nuked. Fix: gate this whole block on `ModeLocal` (the `resume` CLI is local-only anyway per the comment on `cmd/resume/resume.go:62`), or iterate `stores.Orgs.ListActiveSystem` and union the preserve sets.
 
-### 2. Local GitHub-identity bootstrap is correctly gated, but the orgID derived inside is still the sentinel
-- **Where:** `main.go:580` → `bootstrapLocalGitHubIdentity` (`main.go:162-189`)
-- **Local purpose:** Derives `users.github_username` from the configured PAT so shipped event_handler predicates can substitute "me" before the seed call.
-- **Multi-mode:** Already gated at line 163 (`if runmode.Current() != runmode.ModeLocal { return nil }`). No change needed — call this finding DONE, just confirming.
+### 2. Local GitHub-identity bootstrap — REMOVED (SKY-458)
+- **Was:** `bootstrapLocalGitHubIdentity`, which derived the local user's
+  `user_github_identities` row from the configured org PAT at boot.
+- **Removed** because it conflated access (the org PAT, PAT_1) with identity
+  (the user's `@login`, PAT_2). Per-user GitHub identity is now captured only
+  through its own surface — the setup wizard's User step / the Connect gate page
+  (`internal/server/github_connect.go`) — in both modes, never derived from the
+  org credential. The local user binds their login through that step like any
+  other user; nothing happens silently at boot.
 
 ### 3. Local Jira-identity bootstrap — same as above
 - **Where:** `main.go:583` → `bootstrapLocalJiraIdentity` (`main.go:206-234`)

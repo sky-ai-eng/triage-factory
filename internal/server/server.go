@@ -755,6 +755,11 @@ func (s *Server) routes() {
 	s.api("GET /api/orgs/{org_id}/github/connect/start", s.handleGitHubConnectStart)
 	s.api("GET /api/orgs/{org_id}/github/connect/callback", s.handleGitHubConnectCallback)
 	s.api("GET /api/orgs/{org_id}/identity/github", s.handleGitHubIdentityStatus)
+	// Capture-and-discard per-user identity from a user-supplied PAT (PAT_2):
+	// validate → whoami → write user_github_identities → drop the token. The
+	// always-available fallback to Connect (and the only path when no App is
+	// registered). Never stores the token.
+	s.api("POST /api/orgs/{org_id}/identity/github/pat", s.handleGitHubIdentityPAT)
 
 	// Per-org GitHub App webhook receiver. Pre-auth (GitHub has no
 	// session) and identified by org_id from the path; the handler
