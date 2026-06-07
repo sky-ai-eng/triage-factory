@@ -153,6 +153,11 @@ func Handle(args []string) {
 		// builds the same ForSystem client directly — the unchanged local
 		// path. Bot-authored writes by design; no per-user routing in the
 		// sandbox (user-attributed Jira writes are the server-side handlers).
+		//
+		// Unlike the gh branch, this never calls loadCreds — the credential
+		// resolves host-side (or in-process via the LocalClient), so the DB
+		// opened at the top of Handle is consulted here only by the local-mode
+		// LocalClient; the sandbox IPC path ignores it.
 		if isHelp(cmdArgs) {
 			jiraexec.Handle(nil, cmdArgs)
 			return

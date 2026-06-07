@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -24,9 +25,11 @@ import (
 
 // fakeJiraSecrets serves the org's jira_url + jira_pat through GetSystem
 // and embeds db.SecretStore so the resolver's unexercised methods
-// compile-satisfy (and panic loudly if ever reached). The two keys
-// mirror the resolver's own (unexported) constants verbatim — they are
-// the stable wire-level secret names, not something this package owns.
+// compile-satisfy (and panic loudly if ever reached). It keys off the
+// canonical integrations.Key* constants — the same source the resolver's
+// own (unexported) keys are proven to match by
+// internal/jira.TestForSystem_KeysMatchIntegrations — so a key rename
+// can't let these tests silently fall through to "not configured".
 type fakeJiraSecrets struct {
 	db.SecretStore
 	url string
@@ -35,9 +38,9 @@ type fakeJiraSecrets struct {
 
 func (f fakeJiraSecrets) GetSystem(_ context.Context, _ string, key string) (string, error) {
 	switch key {
-	case "jira_url":
+	case integrations.KeyJiraURL:
 		return f.url, nil
-	case "jira_pat":
+	case integrations.KeyJiraPAT:
 		return f.pat, nil
 	default:
 		return "", nil
@@ -206,11 +209,13 @@ func TestServer_JiraUpdateIssue_FieldsCrossWire(t *testing.T) {
 	}
 }
 
-// TestServer_JiraTransition_RejectionPropagates is the error-fidelity
-// acceptance: when the requested status isn't a legal move, the agent
-// must get back the actionable "no transition to X (available: …)"
-// message — discovered via list-transitions — not a bare failure.
-func TestServer_JiraTransition_RejectionPropagates(t *testing.T) {
+// TestServer_JiraTransition_ClientSideRejectionPropagates is the
+// error-fidelity acceptance for the client-synthesized rejection: when
+// the requested status isn't in the fetched transition list, TransitionTo
+// builds the actionable "no transition to X (available: …)" message
+// itself, and it must survive the RPC. (The sibling _APIErrorPropagates
+// covers the other path — a server-side 4xx on the transition POST.)
+func TestServer_JiraTransition_ClientSideRejectionPropagates(t *testing.T) {
 	jira := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The transitions list deliberately omits "Done".
 		w.Header().Set("Content-Type", "application/json")
@@ -291,19 +296,23 @@ func TestLocalClient_JiraGetIssue_DirectPath(t *testing.T) {
 func TestJira_NotConfigured_BothModes(t *testing.T) {
 	info := RunInfo{OrgID: runmode.LocalDefaultOrg, RunID: "run-1"}
 
+	// Assert on the actionable "run triagefactory" guidance: it's absent
+	// from the raw resolver sentinel ("jira: no system credential for
+	// org: …"), so its presence proves the friendly remap fired rather
+	// than the bare error leaking through.
 	t.Run("local", func(t *testing.T) {
 		client := NewLocal(jiraStores("", ""), info)
 		_, err := client.JiraGetIssue(context.Background(), "PROJ-1")
-		if err == nil || !strings.Contains(err.Error(), "Jira not configured") {
-			t.Fatalf("err = %v, want a friendly 'Jira not configured' message", err)
+		if err == nil || !strings.Contains(err.Error(), "run triagefactory") {
+			t.Fatalf("err = %v, want the friendly 'not configured' guidance", err)
 		}
 	})
 
 	t.Run("ipc", func(t *testing.T) {
 		client := startJiraDaemon(t, jiraStores("", ""), info)
 		_, err := client.JiraGetIssue(context.Background(), "PROJ-1")
-		if err == nil || !strings.Contains(err.Error(), "Jira not configured") {
-			t.Fatalf("err = %v, want the friendly message to cross the wire", err)
+		if err == nil || !strings.Contains(err.Error(), "run triagefactory") {
+			t.Fatalf("err = %v, want the friendly guidance to cross the wire", err)
 		}
 	})
 }

@@ -239,15 +239,15 @@ func (c *LocalClient) BuildAgentRunFooter(_ context.Context, kind string) (strin
 // Vault-backed store — the host can read the credential the sandboxed
 // agent can't. Either way the agent process never holds the token.
 //
-// A missing credential maps to the same user-facing "not configured"
-// message exec used to print before handing off; every other resolver
-// error (a transient vault/keychain outage) propagates so it isn't
-// misreported as "absent". Over IPC the message crosses as the response
-// Error string, so the agent reads the identical text in both modes.
+// A missing credential maps to a clear "not configured" message (the
+// guidance exec printed before handing off); every other resolver error
+// (a transient vault/keychain outage) propagates so it isn't misreported
+// as "absent". Over IPC the message crosses as the response Error string,
+// so the agent reads the identical text in both modes.
 func (c *LocalClient) jiraSystemClient(ctx context.Context) (*jiraclient.Client, error) {
 	client, err := jiraclient.NewResolver(c.stores.Secrets, c.stores.Orgs).ForSystem(ctx, c.info.OrgID)
 	if errors.Is(err, jiraclient.ErrNoJiraSystemCredential) {
-		return nil, errors.New("Jira not configured; run triagefactory and complete setup first")
+		return nil, errors.New("no Jira credential configured; run triagefactory and complete setup first")
 	}
 	if err != nil {
 		return nil, err
