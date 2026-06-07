@@ -18,21 +18,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// claudeProjectsDir is where Claude Code auto-creates per-cwd session history.
-const claudeProjectsDir = ".claude/projects"
-
-// claudeHome resolves the user's real home directory for ~/.claude
-// access. Claude Code SDK session state (the per-cwd JSONL transcripts
-// under claudeProjectsDir) is keyed to the agent's real HOME, not to TF
-// state — in the jail HOME=/work handles it, on the host it's the
-// user's ~/.claude. It therefore stays home-relative even in multi mode
-// (where TF state diverges onto a mounted volume) and does NOT route
-// through internal/paths. The single nolint here is the documented
-// exception to the forbidigo guard for every ~/.claude site in this
-// file.
-func claudeHome() (string, error) {
-	return os.UserHomeDir() //nolint:forbidigo // Claude Code SDK session state, not TF state (see internal/paths doc).
-}
+// claudeProjectsDir and claudeHome live in claude_session.go alongside the
+// rest of the Claude Code session/project-dir handling.
 
 // Per-repo mutexes prevent concurrent fetches from racing on the same bare repo.
 var (

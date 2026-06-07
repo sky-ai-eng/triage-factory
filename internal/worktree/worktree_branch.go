@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -356,12 +355,12 @@ func branchExists(bareDir, branch string) bool {
 // In a bare clone, HEAD points directly to refs/heads/<default> (not refs/remotes/origin/*).
 // Falls back to "main" if detection fails.
 func detectDefaultBranch(ctx context.Context, bareDir string) string {
-	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "HEAD")
-	cmd.Dir = bareDir
-	out, err := cmd.Output()
+	// Routed through gitOutputCtx (like every other git call in this package)
+	// so error handling stays consistent; detection failure falls back to "main".
+	out, err := gitOutputCtx(ctx, bareDir, "symbolic-ref", "HEAD")
 	if err == nil {
 		// Output is like "refs/heads/main\n"
-		ref := strings.TrimSpace(string(out))
+		ref := strings.TrimSpace(out)
 		if strings.HasPrefix(ref, "refs/heads/") {
 			return ref[len("refs/heads/"):]
 		}

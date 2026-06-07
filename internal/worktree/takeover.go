@@ -457,7 +457,7 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer out.Close() // best-effort overlay copy; io.Copy below surfaces the write errors that matter
 	_, err = io.Copy(out, in)
 	return err
 }
@@ -470,14 +470,7 @@ func copyFile(src, dst string, mode os.FileMode) error {
 // fetch-into-checked-out-branch error can clear, and a network call
 // would make release fail when GitHub is unreachable.
 func WorktreeBranch(path string) (string, error) {
-	out, err := gitOutput(path, "rev-parse", "--abbrev-ref", "HEAD")
-	if err != nil {
-		return "", err
-	}
-	branch := strings.TrimSpace(out)
-	if branch == "HEAD" {
-		// Detached HEAD — no branch name to clean up.
-		return "", nil
-	}
-	return branch, nil
+	// Same query as currentBranch (rev-parse --abbrev-ref HEAD, "" on detached
+	// HEAD); delegate so the two implementations can't drift.
+	return currentBranch(context.Background(), path)
 }
