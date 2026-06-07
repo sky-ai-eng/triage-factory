@@ -393,15 +393,26 @@ const githubPollerStep: WizardStep = {
   persist: ({ state }) => persistOrg(state),
   collapsedSummary: (s) => `GitHub every ${intervalLabel(s.org.github_poll_interval)}`,
   render: ({ state, patch }) => (
-    <PollerTimingGroup
-      value={{
-        github_poll_interval: state.org.github_poll_interval,
-        jira_poll_interval: state.org.jira_poll_interval,
-      }}
-      onChange={(p) => patch({ org: { ...state.org, ...p } })}
-      showJira={false}
-      showHeading={false}
-    />
+    <div className="space-y-5">
+      <div className="space-y-1.5">
+        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+          How often should we poll GitHub?
+        </h2>
+        <p className="text-[13px] leading-relaxed text-text-tertiary">
+          More frequent polling surfaces new PRs and reviews sooner; less frequent is lighter on
+          rate limits.
+        </p>
+      </div>
+      <PollerTimingGroup
+        value={{
+          github_poll_interval: state.org.github_poll_interval,
+          jira_poll_interval: state.org.jira_poll_interval,
+        }}
+        onChange={(p) => patch({ org: { ...state.org, ...p } })}
+        showJira={false}
+        bare
+      />
+    </div>
   ),
 }
 
@@ -494,15 +505,25 @@ const jiraPollerStep: WizardStep = {
   persist: ({ state }) => persistOrg(state),
   collapsedSummary: (s) => `Jira every ${intervalLabel(s.org.jira_poll_interval)}`,
   render: ({ state, patch }) => (
-    <PollerTimingGroup
-      value={{
-        github_poll_interval: state.org.github_poll_interval,
-        jira_poll_interval: state.org.jira_poll_interval,
-      }}
-      onChange={(p) => patch({ org: { ...state.org, ...p } })}
-      showGitHub={false}
-      showHeading={false}
-    />
+    <div className="space-y-5">
+      <div className="space-y-1.5">
+        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+          How often should we poll Jira?
+        </h2>
+        <p className="text-[13px] leading-relaxed text-text-tertiary">
+          The cadence for the Jira tracker — independent of the GitHub poll interval.
+        </p>
+      </div>
+      <PollerTimingGroup
+        value={{
+          github_poll_interval: state.org.github_poll_interval,
+          jira_poll_interval: state.org.jira_poll_interval,
+        }}
+        onChange={(p) => patch({ org: { ...state.org, ...p } })}
+        showGitHub={false}
+        bare
+      />
+    </div>
   ),
 }
 
