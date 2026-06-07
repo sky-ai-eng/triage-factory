@@ -62,6 +62,15 @@ type RunOptions struct {
 	// MaxTurns sets --max-turns. Zero omits the flag.
 	MaxTurns int
 
+	// Interactive switches the invocation into the SDK's streaming-input
+	// mode: BuildArgs emits `--input-format stream-json` and omits
+	// `-p`/Message (the initial message is sent over stdin by the
+	// caller). This is the only mode in which the SDK exposes its live
+	// controls — interrupt, setPermissionMode, and the canUseTool
+	// permission callback — so RunInteractive sets it. The one-shot Run
+	// path leaves it false.
+	Interactive bool
+
 	// ExtraEnv is appended to os.Environ() for the subprocess. Use
 	// this for run-scoped variables like TRIAGE_FACTORY_RUN_ID and
 	// TRIAGE_FACTORY_REPO that the delegated CLI subcommands read.
@@ -376,29 +385,11 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 		cmd, sb = sandboxCmd, sboxObj
 		defer func() { _ = sb.Close() }()
 	} else {
-		// Direct-path: resolve per-org LLM credentials before spawning
-		// Node so multi-mode-with-no-creds (in local-mode-but-no-keychain
-		// boxes) fails fast with a typed error rather than waiting for
-		// the SDK to ENOAUTH inside the subprocess. Resolver returns an
-		// empty map when no per-org credentials are configured; mergeEnv
-		// detects that and preserves the inherited env (subscription /
-		// shell-env fallback).
-		creds, err := resolveCredentials(runCtx, opts.Secrets, opts.OrgID)
+		directCmd, err := newDirectCommand(runCtx, opts, nodeArgs)
 		if err != nil {
-			return nil, fmt.Errorf("resolve credentials for org %q: %w", opts.OrgID, err)
+			return nil, err
 		}
-		cmd = exec.CommandContext(runCtx, "node", nodeArgs...)
-		cmd.Dir = opts.Cwd
-		cmd.Env = mergeEnv(os.Environ(), opts.ExtraEnv, creds)
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		cmd.Cancel = func() error {
-			// Process is non-nil here because the watcher only fires after
-			// Start has succeeded. ESRCH is fine — it just means the
-			// process group already exited on its own between Wait
-			// returning and the cancel watcher reading runCtx.Done(),
-			// which is a race exec handles internally.
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
+		cmd = directCmd
 	}
 
 	stdout, err := cmd.StdoutPipe()
@@ -448,6 +439,38 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 	}
 
 	return outcome, nil
+}
+
+// newDirectCommand builds the direct (non-sandbox) `node wrapper.mjs`
+// command, resolving per-org LLM credentials before spawning Node so
+// multi-mode-with-no-creds (in local-mode-but-no-keychain boxes) fails
+// fast with a typed error rather than waiting for the SDK to ENOAUTH
+// inside the subprocess. The resolver returns an empty map when no
+// per-org credentials are configured; mergeEnv detects that and
+// preserves the inherited env (subscription / shell-env fallback).
+//
+// Setpgid + the Cancel hook give the caller hard teardown: cancelling
+// runCtx SIGKILLs the whole process group so children the agent spawned
+// go down with it. Shared by the one-shot Run and the interactive
+// RunInteractive so both spawn identically.
+func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string) (*exec.Cmd, error) {
+	creds, err := resolveCredentials(runCtx, opts.Secrets, opts.OrgID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve credentials for org %q: %w", opts.OrgID, err)
+	}
+	cmd := exec.CommandContext(runCtx, "node", nodeArgs...)
+	cmd.Dir = opts.Cwd
+	cmd.Env = mergeEnv(os.Environ(), opts.ExtraEnv, creds)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		// Process is non-nil here because the watcher only fires after
+		// Start has succeeded. ESRCH is fine — it just means the
+		// process group already exited on its own between Wait
+		// returning and the cancel watcher reading runCtx.Done(),
+		// which is a race exec handles internally.
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	return cmd, nil
 }
 
 // maxStreamLineBytes caps a single NDJSON line. Well above any

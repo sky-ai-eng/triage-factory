@@ -23,5 +23,8 @@ func MergeResult(base, resume *Result) *Result {
 	if resume.StopReason != "" {
 		merged.StopReason = resume.StopReason
 	}
+	if resume.Subtype != "" {
+		merged.Subtype = resume.Subtype
+	}
 	return &merged
 }

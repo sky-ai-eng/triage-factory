@@ -13,8 +13,16 @@ import "strconv"
 // resume paths pick them up uniformly, and mirrored in wrapper.mjs's
 // parseArgs switch.
 func BuildArgs(opts RunOptions) []string {
-	args := []string{
-		"-p", opts.Message,
+	var args []string
+	if opts.Interactive {
+		// Streaming-input mode: the prompt is fed as a stream of user
+		// messages over stdin rather than a one-shot -p value, which is
+		// what unlocks the SDK's live controls. The initial message is
+		// sent by the caller over stdin once the wrapper signals ready,
+		// so Message is deliberately omitted from argv here.
+		args = append(args, "--input-format", "stream-json")
+	} else {
+		args = append(args, "-p", opts.Message)
 	}
 	if opts.SessionID != "" {
 		args = append(args, "--resume", opts.SessionID)

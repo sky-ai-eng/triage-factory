@@ -3,7 +3,9 @@ package agentproc
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -56,6 +58,222 @@ func TestSDK_LiveSmoke(t *testing.T) {
 		t.Errorf("expected at least one assistant message in the sink")
 	}
 	t.Logf("live SDK smoke ok: session=%s cost_usd=%.6f turns=%d", outcome.SessionID, outcome.Result.CostUSD, outcome.Result.NumTurns)
+}
+
+// TestSDK_LiveSmoke_Interactive exercises the streaming-input bridge
+// end-to-end against the real SDK: an initial turn, a second message
+// continuing the SAME process (no replay), and stable session id across
+// both. Gated like TestSDK_LiveSmoke (TF_TEST_SDK_LIVE=1).
+//
+// Mirrors the spike's 01-interrupt-live.mjs steering flow minus the
+// interrupt (covered by TestSDK_LiveSmoke_InteractiveInterrupt).
+func TestSDK_LiveSmoke_Interactive(t *testing.T) {
+	if os.Getenv("TF_TEST_SDK_LIVE") != "1" {
+		t.Skip("set TF_TEST_SDK_LIVE=1 to run the live SDK smoke test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	sink := newLiveSink()
+	lr, err := RunInteractive(ctx, RunOptions{
+		Cwd:     t.TempDir(),
+		Message: "Reply with exactly the word PING and nothing else.",
+		Model:   "haiku",
+		TraceID: "live-interactive",
+	}, sink, denyAllPermissions)
+	if err != nil {
+		t.Fatalf("RunInteractive failed: %v", err)
+	}
+	defer func() { _ = lr.Close() }()
+
+	first := sink.waitAssistant(t, 60*time.Second)
+	t.Logf("first turn: %q", first.Content)
+
+	sid := lr.SessionID()
+	if sid == "" {
+		t.Fatal("expected a session id after the first turn")
+	}
+
+	// Continue the same process with a second message.
+	if err := lr.Send(ctx, "Now reply with exactly the word PONG and nothing else."); err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+	second := sink.waitAssistant(t, 60*time.Second)
+	t.Logf("second turn: %q", second.Content)
+
+	if lr.SessionID() != sid {
+		t.Errorf("session id changed across turns: %q -> %q", sid, lr.SessionID())
+	}
+
+	if err := lr.Close(); err != nil {
+		t.Logf("close returned (non-fatal): %v", err)
+	}
+}
+
+// TestSDK_LiveSmoke_InteractiveInterrupt asserts interrupt() lands: the
+// in-flight turn ends with an error_during_execution result. Mirrors
+// spike/takeover/01-interrupt-live.mjs.
+func TestSDK_LiveSmoke_InteractiveInterrupt(t *testing.T) {
+	if os.Getenv("TF_TEST_SDK_LIVE") != "1" {
+		t.Skip("set TF_TEST_SDK_LIVE=1 to run the live SDK smoke test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	sink := newLiveSink()
+	lr, err := RunInteractive(ctx, RunOptions{
+		Cwd:     t.TempDir(),
+		Message: "Write a very long, detailed essay of at least 3000 words about the full history of computing. Take your time and be thorough.",
+		Model:   "haiku",
+		TraceID: "live-interrupt",
+	}, sink, denyAllPermissions)
+	if err != nil {
+		t.Fatalf("RunInteractive failed: %v", err)
+	}
+	defer func() { _ = lr.Close() }()
+
+	// Let the turn get underway, then interrupt mid-flight. The assistant
+	// message only flushes at stop_reason, so we wait on the session id
+	// (emitted early in the stream) rather than an assistant turn.
+	waitSession(t, lr, 60*time.Second)
+	time.Sleep(3 * time.Second)
+
+	if err := lr.Interrupt(ctx); err != nil {
+		t.Fatalf("Interrupt failed: %v", err)
+	}
+
+	// Graceful close drains the interrupted turn's result.
+	if err := lr.Close(); err != nil {
+		t.Logf("close returned (non-fatal): %v", err)
+	}
+	<-lr.Done()
+
+	res := lr.Result()
+	if res == nil {
+		t.Fatal("expected a Result after interrupt")
+	}
+	if res.Subtype != "error_during_execution" {
+		t.Errorf("interrupt result subtype = %q, want error_during_execution", res.Subtype)
+	}
+	t.Logf("interrupt ok: subtype=%s is_error=%v", res.Subtype, res.IsError)
+}
+
+// TestSDK_LiveSmoke_InteractivePermission asserts the canUseTool bridge:
+// a Write attempt surfaces a permission_request to the handler, and a
+// deny is honored (the file is never written). Mirrors
+// spike/takeover/03-permission.mjs.
+func TestSDK_LiveSmoke_InteractivePermission(t *testing.T) {
+	if os.Getenv("TF_TEST_SDK_LIVE") != "1" {
+		t.Skip("set TF_TEST_SDK_LIVE=1 to run the live SDK smoke test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+	defer cancel()
+
+	cwd := t.TempDir()
+	target := filepath.Join(cwd, "secret.txt")
+
+	permCh := make(chan PermissionRequest, 8)
+	handler := func(req PermissionRequest) PermissionDecision {
+		permCh <- req
+		return PermissionDecision{Behavior: "deny", Message: "denied by test"}
+	}
+
+	sink := newLiveSink()
+	lr, err := RunInteractive(ctx, RunOptions{
+		Cwd:     cwd,
+		Message: "Use the Write tool to create a file named secret.txt containing the text 'hello'. Do it now without asking.",
+		Model:   "sonnet-4-6",
+		TraceID: "live-perm",
+	}, sink, handler)
+	if err != nil {
+		t.Fatalf("RunInteractive failed: %v", err)
+	}
+	defer func() { _ = lr.Close() }()
+
+	select {
+	case req := <-permCh:
+		t.Logf("permission requested: tool=%s input=%v", req.ToolName, req.Input)
+	case <-time.After(120 * time.Second):
+		t.Fatal("expected a permission_request for the Write tool")
+	}
+
+	// Deny honored — the file must not have been created.
+	if _, err := os.Stat(target); err == nil {
+		t.Errorf("file %s was written despite a denied permission", target)
+	}
+}
+
+// denyAllPermissions is a PermissionHandler that denies everything —
+// suitable for smoke tests that don't expect any tool use.
+func denyAllPermissions(req PermissionRequest) PermissionDecision {
+	return PermissionDecision{Behavior: "deny", Message: "denied (smoke test)"}
+}
+
+// waitSession blocks until the run has captured a session id or the
+// deadline passes.
+func waitSession(t *testing.T, lr *LiveRun, d time.Duration) {
+	t.Helper()
+	deadline := time.After(d)
+	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if lr.SessionID() != "" {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for session id")
+		case <-lr.Done():
+			if lr.SessionID() == "" {
+				t.Fatalf("run finished before a session id: %v", lr.Err())
+			}
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// liveSink is a concurrency-safe Sink for the interactive smoke tests:
+// the reader goroutine writes while the test goroutine reads. It signals
+// each completed assistant turn (a flushed assistant message with text)
+// over a channel so a test can wait for it.
+type liveSink struct {
+	mu       sync.Mutex
+	messages []*domain.AgentMessage
+	asst     chan *domain.AgentMessage
+}
+
+func newLiveSink() *liveSink {
+	return &liveSink{asst: make(chan *domain.AgentMessage, 64)}
+}
+
+func (s *liveSink) OnSession(string) error { return nil }
+
+func (s *liveSink) OnMessage(m *domain.AgentMessage) error {
+	s.mu.Lock()
+	s.messages = append(s.messages, m)
+	s.mu.Unlock()
+	if m.Role == "assistant" && m.Content != "" {
+		select {
+		case s.asst <- m:
+		default:
+		}
+	}
+	return nil
+}
+
+func (s *liveSink) waitAssistant(t *testing.T, d time.Duration) *domain.AgentMessage {
+	t.Helper()
+	select {
+	case m := <-s.asst:
+		return m
+	case <-time.After(d):
+		t.Fatalf("timed out waiting for an assistant turn")
+		return nil
+	}
 }
 
 func outcomeStderr(o *Outcome) string {

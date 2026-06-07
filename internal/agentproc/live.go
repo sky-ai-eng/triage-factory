@@ -1,0 +1,489 @@
+package agentproc
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"os/exec"
+	"sync"
+	"time"
+)
+
+// The control protocol bridging Go and wrapper.mjs in streaming-input
+// mode. Both sides must match exactly.
+//
+// stdin (Go → wrapper), newline-delimited JSON, one object per line:
+//
+//	{"kind":"user_message","text":"..."}
+//	{"kind":"interrupt"}
+//	{"kind":"set_mode","mode":"default|acceptEdits|plan|bypassPermissions|dontAsk|auto"}
+//	{"kind":"permission_response","request_id":"<id>","behavior":"allow"|"deny","message":"...","updated_input":{...}}
+//	{"kind":"end"}
+//
+// stdout (wrapper → Go): the existing SDK envelopes (system/assistant/
+// user/result) the StreamState parser already consumes, PLUS control
+// lines this reader intercepts:
+//
+//	{"type":"control","subtype":"ready"}
+//	{"type":"control","subtype":"permission_request","request_id":"<id>","tool_name":"...","input":{...}}
+//	{"type":"control","subtype":"interrupted"}
+
+// PermissionRequest is one canUseTool round-trip surfaced from the
+// wrapper. The handler decides allow/deny; the reader writes the
+// matching permission_response back to the wrapper.
+type PermissionRequest struct {
+	RequestID string
+	ToolName  string
+	Input     map[string]any
+}
+
+// PermissionDecision is the handler's answer. Behavior is "allow" or
+// "deny"; Message is the (optional) deny reason; UpdatedInput, when set
+// on an allow, replaces the tool input the agent runs with.
+type PermissionDecision struct {
+	Behavior     string
+	Message      string
+	UpdatedInput map[string]any
+}
+
+// PermissionHandler is called from the reader goroutine for every
+// permission_request. It must not block indefinitely — the agent's turn
+// is parked on the answer. A nil handler denies every request.
+type PermissionHandler func(PermissionRequest) PermissionDecision
+
+const closeDrainTimeout = 5 * time.Second
+
+// LiveRun is a single long-lived streaming-input agent process you can
+// send messages to, interrupt, switch permission modes on, and answer
+// tool-permission prompts for. Created by RunInteractive; unlike the
+// one-shot Run it does not block until the subprocess exits — the reader
+// loop runs in a goroutine and the caller steers via the methods below.
+//
+// Concurrency: the sink is driven from the single reader goroutine
+// (preserving the Sink contract). The control-writer methods (Send,
+// Interrupt, SetMode, Close) and the reader's permission responses share
+// one mutex-guarded stdin writer, so they're safe to call from any
+// goroutine.
+type LiveRun struct {
+	stdin   io.WriteCloser
+	writeMu sync.Mutex
+	cancel  context.CancelFunc
+
+	done      chan struct{} // closed when the reader loop exits
+	ready     chan struct{} // closed when the wrapper emits control/ready
+	readyOnce sync.Once
+
+	mu        sync.Mutex
+	termErr   error
+	result    *Result
+	sessionID string
+	stderr    string
+}
+
+// RunInteractive spawns the agent in streaming-input mode and returns a
+// LiveRun the caller steers. The reader loop runs in a background
+// goroutine; the call returns as soon as the subprocess is started.
+//
+// If opts.Message is non-empty it is sent as the first user_message once
+// the wrapper signals ready. perms answers tool-permission prompts; a
+// nil perms denies every prompt. A nil sink discards stream events.
+//
+// Sandbox runs are not yet supported here — the gVisor bidirectional
+// channel is a later phase — so a sandbox-mode host returns an error.
+func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms PermissionHandler) (*LiveRun, error) {
+	if sink == nil {
+		sink = NoopSink{}
+	}
+	opts.Interactive = true
+
+	// Derived ctx so Close() (and the terminal-error path) can SIGKILL
+	// the process group via cmd.Cancel without touching the caller's ctx.
+	runCtx, cancel := context.WithCancel(ctx)
+
+	wrapperPath, err := EnsureSDK()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("agent runtime: %w", err)
+	}
+
+	if shouldSandbox() {
+		cancel()
+		return nil, fmt.Errorf("interactive runs are not supported under the sandbox runtime yet")
+	}
+
+	nodeArgs := append([]string{wrapperPath}, BuildArgs(opts)...)
+	cmd, err := newDirectCommand(runCtx, opts, nodeArgs)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("stdin pipe: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("stdout pipe: %w", err)
+	}
+
+	// Stderr is written by exec's copy goroutine and only read after the
+	// process exits (inside the reader loop, after cmd.Wait), so a plain
+	// buffer is safe here.
+	stderr := newSyncBuffer()
+	cmd.Stderr = stderr
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return nil, fmt.Errorf("start agent runtime: %w", err)
+	}
+
+	l := &LiveRun{
+		stdin:  stdin,
+		cancel: cancel,
+		done:   make(chan struct{}),
+		ready:  make(chan struct{}),
+	}
+
+	go l.readLoop(runCtx, cmd, stdout, stderr, sink, perms, opts.TraceID)
+
+	// Send the initial prompt once the wrapper is ready. Done in its own
+	// goroutine so RunInteractive returns immediately; Send blocks on the
+	// ready signal internally.
+	if opts.Message != "" {
+		go func() {
+			if err := l.Send(ctx, opts.Message); err != nil {
+				log.Printf("[agentproc] initial message send failed: %v", err)
+			}
+		}()
+	}
+
+	return l, nil
+}
+
+// Send delivers a user message to the agent. It blocks until the wrapper
+// has signaled readiness (or the run finishes / ctx cancels first).
+func (l *LiveRun) Send(ctx context.Context, text string) error {
+	select {
+	case <-l.ready:
+	case <-l.done:
+		return fmt.Errorf("live run finished before send: %w", l.Err())
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return l.writeControl(map[string]any{"kind": "user_message", "text": text})
+}
+
+// Interrupt stops the agent's current turn. The wrapper acknowledges
+// with a control/interrupted line and the in-flight turn ends with an
+// error_during_execution result; the process stays alive for further
+// messages.
+func (l *LiveRun) Interrupt(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return l.writeControl(map[string]any{"kind": "interrupt"})
+}
+
+// SetMode switches the agent's permission mode mid-run (default,
+// acceptEdits, plan, bypassPermissions, dontAsk, auto).
+func (l *LiveRun) SetMode(ctx context.Context, mode string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return l.writeControl(map[string]any{"kind": "set_mode", "mode": mode})
+}
+
+// Close ends the run gracefully: it tells the wrapper to end its input
+// iterable so the query drains, waits up to closeDrainTimeout for the
+// process to exit, then SIGKILLs the process group on timeout. Returns
+// the run's terminal error, if any.
+func (l *LiveRun) Close() error {
+	// Best-effort graceful end; ignore the write error (the process may
+	// already be gone, in which case the drain wait returns immediately).
+	_ = l.writeControl(map[string]any{"kind": "end"})
+
+	select {
+	case <-l.done:
+	case <-time.After(closeDrainTimeout):
+		l.cancel() // SIGKILL the process group
+		<-l.done
+	}
+	return l.Err()
+}
+
+// Done is closed when the run has fully terminated and Err/Result/
+// SessionID are final.
+func (l *LiveRun) Done() <-chan struct{} { return l.done }
+
+// Err returns the run's terminal error, or nil. Only meaningful after
+// Done is closed.
+func (l *LiveRun) Err() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.termErr
+}
+
+// Result returns the folded terminal Result (cost/duration/turns summed
+// across turns), or nil if no result event was seen. Only meaningful
+// after Done is closed.
+func (l *LiveRun) Result() *Result {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.result
+}
+
+// SessionID returns the captured Claude Code session id, or empty if the
+// stream never emitted system/init.
+func (l *LiveRun) SessionID() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.sessionID
+}
+
+// Stderr returns the subprocess's captured stderr. Only meaningful after
+// Done is closed.
+func (l *LiveRun) Stderr() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.stderr
+}
+
+func (l *LiveRun) markReady() {
+	l.readyOnce.Do(func() { close(l.ready) })
+}
+
+// writeControl marshals one control object and writes it as a single
+// NDJSON line to the wrapper's stdin. Serialized by writeMu so the
+// reader goroutine's permission responses and the caller's steering
+// writes never interleave.
+func (l *LiveRun) writeControl(v map[string]any) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
+
+	l.writeMu.Lock()
+	defer l.writeMu.Unlock()
+	select {
+	case <-l.done:
+		return fmt.Errorf("live run already finished: %w", l.Err())
+	default:
+	}
+	_, err = l.stdin.Write(b)
+	return err
+}
+
+// readLoop is the single goroutine that owns the sink and the
+// subprocess lifecycle: it consumes the stream until EOF/ctx, waits on
+// the process, and records the terminal state.
+func (l *LiveRun) readLoop(runCtx context.Context, cmd *exec.Cmd, stdout io.Reader, stderr *syncBuffer, sink Sink, perms PermissionHandler, traceID string) {
+	defer close(l.done)
+
+	stream := NewStreamState()
+	result, streamErr := l.consumeStreamInteractive(stdout, sink, stream, perms, traceID)
+
+	// If the stream reader bailed before any terminal result, the
+	// subprocess may still be running with data to write — kill the
+	// process group so cmd.Wait doesn't block on a stuck pipe.
+	if streamErr != nil && result == nil {
+		l.cancel()
+	}
+
+	waitErr := cmd.Wait()
+
+	l.mu.Lock()
+	l.result = result
+	l.sessionID = stream.SessionID()
+	l.stderr = stderr.String()
+	switch {
+	case streamErr != nil && result == nil:
+		l.termErr = fmt.Errorf("stream: %w", streamErr)
+	case waitErr != nil && result == nil:
+		if runCtx.Err() != nil {
+			l.termErr = runCtx.Err()
+		} else {
+			l.termErr = fmt.Errorf("agent runtime exited with error: %w", waitErr)
+		}
+	}
+	l.mu.Unlock()
+
+	// Release the derived context's resources now the process is gone.
+	l.cancel()
+}
+
+// consumeStreamInteractive scans the wrapper's NDJSON output, driving
+// the sink with SDK envelopes and intercepting control lines. Unlike the
+// one-shot consumeStream it does NOT return on the first result: it loops
+// until EOF / read error, folding every per-turn Result with MergeResult
+// so the returned Result reflects the whole conversation.
+func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *StreamState, perms PermissionHandler, traceID string) (*Result, error) {
+	reader := bufio.NewReader(stdout)
+
+	sessionDelivered := false
+	interruptPending := false
+	var merged *Result
+
+	for {
+		line, readErr := readLine(reader, maxStreamLineBytes)
+		if len(line) > 0 {
+			if ctl, ok := parseControlLine(line); ok {
+				switch ctl.Subtype {
+				case "ready":
+					l.markReady()
+				case "interrupted":
+					// The next result closes out the interrupted turn;
+					// label it so callers can tell an interrupt apart
+					// from a natural end even if the SDK omits the
+					// error_during_execution subtype.
+					interruptPending = true
+				case "permission_request":
+					l.handlePermission(ctl, perms)
+				}
+				// Control lines are not sink content.
+			} else {
+				messages, result := stream.ParseLine(line, traceID)
+
+				if !sessionDelivered {
+					if sid := stream.SessionID(); sid != "" {
+						// Publish the session id eagerly so callers can
+						// read it (resume key, takeover validation) while
+						// the run is still live, not just at exit.
+						l.mu.Lock()
+						l.sessionID = sid
+						l.mu.Unlock()
+						if err := sink.OnSession(sid); err != nil {
+							log.Printf("[agentproc] sink.OnSession failed: %v", err)
+						}
+						sessionDelivered = true
+					}
+				}
+
+				for _, msg := range messages {
+					if err := sink.OnMessage(msg); err != nil {
+						log.Printf("[agentproc] sink.OnMessage failed: %v", err)
+						continue
+					}
+				}
+
+				if result != nil {
+					if interruptPending {
+						if result.Subtype == "" {
+							result.Subtype = "error_during_execution"
+						}
+						interruptPending = false
+					}
+					if merged == nil {
+						merged = result
+					} else {
+						merged = MergeResult(merged, result)
+					}
+				}
+			}
+		}
+
+		if readErr != nil {
+			if readErr == io.EOF {
+				return merged, nil
+			}
+			return merged, readErr
+		}
+	}
+}
+
+// handlePermission answers one permission_request by invoking the
+// handler and writing the resulting permission_response back to the
+// wrapper. A nil handler denies. Runs on the reader goroutine; the
+// handler must not block indefinitely.
+func (l *LiveRun) handlePermission(ctl controlLine, perms PermissionHandler) {
+	var decision PermissionDecision
+	if perms != nil {
+		decision = perms(PermissionRequest{
+			RequestID: ctl.RequestID,
+			ToolName:  ctl.ToolName,
+			Input:     ctl.Input,
+		})
+	} else {
+		decision = PermissionDecision{Behavior: "deny", Message: "no permission handler configured"}
+	}
+	if decision.Behavior == "" {
+		decision.Behavior = "deny"
+	}
+
+	resp := map[string]any{
+		"kind":       "permission_response",
+		"request_id": ctl.RequestID,
+		"behavior":   decision.Behavior,
+	}
+	if decision.Message != "" {
+		resp["message"] = decision.Message
+	}
+	if decision.UpdatedInput != nil {
+		resp["updated_input"] = decision.UpdatedInput
+	}
+	if err := l.writeControl(resp); err != nil {
+		log.Printf("[agentproc] permission response write failed: %v", err)
+	}
+}
+
+// controlLine is the decoded shape of a `type:"control"` stdout line.
+type controlLine struct {
+	Subtype   string
+	RequestID string
+	ToolName  string
+	Input     map[string]any
+}
+
+// parseControlLine reports whether line is a control envelope and, if
+// so, returns its decoded fields. Non-control (or malformed) lines
+// return ok=false so the caller falls back to the SDK-envelope parser.
+func parseControlLine(line []byte) (controlLine, bool) {
+	var raw struct {
+		Type      string         `json:"type"`
+		Subtype   string         `json:"subtype"`
+		RequestID string         `json:"request_id"`
+		ToolName  string         `json:"tool_name"`
+		Input     map[string]any `json:"input"`
+	}
+	if err := json.Unmarshal(line, &raw); err != nil {
+		return controlLine{}, false
+	}
+	if raw.Type != "control" {
+		return controlLine{}, false
+	}
+	return controlLine{
+		Subtype:   raw.Subtype,
+		RequestID: raw.RequestID,
+		ToolName:  raw.ToolName,
+		Input:     raw.Input,
+	}, true
+}
+
+// syncBuffer is a minimal concurrency-safe bytes buffer for capturing
+// subprocess stderr that exec writes from its own goroutine while the
+// LiveRun owner may read it via Stderr().
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf []byte
+}
+
+func newSyncBuffer() *syncBuffer { return &syncBuffer{} }
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf = append(b.buf, p...)
+	return len(p), nil
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(b.buf)
+}

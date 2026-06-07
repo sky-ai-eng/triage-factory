@@ -76,6 +76,53 @@ func TestParseLine_ToolUseAndToolResult(t *testing.T) {
 	}
 }
 
+// TestParseLine_ResultSubtypePopulated pins that the result event's
+// subtype flows into Result.Subtype — the interactive reader keys off
+// "error_during_execution" to corroborate an interrupt.
+func TestParseLine_ResultSubtypePopulated(t *testing.T) {
+	s := NewStreamState()
+	_, res := s.ParseLine([]byte(`{"type":"result","subtype":"success","is_error":false,"duration_ms":5,"num_turns":1,"total_cost_usd":0.01,"stop_reason":"end_turn","result":"ok"}`), "t")
+	if res == nil {
+		t.Fatal("expected Result on result event")
+	}
+	if res.Subtype != "success" {
+		t.Errorf("Result.Subtype = %q, want success", res.Subtype)
+	}
+}
+
+// TestParseLine_InterruptSubtype pins that an interrupted turn surfaces
+// as a result with subtype error_during_execution — the on-the-wire
+// signal the interactive reader treats as an interrupt.
+func TestParseLine_InterruptSubtype(t *testing.T) {
+	s := NewStreamState()
+	_, res := s.ParseLine([]byte(`{"type":"result","subtype":"error_during_execution","is_error":true,"duration_ms":8,"num_turns":1,"total_cost_usd":0.01}`), "t")
+	if res == nil {
+		t.Fatal("expected Result on result event")
+	}
+	if res.Subtype != "error_during_execution" {
+		t.Errorf("Result.Subtype = %q, want error_during_execution", res.Subtype)
+	}
+	if !res.IsError {
+		t.Errorf("interrupted result should be is_error=true")
+	}
+}
+
+// TestParseLine_MultipleResultsEachSurface guards the multi-turn
+// streaming case at the parser level: each result envelope yields its
+// own Result (the interactive reader is what folds them — ParseLine must
+// not swallow the second).
+func TestParseLine_MultipleResultsEachSurface(t *testing.T) {
+	s := NewStreamState()
+	_, r1 := s.ParseLine([]byte(`{"type":"result","subtype":"success","duration_ms":10,"num_turns":1,"total_cost_usd":0.01,"result":"one"}`), "t")
+	_, r2 := s.ParseLine([]byte(`{"type":"result","subtype":"success","duration_ms":20,"num_turns":1,"total_cost_usd":0.02,"result":"two"}`), "t")
+	if r1 == nil || r2 == nil {
+		t.Fatalf("both result envelopes must surface; got r1=%v r2=%v", r1, r2)
+	}
+	if r1.Result != "one" || r2.Result != "two" {
+		t.Errorf("result texts wrong: r1=%q r2=%q", r1.Result, r2.Result)
+	}
+}
+
 func TestParseLine_IgnoresMalformedJSON(t *testing.T) {
 	s := NewStreamState()
 	if msgs, res := s.ParseLine([]byte(`not json`), "t"); msgs != nil || res != nil {

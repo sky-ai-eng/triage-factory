@@ -25,6 +25,41 @@ func TestBuildArgs_InitialInvocation(t *testing.T) {
 	}
 }
 
+func TestBuildArgs_Interactive(t *testing.T) {
+	got := BuildArgs(RunOptions{
+		Interactive:  true,
+		Message:      "this is sent over stdin, not argv",
+		Model:        "sonnet-4-6",
+		AllowedTools: "Read,Write",
+		MaxTurns:     50,
+	})
+
+	// Streaming-input mode must request the stream-json input format and
+	// must NOT carry the one-shot -p prompt (the initial message goes
+	// over stdin once the wrapper signals ready).
+	if slices.Contains(got, "-p") {
+		t.Errorf("interactive argv must omit -p: %v", got)
+	}
+	if slices.Contains(got, "this is sent over stdin, not argv") {
+		t.Errorf("interactive argv must omit Message: %v", got)
+	}
+	ifIdx := slices.Index(got, "--input-format")
+	if ifIdx < 0 {
+		t.Fatalf("expected --input-format flag: %v", got)
+	}
+	if got[ifIdx+1] != "stream-json" {
+		t.Errorf("--input-format value = %q, want stream-json", got[ifIdx+1])
+	}
+
+	// The shared flags still flow through unchanged.
+	if !slices.Contains(got, "--output-format") || !slices.Contains(got, "--verbose") {
+		t.Errorf("missing fixed flags: %v", got)
+	}
+	if !slices.Contains(got, "--allowedTools") || !slices.Contains(got, "--max-turns") {
+		t.Errorf("expected allowedTools + max-turns to flow through: %v", got)
+	}
+}
+
 func TestBuildArgs_ResumeAddsResumeFlagBeforeModel(t *testing.T) {
 	// --resume must precede --model so claude treats this as a
 	// continuation of the captured session, not a fresh run that

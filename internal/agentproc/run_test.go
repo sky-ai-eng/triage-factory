@@ -72,6 +72,95 @@ func TestConsumeStream_HandlesOversizedToolResult(t *testing.T) {
 	}
 }
 
+// TestConsumeStreamInteractive_MultiTurn is the core multi-envelope
+// regression: the interactive reader must NOT stop at the first result
+// the way one-shot consumeStream does. A canned two-turn stream
+// (ready + init + assistant + result, twice) must deliver both assistant
+// messages and fold both results into one (cost/turns summed), and the
+// ready signal must fire.
+func TestConsumeStreamInteractive_MultiTurn(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"type":"control","subtype":"ready"}`,
+		`{"type":"system","subtype":"init","session_id":"sess-i"}`,
+		`{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"first"}]}}`,
+		`{"type":"assistant","message":{"id":"m1","stop_reason":"end_turn","content":[]}}`,
+		`{"type":"result","subtype":"success","is_error":false,"duration_ms":10,"num_turns":1,"total_cost_usd":0.01,"stop_reason":"end_turn","result":"one"}`,
+		`{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"second"}]}}`,
+		`{"type":"assistant","message":{"id":"m2","stop_reason":"end_turn","content":[]}}`,
+		`{"type":"result","subtype":"success","is_error":false,"duration_ms":20,"num_turns":1,"total_cost_usd":0.02,"stop_reason":"end_turn","result":"two"}`,
+		"",
+	}, "\n")
+
+	lr := &LiveRun{ready: make(chan struct{})}
+	sink := &captureSink{}
+	result, err := lr.consumeStreamInteractive(strings.NewReader(stream), sink, NewStreamState(), nil, "trace-i")
+	if err != nil {
+		t.Fatalf("consumeStreamInteractive returned error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected a folded terminal Result, got nil")
+	}
+
+	// Both turns folded.
+	if result.NumTurns != 2 {
+		t.Errorf("NumTurns = %d, want 2 (results not folded)", result.NumTurns)
+	}
+	if result.CostUSD != 0.03 {
+		t.Errorf("CostUSD = %v, want 0.03 (results not folded)", result.CostUSD)
+	}
+	if result.Result != "two" {
+		t.Errorf("Result = %q, want two (resume text should win)", result.Result)
+	}
+
+	// Both assistant messages delivered — the reader did not stop at the
+	// first result.
+	var texts []string
+	for _, m := range sink.messages {
+		if m.Role == "assistant" {
+			texts = append(texts, m.Content)
+		}
+	}
+	if len(texts) != 2 || texts[0] != "first" || texts[1] != "second" {
+		t.Errorf("assistant messages = %v, want [first second]", texts)
+	}
+	if sink.sessionID != "sess-i" {
+		t.Errorf("session id = %q, want sess-i", sink.sessionID)
+	}
+
+	// ready signal fired.
+	select {
+	case <-lr.ready:
+	default:
+		t.Error("expected ready channel closed after control/ready line")
+	}
+}
+
+// TestConsumeStreamInteractive_InterruptLabelsResult pins that a
+// control/interrupted line tags the following result as an interrupt
+// even when the SDK omits the error_during_execution subtype.
+func TestConsumeStreamInteractive_InterruptLabelsResult(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"type":"control","subtype":"ready"}`,
+		`{"type":"system","subtype":"init","session_id":"s"}`,
+		`{"type":"control","subtype":"interrupted"}`,
+		`{"type":"result","is_error":true,"duration_ms":3,"num_turns":1,"total_cost_usd":0,"stop_reason":""}`,
+		"",
+	}, "\n")
+
+	lr := &LiveRun{ready: make(chan struct{})}
+	sink := &captureSink{}
+	result, err := lr.consumeStreamInteractive(strings.NewReader(stream), sink, NewStreamState(), nil, "trace-int")
+	if err != nil {
+		t.Fatalf("consumeStreamInteractive returned error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected terminal Result, got nil")
+	}
+	if result.Subtype != "error_during_execution" {
+		t.Errorf("Subtype = %q, want error_during_execution (interrupt label)", result.Subtype)
+	}
+}
+
 // TestReadLine_RejectsRunawayLine guards the upper bound: if the
 // subprocess wedges and streams without ever emitting a newline (or a
 // single legitimate line somehow exceeds maxStreamLineBytes), we want

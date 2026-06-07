@@ -214,6 +214,13 @@ type Result struct {
 	CostUSD    float64
 	StopReason string
 	Result     string
+
+	// Subtype mirrors the SDK result event's `subtype` field
+	// ("success", "error_during_execution", "error_max_turns", ...).
+	// The one-shot path doesn't inspect it, but the interactive reader
+	// uses "error_during_execution" to corroborate that a turn ended
+	// because the bridge called interrupt().
+	Subtype string
 }
 
 func parseResult(raw map[string]any) *Result {
@@ -230,6 +237,7 @@ func parseResult(raw map[string]any) *Result {
 	}
 	rc.StopReason, _ = raw["stop_reason"].(string)
 	rc.Result, _ = raw["result"].(string)
+	rc.Subtype, _ = raw["subtype"].(string)
 	return rc
 }
 
