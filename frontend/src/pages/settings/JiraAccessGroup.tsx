@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Section, Field, inputClass } from './primitives'
+import { Section, Field, inputClass, glassInputClass } from './primitives'
 import { toast } from '../../components/Toast/toastStore'
 import { readError } from '../../lib/api'
 
@@ -28,6 +28,11 @@ interface JiraAccessValue {
  * confirms the Jira URL in its own reachability sub-step and feeds it in via
  * `value.jira_url`, so it suppresses the field here and renders this group as
  * the PAT-auth sub-step alone — no forked connect logic.
+ *
+ * bare (default false) drops the carded `<Section>` chrome + heading and uses
+ * the flush glass field material, so the setup wizard and the redesigned
+ * Settings stack compose it flush like the other groups; Settings' legacy
+ * carded look is the default.
  */
 export default function JiraAccessGroup({
   value,
@@ -36,6 +41,7 @@ export default function JiraAccessGroup({
   onConnected,
   onDisconnected,
   showBaseUrl = true,
+  bare = false,
 }: {
   value: JiraAccessValue
   onChange: (patch: Partial<JiraAccessValue>) => void
@@ -43,9 +49,11 @@ export default function JiraAccessGroup({
   onConnected?: (url: string) => void
   onDisconnected?: () => void
   showBaseUrl?: boolean
+  bare?: boolean
 }) {
   const [connecting, setConnecting] = useState(false)
   const [connectError, setConnectError] = useState<string | null>(null)
+  const field = bare ? glassInputClass : inputClass
 
   const connect = async () => {
     setConnecting(true)
@@ -116,20 +124,25 @@ export default function JiraAccessGroup({
     onDisconnected?.()
   }
 
-  return (
-    <Section>
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-[13px] font-medium text-text-secondary">Jira connection</h2>
-        {connected && (
-          <button
-            type="button"
-            onClick={disconnect}
-            className="text-[11px] text-dismiss hover:text-dismiss/80 transition-colors"
-          >
-            Disconnect
-          </button>
-        )}
-      </div>
+  const body = (
+    <>
+      {/* The carded layout titles itself ("Jira connection") + carries the
+          Disconnect on the heading row; bare relies on the host's section
+          title and tucks Disconnect above the status line. */}
+      {!bare && (
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-[13px] font-medium text-text-secondary">Jira connection</h2>
+          {connected && (
+            <button
+              type="button"
+              onClick={disconnect}
+              className="text-[11px] text-dismiss transition-colors hover:text-dismiss/80"
+            >
+              Disconnect
+            </button>
+          )}
+        </div>
+      )}
 
       {!connected ? (
         /* Stage 1: Connect credentials */
@@ -141,7 +154,7 @@ export default function JiraAccessGroup({
                 placeholder="https://jira.yourcompany.com"
                 value={value.jira_url}
                 onChange={(e) => onChange({ jira_url: e.target.value })}
-                className={inputClass}
+                className={field}
               />
             </Field>
           )}
@@ -151,11 +164,11 @@ export default function JiraAccessGroup({
               placeholder="Jira Personal Access Token"
               value={value.jira_pat}
               onChange={(e) => onChange({ jira_pat: e.target.value })}
-              className={inputClass}
+              className={field}
             />
           </Field>
           {connectError && (
-            <div className="rounded-xl px-4 py-2.5 text-[13px] bg-dismiss/[0.08] border border-dismiss/20 text-dismiss">
+            <div className="rounded-xl border border-dismiss/20 bg-dismiss/[0.08] px-4 py-2.5 text-[13px] text-dismiss">
               {connectError}
             </div>
           )}
@@ -163,21 +176,34 @@ export default function JiraAccessGroup({
             type="button"
             onClick={connect}
             disabled={connecting || !value.jira_url.trim() || !value.jira_pat.trim()}
-            className="w-full bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
+            className="w-full rounded-xl bg-accent px-4 py-2.5 text-[13px] font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-40"
           >
             {connecting ? 'Connecting...' : 'Connect'}
           </button>
         </div>
       ) : (
-        /* Stage 2: connected — status only (poll interval lives in the
-           shared poller-timing group). */
-        <div className="flex items-center gap-2 rounded-xl bg-claim/[0.06] border border-claim/15 px-4 py-2.5">
-          <div className="w-1.5 h-1.5 rounded-full bg-claim shrink-0" />
-          <span className="text-[12px] text-claim">
-            Connected to {value.jira_url.replace(/^https?:\/\//, '')}
-          </span>
+        /* Stage 2: connected — status + (bare) the Disconnect the carded
+           layout puts on its heading row. */
+        <div className="space-y-2">
+          <div className="flex items-center gap-2 rounded-xl border border-claim/15 bg-claim/[0.06] px-4 py-2.5">
+            <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-claim" />
+            <span className="text-[12px] text-claim">
+              Connected to {value.jira_url.replace(/^https?:\/\//, '')}
+            </span>
+            {bare && (
+              <button
+                type="button"
+                onClick={disconnect}
+                className="ml-auto text-[11px] text-dismiss transition-colors hover:text-dismiss/80"
+              >
+                Disconnect
+              </button>
+            )}
+          </div>
         </div>
       )}
-    </Section>
+    </>
   )
+
+  return bare ? body : <Section>{body}</Section>
 }

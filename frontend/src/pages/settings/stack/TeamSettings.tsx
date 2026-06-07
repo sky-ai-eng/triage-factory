@@ -1,8 +1,9 @@
 // The Team group of the Settings stack — rendered only when the viewer admins
-// ≥1 team. A write-scope team selector (admin'd teams only) sits under the
-// divider; switching teams reloads that team's config. Each team-scope group
-// (repos, GitHub teams, Jira projects, default model) is its own collapsible
-// section saving to its own endpoint.
+// >=1 team. A write-scope team selector (admin'd teams only, reusing TeamSwitch)
+// sits under the divider; switching teams reloads that team's config. Each
+// team-scope group is its own flush collapsible composing the wizard's
+// `bare`/glass primitives (the inline RepoPickerModal, bare GitHubTeamGroup /
+// JiraProjectRulesGroup, ModelTierSelector) — no carded field groups.
 //
 // Two couplings to honour:
 //   • Jira-projects + Team-defaults both ride POST /api/settings/team/{id}, so
@@ -15,10 +16,11 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { toast } from '../../../components/Toast/toastStore'
-import ReposGroup from '../ReposGroup'
+import RepoPickerModal from '../../../components/RepoPickerModal'
 import GitHubTeamGroup from '../GitHubTeamGroup'
 import JiraProjectRulesGroup from '../JiraProjectRulesGroup'
-import TeamSettingsGroup from '../TeamSettingsGroup'
+import ModelTierSelector from '../ModelTierSelector'
+import { MODEL_TIER_OPTIONS } from '../modelTiers'
 import {
   emptyTeamConfig,
   fetchTeamRepos,
@@ -148,9 +150,8 @@ export default function TeamSettings({
     return cancel
   }, [load])
 
-  // Re-seed the selection if the admin'd team set changes out from under us
-  // (e.g. a team created in the org section) and the held id is no longer
-  // admin'd.
+  // Re-seed the selection if the admin'd team set changes (e.g. a team created
+  // in the org section) and the held id is no longer admin'd.
   useEffect(() => {
     if (isLocal) return
     if (selectedTeamId && adminTeams.some((t) => t.id === selectedTeamId)) return
@@ -249,7 +250,7 @@ export default function TeamSettings({
 
   if (loadError) {
     return (
-      <div className="rounded-2xl border border-border-glass bg-surface-overlay/40 px-5 py-4 text-[13px] text-text-secondary">
+      <div className="px-1 py-3 text-[13px] text-text-secondary">
         {loadError}{' '}
         <button type="button" onClick={() => load()} className="text-accent underline">
           Retry
@@ -261,10 +262,10 @@ export default function TeamSettings({
   const trackedProjects = projects.filter((p) => p.key.trim() !== '').length
 
   return (
-    <div className="space-y-2.5">
-      {/* Selector — only renders for ≥2 admin'd teams (solo/local hidden). */}
+    <div>
+      {/* Selector — only renders for >=2 admin'd teams (solo/local hidden). */}
       {!isLocal && adminTeams.length >= 2 && (
-        <div className="flex items-center justify-between px-1">
+        <div className="flex items-center justify-between pb-1 pl-1">
           <span className="text-[11px] uppercase tracking-wide text-text-tertiary">
             Configuring team
           </span>
@@ -273,11 +274,9 @@ export default function TeamSettings({
       )}
 
       {loading ? (
-        <div className="rounded-2xl border border-border-glass bg-surface-overlay/40 px-5 py-4 text-[13px] text-text-tertiary">
-          Loading team settings…
-        </div>
+        <div className="px-1 py-3 text-[13px] text-text-tertiary">Loading team settings…</div>
       ) : (
-        <>
+        <div className="divide-y divide-border-subtle">
           <SettingsSection
             title="Repositories"
             summary={`${(baseline.repos ?? []).length} tracked`}
@@ -286,7 +285,25 @@ export default function TeamSettings({
             onSave={saveRepos}
             onCancel={() => setRepos(baseline.repos ?? [])}
           >
-            <ReposGroup value={repos} onChange={setRepos} canEdit loaded={reposLoaded} />
+            <p className="text-[13px] leading-relaxed text-text-tertiary">
+              Watched repos surface in this team&rsquo;s triage queue and anchor Jira-to-code
+              matching for delegation.
+            </p>
+            {reposLoaded ? (
+              <RepoPickerModal
+                inline
+                hideFooter
+                selected={repos}
+                onSelectionChange={setRepos}
+                onSave={() => {}}
+                onClose={() => {}}
+              />
+            ) : (
+              <p className="text-[12px] italic text-amber-600">
+                Couldn&rsquo;t load this team&rsquo;s repositories — they&rsquo;ll be left
+                unchanged. Reload to edit them.
+              </p>
+            )}
           </SettingsSection>
 
           <SettingsSection
@@ -309,6 +326,7 @@ export default function TeamSettings({
                 setGroups(seed)
                 setGroupsBaseline(seed)
               }}
+              bare
             />
           </SettingsSection>
 
@@ -325,6 +343,7 @@ export default function TeamSettings({
               value={projects}
               onChange={setProjects}
               connected={jiraConnected}
+              bare
             />
           </SettingsSection>
 
@@ -341,16 +360,42 @@ export default function TeamSettings({
               setAutoDelegate(baseline.auto_delegate_enabled)
             }}
           >
-            <TeamSettingsGroup
-              value={{ default_model: defaultModel, auto_delegate_enabled: autoDelegate }}
-              onChange={(patch) => {
-                if (patch.default_model !== undefined) setDefaultModel(patch.default_model)
-                if (patch.auto_delegate_enabled !== undefined)
-                  setAutoDelegate(patch.auto_delegate_enabled)
-              }}
-            />
+            <div className="space-y-2">
+              <span className="text-[11px] uppercase tracking-wide text-text-tertiary">
+                Default delegation model
+              </span>
+              <ModelTierSelector
+                value={defaultModel}
+                onChange={setDefaultModel}
+                options={MODEL_TIER_OPTIONS}
+                ariaLabel="Team default model"
+              />
+            </div>
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-[13px] text-text-primary">Auto-delegation</p>
+                <p className="mt-0.5 text-[11px] text-text-tertiary">
+                  Automatically delegate tasks when matching triggers fire
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={autoDelegate}
+                onClick={() => setAutoDelegate((v) => !v)}
+                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
+                  autoDelegate ? 'bg-accent' : 'bg-black/[0.08]'
+                }`}
+              >
+                <span
+                  className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform ${
+                    autoDelegate ? 'translate-x-4' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
           </SettingsSection>
-        </>
+        </div>
       )}
     </div>
   )
