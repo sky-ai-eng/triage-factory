@@ -170,10 +170,12 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
               <section key={section.id} aria-labelledby={`setup-section-${section.id}`}>
                 <SectionDivider id={`setup-section-${section.id}`} title={section.title} />
                 <ol className="relative space-y-5 pl-9">
-                  {/* The faint thread the steps flow down; markers sit on it. */}
-                  <div
+                  {/* The faint thread the steps flow down; markers sit on it.
+                      An aria-hidden, list-none <li> so the <ol> keeps only <li>
+                      children (valid list semantics) while staying decorative. */}
+                  <li
                     aria-hidden
-                    className="absolute bottom-3 left-[10px] top-2 w-px bg-[var(--color-border-subtle)]"
+                    className="pointer-events-none absolute bottom-3 left-[10px] top-2 w-px list-none bg-[var(--color-border-subtle)]"
                   />
                   {entries.map(({ step, index }) => {
                     const isActive = index === activeIndex

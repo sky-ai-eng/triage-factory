@@ -148,10 +148,10 @@ body {
 }
 
 /* Tailwind v4 dropped the default cursor: pointer on buttons; restore it for
-   every enabled button so clickable controls read as interactive. Explicit
-   cursor-* utilities (e.g. the disabled "coming soon" cards) still win by
-   specificity. */
-button:not(:disabled) {
+   every enabled button so clickable controls read as interactive. Wrapped in
+   :where() for zero specificity so explicit cursor-* utilities (cursor-wait,
+   cursor-not-allowed, etc.) always override it. */
+:where(button:not(:disabled)) {
   cursor: pointer;
 }
 

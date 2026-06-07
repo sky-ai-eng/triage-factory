@@ -25,6 +25,7 @@ export function ChoiceCards<T extends string>({
 }) {
   return (
     <div
+      role="radiogroup"
       aria-label={ariaLabel}
       className="grid grid-cols-2 divide-x divide-[var(--color-border-subtle)]"
     >
@@ -34,6 +35,8 @@ export function ChoiceCards<T extends string>({
           <button
             key={opt.kind}
             type="button"
+            role="radio"
+            aria-checked={isSelected}
             onClick={() => onChoose(opt.kind)}
             className={`group flex flex-col gap-1 text-left outline-none ${i === 0 ? 'pr-5' : 'pl-5'}`}
           >
