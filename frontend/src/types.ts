@@ -397,6 +397,23 @@ export interface GitHubIdentityStatus {
   connect_available: boolean
 }
 
+/** GET /api/orgs/{org}/identity/jira — the Jira sibling of GitHubIdentityStatus.
+ *  Unlike GitHub (identity only), Jira's user level holds *access*, so
+ *  `connected` reflects a STORED per-user credential, not just an identity row.
+ *  An absent credential is connected=false (the gate asks the user to bind one
+ *  before entering the app). */
+export interface JiraIdentityStatus {
+  connected: boolean
+  /** The bound account (display name), when connected — the Jira analog of
+   *  GitHub's @login. */
+  account?: string
+  /** The org's Jira host the credential is keyed against. */
+  host: string
+  /** Whether one-click Connect is offerable. False until Cloud OAuth lands
+   *  (DC = paste-a-PAT), so the surfaces offer only the token path for now. */
+  connect_available: boolean
+}
+
 /** GET /api/team/members row. Backs Variant B's searchable multi-select.
  *  Local mode returns a single-entry array containing the synthetic
  *  LocalDefaultUserID; multi mode (post-SKY-251) returns the active

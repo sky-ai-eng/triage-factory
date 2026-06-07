@@ -23,6 +23,14 @@ var httpClient = &http.Client{Timeout: 10 * time.Second}
 // onboarding state separately from "you haven't connected yet."
 var ErrGitHubHostUnreachable = errors.New("github host unreachable")
 
+// ErrJiraHostUnreachable is the Jira sibling of ErrGitHubHostUnreachable: it
+// wraps the network-level failure of a call to a Jira host (DNS, dial, TLS,
+// timeout) — TF's backend couldn't reach the host at all, distinct from the
+// host answering with an auth/permission error. The per-user Jira PAT handler
+// keys on this via errors.Is to return a 502 ("couldn't reach the host" infra
+// state) rather than the 422 it returns for a token the host rejected.
+var ErrJiraHostUnreachable = errors.New("jira host unreachable")
+
 // GitHubUser is the subset of fields we extract from the GitHub user endpoint.
 type GitHubUser struct {
 	Login     string `json:"login"`
@@ -117,7 +125,11 @@ func ValidateJira(ctx context.Context, cfg jira.Config) (*JiraUser, error) {
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("unreachable: %w", err)
+		// Wrap the network failure in the sentinel so callers can errors.Is
+		// it apart from an auth/permission rejection (the host answered) —
+		// the 502-vs-422 split the PAT handlers render. Keep the underlying
+		// cause visible via %v for logs.
+		return nil, fmt.Errorf("%w: %v", ErrJiraHostUnreachable, err)
 	}
 	defer resp.Body.Close()
 

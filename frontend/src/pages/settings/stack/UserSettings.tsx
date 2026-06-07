@@ -6,7 +6,9 @@
 
 import { useState } from 'react'
 import { useGitHubIdentity } from '../../../hooks/useGitHubIdentity'
+import { useJiraIdentity } from '../../../hooks/useJiraIdentity'
 import { captureGitHubIdentityPat } from '../../../lib/githubIdentity'
+import { captureJiraIdentityPat } from '../../../lib/jiraIdentity'
 import { getStoredTheme, setTheme, type ThemeMode } from '../../../lib/theme'
 import SettingsSection from './SettingsSection'
 
@@ -14,6 +16,7 @@ export default function UserSettings({ orgId }: { orgId: string | null }) {
   return (
     <div className="space-y-2.5">
       <GitHubIdentitySection orgId={orgId} />
+      <JiraIdentitySection orgId={orgId} />
       <AppearanceSection />
     </div>
   )
@@ -111,6 +114,124 @@ function GitHubIdentitySection({ orgId }: { orgId: string | null }) {
                 autoComplete="off"
                 value={pat}
                 placeholder="ghp_…"
+                onChange={(e) => {
+                  setPat(e.target.value)
+                  if (patError) setPatError(null)
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void submitPat()
+                }}
+                aria-invalid={!!patError || undefined}
+                className={`w-full rounded-xl border bg-surface px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary transition-colors focus:outline-none focus:ring-2 focus:ring-accent/30 ${
+                  patError ? 'border-dismiss/50' : 'border-border-glass focus:border-accent/40'
+                }`}
+              />
+            </label>
+            {patError && <p className="text-[12px] leading-relaxed text-dismiss">{patError}</p>}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void submitPat()}
+                disabled={pat.trim() === '' || capturing}
+                className="rounded-xl border border-border-glass px-4 py-2 text-[13px] font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary disabled:opacity-40"
+              >
+                {capturing ? 'Verifying…' : 'Verify token'}
+              </button>
+              {connected && reentering && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReentering(false)
+                    setPat('')
+                    setPatError(null)
+                  }}
+                  className="text-[12px] text-text-tertiary transition-colors hover:text-text-secondary"
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </SettingsSection>
+  )
+}
+
+// JiraIdentitySection — the Jira sibling of GitHubIdentitySection. DC =
+// paste-a-PAT (no Connect button; Cloud OAuth is a later ticket). The
+// structural difference from GitHub: the token is STORED (Jira's user level
+// holds access, not just identity), so the copy is honest about retention. An
+// action section (binds inline), so no Save footer.
+function JiraIdentitySection({ orgId }: { orgId: string | null }) {
+  const { state, refresh } = useJiraIdentity(orgId)
+  const [pat, setPat] = useState('')
+  const [capturing, setCapturing] = useState(false)
+  const [patError, setPatError] = useState<string | null>(null)
+  const [reentering, setReentering] = useState(false)
+
+  const summary =
+    state.status === 'ready'
+      ? state.data.connected
+        ? `${state.data.account ?? ''} · ${state.data.host}`
+        : 'Not connected'
+      : state.status === 'error'
+        ? 'Status unavailable'
+        : 'Loading…'
+
+  const submitPat = async () => {
+    if (!orgId || pat.trim() === '' || capturing) return
+    setCapturing(true)
+    setPatError(null)
+    try {
+      await captureJiraIdentityPat(orgId, pat.trim())
+      setPat('')
+      setReentering(false)
+      refresh()
+    } catch (e) {
+      setPatError(e instanceof Error ? e.message : 'Could not verify that token.')
+    } finally {
+      setCapturing(false)
+    }
+  }
+
+  const connected = state.status === 'ready' && state.data.connected
+  const host = state.status === 'ready' ? state.data.host : 'Jira'
+
+  return (
+    <SettingsSection title="Jira identity" summary={summary}>
+      <div className="space-y-3">
+        <p className="text-[12px] leading-relaxed text-text-tertiary">
+          Triage Factory acts as you on <span className="text-text-secondary">{host}</span> — so the
+          tickets it claims and updates are attributed to you, not a shared bot. Unlike GitHub, your
+          token is stored (it&rsquo;s needed to act as you); it stays in your workspace&rsquo;s
+          secret store and is never shared with other users.
+        </p>
+
+        {connected && !reentering ? (
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-claim/15 bg-claim/[0.06] px-4 py-2.5">
+            <span className="text-[12px] text-claim">
+              Connected as {state.status === 'ready' ? state.data.account : ''}
+            </span>
+            <button
+              type="button"
+              onClick={() => setReentering(true)}
+              className="text-[11px] text-text-tertiary underline transition-colors hover:text-text-secondary"
+            >
+              Reconnect
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-2.5">
+            <label className="block">
+              <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+                Paste a personal access token
+              </span>
+              <input
+                type="password"
+                autoComplete="off"
+                value={pat}
+                placeholder="Your Jira token"
                 onChange={(e) => {
                   setPat(e.target.value)
                   if (patError) setPatError(null)

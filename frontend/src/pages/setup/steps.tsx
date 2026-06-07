@@ -51,9 +51,11 @@ import { toast } from '../../components/Toast/toastStore'
 import RepoPickerModal from '../../components/RepoPickerModal'
 import { OrgModelStep, TeamModelStep } from './ModelStep'
 import { UserIdentityStep } from './UserIdentityStep'
+import { JiraUserAccessStep } from './JiraUserAccessStep'
 import { captureGitHubIdentityPat } from '../../lib/githubIdentity'
+import { captureJiraIdentityPat } from '../../lib/jiraIdentity'
 import { apiJSON } from '../../lib/apiClient'
-import type { GitHubIdentityStatus } from '../../types'
+import type { GitHubIdentityStatus, JiraIdentityStatus } from '../../types'
 import PollerTimingGroup from '../settings/PollerTimingGroup'
 import GitHubTeamGroup from '../settings/GitHubTeamGroup'
 import JiraProjectRulesGroup from '../settings/JiraProjectRulesGroup'
@@ -97,6 +99,11 @@ export const initialWizardState = (): WizardState => ({
   userIdentityHost: '',
   userConnectAvailable: false,
   userGitHubPat: '',
+  jiraUserConnected: false,
+  jiraUserAccount: '',
+  jiraUserHost: '',
+  jiraUserConnectAvailable: false,
+  jiraUserPat: '',
 })
 
 const TIER_LABELS: Record<string, string> = {
@@ -752,6 +759,66 @@ const userIdentityStep: WizardStep = {
   render: (ctx) => <UserIdentityStep {...ctx} />,
 }
 
+// loadJiraUserAccess reads the caller's Jira access-binding status for the
+// active org's Jira host (the same endpoint the gate will poll). It seeds the
+// Jira user step: `connected` resumes it complete (a stored credential from a
+// prior session), `account`/`host` drive the copy. Throws on a hard read
+// failure so the host shows a retry rather than wrongly prompting a connected
+// user to reconnect.
+export async function loadJiraUserAccess(ctx: LoadContext): Promise<Partial<WizardState>> {
+  if (!ctx.orgId) throw new Error('No organization context for the Jira access check.')
+  // Through apiClient so a stale-session 401 is routed to AuthContext; a hard
+  // failure (HttpError / network) throws.
+  const data = await apiJSON<JiraIdentityStatus>('/identity/jira', { org: ctx.orgId })
+  return {
+    jiraUserConnected: data.connected,
+    jiraUserAccount: data.account ?? '',
+    jiraUserHost: data.host ?? '',
+    jiraUserConnectAvailable: data.connect_available,
+  }
+}
+
+// Step · Your Jira access (User section, shown only when Jira is the connected
+// tracker). The Jira sibling of the GitHub identity step, with the structural
+// difference that the token is STORED (Jira's user level holds access, not just
+// identity). DC = paste-a-PAT — no Connect button yet (Cloud OAuth is a later
+// ticket). The PAT path is this step's Continue, which validates the token,
+// stores it, and derives the account. Mandatory while visible: the wizard can't
+// finish a Jira-tracked workspace until the user has bound their own access.
+const jiraUserAccessStep: WizardStep = {
+  id: 'user-jira-access',
+  section: 'user',
+  title: 'Your Jira access',
+  advanceOnEnter: true,
+  visible: (s) => jiraActive(s),
+  load: loadJiraUserAccess,
+  isComplete: (s) => s.jiraUserConnected,
+  validate: (s) =>
+    s.jiraUserConnected || s.jiraUserPat.trim() !== ''
+      ? null
+      : 'Paste your personal Jira token to finish.',
+  persist: async ({ state, orgId, patch }) => {
+    // Already bound (a stored credential) — nothing to do; Continue finishes.
+    if (state.jiraUserConnected) return
+    if (!orgId) throw new Error('No organization context.')
+    const pat = state.jiraUserPat.trim()
+    if (pat === '') {
+      throw new Error('Paste your personal Jira token to finish.')
+    }
+    // Capture-and-store: validates the token, derives the account, persists the
+    // credential. On success mark connected + clear the draft.
+    const result = await captureJiraIdentityPat(orgId, pat)
+    patch({
+      jiraUserConnected: true,
+      jiraUserAccount: result.account,
+      jiraUserHost: result.host,
+      jiraUserPat: '',
+    })
+  },
+  collapsedSummary: (s) => (s.jiraUserConnected ? `Jira: ${s.jiraUserAccount}` : 'Not connected'),
+  render: (ctx) => <JiraUserAccessStep {...ctx} />,
+}
+
 // Ordered registry. Section grouping is derived from each step's `section`;
 // the host inserts a divider above the first step of each section. The
 // Jira-projects step is conditionally omitted via its `visible` predicate.
@@ -773,4 +840,5 @@ export const WIZARD_STEPS: WizardStep[] = [
   jiraProjectsStep,
   teamModelStep,
   userIdentityStep,
+  jiraUserAccessStep,
 ]

@@ -123,6 +123,29 @@ export interface WizardState {
   // The draft PAT_2 the user pastes when capturing identity by token. Captured
   // (validated → whoami → discarded) on the User step's Continue, then cleared.
   userGitHubPat: string
+
+  // ── User settings · Jira access ──
+  // The signed-in user's own Jira access on the org's host — the Jira sibling of
+  // the userIdentity* slices, with the difference that the credential is STORED
+  // (Jira's user level holds access, not just identity). These seed from the
+  // Jira identity-status endpoint and drive the Jira user step (shown only when
+  // Jira is the connected tracker).
+  //
+  // Whether a stored Jira credential already exists for the active org's host.
+  // Satisfies the Jira user step.
+  jiraUserConnected: boolean
+  // The bound account (display name), when connected (for the confirmation +
+  // collapsed summary).
+  jiraUserAccount: string
+  // The org's Jira host the credential is keyed under (for the explanatory copy).
+  jiraUserHost: string
+  // Whether one-click Connect is offerable — false until Cloud OAuth lands
+  // (DC = paste-a-PAT), so the step offers only the token path for now.
+  jiraUserConnectAvailable: boolean
+  // The draft token the user pastes when binding Jira access. Captured
+  // (validated → stored → account derived) on the Jira user step's Continue,
+  // then cleared.
+  jiraUserPat: string
 }
 
 // Identity the host resolves once and threads to every step. The org/team

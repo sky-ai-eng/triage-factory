@@ -761,6 +761,15 @@ func (s *Server) routes() {
 	// registered). Never stores the token.
 	s.apiMutating("POST /api/orgs/{org_id}/identity/github/pat", s.handleGitHubIdentityPAT)
 
+	// Per-user Jira access — the Jira sibling of the GitHub identity flow
+	// (jira_connect.go). status reports connected from a STORED credential
+	// (Jira's user level holds access, not just identity); the PAT path
+	// validates the token, STORES it (per-user vault scope), and derives the
+	// user's Jira identity. DC = paste-a-PAT; Cloud OAuth is a later ticket
+	// (connect_available stays false). Any org member binds their own access.
+	s.api("GET /api/orgs/{org_id}/identity/jira", s.handleJiraIdentityStatus)
+	s.apiMutating("POST /api/orgs/{org_id}/identity/jira/pat", s.handleJiraIdentityPAT)
+
 	// Per-org GitHub App webhook receiver. Pre-auth (GitHub has no
 	// session) and identified by org_id from the path; the handler
 	// verifies the HMAC signature against that org's stored webhook
