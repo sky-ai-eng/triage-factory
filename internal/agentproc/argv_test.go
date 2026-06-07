@@ -60,6 +60,28 @@ func TestBuildArgs_Interactive(t *testing.T) {
 	}
 }
 
+func TestBuildArgs_PermissionPromptsFlag(t *testing.T) {
+	// The opt-in flag only appears in interactive mode and only when the
+	// caller asked for it. Its presence is what makes the wrapper wire
+	// canUseTool; its absence keeps the wrapper allowlist-only.
+	withHandler := BuildArgs(RunOptions{Interactive: true, PermissionPrompts: true, Model: "sonnet-4-6"})
+	if !slices.Contains(withHandler, "--permission-prompts") {
+		t.Errorf("expected --permission-prompts when PermissionPrompts=true: %v", withHandler)
+	}
+
+	withoutHandler := BuildArgs(RunOptions{Interactive: true, PermissionPrompts: false, Model: "sonnet-4-6"})
+	if slices.Contains(withoutHandler, "--permission-prompts") {
+		t.Errorf("expected --permission-prompts omitted when PermissionPrompts=false: %v", withoutHandler)
+	}
+
+	// One-shot mode never wires canUseTool, so the flag is inert there and
+	// must not be emitted even if the field is somehow set.
+	oneShot := BuildArgs(RunOptions{Interactive: false, PermissionPrompts: true, Message: "hi"})
+	if slices.Contains(oneShot, "--permission-prompts") {
+		t.Errorf("expected --permission-prompts omitted in one-shot mode: %v", oneShot)
+	}
+}
+
 func TestBuildArgs_ResumeAddsResumeFlagBeforeModel(t *testing.T) {
 	// --resume must precede --model so claude treats this as a
 	// continuation of the captured session, not a fresh run that

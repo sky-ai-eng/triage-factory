@@ -71,6 +71,26 @@ type RunOptions struct {
 	// path leaves it false.
 	Interactive bool
 
+	// PermissionPrompts opts the streaming-input wrapper into the
+	// canUseTool permission callback. The wrapper sets options.canUseTool
+	// ONLY when BuildArgs emits the matching --permission-prompts flag,
+	// which it does only when this is true. RunInteractive derives it
+	// from whether the caller supplied a non-nil PermissionHandler:
+	//
+	//   - handler supplied   → PermissionPrompts=true  → wrapper wires
+	//     canUseTool, so off-allowlist tools route to the handler (the
+	//     "ask" path); allowlist matches still short-circuit to allow.
+	//   - handler nil        → PermissionPrompts=false → wrapper omits
+	//     canUseTool entirely → behavior is byte-identical to the
+	//     headless allowlist-only path (off-allowlist tools auto-deny,
+	//     no callback). This is what keeps autonomous runs prompt-free.
+	//
+	// Without this opt-in the streaming wrapper would set canUseTool
+	// unconditionally and a nil handler would deny-all everything off the
+	// --allowedTools list. Interactive-mode only; the one-shot path
+	// ignores it.
+	PermissionPrompts bool
+
 	// ExtraEnv is appended to os.Environ() for the subprocess. Use
 	// this for run-scoped variables like TRIAGE_FACTORY_RUN_ID and
 	// TRIAGE_FACTORY_REPO that the delegated CLI subcommands read.
@@ -101,6 +121,17 @@ type RunOptions struct {
 	// empty OrgID — the resolver no-ops and the subprocess inherits
 	// the host env unchanged.
 	Secrets SecretsReader
+
+	// OnResult, when non-nil, is invoked once per turn-terminal `result`
+	// envelope the streaming-input reader folds, with that turn's parsed
+	// Result. It is the per-turn signal a live caller needs to react
+	// promptly to a completed turn (the delegate driver uses it to detect
+	// the autonomous run's terminal turn and close the process, rather
+	// than waiting for the whole query to drain). Called from the reader
+	// goroutine; it must not block. Ignored by the one-shot Run path
+	// (which returns on the first result anyway) — only RunInteractive
+	// threads it through.
+	OnResult func(*Result)
 
 	// StartAgentHost, when non-nil, starts the per-run host agenthost
 	// daemon in the sandbox branch. The daemon owns the run identity

@@ -206,6 +206,79 @@ func TestSDK_LiveSmoke_InteractivePermission(t *testing.T) {
 	}
 }
 
+// TestSDK_LiveSmoke_AllowlistShortCircuitsHandler pins the load-bearing
+// assumption behind the §F permission model: an --allowedTools match
+// short-circuits to allow and canUseTool is NEVER invoked for it, while an
+// off-allowlist tool DOES round-trip through the handler. If this ever
+// regressed (the SDK started consulting canUseTool for allowlisted tools),
+// wiring delegate's autonomous runs onto a nil handler would silently
+// deny-all the allowlist. Mirrors spike/takeover/03-permission.mjs +
+// 03b. Gated like the other live smokes (TF_TEST_SDK_LIVE=1).
+func TestSDK_LiveSmoke_AllowlistShortCircuitsHandler(t *testing.T) {
+	if os.Getenv("TF_TEST_SDK_LIVE") != "1" {
+		t.Skip("set TF_TEST_SDK_LIVE=1 to run the live SDK smoke test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+	defer cancel()
+
+	cwd := t.TempDir()
+	allowedTarget := filepath.Join(cwd, "allowed.txt")
+
+	var mu sync.Mutex
+	var seen []string
+	offAllowlist := make(chan string, 8)
+	handler := func(req PermissionRequest) PermissionDecision {
+		mu.Lock()
+		seen = append(seen, req.ToolName)
+		mu.Unlock()
+		select {
+		case offAllowlist <- req.ToolName:
+		default:
+		}
+		// Deny the off-allowlist tool so the run stays bounded.
+		return PermissionDecision{Behavior: "deny", Message: "denied by test"}
+	}
+
+	// Write is on the allowlist (match → allow, no callback); Bash is NOT
+	// (off-allowlist → must reach the handler). Do the Write first so the
+	// allowlist path is exercised before the agent reaches the denied Bash.
+	sink := newLiveSink()
+	lr, err := RunInteractive(ctx, RunOptions{
+		Cwd:          cwd,
+		Message:      "First use the Write tool to create a file named allowed.txt containing 'hi'. After that, use the Bash tool to run `echo nope`. Do both without asking.",
+		Model:        "sonnet-4-6",
+		AllowedTools: "Write,Read,Glob,Grep",
+		TraceID:      "live-allowlist",
+	}, sink, handler)
+	if err != nil {
+		t.Fatalf("RunInteractive failed: %v", err)
+	}
+	defer func() { _ = lr.Close() }()
+
+	// Wait for the off-allowlist tool to reach the handler.
+	select {
+	case tool := <-offAllowlist:
+		t.Logf("off-allowlist tool routed to handler: %s", tool)
+	case <-time.After(120 * time.Second):
+		t.Fatal("expected an off-allowlist tool (Bash) to reach the handler")
+	}
+
+	// The load-bearing assertions: the allowlisted Write was allowed
+	// without ever consulting the handler, and the file was written.
+	mu.Lock()
+	for _, tool := range seen {
+		if tool == "Write" {
+			mu.Unlock()
+			t.Fatalf("allowlisted Write reached canUseTool (handler saw %v) — allowlist no longer short-circuits", seen)
+		}
+	}
+	mu.Unlock()
+	if _, statErr := os.Stat(allowedTarget); statErr != nil {
+		t.Errorf("allowed.txt was not written despite Write being allowlisted (allow short-circuit failed): %v", statErr)
+	}
+}
+
 // denyAllPermissions is a PermissionHandler that denies everything —
 // suitable for smoke tests that don't expect any tool use.
 func denyAllPermissions(req PermissionRequest) PermissionDecision {
