@@ -8,10 +8,22 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
+
+// reviewsHandler serves the pending-review endpoints. ghClient and spawner are
+// read through getters so the handler always sees the current values, which are
+// (re)wired onto the server after construction / on credential reload.
+type reviewsHandler struct {
+	tx        db.TxRunner
+	ws        *websocket.Hub
+	agentRuns db.AgentRunStore
+	ghClient  func() *ghclient.Client
+	spawner   func() *delegate.Spawner
+}
 
 type pendingReviewJSON struct {
 	ID          string                     `json:"id"`
@@ -39,8 +51,8 @@ type pendingReviewCommentJSON struct {
 }
 
 // handleReviewGet returns a pending review and its comments.
-func (s *Server) handleReviewGet(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (rh *reviewsHandler) handleReviewGet(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -49,7 +61,7 @@ func (s *Server) handleReviewGet(w http.ResponseWriter, r *http.Request) {
 
 	var review *domain.PendingReview
 	var comments []domain.PendingReviewComment
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := rh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		review, e = tx.Reviews.Get(r.Context(), orgID, reviewID)
 		if e != nil {
@@ -96,22 +108,22 @@ func (s *Server) handleReviewGet(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleReviewSubmit posts a pending review to GitHub, then cleans up local state.
-func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (rh *reviewsHandler) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	reviewID := r.PathValue("id")
 
-	if s.ghClient == nil {
+	if rh.ghClient() == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub credentials not configured"})
 		return
 	}
 
 	var review *domain.PendingReview
 	var comments []domain.PendingReviewComment
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := rh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		review, e = tx.Reviews.Get(r.Context(), orgID, reviewID)
 		if e != nil {
@@ -153,10 +165,10 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build the final review body with header + footer using actual run data
-	body := review.ReviewBody + agentmeta.Build(s.agentRuns, orgID, review.RunID, "review")
+	body := review.ReviewBody + agentmeta.Build(rh.agentRuns, orgID, review.RunID, "review")
 
 	// Submit to GitHub
-	ghReviewID, actualEvent, err := s.ghClient.SubmitReview(
+	ghReviewID, actualEvent, err := rh.ghClient().SubmitReview(
 		review.Owner, review.Repo, review.PRNumber,
 		review.CommitSHA, review.ReviewEvent, body, ghComments,
 	)
@@ -174,7 +186,7 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 	// surface as a 5xx and confuse the user about what landed.
 	if review.RunID != "" {
 		humanContent := FormatHumanFeedback(buildHumanFeedbackInput(review, comments, actualEvent))
-		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		if err := rh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 			return tx.TaskMemory.UpdateRunMemoryHumanContent(r.Context(), orgID, review.RunID, humanContent)
 		}); err != nil {
 			log.Printf("[reviews] warning: failed to record human verdict for run %s: %v", review.RunID, err)
@@ -198,7 +210,7 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 	// Step 1: clear the pending review. Must commit on its own to
 	// prevent a double-submit on retry (no guard equivalent to
 	// pending_prs.submitted_at exists on this path).
-	if err := s.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
+	if err := rh.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
 		return tx.Reviews.Delete(cleanupCtx, orgID, reviewID)
 	}); err != nil {
 		log.Printf("[reviews] warning: failed to clean up review %s: %v", reviewID, err)
@@ -207,7 +219,7 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 	// Step 2: run/task bookkeeping. Independent of the delete above.
 	var blueprintRun *domain.BlueprintRun
 	if review.RunID != "" {
-		if err := s.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
+		if err := rh.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
 			if _, err := tx.AgentRuns.MarkCompletedIfPendingApproval(cleanupCtx, orgID, review.RunID); err != nil {
 				return fmt.Errorf("mark run completed: %w", err)
 			}
@@ -238,19 +250,19 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[reviews] warning: post-submit run bookkeeping for %s: %v", review.RunID, err)
 		}
 
-		s.ws.Broadcast(websocket.Event{
+		rh.ws.Broadcast(websocket.Event{
 			Type:  "agent_run_update",
 			OrgID: orgID,
 			RunID: review.RunID,
 			Data:  map[string]string{"status": "completed"},
 		})
-		if blueprintRun != nil && s.spawner != nil {
-			s.spawner.ResumeBlueprintAfterApproval(orgID, review.RunID, userID)
-		} else if s.spawner != nil {
+		if blueprintRun != nil && rh.spawner() != nil {
+			rh.spawner().ResumeBlueprintAfterApproval(orgID, review.RunID, userID)
+		} else if rh.spawner() != nil {
 			// Standalone run: approval is its terminal, so drop the durable
 			// workspace snapshot taken when it parked in pending_approval. The
 			// blueprint mirror of this cleanup lives in terminateBlueprint.
-			s.spawner.DiscardWorkspaceSnapshot(orgID, review.RunID)
+			rh.spawner().DiscardWorkspaceSnapshot(orgID, review.RunID)
 		}
 	}
 
@@ -262,8 +274,8 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRunReview looks up the pending review associated with an agent run.
-func (s *Server) handleRunReview(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (rh *reviewsHandler) handleRunReview(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -272,7 +284,7 @@ func (s *Server) handleRunReview(w http.ResponseWriter, r *http.Request) {
 
 	var review *domain.PendingReview
 	var comments []domain.PendingReviewComment
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := rh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		review, e = tx.Reviews.ByRunID(r.Context(), orgID, runID)
 		if e != nil {
@@ -320,8 +332,8 @@ func (s *Server) handleRunReview(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleReviewUpdate updates the review body and/or event type.
-func (s *Server) handleReviewUpdate(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (rh *reviewsHandler) handleReviewUpdate(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -337,7 +349,7 @@ func (s *Server) handleReviewUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var review *domain.PendingReview
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := rh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		review, e = tx.Reviews.Get(r.Context(), orgID, reviewID)
 		if e != nil {
@@ -368,8 +380,8 @@ func (s *Server) handleReviewUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleReviewCommentUpdate edits the body of a pending review comment.
-func (s *Server) handleReviewCommentUpdate(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (rh *reviewsHandler) handleReviewCommentUpdate(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -387,7 +399,7 @@ func (s *Server) handleReviewCommentUpdate(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := rh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		return tx.Reviews.UpdateComment(r.Context(), orgID, commentID, req.Body)
 	}); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
@@ -398,15 +410,15 @@ func (s *Server) handleReviewCommentUpdate(w http.ResponseWriter, r *http.Reques
 }
 
 // handleReviewCommentDelete removes a pending review comment.
-func (s *Server) handleReviewCommentDelete(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (rh *reviewsHandler) handleReviewCommentDelete(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	commentID := r.PathValue("commentId")
 
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := rh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		return tx.Reviews.DeleteComment(r.Context(), orgID, commentID)
 	}); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
@@ -417,21 +429,21 @@ func (s *Server) handleReviewCommentDelete(w http.ResponseWriter, r *http.Reques
 }
 
 // handleReviewDiff proxies the PR diff from GitHub for the review's PR.
-func (s *Server) handleReviewDiff(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (rh *reviewsHandler) handleReviewDiff(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	reviewID := r.PathValue("id")
 
-	if s.ghClient == nil {
+	if rh.ghClient() == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub credentials not configured"})
 		return
 	}
 
 	var review *domain.PendingReview
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := rh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		review, e = tx.Reviews.Get(r.Context(), orgID, reviewID)
 		return e
@@ -445,7 +457,7 @@ func (s *Server) handleReviewDiff(w http.ResponseWriter, r *http.Request) {
 	}
 
 	file := r.URL.Query().Get("file")
-	diff, err := s.ghClient.GetPRDiff(review.Owner, review.Repo, review.PRNumber, file)
+	diff, err := rh.ghClient().GetPRDiff(review.Owner, review.Repo, review.PRNumber, file)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
 		return

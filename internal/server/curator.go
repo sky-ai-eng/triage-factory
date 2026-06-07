@@ -1,14 +1,26 @@
 package server
 
 import (
+	"database/sql"
 	"errors"
 	"net/http"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
+
+// curatorHandler serves the per-project curator chat endpoints. runtime is read
+// through a getter so the handler always sees the current curator runtime,
+// which is wired onto the server after construction.
+type curatorHandler struct {
+	db      *sql.DB
+	tx      db.TxRunner
+	ws      *websocket.Hub
+	runtime func() *curator.Curator
+}
 
 // Curator chat endpoints (SKY-216). Three operations the Projects
 // page (SKY-217) needs:
@@ -39,19 +51,19 @@ type curatorRequestJSON struct {
 	Messages []domain.CuratorMessage `json:"messages"`
 }
 
-func (s *Server) handleCuratorSend(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (ch *curatorHandler) handleCuratorSend(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	if s.curator == nil {
+	if ch.runtime() == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "curator runtime not started"})
 		return
 	}
 	projectID := r.PathValue("id")
 	var project *domain.Project
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ch.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		project, e = tx.Projects.Get(r.Context(), orgID, projectID)
 		return e
@@ -78,7 +90,7 @@ func (s *Server) handleCuratorSend(w http.ResponseWriter, r *http.Request) {
 	// goroutine attributes every per-turn write accordingly. Both org
 	// and user come from the request context — sentinel in local mode
 	// via the shim, real values in multi mode.
-	requestID, err := s.curator.SendMessage(r.Context(), projectID, orgID, userID, content)
+	requestID, err := ch.runtime().SendMessage(r.Context(), projectID, orgID, userID, content)
 	if err != nil {
 		internalError(w, "curator", err)
 		return
@@ -86,15 +98,15 @@ func (s *Server) handleCuratorSend(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, curatorSendResponse{RequestID: requestID})
 }
 
-func (s *Server) handleCuratorHistory(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (ch *curatorHandler) handleCuratorHistory(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	projectID := r.PathValue("id")
 	var project *domain.Project
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ch.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		project, e = tx.Projects.Get(r.Context(), orgID, projectID)
 		return e
@@ -107,7 +119,7 @@ func (s *Server) handleCuratorHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	requests, err := db.ListCuratorRequestsByProject(s.db, projectID)
+	requests, err := db.ListCuratorRequestsByProject(ch.db, projectID)
 	if err != nil {
 		internalError(w, "curator", err)
 		return
@@ -121,7 +133,7 @@ func (s *Server) handleCuratorHistory(w http.ResponseWriter, r *http.Request) {
 	for i, req := range requests {
 		requestIDs[i] = req.ID
 	}
-	messagesByRequest, err := db.ListCuratorMessagesByRequestIDs(s.db, requestIDs)
+	messagesByRequest, err := db.ListCuratorMessagesByRequestIDs(ch.db, requestIDs)
 	if err != nil {
 		internalError(w, "curator", err)
 		return
@@ -145,19 +157,19 @@ func (s *Server) handleCuratorHistory(w http.ResponseWriter, r *http.Request) {
 // 404 if there's no queued or running request for the project — the
 // frontend uses that to clear stale "cancelling…" state when the
 // agent finished between the user's click and the request landing.
-func (s *Server) handleCuratorCancel(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (ch *curatorHandler) handleCuratorCancel(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
-	if s.curator == nil {
+	if ch.runtime() == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "curator runtime not started"})
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	projectID := r.PathValue("id")
 	var project *domain.Project
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ch.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		project, e = tx.Projects.Get(r.Context(), orgID, projectID)
 		return e
@@ -170,7 +182,7 @@ func (s *Server) handleCuratorCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	inFlight, err := db.InFlightCuratorRequestForProject(s.db, projectID)
+	inFlight, err := db.InFlightCuratorRequestForProject(ch.db, projectID)
 	if err != nil {
 		internalError(w, "curator", err)
 		return
@@ -187,8 +199,8 @@ func (s *Server) handleCuratorCancel(w http.ResponseWriter, r *http.Request) {
 	// status when it observes ctx.Err(); the status filter in
 	// MarkCuratorRequestCancelledIfActive makes the second write
 	// a no-op.
-	s.curator.Cancel(projectID)
-	if _, err := db.MarkCuratorRequestCancelledIfActive(s.db, inFlight.ID, "user cancelled"); err != nil {
+	ch.runtime().Cancel(projectID)
+	if _, err := db.MarkCuratorRequestCancelledIfActive(ch.db, inFlight.ID, "user cancelled"); err != nil {
 		internalError(w, "curator", err)
 		return
 	}
@@ -205,15 +217,15 @@ func (s *Server) handleCuratorCancel(w http.ResponseWriter, r *http.Request) {
 // 409 with a clear hint if there's an in-flight turn — caller should
 // cancel first. The DB op + the WS broadcast are decoupled because a
 // failed broadcast (e.g. hub panicked) shouldn't roll back the wipe.
-func (s *Server) handleCuratorReset(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (ch *curatorHandler) handleCuratorReset(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	projectID := r.PathValue("id")
 	var project *domain.Project
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ch.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		project, e = tx.Projects.Get(r.Context(), orgID, projectID)
 		return e
@@ -226,7 +238,7 @@ func (s *Server) handleCuratorReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := db.ResetCuratorForProject(s.db, projectID); err != nil {
+	if err := db.ResetCuratorForProject(ch.db, projectID); err != nil {
 		if errors.Is(err, db.ErrCuratorInFlight) {
 			writeJSON(w, http.StatusConflict, map[string]string{
 				"error": "in-flight curator request — cancel it before resetting",
@@ -237,8 +249,8 @@ func (s *Server) handleCuratorReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.ws != nil {
-		s.ws.Broadcast(websocket.Event{
+	if ch.ws != nil {
+		ch.ws.Broadcast(websocket.Event{
 			Type:      "curator_reset",
 			OrgID:     orgID,
 			ProjectID: projectID,
