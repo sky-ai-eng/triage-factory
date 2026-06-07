@@ -366,6 +366,24 @@ func TestRunJiraMirror_InProgress_SkipsOnUnreadableState(t *testing.T) {
 	}
 }
 
+// The done mirror's mirror image: an unreadable state must NOT prevent the Done
+// transition. Reaching the done mirror means the work is complete, so moving to
+// Done is correct even when GetClaimState fails — the asymmetry with the
+// in-progress path (which skips on nil) is deliberate, and this pins it against
+// a refactor that accidentally makes both skip.
+func TestRunJiraMirror_Done_ProceedsWhenStateUnreadable(t *testing.T) {
+	fake := newRecordingJiraServer(t, "In Progress", "bot") // can't confirm current status...
+	fake.failClaimState = true                              // ...GetClaimState returns nil
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
+
+	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), true)
+
+	if _, transitions := fake.snapshot(); len(transitions) != 1 || transitions[0] != "Done" {
+		t.Errorf("transitions = %v, want [Done] (unreadable state must not prevent the done transition)", transitions)
+	}
+}
+
 // assign + transition move together: a failed AssignToSelf skips the status
 // transition, so the ticket is never left "In Progress but unassigned". It
 // self-heals on the next board transition's mirror pass.

@@ -180,6 +180,12 @@ func (s *Spawner) runJiraMirror(orgID, issueKey string, rule domain.JiraProjectS
 	state := client.GetClaimState(ctx, issueKey)
 
 	if done {
+		// Idempotency skip when the ticket is already in the Done bucket. Unlike
+		// the in-progress path below, a nil state (transient read failure) falls
+		// through to the transition rather than skipping: reaching the done mirror
+		// means the work is complete, so moving to Done is correct either way — and
+		// a redundant Done→Done attempt just errors harmlessly. Moving to Done is
+		// forward, never the backward regression the in-progress skip guards.
 		if state != nil && rule.DoneContains(state.StatusName) {
 			log.Printf("[jira] mirror: %s already in done bucket (%q), skipping", issueKey, state.StatusName)
 			return
