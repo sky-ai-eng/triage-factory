@@ -3,11 +3,13 @@ package agenthost
 import (
 	"context"
 	"errors"
+	"io"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/runident"
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 )
 
@@ -27,6 +29,12 @@ import (
 type LocalClient struct {
 	stores db.Stores
 	info   RunInfo
+
+	// ghResolver overrides the GitHub credential resolver. Nil in
+	// production (githubResolver builds the real one from stores); set by
+	// tests to inject a fake resolver covering both the App-installation and
+	// PAT tiers without standing up the full App-mint plumbing.
+	ghResolver ghclient.Resolver
 }
 
 // NewLocal builds a LocalClient bound to the given stores + identity.
@@ -365,4 +373,162 @@ func (c *LocalClient) JiraListIssueTypes(ctx context.Context, project string) ([
 		return nil, err
 	}
 	return client.ListIssueTypes(ctx, project)
+}
+
+// --- github ---
+//
+// githubResolver returns the credential resolver to use. Tests inject one
+// via the ghResolver field; production builds the real org-tiered resolver
+// (App installation token → org PAT) from this client's stores. The secret
+// store backing it differs by mode but the call site doesn't care: local
+// mode reads the OS keychain on the user's own machine; the daemon (sandbox
+// path) reads the host's Vault-backed store — the host can read the
+// credential the sandboxed agent can't. Either way the agent process never
+// holds a token.
+//
+// A fresh resolver (and its in-memory token cache) is built per call; the
+// per-run call volume is low and this matches the Jira path's
+// resolver-per-call shape. App-or-PAT tier selection lives entirely in the
+// resolver — no gh-specific credential logic here.
+func (c *LocalClient) githubResolver() ghclient.Resolver {
+	if c.ghResolver != nil {
+		return c.ghResolver
+	}
+	return ghclient.NewResolver(c.stores.Secrets, c.stores.GitHubApps, c.stores.Orgs, c.stores.Agents, nil)
+}
+
+// githubClientForRepo resolves an authenticated client for owner/repo. A
+// missing credential maps to the same "not configured" guidance the gh
+// branch printed before this refactor; every other resolver error (a
+// transient vault/keychain outage) propagates so it isn't misreported as
+// "absent". Over IPC the message crosses as the response Error string.
+func (c *LocalClient) githubClientForRepo(ctx context.Context, owner, repo string) (*ghclient.Client, error) {
+	client, err := c.githubResolver().ClientForRepo(ctx, c.info.OrgID, owner, repo)
+	if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+		return nil, errors.New("GitHub not configured; run triagefactory and complete setup first")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return client, nil
+}
+
+func (c *LocalClient) GithubGetPR(ctx context.Context, owner, repo string, number int, verbose bool) (*ghclient.PRView, error) {
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	return client.GetPR(owner, repo, number, verbose)
+}
+
+func (c *LocalClient) GithubGetPRDiff(ctx context.Context, owner, repo string, number int, file string) (string, error) {
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		return "", err
+	}
+	return client.GetPRDiff(owner, repo, number, file)
+}
+
+func (c *LocalClient) GithubGetPRFiles(ctx context.Context, owner, repo string, number int) ([]ghclient.PRFile, error) {
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	return client.GetPRFiles(owner, repo, number)
+}
+
+func (c *LocalClient) GithubGetCommentThread(ctx context.Context, owner, repo string, commentID, page int) (*ghclient.CommentThread, error) {
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	return client.GetCommentThread(owner, repo, commentID, page)
+}
+
+func (c *LocalClient) GithubGetReviewDetail(ctx context.Context, owner, repo string, number, reviewID int, verbose bool) (*ghclient.ReviewDetail, error) {
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	return client.GetReviewDetail(owner, repo, number, reviewID, verbose)
+}
+
+func (c *LocalClient) GithubDismissReview(ctx context.Context, owner, repo string, number, reviewID int, message string) error {
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		return err
+	}
+	return client.DismissReview(owner, repo, number, reviewID, message)
+}
+
+func (c *LocalClient) GithubSubmitReview(ctx context.Context, owner, repo string, number int, commitSHA, event, body string, comments []ghclient.SubmitReviewComment) (int, string, error) {
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		return 0, "", err
+	}
+	return client.SubmitReview(owner, repo, number, commitSHA, event, body, comments)
+}
+
+func (c *LocalClient) GithubCreatePR(ctx context.Context, owner, repo, head, base, title, body string, draft bool) (int, string, error) {
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		return 0, "", err
+	}
+	return client.CreatePR(owner, repo, head, base, title, body, draft)
+}
+
+func (c *LocalClient) GithubAddComment(ctx context.Context, owner, repo string, number int, body string) (int, error) {
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		return 0, err
+	}
+	return client.AddComment(owner, repo, number, body)
+}
+
+func (c *LocalClient) GithubReplyToComment(ctx context.Context, owner, repo string, number, commentID int, body string) (int, error) {
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		return 0, err
+	}
+	return client.ReplyToComment(owner, repo, number, commentID, body)
+}
+
+func (c *LocalClient) GithubReactToComment(ctx context.Context, owner, repo string, commentID int, emoji string) error {
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		return err
+	}
+	return client.ReactToComment(owner, repo, commentID, emoji)
+}
+
+func (c *LocalClient) GithubUpdateComment(ctx context.Context, owner, repo string, commentID int, body string) error {
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		return err
+	}
+	return client.UpdateComment(owner, repo, commentID, body)
+}
+
+func (c *LocalClient) GithubDeleteComment(ctx context.Context, owner, repo string, commentID int) error {
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		return err
+	}
+	return client.DeleteComment(owner, repo, commentID)
+}
+
+func (c *LocalClient) GithubAPIGet(ctx context.Context, owner, repo, path string) ([]byte, error) {
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	return client.Get(path)
+}
+
+func (c *LocalClient) GithubDownloadArtifact(ctx context.Context, owner, repo, path string, dst io.Writer, maxBytes int64) (int64, error) {
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		return 0, err
+	}
+	return client.DownloadArtifact(ctx, path, dst, maxBytes)
 }

@@ -5,7 +5,6 @@ import (
 	"os"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
-	"github.com/sky-ai-eng/triage-factory/internal/github"
 )
 
 // HelpText is the help output for gh commands, shared with the top-level exec help.
@@ -60,9 +59,13 @@ Repo Resolution (all gh commands):
   Priority order: --repo flag > TRIAGE_FACTORY_REPO env var > .git/config origin of cwd.
   Commands fail with a clear error if none resolve.`
 
-// Handle dispatches gh subcommands. host is the agenthost.Client the
-// PR write paths route through; it may be nil for help routes.
-func Handle(client *github.Client, host agenthost.Client, args []string) {
+// Handle dispatches gh subcommands. host is the agenthost.Client every
+// GitHub API call (and the PR/review DB write paths) route through: in the
+// sandbox it ships each call to the host daemon, which resolves the org's
+// App-installation-or-PAT credential and makes the request; in local mode the
+// in-process LocalClient builds the same client directly on the user's
+// machine. host is nil on the help route, which returns before any call.
+func Handle(host agenthost.Client, args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
 		printHelp()
 		return
@@ -73,9 +76,9 @@ func Handle(client *github.Client, host agenthost.Client, args []string) {
 
 	switch resource {
 	case "pr":
-		handlePR(client, host, cmdArgs)
+		handlePR(host, cmdArgs)
 	case "actions":
-		handleActions(client, cmdArgs)
+		handleActions(host, cmdArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown gh resource: %s\n", resource)
 		os.Exit(1)

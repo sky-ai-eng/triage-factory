@@ -22,6 +22,16 @@ type HTTPError struct {
 
 func (e *HTTPError) Error() string { return e.msg }
 
+// NewHTTPError reconstructs an *HTTPError from its wire-transmitted parts.
+// The agenthost IPC path serializes a GitHub API failure's status code,
+// body, and rendered message across the per-run socket; the sandbox-side
+// client rebuilds the typed error here so callers that discriminate on
+// status (IsHTTP406, the download-logs 404 fallback) keep working over the
+// RPC exactly as they do against an in-process *Client.
+func NewHTTPError(statusCode int, body, msg string) *HTTPError {
+	return &HTTPError{StatusCode: statusCode, Body: body, msg: msg}
+}
+
 // IsHTTP406 reports whether err is an HTTP 406 Not Acceptable response.
 func IsHTTP406(err error) bool {
 	var he *HTTPError

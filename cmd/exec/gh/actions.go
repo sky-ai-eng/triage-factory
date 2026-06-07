@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
 )
 
@@ -47,8 +48,10 @@ const (
 	maxTotalUncompressedBytes int64 = 2 * 1024 * 1024 * 1024 // 2 GB
 )
 
-// handleActions dispatches gh actions subcommands.
-func handleActions(client *github.Client, args []string) {
+// handleActions dispatches gh actions subcommands. The GitHub adapter is
+// built inside each action once owner/repo resolve, since the raw transport
+// (Get / DownloadArtifact) needs them for the host's credential resolution.
+func handleActions(host agenthost.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: triagefactory exec gh actions <action> [flags]")
 	}
@@ -58,9 +61,9 @@ func handleActions(client *github.Client, args []string) {
 
 	switch action {
 	case "download-logs":
-		actionsDownloadLogs(client, flags)
+		actionsDownloadLogs(host, flags)
 	case "list-runs":
-		actionsListRuns(client, flags)
+		actionsListRuns(host, flags)
 	default:
 		exitErr(fmt.Sprintf("unknown actions action: %s", action))
 	}
@@ -111,7 +114,7 @@ type listRun struct {
 // Exactly one of --pr / --sha is required. --pr takes a PR number and
 // resolves the head SHA before calling the Actions list endpoint; --sha
 // hits the endpoint directly.
-func actionsListRuns(client *github.Client, args []string) {
+func actionsListRuns(host agenthost.Client, args []string) {
 	prStr := flagValue(args, "--pr")
 	sha := flagValue(args, "--sha")
 
@@ -123,6 +126,7 @@ func actionsListRuns(client *github.Client, args []string) {
 	if err != nil {
 		exitErr(err.Error())
 	}
+	client := newHostAPI(host, owner, repo)
 
 	if prStr != "" {
 		prNum, err := strconv.Atoi(prStr)
@@ -168,7 +172,7 @@ func actionsListRuns(client *github.Client, args []string) {
 // fetchRunsForSHA queries GET /repos/{o}/{r}/actions/runs?head_sha=<sha>
 // and flattens the response to the subset of fields the agent needs.
 // Runs come back newest-first per GitHub's default ordering.
-func fetchRunsForSHA(client *github.Client, owner, repo, sha string) ([]listRun, error) {
+func fetchRunsForSHA(client ghAPI, owner, repo, sha string) ([]listRun, error) {
 	q := url.Values{
 		"head_sha":              []string{sha},
 		"per_page":              []string{strconv.Itoa(maxListedRuns)},
@@ -296,7 +300,7 @@ type jobInfo struct {
 // on error — exitErr calls os.Exit, which skips defers, so inlining the
 // logic here would leak the temp zip (and leave a half-extracted destDir)
 // on every failure path.
-func actionsDownloadLogs(client *github.Client, args []string) {
+func actionsDownloadLogs(host agenthost.Client, args []string) {
 	// Validate the positional arg first. If the user forgot <run_id>
 	// entirely, we want the usage message, not a confusing "could not
 	// resolve repo" error that happens to surface because they're
@@ -315,6 +319,7 @@ func actionsDownloadLogs(client *github.Client, args []string) {
 	if err != nil {
 		exitErr(err.Error())
 	}
+	client := newHostAPI(host, owner, repo)
 
 	// Destination: <cwd>/_scratch/ci-logs/<run_id>/. Resolving to absolute
 	// so the success output gives the agent a path it can use directly
@@ -401,7 +406,7 @@ func actionsDownloadLogs(client *github.Client, args []string) {
 // already extreme; if we ever see truncation we log a warning to stderr
 // rather than silently dropping data, but real pagination is deferred
 // until something actually hits the cap.
-func fetchJobsForRun(client *github.Client, owner, repo string, runID int64) ([]jobInfo, error) {
+func fetchJobsForRun(client ghAPI, owner, repo string, runID int64) ([]jobInfo, error) {
 	apiPath := fmt.Sprintf("/repos/%s/%s/actions/runs/%d/jobs?per_page=100", owner, repo, runID)
 	data, err := client.Get(apiPath)
 	if err != nil {
@@ -506,7 +511,7 @@ func sanitizeJobNameForFile(name string) string {
 // up front, and on any failure (mid-download or partial extract) it's
 // removed so a retry sees a clean slate. Queued and in_progress jobs are
 // skipped (their LogPath stays empty as a stub).
-func downloadPerJobLogsToDir(client *github.Client, owner, repo, destDir string, jobs []jobInfo) (int64, []jobInfo, error) {
+func downloadPerJobLogsToDir(client ghAPI, owner, repo, destDir string, jobs []jobInfo) (int64, []jobInfo, error) {
 	if err := os.RemoveAll(destDir); err != nil {
 		return 0, nil, fmt.Errorf("clear stale destination directory: %w", err)
 	}
@@ -568,7 +573,7 @@ func downloadPerJobLogsToDir(client *github.Client, owner, repo, destDir string,
 //     valid state to the next retry.
 //
 // Returns the number of bytes downloaded on success.
-func downloadAndExtractLogs(client *github.Client, owner, repo string, runID int64, destDir string) (int64, error) {
+func downloadAndExtractLogs(client ghAPI, owner, repo string, runID int64, destDir string) (int64, error) {
 	// Clobber any previous extraction for the same run_id. The command owns
 	// this directory completely (<cwd>/_scratch/ci-logs/<run_id>), so a
 	// re-run should produce a clean state — otherwise stale entries from an

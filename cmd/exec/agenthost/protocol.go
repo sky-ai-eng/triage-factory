@@ -8,6 +8,7 @@ import (
 	"io"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 )
 
@@ -59,9 +60,21 @@ type request struct {
 // only consumer is cmd/exec subcommands that surface the message
 // verbatim to the agent via stderr; adding code-based routing would
 // be premature.
+//
+// HTTPStatus / HTTPBody are the one structured-error exception: when a
+// host-routed GitHub API call fails with a *github.HTTPError, the daemon
+// echoes the status code and response body alongside Error so the sandbox
+// client can rebuild the typed error (github.NewHTTPError). That's what
+// keeps the diff-too-large 406 fallback and the download-logs 404 fallback
+// working over the RPC — they discriminate on status, and a bare string
+// would erase it. Zero HTTPStatus means "not an HTTP error" (the common
+// case, including every Jira/DB method) and the client returns a plain
+// errors.New(Error).
 type response struct {
-	Result json.RawMessage `json:"r,omitempty"`
-	Error  string          `json:"e,omitempty"`
+	Result     json.RawMessage `json:"r,omitempty"`
+	Error      string          `json:"e,omitempty"`
+	HTTPStatus int             `json:"hs,omitempty"`
+	HTTPBody   string          `json:"hb,omitempty"`
 }
 
 // writeFrame serializes msg as a length-prefixed JSON frame on w.
@@ -315,6 +328,162 @@ type jiraIssueTypesResult struct {
 	IssueTypes []jiraclient.IssueType `json:"issue_types"`
 }
 
+// --- github (exec gh pr / actions ...) ---
+//
+// Args/result envelopes for the host-routed GitHub surface. The daemon
+// (or the in-process LocalClient) builds the org's authenticated client via
+// the resolver's ClientForRepo (App installation token → org PAT) and makes
+// the REST call; these structs are just the wire shapes. The ghclient result
+// types (PRView, PRFile, CommentThread, ReviewDetail) already carry JSON
+// tags, so they cross the wire unchanged. owner/repo ride on every request so
+// the host resolves the right per-repo credential tier; the sandbox holds no
+// token. HTTP failures surface as the response Error string AND, via the
+// HTTPStatus/HTTPBody fields above, as a reconstructable github.HTTPError.
+
+type githubRepoRef struct {
+	Owner string `json:"owner"`
+	Repo  string `json:"repo"`
+}
+
+type githubGetPRArgs struct {
+	githubRepoRef
+	Number  int  `json:"number"`
+	Verbose bool `json:"verbose"`
+}
+
+type githubPRViewResult struct {
+	PR *ghclient.PRView `json:"pr,omitempty"`
+}
+
+type githubPRDiffArgs struct {
+	githubRepoRef
+	Number int    `json:"number"`
+	File   string `json:"file"`
+}
+
+type githubPRDiffResult struct {
+	Diff string `json:"diff"`
+}
+
+type githubPRFilesArgs struct {
+	githubRepoRef
+	Number int `json:"number"`
+}
+
+type githubPRFilesResult struct {
+	Files []ghclient.PRFile `json:"files"`
+}
+
+type githubCommentThreadArgs struct {
+	githubRepoRef
+	CommentID int `json:"comment_id"`
+	Page      int `json:"page"`
+}
+
+type githubCommentThreadResult struct {
+	Thread *ghclient.CommentThread `json:"thread,omitempty"`
+}
+
+type githubReviewDetailArgs struct {
+	githubRepoRef
+	Number   int  `json:"number"`
+	ReviewID int  `json:"review_id"`
+	Verbose  bool `json:"verbose"`
+}
+
+type githubReviewDetailResult struct {
+	Detail *ghclient.ReviewDetail `json:"detail,omitempty"`
+}
+
+type githubDismissReviewArgs struct {
+	githubRepoRef
+	Number   int    `json:"number"`
+	ReviewID int    `json:"review_id"`
+	Message  string `json:"message"`
+}
+
+type githubSubmitReviewArgs struct {
+	githubRepoRef
+	Number    int                            `json:"number"`
+	CommitSHA string                         `json:"commit_sha"`
+	Event     string                         `json:"event"`
+	Body      string                         `json:"body"`
+	Comments  []ghclient.SubmitReviewComment `json:"comments"`
+}
+
+type githubSubmitReviewResult struct {
+	ReviewID int    `json:"review_id"`
+	Event    string `json:"event"`
+}
+
+type githubCreatePRArgs struct {
+	githubRepoRef
+	Head  string `json:"head"`
+	Base  string `json:"base"`
+	Title string `json:"title"`
+	Body  string `json:"body"`
+	Draft bool   `json:"draft"`
+}
+
+type githubCreatePRResult struct {
+	Number  int    `json:"number"`
+	HTMLURL string `json:"html_url"`
+}
+
+type githubAddCommentArgs struct {
+	githubRepoRef
+	Number int    `json:"number"`
+	Body   string `json:"body"`
+}
+
+type githubCommentIDResult struct {
+	CommentID int `json:"comment_id"`
+}
+
+type githubReplyToCommentArgs struct {
+	githubRepoRef
+	Number    int    `json:"number"`
+	CommentID int    `json:"comment_id"`
+	Body      string `json:"body"`
+}
+
+type githubReactToCommentArgs struct {
+	githubRepoRef
+	CommentID int    `json:"comment_id"`
+	Emoji     string `json:"emoji"`
+}
+
+type githubUpdateCommentArgs struct {
+	githubRepoRef
+	CommentID int    `json:"comment_id"`
+	Body      string `json:"body"`
+}
+
+type githubDeleteCommentArgs struct {
+	githubRepoRef
+	CommentID int `json:"comment_id"`
+}
+
+type githubAPIGetArgs struct {
+	githubRepoRef
+	Path string `json:"path"`
+}
+
+type githubAPIGetResult struct {
+	Data []byte `json:"data"`
+}
+
+type githubDownloadArtifactArgs struct {
+	githubRepoRef
+	Path     string `json:"path"`
+	MaxBytes int64  `json:"max_bytes"`
+}
+
+type githubDownloadArtifactResult struct {
+	Data []byte `json:"data"`
+	N    int64  `json:"n"`
+}
+
 // emptyArgs is the args type for methods that take no parameters
 // (LookupRun, GetPendingPRByRunID, GetAgentRun, ListRunWorktrees,
 // ListRepos). Using an empty struct rather than json.RawMessage(nil)
@@ -363,4 +532,20 @@ const (
 	methodJiraListPriorities = "JiraListPriorities"
 	methodJiraSetPriority    = "JiraSetPriority"
 	methodJiraListIssueTypes = "JiraListIssueTypes"
+
+	methodGithubGetPR            = "GithubGetPR"
+	methodGithubGetPRDiff        = "GithubGetPRDiff"
+	methodGithubGetPRFiles       = "GithubGetPRFiles"
+	methodGithubGetCommentThread = "GithubGetCommentThread"
+	methodGithubGetReviewDetail  = "GithubGetReviewDetail"
+	methodGithubDismissReview    = "GithubDismissReview"
+	methodGithubSubmitReview     = "GithubSubmitReview"
+	methodGithubCreatePR         = "GithubCreatePR"
+	methodGithubAddComment       = "GithubAddComment"
+	methodGithubReplyToComment   = "GithubReplyToComment"
+	methodGithubReactToComment   = "GithubReactToComment"
+	methodGithubUpdateComment    = "GithubUpdateComment"
+	methodGithubDeleteComment    = "GithubDeleteComment"
+	methodGithubAPIGet           = "GithubAPIGet"
+	methodGithubDownloadArtifact = "GithubDownloadArtifact"
 )

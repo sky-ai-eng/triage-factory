@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 )
 
@@ -111,6 +112,14 @@ func (c *IPCClient) call(ctx context.Context, method string, args any, result an
 	}
 
 	if resp.Error != "" {
+		// A non-zero HTTPStatus marks a host-routed GitHub API failure;
+		// rebuild the typed error so status-discriminating callers
+		// (IsHTTP406, the download-logs 404 fallback) behave identically to
+		// the in-process path. Plain (non-HTTP) errors — every Jira/DB
+		// method, resolver outages — keep the bare string.
+		if resp.HTTPStatus != 0 {
+			return ghclient.NewHTTPError(resp.HTTPStatus, resp.HTTPBody, resp.Error)
+		}
 		return errors.New(resp.Error)
 	}
 	if result == nil {
@@ -359,4 +368,124 @@ func (c *IPCClient) JiraListIssueTypes(ctx context.Context, project string) ([]j
 		return nil, err
 	}
 	return res.IssueTypes, nil
+}
+
+// --- github ---
+//
+// Each method is a thin RPC: serialize args, ship one frame to the daemon,
+// decode one frame back. The daemon builds the org-tiered GitHub client
+// host-side (App installation token → org PAT) and makes the REST call — the
+// sandbox holds no credential. HTTP failures surface as the response Error
+// string and, when the daemon flagged a github.HTTPError, as a
+// reconstructed typed error (see call()), so the 406/404 fallbacks survive.
+
+func (c *IPCClient) GithubGetPR(ctx context.Context, owner, repo string, number int, verbose bool) (*ghclient.PRView, error) {
+	var res githubPRViewResult
+	if err := c.call(ctx, methodGithubGetPR, githubGetPRArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Number: number, Verbose: verbose}, &res); err != nil {
+		return nil, err
+	}
+	return res.PR, nil
+}
+
+func (c *IPCClient) GithubGetPRDiff(ctx context.Context, owner, repo string, number int, file string) (string, error) {
+	var res githubPRDiffResult
+	if err := c.call(ctx, methodGithubGetPRDiff, githubPRDiffArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Number: number, File: file}, &res); err != nil {
+		return "", err
+	}
+	return res.Diff, nil
+}
+
+func (c *IPCClient) GithubGetPRFiles(ctx context.Context, owner, repo string, number int) ([]ghclient.PRFile, error) {
+	var res githubPRFilesResult
+	if err := c.call(ctx, methodGithubGetPRFiles, githubPRFilesArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Number: number}, &res); err != nil {
+		return nil, err
+	}
+	return res.Files, nil
+}
+
+func (c *IPCClient) GithubGetCommentThread(ctx context.Context, owner, repo string, commentID, page int) (*ghclient.CommentThread, error) {
+	var res githubCommentThreadResult
+	if err := c.call(ctx, methodGithubGetCommentThread, githubCommentThreadArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, CommentID: commentID, Page: page}, &res); err != nil {
+		return nil, err
+	}
+	return res.Thread, nil
+}
+
+func (c *IPCClient) GithubGetReviewDetail(ctx context.Context, owner, repo string, number, reviewID int, verbose bool) (*ghclient.ReviewDetail, error) {
+	var res githubReviewDetailResult
+	if err := c.call(ctx, methodGithubGetReviewDetail, githubReviewDetailArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Number: number, ReviewID: reviewID, Verbose: verbose}, &res); err != nil {
+		return nil, err
+	}
+	return res.Detail, nil
+}
+
+func (c *IPCClient) GithubDismissReview(ctx context.Context, owner, repo string, number, reviewID int, message string) error {
+	return c.call(ctx, methodGithubDismissReview, githubDismissReviewArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Number: number, ReviewID: reviewID, Message: message}, nil)
+}
+
+func (c *IPCClient) GithubSubmitReview(ctx context.Context, owner, repo string, number int, commitSHA, event, body string, comments []ghclient.SubmitReviewComment) (int, string, error) {
+	var res githubSubmitReviewResult
+	if err := c.call(ctx, methodGithubSubmitReview, githubSubmitReviewArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Number: number, CommitSHA: commitSHA, Event: event, Body: body, Comments: comments}, &res); err != nil {
+		return 0, "", err
+	}
+	return res.ReviewID, res.Event, nil
+}
+
+func (c *IPCClient) GithubCreatePR(ctx context.Context, owner, repo, head, base, title, body string, draft bool) (int, string, error) {
+	var res githubCreatePRResult
+	if err := c.call(ctx, methodGithubCreatePR, githubCreatePRArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Head: head, Base: base, Title: title, Body: body, Draft: draft}, &res); err != nil {
+		return 0, "", err
+	}
+	return res.Number, res.HTMLURL, nil
+}
+
+func (c *IPCClient) GithubAddComment(ctx context.Context, owner, repo string, number int, body string) (int, error) {
+	var res githubCommentIDResult
+	if err := c.call(ctx, methodGithubAddComment, githubAddCommentArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Number: number, Body: body}, &res); err != nil {
+		return 0, err
+	}
+	return res.CommentID, nil
+}
+
+func (c *IPCClient) GithubReplyToComment(ctx context.Context, owner, repo string, number, commentID int, body string) (int, error) {
+	var res githubCommentIDResult
+	if err := c.call(ctx, methodGithubReplyToComment, githubReplyToCommentArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Number: number, CommentID: commentID, Body: body}, &res); err != nil {
+		return 0, err
+	}
+	return res.CommentID, nil
+}
+
+func (c *IPCClient) GithubReactToComment(ctx context.Context, owner, repo string, commentID int, emoji string) error {
+	return c.call(ctx, methodGithubReactToComment, githubReactToCommentArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, CommentID: commentID, Emoji: emoji}, nil)
+}
+
+func (c *IPCClient) GithubUpdateComment(ctx context.Context, owner, repo string, commentID int, body string) error {
+	return c.call(ctx, methodGithubUpdateComment, githubUpdateCommentArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, CommentID: commentID, Body: body}, nil)
+}
+
+func (c *IPCClient) GithubDeleteComment(ctx context.Context, owner, repo string, commentID int) error {
+	return c.call(ctx, methodGithubDeleteComment, githubDeleteCommentArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, CommentID: commentID}, nil)
+}
+
+func (c *IPCClient) GithubAPIGet(ctx context.Context, owner, repo, path string) ([]byte, error) {
+	var res githubAPIGetResult
+	if err := c.call(ctx, methodGithubAPIGet, githubAPIGetArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Path: path}, &res); err != nil {
+		return nil, err
+	}
+	return res.Data, nil
+}
+
+// GithubDownloadArtifact buffers the daemon's reply and copies it into dst.
+// The blob can't stream over the one-shot RPC frame, so the host returns the
+// full (capped) body and the sandbox writes it into its own worktree. The
+// frame cap bounds what fits this way; realistic CI log archives are a few MB.
+func (c *IPCClient) GithubDownloadArtifact(ctx context.Context, owner, repo, path string, dst io.Writer, maxBytes int64) (int64, error) {
+	var res githubDownloadArtifactResult
+	if err := c.call(ctx, methodGithubDownloadArtifact, githubDownloadArtifactArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Path: path, MaxBytes: maxBytes}, &res); err != nil {
+		return 0, err
+	}
+	if _, err := dst.Write(res.Data); err != nil {
+		return 0, fmt.Errorf("agenthost: write downloaded artifact: %w", err)
+	}
+	return res.N, nil
 }
