@@ -372,17 +372,18 @@ func (s *Server) swipeTeardownRuns(r *http.Request, orgID, userID, id, action st
 	case "delegate":
 		outcome = discardOutcomeRedelegated
 	}
-	// Cleanup runs detached from r.Context() so a client disconnect after the
-	// swipe response doesn't strand the run in pending_approval.
+	// Teardown runs detached from r.Context() so a client disconnect after the
+	// swipe response doesn't strand the run: both the pending_approval cleanup
+	// and the active-run lookup + cancellation below must complete regardless.
 	cleanupCtx := context.WithoutCancel(r.Context())
 	s.cleanupPendingApprovalRun(cleanupCtx, orgID, userID, id, outcome)
 	if s.spawner == nil {
 		return
 	}
 	var ids []string
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := s.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		ids, e = tx.AgentRuns.ActiveIDsForTask(r.Context(), orgID, id)
+		ids, e = tx.AgentRuns.ActiveIDsForTask(cleanupCtx, orgID, id)
 		return e
 	}); err != nil {
 		log.Printf("[swipe] active-run lookup for task %s failed: %v", id, err)
