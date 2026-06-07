@@ -178,7 +178,7 @@ func rollbackPRSetupLocked(ctx context.Context, bareDir, wtDir, runID, headBranc
 		log.Printf("[worktree] rollback PR setup: remove worktree: %v", rmErr)
 	}
 
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
 
 	removePRConfigLocked(cleanupCtx, bareDir, headBranch, prNumber)
@@ -214,10 +214,11 @@ func forkPRRemoteName(prNumber int) string {
 // match logic obvious.
 const trackedBranchMarkerKey = "tfprnumber"
 
-// cleanupTimeout caps the time CleanupPRConfig and SweepStaleForkPRConfig
-// will spend on their detached-context git invocations. Reclamation is
-// best-effort; if a single config-rewrite hangs (locked file, slow disk),
-// we'd rather time out than block run finalization indefinitely.
+// cleanupTimeout caps the time the detached-context PR-config cleanups
+// (CleanupPRConfig, SweepStaleForkPRConfig, and rollbackPRSetupLocked) will
+// spend on their git invocations. Reclamation is best-effort; if a single
+// config-rewrite hangs (locked file, slow disk), we'd rather time out than
+// block run finalization indefinitely.
 const cleanupTimeout = 30 * time.Second
 
 // CleanupPRConfig removes per-PR config blocks the bare repo
