@@ -123,88 +123,83 @@ export default function BoardColumn({
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      {/* Droppable wrapper does NOT clip — the accent lines + glows ride its
-          edges. */}
-      <div ref={setNodeRef} className="relative min-h-0 flex-1">
-        {/* The slab: hard-cornered frosted glass. No radius, no drop-shadow —
-            structure comes from the fading rust L-bracket below, not a box that
-            pops off the page. */}
-        <div className="relative h-full overflow-y-auto bg-[var(--color-surface-overlay)]/50 backdrop-blur-xl">
-          {/* Sticky masthead — title + search + filter, all floating on the
-              column glass (no box). Just backdrop-blur so cards stay legible as
-              they scroll beneath. The filter panel melts down from here. */}
-          <div className="sticky top-0 z-10 px-3 pb-2 pt-3 backdrop-blur-md">
-            <div className="mb-1.5 flex items-center justify-between px-0.5">
-              <h2 className="text-[15px] font-semibold tracking-tight text-text-primary">
-                {title}
-              </h2>
-              {headerExtra}
-            </div>
-
-            <div className="flex items-center gap-2">
-              <div className="relative flex-1">
-                <Search
-                  size={14}
-                  aria-hidden
-                  className="pointer-events-none absolute left-0 top-1/2 -translate-y-1/2 text-text-tertiary"
-                />
-                <input
-                  type="text"
-                  placeholder="Search…"
-                  value={filter.search}
-                  onChange={(e) => onFilterChange({ ...filter, search: e.target.value })}
-                  className={searchInputClass}
-                />
-                {filter.search && (
-                  <button
-                    type="button"
-                    aria-label="Clear search"
-                    onClick={() => onFilterChange({ ...filter, search: '' })}
-                    className="absolute right-1 top-1/2 -translate-y-1/2 text-text-tertiary transition-colors hover:text-text-secondary"
-                  >
-                    <X size={12} />
-                  </button>
-                )}
-              </div>
-              <button
-                type="button"
-                aria-label="Sort & filter"
-                aria-expanded={controlsOpen}
-                onClick={() => setControlsOpen((v) => !v)}
-                className={`relative shrink-0 rounded-lg p-1.5 transition-colors ${
-                  controlsOpen ? 'text-accent' : 'text-text-tertiary hover:text-text-secondary'
-                }`}
-              >
-                <SlidersHorizontal size={15} />
-                {hasFilters && (
-                  <span
-                    aria-hidden
-                    className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-accent"
-                  />
-                )}
-              </button>
-            </div>
-
-            {/* The melt-down: height + opacity animate from the search row. */}
-            <motion.div
-              initial={false}
-              animate={{ height: controlsOpen ? 'auto' : 0, opacity: controlsOpen ? 1 : 0 }}
-              transition={reduce ? { duration: 0 } : bodyEase}
-              className="overflow-hidden"
-            >
-              <div className="space-y-3 pt-3">
-                <FilterControls
-                  filter={filter}
-                  onChange={onFilterChange}
-                  eventTypes={eventTypes}
-                  snooze={snooze}
-                />
-              </div>
-            </motion.div>
+      {/* The column is not a surface — no fill, no blur. It melts into the page;
+          only the rust L-bracket and the cards themselves mark it out. Flex-col
+          so the masthead sits above its own scrolling card area (no sticky
+          overlap, nothing to frost). */}
+      <div ref={setNodeRef} className="relative flex min-h-0 flex-1 flex-col">
+        {/* Masthead — title + search + filter floating directly on the page.
+            The filter panel melts down from here, pushing the cards down. */}
+        <div className="px-3 pb-2 pt-3">
+          <div className="mb-1.5 flex items-center justify-between px-0.5">
+            <h2 className="text-[15px] font-semibold tracking-tight text-text-primary">{title}</h2>
+            {headerExtra}
           </div>
 
-          <div className="space-y-3 px-3 pb-3 pt-2">{children}</div>
+          <div className="flex items-center gap-2">
+            <div className="relative flex-1">
+              <Search
+                size={14}
+                aria-hidden
+                className="pointer-events-none absolute left-0 top-1/2 -translate-y-1/2 text-text-tertiary"
+              />
+              <input
+                type="text"
+                placeholder="Search…"
+                value={filter.search}
+                onChange={(e) => onFilterChange({ ...filter, search: e.target.value })}
+                className={searchInputClass}
+              />
+              {filter.search && (
+                <button
+                  type="button"
+                  aria-label="Clear search"
+                  onClick={() => onFilterChange({ ...filter, search: '' })}
+                  className="absolute right-1 top-1/2 -translate-y-1/2 text-text-tertiary transition-colors hover:text-text-secondary"
+                >
+                  <X size={12} />
+                </button>
+              )}
+            </div>
+            <button
+              type="button"
+              aria-label="Sort & filter"
+              aria-expanded={controlsOpen}
+              onClick={() => setControlsOpen((v) => !v)}
+              className={`relative shrink-0 rounded-lg p-1.5 transition-colors ${
+                controlsOpen ? 'text-accent' : 'text-text-tertiary hover:text-text-secondary'
+              }`}
+            >
+              <SlidersHorizontal size={15} />
+              {hasFilters && (
+                <span
+                  aria-hidden
+                  className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-accent"
+                />
+              )}
+            </button>
+          </div>
+
+          {/* The melt-down: height + opacity animate from the search row. */}
+          <motion.div
+            initial={false}
+            animate={{ height: controlsOpen ? 'auto' : 0, opacity: controlsOpen ? 1 : 0 }}
+            transition={reduce ? { duration: 0 } : bodyEase}
+            className="overflow-hidden"
+          >
+            <div className="space-y-3 pt-3">
+              <FilterControls
+                filter={filter}
+                onChange={onFilterChange}
+                eventTypes={eventTypes}
+                snooze={snooze}
+              />
+            </div>
+          </motion.div>
         </div>
+
+        {/* Cards scroll independently below the masthead. */}
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 pb-3 pt-1">{children}</div>
 
         {/* The rust L-bracket — a faded guiding line down the top and left
             edges, brightest at the hard top-left corner and dissolving toward
