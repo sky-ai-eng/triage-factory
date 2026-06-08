@@ -59,7 +59,7 @@ func agentMemoryFile() string {
 	ns := os.Getenv("TRIAGE_FACTORY_BLUEPRINT_RUN_ID")
 	runID := os.Getenv("TRIAGE_FACTORY_RUN_ID")
 	if root == "" || ns == "" || runID == "" {
-		return "$TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/$TRIAGE_FACTORY_BLUEPRINT_RUN_ID/<run_id>.md"
+		return "$TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/$TRIAGE_FACTORY_BLUEPRINT_RUN_ID/$TRIAGE_FACTORY_RUN_ID.md"
 	}
 	return filepath.Join(root, "_scratch", "entity-memory", ns, runID+".md")
 }

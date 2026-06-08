@@ -148,7 +148,6 @@ func (s *Spawner) resolvePrompt(orgID string, task domain.Task, explicitPromptID
 	return p, nil
 }
 
-// buildPrompt composes: mission + envelope (scope, tools, task memory, completion contract).
 // buildPrompt composes mission + envelope and interpolates all placeholders
 // in one pass. See placeholders.go for the full catalog — every {{X}} in
 // the mission or envelope gets resolved here, with unknown names falling
