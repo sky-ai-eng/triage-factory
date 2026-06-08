@@ -13,6 +13,7 @@ package delegate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -145,6 +146,11 @@ type RunController interface {
 	Cancel(runID string) (found bool)
 }
 
+// ErrNoLiveProcess is the typed error the control seam returns when a run has
+// no live process to reach — it terminated, idle-hibernated, or never started.
+// The P3 interrupt/message endpoints map it to 409 Conflict.
+var ErrNoLiveProcess = errors.New("run has no live process")
+
 // inProcessController is the N=1 RunController: every run's process lives
 // in this same process, so the lookups are direct map reads.
 type inProcessController struct{ s *Spawner }
@@ -152,7 +158,7 @@ type inProcessController struct{ s *Spawner }
 func (c inProcessController) Interrupt(ctx context.Context, runID string) error {
 	h := c.s.getProc(runID)
 	if h == nil {
-		return fmt.Errorf("run %s has no live process to interrupt", runID)
+		return fmt.Errorf("interrupt run %s: %w", runID, ErrNoLiveProcess)
 	}
 	return h.lr.Interrupt(ctx)
 }
@@ -160,7 +166,7 @@ func (c inProcessController) Interrupt(ctx context.Context, runID string) error 
 func (c inProcessController) Steer(ctx context.Context, runID, text string) error {
 	h := c.s.getProc(runID)
 	if h == nil {
-		return fmt.Errorf("run %s has no live process to steer", runID)
+		return fmt.Errorf("steer run %s: %w", runID, ErrNoLiveProcess)
 	}
 	return h.lr.Send(ctx, text)
 }

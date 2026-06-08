@@ -597,6 +597,14 @@ export interface FactorySnapshot {
 export type WSEvent =
   | { type: 'agent_run_update'; run_id: string; data: { status: string } }
   | { type: 'agent_message'; run_id: string; data: AgentMessage }
+  | {
+      // P3 steering: a run surfaced a tool-permission prompt (canUseTool),
+      // answered via POST /api/agent/runs/{runID}/permissions/{requestID}.
+      // Type only for now — no rendering until the RunDetail console.
+      type: 'permission_request'
+      run_id: string
+      data: { request_id: string; tool_name: string; input: Record<string, unknown> }
+    }
   | { type: 'curator_message'; project_id: string; data: CuratorMessage }
   | {
       type: 'curator_request_update'

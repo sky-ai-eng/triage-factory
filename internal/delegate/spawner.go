@@ -154,6 +154,14 @@ type Spawner struct {
 	// seam horizontal scaling swaps for a DB-signal to the owning
 	// executor. Set once in NewSpawner.
 	controller RunController
+	// permPending brokers the browser tool-permission round-trip: each
+	// in-flight canUseTool prompt registers a pending entry here keyed by its
+	// SDK request_id; the WS POST resolves it and the parked handler goroutine
+	// receives the decision (or a bounded timeout denies it). In-memory only
+	// (no schema); guarded by s.mu. The runLiveAndDrive call sites still pass
+	// perms:nil, so the broker is dormant until a follow-up wires the handler
+	// in alongside the browser prompt UI.
+	permPending map[string]*pendingPermission
 	// executorID is this spawner instance's executor identity, generated
 	// once at construction and stamped onto runs.executor_id when a run
 	// goes live. At N=1 there is one executor per process; on restart a
@@ -223,6 +231,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		dispatchWake: make(chan struct{}, 1),
 		takenOver:    make(map[string]bool),
 		procs:        make(map[string]*liveRunHandle),
+		permPending:  make(map[string]*pendingPermission),
 		executorID:   uuid.New().String(),
 		runSem:       make(chan struct{}, DefaultMaxConcurrentRuns),
 	}

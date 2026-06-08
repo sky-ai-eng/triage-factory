@@ -3,6 +3,7 @@ package delegate
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -58,11 +59,11 @@ func TestController_CancelRoutesToRegisteredCancel(t *testing.T) {
 // rather than panic when the run has no registered handle.
 func TestController_InterruptSteerNoProcErrors(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
-	if err := s.Interrupt(context.Background(), "nope"); err == nil {
-		t.Error("expected Interrupt to error when no live process is registered")
+	if err := s.Interrupt(context.Background(), "nope"); !errors.Is(err, ErrNoLiveProcess) {
+		t.Errorf("Interrupt err = %v, want ErrNoLiveProcess when no live process is registered", err)
 	}
-	if err := s.Steer(context.Background(), "nope", "hi"); err == nil {
-		t.Error("expected Steer to error when no live process is registered")
+	if err := s.Steer(context.Background(), "nope", "hi"); !errors.Is(err, ErrNoLiveProcess) {
+		t.Errorf("Steer err = %v, want ErrNoLiveProcess when no live process is registered", err)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -139,6 +140,143 @@ func (ag *agentHandler) handleAgentCancel(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
+}
+
+// handleAgentMessage records a free-form user message on a run, broadcasts it
+// to watchers, then routes it: a live run is steered in place, an `open` run is
+// woken via resume. Recording before routing keeps the transcript optimistic
+// (the user's words show immediately) and — in multi mode — makes the
+// RLS-checked InsertMessage the cross-org gate before SendMessage reaches the
+// process. A run that can take no message (terminal / no live process) is 409.
+func (ag *agentHandler) handleAgentMessage(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	runID := r.PathValue("runID")
+
+	var body struct {
+		Text string `json:"text"`
+	}
+	if !decodeJSON(w, r, &body, "") {
+		return
+	}
+	if strings.TrimSpace(body.Text) == "" {
+		badRequest(w, "text is required")
+		return
+	}
+
+	spawner := ag.spawner()
+	if spawner == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
+		return
+	}
+
+	// Record + broadcast the user's message before routing so the transcript
+	// reflects it regardless of where (or whether) it lands.
+	msg := &domain.AgentMessage{RunID: runID, Role: "user", Content: body.Text}
+	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		_, e := tx.AgentRuns.InsertMessage(r.Context(), orgID, msg)
+		return e
+	}); err != nil {
+		internalError(w, "agent", err)
+		return
+	}
+	ag.ws.Broadcast(websocket.Event{
+		Type:  "agent_message",
+		OrgID: orgID,
+		RunID: runID,
+		Data:  msg,
+	})
+
+	if err := spawner.SendMessage(r.Context(), orgID, runID, userID, body.Text); err != nil {
+		writeJSON(w, steerErrorStatus(err), map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
+}
+
+// handleAgentInterrupt stops a live run's current turn, leaving the process
+// alive for further input. A run with no live process is 409 — nothing to
+// interrupt.
+func (ag *agentHandler) handleAgentInterrupt(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireOrg(w, r); !ok {
+		return
+	}
+	runID := r.PathValue("runID")
+	spawner := ag.spawner()
+	if spawner == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
+		return
+	}
+	if err := spawner.Interrupt(r.Context(), runID); err != nil {
+		writeJSON(w, steerErrorStatus(err), map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "interrupted"})
+}
+
+// steerErrorStatus maps a SendMessage / Interrupt error to an HTTP status. A
+// run that can't take the op right now — no live process (ErrNoLiveProcess),
+// not steerable (ErrRunNotSteerable), or a lost resume race
+// (ErrRunNotResumable) — is 409 Conflict so the client refreshes and re-reads
+// the run's state. Everything else is a server-side 500.
+func steerErrorStatus(err error) int {
+	switch {
+	case errors.Is(err, delegate.ErrNoLiveProcess),
+		errors.Is(err, delegate.ErrRunNotSteerable),
+		errors.Is(err, delegate.ErrRunNotResumable):
+		return http.StatusConflict
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// handleAgentPermission answers a pending tool-permission prompt a run surfaced
+// via a `permission_request` WS event. Body: {"behavior":"allow"|"deny",
+// "message"?:string,"updated_input"?:object}. A request that isn't pending —
+// already answered, timed out, or never existed — is 404.
+func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
+	}
+	runID := r.PathValue("runID")
+	requestID := r.PathValue("requestID")
+
+	var body struct {
+		Behavior     string         `json:"behavior"`
+		Message      string         `json:"message"`
+		UpdatedInput map[string]any `json:"updated_input"`
+	}
+	if !decodeJSON(w, r, &body, "") {
+		return
+	}
+	if body.Behavior != "allow" && body.Behavior != "deny" {
+		badRequest(w, `behavior must be "allow" or "deny"`)
+		return
+	}
+
+	spawner := ag.spawner()
+	if spawner == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
+		return
+	}
+
+	err := spawner.ResolvePermission(orgID, runID, requestID, agentproc.PermissionDecision{
+		Behavior:     body.Behavior,
+		Message:      body.Message,
+		UpdatedInput: body.UpdatedInput,
+	})
+	switch {
+	case errors.Is(err, delegate.ErrNoPendingPermission):
+		notFound(w, "permission request")
+	case err != nil:
+		internalError(w, "agent", err)
+	default:
+		writeJSON(w, http.StatusOK, map[string]string{"status": "resolved"})
+	}
 }
 
 func (ag *agentHandler) handleAgentTakeover(w http.ResponseWriter, r *http.Request) {
