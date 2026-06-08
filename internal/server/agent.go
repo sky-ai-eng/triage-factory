@@ -129,11 +129,12 @@ func (ag *agentHandler) handleAgentCancel(w http.ResponseWriter, r *http.Request
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	runID := r.PathValue("runID")
-	if ag.spawner() == nil {
+	spawner := ag.spawner()
+	if spawner == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
 		return
 	}
-	if err := ag.spawner().Cancel(orgID, runID, userID); err != nil {
+	if err := spawner.Cancel(orgID, runID, userID); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
@@ -147,7 +148,8 @@ func (ag *agentHandler) handleAgentTakeover(w http.ResponseWriter, r *http.Reque
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	runID := r.PathValue("runID")
-	if ag.spawner() == nil {
+	spawner := ag.spawner()
+	if spawner == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
 		return
 	}
@@ -162,7 +164,7 @@ func (ag *agentHandler) handleAgentTakeover(w http.ResponseWriter, r *http.Reque
 	// (sets the takenOver flag and SIGKILLs the agent) the operation
 	// must run to completion or roll back cleanly; tying it to the
 	// request context would let a client disconnect destroy the run.
-	result, err := ag.spawner().Takeover(orgID, runID, baseDir, userID)
+	result, err := spawner.Takeover(orgID, runID, baseDir, userID)
 	if err != nil {
 		writeJSON(w, takeoverErrorStatus(err), map[string]string{"error": err.Error()})
 		return
@@ -199,11 +201,12 @@ func (ag *agentHandler) handleAgentRelease(w http.ResponseWriter, r *http.Reques
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	runID := r.PathValue("runID")
-	if ag.spawner() == nil {
+	spawner := ag.spawner()
+	if spawner == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
 		return
 	}
-	if err := ag.spawner().Release(orgID, runID, userID); err != nil {
+	if err := spawner.Release(orgID, runID, userID); err != nil {
 		writeJSON(w, releaseErrorStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
@@ -348,7 +351,8 @@ func (ag *agentHandler) handleAgentRespond(w http.ResponseWriter, r *http.Reques
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	runID := r.PathValue("runID")
-	if ag.spawner() == nil {
+	spawner := ag.spawner()
+	if spawner == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
 		return
 	}
@@ -422,7 +426,7 @@ func (ag *agentHandler) handleAgentRespond(w http.ResponseWriter, r *http.Reques
 	// silently mark the run cancelled while the resume goroutine
 	// still continues the Claude session.
 	agentText := domain.RenderYieldResponseForAgent(req, &resp)
-	if err := ag.spawner().ResumeAfterYield(orgID, runID, agentText, userID); err != nil {
+	if err := spawner.ResumeAfterYield(orgID, runID, agentText, userID); err != nil {
 		if errors.Is(err, delegate.ErrYieldNotResumable) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return

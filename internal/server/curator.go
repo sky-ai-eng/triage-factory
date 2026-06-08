@@ -57,7 +57,8 @@ func (ch *curatorHandler) handleCuratorSend(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	if ch.runtime() == nil {
+	cur := ch.runtime()
+	if cur == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "curator runtime not started"})
 		return
 	}
@@ -90,7 +91,7 @@ func (ch *curatorHandler) handleCuratorSend(w http.ResponseWriter, r *http.Reque
 	// goroutine attributes every per-turn write accordingly. Both org
 	// and user come from the request context — sentinel in local mode
 	// via the shim, real values in multi mode.
-	requestID, err := ch.runtime().SendMessage(r.Context(), projectID, orgID, userID, content)
+	requestID, err := cur.SendMessage(r.Context(), projectID, orgID, userID, content)
 	if err != nil {
 		internalError(w, "curator", err)
 		return
@@ -162,7 +163,8 @@ func (ch *curatorHandler) handleCuratorCancel(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
-	if ch.runtime() == nil {
+	cur := ch.runtime()
+	if cur == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "curator runtime not started"})
 		return
 	}
@@ -199,7 +201,7 @@ func (ch *curatorHandler) handleCuratorCancel(w http.ResponseWriter, r *http.Req
 	// status when it observes ctx.Err(); the status filter in
 	// MarkCuratorRequestCancelledIfActive makes the second write
 	// a no-op.
-	ch.runtime().Cancel(projectID)
+	cur.Cancel(projectID)
 	if _, err := db.MarkCuratorRequestCancelledIfActive(ch.db, inFlight.ID, "user cancelled"); err != nil {
 		internalError(w, "curator", err)
 		return

@@ -116,7 +116,8 @@ func (rh *reviewsHandler) handleReviewSubmit(w http.ResponseWriter, r *http.Requ
 	userID := ClaimsFrom(r.Context()).Subject
 	reviewID := r.PathValue("id")
 
-	if rh.ghClient() == nil {
+	gh := rh.ghClient()
+	if gh == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub credentials not configured"})
 		return
 	}
@@ -168,7 +169,7 @@ func (rh *reviewsHandler) handleReviewSubmit(w http.ResponseWriter, r *http.Requ
 	body := review.ReviewBody + agentmeta.Build(rh.agentRuns, orgID, review.RunID, "review")
 
 	// Submit to GitHub
-	ghReviewID, actualEvent, err := rh.ghClient().SubmitReview(
+	ghReviewID, actualEvent, err := gh.SubmitReview(
 		review.Owner, review.Repo, review.PRNumber,
 		review.CommitSHA, review.ReviewEvent, body, ghComments,
 	)
@@ -256,13 +257,14 @@ func (rh *reviewsHandler) handleReviewSubmit(w http.ResponseWriter, r *http.Requ
 			RunID: review.RunID,
 			Data:  map[string]string{"status": "completed"},
 		})
-		if blueprintRun != nil && rh.spawner() != nil {
-			rh.spawner().ResumeBlueprintAfterApproval(orgID, review.RunID, userID)
-		} else if rh.spawner() != nil {
+		spawner := rh.spawner()
+		if blueprintRun != nil && spawner != nil {
+			spawner.ResumeBlueprintAfterApproval(orgID, review.RunID, userID)
+		} else if spawner != nil {
 			// Standalone run: approval is its terminal, so drop the durable
 			// workspace snapshot taken when it parked in pending_approval. The
 			// blueprint mirror of this cleanup lives in terminateBlueprint.
-			rh.spawner().DiscardWorkspaceSnapshot(orgID, review.RunID)
+			spawner.DiscardWorkspaceSnapshot(orgID, review.RunID)
 		}
 	}
 
@@ -437,7 +439,8 @@ func (rh *reviewsHandler) handleReviewDiff(w http.ResponseWriter, r *http.Reques
 	userID := ClaimsFrom(r.Context()).Subject
 	reviewID := r.PathValue("id")
 
-	if rh.ghClient() == nil {
+	gh := rh.ghClient()
+	if gh == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub credentials not configured"})
 		return
 	}
@@ -457,7 +460,7 @@ func (rh *reviewsHandler) handleReviewDiff(w http.ResponseWriter, r *http.Reques
 	}
 
 	file := r.URL.Query().Get("file")
-	diff, err := rh.ghClient().GetPRDiff(review.Owner, review.Repo, review.PRNumber, file)
+	diff, err := gh.GetPRDiff(review.Owner, review.Repo, review.PRNumber, file)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
 		return

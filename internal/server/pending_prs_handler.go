@@ -238,7 +238,8 @@ func (pp *pendingPRsHandler) handlePendingPRSubmit(w http.ResponseWriter, r *htt
 	userID := ClaimsFrom(r.Context()).Subject
 	id := r.PathValue("id")
 
-	if pp.ghClient() == nil {
+	gh := pp.ghClient()
+	if gh == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub credentials not configured"})
 		return
 	}
@@ -296,7 +297,7 @@ func (pp *pendingPRsHandler) handlePendingPRSubmit(w http.ResponseWriter, r *htt
 	if req.Draft != nil {
 		draft = *req.Draft
 	}
-	number, htmlURL, err := pp.ghClient().CreatePR(pr.Owner, pr.Repo, pr.HeadBranch, pr.BaseBranch, pr.Title, finalBody, draft)
+	number, htmlURL, err := gh.CreatePR(pr.Owner, pr.Repo, pr.HeadBranch, pr.BaseBranch, pr.Title, finalBody, draft)
 	if err != nil {
 		// Release the guard so the user can retry. Pending row stays
 		// in place — they may want to edit title/body or push more
@@ -397,13 +398,14 @@ func (pp *pendingPRsHandler) handlePendingPRSubmit(w http.ResponseWriter, r *htt
 			RunID: pr.RunID,
 			Data:  map[string]string{"status": "completed"},
 		})
-		if blueprintRun != nil && pp.spawner() != nil {
-			pp.spawner().ResumeBlueprintAfterApproval(orgID, pr.RunID, userID)
-		} else if pp.spawner() != nil {
+		spawner := pp.spawner()
+		if blueprintRun != nil && spawner != nil {
+			spawner.ResumeBlueprintAfterApproval(orgID, pr.RunID, userID)
+		} else if spawner != nil {
 			// Standalone run: approval is its terminal, so drop the durable
 			// workspace snapshot taken when it parked in pending_approval. The
 			// blueprint mirror of this cleanup lives in terminateBlueprint.
-			pp.spawner().DiscardWorkspaceSnapshot(orgID, pr.RunID)
+			spawner.DiscardWorkspaceSnapshot(orgID, pr.RunID)
 		}
 	}
 

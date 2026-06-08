@@ -873,7 +873,8 @@ func (bh *blueprintsHandler) handleBlueprintRunCancel(w http.ResponseWriter, r *
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	if bh.spawner() == nil {
+	spawner := bh.spawner()
+	if spawner == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
 		return
 	}
@@ -900,7 +901,7 @@ func (bh *blueprintsHandler) handleBlueprintRunCancel(w http.ResponseWriter, r *
 		return
 	}
 
-	if err := bh.spawner().CancelBlueprint(orgID, id, userID); err != nil {
+	if err := spawner.CancelBlueprint(orgID, id, userID); err != nil {
 		internalError(w, "blueprints", err)
 		return
 	}
