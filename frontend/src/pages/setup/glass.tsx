@@ -50,6 +50,18 @@ export function GlassBackdrop() {
         }}
         {...drift([0, -38, 0], [0, -30, 0], 36)}
       />
+      {/* A cool counterpoint to the two warm orbs — keeps the field from going
+          one-note amber and gives the glass a warm→cool gradient to refract
+          (the Halo/Transcendence depth). Very low opacity; drifts on its own
+          slow clock so the three never beat in sync. */}
+      <motion.div
+        className="absolute left-1/2 top-1/4 h-[38rem] w-[38rem] -translate-x-1/2 rounded-full blur-[170px]"
+        style={{
+          background: 'radial-gradient(circle, rgba(99,130,175,1) 0%, transparent 70%)',
+          opacity: 0.07,
+        }}
+        {...drift([0, 34, 0], [0, -26, 0], 44)}
+      />
     </div>
   )
 }

@@ -176,6 +176,9 @@ export default function Board() {
   // itself (via useDroppable's isOver), so we don't need to track it
   // up here anymore.
   const [activeId, setActiveId] = useState<string | null>(null)
+  // The column the cursor is over — drives the depth-of-field focal plane
+  // (every other lane recedes). Suppressed while dragging.
+  const [hoveredCol, setHoveredCol] = useState<ColumnId | null>(null)
 
   // Delegate flow
   const [showPromptPicker, setShowPromptPicker] = useState(false)
@@ -536,17 +539,6 @@ export default function Board() {
     }
   }, [claimed, inProgress, inReview, agentRuns])
 
-  const totalCounts = useMemo<Record<ColumnId, number>>(
-    () => ({
-      queued: queued.length,
-      claimed: claimed.length,
-      in_progress: inProgress.length,
-      in_review: inReview.length,
-      done: done.length,
-    }),
-    [queued, claimed, inProgress, inReview, done],
-  )
-
   const rawByColumn = useMemo<Record<ColumnId, Task[]>>(
     () => ({
       queued,
@@ -633,6 +625,7 @@ export default function Board() {
 
   const handleDragStart = (event: DragStartEvent) => {
     setActiveId(String(event.active.id))
+    setHoveredCol(null) // no focal-plane recede mid-drag
   }
 
   const handleDragOver = (_event: DragOverEvent) => {
@@ -900,10 +893,14 @@ export default function Board() {
             position (set on mount) shows Claimed → In Review; user scrolls left
             for Queued, right for Done. The dynamic mask dissolves columns into
             the page at whichever edge still has more to scroll. */}
+        {/* -mx-8 bleeds the lane strip past the page's px-8 gutter to the
+            viewport edges (F): columns dissolve into the chrome at the fade
+            instead of stopping at a margin. The banner + team filter above keep
+            the gutter so controls stay aligned. */}
         <div
           ref={scrollRef}
           onScroll={recomputeFade}
-          className="min-h-0 flex-1 overflow-x-auto pb-2"
+          className="-mx-8 min-h-0 flex-1 overflow-x-auto pb-2"
           style={fadeMask}
         >
           <div className="flex h-full gap-6 px-1">
@@ -913,9 +910,10 @@ export default function Board() {
                 id={colId}
                 index={i}
                 active={columnActive[colId]}
+                recede={hoveredCol !== null && hoveredCol !== colId && !activeId}
+                onMouseEnter={() => !activeId && setHoveredCol(colId)}
+                onMouseLeave={() => setHoveredCol((c) => (c === colId ? null : c))}
                 title={COLUMN_TITLES[colId]}
-                totalCount={totalCounts[colId]}
-                filteredCount={filtered[colId].length}
                 tasks={rawByColumn[colId]}
                 filter={filters[colId]}
                 onFilterChange={(next) => setFilters((prev) => ({ ...prev, [colId]: next }))}

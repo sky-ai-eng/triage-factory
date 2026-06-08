@@ -14,31 +14,35 @@ import {
 } from './columnFilter'
 import type { Task } from '../../types'
 
-// BoardColumn is the board's column shell, redressed in the liquid-glass
-// material the setup/settings flows established: a frosted slab (surface-overlay
-// over a glass edge, backdrop-blurred) that fills to the bottom of the page and
-// floats on the ambient GlassBackdrop. Two glow layers ride over it —
-//   • an ambient breathing glow when an autonomous run is live in this lane
-//     (you see *where* the factory is working at a glance), and
-//   • the drag-over receive glow that ramps in under bodyEase.
-// Both are non-clipping overlay siblings so their bloom spills past the slab.
+// BoardColumn is the board's column shell in the borderless liquid-glass
+// idiom: no outlines anywhere — panes separate by depth and light, not lines.
+// Each column is a frosted slab (surface-overlay, backdrop-blurred) that floats
+// on the ambient GlassBackdrop via a soft drop-shadow + a 1px specular top edge,
+// with a slow living sheen catching the top. Several overlay layers ride over
+// the slab (all non-clipping siblings so their bloom spills past it):
+//   • a top specular sheen that slowly breathes (the pane catches light),
+//   • an ambient breathing glow when an autonomous run is live in this lane,
+//   • a depth-of-field veil (backdrop-blur + dim) that recedes the column when
+//     another lane has focus — a camera focal plane across the board, and
+//   • the drag-over receive glow.
 //
-// Search + structured filters live in a sticky frosted header *inside* the
-// scroll body (cards slide under it). The search field is always visible; the
-// sliders button *melts the header downward* — the filter criteria (sort,
-// source, event-type, created-date range) animate open in an expanding panel
-// glued beneath the search row, and clicking again shrinks it back. No detached
-// popover. Filter state is owned by the parent (Board.tsx) and persisted per
-// column; the apply/sort pass lives in ./columnFilter.ts so this file exports
-// only a component (React Fast Refresh constraint).
+// IMPORTANT: the recede blur is a `backdrop-filter` overlay *in front* of the
+// column, never a CSS `filter`/`transform` on an ancestor — either of those
+// would establish a new backdrop root and silently kill the slab's own frost at
+// rest. Opacity dimming is safe (only active while receding).
+//
+// Search + structured filters live in a sticky frosted header inside the scroll
+// body; the sliders button melts the header downward into an expanding filter
+// panel. State is owned by Board.tsx; the apply/sort pass lives in
+// ./columnFilter.ts so this file exports only a component (Fast Refresh).
 
 const searchInputClass =
-  'w-full rounded-xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/60 py-1.5 pl-8 pr-7 text-[12px] text-text-primary placeholder:text-text-tertiary backdrop-blur-md outline-none transition-[border-color,background-color,box-shadow] focus:border-accent/40 focus:bg-[var(--color-surface-overlay)] focus:shadow-[0_0_0_3px_var(--color-accent-soft)]'
+  'w-full rounded-xl bg-[var(--color-surface-overlay)]/70 py-1.5 pl-8 pr-7 text-[12px] text-text-primary placeholder:text-text-tertiary backdrop-blur-md outline-none transition-[background-color,box-shadow] focus:bg-[var(--color-surface-overlay)] focus:shadow-[0_0_0_3px_var(--color-accent-soft)]'
 
 const dateInputClass =
-  'flex-1 rounded-lg border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/60 px-2 py-1 text-[11px] text-text-primary outline-none transition-colors focus:border-accent/40'
+  'flex-1 rounded-lg bg-[var(--color-surface-overlay)]/70 px-2 py-1 text-[11px] text-text-primary outline-none transition-[box-shadow] focus:shadow-[0_0_0_2px_var(--color-accent-soft)]'
 const timeInputClass =
-  'w-[5.5rem] rounded-lg border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/60 px-2 py-1 text-[11px] text-text-primary outline-none transition-colors focus:border-accent/40 disabled:opacity-40'
+  'w-[5.5rem] rounded-lg bg-[var(--color-surface-overlay)]/70 px-2 py-1 text-[11px] text-text-primary outline-none transition-[box-shadow] focus:shadow-[0_0_0_2px_var(--color-accent-soft)] disabled:opacity-40'
 
 // Split / join the stored datetime-local string ("YYYY-MM-DDTHH:mm") into its
 // date and time halves. The time is optional in the UI — a bare date stores
@@ -56,34 +60,37 @@ function joinDT(date: string, time: string): string {
 interface Props {
   id: string
   title: string
-  totalCount: number
-  filteredCount: number
   tasks: Task[] // raw list, used to populate the event-type chips
   filter: ColumnFilterState
   onFilterChange: (next: ColumnFilterState) => void
   // Optional header slot for column-specific affordances (e.g. the
   // snoozed toggle on Queued, "see more" on Done). Renders to the
-  // right of the title/count.
+  // right of the title.
   headerExtra?: React.ReactNode
   // Position in the row (0-based) — drives the staggered mount reveal.
   index?: number
   // True when ≥1 autonomous run is actively turning in this lane — lights the
   // ambient breathing glow.
   active?: boolean
+  // True when another column has focus — this one recedes into depth.
+  recede?: boolean
+  onMouseEnter?: () => void
+  onMouseLeave?: () => void
   children: React.ReactNode
 }
 
 export default function BoardColumn({
   id,
   title,
-  totalCount,
-  filteredCount,
   tasks,
   filter,
   onFilterChange,
   headerExtra,
   index = 0,
   active = false,
+  recede = false,
+  onMouseEnter,
+  onMouseLeave,
   children,
 }: Props) {
   const { setNodeRef, isOver } = useDroppable({ id, data: { type: 'column' } })
@@ -101,127 +108,167 @@ export default function BoardColumn({
     return Array.from(seen).sort()
   }, [tasks])
 
-  const showFilteredCount = filteredCount !== totalCount
   const hasFilters = filterIsActive(filter)
 
   // SKY-330: fixed 520px width — the board is horizontally scrollable, so a
   // viewport-relative width would compress cards as columns scroll into view.
   return (
     <motion.div
-      className="flex h-full w-[520px] shrink-0 flex-col"
+      className="h-full w-[520px] shrink-0"
       initial={reduce ? false : { opacity: 0, y: 14 }}
       animate={{ opacity: 1, y: 0 }}
       transition={reduce ? { duration: 0 } : { ...bodyEase, delay: index * 0.05 }}
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
     >
-      <div className="mb-3 flex items-center justify-between px-1">
-        <div className="flex items-center gap-2">
+      {/* Depth-of-field dim. Opacity only — never filter/transform here (would
+          kill the slab's backdrop frost). The blur half of the focal-plane
+          effect comes from the veil overlay below. */}
+      <motion.div
+        className="flex h-full flex-col"
+        animate={{ opacity: recede ? 0.62 : 1 }}
+        transition={reduce ? { duration: 0 } : bodyEase}
+      >
+        <div className="mb-3 flex items-center justify-between px-1">
           <h2 className="text-[13px] font-medium tracking-tight text-text-secondary">{title}</h2>
-          <span className="rounded-full border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/60 px-2 py-0.5 text-[11px] text-text-tertiary backdrop-blur-md">
-            {showFilteredCount ? `${filteredCount}/${totalCount}` : totalCount}
-          </span>
+          {headerExtra}
         </div>
-        {headerExtra}
-      </div>
 
-      {/* Droppable wrapper does NOT clip — so the glow overlays' bloom spills
-          past the slab edge. */}
-      <div ref={setNodeRef} className="relative min-h-0 flex-1">
-        <div className="h-full overflow-y-auto rounded-3xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/50 backdrop-blur-xl">
-          {/* Sticky frosted control header — cards scroll beneath it. The
-              filter panel melts down from here on demand. */}
-          <div className="sticky top-0 z-10 border-b border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/70 px-3 pb-2.5 pt-3 backdrop-blur-md">
-            <div className="flex items-center gap-2">
-              <div className="relative flex-1">
-                <Search
-                  size={13}
-                  aria-hidden
-                  className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-text-tertiary"
-                />
-                <input
-                  type="text"
-                  placeholder="Search…"
-                  value={filter.search}
-                  onChange={(e) => onFilterChange({ ...filter, search: e.target.value })}
-                  className={searchInputClass}
-                />
-                {filter.search && (
-                  <button
-                    type="button"
-                    aria-label="Clear search"
-                    onClick={() => onFilterChange({ ...filter, search: '' })}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-text-tertiary transition-colors hover:text-text-secondary"
-                  >
-                    <X size={12} />
-                  </button>
-                )}
-              </div>
-              <button
-                type="button"
-                aria-label="Sort & filter"
-                aria-expanded={controlsOpen}
-                onClick={() => setControlsOpen((v) => !v)}
-                className={`relative shrink-0 rounded-xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/60 p-1.5 backdrop-blur-md transition-colors ${
-                  controlsOpen ? 'text-accent' : 'text-text-tertiary hover:text-text-secondary'
-                }`}
-              >
-                <SlidersHorizontal size={14} />
-                {hasFilters && (
-                  <span
+        {/* Droppable wrapper does NOT clip — overlay bloom spills past the slab. */}
+        <div ref={setNodeRef} className="relative min-h-0 flex-1">
+          {/* The slab: borderless. A soft drop-shadow floats it; a 1px inset
+              top highlight is its only "edge" — a specular catch, not an outline. */}
+          <div
+            className="h-full overflow-y-auto rounded-3xl bg-[var(--color-surface-overlay)]/50 backdrop-blur-xl"
+            style={{
+              boxShadow: '0 26px 70px -32px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.14)',
+            }}
+          >
+            {/* Sticky frosted control header — no border, cards scroll beneath
+                it; the filter panel melts down from here on demand. */}
+            <div className="sticky top-0 z-10 bg-[var(--color-surface-overlay)]/70 px-3 pb-2.5 pt-3 backdrop-blur-md">
+              <div className="flex items-center gap-2">
+                <div className="relative flex-1">
+                  <Search
+                    size={13}
                     aria-hidden
-                    className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-accent"
+                    className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-text-tertiary"
                   />
-                )}
-              </button>
+                  <input
+                    type="text"
+                    placeholder="Search…"
+                    value={filter.search}
+                    onChange={(e) => onFilterChange({ ...filter, search: e.target.value })}
+                    className={searchInputClass}
+                  />
+                  {filter.search && (
+                    <button
+                      type="button"
+                      aria-label="Clear search"
+                      onClick={() => onFilterChange({ ...filter, search: '' })}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-text-tertiary transition-colors hover:text-text-secondary"
+                    >
+                      <X size={12} />
+                    </button>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  aria-label="Sort & filter"
+                  aria-expanded={controlsOpen}
+                  onClick={() => setControlsOpen((v) => !v)}
+                  className={`relative shrink-0 rounded-xl bg-[var(--color-surface-overlay)]/70 p-1.5 backdrop-blur-md transition-colors ${
+                    controlsOpen ? 'text-accent' : 'text-text-tertiary hover:text-text-secondary'
+                  }`}
+                >
+                  <SlidersHorizontal size={14} />
+                  {hasFilters && (
+                    <span
+                      aria-hidden
+                      className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-accent"
+                    />
+                  )}
+                </button>
+              </div>
+
+              {/* The melt-down: height + opacity animate from the search row. */}
+              <motion.div
+                initial={false}
+                animate={{ height: controlsOpen ? 'auto' : 0, opacity: controlsOpen ? 1 : 0 }}
+                transition={reduce ? { duration: 0 } : bodyEase}
+                className="overflow-hidden"
+              >
+                <div className="space-y-3 pt-3">
+                  <FilterControls
+                    filter={filter}
+                    onChange={onFilterChange}
+                    eventTypes={eventTypes}
+                  />
+                </div>
+              </motion.div>
             </div>
 
-            {/* The melt-down: height + opacity animate from the search row,
-                concentrating the filter criteria in the extended bar. */}
-            <motion.div
-              initial={false}
-              animate={{ height: controlsOpen ? 'auto' : 0, opacity: controlsOpen ? 1 : 0 }}
-              transition={reduce ? { duration: 0 } : bodyEase}
-              className="overflow-hidden"
-            >
-              <div className="space-y-3 pt-3">
-                <FilterControls filter={filter} onChange={onFilterChange} eventTypes={eventTypes} />
-              </div>
-            </motion.div>
+            <div className="space-y-3 px-3 pb-3 pt-2">{children}</div>
           </div>
 
-          <div className="space-y-3 px-3 pb-3 pt-2">{children}</div>
+          {/* Top specular sheen — the pane catches light, slowly breathing. */}
+          <motion.div
+            aria-hidden
+            className="pointer-events-none absolute inset-x-0 top-0 h-28 rounded-t-3xl"
+            style={{
+              background: 'linear-gradient(to bottom, rgba(255,255,255,0.10), transparent)',
+            }}
+            initial={false}
+            animate={{ opacity: reduce ? 0.5 : [0.35, 0.6, 0.35] }}
+            transition={
+              reduce ? { duration: 0 } : { duration: 9, repeat: Infinity, ease: 'easeInOut' }
+            }
+          />
+
+          {/* Depth-of-field veil — blurs + faintly dims this column from in
+              front when another lane has focus. backdrop-filter in front, so the
+              slab's own frost is untouched at rest. */}
+          <motion.div
+            aria-hidden
+            className="pointer-events-none absolute inset-0 rounded-3xl backdrop-blur-[3px]"
+            initial={false}
+            animate={{ opacity: recede ? 1 : 0 }}
+            transition={reduce ? { duration: 0 } : bodyEase}
+            style={{ backgroundColor: 'rgba(20,22,30,0.05)' }}
+          />
+
+          {/* Ambient "work is live here" glow — a slow breathing ring,
+              suppressed while the receive glow is showing. */}
+          <motion.div
+            aria-hidden
+            className="pointer-events-none absolute inset-0 rounded-3xl"
+            initial={false}
+            animate={{ opacity: isOver ? 0 : active ? (reduce ? 0.22 : [0, 0.45, 0]) : 0 }}
+            transition={
+              isOver || !active || reduce
+                ? bodyEase
+                : { duration: 4.5, repeat: Infinity, ease: 'easeInOut' }
+            }
+            style={{
+              boxShadow: 'inset 0 0 0 1px var(--color-accent), 0 0 38px -14px var(--color-accent)',
+            }}
+          />
+
+          {/* Drag-over receive glow — the target lane breathes toward you. */}
+          <motion.div
+            aria-hidden
+            className="pointer-events-none absolute inset-0 rounded-3xl"
+            initial={false}
+            animate={{ opacity: isOver ? 1 : 0 }}
+            transition={reduce ? { duration: 0 } : bodyEase}
+            style={{
+              background: 'var(--color-accent-soft)',
+              boxShadow:
+                'inset 0 0 0 1px var(--color-accent), 0 24px 60px -24px var(--color-accent)',
+            }}
+          />
         </div>
-
-        {/* Ambient "work is live here" glow — a slow breathing ring, suppressed
-            while the receive glow is showing. Ring/bloom only (no fill), so it
-            never washes the cards. */}
-        <motion.div
-          aria-hidden
-          className="pointer-events-none absolute inset-0 rounded-3xl"
-          initial={false}
-          animate={{ opacity: isOver ? 0 : active ? (reduce ? 0.22 : [0, 0.45, 0]) : 0 }}
-          transition={
-            isOver || !active || reduce
-              ? bodyEase
-              : { duration: 4.5, repeat: Infinity, ease: 'easeInOut' }
-          }
-          style={{
-            boxShadow: 'inset 0 0 0 1px var(--color-accent), 0 0 38px -14px var(--color-accent)',
-          }}
-        />
-
-        {/* Drag-over receive glow — the target lane breathes toward you. */}
-        <motion.div
-          aria-hidden
-          className="pointer-events-none absolute inset-0 rounded-3xl"
-          initial={false}
-          animate={{ opacity: isOver ? 1 : 0 }}
-          transition={reduce ? { duration: 0 } : bodyEase}
-          style={{
-            background: 'var(--color-accent-soft)',
-            boxShadow: 'inset 0 0 0 1px var(--color-accent), 0 24px 60px -24px var(--color-accent)',
-          }}
-        />
-      </div>
+      </motion.div>
     </motion.div>
   )
 }
@@ -237,7 +284,7 @@ function pill(selected: boolean): string {
   return `rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
     selected
       ? 'bg-accent/[0.14] text-accent'
-      : 'border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/60 text-text-tertiary hover:text-text-secondary'
+      : 'bg-[var(--color-surface-overlay)]/70 text-text-tertiary hover:text-text-secondary'
   }`
 }
 
