@@ -1,16 +1,14 @@
-import { useEffect, useMemo, useRef, useState, type RefObject } from 'react'
+import { useMemo, useState } from 'react'
 import { useDroppable } from '@dnd-kit/core'
-import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
+import { motion, useReducedMotion } from 'motion/react'
 import { ArrowDown, ArrowUp, Search, SlidersHorizontal, X } from 'lucide-react'
 import EventBadge from '../EventBadge'
 import { bodyEase } from '../../pages/setup/glassStyle'
 import {
   emptyFilter,
   filterIsActive,
-  OLDER_THAN_LABEL,
   SORT_LABEL,
   type ColumnFilterState,
-  type OlderThan,
   type SortKey,
   type SourceFilter,
 } from './columnFilter'
@@ -26,14 +24,19 @@ import type { Task } from '../../types'
 // Both are non-clipping overlay siblings so their bloom spills past the slab.
 //
 // Search + structured filters live in a sticky frosted header *inside* the
-// scroll body (cards slide under it) — the search field is always visible; the
-// sliders button blooms a glass popover with sort + source + event-type +
-// older-than. Filter state is owned by the parent (Board.tsx) and persisted per
+// scroll body (cards slide under it). The search field is always visible; the
+// sliders button *melts the header downward* — the filter criteria (sort,
+// source, event-type, created-date range) animate open in an expanding panel
+// glued beneath the search row, and clicking again shrinks it back. No detached
+// popover. Filter state is owned by the parent (Board.tsx) and persisted per
 // column; the apply/sort pass lives in ./columnFilter.ts so this file exports
-// only components (React Fast Refresh constraint).
+// only a component (React Fast Refresh constraint).
 
 const searchInputClass =
   'w-full rounded-xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/60 py-1.5 pl-8 pr-7 text-[12px] text-text-primary placeholder:text-text-tertiary backdrop-blur-md outline-none transition-[border-color,background-color,box-shadow] focus:border-accent/40 focus:bg-[var(--color-surface-overlay)] focus:shadow-[0_0_0_3px_var(--color-accent-soft)]'
+
+const dateInputClass =
+  'w-full rounded-lg border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/60 px-2 py-1 text-[11px] text-text-primary outline-none transition-colors focus:border-accent/40'
 
 interface Props {
   id: string
@@ -72,7 +75,6 @@ export default function BoardColumn({
   const reduce = !!useReducedMotion()
 
   const [controlsOpen, setControlsOpen] = useState(false)
-  const filterBtnRef = useRef<HTMLButtonElement>(null)
 
   // Event-type chips reflect the unfiltered set so the user always sees what
   // types exist in this column, even after filtering them out.
@@ -107,10 +109,11 @@ export default function BoardColumn({
       </div>
 
       {/* Droppable wrapper does NOT clip — so the glow overlays' bloom spills
-          past the slab edge and the filter popover escapes the scroll body. */}
+          past the slab edge. */}
       <div ref={setNodeRef} className="relative min-h-0 flex-1">
         <div className="h-full overflow-y-auto rounded-3xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/50 backdrop-blur-xl">
-          {/* Sticky frosted control header — cards scroll beneath it. */}
+          {/* Sticky frosted control header — cards scroll beneath it. The
+              filter panel melts down from here on demand. */}
           <div className="sticky top-0 z-10 border-b border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/70 px-3 pb-2.5 pt-3 backdrop-blur-md">
             <div className="flex items-center gap-2">
               <div className="relative flex-1">
@@ -138,7 +141,6 @@ export default function BoardColumn({
                 )}
               </div>
               <button
-                ref={filterBtnRef}
                 type="button"
                 aria-label="Sort & filter"
                 aria-expanded={controlsOpen}
@@ -158,6 +160,19 @@ export default function BoardColumn({
                 )}
               </button>
             </div>
+
+            {/* The melt-down: height + opacity animate from the search row,
+                concentrating the filter criteria in the extended bar. */}
+            <motion.div
+              initial={false}
+              animate={{ height: controlsOpen ? 'auto' : 0, opacity: controlsOpen ? 1 : 0 }}
+              transition={reduce ? { duration: 0 } : bodyEase}
+              className="overflow-hidden"
+            >
+              <div className="space-y-3 pt-3">
+                <FilterControls filter={filter} onChange={onFilterChange} eventTypes={eventTypes} />
+              </div>
+            </motion.div>
           </div>
 
           <div className="space-y-3 px-3 pb-3 pt-2">{children}</div>
@@ -193,18 +208,6 @@ export default function BoardColumn({
             boxShadow: 'inset 0 0 0 1px var(--color-accent), 0 24px 60px -24px var(--color-accent)',
           }}
         />
-
-        <AnimatePresence>
-          {controlsOpen && (
-            <FilterPopover
-              filter={filter}
-              onChange={onFilterChange}
-              eventTypes={eventTypes}
-              anchorRef={filterBtnRef}
-              onClose={() => setControlsOpen(false)}
-            />
-          )}
-        </AnimatePresence>
       </div>
     </motion.div>
   )
@@ -216,7 +219,6 @@ const SOURCES: { value: SourceFilter; label: string }[] = [
   { value: 'github', label: 'GitHub' },
   { value: 'jira', label: 'Jira' },
 ]
-const AGES: OlderThan[] = ['', '1d', '3d', '7d']
 
 function pill(selected: boolean): string {
   return `rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
@@ -235,62 +237,34 @@ function Group({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
-// FilterPopover is the glass sort+filter panel the sliders button blooms. It
-// renders in the (non-clipping) droppable wrapper rather than the scroll body,
-// so the scroll container's overflow doesn't clip it. Controlled — every
-// mutation flows straight back through onChange.
-function FilterPopover({
+// FilterControls is the sort+filter body that melts open inside the column
+// header. Controlled — every mutation flows straight back through onChange.
+function FilterControls({
   filter,
   onChange,
   eventTypes,
-  anchorRef,
-  onClose,
 }: {
   filter: ColumnFilterState
   onChange: (next: ColumnFilterState) => void
   eventTypes: string[]
-  anchorRef: RefObject<HTMLButtonElement | null>
-  onClose: () => void
 }) {
-  const ref = useRef<HTMLDivElement>(null)
-  const reduce = !!useReducedMotion()
-
-  useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      const t = e.target as Node
-      if (ref.current?.contains(t)) return
-      if (anchorRef.current?.contains(t)) return
-      onClose()
-    }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [anchorRef, onClose])
-
+  // Empty eventTypes = "all on". The first click off the all-on state switches
+  // to an explicit set of everything-but-this; re-selecting every type collapses
+  // back to the empty (all) sentinel.
+  const allOn = filter.eventTypes.length === 0
+  const isOn = (et: string) => allOn || filter.eventTypes.includes(et)
   const toggleEvent = (et: string) => {
+    if (allOn) {
+      onChange({ ...filter, eventTypes: eventTypes.filter((x) => x !== et) })
+      return
+    }
     const has = filter.eventTypes.includes(et)
-    onChange({
-      ...filter,
-      eventTypes: has ? filter.eventTypes.filter((x) => x !== et) : [...filter.eventTypes, et],
-    })
+    const next = has ? filter.eventTypes.filter((x) => x !== et) : [...filter.eventTypes, et]
+    onChange({ ...filter, eventTypes: next.length === eventTypes.length ? [] : next })
   }
 
   return (
-    <motion.div
-      ref={ref}
-      initial={reduce ? { opacity: 0 } : { opacity: 0, scale: 0.96, y: -4 }}
-      animate={{ opacity: 1, scale: 1, y: 0 }}
-      exit={reduce ? { opacity: 0 } : { opacity: 0, scale: 0.96, y: -4 }}
-      transition={reduce ? { duration: 0 } : bodyEase}
-      style={{ transformOrigin: 'top right' }}
-      className="absolute right-3 top-[3.25rem] z-30 w-72 space-y-4 rounded-2xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)] p-4 shadow-[0_24px_60px_-24px_rgba(0,0,0,0.5)] backdrop-blur-xl"
-    >
+    <>
       <Group label="Sort">
         {SORT_KEYS.map((k) => (
           <button
@@ -332,56 +306,71 @@ function FilterPopover({
 
       {eventTypes.length > 0 && (
         <Group label="Event type">
-          {eventTypes.map((et) => {
-            const selected = filter.eventTypes.includes(et)
-            return (
-              <button
-                key={et}
-                type="button"
-                aria-pressed={selected}
-                onClick={() => toggleEvent(et)}
-                title={et}
-                className={`rounded-full p-0.5 transition ${
-                  selected ? 'ring-2 ring-accent/50' : 'opacity-60 hover:opacity-100'
-                }`}
-              >
-                <EventBadge eventType={et} compact />
-              </button>
-            )
-          })}
+          {eventTypes.map((et) => (
+            <button
+              key={et}
+              type="button"
+              aria-pressed={isOn(et)}
+              onClick={() => toggleEvent(et)}
+              title={et}
+              // Selection is an adaptation of the badge itself — off types dim
+              // and desaturate rather than wearing a ring.
+              className={`rounded transition-[opacity,filter] duration-200 ${
+                isOn(et) ? '' : 'opacity-40 grayscale'
+              }`}
+            >
+              <EventBadge eventType={et} compact />
+            </button>
+          ))}
         </Group>
       )}
 
-      <Group label="Age">
-        {AGES.map((a) => (
+      <Group label="Created">
+        <div className="flex w-full items-end gap-2">
+          <label className="flex-1">
+            <span className="mb-1 block text-[10px] text-text-tertiary">After</span>
+            <input
+              type="datetime-local"
+              value={filter.after}
+              max={filter.before || undefined}
+              onChange={(e) => onChange({ ...filter, after: e.target.value })}
+              style={{ colorScheme: 'light dark' }}
+              className={dateInputClass}
+            />
+          </label>
+          <label className="flex-1">
+            <span className="mb-1 block text-[10px] text-text-tertiary">Before</span>
+            <input
+              type="datetime-local"
+              value={filter.before}
+              min={filter.after || undefined}
+              onChange={(e) => onChange({ ...filter, before: e.target.value })}
+              style={{ colorScheme: 'light dark' }}
+              className={dateInputClass}
+            />
+          </label>
+        </div>
+        {(filter.after || filter.before) && (
           <button
-            key={a || 'any'}
             type="button"
-            onClick={() => onChange({ ...filter, olderThan: a })}
-            className={pill(filter.olderThan === a)}
+            onClick={() => onChange({ ...filter, after: '', before: '' })}
+            className="text-[11px] text-text-tertiary transition-colors hover:text-text-secondary"
           >
-            {OLDER_THAN_LABEL[a]}
+            Clear dates
           </button>
-        ))}
+        )}
       </Group>
 
-      <div className="flex items-center justify-between pt-1">
+      <div className="flex justify-end pt-1">
         <button
           type="button"
           disabled={!filterIsActive(filter)}
           onClick={() => onChange({ ...emptyFilter, search: filter.search })}
           className="text-[11px] text-text-tertiary transition-colors hover:text-text-secondary disabled:opacity-40"
         >
-          Reset
-        </button>
-        <button
-          type="button"
-          onClick={onClose}
-          className="rounded-full bg-accent/[0.12] px-3 py-1 text-[11px] font-medium text-accent transition-colors hover:bg-accent/[0.18]"
-        >
-          Done
+          Reset filters
         </button>
       </div>
-    </motion.div>
+    </>
   )
 }

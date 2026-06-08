@@ -14,15 +14,17 @@ export type SourceFilter = 'all' | 'github' | 'jira'
 // thing that silently reshuffles a freshly-loaded board.
 export type SortKey = 'default' | 'title' | 'created' | 'event_type' | 'claimee'
 export type SortDir = 'asc' | 'desc'
-// Empty = no age filter; the rest are "created more than N ago" presets.
-export type OlderThan = '' | '1d' | '3d' | '7d'
 
 export type ColumnFilterState = {
   search: string
   source: SourceFilter
   // Selected event types; empty = all. Replaces the old single-chip search.
   eventTypes: string[]
-  olderThan: OlderThan
+  // Created-date window. ISO-ish datetime-local strings ("2026-06-01T12:00"),
+  // empty = unbounded on that side. `after` keeps tasks created at/after it;
+  // `before` keeps tasks created at/before it.
+  after: string
+  before: string
   sortKey: SortKey
   sortDir: SortDir
 }
@@ -31,7 +33,8 @@ export const emptyFilter: ColumnFilterState = {
   search: '',
   source: 'all',
   eventTypes: [],
-  olderThan: '',
+  after: '',
+  before: '',
   sortKey: 'default',
   sortDir: 'desc',
 }
@@ -42,22 +45,12 @@ export const emptyFilter: ColumnFilterState = {
 // it).
 export function filterIsActive(f: ColumnFilterState): boolean {
   return (
-    f.source !== 'all' || f.eventTypes.length > 0 || f.olderThan !== '' || f.sortKey !== 'default'
+    f.source !== 'all' ||
+    f.eventTypes.length > 0 ||
+    f.after !== '' ||
+    f.before !== '' ||
+    f.sortKey !== 'default'
   )
-}
-
-const DAY_MS = 24 * 60 * 60 * 1000
-const OLDER_THAN_MS: Record<Exclude<OlderThan, ''>, number> = {
-  '1d': DAY_MS,
-  '3d': 3 * DAY_MS,
-  '7d': 7 * DAY_MS,
-}
-
-export const OLDER_THAN_LABEL: Record<OlderThan, string> = {
-  '': 'Any age',
-  '1d': '> 1 day',
-  '3d': '> 3 days',
-  '7d': '> 7 days',
 }
 
 // Active-run statuses that light a lane's ambient glow. Terminal / waiting
@@ -109,12 +102,24 @@ export function applyColumnFilter(
     items = items.filter((t) => set.has(t.event_type))
   }
 
-  if (f.olderThan) {
-    const cutoff = Date.now() - OLDER_THAN_MS[f.olderThan]
-    items = items.filter((t) => {
-      const ts = Date.parse(t.created_at)
-      return !Number.isNaN(ts) && ts < cutoff
-    })
+  if (f.after) {
+    const a = Date.parse(f.after)
+    if (!Number.isNaN(a)) {
+      items = items.filter((t) => {
+        const ts = Date.parse(t.created_at)
+        return !Number.isNaN(ts) && ts >= a
+      })
+    }
+  }
+
+  if (f.before) {
+    const b = Date.parse(f.before)
+    if (!Number.isNaN(b)) {
+      items = items.filter((t) => {
+        const ts = Date.parse(t.created_at)
+        return !Number.isNaN(ts) && ts <= b
+      })
+    }
   }
 
   const q = f.search.trim().toLowerCase()
