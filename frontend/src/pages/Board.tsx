@@ -22,6 +22,7 @@ import BoardColumn from '../components/board/BoardColumn'
 import {
   applyColumnFilter,
   emptyFilter,
+  isActiveRunStatus,
   type ColumnFilterState,
 } from '../components/board/columnFilter'
 import { GlassBackdrop } from './setup/glass'
@@ -494,15 +495,46 @@ export default function Board() {
     [agentRuns],
   )
 
+  // Resolve a task's claimee to a display name for the claimee sort. Agent
+  // claims read the bot's name; user claims read the roster (with "You" for the
+  // viewer); unclaimed returns '' (sorts last).
+  const resolveClaimee = useCallback(
+    (t: Task): string => {
+      if (t.claimed_by_agent_id) return bot?.display_name ?? 'Agent'
+      if (t.claimed_by_user_id) {
+        const m = members.find((mm) => mm.user_id === t.claimed_by_user_id)
+        if (m) return m.is_current_user ? 'You' : m.display_name
+        return t.claimed_by_user_id === currentUserID ? 'You' : 'User'
+      }
+      return ''
+    },
+    [members, bot, currentUserID],
+  )
+
   const filtered = useMemo<Record<ColumnId, Task[]>>(() => {
+    const opts = { resolveClaimee }
     return {
-      queued: applyColumnFilter(queued, filters.queued),
-      claimed: applyColumnFilter(claimed, filters.claimed),
-      in_progress: applyColumnFilter(sortByRunAttention(inProgress), filters.in_progress),
-      in_review: applyColumnFilter(sortByRunAttention(inReview), filters.in_review),
-      done: applyColumnFilter(done, filters.done),
+      queued: applyColumnFilter(queued, filters.queued, opts),
+      claimed: applyColumnFilter(claimed, filters.claimed, opts),
+      in_progress: applyColumnFilter(sortByRunAttention(inProgress), filters.in_progress, opts),
+      in_review: applyColumnFilter(sortByRunAttention(inReview), filters.in_review, opts),
+      done: applyColumnFilter(done, filters.done, opts),
     }
-  }, [queued, claimed, inProgress, inReview, done, filters, sortByRunAttention])
+  }, [queued, claimed, inProgress, inReview, done, filters, sortByRunAttention, resolveClaimee])
+
+  // Per-column ambient glow: lit when ≥1 task in the lane has an actively
+  // turning agent run. Queued never holds runs and Done is settled, so both
+  // stay calm.
+  const columnActive = useMemo<Record<ColumnId, boolean>>(() => {
+    const anyLive = (list: Task[]) => list.some((t) => isActiveRunStatus(agentRuns[t.id]?.Status))
+    return {
+      queued: false,
+      claimed: anyLive(claimed),
+      in_progress: anyLive(inProgress),
+      in_review: anyLive(inReview),
+      done: false,
+    }
+  }, [claimed, inProgress, inReview, agentRuns])
 
   const totalCounts = useMemo<Record<ColumnId, number>>(
     () => ({
@@ -560,6 +592,42 @@ export default function Board() {
     scrollRef.current.scrollLeft = 544
     didInitialScroll.current = true
   }, [loading])
+
+  // Dynamic edge-fade. The outermost walls — left of Queued, right of Done —
+  // stay solid (there's nowhere further to scroll), and the fade ramps in on a
+  // side only as content scrolls past it. `left`/`right` are 0→1 fractions of a
+  // full FADE_PX fade; recomputed on scroll + resize.
+  const FADE_PX = 40
+  const [edgeFade, setEdgeFade] = useState({ left: 0, right: 1 })
+  const recomputeFade = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const maxScroll = el.scrollWidth - el.clientWidth
+    const left = maxScroll <= 0 ? 0 : Math.min(el.scrollLeft / FADE_PX, 1)
+    const right = maxScroll <= 0 ? 0 : Math.min((maxScroll - el.scrollLeft) / FADE_PX, 1)
+    setEdgeFade((prev) => (prev.left === left && prev.right === right ? prev : { left, right }))
+  }, [])
+  useEffect(() => {
+    if (loading) return
+    recomputeFade()
+    const el = scrollRef.current
+    if (!el) return
+    const onResize = () => recomputeFade()
+    window.addEventListener('resize', onResize)
+    const ro = new ResizeObserver(() => recomputeFade())
+    ro.observe(el)
+    return () => {
+      window.removeEventListener('resize', onResize)
+      ro.disconnect()
+    }
+  }, [loading, recomputeFade])
+
+  const fadeMask = useMemo(() => {
+    const l = FADE_PX * edgeFade.left
+    const r = FADE_PX * edgeFade.right
+    const grad = `linear-gradient(to right, rgba(0,0,0,${1 - edgeFade.left}) 0, #000 ${l}px, #000 calc(100% - ${r}px), rgba(0,0,0,${1 - edgeFade.right}) 100%)`
+    return { maskImage: grad, WebkitMaskImage: grad }
+  }, [edgeFade])
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
@@ -813,68 +881,71 @@ export default function Board() {
       onDragEnd={handleDragEnd}
     >
       <GlassBackdrop />
-      <HeldTakeoversBanner />
 
-      {/* Per-page team filter. Renders nothing at ≤1 team. */}
-      {teams.length >= 2 && (
-        <div className="flex items-center justify-end px-1 pb-3">
-          <TeamScopeSelect value={teamFilter} onChange={setTeamFilter} />
-        </div>
-      )}
+      {/* Full-height stage: the banner + team filter take what they need, the
+          scroll area fills the rest to the bottom of the viewport (with a hard
+          floor on short screens) so columns reach the page bottom instead of
+          stopping stubbily partway down. */}
+      <div className="flex h-[calc(100dvh-8rem)] min-h-[26rem] flex-col">
+        <HeldTakeoversBanner />
 
-      {/* SKY-330: horizontal-scroll container for 5 columns. Default
-          scroll position (set on mount) shows Claimed → In Review;
-          user scrolls left for Queued, right for Done. The horizontal
-          mask dissolves columns into the page at the left/right edges
-          instead of hard-cutting them — the "Her" edge fade. */}
-      <div
-        ref={scrollRef}
-        className="overflow-x-auto pb-4"
-        style={{
-          maskImage:
-            'linear-gradient(to right, transparent 0, #000 2.5rem, #000 calc(100% - 2.5rem), transparent 100%)',
-          WebkitMaskImage:
-            'linear-gradient(to right, transparent 0, #000 2.5rem, #000 calc(100% - 2.5rem), transparent 100%)',
-        }}
-      >
-        <div className="flex gap-6 min-h-[70vh] px-1">
-          {ALL_COLUMNS.map((colId, i) => (
-            <BoardColumn
-              key={colId}
-              id={colId}
-              index={i}
-              title={COLUMN_TITLES[colId]}
-              totalCount={totalCounts[colId]}
-              filteredCount={filtered[colId].length}
-              tasks={rawByColumn[colId]}
-              filter={filters[colId]}
-              onFilterChange={(next) => setFilters((prev) => ({ ...prev, [colId]: next }))}
-              headerExtra={
-                colId === 'queued' ? queuedHeader : colId === 'done' ? doneHeader : undefined
-              }
-            >
-              <ColumnContents
-                colId={colId}
-                tasks={filtered[colId]}
-                agentRuns={agentRuns}
-                agentMessages={agentMessages}
-                chainStepRuns={chainStepRuns}
-                currentUserID={currentUserID}
-                members={members}
-                bot={bot}
-                delegateFailures={delegateFailures}
-                onRequeue={handleRequeue}
-                onPickerClaim={handlePickerClaim}
-                onPickerUnclaim={handlePickerUnclaim}
-                onPickerDelegate={handlePickerDelegate}
-                onReview={(runID, kind) => setApprovalCtx({ runID, kind })}
-                onRetry={(task) => {
-                  pendingDelegateTask.current = task
-                  setShowPromptPicker(true)
-                }}
-              />
-            </BoardColumn>
-          ))}
+        {/* Per-page team filter. Renders nothing at ≤1 team. */}
+        {teams.length >= 2 && (
+          <div className="flex items-center justify-end px-1 pb-3">
+            <TeamScopeSelect value={teamFilter} onChange={setTeamFilter} />
+          </div>
+        )}
+
+        {/* SKY-330: horizontal-scroll container for 5 columns. Default scroll
+            position (set on mount) shows Claimed → In Review; user scrolls left
+            for Queued, right for Done. The dynamic mask dissolves columns into
+            the page at whichever edge still has more to scroll. */}
+        <div
+          ref={scrollRef}
+          onScroll={recomputeFade}
+          className="min-h-0 flex-1 overflow-x-auto pb-2"
+          style={fadeMask}
+        >
+          <div className="flex h-full gap-6 px-1">
+            {ALL_COLUMNS.map((colId, i) => (
+              <BoardColumn
+                key={colId}
+                id={colId}
+                index={i}
+                active={columnActive[colId]}
+                title={COLUMN_TITLES[colId]}
+                totalCount={totalCounts[colId]}
+                filteredCount={filtered[colId].length}
+                tasks={rawByColumn[colId]}
+                filter={filters[colId]}
+                onFilterChange={(next) => setFilters((prev) => ({ ...prev, [colId]: next }))}
+                headerExtra={
+                  colId === 'queued' ? queuedHeader : colId === 'done' ? doneHeader : undefined
+                }
+              >
+                <ColumnContents
+                  colId={colId}
+                  tasks={filtered[colId]}
+                  agentRuns={agentRuns}
+                  agentMessages={agentMessages}
+                  chainStepRuns={chainStepRuns}
+                  currentUserID={currentUserID}
+                  members={members}
+                  bot={bot}
+                  delegateFailures={delegateFailures}
+                  onRequeue={handleRequeue}
+                  onPickerClaim={handlePickerClaim}
+                  onPickerUnclaim={handlePickerUnclaim}
+                  onPickerDelegate={handlePickerDelegate}
+                  onReview={(runID, kind) => setApprovalCtx({ runID, kind })}
+                  onRetry={(task) => {
+                    pendingDelegateTask.current = task
+                    setShowPromptPicker(true)
+                  }}
+                />
+              </BoardColumn>
+            ))}
+          </div>
         </div>
       </div>
 
