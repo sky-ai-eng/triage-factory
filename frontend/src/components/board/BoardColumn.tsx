@@ -125,12 +125,12 @@ export default function BoardColumn({
 
   const hasFilters = filterIsActive(filter)
 
-  // SKY-330: fixed 460px width (keep in sync with COL_W in Board.tsx, which
+  // SKY-330: fixed 430px width (keep in sync with COL_W in Board.tsx, which
   // computes the centered-lane layout). Fixed, not viewport-relative, so cards
   // don't compress as columns scroll into view.
   return (
     <motion.div
-      className="flex h-full w-[460px] shrink-0 flex-col"
+      className="flex h-full w-[430px] shrink-0 flex-col"
       initial={reduce ? false : { opacity: 0, y: 14 }}
       animate={{ opacity: 1, y: 0 }}
       transition={reduce ? { duration: 0 } : { ...bodyEase, delay: index * 0.05 }}
