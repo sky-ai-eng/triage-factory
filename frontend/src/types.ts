@@ -90,8 +90,8 @@ export interface AgentRun {
   StopReason?: string
   ResultSummary: string
   // Outcome is the parsed terminal-envelope outcome
-  // (continue|finish|abort|yield), persisted to runs.outcome. Empty/absent
-  // for an infra-error run or a blueprint step whose outcome gate gave up.
+  // (continue|finish|abort), persisted to runs.outcome. Empty/absent for an
+  // infra-error run or a step that ended without a recognized conclusion.
   // The blueprint run timeline reads this in place of the old verdict object.
   Outcome?: string
   // OutcomeReason is the "why I stopped" populated only on an abort outcome.
@@ -150,7 +150,7 @@ export interface CuratorMessage {
   id: number
   request_id: string
   role: string // "assistant" | "user" | "tool" | "system"
-  subtype: string // "" | "context_change" | "yield_request" | ...
+  subtype: string // "" | "context_change" | ...
   content: string
   tool_calls?: ToolCall[]
   tool_call_id?: string
@@ -567,10 +567,10 @@ export interface FactoryEntity {
    *  not currently sent on the request — and is kept available for
    *  future UI hints (e.g., "this queued chip already has a task"). */
   pending_tasks?: Record<string, Array<{ task_id: string; dedup_key: string }>>
-  /** True if any run on this entity is in awaiting_input. Drives the
-   *  attention badge on the runs-tray chip so a user scanning the
-   *  factory can spot yielded runs without opening each card. */
-  has_awaiting_input?: boolean
+  /** True if any run on this entity is `open` (a turn ended without a
+   *  conclusion). Drives the idle badge on the runs-tray chip so a user
+   *  scanning the factory can spot open runs without opening each card. */
+  has_open_run?: boolean
 }
 
 export interface FactoryStation {

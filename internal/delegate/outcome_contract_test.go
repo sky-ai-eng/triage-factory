@@ -12,6 +12,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
+func res(body string) *agentproc.Result { return &agentproc.Result{Result: body} }
+
 // --- Position-gated contract injection ------------------------------------
 
 // nonterminalStepSysPrompt is the one position bit that reaches the agent:
@@ -36,15 +38,19 @@ func TestNonterminalStepSysPrompt_PositionGated(t *testing.T) {
 }
 
 // TestTerminalContractHasNoContinue pins the terminal/N=1 assembled prompt:
-// the base completion envelope documents finish/abort/yield and never offers
-// `continue`. (A non-terminal step's assembled prompt = this envelope PLUS the
-// fragment below, which does.)
+// the base completion envelope documents finish/abort and never offers
+// `continue` (a non-terminal step's assembled prompt = this envelope PLUS the
+// fragment below, which does). It also no longer mentions `yield` — that
+// vocabulary was removed.
 func TestTerminalContractHasNoContinue(t *testing.T) {
 	env := ai.EnvelopeTemplate
 	if strings.Contains(env, "continue") {
 		t.Errorf("terminal completion contract must not mention `continue`")
 	}
-	for _, want := range []string{`"finish"`, `"abort"`, `"yield"`} {
+	if strings.Contains(env, "yield") {
+		t.Errorf("completion contract must not mention `yield` (removed)")
+	}
+	for _, want := range []string{`"finish"`, `"abort"`} {
 		if !strings.Contains(env, want) {
 			t.Errorf("terminal completion contract missing %s", want)
 		}
@@ -65,206 +71,17 @@ func TestNonterminalFragmentFramesContinueAsDefault(t *testing.T) {
 	if !strings.Contains(frag, "finish") {
 		t.Errorf("non-terminal fragment must describe the `finish` exception")
 	}
-}
-
-// --- Consolidated completion-gate retry loop ------------------------------
-
-func res(body string) *agentproc.Result { return &agentproc.Result{Result: body} }
-
-// memPresentTrue / memPresentFalse are the two fixed memoryPresent predicates
-// the outcome-focused loop tests use; the consolidated tests below use a
-// closure that flips when the resume "writes" the file.
-func memPresentTrue() bool  { return true }
-func memPresentFalse() bool { return false }
-
-// TestCompletionRetryLoop_ValidInitialSkipsRetry: a completion that already
-// has its memory file AND a valid outcome is returned untouched, never resumes.
-func TestCompletionRetryLoop_ValidInitialSkipsRetry(t *testing.T) {
-	calls := 0
-	resume := func(string) (*agentproc.Result, error) {
-		calls++
-		return res(`{"outcome":"finish","summary":"ok"}`), nil
-	}
-	got := runCompletionRetryLoop("r1", "ns", res(`{"outcome":"finish","summary":"done"}`), memPresentTrue, resume, maxCompletionRetries)
-	if calls != 0 {
-		t.Errorf("resume called %d times for a valid initial envelope with memory present; want 0", calls)
-	}
-	if !completionHasValidOutcome(got) {
-		t.Errorf("valid initial envelope should pass through")
+	if strings.Contains(frag, "yield") {
+		t.Errorf("non-terminal fragment must not mention `yield` (removed)")
 	}
 }
 
-// TestCompletionRetryLoop_AcceptsValidOnRetry2 pins the acceptance: an
-// unparseable envelope (memory present) re-prompts, and a valid outcome on the
-// second attempt is accepted (no further retries).
-func TestCompletionRetryLoop_AcceptsValidOnRetry2(t *testing.T) {
-	calls := 0
-	resume := func(string) (*agentproc.Result, error) {
-		calls++
-		if calls < 2 {
-			return res(`not json`), nil // attempt 1 still invalid
-		}
-		return res(`{"outcome":"finish","summary":"recovered"}`), nil // attempt 2 valid
-	}
-	got := runCompletionRetryLoop("r2", "ns", res(`{"summary":"no outcome"}`), memPresentTrue, resume, maxCompletionRetries)
-	if calls != 2 {
-		t.Errorf("resume called %d times; want exactly 2 (valid on retry-2, then stop)", calls)
-	}
-	if !completionHasValidOutcome(got) {
-		t.Errorf("valid outcome on retry-2 should be accepted")
-	}
-	if parsed := parseAgentResult(got.Result); parsed == nil || parsed.Outcome != "finish" {
-		t.Errorf("merged result should carry the retry's finish outcome, got %+v", parsed)
-	}
-}
-
-// TestCompletionRetryLoop_ExhaustsThreeRetries: when nothing ever satisfies the
-// gate, the loop resumes exactly maxCompletionRetries (3) times before giving
-// up to the caller's fallback.
-func TestCompletionRetryLoop_ExhaustsThreeRetries(t *testing.T) {
-	calls := 0
-	resume := func(string) (*agentproc.Result, error) { calls++; return res(`still not valid`), nil }
-	got := runCompletionRetryLoop("r3", "ns", res(`{"summary":"no outcome"}`), memPresentTrue, resume, maxCompletionRetries)
-	if calls != 3 {
-		t.Errorf("resume called %d times; want 3 (maxCompletionRetries)", calls)
-	}
-	if completionHasValidOutcome(got) {
-		t.Errorf("loop should give up with no valid outcome after exhausting retries")
-	}
-}
-
-// TestCompletionRetryLoop_ErrorHaltsRetries: a resume error stops the loop and
-// preserves the accumulated completion rather than crashing.
-func TestCompletionRetryLoop_ErrorHaltsRetries(t *testing.T) {
-	calls := 0
-	resume := func(string) (*agentproc.Result, error) { calls++; return nil, context.DeadlineExceeded }
-	got := runCompletionRetryLoop("r4", "ns", res(`{"summary":"no outcome"}`), memPresentTrue, resume, maxCompletionRetries)
-	if calls != 1 {
-		t.Errorf("resume called %d times; a resume error should halt after the first attempt", calls)
-	}
-	if got == nil {
-		t.Errorf("loop must return the accumulated completion even on resume error")
-	}
-}
-
-// TestCompletionRetryLoop_RepromptsAbortMissingReason: an abort with no reason
-// is re-prompted (it's the deliberate-stop decision; we collect the why), and a
-// reason supplied on the retry is accepted.
-func TestCompletionRetryLoop_RepromptsAbortMissingReason(t *testing.T) {
-	calls := 0
-	resume := func(string) (*agentproc.Result, error) {
-		calls++
-		return res(`{"outcome":"abort","summary":"stopped","reason":"needs a human to rotate the token"}`), nil
-	}
-	got := runCompletionRetryLoop("ra", "ns", res(`{"outcome":"abort","summary":"stopped"}`), memPresentTrue, resume, maxCompletionRetries)
-	if calls != 1 {
-		t.Errorf("resume called %d times; a reasonless abort should re-prompt once then accept", calls)
-	}
-	if !completionHasValidOutcome(got) {
-		t.Errorf("an abort with a reason on retry should be accepted")
-	}
-}
-
-// TestCompletionRetryLoop_MissingBoth_AsksForBothThenAccepts is the headline
-// consolidation case: a run missing BOTH its memory file and a valid outcome
-// gets a single re-invoke whose correction names both, and is accepted once the
-// resume supplies both.
-func TestCompletionRetryLoop_MissingBoth_AsksForBothThenAccepts(t *testing.T) {
-	memWritten := false
-	var lastMsg string
-	calls := 0
-	resume := func(msg string) (*agentproc.Result, error) {
-		calls++
-		lastMsg = msg
-		memWritten = true // the agent writes its memory file on the resume
-		return res(`{"outcome":"finish","summary":"did both"}`), nil
-	}
-	got := runCompletionRetryLoop("rb", "ns-x", res(`{"summary":"no outcome"}`),
-		func() bool { return memWritten }, resume, maxCompletionRetries)
-	if calls != 1 {
-		t.Errorf("resume called %d times; both satisfied on retry-1 should stop, want 1", calls)
-	}
-	// The correction must name BOTH the namespaced memory path and the outcome.
-	if !strings.Contains(lastMsg, "entity-memory/ns-x/rb.md") {
-		t.Errorf("missing-both correction should name the namespaced memory path; got %q", lastMsg)
-	}
-	if !strings.Contains(lastMsg, "outcome") {
-		t.Errorf("missing-both correction should ask for a valid outcome; got %q", lastMsg)
-	}
-	if !completionHasValidOutcome(got) {
-		t.Errorf("both satisfied on retry should be accepted")
-	}
-}
-
-// TestCompletionRetryLoop_MemoryOnly_RepromptsForMemory: a valid outcome but no
-// memory file re-prompts for the memory file only (not the outcome message),
-// and accepts once the file appears.
-func TestCompletionRetryLoop_MemoryOnly_RepromptsForMemory(t *testing.T) {
-	memWritten := false
-	var lastMsg string
-	resume := func(msg string) (*agentproc.Result, error) {
-		lastMsg = msg
-		memWritten = true
-		return res(`{"outcome":"finish","summary":"wrote memory"}`), nil
-	}
-	got := runCompletionRetryLoop("rm", "ns-y", res(`{"outcome":"finish","summary":"done"}`),
-		func() bool { return memWritten }, resume, maxCompletionRetries)
-	if !strings.Contains(lastMsg, "entity-memory/ns-y/rm.md") {
-		t.Errorf("memory-only correction should name the namespaced memory path; got %q", lastMsg)
-	}
-	if strings.Contains(lastMsg, "Re-read the completion") {
-		t.Errorf("memory-only correction must not be the outcome-only message; got %q", lastMsg)
-	}
-	if !completionHasValidOutcome(got) {
-		t.Errorf("memory present + valid outcome should be accepted")
-	}
-}
-
-// TestCompletionRetryLoop_YieldDuringResumeStops: a gate resume that ends in a
-// yield stops the loop immediately (the caller parks it), even with the memory
-// file still absent — a pause isn't a termination.
-func TestCompletionRetryLoop_YieldDuringResumeStops(t *testing.T) {
-	calls := 0
-	resume := func(string) (*agentproc.Result, error) {
-		calls++
-		return res(`{"outcome":"yield","yield":{"type":"confirmation","message":"Proceed?"}}`), nil
-	}
-	got := runCompletionRetryLoop("ry", "ns-z", res(`{"summary":"no outcome"}`), memPresentFalse, resume, maxCompletionRetries)
-	if calls != 1 {
-		t.Errorf("a yield during resume should stop the loop after one attempt; calls=%d", calls)
-	}
-	if parsed := parseAgentResult(got.Result); parsed == nil || !parsed.isYield() {
-		t.Errorf("loop should return the yield completion for the caller to park, got %+v", parsed)
-	}
-}
-
-// TestCompletionRetryMessage_NamesWhatsMissing pins the three correction
-// shapes: memory-only, outcome-only, and both.
-func TestCompletionRetryMessage_NamesWhatsMissing(t *testing.T) {
-	// Memory missing, outcome valid → memory-only.
-	memOnly := completionRetryMessage("nsA", "runA", false, true)
-	if !strings.Contains(memOnly, "entity-memory/nsA/runA.md") {
-		t.Errorf("memory-only message should name the path; got %q", memOnly)
-	}
-	if strings.Contains(memOnly, "Re-read the completion") {
-		t.Errorf("memory-only message should not include the outcome-only phrasing; got %q", memOnly)
-	}
-	// Memory present, outcome missing → outcome-only.
-	outcomeOnly := completionRetryMessage("nsB", "runB", true, false)
-	if strings.Contains(outcomeOnly, "entity-memory/nsB/runB.md") {
-		t.Errorf("outcome-only message should not name the memory path; got %q", outcomeOnly)
-	}
-	if !strings.Contains(outcomeOnly, "outcome") {
-		t.Errorf("outcome-only message should mention the outcome; got %q", outcomeOnly)
-	}
-	// Both missing → names both.
-	both := completionRetryMessage("nsC", "runC", false, false)
-	if !strings.Contains(both, "entity-memory/nsC/runC.md") || !strings.Contains(both, "outcome") {
-		t.Errorf("both-missing message should name memory path AND outcome; got %q", both)
-	}
-}
-
-// --- Single/terminal disposition parity -----------------------------------
+// --- Terminal disposition (processCompletion) -----------------------------
+//
+// By the time a result reaches processCompletion it is a conclusion (or an
+// IsError result) — the live driver owns the concluded-vs-open classification
+// and the invalid-envelope re-prompt. These tests feed processCompletion
+// directly (the one-shot / resume shape) to pin how it records each outcome.
 
 func loadRun(t *testing.T, s *Spawner, runID string) *domain.AgentRun {
 	t.Helper()
@@ -285,10 +102,8 @@ func loadTask(t *testing.T, s *Spawner, taskID string) domain.Task {
 }
 
 // TestProcessCompletion_FinishRecordsOutcome: a step emitting finish persists
-// outcome=finish + status=completed. processCompletion no longer closes the task
-// — task disposition is the orchestrator's (terminateBlueprint, exercised in
-// TestTerminateBlueprint_CompletedClosesTask). The aggregate column stays
-// in_progress until the orchestrator terminates the blueprint.
+// outcome=finish + status=completed. processCompletion does not close the task
+// — task disposition is the orchestrator's (terminateBlueprint).
 func TestProcessCompletion_FinishRecordsOutcome(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "finish")
 	stampBotClaim(t, database, taskID)
@@ -297,7 +112,7 @@ func TestProcessCompletion_FinishRecordsOutcome(t *testing.T) {
 	cwd := t.TempDir()
 
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, bpr, task,
-		res(`{"outcome":"finish","summary":"shipped it"}`), cwd, "", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
+		res(`{"outcome":"finish","summary":"shipped it"}`), cwd, "", "event", "")
 
 	run := loadRun(t, s, runID)
 	if run.Status != "completed" {
@@ -324,7 +139,7 @@ func TestProcessCompletion_AbortLeavesTaskOpen(t *testing.T) {
 
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, bpr, task,
 		res(`{"outcome":"abort","summary":"investigated the failure","reason":"needs a human to rotate the token"}`),
-		cwd, "", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
+		cwd, "", "event", "")
 
 	run := loadRun(t, s, runID)
 	if run.Status != "completed" {
@@ -344,10 +159,13 @@ func TestProcessCompletion_AbortLeavesTaskOpen(t *testing.T) {
 	}
 }
 
-// TestProcessCompletion_AbortMissingReason_StillLeavesTaskOpen: the agent chose
-// abort but never supplied a reason and there's no session to re-prompt. The run
-// must NOT degrade to finish — it stays an abort with an empty reason.
-func TestProcessCompletion_AbortMissingReason_StillLeavesTaskOpen(t *testing.T) {
+// TestProcessCompletion_AbortMissingReasonFails: abort is the agent's voluntary
+// stop, so the reason is its required companion — an abort without one is an
+// invalid envelope, not a valid conclusion. The live driver re-prompts it; a
+// non-live path (resume / one-shot) that can't lands here, where it's a knowable
+// error → failed (with no recorded outcome), never a clean NULL-outcome
+// completion the orchestrator would read as finish.
+func TestProcessCompletion_AbortMissingReasonFails(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "abort-noreason")
 	stampBotClaim(t, database, taskID)
 	bpr := blueprintRunIDForRun(t, database, runID)
@@ -355,66 +173,85 @@ func TestProcessCompletion_AbortMissingReason_StillLeavesTaskOpen(t *testing.T) 
 	cwd := t.TempDir()
 
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, bpr, task,
-		res(`{"outcome":"abort","summary":"stopped, couldn't proceed"}`),
-		cwd, "", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
+		res(`{"outcome":"abort","summary":"stopped, couldn't proceed"}`), cwd, "", "event", "")
 
 	run := loadRun(t, s, runID)
-	if run.Outcome != "abort" {
-		t.Errorf("run.outcome = %q, want abort (a reasonless abort must not degrade to finish)", run.Outcome)
-	}
-	if run.OutcomeReason != "" {
-		t.Errorf("run.outcome_reason = %q, want empty (no reason was supplied)", run.OutcomeReason)
-	}
-	if got := readTaskStatus(t, database, taskID); got == "done" {
-		t.Errorf("task.status = %q; a reasonless abort must still leave the task open", got)
-	}
-}
-
-// TestProcessCompletion_YieldParks: a yield envelope parks the run in
-// awaiting_input rather than completing.
-func TestProcessCompletion_YieldParks(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "yield")
-	bpr := blueprintRunIDForRun(t, database, runID)
-	task := loadTask(t, s, taskID)
-	cwd := t.TempDir()
-
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, bpr, task,
-		res(`{"outcome":"yield","summary":"need a decision","yield":{"type":"confirmation","message":"Proceed?"}}`),
-		cwd, "sess-yield", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
-
-	run := loadRun(t, s, runID)
-	if run.Status != "awaiting_input" {
-		t.Errorf("run.status = %q, want awaiting_input", run.Status)
-	}
-}
-
-// TestProcessCompletion_UnparseableLeavesOutcomeNull: a step whose envelope
-// never carries a valid outcome (and can't be gate-retried because there's no
-// session id) keeps a NULL outcome — the orchestrator's decideBlueprintStep maps
-// a NULL on the final/only step to finish (TestDecideBlueprintStep), not
-// processCompletion. The old single-run finish fallback is gone.
-func TestProcessCompletion_UnparseableLeavesOutcomeNull(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "fallback")
-	bpr := blueprintRunIDForRun(t, database, runID)
-	task := loadTask(t, s, taskID)
-	cwd := t.TempDir()
-
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, bpr, task,
-		res(`this is not a JSON envelope`), cwd, "", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
-
-	run := loadRun(t, s, runID)
-	if run.Status != "completed" {
-		t.Errorf("run.status = %q, want completed", run.Status)
+	if run.Status != "failed" {
+		t.Errorf("run.status = %q, want failed (an abort with no reason is an invalid envelope)", run.Status)
 	}
 	if run.Outcome != "" {
-		t.Errorf("run.outcome = %q, want \"\" (NULL — no single-run finish fallback)", run.Outcome)
+		t.Errorf("run.outcome = %q, want empty (an abort with no reason is not a valid conclusion)", run.Outcome)
+	}
+}
+
+// TestProcessCompletion_NoConclusionParksOpen: a turn that ends with no
+// envelope at all (prose) is not a termination — the run is parked `open` (not
+// recorded as a NULL-outcome completion, which would let the orchestrator close
+// a final step). This is the disposition for a one-shot/resume turn that ends
+// without concluding (the live driver consumes this in its loop instead).
+func TestProcessCompletion_NoConclusionParksOpen(t *testing.T) {
+	s, database, runID, taskID := setupAdvanceFixture(t, "open-noconcl")
+	bpr := blueprintRunIDForRun(t, database, runID)
+	task := loadTask(t, s, taskID)
+	cwd := t.TempDir()
+
+	parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, bpr, task,
+		res(`this is not a JSON envelope`), cwd, "", "event", "")
+
+	if !parked {
+		t.Error("processCompletion(no-conclusion) = false; want true (open, not terminal)")
+	}
+	run := loadRun(t, s, runID)
+	if run.Status != "open" {
+		t.Errorf("run.status = %q, want open (a no-conclusion turn parks open, not completed)", run.Status)
+	}
+	if run.Outcome != "" {
+		t.Errorf("run.outcome = %q, want \"\" (no conclusion was recorded)", run.Outcome)
+	}
+}
+
+// TestProcessCompletion_InvalidEnvelopeFails: an envelope attempt that never
+// validated (here a `finish` with no summary) is a knowable error — recorded
+// failed, not a NULL-outcome completion. The live driver re-prompts this in
+// place; when a backend can't or the bound is exhausted, the unfixed result
+// lands here and fails (TestDriveLiveRun_InvalidRepromptsToBoundThenHandsBack).
+func TestProcessCompletion_InvalidEnvelopeFails(t *testing.T) {
+	s, database, runID, taskID := setupAdvanceFixture(t, "invalid-fails")
+	bpr := blueprintRunIDForRun(t, database, runID)
+	task := loadTask(t, s, taskID)
+	cwd := t.TempDir()
+
+	parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, bpr, task,
+		res(`{"outcome":"finish"}`), cwd, "", "event", "")
+
+	if parked {
+		t.Error("processCompletion(invalid) = true; want false (terminal failure, not parked)")
+	}
+	run := loadRun(t, s, runID)
+	if run.Status != "failed" {
+		t.Errorf("run.status = %q, want failed (an invalid envelope is a knowable error)", run.Status)
+	}
+	if run.Outcome != "" {
+		t.Errorf("run.outcome = %q, want \"\" (an invalid attempt records no outcome)", run.Outcome)
+	}
+}
+
+// TestProcessCompletion_FinishReturnsNotParked: a terminal finish returns
+// parked=false so runAgent's cleanup defers tear the worktree down (a
+// pending_approval flip is the only thing that parks a completed run, and that's
+// covered in blueprint_advance_test.go).
+func TestProcessCompletion_FinishReturnsNotParked(t *testing.T) {
+	s, _, runID, taskID := setupAdvanceFixture(t, "pc-finish")
+	if parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, "",
+		loadTask(t, s, taskID), res(`{"outcome":"finish","summary":"done"}`),
+		t.TempDir(), "", "event", ""); parked {
+		t.Error("processCompletion(finish) = true; want false (terminal, not parked)")
 	}
 }
 
 // TestTerminateBlueprint_CompletedClosesTask pins the orchestrator-owned close:
 // finalizing a blueprint_run as completed closes its task (done +
-// close_reason=run_completed), the finish→close parity the per-step
-// processCompletion no longer owns.
+// close_reason=run_completed).
 func TestTerminateBlueprint_CompletedClosesTask(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "terminate-done")
 	stampBotClaim(t, database, taskID)
@@ -450,99 +287,5 @@ func TestTerminateBlueprint_AbortLeavesTaskOpen(t *testing.T) {
 
 	if got := readTaskStatus(t, database, taskID); got == "done" {
 		t.Errorf("task.status = %q; abort must leave the task open", got)
-	}
-}
-
-// --- routeYield: yield routing before AND after the gates -----------------
-
-// TestRouteYield_ParksWellFormedYield: routeYield handles a valid yield by
-// parking the run, returning true. This is the reusable park the post-gate
-// check uses so a yield emitted during a memory/outcome-gate resume still
-// lands in awaiting_input instead of the completion path.
-func TestRouteYield_ParksWellFormedYield(t *testing.T) {
-	s, _, runID, taskID := setupAdvanceFixture(t, "ry-park")
-	task := loadTask(t, s, taskID)
-
-	handled := s.routeYield(runmode.LocalDefaultOrg, runID, task,
-		res(`{"outcome":"yield","yield":{"type":"confirmation","message":"Proceed?"}}`), "", "", "", "event", "")
-	if !handled {
-		t.Fatal("routeYield should handle a well-formed yield")
-	}
-	if got := loadRun(t, s, runID).Status; got != "awaiting_input" {
-		t.Errorf("run.status = %q, want awaiting_input", got)
-	}
-}
-
-// TestRouteYield_IgnoresMalformedYield: a yield-outcome with a non-empty
-// summary but no payload must NOT be parked — routeYield returns false so the
-// completion falls through to the outcome gate / fallback rather than parking
-// a modal the user can't act on or (worse) being treated as a completion.
-func TestRouteYield_IgnoresMalformedYield(t *testing.T) {
-	s, _, runID, taskID := setupAdvanceFixture(t, "ry-bad")
-	task := loadTask(t, s, taskID)
-
-	handled := s.routeYield(runmode.LocalDefaultOrg, runID, task,
-		res(`{"outcome":"yield","summary":"I want to pause"}`), "", "", "", "event", "")
-	if handled {
-		t.Fatal("routeYield must not park a yield with no payload")
-	}
-	if got := loadRun(t, s, runID).Status; got == "awaiting_input" {
-		t.Errorf("run.status = %q; a payload-less yield must not park the run", got)
-	}
-}
-
-// TestRouteYield_IgnoresNonYield: a finish completion is not a yield.
-func TestRouteYield_IgnoresNonYield(t *testing.T) {
-	s, _, runID, taskID := setupAdvanceFixture(t, "ry-finish")
-	task := loadTask(t, s, taskID)
-
-	if s.routeYield(runmode.LocalDefaultOrg, runID, task,
-		res(`{"outcome":"finish","summary":"done"}`), "", "", "", "event", "") {
-		t.Fatal("routeYield must not treat a finish as a yield")
-	}
-}
-
-// TestProcessCompletion_YieldReturnsParked locks the warm-cache signal: a yield
-// parks the run AND returns parked=true (the flag runAgent's defers read to keep
-// the worktree + session JSONL on disk), while a terminal finish returns false
-// so the defers clean up normally.
-func TestProcessCompletion_YieldReturnsParked(t *testing.T) {
-	yielded, _, yieldRun, yieldTask := setupAdvanceFixture(t, "pc-yield")
-	if parked := yielded.processCompletion(context.Background(), runmode.LocalDefaultOrg, yieldRun, "",
-		loadTask(t, yielded, yieldTask),
-		res(`{"outcome":"yield","yield":{"type":"confirmation","message":"Proceed?"}}`),
-		t.TempDir(), "sess", "claude-sonnet-4-6", "owner", "repo", "event", "", ""); !parked {
-		t.Error("processCompletion(yield) = false; want true (parked → keep the warm worktree)")
-	}
-	if got := loadRun(t, yielded, yieldRun).Status; got != "awaiting_input" {
-		t.Errorf("run.status = %q, want awaiting_input", got)
-	}
-
-	done, _, doneRun, doneTask := setupAdvanceFixture(t, "pc-finish")
-	if parked := done.processCompletion(context.Background(), runmode.LocalDefaultOrg, doneRun, "",
-		loadTask(t, done, doneTask),
-		res(`{"outcome":"finish","summary":"done"}`),
-		t.TempDir(), "", "claude-sonnet-4-6", "owner", "repo", "event", "", ""); parked {
-		t.Error("processCompletion(finish) = true; want false (terminal, not parked)")
-	}
-}
-
-// TestProcessCompletion_MalformedYieldDoesNotPark is the end-to-end guard for
-// the regression: a yield-outcome with a non-empty summary but no payload, on
-// a single/terminal run with no session to re-prompt, must not be parked with
-// a broken payload. The conservative fallback applies (finish) instead.
-func TestProcessCompletion_MalformedYieldDoesNotPark(t *testing.T) {
-	s, _, runID, taskID := setupAdvanceFixture(t, "bad-yield")
-	task := loadTask(t, s, taskID)
-	cwd := t.TempDir()
-
-	// sessionID empty → the outcome gate can't re-prompt; the malformed
-	// yield is not a valid outcome, so the single/terminal fallback to
-	// finish applies. The key assertion is that it did NOT park.
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, "", task,
-		res(`{"outcome":"yield","summary":"please decide"}`), cwd, "", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
-
-	if got := loadRun(t, s, runID).Status; got == "awaiting_input" {
-		t.Errorf("run.status = %q; a payload-less yield must not park the run", got)
 	}
 }

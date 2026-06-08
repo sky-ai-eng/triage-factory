@@ -256,9 +256,9 @@ func TestRunJiraMirror_Idempotent_AlreadyInBucket_NoWrites(t *testing.T) {
 	}
 }
 
-// in_review collapses into In Progress: a bot that yields (board → in_review)
-// re-targets the SAME InProgress canonical, so the second mirror pass finds the
-// ticket already there and makes no distinct Jira move.
+// in_review collapses into In Progress: a bot that parks a run (board →
+// in_review) re-targets the SAME InProgress canonical, so the second mirror
+// pass finds the ticket already there and makes no distinct Jira move.
 func TestRunJiraMirror_InReviewCollapsesToInProgress_NoDistinctMove(t *testing.T) {
 	fake := newRecordingJiraServer(t, "To Do", "")
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")

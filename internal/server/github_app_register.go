@@ -304,7 +304,7 @@ func (s *Server) handleGitHubAppRegisterLaunch(w http.ResponseWriter, r *http.Re
 		http.NotFound(w, r)
 		return
 	}
-	orgID, userID, ok := s.az.requireOrgAdmin(w, r)
+	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {
 		return
 	}
@@ -422,7 +422,7 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 		http.NotFound(w, r)
 		return
 	}
-	orgID, userID, ok := s.az.requireOrgAdmin(w, r)
+	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {
 		return
 	}

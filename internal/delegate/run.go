@@ -1,7 +1,11 @@
-// Generic agent execution loop and the post-stream branching that turns
-// either a yield (park in awaiting_input) or a terminal completion (run
-// the memory gate, finalize the run row) into the right DB state. Shared
-// between the initial Delegate path and the SKY-139 yield-resume flow.
+// Generic agent execution loop and the post-stream branching that turns a
+// terminal completion into the right DB state — record the parsed outcome,
+// finalize the run row, and (when the agent queued a review/PR) park it in
+// pending_approval. Shared between the initial Delegate path and the
+// resume-with-message flow. The concluded-vs-open turn classification and the
+// invalid-envelope re-prompt live on the live driver (live.go); by the time a
+// result reaches processCompletion it is a conclusion (or an IsError / crash
+// result), never an open turn-end.
 
 package delegate
 
@@ -51,12 +55,12 @@ func sessionTranscriptExists(wtPath, sessionID string) bool {
 // from scratch.
 func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model string, triggerType string, creatorUserID string, priorSessionID string) {
 	orgID := cfg.orgID
-	// parked is set true by processCompletion when this run ends in a dormant
-	// state (awaiting_input / pending_approval) rather than terminating. The
-	// per-run cleanup defers below read it to KEEP the worktree and session
-	// JSONL on disk as the warm resume cache — mirroring the wasTakenOver /
-	// isBlueprintStep skips. Captured by reference by the deferred closures, so
-	// they observe its final value at return.
+	// parked is set true when this run ends dormant rather than terminating:
+	// idle hibernation flips it to `open` (runAgent, below), or processCompletion
+	// parks it in `pending_approval`. The per-run cleanup defers below read it to
+	// KEEP the worktree and session JSONL on disk as the warm resume cache —
+	// mirroring the wasTakenOver / isBlueprintStep skips. Captured by reference
+	// by the deferred closures, so they observe its final value at return.
 	var parked bool
 	if cfg.hasWT {
 		// GitHub PR cleanup. Best-effort cleanup on return; the worktree ID is unique per run
@@ -77,8 +81,9 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 				return
 			}
 			if parked {
-				// Dormant yield/approval: the worktree is the warm cache the
-				// resume reuses (a snapshot was taken too, for the cold path).
+				// Dormant (idle-closed `open`, or `pending_approval`): the worktree
+				// is the warm cache the resume reuses (a snapshot was taken too, for
+				// the cold path).
 				return
 			}
 			// Capture the RemoveAt error rather than discarding it.
@@ -324,15 +329,15 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		return
 	}
 
-	// Idle hibernation parked the run (awaiting_input, snapshot written) — the
-	// same dormant disposition as a yield, so keep the warm worktree.
+	// Idle hibernation parked the run (status `open`, snapshot written) — a
+	// dormant disposition, so keep the warm worktree as the fast resume path.
 	if out.hibernated {
 		parked = true
 		return
 	}
 
 	if out.result != nil {
-		parked = s.processCompletion(ctx, orgID, runID, cfg.blueprintRunID, task, out.result, claudeCwd, out.sessionID, model, cfg.owner, cfg.repo, triggerType, creatorUserID, cfg.extraAllowedTools)
+		parked = s.processCompletion(ctx, orgID, runID, cfg.blueprintRunID, task, out.result, claudeCwd, out.sessionID, triggerType, creatorUserID)
 		return
 	}
 
@@ -348,105 +353,83 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, "agent runtime exited cleanly without producing a result event")
 }
 
-// processCompletion handles the post-stream branching for any Claude
-// invocation (initial run or yield-resume): if the parsed envelope is
-// a yield, park the run in awaiting_input; otherwise run the completion
-// gate and finalize the run as terminal. Shared between runAgent and
-// ResumeAfterYield so a yield-then-resume run lands in identical
-// terminal state to a run that completed in one shot — same gate, same
-// toast, same task-done bookkeeping. SKY-139.
+// processCompletion is the single disposition authority for a result, whatever
+// backend produced it (the live driver, the one-shot sandbox fallback, or a
+// resume). It classifies the turn-end and acts uniformly:
+//
+//   - valid conclusion → record the outcome (finalize / let the orchestrator
+//     advance or close); a queued review/PR parks it in pending_approval.
+//   - no conclusion (prose / nothing) → the run is open, not a termination:
+//     park it open (snapshot + flip + keep the warm worktree) and return. The
+//     live driver normally consumes this in its loop; it reaches here only from
+//     the one-shot/resume backends (which hold no warm process) or a crash that
+//     left a complete-but-open last turn.
+//   - invalid attempt / IsError → record failed (a knowable error) with the
+//     totals already folded onto the result.
+//
+// Keeping the disposition here — rather than in the live driver — is what makes
+// the non-live backends honest: a one-shot/resume turn that ends open or with a
+// malformed envelope is no longer mis-recorded as a clean NULL-outcome
+// completion (which would wrongly advance/close a final step).
 //
 // blueprintRunID is the run's blueprint run (cfg.blueprintRunID for an initial
-// run, the resumed run's blueprint_run_id for a yield-resume); empty for a
-// standalone run. It's the authoritative source for the memory namespace and
-// for whether this is a blueprint step — threaded in by the caller, which
-// already holds it, rather than re-fetched, so a DB hiccup can't silently
-// mis-namespace the memory or mis-route the task close.
+// run, the resumed run's blueprint_run_id for a resume). It's the authoritative
+// source for the memory namespace and for whether this is a blueprint step —
+// threaded in by the caller, which already holds it, rather than re-fetched, so
+// a DB hiccup can't silently mis-namespace the memory or mis-route the task
+// close.
 //
-// The caller is responsible for draining any subprocess state
-// (the agentproc.Run path waits internally); this helper only
-// operates on the parsed completion.
-//
-// Returns parked: true when the run ended dormant (awaiting_input or
-// pending_approval) rather than terminal, so runAgent's cleanup defers keep
-// the worktree + session JSONL on disk as the warm resume cache.
+// Returns parked: true when the run ended dormant (open, or pending_approval)
+// rather than terminal, so runAgent's cleanup defers keep the worktree +
+// session JSONL on disk as the warm resume cache.
 func (s *Spawner) processCompletion(
 	ctx context.Context,
 	orgID, runID, blueprintRunID string,
 	task domain.Task,
 	completion *agentproc.Result,
-	claudeCwd, sessionID, model, owner, repo, triggerType, creatorUserID, extraAllowedTools string,
+	claudeCwd, sessionID, triggerType, creatorUserID string,
 ) (parked bool) {
-	// Yield branch (SKY-139): the agent emitted outcome:"yield" to pause
-	// the run for user input rather than terminating. Park it in
-	// awaiting_input and skip BOTH gates and CompleteAgentRun — a pause
-	// isn't a termination, so we don't force a memory write or an outcome.
-	// The respond endpoint reopens the session via ResumeAfterYield when the
-	// user answers. routeYield's IsError guard keeps a Claude-side error
-	// (e.g. max-turns hit) that happens to carry yield-shaped JSON a failure,
-	// not a pause.
-	if s.routeYield(orgID, runID, task, completion, claudeCwd, blueprintRunID, sessionID, triggerType, creatorUserID) {
+	// The memory namespace is the folder grouping this run's memory file with
+	// its blueprint siblings (so step N+1 reads step N's as its handoff).
+	// Derived from the caller-supplied blueprint_run_id — no DB fetch, so it
+	// can't silently fall back to the wrong namespace on a transient read error.
+	namespace := memoryNamespace(blueprintRunID, runID)
+
+	// Classify the turn-end up front. A no-conclusion turn (prose / nothing) is
+	// NOT a termination — the run is open. Park it open (snapshot for the
+	// cold-resume backstop, flip the status, keep the warm worktree) and skip the
+	// terminal bookkeeping below. An IsError result is always a termination, so
+	// it never takes this branch however envelope-shaped its text.
+	class, parsed := classifyAgentResult(completion.Result)
+	if !completion.IsError && class == turnNone {
+		s.parkRunOpen(liveParkContext{
+			orgID:         orgID,
+			runID:         runID,
+			taskID:        task.ID,
+			namespace:     namespace,
+			claudeCwd:     claudeCwd,
+			triggerType:   triggerType,
+			creatorUserID: creatorUserID,
+		}, sessionID)
 		return true
 	}
 
-	repoEnv := ""
-	if owner != "" && repo != "" {
-		repoEnv = owner + "/" + repo
-	}
-
-	// The memory namespace is the folder grouping this run's memory file with
-	// its blueprint siblings (so step N+1 reads step N's as its handoff), else
-	// the run's own id for a standalone run. Derived from the caller-supplied
-	// blueprint_run_id — no DB fetch, so it can't silently fall back to the
-	// wrong namespace on a transient read error.
-	namespace := memoryNamespace(blueprintRunID, runID)
-
-	// One completion gate (consolidates the former memory-write + outcome
-	// gates): if the agent terminated without writing its namespaced memory
-	// file ./_scratch/entity-memory/<namespace>/<runID>.md OR without a valid
-	// terminal outcome, resume the session with a correction naming exactly
-	// what's missing, up to maxCompletionRetries. Skipped on an infra IsError
-	// completion — that's failing regardless and resuming a crashed session is
-	// futile. Retries that produce new completions are merged into the totals
-	// so cost/duration accounting reflects the full invocation, not just the
-	// initial call.
-	//
-	// Pass model + repoEnv explicitly rather than letting the gate read live
-	// spawner state, so a concurrent UpdateCredentials can't silently switch
-	// models or drop repo context mid-run.
-	if !completion.IsError {
-		completion = s.completionGate(ctx, orgID, runID, claudeCwd, namespace, completion, sessionID, model, repoEnv, extraAllowedTools, triggerType, creatorUserID)
-	}
-
-	// Unconditional upsert of the run_memory row at termination
-	// (SKY-204): row presence === "termination passed through the
-	// gate", agent_content NULL === "agent didn't comply with the gate
-	// after retries" (UpsertAgentMemory normalizes empty/whitespace
-	// input to NULL on the way in). blueprint_run_id is denormalized
-	// onto the row so the next run's materializer folders this file
-	// under the right namespace.
+	// Unconditional upsert of the run_memory row at termination: row presence
+	// === "the run terminated", agent_content NULL === "the agent didn't write a
+	// usable memory file" (UpsertAgentMemory normalizes empty/whitespace input
+	// to NULL on the way in). blueprint_run_id is denormalized onto the row so
+	// the next run's materializer folders this file under the right namespace.
 	agentContent, fileState := readAgentMemoryFile(claudeCwd, namespace, runID)
 	if err := s.taskMemory.UpsertAgentMemorySystem(context.Background(), orgID, runID, task.EntityID, blueprintRunID, agentContent); err != nil {
 		log.Printf("[delegate] warning: failed to upsert memory for run %s: %v", runID, err)
 	}
 	switch fileState {
 	case memoryFileMissing:
-		log.Printf("[delegate] run %s: memory file missing after gate retries (agent_content NULL)", runID)
+		log.Printf("[delegate] run %s: memory file missing at termination (agent_content NULL)", runID)
 	case memoryFileEmpty:
-		log.Printf("[delegate] run %s: memory file present but empty after gate retries (agent_content NULL)", runID)
+		log.Printf("[delegate] run %s: memory file present but empty at termination (agent_content NULL)", runID)
 	case memoryFileReadErr:
-		log.Printf("[delegate] run %s: memory file unreadable after gate retries (agent_content NULL)", runID)
-	}
-
-	// A gate resume above can itself end in a yield (the agent decided it
-	// needs the user before it can write memory or a valid outcome). Honor
-	// that yield exactly as an initial one — park in awaiting_input — rather
-	// than letting it fall through to the terminal-completion path below,
-	// which would record status=completed and (for a single run) close the
-	// task. The memory upsert just ran, but it's idempotent and gets
-	// rewritten when the run truly terminates after the user responds.
-	if s.routeYield(orgID, runID, task, completion, claudeCwd, blueprintRunID, sessionID, triggerType, creatorUserID) {
-		return true
+		log.Printf("[delegate] run %s: memory file unreadable at termination (agent_content NULL)", runID)
 	}
 
 	// Every run is a step of a blueprint_run now (a single prompt is a 1-step
@@ -456,32 +439,26 @@ func (s *Spawner) processCompletion(
 
 	resultSummary := ""
 	status := "completed"
-	if completion.IsError {
-		status = "failed"
-	}
 	var outcome, outcomeReason string
-	if parsed := parseAgentResult(completion.Result); parsed != nil {
+	switch {
+	case completion.IsError:
+		// Process crash / runtime error — an always-knowable terminal.
+		status = "failed"
+	case class == turnValid:
 		resultSummary = parsed.Summary
-		switch {
-		case parsed.hasValidOutcome():
-			outcome = parsed.Outcome
-			if domain.RunOutcome(parsed.Outcome) == domain.RunOutcomeAbort {
-				outcomeReason = parsed.Reason
-			}
-		case domain.RunOutcome(parsed.Outcome) == domain.RunOutcomeAbort:
-			// The agent deliberately chose to abort but never supplied a
-			// reason, even after the outcome gate's retries. Honor the abort
-			// (leaving the task open) rather than letting the finish fallback
-			// below close a task the agent explicitly declined to complete;
-			// the reason stays empty.
-			outcome = string(domain.RunOutcomeAbort)
+		outcome = parsed.Outcome
+		if domain.RunOutcome(parsed.Outcome) == domain.RunOutcomeAbort {
+			outcomeReason = parsed.Reason
 		}
+	default: // turnInvalid
+		// An envelope attempt that never validated. The live driver re-prompts
+		// this in place; a backend that can't (one-shot) or that exhausted the
+		// bound lands here, where it's a knowable error → failed, recorded with
+		// the totals folded onto the result. NOT a NULL-outcome completion, which
+		// the orchestrator would read as a clean finish on a final step.
+		status = "failed"
+		resultSummary = "agent did not return a valid completion envelope"
 	}
-	// No single-run finish fallback here: a run that completes with no
-	// recognizable outcome keeps a NULL outcome and is left for the orchestrator.
-	// decideBlueprintStep maps a NULL outcome on the final (or only) step to
-	// finish — the same close-on-clean-completion behavior — and a NULL on a
-	// non-final step to no-outcome→abort.
 
 	// Detached context: the run's ctx may have been cancelled (user
 	// cancel mid-stream) but the terminal write still needs to record.
@@ -623,133 +600,4 @@ func (s *Spawner) processCompletion(
 	// step now, so there is no standalone run_id-keyed snapshot to drop here. A
 	// parked run keeps its snapshot for the eventual resume.
 	return parked
-}
-
-// routeYield parks the run in awaiting_input when completion is a well-formed
-// yield envelope, returning true if it handled the completion (the caller must
-// then return without running the terminal-completion path). Used in two
-// places in processCompletion: before the memory/outcome gates (an initial
-// yield is a pause, not a termination, so it skips both gates) and again after
-// them (a gate resume can itself end in a yield, which must still park rather
-// than be treated as a completion that closes the task).
-//
-// A malformed/payload-less "yield" is deliberately NOT routed here (isYield
-// gates on a valid payload) — it falls through so the outcome gate can
-// re-prompt for a usable envelope instead of parking a modal the user can't
-// act on. An IsError completion is never a yield, however yield-shaped its
-// JSON.
-//
-// claudeCwd / blueprintRunID / sessionID are threaded through to persistYield
-// so it can snapshot the workspace before parking — the run is about to go
-// dormant and a resume could land without the warm worktree.
-func (s *Spawner) routeYield(orgID, runID string, task domain.Task, completion *agentproc.Result, claudeCwd, blueprintRunID, sessionID, triggerType, creatorUserID string) bool {
-	if completion.IsError {
-		return false
-	}
-	parsed := parseAgentResult(completion.Result)
-	if parsed == nil || !parsed.isYield() {
-		return false
-	}
-	if err := s.persistYield(orgID, runID, parsed.Yield, completion, claudeCwd, blueprintRunID, sessionID, triggerType, creatorUserID); err != nil {
-		log.Printf("[delegate] failed to persist yield for run %s: %v", runID, err)
-		s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, "failed to record yield: "+err.Error())
-	}
-	return true
-}
-
-// persistYield records an agent yield request, accumulates the partial
-// invocation totals onto the run row, and parks the run in
-// awaiting_input. SKY-139.
-//
-// The status flip is guarded against concurrent terminal flips
-// (cancellation, takeover) by MarkAgentRunAwaitingInput's
-// status-NOT-IN filter. If the run already reached a terminal state
-// while the agent was emitting the yield envelope (rare but possible
-// — a user cancel raced the stream's last line), we still record the
-// yield_request message for transcript completeness but skip the
-// status flip and the toast. The terminal status the racing path set
-// stands.
-func (s *Spawner) persistYield(orgID, runID string, req *domain.YieldRequest, completion *agentproc.Result, claudeCwd, blueprintRunID, sessionID, triggerType, creatorUserID string) error {
-	// Detached context — yield bookkeeping must survive ctx cancel
-	// (a user cancel mid-yield-emit still needs the transcript
-	// row recorded for audit).
-	bgCtx := context.Background()
-
-	if triggerType == "manual" {
-		if err := s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			return ts.AgentRuns.AddPartialTotals(bgCtx, orgID, runID, completion.CostUSD, completion.DurationMs, completion.NumTurns)
-		}); err != nil {
-			log.Printf("[delegate] warning: failed to record partial totals for run %s: %v", runID, err)
-		}
-	} else if err := s.agentRuns.AddPartialTotalsSystem(bgCtx, orgID, runID, completion.CostUSD, completion.DurationMs, completion.NumTurns); err != nil {
-		log.Printf("[delegate] warning: failed to record partial totals for run %s: %v", runID, err)
-	}
-
-	var msg *domain.AgentMessage
-	if triggerType == "manual" {
-		if err := s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			m, ierr := ts.AgentRuns.InsertYieldRequest(bgCtx, orgID, runID, req)
-			if ierr != nil {
-				return ierr
-			}
-			msg = m
-			return nil
-		}); err != nil {
-			return fmt.Errorf("insert yield request: %w", err)
-		}
-	} else {
-		m, ierr := s.agentRuns.InsertYieldRequestSystem(bgCtx, orgID, runID, req)
-		if ierr != nil {
-			return fmt.Errorf("insert yield request: %w", ierr)
-		}
-		msg = m
-	}
-	s.broadcastMessage(orgID, runID, msg)
-
-	// Snapshot the workspace to durable storage BEFORE parking in
-	// awaiting_input. Parking makes the run resumable on a host that may not
-	// have the warm worktree, so the snapshot must exist by the time the flip
-	// commits. Best-effort: the warm worktree (kept on disk by runAgent's
-	// parked guard) is the fast resume path; this blob is the cold-path
-	// backstop ensureWorkspace reads when the cache is gone. Keyed by namespace
-	// (blueprint_run_id for a step, else run_id) — the same key the worktree dir
-	// is named after.
-	if err := s.snapshotWorkspace(bgCtx, orgID, memoryNamespace(blueprintRunID, runID), claudeCwd, sessionID); err != nil {
-		log.Printf("[delegate] warning: failed to snapshot workspace for run %s before yield: %v", runID, err)
-	}
-
-	var flipped bool
-	if triggerType == "manual" {
-		if err := s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			f, ferr := ts.AgentRuns.MarkAwaitingInput(bgCtx, orgID, runID)
-			if ferr != nil {
-				return ferr
-			}
-			flipped = f
-			return nil
-		}); err != nil {
-			return fmt.Errorf("mark awaiting_input: %w", err)
-		}
-	} else {
-		f, ferr := s.agentRuns.MarkAwaitingInputSystem(bgCtx, orgID, runID)
-		if ferr != nil {
-			return fmt.Errorf("mark awaiting_input: %w", ferr)
-		}
-		flipped = f
-	}
-	if !flipped {
-		// Terminal status was already set by a racing path (cancel, takeover).
-		// The yield_request message is recorded for transcript completeness but
-		// the run ends in whatever terminal state the racing path chose; no toast
-		// or broadcast needed (the racing path already broadcast). The snapshot
-		// taken just above won't be read (the run won't resume), but it's keyed by
-		// blueprint_run_id and dropped by the blueprint-level terminal path — the
-		// orchestrator sees the racing terminal status and calls terminateBlueprint,
-		// or the DB-only cancel runs finalizeParkedBlueprintOnCancel — so there's
-		// nothing to discard here.
-		return nil
-	}
-	s.broadcastRunUpdate(orgID, runID, "awaiting_input")
-	toast.Info(s.wsHub, orgID, fmt.Sprintf("Run %s waiting for response", shortRunID(runID)))
-	return nil
 }

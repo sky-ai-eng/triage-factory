@@ -28,9 +28,9 @@ type RunOptions struct {
 	Model string
 
 	// SessionID, when non-empty, switches the invocation to
-	// `--resume <id>`. Used for the memory-gate retry loop, the
-	// SKY-139 yield-resume flow, and the curator's per-message
-	// resumption against a long-lived project session.
+	// `--resume <id>`. Used for the crash-reclaim resume, the open-run
+	// resume path, and the curator's per-message resumption against a
+	// long-lived project session.
 	SessionID string
 
 	// Message is the value passed to `-p`. For an initial invocation

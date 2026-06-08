@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -109,58 +110,6 @@ func teamIDString(teamID *string) string {
 	return *teamID
 }
 
-// teamFilterParam extracts the per-page multi-team read filter from the
-// request — the set of non-empty, deduped, *valid-UUID* ?team_id= values
-// (a repeated query param). Returns nil when none are present, which the
-// stores treat as "the union of the viewer's teams."
-//
-// Malformed values are dropped, not errored: these params are
-// user-controlled and also come from possibly-stale/corrupt localStorage
-// (the device-local read filter), so a junk id should degrade to "no
-// narrow for that value" rather than 500 the queue/board/factory when the
-// raw string hits a Postgres ::uuid cast. A team the caller isn't in is
-// already filtered out downstream by the RLS-mirroring predicate, so the
-// only validation needed here is well-formedness.
-func teamFilterParam(r *http.Request) []string {
-	raw := r.URL.Query()["team_id"]
-	if len(raw) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(raw))
-	out := make([]string, 0, len(raw))
-	for _, v := range raw {
-		if v == "" {
-			continue
-		}
-		if _, err := uuid.Parse(v); err != nil {
-			continue // drop malformed ids (stale localStorage, hand-edited URL)
-		}
-		if _, dup := seen[v]; dup {
-			continue
-		}
-		seen[v] = struct{}{}
-		out = append(out, v)
-	}
-	return out
-}
-
-// singleTeamParam reads a single ?team_id= value for the single-team read
-// surfaces (the prompts page narrowed to one team). Like teamFilterParam
-// it drops a malformed id rather than erroring — the value is device-local
-// view state (possibly stale localStorage) and junk should degrade to
-// "unfiltered", not 500 the page. Returns "" when absent or malformed; the
-// stores treat "" as no team narrow.
-func singleTeamParam(r *http.Request) string {
-	v := r.URL.Query().Get("team_id")
-	if v == "" {
-		return ""
-	}
-	if _, err := uuid.Parse(v); err != nil {
-		return "" // drop malformed (stale localStorage, hand-edited URL)
-	}
-	return v
-}
-
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
@@ -179,7 +128,7 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	// owned/visible tasks. Teams the caller isn't in yield nothing under
 	// RLS rather than leaking, so no extra validation is needed here — the
 	// narrow is additive on top of the visibility scope.
-	teamFilter := teamFilterParam(r)
+	teamFilter := teamscope.FilterParam(r)
 	var tasks []domain.Task
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -208,7 +157,7 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 	userID := ClaimsFrom(r.Context()).Subject
 	status := r.URL.Query().Get("status")
 	// Optional per-page team filter — see handleQueue.
-	teamFilter := teamFilterParam(r)
+	teamFilter := teamscope.FilterParam(r)
 	var tasks []domain.Task
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error

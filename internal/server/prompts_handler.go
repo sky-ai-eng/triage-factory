@@ -1,16 +1,16 @@
 package server
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/server/prompts"
+	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
 
 // promptsHandler serves the prompt and event-type endpoints. It holds only
@@ -42,20 +42,20 @@ func (ph *promptsHandler) handlePromptsList(w http.ResponseWriter, r *http.Reque
 	userID := ClaimsFrom(r.Context()).Subject
 	// ?team_id= narrows to one team's prompts (+ org-visible) on the
 	// multi-team prompts page; absent/solo returns everything visible.
-	teamID := singleTeamParam(r)
-	var prompts []domain.Prompt
+	teamID := teamscope.SingleParam(r)
+	var list []domain.Prompt
 	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		prompts, e = tx.Prompts.List(r.Context(), orgID, teamID)
+		list, e = tx.Prompts.List(r.Context(), orgID, teamID)
 		return e
 	}); err != nil {
 		internalError(w, "prompts", err)
 		return
 	}
-	if prompts == nil {
-		prompts = []domain.Prompt{}
+	if list == nil {
+		list = []domain.Prompt{}
 	}
-	writeJSON(w, http.StatusOK, prompts)
+	writeJSON(w, http.StatusOK, list)
 }
 
 func (ph *promptsHandler) handlePromptGet(w http.ResponseWriter, r *http.Request) {
@@ -82,45 +82,12 @@ func (ph *promptsHandler) handlePromptGet(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, prompt)
 }
 
-type createPromptRequest struct {
-	Name  string `json:"name"`
-	Body  string `json:"body"`
-	Model string `json:"model"`
-	// TeamID is the acting team the write picker supplied. Required in
-	// the UI whenever the caller belongs to ≥2 teams; empty for a solo
-	// caller (the picker is hidden), where the resolver falls back to the
-	// sole team. See resolveActingTeam.
-	TeamID string `json:"team_id"`
-}
-
-// allowedPromptModelOverrides is the set of non-empty values accepted
-// for prompts.model. "" is always allowed and means "inherit the
-// global default from settings.AI.Model at dispatch". Kept aligned
-// with the picker in frontend/src/pages/Settings.tsx.
-var allowedPromptModelOverrides = []string{"haiku", "sonnet", "opus"}
-
-func validPromptModel(m string) bool {
-	if m == "" {
-		return true
-	}
-	for _, v := range allowedPromptModelOverrides {
-		if m == v {
-			return true
-		}
-	}
-	return false
-}
-
-func invalidPromptModelError() string {
-	return `model must be "" or one of: ` + strings.Join(allowedPromptModelOverrides, ", ")
-}
-
 func (ph *promptsHandler) handlePromptCreate(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
-	var req createPromptRequest
+	var req prompts.CreateRequest
 	if !decodeJSON(w, r, &req, "") {
 		return
 	}
@@ -135,8 +102,8 @@ func (ph *promptsHandler) handlePromptCreate(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body is required"})
 		return
 	}
-	if !validPromptModel(req.Model) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": invalidPromptModelError()})
+	if !prompts.ValidModel(req.Model) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": prompts.InvalidModelError()})
 		return
 	}
 
@@ -152,7 +119,7 @@ func (ph *promptsHandler) handlePromptCreate(w http.ResponseWriter, r *http.Requ
 	userID := ClaimsFrom(r.Context()).Subject
 	var created *domain.Prompt
 	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		teamID, e := resolveActingTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
 		}
@@ -163,19 +130,13 @@ func (ph *promptsHandler) handlePromptCreate(w http.ResponseWriter, r *http.Requ
 		created, ge = tx.Prompts.Get(r.Context(), orgID, id)
 		return ge
 	}); err != nil {
-		if writeIfActingTeamError(w, err) {
+		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
 		internalError(w, "prompts", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, created)
-}
-
-type updatePromptRequest struct {
-	Name  string `json:"name"`
-	Body  string `json:"body"`
-	Model string `json:"model"`
 }
 
 func (ph *promptsHandler) handlePromptPut(w http.ResponseWriter, r *http.Request) {
@@ -186,7 +147,7 @@ func (ph *promptsHandler) handlePromptPut(w http.ResponseWriter, r *http.Request
 	userID := ClaimsFrom(r.Context()).Subject
 	id := r.PathValue("id")
 
-	var req updatePromptRequest
+	var req prompts.UpdateRequest
 	if !decodeJSON(w, r, &req, "") {
 		return
 	}
@@ -198,8 +159,8 @@ func (ph *promptsHandler) handlePromptPut(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body is required"})
 		return
 	}
-	if !validPromptModel(req.Model) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": invalidPromptModelError()})
+	if !prompts.ValidModel(req.Model) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": prompts.InvalidModelError()})
 		return
 	}
 
@@ -334,7 +295,7 @@ func (ph *promptsHandler) handlePromptDelete(w http.ResponseWriter, r *http.Requ
 		// Delete (also soft — runs.prompt_id is RESTRICT). Both leave the row +
 		// its runs so historical timelines still resolve the prompt.
 		var de error
-		status, de = softDeletePromptBySource(r.Context(), tx, orgID, prompt)
+		status, de = prompts.SoftDeleteBySource(r.Context(), tx, orgID, prompt)
 		return de
 	}); err != nil {
 		internalError(w, "prompts", err)
@@ -345,28 +306,6 @@ func (ph *promptsHandler) handlePromptDelete(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": status, "orphaned_blueprint": orphaned})
-}
-
-// softDeletePromptBySource soft-deletes a prompt according to its source and
-// returns the resulting status. System / imported prompts are hidden (kept out
-// of the re-import set); user (and any other) prompts get deleted_at stamped.
-// Both are soft — runs.prompt_id and blueprint_steps.step_prompt_id are RESTRICT
-// FKs, and historical timelines resolve the prompt via the ...System reads — so
-// the row survives as audit. Shared by the prompt-delete delete-pairing (a
-// prompt taking its sole-owner blueprint) and the blueprint-delete cascade (a
-// blueprint taking its step prompts), the two halves of the same pairing, so the
-// source dispatch lives in one place. The caller must have already fetched p.
-func softDeletePromptBySource(ctx context.Context, tx db.TxStores, orgID string, p *domain.Prompt) (status string, err error) {
-	if p.Source == "system" || p.Source == "imported" {
-		if e := tx.Prompts.Hide(ctx, orgID, p.ID); e != nil {
-			return "", e
-		}
-		return "hidden", nil
-	}
-	if e := tx.Prompts.Delete(ctx, orgID, p.ID); e != nil {
-		return "", e
-	}
-	return "deleted", nil
 }
 
 // indexOfStep returns the position of the step whose prompt is promptID, or -1.

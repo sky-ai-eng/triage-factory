@@ -46,7 +46,7 @@ type liveRunHandle struct {
 
 // registerProc records a run's live process handle so control ops can
 // reach it across HTTP turns. Mirrors the cancels-map registration the
-// dispatcher and ResumeAfterYield already do, under the same s.mu.
+// dispatcher and ResumeOpenRun already do, under the same s.mu.
 func (s *Spawner) registerProc(orgID, runID string, lr *agentproc.LiveRun) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

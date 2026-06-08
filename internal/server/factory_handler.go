@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
 
 // factoryHandler serves the factory snapshot endpoint, holding the
@@ -145,11 +146,11 @@ type factoryEntityJSON struct {
 	// entries; v1 frontend uses the first.
 	PendingTasks map[string][]pendingTaskRef `json:"pending_tasks,omitempty"`
 
-	// HasAwaitingInput is true if any run on this entity is in
-	// awaiting_input. The runs-tray chip paints an attention badge
-	// when this is set so a user scanning the factory can spot
-	// yielded runs at a glance. SKY-139.
-	HasAwaitingInput bool `json:"has_awaiting_input,omitempty"`
+	// HasOpenRun is true if any run on this entity is in the `open` state
+	// (a turn ended without a conclusion). The runs-tray chip paints an
+	// idle badge when this is set so a user scanning the factory can spot
+	// open runs at a glance.
+	HasOpenRun bool `json:"has_open_run,omitempty"`
 }
 
 // pendingTaskRef is the minimal task reference shipped per queued
@@ -205,7 +206,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 	// Only the belt narrows here — the throughput counters stay at the
 	// viewer-union (a deliberate scope line; the belt is what "hides
 	// cross-team rows" refers to on the factory).
-	teamFilter := teamFilterParam(r)
+	teamFilter := teamscope.FilterParam(r)
 
 	// Session user's GitHub login drives the "mine" flag. Identity lives in
 	// user_github_identities, host-scoped (SKY-396) — resolve the org's
@@ -219,7 +220,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 	var entityRows []domain.FactoryEntityRow
 	var recentByEntity map[string][]domain.FactoryRecentEvent
 	var pendingTasks []domain.PendingTaskRef
-	var awaitingByEntity map[string]struct{}
+	var openRunsByEntity map[string]struct{}
 	runAuthors := map[string]string{}
 	if err := fh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		orgSet, _ := tx.Orgs.GetSettings(r.Context(), orgID)
@@ -281,7 +282,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 			return e
 		}
 
-		awaitingByEntity, e = tx.AgentRuns.EntitiesWithAwaitingInput(r.Context(), orgID, entityIDs)
+		openRunsByEntity, e = tx.AgentRuns.EntitiesWithOpenRuns(r.Context(), orgID, entityIDs)
 		return e
 	}); err != nil {
 		internalError(w, "factory", err)
@@ -373,8 +374,8 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 		if pending, ok := pendingByEntity[row.Entity.ID]; ok {
 			ej.PendingTasks = pending
 		}
-		if _, ok := awaitingByEntity[row.Entity.ID]; ok {
-			ej.HasAwaitingInput = true
+		if _, ok := openRunsByEntity[row.Entity.ID]; ok {
+			ej.HasOpenRun = true
 		}
 		switch row.Entity.Source {
 		case "github":

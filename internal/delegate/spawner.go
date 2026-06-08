@@ -2,7 +2,7 @@
 // the small cross-cutting helpers (status broadcasts, status updates,
 // drainer/classification wiring) every other file in this package
 // reaches for. The lifecycle methods (Delegate, Cancel, Takeover,
-// Release, ResumeAfterYield) live in their own files; this one is the
+// Release, ResumeOpenRun) live in their own files; this one is the
 // type definition + the bits that don't belong anywhere else.
 
 package delegate
@@ -57,7 +57,7 @@ type Spawner struct {
 	blueprints db.BlueprintStore
 	runQueue   db.RunQueueStore  // the run queue the dispatcher drains: enqueue a step, claim it, run it, react
 	tasks      db.TaskStore      // re-read tasks for run lifecycle handlers
-	agentRuns  db.AgentRunStore  // run lifecycle + transcript + yields
+	agentRuns  db.AgentRunStore  // run lifecycle + transcript
 	entities   db.EntityStore    // entity reads for project lookup + resume context
 	reviews    db.ReviewStore    // pending review cleanup on discard / cancel paths
 	pendingPRs db.PendingPRStore // pending PR lookup on processCompletion / cleanup paths
@@ -599,8 +599,8 @@ func (s *Spawner) updateStatus(orgID, runID, status string) {
 // live column (tasks.status) is a recomputed aggregate over its active
 // blueprint_run's step runs, never a mirror of one run. For a bot-claimed task
 // with an active blueprint_run it sets in_review ("needs 👀") if any of that
-// run's runs is parked (awaiting_input OR pending_approval — one column for both
-// human-interaction points), else in_progress, writing tasks.status only when it
+// run's runs is parked (open OR pending_approval — one column for both
+// non-executing states), else in_progress, writing tasks.status only when it
 // changes and pushing a WS nudge so peer boards follow.
 //
 // Terminal columns are NOT owned here — terminateBlueprint closes the task
@@ -650,7 +650,7 @@ func (s *Spawner) recomputeTaskBoardColumn(orgID, taskID string) {
 	}
 	target := "in_progress"
 	for _, r := range runs {
-		if r.Status == "awaiting_input" || r.Status == "pending_approval" {
+		if r.Status == "open" || r.Status == "pending_approval" {
 			target = "in_review"
 			break
 		}

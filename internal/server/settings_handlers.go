@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -14,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -122,13 +122,13 @@ func (s *Server) handleTeamSettingsGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	teamID, err := s.az.resolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
+	teamID, err := s.az.ResolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
 	if err != nil {
-		writeResolveError(w, "settings/team", err)
+		authz.WriteResolveError(w, "settings/team", err)
 		return
 	}
 
-	if !s.az.verifyTeamInOrg(w, r, orgID, userID, teamID) {
+	if !s.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
 		return
 	}
 
@@ -156,7 +156,7 @@ func (s *Server) handleTeamSettingsGet(w http.ResponseWriter, r *http.Request) {
 		resp.JiraProjects = []jiraProjectSettings{}
 	}
 
-	count, role, err := s.az.teamMemberCountAndRole(r.Context(), orgID, userID, teamID)
+	count, role, err := s.az.TeamMemberCountAndRole(r.Context(), orgID, userID, teamID)
 	if err != nil {
 		internalError(w, "settings/team", err)
 		return
@@ -181,16 +181,16 @@ func (s *Server) handleTeamSettingsPost(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	teamID, err := s.az.resolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
+	teamID, err := s.az.ResolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
 	if err != nil {
-		writeResolveError(w, "settings/team", err)
+		authz.WriteResolveError(w, "settings/team", err)
 		return
 	}
 
-	if !s.az.verifyTeamInOrg(w, r, orgID, userID, teamID) {
+	if !s.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
 		return
 	}
-	if !s.az.requireTeamAdmin(w, r, orgID, userID, teamID) {
+	if !s.az.RequireTeamAdmin(w, r, orgID, userID, teamID) {
 		return
 	}
 
@@ -360,7 +360,7 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 		jiraBaseURL = creds.JiraURL
 	}
 
-	memberCount, err := s.az.orgMemberCount(r.Context(), orgID, userID)
+	memberCount, err := s.az.OrgMemberCount(r.Context(), orgID, userID)
 	if err != nil {
 		internalError(w, "settings/org", err)
 		return
@@ -400,7 +400,7 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
-	if !s.az.requireOrgAdminRole(w, r, orgID, userID) {
+	if !s.az.RequireOrgAdminRole(w, r, orgID, userID) {
 		return
 	}
 
@@ -676,25 +676,10 @@ func (s *Server) capDowngradeWarning(ctx context.Context, orgID, userID, maxTier
 }
 
 // --------------------------------------------------------------------
-// Helpers: resolve-error rendering, duration parsing
-// (the team/org role checks + team-ID resolution live in authz.go)
+// Helpers: duration parsing
+// (the authorization checks, team-ID resolution, and resolve-error
+// rendering live in the authz package)
 // --------------------------------------------------------------------
-
-type resolveError struct {
-	notFound bool
-	err      error
-}
-
-func (e *resolveError) Error() string { return e.err.Error() }
-
-func writeResolveError(w http.ResponseWriter, scope string, err error) {
-	var re *resolveError
-	if errors.As(err, &re) && re.notFound {
-		notFound(w, "team")
-		return
-	}
-	internalError(w, scope, err)
-}
 
 func parseMinDuration(s string, minSeconds int) (time.Duration, error) {
 	d, err := time.ParseDuration(s)

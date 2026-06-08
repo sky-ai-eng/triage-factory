@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // TestRequireOrg_MultiModeNoActiveOrg_Returns409 pins the 409 contract:
@@ -22,7 +23,7 @@ func TestRequireOrg_MultiModeNoActiveOrg_Returns409(t *testing.T) {
 	s := &Server{}
 
 	// Multi-mode-shaped context: claims present, no org.
-	ctx := context.WithValue(context.Background(), ctxKeyClaims, &verify.Claims{Subject: "user-with-no-org"})
+	ctx := httpx.WithClaims(context.Background(), &verify.Claims{Subject: "user-with-no-org"})
 
 	r := httptest.NewRequest("GET", "/api/queue", nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
@@ -55,7 +56,7 @@ func TestRequireOrg_MultiModeNoActiveOrg_Returns409(t *testing.T) {
 // returns the value untouched and ok=true.
 func TestRequireOrg_OrgPresent_ReturnsValue(t *testing.T) {
 	s := &Server{}
-	ctx := context.WithValue(context.Background(), ctxKeyOrgID, "00000000-0000-0000-0000-000000000abc")
+	ctx := httpx.WithOrgID(context.Background(), "00000000-0000-0000-0000-000000000abc")
 	r := httptest.NewRequest("GET", "/api/queue", nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
 

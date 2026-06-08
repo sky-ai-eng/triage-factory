@@ -61,7 +61,7 @@ type RunQueueStore interface {
 	// ResetProcessingRuns is the boot reconcile sweep: every run left
 	// mid-flight by a crash (claimed/running/setup statuses — non-terminal and
 	// non-dormant, but not already 'queued') is flipped back to 'queued' so the
-	// dispatcher re-claims and re-runs it. Dormant runs (awaiting_input,
+	// dispatcher re-claims and re-runs it. Dormant runs (open,
 	// pending_approval) are intentionally left parked — they resume through
 	// their own paths, not the queue. attempts is retained (mirrors
 	// EventQueue.ResetProcessing) so a run that keeps hard-crashing the process

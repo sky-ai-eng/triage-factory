@@ -817,10 +817,12 @@ CREATE TABLE runs (
     worktree_path   TEXT,
     result_summary  TEXT,
     -- outcome is the parsed terminal-envelope outcome
-    -- (continue|finish|abort|yield); NULL on infra-error runs and on
-    -- blueprint steps whose outcome gate exhausted its retries. outcome_reason
-    -- carries the natural-language "why I stopped" populated only on abort,
-    -- kept distinct from result_summary's "what I did".
+    -- (continue|finish|abort); NULL on infra-error runs and on blueprint steps
+    -- that ended without a recognized conclusion. outcome_reason carries the
+    -- natural-language "why I stopped" populated only on abort, kept distinct
+    -- from result_summary's "what I did". A turn that ends with no conclusion at
+    -- all leaves the run 'open' (not concluded, not executing) rather than
+    -- writing an outcome.
     outcome         TEXT,
     outcome_reason  TEXT,
     stop_reason     TEXT,

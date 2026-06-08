@@ -86,7 +86,7 @@ func (a *App) cleanupWorktrees(ctx context.Context) {
 	for _, id := range preserveIDs {
 		preserveSet[id] = true
 	}
-	// Parked runs (awaiting_input / pending_approval) keep their whole
+	// Parked runs (open / pending_approval) keep their whole
 	// worktree as the warm resume cache. A load failure just forgoes the
 	// optimization — those runs still resume by rehydrating from snapshot.
 	preserveWorktrees := map[string]bool{}

@@ -106,7 +106,7 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context) (int, error) {
 		WHERE status NOT IN (
 			'queued',
 			'completed','failed','cancelled','task_unsolvable','taken_over',
-			'awaiting_input','pending_approval'
+			'open','pending_approval'
 		)
 		AND blueprint_run_id IN (SELECT id FROM blueprint_runs WHERE status = 'running')
 	`)

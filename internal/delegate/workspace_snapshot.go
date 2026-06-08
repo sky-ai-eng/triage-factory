@@ -5,12 +5,12 @@
 // fast path (resume uses it directly, rehydrate is a no-op); a missing one
 // rebuilds from the snapshot — never a brick.
 //
-// Two dormancy triggers are wired today, both in processCompletion: a yield to
-// the user (persistYield) and a flip to pending_approval. A third — an
-// executor-drain/scale-down trigger — is a forward seam for the execution-plane
-// split: there are no executors to drain yet, so it is intentionally NOT wired.
-// When it lands it calls snapshotWorkspace with the same key, identically to
-// the two triggers below.
+// Two dormancy triggers are wired today: idle hibernation to `open`
+// (hibernatePark, live.go) and a flip to pending_approval (processCompletion).
+// A third — an executor-drain/scale-down trigger — is a forward seam for the
+// execution-plane split: there are no executors to drain yet, so it is
+// intentionally NOT wired. When it lands it calls snapshotWorkspace with the
+// same key, identically to the two triggers above.
 
 package delegate
 
@@ -203,7 +203,7 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 		// Point the run (and the cleanup paths that key off it) at the rebuilt
 		// worktree. System write — resume goroutines hold no JWT claims.
 		// Non-fatal: the rebuilt path is returned and this resume proceeds. But
-		// run.WorktreePath stays stale, so the NEXT yield+resume won't find the
+		// run.WorktreePath stays stale, so the NEXT resume won't find the
 		// warm copy and will cold-rehydrate again (correct, just slower) — log
 		// it distinctly so unexpected repeat rehydrates are diagnosable.
 		if err := s.agentRuns.SetWorktreePathSystem(context.Background(), orgID, run.ID, wtDir); err != nil {

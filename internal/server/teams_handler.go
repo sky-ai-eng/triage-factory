@@ -8,16 +8,17 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 )
 
 // teamsHandler serves /api/teams — the caller's team list and the org-admin
 // "add team" affordance. It reads/writes through the transactional store
-// runner, gates the create on az.userIsOrgAdmin, and runs the post-commit
+// runner, gates the create on az.UserIsOrgAdmin, and runs the post-commit
 // new-team bootstrap (prompts/rules/bot defaults) against the full store
 // bundle, which must run outside the request transaction.
 type teamsHandler struct {
 	tx        db.TxRunner
-	az        *authz
+	az        *authz.Checker
 	allStores db.Stores
 }
 
@@ -105,7 +106,7 @@ func (th *teamsHandler) handleTeamCreate(w http.ResponseWriter, r *http.Request)
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
-	isAdmin, err := th.az.userIsOrgAdmin(r.Context(), userID, orgID)
+	isAdmin, err := th.az.UserIsOrgAdmin(r.Context(), userID, orgID)
 	if err != nil {
 		internalError(w, "teams", err)
 		return

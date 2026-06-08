@@ -84,8 +84,8 @@ func (s *Spawner) RunDispatcher(ctx context.Context, scanInterval time.Duration)
 // reconcileRunQueue is the boot crash-recovery sweep (decision #4). Runs left
 // mid-flight by a crash (claimed/running/setup statuses) are re-queued so the
 // dispatcher re-claims and re-runs them; a mid-flight blueprint thus resumes by
-// re-running its current step. Dormant runs (awaiting_input, pending_approval)
-// are left parked — they resume through their own paths, not the queue.
+// re-running its current step. Dormant runs (open, pending_approval) are left
+// parked — they resume through their own paths, not the queue.
 func (s *Spawner) reconcileRunQueue(ctx context.Context) {
 	// No step-plan handling needed: a re-queued mid-flight run is re-claimed by
 	// dispatchClaimedRun, which reads the plan frozen on its blueprint_run (off
@@ -329,7 +329,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 // that has reached a terminal (or parked) state, advance the blueprint_run.
 // This is the post-step switch lifted out of the old runBlueprint loop —
 // continue→enqueue-next, finish→complete+close, abort→leave-open,
-// yield/pending_approval→leave parked — now driven by the DB rather than a
+// open/pending_approval→leave parked — now driven by the DB rather than a
 // goroutine stack. It calls recomputeTaskBoardColumn on every transition so the
 // board stays live under the queue model.
 func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, stepRun domain.AgentRun, cfg runConfig, startTime time.Time) {
@@ -343,7 +343,7 @@ func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, ste
 	// Parked mid-step: leave the blueprint running, the worktree on disk, and the
 	// snapshot in the blob store for the resume path. The aggregate column lands
 	// the task in_review.
-	if stepRun.Status == "awaiting_input" || stepRun.Status == "pending_approval" {
+	if stepRun.Status == "open" || stepRun.Status == "pending_approval" {
 		log.Printf("[dispatch] blueprint_run %s step %d paused at status=%s; blueprint remains running", br.ID, stepIdx, stepRun.Status)
 		s.recomputeTaskBoardColumn(orgID, br.TaskID)
 		return

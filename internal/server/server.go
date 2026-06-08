@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -22,6 +21,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -35,7 +35,7 @@ type Server struct {
 	users        db.UsersStore           // display_name + Jira binding on the user row; host-scoped GitHub identity via user_github_identities (SKY-396)
 	blueprints   db.BlueprintStore       // used by event-handler + project test fixtures
 	tasks        db.TaskStore            // SKY-283: task lifecycle, claim, queue + factory snapshot reads
-	agentRuns    db.AgentRunStore        // SKY-285: agent run lifecycle + transcript + yields
+	agentRuns    db.AgentRunStore        // SKY-285: agent run lifecycle + transcript
 	repos        db.RepoStore            // SKY-288: repo_profiles CRUD for repos/settings/projects handlers and curator pinned-repo materialization
 	projects     db.ProjectStore         // SKY-290: projects CRUD for projects/curator/backfill/project_entities handlers
 	curatorStore db.CuratorStore         // curator-runtime CRUD (curator_requests / curator_messages / curator_pending_context) — handler-side writes go through here so Postgres mode honors RLS and uses the right placeholder syntax
@@ -65,12 +65,12 @@ type Server struct {
 	// userID, fn)` so multi-mode RLS sees the user's identity. Local
 	// mode SQLite ignores userID.
 	tx db.TxRunner
-	// az is the org/team authorization layer — resolveTeamID, the
-	// require* gates, and the membership/role probes. It bundles db +
+	// az is the org/team authorization layer — ResolveTeamID, the
+	// Require* gates, and the membership/role probes. It bundles db +
 	// tx so a handler holds one dependency for these cross-cutting
-	// checks instead of re-deriving them against raw fields. See
-	// authz.go.
-	az *authz
+	// checks instead of re-deriving them against raw fields. See the
+	// authz package.
+	az *authz.Checker
 	// allStores is the full bundle, retained so post-commit bootstrap
 	// helpers (db.BootstrapNewOrg / db.BootstrapNewTeam) — which take a
 	// db.Stores and must run outside WithTx on the admin pool — can be
@@ -410,7 +410,7 @@ func New(database *sql.DB, stores db.Stores, takeoverDir string, serverPort int)
 		githubApps:   stores.GitHubApps,
 		orgTemplate:  stores.OrgTemplate,
 		tx:           stores.Tx,
-		az:           &authz{db: database, tx: stores.Tx},
+		az:           authz.New(database, stores.Tx),
 		allStores:    stores,
 		takeoverDir:  takeoverDir,
 		serverPort:   serverPort,
@@ -616,7 +616,6 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/agent/runs/{runID}/cancel", ag.handleAgentCancel)
 	s.apiMutating("POST /api/agent/runs/{runID}/takeover", ag.handleAgentTakeover)
 	s.apiMutating("POST /api/agent/runs/{runID}/release", ag.handleAgentRelease)
-	s.apiMutating("POST /api/agent/runs/{runID}/respond", ag.handleAgentRespond)
 	s.api("GET /api/agent/runs", ag.handleAgentRuns)
 	s.api("GET /api/agent/takeovers/held", ag.handleHeldTakeovers)
 
@@ -1003,9 +1002,3 @@ func (s *Server) handlePreferences(w http.ResponseWriter, r *http.Request) {
 
 // Prompt handlers are in prompts_handler.go
 // Skill import handler is in skills_handler.go
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
-}

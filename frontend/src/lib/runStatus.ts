@@ -31,7 +31,7 @@ export function statusLabel(status: string): string {
     worktree_created: 'Creating worktree',
     agent_starting: 'Starting Claude Code',
     running: 'Running',
-    awaiting_input: 'Waiting for response',
+    open: 'Open',
     completed: 'Completed',
     pending_approval: 'Pending Approval',
     cancelled: 'Cancelled',
@@ -53,13 +53,13 @@ export function statusDisplay(run: AgentRun): StatusDisplay {
   const isCancelled = run.Status === 'cancelled'
   const isUnsolvable = run.Status === 'task_unsolvable'
   const isPendingApproval = run.Status === 'pending_approval'
-  const isAwaiting = run.Status === 'awaiting_input'
+  const isOpen = run.Status === 'open'
   const active = isActiveRun(run)
 
   const color =
     isFailed || isCancelled
       ? 'text-dismiss'
-      : isUnsolvable || isPendingApproval || isAwaiting
+      : isUnsolvable || isPendingApproval || isOpen
         ? 'text-snooze'
         : active
           ? 'text-delegate'
@@ -73,8 +73,8 @@ export function statusDisplay(run: AgentRun): StatusDisplay {
         ? '⊘'
         : isPendingApproval
           ? '◉'
-          : isAwaiting
-            ? '⏳'
+          : isOpen
+            ? '◌'
             : active
               ? '●'
               : '✓'
