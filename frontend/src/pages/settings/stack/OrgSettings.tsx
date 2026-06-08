@@ -10,11 +10,15 @@
 // org-form sections all persist through the single POST /api/settings/org, so
 // each saves {...baseline.org, ...ownFields} against the LIVE baseline — saving
 // one never flushes another's unsaved edits. Selector/panel sections (the
-// access-method picker, the App register panel) and Jira disconnect commit no
-// org-form slice, so they carry no Save footer. The Jira *connect* is the
-// exception that proves the rule it used to break: its Save footer ("Connect")
-// drives POST /api/jira/connect rather than the org POST, but it's a footer all
-// the same — the same one-button shape as the GitHub PAT section.
+// access-method picker, the App register panel) carry no Save footer. Jira
+// disconnect is footer-less too — it commits inline on its own button — though
+// note it DOES mutate org settings (JiraAccessGroup.disconnect POSTs
+// /api/settings/org to clear jira_base_url, on top of DELETE
+// /api/integrations/jira); footer-less is about how it commits, not whether it
+// persists. The Jira *connect* is the exception that proves the rule it used to
+// break: its Save footer ("Connect") drives POST /api/jira/connect rather than
+// the org POST, but it's a footer all the same — the same one-button shape as
+// the GitHub PAT section.
 
 import { useCallback, useEffect, useState } from 'react'
 import { toast } from '../../../components/Toast/toastStore'
@@ -345,9 +349,13 @@ export default function OrgSettings({
           title="Jira connection"
           summary="Not connected"
           saveLabel="Connect"
-          // Connect needs both fields; light the section's Save only once both
-          // are present (mirrors the old Connect button's disabled rule).
-          dirty={draft.org.jira_url.trim() !== '' && draft.org.jira_pat.trim() !== ''}
+          // dirty reflects any draft change against the baseline — it arms the
+          // discard guard + unsaved dot, so a partially-typed URL/PAT isn't
+          // silently dropped on collapse. The "needs BOTH fields" rule that
+          // gates the connect lives in saveDisabled instead (mirrors the old
+          // Connect button's disabled condition).
+          dirty={draft.org.jira_url !== baseline.org.jira_url || draft.org.jira_pat.trim() !== ''}
+          saveDisabled={draft.org.jira_url.trim() === '' || draft.org.jira_pat.trim() === ''}
           saving={isSaving('jira-connect')}
           onSave={async () => {
             setSavingKey('jira-connect', true)

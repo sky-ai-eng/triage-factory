@@ -505,6 +505,11 @@ const jiraAccessStep: WizardStep = {
   isComplete: (s) => s.jiraConnected,
   validate: (s) => {
     if (s.jiraConnected) return null
+    // A disconnect (JiraAccessStep onDisconnected) clears jiraUrlConfirmed, so
+    // reconnecting must re-probe the URL first — bounce Continue back to the
+    // (now-incomplete) URL bar above rather than connecting against an
+    // unconfirmed host.
+    if (!s.jiraUrlConfirmed) return 'Re-confirm your Jira URL above to reconnect.'
     return s.org.jira_pat.trim() === '' ? 'Enter a personal access token to connect.' : null
   },
   persist: async ({ state, patch }) => {
