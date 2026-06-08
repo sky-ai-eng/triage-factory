@@ -646,6 +646,117 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 	writeJSON(w, http.StatusOK, fresh)
 }
 
+// POST /api/event-handlers/{id}/retarget
+//
+// Re-points a trigger at a different blueprint — the canvas gesture of dragging
+// a trigger arrow's head off one blueprint's entry and onto another's. A single
+// UPDATE of blueprint_id (RetargetBlueprint) preserves the handler row and its
+// id, so run history and the event-trigger fence survive the move. blueprint_id
+// in the body is the new target; it must exist, be same-team, and be
+// trigger-less (a blueprint is fired by exactly one event).
+type retargetEventHandlerRequest struct {
+	BlueprintID string `json:"blueprint_id"`
+}
+
+func (eh *eventHandlersHandler) handleEventHandlerRetarget(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	id := r.PathValue("id")
+
+	var req retargetEventHandlerRequest
+	if !decodeJSON(w, r, &req, "") {
+		return
+	}
+	if req.BlueprintID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "blueprint_id is required"})
+		return
+	}
+
+	var (
+		existing   *domain.EventHandler
+		blueprint  *domain.Blueprint
+		fresh      *domain.EventHandler
+		notTrigger bool
+		crossTeam  bool
+		hasTrigger bool
+		noChange   bool
+	)
+	// Validation + the UPDATE share one tx, so the "blueprint already triggered"
+	// check and the write see the same snapshot — no promote-style race window.
+	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		existing, e = tx.EventHandlers.Get(r.Context(), orgID, id)
+		if e != nil || existing == nil {
+			return e
+		}
+		if existing.Kind != domain.EventHandlerKindTrigger {
+			notTrigger = true
+			return nil
+		}
+		if existing.BlueprintID == req.BlueprintID {
+			noChange = true
+			return nil
+		}
+		blueprint, e = tx.Blueprints.Get(r.Context(), orgID, req.BlueprintID)
+		if e != nil || blueprint == nil {
+			return e
+		}
+		if existing.TeamID != "" && blueprint.TeamID != "" && blueprint.TeamID != existing.TeamID {
+			crossTeam = true
+			return nil
+		}
+		triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, req.BlueprintID)
+		if e != nil {
+			return e
+		}
+		if len(triggers) > 0 {
+			hasTrigger = true
+			return nil
+		}
+		if e := tx.EventHandlers.RetargetBlueprint(r.Context(), orgID, id, req.BlueprintID); e != nil {
+			return e
+		}
+		fresh, e = tx.EventHandlers.Get(r.Context(), orgID, id)
+		return e
+	}); err != nil {
+		if isUniqueViolation(err) {
+			log.Printf("[event_handlers] retarget conflict (blueprint already triggered): %v", err)
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
+			return
+		}
+		internalError(w, "event_handlers", err)
+		return
+	}
+	if existing == nil {
+		notFound(w, "event handler")
+		return
+	}
+	if notTrigger {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "only triggers can be retargeted"})
+		return
+	}
+	if noChange {
+		writeJSON(w, http.StatusOK, existing)
+		return
+	}
+	if blueprint == nil {
+		notFound(w, "blueprint")
+		return
+	}
+	if crossTeam {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "blueprint_id references a blueprint owned by another team"})
+		return
+	}
+	if hasTrigger {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
+		return
+	}
+	writeJSON(w, http.StatusOK, fresh)
+}
+
 // PUT /api/event-handlers/reorder
 //
 // Rules-only — trigger IDs in the list are silently skipped by the

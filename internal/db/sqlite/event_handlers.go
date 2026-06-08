@@ -328,6 +328,14 @@ func (s *eventHandlerStore) Delete(ctx context.Context, orgID, id string) error 
 	return err
 }
 
+func (s *eventHandlerStore) RetargetBlueprint(ctx context.Context, orgID, id, newBlueprintID string) error {
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE event_handlers SET blueprint_id = ?, updated_at = ?
+		WHERE org_id = ? AND id = ? AND kind = 'trigger'
+	`, newBlueprintID, time.Now().UTC(), orgID, id)
+	return err
+}
+
 func (s *eventHandlerStore) Reorder(ctx context.Context, orgID string, ids []string) error {
 	return inTx(ctx, s.q, func(q queryer) error {
 		now := time.Now().UTC()

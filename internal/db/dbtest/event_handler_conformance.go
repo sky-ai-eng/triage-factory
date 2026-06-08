@@ -173,6 +173,40 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}
 	})
 
+	t.Run("RetargetBlueprint_MovesTriggerPreservingRow", func(t *testing.T) {
+		store, orgID, teamID, seedBlueprints := factory(t)
+		ctx := context.Background()
+		ids := seedBlueprints(t, "p-retarget-from", "p-retarget-to")
+		from, to := ids["p-retarget-from"], ids["p-retarget-to"]
+		breaker := 3
+		minAutonomy := 0.0
+		h := domain.EventHandler{
+			ID:                     uuid.New().String(),
+			Kind:                   domain.EventHandlerKindTrigger,
+			BlueprintID:            from,
+			EventType:              domain.EventGitHubPRCICheckFailed,
+			BreakerThreshold:       &breaker,
+			MinAutonomySuitability: &minAutonomy,
+		}
+		if err := store.Create(ctx, orgID, teamID, h); err != nil {
+			t.Fatalf("Create trigger: %v", err)
+		}
+		if err := store.RetargetBlueprint(ctx, orgID, h.ID, to); err != nil {
+			t.Fatalf("RetargetBlueprint: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, h.ID)
+		if err != nil || got == nil {
+			t.Fatalf("Get after retarget: got=%v err=%v", got, err)
+		}
+		// Same row (id preserved), now pointing at the new blueprint, still a trigger.
+		if got.BlueprintID != to {
+			t.Errorf("BlueprintID=%q want %q (retarget must move it)", got.BlueprintID, to)
+		}
+		if got.Kind != domain.EventHandlerKindTrigger {
+			t.Errorf("Kind=%q want trigger (retarget must not change kind)", got.Kind)
+		}
+	})
+
 	t.Run("Create_RejectsRuleWithTriggerFields", func(t *testing.T) {
 		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()

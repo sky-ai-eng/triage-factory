@@ -595,6 +595,10 @@ function BindingGraphInner({
   // True while a delete batch is in flight, so a held/double Delete (or a
   // double-click of the confirm dialog's Delete) doesn't dispatch twice.
   const deletingRef = useRef(false)
+  // Edge reconnection (rule 4): tracks whether a reconnect drag landed on a
+  // valid handle. onReconnectStart clears it; onReconnect sets it. If it's still
+  // false in onReconnectEnd, the edge was dropped on empty space → detach it.
+  const edgeReconnectSuccessful = useRef(true)
   // Mirror of deleteConfirm so onBeforeDelete (narrow deps, doesn't close over
   // the state) can early-return while the dialog is already open — a focused
   // Cancel button isn't in xyflow's key-guard list, so Delete/Backspace would
@@ -1052,6 +1056,9 @@ function BindingGraphInner({
     // Only wire to prompts that are actually on the canvas — a step whose prompt
     // is absent (e.g. mid-fetch or a deleted prompt) gets no dangling edge.
     const presentPrompts = new Set(prompts.map((p) => p.id))
+    // Reconnection (rule 4) is team-scope only for now (the re-target endpoints
+    // are team-only) and only on the head (target) end. Off in the org template.
+    const reconnectable: Edge['reconnectable'] = template ? false : 'target'
     const triggerEdges: Edge[] = triggers
       // Drop triggers whose blueprint has no resolvable entry prompt so we never
       // emit an edge pointing at a node that isn't on the canvas.
@@ -1069,6 +1076,7 @@ function BindingGraphInner({
         animated: t.enabled,
         data: { kind: 'trigger' },
         deletable: false,
+        reconnectable,
         style: {
           stroke: t.enabled ? 'var(--color-accent)' : 'var(--color-text-tertiary)',
           strokeWidth: t.enabled ? 2 : 1,
@@ -1102,13 +1110,14 @@ function BindingGraphInner({
           // Disconnecting this edge splits the blueprint before step i+1.
           data: { kind: 'sequence', blueprintId: bpId, atStepIndex: i + 1 },
           deletable: false,
+          reconnectable,
           style: { stroke: 'var(--color-text-tertiary)', strokeWidth: 1.5 },
           markerEnd: { type: MarkerType.ArrowClosed, color: 'var(--color-text-tertiary)' },
         })
       }
     }
     return [...sequenceEdges, ...triggerEdges]
-  }, [triggers, activeEventIds, blueprintFirstPrompt, blueprintSteps, prompts])
+  }, [triggers, activeEventIds, blueprintFirstPrompt, blueprintSteps, prompts, template])
 
   // Handle node changes (dragging) — apply, persist positions, recompute boxes.
   //
@@ -1489,6 +1498,136 @@ function BindingGraphInner({
     [template, fetchAll],
   )
 
+  // --- Edge reconnection (rule 4: drag an arrow's head onto a new target) ---
+  // Re-target lands on a free chain entry; drop-on-empty detaches. Both are
+  // team-scope only (the re-target endpoints are team-only); the edges are
+  // marked non-reconnectable in template scope, so these never fire there.
+
+  // Re-point a trigger edge onto a different blueprint's entry: an in-place
+  // blueprint_id move that preserves the trigger row + its run history.
+  const doRetargetTrigger = useCallback(
+    async (triggerId: string, targetBlueprintId: string) => {
+      try {
+        const res = await fetch(
+          `${handlersBase(template)}/${encodeURIComponent(triggerId)}/retarget`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ blueprint_id: targetBlueprintId }),
+          },
+        )
+        if (!res.ok) {
+          toast.error(await readError(res, 'Failed to move trigger'))
+        }
+      } catch (err) {
+        toast.error(`Failed to move trigger: ${err instanceof Error ? err.message : String(err)}`)
+      } finally {
+        fetchAll()
+      }
+    },
+    [template, fetchAll],
+  )
+
+  // Re-point a sequence edge onto a different blueprint's entry: atomic
+  // split-here + merge-there, peeling the old downstream into a new orphan.
+  const doReconnectSequence = useCallback(
+    async (blueprintId: string, atStepIndex: number, targetBlueprintId: string) => {
+      try {
+        const res = await fetch(
+          `${blueprintsBase(template)}/${encodeURIComponent(blueprintId)}/reconnect`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              at_step_index: atStepIndex,
+              target_blueprint_id: targetBlueprintId,
+            }),
+          },
+        )
+        if (!res.ok) {
+          toast.error(await readError(res, 'Failed to reconnect step'))
+          return
+        }
+        toast.info('Steps after the reconnect point are now a separate blueprint.')
+      } catch (err) {
+        toast.error(`Failed to reconnect step: ${err instanceof Error ? err.message : String(err)}`)
+      } finally {
+        fetchAll()
+      }
+    },
+    [template, fetchAll],
+  )
+
+  const onReconnectStart = useCallback(() => {
+    edgeReconnectSuccessful.current = false
+  }, [])
+
+  // A reconnect drag landed on a handle. Resolve the edge kind + the new target,
+  // validate it's a free chain entry (≤1 input), and route to the right move.
+  // Setting the success flag first means a refused/no-op reconnect is never
+  // mistaken for a drop-on-empty delete.
+  const onReconnect = useCallback(
+    (oldEdge: Edge, newConnection: Connection) => {
+      edgeReconnectSuccessful.current = true
+      if (!scopeReady || template) return
+      const newTarget = newConnection.target ?? ''
+      if (!newTarget.startsWith('p:')) {
+        toast.error('A connection has to end on a prompt')
+        return
+      }
+      // Dropped back on the same head — nothing changed.
+      if (newTarget === oldEdge.target) return
+      const tid = newTarget.slice(2)
+      const targetBp = promptToBlueprintRef.current[tid]
+      if (!targetBp) {
+        toast.error('That prompt is not part of a blueprint')
+        return
+      }
+      // A valid re-target lands on a free chain entry: step 0 of a trigger-less
+      // blueprint (its head carries no inbound edge).
+      if (firstPromptRef.current[targetBp] !== tid) {
+        toast.error('That prompt already has an input — a step takes a single incoming edge')
+        return
+      }
+      if (triggeredRef.current.has(targetBp)) {
+        toast.error('That blueprint already has a trigger — detach it first')
+        return
+      }
+      const kind = (oldEdge.data as { kind?: string } | undefined)?.kind
+      if (kind === 'trigger') {
+        doRetargetTrigger(oldEdge.id, targetBp)
+        return
+      }
+      if (kind === 'sequence') {
+        const data = oldEdge.data as { blueprintId: string; atStepIndex: number }
+        if (targetBp === data.blueprintId) {
+          toast.error('A blueprint can’t wire into itself')
+          return
+        }
+        doReconnectSequence(data.blueprintId, data.atStepIndex, targetBp)
+      }
+    },
+    [scopeReady, template, doRetargetTrigger, doReconnectSequence],
+  )
+
+  // A reconnect drag ended. If it didn't land on a handle (success still false),
+  // the user dropped the head on empty space → detach: a trigger edge removes
+  // the trigger, a sequence edge splits the blueprint at that point.
+  const onReconnectEnd = useCallback(
+    (_event: MouseEvent | TouchEvent, edge: Edge) => {
+      if (edgeReconnectSuccessful.current) return
+      const kind = (edge.data as { kind?: string } | undefined)?.kind
+      if (kind === 'trigger') {
+        doDeleteTrigger(edge.id)
+      } else if (kind === 'sequence') {
+        const data = edge.data as { blueprintId: string; atStepIndex: number }
+        doSplit(data.blueprintId, data.atStepIndex)
+      }
+      edgeReconnectSuccessful.current = true
+    },
+    [doDeleteTrigger, doSplit],
+  )
+
   // Click an edge: plain click on a trigger edge opens its config; shift-click
   // any edge opens a contextual menu (trigger: edit/remove; sequence: split).
   const onEdgeClick: EdgeMouseHandler = useCallback((event, edge) => {
@@ -1649,6 +1788,9 @@ function BindingGraphInner({
         nodeTypes={nodeTypes}
         onNodesChange={onNodesChange}
         onConnect={onConnect}
+        onReconnectStart={onReconnectStart}
+        onReconnect={onReconnect}
+        onReconnectEnd={onReconnectEnd}
         onEdgeClick={onEdgeClick}
         onBeforeDelete={onBeforeDelete}
         fitView

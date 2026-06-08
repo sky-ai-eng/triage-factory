@@ -705,6 +705,157 @@ func (bh *blueprintsHandler) handleBlueprintSplit(w http.ResponseWriter, r *http
 	})
 }
 
+type reconnectBlueprintRequest struct {
+	// AtStepIndex k re-points the boundary before step k: steps [0,k) stay on
+	// {id} and continue into the target's chain; steps [k,N) peel off as a new
+	// orphaned trigger-less blueprint. Pointer so a missing field 400s
+	// ("required") instead of silently defaulting to 0.
+	AtStepIndex *int `json:"at_step_index"`
+	// TargetBlueprintID (C) is the trigger-less blueprint whose entry the
+	// upstream half now connects to; its steps are absorbed onto {id}'s tail.
+	TargetBlueprintID string `json:"target_blueprint_id"`
+}
+
+// blueprintReconnectResponse returns the updated host (the upstream half with
+// the target's steps absorbed onto its tail) plus the id of the peeled-off
+// orphan downstream blueprint, so the caller can refresh + surface a toast.
+type blueprintReconnectResponse struct {
+	Host              blueprintWithSteps `json:"host"`
+	OrphanBlueprintID string             `json:"orphan_blueprint_id"`
+}
+
+// handleBlueprintReconnect re-points a sequence edge's head onto another
+// blueprint's entry — the canvas "drag a step arrow's head to a new prompt"
+// gesture (full re-target). It splits {id} at at_step_index (steps [k,N) peel
+// off as a new orphaned trigger-less blueprint) and merges target_blueprint_id
+// onto the surviving upstream half, atomically: SplitAt + MergeInto run in one
+// tx (inTx reuses the WithTx tx), so a mid-sequence failure can't leave a
+// half-split blueprint behind. The host keeps its id + trigger.
+func (bh *blueprintsHandler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	id := r.PathValue("id")
+
+	var req reconnectBlueprintRequest
+	if !decodeJSON(w, r, &req, "") {
+		return
+	}
+	if req.AtStepIndex == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "at_step_index is required"})
+		return
+	}
+	if req.TargetBlueprintID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_blueprint_id is required"})
+		return
+	}
+	atIndex := *req.AtStepIndex
+	orphanID := uuid.New().String()
+
+	var (
+		host, target *domain.Blueprint
+		hostOut      *domain.Blueprint
+		hostSteps    []domain.BlueprintStep
+		failStatus   int
+		failMsg      string
+	)
+	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		if host, e = tx.Blueprints.Get(r.Context(), orgID, id); e != nil || host == nil {
+			return e
+		}
+		if target, e = tx.Blueprints.Get(r.Context(), orgID, req.TargetBlueprintID); e != nil || target == nil {
+			return e
+		}
+		if req.TargetBlueprintID == id {
+			failStatus, failMsg = http.StatusUnprocessableEntity, "cannot reconnect a blueprint into itself"
+			return nil
+		}
+		// Same-team guard (MergeInto leaves team_id on the reparented steps
+		// unchanged).
+		if host.TeamID != "" && target.TeamID != "" && host.TeamID != target.TeamID {
+			failStatus, failMsg = http.StatusUnprocessableEntity, "host and target blueprints belong to different teams"
+			return nil
+		}
+		steps, e := tx.Blueprints.ListSteps(r.Context(), orgID, id)
+		if e != nil {
+			return e
+		}
+		// 0 < k < N: both the surviving upstream and the orphaned downstream must
+		// be non-empty (a sequence edge always sits at such a boundary).
+		if atIndex <= 0 || atIndex >= len(steps) {
+			failStatus, failMsg = http.StatusUnprocessableEntity, "at_step_index must split the blueprint into two non-empty halves"
+			return nil
+		}
+		// Target must be trigger-less to be absorbed (mirrors merge). The
+		// one-trigger-per-blueprint partial-unique index is the hard backstop.
+		triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, req.TargetBlueprintID)
+		if e != nil {
+			return e
+		}
+		if len(triggers) > 0 {
+			failStatus, failMsg = http.StatusUnprocessableEntity, "the target blueprint has its own event trigger; detach it first"
+			return nil
+		}
+		// Cap: the surviving upstream (atIndex steps) + the absorbed target must
+		// stay editable via the steps-PUT, which rejects lists over the max.
+		targetSteps, e := tx.Blueprints.ListSteps(r.Context(), orgID, req.TargetBlueprintID)
+		if e != nil {
+			return e
+		}
+		if atIndex+len(targetSteps) > maxBlueprintSteps {
+			failStatus, failMsg = http.StatusUnprocessableEntity, "reconnected blueprint would exceed "+strconv.Itoa(maxBlueprintSteps)+" steps"
+			return nil
+		}
+		// Orphan name defaults to its new step-0 prompt's name (the prompt at the
+		// boundary), consistent with split / auto-wrap.
+		orphanName := ""
+		if p, pe := tx.Prompts.Get(r.Context(), orgID, steps[atIndex].StepPromptID); pe != nil {
+			return pe
+		} else if p != nil {
+			orphanName = p.Name
+		}
+		if orphanName == "" {
+			orphanName = "Untitled blueprint"
+		}
+		if _, e = tx.Blueprints.SplitAt(r.Context(), orgID, id, atIndex, orphanID, orphanName); e != nil {
+			return e
+		}
+		if e = tx.Blueprints.MergeInto(r.Context(), orgID, id, req.TargetBlueprintID); e != nil {
+			return e
+		}
+		if hostOut, e = tx.Blueprints.Get(r.Context(), orgID, id); e != nil {
+			return e
+		}
+		hostSteps, e = tx.Blueprints.ListSteps(r.Context(), orgID, id)
+		return e
+	}); err != nil {
+		internalError(w, "blueprints", err)
+		return
+	}
+	if host == nil {
+		notFound(w, "blueprint")
+		return
+	}
+	if target == nil {
+		notFound(w, "target blueprint")
+		return
+	}
+	if failMsg != "" {
+		writeJSON(w, failStatus, map[string]string{"error": failMsg})
+		return
+	}
+	if hostSteps == nil {
+		hostSteps = []domain.BlueprintStep{}
+	}
+	writeJSON(w, http.StatusOK, blueprintReconnectResponse{
+		Host:              blueprintWithSteps{Blueprint: hostOut, Steps: hostSteps},
+		OrphanBlueprintID: orphanID,
+	})
+}
+
 // --- Blueprint duplication (deep-copy) -----------------------------------
 
 type duplicateBlueprintsRequest struct {

@@ -125,6 +125,16 @@ type EventHandlerStore interface {
 	// don't satisfy the CHECK constraints.
 	Promote(ctx context.Context, orgID string, id string, t domain.EventHandler) error
 
+	// RetargetBlueprint re-points a trigger at a different blueprint in a single
+	// UPDATE, preserving the handler row — and its id, which runs /
+	// blueprint_runs / pending_firings FK-reference — so run history and the
+	// event-trigger fence survive the move (a delete+recreate would orphan that
+	// history and trip the FK). Trigger-only: the WHERE pins kind='trigger', so a
+	// rule id is a no-op. The caller validates that the new blueprint exists, is
+	// same-team, and is not already triggered; the one-trigger-per-blueprint
+	// partial-unique index is the hard backstop.
+	RetargetBlueprint(ctx context.Context, orgID string, id string, newBlueprintID string) error
+
 	// --- Admin-pool variants (`...System`) ---
 	//
 	// The router consumes these from its eventbus subscriber
