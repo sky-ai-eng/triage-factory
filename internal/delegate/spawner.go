@@ -10,6 +10,8 @@ package delegate
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -19,6 +21,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
@@ -483,6 +486,53 @@ func (s *Spawner) resolveCloneToken(ctx context.Context, orgID, owner string) st
 		return ""
 	}
 	return tok.Value
+}
+
+// gitProxyConfigFor builds the per-run git-egress wiring for a run
+// targeting a repo owned by owner: a gitproxy TokenSource backed by the
+// same resolver resolveCloneToken uses, so the host-side clone and the
+// in-sandbox push resolve one credential (App installation token or org
+// PAT, App preferred — TokenFor selects the owner's installation and
+// falls through to the PAT). agentproc holds the token host-side and
+// routes the sandbox git at the proxy; the real credential never enters
+// the box.
+//
+// Returns nil — disabling the git proxy — in local mode (the agent runs
+// on the host with the operator's own git credentials), when no resolver
+// is wired (test fixtures), or when owner is empty (Jira-only runs that
+// pre-clone nothing). agentproc ignores a nil GitProxy.
+//
+// The closure maps the resolver's no-credentials sentinel to
+// agentproc.ErrNoSandboxGitCredentials so a misconfigured org surfaces a
+// clear admin-facing failure at run start rather than a confusing git
+// error from inside the sandbox. The resolver is read under the same
+// lock as resolveCloneToken so a startup-time credential hot-swap can't
+// race it.
+func (s *Spawner) gitProxyConfigFor(orgID, owner string) *agentproc.GitProxyConfig {
+	if runmode.Current() == runmode.ModeLocal {
+		return nil
+	}
+	if owner == "" {
+		return nil
+	}
+	s.mu.Lock()
+	resolver := s.ghResolver
+	s.mu.Unlock()
+	if resolver == nil {
+		return nil
+	}
+	return &agentproc.GitProxyConfig{
+		TokenSource: func(ctx context.Context) (gitproxy.Token, error) {
+			tok, err := resolver.TokenFor(ctx, orgID, owner)
+			if err != nil {
+				if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+					return gitproxy.Token{}, fmt.Errorf("%w: org %s owner %s", agentproc.ErrNoSandboxGitCredentials, orgID, owner)
+				}
+				return gitproxy.Token{}, err
+			}
+			return gitproxy.Token{Value: tok.Value, ExpiresAt: tok.ExpiresAt}, nil
+		},
+	}
 }
 
 // resolveModel resolves the run's team default model via the SKY-389
