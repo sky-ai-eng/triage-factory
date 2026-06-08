@@ -597,8 +597,9 @@ func (s *Server) routes() {
 	// explicit-set endpoint — it's a recency signal, not a user preference).
 	// POST /api/teams is the org-admin "add team" affordance (hosted-only;
 	// 404 in local).
-	s.api("GET /api/teams", s.handleTeamsList)
-	s.apiMutating("POST /api/teams", s.handleTeamCreate)
+	th := &teamsHandler{tx: s.tx, az: s.az, allStores: s.allStores}
+	s.api("GET /api/teams", th.handleTeamsList)
+	s.apiMutating("POST /api/teams", th.handleTeamCreate)
 
 	s.api("GET /api/queue", s.handleQueue)
 	s.api("GET /api/tasks", s.handleTasks)
@@ -762,30 +763,31 @@ func (s *Server) routes() {
 	// Org template editor (SKY-381) — org-admin-gated, multi-mode only.
 	// Mirrors the /api/prompts + /api/event-handlers families at org-template
 	// scope (no team_id); each handler gates via requireOrgTemplate.
-	s.api("GET /api/org-template/prompts", s.handleOrgTemplatePromptsList)
-	s.apiMutating("POST /api/org-template/prompts", s.handleOrgTemplatePromptCreate)
-	s.api("GET /api/org-template/prompts/{id}", s.handleOrgTemplatePromptGet)
-	s.apiMutating("PUT /api/org-template/prompts/{id}", s.handleOrgTemplatePromptPut)
-	s.apiMutating("DELETE /api/org-template/prompts/{id}", s.handleOrgTemplatePromptDelete)
-	s.api("GET /api/org-template/blueprints", s.handleOrgTemplateBlueprintsList)
-	s.apiMutating("POST /api/org-template/blueprints", s.handleOrgTemplateBlueprintCreate)
-	s.apiMutating("POST /api/org-template/blueprints/duplicate", s.handleOrgTemplateBlueprintDuplicate)
-	s.api("GET /api/org-template/blueprints/{id}", s.handleOrgTemplateBlueprintGet)
-	s.apiMutating("PUT /api/org-template/blueprints/{id}", s.handleOrgTemplateBlueprintPut)
-	s.apiMutating("DELETE /api/org-template/blueprints/{id}", s.handleOrgTemplateBlueprintDelete)
-	s.api("GET /api/org-template/blueprint-steps", s.handleOrgTemplateBlueprintStepsAll)
-	s.api("GET /api/org-template/blueprints/{id}/steps", s.handleOrgTemplateBlueprintStepsGet)
-	s.apiMutating("PUT /api/org-template/blueprints/{id}/steps", s.handleOrgTemplateBlueprintStepsPut)
-	s.apiMutating("POST /api/org-template/blueprints/{id}/merge", s.handleOrgTemplateBlueprintMerge)
-	s.apiMutating("POST /api/org-template/blueprints/{id}/split", s.handleOrgTemplateBlueprintSplit)
-	s.api("GET /api/org-template/event-handlers", s.handleOrgTemplateHandlersList)
-	s.apiMutating("POST /api/org-template/event-handlers", s.handleOrgTemplateHandlerCreate)
-	s.apiMutating("PUT /api/org-template/event-handlers/reorder", s.handleOrgTemplateHandlerReorder)
-	s.apiMutating("PATCH /api/org-template/event-handlers/{id}", s.handleOrgTemplateHandlerUpdate)
-	s.apiMutating("PUT /api/org-template/event-handlers/{id}", s.handleOrgTemplateHandlerUpdate)
-	s.apiMutating("DELETE /api/org-template/event-handlers/{id}", s.handleOrgTemplateHandlerDelete)
-	s.apiMutating("POST /api/org-template/event-handlers/{id}/toggle", s.handleOrgTemplateHandlerToggle)
-	s.apiMutating("POST /api/org-template/event-handlers/{id}/promote", s.handleOrgTemplateHandlerPromote)
+	ot := &orgTemplateHandler{tx: s.tx, az: s.az}
+	s.api("GET /api/org-template/prompts", ot.handleOrgTemplatePromptsList)
+	s.apiMutating("POST /api/org-template/prompts", ot.handleOrgTemplatePromptCreate)
+	s.api("GET /api/org-template/prompts/{id}", ot.handleOrgTemplatePromptGet)
+	s.apiMutating("PUT /api/org-template/prompts/{id}", ot.handleOrgTemplatePromptPut)
+	s.apiMutating("DELETE /api/org-template/prompts/{id}", ot.handleOrgTemplatePromptDelete)
+	s.api("GET /api/org-template/blueprints", ot.handleOrgTemplateBlueprintsList)
+	s.apiMutating("POST /api/org-template/blueprints", ot.handleOrgTemplateBlueprintCreate)
+	s.apiMutating("POST /api/org-template/blueprints/duplicate", ot.handleOrgTemplateBlueprintDuplicate)
+	s.api("GET /api/org-template/blueprints/{id}", ot.handleOrgTemplateBlueprintGet)
+	s.apiMutating("PUT /api/org-template/blueprints/{id}", ot.handleOrgTemplateBlueprintPut)
+	s.apiMutating("DELETE /api/org-template/blueprints/{id}", ot.handleOrgTemplateBlueprintDelete)
+	s.api("GET /api/org-template/blueprint-steps", ot.handleOrgTemplateBlueprintStepsAll)
+	s.api("GET /api/org-template/blueprints/{id}/steps", ot.handleOrgTemplateBlueprintStepsGet)
+	s.apiMutating("PUT /api/org-template/blueprints/{id}/steps", ot.handleOrgTemplateBlueprintStepsPut)
+	s.apiMutating("POST /api/org-template/blueprints/{id}/merge", ot.handleOrgTemplateBlueprintMerge)
+	s.apiMutating("POST /api/org-template/blueprints/{id}/split", ot.handleOrgTemplateBlueprintSplit)
+	s.api("GET /api/org-template/event-handlers", ot.handleOrgTemplateHandlersList)
+	s.apiMutating("POST /api/org-template/event-handlers", ot.handleOrgTemplateHandlerCreate)
+	s.apiMutating("PUT /api/org-template/event-handlers/reorder", ot.handleOrgTemplateHandlerReorder)
+	s.apiMutating("PATCH /api/org-template/event-handlers/{id}", ot.handleOrgTemplateHandlerUpdate)
+	s.apiMutating("PUT /api/org-template/event-handlers/{id}", ot.handleOrgTemplateHandlerUpdate)
+	s.apiMutating("DELETE /api/org-template/event-handlers/{id}", ot.handleOrgTemplateHandlerDelete)
+	s.apiMutating("POST /api/org-template/event-handlers/{id}/toggle", ot.handleOrgTemplateHandlerToggle)
+	s.apiMutating("POST /api/org-template/event-handlers/{id}/promote", ot.handleOrgTemplateHandlerPromote)
 
 	// GitHub App manifest registration. The launch endpoint serves a
 	// script-free bounce page (carrying its own per-response CSP) that

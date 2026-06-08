@@ -10,6 +10,17 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
+// teamsHandler serves /api/teams — the caller's team list and the org-admin
+// "add team" affordance. It reads/writes through the transactional store
+// runner, gates the create on az.userIsOrgAdmin, and runs the post-commit
+// new-team bootstrap (prompts/rules/bot defaults) against the full store
+// bundle, which must run outside the request transaction.
+type teamsHandler struct {
+	tx        db.TxRunner
+	az        *authz
+	allStores db.Stores
+}
+
 // teamJSON is the wire shape the multi-team selectors enumerate. Slug is
 // included for a stable, human-readable secondary label; the frontend
 // renders name as the primary. Role is the caller's membership role in the
@@ -40,8 +51,8 @@ type teamsResponse struct {
 // control hidden) without a mode branch here.
 //
 // GET /api/teams
-func (s *Server) handleTeamsList(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (th *teamsHandler) handleTeamsList(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -51,7 +62,7 @@ func (s *Server) handleTeamsList(w http.ResponseWriter, r *http.Request) {
 		teams      []domain.Team
 		lastActing string
 	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := th.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		teams, e = tx.Teams.ListForUser(r.Context(), orgID)
 		if e != nil {
@@ -82,19 +93,19 @@ func (s *Server) handleTeamsList(w http.ResponseWriter, r *http.Request) {
 // the new team enrolls the creator so it shows up in their team list.
 //
 // POST /api/teams  body: { "name": "<display name>", "slug"?: "<slug>" }
-func (s *Server) handleTeamCreate(w http.ResponseWriter, r *http.Request) {
+func (th *teamsHandler) handleTeamCreate(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
 		// Hosted-only: local mode has exactly one team by construction.
 		http.NotFound(w, r)
 		return
 	}
-	orgID, ok := s.requireOrg(w, r)
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
-	isAdmin, err := s.az.userIsOrgAdmin(r.Context(), userID, orgID)
+	isAdmin, err := th.az.userIsOrgAdmin(r.Context(), userID, orgID)
 	if err != nil {
 		internalError(w, "teams", err)
 		return
@@ -130,7 +141,7 @@ func (s *Server) handleTeamCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var created domain.Team
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := th.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		created, e = tx.Teams.Create(r.Context(), orgID, name, slug, userID)
 		return e
@@ -160,7 +171,7 @@ func (s *Server) handleTeamCreate(w http.ResponseWriter, r *http.Request) {
 	// degraded (auto-delegation won't fire) but repairable by re-running
 	// bootstrap, whereas failing the create after the row committed would
 	// orphan it.
-	if err := db.BootstrapNewTeam(r.Context(), s.allStores, orgID, created.ID); err != nil {
+	if err := db.BootstrapNewTeam(r.Context(), th.allStores, orgID, created.ID); err != nil {
 		log.Printf("[teams] new team %s/%s created but bootstrap failed (prompts/rules/bot may be missing): %v", orgID, created.ID, err)
 	}
 
