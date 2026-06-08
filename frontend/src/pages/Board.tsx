@@ -176,9 +176,6 @@ export default function Board() {
   // itself (via useDroppable's isOver), so we don't need to track it
   // up here anymore.
   const [activeId, setActiveId] = useState<string | null>(null)
-  // The column the cursor is over — drives the depth-of-field focal plane
-  // (every other lane recedes). Suppressed while dragging.
-  const [hoveredCol, setHoveredCol] = useState<ColumnId | null>(null)
 
   // Delegate flow
   const [showPromptPicker, setShowPromptPicker] = useState(false)
@@ -625,7 +622,6 @@ export default function Board() {
 
   const handleDragStart = (event: DragStartEvent) => {
     setActiveId(String(event.active.id))
-    setHoveredCol(null) // no focal-plane recede mid-drag
   }
 
   const handleDragOver = (_event: DragOverEvent) => {
@@ -912,9 +908,6 @@ export default function Board() {
                 id={colId}
                 index={i}
                 active={columnActive[colId]}
-                recede={hoveredCol !== null && hoveredCol !== colId && !activeId}
-                onMouseEnter={() => !activeId && setHoveredCol(colId)}
-                onMouseLeave={() => setHoveredCol((c) => (c === colId ? null : c))}
                 title={COLUMN_TITLES[colId]}
                 tasks={rawByColumn[colId]}
                 filter={filters[colId]}

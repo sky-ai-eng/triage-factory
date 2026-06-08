@@ -72,10 +72,6 @@ interface Props {
   // True when ≥1 autonomous run is actively turning in this lane — lights the
   // ambient breathing glow.
   active?: boolean
-  // True when another column has focus — this one recedes into depth.
-  recede?: boolean
-  onMouseEnter?: () => void
-  onMouseLeave?: () => void
   children: React.ReactNode
 }
 
@@ -88,15 +84,15 @@ export default function BoardColumn({
   headerExtra,
   index = 0,
   active = false,
-  recede = false,
-  onMouseEnter,
-  onMouseLeave,
   children,
 }: Props) {
   const { setNodeRef, isOver } = useDroppable({ id, data: { type: 'column' } })
   const reduce = !!useReducedMotion()
 
   const [controlsOpen, setControlsOpen] = useState(false)
+  // Hovering a column warms its own drop-shadow toward faded rust — a quiet
+  // "this one has focus" cue, no effect on the other lanes.
+  const [hovered, setHovered] = useState(false)
 
   // Event-type chips reflect the unfiltered set so the user always sees what
   // types exist in this column, even after filtering them out.
@@ -114,164 +110,141 @@ export default function BoardColumn({
   // viewport-relative width would compress cards as columns scroll into view.
   return (
     <motion.div
-      className="h-full w-[520px] shrink-0"
+      className="flex h-full w-[520px] shrink-0 flex-col"
       initial={reduce ? false : { opacity: 0, y: 14 }}
       animate={{ opacity: 1, y: 0 }}
       transition={reduce ? { duration: 0 } : { ...bodyEase, delay: index * 0.05 }}
-      onMouseEnter={onMouseEnter}
-      onMouseLeave={onMouseLeave}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
     >
-      {/* Depth-of-field dim. Opacity only — never filter/transform here (would
-          kill the slab's backdrop frost). The blur half of the focal-plane
-          effect comes from the veil overlay below. */}
-      <motion.div
-        className="flex h-full flex-col"
-        animate={{ opacity: recede ? 0.62 : 1 }}
-        transition={reduce ? { duration: 0 } : bodyEase}
-      >
-        <div className="mb-3 flex items-center justify-between px-1">
-          <h2 className="text-[13px] font-medium tracking-tight text-text-secondary">{title}</h2>
-          {headerExtra}
-        </div>
+      <div className="mb-3 flex items-center justify-between px-1">
+        <h2 className="text-[13px] font-medium tracking-tight text-text-secondary">{title}</h2>
+        {headerExtra}
+      </div>
 
-        {/* Droppable wrapper does NOT clip — overlay bloom spills past the slab. */}
-        <div ref={setNodeRef} className="relative min-h-0 flex-1">
-          {/* The slab: borderless. A soft drop-shadow floats it; a 1px inset
+      {/* Droppable wrapper does NOT clip — overlay bloom spills past the slab. */}
+      <div ref={setNodeRef} className="relative min-h-0 flex-1">
+        {/* The slab: borderless. A soft drop-shadow floats it; a 1px inset
               top highlight is its only "edge" — a specular catch, not an outline. */}
-          <div
-            className="h-full overflow-y-auto rounded-3xl bg-[var(--color-surface-overlay)]/50 backdrop-blur-xl"
-            style={{
-              // Kept tight enough to bloom inside the scrollport's py-8 padding
-              // — a wider shadow gets clipped into a hard band at the scroll
-              // edges (overflow-x:auto clips both axes).
-              boxShadow: '0 12px 32px -16px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.14)',
-            }}
-          >
-            {/* Sticky frosted control header — no border, cards scroll beneath
+        <div
+          className="h-full overflow-y-auto rounded-3xl bg-[var(--color-surface-overlay)]/50 backdrop-blur-xl transition-[box-shadow] duration-500"
+          style={{
+            // Borderless float. Hover warms the shadow toward faded rust (the
+            // accent) — the focus cue. Kept tight enough to bloom inside the
+            // scrollport's py-8 padding; a wider shadow gets clipped into a
+            // hard band at the scroll edges (overflow-x:auto clips both axes).
+            boxShadow: hovered
+              ? '0 16px 38px -14px color-mix(in srgb, var(--color-accent) 45%, transparent), inset 0 1px 0 rgba(255,255,255,0.18)'
+              : '0 12px 32px -16px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.14)',
+          }}
+        >
+          {/* Sticky frosted control header — no border, cards scroll beneath
                 it; the filter panel melts down from here on demand. */}
-            <div className="sticky top-0 z-10 bg-[var(--color-surface-overlay)]/70 px-3 pb-2.5 pt-3 backdrop-blur-md">
-              <div className="flex items-center gap-2">
-                <div className="relative flex-1">
-                  <Search
-                    size={13}
-                    aria-hidden
-                    className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-text-tertiary"
-                  />
-                  <input
-                    type="text"
-                    placeholder="Search…"
-                    value={filter.search}
-                    onChange={(e) => onFilterChange({ ...filter, search: e.target.value })}
-                    className={searchInputClass}
-                  />
-                  {filter.search && (
-                    <button
-                      type="button"
-                      aria-label="Clear search"
-                      onClick={() => onFilterChange({ ...filter, search: '' })}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-text-tertiary transition-colors hover:text-text-secondary"
-                    >
-                      <X size={12} />
-                    </button>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  aria-label="Sort & filter"
-                  aria-expanded={controlsOpen}
-                  onClick={() => setControlsOpen((v) => !v)}
-                  className={`relative shrink-0 rounded-xl bg-[var(--color-surface-overlay)]/70 p-1.5 backdrop-blur-md transition-colors ${
-                    controlsOpen ? 'text-accent' : 'text-text-tertiary hover:text-text-secondary'
-                  }`}
-                >
-                  <SlidersHorizontal size={14} />
-                  {hasFilters && (
-                    <span
-                      aria-hidden
-                      className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-accent"
-                    />
-                  )}
-                </button>
+          <div className="sticky top-0 z-10 bg-[var(--color-surface-overlay)]/70 px-3 pb-2.5 pt-3 backdrop-blur-md">
+            <div className="flex items-center gap-2">
+              <div className="relative flex-1">
+                <Search
+                  size={13}
+                  aria-hidden
+                  className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-text-tertiary"
+                />
+                <input
+                  type="text"
+                  placeholder="Search…"
+                  value={filter.search}
+                  onChange={(e) => onFilterChange({ ...filter, search: e.target.value })}
+                  className={searchInputClass}
+                />
+                {filter.search && (
+                  <button
+                    type="button"
+                    aria-label="Clear search"
+                    onClick={() => onFilterChange({ ...filter, search: '' })}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-text-tertiary transition-colors hover:text-text-secondary"
+                  >
+                    <X size={12} />
+                  </button>
+                )}
               </div>
-
-              {/* The melt-down: height + opacity animate from the search row. */}
-              <motion.div
-                initial={false}
-                animate={{ height: controlsOpen ? 'auto' : 0, opacity: controlsOpen ? 1 : 0 }}
-                transition={reduce ? { duration: 0 } : bodyEase}
-                className="overflow-hidden"
+              <button
+                type="button"
+                aria-label="Sort & filter"
+                aria-expanded={controlsOpen}
+                onClick={() => setControlsOpen((v) => !v)}
+                className={`relative shrink-0 rounded-xl bg-[var(--color-surface-overlay)]/70 p-1.5 backdrop-blur-md transition-colors ${
+                  controlsOpen ? 'text-accent' : 'text-text-tertiary hover:text-text-secondary'
+                }`}
               >
-                <div className="space-y-3 pt-3">
-                  <FilterControls
-                    filter={filter}
-                    onChange={onFilterChange}
-                    eventTypes={eventTypes}
+                <SlidersHorizontal size={14} />
+                {hasFilters && (
+                  <span
+                    aria-hidden
+                    className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-accent"
                   />
-                </div>
-              </motion.div>
+                )}
+              </button>
             </div>
 
-            <div className="space-y-3 px-3 pb-3 pt-2">{children}</div>
+            {/* The melt-down: height + opacity animate from the search row. */}
+            <motion.div
+              initial={false}
+              animate={{ height: controlsOpen ? 'auto' : 0, opacity: controlsOpen ? 1 : 0 }}
+              transition={reduce ? { duration: 0 } : bodyEase}
+              className="overflow-hidden"
+            >
+              <div className="space-y-3 pt-3">
+                <FilterControls filter={filter} onChange={onFilterChange} eventTypes={eventTypes} />
+              </div>
+            </motion.div>
           </div>
 
-          {/* Top specular sheen — the pane catches light, slowly breathing. */}
-          <motion.div
-            aria-hidden
-            className="pointer-events-none absolute inset-x-0 top-0 h-28 rounded-t-3xl"
-            style={{
-              background: 'linear-gradient(to bottom, rgba(255,255,255,0.10), transparent)',
-            }}
-            initial={false}
-            animate={{ opacity: reduce ? 0.5 : [0.35, 0.6, 0.35] }}
-            transition={
-              reduce ? { duration: 0 } : { duration: 9, repeat: Infinity, ease: 'easeInOut' }
-            }
-          />
-
-          {/* Depth-of-field veil — blurs + faintly dims this column from in
-              front when another lane has focus. backdrop-filter in front, so the
-              slab's own frost is untouched at rest. */}
-          <motion.div
-            aria-hidden
-            className="pointer-events-none absolute inset-0 rounded-3xl backdrop-blur-[3px]"
-            initial={false}
-            animate={{ opacity: recede ? 1 : 0 }}
-            transition={reduce ? { duration: 0 } : bodyEase}
-            style={{ backgroundColor: 'rgba(20,22,30,0.05)' }}
-          />
-
-          {/* Ambient "work is live here" glow — a slow breathing ring,
-              suppressed while the receive glow is showing. */}
-          <motion.div
-            aria-hidden
-            className="pointer-events-none absolute inset-0 rounded-3xl"
-            initial={false}
-            animate={{ opacity: isOver ? 0 : active ? (reduce ? 0.22 : [0, 0.45, 0]) : 0 }}
-            transition={
-              isOver || !active || reduce
-                ? bodyEase
-                : { duration: 4.5, repeat: Infinity, ease: 'easeInOut' }
-            }
-            style={{
-              boxShadow: 'inset 0 0 0 1px var(--color-accent), 0 0 38px -14px var(--color-accent)',
-            }}
-          />
-
-          {/* Drag-over receive glow — the target lane breathes toward you. */}
-          <motion.div
-            aria-hidden
-            className="pointer-events-none absolute inset-0 rounded-3xl"
-            initial={false}
-            animate={{ opacity: isOver ? 1 : 0 }}
-            transition={reduce ? { duration: 0 } : bodyEase}
-            style={{
-              background: 'var(--color-accent-soft)',
-              boxShadow:
-                'inset 0 0 0 1px var(--color-accent), 0 24px 60px -24px var(--color-accent)',
-            }}
-          />
+          <div className="space-y-3 px-3 pb-3 pt-2">{children}</div>
         </div>
-      </motion.div>
+
+        {/* Top specular sheen — the pane catches light, slowly breathing. */}
+        <motion.div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 top-0 h-28 rounded-t-3xl"
+          style={{
+            background: 'linear-gradient(to bottom, rgba(255,255,255,0.10), transparent)',
+          }}
+          initial={false}
+          animate={{ opacity: reduce ? 0.5 : [0.35, 0.6, 0.35] }}
+          transition={
+            reduce ? { duration: 0 } : { duration: 9, repeat: Infinity, ease: 'easeInOut' }
+          }
+        />
+
+        {/* Ambient "work is live here" glow — a slow breathing ring,
+              suppressed while the receive glow is showing. */}
+        <motion.div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 rounded-3xl"
+          initial={false}
+          animate={{ opacity: isOver ? 0 : active ? (reduce ? 0.22 : [0, 0.45, 0]) : 0 }}
+          transition={
+            isOver || !active || reduce
+              ? bodyEase
+              : { duration: 4.5, repeat: Infinity, ease: 'easeInOut' }
+          }
+          style={{
+            boxShadow: 'inset 0 0 0 1px var(--color-accent), 0 0 38px -14px var(--color-accent)',
+          }}
+        />
+
+        {/* Drag-over receive glow — the target lane breathes toward you. */}
+        <motion.div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 rounded-3xl"
+          initial={false}
+          animate={{ opacity: isOver ? 1 : 0 }}
+          transition={reduce ? { duration: 0 } : bodyEase}
+          style={{
+            background: 'var(--color-accent-soft)',
+            boxShadow: 'inset 0 0 0 1px var(--color-accent), 0 24px 60px -24px var(--color-accent)',
+          }}
+        />
+      </div>
     </motion.div>
   )
 }
