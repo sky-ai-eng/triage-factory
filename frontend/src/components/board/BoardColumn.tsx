@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useDroppable } from '@dnd-kit/core'
 import * as Tooltip from '@radix-ui/react-tooltip'
-import { animate, motion, useMotionValue, useReducedMotion } from 'motion/react'
+import {
+  animate,
+  motion,
+  useMotionValue,
+  useReducedMotion,
+  useTransform,
+  type MotionValue,
+} from 'motion/react'
 import {
   ArrowDown,
   ArrowUp,
@@ -59,8 +66,19 @@ const BRACKET_REST = 0.55
 // it straddles the top-left corner (path origin), so the offset that parks it
 // there is +ARM. Sliding the offset by −100 is exactly one lap.
 const ARM = 7
-const TRACE_DASH = `${ARM * 2} ${100 - ARM * 2}`
 const BRACKET_REST_OFFSET = ARM
+// The fade: instead of one solid dash, stack FADE_N concentric dashes, all
+// centred on the same point. Shorter layers cover only the middle, longer ones
+// reach the tips — and the longer (tip-reaching) layers are the faintest, so
+// the stack is bright at the centre (the corner, at rest) and dissolves toward
+// the arm ends, like the old gradient bracket. The parent <svg> opacity scales
+// the whole thing. They share one offset, so the soft-edged segment travels
+// intact and rests as a faded L.
+const FADE_N = 6
+const FADE_LAYERS = Array.from({ length: FADE_N }, (_, k) => {
+  const t = (k + 1) / FADE_N // longest (reaches the tips) at t = 1
+  return { length: 2 * ARM * t, opacity: 0.4 * (1 - t) + 0.05 }
+})
 
 const searchInputClass =
   'w-full rounded-lg bg-transparent py-1.5 pl-7 pr-7 text-[13px] text-text-primary placeholder:text-text-tertiary outline-none transition-colors focus:bg-[var(--color-surface-overlay)]/40'
@@ -334,10 +352,11 @@ export default function BoardColumn({
           }}
         />
 
-        {/* The rust L-bracket — a single stroke. At rest it's a dash straddling
-            the top-left corner (the L); the lap slides its offset one full turn
-            and back, so the same stroke unfolds into the travelling segment and
-            folds back into the L. Brightens on hover / while a card is over. */}
+        {/* The rust L-bracket — concentric fading dashes (see TraceLayer). At
+            rest they straddle the top-left corner as a soft-edged L; the lap
+            slides their shared offset one full turn and back, so the L unfolds
+            into the travelling segment and folds back. Brightens on hover /
+            while a card is over. */}
         <svg
           aria-hidden
           className="pointer-events-none absolute inset-0 h-full w-full overflow-visible"
@@ -346,22 +365,46 @@ export default function BoardColumn({
             transition: 'opacity 0.3s ease',
           }}
         >
-          <motion.rect
-            x="0"
-            y="0"
-            width="100%"
-            height="100%"
-            pathLength={100}
-            fill="none"
-            stroke="var(--color-accent)"
-            strokeWidth={1}
-            strokeLinecap="round"
-            strokeDasharray={TRACE_DASH}
-            strokeDashoffset={reduce ? BRACKET_REST_OFFSET : offset}
-          />
+          {FADE_LAYERS.map((layer, i) => (
+            <TraceLayer key={i} base={offset} length={layer.length} opacity={layer.opacity} />
+          ))}
         </svg>
       </div>
     </motion.div>
+  )
+}
+
+// TraceLayer is one concentric dash of the L-bracket's fade. `length` is its lit
+// span (path units); it's centred on the same point as every other layer, so a
+// shorter layer covers only the middle and a longer one reaches the tips —
+// stacked, they read as a soft fade. Its offset tracks the shared `base` value
+// (rest = ARM), shifted by (length/2 − ARM) so all layers stay co-centred as
+// the base slides one lap.
+function TraceLayer({
+  base,
+  length,
+  opacity,
+}: {
+  base: MotionValue<number>
+  length: number
+  opacity: number
+}) {
+  const off = useTransform(base, (v) => v + length / 2 - ARM)
+  return (
+    <motion.rect
+      x="0"
+      y="0"
+      width="100%"
+      height="100%"
+      pathLength={100}
+      fill="none"
+      stroke="var(--color-accent)"
+      strokeWidth={1}
+      strokeLinecap="round"
+      strokeDasharray={`${length} ${100 - length}`}
+      strokeDashoffset={off}
+      style={{ opacity }}
+    />
   )
 }
 
