@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -404,7 +405,11 @@ func (rh *reviewsHandler) handleReviewCommentUpdate(w http.ResponseWriter, r *ht
 	if err := rh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		return tx.Reviews.UpdateComment(r.Context(), orgID, commentID, req.Body)
 	}); err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		if errors.Is(err, db.ErrPendingReviewCommentNotFound) {
+			notFound(w, "review comment")
+			return
+		}
+		internalError(w, "reviews", err)
 		return
 	}
 
@@ -423,7 +428,11 @@ func (rh *reviewsHandler) handleReviewCommentDelete(w http.ResponseWriter, r *ht
 	if err := rh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		return tx.Reviews.DeleteComment(r.Context(), orgID, commentID)
 	}); err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		if errors.Is(err, db.ErrPendingReviewCommentNotFound) {
+			notFound(w, "review comment")
+			return
+		}
+		internalError(w, "reviews", err)
 		return
 	}
 

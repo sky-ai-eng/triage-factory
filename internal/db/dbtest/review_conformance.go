@@ -190,13 +190,17 @@ func RunReviewStoreConformance(t *testing.T, mk ReviewStoreFactory) {
 
 	t.Run("UpdateComment_and_DeleteComment_not_found", func(t *testing.T) {
 		s, orgID, _ := mk(t)
+		// Both must wrap ErrPendingReviewCommentNotFound so the reviews
+		// handler can errors.Is it into a 404 while a real DB/RLS failure
+		// falls through to a redacted 500. The substring check stays too:
+		// the agent CLI surfaces the message text directly.
 		err := s.UpdateComment(ctx, orgID, uuid.New().String(), "anything")
-		if err == nil || !strings.Contains(err.Error(), "not found") {
-			t.Errorf("UpdateComment missing: err = %v, want 'not found'", err)
+		if !errors.Is(err, db.ErrPendingReviewCommentNotFound) || !strings.Contains(err.Error(), "not found") {
+			t.Errorf("UpdateComment missing: err = %v, want wrapped ErrPendingReviewCommentNotFound", err)
 		}
 		err = s.DeleteComment(ctx, orgID, uuid.New().String())
-		if err == nil || !strings.Contains(err.Error(), "not found") {
-			t.Errorf("DeleteComment missing: err = %v, want 'not found'", err)
+		if !errors.Is(err, db.ErrPendingReviewCommentNotFound) || !strings.Contains(err.Error(), "not found") {
+			t.Errorf("DeleteComment missing: err = %v, want wrapped ErrPendingReviewCommentNotFound", err)
 		}
 	})
 
