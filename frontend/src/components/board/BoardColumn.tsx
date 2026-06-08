@@ -65,7 +65,7 @@ const BRACKET_REST = 0.55
 // path units render as equal pixel lengths). The lit dash is both arms; at rest
 // it straddles the top-left corner (path origin), so the offset that parks it
 // there is +ARM. Sliding the offset by −100 is exactly one lap.
-const ARM = 7
+const ARM = 10
 const BRACKET_REST_OFFSET = ARM
 // The fade: instead of one solid dash, stack FADE_N concentric dashes, all
 // centred on the same point. Shorter layers cover only the middle, longer ones
@@ -77,7 +77,7 @@ const BRACKET_REST_OFFSET = ARM
 const FADE_N = 6
 const FADE_LAYERS = Array.from({ length: FADE_N }, (_, k) => {
   const t = (k + 1) / FADE_N // longest (reaches the tips) at t = 1
-  return { length: 2 * ARM * t, opacity: 0.4 * (1 - t) + 0.05 }
+  return { length: 2 * ARM * t, opacity: 0.46 * (1 - t) + 0.07 }
 })
 
 const searchInputClass =
