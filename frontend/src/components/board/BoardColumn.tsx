@@ -118,6 +118,9 @@ interface Props {
   // True when ≥1 autonomous run is actively turning in this lane — lights the
   // ambient breathing glow.
   active?: boolean
+  // True when a drag is currently over this column or any of its cards
+  // (resolved at the board level). Fires the border-trace + brightens it.
+  dragOver?: boolean
   // When provided, renders a faint collapse affordance left of the title.
   onCollapse?: () => void
   children: React.ReactNode
@@ -133,10 +136,14 @@ export default function BoardColumn({
   snooze,
   index = 0,
   active = false,
+  dragOver = false,
   onCollapse,
   children,
 }: Props) {
-  const { setNodeRef, isOver } = useDroppable({ id, data: { type: 'column' } })
+  // setNodeRef registers the column as a drop target; the "is the drag over
+  // me" signal comes from the `dragOver` prop (board-resolved) so it counts
+  // hovering the column's cards too, not just its empty area.
+  const { setNodeRef } = useDroppable({ id, data: { type: 'column' } })
   const reduce = !!useReducedMotion()
 
   const [controlsOpen, setControlsOpen] = useState(false)
@@ -177,9 +184,9 @@ export default function BoardColumn({
   // self-resets to the resting L; leaving mid-lap just lets it finish.
   const wasOver = useRef(false)
   useEffect(() => {
-    if (isOver && !wasOver.current) lapOnce()
-    wasOver.current = isOver
-  }, [isOver, lapOnce])
+    if (dragOver && !wasOver.current) lapOnce()
+    wasOver.current = dragOver
+  }, [dragOver, lapOnce])
 
   // Event-type chips reflect the unfiltered set so the user always sees what
   // types exist in this column, even after filtering them out.
@@ -319,9 +326,9 @@ export default function BoardColumn({
           aria-hidden
           className="pointer-events-none absolute inset-0"
           initial={false}
-          animate={{ opacity: isOver ? 0 : active ? (reduce ? 0.22 : [0, 0.45, 0]) : 0 }}
+          animate={{ opacity: dragOver ? 0 : active ? (reduce ? 0.22 : [0, 0.45, 0]) : 0 }}
           transition={
-            isOver || !active || reduce
+            dragOver || !active || reduce
               ? bodyEase
               : { duration: 4.5, repeat: Infinity, ease: 'easeInOut' }
           }
@@ -339,7 +346,7 @@ export default function BoardColumn({
           aria-hidden
           className="pointer-events-none absolute inset-0 h-full w-full overflow-visible"
           style={{
-            opacity: isOver ? 0.9 : hovered ? 1 : BRACKET_REST,
+            opacity: dragOver ? 0.9 : hovered ? 1 : BRACKET_REST,
             transition: 'opacity 0.3s ease',
           }}
         >

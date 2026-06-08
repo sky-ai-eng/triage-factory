@@ -236,6 +236,10 @@ export default function Board() {
   // itself (via useDroppable's isOver), so we don't need to track it
   // up here anymore.
   const [activeId, setActiveId] = useState<string | null>(null)
+  // The column the drag is currently over — resolved at the board level so it
+  // counts hovering a *card* inside a column, not just the column's empty area
+  // (each card is its own droppable, so the column's own isOver misses them).
+  const [activeDropCol, setActiveDropCol] = useState<ColumnId | null>(null)
 
   // Delegate flow
   const [showPromptPicker, setShowPromptPicker] = useState(false)
@@ -713,15 +717,23 @@ export default function Board() {
     setActiveId(String(event.active.id))
   }
 
-  const handleDragOver = (_event: DragOverEvent) => {
-    // BoardColumn owns its own isOver highlight via useDroppable;
-    // nothing to track at this level. Kept as a hook for future
-    // cross-column behaviors (e.g. preview-the-drop-effect).
+  const handleDragOver = (event: DragOverEvent) => {
+    // Resolve whichever column the cursor is over — a column id directly, or
+    // the column owning the card under the cursor — and hand it to that column
+    // so its border-trace fires even when you're hovering its cards.
+    const overId = event.over?.id
+    if (overId == null) {
+      setActiveDropCol(null)
+      return
+    }
+    const id = String(overId)
+    setActiveDropCol(ALL_COLUMNS.includes(id as ColumnId) ? (id as ColumnId) : getColumn(id))
   }
 
   const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event
     setActiveId(null)
+    setActiveDropCol(null)
 
     if (!over) return
     const taskId = String(active.id)
@@ -943,6 +955,10 @@ export default function Board() {
       onDragStart={handleDragStart}
       onDragOver={handleDragOver}
       onDragEnd={handleDragEnd}
+      onDragCancel={() => {
+        setActiveId(null)
+        setActiveDropCol(null)
+      }}
     >
       <GlassBackdrop />
 
@@ -991,6 +1007,7 @@ export default function Board() {
                   id={colId}
                   index={i}
                   active={columnActive[colId]}
+                  dragOver={activeDropCol === colId}
                   title={COLUMN_TITLES[colId]}
                   tasks={rawByColumn[colId]}
                   filter={filters[colId]}
