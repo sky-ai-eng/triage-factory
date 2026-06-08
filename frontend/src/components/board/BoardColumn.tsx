@@ -560,7 +560,16 @@ function FilterControls({
           <button
             key={k}
             type="button"
-            onClick={() => onChange({ ...filter, sortKey: k })}
+            // Returning to 'default' (Smart) also resets the direction, so a
+            // stale asc/desc from a prior key can't silently carry into the
+            // next sort the user picks.
+            onClick={() =>
+              onChange({
+                ...filter,
+                sortKey: k,
+                sortDir: k === 'default' ? emptyFilter.sortDir : filter.sortDir,
+              })
+            }
             className={pill(filter.sortKey === k)}
           >
             {SORT_LABEL[k]}

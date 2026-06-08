@@ -36,26 +36,6 @@ export const TONE_TEXT: Record<Tone, string> = {
   neutral: 'text-text-tertiary',
 }
 
-// runTone collapses a run's status into the spine color. Active (turning right
-// now) is delegate-violet; the waiting/approval states are amber; the failure
-// family is red; a clean finish is green; everything else rests neutral.
-export function runTone(run: AgentRun): Tone {
-  if (isActiveRun(run)) return 'active'
-  switch (run.Status) {
-    case 'awaiting_input':
-    case 'pending_approval':
-      return 'attention'
-    case 'failed':
-    case 'cancelled':
-    case 'task_unsolvable':
-      return 'problem'
-    case 'completed':
-      return 'good'
-    default:
-      return 'neutral' // taken_over, pending, unknown
-  }
-}
-
 export interface Glow {
   tone: Tone
   // Breathing = an actively-turning run (the lane is alive). Steady = a state

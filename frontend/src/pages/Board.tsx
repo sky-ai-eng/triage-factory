@@ -604,16 +604,22 @@ export default function Board() {
     return map
   }, [queued, claimed, inProgress, inReview, done])
 
+  // taskId → column lookup, built once per board state. getColumn is called
+  // per dnd onDragOver event (which fires rapidly while dragging), so an O(1)
+  // map beats re-scanning all five lists on every move.
+  const columnByTask = useMemo<Map<string, ColumnId>>(() => {
+    const m = new Map<string, ColumnId>()
+    for (const t of queued) m.set(t.id, 'queued')
+    for (const t of claimed) m.set(t.id, 'claimed')
+    for (const t of inProgress) m.set(t.id, 'in_progress')
+    for (const t of inReview) m.set(t.id, 'in_review')
+    for (const t of done) m.set(t.id, 'done')
+    return m
+  }, [queued, claimed, inProgress, inReview, done])
+
   const getColumn = useCallback(
-    (taskId: string): ColumnId | null => {
-      if (queued.some((t) => t.id === taskId)) return 'queued'
-      if (claimed.some((t) => t.id === taskId)) return 'claimed'
-      if (inProgress.some((t) => t.id === taskId)) return 'in_progress'
-      if (inReview.some((t) => t.id === taskId)) return 'in_review'
-      if (done.some((t) => t.id === taskId)) return 'done'
-      return null
-    },
-    [queued, claimed, inProgress, inReview, done],
+    (taskId: string): ColumnId | null => columnByTask.get(taskId) ?? null,
+    [columnByTask],
   )
 
   // SKY-330: the board opens at the left (Queued first). With Claimed + In
