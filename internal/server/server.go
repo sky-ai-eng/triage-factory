@@ -604,14 +604,15 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/tasks/{id}/requeue", s.handleRequeue)
 	s.apiMutating("POST /api/tasks/{id}/advance", s.handleTaskAdvance)
 
-	s.api("GET /api/agent/runs/{runID}", s.handleAgentStatus)
-	s.api("GET /api/agent/runs/{runID}/messages", s.handleAgentMessages)
-	s.apiMutating("POST /api/agent/runs/{runID}/cancel", s.handleAgentCancel)
-	s.apiMutating("POST /api/agent/runs/{runID}/takeover", s.handleAgentTakeover)
-	s.apiMutating("POST /api/agent/runs/{runID}/release", s.handleAgentRelease)
-	s.apiMutating("POST /api/agent/runs/{runID}/respond", s.handleAgentRespond)
-	s.api("GET /api/agent/runs", s.handleAgentRuns)
-	s.api("GET /api/agent/takeovers/held", s.handleHeldTakeovers)
+	ag := &agentHandler{tx: s.tx, ws: s.ws, takeoverDir: s.takeoverDir, spawner: func() *delegate.Spawner { return s.spawner }}
+	s.api("GET /api/agent/runs/{runID}", ag.handleAgentStatus)
+	s.api("GET /api/agent/runs/{runID}/messages", ag.handleAgentMessages)
+	s.apiMutating("POST /api/agent/runs/{runID}/cancel", ag.handleAgentCancel)
+	s.apiMutating("POST /api/agent/runs/{runID}/takeover", ag.handleAgentTakeover)
+	s.apiMutating("POST /api/agent/runs/{runID}/release", ag.handleAgentRelease)
+	s.apiMutating("POST /api/agent/runs/{runID}/respond", ag.handleAgentRespond)
+	s.api("GET /api/agent/runs", ag.handleAgentRuns)
+	s.api("GET /api/agent/takeovers/held", ag.handleHeldTakeovers)
 
 	// Projects (SKY-215). Pure CRUD over the projects table; the
 	// Curator runtime that populates curator_session_id lands in
@@ -680,18 +681,20 @@ func (s *Server) routes() {
 	// AuthGate boot endpoint — is mounted pre-auth above; per-user
 	// identity that used to live on /api/config moved to /api/me.
 	s.api("GET /api/team/members", s.handleTeamMembers)
-	s.apiMutating("POST /api/skills/import", s.handleSkillsImport)
+	sk := &skillsHandler{db: s.db, prompts: s.prompts}
+	s.apiMutating("POST /api/skills/import", sk.handleSkillsImport)
 	s.api("GET /api/github/repos", s.handleGitHubRepos)
-	s.apiMutating("POST /api/github/preflight-ssh", s.handleGitHubPreflightSSH)
+	se := &settingsHandler{tx: s.tx}
+	s.apiMutating("POST /api/github/preflight-ssh", se.handleGitHubPreflightSSH)
 	// URL-only host reachability (the wizard's URL sub-step) — no auth sent,
 	// distinct from the creds stage (auth.ValidateGitHub / /api/jira/connect).
-	s.apiMutating("POST /api/github/reachability", s.handleGitHubReachability)
+	s.apiMutating("POST /api/github/reachability", handleGitHubReachability)
 	s.api("GET /api/repos", s.handleRepoProfiles)
 	s.apiMutating("PATCH /api/repos/{owner}/{repo}", s.handleRepoUpdate)
 	s.api("GET /api/repos/{owner}/{repo}/branches", s.handleRepoBranches)
-	s.apiMutating("POST /api/jira/reachability", s.handleJiraReachability)
-	s.apiMutating("POST /api/jira/connect", s.handleJiraConnect)
-	s.api("GET /api/jira/statuses", s.handleJiraStatuses)
+	s.apiMutating("POST /api/jira/reachability", handleJiraReachability)
+	s.apiMutating("POST /api/jira/connect", se.handleJiraConnect)
+	s.api("GET /api/jira/statuses", se.handleJiraStatuses)
 	s.api("GET /api/jira/stock", s.handleJiraStockGet)
 	s.apiMutating("POST /api/jira/stock", s.handleJiraStockPost)
 
@@ -704,11 +707,12 @@ func (s *Server) routes() {
 	s.apiMutating("DELETE /api/reviews/{id}/comments/{commentId}", rh.handleReviewCommentDelete)
 	s.api("GET /api/agent/runs/{runID}/review", rh.handleRunReview)
 
-	s.api("GET /api/pending-prs/{id}", s.handlePendingPRGet)
-	s.apiMutating("PATCH /api/pending-prs/{id}", s.handlePendingPRUpdate)
-	s.api("GET /api/pending-prs/{id}/diff", s.handlePendingPRDiff)
-	s.apiMutating("POST /api/pending-prs/{id}/submit", s.handlePendingPRSubmit)
-	s.api("GET /api/agent/runs/{runID}/pending-pr", s.handleRunPendingPR)
+	pp := &pendingPRsHandler{tx: s.tx, ws: s.ws, agentRuns: s.agentRuns, ghClient: func() *ghclient.Client { return s.ghClient }, spawner: func() *delegate.Spawner { return s.spawner }}
+	s.api("GET /api/pending-prs/{id}", pp.handlePendingPRGet)
+	s.apiMutating("PATCH /api/pending-prs/{id}", pp.handlePendingPRUpdate)
+	s.api("GET /api/pending-prs/{id}/diff", pp.handlePendingPRDiff)
+	s.apiMutating("POST /api/pending-prs/{id}/submit", pp.handlePendingPRSubmit)
+	s.api("GET /api/agent/runs/{runID}/pending-pr", pp.handleRunPendingPR)
 
 	fh := &factoryHandler{tx: s.tx}
 	s.api("GET /api/factory/snapshot", fh.handleFactorySnapshot)
@@ -716,8 +720,8 @@ func (s *Server) routes() {
 
 	ph := &promptsHandler{db: s.db, tx: s.tx}
 	s.api("GET /api/event-types", ph.handleEventTypes)
-	s.api("GET /api/event-schemas", s.handleEventSchemasList)
-	s.api("GET /api/event-schemas/{event_type}", s.handleEventSchemaGet)
+	s.api("GET /api/event-schemas", handleEventSchemasList)
+	s.api("GET /api/event-schemas/{event_type}", handleEventSchemaGet)
 	// Unified event_handlers endpoints (SKY-259). Replace the former
 	// /api/task-rules + /api/triggers split — kind is passed as ?kind=
 	// on list, in the body on create, derived on update.

@@ -13,7 +13,7 @@ import (
 // schema for that event type. Used by the frontend's predicate editor to
 // render typed inputs (checkbox for bools, dropdown for enums, text for
 // strings, etc.).
-func (s *Server) handleEventSchemasList(w http.ResponseWriter, r *http.Request) {
+func handleEventSchemasList(w http.ResponseWriter, r *http.Request) {
 	all := events.All()
 
 	out := make(map[string]schemaPayload, len(all))
@@ -27,7 +27,7 @@ func (s *Server) handleEventSchemasList(w http.ResponseWriter, r *http.Request) 
 //
 // Returns the predicate field schema for a single event type, or 404 if
 // the event_type isn't registered.
-func (s *Server) handleEventSchemaGet(w http.ResponseWriter, r *http.Request) {
+func handleEventSchemaGet(w http.ResponseWriter, r *http.Request) {
 	eventType := r.PathValue("event_type")
 	sc, ok := events.Get(eventType)
 	if !ok {
