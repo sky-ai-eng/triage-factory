@@ -71,6 +71,18 @@ type Resolver interface {
 	// a zero ExpiresAt (PATs have no mint lifetime we track). Returns
 	// ErrNoGitHubCredentials when neither tier resolves.
 	TokenFor(ctx context.Context, orgID, githubTarget string) (githubapp.Token, error)
+
+	// BaseURLFor returns the org's user-facing GitHub host base — github.com
+	// or a GHES host — resolved from org_settings.github_base_url, then the
+	// legacy github_url secret, then the public default. It is the same
+	// resolution ClientFor/TokenFor use internally, exposed for callers that
+	// must route a subprocess at the org's git host rather than make API
+	// calls — the multi-mode sandbox git proxy uses it for its upstream and
+	// insteadOf rewrite, so the proxy forwards to (and the rewrite matches)
+	// the same host the worktree was cloned from. A backend read error
+	// propagates rather than silently defaulting to github.com: a GHES org
+	// whose base can't be read must not be paired with the public host.
+	BaseURLFor(ctx context.Context, orgID string) (string, error)
 }
 
 type resolver struct {
@@ -277,6 +289,14 @@ func (r *resolver) TokenFor(ctx context.Context, orgID, target string) (githubap
 	}
 
 	return githubapp.Token{}, fmt.Errorf("%w: org=%s target=%s", ErrNoGitHubCredentials, orgID, target)
+}
+
+// BaseURLFor exposes githubBaseFor to callers outside the package that need
+// the org's git host base (the multi-mode sandbox git proxy's upstream).
+// Same resolution as ClientFor/TokenFor — org_settings, then the github_url
+// secret, then github.com — so the proxy routes to the host the clone used.
+func (r *resolver) BaseURLFor(ctx context.Context, orgID string) (string, error) {
+	return r.githubBaseFor(ctx, orgID)
 }
 
 // installationFor selects the App installation whose account matches target.

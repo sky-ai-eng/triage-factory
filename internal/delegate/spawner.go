@@ -502,10 +502,14 @@ func (s *Spawner) resolveCloneToken(ctx context.Context, orgID, owner string) st
 // is wired (test fixtures), or when owner is empty (Jira-only runs that
 // pre-clone nothing). agentproc ignores a nil GitProxy.
 //
-// Upstream is resolved from the org's GitHub base so a GHES org's
-// sandbox git routes to (and the insteadOf rewrite matches) its own host
-// rather than github.com; an empty/unset base leaves Upstream empty and
-// agentproc defaults it to github.com.
+// Upstream is resolved through the resolver's authoritative base
+// resolution (org_settings → legacy github_url secret → github.com) so a
+// GHES org's sandbox git routes to, and the insteadOf rewrite matches,
+// its own host rather than github.com; a read error degrades to "" and
+// agentproc defaults it to github.com. Failing safe: a wrong base only
+// makes the insteadOf prefix miss the worktree remote, so the push is
+// dropped closed at the egress allowlist — the credential is never sent
+// to the wrong host.
 //
 // The closure maps the resolver's no-credentials sentinel to
 // agentproc.ErrNoSandboxGitCredentials so a misconfigured org surfaces a
@@ -526,8 +530,16 @@ func (s *Spawner) gitProxyConfigFor(ctx context.Context, orgID, owner string) *a
 	if resolver == nil {
 		return nil
 	}
+
+	upstream := ""
+	if base, err := resolver.BaseURLFor(ctx, orgID); err != nil {
+		log.Printf("[delegate] resolve git host base for org %s: %v (defaulting to github.com)", orgID, err)
+	} else {
+		upstream = base
+	}
+
 	return &agentproc.GitProxyConfig{
-		Upstream: s.gitUpstreamFor(ctx, orgID),
+		Upstream: upstream,
 		TokenSource: func(ctx context.Context) (gitproxy.Token, error) {
 			tok, err := resolver.TokenFor(ctx, orgID, owner)
 			if err != nil {
@@ -539,27 +551,6 @@ func (s *Spawner) gitProxyConfigFor(ctx context.Context, orgID, owner string) *a
 			return gitproxy.Token{Value: tok.Value, ExpiresAt: tok.ExpiresAt}, nil
 		},
 	}
-}
-
-// gitUpstreamFor resolves the org's user-facing git host base — github.com
-// or a GHES host — so the sandbox git proxy forwards to, and the insteadOf
-// rewrite matches, the same host the worktree was cloned from. Mirrors the
-// org-settings read useSSHCloneProtocol uses; a missing store, an unreadable
-// setting, or an unset base all return "" so agentproc applies its own
-// github.com default (keeping the public-host literal in one place).
-func (s *Spawner) gitUpstreamFor(ctx context.Context, orgID string) string {
-	if s.orgs == nil {
-		return ""
-	}
-	settings, err := s.orgs.GetSettingsSystem(ctx, orgID)
-	if err != nil {
-		log.Printf("[delegate] resolve git host base for org %s: %v (defaulting to github.com)", orgID, err)
-		return ""
-	}
-	if settings.GitHubBaseURL == "" {
-		return ""
-	}
-	return ghclient.ResolveBaseURL(settings.GitHubBaseURL)
 }
 
 // resolveModel resolves the run's team default model via the SKY-389

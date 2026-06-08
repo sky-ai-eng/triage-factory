@@ -331,9 +331,16 @@ type tokenCtxKey struct{}
 // remote-URL userinfo or http.<url>.extraHeader (set host-side), both
 // of which arrive as "Authorization: Basic base64(user:token)"; the
 // username is irrelevant (conventionally x-run) — only the password is
-// validated. The compare is constant-time so a hostile caller can't
-// time-probe the token byte by byte; ConstantTimeCompare also returns 0
-// on a length mismatch, which covers the missing/malformed-header case.
+// validated.
+//
+// subtle.ConstantTimeCompare is constant-time only in the CONTENT of two
+// equal-length inputs: it can't be byte-probed for an equal-length wrong
+// guess. It short-circuits (returns 0 immediately) when the lengths
+// differ, so a missing, malformed, or wrong-length credential is rejected
+// without a content compare — and that length-dependent timing leaks
+// nothing here, because the token is a fixed-length 64-hex secret whose
+// length an attacker already knows. The empty-string from a missing
+// Basic header thus fails the compare and 401s.
 //
 // An empty IncomingToken disables the gate (loopback/test path, or a
 // single-tenant direct usage where the local hop is already trusted).
