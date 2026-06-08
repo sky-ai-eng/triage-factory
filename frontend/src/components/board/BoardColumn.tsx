@@ -270,6 +270,7 @@ export default function BoardColumn({
               />
               <input
                 type="text"
+                aria-label={`Search ${title}`}
                 placeholder="Search…"
                 value={filter.search}
                 onChange={(e) => onFilterChange({ ...filter, search: e.target.value })}
