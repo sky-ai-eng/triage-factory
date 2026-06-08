@@ -12,7 +12,6 @@ import {
   isActiveStatus,
   isFailedStatus,
 } from '../lib/runStatus'
-import TakeoverModal, { type TakeoverInfo } from './TakeoverModal'
 import YieldModal, { type YieldRequest } from './YieldModal'
 import { AttentionRow, CardPlane, EventTag, HudHeader, SourceTag } from './board/cardChrome'
 import { compactNum, runGlow, TONE_TEXT, type StepState } from './board/cardStyle'
@@ -45,11 +44,6 @@ export default function AgentCard({
 }: Props) {
   const orgHref = useOrgHref()
   const [now, setNow] = useState(() => Date.now())
-  const [takeoverInfo, setTakeoverInfo] = useState<TakeoverInfo | null>(null)
-  const [takeoverPending, setTakeoverPending] = useState(false)
-  // While a takeover is pending we cover the activity log with a pulse; clicking
-  // it dismisses so the user can still scroll the log. Reset on each attempt.
-  const [pendingOverlayDismissed, setPendingOverlayDismissed] = useState(false)
 
   const isActive = isActiveRun(run)
   const isAwaiting = run.Status === 'awaiting_input'
@@ -74,8 +68,6 @@ export default function AgentCard({
   const openYieldRequest = openYield?.request ?? null
   const openYieldMessageID = openYield?.messageID ?? 0
   const [yieldModalOpen, setYieldModalOpen] = useState(false)
-  // Takeover only makes sense once the agent is actually running with a session.
-  const canTakeOver = run.Status === 'running' && !!run.SessionID
 
   // Tick once per second while active so the elapsed display updates live.
   useEffect(() => {
@@ -113,7 +105,6 @@ export default function AgentCard({
   return (
     <div className="relative">
       <CardPlane glow={glow}>
-        <TakeoverModal info={takeoverInfo} onClose={() => setTakeoverInfo(null)} />
         {openYieldRequest && (
           <YieldModal
             key={openYieldMessageID}
@@ -156,45 +147,6 @@ export default function AgentCard({
                   />
                 </svg>
               </Link>
-              {(canTakeOver || takeoverPending) && (
-                <button
-                  disabled={takeoverPending}
-                  onClick={async () => {
-                    setPendingOverlayDismissed(false)
-                    setTakeoverPending(true)
-                    try {
-                      const res = await fetch(`/api/agent/runs/${run.ID}/takeover`, {
-                        method: 'POST',
-                      })
-                      if (!res.ok) {
-                        toast.error(await readError(res, 'Failed to take over run'))
-                        return
-                      }
-                      const data = (await res.json()) as TakeoverInfo
-                      setTakeoverInfo(data)
-                    } catch (err) {
-                      toast.error(`Failed to take over run: ${(err as Error).message}`)
-                    } finally {
-                      setTakeoverPending(false)
-                    }
-                  }}
-                  className="inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-[10px] font-semibold uppercase leading-none tracking-wider text-accent transition-colors hover:bg-accent/10 disabled:cursor-wait"
-                  title={
-                    takeoverPending
-                      ? 'Stopping the headless session and preparing your takeover dir…'
-                      : 'Stop the headless run, link a worktree at your takeover dir, and resume the session in your terminal'
-                  }
-                >
-                  {takeoverPending ? (
-                    <>
-                      <Spinner />
-                      <span>Taking over…</span>
-                    </>
-                  ) : (
-                    <span>Take over</span>
-                  )}
-                </button>
-              )}
               {isActive && (
                 <button
                   onClick={async () => {
@@ -238,33 +190,11 @@ export default function AgentCard({
         {/* Activity — a terminal run shows its outcome; a live run shows a
             flush, borderless feed of one-liners (no window-into-the-agent; the
             expanded view is for that). */}
-        <div className="relative">
-          {isTerminal && run.ResultSummary ? (
-            <ResultBlock status={run.Status} summary={run.ResultSummary} />
-          ) : (
-            <LiveFeed
-              messages={messages}
-              isActive={isActive}
-              dimmed={takeoverPending && !pendingOverlayDismissed}
-            />
-          )}
-          {takeoverPending && !pendingOverlayDismissed && (
-            <button
-              type="button"
-              onClick={() => setPendingOverlayDismissed(true)}
-              className="group absolute inset-0 flex items-center justify-center bg-surface-raised/40 backdrop-blur-[1px]"
-              aria-label="Dismiss to view agent messages while takeover finishes"
-            >
-              <span className="inline-flex items-center gap-2 rounded-full border border-border-glass bg-surface-raised/90 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-accent shadow-sm">
-                <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-accent" />
-                Loading takeover
-                <span className="font-medium normal-case tracking-normal text-text-tertiary opacity-0 transition-opacity group-hover:opacity-100">
-                  · click to view log
-                </span>
-              </span>
-            </button>
-          )}
-        </div>
+        {isTerminal && run.ResultSummary ? (
+          <ResultBlock status={run.Status} summary={run.ResultSummary} />
+        ) : (
+          <LiveFeed messages={messages} isActive={isActive} />
+        )}
 
         {/* Attention rows — your move, in the canonical toned pattern. */}
         {isAwaiting && openYieldRequest && (
@@ -404,15 +334,7 @@ function clip(s: string, n: number): string {
 // LiveFeed is the flush, borderless activity ticker: a few of the most recent
 // one-liners in monospace, auto-advancing to the newest, top-masked so older
 // lines dissolve upward. No box, no scrollbar — it's part of the card.
-function LiveFeed({
-  messages,
-  isActive,
-  dimmed,
-}: {
-  messages: AgentMessage[]
-  isActive: boolean
-  dimmed?: boolean
-}) {
+function LiveFeed({ messages, isActive }: { messages: AgentMessage[]; isActive: boolean }) {
   const lines = useMemo(() => feedLines(messages), [messages])
 
   if (lines.length === 0) {
@@ -435,9 +357,7 @@ function LiveFeed({
   const recent = lines.slice(-5)
   return (
     <div
-      className={`flex h-[3.5rem] flex-col justify-end overflow-hidden px-4 transition-opacity ${
-        dimmed ? 'opacity-50' : ''
-      }`}
+      className="flex h-[3.5rem] flex-col justify-end overflow-hidden px-4"
       style={{ maskImage: FEED_MASK, WebkitMaskImage: FEED_MASK }}
     >
       {recent.map((l, i) => {
@@ -544,23 +464,6 @@ function extractFlag(cmd: string, flag: string): string {
 function basename(path: string): string {
   const parts = path.split('/')
   return parts[parts.length - 1] || path
-}
-
-// 12px spinner sized to match the Take over button's text.
-function Spinner() {
-  return (
-    <svg
-      width="11"
-      height="11"
-      viewBox="0 0 16 16"
-      fill="none"
-      className="animate-spin text-accent"
-      aria-hidden
-    >
-      <circle cx="8" cy="8" r="6" stroke="currentColor" strokeOpacity="0.25" strokeWidth="2" />
-      <path d="M8 2a6 6 0 0 1 6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-    </svg>
-  )
 }
 
 function computeStats(messages: AgentMessage[], _run: AgentRun) {
