@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from 'react'
 import type {
   Task,
   AgentRun,
@@ -55,6 +55,13 @@ const COLUMN_TITLES: Record<ColumnId, string> = {
   in_review: 'In Review',
   done: 'Done',
 }
+
+// Lane geometry, used to center the strip on the midpoint of the *open*
+// columns. COL_W must match the expanded BoardColumn width (w-[460px]); RAIL_W
+// the collapsed CollapsedColumn (w-12 = 48px); GAP the row's gap-6 (24px).
+const COL_W = 460
+const RAIL_W = 48
+const GAP = 24
 
 // Filter persistence: per-user, per-column. Storage key is namespaced
 // by the user's id so a re-login (different user on the same browser)
@@ -633,9 +640,12 @@ export default function Board() {
   // full FADE_PX fade; recomputed on scroll + resize.
   const FADE_PX = 40
   const [edgeFade, setEdgeFade] = useState({ left: 0, right: 1 })
+  // Viewport width of the scrollport — feeds the centered-lane geometry below.
+  const [containerW, setContainerW] = useState(0)
   const recomputeFade = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
+    setContainerW((w) => (w === el.clientWidth ? w : el.clientWidth))
     const maxScroll = el.scrollWidth - el.clientWidth
     const left = maxScroll <= 0 ? 0 : Math.min(el.scrollLeft / FADE_PX, 1)
     const right = maxScroll <= 0 ? 0 : Math.min((maxScroll - el.scrollLeft) / FADE_PX, 1)
@@ -662,6 +672,40 @@ export default function Board() {
     const grad = `linear-gradient(to right, rgba(0,0,0,${1 - edgeFade.left}) 0, #000 ${l}px, #000 calc(100% - ${r}px), rgba(0,0,0,${1 - edgeFade.right}) 100%)`
     return { maskImage: grad, WebkitMaskImage: grad }
   }, [edgeFade])
+
+  // Centered-lane geometry. We want the viewport center to land on the midpoint
+  // of the *open* (expanded) columns — one open → that column; two → their
+  // midpoint; none → the center of the collapsed rails. Widths are fixed, so we
+  // compute positions analytically rather than measuring the DOM. Symmetric
+  // padding parks the strip so that midpoint sits dead-center when it fits, and
+  // a matching scroll offset (applied below) handles the overflow case.
+  const lane = useMemo(() => {
+    let x = 0
+    const centers: number[] = []
+    for (const col of ALL_COLUMNS) {
+      const w = collapsed[col] ? RAIL_W : COL_W
+      if (!collapsed[col]) centers.push(x + w / 2)
+      x += w + GAP
+    }
+    const stripW = x - GAP
+    const centroid = centers.length
+      ? centers.reduce((a, b) => a + b, 0) / centers.length
+      : stripW / 2
+    const half = containerW / 2
+    const padLeft = Math.max(0, half - centroid)
+    const padRight = Math.max(0, half - (stripW - centroid))
+    return { padLeft, padRight, targetScroll: padLeft + centroid - half }
+  }, [collapsed, containerW])
+
+  // Park the scroll so the open-columns midpoint is centered (clamped to the
+  // scrollable range for the overflow case). Re-runs on collapse + resize.
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (!el || loading) return
+    const max = el.scrollWidth - el.clientWidth
+    el.scrollLeft = Math.max(0, Math.min(lane.targetScroll, max))
+    recomputeFade()
+  }, [lane, loading, recomputeFade])
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
@@ -917,19 +961,21 @@ export default function Board() {
           </div>
         )}
 
-        {/* SKY-330: horizontal-scroll container for 5 columns. Default scroll
-            position (set on mount) shows Claimed → In Review; user scrolls left
-            for Queued, right for Done. The dynamic mask dissolves columns into
-            the page at whichever edge still has more to scroll. Tight vertical
-            padding now that columns carry no drop-shadow to protect from the
-            scrollport clip. */}
+        {/* SKY-330: horizontal-scroll container for 5 columns. The strip is
+            parked so the open-columns midpoint sits at the viewport center (see
+            `lane` above) via dynamic left/right padding + a scroll offset. The
+            dynamic mask dissolves columns into the page at whichever edge still
+            has more to scroll. */}
         <div
           ref={scrollRef}
           onScroll={recomputeFade}
-          className="min-h-0 flex-1 overflow-x-auto px-2 pb-3 pt-1"
+          className="min-h-0 flex-1 overflow-x-auto pb-3 pt-1"
           style={fadeMask}
         >
-          <div className="flex h-full gap-6 px-1">
+          <div
+            className="flex h-full gap-6"
+            style={{ paddingLeft: lane.padLeft, paddingRight: lane.padRight }}
+          >
             {ALL_COLUMNS.map((colId, i) =>
               collapsed[colId] ? (
                 <CollapsedColumn

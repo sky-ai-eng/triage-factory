@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useDroppable } from '@dnd-kit/core'
+import * as Tooltip from '@radix-ui/react-tooltip'
 import { motion, useReducedMotion } from 'motion/react'
 import {
   ArrowDown,
@@ -124,11 +125,12 @@ export default function BoardColumn({
 
   const hasFilters = filterIsActive(filter)
 
-  // SKY-330: fixed 520px width — the board is horizontally scrollable, so a
-  // viewport-relative width would compress cards as columns scroll into view.
+  // SKY-330: fixed 460px width (keep in sync with COL_W in Board.tsx, which
+  // computes the centered-lane layout). Fixed, not viewport-relative, so cards
+  // don't compress as columns scroll into view.
   return (
     <motion.div
-      className="flex h-full w-[520px] shrink-0 flex-col"
+      className="flex h-full w-[460px] shrink-0 flex-col"
       initial={reduce ? false : { opacity: 0, y: 14 }}
       animate={{ opacity: 1, y: 0 }}
       transition={reduce ? { duration: 0 } : { ...bodyEase, delay: index * 0.05 }}
@@ -146,15 +148,30 @@ export default function BoardColumn({
           <div className="mb-1.5 flex items-center justify-between px-0.5">
             <div className="flex items-center gap-1.5">
               {onCollapse && (
-                <button
-                  type="button"
-                  aria-label={`Collapse ${title}`}
-                  title="Collapse"
-                  onClick={onCollapse}
-                  className="text-text-tertiary/50 transition-colors hover:text-text-secondary"
-                >
-                  <ChevronsRightLeft size={14} />
-                </button>
+                <Tooltip.Provider delayDuration={650}>
+                  <Tooltip.Root>
+                    <Tooltip.Trigger asChild>
+                      <button
+                        type="button"
+                        aria-label={`Collapse ${title}`}
+                        onClick={onCollapse}
+                        className="text-text-tertiary/50 transition-colors hover:text-text-secondary"
+                      >
+                        <ChevronsRightLeft size={14} />
+                      </button>
+                    </Tooltip.Trigger>
+                    <Tooltip.Portal>
+                      <Tooltip.Content
+                        side="top"
+                        sideOffset={6}
+                        className="z-[100] rounded-lg border border-border-glass bg-surface-raised px-2.5 py-1 text-[12px] text-text-secondary shadow-lg shadow-black/[0.06] animate-in fade-in-0 zoom-in-95"
+                      >
+                        Collapse
+                        <Tooltip.Arrow className="fill-surface-raised" />
+                      </Tooltip.Content>
+                    </Tooltip.Portal>
+                  </Tooltip.Root>
+                </Tooltip.Provider>
               )}
               <h2 className="text-[15px] font-semibold tracking-tight text-text-primary">
                 {title}
@@ -328,7 +345,12 @@ export function CollapsedColumn({
         }
       >
         {count > 0 && (
-          <span className="text-[11px] font-medium tabular-nums text-text-tertiary">{count}</span>
+          <span
+            className="text-[11px] font-medium tabular-nums text-text-tertiary [writing-mode:vertical-rl]"
+            style={{ textOrientation: 'mixed' }}
+          >
+            {count}
+          </span>
         )}
         <span
           className="text-[13px] font-medium tracking-wide text-text-secondary decoration-text-tertiary underline-offset-4 [writing-mode:vertical-rl] group-hover:underline"
