@@ -873,11 +873,6 @@ func (bh *blueprintsHandler) handleBlueprintRunCancel(w http.ResponseWriter, r *
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	spawner := bh.spawner()
-	if spawner == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
-		return
-	}
 	id := r.PathValue("id")
 
 	var br *domain.BlueprintRun
@@ -901,6 +896,13 @@ func (bh *blueprintsHandler) handleBlueprintRunCancel(w http.ResponseWriter, r *
 		return
 	}
 
+	// Availability check after the existence + terminal checks so a missing or
+	// already-terminal run gets a 404/409 rather than a 503.
+	spawner := bh.spawner()
+	if spawner == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
+		return
+	}
 	if err := spawner.CancelBlueprint(orgID, id, userID); err != nil {
 		internalError(w, "blueprints", err)
 		return

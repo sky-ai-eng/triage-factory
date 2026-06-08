@@ -36,7 +36,6 @@ type Server struct {
 	blueprints   db.BlueprintStore       // used by event-handler + project test fixtures
 	tasks        db.TaskStore            // SKY-283: task lifecycle, claim, queue + factory snapshot reads
 	agentRuns    db.AgentRunStore        // SKY-285: agent run lifecycle + transcript + yields
-	pendingPRs   db.PendingPRStore       // SKY-287: pending_prs CRUD for pending_prs handler, agent status payload, drag-back-to-queue cleanup
 	repos        db.RepoStore            // SKY-288: repo_profiles CRUD for repos/settings/projects handlers and curator pinned-repo materialization
 	projects     db.ProjectStore         // SKY-290: projects CRUD for projects/curator/backfill/project_entities handlers
 	curatorStore db.CuratorStore         // curator-runtime CRUD (curator_requests / curator_messages / curator_pending_context) — handler-side writes go through here so Postgres mode honors RLS and uses the right placeholder syntax
@@ -393,7 +392,6 @@ func New(database *sql.DB, stores db.Stores, takeoverDir string, serverPort int)
 		blueprints:   stores.Blueprints,
 		tasks:        stores.Tasks,
 		agentRuns:    stores.AgentRuns,
-		pendingPRs:   stores.PendingPRs,
 		repos:        stores.Repos,
 		projects:     stores.Projects,
 		events:       stores.Events,
