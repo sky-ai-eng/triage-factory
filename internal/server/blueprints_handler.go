@@ -831,6 +831,11 @@ func (bh *blueprintsHandler) handleBlueprintReconnect(w http.ResponseWriter, r *
 		if hostOut, e = tx.Blueprints.Get(r.Context(), orgID, id); e != nil {
 			return e
 		}
+		if hostOut == nil {
+			// SplitAt + MergeInto just kept the host alive; an unreadable host is a
+			// store inconsistency, not a 404 — fail the tx rather than emit a null.
+			return fmt.Errorf("host blueprint %s not readable after reconnect", id)
+		}
 		hostSteps, e = tx.Blueprints.ListSteps(r.Context(), orgID, id)
 		return e
 	}); err != nil {

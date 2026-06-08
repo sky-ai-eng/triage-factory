@@ -1567,6 +1567,12 @@ function BindingGraphInner({
   // validate it's a free chain entry (≤1 input), and route to the right move.
   // Setting the success flag first means a refused/no-op reconnect is never
   // mistaken for a drop-on-empty delete.
+  //
+  // We never call ReactFlow's reconnectEdge / setEdges — `edges` is derived from
+  // server state and only changes on the fetchAll a successful move triggers. So
+  // a refused or failed reconnect simply doesn't mutate `edges`, and @xyflow
+  // snaps the dragged endpoint back to the original edge on drop (its
+  // reconnectable contract: the host app owns whether the change is committed).
   const onReconnect = useCallback(
     (oldEdge: Edge, newConnection: Connection) => {
       edgeReconnectSuccessful.current = true

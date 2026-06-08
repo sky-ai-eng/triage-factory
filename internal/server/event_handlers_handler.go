@@ -748,7 +748,7 @@ func (eh *eventHandlersHandler) handleEventHandlerRetarget(w http.ResponseWriter
 		return
 	}
 	if crossTeam {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "blueprint_id references a blueprint owned by another team"})
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "blueprint_id references a blueprint owned by another team"})
 		return
 	}
 	if hasTrigger {

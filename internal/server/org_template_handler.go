@@ -888,6 +888,9 @@ func (ot *orgTemplateHandler) handleOrgTemplateBlueprintReconnect(w http.Respons
 		if hostOut, e = tx.OrgTemplate.GetBlueprint(r.Context(), orgID, id); e != nil {
 			return e
 		}
+		if hostOut == nil {
+			return fmt.Errorf("host template blueprint %s not readable after reconnect", id)
+		}
 		hostSteps, e = tx.OrgTemplate.ListBlueprintSteps(r.Context(), orgID, id)
 		return e
 	}); err != nil {
