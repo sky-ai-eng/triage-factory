@@ -18,39 +18,59 @@ func execSQL(t *testing.T, database *sql.DB, query string, args ...any) {
 	}
 }
 
+// seedSteerRun installs the entity → event → prompt → task → blueprint_run → run
+// chain a steering endpoint needs, on the local-default org/team, and returns
+// the run id. status sets the run's lifecycle state.
+func seedSteerRun(t *testing.T, database *sql.DB, suffix, status string) string {
+	t.Helper()
+	const eventType = "github:pr:ci_check_failed"
+	e, ev, p, tk, rn := "e_"+suffix, "ev_"+suffix, "p_"+suffix, "t_"+suffix, "r_"+suffix
+	execSQL(t, database, `INSERT INTO entities (id, source, source_id, kind, state) VALUES (?, 'github', ?, 'pr', 'active')`, e, "owner/repo#"+suffix)
+	execSQL(t, database, `INSERT INTO events (id, entity_id, event_type, dedup_key) VALUES (?, ?, ?, '')`, ev, e, eventType)
+	execSQL(t, database, `INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES (?, 'P', 'b', ?, ?)`, p, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID)
+	execSQL(t, database, `INSERT INTO tasks (id, entity_id, event_type, primary_event_id) VALUES (?, ?, ?, ?)`, tk, e, eventType, ev)
+	brID := seedBlueprintRunSQLite(t, database, tk)
+	execSQL(t, database, `INSERT INTO runs (id, task_id, prompt_id, status, trigger_type, blueprint_run_id) VALUES (?, ?, ?, ?, 'manual', ?)`, rn, tk, p, status, brID)
+	return rn
+}
+
 // TestHandleAgentMessage_RecordsThenConflictsOnTerminal drives the message
-// endpoint end-to-end against a terminal run: the handler records the user's
-// message (recording precedes routing), then SendMessage reports the run not
-// steerable, which maps to 409. Asserts both the 409 and that the message
-// landed in the transcript.
+// endpoint against a terminal run: the run is visible (so it's recorded, not a
+// 404), the user message lands in the transcript, then SendMessage reports it
+// not steerable → 409. Asserts the 409 and the recorded row (role/subtype/body).
 func TestHandleAgentMessage_RecordsThenConflictsOnTerminal(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6", ""))
+	runID := seedSteerRun(t, s.db, "msg", "completed")
 
-	const eventType = "github:pr:ci_check_failed"
-	execSQL(t, s.db, `INSERT INTO entities (id, source, source_id, kind, state) VALUES ('e_msg','github','owner/repo#msg','pr','active')`)
-	execSQL(t, s.db, `INSERT INTO events (id, entity_id, event_type, dedup_key) VALUES ('ev_msg','e_msg',?, '')`, eventType)
-	execSQL(t, s.db, `INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p_msg','P','b',?,?)`, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID)
-	execSQL(t, s.db, `INSERT INTO tasks (id, entity_id, event_type, primary_event_id) VALUES ('t_msg','e_msg',?, 'ev_msg')`, eventType)
-	brID := seedBlueprintRunSQLite(t, s.db, "t_msg")
-	execSQL(t, s.db, `INSERT INTO runs (id, task_id, prompt_id, status, trigger_type, blueprint_run_id) VALUES ('r_msg','t_msg','p_msg','completed','manual',?)`, brID)
-
-	rec := doJSON(t, s, "POST", "/api/agent/runs/r_msg/message", map[string]string{"text": "pick this back up"})
+	rec := doJSON(t, s, "POST", "/api/agent/runs/"+runID+"/message", map[string]string{"text": "pick this back up"})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (a terminal run is not steerable)", rec.Code)
 	}
 
-	var role, content string
-	if err := s.db.QueryRow(`SELECT role, content FROM run_messages WHERE run_id='r_msg'`).Scan(&role, &content); err != nil {
+	var role, subtype, content string
+	if err := s.db.QueryRow(`SELECT role, subtype, content FROM run_messages WHERE run_id=?`, runID).Scan(&role, &subtype, &content); err != nil {
 		t.Fatalf("read recorded message: %v", err)
 	}
-	if role != "user" || content != "pick this back up" {
-		t.Errorf("recorded message = {role:%q content:%q}, want {user, pick this back up}", role, content)
+	if role != "user" || subtype != "text" || content != "pick this back up" {
+		t.Errorf("recorded message = {role:%q subtype:%q content:%q}, want {user, text, pick this back up}", role, subtype, content)
 	}
 }
 
-// TestHandleAgentMessage_EmptyTextRejected: the endpoint rejects a blank
-// message before touching the run.
+// TestHandleAgentMessage_UnknownRunNotFound: a message to a run not visible to
+// the caller's org is 404 (the authz gate), before anything is recorded.
+func TestHandleAgentMessage_UnknownRunNotFound(t *testing.T) {
+	s := newTestServer(t)
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6", ""))
+
+	rec := doJSON(t, s, "POST", "/api/agent/runs/r_absent/message", map[string]string{"text": "hello"})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (unknown run)", rec.Code)
+	}
+}
+
+// TestHandleAgentMessage_EmptyTextRejected: a blank message is 400 before the
+// run is even looked up.
 func TestHandleAgentMessage_EmptyTextRejected(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6", ""))
@@ -61,16 +81,29 @@ func TestHandleAgentMessage_EmptyTextRejected(t *testing.T) {
 	}
 }
 
-// TestHandleAgentInterrupt_NoLiveProcessConflict: interrupting a run with no
-// live process is a 409 (nothing to interrupt). No run row is needed — Interrupt
-// resolves purely against the in-memory process registry.
+// TestHandleAgentInterrupt_NoLiveProcessConflict: interrupting an existing run
+// that has no live process is 409 (nothing to interrupt).
 func TestHandleAgentInterrupt_NoLiveProcessConflict(t *testing.T) {
+	s := newTestServer(t)
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6", ""))
+	runID := seedSteerRun(t, s.db, "int", "running")
+
+	rec := doJSON(t, s, "POST", "/api/agent/runs/"+runID+"/interrupt", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (run exists but has no live process)", rec.Code)
+	}
+}
+
+// TestHandleAgentInterrupt_UnknownRunNotFound: interrupting a run not visible to
+// the caller's org is 404 — the authz gate keeps a known run id from reaching
+// another tenant's process.
+func TestHandleAgentInterrupt_UnknownRunNotFound(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6", ""))
 
 	rec := doJSON(t, s, "POST", "/api/agent/runs/r_absent/interrupt", nil)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409 (no live process to interrupt)", rec.Code)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (unknown run)", rec.Code)
 	}
 }
 

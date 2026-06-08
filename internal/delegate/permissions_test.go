@@ -10,22 +10,22 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// waitForPending blocks until the broker has registered requestID. The handler
-// registers synchronously on entry and then parks, so a test can resolve it
-// without racing the handler goroutine.
-func waitForPending(t *testing.T, s *Spawner, requestID string) {
+// waitForPending blocks until the broker has registered (runID, requestID). The
+// handler registers synchronously on entry and then parks, so a test can resolve
+// it without racing the handler goroutine.
+func waitForPending(t *testing.T, s *Spawner, runID, requestID string) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		s.mu.Lock()
-		_, ok := s.permPending[requestID]
+		_, ok := s.permPending[permKey(runID, requestID)]
 		s.mu.Unlock()
 		if ok {
 			return
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("permission request %q never registered", requestID)
+	t.Fatalf("permission request %q (run %q) never registered", requestID, runID)
 }
 
 // TestBrowserPermissionHandler_ResolveAllow: a prompt answered via
@@ -39,7 +39,7 @@ func TestBrowserPermissionHandler_ResolveAllow(t *testing.T) {
 		got <- h(agentproc.PermissionRequest{RequestID: "req-1", ToolName: "Bash", Input: map[string]any{"command": "ls"}})
 	}()
 
-	waitForPending(t, s, "req-1")
+	waitForPending(t, s, "run-1", "req-1")
 	if err := s.ResolvePermission(runmode.LocalDefaultOrg, "run-1", "req-1", agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
 		t.Fatalf("ResolvePermission: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestBrowserPermissionHandler_TimeoutDenies(t *testing.T) {
 	}
 	// The handler deregisters on return, resolved or timed out.
 	s.mu.Lock()
-	_, stillPending := s.permPending["req-timeout"]
+	_, stillPending := s.permPending[permKey("run-1", "req-timeout")]
 	s.mu.Unlock()
 	if stillPending {
 		t.Error("expected the timed-out request to be deregistered")
@@ -105,7 +105,7 @@ func TestResolvePermission_WrongRun(t *testing.T) {
 	h := s.browserPermissionHandler(runmode.LocalDefaultOrg, "run-A")
 	done := make(chan agentproc.PermissionDecision, 1)
 	go func() { done <- h(agentproc.PermissionRequest{RequestID: "req-x"}) }()
-	waitForPending(t, s, "req-x")
+	waitForPending(t, s, "run-A", "req-x")
 
 	if err := s.ResolvePermission(runmode.LocalDefaultOrg, "run-B", "req-x", agentproc.PermissionDecision{Behavior: "allow"}); !errors.Is(err, ErrNoPendingPermission) {
 		t.Errorf("err = %v, want ErrNoPendingPermission for a wrong-run resolve", err)
@@ -116,4 +116,35 @@ func TestResolvePermission_WrongRun(t *testing.T) {
 		t.Fatalf("correct resolve: %v", err)
 	}
 	<-done
+}
+
+// TestBrowserPermissionHandler_ConcurrentRunsSameRequestID guards the broker
+// key: the wrapper's request_id is only unique within a run process, so two
+// concurrent runs can both raise "perm-1". Keying by (runID, requestID) keeps
+// them isolated — each registers without clobbering the other and each resolves
+// to its own decision.
+func TestBrowserPermissionHandler_ConcurrentRunsSameRequestID(t *testing.T) {
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	hA := s.browserPermissionHandler(runmode.LocalDefaultOrg, "run-A")
+	hB := s.browserPermissionHandler(runmode.LocalDefaultOrg, "run-B")
+
+	gotA := make(chan agentproc.PermissionDecision, 1)
+	gotB := make(chan agentproc.PermissionDecision, 1)
+	go func() { gotA <- hA(agentproc.PermissionRequest{RequestID: "perm-1"}) }()
+	go func() { gotB <- hB(agentproc.PermissionRequest{RequestID: "perm-1"}) }()
+	waitForPending(t, s, "run-A", "perm-1")
+	waitForPending(t, s, "run-B", "perm-1")
+
+	if err := s.ResolvePermission(runmode.LocalDefaultOrg, "run-A", "perm-1", agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
+		t.Fatalf("resolve run-A: %v", err)
+	}
+	if err := s.ResolvePermission(runmode.LocalDefaultOrg, "run-B", "perm-1", agentproc.PermissionDecision{Behavior: "deny"}); err != nil {
+		t.Fatalf("resolve run-B: %v", err)
+	}
+	if d := <-gotA; d.Behavior != "allow" {
+		t.Errorf("run-A decision = %q, want allow", d.Behavior)
+	}
+	if d := <-gotB; d.Behavior != "deny" {
+		t.Errorf("run-B decision = %q, want deny", d.Behavior)
+	}
 }

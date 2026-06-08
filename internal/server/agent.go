@@ -144,10 +144,11 @@ func (ag *agentHandler) handleAgentCancel(w http.ResponseWriter, r *http.Request
 
 // handleAgentMessage records a free-form user message on a run, broadcasts it
 // to watchers, then routes it: a live run is steered in place, an `open` run is
-// woken via resume. Recording before routing keeps the transcript optimistic
-// (the user's words show immediately) and — in multi mode — makes the
-// RLS-checked InsertMessage the cross-org gate before SendMessage reaches the
-// process. A run that can take no message (terminal / no live process) is 409.
+// woken via resume. The run is read in the same tx that records the message, so
+// a run not visible to the caller's org reads as 404 (the authz gate before any
+// control op) and an existing run's message is recorded before routing — the
+// transcript stays optimistic (the user's words show immediately). A run that
+// can take no message (terminal / no live process) is 409.
 func (ag *agentHandler) handleAgentMessage(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -173,14 +174,33 @@ func (ag *agentHandler) handleAgentMessage(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Record + broadcast the user's message before routing so the transcript
-	// reflects it regardless of where (or whether) it lands.
-	msg := &domain.AgentMessage{RunID: runID, Role: "user", Content: body.Text}
+	// Read + record in one tx: the Get authorizes against the run under the
+	// caller's org (RLS), so a missing / cross-org run is a 404 before SendMessage
+	// reaches the registry; an existing run gets the user message persisted (with
+	// the row id carried back onto msg.ID for the broadcast's client dedup).
+	msg := &domain.AgentMessage{RunID: runID, Role: "user", Subtype: "text", Content: body.Text}
+	var runExists bool
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		_, e := tx.AgentRuns.InsertMessage(r.Context(), orgID, msg)
-		return e
+		run, e := tx.AgentRuns.Get(r.Context(), orgID, runID)
+		if e != nil {
+			return e
+		}
+		if run == nil {
+			return nil
+		}
+		runExists = true
+		id, e := tx.AgentRuns.InsertMessage(r.Context(), orgID, msg)
+		if e != nil {
+			return e
+		}
+		msg.ID = int(id)
+		return nil
 	}); err != nil {
 		internalError(w, "agent", err)
+		return
+	}
+	if !runExists {
+		notFound(w, "run")
 		return
 	}
 	ag.ws.Broadcast(websocket.Event{
@@ -198,16 +218,36 @@ func (ag *agentHandler) handleAgentMessage(w http.ResponseWriter, r *http.Reques
 }
 
 // handleAgentInterrupt stops a live run's current turn, leaving the process
-// alive for further input. A run with no live process is 409 — nothing to
-// interrupt.
+// alive for further input. The run is authorized under the caller's org first
+// (404 if not visible) — the process registry is keyed by run id alone, so this
+// gate keeps a known run id from interrupting another tenant's run. An existing
+// run with no live process is 409 — nothing to interrupt.
 func (ag *agentHandler) handleAgentInterrupt(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireOrg(w, r); !ok {
+	orgID, ok := requireOrg(w, r)
+	if !ok {
 		return
 	}
+	userID := ClaimsFrom(r.Context()).Subject
 	runID := r.PathValue("runID")
 	spawner := ag.spawner()
 	if spawner == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
+		return
+	}
+	var runExists bool
+	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		run, e := tx.AgentRuns.Get(r.Context(), orgID, runID)
+		if e != nil {
+			return e
+		}
+		runExists = run != nil
+		return nil
+	}); err != nil {
+		internalError(w, "agent", err)
+		return
+	}
+	if !runExists {
+		notFound(w, "run")
 		return
 	}
 	if err := spawner.Interrupt(r.Context(), runID); err != nil {

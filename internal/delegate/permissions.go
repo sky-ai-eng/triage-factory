@@ -27,12 +27,21 @@ import (
 var ErrNoPendingPermission = errors.New("no pending permission request")
 
 // pendingPermission is one in-flight browser permission prompt: the 1-buffered
-// channel the handler goroutine is parked on, plus the run/tenant it belongs to
-// so a resolve addressed to the wrong run or org can't satisfy it.
+// channel the handler goroutine is parked on, plus the owning org so a resolve
+// from another tenant can't satisfy it. The owning run is encoded in the broker
+// key (see permKey), not stored here.
 type pendingPermission struct {
 	ch    chan agentproc.PermissionDecision
 	orgID string
-	runID string
+}
+
+// permKey is the broker key for a pending prompt. The wrapper's request_id is
+// only unique within a single run process (`perm-N` from a per-process
+// counter), so two concurrent runs can collide on the same id — keying by
+// (runID, requestID) keeps each run's prompts isolated. The NUL separator can't
+// appear in a run uuid or a `perm-N` id, so the composite is unambiguous.
+func permKey(runID, requestID string) string {
+	return runID + "\x00" + requestID
 }
 
 // permTimeout is how long a surfaced prompt waits for an answer before denying.
@@ -53,13 +62,14 @@ func (s *Spawner) permTimeout() time.Duration {
 // deregisters.
 func (s *Spawner) browserPermissionHandler(orgID, runID string) agentproc.PermissionHandler {
 	return func(req agentproc.PermissionRequest) agentproc.PermissionDecision {
+		key := permKey(runID, req.RequestID)
 		ch := make(chan agentproc.PermissionDecision, 1)
 		s.mu.Lock()
-		s.permPending[req.RequestID] = &pendingPermission{ch: ch, orgID: orgID, runID: runID}
+		s.permPending[key] = &pendingPermission{ch: ch, orgID: orgID}
 		s.mu.Unlock()
 		defer func() {
 			s.mu.Lock()
-			delete(s.permPending, req.RequestID)
+			delete(s.permPending, key)
 			s.mu.Unlock()
 		}()
 
@@ -94,9 +104,9 @@ func (s *Spawner) browserPermissionHandler(orgID, runID string) agentproc.Permis
 // ErrNoPendingPermission for the caller to map to 404.
 func (s *Spawner) ResolvePermission(orgID, runID, requestID string, d agentproc.PermissionDecision) error {
 	s.mu.Lock()
-	p, ok := s.permPending[requestID]
+	p, ok := s.permPending[permKey(runID, requestID)]
 	s.mu.Unlock()
-	if !ok || p.orgID != orgID || p.runID != runID {
+	if !ok || p.orgID != orgID {
 		return ErrNoPendingPermission
 	}
 	select {
