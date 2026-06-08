@@ -45,11 +45,7 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
         className={`group relative cursor-grab active:cursor-grabbing ${isDragging ? 'z-50' : ''}`}
         {...props}
       >
-        <CardPlane
-          glow={delegateFailed ? { tone: 'problem', breathing: false } : undefined}
-          dim={isSnoozed}
-          dragging={isDragging}
-        >
+        <CardPlane dim={isSnoozed} dragging={isDragging}>
           <HudHeader>
             <div className="flex items-center justify-between gap-2">
               <div className="flex min-w-0 items-center gap-2.5">

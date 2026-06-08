@@ -63,21 +63,14 @@ export interface Glow {
   breathing: boolean
 }
 
-// runGlow decides whether the card itself lights up, and how. Settled states
-// (completed, taken_over) return null — a finished card shouldn't keep glowing.
+// runGlow decides whether the card itself lights up. Only a LIVE run glows — a
+// breathing "work is alive here" bloom. Everything else returns null: a steady
+// colored glow on a settled/cancelled/waiting card just reads as a tinted
+// drop-shadow under the card (and those states already announce themselves via
+// the attention row / result verdict).
 export function runGlow(run: AgentRun): Glow | null {
   if (isActiveRun(run)) return { tone: 'active', breathing: true }
-  switch (run.Status) {
-    case 'awaiting_input':
-    case 'pending_approval':
-      return { tone: 'attention', breathing: false }
-    case 'failed':
-    case 'cancelled':
-    case 'task_unsolvable':
-      return { tone: 'problem', breathing: false }
-    default:
-      return null
-  }
+  return null
 }
 
 // StepState is a chain step's lifecycle, rendered as a notch on the spine.
