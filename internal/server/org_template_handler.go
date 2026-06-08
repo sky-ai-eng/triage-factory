@@ -805,7 +805,7 @@ func (ot *orgTemplateHandler) handleOrgTemplateBlueprintSplit(w http.ResponseWri
 // peels off as a new orphaned trigger-less template blueprint) and merge
 // target_blueprint_id onto the upstream half, atomically.
 func (ot *orgTemplateHandler) handleOrgTemplateBlueprintReconnect(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -1434,7 +1434,7 @@ func (ot *orgTemplateHandler) handleOrgTemplateHandlerPromote(w http.ResponseWri
 // handleEventHandlerRetarget: re-point a template trigger at a different
 // template blueprint in place (RetargetHandlerBlueprint), preserving the row.
 func (ot *orgTemplateHandler) handleOrgTemplateHandlerRetarget(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
