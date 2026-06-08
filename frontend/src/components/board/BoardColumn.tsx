@@ -36,8 +36,11 @@ import type { Task } from '../../types'
 // panel. State is owned by Board.tsx; the apply/sort pass lives in
 // ./columnFilter.ts so this file exports only a component (Fast Refresh).
 
+// The search field floats — no box, no border, just the icon + text on the
+// column glass (the Her move). A whisper of fill appears only on focus so
+// typing has some ground.
 const searchInputClass =
-  'w-full rounded-xl bg-[var(--color-surface-overlay)]/70 py-1.5 pl-8 pr-7 text-[12px] text-text-primary placeholder:text-text-tertiary backdrop-blur-md outline-none transition-[background-color,box-shadow] focus:bg-[var(--color-surface-overlay)] focus:shadow-[0_0_0_3px_var(--color-accent-soft)]'
+  'w-full rounded-lg bg-transparent py-1.5 pl-7 pr-7 text-[13px] text-text-primary placeholder:text-text-tertiary outline-none transition-colors focus:bg-[var(--color-surface-overlay)]/40'
 
 const dateInputClass =
   'flex-1 rounded-lg bg-[var(--color-surface-overlay)]/70 px-2 py-1 text-[11px] text-text-primary outline-none transition-[box-shadow] focus:shadow-[0_0_0_2px_var(--color-accent-soft)]'
@@ -63,10 +66,12 @@ interface Props {
   tasks: Task[] // raw list, used to populate the event-type chips
   filter: ColumnFilterState
   onFilterChange: (next: ColumnFilterState) => void
-  // Optional header slot for column-specific affordances (e.g. the
-  // snoozed toggle on Queued, "see more" on Done). Renders to the
-  // right of the title.
+  // Optional header slot for a column-specific note (e.g. Done's "last 7
+  // days"). Renders to the right of the title, inside the bracket.
   headerExtra?: React.ReactNode
+  // Optional snoozed toggle (Queued only) — surfaced inside the filter panel
+  // rather than as a button stacked on the column.
+  snooze?: { shown: boolean; onToggle: () => void }
   // Position in the row (0-based) — drives the staggered mount reveal.
   index?: number
   // True when ≥1 autonomous run is actively turning in this lane — lights the
@@ -82,6 +87,7 @@ export default function BoardColumn({
   filter,
   onFilterChange,
   headerExtra,
+  snooze,
   index = 0,
   active = false,
   children,
@@ -90,8 +96,8 @@ export default function BoardColumn({
   const reduce = !!useReducedMotion()
 
   const [controlsOpen, setControlsOpen] = useState(false)
-  // Hovering a column warms its own drop-shadow toward faded rust — a quiet
-  // "this one has focus" cue, no effect on the other lanes.
+  // Hovering a column brightens its own rust L-bracket — a quiet "this one has
+  // focus" cue, no effect on the other lanes.
   const [hovered, setHovered] = useState(false)
 
   // Event-type chips reflect the unfiltered set so the user always sees what
@@ -117,11 +123,6 @@ export default function BoardColumn({
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      <div className="mb-3 flex items-center justify-between px-1">
-        <h2 className="text-[13px] font-medium tracking-tight text-text-secondary">{title}</h2>
-        {headerExtra}
-      </div>
-
       {/* Droppable wrapper does NOT clip — the accent lines + glows ride its
           edges. */}
       <div ref={setNodeRef} className="relative min-h-0 flex-1">
@@ -129,15 +130,23 @@ export default function BoardColumn({
             structure comes from the fading rust L-bracket below, not a box that
             pops off the page. */}
         <div className="relative h-full overflow-y-auto bg-[var(--color-surface-overlay)]/50 backdrop-blur-xl">
-          {/* Sticky frosted control header — no border, cards scroll beneath
-                it; the filter panel melts down from here on demand. */}
-          <div className="sticky top-0 z-10 bg-[var(--color-surface-overlay)]/70 px-3 pb-2.5 pt-3 backdrop-blur-md">
+          {/* Sticky masthead — title + search + filter, all floating on the
+              column glass (no box). Just backdrop-blur so cards stay legible as
+              they scroll beneath. The filter panel melts down from here. */}
+          <div className="sticky top-0 z-10 px-3 pb-2 pt-3 backdrop-blur-md">
+            <div className="mb-1.5 flex items-center justify-between px-0.5">
+              <h2 className="text-[15px] font-semibold tracking-tight text-text-primary">
+                {title}
+              </h2>
+              {headerExtra}
+            </div>
+
             <div className="flex items-center gap-2">
               <div className="relative flex-1">
                 <Search
-                  size={13}
+                  size={14}
                   aria-hidden
-                  className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-text-tertiary"
+                  className="pointer-events-none absolute left-0 top-1/2 -translate-y-1/2 text-text-tertiary"
                 />
                 <input
                   type="text"
@@ -151,7 +160,7 @@ export default function BoardColumn({
                     type="button"
                     aria-label="Clear search"
                     onClick={() => onFilterChange({ ...filter, search: '' })}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-text-tertiary transition-colors hover:text-text-secondary"
+                    className="absolute right-1 top-1/2 -translate-y-1/2 text-text-tertiary transition-colors hover:text-text-secondary"
                   >
                     <X size={12} />
                   </button>
@@ -162,11 +171,11 @@ export default function BoardColumn({
                 aria-label="Sort & filter"
                 aria-expanded={controlsOpen}
                 onClick={() => setControlsOpen((v) => !v)}
-                className={`relative shrink-0 rounded-xl bg-[var(--color-surface-overlay)]/70 p-1.5 backdrop-blur-md transition-colors ${
+                className={`relative shrink-0 rounded-lg p-1.5 transition-colors ${
                   controlsOpen ? 'text-accent' : 'text-text-tertiary hover:text-text-secondary'
                 }`}
               >
-                <SlidersHorizontal size={14} />
+                <SlidersHorizontal size={15} />
                 {hasFilters && (
                   <span
                     aria-hidden
@@ -184,7 +193,12 @@ export default function BoardColumn({
               className="overflow-hidden"
             >
               <div className="space-y-3 pt-3">
-                <FilterControls filter={filter} onChange={onFilterChange} eventTypes={eventTypes} />
+                <FilterControls
+                  filter={filter}
+                  onChange={onFilterChange}
+                  eventTypes={eventTypes}
+                  snooze={snooze}
+                />
               </div>
             </motion.div>
           </div>
@@ -325,10 +339,12 @@ function FilterControls({
   filter,
   onChange,
   eventTypes,
+  snooze,
 }: {
   filter: ColumnFilterState
   onChange: (next: ColumnFilterState) => void
   eventTypes: string[]
+  snooze?: { shown: boolean; onToggle: () => void }
 }) {
   // Empty eventTypes = "all on". The first click off the all-on state switches
   // to an explicit set of everything-but-this; re-selecting every type collapses
@@ -347,6 +363,14 @@ function FilterControls({
 
   return (
     <>
+      {snooze && (
+        <Group label="Snoozed">
+          <button type="button" onClick={snooze.onToggle} className={pill(snooze.shown)}>
+            {snooze.shown ? 'Showing snoozed' : 'Show snoozed'}
+          </button>
+        </Group>
+      )}
+
       <Group label="Sort">
         {SORT_KEYS.map((k) => (
           <button

@@ -836,22 +836,8 @@ export default function Board() {
     )
   }
 
-  // Per-column header extras
-  const queuedHeader = (
-    <button
-      type="button"
-      onClick={() => setShowSnoozed((v) => !v)}
-      title={showSnoozed ? 'Hide snoozed tasks' : 'Show snoozed tasks'}
-      className={`text-[10px] px-2 py-0.5 rounded-full transition-colors ${
-        showSnoozed
-          ? 'bg-snooze/10 text-snooze font-medium'
-          : 'text-text-tertiary hover:text-text-secondary'
-      }`}
-    >
-      {showSnoozed ? '⏾ snoozed shown' : '⏾ show snoozed'}
-    </button>
-  )
-
+  // Per-column header extras. (Queued's snoozed toggle now lives inside the
+  // filter panel — see the `snooze` prop below — not as a header button.)
   const doneHeader = (
     <span
       className="text-[10px] text-text-tertiary"
@@ -909,8 +895,11 @@ export default function Board() {
                 tasks={rawByColumn[colId]}
                 filter={filters[colId]}
                 onFilterChange={(next) => setFilters((prev) => ({ ...prev, [colId]: next }))}
-                headerExtra={
-                  colId === 'queued' ? queuedHeader : colId === 'done' ? doneHeader : undefined
+                headerExtra={colId === 'done' ? doneHeader : undefined}
+                snooze={
+                  colId === 'queued'
+                    ? { shown: showSnoozed, onToggle: () => setShowSnoozed((v) => !v) }
+                    : undefined
                 }
               >
                 <ColumnContents
