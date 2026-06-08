@@ -1,143 +1,11 @@
 import * as Tooltip from '@radix-ui/react-tooltip'
+import { eventDisplay } from '../lib/eventDisplay'
 
-// Maps canonical per-action event types from the events_catalog to UI display info.
-// This is a user-facing subset/override of the AllEventTypes() seed in internal/domain/event.go,
-// so labels may differ and some backend-only event types may fall back to the default badge.
-const EVENT_DISPLAY: Record<string, { label: string; description: string; color: string }> = {
-  // --- GitHub PR: per-action review events (split on review type) ---
-  'github:pr:review_changes_requested': {
-    label: 'Changes Requested',
-    description: 'A reviewer requested changes on a PR',
-    color: 'bg-orange-500/10 text-orange-700',
-  },
-  'github:pr:review_approved': {
-    label: 'Approved',
-    description: 'A reviewer approved a PR',
-    color: 'bg-emerald-500/10 text-emerald-700',
-  },
-  'github:pr:review_commented': {
-    label: 'Review Comment',
-    description: 'A reviewer left non-blocking comments on a PR',
-    color: 'bg-blue-500/10 text-blue-600',
-  },
-  'github:pr:review_dismissed': {
-    label: 'Review Dismissed',
-    description: 'A reviewer dismissed their previous review on a PR',
-    color: 'bg-slate-500/10 text-slate-600',
-  },
-
-  // --- GitHub PR: review request ---
-  'github:pr:review_requested': {
-    label: 'Review Requested',
-    description: 'Someone requested your review on a PR',
-    color: 'bg-amber-500/10 text-amber-700',
-  },
-
-  // --- GitHub PR: per-check CI events (split on conclusion) ---
-  'github:pr:ci_check_failed': {
-    label: 'CI Failed',
-    description: 'A CI check failed on a PR',
-    color: 'bg-red-500/10 text-red-600',
-  },
-  'github:pr:ci_check_passed': {
-    label: 'CI Passed',
-    description: 'A CI check passed on a PR',
-    color: 'bg-emerald-500/10 text-emerald-700',
-  },
-
-  // --- GitHub PR: labels ---
-  'github:pr:label_added': {
-    label: 'Label Added',
-    description: 'A label was added to a PR',
-    color: 'bg-violet-500/10 text-violet-600',
-  },
-  'github:pr:label_removed': {
-    label: 'Label Removed',
-    description: 'A label was removed from a PR',
-    color: 'bg-slate-500/10 text-slate-600',
-  },
-
-  // --- GitHub PR: state events ---
-  'github:pr:new_commits': {
-    label: 'New Commits',
-    description: 'A tracked PR has new commits since the last poll',
-    color: 'bg-sky-500/10 text-sky-600',
-  },
-  'github:pr:conflicts': {
-    label: 'Conflicts',
-    description: 'A PR has merge conflicts',
-    color: 'bg-red-500/10 text-red-600',
-  },
-  'github:pr:ready_for_review': {
-    label: 'Ready for Review',
-    description: 'A draft PR was marked ready for review',
-    color: 'bg-blue-500/10 text-blue-600',
-  },
-  'github:pr:mentioned': {
-    label: 'Mentioned',
-    description: 'You were @mentioned in a PR',
-    color: 'bg-indigo-500/10 text-indigo-600',
-  },
-  'github:pr:opened': {
-    label: 'PR Opened',
-    description: 'A pull request was opened',
-    color: 'bg-sky-500/10 text-sky-600',
-  },
-  'github:pr:merged': {
-    label: 'Merged',
-    description: 'A pull request was merged',
-    color: 'bg-purple-500/10 text-purple-600',
-  },
-  'github:pr:closed': {
-    label: 'Closed',
-    description: 'A pull request was closed without merging',
-    color: 'bg-slate-500/10 text-slate-600',
-  },
-
-  // --- Jira ---
-  'jira:issue:assigned': {
-    label: 'Assigned',
-    description: 'Issue was assigned to you',
-    color: 'bg-blue-500/10 text-blue-600',
-  },
-  'jira:issue:available': {
-    label: 'Available',
-    description: 'New unassigned issue in pickup queue',
-    color: 'bg-slate-500/10 text-slate-600',
-  },
-  'jira:issue:status_changed': {
-    label: 'Status Changed',
-    description: 'Issue status changed',
-    color: 'bg-violet-500/10 text-violet-600',
-  },
-  'jira:issue:priority_changed': {
-    label: 'Priority Changed',
-    description: 'Issue priority was changed',
-    color: 'bg-amber-500/10 text-amber-700',
-  },
-  'jira:issue:commented': {
-    label: 'New Comment',
-    description: 'A new comment was added to an issue',
-    color: 'bg-blue-500/10 text-blue-600',
-  },
-  'jira:issue:completed': {
-    label: 'Completed',
-    description: 'Issue was marked as done',
-    color: 'bg-emerald-500/10 text-emerald-700',
-  },
-  'jira:issue:became_atomic': {
-    label: 'Now Actionable',
-    description: 'All subtasks closed — parent ticket is now an atomic work unit',
-    color: 'bg-blue-500/10 text-blue-600',
-  },
-}
-
-const FALLBACK = {
-  label: 'Event',
-  description: 'A triage event occurred',
-  color: 'bg-black/5 text-text-tertiary',
-}
-
+// EventBadge renders the saturated event-type pill used by the filter chips
+// (where the color is load-bearing — selected shows full color, unselected
+// grayscales). The label/description/color data lives in lib/eventDisplay so
+// non-badge surfaces (the board cards' detuned event tags) can reuse it
+// without importing this component.
 export default function EventBadge({
   eventType,
   compact,
@@ -146,7 +14,7 @@ export default function EventBadge({
   compact?: boolean
 }) {
   if (!eventType) return null
-  const info = EVENT_DISPLAY[eventType] || FALLBACK
+  const info = eventDisplay(eventType)
 
   const badge = compact ? (
     <span

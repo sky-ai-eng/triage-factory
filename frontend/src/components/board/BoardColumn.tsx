@@ -38,10 +38,13 @@ import type { Task } from '../../types'
 // with a slow living sheen catching the top. Several overlay layers ride over
 // the slab (all non-clipping siblings so their bloom spills past it):
 //   • a top specular sheen that slowly breathes (the pane catches light),
-//   • an ambient breathing glow when an autonomous run is live in this lane,
 //   • a depth-of-field veil (backdrop-blur + dim) that recedes the column when
 //     another lane has focus — a camera focal plane across the board, and
 //   • the drag-over receive glow.
+//
+// The lane no longer carries a "work is live" glow — that signal moved onto the
+// card that's actually working (CardPlane's status glow in cardChrome.tsx), so
+// the light rides the work, not the column around it.
 //
 // IMPORTANT: the recede blur is a `backdrop-filter` overlay *in front* of the
 // column, never a CSS `filter`/`transform` on an ancestor — either of those
@@ -115,9 +118,6 @@ interface Props {
   snooze?: { shown: boolean; onToggle: () => void }
   // Position in the row (0-based) — drives the staggered mount reveal.
   index?: number
-  // True when ≥1 autonomous run is actively turning in this lane — lights the
-  // ambient breathing glow.
-  active?: boolean
   // True when a drag is currently over this column or any of its cards
   // (resolved at the board level). Fires the border-trace + brightens it.
   dragOver?: boolean
@@ -135,7 +135,6 @@ export default function BoardColumn({
   headerExtra,
   snooze,
   index = 0,
-  active = false,
   dragOver = false,
   onCollapse,
   children,
@@ -319,23 +318,6 @@ export default function BoardColumn({
 
         {/* Cards scroll independently below the masthead. */}
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 pb-3 pt-1">{children}</div>
-
-        {/* Ambient "work is live here" glow — a slow breathing ring,
-              suppressed while the receive glow is showing. */}
-        <motion.div
-          aria-hidden
-          className="pointer-events-none absolute inset-0"
-          initial={false}
-          animate={{ opacity: dragOver ? 0 : active ? (reduce ? 0.22 : [0, 0.45, 0]) : 0 }}
-          transition={
-            dragOver || !active || reduce
-              ? bodyEase
-              : { duration: 4.5, repeat: Infinity, ease: 'easeInOut' }
-          }
-          style={{
-            boxShadow: 'inset 0 0 0 1px var(--color-accent), 0 0 38px -14px var(--color-accent)',
-          }}
-        />
 
         {/* The rust L-bracket — concentric fading dashes (see TraceLayer). At
             rest they straddle the top-left corner as a soft-edged L; the lap

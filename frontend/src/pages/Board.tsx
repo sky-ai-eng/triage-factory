@@ -22,7 +22,6 @@ import BoardColumn, { CollapsedColumn } from '../components/board/BoardColumn'
 import {
   applyColumnFilter,
   emptyFilter,
-  isActiveRunStatus,
   type ColumnFilterState,
 } from '../components/board/columnFilter'
 import { GlassBackdrop } from './setup/glass'
@@ -586,20 +585,6 @@ export default function Board() {
     }
   }, [queued, claimed, inProgress, inReview, done, filters, sortByRunAttention, resolveClaimee])
 
-  // Per-column ambient glow: lit when ≥1 task in the lane has an actively
-  // turning agent run. Queued never holds runs and Done is settled, so both
-  // stay calm.
-  const columnActive = useMemo<Record<ColumnId, boolean>>(() => {
-    const anyLive = (list: Task[]) => list.some((t) => isActiveRunStatus(agentRuns[t.id]?.Status))
-    return {
-      queued: false,
-      claimed: anyLive(claimed),
-      in_progress: anyLive(inProgress),
-      in_review: anyLive(inReview),
-      done: false,
-    }
-  }, [claimed, inProgress, inReview, agentRuns])
-
   const rawByColumn = useMemo<Record<ColumnId, Task[]>>(
     () => ({
       queued,
@@ -1006,7 +991,6 @@ export default function Board() {
                   key={colId}
                   id={colId}
                   index={i}
-                  active={columnActive[colId]}
                   dragOver={activeDropCol === colId}
                   title={COLUMN_TITLES[colId]}
                   tasks={rawByColumn[colId]}
@@ -1049,7 +1033,7 @@ export default function Board() {
 
       <DragOverlay dropAnimation={null}>
         {activeTask && (
-          <div className="w-[280px]">
+          <div className="w-[400px]">
             <TaskCard task={activeTask} isDragging />
           </div>
         )}
