@@ -893,14 +893,16 @@ export default function Board() {
             position (set on mount) shows Claimed → In Review; user scrolls left
             for Queued, right for Done. The dynamic mask dissolves columns into
             the page at whichever edge still has more to scroll. */}
-        {/* -mx-8 bleeds the lane strip past the page's px-8 gutter to the
-            viewport edges (F): columns dissolve into the chrome at the fade
-            instead of stopping at a margin. The banner + team filter above keep
-            the gutter so controls stay aligned. */}
+        {/* SKY-330: horizontal-scroll container for 5 columns. Default scroll
+            position (set on mount) shows Claimed → In Review; user scrolls left
+            for Queued, right for Done. The dynamic mask dissolves columns into
+            the page at whichever edge still has more to scroll. py-* gives the
+            column drop-shadows room to bloom before the scrollport clips them
+            (overflow-x:auto forces overflow-y to clip). */}
         <div
           ref={scrollRef}
           onScroll={recomputeFade}
-          className="-mx-8 min-h-0 flex-1 overflow-x-auto pb-2"
+          className="min-h-0 flex-1 overflow-x-auto px-2 py-8"
           style={fadeMask}
         >
           <div className="flex h-full gap-6 px-1">

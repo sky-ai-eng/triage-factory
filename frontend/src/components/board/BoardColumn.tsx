@@ -141,7 +141,10 @@ export default function BoardColumn({
           <div
             className="h-full overflow-y-auto rounded-3xl bg-[var(--color-surface-overlay)]/50 backdrop-blur-xl"
             style={{
-              boxShadow: '0 26px 70px -32px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.14)',
+              // Kept tight enough to bloom inside the scrollport's py-8 padding
+              // — a wider shadow gets clipped into a hard band at the scroll
+              // edges (overflow-x:auto clips both axes).
+              boxShadow: '0 12px 32px -16px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.14)',
             }}
           >
             {/* Sticky frosted control header — no border, cards scroll beneath
