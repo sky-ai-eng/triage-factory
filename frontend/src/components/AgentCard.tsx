@@ -14,7 +14,7 @@ import {
 } from '../lib/runStatus'
 import TakeoverModal, { type TakeoverInfo } from './TakeoverModal'
 import YieldModal, { type YieldRequest } from './YieldModal'
-import { AttentionRow, CardPlane, EventTag, SourceTag, Spine, SpineSteps } from './board/cardChrome'
+import { AttentionRow, CardPlane, EventTag, HudHeader, SourceTag } from './board/cardChrome'
 import { compactNum, runGlow, runTone, TONE_TEXT, type StepState } from './board/cardStyle'
 
 interface Props {
@@ -124,9 +124,7 @@ export default function AgentCard({
 
   return (
     <div className="relative">
-      <CardPlane glow={glow}>
-        <Spine tone={tone} />
-        {hasChain && <SpineSteps steps={stepStates} />}
+      <CardPlane tone={tone} steps={hasChain ? stepStates : undefined} glow={glow}>
         <TakeoverModal info={takeoverInfo} onClose={() => setTakeoverInfo(null)} />
         {openYieldRequest && (
           <YieldModal
@@ -138,9 +136,9 @@ export default function AgentCard({
           />
         )}
 
-        {/* Header */}
-        <div className="relative pb-2.5 pl-4 pr-4 pt-3.5">
-          <div className="mb-2 flex items-center justify-between gap-2">
+        {/* Header label plate */}
+        <HudHeader>
+          <div className="flex items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2.5">
               <SourceTag task={task} />
               <EventTag eventType={task.event_type} />
@@ -148,7 +146,7 @@ export default function AgentCard({
             </div>
             <div className="flex shrink-0 items-center gap-2">
               {assigneeSlot}
-              <span className="inline-flex items-center gap-1.5 text-[11px] tabular-nums text-text-tertiary/80">
+              <span className="inline-flex items-center gap-1.5 font-mono text-[11px] tabular-nums text-text-tertiary/80">
                 {isActive && (
                   <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-delegate" />
                 )}
@@ -237,18 +235,21 @@ export default function AgentCard({
               )}
             </div>
           </div>
+        </HudHeader>
 
+        {/* Title + entity readout */}
+        <div className="px-4 pb-2 pt-3">
           <h3 className="mb-1 line-clamp-2 text-[14px] font-semibold leading-snug text-text-primary">
             {task.title}
           </h3>
           <div className="flex min-w-0 items-center gap-2 text-[11px] text-text-tertiary/80">
-            <span className="truncate">{task.source_id}</span>
+            <span className="truncate font-mono">{task.source_id}</span>
             {stepLabel && (
               <>
                 <span aria-hidden className="text-text-tertiary/50">
                   ·
                 </span>
-                <span className="shrink-0 uppercase tracking-wider">{stepLabel}</span>
+                <span className="shrink-0 font-mono uppercase tracking-wider">{stepLabel}</span>
               </>
             )}
           </div>
@@ -321,7 +322,7 @@ export default function AgentCard({
 
         {/* Footer */}
         <div className="flex items-center justify-between pb-3.5 pl-4 pr-4">
-          <div className="flex items-center gap-3 text-[11px] tracking-wide text-text-tertiary/80">
+          <div className="flex items-center gap-3 font-mono text-[11px] tabular-nums tracking-wide text-text-tertiary/80">
             {stats.comments > 0 && <span>{stats.comments} comments</span>}
             {stats.tokens > 0 && <span>{compactNum(stats.tokens)} tokens</span>}
             {run.TotalCostUSD != null && run.TotalCostUSD > 0 && (

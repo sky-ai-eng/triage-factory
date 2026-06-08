@@ -1,7 +1,7 @@
 import { forwardRef } from 'react'
 import type { Task } from '../types'
 import RequestedReviewerBadge from './RequestedReviewerBadge'
-import { CardPlane, EventTag, SourceTag, Spine } from './board/cardChrome'
+import { CardPlane, EventTag, HudHeader, SourceTag } from './board/cardChrome'
 import { formatAge, type Tone } from './board/cardStyle'
 
 interface Props {
@@ -48,13 +48,13 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
         {...props}
       >
         <CardPlane
+          tone={tone}
           glow={delegateFailed ? { tone: 'problem', breathing: false } : undefined}
           dim={isSnoozed}
           dragging={isDragging}
         >
-          <Spine tone={tone} />
-          <div className="relative py-3.5 pl-4 pr-3.5">
-            <div className="mb-2 flex items-center justify-between gap-2">
+          <HudHeader>
+            <div className="flex items-center justify-between gap-2">
               <div className="flex min-w-0 items-center gap-2.5">
                 <SourceTag task={task} />
                 <EventTag eventType={task.event_type} />
@@ -65,7 +65,9 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
               </div>
               {assigneeSlot && <div className="shrink-0">{assigneeSlot}</div>}
             </div>
+          </HudHeader>
 
+          <div className="relative px-4 pb-3 pt-3">
             <h3 className="mb-1 line-clamp-2 text-[13px] font-semibold leading-snug text-text-primary">
               {task.title}
             </h3>
@@ -77,7 +79,9 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
             )}
 
             <div className="flex items-center justify-between">
-              <span className="text-[11px] tracking-wide text-text-tertiary/80">{age}</span>
+              <span className="font-mono text-[11px] tracking-wide text-text-tertiary/80">
+                {age}
+              </span>
 
               <div className="flex items-center gap-3">
                 {delegateFailed && onRetry && (

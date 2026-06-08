@@ -4,21 +4,32 @@ import type { Task } from '../../types'
 import { eventDisplay, eventTone } from '../../lib/eventDisplay'
 import { STEP_VAR, TONE_TEXT, TONE_VAR, type Glow, type StepState, type Tone } from './cardStyle'
 
-// cardChrome — the shared visual chrome for the board's lit-plane cards. Every
-// export here is a component (Fast Refresh rule); the tokens + logic live in
+// cardChrome — the shared visual chrome for the board's cards. Every export
+// here is a component (Fast Refresh rule); the tokens + logic live in
 // cardStyle.ts. TaskCard and AgentCard compose these.
+//
+// The idiom is a factory crate / HUD module: against the columns' pure
+// emptiness, each card is a defined panel — a machined beveled edge, rust
+// corner-reinforcement brackets (the column L-bracket DNA, now hugging the
+// card), a recessed header "label plate" with a registration tick, and
+// monospace readout data. Status is carried by light: a left-edge spine in the
+// run's tone plus, for live work, a breathing glow. (The lane's own glow was
+// retired — the light rides the work, not the column around it.)
 
-// CardPlane is the frosted borderless plane: a translucent glass fill with a
-// hard top-left corner (the Blade-Runner/Transcendence move from the columns),
-// a top-left specular catch (liquid glass), a whisper of depth shadow so it
-// floats off the field, and — when a run is live — a status glow. No border:
-// the plane separates by light, the spine carries meaning.
+// CardPlane is the crate body: a translucent frosted panel with a beveled
+// machined edge (inner top highlight + bottom shadow), a faint hairline border
+// for panel definition, rust corner brackets, the status spine (+ optional
+// chain notches), and — when a run is live — a status glow.
 export function CardPlane({
+  tone = 'rust',
+  steps,
   glow,
   dim,
   dragging,
   children,
 }: {
+  tone?: Tone
+  steps?: StepState[]
   glow?: Glow | null
   dim?: boolean
   dragging?: boolean
@@ -27,27 +38,36 @@ export function CardPlane({
   const reduce = !!useReducedMotion()
   return (
     <div
-      className={`relative rounded-[13px] rounded-tl-[3px] bg-surface-overlay backdrop-blur-xl transition-[box-shadow,transform] duration-300 ${
-        dragging
-          ? 'scale-[1.015] shadow-[0_22px_55px_-20px_rgba(0,0,0,0.55)]'
-          : 'shadow-[0_10px_30px_-22px_rgba(0,0,0,0.5)]'
-      } ${dim ? 'opacity-70' : ''}`}
+      className={`group/plane relative transition-transform duration-300 ${
+        dim ? 'opacity-70' : ''
+      } ${dragging ? 'scale-[1.015]' : ''}`}
     >
-      {/* Top-left specular — the glass catches light at the hard corner. */}
+      {/* The crate body. No overflow clip, so the glow bloom + spine notches
+          spill past the panel; the header plate rounds its own top corners. */}
       <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 rounded-[inherit]"
-        style={{ background: 'linear-gradient(135deg, rgba(255,255,255,0.4), transparent 46%)' }}
-      />
-      {/* Status glow: a 1px inner ring + an outward bloom in the run's tone.
+        className="relative rounded-[5px] border border-border-subtle bg-surface-overlay backdrop-blur-xl"
+        style={{
+          boxShadow: dragging
+            ? '0 22px 55px -20px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.09), inset 0 -1px 0 rgba(0,0,0,0.16)'
+            : '0 10px 28px -22px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.07), inset 0 -1px 0 rgba(0,0,0,0.12)',
+        }}
+      >
+        {/* Top specular — the glass catches light along the header plate. */}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 top-0 h-12 rounded-t-[5px]"
+          style={{ background: 'linear-gradient(to bottom, rgba(255,255,255,0.06), transparent)' }}
+        />
+        {children}
+      </div>
+
+      {/* Status glow: a 1px inner ring + outward bloom in the run's tone.
           Breathing for a live run; steady for a state that wants attention.
-          Painted over the fill but under the content (which clears the edges
-          via padding), so the ring reads at the rim and the bloom spills past
-          the unclipped plane. */}
+          A wrapper-level overlay so the bloom spills past the unclipped panel. */}
       {glow && (
         <motion.div
           aria-hidden
-          className="pointer-events-none absolute inset-0 rounded-[inherit]"
+          className="pointer-events-none absolute inset-0 rounded-[5px]"
           initial={false}
           animate={{
             opacity: glow.breathing && !reduce ? [0.3, 0.85, 0.3] : glow.breathing ? 0.6 : 0.5,
@@ -62,41 +82,88 @@ export function CardPlane({
           }}
         />
       )}
-      {children}
+
+      <Spine tone={tone} />
+      {steps && steps.length > 0 && <SpineSteps steps={steps} />}
+      <CornerBrackets />
     </div>
   )
 }
 
-// Spine is the status line: a 2px vertical bar down the left edge, faded to
-// transparent at both ends so it never collides with the rounded corners and
-// reads as a guiding line rather than a hard rule.
-export function Spine({ tone, opacity = 0.9 }: { tone: Tone; opacity?: number }) {
+// CornerBrackets are the crate's corner reinforcements — short rust L-ticks
+// hugging each corner (the column bracket, scaled down to the card). Faint at
+// rest, they brighten when the card is hovered, so the panel reads as a
+// targetable HUD module.
+function CornerBrackets() {
+  const base =
+    'pointer-events-none absolute h-2.5 w-2.5 border-accent/35 transition-colors duration-200 group-hover/plane:border-accent/75'
+  return (
+    <>
+      <span className={`${base} left-0 top-0 rounded-tl-[5px] border-l-[1.5px] border-t-[1.5px]`} />
+      <span
+        className={`${base} right-0 top-0 rounded-tr-[5px] border-r-[1.5px] border-t-[1.5px]`}
+      />
+      <span
+        className={`${base} bottom-0 left-0 rounded-bl-[5px] border-b-[1.5px] border-l-[1.5px]`}
+      />
+      <span
+        className={`${base} bottom-0 right-0 rounded-br-[5px] border-b-[1.5px] border-r-[1.5px]`}
+      />
+    </>
+  )
+}
+
+// HudHeader is the recessed label plate at the top of a crate — a faint
+// inset strip holding the source/event readout, closed by a hairline divider
+// with a rust registration tick at the spine end. Spans the full width (its own
+// padding), so it reads as a plate rather than another padded row.
+export function HudHeader({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      className="relative rounded-t-[5px] border-b border-border-subtle/80 px-4 py-2.5"
+      style={{ background: 'linear-gradient(to bottom, rgba(0,0,0,0.022), transparent)' }}
+    >
+      {children}
+      {/* Registration tick: a short rust mark where the divider meets the
+          spine — a HUD readout detail, aligning the plate to the status rail. */}
+      <span
+        aria-hidden
+        className="absolute -bottom-px left-0 h-px w-7"
+        style={{ background: 'var(--color-accent)', opacity: 0.55 }}
+      />
+    </div>
+  )
+}
+
+// Spine is the status line: a 2px bar riding the left border edge, faded to
+// transparent at both ends so it never collides with the corners and reads as
+// a guiding rail rather than a hard rule.
+export function Spine({ tone, opacity = 0.95 }: { tone: Tone; opacity?: number }) {
   return (
     <div
       aria-hidden
       className="pointer-events-none absolute bottom-0 left-0 top-0 w-[2px]"
       style={{
-        background: `linear-gradient(to bottom, transparent, ${TONE_VAR[tone]} 14%, ${TONE_VAR[tone]} 86%, transparent)`,
+        background: `linear-gradient(to bottom, transparent, ${TONE_VAR[tone]} 12%, ${TONE_VAR[tone]} 88%, transparent)`,
         opacity,
       }}
     />
   )
 }
 
-// SpineSteps overlays a chain run's steps as notches riding the spine — done,
+// SpineSteps overlays a chain run's steps as notches beside the spine — done,
 // active (pulsing), failed, the current step (ringed), and pending — replacing
-// the old horizontal circles-and-line rail. They sit in the header zone near
-// the title, so "this card is step N of a chain" lives in the spine instead of
-// a separate widget.
-export function SpineSteps({ steps }: { steps: StepState[] }) {
+// the old horizontal circles-and-line rail. They sit on the inner rail beside
+// the title, so "this card is step N of a chain" lives on the spine.
+function SpineSteps({ steps }: { steps: StepState[] }) {
   const reduce = !!useReducedMotion()
   return (
     <div aria-hidden className="pointer-events-none absolute left-0 top-0 w-3">
       {steps.map((state, i) => {
-        const top = 17 + i * 13
+        const top = 54 + i * 13
         const color = STEP_VAR[state]
         return (
-          <span key={i} className="absolute" style={{ top, left: -2 }}>
+          <span key={i} className="absolute" style={{ top, left: 3 }}>
             {state === 'active' && !reduce && (
               <motion.span
                 className="absolute inset-0 rounded-full"
@@ -152,23 +219,22 @@ export function EventTag({ eventType }: { eventType?: string }) {
   )
 }
 
-// SourceTag is the source marker, detuned to a monochrome uppercase glyph (no
-// blue Jira pill) so it sits quietly in the warm field next to the event tag.
+// SourceTag is the source marker, detuned to a monospace uppercase glyph (no
+// blue Jira pill) so it sits quietly in the warm field as a HUD readout.
 export function SourceTag({ task }: { task: Task }) {
   const isGitHub = task.source === 'github'
   const label = isGitHub ? (task.entity_kind === 'pr' ? 'PR' : 'GH') : 'JIRA'
   return (
-    <span className="text-[10px] font-semibold uppercase tracking-[0.09em] text-text-tertiary/70">
+    <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-text-tertiary/80">
       {label}
     </span>
   )
 }
 
-// AttentionRow is the canonical "this needs you" row — the amber waiting-for-
-// response pattern, generalized. A toned kicker + a one-line message + a
-// trailing verb with an arrow. Used for awaiting_input (Respond) and
-// pending_approval (Review / Open PR), so every "your move" moment looks the
-// same instead of three different treatments.
+// AttentionRow is the canonical "this needs you" row — a toned kicker + a
+// one-line message + a trailing verb with an arrow. Used for awaiting_input
+// (Respond) and pending_approval (Review / Open PR), so every "your move"
+// moment looks the same.
 export function AttentionRow({
   tone = 'attention',
   kicker,
@@ -190,8 +256,11 @@ export function AttentionRow({
       type="button"
       onClick={onClick}
       aria-label={`${kicker}: ${action}`}
-      className="flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-left transition-colors"
-      style={{ background: `color-mix(in srgb, ${TONE_VAR[tone]} 10%, transparent)` }}
+      className="flex w-full items-center justify-between gap-3 rounded-[4px] px-3 py-2 text-left transition-colors"
+      style={{
+        background: `color-mix(in srgb, ${TONE_VAR[tone]} 10%, transparent)`,
+        boxShadow: `inset 0 0 0 1px color-mix(in srgb, ${TONE_VAR[tone]} 22%, transparent)`,
+      }}
     >
       <span className="flex min-w-0 items-start gap-2">
         <motion.span
