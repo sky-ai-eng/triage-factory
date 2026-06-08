@@ -49,9 +49,12 @@ import type { Task } from '../../types'
 // The search field floats — no box, no border, just the icon + text on the
 // column glass (the Her move). A whisper of fill appears only on focus so
 // typing has some ground.
-// Border-trace timing — a smooth ease-in-out lap, one clear loop.
+// Border-trace timing — a smooth ease-in-out lap, one clear loop. TRACE_PEAK
+// matches the resting bracket's weight so the travelling light reads as the
+// bracket itself, not a brighter object laid over it.
 const TRACE_EASE = [0.65, 0, 0.35, 1] as const
-const TRACE_DUR = 1.2
+const TRACE_DUR = 1.4
+const TRACE_PEAK = 0.5
 
 const searchInputClass =
   'w-full rounded-lg bg-transparent py-1.5 pl-7 pr-7 text-[13px] text-text-primary placeholder:text-text-tertiary outline-none transition-colors focus:bg-[var(--color-surface-overlay)]/40'
@@ -124,24 +127,40 @@ export default function BoardColumn({
   // old whole-column fill highlight). pathLength normalizes the rect to 100
   // units so the dash math is size-independent.
   const trace = useAnimationControls()
+  // One lap, fading in at the top-left corner (where the bracket lives) and out
+  // again there, so the light looks like it peels off the bracket, runs the
+  // perimeter, and settles back in — no hard pop. Peak opacity matches the
+  // bracket's weight (TRACE_PEAK), not a bright bar.
   const playTraceOnce = useCallback(() => {
     if (reduce) return
-    trace.set({ opacity: 1, strokeDashoffset: 0 })
-    trace
-      .start({ strokeDashoffset: -100, transition: { duration: TRACE_DUR, ease: TRACE_EASE } })
-      .then(() => trace.start({ opacity: 0, transition: { duration: 0.3 } }))
-  }, [reduce, trace])
-  const playTraceLoop = useCallback(() => {
-    trace.set({ opacity: 1, strokeDashoffset: 0 })
-    if (reduce) return // reduced-motion: hold a static border, no travel
+    trace.set({ strokeDashoffset: 0, opacity: 0 })
     trace.start({
       strokeDashoffset: -100,
-      transition: { duration: TRACE_DUR, ease: TRACE_EASE, repeat: Infinity },
+      opacity: [0, TRACE_PEAK, TRACE_PEAK, 0],
+      transition: {
+        strokeDashoffset: { duration: TRACE_DUR, ease: TRACE_EASE },
+        opacity: { duration: TRACE_DUR, times: [0, 0.14, 0.82, 1] },
+      },
+    })
+  }, [reduce, trace])
+  const playTraceLoop = useCallback(() => {
+    trace.set({ strokeDashoffset: 0 })
+    if (reduce) {
+      trace.set({ opacity: TRACE_PEAK })
+      return
+    }
+    trace.start({
+      opacity: TRACE_PEAK,
+      strokeDashoffset: -100,
+      transition: {
+        opacity: { duration: 0.25 },
+        strokeDashoffset: { duration: TRACE_DUR, ease: TRACE_EASE, repeat: Infinity },
+      },
     })
   }, [reduce, trace])
   const hideTrace = useCallback(() => {
     trace.stop()
-    trace.start({ opacity: 0, transition: { duration: 0.3 } })
+    trace.start({ opacity: 0, transition: { duration: 0.35 } })
   }, [trace])
 
   // Play once on mount (page load + post-expand remount).
@@ -347,12 +366,11 @@ export default function BoardColumn({
             pathLength={100}
             fill="none"
             stroke="var(--color-accent)"
-            strokeWidth={1.5}
+            strokeWidth={1}
             strokeLinecap="round"
-            strokeDasharray={reduce ? undefined : '12 88'}
+            strokeDasharray={reduce ? undefined : '14 86'}
             initial={{ opacity: 0, strokeDashoffset: 0 }}
             animate={trace}
-            style={{ filter: 'drop-shadow(0 0 4px var(--color-accent))' }}
           />
         </svg>
       </div>
