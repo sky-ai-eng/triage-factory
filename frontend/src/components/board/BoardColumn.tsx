@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useDroppable } from '@dnd-kit/core'
 import * as Tooltip from '@radix-ui/react-tooltip'
-import { motion, useReducedMotion } from 'motion/react'
+import { motion, useAnimationControls, useReducedMotion } from 'motion/react'
 import {
   ArrowDown,
   ArrowUp,
@@ -49,6 +49,10 @@ import type { Task } from '../../types'
 // The search field floats — no box, no border, just the icon + text on the
 // column glass (the Her move). A whisper of fill appears only on focus so
 // typing has some ground.
+// Border-trace timing — a smooth ease-in-out lap, one clear loop.
+const TRACE_EASE = [0.65, 0, 0.35, 1] as const
+const TRACE_DUR = 1.2
+
 const searchInputClass =
   'w-full rounded-lg bg-transparent py-1.5 pl-7 pr-7 text-[13px] text-text-primary placeholder:text-text-tertiary outline-none transition-colors focus:bg-[var(--color-surface-overlay)]/40'
 
@@ -112,6 +116,47 @@ export default function BoardColumn({
   // Hovering a column brightens its own rust L-bracket — a quiet "this one has
   // focus" cue, no effect on the other lanes.
   const [hovered, setHovered] = useState(false)
+
+  // Border-trace: a single rust light segment that zooms one smooth lap around
+  // the column's perimeter. Plays once on mount (so it greets every column on
+  // page load AND right after a column is expanded, since expanding remounts a
+  // fresh BoardColumn), and loops while a card is dragged over (replacing the
+  // old whole-column fill highlight). pathLength normalizes the rect to 100
+  // units so the dash math is size-independent.
+  const trace = useAnimationControls()
+  const playTraceOnce = useCallback(() => {
+    if (reduce) return
+    trace.set({ opacity: 1, strokeDashoffset: 0 })
+    trace
+      .start({ strokeDashoffset: -100, transition: { duration: TRACE_DUR, ease: TRACE_EASE } })
+      .then(() => trace.start({ opacity: 0, transition: { duration: 0.3 } }))
+  }, [reduce, trace])
+  const playTraceLoop = useCallback(() => {
+    trace.set({ opacity: 1, strokeDashoffset: 0 })
+    if (reduce) return // reduced-motion: hold a static border, no travel
+    trace.start({
+      strokeDashoffset: -100,
+      transition: { duration: TRACE_DUR, ease: TRACE_EASE, repeat: Infinity },
+    })
+  }, [reduce, trace])
+  const hideTrace = useCallback(() => {
+    trace.stop()
+    trace.start({ opacity: 0, transition: { duration: 0.3 } })
+  }, [trace])
+
+  // Play once on mount (page load + post-expand remount).
+  useEffect(() => {
+    playTraceOnce()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Loop while a card hovers this column; fade out when it leaves.
+  const wasOver = useRef(false)
+  useEffect(() => {
+    if (isOver && !wasOver.current) playTraceLoop()
+    else if (!isOver && wasOver.current) hideTrace()
+    wasOver.current = isOver
+  }, [isOver, playTraceLoop, hideTrace])
 
   // Event-type chips reflect the unfiltered set so the user always sees what
   // types exist in this column, even after filtering them out.
@@ -287,18 +332,29 @@ export default function BoardColumn({
           }}
         />
 
-        {/* Drag-over receive glow — the target lane breathes toward you. */}
-        <motion.div
+        {/* Border-trace — a single rust light segment that laps the perimeter.
+            One smooth loop on mount (page load / expand); loops continuously
+            while a card is dragged over. Replaces the old whole-column fill. */}
+        <svg
           aria-hidden
-          className="pointer-events-none absolute inset-0"
-          initial={false}
-          animate={{ opacity: isOver ? 1 : 0 }}
-          transition={reduce ? { duration: 0 } : bodyEase}
-          style={{
-            background: 'var(--color-accent-soft)',
-            boxShadow: 'inset 0 0 0 1px var(--color-accent), 0 24px 60px -24px var(--color-accent)',
-          }}
-        />
+          className="pointer-events-none absolute inset-0 h-full w-full overflow-visible"
+        >
+          <motion.rect
+            x="0"
+            y="0"
+            width="100%"
+            height="100%"
+            pathLength={100}
+            fill="none"
+            stroke="var(--color-accent)"
+            strokeWidth={1.5}
+            strokeLinecap="round"
+            strokeDasharray={reduce ? undefined : '12 88'}
+            initial={{ opacity: 0, strokeDashoffset: 0 }}
+            animate={trace}
+            style={{ filter: 'drop-shadow(0 0 4px var(--color-accent))' }}
+          />
+        </svg>
       </div>
     </motion.div>
   )
