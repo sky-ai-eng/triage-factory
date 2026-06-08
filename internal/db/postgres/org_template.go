@@ -1036,6 +1036,17 @@ func (s *orgTemplateStore) SetHandlerEnabled(ctx context.Context, orgID, id stri
 	return err
 }
 
+func (s *orgTemplateStore) RetargetHandlerBlueprint(ctx context.Context, orgID, id, newBlueprintID string) error {
+	if !isValidUUID(id) || !isValidUUID(newBlueprintID) {
+		return nil
+	}
+	_, err := s.app.ExecContext(ctx, `
+		UPDATE org_template_handlers SET blueprint_id = $1, updated_at = now()
+		WHERE org_id = $2 AND id = $3 AND kind = 'trigger'
+	`, newBlueprintID, orgID, id)
+	return err
+}
+
 func (s *orgTemplateStore) DeleteHandler(ctx context.Context, orgID, id string) error {
 	if !isValidUUID(id) {
 		return nil

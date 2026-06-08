@@ -908,6 +908,14 @@ func (s *orgTemplateStore) DeleteHandler(ctx context.Context, orgID, id string) 
 	return err
 }
 
+func (s *orgTemplateStore) RetargetHandlerBlueprint(ctx context.Context, orgID, id, newBlueprintID string) error {
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE org_template_handlers SET blueprint_id = ?, updated_at = ?
+		WHERE org_id = ? AND id = ? AND kind = 'trigger'
+	`, newBlueprintID, time.Now().UTC(), orgID, id)
+	return err
+}
+
 func (s *orgTemplateStore) PromoteHandler(ctx context.Context, orgID, id string, t domain.EventHandler) error {
 	if t.Kind != domain.EventHandlerKindTrigger {
 		return errors.New("sqlite org_template PromoteHandler: target kind must be 'trigger'")

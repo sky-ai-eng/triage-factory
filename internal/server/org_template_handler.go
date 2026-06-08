@@ -797,6 +797,122 @@ func (ot *orgTemplateHandler) handleOrgTemplateBlueprintSplit(w http.ResponseWri
 	})
 }
 
+// handleOrgTemplateBlueprintReconnect is the org-template mirror of
+// handleBlueprintReconnect: re-point a sequence edge's head onto another
+// template blueprint's entry — split {id} at at_step_index (the old downstream
+// peels off as a new orphaned trigger-less template blueprint) and merge
+// target_blueprint_id onto the upstream half, atomically.
+func (ot *orgTemplateHandler) handleOrgTemplateBlueprintReconnect(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+
+	var req reconnectBlueprintRequest
+	if !decodeJSON(w, r, &req, "") {
+		return
+	}
+	if req.AtStepIndex == nil {
+		badRequest(w, "at_step_index is required")
+		return
+	}
+	if req.TargetBlueprintID == "" {
+		badRequest(w, "target_blueprint_id is required")
+		return
+	}
+	atIndex := *req.AtStepIndex
+	orphanID := uuid.New().String()
+	orphanSlug := newTemplateSlug()
+
+	var (
+		host, target *domain.Blueprint
+		hostOut      *domain.Blueprint
+		hostSteps    []domain.BlueprintStep
+		failStatus   int
+		failMsg      string
+	)
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		if host, e = tx.OrgTemplate.GetBlueprint(r.Context(), orgID, id); e != nil || host == nil {
+			return e
+		}
+		if target, e = tx.OrgTemplate.GetBlueprint(r.Context(), orgID, req.TargetBlueprintID); e != nil || target == nil {
+			return e
+		}
+		if req.TargetBlueprintID == id {
+			failStatus, failMsg = http.StatusUnprocessableEntity, "cannot reconnect a blueprint into itself"
+			return nil
+		}
+		steps, e := tx.OrgTemplate.ListBlueprintSteps(r.Context(), orgID, id)
+		if e != nil {
+			return e
+		}
+		if atIndex <= 0 || atIndex >= len(steps) {
+			failStatus, failMsg = http.StatusUnprocessableEntity, "at_step_index must split the blueprint into two non-empty halves"
+			return nil
+		}
+		triggered, e := templateBlueprintTriggered(r.Context(), tx, orgID, req.TargetBlueprintID)
+		if e != nil {
+			return e
+		}
+		if triggered {
+			failStatus, failMsg = http.StatusUnprocessableEntity, "the target blueprint has its own event trigger; detach it first"
+			return nil
+		}
+		targetSteps, e := tx.OrgTemplate.ListBlueprintSteps(r.Context(), orgID, req.TargetBlueprintID)
+		if e != nil {
+			return e
+		}
+		if atIndex+len(targetSteps) > maxBlueprintSteps {
+			failStatus, failMsg = http.StatusUnprocessableEntity, "reconnected blueprint would exceed "+strconv.Itoa(maxBlueprintSteps)+" steps"
+			return nil
+		}
+		orphanName := ""
+		if p, pe := tx.OrgTemplate.GetPrompt(r.Context(), orgID, steps[atIndex].StepPromptID); pe != nil {
+			return pe
+		} else if p != nil {
+			orphanName = p.Name
+		}
+		if orphanName == "" {
+			orphanName = "Untitled blueprint"
+		}
+		if _, e = tx.OrgTemplate.SplitBlueprint(r.Context(), orgID, id, atIndex, orphanID, orphanSlug, orphanName); e != nil {
+			return e
+		}
+		if e = tx.OrgTemplate.MergeBlueprints(r.Context(), orgID, id, req.TargetBlueprintID); e != nil {
+			return e
+		}
+		if hostOut, e = tx.OrgTemplate.GetBlueprint(r.Context(), orgID, id); e != nil {
+			return e
+		}
+		hostSteps, e = tx.OrgTemplate.ListBlueprintSteps(r.Context(), orgID, id)
+		return e
+	}); err != nil {
+		internalError(w, "org_template", err)
+		return
+	}
+	if host == nil {
+		notFound(w, "template blueprint")
+		return
+	}
+	if target == nil {
+		notFound(w, "target template blueprint")
+		return
+	}
+	if failMsg != "" {
+		writeJSON(w, failStatus, map[string]string{"error": failMsg})
+		return
+	}
+	if hostSteps == nil {
+		hostSteps = []domain.BlueprintStep{}
+	}
+	writeJSON(w, http.StatusOK, blueprintReconnectResponse{
+		Host:              blueprintWithSteps{Blueprint: hostOut, Steps: hostSteps},
+		OrphanBlueprintID: orphanID,
+	})
+}
+
 // handleOrgTemplateBlueprintDuplicate is the org-template mirror of
 // handleBlueprintDuplicate: it deep-copies a flat set of template prompt ids
 // into new trigger-less template blueprint(s) following the induced-contiguous-
@@ -1307,6 +1423,94 @@ func (ot *orgTemplateHandler) handleOrgTemplateHandlerPromote(w http.ResponseWri
 			return
 		}
 		internalError(w, "org_template", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, fresh)
+}
+
+// handleOrgTemplateHandlerRetarget is the org-template mirror of
+// handleEventHandlerRetarget: re-point a template trigger at a different
+// template blueprint in place (RetargetHandlerBlueprint), preserving the row.
+func (ot *orgTemplateHandler) handleOrgTemplateHandlerRetarget(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	var req retargetEventHandlerRequest
+	if !decodeJSON(w, r, &req, "") {
+		return
+	}
+	if req.BlueprintID == "" {
+		badRequest(w, "blueprint_id is required")
+		return
+	}
+
+	var (
+		existing   *domain.EventHandler
+		blueprint  *domain.Blueprint
+		fresh      *domain.EventHandler
+		notTrigger bool
+		hasTrigger bool
+		noChange   bool
+	)
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		existing, e = tx.OrgTemplate.GetHandler(r.Context(), orgID, id)
+		if e != nil || existing == nil {
+			return e
+		}
+		if existing.Kind != domain.EventHandlerKindTrigger {
+			notTrigger = true
+			return nil
+		}
+		if existing.BlueprintID == req.BlueprintID {
+			noChange = true
+			return nil
+		}
+		blueprint, e = tx.OrgTemplate.GetBlueprint(r.Context(), orgID, req.BlueprintID)
+		if e != nil || blueprint == nil {
+			return e
+		}
+		hasTrigger, e = templateBlueprintTriggered(r.Context(), tx, orgID, req.BlueprintID)
+		if e != nil {
+			return e
+		}
+		if hasTrigger {
+			return nil
+		}
+		if e := tx.OrgTemplate.RetargetHandlerBlueprint(r.Context(), orgID, id, req.BlueprintID); e != nil {
+			return e
+		}
+		fresh, e = tx.OrgTemplate.GetHandler(r.Context(), orgID, id)
+		return e
+	}); err != nil {
+		if isUniqueViolation(err) {
+			log.Printf("[org_template] retarget conflict (blueprint already triggered): %v", err)
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
+			return
+		}
+		internalError(w, "org_template", err)
+		return
+	}
+	if existing == nil {
+		notFound(w, "template handler")
+		return
+	}
+	if notTrigger {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "only triggers can be retargeted"})
+		return
+	}
+	if noChange {
+		writeJSON(w, http.StatusOK, existing)
+		return
+	}
+	if blueprint == nil {
+		notFound(w, "template blueprint")
+		return
+	}
+	if hasTrigger {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
 		return
 	}
 	writeJSON(w, http.StatusOK, fresh)

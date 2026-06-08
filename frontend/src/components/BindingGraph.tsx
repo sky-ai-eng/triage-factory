@@ -1056,9 +1056,10 @@ function BindingGraphInner({
     // Only wire to prompts that are actually on the canvas — a step whose prompt
     // is absent (e.g. mid-fetch or a deleted prompt) gets no dangling edge.
     const presentPrompts = new Set(prompts.map((p) => p.id))
-    // Reconnection (rule 4) is team-scope only for now (the re-target endpoints
-    // are team-only) and only on the head (target) end. Off in the org template.
-    const reconnectable: Edge['reconnectable'] = template ? false : 'target'
+    // Reconnection (rule 4) is enabled on the head (target) end only, in both
+    // team and org-template scope (each has its own reconnect / retarget routes,
+    // reached via the scope-derived bases).
+    const reconnectable: Edge['reconnectable'] = 'target'
     const triggerEdges: Edge[] = triggers
       // Drop triggers whose blueprint has no resolvable entry prompt so we never
       // emit an edge pointing at a node that isn't on the canvas.
@@ -1117,7 +1118,7 @@ function BindingGraphInner({
       }
     }
     return [...sequenceEdges, ...triggerEdges]
-  }, [triggers, activeEventIds, blueprintFirstPrompt, blueprintSteps, prompts, template])
+  }, [triggers, activeEventIds, blueprintFirstPrompt, blueprintSteps, prompts])
 
   // Handle node changes (dragging) — apply, persist positions, recompute boxes.
   //
@@ -1499,9 +1500,9 @@ function BindingGraphInner({
   )
 
   // --- Edge reconnection (rule 4: drag an arrow's head onto a new target) ---
-  // Re-target lands on a free chain entry; drop-on-empty detaches. Both are
-  // team-scope only (the re-target endpoints are team-only); the edges are
-  // marked non-reconnectable in template scope, so these never fire there.
+  // Re-target lands on a free chain entry; drop-on-empty detaches. Both scopes
+  // (team + org template) have their own reconnect / retarget routes, reached
+  // via the scope-derived bases below.
 
   // Re-point a trigger edge onto a different blueprint's entry: an in-place
   // blueprint_id move that preserves the trigger row + its run history.
@@ -1569,7 +1570,7 @@ function BindingGraphInner({
   const onReconnect = useCallback(
     (oldEdge: Edge, newConnection: Connection) => {
       edgeReconnectSuccessful.current = true
-      if (!scopeReady || template) return
+      if (!scopeReady) return
       const newTarget = newConnection.target ?? ''
       if (!newTarget.startsWith('p:')) {
         toast.error('A connection has to end on a prompt')
@@ -1607,7 +1608,7 @@ function BindingGraphInner({
         doReconnectSequence(data.blueprintId, data.atStepIndex, targetBp)
       }
     },
-    [scopeReady, template, doRetargetTrigger, doReconnectSequence],
+    [scopeReady, doRetargetTrigger, doReconnectSequence],
   )
 
   // A reconnect drag ended. If it didn't land on a handle (success still false),

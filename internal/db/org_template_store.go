@@ -194,6 +194,13 @@ type OrgTemplateStore interface {
 	DeleteHandler(ctx context.Context, orgID, id string) error
 	// PromoteHandler converts a kind='rule' template row to kind='trigger'.
 	PromoteHandler(ctx context.Context, orgID, id string, t domain.EventHandler) error
+	// RetargetHandlerBlueprint re-points a template trigger at a different
+	// template blueprint (the canvas reconnect gesture) — the template mirror of
+	// EventHandlerStore.RetargetBlueprint. Pinned to kind='trigger'; blueprint_id
+	// is otherwise immutable via UpdateHandler. The caller validates the new
+	// blueprint exists and is trigger-less; the one-trigger-per-blueprint
+	// partial-unique index is the backstop.
+	RetargetHandlerBlueprint(ctx context.Context, orgID, id, newBlueprintID string) error
 	// ReorderHandlers updates sort_order for the rules in the given id order.
 	ReorderHandlers(ctx context.Context, orgID string, ids []string) error
 }
