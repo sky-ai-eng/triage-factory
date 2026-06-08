@@ -134,7 +134,7 @@ export default function AgentCard({
             </div>
             <div className="flex shrink-0 items-center gap-2">
               {assigneeSlot}
-              <span className="inline-flex items-center gap-1.5 font-mono text-[11px] tabular-nums text-text-tertiary/80">
+              <span className="inline-flex items-center gap-1.5 font-mono text-[11px] leading-none tabular-nums text-text-tertiary/80">
                 {isActive && (
                   <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-delegate" />
                 )}
@@ -178,7 +178,7 @@ export default function AgentCard({
                       setTakeoverPending(false)
                     }
                   }}
-                  className="inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-accent transition-colors hover:bg-accent/10 disabled:cursor-wait"
+                  className="inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-[10px] font-semibold uppercase leading-none tracking-wider text-accent transition-colors hover:bg-accent/10 disabled:cursor-wait"
                   title={
                     takeoverPending
                       ? 'Stopping the headless session and preparing your takeover dir…'

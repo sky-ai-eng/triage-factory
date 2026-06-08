@@ -38,22 +38,16 @@ export function CardPlane({
         dim ? 'opacity-70' : ''
       } ${dragging ? 'scale-[1.015]' : ''}`}
     >
-      {/* The crate body. No overflow clip, so the glow bloom + spine notches
-          spill past the panel; the header plate rounds its own top corners. */}
+      {/* The crate body — flat frosted fill + a hairline border + the corner
+          brackets. No resting shadow / bevel / sheen: those bloomed past the
+          card and fought the column's bracket edges. A lift shadow returns only
+          while dragging. No overflow clip, so the glow bloom spills past the
+          panel; the header plate rounds its own top corners. */}
       <div
-        className="relative rounded-[5px] border border-border-subtle bg-surface-overlay backdrop-blur-xl"
-        style={{
-          boxShadow: dragging
-            ? '0 22px 55px -20px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.09), inset 0 -1px 0 rgba(0,0,0,0.16)'
-            : '0 10px 28px -22px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.07), inset 0 -1px 0 rgba(0,0,0,0.12)',
-        }}
+        className={`relative rounded-[5px] border border-border-subtle bg-surface-overlay backdrop-blur-xl ${
+          dragging ? 'shadow-[0_22px_55px_-20px_rgba(0,0,0,0.5)]' : ''
+        }`}
       >
-        {/* Top specular — the glass catches light along the header plate. */}
-        <div
-          aria-hidden
-          className="pointer-events-none absolute inset-x-0 top-0 h-12 rounded-t-[5px]"
-          style={{ background: 'linear-gradient(to bottom, rgba(255,255,255,0.06), transparent)' }}
-        />
         {children}
       </div>
 
