@@ -202,7 +202,7 @@ func (s *Server) withOrg(next http.Handler) http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		ok, err := s.az.userHasOrgAccess(r.Context(), claims.Subject, orgID)
+		ok, err := s.az.UserHasOrgAccess(r.Context(), claims.Subject, orgID)
 		if err != nil {
 			log.Printf("[auth] membership check %s/%s: %v", claims.Subject, orgID, err)
 			http.Error(w, "internal error", http.StatusInternalServerError)

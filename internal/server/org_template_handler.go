@@ -15,15 +15,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 )
 
 // orgTemplateHandler serves /api/org-template/* — the org-admin editor over
 // the org template that new teams are seeded from (SKY-381). Every endpoint
-// gates through az.requireOrgTemplate (multi-mode + org-admin) and reads/
+// gates through az.RequireOrgTemplate (multi-mode + org-admin) and reads/
 // writes via the transactional store runner; those two deps are all it needs.
 type orgTemplateHandler struct {
 	tx db.TxRunner
-	az *authz
+	az *authz.Checker
 }
 
 // errTemplateBlueprintMissing signals (inside a WithTx closure) that a trigger's
@@ -96,7 +97,7 @@ func newTemplateSlug() string {
 // --- prompts --------------------------------------------------------
 
 func (ot *orgTemplateHandler) handleOrgTemplatePromptsList(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -116,7 +117,7 @@ func (ot *orgTemplateHandler) handleOrgTemplatePromptsList(w http.ResponseWriter
 }
 
 func (ot *orgTemplateHandler) handleOrgTemplatePromptGet(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -138,7 +139,7 @@ func (ot *orgTemplateHandler) handleOrgTemplatePromptGet(w http.ResponseWriter, 
 }
 
 func (ot *orgTemplateHandler) handleOrgTemplatePromptCreate(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -186,7 +187,7 @@ func (ot *orgTemplateHandler) handleOrgTemplatePromptCreate(w http.ResponseWrite
 }
 
 func (ot *orgTemplateHandler) handleOrgTemplatePromptPut(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -230,7 +231,7 @@ func (ot *orgTemplateHandler) handleOrgTemplatePromptPut(w http.ResponseWriter, 
 }
 
 func (ot *orgTemplateHandler) handleOrgTemplatePromptDelete(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -297,7 +298,7 @@ type orgTemplateBlueprintRequest struct {
 }
 
 func (ot *orgTemplateHandler) handleOrgTemplateBlueprintsList(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -317,7 +318,7 @@ func (ot *orgTemplateHandler) handleOrgTemplateBlueprintsList(w http.ResponseWri
 }
 
 func (ot *orgTemplateHandler) handleOrgTemplateBlueprintCreate(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -393,7 +394,7 @@ func (ot *orgTemplateHandler) handleOrgTemplateBlueprintCreate(w http.ResponseWr
 }
 
 func (ot *orgTemplateHandler) handleOrgTemplateBlueprintGet(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -415,7 +416,7 @@ func (ot *orgTemplateHandler) handleOrgTemplateBlueprintGet(w http.ResponseWrite
 }
 
 func (ot *orgTemplateHandler) handleOrgTemplateBlueprintPut(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -451,7 +452,7 @@ func (ot *orgTemplateHandler) handleOrgTemplateBlueprintPut(w http.ResponseWrite
 }
 
 func (ot *orgTemplateHandler) handleOrgTemplateBlueprintDelete(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -481,7 +482,7 @@ func (ot *orgTemplateHandler) handleOrgTemplateBlueprintDelete(w http.ResponseWr
 // handleBlueprintStepsAll — every template blueprint's steps in one read for the
 // canvas's bulk fetch.
 func (ot *orgTemplateHandler) handleOrgTemplateBlueprintStepsAll(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -501,7 +502,7 @@ func (ot *orgTemplateHandler) handleOrgTemplateBlueprintStepsAll(w http.Response
 }
 
 func (ot *orgTemplateHandler) handleOrgTemplateBlueprintStepsGet(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -531,7 +532,7 @@ func (ot *orgTemplateHandler) handleOrgTemplateBlueprintStepsGet(w http.Response
 }
 
 func (ot *orgTemplateHandler) handleOrgTemplateBlueprintStepsPut(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -616,7 +617,7 @@ func (ot *orgTemplateHandler) handleOrgTemplateBlueprintStepsPut(w http.Response
 // handlers (mergeBlueprintRequest / blueprintWithSteps / blueprintSplitResponse).
 
 func (ot *orgTemplateHandler) handleOrgTemplateBlueprintMerge(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -709,7 +710,7 @@ func (ot *orgTemplateHandler) handleOrgTemplateBlueprintMerge(w http.ResponseWri
 }
 
 func (ot *orgTemplateHandler) handleOrgTemplateBlueprintSplit(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -802,7 +803,7 @@ func (ot *orgTemplateHandler) handleOrgTemplateBlueprintSplit(w http.ResponseWri
 // into new trigger-less template blueprint(s) following the induced-contiguous-
 // runs rule, in one transaction, against the org_template_* tables.
 func (ot *orgTemplateHandler) handleOrgTemplateBlueprintDuplicate(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -868,7 +869,7 @@ func (ot *orgTemplateHandler) handleOrgTemplateBlueprintDuplicate(w http.Respons
 // --- event handlers -------------------------------------------------
 
 func (ot *orgTemplateHandler) handleOrgTemplateHandlersList(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -893,7 +894,7 @@ func (ot *orgTemplateHandler) handleOrgTemplateHandlersList(w http.ResponseWrite
 }
 
 func (ot *orgTemplateHandler) handleOrgTemplateHandlerCreate(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -1027,7 +1028,7 @@ func (ot *orgTemplateHandler) handleOrgTemplateHandlerCreate(w http.ResponseWrit
 }
 
 func (ot *orgTemplateHandler) handleOrgTemplateHandlerUpdate(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -1151,7 +1152,7 @@ func (ot *orgTemplateHandler) handleOrgTemplateHandlerUpdate(w http.ResponseWrit
 }
 
 func (ot *orgTemplateHandler) handleOrgTemplateHandlerDelete(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -1180,7 +1181,7 @@ func (ot *orgTemplateHandler) handleOrgTemplateHandlerDelete(w http.ResponseWrit
 }
 
 func (ot *orgTemplateHandler) handleOrgTemplateHandlerToggle(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -1211,7 +1212,7 @@ func (ot *orgTemplateHandler) handleOrgTemplateHandlerToggle(w http.ResponseWrit
 }
 
 func (ot *orgTemplateHandler) handleOrgTemplateHandlerPromote(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -1313,7 +1314,7 @@ func (ot *orgTemplateHandler) handleOrgTemplateHandlerPromote(w http.ResponseWri
 }
 
 func (ot *orgTemplateHandler) handleOrgTemplateHandlerReorder(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
+	orgID, userID, ok := ot.az.RequireOrgTemplate(w, r)
 	if !ok {
 		return
 	}

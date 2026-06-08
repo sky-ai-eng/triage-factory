@@ -21,6 +21,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -64,12 +65,12 @@ type Server struct {
 	// userID, fn)` so multi-mode RLS sees the user's identity. Local
 	// mode SQLite ignores userID.
 	tx db.TxRunner
-	// az is the org/team authorization layer — resolveTeamID, the
-	// require* gates, and the membership/role probes. It bundles db +
+	// az is the org/team authorization layer — ResolveTeamID, the
+	// Require* gates, and the membership/role probes. It bundles db +
 	// tx so a handler holds one dependency for these cross-cutting
-	// checks instead of re-deriving them against raw fields. See
-	// authz.go.
-	az *authz
+	// checks instead of re-deriving them against raw fields. See the
+	// authz package.
+	az *authz.Checker
 	// allStores is the full bundle, retained so post-commit bootstrap
 	// helpers (db.BootstrapNewOrg / db.BootstrapNewTeam) — which take a
 	// db.Stores and must run outside WithTx on the admin pool — can be
@@ -409,7 +410,7 @@ func New(database *sql.DB, stores db.Stores, takeoverDir string, serverPort int)
 		githubApps:   stores.GitHubApps,
 		orgTemplate:  stores.OrgTemplate,
 		tx:           stores.Tx,
-		az:           &authz{db: database, tx: stores.Tx},
+		az:           authz.New(database, stores.Tx),
 		allStores:    stores,
 		takeoverDir:  takeoverDir,
 		serverPort:   serverPort,

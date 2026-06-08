@@ -40,7 +40,7 @@ type githubAppInstallation struct {
 //
 // GET /api/orgs/{org_id}/github-app
 func (s *Server) handleGitHubAppStatus(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.az.requireOrgMember(w, r)
+	orgID, userID, ok := s.az.RequireOrgMember(w, r)
 	if !ok {
 		return
 	}
@@ -102,7 +102,7 @@ func (s *Server) handleGitHubAppStatus(w http.ResponseWriter, r *http.Request) {
 //
 // GET /api/orgs/{org_id}/github-app/install-url
 func (s *Server) handleGitHubAppInstallURL(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.az.requireOrgMember(w, r)
+	orgID, userID, ok := s.az.RequireOrgMember(w, r)
 	if !ok {
 		return
 	}
