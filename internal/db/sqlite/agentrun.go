@@ -218,6 +218,9 @@ func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID str
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
+	// 'open' is deliberately failable here (unlike 'pending_approval') — see
+	// AgentRunStore.MarkFailedIfActive: a warm 'open' run has no durable
+	// snapshot yet, so an infra error reaching failRun must terminate it.
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE runs SET status = 'failed', completed_at = COALESCE(completed_at, ?)
 		WHERE id = ?

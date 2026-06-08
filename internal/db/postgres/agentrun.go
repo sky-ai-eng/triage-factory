@@ -344,6 +344,9 @@ func (s *agentRunStore) MarkFailedIfActiveSystem(ctx context.Context, orgID, run
 }
 
 func markFailedIfActive(ctx context.Context, q queryer, orgID, runID string) (bool, error) {
+	// 'open' is deliberately failable here (unlike 'pending_approval') — see
+	// AgentRunStore.MarkFailedIfActive: a warm 'open' run has no durable
+	// snapshot yet, so an infra error reaching failRun must terminate it.
 	res, err := q.ExecContext(ctx, `
 		UPDATE runs SET status = 'failed', completed_at = COALESCE(completed_at, $1)
 		WHERE org_id = $2 AND id = $3

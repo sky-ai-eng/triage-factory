@@ -256,66 +256,68 @@ const (
 )
 
 // classifyAgentResult sorts the agent's final message text into the three
-// turn-end buckets. An "envelope attempt" is brace-delimited JSON that parses
-// to an object carrying an `outcome` key (recognized or not), OR output that
-// is clearly envelope-shaped (carries an `"outcome"` key) but won't parse.
-// Anything else — prose, an empty/unrelated JSON object — is none. The parsed
-// result is returned only for the valid case. Handles markdown fences and
-// leading/trailing prose around the JSON.
+// turn-end buckets. It looks for the agent's intended completion envelope — the
+// first brace-delimited JSON object that decodes AND carries an `outcome` key
+// (envelopeObject) — tolerating leading prose, trailing text, markdown fences,
+// and nested objects. If such an object is found it's valid or invalid per
+// isValid; if none decodes but the text still carries an `"outcome"` key (a
+// malformed object that wouldn't parse) it's an invalid attempt the driver
+// re-prompts; anything else — prose, an empty or unrelated JSON object — is
+// none, and the run is open. The parsed result is returned only for valid.
+//
+// Known limitation: the malformed-envelope fallback is a substring check for
+// the quoted `"outcome"` token, so prose that literally contains it with no
+// real envelope is treated as a (malformed) attempt and re-prompted once. The
+// contract is "ONLY a JSON object," so that's a rare violation the re-prompt
+// corrects.
 func classifyAgentResult(text string) (turnClass, *agentResult) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return turnNone, nil
 	}
-	for _, candidate := range envelopeCandidates(text) {
-		var probe map[string]any
-		if json.Unmarshal([]byte(candidate), &probe) != nil {
-			continue // not a parseable JSON object; try the next extraction
-		}
-		if _, hasOutcome := probe["outcome"]; !hasOutcome {
-			continue // parseable but not an envelope attempt ({} / unrelated JSON)
-		}
+	if candidate, ok := envelopeObject(text); ok {
 		var result agentResult
-		_ = json.Unmarshal([]byte(candidate), &result) // probe succeeded, can't fail
+		_ = json.Unmarshal([]byte(candidate), &result) // envelopeObject already decoded it
 		if result.isValid() {
 			return turnValid, &result
 		}
 		return turnInvalid, nil // a parseable envelope attempt that fails validation
 	}
-	// No candidate parsed into an envelope attempt. If the text is nonetheless
-	// clearly an envelope attempt that didn't parse (a malformed JSON object
-	// carrying an "outcome" key), treat it as invalid so the driver re-prompts;
-	// otherwise it's prose / unrelated JSON and the run is open.
+	// No decodable object carried an `outcome`. If the text is nonetheless
+	// clearly an envelope attempt that didn't parse (a malformed object with an
+	// "outcome" key), treat it as invalid so the driver re-prompts; otherwise
+	// it's prose / unrelated JSON and the run is open.
 	if looksMalformedEnvelope(text) {
 		return turnInvalid, nil
 	}
 	return turnNone, nil
 }
 
-// envelopeCandidates returns the substrings of text to try as the JSON
-// envelope, in priority order: the whole text (the contract demands ONLY a
-// JSON object), the contents of a markdown fence (agent disobeyed "no
-// fences"), and the first-brace-to-last-brace span (agent wrapped it in
-// prose). The caller parses each in turn and takes the first that is an
-// envelope attempt.
-func envelopeCandidates(text string) []string {
-	out := []string{text}
-	if idx := strings.Index(text, "```"); idx >= 0 {
-		stripped := text[idx+3:]
-		if nl := strings.Index(stripped, "\n"); nl >= 0 {
-			stripped = stripped[nl+1:]
+// envelopeObject returns the agent's intended completion envelope: the first
+// brace-delimited JSON object in text that decodes AND carries an `outcome`
+// key, as an exactly-bounded span re-parseable with json.Unmarshal. A streaming
+// json.Decoder started at each `{` consumes one balanced object and ignores the
+// rest, so this tolerates leading prose, a trailing ``` fence, text after the
+// JSON, and nested objects — cases the cruder first-{-to-last-} span could not
+// (e.g. "Config {x} done. {\"outcome\":\"finish\",...}"). Objects without an
+// `outcome` key (a stray prose `{...}`, a nested links object, `{}`) are
+// skipped. Returns ok=false when no such object exists.
+func envelopeObject(text string) (string, bool) {
+	for i := 0; i < len(text); i++ {
+		if text[i] != '{' {
+			continue
 		}
-		if end := strings.LastIndex(stripped, "```"); end >= 0 {
-			stripped = stripped[:end]
+		dec := json.NewDecoder(strings.NewReader(text[i:]))
+		var probe map[string]any
+		if dec.Decode(&probe) != nil {
+			continue // not a JSON object starting at this brace
 		}
-		out = append(out, strings.TrimSpace(stripped))
+		if _, hasOutcome := probe["outcome"]; !hasOutcome {
+			continue // a JSON object, but not the envelope
+		}
+		return text[i : i+int(dec.InputOffset())], true
 	}
-	if start := strings.Index(text, "{"); start >= 0 {
-		if end := strings.LastIndex(text, "}"); end > start {
-			out = append(out, text[start:end+1])
-		}
-	}
-	return out
+	return "", false
 }
 
 // looksMalformedEnvelope reports whether text is clearly an envelope attempt

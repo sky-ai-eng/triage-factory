@@ -84,6 +84,17 @@ type liveRunSpec struct {
 	idleTimeout time.Duration // <=0 disables idle hibernation (e.g. the gate's bounded resume)
 }
 
+// resultsBufferDepth sizes the OnResult channel runLiveAndDrive hands the
+// driver. Each turn produces one result and the driver consumes one per loop
+// iteration; the bounded re-prompt loop is sequential (read a turn, then send
+// its correction), so only a couple of results are ever unread at once. The
+// depth is defined as maxCompletionRetries plus headroom purely as a defensive
+// lower bound — it ties the two constants together so bumping the retry bound
+// can never silently drop the buffer below the in-flight turn count and start
+// shedding live turns. (The non-blocking send only ever sheds a turn the driver
+// has already moved past; see OnResult.)
+const resultsBufferDepth = maxCompletionRetries + 5
+
 // runLiveAndDrive starts an interactive agent process for the run, registers
 // it in the process registry so control ops can reach it, stamps executor
 // ownership, and drives it to a terminal result or an idle hibernation. The
@@ -94,7 +105,7 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 	// Buffered so the reader goroutine's OnResult / activity callbacks never
 	// block on a driver that's momentarily not selecting (both use a
 	// non-blocking send, but a buffer keeps the common case lock-free).
-	results := make(chan *agentproc.Result, 8)
+	results := make(chan *agentproc.Result, resultsBufferDepth)
 	activity := make(chan struct{}, 64)
 
 	spec.opts.OnResult = func(r *agentproc.Result) {
@@ -102,10 +113,11 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 		// process and returns, an invalid one is re-prompted (the next turn
 		// produces the next result), and a no-conclusion turn keeps the process
 		// warm. A full buffer means results are arriving faster than the driver
-		// selects them; a non-blocking send keeps the reader goroutine moving,
-		// and the buffer depth covers the normal turn cadence. The driver only
-		// ever acts on the result it reads next, so an overflow drop loses a
-		// stale turn, never the one it will decide on.
+		// selects them; a non-blocking send keeps the reader goroutine moving.
+		// The driver only ever acts on the result it reads next, so an overflow
+		// drop loses a stale turn, never the one it will decide on — and
+		// resultsBufferDepth stays above the in-flight turn count by
+		// construction (see its definition).
 		select {
 		case results <- r:
 		default:

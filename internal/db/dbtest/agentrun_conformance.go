@@ -447,6 +447,34 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
+	t.Run("MarkFailedIfActive_FailsOpen_RefusesTerminalAndPendingApproval", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		// `open` is intentionally failable (a warm open run has no durable
+		// snapshot, so an infra error reaching failRun must terminate it).
+		openRun := seedAgentRunForTest(t, store, orgID, seed, "running")
+		if _, err := store.MarkOpen(ctx, orgID, openRun); err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		ok, err := store.MarkFailedIfActive(ctx, orgID, openRun)
+		if err != nil || !ok {
+			t.Fatalf("MarkFailedIfActive on open: ok=%v err=%v, want true (open is failable)", ok, err)
+		}
+		if got, _ := store.Get(ctx, orgID, openRun); got.Status != "failed" {
+			t.Errorf("status = %q, want failed", got.Status)
+		}
+		// pending_approval is protected (it has a durable snapshot) → refused.
+		paRun := seedAgentRunForTest(t, store, orgID, seed, "pending_approval")
+		if ok, _ := store.MarkFailedIfActive(ctx, orgID, paRun); ok {
+			t.Errorf("MarkFailedIfActive flipped a pending_approval run; want refused")
+		}
+		// Already terminal → refused.
+		doneRun := seedAgentRunForTest(t, store, orgID, seed, "completed")
+		if ok, _ := store.MarkFailedIfActive(ctx, orgID, doneRun); ok {
+			t.Errorf("MarkFailedIfActive flipped a completed run; want refused")
+		}
+	})
+
 	t.Run("MarkCancelledIfActive_FlipsActive_RefusesTerminal", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()

@@ -16,6 +16,15 @@ func TestClassifyAgentResult_Valid(t *testing.T) {
 		{"abort with reason", `{"outcome":"abort","reason":"needs a human","summary":"looked into it"}`, "abort"},
 		{"fenced", "```json\n{\"outcome\":\"finish\",\"summary\":\"ok\"}\n```", "finish"},
 		{"prose-wrapped", "Here is my result:\n{\"outcome\":\"finish\",\"summary\":\"ok\"}", "finish"},
+		// Prose with its own (non-JSON) braces BEFORE the real envelope: the
+		// first-{-to-last-} span would fail to parse, but the per-brace decoder
+		// scan finds the trailing envelope object.
+		{"prose with stray braces then envelope", `Config {enabled:true} updated. {"outcome":"finish","summary":"done"}`, "finish"},
+		// Nested object in the envelope: the decoder consumes the whole balanced
+		// object (a last-{ heuristic would have grabbed only the inner one).
+		{"nested links object", `{"outcome":"finish","summary":"shipped","links":{"pr":"http://x/1"}}`, "finish"},
+		// Trailing text after the JSON (no fence) is ignored.
+		{"trailing prose", `{"outcome":"abort","reason":"blocked"} — see the log for details`, "abort"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

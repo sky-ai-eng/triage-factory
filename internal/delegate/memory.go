@@ -25,7 +25,9 @@ import (
 // contract real chances to correct without spending unbounded turns on one
 // that's ignoring it. Not a config knob because no one needs to tune it
 // per-run. A turn that ends with NO envelope attempt is not retried — the run
-// is left open (see driveLiveRun).
+// is left open (see driveLiveRun). The live driver's results-channel buffer is
+// sized off this (resultsBufferDepth in live.go); keep that in mind if you bump
+// it.
 const maxCompletionRetries = 3
 
 // memoryNamespace is the folder under _scratch/entity-memory/ that groups a

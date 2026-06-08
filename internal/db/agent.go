@@ -152,6 +152,17 @@ type AgentRunStore interface {
 	// ok=false (no error) if the row is already terminal; the
 	// caller logs and continues — the racing path's terminal
 	// status stands.
+	//
+	// `open` is intentionally NOT in the protected set (unlike
+	// pending_approval): an `open` run reaches failRun only in the warm
+	// window after a no-conclusion turn flipped it open but before idle
+	// hibernation took its workspace snapshot (e.g. a proc.Send error on the
+	// next correction attempt). With no durable snapshot yet, the run can't be
+	// left resumably-open, so failing it is correct — and the per-run cleanup
+	// then tears the worktree down. A durably-parked open run (snapshot taken,
+	// worktree kept) is only ever woken via ResumeOpenRun, which flips it to
+	// `running` before any failRun could see it, so this never clobbers a
+	// resumable run.
 	MarkFailedIfActive(ctx context.Context, orgID, runID string) (bool, error)
 
 	// MarkPendingApprovalIfCompleted flips a 'completed' run to
