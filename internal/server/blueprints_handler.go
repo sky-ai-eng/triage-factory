@@ -972,6 +972,15 @@ type blueprintRunStepView struct {
 	Run  *domain.AgentRun     `json:"run,omitempty"`
 }
 
+// handleBlueprintRunGet returns a blueprint run with its per-step views. The
+// step list is projected from the plan frozen onto the run at mint
+// (br.StepPlan), NOT the live blueprint_steps — a run executes the plan it was
+// minted with, immune to later edits of the blueprint, and its rendered step
+// list must match (TFAC-313). Reading the live steps here let a settled run's
+// board card change its step count after the blueprint was edited (e.g. a
+// cancelled 1-step run sprouting a phantom second step once a prompt was
+// appended). ListSteps is only a fallback for a run with no frozen plan
+// (defensive — every run minted through the delegation path freezes one).
 func (bh *blueprintsHandler) handleBlueprintRunGet(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -981,7 +990,7 @@ func (bh *blueprintsHandler) handleBlueprintRunGet(w http.ResponseWriter, r *htt
 	id := r.PathValue("id")
 
 	var br *domain.BlueprintRun
-	var steps []domain.BlueprintStep
+	var fallbackSteps []domain.BlueprintStep
 	var stepRuns []domain.AgentRun
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -992,11 +1001,14 @@ func (bh *blueprintsHandler) handleBlueprintRunGet(w http.ResponseWriter, r *htt
 		if br == nil {
 			return nil
 		}
-		steps, e = tx.Blueprints.ListSteps(r.Context(), orgID, br.BlueprintID)
+		stepRuns, e = tx.Blueprints.RunsForBlueprint(r.Context(), orgID, id)
 		if e != nil {
 			return e
 		}
-		stepRuns, e = tx.Blueprints.RunsForBlueprint(r.Context(), orgID, id)
+		// Only hit the live steps when the run carries no frozen plan.
+		if len(br.StepPlan) == 0 {
+			fallbackSteps, e = tx.Blueprints.ListSteps(r.Context(), orgID, br.BlueprintID)
+		}
 		return e
 	}); err != nil {
 		internalError(w, "blueprints", err)
@@ -1006,6 +1018,17 @@ func (bh *blueprintsHandler) handleBlueprintRunGet(w http.ResponseWriter, r *htt
 		notFound(w, "blueprint run")
 		return
 	}
+
+	// Reconstruct the step list from the frozen plan; fall back to the live
+	// steps only when the plan is absent.
+	steps := fallbackSteps
+	if len(br.StepPlan) > 0 {
+		steps = make([]domain.BlueprintStep, len(br.StepPlan))
+		for i, ps := range br.StepPlan {
+			steps[i] = ps.Step(br.BlueprintID)
+		}
+	}
+
 	runByStep := map[int]*domain.AgentRun{}
 	for i := range stepRuns {
 		if stepRuns[i].BlueprintStepIndex != nil {
