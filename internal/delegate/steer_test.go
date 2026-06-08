@@ -97,6 +97,7 @@ func TestSendMessage_OpenRoutesToResume(t *testing.T) {
 	if status == "open" {
 		t.Error("run stayed open — SendMessage did not route to ResumeOpenRun")
 	}
+	t.Logf("final run status after open-resume: %s", status)
 }
 
 // TestSendMessage_TerminalNotSteerable: a terminal run (no live process, not

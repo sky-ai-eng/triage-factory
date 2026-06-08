@@ -109,16 +109,31 @@ func TestHandleAgentInterrupt_UnknownRunNotFound(t *testing.T) {
 	}
 }
 
-// TestHandleAgentPermission_NotPendingNotFound: answering a request that isn't
-// pending (already resolved / timed out / never existed) is 404. The broker is
-// in-memory, so no run row is needed.
+// TestHandleAgentPermission_NotPendingNotFound: with a visible run but no
+// pending prompt for the request id, the broker miss is a 404. The run is seeded
+// so the request clears the run-authz gate and actually reaches the broker
+// (otherwise this would test the run-not-found 404 instead).
 func TestHandleAgentPermission_NotPendingNotFound(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6", ""))
+	runID := seedSteerRun(t, s.db, "noperm", "running")
 
-	rec := doJSON(t, s, "POST", "/api/agent/runs/r1/permissions/req-ghost", map[string]string{"behavior": "allow"})
+	rec := doJSON(t, s, "POST", "/api/agent/runs/"+runID+"/permissions/req-ghost", map[string]string{"behavior": "allow"})
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 (no pending permission request)", rec.Code)
+	}
+}
+
+// TestHandleAgentPermission_UnknownRunNotFound: resolving a permission on a run
+// not visible to the caller's org is 404 before the broker is consulted —
+// mirrors the message/interrupt authz gate.
+func TestHandleAgentPermission_UnknownRunNotFound(t *testing.T) {
+	s := newTestServer(t)
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6", ""))
+
+	rec := doJSON(t, s, "POST", "/api/agent/runs/r_absent/permissions/req-1", map[string]string{"behavior": "allow"})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (unknown run)", rec.Code)
 	}
 }
 
