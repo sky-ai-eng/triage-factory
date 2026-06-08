@@ -12,6 +12,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/sessions"
 )
 
@@ -23,47 +24,19 @@ func unixToTime(unixSeconds int64) time.Time {
 	return time.Unix(unixSeconds, 0).UTC()
 }
 
-// Request-context keys. Unexported type so callers must use the
-// exported accessors below — prevents accidental shadowing.
+// Request-context key for the resolved session row. The verified claims and
+// the active org now live in internal/server/httpx (read via httpx.ClaimsFrom
+// / httpx.OrgIDFrom, forwarded under their short names in http_helpers.go);
+// the session stays here because only the auth and orgs handlers read it.
+// Unexported type so callers must use SessionFrom.
 type ctxKey int
 
-const (
-	ctxKeyClaims ctxKey = iota
-	ctxKeySession
-	ctxKeyOrgID
-)
-
-// ClaimsFrom returns the verified JWT claims set by SessionMiddleware,
-// or nil if the request didn't pass through it. Handlers that depend
-// on a claim should fail closed on nil; the middleware would have
-// already rejected an unauthenticated request, so nil from this
-// helper inside a protected handler indicates a registration bug.
-func ClaimsFrom(ctx context.Context) *verify.Claims {
-	v, _ := ctx.Value(ctxKeyClaims).(*verify.Claims)
-	return v
-}
+const ctxKeySession ctxKey = iota
 
 // SessionFrom returns the resolved session row. Used by /api/auth/logout
 // to know which sid to revoke without re-reading the cookie.
 func SessionFrom(ctx context.Context) *sessions.Session {
 	v, _ := ctx.Value(ctxKeySession).(*sessions.Session)
-	return v
-}
-
-// OrgIDFrom returns the active org for the request. Sources, in order:
-//
-//   - URL-path {org_id} validated by withOrg against the caller's
-//     memberships (used by org-scoped routes like /api/orgs/{org_id}/...);
-//   - the session's active_org_id, populated by withSession in multi
-//     mode from public.sessions.active_org_id (SKY-313);
-//   - the hardcoded LocalDefaultOrgID set by the local-mode shim in
-//     withSession.
-//
-// Empty string when the caller is multi-mode and has no active org
-// (zero memberships) — handlers that require an org should 409 with a
-// stable code so the SPA can prompt the user to pick/join one.
-func OrgIDFrom(ctx context.Context) string {
-	v, _ := ctx.Value(ctxKeyOrgID).(string)
 	return v
 }
 
@@ -104,7 +77,7 @@ type authDeps struct {
 // Local-mode behavior: when authDeps stays nil AND the process booted
 // in ModeLocal, the wrapper injects sentinel identity values into the
 // request context — a synthetic *verify.Claims carrying
-// runmode.LocalDefaultUserID as Subject, and ctxKeyOrgID =
+// runmode.LocalDefaultUserID as Subject, and the active org =
 // runmode.LocalDefaultOrgID. Handlers then read identity uniformly via
 // ClaimsFrom + OrgIDFrom without branching on mode. The "local equals
 // multi at N=1" framing: handler code structure stays identical in
@@ -121,8 +94,8 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.authDeps == nil {
 			if runmode.Current() == runmode.ModeLocal {
-				ctx := context.WithValue(r.Context(), ctxKeyClaims, &verify.Claims{Subject: runmode.LocalDefaultUserID})
-				ctx = context.WithValue(ctx, ctxKeyOrgID, runmode.LocalDefaultOrgID)
+				ctx := httpx.WithClaims(r.Context(), &verify.Claims{Subject: runmode.LocalDefaultUserID})
+				ctx = httpx.WithOrgID(ctx, runmode.LocalDefaultOrgID)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
@@ -188,14 +161,14 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 			}
 		}(sid)
 
-		ctx := context.WithValue(r.Context(), ctxKeyClaims, claims)
+		ctx := httpx.WithClaims(r.Context(), claims)
 		ctx = context.WithValue(ctx, ctxKeySession, sess)
 		// SKY-313: surface the session's active org so OrgIDFrom() works
 		// uniformly in multi mode without per-handler plumbing. Sessions
 		// whose user has zero memberships carry NULL here — we leave
-		// ctxKeyOrgID unset and handlers that require an org return 409.
+		// the active org unset and handlers that require an org return 409.
 		if sess.ActiveOrgID.Valid {
-			ctx = context.WithValue(ctx, ctxKeyOrgID, sess.ActiveOrgID.UUID.String())
+			ctx = httpx.WithOrgID(ctx, sess.ActiveOrgID.UUID.String())
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -239,7 +212,7 @@ func (s *Server) withOrg(next http.Handler) http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		ctx := context.WithValue(r.Context(), ctxKeyOrgID, orgID)
+		ctx := httpx.WithOrgID(r.Context(), orgID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -397,8 +370,4 @@ func (s *Server) cookieSecure(r *http.Request) bool {
 		return true
 	}
 	return isHTTPS(r)
-}
-
-func writeUnauth(w http.ResponseWriter) {
-	http.Error(w, "unauthenticated", http.StatusUnauthorized)
 }
