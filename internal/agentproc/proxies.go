@@ -242,8 +242,9 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 // The eager TokenSource probe runs first: it surfaces a no-credentials
 // org as ErrNoSandboxGitCredentials at run start (a clear admin-facing
 // failure) instead of a confusing 502 the first time the agent pushes.
-// The resolver caches its token, so the proxy's own lazy resolve on
-// first request reuses it — the probe costs no extra mint.
+// For an App-installation source the minted token is cached, so the
+// proxy's own lazy resolve on first request reuses it at no extra mint;
+// a PAT source pays one extra (cheap) secret-store read at run start.
 func startGitProxyForSandbox(ctx context.Context, hostVethIP string, git *GitProxyConfig) ([]string, *gitproxy.Server, error) {
 	if git.TokenSource == nil {
 		return nil, nil, errors.New("agentproc: GitProxyConfig.TokenSource is required")

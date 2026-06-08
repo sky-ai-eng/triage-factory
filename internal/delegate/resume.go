@@ -470,7 +470,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		TraceID:        runID,
 		OrgID:          orgID,
 		Secrets:        s.getRunSecrets(),
-		GitProxy:       s.gitProxyConfigFor(orgID, gitOwner),
+		GitProxy:       s.gitProxyConfigFor(ctx, orgID, gitOwner),
 		StartAgentHost: startAgentHost,
 	}
 	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)
