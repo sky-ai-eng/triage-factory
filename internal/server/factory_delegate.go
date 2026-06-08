@@ -8,6 +8,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -136,7 +137,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		// limit itself to that team's rules. Scanning before resolving
 		// let a sibling team's high-priority rule inflate a task created
 		// for a different team (Codex review on PR #263).
-		teamID, e := resolveActingTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
 		}
@@ -220,7 +221,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	}); err != nil {
-		if writeIfActingTeamError(w, err) {
+		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
 		internalError(w, "factory", err)

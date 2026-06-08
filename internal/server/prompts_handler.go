@@ -11,6 +11,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
 
 // promptsHandler serves the prompt and event-type endpoints. It holds only
@@ -152,7 +153,7 @@ func (ph *promptsHandler) handlePromptCreate(w http.ResponseWriter, r *http.Requ
 	userID := ClaimsFrom(r.Context()).Subject
 	var created *domain.Prompt
 	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		teamID, e := resolveActingTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
 		}
@@ -163,7 +164,7 @@ func (ph *promptsHandler) handlePromptCreate(w http.ResponseWriter, r *http.Requ
 		created, ge = tx.Prompts.Get(r.Context(), orgID, id)
 		return ge
 	}); err != nil {
-		if writeIfActingTeamError(w, err) {
+		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
 		internalError(w, "prompts", err)

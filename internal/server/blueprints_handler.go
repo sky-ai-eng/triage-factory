@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
 
 // blueprintsHandler serves the blueprint + blueprint-run endpoints. spawner is
@@ -115,7 +116,7 @@ func (bh *blueprintsHandler) handleBlueprintCreate(w http.ResponseWriter, r *htt
 	var created *domain.Blueprint
 	var firstPromptID string
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		teamID, e := resolveActingTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
 		}
@@ -149,7 +150,7 @@ func (bh *blueprintsHandler) handleBlueprintCreate(w http.ResponseWriter, r *htt
 		created, ge = tx.Blueprints.Get(r.Context(), orgID, id)
 		return ge
 	}); err != nil {
-		if writeIfActingTeamError(w, err) {
+		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
 		internalError(w, "blueprints", err)
@@ -744,7 +745,7 @@ func (bh *blueprintsHandler) handleBlueprintDuplicate(w http.ResponseWriter, r *
 		failMsg    string
 	)
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		teamID, e := resolveActingTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
 		}
@@ -785,7 +786,7 @@ func (bh *blueprintsHandler) handleBlueprintDuplicate(w http.ResponseWriter, r *
 		}
 		return nil
 	}); err != nil {
-		if writeIfActingTeamError(w, err) {
+		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
 		internalError(w, "blueprints", err)

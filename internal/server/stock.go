@@ -16,6 +16,7 @@ import (
 	jiraevents "github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 )
 
@@ -96,7 +97,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		if e != nil {
 			return fmt.Errorf("load org settings: %w", e)
 		}
-		teamID, e = resolveReadTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, filterTeam)
+		teamID, e = teamscope.ResolveRead(r.Context(), tx.Teams, tx.Users, orgID, userID, filterTeam)
 		if e != nil {
 			return e
 		}
@@ -362,7 +363,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
 		var e error
-		teamID, e = resolveActingTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+		teamID, e = teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
 		}
@@ -373,7 +374,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 		localAccountID, localDisplayName, e = tx.Users.GetJiraIdentity(r.Context(), userID)
 		return e
 	}); err != nil {
-		if writeIfActingTeamError(w, err) {
+		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
 		internalError(w, "stock", err)

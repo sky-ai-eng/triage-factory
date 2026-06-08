@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
 
 // eventHandlersHandler serves the event-handler (rule + trigger) config
@@ -194,7 +195,7 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 			if e != nil || blueprint == nil {
 				return e
 			}
-			teamID, e := resolveActingTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+			teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 			if e != nil {
 				return e
 			}
@@ -212,7 +213,7 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 			}
 			return nil
 		}); err != nil {
-			if writeIfActingTeamError(w, err) {
+			if teamscope.WriteIfSelectionError(w, err) {
 				return
 			}
 			internalError(w, "event_handlers", err)
@@ -260,7 +261,7 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 
 	var fresh *domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		teamID, e := resolveActingTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
 		}
@@ -271,7 +272,7 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 		fresh, ge = tx.EventHandlers.Get(r.Context(), orgID, h.ID)
 		return ge
 	}); err != nil {
-		if writeIfActingTeamError(w, err) {
+		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
 		// A unique-constraint failure leaks schema/index names; translate to a
