@@ -274,7 +274,10 @@ func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error
 			s.failRun(orgID, runID, taskCopy.ID, "manual", userID, "resume failed: "+err.Error())
 			return
 		}
-		if outcome == nil || outcome.Completion == nil {
+		// ResumeWithMessage always returns a non-nil outcome (it returns the same
+		// &ResumeOutcome on every path); Completion is the field that's nil when
+		// the resume produced no terminal result.
+		if outcome.Completion == nil {
 			s.failRun(orgID, runID, taskCopy.ID, "manual", userID, "resume produced no completion")
 			return
 		}
@@ -337,8 +340,10 @@ type ResumeOptions struct {
 // the parsed agent result JSON (nil if the completion text didn't
 // contain a parseable envelope), and captured stderr for diagnostics.
 //
-// Callers decide how to interpret a nil Completion — ResumeOpenRun treats it
-// as a session-level failure and surfaces an error.
+// ResumeWithMessage always returns a non-nil *ResumeOutcome (the same struct on
+// every path, error or not), so callers guard on Completion == nil, not on a
+// nil outcome. Callers decide how to interpret a nil Completion — ResumeOpenRun
+// treats it as a session-level failure and surfaces an error.
 type ResumeOutcome struct {
 	Completion *agentproc.Result
 	Result     *agentResult
