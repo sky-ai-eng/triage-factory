@@ -272,7 +272,13 @@ function initialsFor(s: string): string {
 function AssigneeAvatar({ entry }: { entry: AssigneeEntry }) {
   switch (entry.kind) {
     case 'bot':
-      return <span className="text-[11px]">🤖</span>
+      // Fixed centered box so the emoji's tall line-box doesn't drop the chip
+      // below its row-mates (elapsed / expand) in the agent card header.
+      return (
+        <span className="inline-flex h-3.5 w-3.5 items-center justify-center text-[11px] leading-none">
+          🤖
+        </span>
+      )
     case 'user':
       return <AvatarCircle initials={initialsFor(entry.label)} tone="user" small />
     case 'unknown':

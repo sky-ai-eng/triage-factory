@@ -21,13 +21,11 @@ import { STEP_VAR, TONE_TEXT, TONE_VAR, type Glow, type StepState, type Tone } f
 // for panel definition, rust corner brackets, the status spine (+ optional
 // chain notches), and — when a run is live — a status glow.
 export function CardPlane({
-  steps,
   glow,
   dim,
   dragging,
   children,
 }: {
-  steps?: StepState[]
   glow?: Glow | null
   dim?: boolean
   dragging?: boolean
@@ -81,7 +79,6 @@ export function CardPlane({
         />
       )}
 
-      {steps && steps.length > 0 && <SpineSteps steps={steps} />}
       <CornerBrackets />
     </div>
   )
@@ -110,76 +107,53 @@ function CornerBrackets() {
   )
 }
 
-// HudHeader is the recessed label plate at the top of a crate — a faint
-// inset strip holding the source/event readout, closed by a hairline divider
-// with a rust registration tick at the spine end. Spans the full width (its own
-// padding), so it reads as a plate rather than another padded row.
-export function HudHeader({ children }: { children: React.ReactNode }) {
+// HudHeader is the recessed label plate at the top of a crate — a faint inset
+// strip holding the source/event readout, closed by a hairline divider. Spans
+// the full width (its own padding), so it reads as a plate rather than another
+// padded row. When a chain `steps` array is passed, the divider becomes a
+// segmented progress track (the chain's done/active/current/pending), so step
+// progress lives in the plate edge instead of a separate widget; otherwise the
+// divider gets a short rust registration tick at the left.
+export function HudHeader({ children, steps }: { children: React.ReactNode; steps?: StepState[] }) {
+  const hasChain = !!steps && steps.length > 1
   return (
     <div
       className="relative rounded-t-[5px] border-b border-border-subtle/80 px-4 py-2.5"
       style={{ background: 'linear-gradient(to bottom, rgba(0,0,0,0.022), transparent)' }}
     >
       {children}
-      {/* Registration tick: a short rust mark where the divider meets the
-          spine — a HUD readout detail, aligning the plate to the status rail. */}
-      <span
-        aria-hidden
-        className="absolute -bottom-px left-0 h-px w-7"
-        style={{ background: 'var(--color-accent)', opacity: 0.55 }}
-      />
+      {hasChain ? (
+        <ChainTrack steps={steps!} />
+      ) : (
+        // Registration tick: a short rust mark at the divider's left end — a
+        // HUD readout detail anchoring the plate.
+        <span
+          aria-hidden
+          className="absolute -bottom-px left-0 h-px w-7"
+          style={{ background: 'var(--color-accent)', opacity: 0.55 }}
+        />
+      )}
     </div>
   )
 }
 
-// Spine is the status line: a 2px bar riding the left border edge, faded to
-// transparent at both ends so it never collides with the corners and reads as
-// a guiding rail rather than a hard rule.
-export function Spine({ tone, opacity = 0.95 }: { tone: Tone; opacity?: number }) {
+// ChainTrack draws the blueprint chain as a segmented bar riding the plate's
+// bottom edge — done segments solid, the active one pulsing, the current
+// (queued-next) one accent, pending faint. Reads as a progress bar without any
+// "step N of M" text.
+function ChainTrack({ steps }: { steps: StepState[] }) {
   return (
-    <div
-      aria-hidden
-      className="pointer-events-none absolute bottom-0 left-0 top-0 w-[2px]"
-      style={{
-        background: `linear-gradient(to bottom, transparent, ${TONE_VAR[tone]} 12%, ${TONE_VAR[tone]} 88%, transparent)`,
-        opacity,
-      }}
-    />
-  )
-}
-
-// SpineSteps overlays a chain run's steps as notches beside the spine — done,
-// active (pulsing), failed, the current step (ringed), and pending — replacing
-// the old horizontal circles-and-line rail. They sit on the inner rail beside
-// the title, so "this card is step N of a chain" lives on the spine.
-function SpineSteps({ steps }: { steps: StepState[] }) {
-  const reduce = !!useReducedMotion()
-  return (
-    <div aria-hidden className="pointer-events-none absolute left-0 top-0 w-3">
-      {steps.map((state, i) => {
-        const top = 54 + i * 13
-        const color = STEP_VAR[state]
-        return (
-          <span key={i} className="absolute" style={{ top, left: 3 }}>
-            {state === 'active' && !reduce && (
-              <motion.span
-                className="absolute inset-0 rounded-full"
-                style={{ boxShadow: `0 0 0 2px ${color}` }}
-                animate={{ opacity: [0.6, 0, 0.6], scale: [1, 1.9, 1] }}
-                transition={{ duration: 1.8, repeat: Infinity, ease: 'easeInOut' }}
-              />
-            )}
-            <span
-              className="block h-1.5 w-1.5 rounded-full"
-              style={{
-                background: state === 'current' ? 'transparent' : color,
-                boxShadow: state === 'current' ? `inset 0 0 0 1.5px ${color}` : undefined,
-                opacity: state === 'pending' ? 0.35 : 1,
-              }}
-            />
-          </span>
-        )
-      })}
+    <div aria-hidden className="absolute inset-x-0 -bottom-[1.5px] flex gap-[3px] px-3">
+      {steps.map((state, i) => (
+        <span
+          key={i}
+          className={`h-[2px] flex-1 rounded-full ${state === 'active' ? 'animate-pulse' : ''}`}
+          style={{
+            background: STEP_VAR[state],
+            opacity: state === 'pending' ? 0.3 : 1,
+          }}
+        />
+      ))}
     </div>
   )
 }

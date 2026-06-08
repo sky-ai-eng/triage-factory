@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import type { AgentMessage, AgentRun, Task, ToolCall } from '../types'
+import type { AgentMessage, AgentRun, Task } from '../types'
 import { useOrgHref } from '../hooks/useOrgHref'
 import RequestedReviewerBadge from './RequestedReviewerBadge'
 import { toast } from './Toast/toastStore'
@@ -44,7 +44,6 @@ export default function AgentCard({
   assigneeSlot,
 }: Props) {
   const orgHref = useOrgHref()
-  const scrollRef = useRef<HTMLDivElement>(null)
   const [now, setNow] = useState(() => Date.now())
   const [takeoverInfo, setTakeoverInfo] = useState<TakeoverInfo | null>(null)
   const [takeoverPending, setTakeoverPending] = useState(false)
@@ -78,13 +77,6 @@ export default function AgentCard({
   // Takeover only makes sense once the agent is actually running with a session.
   const canTakeOver = run.Status === 'running' && !!run.SessionID
 
-  // Auto-scroll the log to the bottom when new messages arrive.
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-    }
-  }, [messages.length])
-
   // Tick once per second while active so the elapsed display updates live.
   useEffect(() => {
     if (!isActive) return
@@ -103,6 +95,8 @@ export default function AgentCard({
   // Functionally a failure from the user's POV, so it gets the same
   // Return-to-queue affordance.
   const isUnsolvable = run.Status === 'task_unsolvable'
+  // A terminal run is settled — show its outcome, not a live feed.
+  const isTerminal = isFailed || isCancelled || isUnsolvable || run.Status === 'completed'
   // A "held" takeover has a live worktree on disk; releasing tears it down.
   const isHeldTakeover = run.Status === 'taken_over' && !!run.WorktreePath
   const [releasePending, setReleasePending] = useState(false)
@@ -116,14 +110,9 @@ export default function AgentCard({
       hasChain ? chainStepStates(chainSteps!, run.ID, run.blueprint_step_index ?? undefined) : [],
     [hasChain, chainSteps, run.ID, run.blueprint_step_index],
   )
-  const stepLabel =
-    hasChain && (run.blueprint_step_index ?? -1) >= 0
-      ? `Step ${(run.blueprint_step_index ?? 0) + 1} / ${chainSteps!.length}`
-      : null
-
   return (
     <div className="relative">
-      <CardPlane steps={hasChain ? stepStates : undefined} glow={glow}>
+      <CardPlane glow={glow}>
         <TakeoverModal info={takeoverInfo} onClose={() => setTakeoverInfo(null)} />
         {openYieldRequest && (
           <YieldModal
@@ -135,8 +124,8 @@ export default function AgentCard({
           />
         )}
 
-        {/* Header label plate */}
-        <HudHeader>
+        {/* Header label plate — its divider doubles as the chain progress track. */}
+        <HudHeader steps={hasChain ? stepStates : undefined}>
           <div className="flex items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2.5">
               <SourceTag task={task} />
@@ -243,48 +232,27 @@ export default function AgentCard({
           </h3>
           <div className="flex min-w-0 items-center gap-2 text-[11px] text-text-tertiary/80">
             <span className="truncate font-mono">{task.source_id}</span>
-            {stepLabel && (
-              <>
-                <span aria-hidden className="text-text-tertiary/50">
-                  ·
-                </span>
-                <span className="shrink-0 font-mono uppercase tracking-wider">{stepLabel}</span>
-              </>
-            )}
           </div>
         </div>
 
-        {/* Transcript shelf: the activity stream with a faded gutter rail and a
-            soft mask top + bottom, so the log emerges from the mist rather than
-            sitting in a boxed-in widget. */}
-        <div className="relative mx-4 mb-1">
-          <div
-            aria-hidden
-            className="absolute bottom-0 left-0 top-0 w-px"
-            style={{
-              background:
-                'linear-gradient(to bottom, transparent, var(--color-border-subtle) 12px, var(--color-border-subtle) calc(100% - 12px), transparent)',
-            }}
-          />
-          <div
-            ref={scrollRef}
-            className={`max-h-[190px] overflow-y-auto pl-3 transition-[filter,opacity] ${
-              takeoverPending && !pendingOverlayDismissed
-                ? 'pointer-events-none opacity-50 grayscale'
-                : ''
-            }`}
-            style={{ maskImage: SHELF_MASK, WebkitMaskImage: SHELF_MASK }}
-          >
-            {messages.length === 0 && isActive && (
-              <div className="py-2 text-[12px] text-text-tertiary">Waiting for agent…</div>
-            )}
-            {renderActivityLog(messages, isActive, run)}
-          </div>
+        {/* Activity — a terminal run shows its outcome; a live run shows a
+            flush, borderless feed of one-liners (no window-into-the-agent; the
+            expanded view is for that). */}
+        <div className="relative">
+          {isTerminal && run.ResultSummary ? (
+            <ResultBlock status={run.Status} summary={run.ResultSummary} />
+          ) : (
+            <LiveFeed
+              messages={messages}
+              isActive={isActive}
+              dimmed={takeoverPending && !pendingOverlayDismissed}
+            />
+          )}
           {takeoverPending && !pendingOverlayDismissed && (
             <button
               type="button"
               onClick={() => setPendingOverlayDismissed(true)}
-              className="group absolute inset-0 flex items-center justify-center rounded-xl bg-surface-raised/40 backdrop-blur-[1px]"
+              className="group absolute inset-0 flex items-center justify-center bg-surface-raised/40 backdrop-blur-[1px]"
               aria-label="Dismiss to view agent messages while takeover finishes"
             >
               <span className="inline-flex items-center gap-2 rounded-full border border-border-glass bg-surface-raised/90 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-accent shadow-sm">
@@ -380,10 +348,145 @@ export default function AgentCard({
   )
 }
 
-const SHELF_MASK =
-  'linear-gradient(to bottom, transparent 0, #000 12px, #000 calc(100% - 12px), transparent 100%)'
+// The feed fades in at its top edge so older lines dissolve as new ones arrive.
+const FEED_MASK = 'linear-gradient(to bottom, transparent 0, #000 22px, #000 100%)'
 
-// chainStepStates maps a chain's runs to the spine-notch states.
+interface FeedLine {
+  id: string
+  time: string
+  text: string
+}
+
+// feedLines flattens the transcript into compact one-liners — the agent's
+// actions (tool calls), its prose turns, and yield Q/A — for the card's live
+// ticker. The full, nested transcript lives in the expanded run view.
+function feedLines(messages: AgentMessage[]): FeedLine[] {
+  const out: FeedLine[] = []
+  for (const msg of messages) {
+    const time = new Date(msg.CreatedAt).toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    })
+    if (msg.Subtype === 'yield_request') {
+      let m = ''
+      try {
+        m = (JSON.parse(msg.Content) as { message?: string }).message || ''
+      } catch {
+        m = msg.Content
+      }
+      out.push({ id: `yreq-${msg.ID}`, time, text: `? ${clip(m, 70)}` })
+      continue
+    }
+    if (msg.Subtype === 'yield_response') {
+      out.push({ id: `yres-${msg.ID}`, time, text: `↩ ${clip(msg.Content, 70)}` })
+      continue
+    }
+    if (msg.Role !== 'assistant') continue
+    // Skip the raw JSON completion message (the agent's structured output).
+    if (msg.Content && msg.Content.trimStart().startsWith('{"status":')) continue
+    if (msg.Content) out.push({ id: `txt-${msg.ID}`, time, text: clip(msg.Content, 70) })
+    if (msg.ToolCalls?.length) {
+      for (const tc of msg.ToolCalls) {
+        out.push({ id: `tc-${tc.id}`, time, text: formatToolCall(tc.name, tc.input) })
+      }
+    }
+  }
+  return out
+}
+
+function clip(s: string, n: number): string {
+  const t = s.replace(/\s+/g, ' ').trim()
+  return t.length > n ? t.slice(0, n - 1) + '…' : t
+}
+
+// LiveFeed is the flush, borderless activity ticker: a few of the most recent
+// one-liners in monospace, auto-advancing to the newest, top-masked so older
+// lines dissolve upward. No box, no scrollbar — it's part of the card.
+function LiveFeed({
+  messages,
+  isActive,
+  dimmed,
+}: {
+  messages: AgentMessage[]
+  isActive: boolean
+  dimmed?: boolean
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  const lines = useMemo(() => feedLines(messages), [messages])
+  useEffect(() => {
+    if (ref.current) ref.current.scrollTop = ref.current.scrollHeight
+  }, [lines.length])
+
+  if (lines.length === 0) {
+    return (
+      <div className="flex h-[3.5rem] items-center px-4 font-mono text-[10.5px] text-text-tertiary/70">
+        {isActive ? (
+          <span className="inline-flex items-center gap-2">
+            <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-delegate" />
+            awaiting agent…
+          </span>
+        ) : null}
+      </div>
+    )
+  }
+
+  return (
+    <div
+      ref={ref}
+      className={`h-[3.5rem] overflow-hidden px-4 transition-opacity ${dimmed ? 'opacity-50' : ''}`}
+      style={{ maskImage: FEED_MASK, WebkitMaskImage: FEED_MASK }}
+    >
+      {lines.map((l, i) => {
+        const latest = i === lines.length - 1
+        return (
+          <div
+            key={l.id}
+            className="flex items-baseline gap-2 py-[1.5px] font-mono text-[10.5px] leading-relaxed"
+          >
+            <span className="shrink-0 tabular-nums text-text-tertiary/45">{l.time}</span>
+            <span
+              className={`truncate ${latest ? 'text-text-secondary' : 'text-text-tertiary/70'}`}
+            >
+              {latest && isActive && <span className="text-delegate">› </span>}
+              {l.text}
+            </span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// ResultBlock is the settled-run outcome: a toned uppercase verdict + the
+// agent's summary, flush in the card (no box).
+function ResultBlock({ status, summary }: { status: string; summary: string }) {
+  const tone =
+    status === 'failed' || status === 'cancelled'
+      ? 'problem'
+      : status === 'task_unsolvable'
+        ? 'attention'
+        : 'good'
+  const heading =
+    status === 'cancelled'
+      ? 'Cancelled'
+      : status === 'failed'
+        ? 'Failed'
+        : status === 'task_unsolvable'
+          ? 'Unsolvable'
+          : 'Done'
+  return (
+    <div className="px-4 pb-1 pt-0.5">
+      <div className={`mb-1 text-[10px] font-semibold uppercase tracking-wider ${TONE_TEXT[tone]}`}>
+        {heading}
+      </div>
+      <p className="line-clamp-3 text-[12px] leading-relaxed text-text-secondary">{summary}</p>
+    </div>
+  )
+}
+
+// chainStepStates maps a chain's runs to the progress-track states.
 function chainStepStates(
   steps: AgentRun[],
   currentRunID: string,
@@ -396,140 +499,6 @@ function chainStepStates(
     if (s.ID === currentRunID || i === currentStepIndex) return 'current'
     return 'pending'
   })
-}
-
-// Build a paired activity log: assistant turns with their tool results nested
-// underneath. Borderless rows (no per-row rule) — the stream reads as the
-// card's own depth under the shelf mask.
-function renderActivityLog(messages: AgentMessage[], isActive: boolean, run: AgentRun) {
-  const elements: React.ReactNode[] = []
-
-  const toolResults = new Map<string, AgentMessage>()
-  for (const msg of messages) {
-    if (msg.Role === 'tool' && msg.ToolCallID) {
-      toolResults.set(msg.ToolCallID, msg)
-    }
-  }
-
-  for (const msg of messages) {
-    const time = new Date(msg.CreatedAt).toLocaleTimeString([], {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    })
-
-    // SKY-139: yield_request / yield_response render as compact Q+A rows.
-    if (msg.Subtype === 'yield_request') {
-      let parsedMessage = ''
-      try {
-        const req = JSON.parse(msg.Content) as { message?: string }
-        parsedMessage = req.message || ''
-      } catch {
-        parsedMessage = msg.Content
-      }
-      elements.push(
-        <div key={`yreq-${msg.ID}`} className="flex items-start gap-2 py-1 text-[12px]">
-          <span className="mt-0.5 shrink-0 font-mono text-[10px] text-text-tertiary opacity-60">
-            {time}
-          </span>
-          <span className="leading-snug text-snooze">❓ {parsedMessage}</span>
-        </div>,
-      )
-      continue
-    }
-    if (msg.Subtype === 'yield_response') {
-      elements.push(
-        <div key={`yres-${msg.ID}`} className="flex items-start gap-2 py-1 text-[12px]">
-          <span className="mt-0.5 shrink-0 font-mono text-[10px] text-text-tertiary opacity-60">
-            {time}
-          </span>
-          <span className="leading-snug text-text-secondary">
-            ↩ <span className="font-medium text-text-primary">{msg.Content}</span>
-          </span>
-        </div>,
-      )
-      continue
-    }
-
-    if (msg.Role !== 'assistant') continue
-
-    // Skip the raw JSON completion message (the agent's structured output).
-    if (msg.Content && msg.Content.trimStart().startsWith('{"status":')) continue
-
-    if (msg.Content) {
-      const text = msg.Content.length > 150 ? msg.Content.slice(0, 147) + '...' : msg.Content
-      elements.push(
-        <div key={`text-${msg.ID}`} className="flex items-start gap-2 py-1 text-[12px]">
-          <span className="mt-0.5 shrink-0 font-mono text-[10px] text-text-tertiary opacity-60">
-            {time}
-          </span>
-          <span className="leading-snug text-text-secondary">{text}</span>
-        </div>,
-      )
-    }
-
-    if (msg.ToolCalls?.length) {
-      for (const tc of msg.ToolCalls) {
-        const label = formatToolCall(tc.name, tc.input)
-        const result = toolResults.get(tc.id)
-
-        elements.push(
-          <div key={`tc-${tc.id}`} className="py-1">
-            <div className="flex items-start gap-2 text-[12px]">
-              <span className="mt-0.5 shrink-0 font-mono text-[10px] text-text-tertiary opacity-60">
-                {time}
-              </span>
-              <span className="leading-snug text-text-secondary">{label}</span>
-            </div>
-            {result ? (
-              <div
-                className={`ml-[4.25rem] mt-1 rounded px-2.5 py-1 text-[11px] leading-snug ${
-                  result.IsError
-                    ? 'bg-dismiss/5 text-dismiss'
-                    : 'bg-black/[0.02] text-text-tertiary'
-                }`}
-              >
-                {formatToolResult(tc, result)}
-              </div>
-            ) : isActive ? (
-              <div className="ml-[4.25rem] mt-1 text-[11px] text-text-tertiary">
-                <span className="mr-1.5 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-delegate" />
-                Running…
-              </div>
-            ) : null}
-          </div>,
-        )
-      }
-    }
-  }
-
-  // Terminal outcome — a borderless block under a hairline rule, not a card.
-  if (run.ResultSummary && !isActive) {
-    const summaryTone =
-      run.Status === 'failed' || run.Status === 'cancelled'
-        ? 'problem'
-        : run.Status === 'task_unsolvable'
-          ? 'attention'
-          : 'good'
-    const heading =
-      run.Status === 'cancelled'
-        ? '◼ Cancelled'
-        : run.Status === 'failed'
-          ? '✗ Failed'
-          : run.Status === 'task_unsolvable'
-            ? '⊘ Unsolvable'
-            : '✓ Done'
-    elements.push(
-      <div key="result-summary" className="mt-2.5 border-t border-border-subtle/70 pb-1 pt-2.5">
-        <div className={`mb-1 text-[11px] font-semibold tracking-wide ${TONE_TEXT[summaryTone]}`}>
-          {heading}
-        </div>
-        <p className="text-[12px] leading-relaxed text-text-secondary">{run.ResultSummary}</p>
-      </div>,
-    )
-  }
-
-  return elements
 }
 
 function formatToolCall(name: string, input: Record<string, unknown>): string {
@@ -573,63 +542,6 @@ function extractFlag(cmd: string, flag: string): string {
 function basename(path: string): string {
   const parts = path.split('/')
   return parts[parts.length - 1] || path
-}
-
-function formatToolResult(tc: ToolCall, result: AgentMessage): string {
-  if (result.IsError) {
-    const text = result.Content || 'Unknown error'
-    return text.length > 120 ? text.slice(0, 117) + '...' : text
-  }
-
-  if (!result.Content) return '✓'
-
-  try {
-    const data = JSON.parse(result.Content)
-
-    if (data.github_review_id != null) {
-      const event = (data.event || 'comment').toLowerCase()
-      const count = data.comments_posted || 0
-      return `${event} review posted — ${count} comment${count !== 1 ? 's' : ''}`
-    }
-    if (data.comment_id && data.review_id && data.status === 'pending_local') {
-      return 'Comment added to pending review'
-    }
-    if (data.review_id && data.status === 'pending_local' && data.files != null) {
-      return `Review started — ${data.files} files in diff`
-    }
-    if (Array.isArray(data)) {
-      return `${data.length} pending comment${data.length !== 1 ? 's' : ''}`
-    }
-    if (data.number && data.title) {
-      const reviews = data.reviews?.length || 0
-      const comments = data.comments?.length || 0
-      return `PR #${data.number}: ${reviews} review${reviews !== 1 ? 's' : ''}, ${comments} comment${comments !== 1 ? 's' : ''}`
-    }
-    if (Array.isArray(data) && data[0]?.filename) {
-      return `${data.length} file${data.length !== 1 ? 's' : ''} changed`
-    }
-    if (data.id && data.state && data.comments) {
-      return `${data.author}: ${data.state.toLowerCase()} — ${data.comments.length} comment${data.comments.length !== 1 ? 's' : ''}`
-    }
-    if (data.ok) return '✓'
-    if (data.scope) return `✓ (${data.scope})`
-  } catch {
-    // Not JSON
-  }
-
-  const toolName = tc.name
-  if (toolName === 'Read' || toolName === 'Glob' || toolName === 'Grep') {
-    const lines = result.Content.split('\n').length
-    return `${lines} line${lines !== 1 ? 's' : ''}`
-  }
-
-  if (result.Content.startsWith('diff --git')) {
-    const files = result.Content.split('diff --git').length - 1
-    return `Diff loaded — ${files} file${files !== 1 ? 's' : ''}`
-  }
-
-  const text = result.Content
-  return text.length > 80 ? text.slice(0, 77) + '...' : text
 }
 
 // 12px spinner sized to match the Take over button's text.
