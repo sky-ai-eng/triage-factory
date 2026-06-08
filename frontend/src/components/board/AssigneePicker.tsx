@@ -140,7 +140,11 @@ export default function AssigneePicker({
           {/* Bot — only when enabled for this team */}
           {bot && (
             <PickerRow
-              avatar={<AvatarCircle initials="🤖" tone="bot" />}
+              avatar={
+                <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-accent/15 text-accent">
+                  <Bot size={12} aria-hidden />
+                </span>
+              }
               label={bot.display_name || 'Bot'}
               sublabel={
                 claimedByBot

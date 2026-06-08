@@ -125,12 +125,14 @@ export default function AgentCard({
             </div>
             <div className="flex shrink-0 items-center gap-2">
               {assigneeSlot}
+              <HeaderDivider />
               <span className="inline-flex items-center gap-1.5 font-mono text-[11px] leading-none tabular-nums text-text-tertiary/80">
                 {isActive && (
                   <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-delegate" />
                 )}
                 {elapsed}
               </span>
+              <HeaderDivider />
               <Link
                 to={orgHref(`/board/runs/${run.ID}`)}
                 aria-label="Expand run details"
@@ -148,30 +150,33 @@ export default function AgentCard({
                 </svg>
               </Link>
               {isActive && (
-                <button
-                  onClick={async () => {
-                    try {
-                      const res = await fetch(`/api/agent/runs/${run.ID}/cancel`, {
-                        method: 'POST',
-                      })
-                      if (!res.ok) toast.error(await readError(res, 'Failed to cancel run'))
-                    } catch (err) {
-                      toast.error(`Failed to cancel run: ${(err as Error).message}`)
-                    }
-                  }}
-                  className="inline-flex items-center text-dismiss/40 transition-colors hover:text-dismiss"
-                  title="Cancel run"
-                >
-                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                    <circle cx="8" cy="8" r="7" stroke="currentColor" strokeWidth="1.5" />
-                    <path
-                      d="M5.5 5.5l5 5M10.5 5.5l-5 5"
-                      stroke="currentColor"
-                      strokeWidth="1.5"
-                      strokeLinecap="round"
-                    />
-                  </svg>
-                </button>
+                <>
+                  <HeaderDivider />
+                  <button
+                    onClick={async () => {
+                      try {
+                        const res = await fetch(`/api/agent/runs/${run.ID}/cancel`, {
+                          method: 'POST',
+                        })
+                        if (!res.ok) toast.error(await readError(res, 'Failed to cancel run'))
+                      } catch (err) {
+                        toast.error(`Failed to cancel run: ${(err as Error).message}`)
+                      }
+                    }}
+                    className="inline-flex items-center text-dismiss/40 transition-colors hover:text-dismiss"
+                    title="Cancel run"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                      <circle cx="8" cy="8" r="7" stroke="currentColor" strokeWidth="1.5" />
+                      <path
+                        d="M5.5 5.5l5 5M10.5 5.5l-5 5"
+                        stroke="currentColor"
+                        strokeWidth="1.5"
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                  </button>
+                </>
               )}
             </div>
           </div>
@@ -276,6 +281,12 @@ export default function AgentCard({
       </CardPlane>
     </div>
   )
+}
+
+// HeaderDivider is the hairline tick between the header's right-cluster
+// readouts (assignee | elapsed | expand | cancel).
+function HeaderDivider() {
+  return <span aria-hidden className="h-3 w-px shrink-0 bg-text-tertiary/20" />
 }
 
 // The feed fades in at its top edge so older lines dissolve as new ones arrive.
