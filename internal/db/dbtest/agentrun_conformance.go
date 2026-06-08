@@ -86,7 +86,7 @@ type AgentRunSeeder struct {
 // backend impl must hold:
 //
 //   - Lifecycle methods (Create / Complete / AddPartialTotals /
-//     SetSession / MarkAwaitingInput / MarkResuming /
+//     SetSession / MarkOpen / MarkResuming /
 //     MarkCancelledIfActive / MarkDiscarded / MarkReleased /
 //     MarkTakenOver) refuse terminal statuses and produce correct
 //     side effects when they accept.
@@ -97,8 +97,6 @@ type AgentRunSeeder struct {
 //     orders, JOIN-derived projections).
 //   - Transcript layer round-trips messages including JSONB
 //     metadata + tool_calls, and TokenTotals sums correctly.
-//   - Yields go through the run_messages subtype channel and the
-//     latest-yield lookup picks the most recent.
 //   - Memory_missing derivation matches the four noncompliance
 //     forms (no row / NULL / "" / whitespace) + the populated
 //     baseline.
@@ -172,7 +170,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		// the round-trip here so a future projection edit can't
 		// silently drop the column — when the column was missing,
 		// every caller saw "" and the resume goroutine treated event
-		// runs as manual on yield/resume.
+		// runs as manual on resume.
 		if got.TriggerType != "event" {
 			t.Errorf("TriggerType = %q, want event", got.TriggerType)
 		}
@@ -348,7 +346,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 
 		// Pre-seed a partial total so Complete's COALESCE+add semantics
 		// are exercised end-to-end (a fresh run starts with NULL
-		// totals; we want to verify a yield-resume-style accumulation).
+		// totals; we want to verify a resume-style accumulation).
 		if err := store.AddPartialTotals(ctx, orgID, runID, 1.25, 4000, 3); err != nil {
 			t.Fatalf("AddPartialTotals: %v", err)
 		}
@@ -398,34 +396,34 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
-	t.Run("MarkAwaitingInput_FlipsRunning_RefusesTerminal", func(t *testing.T) {
+	t.Run("MarkOpen_FlipsRunning_RefusesTerminal", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		// Running → ok=true.
 		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
-		ok, err := store.MarkAwaitingInput(ctx, orgID, runID)
+		ok, err := store.MarkOpen(ctx, orgID, runID)
 		if err != nil || !ok {
-			t.Fatalf("MarkAwaitingInput on running: ok=%v err=%v", ok, err)
+			t.Fatalf("MarkOpen on running: ok=%v err=%v", ok, err)
 		}
 		got, _ := store.Get(ctx, orgID, runID)
-		if got.Status != "awaiting_input" {
-			t.Errorf("status = %q, want awaiting_input", got.Status)
+		if got.Status != "open" {
+			t.Errorf("status = %q, want open", got.Status)
 		}
-		// Already awaiting_input → ok=false (terminal-list excludes
-		// awaiting_input, so idempotent re-call refuses).
-		ok, err = store.MarkAwaitingInput(ctx, orgID, runID)
+		// Already open → ok=false (terminal-list excludes open, so an
+		// idempotent re-call refuses).
+		ok, err = store.MarkOpen(ctx, orgID, runID)
 		if err != nil || ok {
-			t.Errorf("re-call on awaiting_input: ok=%v err=%v, want false/nil", ok, err)
+			t.Errorf("re-call on open: ok=%v err=%v, want false/nil", ok, err)
 		}
 		// Terminal → ok=false.
 		runID2 := seedAgentRunForTest(t, store, orgID, seed, "completed")
-		ok, err = store.MarkAwaitingInput(ctx, orgID, runID2)
+		ok, err = store.MarkOpen(ctx, orgID, runID2)
 		if err != nil || ok {
 			t.Errorf("on completed: ok=%v err=%v, want false/nil", ok, err)
 		}
 	})
 
-	t.Run("MarkResuming_OnlyFromAwaitingInput", func(t *testing.T) {
+	t.Run("MarkResuming_OnlyFromOpen", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
@@ -434,13 +432,13 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if err != nil || ok {
 			t.Errorf("Resuming on running: ok=%v err=%v, want false", ok, err)
 		}
-		// Park it, then resume → ok.
-		if _, err := store.MarkAwaitingInput(ctx, orgID, runID); err != nil {
-			t.Fatalf("park: %v", err)
+		// Open it, then resume → ok.
+		if _, err := store.MarkOpen(ctx, orgID, runID); err != nil {
+			t.Fatalf("open: %v", err)
 		}
 		ok, err = store.MarkResuming(ctx, orgID, runID)
 		if err != nil || !ok {
-			t.Fatalf("Resuming from awaiting: ok=%v err=%v", ok, err)
+			t.Fatalf("Resuming from open: ok=%v err=%v", ok, err)
 		}
 		// Second resume → refused (back to running).
 		ok, _ = store.MarkResuming(ctx, orgID, runID)
@@ -830,17 +828,17 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 
-		// awaiting_input + pending_approval WITH a worktree path → included.
-		awaiting := seedAgentRunForTest(t, store, orgID, seed, "awaiting_input")
-		if err := store.SetWorktreePath(ctx, orgID, awaiting, "/tmp/triagefactory-runs/awaiting"); err != nil {
-			t.Fatalf("set worktree (awaiting): %v", err)
+		// open + pending_approval WITH a worktree path → included.
+		openRun := seedAgentRunForTest(t, store, orgID, seed, "open")
+		if err := store.SetWorktreePath(ctx, orgID, openRun, "/tmp/triagefactory-runs/open"); err != nil {
+			t.Fatalf("set worktree (open): %v", err)
 		}
 		pending := seedAgentRunForTest(t, store, orgID, seed, "pending_approval")
 		if err := store.SetWorktreePath(ctx, orgID, pending, "/tmp/triagefactory-runs/pending"); err != nil {
 			t.Fatalf("set worktree (pending): %v", err)
 		}
-		// awaiting_input WITHOUT a worktree → excluded by the COALESCE filter.
-		_ = seedAgentRunForTest(t, store, orgID, seed, "awaiting_input")
+		// open WITHOUT a worktree → excluded by the COALESCE filter.
+		_ = seedAgentRunForTest(t, store, orgID, seed, "open")
 		// running WITH a worktree → excluded by the status filter.
 		running := seedAgentRunForTest(t, store, orgID, seed, "running")
 		if err := store.SetWorktreePath(ctx, orgID, running, "/tmp/triagefactory-runs/running"); err != nil {
@@ -855,8 +853,8 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		for _, p := range paths {
 			got[p] = true
 		}
-		if !got["/tmp/triagefactory-runs/awaiting"] {
-			t.Error("awaiting_input worktree missing from ListParkedWorktreePaths")
+		if !got["/tmp/triagefactory-runs/open"] {
+			t.Error("open worktree missing from ListParkedWorktreePaths")
 		}
 		if !got["/tmp/triagefactory-runs/pending"] {
 			t.Error("pending_approval worktree missing from ListParkedWorktreePaths")
@@ -879,16 +877,16 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
-	t.Run("EntitiesWithAwaitingInput_EmptyInputFastPath", func(t *testing.T) {
+	t.Run("EntitiesWithOpenRuns_EmptyInputFastPath", func(t *testing.T) {
 		store, orgID, _, _ := mk(t)
-		got, err := store.EntitiesWithAwaitingInput(context.Background(), orgID, nil)
+		got, err := store.EntitiesWithOpenRuns(context.Background(), orgID, nil)
 		if err != nil {
 			t.Fatalf("nil: %v", err)
 		}
 		if len(got) != 0 {
 			t.Errorf("nil input: %d entries, want 0", len(got))
 		}
-		got, err = store.EntitiesWithAwaitingInput(context.Background(), orgID, []string{})
+		got, err = store.EntitiesWithOpenRuns(context.Background(), orgID, []string{})
 		if err != nil {
 			t.Fatalf("empty: %v", err)
 		}
@@ -897,7 +895,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
-	t.Run("EntitiesWithAwaitingInput_FiltersByStatus", func(t *testing.T) {
+	t.Run("EntitiesWithOpenRuns_FiltersByStatus", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		entA := seed.Entity(t, "ewa-a")
@@ -907,22 +905,22 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		taskA := seed.Task(t, entA, domain.EventGitHubPROpened, evA)
 		taskB := seed.Task(t, entB, domain.EventGitHubPROpened, evB)
 
-		// A has a run in awaiting_input; B has only a running run.
+		// A has an open run; B has only a running run.
 		runA := seedAgentRunForTaskTest(t, store, orgID, taskA, "running", seed)
-		if _, err := store.MarkAwaitingInput(ctx, orgID, runA); err != nil {
-			t.Fatalf("park A: %v", err)
+		if _, err := store.MarkOpen(ctx, orgID, runA); err != nil {
+			t.Fatalf("open A: %v", err)
 		}
 		_ = seedAgentRunForTaskTest(t, store, orgID, taskB, "running", seed)
 
-		got, err := store.EntitiesWithAwaitingInput(ctx, orgID, []string{entA, entB})
+		got, err := store.EntitiesWithOpenRuns(ctx, orgID, []string{entA, entB})
 		if err != nil {
-			t.Fatalf("EntitiesWithAwaitingInput: %v", err)
+			t.Fatalf("EntitiesWithOpenRuns: %v", err)
 		}
 		if _, ok := got[entA]; !ok {
-			t.Errorf("entA missing from awaiting set")
+			t.Errorf("entA missing from open set")
 		}
 		if _, ok := got[entB]; ok {
-			t.Errorf("entB leaked — only entA has an awaiting run")
+			t.Errorf("entB leaked — only entA has an open run")
 		}
 	})
 
@@ -1038,48 +1036,6 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 		if tot.NumTurns != 2 {
 			t.Errorf("NumTurns = %d, want 2 (assistant rows)", tot.NumTurns)
-		}
-	})
-
-	t.Run("InsertYieldRequest_LatestYieldRequest_RoundTrip", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
-		req := &domain.YieldRequest{Type: domain.YieldTypePrompt, Message: "name?"}
-		msg, err := store.InsertYieldRequest(ctx, orgID, runID, req)
-		if err != nil {
-			t.Fatalf("InsertYieldRequest: %v", err)
-		}
-		if msg == nil || msg.Subtype != db.YieldRequestSubtype {
-			t.Fatalf("InsertYieldRequest returned %+v", msg)
-		}
-		got, err := store.LatestYieldRequest(ctx, orgID, runID)
-		if err != nil {
-			t.Fatalf("LatestYieldRequest: %v", err)
-		}
-		if got == nil || got.Type != domain.YieldTypePrompt || got.Message != "name?" {
-			t.Errorf("LatestYieldRequest: %+v", got)
-		}
-	})
-
-	t.Run("LatestYieldRequest_PicksMostRecent", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
-		if _, err := store.InsertYieldRequest(ctx, orgID, runID,
-			&domain.YieldRequest{Type: domain.YieldTypeConfirmation, Message: "first?"}); err != nil {
-			t.Fatalf("first: %v", err)
-		}
-		if _, err := store.InsertYieldRequest(ctx, orgID, runID,
-			&domain.YieldRequest{Type: domain.YieldTypePrompt, Message: "second?"}); err != nil {
-			t.Fatalf("second: %v", err)
-		}
-		got, err := store.LatestYieldRequest(ctx, orgID, runID)
-		if err != nil || got == nil {
-			t.Fatalf("LatestYieldRequest: err=%v got=%v", err, got)
-		}
-		if got.Message != "second?" {
-			t.Errorf("got message %q, want 'second?'", got.Message)
 		}
 	})
 

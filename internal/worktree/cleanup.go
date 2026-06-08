@@ -72,7 +72,7 @@ type CleanupOptions struct {
 
 	// PreserveWorktreeFor names worktree directories that must survive the
 	// sweep WHOLE — the directory AND its ~/.claude/projects session JSONL —
-	// because the run parked in awaiting_input / pending_approval and the
+	// because the run parked `open` / pending_approval and the
 	// worktree is the warm cache an eventual resume reuses. Unlike
 	// PreserveClaudeProjectFor (which keeps only the JSONL while still deleting
 	// the worktree dir), a matching entry here skips removal of both.

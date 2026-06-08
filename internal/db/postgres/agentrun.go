@@ -232,21 +232,21 @@ func addPartialTotals(ctx context.Context, q queryer, orgID, runID string, costU
 	return err
 }
 
-func (s *agentRunStore) MarkAwaitingInput(ctx context.Context, orgID, runID string) (bool, error) {
-	return markAwaitingInput(ctx, s.q, orgID, runID)
+func (s *agentRunStore) MarkOpen(ctx context.Context, orgID, runID string) (bool, error) {
+	return markOpen(ctx, s.q, orgID, runID)
 }
 
-func (s *agentRunStore) MarkAwaitingInputSystem(ctx context.Context, orgID, runID string) (bool, error) {
-	return markAwaitingInput(ctx, s.admin, orgID, runID)
+func (s *agentRunStore) MarkOpenSystem(ctx context.Context, orgID, runID string) (bool, error) {
+	return markOpen(ctx, s.admin, orgID, runID)
 }
 
-func markAwaitingInput(ctx context.Context, q queryer, orgID, runID string) (bool, error) {
+func markOpen(ctx context.Context, q queryer, orgID, runID string) (bool, error) {
 	res, err := q.ExecContext(ctx, `
 		UPDATE runs
-		SET status = 'awaiting_input'
+		SET status = 'open'
 		WHERE org_id = $1 AND id = $2
 		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-		                     'pending_approval', 'taken_over', 'awaiting_input')
+		                     'pending_approval', 'taken_over', 'open')
 	`, orgID, runID)
 	if err != nil {
 		return false, err
@@ -266,7 +266,7 @@ func (s *agentRunStore) MarkResumingSystem(ctx context.Context, orgID, runID str
 func markResuming(ctx context.Context, q queryer, orgID, runID string) (bool, error) {
 	res, err := q.ExecContext(ctx, `
 		UPDATE runs SET status = 'running'
-		WHERE org_id = $1 AND id = $2 AND status = 'awaiting_input'
+		WHERE org_id = $1 AND id = $2 AND status = 'open'
 	`, orgID, runID)
 	if err != nil {
 		return false, err
@@ -747,7 +747,7 @@ func listParkedWorktreePaths(ctx context.Context, q queryer, orgID string) ([]st
 	rows, err := q.QueryContext(ctx, `
 		SELECT worktree_path FROM runs
 		WHERE org_id = $1
-		  AND status IN ('awaiting_input', 'pending_approval')
+		  AND status IN ('open', 'pending_approval')
 		  AND COALESCE(worktree_path, '') != ''
 	`, orgID)
 	if err != nil {
@@ -807,7 +807,7 @@ func (s *agentRunStore) ListTakenOverForResume(ctx context.Context, orgID string
 	return out, rows.Err()
 }
 
-func (s *agentRunStore) EntitiesWithAwaitingInput(ctx context.Context, orgID string, entityIDs []string) (map[string]struct{}, error) {
+func (s *agentRunStore) EntitiesWithOpenRuns(ctx context.Context, orgID string, entityIDs []string) (map[string]struct{}, error) {
 	out := make(map[string]struct{})
 	if len(entityIDs) == 0 {
 		return out, nil
@@ -817,7 +817,7 @@ func (s *agentRunStore) EntitiesWithAwaitingInput(ctx context.Context, orgID str
 		FROM runs r
 		JOIN tasks t ON t.id = r.task_id AND t.org_id = r.org_id
 		WHERE r.org_id = $1
-		  AND r.status = 'awaiting_input'
+		  AND r.status = 'open'
 		  AND t.entity_id = ANY($2)
 	`, orgID, entityIDs)
 	if err != nil {
@@ -993,80 +993,6 @@ func tokenTotals(ctx context.Context, q queryer, orgID, runID string) (*domain.T
 		return nil, err
 	}
 	return &t, nil
-}
-
-// --- Yields ---
-
-func (s *agentRunStore) InsertYieldRequest(ctx context.Context, orgID, runID string, req *domain.YieldRequest) (*domain.AgentMessage, error) {
-	return insertYieldRequest(ctx, s.q, orgID, runID, req)
-}
-
-func (s *agentRunStore) InsertYieldRequestSystem(ctx context.Context, orgID, runID string, req *domain.YieldRequest) (*domain.AgentMessage, error) {
-	return insertYieldRequest(ctx, s.admin, orgID, runID, req)
-}
-
-func insertYieldRequest(ctx context.Context, q queryer, orgID, runID string, req *domain.YieldRequest) (*domain.AgentMessage, error) {
-	payload, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal yield request: %w", err)
-	}
-	msg := &domain.AgentMessage{
-		RunID:   runID,
-		Role:    "assistant",
-		Subtype: db.YieldRequestSubtype,
-		Content: string(payload),
-	}
-	id, err := insertRunMessage(ctx, q, orgID, msg)
-	if err != nil {
-		return nil, err
-	}
-	msg.ID = int(id)
-	return msg, nil
-}
-
-func (s *agentRunStore) InsertYieldResponse(ctx context.Context, orgID, runID string, resp *domain.YieldResponse, displayContent string) (*domain.AgentMessage, error) {
-	payload, err := json.Marshal(resp)
-	if err != nil {
-		return nil, fmt.Errorf("marshal yield response: %w", err)
-	}
-	msg := &domain.AgentMessage{
-		RunID:   runID,
-		Role:    "user",
-		Subtype: db.YieldResponseSubtype,
-		Content: displayContent,
-		Metadata: map[string]any{
-			"yield_response": json.RawMessage(payload),
-		},
-	}
-	id, err := s.InsertMessage(ctx, orgID, msg)
-	if err != nil {
-		return nil, err
-	}
-	msg.ID = int(id)
-	return msg, nil
-}
-
-func (s *agentRunStore) LatestYieldRequest(ctx context.Context, orgID, runID string) (*domain.YieldRequest, error) {
-	var content sql.NullString
-	err := s.q.QueryRowContext(ctx, `
-		SELECT content FROM run_messages
-		WHERE org_id = $1 AND run_id = $2 AND subtype = $3
-		ORDER BY id DESC LIMIT 1
-	`, orgID, runID, db.YieldRequestSubtype).Scan(&content)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if !content.Valid || content.String == "" {
-		return nil, nil
-	}
-	var req domain.YieldRequest
-	if err := json.Unmarshal([]byte(content.String), &req); err != nil {
-		return nil, fmt.Errorf("unmarshal yield request: %w", err)
-	}
-	return &req, nil
 }
 
 // --- Helpers ---

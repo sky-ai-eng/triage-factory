@@ -54,7 +54,7 @@ The model has better tools for navigating files than we'd build into flags. Only
 
 Confirmed against Claude Code docs. Our pre-complete gate for SKY-141 is implemented externally via session-ID capture + `--resume`, **not** via the harness Stop hook. Same goes for `/loop` — it's a first-party CC feature but only works in interactive sessions, so it's not usable in our delegation path. Don't spend time trying to wire up hooks you saw in the docs; they won't fire from `claude -p`.
 
-The resume helper built for SKY-141 is **shared with SKY-139** (agent yield-to-user). Design it as a reusable function in the spawner package, not inlined into the memory-gate retry loop.
+The resume helper built for SKY-141 is **reused by the open-run resume path** (waking a run whose turn ended without a conclusion). Design it as a reusable function in the spawner package, not inlined into any one caller.
 
 ### 5. Manual vs auto run distinction
 
@@ -123,8 +123,8 @@ Several tickets touch the same plumbing. You can assume you're the only agent ma
 ### Session ID capture + resume helper
 
 - **Built in**: SKY-141
-- **Reused by**: SKY-139 (agent yield)
-- Capture `session_id` from `claude -p --output-format json` stdout. Store on `agent_runs.session_id`. Build the resume helper as a standalone function in the spawner package so SKY-139 can call it directly later.
+- **Reused by**: the open-run resume path (waking a run that ended a turn without a conclusion)
+- Capture `session_id` from `claude -p --output-format json` stdout. Store on `agent_runs.session_id`. Build the resume helper as a standalone function in the spawner package so the resume path can call it directly later.
 
 ### `_scratch/` directory convention
 

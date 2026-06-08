@@ -20,10 +20,9 @@ var ErrFenceRequiresEventAndTrigger = errors.New("db: CreateIfNotFiredSystem req
 //go:generate go run github.com/vektra/mockery/v2 --name=AgentRunStore --output=./mocks --case=underscore --with-expecter
 
 // AgentRunStore owns the runs / run_messages tables — agent run
-// lifecycle, transcript messages, yield requests/responses, and the
-// derived queries the delegate spawner + agent handler + chains
-// depend on. All methods take orgID; local mode passes
-// runmode.LocalDefaultOrg.
+// lifecycle, transcript messages, and the derived queries the delegate
+// spawner + agent handler + chains depend on. All methods take orgID;
+// local mode passes runmode.LocalDefaultOrg.
 //
 // Wired against the app pool in Postgres (RLS-active): every
 // consumer is request-equivalent or runs inside a delegate spawner
@@ -38,12 +37,8 @@ var ErrFenceRequiresEventAndTrigger = errors.New("db: CreateIfNotFiredSystem req
 // construction — a denormalized column drifted from ground truth
 // whenever a memory row was written outside the spawner's gate.
 //
-// The transcript layer (Messages, InsertMessage, TokenTotals,
-// InsertYieldRequest/Response, LatestYieldRequest) sits on
-// run_messages. Yields are stored as messages with subtype
-// YieldRequestSubtype / YieldResponseSubtype rather than dedicated
-// tables so the UI can render Q+A pairs inline and the
-// run_messages-driven analytics don't need to know yield exists.
+// The transcript layer (Messages, InsertMessage, TokenTotals) sits on
+// run_messages.
 type AgentRunStore interface {
 	// --- Lifecycle ---
 
@@ -77,10 +72,10 @@ type AgentRunStore interface {
 	CreateIfNotFiredSystem(ctx context.Context, orgID string, run domain.AgentRun) (inserted bool, err error)
 
 	// Complete finalizes a run with the terminal totals folded
-	// into any partial totals already on the row. SKY-139's
-	// yield-resume flow keeps cost/duration/turns running via
-	// AddPartialTotals; this call adds the terminal invocation's
-	// deltas to produce correct cumulative spend.
+	// into any partial totals already on the row. The resume path
+	// keeps cost/duration/turns running via AddPartialTotals; this
+	// call adds the terminal invocation's deltas to produce correct
+	// cumulative spend.
 	//
 	// outcome / outcomeReason persist the parsed terminal-envelope
 	// outcome and (abort-only) reason; pass "" for both on runs that
@@ -89,18 +84,17 @@ type AgentRunStore interface {
 
 	// AddPartialTotals folds an invocation's cost/duration/turns
 	// into the running totals without flipping status or
-	// completed_at. Called when a run yields mid-execution.
+	// completed_at. Called to accumulate spend across turns of one run.
 	AddPartialTotals(ctx context.Context, orgID, runID string, costUSD float64, durationMs, numTurns int) error
 
-	// MarkAwaitingInput flips a running run to awaiting_input.
-	// Returns ok=false (no error) if the row already reached a
-	// terminal state.
-	MarkAwaitingInput(ctx context.Context, orgID, runID string) (bool, error)
+	// MarkOpen flips a running run to `open` — a turn ended without a
+	// conclusion (or the live process idle-closed). Returns ok=false (no
+	// error) if the row already reached a terminal state.
+	MarkOpen(ctx context.Context, orgID, runID string) (bool, error)
 
-	// MarkResuming flips an awaiting_input run back to running
-	// when the user responds and a resume goroutine is about to
-	// spawn. ok=false means the run is no longer in awaiting_input
-	// — caller must not spawn the resume.
+	// MarkResuming flips an `open` run back to running when it is woken
+	// (a resume goroutine is about to spawn). ok=false means the run is no
+	// longer `open` — caller must not spawn the resume.
 	MarkResuming(ctx context.Context, orgID, runID string) (bool, error)
 
 	// SetSession stores the Claude Code session_id captured from
@@ -238,7 +232,7 @@ type AgentRunStore interface {
 	ListTakenOverIDsSystem(ctx context.Context, orgID string) ([]string, error)
 
 	// ListParkedWorktreePaths returns the worktree_path of every run
-	// parked in awaiting_input or pending_approval with a non-empty
+	// parked in `open` or pending_approval with a non-empty
 	// worktree_path. Read at startup so the worktree-cleanup sweep
 	// preserves a parked run's warm workspace (worktree dir + session
 	// JSONL) as the fast resume path. A swept entry still resumes via
@@ -267,10 +261,10 @@ type AgentRunStore interface {
 	// ordered newest-first. Used by the CLI's resume command.
 	ListTakenOverForResume(ctx context.Context, orgID string) ([]domain.TakenOverRun, error)
 
-	// EntitiesWithAwaitingInput returns the subset of entityIDs
-	// that have at least one run currently in awaiting_input.
-	// Drives the factory snapshot's "waiting for response" badge.
-	EntitiesWithAwaitingInput(ctx context.Context, orgID string, entityIDs []string) (map[string]struct{}, error)
+	// EntitiesWithOpenRuns returns the subset of entityIDs that have at
+	// least one run currently in the `open` state (a turn ended without a
+	// conclusion). Drives the factory snapshot's idle-run badge.
+	EntitiesWithOpenRuns(ctx context.Context, orgID string, entityIDs []string) (map[string]struct{}, error)
 
 	// --- Transcript / messages ---
 
@@ -288,26 +282,6 @@ type AgentRunStore interface {
 	// in a run. Model is MAX(model) (preserves the
 	// last-wins-alphabetically pre-migration behavior).
 	TokenTotals(ctx context.Context, orgID, runID string) (*domain.TokenTotals, error)
-
-	// --- Yields (SKY-139) ---
-
-	// InsertYieldRequest records the agent's yield request as an
-	// assistant-role run_messages row with subtype
-	// YieldRequestSubtype. Returns the inserted message (ID +
-	// CreatedAt populated).
-	InsertYieldRequest(ctx context.Context, orgID, runID string, req *domain.YieldRequest) (*domain.AgentMessage, error)
-
-	// InsertYieldResponse records the user's response as a
-	// user-role row with subtype YieldResponseSubtype. content is
-	// the human-readable display rendering; metadata carries the
-	// structured YieldResponse JSON for backend replay.
-	InsertYieldResponse(ctx context.Context, orgID, runID string, resp *domain.YieldResponse, displayContent string) (*domain.AgentMessage, error)
-
-	// LatestYieldRequest returns the most recent yield_request
-	// for a run, or (nil, nil) if none. Used by the respond
-	// endpoint to validate that a submitted response matches the
-	// open request's type.
-	LatestYieldRequest(ctx context.Context, orgID, runID string) (*domain.YieldRequest, error)
 
 	// --- Admin-pool variants (`...System`) ---
 	//
@@ -340,7 +314,7 @@ type AgentRunStore interface {
 	LookupOrgForRunSystem(ctx context.Context, runID string) (string, error)
 	CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason string) error
 	AddPartialTotalsSystem(ctx context.Context, orgID, runID string, costUSD float64, durationMs, numTurns int) error
-	MarkAwaitingInputSystem(ctx context.Context, orgID, runID string) (bool, error)
+	MarkOpenSystem(ctx context.Context, orgID, runID string) (bool, error)
 	MarkResumingSystem(ctx context.Context, orgID, runID string) (bool, error)
 	SetSessionSystem(ctx context.Context, orgID, runID, sessionID string) error
 	SetStatusSystem(ctx context.Context, orgID, runID, status string) error
@@ -351,7 +325,6 @@ type AgentRunStore interface {
 	MarkPendingApprovalIfCompletedSystem(ctx context.Context, orgID, runID string) (bool, error)
 	HasOtherActiveRunForTaskSystem(ctx context.Context, orgID, taskID, excludeRunID string) (bool, error)
 	InsertMessageSystem(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error)
-	InsertYieldRequestSystem(ctx context.Context, orgID, runID string, req *domain.YieldRequest) (*domain.AgentMessage, error)
 
 	// TokenTotalsSystem mirrors TokenTotals but routes through the
 	// admin pool in Postgres. Consumed by agentmeta.Build, which
@@ -363,13 +336,3 @@ type AgentRunStore interface {
 	// claims tx just to read one aggregate row.
 	TokenTotalsSystem(ctx context.Context, orgID, runID string) (*domain.TokenTotals, error)
 }
-
-// run_messages subtypes used by the SKY-139 yield-resume flow.
-// Stored in the existing transcript stream rather than dedicated
-// tables so the UI can render Q+A pairs inline with the rest of
-// the run's conversation, and so the run_messages-driven token /
-// cost analytics don't need to know yield exists.
-const (
-	YieldRequestSubtype  = "yield_request"
-	YieldResponseSubtype = "yield_response"
-)

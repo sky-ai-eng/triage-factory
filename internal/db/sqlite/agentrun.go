@@ -147,16 +147,16 @@ func (s *agentRunStore) AddPartialTotals(ctx context.Context, orgID, runID strin
 	return err
 }
 
-func (s *agentRunStore) MarkAwaitingInput(ctx context.Context, orgID, runID string) (bool, error) {
+func (s *agentRunStore) MarkOpen(ctx context.Context, orgID, runID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE runs
-		SET status = 'awaiting_input'
+		SET status = 'open'
 		WHERE id = ?
 		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-		                     'pending_approval', 'taken_over', 'awaiting_input')
+		                     'pending_approval', 'taken_over', 'open')
 	`, runID)
 	if err != nil {
 		return false, err
@@ -171,7 +171,7 @@ func (s *agentRunStore) MarkResuming(ctx context.Context, orgID, runID string) (
 	}
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE runs SET status = 'running'
-		WHERE id = ? AND status = 'awaiting_input'
+		WHERE id = ? AND status = 'open'
 	`, runID)
 	if err != nil {
 		return false, err
@@ -638,8 +638,8 @@ func (s *agentRunStore) AddPartialTotalsSystem(ctx context.Context, orgID, runID
 	return s.AddPartialTotals(ctx, orgID, runID, costUSD, durationMs, numTurns)
 }
 
-func (s *agentRunStore) MarkAwaitingInputSystem(ctx context.Context, orgID, runID string) (bool, error) {
-	return s.MarkAwaitingInput(ctx, orgID, runID)
+func (s *agentRunStore) MarkOpenSystem(ctx context.Context, orgID, runID string) (bool, error) {
+	return s.MarkOpen(ctx, orgID, runID)
 }
 
 func (s *agentRunStore) MarkResumingSystem(ctx context.Context, orgID, runID string) (bool, error) {
@@ -682,10 +682,6 @@ func (s *agentRunStore) InsertMessageSystem(ctx context.Context, orgID string, m
 	return s.InsertMessage(ctx, orgID, msg)
 }
 
-func (s *agentRunStore) InsertYieldRequestSystem(ctx context.Context, orgID, runID string, req *domain.YieldRequest) (*domain.AgentMessage, error) {
-	return s.InsertYieldRequest(ctx, orgID, runID, req)
-}
-
 func (s *agentRunStore) ListTakenOverIDs(ctx context.Context, orgID string) ([]string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
@@ -717,7 +713,7 @@ func (s *agentRunStore) ListParkedWorktreePaths(ctx context.Context, orgID strin
 	}
 	rows, err := s.q.QueryContext(ctx,
 		`SELECT worktree_path FROM runs
-		 WHERE status IN ('awaiting_input', 'pending_approval')
+		 WHERE status IN ('open', 'pending_approval')
 		   AND COALESCE(worktree_path, '') != ''`)
 	if err != nil {
 		return nil, err
@@ -781,7 +777,7 @@ func (s *agentRunStore) ListTakenOverForResume(ctx context.Context, orgID string
 	return out, rows.Err()
 }
 
-func (s *agentRunStore) EntitiesWithAwaitingInput(ctx context.Context, orgID string, entityIDs []string) (map[string]struct{}, error) {
+func (s *agentRunStore) EntitiesWithOpenRuns(ctx context.Context, orgID string, entityIDs []string) (map[string]struct{}, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -799,7 +795,7 @@ func (s *agentRunStore) EntitiesWithAwaitingInput(ctx context.Context, orgID str
 		SELECT DISTINCT t.entity_id
 		FROM runs r
 		JOIN tasks t ON t.id = r.task_id
-		WHERE r.status = 'awaiting_input'
+		WHERE r.status = 'open'
 		  AND t.entity_id IN (` + strings.Join(placeholders, ",") + `)
 	`
 	rows, err := s.q.QueryContext(ctx, query, args...)
@@ -950,81 +946,6 @@ func (s *agentRunStore) TokenTotals(ctx context.Context, orgID, runID string) (*
 
 func (s *agentRunStore) TokenTotalsSystem(ctx context.Context, orgID, runID string) (*domain.TokenTotals, error) {
 	return s.TokenTotals(ctx, orgID, runID)
-}
-
-// --- Yields ---
-
-func (s *agentRunStore) InsertYieldRequest(ctx context.Context, orgID, runID string, req *domain.YieldRequest) (*domain.AgentMessage, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	payload, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal yield request: %w", err)
-	}
-	msg := &domain.AgentMessage{
-		RunID:   runID,
-		Role:    "assistant",
-		Subtype: db.YieldRequestSubtype,
-		Content: string(payload),
-	}
-	id, err := s.InsertMessage(ctx, orgID, msg)
-	if err != nil {
-		return nil, err
-	}
-	msg.ID = int(id)
-	return msg, nil
-}
-
-func (s *agentRunStore) InsertYieldResponse(ctx context.Context, orgID, runID string, resp *domain.YieldResponse, displayContent string) (*domain.AgentMessage, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	payload, err := json.Marshal(resp)
-	if err != nil {
-		return nil, fmt.Errorf("marshal yield response: %w", err)
-	}
-	msg := &domain.AgentMessage{
-		RunID:   runID,
-		Role:    "user",
-		Subtype: db.YieldResponseSubtype,
-		Content: displayContent,
-		Metadata: map[string]any{
-			"yield_response": json.RawMessage(payload),
-		},
-	}
-	id, err := s.InsertMessage(ctx, orgID, msg)
-	if err != nil {
-		return nil, err
-	}
-	msg.ID = int(id)
-	return msg, nil
-}
-
-func (s *agentRunStore) LatestYieldRequest(ctx context.Context, orgID, runID string) (*domain.YieldRequest, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	row := s.q.QueryRowContext(ctx, `
-		SELECT content FROM run_messages
-		WHERE run_id = ? AND subtype = ?
-		ORDER BY id DESC LIMIT 1
-	`, runID, db.YieldRequestSubtype)
-	var content sql.NullString
-	if err := row.Scan(&content); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		return nil, err
-	}
-	if !content.Valid || content.String == "" {
-		return nil, nil
-	}
-	var req domain.YieldRequest
-	if err := json.Unmarshal([]byte(content.String), &req); err != nil {
-		return nil, fmt.Errorf("unmarshal yield request: %w", err)
-	}
-	return &req, nil
 }
 
 // --- Helpers ---

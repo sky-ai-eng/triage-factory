@@ -35,7 +35,7 @@ type Server struct {
 	users        db.UsersStore     // display_name + Jira binding on the user row; host-scoped GitHub identity via user_github_identities (SKY-396)
 	blueprints   db.BlueprintStore
 	tasks        db.TaskStore            // SKY-283: task lifecycle, claim, queue + factory snapshot reads
-	agentRuns    db.AgentRunStore        // SKY-285: agent run lifecycle + transcript + yields
+	agentRuns    db.AgentRunStore        // SKY-285: agent run lifecycle + transcript
 	reviews      db.ReviewStore          // SKY-286: pending_reviews CRUD for reviews handler, swipe-discard, agent status payload
 	pendingPRs   db.PendingPRStore       // SKY-287: pending_prs CRUD for pending_prs handler, agent status payload, drag-back-to-queue cleanup
 	repos        db.RepoStore            // SKY-288: repo_profiles CRUD for repos/settings/projects handlers and curator pinned-repo materialization
@@ -611,7 +611,6 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/agent/runs/{runID}/cancel", s.handleAgentCancel)
 	s.apiMutating("POST /api/agent/runs/{runID}/takeover", s.handleAgentTakeover)
 	s.apiMutating("POST /api/agent/runs/{runID}/release", s.handleAgentRelease)
-	s.apiMutating("POST /api/agent/runs/{runID}/respond", s.handleAgentRespond)
 	s.api("GET /api/agent/runs", s.handleAgentRuns)
 	s.api("GET /api/agent/takeovers/held", s.handleHeldTakeovers)
 

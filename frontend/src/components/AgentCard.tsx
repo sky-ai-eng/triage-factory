@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import type { AgentMessage, AgentRun, Task, ToolCall } from '../types'
 import { useOrgHref } from '../hooks/useOrgHref'
@@ -9,7 +9,6 @@ import { readError } from '../lib/api'
 import { formatDurationMs, formatElapsed, isActiveRun, statusDisplay } from '../lib/runStatus'
 import ChainStepsRail from './ChainStepsRail'
 import TakeoverModal, { type TakeoverInfo } from './TakeoverModal'
-import YieldModal, { type YieldRequest } from './YieldModal'
 
 interface Props {
   task: Task
@@ -48,30 +47,7 @@ export default function AgentCard({
   const [pendingOverlayDismissed, setPendingOverlayDismissed] = useState(false)
 
   const isActive = isActiveRun(run)
-  const isAwaiting = run.Status === 'awaiting_input'
 
-  // Locate the open yield_request (latest one) so the attention row +
-  // modal can render. Once status flips back to running the answered
-  // request collapses into the transcript as a paired Q+A row.
-  const openYield = useMemo<{ request: YieldRequest; messageID: number } | null>(() => {
-    if (!isAwaiting) return null
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].Subtype === 'yield_request') {
-        try {
-          return {
-            request: JSON.parse(messages[i].Content) as YieldRequest,
-            messageID: messages[i].ID,
-          }
-        } catch {
-          return null
-        }
-      }
-    }
-    return null
-  }, [messages, isAwaiting])
-  const openYieldRequest = openYield?.request ?? null
-  const openYieldMessageID = openYield?.messageID ?? 0
-  const [yieldModalOpen, setYieldModalOpen] = useState(false)
   // Takeover only makes sense once the agent has actually started — earlier
   // phases either don't yet have a session_id (clone/fetch/worktree_created)
   // or are at the agent's startup boundary. Gating on session_id presence
@@ -126,15 +102,6 @@ export default function AgentCard({
   return (
     <div className="bg-surface-raised backdrop-blur-xl border border-border-glass rounded-2xl overflow-hidden shadow-sm shadow-black/[0.03]">
       <TakeoverModal info={takeoverInfo} onClose={() => setTakeoverInfo(null)} />
-      {openYieldRequest && (
-        <YieldModal
-          key={openYieldMessageID}
-          runID={run.ID}
-          request={openYieldRequest}
-          open={yieldModalOpen}
-          onClose={() => setYieldModalOpen(false)}
-        />
-      )}
       {/* Header */}
       <div className="px-5 pt-4 pb-3">
         <div className="flex items-center justify-between mb-2">
@@ -262,33 +229,6 @@ export default function AgentCard({
           )}
           {renderActivityLog(messages, isActive, run)}
         </div>
-        {isAwaiting && openYieldRequest && (
-          <button
-            type="button"
-            onClick={() => setYieldModalOpen(true)}
-            aria-label={`Respond to agent: ${openYieldRequest.message}`}
-            aria-haspopup="dialog"
-            className="mt-2 w-full flex items-center justify-between gap-3 px-3 py-2 rounded-xl border border-snooze/40 bg-snooze/10 hover:bg-snooze/20 transition-colors text-left"
-          >
-            <span className="flex items-start gap-2 min-w-0">
-              <span
-                className="shrink-0 mt-0.5 inline-block w-1.5 h-1.5 rounded-full bg-snooze animate-pulse"
-                aria-hidden="true"
-              />
-              <span className="flex flex-col min-w-0">
-                <span className="text-[10px] font-semibold uppercase tracking-wider text-snooze">
-                  Agent waiting for response
-                </span>
-                <span className="text-[12px] text-text-primary leading-snug truncate">
-                  {openYieldRequest.message}
-                </span>
-              </span>
-            </span>
-            <span className="shrink-0 text-[12px] font-semibold text-snooze" aria-hidden="true">
-              Respond →
-            </span>
-          </button>
-        )}
         {takeoverPending && !pendingOverlayDismissed && (
           <button
             type="button"
@@ -393,48 +333,6 @@ function renderActivityLog(messages: AgentMessage[], isActive: boolean, run: Age
       minute: '2-digit',
       second: '2-digit',
     })
-
-    // SKY-139: yield_request / yield_response render as compact Q+A
-    // rows in the transcript. The "current open yield" gets the
-    // attention CTA outside the activity log; resolved yields stay
-    // here as transcript history.
-    if (msg.Subtype === 'yield_request') {
-      let parsedMessage = ''
-      try {
-        const req = JSON.parse(msg.Content) as { message?: string }
-        parsedMessage = req.message || ''
-      } catch {
-        parsedMessage = msg.Content
-      }
-      elements.push(
-        <div
-          key={`yreq-${msg.ID}`}
-          className="flex items-start gap-2 px-4 py-1.5 text-[12px] border-b border-border-subtle/50"
-        >
-          <span className="shrink-0 mt-0.5 text-[10px] text-text-tertiary opacity-60 font-mono">
-            {time}
-          </span>
-          <span className="text-snooze leading-snug">❓ {parsedMessage}</span>
-        </div>,
-      )
-      continue
-    }
-    if (msg.Subtype === 'yield_response') {
-      elements.push(
-        <div
-          key={`yres-${msg.ID}`}
-          className="flex items-start gap-2 px-4 py-1.5 text-[12px] border-b border-border-subtle/50"
-        >
-          <span className="shrink-0 mt-0.5 text-[10px] text-text-tertiary opacity-60 font-mono">
-            {time}
-          </span>
-          <span className="text-text-secondary leading-snug">
-            ↩ <span className="font-medium text-text-primary">{msg.Content}</span>
-          </span>
-        </div>,
-      )
-      continue
-    }
 
     if (msg.Role !== 'assistant') continue
 

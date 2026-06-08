@@ -207,10 +207,10 @@ func TestRunQueueStore_SQLite_ResetLeavesDormantAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
-	// A parked (dormant) run — directly insert with status awaiting_input.
+	// A parked (dormant) run — directly insert with status open.
 	step0 := 0
 	if err := stores.AgentRuns.Create(ctx, org, domain.AgentRun{
-		ID: "rqd-run-0", TaskID: task.ID, PromptID: "rqd-p0", Status: "awaiting_input",
+		ID: "rqd-run-0", TaskID: task.ID, PromptID: "rqd-p0", Status: "open",
 		Model: "m", TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
 		t.Fatalf("Create dormant run: %v", err)

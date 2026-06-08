@@ -933,7 +933,7 @@ func markBlueprintRunStatus(ctx context.Context, q queryer, orgID, id string, st
 		UPDATE blueprint_runs
 		SET status = $1, abort_reason = $2, aborted_at_step = $3, completed_at = now()
 		WHERE org_id = $4 AND id = $5
-		  AND status IN ('running','pending_approval','awaiting_input')
+		  AND status IN ('running','pending_approval','open')
 	`, string(status), reasonArg, stepArg, orgID, id)
 	if err != nil {
 		return false, err
@@ -997,7 +997,7 @@ func blueprintActiveStepRunIDs(ctx context.Context, q queryer, orgID, blueprintR
 		SELECT id FROM runs
 		WHERE org_id = $1 AND blueprint_run_id = $2
 		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
-		                     'pending_approval','taken_over','awaiting_input')
+		                     'pending_approval','taken_over','open')
 	`, orgID, blueprintRunID)
 	if err != nil {
 		return nil, err

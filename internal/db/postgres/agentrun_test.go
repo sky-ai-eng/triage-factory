@@ -593,12 +593,11 @@ func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.
 	// Drive each lifecycle write through SyntheticClaimsWithTx — the
 	// shape the spawner uses for every manual-run bookkeeping point.
 
-	// MarkResuming (yield-resume entry).
+	// MarkResuming (open-run resume entry).
 	var resumed bool
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		// Park the run in awaiting_input first so MarkResuming's
-		// guard fires.
-		if err := tx.AgentRuns.SetStatus(ctx, orgID, runID, "awaiting_input"); err != nil {
+		// Park the run `open` first so MarkResuming's guard fires.
+		if err := tx.AgentRuns.SetStatus(ctx, orgID, runID, "open"); err != nil {
 			return err
 		}
 		r, mErr := tx.AgentRuns.MarkResuming(ctx, orgID, runID)
@@ -608,10 +607,10 @@ func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.
 		t.Fatalf("MarkResuming under synth claims: %v", err)
 	}
 	if !resumed {
-		t.Errorf("MarkResuming: flipped=false, want true (was awaiting_input)")
+		t.Errorf("MarkResuming: flipped=false, want true (was open)")
 	}
 
-	// AddPartialTotals (yield path).
+	// AddPartialTotals (per-turn accumulation).
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		return tx.AgentRuns.AddPartialTotals(ctx, orgID, runID, 0.5, 1500, 3)
 	}); err != nil {

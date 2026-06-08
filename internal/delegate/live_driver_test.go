@@ -22,6 +22,11 @@ type fakeLiveProc struct {
 	sessionID string
 	result    *agentproc.Result
 	err       error
+	sendCount int
+	// onSend fires (with the 1-based send count) after each Send so a test can
+	// feed the next turn's result onto the results channel — the way the driver
+	// drives the invalid-envelope re-prompt loop.
+	onSend func(count int)
 }
 
 func newFakeLiveProc(sessionID string) *fakeLiveProc {
@@ -33,6 +38,24 @@ func (f *fakeLiveProc) SessionID() string         { return f.sessionID }
 func (f *fakeLiveProc) Stderr() string            { return "" }
 func (f *fakeLiveProc) Result() *agentproc.Result { f.mu.Lock(); defer f.mu.Unlock(); return f.result }
 func (f *fakeLiveProc) Err() error                { f.mu.Lock(); defer f.mu.Unlock(); return f.err }
+
+func (f *fakeLiveProc) Send(_ context.Context, _ string) error {
+	f.mu.Lock()
+	f.sendCount++
+	n := f.sendCount
+	hook := f.onSend
+	f.mu.Unlock()
+	if hook != nil {
+		hook(n)
+	}
+	return nil
+}
+
+func (f *fakeLiveProc) sends() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sendCount
+}
 
 func (f *fakeLiveProc) Close() error {
 	f.mu.Lock()
@@ -150,7 +173,7 @@ func TestDriveLiveRun_ProcessExitCarriesErr(t *testing.T) {
 
 // TestDriveLiveRun_IdleHibernates is the acceptance check for idle
 // hibernation: a live run quiet past the (injected short) threshold closes
-// its process and parks to awaiting_input, keeping the worktree.
+// its process and parks to `open`, keeping the worktree.
 func TestDriveLiveRun_IdleHibernates(t *testing.T) {
 	database := newTakeoverTestDB(t)
 	seedRun(t, database, "r-idle", "sess-idle", "/tmp/wt-idle")
@@ -182,8 +205,8 @@ func TestDriveLiveRun_IdleHibernates(t *testing.T) {
 	if err := database.QueryRow(`SELECT status FROM runs WHERE id='r-idle'`).Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
-	if status != "awaiting_input" {
-		t.Errorf("status = %q, want awaiting_input (idle hibernation reuses it, no new status)", status)
+	if status != "open" {
+		t.Errorf("status = %q, want open (idle hibernation flips to open)", status)
 	}
 }
 
@@ -216,7 +239,7 @@ pumping:
 			activity <- struct{}{}
 		}
 	}
-	results <- &agentproc.Result{Result: "ok"}
+	results <- &agentproc.Result{Result: `{"outcome":"finish","summary":"ok"}`}
 
 	out := <-done
 	if out.hibernated {
@@ -224,5 +247,123 @@ pumping:
 	}
 	if out.result == nil {
 		t.Error("expected the terminal result after activity stopped")
+	}
+}
+
+// TestDriveLiveRun_NoneKeepsProcOpenAndLoops: a turn that ends with no
+// conclusion (prose) must NOT close the process or hibernate — the run is
+// open, so the driver keeps the process warm and loops. We prove the loop by
+// delivering prose first and a valid conclusion second: the driver returns the
+// valid result, which it could only reach by looping past the prose.
+func TestDriveLiveRun_NoneKeepsProcOpenAndLoops(t *testing.T) {
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	proc := newFakeLiveProc("sess")
+	results := make(chan *agentproc.Result, 8)
+	results <- &agentproc.Result{Result: "Some prose with no completion envelope at all."}
+	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
+	results <- want
+
+	out := s.driveLiveRun(context.Background(), liveParkContext{}, proc, results, make(chan struct{}), time.Minute)
+
+	if out.result != want {
+		t.Errorf("result = %+v, want the valid conclusion reached after looping past prose", out.result)
+	}
+	if out.hibernated {
+		t.Error("a no-conclusion turn must not hibernate while results keep arriving")
+	}
+	if proc.sends() != 0 {
+		t.Errorf("sends = %d, want 0 (a no-conclusion turn is not re-prompted)", proc.sends())
+	}
+}
+
+// TestDriveLiveRun_InvalidRepromptsThenFails: an envelope-shaped but invalid
+// conclusion is re-prompted to fix, up to maxCompletionRetries, then the run
+// fails. Each correction the driver sends produces another invalid turn here,
+// so the bound is exhausted.
+func TestDriveLiveRun_InvalidRepromptsThenFails(t *testing.T) {
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	proc := newFakeLiveProc("sess")
+	results := make(chan *agentproc.Result, 8)
+	invalid := &agentproc.Result{Result: `{"outcome":"frobnicate"}`}
+	proc.onSend = func(int) { results <- invalid } // every correction yields another invalid turn
+	results <- invalid                             // the initial invalid turn
+
+	out := s.driveLiveRun(context.Background(), liveParkContext{}, proc, results, make(chan struct{}), time.Minute)
+
+	if out.err == nil {
+		t.Fatalf("expected a failure after exhausting re-prompts, got %+v", out)
+	}
+	if proc.sends() != maxCompletionRetries {
+		t.Errorf("sends = %d, want %d (one correction per retry)", proc.sends(), maxCompletionRetries)
+	}
+	if !proc.wasClosed() {
+		t.Error("expected the process closed after exhausting re-prompts")
+	}
+}
+
+// TestDriveLiveRun_InvalidThenValidReturns: an invalid conclusion is re-prompted
+// once and the corrected turn is a valid conclusion → the driver returns it
+// (no failure).
+func TestDriveLiveRun_InvalidThenValidReturns(t *testing.T) {
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	proc := newFakeLiveProc("sess")
+	results := make(chan *agentproc.Result, 8)
+	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"fixed"}`}
+	proc.onSend = func(int) { results <- want } // the correction lands a valid conclusion
+	results <- &agentproc.Result{Result: `{"outcome":"finish"}`}
+
+	out := s.driveLiveRun(context.Background(), liveParkContext{}, proc, results, make(chan struct{}), time.Minute)
+
+	if out.err != nil {
+		t.Fatalf("expected success after one correction, got err %v", out.err)
+	}
+	if out.result != want {
+		t.Errorf("result = %+v, want the corrected valid conclusion", out.result)
+	}
+	if proc.sends() != 1 {
+		t.Errorf("sends = %d, want 1 (corrected on the first re-prompt)", proc.sends())
+	}
+}
+
+// TestDriveLiveRun_NoneFlipsStatusOpen: an autonomous turn that ends without a
+// conclusion flips the run to `open` in the DB while the process stays warm —
+// so a crash in the warm window leaves an open run (which the boot reconcile
+// leaves alone) rather than a running one (which it would re-queue). We deliver
+// a no-conclusion turn followed by a valid one: the driver returns the valid
+// result, and the row is left `open` from the no-conclusion turn (driveLiveRun
+// records the conclusion via processCompletion, not here).
+func TestDriveLiveRun_NoneFlipsStatusOpen(t *testing.T) {
+	database := newTakeoverTestDB(t)
+	seedRun(t, database, "r-none", "sess-none", "/tmp/wt-none")
+	if _, err := database.Exec(`UPDATE runs SET status='running' WHERE id='r-none'`); err != nil {
+		t.Fatalf("set running: %v", err)
+	}
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6", "")
+
+	var taskID string
+	if err := database.QueryRow(`SELECT task_id FROM runs WHERE id='r-none'`).Scan(&taskID); err != nil {
+		t.Fatalf("read task_id: %v", err)
+	}
+	proc := newFakeLiveProc("sess-none")
+	results := make(chan *agentproc.Result, 8)
+	results <- &agentproc.Result{Result: "prose, no completion envelope"}
+	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
+	results <- want
+	park := liveParkContext{
+		orgID: runmode.LocalDefaultOrg, runID: "r-none", taskID: taskID,
+		namespace: "seedbpr-r-none", claudeCwd: "/tmp/wt-none",
+		triggerType: "manual", creatorUserID: runmode.LocalDefaultUserID,
+	}
+
+	out := s.driveLiveRun(context.Background(), park, proc, results, make(chan struct{}), time.Minute)
+	if out.result != want {
+		t.Fatalf("result = %+v, want the valid conclusion after the open turn", out.result)
+	}
+	var status string
+	if err := database.QueryRow(`SELECT status FROM runs WHERE id='r-none'`).Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status != "open" {
+		t.Errorf("status = %q, want open (a no-conclusion turn flips the run open)", status)
 	}
 }

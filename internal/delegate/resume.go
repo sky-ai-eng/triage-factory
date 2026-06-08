@@ -1,8 +1,9 @@
-// Yield-resume flow (SKY-139): when an agent emits status:"yield" the
-// run parks in awaiting_input; ResumeAfterYield is the entry point used
-// by the respond endpoint to wake the session back up with the user's
-// answer. ResumeWithMessage is the lower-level helper shared with the
-// memory-gate retry loop.
+// Open-run resume flow: a run that went `open` (a turn ended without a
+// conclusion and the process then idle-closed) is woken by ResumeOpenRun,
+// which flips it back to running and re-invokes the session with a new message.
+// ResumeWithMessage is the lower-level re-invoke helper. The P3 steering
+// endpoints (message/interrupt) are the production caller; this is the durable
+// cold-resume backstop beneath the warm-process steering path.
 
 package delegate
 
@@ -20,25 +21,24 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
-// ErrYieldNotResumable is returned by ResumeAfterYield when the run
-// can't be resumed in its current state — typically a concurrent
-// cancel or takeover flipped it terminal between the handler's
-// validation read and our status flip. The respond endpoint maps
-// this to 409 Conflict so the client can refresh and see the actual
-// state. SKY-139.
-var ErrYieldNotResumable = errors.New("yield: run not in awaiting_input")
+// ErrRunNotResumable is returned by ResumeOpenRun when the run can't be
+// resumed in its current state — typically a concurrent cancel or takeover
+// flipped it terminal between the caller's validation read and our status flip
+// (MarkResuming only flips from `open`). Callers map this to 409 Conflict so
+// the client can refresh and see the actual state.
+var ErrRunNotResumable = errors.New("resume: run not in open state")
 
-// ResumeAfterYield is the entry point used by the respond endpoint
-// after the user records an answer to a yield. This method:
+// ResumeOpenRun wakes an `open` run (one whose turn ended without a conclusion
+// and then idle-closed) with a new message. This method:
 //  1. validates the run is resumable (session id, worktree path, task)
 //  2. registers a cancellation handle in s.cancels[runID]
-//  3. flips status awaiting_input → running (with race guard)
-//  4. spawns the goroutine that re-invokes Claude with the user's
-//     plain-text response and runs the resulting completion through
-//     the same processCompletion path the initial run uses
+//  3. flips status open → running (with race guard)
+//  4. spawns the goroutine that re-invokes Claude with the message and runs
+//     the resulting completion through the same processCompletion path the
+//     initial run uses
 //
-// agentMessage is the plain-text rendering of the user's response
-// shaped by domain.RenderYieldResponseForAgent.
+// agentMessage is the plain-text message to feed the resumed session (in P3,
+// the user's steering text).
 //
 // Cancel-during-resume is closed by ordering: the cancel handle is in
 // place before the status flip, so any Cancel() arriving after the
@@ -48,17 +48,13 @@ var ErrYieldNotResumable = errors.New("yield: run not in awaiting_input")
 // the registered-cancel path doesn't write to the DB itself, so
 // without that we'd leak a "cancelled but row says running" state.
 //
-// userID identifies the responding user — the actor whose action
-// resumed the yielded run. All writes inside the resume goroutine
-// route under this user's synthetic claims regardless of the run's
-// original trigger type (an event-triggered run that yielded and was
-// answered by a teammate gets the teammate's identity on the resume
-// writes, which is the audit-honest outcome). Local mode passes
-// runmode.LocalDefaultUserID; multi-mode handlers extract it from JWT
-// claims.
-//
-// SKY-139.
-func (s *Spawner) ResumeAfterYield(orgID, runID, agentMessage, userID string) error {
+// userID identifies the resuming user — the actor whose action woke the run.
+// All writes inside the resume goroutine route under this user's synthetic
+// claims regardless of the run's original trigger type (an event-triggered run
+// resumed by a teammate gets the teammate's identity on the resume writes,
+// which is the audit-honest outcome). Local mode passes
+// runmode.LocalDefaultUserID; multi-mode handlers extract it from JWT claims.
+func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error {
 	if userID == "" {
 		return fmt.Errorf("resume: empty user id")
 	}
@@ -77,8 +73,8 @@ func (s *Spawner) ResumeAfterYield(orgID, runID, agentMessage, userID string) er
 	}
 	// A resume must reuse the model the run started with. run.Model is set
 	// at Delegate time (always non-empty for a real run); guard here so the
-	// yield path fails with a clear message rather than tripping
-	// ResumeWithMessage's required-model check downstream. SKY-389 review #1.
+	// resume fails with a clear message rather than tripping ResumeWithMessage's
+	// required-model check downstream.
 	if run.Model == "" {
 		return fmt.Errorf("run has no model; cannot resume")
 	}
@@ -126,9 +122,9 @@ func (s *Spawner) ResumeAfterYield(orgID, runID, agentMessage, userID string) er
 	// column unset. Keeping it cheap and explicit rather than
 	// trusting the read.
 	// Resume is always user-initiated — the userID arg is the actor
-	// who clicked respond. All writes inside the resume route under
+	// who woke the run. All writes inside the resume route under
 	// that user's synthetic claims regardless of the run's original
-	// trigger type: an event-triggered run answered by a teammate
+	// trigger type: an event-triggered run resumed by a teammate
 	// still attributes the resume's writes to the teammate. The
 	// trigger_type captured here is only used for the drainer +
 	// pollDrainer hook on terminal exit (event runs still drive the
@@ -149,23 +145,21 @@ func (s *Spawner) ResumeAfterYield(orgID, runID, agentMessage, userID string) er
 	if _, ok := s.cancels[runID]; ok {
 		s.mu.Unlock()
 		cancel()
-		// Should not happen for awaiting_input (the initial
-		// goroutine exited when it parked the run); defend against
-		// a double-respond or a stale entry.
+		// Should not happen for an open run (the initial goroutine exited when
+		// the run idle-closed); defend against a double-resume or a stale entry.
 		return fmt.Errorf("run already has an active goroutine")
 	}
 	s.cancels[runID] = cancel
 	s.mu.Unlock()
 
-	// Step 2: flip status awaiting_input → running. This must happen
-	// AFTER cancel registration: if the order is reversed, a Cancel()
-	// arriving in the gap sees no goroutine, falls through to the DB
-	// path, and races the resume into the "row cancelled but
-	// goroutine still running" state the review bot flagged. With
-	// the cancel handle already in place, any Cancel() now hits
-	// cancel(ctx) and the goroutine handles the terminal write.
-	// Routed under the responding user's synthetic claims (resume is
-	// always user-initiated regardless of the run's original trigger).
+	// Step 2: flip status open → running. This must happen AFTER cancel
+	// registration: if the order is reversed, a Cancel() arriving in the gap
+	// sees no goroutine, falls through to the DB path, and races the resume into
+	// the "row cancelled but goroutine still running" state. With the cancel
+	// handle already in place, any Cancel() now hits cancel(ctx) and the
+	// goroutine handles the terminal write. Routed under the resuming user's
+	// synthetic claims (resume is always user-initiated regardless of the run's
+	// original trigger).
 	bgCtx := context.Background()
 	var flipped bool
 	err = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, userID, func(ts db.TxStores) error {
@@ -185,7 +179,7 @@ func (s *Spawner) ResumeAfterYield(orgID, runID, agentMessage, userID string) er
 		delete(s.cancels, runID)
 		s.mu.Unlock()
 		cancel()
-		return ErrYieldNotResumable
+		return ErrRunNotResumable
 	}
 	s.broadcastRunUpdate(orgID, runID, "running")
 	// The parked step is running again → bounce the aggregate board column back
@@ -199,8 +193,8 @@ func (s *Spawner) ResumeAfterYield(orgID, runID, agentMessage, userID string) er
 			s.mu.Unlock()
 			cancel()
 			// Drain the per-entity firing queue on terminal exit —
-			// matches the initial-run defer in Delegate so a yield
-			// resume that lands the run terminal still flushes any
+			// matches the initial-run defer in Delegate so a resume
+			// that lands the run terminal still flushes any
 			// queued auto-firings for the same entity.
 			s.notifyDrainer(orgID, triggerType, taskCopy.EntityID)
 		}()
@@ -255,7 +249,7 @@ func (s *Spawner) ResumeAfterYield(orgID, runID, agentMessage, userID string) er
 		}
 		cwd = resumeCwd
 
-		// Resume routes every downstream write under the responding
+		// Resume routes every downstream write under the resuming
 		// user's synthetic claims regardless of the run's original
 		// trigger type: pass "manual" + userID so processCompletion /
 		// failRun / ResumeWithMessage / sink each pick the synth-claims
@@ -276,23 +270,23 @@ func (s *Spawner) ResumeAfterYield(orgID, runID, agentMessage, userID string) er
 			return
 		}
 		if err != nil {
-			s.failRun(orgID, runID, taskCopy.ID, "manual", userID, "resume after yield failed: "+err.Error())
+			s.failRun(orgID, runID, taskCopy.ID, "manual", userID, "resume failed: "+err.Error())
 			return
 		}
 		if outcome == nil || outcome.Completion == nil {
-			s.failRun(orgID, runID, taskCopy.ID, "manual", userID, "resume after yield produced no completion")
+			s.failRun(orgID, runID, taskCopy.ID, "manual", userID, "resume produced no completion")
 			return
 		}
 
-		parked := s.processCompletion(ctx, orgID, runID, blueprintRunID, taskCopy, outcome.Completion, cwd, sessionID, model, owner, repo, "manual", userID, extraTools)
-		// The resumed step reached a terminal state (it didn't yield or queue an
-		// approval again) → hand back to the blueprint orchestrator to finalize:
-		// for a 1-step / final step this terminates the blueprint (finish→close,
-		// abort→leave open), restoring parity with the pre-collapse single-prompt
-		// yield-resume. A non-final step's mid-blueprint advance is the epic's
-		// resume work and stays unimplemented (terminated with a clear reason).
+		parked := s.processCompletion(ctx, orgID, runID, blueprintRunID, taskCopy, outcome.Completion, cwd, sessionID, "manual", userID)
+		// The resumed step reached a terminal state (it didn't go open again or
+		// queue an approval) → hand back to the blueprint orchestrator to
+		// finalize: for a 1-step / final step this terminates the blueprint
+		// (finish→close, abort→leave open). A non-final step's mid-blueprint
+		// advance is the epic's resume work and stays unimplemented (terminated
+		// with a clear reason).
 		if !parked {
-			s.ResumeBlueprintAfterYield(orgID, runID, userID)
+			s.ResumeBlueprintAfterResume(orgID, runID, userID)
 		}
 	}()
 	return nil
@@ -304,13 +298,12 @@ func (s *Spawner) ResumeAfterYield(orgID, runID, agentMessage, userID string) er
 // began with rather than re-resolving live state mid-run.
 type ResumeOptions struct {
 	// Model is the model the run started with. **Required** — a resume
-	// must reuse the model captured at run start (run.Model for the
-	// yield path, the gate's captured model for the memory-gate retry),
-	// never a freshly-resolved one, or a config change between the
-	// initial invocation and the resume would silently switch models
+	// must reuse the model captured at run start (run.Model, captured by
+	// ResumeOpenRun), never a freshly-resolved one, or a config change between
+	// the initial invocation and the resume would silently switch models
 	// mid-run. ResumeWithMessage rejects an empty Model with an error
 	// rather than falling back to a live per-(org, team) resolve, which
-	// would reintroduce exactly that mid-run drift (SKY-389 review #1).
+	// would reintroduce exactly that mid-run drift.
 	Model string
 
 	// RepoEnv, if non-empty, is passed to the resumed subprocess as
@@ -334,8 +327,7 @@ type ResumeOptions struct {
 	// TRIAGE_FACTORY_BLUEPRINT_RUN_ID so the agent's <entity_memory> contract
 	// names the same folder it read and wrote on the initial invocation.
 	// Required for the resume to stay consistent with the initial env; callers
-	// capture it from the run (ResumeAfterYield → run.BlueprintRunID, the
-	// completion gate → the namespace it computed).
+	// capture it from the run (ResumeOpenRun → run.BlueprintRunID).
 	Namespace string
 }
 
@@ -344,10 +336,8 @@ type ResumeOptions struct {
 // the parsed agent result JSON (nil if the completion text didn't
 // contain a parseable envelope), and captured stderr for diagnostics.
 //
-// Callers decide how to interpret a nil Completion — the memory-gate
-// retry loop treats it as "retry again if attempts remain, else flag
-// memory_missing," while a yield-resume flow might treat it as a
-// session-level failure and surface an error.
+// Callers decide how to interpret a nil Completion — ResumeOpenRun treats it
+// as a session-level failure and surfaces an error.
 type ResumeOutcome struct {
 	Completion *agentproc.Result
 	Result     *agentResult
@@ -356,8 +346,8 @@ type ResumeOutcome struct {
 
 // ResumeWithMessage resumes a prior headless claude session with a new
 // user message and streams the result through the same message-
-// persistence path as the initial invocation. Used by the SKY-141
-// task-memory write-gate retry loop and the SKY-139 yield-to-user flow.
+// persistence path as the initial invocation. The cold-resume backstop for an
+// open run (ResumeOpenRun) when the warm process is gone.
 //
 // Callers pass the sessionID captured during the initial run (read
 // from runs.session_id, populated on the runSink during the original
@@ -384,9 +374,8 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	// #1). Requiring it here — rather than falling back to a live per-(org,
 	// team) resolve — is what closes the mid-run model-drift gap: a config
 	// change between the initial invocation and this resume must never
-	// switch models underneath a single logical run. Both real callers
-	// capture and pass it (ResumeAfterYield → run.Model, the completion
-	// gate → the captured model); an empty value is a wiring bug, surfaced loudly.
+	// switch models underneath a single logical run. ResumeOpenRun captures
+	// and passes it (run.Model); an empty value is a wiring bug, surfaced loudly.
 	if opts.Model == "" {
 		return nil, fmt.Errorf("resume: missing model (caller must pass the model captured at run start)")
 	}
@@ -416,8 +405,8 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	}
 	// Mirror runAgent's memory-namespace export so the resumed agent writes
 	// into the same _scratch/entity-memory/<namespace>/ folder it used on the
-	// initial invocation (the completion-gate retry path depends on this, and a
-	// yield-resume continuing the work must land its memory in the same place).
+	// initial invocation (a resume continuing the work must land its memory in
+	// the same place).
 	if opts.Namespace == "" {
 		return nil, fmt.Errorf("resume: missing namespace (caller must pass the memory namespace captured at run start)")
 	}
@@ -469,10 +458,10 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 
 	// Resume executes as a LiveRun (re-registered in procs, so a resumed run
 	// is interruptible/steerable), falling back to the one-shot sandbox path
-	// in multi mode. idleTimeout 0 disables hibernation: a resume is a
-	// bounded re-invoke — the gate's correction, or a user-answered yield
-	// continuing to a completion — not a fresh long-lived autonomous run, so
-	// it always drives to a terminal result. A nil permission handler keeps
+	// in multi mode. idleTimeout 0 disables hibernation AND the driver's
+	// multi-turn loop: a resume is a bounded re-invoke that drives to one
+	// terminal result, not a fresh long-lived autonomous run. A nil permission
+	// handler keeps
 	// the same allowlist-only autonomous gate as the initial run.
 	var out liveOutcome
 	if agentproc.InteractiveSupported() {
@@ -508,8 +497,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	if out.err != nil && out.result == nil {
 		// The driver returns ctx.Err() directly when ctx triggered the kill
 		// before any completion was captured; preserve that shape so the
-		// SKY-139 yield-resume goroutine's ctx.Err() check still routes
-		// through markCancelled.
+		// resume goroutine's ctx.Err() check still routes through markCancelled.
 		if ctx.Err() != nil {
 			return outcome, ctx.Err()
 		}

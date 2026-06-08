@@ -1,30 +1,31 @@
-// The pre-complete memory write gate (SKY-141), the cross-run task-memory
-// + project-knowledge materializers a fresh agent invocation reads as
-// ambient context, and the entity → project lookup that decides whether
-// project knowledge applies.
+// Run-memory file reading at termination, the cross-run task-memory +
+// project-knowledge materializers a fresh agent invocation reads as ambient
+// context, and the entity → project lookup that decides whether project
+// knowledge applies. (The completion envelope's bounded re-prompt-to-fix lives
+// on the live driver — see live.go.)
 
 package delegate
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
 
-// maxCompletionRetries is the hard cap on how many times the completion
-// gate will resume a run to ask the agent for whatever it still owes
-// before the run is accepted — its namespaced memory file and/or a valid
-// terminal outcome. Three gives a model that fumbled the contract real
-// chances to correct without spending unbounded resumes on one that's
-// ignoring it. Not a config knob because no one needs to tune it per-run.
+// maxCompletionRetries is the hard cap on how many times the live driver
+// re-prompts a run to fix an invalid completion envelope (malformed JSON, an
+// unrecognized outcome, or a recognized outcome missing its required
+// companion field) before failing it. Three gives a model that fumbled the
+// contract real chances to correct without spending unbounded turns on one
+// that's ignoring it. Not a config knob because no one needs to tune it
+// per-run. A turn that ends with NO envelope attempt is not retried — the run
+// is left open (see driveLiveRun).
 const maxCompletionRetries = 3
 
 // memoryNamespace is the folder under _scratch/entity-memory/ that groups a
@@ -39,15 +40,6 @@ const maxCompletionRetries = 3
 func memoryNamespace(blueprintRunID, runID string) string {
 	_ = runID
 	return blueprintRunID
-}
-
-// memoryFileExists returns true iff the agent wrote
-// ./_scratch/entity-memory/<namespace>/<runID>.md during the run. Used by the
-// completion gate both before retrying (is another attempt needed?) and
-// after (did the retry succeed?).
-func memoryFileExists(cwd, namespace, runID string) bool {
-	_, err := os.Stat(filepath.Join(cwd, "_scratch", "entity-memory", namespace, runID+".md"))
-	return err == nil
 }
 
 // memoryFileState distinguishes the three reasons readAgentMemoryFile
@@ -88,153 +80,6 @@ func readAgentMemoryFile(cwd, namespace, runID string) (string, memoryFileState)
 		return "", memoryFileEmpty
 	}
 	return content, memoryFilePresent
-}
-
-// completionHasValidOutcome reports whether the completion's terminal envelope
-// parses and carries a recognized outcome. A summary-only envelope (parses via
-// isValid, empty outcome) returns false — that's exactly a case the gate
-// re-prompts for.
-func completionHasValidOutcome(completion *agentproc.Result) bool {
-	parsed := parseAgentResult(completion.Result)
-	return parsed != nil && parsed.hasValidOutcome()
-}
-
-// completionRetryMessage builds the correction the gate resumes a run with,
-// naming exactly what's still missing: the namespaced memory file, a valid
-// terminal outcome, or both. memOK/outcomeOK are the current pass/fail of each
-// check — at least one is false whenever this is called.
-func completionRetryMessage(namespace, runID string, memOK, outcomeOK bool) string {
-	memPath := fmt.Sprintf("$TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/%s/%s.md", namespace, runID)
-	memMsg := "write your memory file to " + memPath + " using the absolute path (the env var " +
-		"resolves to the run-root regardless of which worktree you have cd'd into): what you did " +
-		"and the state you're leaving, the key decisions and why, what you ruled out, and what the " +
-		"next stage needs"
-	outcomeMsg := "return your terminal completion as your final message — ONLY a JSON object whose " +
-		"\"outcome\" is one of \"continue\", \"finish\", \"abort\", or \"yield\", with a \"summary\" " +
-		"(and a \"reason\" when the outcome is \"abort\"), and no other text"
-	switch {
-	case !memOK && !outcomeOK:
-		return "Before this run can be accepted, two things are missing. First, " + memMsg +
-			". Then, " + outcomeMsg + "."
-	case !memOK:
-		return "You returned a completion but did not " + memMsg +
-			". Write it now, then return your completion JSON again."
-	default: // !outcomeOK
-		return "Your final message was not a valid completion envelope. Re-read the completion " +
-			"contract and " + outcomeMsg + "."
-	}
-}
-
-// runCompletionRetryLoop drives the consolidated gate's re-prompt loop. On each
-// pass it asks the agent for whatever's still missing — the namespaced memory
-// file (checked via memoryPresent, which re-stats disk) and/or a valid terminal
-// outcome (checked on the merged completion) — merging each resume's completion
-// so cost/duration/num_turns accounting spans the whole run. It stops the
-// moment both checks pass, the completion becomes a yield (a pause isn't a
-// termination; the caller's post-gate routeYield parks it, so we don't keep
-// demanding the memory write), a resume errors, or maxRetries is exhausted.
-// Pure (no spawner / DB) so the mechanics are unit-testable; resume performs one
-// re-invoke given the correction text and returns the resumed completion (nil if
-// none was observed).
-func runCompletionRetryLoop(
-	runID, namespace string,
-	initial *agentproc.Result,
-	memoryPresent func() bool,
-	resume func(message string) (*agentproc.Result, error),
-	maxRetries int,
-) *agentproc.Result {
-	memOK := memoryPresent()
-	outcomeOK := completionHasValidOutcome(initial)
-	if memOK && outcomeOK {
-		return initial
-	}
-
-	current := initial
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		log.Printf("[delegate] run %s: completion gate resuming (attempt %d; memory_present=%v outcome_valid=%v)", runID, attempt, memOK, outcomeOK)
-		completion, err := resume(completionRetryMessage(namespace, runID, memOK, outcomeOK))
-		if err != nil {
-			log.Printf("[delegate] run %s: completion-gate resume attempt %d failed: %v", runID, attempt, err)
-			// Give up on further retries — the caller applies its conservative
-			// fallback. Don't wipe the accumulated completion's accounting just
-			// because the retry subprocess crashed.
-			return current
-		}
-		if completion != nil {
-			current = agentproc.MergeResult(current, completion)
-		}
-		// A gate resume can itself end in a yield — the agent decided it needs
-		// the user before it can finish. Stop and return; processCompletion's
-		// post-gate routeYield parks it. A pause isn't a termination, so we
-		// don't keep demanding the memory write on it.
-		if parsed := parseAgentResult(current.Result); parsed != nil && parsed.isYield() {
-			return current
-		}
-		memOK = memoryPresent()
-		outcomeOK = completionHasValidOutcome(current)
-		if memOK && outcomeOK {
-			return current
-		}
-	}
-
-	return current
-}
-
-// completionGate consolidates the two pre-finalization checks a terminating run
-// must pass: (a) the agent wrote its namespaced memory file, and (b) the
-// terminal envelope carries a valid outcome. If either is missing, it resumes
-// the session with a correction naming exactly what's missing (memory file
-// and/or outcome), re-checks after each attempt, and repeats up to
-// maxCompletionRetries. Completions from resumed sessions are merged so
-// cost/duration/num_turns accounting reflects the full span of the run.
-//
-// The gate does not touch runs status or persist the outcome — that remains the
-// caller's responsibility. The caller (processCompletion) reads the memory
-// file, upserts run_memory, parses the returned completion, applies the
-// single/terminal-vs-blueprint outcome fallback, and writes runs.outcome. Side
-// effects: (a) spawns resume subprocesses via ResumeWithMessage, whose messages
-// land in run_messages via the runSink, (b) logs progress for operator
-// diagnosis.
-//
-// Model and repoEnv are passed in rather than read from live spawner state so
-// the gate's retries use the same model and repo context as the initial
-// invocation. If we read s.model at resume time, a concurrent UpdateCredentials
-// could silently switch models mid-run.
-//
-// If no session id is available (shouldn't happen in practice because the
-// runSink persists the init event, but defensive), the gate logs and returns
-// without retrying. The caller will see the missing file / outcome and apply
-// its fallbacks (memory_missing, the finish/no-outcome floor).
-func (s *Spawner) completionGate(
-	ctx context.Context,
-	orgID, runID, cwd, namespace string,
-	initial *agentproc.Result,
-	sessionID, model, repoEnv, extraAllowedTools string,
-	triggerType, creatorUserID string,
-) *agentproc.Result {
-	memoryPresent := func() bool { return memoryFileExists(cwd, namespace, runID) }
-	if memoryPresent() && completionHasValidOutcome(initial) {
-		return initial
-	}
-
-	if sessionID == "" {
-		log.Printf("[delegate] run %s: completion gate needs a resume but no session id available — cannot gate-retry", runID)
-		return initial
-	}
-
-	resumeOpts := ResumeOptions{Model: model, RepoEnv: repoEnv, ExtraAllowedTools: extraAllowedTools, Namespace: namespace}
-	resume := func(message string) (*agentproc.Result, error) {
-		outcome, err := s.ResumeWithMessage(ctx, orgID, runID, sessionID, cwd, message, resumeOpts, triggerType, creatorUserID)
-		if err != nil {
-			return nil, err
-		}
-		if outcome == nil {
-			return nil, nil
-		}
-		return outcome.Completion, nil
-	}
-
-	return runCompletionRetryLoop(runID, namespace, initial, memoryPresent, resume, maxCompletionRetries)
 }
 
 // materializePriorMemories writes any existing run_memory rows for the

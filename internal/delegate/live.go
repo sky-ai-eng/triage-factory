@@ -27,18 +27,21 @@ import (
 
 // liveProc is the slice of *agentproc.LiveRun the driver loop needs. Pulled
 // out as an interface so driveLiveRun is unit-testable with a fake process
-// (no subprocess) — the real *agentproc.LiveRun satisfies it.
+// (no subprocess) — the real *agentproc.LiveRun satisfies it. Send delivers a
+// follow-up message into the same warm process (used by the invalid-envelope
+// re-prompt-to-fix).
 type liveProc interface {
 	Done() <-chan struct{}
 	Result() *agentproc.Result
 	SessionID() string
 	Stderr() string
 	Err() error
+	Send(ctx context.Context, text string) error
 	Close() error
 }
 
 // liveParkContext carries the identity an idle hibernation needs to snapshot
-// the workspace and park the run to awaiting_input.
+// the workspace and park the run to open.
 type liveParkContext struct {
 	orgID         string
 	runID         string
@@ -53,13 +56,16 @@ type liveParkContext struct {
 // identically by the LiveRun driver and the one-shot fallback so runAgent /
 // ResumeWithMessage branch on a single shape:
 //
-//   - result set        → a turn produced its terminal envelope; the caller
-//     runs processCompletion (which owns yield→park, the gate, and finalize).
+//   - result set        → a turn produced a valid conclusion (or an IsError /
+//     crash result); the caller runs processCompletion (finalize / advance /
+//     fail-with-reason).
 //   - hibernated true    → the live process went idle and was parked to
-//     awaiting_input (snapshot written, status flipped); the caller returns
-//     dormant, keeping the warm worktree.
-//   - err set, no result → the process errored/was cancelled before any
-//     terminal result; the caller routes through handleCancelled / failRun.
+//     open (snapshot written, status flipped); the caller returns dormant,
+//     keeping the warm worktree.
+//   - err set, no result → the process errored / was cancelled before any
+//     terminal result, or the agent never corrected an invalid conclusion
+//     envelope within the bound; the caller routes through handleCancelled /
+//     failRun.
 type liveOutcome struct {
 	result     *agentproc.Result
 	sessionID  string
@@ -92,11 +98,14 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 	activity := make(chan struct{}, 64)
 
 	spec.opts.OnResult = func(r *agentproc.Result) {
-		// The driver consumes only the FIRST result and then closes the
-		// process, so a full buffer here means later results arrived for a run
-		// we've already decided to terminate — dropping them is intentional,
-		// not lossy. A future multi-turn driver (P3 steering, which keeps the
-		// process warm past a conversational turn) MUST revisit this drop.
+		// The driver consumes a result per turn: a valid conclusion closes the
+		// process and returns, an invalid one is re-prompted (the next turn
+		// produces the next result), and a no-conclusion turn keeps the process
+		// warm. A full buffer means results are arriving faster than the driver
+		// selects them; a non-blocking send keeps the reader goroutine moving,
+		// and the buffer depth covers the normal turn cadence. The driver only
+		// ever acts on the result it reads next, so an overflow drop loses a
+		// stale turn, never the one it will decide on.
 		select {
 		case results <- r:
 		default:
@@ -119,14 +128,37 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 	// the caller's completion + failure paths.
 	out.sessionID = lr.SessionID()
 	out.stderr = lr.Stderr()
+	// The driver hands back the per-turn result it decided on; the live process
+	// folds every turn (the conclusion plus any re-prompt-to-fix correction
+	// turns) into its merged Result, so prefer that for cumulative cost /
+	// duration / turn accounting. MergeResult keeps the latest turn's text, so
+	// the conclusion the driver classified is preserved.
+	if out.result != nil {
+		if merged := lr.Result(); merged != nil {
+			out.result = merged
+		}
+	}
 	return out
 }
 
-// driveLiveRun is the select loop that resolves a live process into one of
-// three terminal dispositions. The idle timer resets on every stream
-// activity, so a slow-but-working agent (constant tool/text output) never
-// hibernates — only a genuinely quiet process does. idleTimeout<=0 disables
-// hibernation entirely (the gate's bounded resume always produces a result).
+// driveLiveRun is the select loop that resolves a live process into a
+// disposition by classifying each turn-end into one of three buckets:
+//
+//   - valid conclusion → close the process and hand the result back for
+//     orchestration (finalize / advance / fail-with-reason).
+//   - invalid conclusion attempt (envelope-shaped but malformed / missing a
+//     required field) → re-prompt the same warm process to fix it, up to
+//     maxCompletionRetries; fail the run if it never corrects.
+//   - no conclusion (prose / nothing) → the run is open: keep the process
+//     warm, reset the idle timer, and loop. Whether the OS process stays warm
+//     is in-memory only; the status only flips to open on idle hibernation.
+//
+// The idle timer resets on every stream activity, so a slow-but-working agent
+// (constant tool/text output) never hibernates — only a genuinely quiet
+// process does. idleTimeout<=0 disables hibernation AND the multi-turn loop:
+// it's the bounded-resume backstop (ResumeWithMessage), which expects exactly
+// one turn, so any result there is terminal and an open turn-end is handed
+// back rather than looped (no idle timer would ever close it).
 //
 // The idle window is armed at entry (process spawn). The first stream event —
 // typically system/init, sub-second — resets it, so idleTimeout is effectively
@@ -142,6 +174,12 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 	if idle != nil {
 		defer idle.Stop()
 	}
+	// multiTurn distinguishes a long-lived autonomous run (it may oscillate
+	// running↔open across turns and hibernate when idle) from a bounded resume
+	// (one re-invoke that always drives to a result). Keyed off idleTimeout so
+	// the two callers stay on one driver.
+	multiTurn := idleTimeout > 0
+	invalidAttempts := 0
 
 	for {
 		select {
@@ -153,18 +191,69 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 			return liveOutcome{err: ctx.Err()}
 
 		case r := <-results:
-			// A turn produced its terminal envelope. Close the process so the
-			// session is free for processCompletion's gate to resume against,
-			// and hand the result back.
-			_ = proc.Close()
-			return liveOutcome{result: r}
+			// An IsError result (max-turns, interrupt, runtime error) is terminal
+			// regardless of envelope shape — hand it back; processCompletion fails
+			// it.
+			if r.IsError {
+				_ = proc.Close()
+				return liveOutcome{result: r}
+			}
+			class, _ := classifyAgentResult(r.Result)
+			switch class {
+			case turnValid:
+				// A turn produced a valid conclusion. Close the process (freeing
+				// the session) and hand the result back to orchestrate.
+				_ = proc.Close()
+				return liveOutcome{result: r}
+
+			case turnInvalid:
+				if !multiTurn {
+					// Bounded resume: no in-process re-prompt loop. Hand the
+					// (invalid) result back; the caller records a NULL outcome and
+					// the orchestrator decides.
+					_ = proc.Close()
+					return liveOutcome{result: r}
+				}
+				if invalidAttempts >= maxCompletionRetries {
+					// The agent kept emitting a malformed envelope past the bound.
+					// This is a knowable error → fail the run.
+					_ = proc.Close()
+					return liveOutcome{err: fmt.Errorf("agent did not return a valid completion envelope after %d correction attempts", maxCompletionRetries)}
+				}
+				invalidAttempts++
+				if err := proc.Send(ctx, invalidEnvelopeCorrection()); err != nil {
+					_ = proc.Close()
+					return liveOutcome{err: fmt.Errorf("re-prompt invalid completion envelope: %w", err)}
+				}
+				// Sending is activity; re-arm the idle window for the corrected turn.
+				resetIdleTimer(idle, idleTimeout)
+
+			case turnNone:
+				if !multiTurn {
+					// Bounded resume produced no envelope — hand it back; the caller
+					// records a NULL outcome (orchestrator decides). Looping here
+					// would block forever (no idle timer to close the warm process).
+					_ = proc.Close()
+					return liveOutcome{result: r}
+				}
+				// The turn ended without a conclusion → the run is open (not
+				// executing, not concluded). Flip the status now: the process stays
+				// warm in s.procs for a follow-up message, but whether it's warm is
+				// never a status — so a crash here leaves an `open` run that the boot
+				// reconcile correctly leaves alone (nothing to resume). No retry, no
+				// fail, no claim about why. Re-arm idle and loop; idle later closes
+				// the warm process (status stays open).
+				s.markRunOpen(park)
+				resetIdleTimer(idle, idleTimeout)
+			}
 
 		case <-activity:
 			resetIdleTimer(idle, idleTimeout)
 
 		case <-idleC:
-			// Quiet past the threshold with no terminal result — hibernate to a
-			// durable resume. Reuses awaiting_input; no new status.
+			// Quiet past the threshold with no input to act on — hibernate to a
+			// durable resume. The status flips to open here; whether a process was
+			// warm was never a status.
 			_ = proc.Close()
 			s.hibernatePark(park, proc.SessionID())
 			return liveOutcome{hibernated: true}
@@ -177,12 +266,58 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 	}
 }
 
-// hibernatePark parks an idle live run to awaiting_input: snapshot the
-// workspace (the cold-resume backstop), flip the status under a race guard,
-// and nudge the board + UI. The mirror of persistYield's tail minus the
-// yield_request message — idle hibernation isn't a yield, it just goes
-// dormant on the same ResumeAfterYield path that a message or autonomous
-// continuation later wakes.
+// invalidEnvelopeCorrection is the message the driver re-prompts a warm run
+// with after a malformed / incomplete completion envelope. It names exactly
+// the contract the agent owes; the agent's position-specific system prompt
+// already told it which outcomes apply, so this just demands a well-formed
+// envelope. Kept terse because it rides the same session, not a fresh prompt.
+func invalidEnvelopeCorrection() string {
+	return "Your final message was not a valid completion envelope. Reply with ONLY a JSON object " +
+		"whose \"outcome\" is one of \"continue\", \"finish\", or \"abort\", carrying a \"summary\" " +
+		"(on finish/continue) or a \"reason\" (on abort), and no other text."
+}
+
+// markRunOpen flips a run to `open` when a turn ends without a conclusion. The
+// process stays warm in s.procs for a follow-up message, so this is status-only
+// — the workspace snapshot is deferred to idle hibernation (there's nothing to
+// lose while the process is alive). Flipping now (rather than at idle) is what
+// makes a crash in the warm window recover correctly: the boot reconcile leaves
+// `open` runs alone, since a restart provides no input to resume them.
+// Nil-safe so the no-DB driver tests can exercise the loop.
+func (s *Spawner) markRunOpen(park liveParkContext) {
+	if s.agentRuns == nil {
+		return // test fixture with no DB wired
+	}
+	bgCtx := context.Background()
+	var flipped bool
+	var err error
+	if park.triggerType == "manual" {
+		err = s.tx.SyntheticClaimsWithTx(bgCtx, park.orgID, park.creatorUserID, func(ts db.TxStores) error {
+			f, e := ts.AgentRuns.MarkOpen(bgCtx, park.orgID, park.runID)
+			flipped = f
+			return e
+		})
+	} else {
+		flipped, err = s.agentRuns.MarkOpenSystem(bgCtx, park.orgID, park.runID)
+	}
+	if err != nil {
+		log.Printf("[delegate] warning: mark open for run %s on a no-conclusion turn: %v", park.runID, err)
+		return
+	}
+	if !flipped {
+		// A racing terminal flip (cancel/takeover) won — leave its status.
+		return
+	}
+	s.broadcastRunUpdate(park.orgID, park.runID, "open")
+	s.recomputeTaskBoardColumn(park.orgID, park.taskID)
+}
+
+// hibernatePark parks an idle live run to open: snapshot the workspace (the
+// cold-resume backstop), flip the status under a race guard (a no-op when the
+// run already went open on its last no-conclusion turn), and nudge the board +
+// UI. "open" makes no claim about why the run stopped or who (if anyone)
+// continues it — the process simply went quiet and was idle-closed; any later
+// input resumes it on the same ResumeWithMessage path.
 func (s *Spawner) hibernatePark(park liveParkContext, sessionID string) {
 	bgCtx := context.Background()
 
@@ -197,15 +332,15 @@ func (s *Spawner) hibernatePark(park liveParkContext, sessionID string) {
 	var flipErr error
 	if park.triggerType == "manual" {
 		flipErr = s.tx.SyntheticClaimsWithTx(bgCtx, park.orgID, park.creatorUserID, func(ts db.TxStores) error {
-			f, e := ts.AgentRuns.MarkAwaitingInput(bgCtx, park.orgID, park.runID)
+			f, e := ts.AgentRuns.MarkOpen(bgCtx, park.orgID, park.runID)
 			flipped = f
 			return e
 		})
 	} else {
-		flipped, flipErr = s.agentRuns.MarkAwaitingInputSystem(bgCtx, park.orgID, park.runID)
+		flipped, flipErr = s.agentRuns.MarkOpenSystem(bgCtx, park.orgID, park.runID)
 	}
 	if flipErr != nil {
-		log.Printf("[delegate] warning: mark awaiting_input for run %s on idle hibernation: %v", park.runID, flipErr)
+		log.Printf("[delegate] warning: mark open for run %s on idle hibernation: %v", park.runID, flipErr)
 		return
 	}
 	if !flipped {
@@ -213,9 +348,9 @@ func (s *Spawner) hibernatePark(park liveParkContext, sessionID string) {
 		// snapshot it didn't need is dropped by that path's terminal cleanup.
 		return
 	}
-	s.broadcastRunUpdate(park.orgID, park.runID, "awaiting_input")
+	s.broadcastRunUpdate(park.orgID, park.runID, "open")
 	s.recomputeTaskBoardColumn(park.orgID, park.taskID)
-	toast.Info(s.wsHub, park.orgID, fmt.Sprintf("Run %s hibernated while idle — resumes on the next message", shortRunID(park.runID)))
+	toast.Info(s.wsHub, park.orgID, fmt.Sprintf("Run %s went idle — open until the next message", shortRunID(park.runID)))
 }
 
 // runOneShot wraps the blocking one-shot agentproc.Run into the shared

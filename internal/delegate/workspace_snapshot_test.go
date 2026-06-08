@@ -246,10 +246,10 @@ func TestEnsureWorkspace_ColdPath_NoSnapshotErrors(t *testing.T) {
 	}
 }
 
-// TestFailRun_DiscardsWorkspaceSnapshot: a parked run that then fails (e.g. a
-// yield-resume that errors mid-execution, or a persistYield that couldn't
-// record) drops its snapshot rather than orphaning the blob. failRun is the
-// single failure chokepoint covering the resume goroutine's failure exits.
+// TestFailRun_DiscardsWorkspaceSnapshot: a parked run that then fails (e.g. an
+// open run whose resume errors mid-execution) drops its snapshot rather than
+// orphaning the blob. failRun is the single failure chokepoint covering the
+// resume goroutine's failure exits.
 func TestFailRun_DiscardsWorkspaceSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	s, _, runID, taskID := setupAdvanceFixture(t, "failrun-discard")

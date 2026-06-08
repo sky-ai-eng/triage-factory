@@ -9,7 +9,7 @@ import (
 
 // recomputeTaskBoardColumn is the blueprint-era board placement rule: a
 // bot-claimed task's live column is a recomputed aggregate over its active
-// blueprint_run's step runs — in_review if any run is parked (awaiting_input or
+// blueprint_run's step runs — in_review if any run is parked (open or
 // pending_approval), else in_progress. Terminal columns (done / leave-open) are
 // owned by terminateBlueprint, not this helper. These tests pin the aggregate
 // directly by mutating run state and invoking the recompute, without spawning a
@@ -29,16 +29,16 @@ func TestRecomputeBoard_RunningSetsInProgress(t *testing.T) {
 	}
 }
 
-// A parked run — yield (awaiting_input) — moves the aggregate to in_review.
-func TestRecomputeBoard_AwaitingInputSetsInReview(t *testing.T) {
+// A parked run — `open` — moves the aggregate to in_review.
+func TestRecomputeBoard_OpenSetsInReview(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "ai")
 	stampBotClaim(t, database, taskID)
-	setRunStatus(t, database, runID, "awaiting_input")
+	setRunStatus(t, database, runID, "open")
 
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
 
 	if got := readTaskStatus(t, database, taskID); got != "in_review" {
-		t.Errorf("task.status = %q, want in_review (yield parks → needs 👀)", got)
+		t.Errorf("task.status = %q, want in_review (open parks → needs 👀)", got)
 	}
 }
 
@@ -68,10 +68,10 @@ func TestRecomputeBoard_BouncesAcrossInteractionPoints(t *testing.T) {
 		t.Fatalf("initial: status = %q, want in_progress", got)
 	}
 
-	setRunStatus(t, database, runID, "awaiting_input")
+	setRunStatus(t, database, runID, "open")
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
 	if got := readTaskStatus(t, database, taskID); got != "in_review" {
-		t.Fatalf("after yield: status = %q, want in_review", got)
+		t.Fatalf("after open: status = %q, want in_review", got)
 	}
 
 	setRunStatus(t, database, runID, "running")

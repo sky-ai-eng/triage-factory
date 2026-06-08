@@ -100,7 +100,7 @@ You should see the parsed claims printed as JSON (`Subject`, `Email`, `Provider`
 
 ## Durable workspace storage (MinIO)
 
-A blueprint's workspace — the git worktree plus the scratch space its steps hand off through — must survive the executor that created it (a yield to a human can outlast the process; an executor can scale down mid-run). The TF binary snapshots that workspace to an **S3-compatible object store** and rehydrates it on resume; the host worktree is only a warm cache.
+A blueprint's workspace — the git worktree plus the scratch space its steps hand off through — must survive the executor that created it (an open run can outlast the process; an executor can scale down mid-run). The TF binary snapshots that workspace to an **S3-compatible object store** and rehydrates it on resume; the host worktree is only a warm cache.
 
 Self-host runs **MinIO** for this: one self-contained S3 container, no Postgres or JWT coupling. The workspace snapshots are opaque server-internal tarballs — they need a dumb bucket, not a storage API's RLS / resumable-upload / CDN layer. The `minio` service in `docker-compose.yml` provides exactly that, and a one-shot `minio-postinit` sidecar creates the bucket on every `up` (`mc mb --ignore-existing` — idempotent).
 

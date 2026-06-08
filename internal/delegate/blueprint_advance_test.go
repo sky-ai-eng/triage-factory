@@ -53,10 +53,9 @@ func TestDecideBlueprintStep(t *testing.T) {
 		{"unknown non-final aborts", "bogus", false, blueprintStepAbort, "unknown-outcome: bogus"},
 		{"unknown final aborts", "bogus", true, blueprintStepAbort, "unknown-outcome: bogus"},
 
-		// yield is a valid RunOutcome but never reaches a completed step (it
-		// parks the run in awaiting_input before completing). Pin that even if
-		// a buggy write ever persisted it on a completed step, the default
-		// branch refuses to act on it — abort, never finish — on either side.
+		// "yield" is no longer a recognized outcome, so a stray "yield"
+		// persisted on a completed step is just an unknown token:
+		// the default branch refuses to act on it — abort, never finish.
 		{"yield on completed step aborts (non-final)", "yield", false, blueprintStepAbort, "unknown-outcome: yield"},
 		{"yield on completed step aborts (final)", "yield", true, blueprintStepAbort, "unknown-outcome: yield"},
 	}
@@ -95,7 +94,7 @@ func TestProcessCompletion_BlueprintStepExternalActionCoercesToFinish(t *testing
 	cwd := t.TempDir()
 
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, "bpr-"+runID, task,
-		res(`{"outcome":"continue","summary":"opened a PR"}`), cwd, "", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
+		res(`{"outcome":"continue","summary":"opened a PR"}`), cwd, "", "event", "")
 
 	run := loadRun(t, s, runID)
 	if run.Outcome != "finish" {
@@ -117,7 +116,7 @@ func TestProcessCompletion_BlueprintStepContinueNoPendingStaysContinue(t *testin
 	cwd := t.TempDir()
 
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, "bpr-"+runID, task,
-		res(`{"outcome":"continue","summary":"did step work"}`), cwd, "", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
+		res(`{"outcome":"continue","summary":"did step work"}`), cwd, "", "event", "")
 
 	run := loadRun(t, s, runID)
 	if run.Outcome != "continue" {
@@ -158,7 +157,7 @@ func TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow(t *testing.T) 
 	// No session id → the gate can't (and needn't) retry; the staged file plus
 	// a valid continue outcome already satisfy it.
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, "bpr-"+runID, task,
-		res(`{"outcome":"continue","summary":"did step work"}`), cwd, "", "claude-sonnet-4-6", "owner", "repo", "event", "", "")
+		res(`{"outcome":"continue","summary":"did step work"}`), cwd, "", "event", "")
 
 	mem, err := sqlitestore.New(database).TaskMemory.GetRunMemory(context.Background(), runmode.LocalDefaultOrg, runID)
 	if err != nil || mem == nil {

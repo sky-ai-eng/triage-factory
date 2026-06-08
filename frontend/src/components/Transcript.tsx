@@ -16,8 +16,8 @@ interface Props {
 // of the detail view is to see exactly what the agent did.
 //
 // View modes:
-//   - conversation: text + tool calls + results + yield Q+A (everything
-//     except thinking, which isn't persisted today).
+//   - conversation: text + tool calls + results (everything except thinking,
+//     which isn't persisted today).
 //   - commands: tool calls + results only. Prose is hidden so it's easy
 //     to scan what the agent actually executed.
 export default function Transcript({ messages, run, mode }: Props) {
@@ -37,38 +37,6 @@ export default function Transcript({ messages, run, mode }: Props) {
       minute: '2-digit',
       second: '2-digit',
     })
-
-    if (msg.Subtype === 'yield_request') {
-      if (mode === 'commands') continue
-      let parsed = msg.Content
-      try {
-        const req = JSON.parse(msg.Content) as { message?: string }
-        parsed = req.message || msg.Content
-      } catch {
-        // not JSON — keep raw
-      }
-      rows.push(
-        <Row key={`yreq-${msg.ID}`} time={time}>
-          <div className="text-snooze text-[13px] leading-relaxed">
-            <span className="font-semibold">❓ Agent asked:</span> {parsed}
-          </div>
-        </Row>,
-      )
-      continue
-    }
-
-    if (msg.Subtype === 'yield_response') {
-      if (mode === 'commands') continue
-      rows.push(
-        <Row key={`yres-${msg.ID}`} time={time}>
-          <div className="text-[13px] leading-relaxed">
-            <span className="font-semibold text-text-secondary">↩ You replied:</span>{' '}
-            <span className="text-text-primary">{msg.Content}</span>
-          </div>
-        </Row>,
-      )
-      continue
-    }
 
     if (msg.Role !== 'assistant') continue
 
