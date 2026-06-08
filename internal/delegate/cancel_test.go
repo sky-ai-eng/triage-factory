@@ -44,15 +44,15 @@ func (f *fakeDrainer) callsCopy() []drainCall {
 	return out
 }
 
-// TestCancel_AwaitingInputAutoRun_DrainsQueue pins the fix for the
+// TestCancel_OpenAutoRun_DrainsQueue pins the fix for the
 // "Cancel without active goroutine never calls notifyDrainer" leak.
-// An auto-fired run parked in awaiting_input has no goroutine defer
-// to piggy-back on, so without the explicit drain the per-entity
-// firing queue would stick until some other run terminated. SKY-139.
-func TestCancel_AwaitingInputAutoRun_DrainsQueue(t *testing.T) {
+// An auto-fired run parked `open` has no goroutine defer to piggy-back on, so
+// without the explicit drain the per-entity firing queue would stick until some
+// other run terminated.
+func TestCancel_OpenAutoRun_DrainsQueue(t *testing.T) {
 	database := newTakeoverTestDB(t)
 	seedRun(t, database, "r1", "sess-1", "/tmp/wt-r1")
-	if _, err := database.Exec(`UPDATE runs SET status = 'awaiting_input', trigger_type = 'event', creator_user_id = NULL WHERE id = 'r1'`); err != nil {
+	if _, err := database.Exec(`UPDATE runs SET status = 'open', trigger_type = 'event', creator_user_id = NULL WHERE id = 'r1'`); err != nil {
 		t.Fatalf("park run: %v", err)
 	}
 
@@ -83,17 +83,16 @@ func TestCancel_AwaitingInputAutoRun_DrainsQueue(t *testing.T) {
 	}
 }
 
-// TestCancel_AwaitingInputManualRun_NoDrain confirms the manual
-// short-circuit still applies when Cancel hits the no-goroutine
-// path. notifyDrainer is the spot that filters trigger_type=manual,
-// not the caller, so this is a regression guard against someone
-// later adding the filter at the call site instead.
-func TestCancel_AwaitingInputManualRun_NoDrain(t *testing.T) {
+// TestCancel_OpenManualRun_NoDrain confirms the manual short-circuit still
+// applies when Cancel hits the no-goroutine path. notifyDrainer is the spot
+// that filters trigger_type=manual, not the caller, so this is a regression
+// guard against someone later adding the filter at the call site instead.
+func TestCancel_OpenManualRun_NoDrain(t *testing.T) {
 	database := newTakeoverTestDB(t)
 	seedRun(t, database, "r-manual", "sess-2", "/tmp/wt-rm")
 	// Manual is the seedRun default but we set it explicitly for
-	// clarity and pin to awaiting_input.
-	if _, err := database.Exec(`UPDATE runs SET status = 'awaiting_input', trigger_type = 'manual' WHERE id = 'r-manual'`); err != nil {
+	// clarity and pin to `open`.
+	if _, err := database.Exec(`UPDATE runs SET status = 'open', trigger_type = 'manual' WHERE id = 'r-manual'`); err != nil {
 		t.Fatalf("park run: %v", err)
 	}
 
@@ -145,16 +144,16 @@ func TestCancel_AlreadyTerminal_NoDrain(t *testing.T) {
 	}
 }
 
-// TestCancel_AwaitingInputStep_FinalizesBlueprintRun pins the fix for the
-// orphaned-blueprint_run leak: cancelling a yield-parked step through the
+// TestCancel_OpenStep_FinalizesBlueprintRun pins the fix for the
+// orphaned-blueprint_run leak: cancelling an open-parked step through the
 // DB-only path (no live orchestrator goroutine) must also finalize the owning
 // blueprint_run, not just the run row. Pre-fix the blueprint_run stuck in
 // 'running' forever (and its snapshot orphaned). seedRun links the run to a
 // 1-step blueprint_run "seedbpr-<runID>".
-func TestCancel_AwaitingInputStep_FinalizesBlueprintRun(t *testing.T) {
+func TestCancel_OpenStep_FinalizesBlueprintRun(t *testing.T) {
 	database := newTakeoverTestDB(t)
 	seedRun(t, database, "r-step", "sess-step", "/tmp/wt-rs")
-	if _, err := database.Exec(`UPDATE runs SET status = 'awaiting_input' WHERE id = 'r-step'`); err != nil {
+	if _, err := database.Exec(`UPDATE runs SET status = 'open' WHERE id = 'r-step'`); err != nil {
 		t.Fatalf("park run: %v", err)
 	}
 

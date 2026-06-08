@@ -23,6 +23,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/projectbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -104,7 +105,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		teamID, e = resolveActingTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+		teamID, e = teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
 		}
@@ -156,7 +157,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		created, getErr = tx.Projects.Get(r.Context(), orgID, id)
 		return getErr
 	}); err != nil {
-		if writeIfActingTeamError(w, err) {
+		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
 		log.Printf("handleProjectCreate: %v", err)
@@ -348,10 +349,10 @@ func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 		var e error
 		// Import is local-mode-only (gated above), so there's no picker
 		// and the sole-team fallback always applies — pass an empty pick.
-		teamID, e = resolveActingTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, "")
+		teamID, e = teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, "")
 		return e
 	}); err != nil {
-		if writeIfActingTeamError(w, err) {
+		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
 		internalError(w, "projects", err)

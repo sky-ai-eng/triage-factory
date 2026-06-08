@@ -154,15 +154,15 @@ func (s *Spawner) Takeover(orgID, runID, baseDir, userID string) (*TakeoverResul
 	if run.WorktreePath == "" {
 		return nil, fmt.Errorf("%w: run %s has no worktree path; cannot take over", ErrTakeoverInvalidState, runID)
 	}
-	// Jira lazy runs DO populate worktree_path (with the run-root, so
-	// yield/resume can reuse it as the resume cwd). Takeover for those
+	// Jira lazy runs DO populate worktree_path (with the run-root, so a
+	// resume can reuse it as the resume cwd). Takeover for those
 	// would require copying the full run-root tree including all
 	// per-repo worktrees as subdirs, plus rewriting any absolute paths
 	// the agent recorded in its session — out of scope for now. Reject
 	// explicitly via a task-source check rather than papering over with
 	// an empty-path heuristic.
 	if task != nil && task.EntitySource == "jira" {
-		return nil, fmt.Errorf("%w: run %s is a Jira lazy delegation; multi-worktree takeover is not yet supported (use the user-respond / yield-resume flow instead)", ErrTakeoverInvalidState, runID)
+		return nil, fmt.Errorf("%w: run %s is a Jira lazy delegation; multi-worktree takeover is not yet supported", ErrTakeoverInvalidState, runID)
 	}
 
 	// Atomically: confirm the run is still active, confirm we haven't

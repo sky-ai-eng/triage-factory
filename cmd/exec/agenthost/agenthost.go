@@ -37,8 +37,10 @@ package agenthost
 import (
 	"context"
 	"errors"
+	"io"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 )
 
@@ -176,6 +178,48 @@ type Client interface {
 	JiraListPriorities(ctx context.Context) ([]jiraclient.Priority, error)
 	JiraSetPriority(ctx context.Context, key, priority string) error
 	JiraListIssueTypes(ctx context.Context, project string) ([]jiraclient.IssueType, error)
+
+	// --- github (exec gh pr / actions ...) ---
+	//
+	// These route the agent's in-sandbox `exec gh` GitHub API calls host-
+	// side: the daemon builds the org's authenticated client via the
+	// resolver's ClientForRepo (App installation token for owner/repo when
+	// the grant covers it, else the org PAT) and makes the REST call, so the
+	// sandbox never loads a GitHub credential — no keychain read, no dbus,
+	// and Property B holds (the jail never holds a token). LocalClient builds
+	// the same client in-process via the same resolver, which is the
+	// unchanged local-mode path (the keychain read happens on the user's own
+	// machine, never in a jail). owner/repo select the credential tier per
+	// call. HTTP failures propagate with their status intact (see the
+	// response struct's HTTPStatus note) so the 406 diff fallback and the
+	// 404 download-logs fallback keep working over the RPC.
+	GithubGetPR(ctx context.Context, owner, repo string, number int, verbose bool) (*ghclient.PRView, error)
+	GithubGetPRDiff(ctx context.Context, owner, repo string, number int, file string) (string, error)
+	GithubGetPRFiles(ctx context.Context, owner, repo string, number int) ([]ghclient.PRFile, error)
+	GithubGetCommentThread(ctx context.Context, owner, repo string, commentID, page int) (*ghclient.CommentThread, error)
+	GithubGetReviewDetail(ctx context.Context, owner, repo string, number, reviewID int, verbose bool) (*ghclient.ReviewDetail, error)
+	GithubDismissReview(ctx context.Context, owner, repo string, number, reviewID int, message string) error
+	GithubSubmitReview(ctx context.Context, owner, repo string, number int, commitSHA, event, body string, comments []ghclient.SubmitReviewComment) (int, string, error)
+	GithubCreatePR(ctx context.Context, owner, repo, head, base, title, body string, draft bool) (int, string, error)
+	GithubAddComment(ctx context.Context, owner, repo string, number int, body string) (int, error)
+	GithubReplyToComment(ctx context.Context, owner, repo string, number, commentID int, body string) (int, error)
+	GithubReactToComment(ctx context.Context, owner, repo string, commentID int, emoji string) error
+	GithubUpdateComment(ctx context.Context, owner, repo string, commentID int, body string) error
+	GithubDeleteComment(ctx context.Context, owner, repo string, commentID int) error
+
+	// GithubAPIGet is the raw authenticated GET the actions verbs lean on
+	// (workflow-run + job listings have no typed ghclient method). Returns
+	// the response body bytes; the sandbox parses them locally.
+	GithubAPIGet(ctx context.Context, owner, repo, path string) ([]byte, error)
+
+	// GithubDownloadArtifact streams a large binary blob (a workflow-run log
+	// archive or per-job log) to dst, capped at maxBytes. LocalClient streams
+	// straight through (no buffering); the IPCClient buffers the host's reply
+	// and copies it into dst, so the daemon does the privileged fetch and the
+	// sandbox only ever writes into its own bind-mounted worktree. A 404
+	// (run still in progress) comes back as a reconstructable github.HTTPError
+	// so the per-job fallback fires.
+	GithubDownloadArtifact(ctx context.Context, owner, repo, path string, dst io.Writer, maxBytes int64) (int64, error)
 
 	// Close releases any resources held by the client. LocalClient is
 	// a no-op (it doesn't own the DB conn — that's exec.Handle's

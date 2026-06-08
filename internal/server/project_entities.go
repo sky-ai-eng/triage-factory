@@ -9,6 +9,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
+// projectEntitiesHandler serves the per-project entities panel endpoint,
+// holding the transactional store runner it reads through.
+type projectEntitiesHandler struct {
+	tx db.TxRunner
+}
+
 // projectEntity is the per-row payload returned by
 // GET /api/projects/{id}/entities. Trimmed down from domain.Entity —
 // snapshot_json + description aren't useful in a list view, and
@@ -33,8 +39,8 @@ type projectEntity struct {
 // are filtered out at the DB layer. The panel surfaces work that's
 // still in flight; historical context lives elsewhere (entity detail
 // pages, future audit views) so the panel stays scannable.
-func (s *Server) handleProjectEntities(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (pe *projectEntitiesHandler) handleProjectEntities(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -42,7 +48,7 @@ func (s *Server) handleProjectEntities(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
 	var project *domain.Project
 	var entities []domain.ProjectPanelEntity
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := pe.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		project, e = tx.Projects.Get(r.Context(), orgID, projectID)
 		if e != nil {

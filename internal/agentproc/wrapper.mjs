@@ -29,6 +29,7 @@ import { createInterface } from "node:readline"
 function parseArgs(argv) {
   let prompt = ""
   let streamInput = false
+  let permissionPrompts = false
   const opts = {}
   const addDirs = []
 
@@ -72,6 +73,15 @@ function parseArgs(argv) {
         // default).
         if (next() === "stream-json") streamInput = true
         break
+      case "--permission-prompts":
+        // Opt into the canUseTool callback (valueless flag). Without it
+        // we deliberately leave options.canUseTool unset so the SDK
+        // gates purely on --allowedTools — off-allowlist tools auto-deny
+        // with no prompt, matching the headless one-shot path. The Go
+        // side (RunInteractive) emits this only when a permission
+        // handler was supplied.
+        permissionPrompts = true
+        break
       case "--output-format":
         // CLI flag — the SDK iterator already emits the same shape.
         next()
@@ -85,7 +95,7 @@ function parseArgs(argv) {
   }
 
   if (addDirs.length > 0) opts.additionalDirectories = addDirs
-  return { prompt, options: opts, streamInput }
+  return { prompt, options: opts, streamInput, permissionPrompts }
 }
 
 function emit(obj) {
@@ -147,11 +157,13 @@ function userMessage(text) {
   }
 }
 
-// runStreamingInput drives the streaming-input mode: it wires the
-// canUseTool permission round-trip, creates the streaming query, and
+// runStreamingInput drives the streaming-input mode: it (optionally) wires
+// the canUseTool permission round-trip, creates the streaming query, and
 // dispatches stdin control messages — one at a time, in arrival order —
-// until end/EOF.
-async function runStreamingInput(options) {
+// until end/EOF. permissionPrompts gates canUseTool: when false the
+// callback is left unset and the SDK gates solely on --allowedTools, so an
+// off-allowlist tool auto-denies with no prompt (the autonomous-run path).
+async function runStreamingInput(options, permissionPrompts) {
   const input = createInputStream()
   const pendingPerms = new Map()
   let permCounter = 0
@@ -166,43 +178,52 @@ async function runStreamingInput(options) {
     for (const settle of settles) settle({ behavior: "deny", message })
   }
 
-  // canUseTool is only honored in streaming-input mode. Each call emits a
-  // permission_request and parks on a promise the matching
+  // canUseTool is only honored in streaming-input mode, and only wired
+  // when the Go caller opted in (a permission handler was supplied). Each
+  // call emits a permission_request and parks on a promise the matching
   // permission_response (from stdin) resolves. The settle wrapper is
   // idempotent (a one-shot guard) so an abort-signal denial, an explicit
   // response, and a close-time deny can't double-resolve. Once we're
   // closing, deny immediately so a late tool request can't re-block the
   // drain. Returns the SDK PermissionResult (sdk.d.ts) shape: allow|deny.
-  options.canUseTool = async (toolName, toolInput, opts = {}) => {
-    if (closing) return { behavior: "deny", message: "run ending" }
-    const requestId = `perm-${++permCounter}`
-    emit({
-      type: "control",
-      subtype: "permission_request",
-      request_id: requestId,
-      tool_name: toolName,
-      input: toolInput,
-    })
-    return new Promise((resolve) => {
-      let done = false
-      const settle = (decision) => {
-        if (done) return
-        done = true
-        pendingPerms.delete(requestId)
-        resolve(decision)
-      }
-      pendingPerms.set(requestId, settle)
-      // If the turn is interrupted, the SDK aborts this signal — resolve
-      // as a deny so the pending promise never strands the query.
-      const signal = opts.signal
-      if (signal) {
-        if (signal.aborted) {
-          settle({ behavior: "deny", message: "interrupted" })
-        } else {
-          signal.addEventListener("abort", () => settle({ behavior: "deny", message: "interrupted" }), { once: true })
+  //
+  // When permissionPrompts is false we deliberately leave canUseTool
+  // unset: the SDK then evaluates only the allow/deny rules from
+  // --allowedTools, short-circuiting an allowlist match to allow and
+  // auto-denying everything else — no callback, byte-identical to the
+  // headless one-shot path.
+  if (permissionPrompts) {
+    options.canUseTool = async (toolName, toolInput, opts = {}) => {
+      if (closing) return { behavior: "deny", message: "run ending" }
+      const requestId = `perm-${++permCounter}`
+      emit({
+        type: "control",
+        subtype: "permission_request",
+        request_id: requestId,
+        tool_name: toolName,
+        input: toolInput,
+      })
+      return new Promise((resolve) => {
+        let done = false
+        const settle = (decision) => {
+          if (done) return
+          done = true
+          pendingPerms.delete(requestId)
+          resolve(decision)
         }
-      }
-    })
+        pendingPerms.set(requestId, settle)
+        // If the turn is interrupted, the SDK aborts this signal — resolve
+        // as a deny so the pending promise never strands the query.
+        const signal = opts.signal
+        if (signal) {
+          if (signal.aborted) {
+            settle({ behavior: "deny", message: "interrupted" })
+          } else {
+            signal.addEventListener("abort", () => settle({ behavior: "deny", message: "interrupted" }), { once: true })
+          }
+        }
+      })
+    }
   }
 
   const q = query({ prompt: input, options })
@@ -311,7 +332,7 @@ async function runStreamingInput(options) {
   process.exit(0)
 }
 
-const { prompt, options, streamInput } = parseArgs(process.argv.slice(2))
+const { prompt, options, streamInput, permissionPrompts } = parseArgs(process.argv.slice(2))
 
 // Forward the spawned Claude Code subprocess's stderr through our own.
 // Without this, the SDK swallows the child's stderr ("ignore" in its
@@ -322,7 +343,7 @@ const { prompt, options, streamInput } = parseArgs(process.argv.slice(2))
 options.stderr = (chunk) => process.stderr.write(chunk)
 
 if (streamInput) {
-  await runStreamingInput(options)
+  await runStreamingInput(options, permissionPrompts)
 } else {
   if (!prompt) {
     process.stderr.write("wrapper: missing -p <message>\n")

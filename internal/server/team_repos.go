@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 )
 
 // --------------------------------------------------------------------
@@ -40,16 +41,16 @@ func (s *Server) handleTeamReposGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	teamID, err := s.resolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
+	teamID, err := s.az.ResolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
 	if err != nil {
-		writeResolveError(w, "settings/team/repos", err)
+		authz.WriteResolveError(w, "settings/team/repos", err)
 		return
 	}
-	if !s.verifyTeamInOrg(w, r, orgID, userID, teamID) {
+	if !s.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
 		return
 	}
 
-	_, role, err := s.teamMemberCountAndRole(r.Context(), orgID, userID, teamID)
+	_, role, err := s.az.TeamMemberCountAndRole(r.Context(), orgID, userID, teamID)
 	if err != nil {
 		internalError(w, "settings/team/repos", err)
 		return
@@ -77,15 +78,15 @@ func (s *Server) handleTeamReposPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	teamID, err := s.resolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
+	teamID, err := s.az.ResolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
 	if err != nil {
-		writeResolveError(w, "settings/team/repos", err)
+		authz.WriteResolveError(w, "settings/team/repos", err)
 		return
 	}
-	if !s.verifyTeamInOrg(w, r, orgID, userID, teamID) {
+	if !s.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
 		return
 	}
-	if !s.requireTeamAdmin(w, r, orgID, userID, teamID) {
+	if !s.az.RequireTeamAdmin(w, r, orgID, userID, teamID) {
 		return
 	}
 

@@ -817,10 +817,12 @@ CREATE TABLE runs (
     worktree_path   TEXT,
     result_summary  TEXT,
     -- outcome is the parsed terminal-envelope outcome
-    -- (continue|finish|abort|yield); NULL on infra-error runs and on
-    -- blueprint steps whose outcome gate exhausted its retries. outcome_reason
-    -- carries the natural-language "why I stopped" populated only on abort,
-    -- kept distinct from result_summary's "what I did".
+    -- (continue|finish|abort); NULL on infra-error runs and on blueprint steps
+    -- that ended without a recognized conclusion. outcome_reason carries the
+    -- natural-language "why I stopped" populated only on abort, kept distinct
+    -- from result_summary's "what I did". A turn that ends with no conclusion at
+    -- all leaves the run 'open' (not concluded, not executing) rather than
+    -- writing an outcome.
     outcome         TEXT,
     outcome_reason  TEXT,
     stop_reason     TEXT,
@@ -861,6 +863,13 @@ CREATE TABLE runs (
     -- startup reconcile read them.
     claimed_at           DATETIME,
     attempts             INTEGER NOT NULL DEFAULT 0,
+    -- executor_id records which executor instance owns a run's live
+    -- process while it is running. Stamped when the run goes live; NULL
+    -- for queued / never-live / terminal-parked rows. At N=1 it's a
+    -- single per-process instance id (forward-compat ownership hook for
+    -- horizontal scaling, where it becomes the lease the control plane
+    -- signals through). Not a status — purely the run→executor pointer.
+    executor_id          TEXT,
     -- Pair trigger_type with creator_user_id nullability so the
     -- seeder can't drift back to lying.
     CONSTRAINT runs_creator_matches_trigger_type CHECK (

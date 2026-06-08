@@ -873,7 +873,7 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE blueprint_runs
 		SET status = ?, abort_reason = ?, aborted_at_step = ?, completed_at = ?
-		WHERE id = ? AND status IN ('running','pending_approval','awaiting_input')
+		WHERE id = ? AND status IN ('running','pending_approval','open')
 	`, string(status), reasonArg, stepArg, time.Now().UTC(), id)
 	if err != nil {
 		return false, err
@@ -995,7 +995,7 @@ func (s *blueprintStore) ActiveStepRunIDs(ctx context.Context, orgID, blueprintR
 		SELECT id FROM runs
 		WHERE blueprint_run_id = ?
 		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
-		                     'pending_approval','taken_over','awaiting_input')
+		                     'pending_approval','taken_over','open')
 	`, blueprintRunID)
 	if err != nil {
 		return nil, err

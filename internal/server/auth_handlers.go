@@ -473,7 +473,7 @@ func (s *Server) handleActiveOrgUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ok, err := s.userHasOrgAccess(r.Context(), claims.Subject, orgUUID.String())
+	ok, err := s.az.UserHasOrgAccess(r.Context(), claims.Subject, orgUUID.String())
 	if err != nil {
 		log.Printf("[auth] active-org membership check %s/%s: %v", claims.Subject, orgUUID, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)

@@ -28,9 +28,9 @@ type RunOptions struct {
 	Model string
 
 	// SessionID, when non-empty, switches the invocation to
-	// `--resume <id>`. Used for the memory-gate retry loop, the
-	// SKY-139 yield-resume flow, and the curator's per-message
-	// resumption against a long-lived project session.
+	// `--resume <id>`. Used for the crash-reclaim resume, the open-run
+	// resume path, and the curator's per-message resumption against a
+	// long-lived project session.
 	SessionID string
 
 	// Message is the value passed to `-p`. For an initial invocation
@@ -71,6 +71,26 @@ type RunOptions struct {
 	// path leaves it false.
 	Interactive bool
 
+	// PermissionPrompts opts the streaming-input wrapper into the
+	// canUseTool permission callback. The wrapper sets options.canUseTool
+	// ONLY when BuildArgs emits the matching --permission-prompts flag,
+	// which it does only when this is true. RunInteractive derives it
+	// from whether the caller supplied a non-nil PermissionHandler:
+	//
+	//   - handler supplied   → PermissionPrompts=true  → wrapper wires
+	//     canUseTool, so off-allowlist tools route to the handler (the
+	//     "ask" path); allowlist matches still short-circuit to allow.
+	//   - handler nil        → PermissionPrompts=false → wrapper omits
+	//     canUseTool entirely → behavior is byte-identical to the
+	//     headless allowlist-only path (off-allowlist tools auto-deny,
+	//     no callback). This is what keeps autonomous runs prompt-free.
+	//
+	// Without this opt-in the streaming wrapper would set canUseTool
+	// unconditionally and a nil handler would deny-all everything off the
+	// --allowedTools list. Interactive-mode only; the one-shot path
+	// ignores it.
+	PermissionPrompts bool
+
 	// ExtraEnv is appended to os.Environ() for the subprocess. Use
 	// this for run-scoped variables like TRIAGE_FACTORY_RUN_ID and
 	// TRIAGE_FACTORY_REPO that the delegated CLI subcommands read.
@@ -101,6 +121,30 @@ type RunOptions struct {
 	// empty OrgID — the resolver no-ops and the subprocess inherits
 	// the host env unchanged.
 	Secrets SecretsReader
+
+	// OnResult, when non-nil, is invoked once per turn-terminal `result`
+	// envelope the streaming-input reader folds, with that turn's parsed
+	// Result. It is the per-turn signal a live caller needs to react
+	// promptly to a completed turn (the delegate driver uses it to detect
+	// the autonomous run's terminal turn and close the process, rather
+	// than waiting for the whole query to drain). Called from the reader
+	// goroutine; it must not block. Ignored by the one-shot Run path
+	// (which returns on the first result anyway) — only RunInteractive
+	// threads it through.
+	OnResult func(*Result)
+
+	// GitProxy, when non-nil, wires a per-run git credential proxy into
+	// the sandbox branch so the agent can push/fetch over git-over-HTTPS
+	// without the real GitHub credential ever entering the box. The
+	// caller (delegate spawner) builds it over the GitHub resolver's
+	// TokenFor (App-or-PAT); the proxy holds the token host-side and the
+	// sandbox git is routed at it via injected GIT_CONFIG env entries.
+	//
+	// nil for runs with no git egress need — prompt-only scorer /
+	// classifier / profiler calls, and Jira-only runs that pre-clone
+	// nothing. Local-mode + non-sandbox paths ignore it (the agent runs
+	// directly on the host with the operator's own git credentials).
+	GitProxy *GitProxyConfig
 
 	// StartAgentHost, when non-nil, starts the per-run host agenthost
 	// daemon in the sandbox branch. The daemon owns the run identity
@@ -359,7 +403,7 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 		// See proxies.go for the mapping from resolved creds to
 		// proxy provider / upstream.
 		configureProxies := func(s *sandbox.Sandbox) ([]string, error) {
-			bundle, proxyEnv, perr := startProxiesForSandbox(s.HostIP, creds)
+			bundle, proxyEnv, perr := startProxiesForSandbox(runCtx, s.HostIP, creds, opts.GitProxy)
 			if perr != nil {
 				return nil, perr
 			}

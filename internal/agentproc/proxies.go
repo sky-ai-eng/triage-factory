@@ -3,13 +3,16 @@ package agentproc
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"strings"
+	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/llmproxy"
 )
 
@@ -36,30 +39,41 @@ const proxyTokenAnthropicPrefix = "sk-ant-"
 // proxy (injected upstream by the rewrite hook) and never enters the
 // sandbox.
 func newSandboxProxyToken(kind llmproxy.Provider) (string, error) {
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return "", fmt.Errorf("agentproc: generate per-run proxy token: %w", err)
+	tok, err := randomHexToken()
+	if err != nil {
+		return "", err
 	}
-	tok := hex.EncodeToString(raw)
 	if kind == llmproxy.ProviderAnthropic {
 		return proxyTokenAnthropicPrefix + tok, nil
 	}
 	return tok, nil
 }
 
-// runProxies bundles the per-run proxy handles for shutdown. Only
-// the LLM proxy is wired in SKY-335; the git proxy slot is reserved
-// for the sibling ticket and remains nil until it lands.
+// randomHexToken mints 32 bytes of crypto/rand, hex-encoded — the raw
+// per-run secret both proxy token minters build on. The git proxy uses
+// it verbatim (the HTTPS Basic password has no key-shape requirement);
+// newSandboxProxyToken prefixes it for the Anthropic SDK's key check.
+func randomHexToken() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("agentproc: generate per-run proxy token: %w", err)
+	}
+	return hex.EncodeToString(raw), nil
+}
+
+// runProxies bundles the per-run proxy handles for shutdown: the LLM
+// egress proxy and, for runs with git egress (a GitHub repo in scope),
+// the git credential proxy. Either may be nil — a prompt-only run
+// (scorer / classifier) has no git proxy.
 type runProxies struct {
 	llm *llmproxy.Server
-	// git *gitproxy.Server // sibling ticket (SKY-335's twin)
+	git *gitproxy.Server
 }
 
 // Shutdown stops every proxy in the bundle. Returns errors.Join of
-// every proxy's Shutdown error so a future bundle with multiple
-// proxies (git proxy slot) surfaces all failures, not just the
-// first. Today, with only the LLM proxy wired, the result is either
-// nil or a single wrapped error.
+// every proxy's Shutdown error so both proxies' failures surface, not
+// just the first. With a single proxy wired the result is either nil
+// or one wrapped error.
 func (p *runProxies) Shutdown(ctx context.Context) error {
 	if p == nil {
 		return nil
@@ -68,6 +82,11 @@ func (p *runProxies) Shutdown(ctx context.Context) error {
 	if p.llm != nil {
 		if err := p.llm.Shutdown(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("llm proxy shutdown: %w", err))
+		}
+	}
+	if p.git != nil {
+		if err := p.git.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("git proxy shutdown: %w", err))
 		}
 	}
 	return errors.Join(errs...)
@@ -83,10 +102,44 @@ func (p *runProxies) Shutdown(ctx context.Context) error {
 // upstream auth error from inside the Node subprocess.
 var ErrUnsupportedSandboxCredentials = errors.New("agentproc: resolved credentials shape not supported in sandbox mode")
 
-// startProxiesForSandbox starts the per-run LLM proxy (and, when the
-// sibling ticket lands, the git proxy) on hostVethIP. Returns the
+// ErrNoSandboxGitCredentials is returned when a run that needs git
+// egress has no resolvable GitHub credential (no App installation, no
+// PAT). Surfaced as a typed error — mirroring ErrUnsupportedSandboxCredentials
+// — so the caller (delegate) produces a clear admin-facing message
+// rather than letting the agent hit a confusing 502 the first time it
+// pushes from inside the sandbox. The caller building the GitProxy
+// TokenSource wraps the resolver's no-credentials sentinel in this.
+var ErrNoSandboxGitCredentials = errors.New("agentproc: no GitHub credential resolved for sandbox git egress")
+
+// defaultGitUpstream is the git-over-HTTPS host the git proxy forwards
+// to, and the URL prefix the in-sandbox git is rewritten away from. GHES
+// orgs override via GitProxyConfig.Upstream (the customer's responsibility
+// per the single-installation scope).
+const defaultGitUpstream = "https://github.com"
+
+// GitProxyConfig is the per-run git-egress wiring the caller (delegate)
+// hands startProxiesForSandbox for a run with a GitHub repo in scope.
+// nil disables the git proxy entirely (prompt-only runs — scorer,
+// classifier — and Jira-only runs that pre-clone nothing).
+type GitProxyConfig struct {
+	// TokenSource resolves the host-side GitHub credential the proxy
+	// injects on outbound git-over-HTTPS. Built over the GitHub
+	// resolver's TokenFor (App installation token tier-1 or org PAT
+	// tier-3, App preferred) so App-and-PAT orgs both work with no proxy
+	// change. Required when GitProxyConfig is non-nil. Lazy + cached
+	// inside the proxy; a zero-expiry token (a PAT) mints exactly once.
+	TokenSource gitproxy.TokenSource
+
+	// Upstream is the real git host base — empty defaults to
+	// defaultGitUpstream. Both the proxy's upstream and the insteadOf
+	// rewrite prefix derive from it.
+	Upstream string
+}
+
+// startProxiesForSandbox starts the per-run LLM proxy, plus the git
+// credential proxy when git is non-nil, on hostVethIP. Returns the
 // proxy bundle for shutdown plus the env entries the sandbox should
-// inject so the agent reaches the proxy instead of the real upstream.
+// inject so the agent reaches the proxies instead of the real upstreams.
 //
 // hostVethIP is the host-side veth address — the 10.42.<idx>.1 IP
 // that the sandbox's netns can reach via its default route. Binding
@@ -95,13 +148,18 @@ var ErrUnsupportedSandboxCredentials = errors.New("agentproc: resolved credentia
 // would be invisible to it.
 //
 // The resolvedCreds map is what resolveCredentials produced — the
-// shape determines the proxy's provider + upstream. See the switch
+// shape determines the LLM proxy's provider + upstream. See the switch
 // below for the mapping.
+//
+// ctx scopes the eager git-credential probe (it surfaces a
+// no-credentials condition as ErrNoSandboxGitCredentials before the
+// run proceeds, rather than as a 502 mid-push); it does not bound the
+// proxies' own lifetime, which the caller owns via Shutdown.
 //
 // Caller MUST call returned.Shutdown when the run completes (normal
 // or cancelled). On error, no proxies are running and the returned
 // bundle is nil — defer Shutdown is safe but a no-op.
-func startProxiesForSandbox(hostVethIP string, resolvedCreds map[string]string) (*runProxies, []string, error) {
+func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCreds map[string]string, git *GitProxyConfig) (*runProxies, []string, error) {
 	if hostVethIP == "" {
 		return nil, nil, errors.New("agentproc: startProxiesForSandbox: hostVethIP is required")
 	}
@@ -152,18 +210,80 @@ func startProxiesForSandbox(hostVethIP string, resolvedCreds map[string]string) 
 
 	env := buildSandboxProxyEnv(cfg, llmURL, token)
 
-	// Git proxy slot: the sibling ticket (per SKY-335's body) will
-	// spawn a second proxy on a different port of hostVethIP and
-	// inject http.proxy git config into the worktree's .git/config.
-	// Until then, multi-mode agents that try to push will fail at the
-	// git-clone or git-push step because no proxy is listening — that
-	// is the intended interim state (multi mode is not user-facing
-	// yet; the gate is the parent SKY-242 epic). The SKY-322
-	// credential resolver exposes the GitHub PAT via the org's vault;
-	// the future git proxy will consume it the same way startProxies
-	// consumes the Anthropic key here.
+	// Git proxy: a second per-run proxy on its own port of hostVethIP
+	// that holds the GitHub credential host-side and injects Basic auth
+	// on outbound git-over-HTTPS. The sandbox git is pointed at it via
+	// GIT_CONFIG env entries (insteadOf + extraHeader) returned alongside
+	// the LLM env. Only wired for runs with a repo in scope; prompt-only
+	// runs pass git=nil and skip it.
+	if git != nil {
+		gitEnv, gitSrv, gerr := startGitProxyForSandbox(ctx, hostVethIP, git)
+		if gerr != nil {
+			// The LLM proxy is already listening; tear it down so a git
+			// failure doesn't leak it, then return a clean nil bundle.
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = bundle.Shutdown(shutdownCtx)
+			return nil, nil, gerr
+		}
+		bundle.git = gitSrv
+		env = append(env, gitEnv...)
+	}
 
 	return bundle, env, nil
+}
+
+// startGitProxyForSandbox mints the per-run git secret, starts the git
+// credential proxy on a free port of hostVethIP, and returns the
+// GIT_CONFIG env entries that route the sandbox git through it. Split
+// from startProxiesForSandbox so the LLM and git paths read independently
+// and the git failure path stays a single early return.
+//
+// The eager TokenSource probe runs first: it surfaces a no-credentials
+// org as ErrNoSandboxGitCredentials at run start (a clear admin-facing
+// failure) instead of a confusing 502 the first time the agent pushes.
+// For an App-installation source the minted token is cached, so the
+// proxy's own lazy resolve on first request reuses it at no extra mint;
+// a PAT source pays one extra (cheap) secret-store read at run start.
+func startGitProxyForSandbox(ctx context.Context, hostVethIP string, git *GitProxyConfig) ([]string, *gitproxy.Server, error) {
+	if git.TokenSource == nil {
+		return nil, nil, errors.New("agentproc: GitProxyConfig.TokenSource is required")
+	}
+
+	if _, err := git.TokenSource(ctx); err != nil {
+		// ErrNoSandboxGitCredentials (wrapped by the caller's TokenSource)
+		// propagates as-is so the run fails with the typed admin message;
+		// any other (transient) resolve error fails the run too rather
+		// than spawning a proxy that can't authenticate.
+		return nil, nil, fmt.Errorf("agentproc: resolve git credential for sandbox: %w", err)
+	}
+
+	incoming, err := randomHexToken()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	upstream := git.Upstream
+	if upstream == "" {
+		upstream = defaultGitUpstream
+	}
+
+	srv, err := gitproxy.New(gitproxy.Config{
+		TokenSource:      git.TokenSource,
+		Upstream:         upstream,
+		AllowNonLoopback: true,
+		IncomingToken:    incoming,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("agentproc: construct git proxy: %w", err)
+	}
+	addr, err := srv.Start(net.JoinHostPort(hostVethIP, "0"))
+	if err != nil {
+		return nil, nil, fmt.Errorf("agentproc: start git proxy on %s: %w", hostVethIP, err)
+	}
+
+	gitEnv := buildSandboxGitProxyEnv("http://"+addr, upstream, incoming)
+	return gitEnv, srv, nil
 }
 
 // sandboxProxyConfig collects the parsed proxy-side configuration the
@@ -274,6 +394,63 @@ func buildSandboxProxyEnv(cfg sandboxProxyConfig, llmURL, incomingToken string) 
 		}
 	}
 	return nil
+}
+
+// gitProxyBasicUser is the conventional username half of the per-run
+// git Basic credential. The proxy ignores it and validates only the
+// password (the per-run token), but git's "Basic base64(user:pass)"
+// encoding needs a username, so we pin a stable sentinel.
+const gitProxyBasicUser = "x-run"
+
+// buildSandboxGitProxyEnv returns the GIT_CONFIG_* env entries that
+// route the in-sandbox git through the per-run git proxy. Two settings,
+// both host-side (the agent never sees the real GitHub credential):
+//
+//   - url.<proxyURL>/.insteadOf=<upstream>/ rewrites every git URL the
+//     sandbox resolves under the upstream host to the proxy's address,
+//     so native git push/fetch transit the proxy instead of trying (and
+//     failing, under the egress allowlist) to reach the host directly.
+//   - http.<proxyURL>/.extraHeader carries the per-run token as the
+//     Basic password — the value the proxy authenticates against before
+//     swapping in the real credential. Mirrors the base64("user:"+token)
+//     encoding internal/worktree uses for the host-side clone.
+//
+// Delivered via GIT_CONFIG_COUNT/KEY_n/VALUE_n rather than a .git/config
+// write because the bind-mounted worktree shares the bare clone's
+// config; the env form scopes the routing to this one sandboxed git
+// without touching shared on-disk state, and keeps the token out of
+// argv. proxyURL is "http://host:port" (no trailing slash); upstream is
+// the real git host base (no trailing slash).
+//
+// Property B: the only secret-shaped value is the per-run token, a
+// capability scoped to this run's own proxy — never the real GitHub
+// credential, which stays in the proxy on the host.
+func buildSandboxGitProxyEnv(proxyURL, upstream, incomingToken string) []string {
+	// Trailing slash on both the rewritten base and the matched prefix
+	// so "<upstream>/owner/repo" maps cleanly to "<proxy>/owner/repo".
+	proxyBase := strings.TrimRight(proxyURL, "/") + "/"
+	upstreamPrefix := strings.TrimRight(upstream, "/") + "/"
+
+	creds := gitProxyBasicUser + ":" + incomingToken
+	extraHeader := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(creds))
+
+	// One git config entry per pair. GIT_CONFIG_COUNT is derived from the
+	// pair count rather than hardcoded: git stops reading at the declared
+	// count, so a literal that drifted from the entries below would
+	// silently drop settings with no compile- or run-time error.
+	pairs := [][2]string{
+		{"url." + proxyBase + ".insteadOf", upstreamPrefix},
+		{"http." + proxyBase + ".extraHeader", extraHeader},
+	}
+	env := make([]string, 0, 1+2*len(pairs))
+	env = append(env, fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(pairs)))
+	for i, kv := range pairs {
+		env = append(env,
+			fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", i, kv[0]),
+			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, kv[1]),
+		)
+	}
+	return env
 }
 
 // validateProxyUpstream is a pre-flight check that mirrors the

@@ -43,6 +43,13 @@ func TestRunQueueStore_SQLite_EnqueueClaim(t *testing.T) {
 		t.Fatalf("EnqueueRun: %v", err)
 	}
 
+	// Simulate a run that got partway (captured a session) before being
+	// re-queued by a crash reconcile, so the claim must carry session_id back
+	// for runAgent's resume-on-reclaim path.
+	if _, err := conn.Exec(`UPDATE runs SET session_id = 'rq-sess' WHERE id = 'rq-run-0'`); err != nil {
+		t.Fatalf("set session_id: %v", err)
+	}
+
 	got, err := stores.RunQueue.ClaimNextRun(ctx)
 	if err != nil {
 		t.Fatalf("ClaimNextRun: %v", err)
@@ -52,6 +59,9 @@ func TestRunQueueStore_SQLite_EnqueueClaim(t *testing.T) {
 	}
 	if got.ID != "rq-run-0" || got.BlueprintRunID != brID || got.Status != "running" {
 		t.Fatalf("claimed run = %+v", got)
+	}
+	if got.SessionID != "rq-sess" {
+		t.Fatalf("claimed session_id = %q, want rq-sess (resume-on-reclaim plumbing)", got.SessionID)
 	}
 	if got.Attempts != 1 {
 		t.Fatalf("attempts = %d, want 1", got.Attempts)
@@ -197,10 +207,10 @@ func TestRunQueueStore_SQLite_ResetLeavesDormantAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
-	// A parked (dormant) run — directly insert with status awaiting_input.
+	// A parked (dormant) run — directly insert with status open.
 	step0 := 0
 	if err := stores.AgentRuns.Create(ctx, org, domain.AgentRun{
-		ID: "rqd-run-0", TaskID: task.ID, PromptID: "rqd-p0", Status: "awaiting_input",
+		ID: "rqd-run-0", TaskID: task.ID, PromptID: "rqd-p0", Status: "open",
 		Model: "m", TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
 		t.Fatalf("Create dormant run: %v", err)

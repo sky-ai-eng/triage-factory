@@ -87,10 +87,10 @@ type Stores struct {
 	// TxStores instead.
 	Factory FactoryReadStore
 
-	// AgentRuns owns runs + run_messages — agent run lifecycle,
-	// transcript, yield requests/responses. App pool in Postgres;
-	// every consumer is request-equivalent or runs in a delegate
-	// goroutine launched from a request handler.
+	// AgentRuns owns runs + run_messages — agent run lifecycle and
+	// transcript. App pool in Postgres; every consumer is
+	// request-equivalent or runs in a delegate goroutine launched from
+	// a request handler.
 	AgentRuns AgentRunStore
 
 	// Entities owns the entities table — the long-lived source

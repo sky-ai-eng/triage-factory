@@ -97,6 +97,16 @@ type LiveRun struct {
 	stderr    string
 }
 
+// InteractiveSupported reports whether this host can run a LiveRun.
+// Streaming-input mode is not yet wired through the gVisor sandbox (the
+// bidirectional channel is a later phase), so a sandbox-mode host returns
+// false — callers fall back to the one-shot Run there. Mirrors the gate
+// RunInteractive enforces internally, exposed so the delegate layer can
+// pick the execution path before building options.
+func InteractiveSupported() bool {
+	return !shouldSandbox()
+}
+
 // RunInteractive spawns the agent in streaming-input mode and returns a
 // LiveRun the caller steers. The reader loop runs in a background
 // goroutine; the call returns as soon as the subprocess is started.
@@ -112,6 +122,13 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 		sink = NoopSink{}
 	}
 	opts.Interactive = true
+	// Opt the wrapper into canUseTool ONLY when the caller supplied a
+	// handler. A nil handler means "autonomous run": the wrapper omits
+	// canUseTool, so the --allowedTools list is the sole gate and
+	// off-allowlist tools auto-deny — byte-identical to the headless
+	// one-shot path, no per-tool prompts. A non-nil handler emits the
+	// flag so the wrapper routes the off-allowlist remainder to perms.
+	opts.PermissionPrompts = perms != nil
 
 	// Derived ctx so Close() (and the terminal-error path) can SIGKILL
 	// the process group via cmd.Cancel without touching the caller's ctx.
@@ -164,7 +181,7 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 		ready:  make(chan struct{}),
 	}
 
-	go l.readLoop(runCtx, cmd, stdout, stderr, sink, perms, opts.TraceID)
+	go l.readLoop(runCtx, cmd, stdout, stderr, sink, perms, opts.OnResult, opts.TraceID)
 
 	// Send the initial prompt once the wrapper is ready. Done in its own
 	// goroutine so RunInteractive returns immediately; Send blocks on the
@@ -316,11 +333,11 @@ func (l *LiveRun) writeControl(v map[string]any) error {
 // readLoop is the single goroutine that owns the sink and the
 // subprocess lifecycle: it consumes the stream until EOF/ctx, waits on
 // the process, and records the terminal state.
-func (l *LiveRun) readLoop(runCtx context.Context, cmd *exec.Cmd, stdout io.Reader, stderr *syncBuffer, sink Sink, perms PermissionHandler, traceID string) {
+func (l *LiveRun) readLoop(runCtx context.Context, cmd *exec.Cmd, stdout io.Reader, stderr *syncBuffer, sink Sink, perms PermissionHandler, onResult func(*Result), traceID string) {
 	defer close(l.done)
 
 	stream := NewStreamState()
-	result, streamErr := l.consumeStreamInteractive(stdout, sink, stream, perms, traceID)
+	result, streamErr := l.consumeStreamInteractive(stdout, sink, stream, perms, onResult, traceID)
 
 	// If the stream reader bailed before any terminal result, the
 	// subprocess may still be running with data to write — kill the
@@ -356,7 +373,7 @@ func (l *LiveRun) readLoop(runCtx context.Context, cmd *exec.Cmd, stdout io.Read
 // one-shot consumeStream it does NOT return on the first result: it loops
 // until EOF / read error, folding every per-turn Result with MergeResult
 // so the returned Result reflects the whole conversation.
-func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *StreamState, perms PermissionHandler, traceID string) (*Result, error) {
+func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *StreamState, perms PermissionHandler, onResult func(*Result), traceID string) (*Result, error) {
 	reader := bufio.NewReader(stdout)
 
 	sessionDelivered := false
@@ -416,6 +433,13 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 						merged = result
 					} else {
 						merged = MergeResult(merged, result)
+					}
+					// Per-turn terminal signal: a live caller (the delegate
+					// driver) reacts to this turn's result without waiting
+					// for the whole query to drain. Fired with the per-turn
+					// result, not the running merge.
+					if onResult != nil {
+						onResult(result)
 					}
 				}
 			}

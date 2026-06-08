@@ -15,6 +15,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // TestActiveOrg_OAuthCallback_DefaultsToEarliestMembership exercises
@@ -305,7 +306,7 @@ func TestActiveOrg_Update_SentinelClaim_Returns401(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/me/active-org", body)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", r.srv.deployCfg.publicURL)
-	ctx := context.WithValue(req.Context(), ctxKeyClaims, &verify.Claims{Subject: runmode.LocalDefaultUserID})
+	ctx := httpx.WithClaims(req.Context(), &verify.Claims{Subject: runmode.LocalDefaultUserID})
 	rec := httptest.NewRecorder()
 	r.srv.handleActiveOrgUpdate(rec, req.WithContext(ctx))
 

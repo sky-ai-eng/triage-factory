@@ -44,10 +44,8 @@ const (
 
 // decideBlueprintStep maps a completed step's terminal outcome + position to
 // the orchestrator's next move. Only valid for a step whose run reached
-// status='completed'; the non-terminal statuses (awaiting_input,
-// pending_approval, cancelled, failed) are handled by the caller before this
-// is consulted, and yield never reaches here (it parks the run in
-// awaiting_input rather than completing).
+// status='completed'; the non-terminal statuses (open, pending_approval,
+// cancelled, failed) are handled by the caller before this is consulted.
 //
 // abortReason is non-empty only for the missing-outcome-on-a-non-final-step
 // case ("no-outcome"); for an explicit abort it is empty and the caller
@@ -79,10 +77,9 @@ func decideBlueprintStep(outcome string, isFinal bool) (decision blueprintStepOu
 	default:
 		// An unrecognized, non-empty outcome — a future/buggy value the
 		// orchestrator can't interpret (a valid completed step only ever
-		// holds continue/finish/abort, or NULL; yield never completes).
-		// Never close a task on a value we don't understand: abort and leave
-		// it open for a human, regardless of position. Mirrors the old
-		// "unknown verdict → abort" floor.
+		// holds continue/finish/abort, or NULL). Never close a task on a value
+		// we don't understand: abort and leave it open for a human, regardless
+		// of position. Mirrors the old "unknown verdict → abort" floor.
 		return blueprintStepAbort, "unknown-outcome: " + outcome
 	}
 }
@@ -312,7 +309,7 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 	// run and cancel its handle.
 	//
 	// anyActive tracks whether at least one live subprocess got killed. If
-	// nothing was active — the blueprint is paused on a yield/approval step, or a
+	// nothing was active — the blueprint is paused on an open/approval step, or a
 	// queued step that was never claimed — no dispatcher goroutine will run the
 	// reactor, so we drive terminateBlueprint ourselves below.
 	var anyActive bool
@@ -380,9 +377,9 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 // run is cancelled through the spawner's DB-only path (Cancel with no live
 // orchestrator goroutine — the step had parked, so the orchestrator already
 // returned and nothing else will mark the blueprint_run terminal). Without this,
-// cancelling a yield-parked step would mark only the run cancelled and strand the
-// blueprint_run in 'running' (and its shared-workspace snapshot in the blob
-// store).
+// cancelling an open/approval-parked step would mark only the run cancelled and
+// strand the blueprint_run in 'running' (and its shared-workspace snapshot in
+// the blob store).
 //
 // It does NOT drain the per-entity queue: the drainer's manual short-circuit
 // keys off the run's trigger type, which the caller (Cancel) already passes to
@@ -443,22 +440,21 @@ func (s *Spawner) markBlueprintRunStatusAsUser(ctx context.Context, orgID, userI
 	return changed, err
 }
 
-// ResumeBlueprintAfterYield finalizes a blueprint after one of its step runs
-// resumed from a yield and reached a terminal state (the respond endpoint drives
-// it via ResumeAfterYield once processCompletion reports the step is no longer
-// parked). It reads the resumed step's terminal runs.outcome + position and
-// routes through terminateBlueprint, so a 1-step (or final-step) yield-resume
-// closes the task on finish and leaves it open on abort — parity with the
-// pre-collapse single-prompt yield-resume.
+// ResumeBlueprintAfterResume finalizes a blueprint after one of its step runs
+// was resumed (via ResumeOpenRun) and reached a terminal state — once
+// processCompletion reports the step is no longer parked. It reads the resumed
+// step's terminal runs.outcome + position and routes through terminateBlueprint,
+// so a 1-step (or final-step) resume closes the task on finish and leaves it
+// open on abort.
 //
 // A non-final step that wants to advance mid-blueprint (continue) is the epic's
 // resume work and is not built here: the blueprint is terminated with a clear
 // reason rather than silently stalling in 'running'.
 //
-// userID identifies the actor for audit (the user whose response resumed the
-// yielded run). Local mode passes runmode.LocalDefaultUserID; multi-mode handlers
+// userID identifies the actor for audit (the user whose action resumed the
+// run). Local mode passes runmode.LocalDefaultUserID; multi-mode handlers
 // extract it from JWT claims.
-func (s *Spawner) ResumeBlueprintAfterYield(orgID, stepRunID, userID string) {
+func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepRunID, userID string) {
 	cr, stepIdx, err := s.blueprints.GetRunForRunSystem(context.Background(), orgID, stepRunID)
 	if err != nil || cr == nil {
 		return
@@ -469,19 +465,19 @@ func (s *Spawner) ResumeBlueprintAfterYield(orgID, stepRunID, userID string) {
 
 	stepRun, err := s.agentRuns.GetSystem(context.Background(), orgID, stepRunID)
 	if err != nil || stepRun == nil {
-		log.Printf("[blueprint] yield-resume run %s: read step run: %v", stepRunID, err)
+		log.Printf("[blueprint] resume run %s: read step run: %v", stepRunID, err)
 		return
 	}
-	// Still dormant after the resume (yielded again / queued an approval) → the
-	// blueprint stays running; the next respond/approval drives finalization.
-	if stepRun.Status == "awaiting_input" || stepRun.Status == "pending_approval" {
+	// Still dormant after the resume (went open again / queued an approval) → the
+	// blueprint stays running; the next resume/approval drives finalization.
+	if stepRun.Status == "open" || stepRun.Status == "pending_approval" {
 		return
 	}
 
 	task, err := s.tasks.GetSystem(context.Background(), orgID, cr.TaskID)
 	if err != nil || task == nil {
-		log.Printf("[blueprint] yield-resume: load task for blueprint_run %s: %v", cr.ID, err)
-		_, _ = s.markBlueprintRunStatusAsUser(context.Background(), orgID, userID, cr.ID, domain.BlueprintRunStatusFailed, "yield_resume_task_load_failed", stepIdx)
+		log.Printf("[blueprint] resume: load task for blueprint_run %s: %v", cr.ID, err)
+		_, _ = s.markBlueprintRunStatusAsUser(context.Background(), orgID, userID, cr.ID, domain.BlueprintRunStatusFailed, "resume_task_load_failed", stepIdx)
 		return
 	}
 	cfg := runConfig{orgID: orgID, wtPath: cr.WorktreePath}
@@ -491,7 +487,7 @@ func (s *Spawner) ResumeBlueprintAfterYield(orgID, stepRunID, userID string) {
 
 	// isFinal = this is the last step (and therefore the only step for N=1).
 	// Read off the plan frozen at mint (cr.StepPlan), not the live steps, so a
-	// mid-flight edit can't change a yielded run's terminal disposition.
+	// mid-flight edit can't change a resumed run's terminal disposition.
 	// Defaults to true when the index or plan can't be resolved, so an unknown
 	// position never advances into the unbuilt mid-blueprint resume.
 	isFinal := true
@@ -523,7 +519,7 @@ func blueprintTerminalForResumedStep(stepRun *domain.AgentRun, isFinal bool) (do
 			}
 			return domain.BlueprintRunStatusAborted, reason
 		default: // blueprintStepAdvance — mid-blueprint resume not implemented
-			return domain.BlueprintRunStatusAborted, "multi_step_yield_resume_not_implemented"
+			return domain.BlueprintRunStatusAborted, "multi_step_resume_not_implemented"
 		}
 	case "failed", "task_unsolvable":
 		return domain.BlueprintRunStatusFailed, "step " + stepRun.Status

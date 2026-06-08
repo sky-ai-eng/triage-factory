@@ -12,7 +12,6 @@ import {
   isActiveStatus,
   isFailedStatus,
 } from '../lib/runStatus'
-import YieldModal, { type YieldRequest } from './YieldModal'
 import { AttentionRow, CardPlane, EventTag, HudHeader, SourceTag } from './board/cardChrome'
 import { compactNum, runGlow, TONE_TEXT, type StepState } from './board/cardStyle'
 
@@ -46,28 +45,6 @@ export default function AgentCard({
   const [now, setNow] = useState(() => Date.now())
 
   const isActive = isActiveRun(run)
-  const isAwaiting = run.Status === 'awaiting_input'
-
-  // Locate the open yield_request (latest) so the attention row + modal render.
-  const openYield = useMemo<{ request: YieldRequest; messageID: number } | null>(() => {
-    if (!isAwaiting) return null
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].Subtype === 'yield_request') {
-        try {
-          return {
-            request: JSON.parse(messages[i].Content) as YieldRequest,
-            messageID: messages[i].ID,
-          }
-        } catch {
-          return null
-        }
-      }
-    }
-    return null
-  }, [messages, isAwaiting])
-  const openYieldRequest = openYield?.request ?? null
-  const openYieldMessageID = openYield?.messageID ?? 0
-  const [yieldModalOpen, setYieldModalOpen] = useState(false)
 
   // Tick once per second while active so the elapsed display updates live.
   useEffect(() => {
@@ -105,16 +82,6 @@ export default function AgentCard({
   return (
     <div className="relative">
       <CardPlane glow={glow}>
-        {openYieldRequest && (
-          <YieldModal
-            key={openYieldMessageID}
-            runID={run.ID}
-            request={openYieldRequest}
-            open={yieldModalOpen}
-            onClose={() => setYieldModalOpen(false)}
-          />
-        )}
-
         {/* Header label plate — its divider doubles as the chain progress track. */}
         <HudHeader steps={hasChain ? stepStates : undefined}>
           <div className="flex items-center justify-between gap-2">
@@ -201,17 +168,7 @@ export default function AgentCard({
           <LiveFeed messages={messages} isActive={isActive} />
         )}
 
-        {/* Attention rows — your move, in the canonical toned pattern. */}
-        {isAwaiting && openYieldRequest && (
-          <div className="mx-4 mb-2">
-            <AttentionRow
-              kicker="Agent waiting for response"
-              message={openYieldRequest.message}
-              action="Respond"
-              onClick={() => setYieldModalOpen(true)}
-            />
-          </div>
-        )}
+        {/* Attention row — your move, in the canonical toned pattern. */}
         {isPendingApproval && onReview && (
           <div className="mx-4 mb-2">
             <AttentionRow
@@ -299,8 +256,8 @@ interface FeedLine {
 }
 
 // feedLines flattens the transcript into compact one-liners — the agent's
-// actions (tool calls), its prose turns, and yield Q/A — for the card's live
-// ticker. The full, nested transcript lives in the expanded run view.
+// actions (tool calls) and its prose turns — for the card's live ticker. The
+// full, nested transcript lives in the expanded run view.
 function feedLines(messages: AgentMessage[]): FeedLine[] {
   const out: FeedLine[] = []
   for (const msg of messages) {
@@ -310,20 +267,6 @@ function feedLines(messages: AgentMessage[]): FeedLine[] {
       second: '2-digit',
       hour12: false,
     })
-    if (msg.Subtype === 'yield_request') {
-      let m = ''
-      try {
-        m = (JSON.parse(msg.Content) as { message?: string }).message || ''
-      } catch {
-        m = msg.Content
-      }
-      out.push({ id: `yreq-${msg.ID}`, time, text: `? ${clip(m, 70)}` })
-      continue
-    }
-    if (msg.Subtype === 'yield_response') {
-      out.push({ id: `yres-${msg.ID}`, time, text: `↩ ${clip(msg.Content, 70)}` })
-      continue
-    }
     if (msg.Role !== 'assistant') continue
     // Skip the raw JSON completion message (the agent's structured output).
     if (msg.Content && msg.Content.trimStart().startsWith('{"status":')) continue

@@ -1,6 +1,7 @@
 package agenthost
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
 
 // Server is the daemon-side counterpart to IPCClient. One Server per
@@ -29,6 +31,13 @@ type Server struct {
 	stores db.Stores
 	info   RunInfo
 
+	// ghResolver is the GitHub credential resolver the host-routed gh
+	// methods build their client from (App installation token → org PAT).
+	// Built once per Server in NewServer so the token cache is shared
+	// across every gh call in the run rather than re-minting per RPC.
+	// Tests override it to inject a fake covering both tiers.
+	ghResolver ghclient.Resolver
+
 	// shutdown signals the accept loop to stop accepting new conns
 	// and lets in-flight handlers drain.
 	shutdown chan struct{}
@@ -43,9 +52,10 @@ type Server struct {
 // and the kicking-off user identity (empty for event-triggered runs).
 func NewServer(stores db.Stores, info RunInfo) *Server {
 	return &Server{
-		stores:   stores,
-		info:     info,
-		shutdown: make(chan struct{}),
+		stores:     stores,
+		info:       info,
+		ghResolver: ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil),
+		shutdown:   make(chan struct{}),
 	}
 }
 
@@ -152,13 +162,26 @@ func (s *Server) handleConn(conn net.Conn) {
 	// write deadline before writing the response.
 	_ = conn.SetReadDeadline(time.Time{})
 
-	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
+	// The download method streams a log archive and gets a longer budget so a
+	// slow transfer isn't cancelled at callTimeout — mirrors the client cap.
+	dispatchTimeout := callTimeout
+	if req.Method == methodGithubDownloadArtifact {
+		dispatchTimeout = downloadCallTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), dispatchTimeout)
 	defer cancel()
 
 	result, err := s.dispatch(ctx, req.Method, req.Args)
 	resp := response{}
 	if err != nil {
 		resp.Error = err.Error()
+		// Echo a GitHub HTTP failure's status + body so the sandbox client
+		// can rebuild the typed error and the 406/404 fallbacks still fire.
+		var he *ghclient.HTTPError
+		if errors.As(err, &he) {
+			resp.HTTPStatus = he.StatusCode
+			resp.HTTPBody = he.Body
+		}
 	} else if result != nil {
 		body, mErr := json.Marshal(result)
 		if mErr != nil {
@@ -192,6 +215,9 @@ func (s *Server) sendError(conn net.Conn, msg string) {
 // same shape.
 func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMessage) (any, error) {
 	client := NewLocal(s.stores, s.info)
+	// Share the Server's resolver (and its token cache) across every gh
+	// call in this run instead of re-minting per request.
+	client.ghResolver = s.ghResolver
 	dec := func(dst any) error {
 		if len(rawArgs) == 0 {
 			return nil
@@ -497,6 +523,170 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 			return nil, err
 		}
 		return jiraIssueTypesResult{IssueTypes: types}, nil
+
+	// --- github: build the org-tiered client host-side (App→PAT), make the
+	// REST call, return the result / error. The per-request LocalClient
+	// resolves the credential from this daemon's (host-side, Vault-backed)
+	// stores, so nothing reaches the sandbox but the typed result or the
+	// error (with its HTTP status preserved for the fallback paths). ---
+
+	case methodGithubGetPR:
+		var a githubGetPRArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		pr, err := client.GithubGetPR(ctx, a.Owner, a.Repo, a.Number, a.Verbose)
+		if err != nil {
+			return nil, err
+		}
+		return githubPRViewResult{PR: pr}, nil
+
+	case methodGithubGetPRDiff:
+		var a githubPRDiffArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		diff, err := client.GithubGetPRDiff(ctx, a.Owner, a.Repo, a.Number, a.File)
+		if err != nil {
+			return nil, err
+		}
+		return githubPRDiffResult{Diff: diff}, nil
+
+	case methodGithubGetPRFiles:
+		var a githubPRFilesArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		files, err := client.GithubGetPRFiles(ctx, a.Owner, a.Repo, a.Number)
+		if err != nil {
+			return nil, err
+		}
+		return githubPRFilesResult{Files: files}, nil
+
+	case methodGithubGetCommentThread:
+		var a githubCommentThreadArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		thread, err := client.GithubGetCommentThread(ctx, a.Owner, a.Repo, a.CommentID, a.Page)
+		if err != nil {
+			return nil, err
+		}
+		return githubCommentThreadResult{Thread: thread}, nil
+
+	case methodGithubGetReviewDetail:
+		var a githubReviewDetailArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		detail, err := client.GithubGetReviewDetail(ctx, a.Owner, a.Repo, a.Number, a.ReviewID, a.Verbose)
+		if err != nil {
+			return nil, err
+		}
+		return githubReviewDetailResult{Detail: detail}, nil
+
+	case methodGithubDismissReview:
+		var a githubDismissReviewArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, client.GithubDismissReview(ctx, a.Owner, a.Repo, a.Number, a.ReviewID, a.Message)
+
+	case methodGithubSubmitReview:
+		var a githubSubmitReviewArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		id, event, err := client.GithubSubmitReview(ctx, a.Owner, a.Repo, a.Number, a.CommitSHA, a.Event, a.Body, a.Comments)
+		if err != nil {
+			return nil, err
+		}
+		return githubSubmitReviewResult{ReviewID: id, Event: event}, nil
+
+	case methodGithubCreatePR:
+		var a githubCreatePRArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		number, htmlURL, err := client.GithubCreatePR(ctx, a.Owner, a.Repo, a.Head, a.Base, a.Title, a.Body, a.Draft)
+		if err != nil {
+			return nil, err
+		}
+		return githubCreatePRResult{Number: number, HTMLURL: htmlURL}, nil
+
+	case methodGithubAddComment:
+		var a githubAddCommentArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		id, err := client.GithubAddComment(ctx, a.Owner, a.Repo, a.Number, a.Body)
+		if err != nil {
+			return nil, err
+		}
+		return githubCommentIDResult{CommentID: id}, nil
+
+	case methodGithubReplyToComment:
+		var a githubReplyToCommentArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		id, err := client.GithubReplyToComment(ctx, a.Owner, a.Repo, a.Number, a.CommentID, a.Body)
+		if err != nil {
+			return nil, err
+		}
+		return githubCommentIDResult{CommentID: id}, nil
+
+	case methodGithubReactToComment:
+		var a githubReactToCommentArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, client.GithubReactToComment(ctx, a.Owner, a.Repo, a.CommentID, a.Emoji)
+
+	case methodGithubUpdateComment:
+		var a githubUpdateCommentArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, client.GithubUpdateComment(ctx, a.Owner, a.Repo, a.CommentID, a.Body)
+
+	case methodGithubDeleteComment:
+		var a githubDeleteCommentArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, client.GithubDeleteComment(ctx, a.Owner, a.Repo, a.CommentID)
+
+	case methodGithubAPIGet:
+		var a githubAPIGetArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		data, err := client.GithubAPIGet(ctx, a.Owner, a.Repo, a.Path)
+		if err != nil {
+			return nil, err
+		}
+		return githubAPIGetResult{Data: data}, nil
+
+	case methodGithubDownloadArtifact:
+		var a githubDownloadArtifactArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		// Buffer host-side: the blob can't stream over the one-shot frame,
+		// so collect the (capped) body and hand the bytes back for the
+		// sandbox to write into its worktree. Clamp the caller's cap to a
+		// frame-safe size so an oversized archive errors cleanly up front
+		// rather than downloading in full and overflowing the response frame.
+		maxBytes := a.MaxBytes
+		if maxBytes > maxIPCArtifactBytes {
+			maxBytes = maxIPCArtifactBytes
+		}
+		var buf bytes.Buffer
+		if _, err := client.GithubDownloadArtifact(ctx, a.Owner, a.Repo, a.Path, &buf, maxBytes); err != nil {
+			return nil, err
+		}
+		return githubDownloadArtifactResult{Data: buf.Bytes()}, nil
 
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnknownMethod, method)

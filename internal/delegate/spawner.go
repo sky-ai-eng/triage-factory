@@ -2,7 +2,7 @@
 // the small cross-cutting helpers (status broadcasts, status updates,
 // drainer/classification wiring) every other file in this package
 // reaches for. The lifecycle methods (Delegate, Cancel, Takeover,
-// Release, ResumeAfterYield) live in their own files; this one is the
+// Release, ResumeOpenRun) live in their own files; this one is the
 // type definition + the bits that don't belong anywhere else.
 
 package delegate
@@ -10,13 +10,18 @@ package delegate
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"log"
 	"sync"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
@@ -52,7 +57,7 @@ type Spawner struct {
 	blueprints db.BlueprintStore
 	runQueue   db.RunQueueStore  // the run queue the dispatcher drains: enqueue a step, claim it, run it, react
 	tasks      db.TaskStore      // re-read tasks for run lifecycle handlers
-	agentRuns  db.AgentRunStore  // run lifecycle + transcript + yields
+	agentRuns  db.AgentRunStore  // run lifecycle + transcript
 	entities   db.EntityStore    // entity reads for project lookup + resume context
 	reviews    db.ReviewStore    // pending review cleanup on discard / cancel paths
 	pendingPRs db.PendingPRStore // pending PR lookup on processCompletion / cleanup paths
@@ -134,6 +139,40 @@ type Spawner struct {
 	takenOver             map[string]bool                                   // runIDs claimed by Takeover. Sticky-on for the rest of the goroutine's lifetime even after rollback — clearing the entry would let late-firing goroutine gates race the takeover/abort lifecycle. Suppresses every cleanup path in runAgent so Takeover/abortTakeover own the row's terminal state.
 	waitForClassification func(ctx context.Context, orgID, entityID string) // SKY-220 hook: blocks until the project classifier has decided this entity, or a timeout/ctx-cancel elapses. orgID scopes the classification read to the run's tenant (SKY-392 — the read goes through the org-scoped admin-pool store, not a raw query). Nil-safe (test setups skip it). Wired in main.go via SetWaitForClassification — keeps internal/delegate from importing internal/projectclassify.
 
+	// procs holds the live agent process handle for each run currently
+	// executing as a LiveRun, keyed by run id. It survives across HTTP
+	// turns because the spawner is the startup singleton, so a control op
+	// (interrupt/steer/cancel) arriving on a later request can still
+	// reach the process a delegation goroutine spawned. Distinct from
+	// cancels (the hard-kill ctx) and takenOver — a live run holds both a
+	// procs and a cancels entry at once. Guarded by s.mu; see the
+	// register/get/deregister accessors in process_registry.go.
+	procs map[string]*liveRunHandle
+	// controller routes the live-process control ops (interrupt, steer,
+	// cancel-kill) to wherever the run's process lives. At N=1 it's the
+	// in-process impl that resolves the handle from procs/cancels; the
+	// seam horizontal scaling swaps for a DB-signal to the owning
+	// executor. Set once in NewSpawner.
+	controller RunController
+	// executorID is this spawner instance's executor identity, generated
+	// once at construction and stamped onto runs.executor_id when a run
+	// goes live. At N=1 there is one executor per process; on restart a
+	// fresh id re-stamps re-claimed runs. The run→executor ownership hook
+	// horizontal scaling builds the lease layer on.
+	executorID string
+	// runSem bounds how many runs execute off the dispatcher at once — a
+	// process-wide cap so a burst of queued steps doesn't fan into an
+	// unbounded number of agent subprocesses. Sized in NewSpawner
+	// (DefaultMaxConcurrentRuns) and replaceable via SetMaxConcurrentRuns
+	// before the dispatcher starts. Each drain acquires a slot before
+	// claiming and the run goroutine releases it on terminal.
+	runSem chan struct{}
+	// idleHibernateTimeout is how long a live run may go quiet (no stream
+	// activity) before it hibernates to a durable resume. Zero means use
+	// DefaultIdleHibernateTimeout; tests inject a short value via
+	// SetIdleHibernateTimeout. Read through idleTimeout().
+	idleHibernateTimeout time.Duration
+
 	agentToolsOnce  sync.Once
 	agentToolsCache string
 
@@ -159,7 +198,7 @@ type Spawner struct {
 // subset of stores can pass partial db.Stores{} — every field is a
 // nil-safe interface.
 func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, wsHub *websocket.Hub, model, takeoverDir string) *Spawner {
-	return &Spawner{
+	s := &Spawner{
 		database:     database,
 		prompts:      stores.Prompts,
 		agents:       stores.Agents,
@@ -183,7 +222,12 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		cancels:      make(map[string]context.CancelFunc),
 		dispatchWake: make(chan struct{}, 1),
 		takenOver:    make(map[string]bool),
+		procs:        make(map[string]*liveRunHandle),
+		executorID:   uuid.New().String(),
+		runSem:       make(chan struct{}, DefaultMaxConcurrentRuns),
 	}
+	s.controller = inProcessController{s: s}
+	return s
 }
 
 // useSSHCloneProtocol reports whether this run should clone over SSH. The
@@ -444,6 +488,71 @@ func (s *Spawner) resolveCloneToken(ctx context.Context, orgID, owner string) st
 	return tok.Value
 }
 
+// gitProxyConfigFor builds the per-run git-egress wiring for a run
+// targeting a repo owned by owner: a gitproxy TokenSource backed by the
+// same resolver resolveCloneToken uses, so the host-side clone and the
+// in-sandbox push resolve one credential (App installation token or org
+// PAT, App preferred — TokenFor selects the owner's installation and
+// falls through to the PAT). agentproc holds the token host-side and
+// routes the sandbox git at the proxy; the real credential never enters
+// the box.
+//
+// Returns nil — disabling the git proxy — in local mode (the agent runs
+// on the host with the operator's own git credentials), when no resolver
+// is wired (test fixtures), or when owner is empty (Jira-only runs that
+// pre-clone nothing). agentproc ignores a nil GitProxy.
+//
+// Upstream is resolved through the resolver's authoritative base
+// resolution (org_settings → legacy github_url secret → github.com) so a
+// GHES org's sandbox git routes to, and the insteadOf rewrite matches,
+// its own host rather than github.com; a read error degrades to "" and
+// agentproc defaults it to github.com. Failing safe: a wrong base only
+// makes the insteadOf prefix miss the worktree remote, so the push is
+// dropped closed at the egress allowlist — the credential is never sent
+// to the wrong host.
+//
+// The closure maps the resolver's no-credentials sentinel to
+// agentproc.ErrNoSandboxGitCredentials so a misconfigured org surfaces a
+// clear admin-facing failure at run start rather than a confusing git
+// error from inside the sandbox. The resolver is read under the same
+// lock as resolveCloneToken so a startup-time credential hot-swap can't
+// race it.
+func (s *Spawner) gitProxyConfigFor(ctx context.Context, orgID, owner string) *agentproc.GitProxyConfig {
+	if runmode.Current() == runmode.ModeLocal {
+		return nil
+	}
+	if owner == "" {
+		return nil
+	}
+	s.mu.Lock()
+	resolver := s.ghResolver
+	s.mu.Unlock()
+	if resolver == nil {
+		return nil
+	}
+
+	upstream := ""
+	if base, err := resolver.BaseURLFor(ctx, orgID); err != nil {
+		log.Printf("[delegate] resolve git host base for org %s: %v (leaving upstream empty; agentproc defaults to github.com)", orgID, err)
+	} else {
+		upstream = base
+	}
+
+	return &agentproc.GitProxyConfig{
+		Upstream: upstream,
+		TokenSource: func(ctx context.Context) (gitproxy.Token, error) {
+			tok, err := resolver.TokenFor(ctx, orgID, owner)
+			if err != nil {
+				if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+					return gitproxy.Token{}, fmt.Errorf("%w: org %s owner %s", agentproc.ErrNoSandboxGitCredentials, orgID, owner)
+				}
+				return gitproxy.Token{}, err
+			}
+			return gitproxy.Token{Value: tok.Value, ExpiresAt: tok.ExpiresAt}, nil
+		},
+	}
+}
+
 // resolveModel resolves the run's team default model via the SKY-389
 // resolver, falling back to the constructor-supplied model when no resolver
 // is wired (test fixtures) or the resolver returns empty. teamID is the
@@ -490,8 +599,8 @@ func (s *Spawner) updateStatus(orgID, runID, status string) {
 // live column (tasks.status) is a recomputed aggregate over its active
 // blueprint_run's step runs, never a mirror of one run. For a bot-claimed task
 // with an active blueprint_run it sets in_review ("needs 👀") if any of that
-// run's runs is parked (awaiting_input OR pending_approval — one column for both
-// human-interaction points), else in_progress, writing tasks.status only when it
+// run's runs is parked (open OR pending_approval — one column for both
+// non-executing states), else in_progress, writing tasks.status only when it
 // changes and pushing a WS nudge so peer boards follow.
 //
 // Terminal columns are NOT owned here — terminateBlueprint closes the task
@@ -541,7 +650,7 @@ func (s *Spawner) recomputeTaskBoardColumn(orgID, taskID string) {
 	}
 	target := "in_progress"
 	for _, r := range runs {
-		if r.Status == "awaiting_input" || r.Status == "pending_approval" {
+		if r.Status == "open" || r.Status == "pending_approval" {
 			target = "in_review"
 			break
 		}

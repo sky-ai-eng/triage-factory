@@ -26,7 +26,7 @@ var _ db.RunQueueStore = (*runQueueStore)(nil)
 
 // runQueueClaimCols is the column list ClaimNextRun returns.
 const runQueueClaimCols = `id::text, org_id::text, task_id::text, COALESCE(prompt_id, ''), status, COALESCE(model, ''),
-	COALESCE(worktree_path, ''), trigger_type, COALESCE(trigger_id::text, ''),
+	COALESCE(worktree_path, ''), COALESCE(session_id, ''), trigger_type, COALESCE(trigger_id::text, ''),
 	COALESCE(creator_user_id::text, ''), COALESCE(blueprint_run_id::text, ''), blueprint_step_index, attempts`
 
 func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain.AgentRun) error {
@@ -118,7 +118,7 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context) (int, error) {
 		WHERE status NOT IN (
 			'queued',
 			'completed','failed','cancelled','task_unsolvable','taken_over',
-			'awaiting_input','pending_approval'
+			'open','pending_approval'
 		)
 		AND blueprint_run_id IN (SELECT id FROM blueprint_runs WHERE status = 'running')
 	`)
@@ -135,7 +135,7 @@ func scanPgClaimedRun(row *sql.Row) (*domain.AgentRun, error) {
 		stepIdx sql.NullInt64
 	)
 	err := row.Scan(&r.ID, &r.OrgID, &r.TaskID, &r.PromptID, &r.Status, &r.Model,
-		&r.WorktreePath, &r.TriggerType, &r.TriggerID,
+		&r.WorktreePath, &r.SessionID, &r.TriggerType, &r.TriggerID,
 		&r.CreatorUserID, &r.BlueprintRunID, &stepIdx, &r.Attempts)
 	if err == sql.ErrNoRows {
 		return nil, nil

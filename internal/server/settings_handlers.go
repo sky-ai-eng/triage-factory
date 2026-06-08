@@ -2,14 +2,10 @@ package server
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"time"
-
-	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -17,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -125,13 +122,13 @@ func (s *Server) handleTeamSettingsGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	teamID, err := s.resolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
+	teamID, err := s.az.ResolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
 	if err != nil {
-		writeResolveError(w, "settings/team", err)
+		authz.WriteResolveError(w, "settings/team", err)
 		return
 	}
 
-	if !s.verifyTeamInOrg(w, r, orgID, userID, teamID) {
+	if !s.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
 		return
 	}
 
@@ -159,7 +156,7 @@ func (s *Server) handleTeamSettingsGet(w http.ResponseWriter, r *http.Request) {
 		resp.JiraProjects = []jiraProjectSettings{}
 	}
 
-	count, role, err := s.teamMemberCountAndRole(r.Context(), orgID, userID, teamID)
+	count, role, err := s.az.TeamMemberCountAndRole(r.Context(), orgID, userID, teamID)
 	if err != nil {
 		internalError(w, "settings/team", err)
 		return
@@ -184,16 +181,16 @@ func (s *Server) handleTeamSettingsPost(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	teamID, err := s.resolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
+	teamID, err := s.az.ResolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
 	if err != nil {
-		writeResolveError(w, "settings/team", err)
+		authz.WriteResolveError(w, "settings/team", err)
 		return
 	}
 
-	if !s.verifyTeamInOrg(w, r, orgID, userID, teamID) {
+	if !s.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
 		return
 	}
-	if !s.requireTeamAdmin(w, r, orgID, userID, teamID) {
+	if !s.az.RequireTeamAdmin(w, r, orgID, userID, teamID) {
 		return
 	}
 
@@ -363,7 +360,7 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 		jiraBaseURL = creds.JiraURL
 	}
 
-	memberCount, err := s.orgMemberCount(r.Context(), orgID, userID)
+	memberCount, err := s.az.OrgMemberCount(r.Context(), orgID, userID)
 	if err != nil {
 		internalError(w, "settings/org", err)
 		return
@@ -403,7 +400,7 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
-	if !s.requireOrgAdminRole(w, r, orgID, userID) {
+	if !s.az.RequireOrgAdminRole(w, r, orgID, userID) {
 		return
 	}
 
@@ -679,174 +676,10 @@ func (s *Server) capDowngradeWarning(ctx context.Context, orgID, userID, maxTier
 }
 
 // --------------------------------------------------------------------
-// Helpers: team/org role checks, team ID resolution, duration parsing
+// Helpers: duration parsing
+// (the authorization checks, team-ID resolution, and resolve-error
+// rendering live in the authz package)
 // --------------------------------------------------------------------
-
-type resolveError struct {
-	notFound bool
-	err      error
-}
-
-func (e *resolveError) Error() string { return e.err.Error() }
-
-// resolveTeamID converts a raw {team_id} path value to a concrete team
-// UUID. The literal "default" resolves to the org's default team so the
-// frontend can call /api/settings/team/default before team pickers ship.
-// Non-"default" values are validated as UUIDs.
-func (s *Server) resolveTeamID(ctx context.Context, orgID, userID, raw string) (string, error) {
-	if raw != "default" {
-		if _, err := uuid.Parse(raw); err != nil {
-			return "", &resolveError{notFound: true, err: fmt.Errorf("invalid team_id")}
-		}
-		return raw, nil
-	}
-	var teamID string
-	err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		var e error
-		teamID, e = tx.Teams.GetDefaultForOrg(ctx, orgID)
-		return e
-	})
-	if err != nil {
-		return "", &resolveError{notFound: false, err: err}
-	}
-	if teamID == "" {
-		return "", &resolveError{notFound: true, err: fmt.Errorf("org %s has no default team", orgID)}
-	}
-	return teamID, nil
-}
-
-// verifyTeamInOrg confirms that team_id belongs to the active org.
-// Returns 404 (not 403) to avoid leaking team existence across orgs.
-func (s *Server) verifyTeamInOrg(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) bool {
-	if runmode.Current() == runmode.ModeLocal {
-		return true
-	}
-	var belongs bool
-	err := db.WithTx(r.Context(), s.db, db.Claims{Sub: userID, OrgID: orgID},
-		func(tx *sql.Tx) error {
-			return tx.QueryRowContext(r.Context(),
-				`SELECT tf.team_in_current_org($1::uuid)`, teamID,
-			).Scan(&belongs)
-		},
-	)
-	if err != nil {
-		log.Printf("[settings] team-in-org check %s/%s: %v", teamID, orgID, err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return false
-	}
-	if !belongs {
-		http.NotFound(w, r)
-		return false
-	}
-	return true
-}
-
-// requireTeamAdmin checks the user is an admin of the given team.
-// Returns 403 on non-admin.
-func (s *Server) requireTeamAdmin(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) bool {
-	if runmode.Current() == runmode.ModeLocal {
-		return true
-	}
-	var isAdmin bool
-	err := db.WithTx(r.Context(), s.db, db.Claims{Sub: userID, OrgID: orgID},
-		func(tx *sql.Tx) error {
-			return tx.QueryRowContext(r.Context(),
-				`SELECT tf.user_is_team_admin($1::uuid)`, teamID,
-			).Scan(&isAdmin)
-		},
-	)
-	if err != nil {
-		log.Printf("[settings] team-admin check %s/%s/%s: %v", userID, orgID, teamID, err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return false
-	}
-	if !isAdmin {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "team admin role required"})
-		return false
-	}
-	return true
-}
-
-// requireOrgAdminRole checks the user is an admin of the given org.
-// Returns 403 on non-admin.
-func (s *Server) requireOrgAdminRole(w http.ResponseWriter, r *http.Request, orgID, userID string) bool {
-	if runmode.Current() == runmode.ModeLocal {
-		return true
-	}
-	isAdmin, err := s.userIsOrgAdmin(r.Context(), userID, orgID)
-	if err != nil {
-		log.Printf("[settings] org-admin check %s/%s: %v", userID, orgID, err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return false
-	}
-	if !isAdmin {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "org admin role required"})
-		return false
-	}
-	return true
-}
-
-// orgMemberCount returns the number of members in the org. Local mode is
-// always single-member (one synthetic user), so it short-circuits to 1
-// without touching Postgres — db.WithTx's set_config is Postgres-only and
-// there are no org_memberships rows in the local SQLite schema anyway.
-func (s *Server) orgMemberCount(ctx context.Context, orgID, userID string) (int, error) {
-	if runmode.Current() == runmode.ModeLocal {
-		return 1, nil
-	}
-	var n int
-	err := db.WithTx(ctx, s.db, db.Claims{Sub: userID, OrgID: orgID},
-		func(tx *sql.Tx) error {
-			return tx.QueryRowContext(ctx,
-				`SELECT COUNT(*) FROM org_memberships WHERE org_id = $1::uuid`, orgID,
-			).Scan(&n)
-		},
-	)
-	return n, err
-}
-
-// teamMemberCountAndRole returns the team's member count and the caller's
-// role in it ("admin" / "member", or "" when not a member). Local mode is
-// the degenerate single-member case: one user who is implicitly the admin.
-// The OrgID claim is required — teams/memberships RLS gates on
-// tf.current_org_id(), so a Sub-only claim would only ever see the
-// caller's own membership row and miscount.
-func (s *Server) teamMemberCountAndRole(ctx context.Context, orgID, userID, teamID string) (int, string, error) {
-	if runmode.Current() == runmode.ModeLocal {
-		return 1, "admin", nil
-	}
-	var (
-		n    int
-		role string
-	)
-	err := db.WithTx(ctx, s.db, db.Claims{Sub: userID, OrgID: orgID},
-		func(tx *sql.Tx) error {
-			if e := tx.QueryRowContext(ctx,
-				`SELECT COUNT(*) FROM memberships WHERE team_id = $1::uuid`, teamID,
-			).Scan(&n); e != nil {
-				return e
-			}
-			e := tx.QueryRowContext(ctx,
-				`SELECT role FROM memberships
-				  WHERE team_id = $1::uuid AND user_id = tf.current_user_id()`, teamID,
-			).Scan(&role)
-			if errors.Is(e, sql.ErrNoRows) {
-				return nil
-			}
-			return e
-		},
-	)
-	return n, role, err
-}
-
-func writeResolveError(w http.ResponseWriter, scope string, err error) {
-	var re *resolveError
-	if errors.As(err, &re) && re.notFound {
-		notFound(w, "team")
-		return
-	}
-	internalError(w, scope, err)
-}
 
 func parseMinDuration(s string, minSeconds int) (time.Duration, error) {
 	d, err := time.ParseDuration(s)

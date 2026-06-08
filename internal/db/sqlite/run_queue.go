@@ -28,7 +28,7 @@ var _ db.RunQueueStore = (*runQueueStore)(nil)
 // runQueueClaimCols is the column list ClaimNextRun returns, shared with the
 // scan helper. team_id/visibility are left at their row defaults on enqueue.
 const runQueueClaimCols = `id, org_id, task_id, COALESCE(prompt_id, ''), status, COALESCE(model, ''),
-	COALESCE(worktree_path, ''), trigger_type, COALESCE(trigger_id, ''),
+	COALESCE(worktree_path, ''), COALESCE(session_id, ''), trigger_type, COALESCE(trigger_id, ''),
 	COALESCE(creator_user_id, ''), COALESCE(blueprint_run_id, ''), blueprint_step_index, attempts`
 
 func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain.AgentRun) error {
@@ -106,7 +106,7 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context) (int, error) {
 		WHERE status NOT IN (
 			'queued',
 			'completed','failed','cancelled','task_unsolvable','taken_over',
-			'awaiting_input','pending_approval'
+			'open','pending_approval'
 		)
 		AND blueprint_run_id IN (SELECT id FROM blueprint_runs WHERE status = 'running')
 	`)
@@ -126,7 +126,7 @@ func scanSqliteClaimedRun(row *sql.Row) (*domain.AgentRun, error) {
 		stepIdx sql.NullInt64
 	)
 	err := row.Scan(&r.ID, &r.OrgID, &r.TaskID, &r.PromptID, &r.Status, &r.Model,
-		&r.WorktreePath, &r.TriggerType, &r.TriggerID,
+		&r.WorktreePath, &r.SessionID, &r.TriggerType, &r.TriggerID,
 		&r.CreatorUserID, &r.BlueprintRunID, &stepIdx, &r.Attempts)
 	if err == sql.ErrNoRows {
 		return nil, nil

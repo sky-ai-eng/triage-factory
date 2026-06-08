@@ -1263,6 +1263,13 @@ CREATE TABLE public.runs (
     -- bumping attempts. Both stay NULL/0 for the legacy never-queued shape.
     claimed_at timestamp with time zone,
     attempts integer DEFAULT 0 NOT NULL,
+    -- executor_id records which executor instance owns a run's live
+    -- process while it is running. Stamped when the run goes live; NULL
+    -- for queued / never-live / terminal-parked rows. At N=1 it's a single
+    -- per-process instance id (forward-compat ownership hook for
+    -- horizontal scaling, where it becomes the lease the control plane
+    -- signals through). Not a status — purely the run→executor pointer.
+    executor_id text,
     CONSTRAINT runs_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL)))),
     CONSTRAINT runs_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
     CONSTRAINT runs_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text])))

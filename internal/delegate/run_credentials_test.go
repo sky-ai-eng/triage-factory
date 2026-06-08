@@ -24,6 +24,9 @@ type fakeResolver struct {
 	// token is what TokenFor hands back — the credential the
 	// host-side clone injects. Defaults to the zero Token when unset.
 	token githubapp.Token
+	// baseURL is what BaseURLFor hands back — the org's git host base.
+	// Empty defaults to github.com so existing fixtures need no change.
+	baseURL string
 }
 
 type resolverCall struct {
@@ -46,6 +49,16 @@ func (f *fakeResolver) TokenFor(ctx context.Context, orgID, target string) (gith
 		return githubapp.Token{}, f.err
 	}
 	return f.token, nil
+}
+
+func (f *fakeResolver) BaseURLFor(ctx context.Context, orgID string) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	if f.baseURL != "" {
+		return f.baseURL, nil
+	}
+	return ghclient.DefaultBaseURL, nil
 }
 
 var _ ghclient.Resolver = (*fakeResolver)(nil)

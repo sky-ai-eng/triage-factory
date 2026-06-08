@@ -19,8 +19,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/google/uuid"
-
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -306,7 +304,7 @@ func (s *Server) handleGitHubAppRegisterLaunch(w http.ResponseWriter, r *http.Re
 		http.NotFound(w, r)
 		return
 	}
-	orgID, userID, ok := s.requireOrgAdmin(w, r)
+	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {
 		return
 	}
@@ -424,7 +422,7 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 		http.NotFound(w, r)
 		return
 	}
-	orgID, userID, ok := s.requireOrgAdmin(w, r)
+	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {
 		return
 	}
@@ -563,41 +561,6 @@ func settingsRedirectPath(orgID string) string {
 		return "/settings"
 	}
 	return "/orgs/" + orgID + "/settings"
-}
-
-// requireOrgAdmin validates {org_id} from the URL path and checks the
-// caller is both a member and an admin of that org. Returns (orgID,
-// userID, true) on success; writes an error and returns ("", "", false)
-// on failure.
-func (s *Server) requireOrgAdmin(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
-	rawOrgID := r.PathValue("org_id")
-	if _, err := uuid.Parse(rawOrgID); err != nil {
-		http.NotFound(w, r)
-		return
-	}
-
-	claims := ClaimsFrom(r.Context())
-	if claims == nil {
-		writeUnauth(w)
-		return
-	}
-	userID = claims.Subject
-
-	if runmode.Current() == runmode.ModeLocal {
-		return rawOrgID, userID, true
-	}
-
-	isAdmin, err := s.userIsOrgAdmin(r.Context(), userID, rawOrgID)
-	if err != nil {
-		log.Printf("[github-app] admin check %s/%s: %v", userID, rawOrgID, err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	if !isAdmin {
-		http.NotFound(w, r)
-		return
-	}
-	return rawOrgID, userID, true
 }
 
 // --- manifest code exchange ---

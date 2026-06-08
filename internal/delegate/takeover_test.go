@@ -206,7 +206,7 @@ func TestTakeover_NoSessionID(t *testing.T) {
 // TestTakeover_NoWorktreePath: defensive — a run that for some reason
 // has no worktree_path on its row (setup error, schema oddity) can't
 // be taken over. Jira lazy runs DO populate worktree_path with the
-// run-root (so yield/resume can reuse it as the resume cwd); the
+// run-root (so a resume can reuse it as the resume cwd); the
 // Jira-specific rejection happens at the next gate (task-source
 // check, see TestTakeover_RejectsJiraLazyRun).
 func TestTakeover_NoWorktreePath(t *testing.T) {
@@ -221,7 +221,7 @@ func TestTakeover_NoWorktreePath(t *testing.T) {
 }
 
 // TestTakeover_RejectsJiraLazyRun: Jira lazy delegations populate
-// runs.worktree_path (with the run-root) so yield/resume works, but
+// runs.worktree_path (with the run-root) so a resume works, but
 // they're not yet supported for takeover — multi-worktree relocation
 // requires `git worktree move` per materialized worktree (SKY-234).
 // Until that lands, refuse explicitly via the task-source check.

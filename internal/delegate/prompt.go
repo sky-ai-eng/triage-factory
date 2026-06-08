@@ -184,76 +184,33 @@ func (s *Spawner) collectExtraTools(promptAllowedTools string) string {
 }
 
 type agentResult struct {
-	// Outcome is the single terminal vocabulary (continue|finish|abort|
-	// yield) — renamed from the legacy `status` field for clarity. See
-	// domain.RunOutcome and internal/ai/prompts/envelope.txt.
+	// Outcome is the single terminal vocabulary (continue|finish|abort) —
+	// renamed from the legacy `status` field for clarity. See domain.RunOutcome
+	// and internal/ai/prompts/envelope.txt.
 	Outcome string `json:"outcome"`
-	// Summary is the always-present natural-language "what I did". Maps
-	// to runs.result_summary.
+	// Summary is the natural-language "what I did" — required on a
+	// finish/continue. Maps to runs.result_summary.
 	Summary string `json:"summary"`
 	// Reason is the natural-language "why I stopped / what a human needs
-	// to do" — populated only on an abort outcome. Maps to
-	// runs.outcome_reason, kept distinct from Summary.
+	// to do" — required on (and only meaningful for) an abort outcome. Maps
+	// to runs.outcome_reason, kept distinct from Summary.
 	Reason string         `json:"reason"`
 	Links  map[string]any `json:"links"` // keyed URLs (pr_review, pr, jira_issues)
-
-	// Yield is populated when Outcome == "yield". The agent is asking
-	// the user a question and the run should park in awaiting_input
-	// rather than completing. See domain.YieldRequest and SKY-139 /
-	// internal/ai/prompts/envelope.txt for the agent-facing contract.
-	Yield *domain.YieldRequest `json:"yield,omitempty"`
 }
 
-// isValid reports whether the parsed envelope contains enough to act on.
-// Two terminal shapes are accepted:
-//   - continue / finish / abort: Summary is non-empty (every successful
-//     or stopped envelope carries a natural-language summary)
-//   - yield: a well-formed yield envelope (see isYield)
-//
-// Anything else is treated as "didn't parse cleanly" — the parser
-// falls through to its markdown-fence and brace-extraction paths
-// before giving up. Rejecting malformed yield payloads at parse time
-// matters because once a yield parks the run in awaiting_input, the
-// user can't respond unless the modal can render meaningfully —
-// e.g. a choice yield with no options has no buttons to click.
+// isValid reports whether the envelope is a recognized conclusion carrying its
+// required companion field: finish/continue need a non-empty summary; abort
+// needs a non-empty reason (abort is the agent's *voluntary* "I'm functioning
+// but choosing to stop" decision, so the why is exactly the thing worth
+// collecting — involuntary death is the separate `failed` status). Any other
+// outcome token, or a recognized one missing its companion, is not a valid
+// conclusion — it's an invalid attempt the driver re-prompts to fix.
 func (r *agentResult) isValid() bool {
-	if r.Summary != "" {
-		return true
-	}
-	return r.isYield()
-}
-
-// isYield reports whether this is a well-formed yield envelope: outcome
-// "yield" AND a yield payload that passes YieldRequest.Validate (known type,
-// non-empty message, well-formed options for choice yields, no duplicate
-// option ids). Both the run-completion yield routing and hasValidOutcome
-// gate on it so a "yield" carrying a missing/malformed payload is never
-// (a) parked in awaiting_input with a modal the user can't act on, nor
-// (b) waved through the outcome gate and then treated as a normal completion
-// that closes the task. A non-empty summary does NOT make a payload-less
-// yield valid — the payload is what the UI needs.
-func (r *agentResult) isYield() bool {
-	return r.Outcome == string(domain.RunOutcomeYield) && r.Yield != nil && r.Yield.Validate() == nil
-}
-
-// hasValidOutcome reports whether the envelope carries a usable outcome.
-// continue/finish need only the outcome token. abort additionally requires a
-// non-empty reason: abort is the agent's *voluntary* "I'm functioning but
-// choosing to stop" decision (involuntary death is the separate `failed`
-// status), so the why is exactly the thing worth collecting — a reasonless
-// abort is re-prompted by the outcome gate. yield requires a well-formed
-// payload (isYield) — otherwise a payload-less "yield" would satisfy the gate
-// and then fall through to the normal completion path. Looser than isValid
-// only in that a summary alone never substitutes for a missing/incomplete
-// outcome: a summary-only envelope parses but trips the gate.
-func (r *agentResult) hasValidOutcome() bool {
 	switch domain.RunOutcome(r.Outcome) {
 	case domain.RunOutcomeContinue, domain.RunOutcomeFinish:
-		return true
+		return r.Summary != ""
 	case domain.RunOutcomeAbort:
 		return r.Reason != ""
-	case domain.RunOutcomeYield:
-		return r.isYield()
 	default:
 		return false
 	}
@@ -278,47 +235,109 @@ func (r *agentResult) PrimaryLink() string {
 	return ""
 }
 
-// parseAgentResult extracts the structured {outcome, summary, reason, links}
-// JSON from the agent's final message. Handles markdown fences, leading/
-// trailing text. Recognizes both completion envelopes (outcome: continue |
-// finish | abort with a non-empty summary) and yield envelopes (outcome:
-// yield with a typed yield payload — SKY-139). See agentResult.isValid for
-// the acceptance rule.
-func parseAgentResult(text string) *agentResult {
+// turnClass is the three-way classification of an agent turn-end: the run is
+// either concluded (valid), made a malformed conclusion attempt (invalid), or
+// did neither (none — prose / nothing, i.e. an open run).
+type turnClass int
+
+const (
+	// turnNone — no envelope attempt at all: prose, nothing, or unrelated
+	// JSON with no `outcome` key. The run is open: not concluded, not
+	// executing, no claim about why it stopped.
+	turnNone turnClass = iota
+	// turnInvalid — the output IS an envelope attempt (a JSON object carrying
+	// an `outcome` key, or clearly envelope-shaped output that won't parse)
+	// but it fails validation: malformed JSON, an unrecognized outcome, or a
+	// recognized outcome missing its required companion. The driver re-prompts
+	// to fix, then fails on exhaustion.
+	turnInvalid
+	// turnValid — a recognized conclusion with its required companion field.
+	turnValid
+)
+
+// classifyAgentResult sorts the agent's final message text into the three
+// turn-end buckets. It looks for the agent's intended completion envelope — the
+// first brace-delimited JSON object that decodes AND carries an `outcome` key
+// (envelopeObject) — tolerating leading prose, trailing text, markdown fences,
+// and nested objects. If such an object is found it's valid or invalid per
+// isValid; if none decodes but the text still carries an `"outcome"` key (a
+// malformed object that wouldn't parse) it's an invalid attempt the driver
+// re-prompts; anything else — prose, an empty or unrelated JSON object — is
+// none, and the run is open. The parsed result is returned only for valid.
+//
+// Known limitation: the malformed-envelope fallback is a substring check for
+// the quoted `"outcome"` token, so prose that literally contains it with no
+// real envelope is treated as a (malformed) attempt and re-prompted once. The
+// contract is "ONLY a JSON object," so that's a rare violation the re-prompt
+// corrects.
+func classifyAgentResult(text string) (turnClass, *agentResult) {
 	text = strings.TrimSpace(text)
 	if text == "" {
-		return nil
+		return turnNone, nil
 	}
-
-	var result agentResult
-	if json.Unmarshal([]byte(text), &result) == nil && result.isValid() {
-		return &result
+	if candidate, ok := envelopeObject(text); ok {
+		var result agentResult
+		_ = json.Unmarshal([]byte(candidate), &result) // envelopeObject already decoded it
+		if result.isValid() {
+			return turnValid, &result
+		}
+		return turnInvalid, nil // a parseable envelope attempt that fails validation
 	}
-
-	stripped := text
-	if idx := strings.Index(stripped, "```"); idx >= 0 {
-		stripped = stripped[idx+3:]
-		if nl := strings.Index(stripped, "\n"); nl >= 0 {
-			stripped = stripped[nl+1:]
-		}
-		if end := strings.LastIndex(stripped, "```"); end >= 0 {
-			stripped = stripped[:end]
-		}
-		stripped = strings.TrimSpace(stripped)
-		if json.Unmarshal([]byte(stripped), &result) == nil && result.isValid() {
-			return &result
-		}
+	// No decodable object carried an `outcome`. If the text is nonetheless
+	// clearly an envelope attempt that didn't parse (a malformed object with an
+	// "outcome" key), treat it as invalid so the driver re-prompts; otherwise
+	// it's prose / unrelated JSON and the run is open.
+	if looksMalformedEnvelope(text) {
+		return turnInvalid, nil
 	}
+	return turnNone, nil
+}
 
-	if start := strings.Index(text, "{"); start >= 0 {
-		if end := strings.LastIndex(text, "}"); end > start {
-			candidate := text[start : end+1]
-			if json.Unmarshal([]byte(candidate), &result) == nil && result.isValid() {
-				return &result
-			}
+// envelopeObject returns the agent's intended completion envelope: the first
+// brace-delimited JSON object in text that decodes AND carries an `outcome`
+// key, as an exactly-bounded span re-parseable with json.Unmarshal. A streaming
+// json.Decoder started at each `{` consumes one balanced object and ignores the
+// rest, so this tolerates leading prose, a trailing ``` fence, text after the
+// JSON, and nested objects — cases the cruder first-{-to-last-} span could not
+// (e.g. "Config {x} done. {\"outcome\":\"finish\",...}"). Objects without an
+// `outcome` key (a stray prose `{...}`, a nested links object, `{}`) are
+// skipped. Returns ok=false when no such object exists.
+func envelopeObject(text string) (string, bool) {
+	for i := 0; i < len(text); i++ {
+		if text[i] != '{' {
+			continue
 		}
+		dec := json.NewDecoder(strings.NewReader(text[i:]))
+		var probe map[string]any
+		if dec.Decode(&probe) != nil {
+			continue // not a JSON object starting at this brace
+		}
+		if _, hasOutcome := probe["outcome"]; !hasOutcome {
+			continue // a JSON object, but not the envelope
+		}
+		return text[i : i+int(dec.InputOffset())], true
 	}
+	return "", false
+}
 
+// looksMalformedEnvelope reports whether text is clearly an envelope attempt
+// that no extraction could parse — the heuristic is the presence of the
+// `"outcome"` JSON key. Prose rarely carries that exact token, so a positive
+// here means "the agent tried to emit an envelope and botched the JSON," which
+// the driver re-prompts rather than treating as an open run.
+func looksMalformedEnvelope(text string) bool {
+	return strings.Contains(text, `"outcome"`)
+}
+
+// parseAgentResult returns the parsed envelope iff the text is a valid
+// conclusion (a recognized outcome with its required companion field), else
+// nil. Used by the terminal-recording path (processCompletion) where only a
+// usable conclusion is acted on; the driver uses classifyAgentResult directly
+// to tell invalid attempts apart from open runs.
+func parseAgentResult(text string) *agentResult {
+	if class, result := classifyAgentResult(text); class == turnValid {
+		return result
+	}
 	return nil
 }
 

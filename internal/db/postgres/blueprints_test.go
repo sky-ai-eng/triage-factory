@@ -290,7 +290,7 @@ func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 	}
 
 	// GetRunForRunSystem mirrors GetRunForRun for goroutine-internal
-	// callers (blueprint orchestrator cleanup, post-yield resume) that
+	// callers (blueprint orchestrator cleanup, post-resume finalize) that
 	// have no JWT-claims context. The contract is identical — both
 	// arms read the same row — so the assertion is just that the
 	// admin-pool variant returns the same values.

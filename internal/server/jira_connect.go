@@ -81,7 +81,7 @@ type jiraIdentityStatusResponse struct {
 //
 // GET /api/orgs/{org_id}/identity/jira
 func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgMember(w, r)
+	orgID, userID, ok := s.az.RequireOrgMember(w, r)
 	if !ok {
 		return
 	}
@@ -177,7 +177,7 @@ type jiraIdentityCaptureResponse struct {
 //
 // POST /api/orgs/{org_id}/identity/jira/pat
 func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgMember(w, r)
+	orgID, userID, ok := s.az.RequireOrgMember(w, r)
 	if !ok {
 		return
 	}

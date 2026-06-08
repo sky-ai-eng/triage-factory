@@ -84,8 +84,8 @@ func (s *Spawner) RunDispatcher(ctx context.Context, scanInterval time.Duration)
 // reconcileRunQueue is the boot crash-recovery sweep (decision #4). Runs left
 // mid-flight by a crash (claimed/running/setup statuses) are re-queued so the
 // dispatcher re-claims and re-runs them; a mid-flight blueprint thus resumes by
-// re-running its current step. Dormant runs (awaiting_input, pending_approval)
-// are left parked — they resume through their own paths, not the queue.
+// re-running its current step. Dormant runs (open, pending_approval) are left
+// parked — they resume through their own paths, not the queue.
 func (s *Spawner) reconcileRunQueue(ctx context.Context) {
 	// No step-plan handling needed: a re-queued mid-flight run is re-claimed by
 	// dispatchClaimedRun, which reads the plan frozen on its blueprint_run (off
@@ -100,24 +100,52 @@ func (s *Spawner) reconcileRunQueue(ctx context.Context) {
 	}
 }
 
-// drainRunQueue claims and dispatches queued runs until the queue is empty (or
-// ctx is cancelled). Unlike the event-queue worker, each claimed run runs its
-// agent inline before the next claim — a single dispatcher processes one step at
-// a time, matching the pre-queue single-goroutine sequencing.
+// drainRunQueue claims queued runs and hands each to a goroutine, bounded by
+// the process-wide concurrency semaphore, until the queue is empty (or ctx is
+// cancelled). It acquires a slot BEFORE each claim, so at capacity it blocks on
+// a free slot rather than reserving a run it can't yet run (no claimed-but-idle
+// 'running' rows). Each claimed run executes — setup, agent, reactor — off the
+// dispatcher, so the loop keeps claiming the next run (up to the cap) without
+// waiting for the previous one to finish. The claim is FOR UPDATE SKIP LOCKED,
+// so this is the same mechanism a future N-worker dispatcher uses; the
+// semaphore is what keeps a burst of queued steps from fanning into an
+// unbounded number of agent subprocesses on one host.
 func (s *Spawner) drainRunQueue(ctx context.Context) {
+	// Capture the semaphore once and use it for both acquire and release so a
+	// startup-time SetMaxConcurrentRuns can't strand a token on a replaced
+	// channel.
+	sem := s.semaphore()
 	for {
 		if ctx.Err() != nil {
 			return
 		}
+		// Acquire a concurrency slot BEFORE claiming, so we never flip a run to
+		// 'running' that then sits idle waiting for a slot. Blocks at capacity
+		// until a finishing run releases its slot; a shutdown breaks the wait
+		// (in-flight runs are ctx-cancelled, and the boot reconcile re-queues
+		// anything left mid-flight).
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
 		run, err := s.runQueue.ClaimNextRun(ctx)
 		if err != nil {
+			<-sem
 			log.Printf("[dispatch] claim next run: %v (retrying on the next scan)", err)
 			return
 		}
 		if run == nil {
-			return // queue drained
+			<-sem
+			return // queue drained — release the slot we acquired but didn't use
 		}
-		s.dispatchClaimedRun(ctx, run)
+		// run is a fresh per-iteration `:=` binding (not a loop variable), so each
+		// goroutine captures its own; the deferred receive hands the slot back on
+		// terminal.
+		go func() {
+			defer func() { <-sem }()
+			s.dispatchClaimedRun(ctx, run)
+		}()
 	}
 }
 
@@ -267,7 +295,10 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 	s.cancels[run.ID] = stepCancel
 	s.mu.Unlock()
 
-	s.runAgent(stepCtx, run.ID, *task, mission, cfg, time.Now(), run.Model, run.TriggerType, run.CreatorUserID)
+	// run.SessionID is empty on a first claim and non-empty when this run was
+	// re-claimed mid-flight by a crash — runAgent resumes it when the warm
+	// session survived, else starts fresh.
+	s.runAgent(stepCtx, run.ID, *task, mission, cfg, time.Now(), run.Model, run.TriggerType, run.CreatorUserID, run.SessionID)
 
 	s.mu.Lock()
 	delete(s.cancels, run.ID)
@@ -298,7 +329,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 // that has reached a terminal (or parked) state, advance the blueprint_run.
 // This is the post-step switch lifted out of the old runBlueprint loop —
 // continue→enqueue-next, finish→complete+close, abort→leave-open,
-// yield/pending_approval→leave parked — now driven by the DB rather than a
+// open/pending_approval→leave parked — now driven by the DB rather than a
 // goroutine stack. It calls recomputeTaskBoardColumn on every transition so the
 // board stays live under the queue model.
 func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, stepRun domain.AgentRun, cfg runConfig, startTime time.Time) {
@@ -312,7 +343,7 @@ func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, ste
 	// Parked mid-step: leave the blueprint running, the worktree on disk, and the
 	// snapshot in the blob store for the resume path. The aggregate column lands
 	// the task in_review.
-	if stepRun.Status == "awaiting_input" || stepRun.Status == "pending_approval" {
+	if stepRun.Status == "open" || stepRun.Status == "pending_approval" {
 		log.Printf("[dispatch] blueprint_run %s step %d paused at status=%s; blueprint remains running", br.ID, stepIdx, stepRun.Status)
 		s.recomputeTaskBoardColumn(orgID, br.TaskID)
 		return

@@ -466,7 +466,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID string, task dom
 // below). Both gh and jira tool surfaces are exposed since the agent
 // will need both to implement and ship a PR.
 //
-// runs.worktree_path is set to the run-root. Yield/resume reads this
+// runs.worktree_path is set to the run-root. The resume path reads this
 // field as the cwd to resume the session in (`claude --resume` keys
 // session storage by cwd-encoded ~/.claude/projects/<encoded>, and we
 // passed cwd=runRoot to the original agentproc.Run). Even though Jira
@@ -480,7 +480,7 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, runID string, task domai
 		return runConfig{}, fmt.Errorf("create run root: %w", err)
 	}
 	if err := s.agentRuns.SetWorktreePathSystem(context.Background(), orgID, runID, runRoot); err != nil {
-		log.Printf("[delegate] warning: failed to set worktree_path for Jira run %s: %v — yield/resume will reject this run", runID, err)
+		log.Printf("[delegate] warning: failed to set worktree_path for Jira run %s: %v — resume will reject this run", runID, err)
 	}
 
 	// SKY-220: block briefly so the project classifier can decide this

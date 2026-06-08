@@ -15,9 +15,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/workspace"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
-	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
-	"github.com/sky-ai-eng/triage-factory/internal/integrations"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // Handle dispatches exec subcommands.
@@ -27,18 +24,15 @@ func Handle(args []string) {
 		return
 	}
 
-	// Open DB for local state (pending reviews, etc.). Credentials and
-	// per-org settings (GitHub base URL) follow the same path — both
-	// route through DB-backed stores.
-	//
-	// The DB open is unconditional even when the sandboxed agenthost
-	// path will win below — credential loading (the loadCreds closure)
-	// still needs SecretStore access, and a future ticket
-	// will route those reads through the IPC client too. Today the
-	// production sandbox path doesn't exercise gh/jira subcommands
-	// (SKY-256 hasn't shipped the musl-static binary yet), so reading
-	// the local DB for creds is fine even when the daemon socket
-	// exists.
+	// Open DB for local state (pending reviews, run worktrees, etc.). The
+	// open is unconditional even when the sandboxed agenthost path wins
+	// below, because the local-mode LocalClient that AutoDetect may return
+	// reads this DB for its state and host-side credential resolution. In
+	// the sandbox the IPC client ignores it — every state access and every
+	// GitHub/Jira credential resolves on the host daemon, not here. No exec
+	// subcommand loads a credential from the keychain anymore: gh and jira
+	// both route their API calls host-side (Property B — the jail never
+	// holds a token, never touches dbus).
 	conn, err := db.Open()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error opening database: %v\n", err)
@@ -81,68 +75,26 @@ func Handle(args []string) {
 		return client
 	}
 
-	// Credentials route through the SecretStore. exec is invoked per-run
-	// with TRIAGE_FACTORY_RUN_ID; resolve the run's orgID so the
-	// SecretStore read is scoped to the right tenant.
-	//
-	// Local mode falls back to runmode.LocalDefaultOrgID when
-	// ResolveRunIdentity errors so `--help` (and stray invocations
-	// outside a delegated run) still load the configured creds for
-	// the single tenant. Multi mode refuses: an unidentified exec
-	// invocation has no valid tenant to bill against, and resolving
-	// to the sentinel org would hit a SecretStore with no rows at
-	// best, leak to the wrong tenant at worst. Help paths short-
-	// circuit before loadCreds runs, so this branch never fires for
-	// genuine `--help`.
-	// resolveOrgID picks the right tenant for credential + settings reads.
-	// In local mode it falls back to the sentinel org so `--help` and
-	// stray invocations still work; in multi-mode it errors out since
-	// there's no valid tenant to attribute the read to.
-	resolveOrgID := func(ctx context.Context) (string, error) {
-		ident, err := runident.ResolveRunIdentity(ctx, stores, os.Getenv(runident.RunIdentityEnvVar))
-		switch {
-		case err == nil:
-			return ident.OrgID, nil
-		case runmode.Current() == runmode.ModeLocal:
-			return runmode.LocalDefaultOrgID, nil
-		default:
-			return "", fmt.Errorf("cmd/exec invoked without a valid %s; this command can only run inside a delegated agent run", runident.RunIdentityEnvVar)
-		}
-	}
-	loadCreds := func() (string, string, string, string, string, error) {
-		ctx := context.Background()
-		orgID, err := resolveOrgID(ctx)
-		if err != nil {
-			return "", "", "", "", "", err
-		}
-		c, lerr := integrations.Load(ctx, stores.Secrets, orgID)
-		orgSet, _ := stores.Orgs.GetSettingsSystem(ctx, orgID) // settings read failures degrade to empty BaseURL — the gh branch already prefers creds.GitHubURL as a fallback
-		return c.GitHubURL, c.GitHubPAT, c.JiraURL, c.JiraPAT, orgSet.GitHubBaseURL, lerr
-	}
-
 	switch cmd {
 	case "gh":
+		// GitHub API calls route through the agenthost client. In the sandbox
+		// the IPC client ships each call to the host daemon, which resolves the
+		// org's App-installation-or-PAT credential (github.Resolver.ClientForRepo)
+		// and makes the request; the jail never reads a token, the keychain, or
+		// dbus. In local mode AutoDetect returns the in-process LocalClient,
+		// which builds the same client directly on the user's machine — the
+		// unchanged local path. Like the jira branch, this never loads a
+		// credential here: it resolves host-side (or in-process via the
+		// LocalClient), so the DB opened at the top of Handle is consulted on
+		// the gh path only by the local-mode LocalClient; the sandbox IPC path
+		// ignores it.
 		if isHelp(cmdArgs) {
-			gh.Handle(nil, nil, cmdArgs)
+			gh.Handle(nil, cmdArgs)
 			return
 		}
-		ghURL, ghPAT, _, _, ghBase, lerr := loadCreds()
-		if lerr != nil {
-			fmt.Fprintf(os.Stderr, "error loading credentials: %v\n", lerr)
-			os.Exit(1)
-		}
-		if ghPAT == "" {
-			fmt.Fprintln(os.Stderr, "GitHub not configured. Run triagefactory and complete setup first.")
-			os.Exit(1)
-		}
-		baseURL := ghBase
-		if baseURL == "" {
-			baseURL = ghURL
-		}
-		client := ghclient.NewClient(baseURL, ghPAT)
 		host := buildAgentHost()
 		defer func() { _ = host.Close() }()
-		gh.Handle(client, host, cmdArgs)
+		gh.Handle(host, cmdArgs)
 
 	case "jira":
 		// Jira API calls route through the agenthost client. In the sandbox
@@ -153,11 +105,10 @@ func Handle(args []string) {
 		// builds the same ForSystem client directly — the unchanged local
 		// path. Bot-authored writes by design; no per-user routing in the
 		// sandbox (user-attributed Jira writes are the server-side handlers).
-		//
-		// Unlike the gh branch, this never calls loadCreds — the credential
-		// resolves host-side (or in-process via the LocalClient), so the DB
-		// opened at the top of Handle is consulted here only by the local-mode
-		// LocalClient; the sandbox IPC path ignores it.
+		// The credential resolves host-side (or in-process via the
+		// LocalClient), so the DB opened at the top of Handle is consulted
+		// here only by the local-mode LocalClient; the sandbox IPC path
+		// ignores it.
 		if isHelp(cmdArgs) {
 			jiraexec.Handle(nil, cmdArgs)
 			return

@@ -10,22 +10,33 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/server/prompts"
+	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
+
+// blueprintsHandler serves the blueprint + blueprint-run endpoints. spawner is
+// read through a getter so the handler always sees the current delegation
+// spawner, which is wired onto the server after construction.
+type blueprintsHandler struct {
+	tx      db.TxRunner
+	spawner func() *delegate.Spawner
+}
 
 const maxBlueprintSteps = 50
 
 // --- Blueprint header CRUD -----------------------------------------------
 
-func (s *Server) handleBlueprintsList(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (bh *blueprintsHandler) handleBlueprintsList(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	teamID := singleTeamParam(r)
+	teamID := teamscope.SingleParam(r)
 	var blueprints []domain.Blueprint
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		blueprints, e = tx.Blueprints.List(r.Context(), orgID, teamID)
 		return e
@@ -66,8 +77,8 @@ type blueprintCreateResponse struct {
 	FirstPromptID string `json:"first_prompt_id,omitempty"`
 }
 
-func (s *Server) handleBlueprintCreate(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (bh *blueprintsHandler) handleBlueprintCreate(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -89,8 +100,8 @@ func (s *Server) handleBlueprintCreate(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "first_prompt.body is required"})
 			return
 		}
-		if !validPromptModel(req.FirstPrompt.Model) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": invalidPromptModelError()})
+		if !prompts.ValidModel(req.FirstPrompt.Model) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": prompts.InvalidModelError()})
 			return
 		}
 		if req.Name == "" {
@@ -105,8 +116,8 @@ func (s *Server) handleBlueprintCreate(w http.ResponseWriter, r *http.Request) {
 	userID := ClaimsFrom(r.Context()).Subject
 	var created *domain.Blueprint
 	var firstPromptID string
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		teamID, e := resolveActingTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
 		}
@@ -140,7 +151,7 @@ func (s *Server) handleBlueprintCreate(w http.ResponseWriter, r *http.Request) {
 		created, ge = tx.Blueprints.Get(r.Context(), orgID, id)
 		return ge
 	}); err != nil {
-		if writeIfActingTeamError(w, err) {
+		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
 		internalError(w, "blueprints", err)
@@ -157,8 +168,8 @@ type renameBlueprintRequest struct {
 // independent of its entry prompt's (auto-wrap defaults them equal, but the box
 // chrome lets a user rename the blueprint without touching the prompt). The
 // org-template family has the same endpoint; this is the team-scope mirror.
-func (s *Server) handleBlueprintUpdate(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (bh *blueprintsHandler) handleBlueprintUpdate(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -176,7 +187,7 @@ func (s *Server) handleBlueprintUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var updated *domain.Blueprint
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		existing, e := tx.Blueprints.Get(r.Context(), orgID, id)
 		if e != nil || existing == nil {
 			return e
@@ -218,8 +229,8 @@ func (s *Server) handleBlueprintUpdate(w http.ResponseWriter, r *http.Request) {
 //
 // 404 by re-read (Get filters soft-deleted) when the blueprint is missing or
 // already deleted.
-func (s *Server) handleBlueprintDelete(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (bh *blueprintsHandler) handleBlueprintDelete(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -227,7 +238,7 @@ func (s *Server) handleBlueprintDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
 	var found bool
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		existing, e := tx.Blueprints.Get(r.Context(), orgID, id)
 		if e != nil || existing == nil {
 			return e
@@ -253,7 +264,7 @@ func (s *Server) handleBlueprintDelete(w http.ResponseWriter, r *http.Request) {
 			if p == nil {
 				continue
 			}
-			if _, de := softDeletePromptBySource(r.Context(), tx, orgID, p); de != nil {
+			if _, de := prompts.SoftDeleteBySource(r.Context(), tx, orgID, p); de != nil {
 				return de
 			}
 		}
@@ -288,15 +299,15 @@ func (s *Server) handleBlueprintDelete(w http.ResponseWriter, r *http.Request) {
 // read — the binding canvas's bulk fetch, which avoids an N+1 of
 // GET .../{id}/steps over the blueprint list. Always an array; the client
 // groups by blueprint_id.
-func (s *Server) handleBlueprintStepsAll(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (bh *blueprintsHandler) handleBlueprintStepsAll(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	teamID := singleTeamParam(r)
+	teamID := teamscope.SingleParam(r)
 	var steps []domain.BlueprintStep
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		steps, e = tx.Blueprints.ListAllSteps(r.Context(), orgID, teamID)
 		return e
@@ -313,8 +324,8 @@ func (s *Server) handleBlueprintStepsAll(w http.ResponseWriter, r *http.Request)
 // handleBlueprintStepsGet returns the ordered step list for a blueprint.
 // Always returns an array (never null) so frontend code can iterate without a
 // nil check.
-func (s *Server) handleBlueprintStepsGet(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (bh *blueprintsHandler) handleBlueprintStepsGet(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -323,7 +334,7 @@ func (s *Server) handleBlueprintStepsGet(w http.ResponseWriter, r *http.Request)
 
 	var blueprint *domain.Blueprint
 	var steps []domain.BlueprintStep
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		blueprint, e = tx.Blueprints.Get(r.Context(), orgID, id)
 		if e != nil {
@@ -360,8 +371,8 @@ type blueprintStepsPutRequest struct {
 // handleBlueprintStepsPut replaces the blueprint's step list. Validates that
 // the blueprint exists and that every step references a prompt the blueprint's
 // own team owns (same-team guard).
-func (s *Server) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (bh *blueprintsHandler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -369,7 +380,7 @@ func (s *Server) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request)
 	id := r.PathValue("id")
 
 	var blueprint *domain.Blueprint
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		blueprint, e = tx.Blueprints.Get(r.Context(), orgID, id)
 		return e
@@ -411,7 +422,7 @@ func (s *Server) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request)
 	// tx so all lookups and the final write share claims.
 	var validationErr string
 	var validationStatus int
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		for i, sid := range stepIDs {
 			stepPrompt, e := tx.Prompts.Get(r.Context(), orgID, sid)
 			if e != nil {
@@ -483,8 +494,8 @@ type mergeBlueprintRequest struct {
 // handleBlueprintMerge absorbs a trigger-less source blueprint onto the tail of
 // the host ({id}) and retires the source, atomically. The host keeps its
 // identity, name, and trigger.
-func (s *Server) handleBlueprintMerge(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (bh *blueprintsHandler) handleBlueprintMerge(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -511,7 +522,7 @@ func (s *Server) handleBlueprintMerge(w http.ResponseWriter, r *http.Request) {
 		failStatus   int
 		failMsg      string
 	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		if host, e = tx.Blueprints.Get(r.Context(), orgID, hostID); e != nil {
 			return e
@@ -602,8 +613,8 @@ type blueprintSplitResponse struct {
 // handleBlueprintSplit partitions a blueprint at an index into the upstream
 // (trigger-retained) half and a new trigger-less downstream blueprint,
 // atomically.
-func (s *Server) handleBlueprintSplit(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (bh *blueprintsHandler) handleBlueprintSplit(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -630,7 +641,7 @@ func (s *Server) handleBlueprintSplit(w http.ResponseWriter, r *http.Request) {
 		failStatus           int
 		failMsg              string
 	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		if bp, e = tx.Blueprints.Get(r.Context(), orgID, id); e != nil || bp == nil {
 			return e
@@ -713,8 +724,8 @@ type duplicateBlueprintsRequest struct {
 // trigger-less blueprint(s) following the induced-contiguous-runs rule, in one
 // transaction. Originals are untouched. Returns each new blueprint with its
 // ordered step list so the caller can render/locate the copies.
-func (s *Server) handleBlueprintDuplicate(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (bh *blueprintsHandler) handleBlueprintDuplicate(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -734,8 +745,8 @@ func (s *Server) handleBlueprintDuplicate(w http.ResponseWriter, r *http.Request
 		failStatus int
 		failMsg    string
 	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		teamID, e := resolveActingTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
 		}
@@ -776,7 +787,7 @@ func (s *Server) handleBlueprintDuplicate(w http.ResponseWriter, r *http.Request
 		}
 		return nil
 	}); err != nil {
-		if writeIfActingTeamError(w, err) {
+		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
 		internalError(w, "blueprints", err)
@@ -805,8 +816,8 @@ type blueprintRunStepView struct {
 	Run  *domain.AgentRun     `json:"run,omitempty"`
 }
 
-func (s *Server) handleBlueprintRunGet(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (bh *blueprintsHandler) handleBlueprintRunGet(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -816,7 +827,7 @@ func (s *Server) handleBlueprintRunGet(w http.ResponseWriter, r *http.Request) {
 	var br *domain.BlueprintRun
 	var steps []domain.BlueprintStep
 	var stepRuns []domain.AgentRun
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		br, e = tx.Blueprints.GetRun(r.Context(), orgID, id)
 		if e != nil {
@@ -858,20 +869,16 @@ func (s *Server) handleBlueprintRunGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, blueprintRunResponse{BlueprintRun: br, Steps: views})
 }
 
-func (s *Server) handleBlueprintRunCancel(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (bh *blueprintsHandler) handleBlueprintRunCancel(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	if s.spawner == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
-		return
-	}
 	id := r.PathValue("id")
 
 	var br *domain.BlueprintRun
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		br, e = tx.Blueprints.GetRun(r.Context(), orgID, id)
 		return e
@@ -891,7 +898,14 @@ func (s *Server) handleBlueprintRunCancel(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := s.spawner.CancelBlueprint(orgID, id, userID); err != nil {
+	// Availability check after the existence + terminal checks so a missing or
+	// already-terminal run gets a 404/409 rather than a 503.
+	spawner := bh.spawner()
+	if spawner == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
+		return
+	}
+	if err := spawner.CancelBlueprint(orgID, id, userID); err != nil {
 		internalError(w, "blueprints", err)
 		return
 	}

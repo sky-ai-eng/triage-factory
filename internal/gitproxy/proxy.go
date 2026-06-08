@@ -42,11 +42,17 @@
 //
 // # Caching
 //
-// The proxy caches the installation token in memory for the lifetime
-// of the Server. First request mints; subsequent requests reuse until
-// the token is within refreshThreshold of its expires_at, at which
-// point a fresh mint replaces it. Concurrent requests during refresh
-// coalesce on a single mint call via the mutex — no thundering herd.
+// The proxy caches the token in memory for the lifetime of the Server.
+// First request mints; subsequent requests reuse until the token is
+// within refreshThreshold of its expires_at, at which point a fresh
+// mint replaces it. Concurrent requests during refresh coalesce on a
+// single mint call via the mutex — no thundering herd.
+//
+// The TokenSource need not be an App minter. A run's source resolves
+// App-installation-token-or-PAT uniformly (App preferred), so an org
+// with no App but a configured PAT works with no proxy change. A PAT
+// has no mint lifetime the proxy tracks (zero ExpiresAt); the cache
+// treats that as "never refresh", so a PAT source mints exactly once.
 //
 // A run's proxy is single-installation, so a single cached token
 // suffices. Multi-installation orgs are out of scope for v1.
@@ -62,6 +68,7 @@ package gitproxy
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -88,9 +95,15 @@ const defaultUpstream = "https://github.com"
 
 // Token is the contract between the minter and the proxy. The proxy
 // doesn't care how the token was obtained, only that it has a value
-// and an expiry. Compatible by-shape with githubapp.Token but typed
-// separately so this package doesn't force the dependency on callers
-// who want to plug in a different source (e.g. for tests).
+// and (optionally) an expiry. Compatible by-shape with githubapp.Token
+// but typed separately so this package doesn't force the dependency on
+// callers who want to plug in a different source (e.g. for tests).
+//
+// ExpiresAt zero means "no tracked lifetime": a PAT, which never
+// expires from the proxy's point of view. The refresh logic treats a
+// zero expiry as "never refresh" rather than "already expired", so a
+// PAT source mints exactly once. A non-zero expiry (an App installation
+// token, ~1h) drives the refresh-on-threshold path.
 type Token struct {
 	Value     string
 	ExpiresAt time.Time
@@ -138,6 +151,29 @@ type Config struct {
 	// future per-run policy / observability; the proxy itself does not
 	// branch on it today.
 	RunID string
+
+	// IncomingToken, when non-empty, is the per-run secret every request
+	// must present before the proxy injects the real credential and
+	// forwards upstream. The caller (internal/agentproc) generates a
+	// fresh random token per run, sets it here, and routes that run's
+	// sandbox git at the proxy with the same value as the HTTPS Basic
+	// password (remote-URL userinfo or http.<url>.extraHeader, set
+	// host-side). The proxy reads the inbound Authorization, compares the
+	// presented password constant-time, and returns 401 on mismatch —
+	// then replaces it with the resolved Basic x-access-token credential
+	// before forwarding.
+	//
+	// This is the application-layer half of cross-tenant isolation: a
+	// sibling run that reaches this proxy over the shared host namespace
+	// holds a *different* token, so it cannot spend this run's GitHub
+	// credential even if a packet gets through the network allowlist. It
+	// is NOT a durable credential and does not violate Property B — the
+	// real token still lives only in the proxy (injected upstream by the
+	// rewrite hook) and never enters any sandbox.
+	//
+	// Empty disables the check (loopback/test usage, or single-tenant
+	// direct paths where the local hop is already trusted).
+	IncomingToken string
 }
 
 // Server is a single per-run proxy instance with a cached installation
@@ -252,6 +288,21 @@ func (s *Server) Handler() http.Handler {
 				http.StatusNotImplemented)
 			return
 		}
+		// Per-run caller auth: validate the inbound credential against
+		// this run's IncomingToken BEFORE minting/injecting the real
+		// one. A sibling run (or any unauthorized caller) gets 401 and
+		// never reaches the upstream credential pipeline. Empty
+		// IncomingToken disables the gate (loopback/test path).
+		if !s.callerAuthorized(r) {
+			// 401 without a WWW-Authenticate challenge: the caller is our
+			// own per-run git config, not an interactive client, so
+			// there's no auth to negotiate. Terse body; the status is the
+			// signal. Read-then-replace happens entirely host-side, so
+			// reading the inbound header here doesn't conflict with the
+			// rewrite that overwrites it on the way upstream.
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		tok, err := s.installationToken(r.Context())
 		if err != nil {
 			// 502 Bad Gateway maps cleanly: the proxy is alive but the
@@ -275,6 +326,32 @@ func (s *Server) Handler() http.Handler {
 // Unexported empty struct so external code cannot collide.
 type tokenCtxKey struct{}
 
+// callerAuthorized reports whether the request presents the per-run
+// IncomingToken as its HTTPS Basic password. Git emits the token via
+// remote-URL userinfo or http.<url>.extraHeader (set host-side), both
+// of which arrive as "Authorization: Basic base64(user:token)"; the
+// username is irrelevant (conventionally x-run) — only the password is
+// validated.
+//
+// subtle.ConstantTimeCompare is constant-time only in the CONTENT of two
+// equal-length inputs: it can't be byte-probed for an equal-length wrong
+// guess. It short-circuits (returns 0 immediately) when the lengths
+// differ, so a missing, malformed, or wrong-length credential is rejected
+// without a content compare — and that length-dependent timing leaks
+// nothing here, because the token is a fixed-length 64-hex secret whose
+// length an attacker already knows. The empty-string from a missing
+// Basic header thus fails the compare and 401s.
+//
+// An empty IncomingToken disables the gate (loopback/test path, or a
+// single-tenant direct usage where the local hop is already trusted).
+func (s *Server) callerAuthorized(r *http.Request) bool {
+	if s.cfg.IncomingToken == "" {
+		return true
+	}
+	_, presented, _ := r.BasicAuth()
+	return subtle.ConstantTimeCompare([]byte(presented), []byte(s.cfg.IncomingToken)) == 1
+}
+
 // installationToken returns a valid cached token, minting a fresh one
 // if the cache is empty or within refreshThreshold of expiry.
 //
@@ -289,7 +366,7 @@ func (s *Server) installationToken(ctx context.Context) (Token, error) {
 	defer s.tokenMu.Unlock()
 
 	now := s.timeNow()
-	if s.cachedToken.Value != "" && now.Add(refreshThreshold).Before(s.cachedToken.ExpiresAt) {
+	if s.cachedToken.Value != "" && !s.cachedTokenStale(now) {
 		return s.cachedToken, nil
 	}
 
@@ -300,15 +377,30 @@ func (s *Server) installationToken(ctx context.Context) (Token, error) {
 	if tok.Value == "" {
 		return Token{}, errors.New("token source returned empty token")
 	}
-	if tok.ExpiresAt.IsZero() {
-		return Token{}, errors.New("token source returned zero expires_at")
-	}
-	if !tok.ExpiresAt.After(now.Add(refreshThreshold)) {
+	// A non-zero expiry must be comfortably in the future — reject a
+	// source that hands back an already-expired or near-expiry token
+	// (fail fast rather than forward a credential GitHub will 401). A
+	// ZERO expiry is the PAT case: the source tracks no lifetime, so we
+	// cache it and never refresh rather than treating the zero value as
+	// already-expired (which would re-mint on every request — a refresh
+	// storm against the secret store for a credential that never rotates).
+	if !tok.ExpiresAt.IsZero() && !tok.ExpiresAt.After(now.Add(refreshThreshold)) {
 		return Token{}, fmt.Errorf("token source returned expired or near-expiry token (expires_at=%s)", tok.ExpiresAt.Format(time.RFC3339))
 	}
 	s.cachedToken = tok
 	s.cachedNonces.Add(1)
 	return tok, nil
+}
+
+// cachedTokenStale reports whether the cached token needs re-minting:
+// true when it is within refreshThreshold of its expiry. A zero
+// ExpiresAt (a PAT — no tracked lifetime) is never stale, so a PAT
+// source mints exactly once for the life of the Server.
+func (s *Server) cachedTokenStale(now time.Time) bool {
+	if s.cachedToken.ExpiresAt.IsZero() {
+		return false
+	}
+	return !now.Add(refreshThreshold).Before(s.cachedToken.ExpiresAt)
 }
 
 // rewrite is the Go 1.20+ ReverseProxy hook (replacing Director). It

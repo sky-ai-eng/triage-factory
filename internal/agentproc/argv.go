@@ -21,6 +21,15 @@ func BuildArgs(opts RunOptions) []string {
 		// sent by the caller over stdin once the wrapper signals ready,
 		// so Message is deliberately omitted from argv here.
 		args = append(args, "--input-format", "stream-json")
+		// Opt the wrapper into the canUseTool permission callback. Emitted
+		// only when the caller supplied a permission handler; without it
+		// the wrapper omits canUseTool entirely and off-allowlist tools
+		// auto-deny (byte-identical to the headless allowlist-only path).
+		// Interactive-mode only — the one-shot wrapper never wires
+		// canUseTool, so the flag would be inert there.
+		if opts.PermissionPrompts {
+			args = append(args, "--permission-prompts")
+		}
 	} else {
 		args = append(args, "-p", opts.Message)
 	}

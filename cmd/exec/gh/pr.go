@@ -44,7 +44,7 @@ func lookupRun(host agenthost.Client) agenthost.RunInfo {
 // hunks — GitHub rejects those with 422 at submit time). Tries the full
 // diff first; falls back to per-file patches if GitHub rejects it as
 // too large (HTTP 406).
-func getDiffShapes(client *ghclient.Client, owner, repo string, number int) (map[string]map[int]bool, map[string][]ghclient.Hunk, error) {
+func getDiffShapes(client ghAPI, owner, repo string, number int) (map[string]map[int]bool, map[string][]ghclient.Hunk, error) {
 	diff, err := client.GetPRDiff(owner, repo, number, "")
 	if err != nil {
 		if ghclient.IsHTTP406(err) {
@@ -59,7 +59,7 @@ func getDiffShapes(client *ghclient.Client, owner, repo string, number int) (map
 	return ghclient.DiffLines(diff), ghclient.DiffHunks(diff), nil
 }
 
-func handlePR(client *ghclient.Client, host agenthost.Client, args []string) {
+func handlePR(host agenthost.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: triagefactory exec gh pr <action> [flags]")
 	}
@@ -67,47 +67,52 @@ func handlePR(client *ghclient.Client, host agenthost.Client, args []string) {
 	action := args[0]
 	flags := args[1:]
 
+	// Every GitHub API call routes through the host. owner/repo are empty
+	// here because the PR verbs all resolve their own and pass them
+	// explicitly; the adapter only needs them for the raw actions transport.
+	api := newHostAPI(host, "", "")
+
 	switch action {
 	case "create":
-		prCreate(client, host, flags)
+		prCreate(api, host, flags)
 	case "view":
-		prView(client, flags)
+		prView(api, flags)
 	case "diff":
-		prDiff(client, flags)
+		prDiff(api, flags)
 	case "files":
-		prFiles(client, flags)
+		prFiles(api, flags)
 	case "thread-view":
-		prThreadView(client, flags)
+		prThreadView(api, flags)
 	case "review-view":
-		prReviewView(client, flags)
+		prReviewView(api, flags)
 	case "review-delete":
 		prReviewDelete(host, flags)
 	case "review-dismiss":
-		prReviewDismiss(client, flags)
+		prReviewDismiss(api, flags)
 	case "start-review":
-		prStartReview(client, host, flags)
+		prStartReview(api, host, flags)
 	case "add-review-comment":
 		prAddReviewComment(host, flags)
 	case "submit-review":
-		prSubmitReview(client, host, flags)
+		prSubmitReview(api, host, flags)
 	case "comment-list-pending":
 		prListPending(host, flags)
 	case "add-comment":
-		prAddComment(client, flags)
+		prAddComment(api, flags)
 	case "comment-reply":
-		prCommentReply(client, flags)
+		prCommentReply(api, flags)
 	case "comment-react":
-		prCommentReact(client, flags)
+		prCommentReact(api, flags)
 	case "comment-update":
-		prCommentUpdate(client, host, flags)
+		prCommentUpdate(api, host, flags)
 	case "comment-delete":
-		prCommentDelete(client, host, flags)
+		prCommentDelete(api, host, flags)
 	default:
 		exitErr(fmt.Sprintf("unknown pr action: %s", action))
 	}
 }
 
-func prView(client *ghclient.Client, args []string) {
+func prView(client ghAPI, args []string) {
 	owner, repo, number := parseRepoAndNumber(args)
 	verbose := hasFlag(args, "-v") || hasFlag(args, "--verbose")
 	pr, err := client.GetPR(owner, repo, number, verbose)
@@ -115,7 +120,7 @@ func prView(client *ghclient.Client, args []string) {
 	printJSON(pr)
 }
 
-func prDiff(client *ghclient.Client, args []string) {
+func prDiff(client ghAPI, args []string) {
 	owner, repo, number := parseRepoAndNumber(args)
 	file := flagVal(args, "--file")
 	diff, err := client.GetPRDiff(owner, repo, number, file)
@@ -123,14 +128,14 @@ func prDiff(client *ghclient.Client, args []string) {
 	fmt.Print(diff)
 }
 
-func prFiles(client *ghclient.Client, args []string) {
+func prFiles(client ghAPI, args []string) {
 	owner, repo, number := parseRepoAndNumber(args)
 	files, err := client.GetPRFiles(owner, repo, number)
 	exitOnErr(err)
 	printJSON(files)
 }
 
-func prThreadView(client *ghclient.Client, args []string) {
+func prThreadView(client ghAPI, args []string) {
 	if len(args) < 2 {
 		exitErr("usage: gh pr thread-view <pr_number> <comment_id> [--page N]")
 	}
@@ -145,7 +150,7 @@ func prThreadView(client *ghclient.Client, args []string) {
 	printJSON(thread)
 }
 
-func prReviewView(client *ghclient.Client, args []string) {
+func prReviewView(client ghAPI, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr review-view <review_id> --pr <pr_number> [-v]")
 	}
@@ -182,7 +187,7 @@ func prReviewDelete(host agenthost.Client, args []string) {
 	printJSON(map[string]any{"ok": true, "review_id": reviewID})
 }
 
-func prReviewDismiss(client *ghclient.Client, args []string) {
+func prReviewDismiss(client ghAPI, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr review-dismiss <review_id> --pr <number> --body <reason>")
 	}
@@ -200,7 +205,7 @@ func prReviewDismiss(client *ghclient.Client, args []string) {
 
 // --- Review lifecycle (local state) ---
 
-func prStartReview(client *ghclient.Client, host agenthost.Client, args []string) {
+func prStartReview(client ghAPI, host agenthost.Client, args []string) {
 	owner, repo, number := parseRepoAndNumber(args)
 	info := lookupRun(host)
 	// Fetch head SHA for the review
@@ -368,7 +373,7 @@ func prAddReviewComment(host agenthost.Client, args []string) {
 	})
 }
 
-func prSubmitReview(client *ghclient.Client, host agenthost.Client, args []string) {
+func prSubmitReview(client ghAPI, host agenthost.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr submit-review <review_id> --event <approve|comment|request_changes> --body <text>")
 	}
@@ -496,7 +501,7 @@ func prSubmitReview(client *ghclient.Client, host agenthost.Client, args []strin
 // Standalone mode (env unset, e.g. a human running this directly
 // from a checkout): pre-apply the footer and POST to GitHub
 // immediately. Same shape as prSubmitReview's standalone branch.
-func prCreate(client *ghclient.Client, host agenthost.Client, args []string) {
+func prCreate(client ghAPI, host agenthost.Client, args []string) {
 	title := flagVal(args, "--title")
 	body := flagVal(args, "--body")
 	bodyFile := flagVal(args, "--body-file")
@@ -712,7 +717,7 @@ func prListPending(host agenthost.Client, args []string) {
 
 // --- Direct comments (hit GitHub API) ---
 
-func prAddComment(client *ghclient.Client, args []string) {
+func prAddComment(client ghAPI, args []string) {
 	owner, repo, number := parseRepoAndNumber(args)
 	body := flagVal(args, "--body")
 	if body == "" {
@@ -723,7 +728,7 @@ func prAddComment(client *ghclient.Client, args []string) {
 	printJSON(map[string]any{"comment_id": commentID})
 }
 
-func prCommentReply(client *ghclient.Client, args []string) {
+func prCommentReply(client ghAPI, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr comment-reply <comment_id> --body <text> --pr <number>")
 	}
@@ -739,7 +744,7 @@ func prCommentReply(client *ghclient.Client, args []string) {
 	printJSON(map[string]any{"reply_id": replyID})
 }
 
-func prCommentReact(client *ghclient.Client, args []string) {
+func prCommentReact(client ghAPI, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr comment-react <comment_id> --emoji <emoji>")
 	}
@@ -754,7 +759,7 @@ func prCommentReact(client *ghclient.Client, args []string) {
 	printJSON(map[string]any{"ok": true})
 }
 
-func prCommentUpdate(client *ghclient.Client, host agenthost.Client, args []string) {
+func prCommentUpdate(client ghAPI, host agenthost.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr comment-update <comment_id> --body <text>")
 	}
@@ -778,7 +783,7 @@ func prCommentUpdate(client *ghclient.Client, host agenthost.Client, args []stri
 	}
 }
 
-func prCommentDelete(client *ghclient.Client, host agenthost.Client, args []string) {
+func prCommentDelete(client ghAPI, host agenthost.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr comment-delete <comment_id>")
 	}

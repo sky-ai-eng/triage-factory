@@ -174,10 +174,10 @@ func TestReactor_CancelRequestedTerminates(t *testing.T) {
 	}
 }
 
-// TestReactor_ParkedStepLeavesRunning: a step parked in awaiting_input leaves the
+// TestReactor_ParkedStepLeavesRunning: a step parked `open` leaves the
 // blueprint running and enqueues nothing (resume drives it later).
 func TestReactor_ParkedStepLeavesRunning(t *testing.T) {
-	s, database, brID, _, run0 := reactorFixture(t, "park", 2, "awaiting_input", "")
+	s, database, brID, _, run0 := reactorFixture(t, "park", 2, "open", "")
 	org := runmode.LocalDefaultOrg
 
 	stepRun, _ := s.agentRuns.GetSystem(context.Background(), org, run0)

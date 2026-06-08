@@ -1,19 +1,29 @@
 package server
 
 import (
-	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/server/prompts"
+	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
 
-func (s *Server) handleEventTypes(w http.ResponseWriter, r *http.Request) {
-	types, err := db.ListEventTypes(s.db)
+// promptsHandler serves the prompt and event-type endpoints. It holds only
+// the deps these routes need — the DB handle (for the event-types catalog
+// read) and the transactional store runner — and routes() registers its
+// methods through the api()/apiMutating() middleware wrappers.
+type promptsHandler struct {
+	db *sql.DB
+	tx db.TxRunner
+}
+
+func (ph *promptsHandler) handleEventTypes(w http.ResponseWriter, r *http.Request) {
+	types, err := db.ListEventTypes(ph.db)
 	if err != nil {
 		internalError(w, "prompts", err)
 		return
@@ -24,39 +34,39 @@ func (s *Server) handleEventTypes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, types)
 }
 
-func (s *Server) handlePromptsList(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (ph *promptsHandler) handlePromptsList(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	// ?team_id= narrows to one team's prompts (+ org-visible) on the
 	// multi-team prompts page; absent/solo returns everything visible.
-	teamID := singleTeamParam(r)
-	var prompts []domain.Prompt
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	teamID := teamscope.SingleParam(r)
+	var list []domain.Prompt
+	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		prompts, e = tx.Prompts.List(r.Context(), orgID, teamID)
+		list, e = tx.Prompts.List(r.Context(), orgID, teamID)
 		return e
 	}); err != nil {
 		internalError(w, "prompts", err)
 		return
 	}
-	if prompts == nil {
-		prompts = []domain.Prompt{}
+	if list == nil {
+		list = []domain.Prompt{}
 	}
-	writeJSON(w, http.StatusOK, prompts)
+	writeJSON(w, http.StatusOK, list)
 }
 
-func (s *Server) handlePromptGet(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (ph *promptsHandler) handlePromptGet(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	id := r.PathValue("id")
 	var prompt *domain.Prompt
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		prompt, e = tx.Prompts.Get(r.Context(), orgID, id)
 		return e
@@ -72,45 +82,12 @@ func (s *Server) handlePromptGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, prompt)
 }
 
-type createPromptRequest struct {
-	Name  string `json:"name"`
-	Body  string `json:"body"`
-	Model string `json:"model"`
-	// TeamID is the acting team the write picker supplied. Required in
-	// the UI whenever the caller belongs to ≥2 teams; empty for a solo
-	// caller (the picker is hidden), where the resolver falls back to the
-	// sole team. See resolveActingTeam.
-	TeamID string `json:"team_id"`
-}
-
-// allowedPromptModelOverrides is the set of non-empty values accepted
-// for prompts.model. "" is always allowed and means "inherit the
-// global default from settings.AI.Model at dispatch". Kept aligned
-// with the picker in frontend/src/pages/Settings.tsx.
-var allowedPromptModelOverrides = []string{"haiku", "sonnet", "opus"}
-
-func validPromptModel(m string) bool {
-	if m == "" {
-		return true
-	}
-	for _, v := range allowedPromptModelOverrides {
-		if m == v {
-			return true
-		}
-	}
-	return false
-}
-
-func invalidPromptModelError() string {
-	return `model must be "" or one of: ` + strings.Join(allowedPromptModelOverrides, ", ")
-}
-
-func (s *Server) handlePromptCreate(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (ph *promptsHandler) handlePromptCreate(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
-	var req createPromptRequest
+	var req prompts.CreateRequest
 	if !decodeJSON(w, r, &req, "") {
 		return
 	}
@@ -125,8 +102,8 @@ func (s *Server) handlePromptCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body is required"})
 		return
 	}
-	if !validPromptModel(req.Model) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": invalidPromptModelError()})
+	if !prompts.ValidModel(req.Model) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": prompts.InvalidModelError()})
 		return
 	}
 
@@ -141,8 +118,8 @@ func (s *Server) handlePromptCreate(w http.ResponseWriter, r *http.Request) {
 
 	userID := ClaimsFrom(r.Context()).Subject
 	var created *domain.Prompt
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		teamID, e := resolveActingTeam(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
 		}
@@ -153,7 +130,7 @@ func (s *Server) handlePromptCreate(w http.ResponseWriter, r *http.Request) {
 		created, ge = tx.Prompts.Get(r.Context(), orgID, id)
 		return ge
 	}); err != nil {
-		if writeIfActingTeamError(w, err) {
+		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
 		internalError(w, "prompts", err)
@@ -162,21 +139,15 @@ func (s *Server) handlePromptCreate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, created)
 }
 
-type updatePromptRequest struct {
-	Name  string `json:"name"`
-	Body  string `json:"body"`
-	Model string `json:"model"`
-}
-
-func (s *Server) handlePromptPut(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (ph *promptsHandler) handlePromptPut(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	id := r.PathValue("id")
 
-	var req updatePromptRequest
+	var req prompts.UpdateRequest
 	if !decodeJSON(w, r, &req, "") {
 		return
 	}
@@ -188,13 +159,13 @@ func (s *Server) handlePromptPut(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body is required"})
 		return
 	}
-	if !validPromptModel(req.Model) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": invalidPromptModelError()})
+	if !prompts.ValidModel(req.Model) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": prompts.InvalidModelError()})
 		return
 	}
 
 	var existing *domain.Prompt
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		existing, e = tx.Prompts.Get(r.Context(), orgID, id)
 		return e
@@ -208,7 +179,7 @@ func (s *Server) handlePromptPut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var updated *domain.Prompt
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		if e := tx.Prompts.Update(r.Context(), orgID, id, req.Name, req.Body, req.Model); e != nil {
 			return e
 		}
@@ -222,8 +193,8 @@ func (s *Server) handlePromptPut(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, updated)
 }
 
-func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (ph *promptsHandler) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -237,7 +208,7 @@ func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 	// delete) — the canvas surfaces a toast so the now-untriggered downstream
 	// doesn't go unnoticed.
 	var orphaned bool
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		prompt, e = tx.Prompts.Get(r.Context(), orgID, id)
 		if e != nil {
@@ -324,7 +295,7 @@ func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 		// Delete (also soft — runs.prompt_id is RESTRICT). Both leave the row +
 		// its runs so historical timelines still resolve the prompt.
 		var de error
-		status, de = softDeletePromptBySource(r.Context(), tx, orgID, prompt)
+		status, de = prompts.SoftDeleteBySource(r.Context(), tx, orgID, prompt)
 		return de
 	}); err != nil {
 		internalError(w, "prompts", err)
@@ -337,28 +308,6 @@ func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": status, "orphaned_blueprint": orphaned})
 }
 
-// softDeletePromptBySource soft-deletes a prompt according to its source and
-// returns the resulting status. System / imported prompts are hidden (kept out
-// of the re-import set); user (and any other) prompts get deleted_at stamped.
-// Both are soft — runs.prompt_id and blueprint_steps.step_prompt_id are RESTRICT
-// FKs, and historical timelines resolve the prompt via the ...System reads — so
-// the row survives as audit. Shared by the prompt-delete delete-pairing (a
-// prompt taking its sole-owner blueprint) and the blueprint-delete cascade (a
-// blueprint taking its step prompts), the two halves of the same pairing, so the
-// source dispatch lives in one place. The caller must have already fetched p.
-func softDeletePromptBySource(ctx context.Context, tx db.TxStores, orgID string, p *domain.Prompt) (status string, err error) {
-	if p.Source == "system" || p.Source == "imported" {
-		if e := tx.Prompts.Hide(ctx, orgID, p.ID); e != nil {
-			return "", e
-		}
-		return "hidden", nil
-	}
-	if e := tx.Prompts.Delete(ctx, orgID, p.ID); e != nil {
-		return "", e
-	}
-	return "deleted", nil
-}
-
 // indexOfStep returns the position of the step whose prompt is promptID, or -1.
 func indexOfStep(steps []domain.BlueprintStep, promptID string) int {
 	for i := range steps {
@@ -369,15 +318,15 @@ func indexOfStep(steps []domain.BlueprintStep, promptID string) int {
 	return -1
 }
 
-func (s *Server) handlePromptStats(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (ph *promptsHandler) handlePromptStats(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	id := r.PathValue("id")
 	var stats *domain.PromptStats
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		stats, e = tx.Prompts.Stats(r.Context(), orgID, id)
 		return e

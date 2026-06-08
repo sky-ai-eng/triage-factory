@@ -93,7 +93,7 @@ func TestConsumeStreamInteractive_MultiTurn(t *testing.T) {
 
 	lr := &LiveRun{ready: make(chan struct{})}
 	sink := &captureSink{}
-	result, err := lr.consumeStreamInteractive(strings.NewReader(stream), sink, NewStreamState(), nil, "trace-i")
+	result, err := lr.consumeStreamInteractive(strings.NewReader(stream), sink, NewStreamState(), nil, nil, "trace-i")
 	if err != nil {
 		t.Fatalf("consumeStreamInteractive returned error: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestConsumeStreamInteractive_InterruptLabelsResult(t *testing.T) {
 
 	lr := &LiveRun{ready: make(chan struct{})}
 	sink := &captureSink{}
-	result, err := lr.consumeStreamInteractive(strings.NewReader(stream), sink, NewStreamState(), nil, "trace-int")
+	result, err := lr.consumeStreamInteractive(strings.NewReader(stream), sink, NewStreamState(), nil, nil, "trace-int")
 	if err != nil {
 		t.Fatalf("consumeStreamInteractive returned error: %v", err)
 	}
@@ -158,6 +158,35 @@ func TestConsumeStreamInteractive_InterruptLabelsResult(t *testing.T) {
 	}
 	if result.Subtype != "error_during_execution" {
 		t.Errorf("Subtype = %q, want error_during_execution (interrupt label)", result.Subtype)
+	}
+}
+
+// TestConsumeStreamInteractive_OnResultFiresPerTurn pins the per-turn
+// result hook the delegate driver leans on: onResult is invoked once for
+// each folded `result` envelope, with that turn's result, so a live
+// caller can react to a completed turn without waiting for the whole
+// query to drain.
+func TestConsumeStreamInteractive_OnResultFiresPerTurn(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"type":"control","subtype":"ready"}`,
+		`{"type":"system","subtype":"init","session_id":"s"}`,
+		`{"type":"assistant","message":{"id":"m1","stop_reason":"end_turn","content":[{"type":"text","text":"one"}]}}`,
+		`{"type":"result","subtype":"success","is_error":false,"duration_ms":10,"num_turns":1,"total_cost_usd":0.01,"stop_reason":"end_turn","result":"first"}`,
+		`{"type":"result","subtype":"success","is_error":false,"duration_ms":20,"num_turns":1,"total_cost_usd":0.02,"stop_reason":"end_turn","result":"second"}`,
+		"",
+	}, "\n")
+
+	var got []string
+	onResult := func(r *Result) { got = append(got, r.Result) }
+
+	lr := &LiveRun{ready: make(chan struct{})}
+	if _, err := lr.consumeStreamInteractive(strings.NewReader(stream), &captureSink{}, NewStreamState(), nil, onResult, "trace-or"); err != nil {
+		t.Fatalf("consumeStreamInteractive returned error: %v", err)
+	}
+	// Each turn's result fires the hook with that turn's value (not the
+	// running merge), in order.
+	if len(got) != 2 || got[0] != "first" || got[1] != "second" {
+		t.Errorf("onResult values = %v, want [first second]", got)
 	}
 }
 

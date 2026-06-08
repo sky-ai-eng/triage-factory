@@ -5,12 +5,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // githubAppStatusResponse is the read-only shape the Workspace Settings
@@ -43,7 +40,7 @@ type githubAppInstallation struct {
 //
 // GET /api/orgs/{org_id}/github-app
 func (s *Server) handleGitHubAppStatus(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgMember(w, r)
+	orgID, userID, ok := s.az.RequireOrgMember(w, r)
 	if !ok {
 		return
 	}
@@ -105,7 +102,7 @@ func (s *Server) handleGitHubAppStatus(w http.ResponseWriter, r *http.Request) {
 //
 // GET /api/orgs/{org_id}/github-app/install-url
 func (s *Server) handleGitHubAppInstallURL(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgMember(w, r)
+	orgID, userID, ok := s.az.RequireOrgMember(w, r)
 	if !ok {
 		return
 	}
@@ -133,39 +130,4 @@ func (s *Server) handleGitHubAppInstallURL(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]string{
 		"url": ghBase + "/apps/" + app.Slug + "/installations/new",
 	})
-}
-
-// requireOrgMember validates {org_id} from the URL path and checks the
-// caller is a member of that org (any role). Returns (orgID, userID,
-// true) on success; writes an error and returns ("", "", false) on
-// failure. The read-only sibling of requireOrgAdmin.
-func (s *Server) requireOrgMember(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
-	rawOrgID := r.PathValue("org_id")
-	if _, err := uuid.Parse(rawOrgID); err != nil {
-		http.NotFound(w, r)
-		return
-	}
-
-	claims := ClaimsFrom(r.Context())
-	if claims == nil {
-		writeUnauth(w)
-		return
-	}
-	userID = claims.Subject
-
-	if runmode.Current() == runmode.ModeLocal {
-		return rawOrgID, userID, true
-	}
-
-	hasAccess, err := s.userHasOrgAccess(r.Context(), userID, rawOrgID)
-	if err != nil {
-		log.Printf("[github-app] member check %s/%s: %v", userID, rawOrgID, err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	if !hasAccess {
-		http.NotFound(w, r)
-		return
-	}
-	return rawOrgID, userID, true
 }

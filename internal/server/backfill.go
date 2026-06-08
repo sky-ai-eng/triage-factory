@@ -12,6 +12,15 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
+// backfillHandler serves the project backfill endpoints (candidate listing
+// and the backfill action). It holds the transactional store runner and the
+// websocket hub for progress broadcasts; routes() registers its methods
+// through the api()/apiMutating() wrappers.
+type backfillHandler struct {
+	tx db.TxRunner
+	ws *websocket.Hub
+}
+
 // backfillCandidate is the per-row payload returned by
 // GET /api/projects/{id}/backfill-candidates. The caller renders these
 // as checkboxes in the create-flow popup; current_project_id +
@@ -45,8 +54,8 @@ type backfillCandidate struct {
 //
 // Entities already assigned to this project are excluded — there's
 // nothing to backfill for them.
-func (s *Server) handleBackfillCandidates(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (bf *backfillHandler) handleBackfillCandidates(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -54,7 +63,7 @@ func (s *Server) handleBackfillCandidates(w http.ResponseWriter, r *http.Request
 	projectID := r.PathValue("id")
 	var project *domain.Project
 	var out []backfillCandidate
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := bf.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		project, e = tx.Projects.Get(r.Context(), orgID, projectID)
 		if e != nil {
@@ -156,15 +165,15 @@ type backfillFailure struct {
 // (internal/server/stock.go): per-entity failures are collected into
 // `failed: [{entity_id, error}]` and the call returns 200 with the
 // applied count rather than failing the whole batch on a single row.
-func (s *Server) handleBackfill(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (bf *backfillHandler) handleBackfill(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	projectID := r.PathValue("id")
 	var project *domain.Project
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := bf.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		project, e = tx.Projects.Get(r.Context(), orgID, projectID)
 		return e
@@ -208,7 +217,7 @@ func (s *Server) handleBackfill(w http.ResponseWriter, r *http.Request) {
 		// entity row by id, and a stale UI could quietly stamp
 		// classified_at on closed work.
 		var failure *backfillFailure
-		txErr := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		txErr := bf.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 			entity, lookupErr := tx.Entities.Get(r.Context(), orgID, eid)
 			if lookupErr != nil {
 				failure = &backfillFailure{EntityID: eid, Error: "lookup failed: " + lookupErr.Error()}
@@ -254,8 +263,8 @@ func (s *Server) handleBackfill(w http.ResponseWriter, r *http.Request) {
 		assigned = append(assigned, eid)
 	}
 
-	if len(assigned) > 0 && s.ws != nil {
-		s.ws.Broadcast(websocket.Event{
+	if len(assigned) > 0 && bf.ws != nil {
+		bf.ws.Broadcast(websocket.Event{
 			Type:      "entities_assigned_to_project",
 			OrgID:     orgID,
 			ProjectID: projectID,

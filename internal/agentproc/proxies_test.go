@@ -2,13 +2,16 @@ package agentproc
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/llmproxy"
 )
 
@@ -252,7 +255,7 @@ func TestStartProxiesForSandbox_AnthropicEndToEnd(t *testing.T) {
 		"ANTHROPIC_API_KEY":  realKey,
 		"ANTHROPIC_BASE_URL": upstream.URL,
 	}
-	bundle, env, err := startProxiesForSandbox("127.0.0.1", creds)
+	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil)
 	if err != nil {
 		t.Fatalf("startProxiesForSandbox: %v", err)
 	}
@@ -308,10 +311,10 @@ func TestStartProxiesForSandbox_TokenAuthEnforced(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	bundle, env, err := startProxiesForSandbox("127.0.0.1", map[string]string{
+	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", map[string]string{
 		"ANTHROPIC_API_KEY":  realKey,
 		"ANTHROPIC_BASE_URL": upstream.URL,
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("startProxiesForSandbox: %v", err)
 	}
@@ -380,12 +383,12 @@ func TestStartProxiesForSandbox_TokensArePerRun(t *testing.T) {
 		"ANTHROPIC_BASE_URL": upstream.URL,
 	}
 
-	b1, env1, err := startProxiesForSandbox("127.0.0.1", creds)
+	b1, env1, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil)
 	if err != nil {
 		t.Fatalf("run 1: %v", err)
 	}
 	t.Cleanup(func() { _ = b1.Shutdown(context.Background()) })
-	b2, env2, err := startProxiesForSandbox("127.0.0.1", creds)
+	b2, env2, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil)
 	if err != nil {
 		t.Fatalf("run 2: %v", err)
 	}
@@ -415,7 +418,7 @@ func TestStartProxiesForSandbox_ShutdownTearsDownProxy(t *testing.T) {
 		"ANTHROPIC_API_KEY":  "k",
 		"ANTHROPIC_BASE_URL": upstream.URL,
 	}
-	bundle, env, err := startProxiesForSandbox("127.0.0.1", creds)
+	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil)
 	if err != nil {
 		t.Fatalf("startProxiesForSandbox: %v", err)
 	}
@@ -450,7 +453,7 @@ func TestStartProxiesForSandbox_ShutdownTearsDownProxy(t *testing.T) {
 // credentialed proxy to anything that can reach the host. Fail
 // loudly at construction.
 func TestStartProxiesForSandbox_EmptyHostIPRejected(t *testing.T) {
-	_, _, err := startProxiesForSandbox("", map[string]string{"ANTHROPIC_API_KEY": "k"})
+	_, _, err := startProxiesForSandbox(context.Background(), "", map[string]string{"ANTHROPIC_API_KEY": "k"}, nil)
 	if err == nil {
 		t.Fatal("startProxiesForSandbox accepted empty hostVethIP; should reject")
 	}
@@ -514,10 +517,10 @@ func TestRunProxies_ShutdownAggregatesErrors(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	bundle, _, err := startProxiesForSandbox("127.0.0.1", map[string]string{
+	bundle, _, err := startProxiesForSandbox(context.Background(), "127.0.0.1", map[string]string{
 		"ANTHROPIC_API_KEY":  "k",
 		"ANTHROPIC_BASE_URL": upstream.URL,
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("startProxiesForSandbox: %v", err)
 	}
@@ -526,6 +529,231 @@ func TestRunProxies_ShutdownAggregatesErrors(t *testing.T) {
 	defer cancel()
 	if err := bundle.Shutdown(ctx); err != nil {
 		t.Errorf("clean Shutdown = %v, want nil", err)
+	}
+}
+
+// --- git proxy wiring (TFAC-302) -------------------------------------
+
+// gitProxyBaseFromEnv extracts the "http://host:port" proxy base the
+// git env entries route to, parsed out of the url.<base>.insteadOf key.
+func gitProxyBaseFromEnv(t *testing.T, env []string) string {
+	t.Helper()
+	v := envValue(env, "GIT_CONFIG_KEY_0")
+	if v == "" {
+		t.Fatalf("no GIT_CONFIG_KEY_0 (insteadOf) in env: %v", env)
+	}
+	v = strings.TrimSuffix(strings.TrimPrefix(v, "url."), ".insteadOf")
+	return strings.TrimRight(v, "/")
+}
+
+// gitProxyTokenFromEnv extracts the per-run token from the
+// http.<base>.extraHeader Basic credential the git env entries carry.
+func gitProxyTokenFromEnv(t *testing.T, env []string) string {
+	t.Helper()
+	hv := envValue(env, "GIT_CONFIG_VALUE_1")
+	b64 := strings.TrimPrefix(hv, "Authorization: Basic ")
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		t.Fatalf("decode extraHeader %q: %v", hv, err)
+	}
+	_, tok, ok := strings.Cut(string(raw), ":")
+	if !ok {
+		t.Fatalf("extraHeader credential not user:token: %q", raw)
+	}
+	return tok
+}
+
+// TestBuildSandboxGitProxyEnv_Shape pins the exact GIT_CONFIG_* entries
+// that route the in-sandbox git through the proxy: an insteadOf rewrite
+// from the upstream host to the proxy base, and an extraHeader carrying
+// the per-run token (NOT the real credential) as the Basic password.
+func TestBuildSandboxGitProxyEnv_Shape(t *testing.T) {
+	env := buildSandboxGitProxyEnv("http://10.42.7.1:5123", "https://github.com", "per-run-secret")
+
+	if got := envValue(env, "GIT_CONFIG_COUNT"); got != "2" {
+		t.Errorf("GIT_CONFIG_COUNT = %q, want 2", got)
+	}
+	if got := envValue(env, "GIT_CONFIG_KEY_0"); got != "url.http://10.42.7.1:5123/.insteadOf" {
+		t.Errorf("GIT_CONFIG_KEY_0 = %q", got)
+	}
+	if got := envValue(env, "GIT_CONFIG_VALUE_0"); got != "https://github.com/" {
+		t.Errorf("GIT_CONFIG_VALUE_0 = %q, want https://github.com/ (insteadOf rewrites this prefix)", got)
+	}
+	if got := envValue(env, "GIT_CONFIG_KEY_1"); got != "http.http://10.42.7.1:5123/.extraHeader" {
+		t.Errorf("GIT_CONFIG_KEY_1 = %q", got)
+	}
+	wantHeader := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-run:per-run-secret"))
+	if got := envValue(env, "GIT_CONFIG_VALUE_1"); got != wantHeader {
+		t.Errorf("GIT_CONFIG_VALUE_1 = %q, want %q", got, wantHeader)
+	}
+}
+
+// TestStartGitProxyForSandbox_RoutesAndAuthenticates is the git-proxy
+// analogue of the LLM end-to-end test: a request bearing this run's
+// per-run token is forwarded with the real credential swapped in, while
+// a different run's token (the cross-run case) gets 401 and never
+// reaches the upstream. The real GitHub token never appears in the env.
+func TestStartGitProxyForSandbox_RoutesAndAuthenticates(t *testing.T) {
+	const realToken = "ghs_REAL_GIT_TOKEN"
+	var (
+		gotAuth string
+		hits    int
+	)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	src := func(ctx context.Context) (gitproxy.Token, error) {
+		return gitproxy.Token{Value: realToken, ExpiresAt: time.Now().Add(time.Hour)}, nil
+	}
+	env, srv, err := startGitProxyForSandbox(context.Background(), "127.0.0.1", &GitProxyConfig{TokenSource: src, Upstream: upstream.URL})
+	if err != nil {
+		t.Fatalf("startGitProxyForSandbox: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+
+	base := gitProxyBaseFromEnv(t, env)
+	runToken := gitProxyTokenFromEnv(t, env)
+	if runToken == realToken {
+		t.Fatal("PROPERTY B VIOLATED: per-run git token equals the real credential")
+	}
+	if strings.Contains(strings.Join(env, "\n"), realToken) {
+		t.Fatal("PROPERTY B VIOLATED: real git credential present in sandbox git env")
+	}
+
+	// Authorized: this run's token → 200, upstream sees the real cred.
+	req, _ := http.NewRequest("GET", base+"/owner/repo/info/refs?service=git-receive-pack", nil)
+	req.SetBasicAuth(gitProxyBasicUser, runToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("authorized roundtrip: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("authorized status = %d, want 200", resp.StatusCode)
+	}
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+realToken))
+	if gotAuth != want {
+		t.Errorf("upstream Authorization = %q, want %q (proxy must inject the real credential)", gotAuth, want)
+	}
+
+	// Cross-run: a sibling run's token → 401, upstream not reached again.
+	hitsBefore := hits
+	req2, _ := http.NewRequest("GET", base+"/owner/repo/info/refs", nil)
+	req2.SetBasicAuth(gitProxyBasicUser, "some-other-runs-token")
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("cross-run roundtrip: %v", err)
+	}
+	_ = resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Errorf("cross-run token status = %d, want 401", resp2.StatusCode)
+	}
+	if hits != hitsBefore {
+		t.Errorf("upstream reached by a cross-run (unauthorized) request; want fail-closed at the proxy")
+	}
+}
+
+// TestStartProxiesForSandbox_GitNilSkipsGitProxy pins that a run with
+// no git egress need (prompt-only) gets no git proxy and no GIT_CONFIG
+// entries — only the LLM proxy is wired.
+func TestStartProxiesForSandbox_GitNilSkipsGitProxy(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	defer upstream.Close()
+
+	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", map[string]string{
+		"ANTHROPIC_API_KEY":  "k",
+		"ANTHROPIC_BASE_URL": upstream.URL,
+	}, nil)
+	if err != nil {
+		t.Fatalf("startProxiesForSandbox: %v", err)
+	}
+	t.Cleanup(func() { _ = bundle.Shutdown(context.Background()) })
+
+	if bundle.git != nil {
+		t.Error("git proxy started despite nil GitProxy")
+	}
+	if got := envValue(env, "GIT_CONFIG_COUNT"); got != "" {
+		t.Errorf("GIT_CONFIG_COUNT = %q present despite nil GitProxy", got)
+	}
+}
+
+// TestStartProxiesForSandbox_GitNoCredentialsTypedError pins the
+// ErrUnsupportedSandboxCredentials parity for git: a run whose
+// TokenSource reports no credential fails fast with the typed
+// ErrNoSandboxGitCredentials (so the caller renders an admin message),
+// and the bundle is nil so the deferred Shutdown is a safe no-op — the
+// already-started LLM proxy having been torn down on the way out.
+func TestStartProxiesForSandbox_GitNoCredentialsTypedError(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	defer upstream.Close()
+
+	src := func(ctx context.Context) (gitproxy.Token, error) {
+		return gitproxy.Token{}, fmt.Errorf("resolver said: %w", ErrNoSandboxGitCredentials)
+	}
+	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", map[string]string{
+		"ANTHROPIC_API_KEY":  "k",
+		"ANTHROPIC_BASE_URL": upstream.URL,
+	}, &GitProxyConfig{TokenSource: src})
+	if !errors.Is(err, ErrNoSandboxGitCredentials) {
+		t.Fatalf("err = %v, want ErrNoSandboxGitCredentials", err)
+	}
+	if bundle != nil {
+		t.Errorf("bundle = %v, want nil on git failure (caller's defer Shutdown must no-op)", bundle)
+	}
+	if env != nil {
+		t.Errorf("env = %v, want nil on git failure", env)
+	}
+}
+
+// TestStartProxiesForSandbox_GitProxyTornDownOnShutdown pins that the
+// git proxy, like the LLM proxy, stops accepting connections after the
+// bundle's Shutdown — the SKY-335 "kill the run, both proxies die"
+// invariant extended to the git slot.
+func TestStartProxiesForSandbox_GitProxyTornDownOnShutdown(t *testing.T) {
+	llmUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	defer llmUp.Close()
+	gitUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	defer gitUp.Close()
+
+	src := func(ctx context.Context) (gitproxy.Token, error) {
+		return gitproxy.Token{Value: "ghs_x", ExpiresAt: time.Now().Add(time.Hour)}, nil
+	}
+	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", map[string]string{
+		"ANTHROPIC_API_KEY":  "k",
+		"ANTHROPIC_BASE_URL": llmUp.URL,
+	}, &GitProxyConfig{TokenSource: src, Upstream: gitUp.URL})
+	if err != nil {
+		t.Fatalf("startProxiesForSandbox: %v", err)
+	}
+	if bundle.git == nil {
+		t.Fatal("git proxy not started despite non-nil GitProxy")
+	}
+
+	base := gitProxyBaseFromEnv(t, env)
+	runToken := gitProxyTokenFromEnv(t, env)
+
+	// Live before Shutdown.
+	req, _ := http.NewRequest("GET", base+"/owner/repo/info/refs", nil)
+	req.SetBasicAuth(gitProxyBasicUser, runToken)
+	if resp, derr := http.DefaultClient.Do(req); derr != nil {
+		t.Fatalf("pre-shutdown roundtrip: %v", derr)
+	} else {
+		_ = resp.Body.Close()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := bundle.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	client := &http.Client{Timeout: 1 * time.Second}
+	if _, err := client.Get(base + "/owner/repo/info/refs"); err == nil {
+		t.Error("git proxy still accepting connections after Shutdown")
 	}
 }
 

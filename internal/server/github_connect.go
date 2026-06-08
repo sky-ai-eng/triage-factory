@@ -97,7 +97,7 @@ func (s *Server) handleGitHubConnectStart(w http.ResponseWriter, r *http.Request
 		http.NotFound(w, r)
 		return
 	}
-	orgID, userID, ok := s.requireOrgMember(w, r)
+	orgID, userID, ok := s.az.RequireOrgMember(w, r)
 	if !ok {
 		return
 	}
@@ -189,7 +189,7 @@ func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Requ
 		http.NotFound(w, r)
 		return
 	}
-	orgID, userID, ok := s.requireOrgMember(w, r)
+	orgID, userID, ok := s.az.RequireOrgMember(w, r)
 	if !ok {
 		return
 	}
@@ -320,7 +320,7 @@ type githubIdentityStatusResponse struct {
 //
 // GET /api/orgs/{org_id}/identity/github
 func (s *Server) handleGitHubIdentityStatus(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgMember(w, r)
+	orgID, userID, ok := s.az.RequireOrgMember(w, r)
 	if !ok {
 		return
 	}
@@ -393,7 +393,7 @@ type githubIdentityCaptureResponse struct {
 //
 // POST /api/orgs/{org_id}/identity/github/pat
 func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgMember(w, r)
+	orgID, userID, ok := s.az.RequireOrgMember(w, r)
 	if !ok {
 		return
 	}

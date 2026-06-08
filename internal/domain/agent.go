@@ -14,23 +14,23 @@ import "time"
 //     task. On a single/terminal run this is normal completion.
 //   - RunOutcomeAbort    → stop; leave the task open for a human. Carries a
 //     natural-language `reason` (the old `unsolvable` folds into this).
-//   - RunOutcomeYield    → hand to the user; the run parks in awaiting_input.
 //
-// runs.outcome persists the parsed value; the blueprint orchestrator's step
-// advancement and the later queue work read it.
+// A turn that ends without one of these (prose / nothing) is not an outcome at
+// all — the run is left `open` (not concluded, not executing); see
+// internal/delegate. runs.outcome persists the parsed value; the blueprint
+// orchestrator's step advancement and the later queue work read it.
 type RunOutcome string
 
 const (
 	RunOutcomeContinue RunOutcome = "continue"
 	RunOutcomeFinish   RunOutcome = "finish"
 	RunOutcomeAbort    RunOutcome = "abort"
-	RunOutcomeYield    RunOutcome = "yield"
 )
 
-// Valid reports whether o is one of the four recognized outcomes.
+// Valid reports whether o is one of the recognized outcomes.
 func (o RunOutcome) Valid() bool {
 	switch o {
-	case RunOutcomeContinue, RunOutcomeFinish, RunOutcomeAbort, RunOutcomeYield:
+	case RunOutcomeContinue, RunOutcomeFinish, RunOutcomeAbort:
 		return true
 	}
 	return false
@@ -41,7 +41,7 @@ type AgentRun struct {
 	ID            string
 	TaskID        string
 	PromptID      string // FK to prompts.id — which prompt was used for this run
-	Status        string // lifecycle: "initializing" | "cloning" | "fetching" | "worktree_created" | "agent_starting" | "running"; terminal: "completed" | "failed" | "cancelled" | "task_unsolvable" | "pending_approval" | "taken_over"
+	Status        string // lifecycle: "queued" | "initializing" | "cloning" | "fetching" | "worktree_created" | "agent_starting" | "running" | "open" (a turn ended without a conclusion — not executing, not concluded); terminal: "completed" | "failed" | "cancelled" | "task_unsolvable" | "pending_approval" | "taken_over"
 	Model         string
 	StartedAt     time.Time
 	CompletedAt   *time.Time
@@ -108,6 +108,14 @@ type AgentRun struct {
 	// call. Empty on rows hydrated by the per-org Get paths, which already
 	// carry org in their call args.
 	OrgID string `json:"-"`
+
+	// ExecutorID names the executor instance that owns this run's live
+	// process while it runs — stamped when the run goes live, NULL/empty
+	// otherwise. At N=1 it's a single per-process instance id; the
+	// forward-compat ownership hook horizontal scaling turns into the
+	// lease the control plane signals an owning executor through. Empty
+	// string === SQL NULL.
+	ExecutorID string `json:"-"`
 }
 
 // AgentMessage represents a single message within an agent run.
