@@ -276,11 +276,14 @@ func TestDriveLiveRun_NoneKeepsProcOpenAndLoops(t *testing.T) {
 	}
 }
 
-// TestDriveLiveRun_InvalidRepromptsThenFails: an envelope-shaped but invalid
-// conclusion is re-prompted to fix, up to maxCompletionRetries, then the run
-// fails. Each correction the driver sends produces another invalid turn here,
-// so the bound is exhausted.
-func TestDriveLiveRun_InvalidRepromptsThenFails(t *testing.T) {
+// TestDriveLiveRun_InvalidRepromptsToBoundThenHandsBack: an envelope-shaped but
+// invalid conclusion is re-prompted to fix, up to maxCompletionRetries. When
+// the bound is exhausted the driver hands the (still invalid) result back —
+// keeping the totals the live process folded — rather than dropping them on a
+// bare error; processCompletion records the failure (see
+// TestProcessCompletion_InvalidEnvelopeFails). Each correction here produces
+// another invalid turn, so the bound is exhausted.
+func TestDriveLiveRun_InvalidRepromptsToBoundThenHandsBack(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
 	proc := newFakeLiveProc("sess")
 	results := make(chan *agentproc.Result, 8)
@@ -290,14 +293,59 @@ func TestDriveLiveRun_InvalidRepromptsThenFails(t *testing.T) {
 
 	out := s.driveLiveRun(context.Background(), liveParkContext{}, proc, results, make(chan struct{}), time.Minute)
 
-	if out.err == nil {
-		t.Fatalf("expected a failure after exhausting re-prompts, got %+v", out)
+	if out.err != nil {
+		t.Fatalf("expected the unfixed result handed back, got err %v", out.err)
+	}
+	if out.result != invalid {
+		t.Errorf("result = %+v, want the unfixed invalid result for processCompletion to fail", out.result)
 	}
 	if proc.sends() != maxCompletionRetries {
 		t.Errorf("sends = %d, want %d (one correction per retry)", proc.sends(), maxCompletionRetries)
 	}
 	if !proc.wasClosed() {
 		t.Error("expected the process closed after exhausting re-prompts")
+	}
+}
+
+// TestDriveLiveRun_BoundedResumeRepromptsInvalid: a bounded resume (idleTimeout
+// 0) holds a live process too, so it re-prompts an invalid envelope in place
+// just like an autonomous run — the fix for the asymmetry where a resume used
+// to accept an invalid envelope uncorrected.
+func TestDriveLiveRun_BoundedResumeRepromptsInvalid(t *testing.T) {
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	proc := newFakeLiveProc("sess")
+	results := make(chan *agentproc.Result, 8)
+	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"fixed"}`}
+	proc.onSend = func(int) { results <- want } // the correction lands a valid conclusion
+	results <- &agentproc.Result{Result: `{"outcome":"abort"}`}
+
+	out := s.driveLiveRun(context.Background(), liveParkContext{}, proc, results, make(chan struct{}), 0)
+
+	if out.result != want {
+		t.Errorf("result = %+v, want the corrected valid conclusion", out.result)
+	}
+	if proc.sends() != 1 {
+		t.Errorf("sends = %d, want 1 (resume re-prompts invalid once, then accepts)", proc.sends())
+	}
+}
+
+// TestDriveLiveRun_BoundedResumeNoneHandsBack: a bounded resume (idleTimeout 0)
+// has no idle timer to close a warm process, so a no-conclusion turn is handed
+// straight back (not looped) for processCompletion to mark open.
+func TestDriveLiveRun_BoundedResumeNoneHandsBack(t *testing.T) {
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	proc := newFakeLiveProc("sess")
+	results := make(chan *agentproc.Result, 1)
+	none := &agentproc.Result{Result: "prose, no envelope"}
+	results <- none
+
+	out := s.driveLiveRun(context.Background(), liveParkContext{}, proc, results, make(chan struct{}), 0)
+
+	if out.result != none {
+		t.Errorf("result = %+v, want the no-conclusion result handed back", out.result)
+	}
+	if !proc.wasClosed() {
+		t.Error("expected the process closed (a bounded resume does not keep it warm)")
 	}
 }
 

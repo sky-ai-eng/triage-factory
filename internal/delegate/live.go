@@ -174,11 +174,14 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 	if idle != nil {
 		defer idle.Stop()
 	}
-	// multiTurn distinguishes a long-lived autonomous run (it may oscillate
-	// running↔open across turns and hibernate when idle) from a bounded resume
-	// (one re-invoke that always drives to a result). Keyed off idleTimeout so
-	// the two callers stay on one driver.
-	multiTurn := idleTimeout > 0
+	// keepWarmOnNone distinguishes a long-lived autonomous run (a no-conclusion
+	// turn leaves the process warm and loops; idle later closes it) from a
+	// bounded backstop resume (no idle timer, so a no-conclusion turn is handed
+	// straight back rather than looped forever). Both hold a live process, so an
+	// invalid envelope is re-prompted in place either way — only the
+	// no-conclusion handling differs. Keyed off idleTimeout so the two callers
+	// stay on one driver.
+	keepWarmOnNone := idleTimeout > 0
 	invalidAttempts := 0
 
 	for {
@@ -201,38 +204,35 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 			class, _ := classifyAgentResult(r.Result)
 			switch class {
 			case turnValid:
-				// A turn produced a valid conclusion. Close the process (freeing
-				// the session) and hand the result back to orchestrate.
+				// A valid conclusion. Close the process (freeing the session) and
+				// hand it to processCompletion to orchestrate.
 				_ = proc.Close()
 				return liveOutcome{result: r}
 
 			case turnInvalid:
-				if !multiTurn {
-					// Bounded resume: no in-process re-prompt loop. Hand the
-					// (invalid) result back; the caller records a NULL outcome and
-					// the orchestrator decides.
+				if invalidAttempts >= maxCompletionRetries {
+					// Exhausted the re-prompt bound — hand the unfixed result back.
+					// processCompletion records the failure (a knowable error) with
+					// the totals the live process folded across the correction turns,
+					// rather than dropping them on a bare error return.
 					_ = proc.Close()
 					return liveOutcome{result: r}
 				}
-				if invalidAttempts >= maxCompletionRetries {
-					// The agent kept emitting a malformed envelope past the bound.
-					// This is a knowable error → fail the run.
-					_ = proc.Close()
-					return liveOutcome{err: fmt.Errorf("agent did not return a valid completion envelope after %d correction attempts", maxCompletionRetries)}
-				}
+				// An envelope attempt that didn't validate — correct it in place on
+				// the warm process and wait for the next turn. Identical for an
+				// autonomous run and a bounded resume: both hold a live process.
 				invalidAttempts++
 				if err := proc.Send(ctx, invalidEnvelopeCorrection()); err != nil {
 					_ = proc.Close()
 					return liveOutcome{err: fmt.Errorf("re-prompt invalid completion envelope: %w", err)}
 				}
-				// Sending is activity; re-arm the idle window for the corrected turn.
-				resetIdleTimer(idle, idleTimeout)
+				resetIdleTimer(idle, idleTimeout) // sending is activity
 
 			case turnNone:
-				if !multiTurn {
-					// Bounded resume produced no envelope — hand it back; the caller
-					// records a NULL outcome (orchestrator decides). Looping here
-					// would block forever (no idle timer to close the warm process).
+				if !keepWarmOnNone {
+					// Bounded resume: no idle timer would ever close a warm process,
+					// so don't loop — hand the no-conclusion result back and let
+					// processCompletion mark the run open.
 					_ = proc.Close()
 					return liveOutcome{result: r}
 				}
@@ -251,11 +251,11 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 			resetIdleTimer(idle, idleTimeout)
 
 		case <-idleC:
-			// Quiet past the threshold with no input to act on — hibernate to a
-			// durable resume. The status flips to open here; whether a process was
-			// warm was never a status.
+			// Quiet past the threshold with no input to act on — park the run open
+			// to a durable resume. The status flips to open here; whether a process
+			// was warm was never a status.
 			_ = proc.Close()
-			s.hibernatePark(park, proc.SessionID())
+			s.parkRunOpen(park, proc.SessionID())
 			return liveOutcome{hibernated: true}
 
 		case <-proc.Done():
@@ -277,13 +277,14 @@ func invalidEnvelopeCorrection() string {
 		"(on finish/continue) or a \"reason\" (on abort), and no other text."
 }
 
-// markRunOpen flips a run to `open` when a turn ends without a conclusion. The
-// process stays warm in s.procs for a follow-up message, so this is status-only
-// — the workspace snapshot is deferred to idle hibernation (there's nothing to
-// lose while the process is alive). Flipping now (rather than at idle) is what
-// makes a crash in the warm window recover correctly: the boot reconcile leaves
-// `open` runs alone, since a restart provides no input to resume them.
-// Nil-safe so the no-DB driver tests can exercise the loop.
+// markRunOpen flips a run's status to `open` under a race guard, then nudges
+// the board + UI. The shared flip for both the warm path (the live driver's
+// no-conclusion turn, where the process stays warm in s.procs and there's
+// nothing to snapshot yet) and parkRunOpen (process gone — snapshots first).
+// Flipping on the no-conclusion turn, rather than only at idle, is what makes a
+// crash in the warm window recover correctly: the boot reconcile leaves `open`
+// runs alone, since a restart provides no input to resume them. Nil-safe so the
+// no-DB driver tests can exercise the loop.
 func (s *Spawner) markRunOpen(park liveParkContext) {
 	if s.agentRuns == nil {
 		return // test fixture with no DB wired
@@ -301,7 +302,7 @@ func (s *Spawner) markRunOpen(park liveParkContext) {
 		flipped, err = s.agentRuns.MarkOpenSystem(bgCtx, park.orgID, park.runID)
 	}
 	if err != nil {
-		log.Printf("[delegate] warning: mark open for run %s on a no-conclusion turn: %v", park.runID, err)
+		log.Printf("[delegate] warning: mark run %s open: %v", park.runID, err)
 		return
 	}
 	if !flipped {
@@ -312,45 +313,23 @@ func (s *Spawner) markRunOpen(park liveParkContext) {
 	s.recomputeTaskBoardColumn(park.orgID, park.taskID)
 }
 
-// hibernatePark parks an idle live run to open: snapshot the workspace (the
-// cold-resume backstop), flip the status under a race guard (a no-op when the
-// run already went open on its last no-conclusion turn), and nudge the board +
-// UI. "open" makes no claim about why the run stopped or who (if anyone)
-// continues it — the process simply went quiet and was idle-closed; any later
-// input resumes it on the same ResumeWithMessage path.
-func (s *Spawner) hibernatePark(park liveParkContext, sessionID string) {
-	bgCtx := context.Background()
-
+// parkRunOpen records a run as `open` when its process is gone — the live
+// driver idle-closed it, or a one-shot/resume turn ended without a conclusion.
+// It snapshots the workspace (the cold-resume backstop) BEFORE the flip so a
+// resume that lands without the warm worktree can rebuild it, then flips the
+// status via markRunOpen and toasts. markRunOpen is the warm-process sibling
+// (no snapshot — the process is still alive to take the next message). "open"
+// makes no claim about why the run stopped or who continues it; any later input
+// resumes it on the same ResumeWithMessage path.
+func (s *Spawner) parkRunOpen(park liveParkContext, sessionID string) {
 	// Snapshot BEFORE the flip: once dormant the run can resume on a host
 	// without the warm worktree, so the blob must exist by the time the
 	// status commits. Best-effort — the kept warm worktree is the fast path.
-	if err := s.snapshotWorkspace(bgCtx, park.orgID, park.namespace, park.claudeCwd, sessionID); err != nil {
-		log.Printf("[delegate] warning: snapshot workspace for run %s before idle hibernation: %v", park.runID, err)
+	if err := s.snapshotWorkspace(context.Background(), park.orgID, park.namespace, park.claudeCwd, sessionID); err != nil {
+		log.Printf("[delegate] warning: snapshot workspace for run %s before parking open: %v", park.runID, err)
 	}
-
-	var flipped bool
-	var flipErr error
-	if park.triggerType == "manual" {
-		flipErr = s.tx.SyntheticClaimsWithTx(bgCtx, park.orgID, park.creatorUserID, func(ts db.TxStores) error {
-			f, e := ts.AgentRuns.MarkOpen(bgCtx, park.orgID, park.runID)
-			flipped = f
-			return e
-		})
-	} else {
-		flipped, flipErr = s.agentRuns.MarkOpenSystem(bgCtx, park.orgID, park.runID)
-	}
-	if flipErr != nil {
-		log.Printf("[delegate] warning: mark open for run %s on idle hibernation: %v", park.runID, flipErr)
-		return
-	}
-	if !flipped {
-		// A racing terminal flip (cancel/takeover) won — leave its status; the
-		// snapshot it didn't need is dropped by that path's terminal cleanup.
-		return
-	}
-	s.broadcastRunUpdate(park.orgID, park.runID, "open")
-	s.recomputeTaskBoardColumn(park.orgID, park.taskID)
-	toast.Info(s.wsHub, park.orgID, fmt.Sprintf("Run %s went idle — open until the next message", shortRunID(park.runID)))
+	s.markRunOpen(park)
+	toast.Info(s.wsHub, park.orgID, fmt.Sprintf("Run %s is open — resumes on the next message", shortRunID(park.runID)))
 }
 
 // runOneShot wraps the blocking one-shot agentproc.Run into the shared

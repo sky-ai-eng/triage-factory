@@ -159,12 +159,13 @@ func TestProcessCompletion_AbortLeavesTaskOpen(t *testing.T) {
 	}
 }
 
-// TestProcessCompletion_AbortMissingReasonRecordsNoOutcome: an abort without a
-// reason is an invalid envelope, not a valid conclusion. The live driver
-// re-prompts it before it ever reaches here; if a non-live path (resume /
-// one-shot) feeds one in, processCompletion records a NULL outcome (the
-// orchestrator decides) rather than acting on a malformed abort.
-func TestProcessCompletion_AbortMissingReasonRecordsNoOutcome(t *testing.T) {
+// TestProcessCompletion_AbortMissingReasonFails: abort is the agent's voluntary
+// stop, so the reason is its required companion — an abort without one is an
+// invalid envelope, not a valid conclusion. The live driver re-prompts it; a
+// non-live path (resume / one-shot) that can't lands here, where it's a knowable
+// error → failed (with no recorded outcome), never a clean NULL-outcome
+// completion the orchestrator would read as finish.
+func TestProcessCompletion_AbortMissingReasonFails(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "abort-noreason")
 	stampBotClaim(t, database, taskID)
 	bpr := blueprintRunIDForRun(t, database, runID)
@@ -175,30 +176,63 @@ func TestProcessCompletion_AbortMissingReasonRecordsNoOutcome(t *testing.T) {
 		res(`{"outcome":"abort","summary":"stopped, couldn't proceed"}`), cwd, "", "event", "")
 
 	run := loadRun(t, s, runID)
+	if run.Status != "failed" {
+		t.Errorf("run.status = %q, want failed (an abort with no reason is an invalid envelope)", run.Status)
+	}
 	if run.Outcome != "" {
 		t.Errorf("run.outcome = %q, want empty (an abort with no reason is not a valid conclusion)", run.Outcome)
 	}
 }
 
-// TestProcessCompletion_UnparseableLeavesOutcomeNull: a step whose envelope
-// never carries a valid outcome keeps a NULL outcome — decideBlueprintStep maps
-// a NULL on the final/only step to finish (TestDecideBlueprintStep), not
-// processCompletion.
-func TestProcessCompletion_UnparseableLeavesOutcomeNull(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "fallback")
+// TestProcessCompletion_NoConclusionParksOpen: a turn that ends with no
+// envelope at all (prose) is not a termination — the run is parked `open` (not
+// recorded as a NULL-outcome completion, which would let the orchestrator close
+// a final step). This is the disposition for a one-shot/resume turn that ends
+// without concluding (the live driver consumes this in its loop instead).
+func TestProcessCompletion_NoConclusionParksOpen(t *testing.T) {
+	s, database, runID, taskID := setupAdvanceFixture(t, "open-noconcl")
 	bpr := blueprintRunIDForRun(t, database, runID)
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, bpr, task,
+	parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, bpr, task,
 		res(`this is not a JSON envelope`), cwd, "", "event", "")
 
+	if !parked {
+		t.Error("processCompletion(no-conclusion) = false; want true (open, not terminal)")
+	}
 	run := loadRun(t, s, runID)
-	if run.Status != "completed" {
-		t.Errorf("run.status = %q, want completed", run.Status)
+	if run.Status != "open" {
+		t.Errorf("run.status = %q, want open (a no-conclusion turn parks open, not completed)", run.Status)
 	}
 	if run.Outcome != "" {
-		t.Errorf("run.outcome = %q, want \"\" (NULL — no single-run finish fallback)", run.Outcome)
+		t.Errorf("run.outcome = %q, want \"\" (no conclusion was recorded)", run.Outcome)
+	}
+}
+
+// TestProcessCompletion_InvalidEnvelopeFails: an envelope attempt that never
+// validated (here a `finish` with no summary) is a knowable error — recorded
+// failed, not a NULL-outcome completion. The live driver re-prompts this in
+// place; when a backend can't or the bound is exhausted, the unfixed result
+// lands here and fails (TestDriveLiveRun_InvalidRepromptsToBoundThenHandsBack).
+func TestProcessCompletion_InvalidEnvelopeFails(t *testing.T) {
+	s, database, runID, taskID := setupAdvanceFixture(t, "invalid-fails")
+	bpr := blueprintRunIDForRun(t, database, runID)
+	task := loadTask(t, s, taskID)
+	cwd := t.TempDir()
+
+	parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, bpr, task,
+		res(`{"outcome":"finish"}`), cwd, "", "event", "")
+
+	if parked {
+		t.Error("processCompletion(invalid) = true; want false (terminal failure, not parked)")
+	}
+	run := loadRun(t, s, runID)
+	if run.Status != "failed" {
+		t.Errorf("run.status = %q, want failed (an invalid envelope is a knowable error)", run.Status)
+	}
+	if run.Outcome != "" {
+		t.Errorf("run.outcome = %q, want \"\" (an invalid attempt records no outcome)", run.Outcome)
 	}
 }
 

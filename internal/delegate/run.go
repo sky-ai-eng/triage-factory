@@ -352,16 +352,24 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, "agent runtime exited cleanly without producing a result event")
 }
 
-// processCompletion records a terminal Claude completion: upsert the run's
-// memory file, parse the conclusion, finalize the run row, and (when the agent
-// queued a review/PR for human approval) park it in pending_approval. Shared
-// between runAgent and the resume-with-message flow so a resumed run lands in
-// identical terminal state to one that completed in a single turn.
+// processCompletion is the single disposition authority for a result, whatever
+// backend produced it (the live driver, the one-shot sandbox fallback, or a
+// resume). It classifies the turn-end and acts uniformly:
 //
-// By the time a result reaches here it is a conclusion (or an IsError / crash
-// result): the live driver owns the concluded-vs-open turn classification and
-// the invalid-envelope re-prompt, so there is no open turn-end and no gate to
-// run at this layer.
+//   - valid conclusion → record the outcome (finalize / let the orchestrator
+//     advance or close); a queued review/PR parks it in pending_approval.
+//   - no conclusion (prose / nothing) → the run is open, not a termination:
+//     park it open (snapshot + flip + keep the warm worktree) and return. The
+//     live driver normally consumes this in its loop; it reaches here only from
+//     the one-shot/resume backends (which hold no warm process) or a crash that
+//     left a complete-but-open last turn.
+//   - invalid attempt / IsError → record failed (a knowable error) with the
+//     totals already folded onto the result.
+//
+// Keeping the disposition here — rather than in the live driver — is what makes
+// the non-live backends honest: a one-shot/resume turn that ends open or with a
+// malformed envelope is no longer mis-recorded as a clean NULL-outcome
+// completion (which would wrongly advance/close a final step).
 //
 // blueprintRunID is the run's blueprint run (cfg.blueprintRunID for an initial
 // run, the resumed run's blueprint_run_id for a resume). It's the authoritative
@@ -370,9 +378,9 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 // a DB hiccup can't silently mis-namespace the memory or mis-route the task
 // close.
 //
-// Returns parked: true when the run ended dormant (pending_approval) rather
-// than terminal, so runAgent's cleanup defers keep the worktree + session JSONL
-// on disk as the warm resume cache.
+// Returns parked: true when the run ended dormant (open, or pending_approval)
+// rather than terminal, so runAgent's cleanup defers keep the worktree +
+// session JSONL on disk as the warm resume cache.
 func (s *Spawner) processCompletion(
 	ctx context.Context,
 	orgID, runID, blueprintRunID string,
@@ -385,6 +393,25 @@ func (s *Spawner) processCompletion(
 	// Derived from the caller-supplied blueprint_run_id — no DB fetch, so it
 	// can't silently fall back to the wrong namespace on a transient read error.
 	namespace := memoryNamespace(blueprintRunID, runID)
+
+	// Classify the turn-end up front. A no-conclusion turn (prose / nothing) is
+	// NOT a termination — the run is open. Park it open (snapshot for the
+	// cold-resume backstop, flip the status, keep the warm worktree) and skip the
+	// terminal bookkeeping below. An IsError result is always a termination, so
+	// it never takes this branch however envelope-shaped its text.
+	class, parsed := classifyAgentResult(completion.Result)
+	if !completion.IsError && class == turnNone {
+		s.parkRunOpen(liveParkContext{
+			orgID:         orgID,
+			runID:         runID,
+			taskID:        task.ID,
+			namespace:     namespace,
+			claudeCwd:     claudeCwd,
+			triggerType:   triggerType,
+			creatorUserID: creatorUserID,
+		}, sessionID)
+		return true
+	}
 
 	// Unconditional upsert of the run_memory row at termination: row presence
 	// === "the run terminated", agent_content NULL === "the agent didn't write a
@@ -411,26 +438,26 @@ func (s *Spawner) processCompletion(
 
 	resultSummary := ""
 	status := "completed"
-	if completion.IsError {
-		status = "failed"
-	}
 	var outcome, outcomeReason string
-	if parsed := parseAgentResult(completion.Result); parsed != nil {
-		// parseAgentResult returns non-nil only for a valid conclusion (a
-		// recognized outcome carrying its required companion field), so the
-		// outcome is always usable here — an invalid attempt or an open turn-end
-		// never reaches this layer.
+	switch {
+	case completion.IsError:
+		// Process crash / runtime error — an always-knowable terminal.
+		status = "failed"
+	case class == turnValid:
 		resultSummary = parsed.Summary
 		outcome = parsed.Outcome
 		if domain.RunOutcome(parsed.Outcome) == domain.RunOutcomeAbort {
 			outcomeReason = parsed.Reason
 		}
+	default: // turnInvalid
+		// An envelope attempt that never validated. The live driver re-prompts
+		// this in place; a backend that can't (one-shot) or that exhausted the
+		// bound lands here, where it's a knowable error → failed, recorded with
+		// the totals folded onto the result. NOT a NULL-outcome completion, which
+		// the orchestrator would read as a clean finish on a final step.
+		status = "failed"
+		resultSummary = "agent did not return a valid completion envelope"
 	}
-	// No single-run finish fallback here: a run that completes with no
-	// recognizable outcome keeps a NULL outcome and is left for the orchestrator.
-	// decideBlueprintStep maps a NULL outcome on the final (or only) step to
-	// finish — the same close-on-clean-completion behavior — and a NULL on a
-	// non-final step to no-outcome→abort.
 
 	// Detached context: the run's ctx may have been cancelled (user
 	// cancel mid-stream) but the terminal write still needs to record.
