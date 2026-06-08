@@ -11,6 +11,7 @@ package httpx
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -59,10 +60,16 @@ func WriteUnauth(w http.ResponseWriter) {
 	http.Error(w, "unauthenticated", http.StatusUnauthorized)
 }
 
-// DecodeJSON decodes the request body into v (which must be a pointer),
-// rejecting trailing data after the first JSON value. On failure it writes a
-// 400 (msg, or "invalid request body" when msg is empty) and returns false;
-// callers should return immediately.
+// DecodeJSON decodes a single top-level JSON value from the request body into
+// v (which must be a pointer). It rejects any trailing content after that
+// value — a second value, junk bytes, or a stray }/] — and allows only
+// trailing whitespace. On failure it writes a 400 (msg, or "invalid request
+// body" when msg is empty) and returns false; callers should return
+// immediately.
+//
+// The trailing check requires the next decode to hit io.EOF rather than using
+// dec.More(): More() reports false at a top-level } or ], so a body like
+// `{...}}` would otherwise be accepted.
 func DecodeJSON(w http.ResponseWriter, r *http.Request, v any, msg string) bool {
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(v); err != nil {
@@ -72,7 +79,8 @@ func DecodeJSON(w http.ResponseWriter, r *http.Request, v any, msg string) bool 
 		BadRequest(w, msg)
 		return false
 	}
-	if dec.More() {
+	var rest json.RawMessage
+	if err := dec.Decode(&rest); err != io.EOF {
 		if msg == "" {
 			msg = "invalid request body"
 		}
