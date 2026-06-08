@@ -18,6 +18,7 @@ import PromptPicker from '../components/PromptPicker'
 import ReviewOverlay from '../components/ReviewOverlay'
 import PendingPROverlay from '../components/PendingPROverlay'
 import AssigneePicker from '../components/board/AssigneePicker'
+import { toast } from '../components/Toast/toastStore'
 import BoardColumn, { CollapsedColumn } from '../components/board/BoardColumn'
 import {
   applyColumnFilter,
@@ -726,107 +727,114 @@ export default function Board() {
     setActiveId(null)
     setActiveDropCol(null)
 
-    if (!over) return
-    const taskId = String(active.id)
-    const sourceCol = getColumn(taskId)
-    const task = allTasks.get(taskId)
-    if (!sourceCol || !task) return
+    try {
+      if (!over) return
+      const taskId = String(active.id)
+      const sourceCol = getColumn(taskId)
+      const task = allTasks.get(taskId)
+      if (!sourceCol || !task) return
 
-    const overId = String(over.id)
-    let targetCol: ColumnId
-    if (ALL_COLUMNS.includes(overId as ColumnId)) {
-      targetCol = overId as ColumnId
-    } else {
-      targetCol = getColumn(overId) || sourceCol
-    }
+      const overId = String(over.id)
+      let targetCol: ColumnId
+      if (ALL_COLUMNS.includes(overId as ColumnId)) {
+        targetCol = overId as ColumnId
+      } else {
+        targetCol = getColumn(overId) || sourceCol
+      }
 
-    // Same column — no-op (we don't persist intra-column order).
-    if (sourceCol === targetCol) return
+      // Same column — no-op (we don't persist intra-column order).
+      if (sourceCol === targetCol) return
 
-    // Externally terminal tasks (merged/closed PRs) can't be dragged.
-    const terminalEvents = ['github:pr:merged', 'github:pr:closed']
-    if (terminalEvents.includes(task.event_type)) return
+      // Externally terminal tasks (merged/closed PRs) can't be dragged.
+      const terminalEvents = ['github:pr:merged', 'github:pr:closed']
+      if (terminalEvents.includes(task.event_type)) return
 
-    // Bot-claimed tasks in In Progress / In Review are bot-managed —
-    // the user shouldn't drag them around (status is set by the
-    // spawner's auto-advance). Takeover happens via the assignee
-    // picker. Silently refuse the drag rather than nag.
-    if (task.claimed_by_agent_id && (sourceCol === 'in_progress' || sourceCol === 'in_review')) {
-      return
-    }
+      // Bot-claimed tasks in In Progress / In Review are bot-managed —
+      // the user shouldn't drag them around (status is set by the
+      // spawner's auto-advance). Takeover happens via the assignee
+      // picker. Silently refuse the drag rather than nag.
+      if (task.claimed_by_agent_id && (sourceCol === 'in_progress' || sourceCol === 'in_review')) {
+        return
+      }
 
-    // Queue → anywhere: requires a claim first. Queue → Claimed is
-    // the natural drag; Queue → In Progress / In Review skips a step
-    // (rare but allowed for the user's convenience — claims then
-    // advances). Queue → Done is dismiss.
-    if (sourceCol === 'queued') {
+      // Queue → anywhere: requires a claim first. Queue → Claimed is
+      // the natural drag; Queue → In Progress / In Review skips a step
+      // (rare but allowed for the user's convenience — claims then
+      // advances). Queue → Done is dismiss.
+      if (sourceCol === 'queued') {
+        if (targetCol === 'done') {
+          await fetch(`/api/tasks/${taskId}/swipe`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'dismiss', hesitation_ms: 0 }),
+          })
+          fetchTasks()
+          return
+        }
+        // Claim first, then advance if needed.
+        await fetch(`/api/tasks/${taskId}/swipe`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'claim', hesitation_ms: 0 }),
+        })
+        if (targetCol === 'in_progress' || targetCol === 'in_review') {
+          await fetch(`/api/tasks/${taskId}/advance`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ to: targetCol }),
+          })
+        }
+        fetchTasks()
+        return
+      }
+
+      // Any → Queued: requeue. Clears the claim and resets status.
+      if (targetCol === 'queued') {
+        await fetch(`/api/tasks/${taskId}/requeue`, { method: 'POST' })
+        fetchTasks()
+        return
+      }
+
+      // Any → Done: complete (preserves the card in Done; distinct
+      // from queue → done which dismisses).
       if (targetCol === 'done') {
         await fetch(`/api/tasks/${taskId}/swipe`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'dismiss', hesitation_ms: 0 }),
+          body: JSON.stringify({ action: 'complete', hesitation_ms: 0 }),
         })
         fetchTasks()
         return
       }
-      // Claim first, then advance if needed.
-      await fetch(`/api/tasks/${taskId}/swipe`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'claim', hesitation_ms: 0 }),
-      })
+
+      // Claimed / In Progress / In Review transitions (user-claimed
+      // only — bot tasks short-circuited above). Backward transitions
+      // (e.g. In Review → In Progress) are allowed by the backend
+      // AdvanceStatusForUser guard.
+      if (targetCol === 'claimed') {
+        // Claimed isn't a real status — it's "status=queued + claim
+        // held". Going "back to Claimed" from In Progress/In Review
+        // means flipping status to queued without releasing the claim.
+        // The current store doesn't expose that exact transition; the
+        // closest is requeue (which clears claim too). For v1, the
+        // back-to-Claimed gesture isn't supported — the user can drag
+        // forward through stages or all the way back to Queued.
+        return
+      }
       if (targetCol === 'in_progress' || targetCol === 'in_review') {
         await fetch(`/api/tasks/${taskId}/advance`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ to: targetCol }),
         })
+        fetchTasks()
+        return
       }
-      fetchTasks()
-      return
-    }
-
-    // Any → Queued: requeue. Clears the claim and resets status.
-    if (targetCol === 'queued') {
-      await fetch(`/api/tasks/${taskId}/requeue`, { method: 'POST' })
-      fetchTasks()
-      return
-    }
-
-    // Any → Done: complete (preserves the card in Done; distinct
-    // from queue → done which dismisses).
-    if (targetCol === 'done') {
-      await fetch(`/api/tasks/${taskId}/swipe`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'complete', hesitation_ms: 0 }),
-      })
-      fetchTasks()
-      return
-    }
-
-    // Claimed / In Progress / In Review transitions (user-claimed
-    // only — bot tasks short-circuited above). Backward transitions
-    // (e.g. In Review → In Progress) are allowed by the backend
-    // AdvanceStatusForUser guard.
-    if (targetCol === 'claimed') {
-      // Claimed isn't a real status — it's "status=queued + claim
-      // held". Going "back to Claimed" from In Progress/In Review
-      // means flipping status to queued without releasing the claim.
-      // The current store doesn't expose that exact transition; the
-      // closest is requeue (which clears claim too). For v1, the
-      // back-to-Claimed gesture isn't supported — the user can drag
-      // forward through stages or all the way back to Queued.
-      return
-    }
-    if (targetCol === 'in_progress' || targetCol === 'in_review') {
-      await fetch(`/api/tasks/${taskId}/advance`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ to: targetCol }),
-      })
-      fetchTasks()
-      return
+    } catch {
+      // A network blip on the swipe/advance/requeue mutation would otherwise
+      // leave the board silently in the wrong state; surface it and let the
+      // next fetchTasks reconcile.
+      toast.error('Move failed — please try again')
     }
   }
 
@@ -1228,6 +1236,9 @@ function SortableTaskCard({
       ref={setNodeRef}
       task={task}
       style={style}
+      // Deliberately false: the lifted "ghost" is rendered by DragOverlay, and
+      // the in-place card fades via style.opacity (set in useSortable above).
+      // isDragging only drives a redundant z-50 here, so we never forward it.
       isDragging={false}
       onRequeue={onRequeue}
       delegateFailed={delegateFailed}

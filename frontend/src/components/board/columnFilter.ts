@@ -53,22 +53,6 @@ export function filterIsActive(f: ColumnFilterState): boolean {
   )
 }
 
-// Active-run statuses that light a lane's ambient glow. Terminal / waiting
-// states (completed, pending_approval, failed) are deliberately excluded — the
-// glow means "an agent is actively turning right now", not "a run exists."
-const ACTIVE_RUN_STATUSES = new Set([
-  'running',
-  'cloning',
-  'fetching',
-  'worktree_created',
-  'agent_starting',
-  'initializing',
-])
-
-export function isActiveRunStatus(status?: string): boolean {
-  return status ? ACTIVE_RUN_STATUSES.has(status) : false
-}
-
 export const SORT_LABEL: Record<SortKey, string> = {
   default: 'Smart',
   created: 'Newest',

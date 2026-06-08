@@ -120,6 +120,7 @@ export default function AgentCard({
                 <>
                   <HeaderDivider />
                   <button
+                    type="button"
                     onClick={async () => {
                       try {
                         const res = await fetch(`/api/agent/runs/${run.ID}/cancel`, {
