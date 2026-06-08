@@ -40,11 +40,12 @@ func lookupRun(host agenthost.Client) agenthost.RunInfo {
 
 // agentMemoryFile returns the absolute path the delegated agent must write its
 // run-memory file to, composed from the run-scoped env vars the spawner exports
-// into the agent's environment (TRIAGE_FACTORY_RUN_ROOT / _BLUEPRINT_RUN_ID /
-// _RUN_ID — see internal/delegate/run.go). This mirrors the path the completion
-// gate reads (cwd/_scratch/entity-memory/<blueprint_run_id>/<run_id>.md), so
-// the "do not retry, finish by writing ..." messages below can point the agent
-// at the file concretely.
+// into the agent's environment (TRIAGE_FACTORY_RUN_ROOT,
+// TRIAGE_FACTORY_BLUEPRINT_RUN_ID, and TRIAGE_FACTORY_RUN_ID — see
+// internal/delegate/run.go). This mirrors the path the completion gate reads
+// (cwd/_scratch/entity-memory/<blueprint_run_id>/<run_id>.md), so the "do not
+// retry, finish by writing ..." messages below can point the agent at the file
+// concretely.
 //
 // The bare env-var reference these messages used to carry would be written
 // verbatim by the agent's Write tool — which does no shell expansion — so the

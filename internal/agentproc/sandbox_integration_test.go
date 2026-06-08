@@ -5,6 +5,20 @@ import (
 	"testing"
 )
 
+// TestAgentVisibleHelpers_LocalPassthrough exercises the un-sandboxed path
+// (tests run in local mode, so shouldSandbox() is false): both helpers must
+// return the host value unchanged. The sandbox branch ("/work" / the
+// bind-mounted binary) is covered by the integration translate tests above and
+// can't be unit-asserted here without forcing multi mode + a Linux host.
+func TestAgentVisibleHelpers_LocalPassthrough(t *testing.T) {
+	if got := AgentVisibleRoot("/data/worktrees/abc"); got != "/data/worktrees/abc" {
+		t.Errorf("AgentVisibleRoot local passthrough: got %q want %q", got, "/data/worktrees/abc")
+	}
+	if got := AgentVisibleBinary("/home/user/bin/triagefactory"); got != "/home/user/bin/triagefactory" {
+		t.Errorf("AgentVisibleBinary local passthrough: got %q want %q", got, "/home/user/bin/triagefactory")
+	}
+}
+
 func TestTranslateAddDirsForSandbox(t *testing.T) {
 	cases := []struct {
 		name    string

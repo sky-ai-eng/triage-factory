@@ -48,6 +48,24 @@ func AgentVisibleRoot(hostRoot string) string {
 	return hostRoot
 }
 
+// AgentVisibleBinary returns the path the agent must use to invoke the TF
+// CLI. Under the sandbox the host binary is bind-mounted at sandboxTFBinary
+// (/usr/local/bin/triagefactory) and the host path doesn't exist inside the
+// rootfs, so the agent sees the canonical mount path; un-sandboxed it runs
+// the host binary directly.
+//
+// This is the {{BINARY_PATH}} value prompts interpolate, and it mirrors
+// rewriteAllowedToolsForSandbox, which re-points the `Bash(<selfBin> exec *)`
+// allowlist pattern to the same mount — without this the prompt would tell a
+// sandboxed agent to run a host path that ENOENTs and that the per-tool path
+// check would reject anyway.
+func AgentVisibleBinary(hostBin string) string {
+	if shouldSandbox() {
+		return sandboxTFBinary
+	}
+	return hostBin
+}
+
 // buildSandboxEnv constructs the *base* env exposed to the
 // sandboxed agent — the slice the sandbox's ConfigureProxies hook
 // then appends ANTHROPIC_BASE_URL / placeholder credentials onto
