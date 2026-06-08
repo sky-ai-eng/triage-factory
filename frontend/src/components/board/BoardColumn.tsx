@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useDroppable } from '@dnd-kit/core'
 import * as Tooltip from '@radix-ui/react-tooltip'
-import { motion, useAnimationControls, useReducedMotion } from 'motion/react'
+import { animate, motion, useMotionValue, useReducedMotion } from 'motion/react'
 import {
   ArrowDown,
   ArrowUp,
@@ -49,14 +49,18 @@ import type { Task } from '../../types'
 // The search field floats — no box, no border, just the icon + text on the
 // column glass (the Her move). A whisper of fill appears only on focus so
 // typing has some ground.
-// Border-trace timing — a smooth ease-in-out lap, one clear loop. TRACE_PEAK
-// matches the resting bracket's weight so the travelling light reads as the
-// bracket itself, not a brighter object laid over it.
+// Border-trace timing — a smooth ease-in-out lap, one clear loop.
 const TRACE_EASE = [0.65, 0, 0.35, 1] as const
 const TRACE_DUR = 1.4
-const TRACE_PEAK = 0.5
-// Resting opacity of the L-bracket (brightens to 1 on hover).
+// Resting opacity of the L-bracket (brightens on hover / drag-over).
 const BRACKET_REST = 0.55
+// The L: each arm is ARM units long (% of the pathLength=100 perimeter — equal
+// path units render as equal pixel lengths). The lit dash is both arms; at rest
+// it straddles the top-left corner (path origin), so the offset that parks it
+// there is +ARM. Sliding the offset by −100 is exactly one lap.
+const ARM = 7
+const TRACE_DASH = `${ARM * 2} ${100 - ARM * 2}`
+const BRACKET_REST_OFFSET = ARM
 
 const searchInputClass =
   'w-full rounded-lg bg-transparent py-1.5 pl-7 pr-7 text-[13px] text-text-primary placeholder:text-text-tertiary outline-none transition-colors focus:bg-[var(--color-surface-overlay)]/40'
@@ -122,97 +126,64 @@ export default function BoardColumn({
   // focus" cue, no effect on the other lanes.
   const [hovered, setHovered] = useState(false)
 
-  // Border-trace: a single rust light segment that zooms one smooth lap around
-  // the column's perimeter. Plays once on mount (so it greets every column on
-  // page load AND right after a column is expanded, since expanding remounts a
-  // fresh BoardColumn), and loops while a card is dragged over (replacing the
-  // old whole-column fill highlight). pathLength normalizes the rect to 100
-  // units so the dash math is size-independent.
-  // The travelling light (`trace`) and the resting L-bracket (`bracket`) are
-  // two halves of one gesture: as the light peels off the top-left corner and
-  // laps the perimeter, the bracket fades out so there's no static L left
-  // behind to fight it; as the light returns to the corner, the bracket fades
-  // back in and reclaims it. They cross-fade at the corner, so it reads as one
-  // continuous thing rather than a bar gliding over a fixed frame.
-  const trace = useAnimationControls()
-  const bracket = useAnimationControls()
-  // True while a lap/loop owns the bracket, so the hover effect doesn't fight
-  // it. Starts true: every column mounts mid-entrance-lap.
-  const tracing = useRef(true)
+  // The L-bracket IS the animation. It's a single SVG stroke (a dash on the
+  // column's rect path, pathLength-normalized to 100 so the math is
+  // size-independent). At rest the dash straddles the top-left corner — ARM
+  // units along the top edge + ARM units up the left edge = the L. We just
+  // slide its dash-offset one full lap (REST → REST−100, same shape) and back,
+  // so the L unfolds into the travelling segment and folds back into the L.
+  // One element, no cross-fade, ends exactly where it rests.
+  //   • lapOnce — on mount (page load + post-expand remount).
+  //   • lapLoop — continuously, while a card is dragged over.
+  //   • lapSettle — ease back to the resting L when the drag leaves.
+  const offset = useMotionValue(BRACKET_REST_OFFSET)
+  const anim = useRef<ReturnType<typeof animate> | null>(null)
 
-  const playTraceOnce = useCallback(() => {
-    if (reduce) {
-      tracing.current = false
-      return
-    }
-    trace.set({ strokeDashoffset: 0, opacity: 0 })
-    bracket.set({ opacity: BRACKET_REST })
-    trace.start({
-      strokeDashoffset: -100,
-      opacity: [0, TRACE_PEAK, TRACE_PEAK, 0],
-      transition: {
-        strokeDashoffset: { duration: TRACE_DUR, ease: TRACE_EASE },
-        opacity: { duration: TRACE_DUR, times: [0, 0.14, 0.82, 1] },
-      },
+  const lapOnce = useCallback(() => {
+    if (reduce) return
+    anim.current?.stop()
+    offset.set(BRACKET_REST_OFFSET)
+    anim.current = animate(offset, BRACKET_REST_OFFSET - 100, {
+      duration: TRACE_DUR,
+      ease: TRACE_EASE,
+      onComplete: () => offset.set(BRACKET_REST_OFFSET),
     })
-    bracket
-      .start({
-        opacity: [BRACKET_REST, 0, 0, BRACKET_REST],
-        transition: { duration: TRACE_DUR, times: [0, 0.14, 0.82, 1] },
-      })
-      .then(() => {
-        tracing.current = false
-      })
-  }, [reduce, trace, bracket])
+  }, [reduce, offset])
 
-  const playTraceLoop = useCallback(() => {
-    tracing.current = true
-    trace.set({ strokeDashoffset: 0 })
-    bracket.start({ opacity: 0, transition: { duration: 0.25 } })
-    if (reduce) {
-      trace.set({ opacity: TRACE_PEAK })
-      return
-    }
-    trace.start({
-      opacity: TRACE_PEAK,
-      strokeDashoffset: -100,
-      transition: {
-        opacity: { duration: 0.25 },
-        strokeDashoffset: { duration: TRACE_DUR, ease: TRACE_EASE, repeat: Infinity },
-      },
+  const lapLoop = useCallback(() => {
+    if (reduce) return
+    anim.current?.stop()
+    offset.set(BRACKET_REST_OFFSET)
+    anim.current = animate(offset, BRACKET_REST_OFFSET - 100, {
+      duration: TRACE_DUR,
+      ease: 'linear',
+      repeat: Infinity,
     })
-  }, [reduce, trace, bracket])
+  }, [reduce, offset])
 
-  const hideTrace = useCallback(() => {
-    trace.stop()
-    trace.start({ opacity: 0, transition: { duration: 0.35 } })
-    bracket
-      .start({ opacity: hovered ? 1 : BRACKET_REST, transition: { duration: 0.35 } })
-      .then(() => {
-        tracing.current = false
-      })
-  }, [trace, bracket, hovered])
+  const lapSettle = useCallback(() => {
+    if (reduce) return
+    anim.current?.stop()
+    anim.current = animate(offset, BRACKET_REST_OFFSET - 100, {
+      duration: 0.6,
+      ease: TRACE_EASE,
+      onComplete: () => offset.set(BRACKET_REST_OFFSET),
+    })
+  }, [reduce, offset])
 
   // Play once on mount (page load + post-expand remount).
   useEffect(() => {
-    playTraceOnce()
+    lapOnce()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Loop while a card hovers this column; fade out when it leaves.
+  // Loop while a card hovers this column; settle back to the L when it leaves.
   const wasOver = useRef(false)
   useEffect(() => {
-    if (isOver && !wasOver.current) playTraceLoop()
-    else if (!isOver && wasOver.current) hideTrace()
+    if (isOver && !wasOver.current) lapLoop()
+    else if (!isOver && wasOver.current) lapSettle()
     wasOver.current = isOver
-  }, [isOver, playTraceLoop, hideTrace])
-
-  // Hover brightens the resting bracket — but only when a lap/loop isn't
-  // currently driving it.
-  useEffect(() => {
-    if (tracing.current) return
-    bracket.start({ opacity: hovered ? 1 : BRACKET_REST, transition: { duration: 0.3 } })
-  }, [hovered, bracket])
+  }, [isOver, lapLoop, lapSettle])
 
   // Event-type chips reflect the unfiltered set so the user always sees what
   // types exist in this column, even after filtering them out.
@@ -346,32 +317,6 @@ export default function BoardColumn({
         {/* Cards scroll independently below the masthead. */}
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 pb-3 pt-1">{children}</div>
 
-        {/* The rust L-bracket — a faded guiding line down the top and left
-            edges, brightest at the hard top-left corner and dissolving toward
-            the right / bottom. This is the column's structure now: Blade Runner
-            HUD frame over liquid glass, no box, no shadow. Brightens on hover. */}
-        <motion.div
-          aria-hidden
-          className="pointer-events-none absolute inset-0"
-          initial={{ opacity: BRACKET_REST }}
-          animate={bracket}
-        >
-          <div
-            className="absolute left-0 top-0 h-px w-full"
-            style={{
-              background:
-                'linear-gradient(to right, color-mix(in srgb, var(--color-accent) 75%, transparent), transparent 55%)',
-            }}
-          />
-          <div
-            className="absolute left-0 top-0 h-full w-px"
-            style={{
-              background:
-                'linear-gradient(to bottom, color-mix(in srgb, var(--color-accent) 75%, transparent), transparent 55%)',
-            }}
-          />
-        </motion.div>
-
         {/* Ambient "work is live here" glow — a slow breathing ring,
               suppressed while the receive glow is showing. */}
         <motion.div
@@ -389,12 +334,17 @@ export default function BoardColumn({
           }}
         />
 
-        {/* Border-trace — a single rust light segment that laps the perimeter.
-            One smooth loop on mount (page load / expand); loops continuously
-            while a card is dragged over. Replaces the old whole-column fill. */}
+        {/* The rust L-bracket — a single stroke. At rest it's a dash straddling
+            the top-left corner (the L); the lap slides its offset one full turn
+            and back, so the same stroke unfolds into the travelling segment and
+            folds back into the L. Brightens on hover / while a card is over. */}
         <svg
           aria-hidden
           className="pointer-events-none absolute inset-0 h-full w-full overflow-visible"
+          style={{
+            opacity: isOver ? 0.9 : hovered ? 1 : BRACKET_REST,
+            transition: 'opacity 0.3s ease',
+          }}
         >
           <motion.rect
             x="0"
@@ -406,9 +356,8 @@ export default function BoardColumn({
             stroke="var(--color-accent)"
             strokeWidth={1}
             strokeLinecap="round"
-            strokeDasharray={reduce ? undefined : '14 86'}
-            initial={{ opacity: 0, strokeDashoffset: 0 }}
-            animate={trace}
+            strokeDasharray={TRACE_DASH}
+            strokeDashoffset={reduce ? BRACKET_REST_OFFSET : offset}
           />
         </svg>
       </div>
