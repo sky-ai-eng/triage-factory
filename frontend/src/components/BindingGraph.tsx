@@ -572,9 +572,6 @@ function BindingGraphInner({
   promptToBlueprintRef.current = promptToBlueprint
   const triggeredRef = useRef(triggeredBlueprints)
   triggeredRef.current = triggeredBlueprints
-  // Full step objects per blueprint (carry the per-step brief), needed to
-  // reconstruct a PUT-steps body on reorder without dropping briefs.
-  const stepObjsRef = useRef<Record<string, BlueprintStep[]>>({})
   const nodesRef = useRef<Node[]>(nodes)
   nodesRef.current = nodes
   const onPromptClickRef = useRef(onPromptClick)
@@ -667,15 +664,13 @@ function BindingGraphInner({
       // — a prompt belongs to exactly one blueprint, so every step prompt is a
       // member of exactly one box — no shared-prompt-across-boxes collision.
       // firstPrompt: blueprint → its entry prompt; stepsByBlueprint: ordered
-      // prompt ids; stepObjs: full step rows (for the reorder PUT).
+      // prompt ids.
       const firstPrompt: Record<string, string> = {}
       const stepsByBlueprint: Record<string, string[]> = {}
-      const stepObjs: Record<string, BlueprintStep[]> = {}
       const nodeList: Prompt[] = []
       const seen = new Set<string>()
       for (const b of blueprintList) {
         const ordered = [...(stepsByBp.get(b.id) ?? [])].sort((x, y) => x.step_index - y.step_index)
-        stepObjs[b.id] = ordered
         stepsByBlueprint[b.id] = ordered.map((s) => s.step_prompt_id)
         if (ordered.length > 0) {
           firstPrompt[b.id] = ordered[0].step_prompt_id
@@ -691,7 +686,6 @@ function BindingGraphInner({
       setBlueprints(blueprintList)
       setBlueprintFirstPrompt(firstPrompt)
       setBlueprintSteps(stepsByBlueprint)
-      stepObjsRef.current = stepObjs
 
       const saved = layoutRef.current
       const boundIds = new Set((tRes as TriggerHandler[]).map((t) => t.event_type))
@@ -1116,63 +1110,14 @@ function BindingGraphInner({
     return [...sequenceEdges, ...triggerEdges]
   }, [triggers, activeEventIds, blueprintFirstPrompt, blueprintSteps, prompts])
 
-  // Persist a reordered step list (drag-to-reorder within a box → PUT steps).
-  const persistReorder = useCallback(
-    async (blueprintId: string, orderedPromptIds: string[]) => {
-      const briefByPrompt = new Map(
-        (stepObjsRef.current[blueprintId] ?? []).map((s) => [s.step_prompt_id, s.brief]),
-      )
-      const steps = orderedPromptIds.map((pid) => ({
-        step_prompt_id: pid,
-        brief: briefByPrompt.get(pid) ?? '',
-      }))
-      try {
-        const res = await fetch(
-          `${blueprintsBase(template)}/${encodeURIComponent(blueprintId)}/steps`,
-          {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ steps }),
-          },
-        )
-        if (!res.ok) {
-          toast.error(await readError(res, 'Failed to reorder steps'))
-        }
-      } catch (err) {
-        toast.error(`Failed to reorder steps: ${err instanceof Error ? err.message : String(err)}`)
-      } finally {
-        // Re-render from the backend's truth either way (success applies the new
-        // order; failure reverts to the persisted order).
-        fetchAll()
-      }
-    },
-    [template, fetchAll],
-  )
-
-  // After a drag ends, if the dragged prompt's blueprint members now sort into a
-  // different order along the flow axis, persist the reorder. Spatial order is
-  // the gesture: nudging without crossing a sibling is a no-op.
-  const maybeReorder = useCallback(
-    (nonBox: Node[], draggedNodeId: string) => {
-      const pid = draggedNodeId.slice(2)
-      const bp = promptToBlueprintRef.current[pid]
-      if (!bp) return
-      const stepIds = blueprintStepsRef.current[bp] ?? []
-      if (stepIds.length < 2) return
-      const members = stepIds.map((id) => nonBox.find((n) => n.id === `p:${id}`))
-      if (members.some((n) => !n)) return
-      const sorted = [...(members as Node[])].sort(
-        (a, b) => a.position.x - b.position.x || a.position.y - b.position.y,
-      )
-      const newOrder = sorted.map((n) => n.id.slice(2))
-      if (newOrder.join('|') === stepIds.join('|')) return
-      persistReorder(bp, newOrder)
-    },
-    [persistReorder],
-  )
-
-  // Handle node changes (dragging) — apply, persist positions, recompute boxes,
-  // and detect a reorder on drag-end.
+  // Handle node changes (dragging) — apply, persist positions, recompute boxes.
+  //
+  // Dragging is purely cosmetic: layout is fully independent of step order, so
+  // moving a node (or a whole box) only updates its saved canvas position and
+  // never rewrites the blueprint's steps. Any layout is allowed. Step order is a
+  // product of the chain topology (the arrows), edited via connect/merge/split,
+  // and the sequence edges always render that true order regardless of where the
+  // nodes sit — so there is deliberately no position-derived reorder here.
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => {
       // A blueprint box drags as a unit: translate its position delta onto its
@@ -1246,16 +1191,8 @@ function BindingGraphInner({
       const next = [...boxes, ...nonBox]
       nodesRef.current = next
       setNodes(next)
-
-      // Reorder detection on drag-end — only a direct prompt drag can reorder; a
-      // box drag moves every member by the same delta, so order is unchanged.
-      for (const change of changes) {
-        if (change.type === 'position' && change.dragging === false && change.id.startsWith('p:')) {
-          maybeReorder(nonBox, change.id)
-        }
-      }
     },
-    [computeBoxNodes, maybeReorder],
+    [computeBoxNodes],
   )
 
   // Connect: route the gesture (decision 7 enforcement lives in planConnection).
