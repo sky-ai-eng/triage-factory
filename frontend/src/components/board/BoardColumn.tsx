@@ -150,10 +150,9 @@ export default function BoardColumn({
   // units along the top edge + ARM units up the left edge = the L. We just
   // slide its dash-offset one full lap (REST → REST−100, same shape) and back,
   // so the L unfolds into the travelling segment and folds back into the L.
-  // One element, no cross-fade, ends exactly where it rests.
-  //   • lapOnce — on mount (page load + post-expand remount).
-  //   • lapLoop — continuously, while a card is dragged over.
-  //   • lapSettle — ease back to the resting L when the drag leaves.
+  // One element, no cross-fade, ends exactly where it rests. lapOnce drives
+  // every case — it plays on mount (page load + post-expand remount) and again
+  // each time a card is dragged over (a single lap, not a continuous loop).
   const offset = useMotionValue(BRACKET_REST_OFFSET)
   const anim = useRef<ReturnType<typeof animate> | null>(null)
 
@@ -168,40 +167,19 @@ export default function BoardColumn({
     })
   }, [reduce, offset])
 
-  const lapLoop = useCallback(() => {
-    if (reduce) return
-    anim.current?.stop()
-    offset.set(BRACKET_REST_OFFSET)
-    anim.current = animate(offset, BRACKET_REST_OFFSET - 100, {
-      duration: TRACE_DUR,
-      ease: 'linear',
-      repeat: Infinity,
-    })
-  }, [reduce, offset])
-
-  const lapSettle = useCallback(() => {
-    if (reduce) return
-    anim.current?.stop()
-    anim.current = animate(offset, BRACKET_REST_OFFSET - 100, {
-      duration: 0.6,
-      ease: TRACE_EASE,
-      onComplete: () => offset.set(BRACKET_REST_OFFSET),
-    })
-  }, [reduce, offset])
-
   // Play once on mount (page load + post-expand remount).
   useEffect(() => {
     lapOnce()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Loop while a card hovers this column; settle back to the L when it leaves.
+  // One lap each time a card enters this column (not a continuous loop). It
+  // self-resets to the resting L; leaving mid-lap just lets it finish.
   const wasOver = useRef(false)
   useEffect(() => {
-    if (isOver && !wasOver.current) lapLoop()
-    else if (!isOver && wasOver.current) lapSettle()
+    if (isOver && !wasOver.current) lapOnce()
     wasOver.current = isOver
-  }, [isOver, lapLoop, lapSettle])
+  }, [isOver, lapOnce])
 
   // Event-type chips reflect the unfiltered set so the user always sees what
   // types exist in this column, even after filtering them out.
