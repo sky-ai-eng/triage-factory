@@ -111,10 +111,10 @@ export default function AssigneePicker({
         }}
         onPointerDown={(e) => e.stopPropagation()}
         title={readOnly ? `Finished by ${currentAssignee.label}` : currentAssignee.label}
-        className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+        className={`inline-flex items-center gap-1 text-[10px] font-medium leading-none transition-colors ${
           readOnly
             ? 'cursor-default text-text-tertiary'
-            : 'cursor-pointer bg-[var(--color-surface-overlay)]/60 text-text-secondary hover:bg-[var(--color-surface-overlay)] hover:text-text-primary'
+            : 'cursor-pointer text-text-secondary hover:text-text-primary'
         }`}
       >
         <AssigneeAvatar entry={currentAssignee} />

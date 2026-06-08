@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import type { AgentMessage, AgentRun, Task } from '../types'
 import { useOrgHref } from '../hooks/useOrgHref'
@@ -413,15 +413,11 @@ function LiveFeed({
   isActive: boolean
   dimmed?: boolean
 }) {
-  const ref = useRef<HTMLDivElement>(null)
   const lines = useMemo(() => feedLines(messages), [messages])
-  useEffect(() => {
-    if (ref.current) ref.current.scrollTop = ref.current.scrollHeight
-  }, [lines.length])
 
   if (lines.length === 0) {
     return (
-      <div className="flex h-[3.5rem] items-center px-4 font-mono text-[10.5px] text-text-tertiary/70">
+      <div className="flex h-[3.5rem] items-end px-4 pb-1 font-mono text-[10.5px] text-text-tertiary/70">
         {isActive ? (
           <span className="inline-flex items-center gap-2">
             <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-delegate" />
@@ -432,14 +428,20 @@ function LiveFeed({
     )
   }
 
+  // Bottom-anchored: the newest line always lands at the same spot at the
+  // bottom; earlier ones stack above it and slide up (and out under the top
+  // mask) as the feed grows. We keep only the last few — the mask hides the
+  // rest, and the expanded run view holds the full history.
+  const recent = lines.slice(-5)
   return (
     <div
-      ref={ref}
-      className={`h-[3.5rem] overflow-hidden px-4 transition-opacity ${dimmed ? 'opacity-50' : ''}`}
+      className={`flex h-[3.5rem] flex-col justify-end overflow-hidden px-4 transition-opacity ${
+        dimmed ? 'opacity-50' : ''
+      }`}
       style={{ maskImage: FEED_MASK, WebkitMaskImage: FEED_MASK }}
     >
-      {lines.map((l, i) => {
-        const latest = i === lines.length - 1
+      {recent.map((l, i) => {
+        const latest = i === recent.length - 1
         return (
           <div
             key={l.id}
