@@ -8,10 +8,10 @@
 //                    No prefill — every Jira host is bespoke (Cloud or Data
 //                    Center). The probe lives in the step's persist (steps.tsx).
 //   JiraAccessStep — the PAT-auth sub-step (shared JiraAccessGroup, base URL
-//                    suppressed). JiraAccessGroup owns the connect/disconnect
-//                    lifecycle and its own Connect button (OAuth is still
-//                    blocked, PAT-only); the step's Continue gates on the
-//                    connected flag it reports back via onConnected.
+//                    suppressed). No separate Connect button: the step's
+//                    Continue performs the connect (steps.tsx), the same shape
+//                    as the GitHub PAT step (OAuth is still blocked, PAT-only).
+//                    JiraAccessGroup keeps only the disconnect affordance.
 //
 // Reuse rule: composes the shared JiraAccessGroup — no parallel field UI. The
 // URL field is the shared UrlField, the same one the GitHub URL step uses.
@@ -41,24 +41,17 @@ export function JiraUrlStep({ state, patch, error }: StepContext) {
   )
 }
 
-// JiraAccessStep body — the PAT connect. JiraAccessGroup posts /api/jira/connect
-// on its Connect button and reports success via onConnected; the step's
-// Continue then advances (it gates on state.jiraConnected). A disconnect clears
-// the connection and re-opens the URL step (jiraUrlConfirmed drops, so the
-// upstream Jira URL step becomes incomplete again).
+// JiraAccessStep body — just the PAT field (base URL suppressed). The connect
+// is the step's Continue (steps.tsx calls connectJira and patches
+// jiraConnected on success), so there's no Connect button here. A disconnect
+// clears the connection and re-opens the URL step (jiraUrlConfirmed drops, so
+// the upstream Jira URL step becomes incomplete again).
 export function JiraAccessStep({ state, patch }: StepContext) {
   return (
     <JiraAccessGroup
       value={{ jira_url: state.org.jira_url, jira_pat: state.org.jira_pat }}
       onChange={(p) => patch({ org: { ...state.org, ...p } })}
       connected={state.jiraConnected}
-      onConnected={(url) =>
-        patch({
-          jiraConnected: true,
-          jiraUrlConfirmed: true,
-          org: { ...state.org, jira_url: url, jira_pat: '' },
-        })
-      }
       onDisconnected={() =>
         // JiraAccessGroup blanks jira_url via its onChange immediately before
         // this fires; rebuild org from this render's state (which still holds

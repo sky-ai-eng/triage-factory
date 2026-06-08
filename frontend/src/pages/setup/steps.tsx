@@ -65,6 +65,7 @@ import {
   orgConfigFromSettings,
   saveOrgConfig,
 } from '../settings/orgConfig'
+import { connectJira } from '../settings/jiraConnect'
 import {
   emptyTeamConfig,
   fetchTeamRepos,
@@ -488,21 +489,34 @@ const jiraUrlStep: WizardStep = {
   render: (ctx) => <JiraUrlStep {...ctx} />,
 }
 
-// Step · Jira access (visible only when Jira is the chosen tracker). The PAT
-// connect, via the shared JiraAccessGroup which owns its Connect button +
-// connect/disconnect lifecycle; the step gates on the connected flag it reports
-// back. Mandatory while Jira is selected — its isComplete blocks finishing a
-// half-connected Jira — but invisible (and so non-blocking) once the tracker is
-// None.
+// Step · Jira access (visible only when Jira is the chosen tracker). The Jira
+// mirror of the GitHub PAT step: no separate Connect button — Continue performs
+// the connect via the shared connectJira helper (POST /api/jira/connect, which
+// validates url+PAT server-side and 4xxs on a bad token). On success the step
+// marks connected and advances; the disconnect half stays inside
+// JiraAccessGroup. Mandatory while Jira is selected — its isComplete blocks
+// finishing a half-connected Jira — but invisible (and so non-blocking) once
+// the tracker is None.
 const jiraAccessStep: WizardStep = {
   id: 'org-jira-access',
   section: 'org',
   title: 'Jira access',
   visible: (s) => s.tracker === 'jira',
   isComplete: (s) => s.jiraConnected,
-  validate: (s) =>
-    s.jiraConnected ? null : 'Connect Jira to continue, or pick a different tracker.',
-  persist: async () => {},
+  validate: (s) => {
+    if (s.jiraConnected) return null
+    return s.org.jira_pat.trim() === '' ? 'Enter a personal access token to connect.' : null
+  },
+  persist: async ({ state, patch }) => {
+    if (state.jiraConnected) return
+    const result = await connectJira(state.org.jira_url, state.org.jira_pat)
+    if (!result.ok) throw new Error(result.error)
+    patch({
+      jiraConnected: true,
+      jiraUrlConfirmed: true,
+      org: { ...state.org, jira_pat: '' },
+    })
+  },
   collapsedSummary: (s) =>
     s.jiraConnected ? `Connected · ${hostOf(s.org.jira_url)}` : 'Not connected',
   render: (ctx) => <JiraAccessStep {...ctx} />,

@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import { Section, Field, inputClass, glassInputClass } from './primitives'
 import { toast } from '../../components/Toast/toastStore'
 import { readError } from '../../lib/api'
@@ -9,17 +8,20 @@ interface JiraAccessValue {
 }
 
 /**
- * JiraAccessGroup is the org-level Jira credential field group. It owns the
- * two-stage connect/disconnect lifecycle against the stable endpoints
- * (POST /api/jira/connect, DELETE /api/integrations/jira) — the same flow in
- * every surface — while the container owns the url/pat form values and the
- * `connected` flag.
+ * JiraAccessGroup is the org-level Jira credential field group. It's a
+ * controlled component — the container owns the url/pat form values and the
+ * `connected` flag, and the container's Continue (setup wizard) / Save
+ * (Settings) performs the connect via the shared `connectJira` helper, exactly
+ * as the GitHub PAT flow does. The group itself carries no Connect button.
+ *
+ * What it still owns is the disconnect half of the lifecycle (DELETE
+ * /api/integrations/jira + the URL-column clear): that's an inline action on
+ * the already-connected state, with no Continue/Save to fold into. On a
+ * successful disconnect it fires onDisconnected so the container can do its
+ * own follow-up (clearing wizard URL-confirmation, resetting baseline).
  *
  * Project tracking + status rules are TEAM-level (a separate surface), so
- * they live outside this group. On a successful connect/disconnect the
- * component fires onConnected(url) / onDisconnected so the container can do
- * its own scope-specific follow-up (e.g. wiping team project config when the
- * instance URL changes, or advancing a wizard step).
+ * they live outside this group.
  *
  * Multi-mode Jira OAuth (3LO/2LO) is unbuilt; until it lands the only
  * connect affordance is this PAT path, which works in both modes.
@@ -27,7 +29,7 @@ interface JiraAccessValue {
  * showBaseUrl (default true) mirrors GitHubAccessGroup: the setup wizard
  * confirms the Jira URL in its own reachability sub-step and feeds it in via
  * `value.jira_url`, so it suppresses the field here and renders this group as
- * the PAT-auth sub-step alone — no forked connect logic.
+ * the PAT-auth sub-step alone.
  *
  * bare (default false) drops the carded `<Section>` chrome + heading and uses
  * the flush glass field material, so the setup wizard and the redesigned
@@ -38,7 +40,6 @@ export default function JiraAccessGroup({
   value,
   onChange,
   connected,
-  onConnected,
   onDisconnected,
   showBaseUrl = true,
   bare = false,
@@ -46,39 +47,11 @@ export default function JiraAccessGroup({
   value: JiraAccessValue
   onChange: (patch: Partial<JiraAccessValue>) => void
   connected: boolean
-  onConnected?: (url: string) => void
   onDisconnected?: () => void
   showBaseUrl?: boolean
   bare?: boolean
 }) {
-  const [connecting, setConnecting] = useState(false)
-  const [connectError, setConnectError] = useState<string | null>(null)
   const field = bare ? glassInputClass : inputClass
-
-  const connect = async () => {
-    setConnecting(true)
-    setConnectError(null)
-    try {
-      const res = await fetch('/api/jira/connect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: value.jira_url.trim(), pat: value.jira_pat.trim() }),
-      })
-      const body = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        setConnectError(body.error || 'Connection failed')
-        return
-      }
-      // Clear the entered PAT — it's persisted server-side now and we never
-      // re-display it.
-      onChange({ jira_pat: '' })
-      onConnected?.(value.jira_url.trim())
-    } catch {
-      setConnectError('Could not connect to server')
-    } finally {
-      setConnecting(false)
-    }
-  }
 
   const disconnect = async () => {
     // DELETE /api/integrations/jira clears the SecretStore entries
@@ -145,7 +118,8 @@ export default function JiraAccessGroup({
       )}
 
       {!connected ? (
-        /* Stage 1: Connect credentials */
+        /* The credential fields. The container's Continue (setup) / Save
+           (Settings) performs the connect — no button here. */
         <div className="space-y-3">
           {showBaseUrl && (
             <Field label="Base URL">
@@ -167,23 +141,10 @@ export default function JiraAccessGroup({
               className={field}
             />
           </Field>
-          {connectError && (
-            <div className="rounded-xl border border-dismiss/20 bg-dismiss/[0.08] px-4 py-2.5 text-[13px] text-dismiss">
-              {connectError}
-            </div>
-          )}
-          <button
-            type="button"
-            onClick={connect}
-            disabled={connecting || !value.jira_url.trim() || !value.jira_pat.trim()}
-            className="w-full rounded-xl bg-accent px-4 py-2.5 text-[13px] font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-40"
-          >
-            {connecting ? 'Connecting...' : 'Connect'}
-          </button>
         </div>
       ) : (
-        /* Stage 2: connected — status + (bare) the Disconnect the carded
-           layout puts on its heading row. */
+        /* Connected — status + (bare) the Disconnect the carded layout puts on
+           its heading row. */
         <div className="space-y-2">
           <div className="flex items-center gap-2 rounded-xl border border-claim/15 bg-claim/[0.06] px-4 py-2.5">
             <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-claim" />
