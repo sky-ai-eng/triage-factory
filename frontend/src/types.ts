@@ -238,7 +238,10 @@ export interface BlueprintStep {
   step_index: number
   step_prompt_id: string
   brief: string
-  created_at: string
+  // Optional: a step rebuilt from a blueprint run's frozen step_plan has no
+  // live blueprint_steps row, so the run projection omits created_at (the
+  // /steps editor reads still carry it).
+  created_at?: string
 }
 
 export interface BlueprintRunStepView {

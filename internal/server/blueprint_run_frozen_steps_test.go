@@ -85,8 +85,9 @@ func TestBlueprintRunGet_ProjectsFrozenStepsNotLive(t *testing.T) {
 	var resp struct {
 		Steps []struct {
 			Step struct {
-				StepIndex    int    `json:"step_index"`
-				StepPromptID string `json:"step_prompt_id"`
+				StepIndex    int     `json:"step_index"`
+				StepPromptID string  `json:"step_prompt_id"`
+				CreatedAt    *string `json:"created_at"`
 			} `json:"step"`
 		} `json:"steps"`
 	}
@@ -98,5 +99,12 @@ func TestBlueprintRunGet_ProjectsFrozenStepsNotLive(t *testing.T) {
 	}
 	if resp.Steps[0].Step.StepPromptID != p0 {
 		t.Errorf("frozen step prompt = %q, want %q", resp.Steps[0].Step.StepPromptID, p0)
+	}
+	// A step reconstructed from the frozen plan has no created_at to report, so
+	// the field is omitted rather than serialized as a zero "0001-01-01"
+	// timestamp (a *string stays nil on an absent key, but holds the sentinel if
+	// a zero time leaks back in).
+	if resp.Steps[0].Step.CreatedAt != nil {
+		t.Errorf("frozen step created_at = %q, want omitted", *resp.Steps[0].Step.CreatedAt)
 	}
 }
