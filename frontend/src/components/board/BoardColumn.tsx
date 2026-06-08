@@ -329,7 +329,7 @@ export function CollapsedColumn({
       onClick={onExpand}
       onHoverStart={() => setHovered(true)}
       onHoverEnd={() => setHovered(false)}
-      className="group flex h-full w-7 shrink-0 cursor-pointer flex-col items-center justify-center gap-3 text-text-tertiary"
+      className="group flex h-full w-5 shrink-0 cursor-pointer flex-col items-center justify-center gap-3 text-text-tertiary"
       initial={reduce ? false : { opacity: 0, y: 14 }}
       animate={{ opacity: 1, y: 0 }}
       transition={reduce ? { duration: 0 } : { ...bodyEase, delay: index * 0.05 }}

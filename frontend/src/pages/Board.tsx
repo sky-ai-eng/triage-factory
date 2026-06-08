@@ -58,9 +58,9 @@ const COLUMN_TITLES: Record<ColumnId, string> = {
 
 // Lane geometry, used to center the strip on the midpoint of the *open*
 // columns. COL_W must match the expanded BoardColumn width (w-[460px]); RAIL_W
-// the collapsed CollapsedColumn (w-7 = 28px); GAP the row's gap-6 (24px).
+// the collapsed CollapsedColumn (w-5 = 20px); GAP the row's gap-6 (24px).
 const COL_W = 460
-const RAIL_W = 28
+const RAIL_W = 20
 const GAP = 24
 
 // Filter persistence: per-user, per-column. Storage key is namespaced
