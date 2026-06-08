@@ -122,22 +122,13 @@ export default function BoardColumn({
         {headerExtra}
       </div>
 
-      {/* Droppable wrapper does NOT clip — overlay bloom spills past the slab. */}
+      {/* Droppable wrapper does NOT clip — the accent lines + glows ride its
+          edges. */}
       <div ref={setNodeRef} className="relative min-h-0 flex-1">
-        {/* The slab: borderless. A soft drop-shadow floats it; a 1px inset
-              top highlight is its only "edge" — a specular catch, not an outline. */}
-        <div
-          className="h-full overflow-y-auto rounded-3xl bg-[var(--color-surface-overlay)]/50 backdrop-blur-xl transition-[box-shadow] duration-500"
-          style={{
-            // Borderless float. Hover warms the shadow toward faded rust (the
-            // accent) — the focus cue. Kept tight enough to bloom inside the
-            // scrollport's py-8 padding; a wider shadow gets clipped into a
-            // hard band at the scroll edges (overflow-x:auto clips both axes).
-            boxShadow: hovered
-              ? '0 16px 38px -14px color-mix(in srgb, var(--color-accent) 45%, transparent), inset 0 1px 0 rgba(255,255,255,0.18)'
-              : '0 12px 32px -16px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.14)',
-          }}
-        >
+        {/* The slab: hard-cornered frosted glass. No radius, no drop-shadow —
+            structure comes from the fading rust L-bracket below, not a box that
+            pops off the page. */}
+        <div className="relative h-full overflow-y-auto bg-[var(--color-surface-overlay)]/50 backdrop-blur-xl">
           {/* Sticky frosted control header — no border, cards scroll beneath
                 it; the filter panel melts down from here on demand. */}
           <div className="sticky top-0 z-10 bg-[var(--color-surface-overlay)]/70 px-3 pb-2.5 pt-3 backdrop-blur-md">
@@ -201,25 +192,36 @@ export default function BoardColumn({
           <div className="space-y-3 px-3 pb-3 pt-2">{children}</div>
         </div>
 
-        {/* Top specular sheen — the pane catches light, slowly breathing. */}
-        <motion.div
+        {/* The rust L-bracket — a faded guiding line down the top and left
+            edges, brightest at the hard top-left corner and dissolving toward
+            the right / bottom. This is the column's structure now: Blade Runner
+            HUD frame over liquid glass, no box, no shadow. Brightens on hover. */}
+        <div
           aria-hidden
-          className="pointer-events-none absolute inset-x-0 top-0 h-28 rounded-t-3xl"
-          style={{
-            background: 'linear-gradient(to bottom, rgba(255,255,255,0.10), transparent)',
-          }}
-          initial={false}
-          animate={{ opacity: reduce ? 0.5 : [0.35, 0.6, 0.35] }}
-          transition={
-            reduce ? { duration: 0 } : { duration: 9, repeat: Infinity, ease: 'easeInOut' }
-          }
-        />
+          className="pointer-events-none absolute inset-0 transition-opacity duration-500"
+          style={{ opacity: hovered ? 1 : 0.55 }}
+        >
+          <div
+            className="absolute left-0 top-0 h-px w-full"
+            style={{
+              background:
+                'linear-gradient(to right, color-mix(in srgb, var(--color-accent) 75%, transparent), transparent 55%)',
+            }}
+          />
+          <div
+            className="absolute left-0 top-0 h-full w-px"
+            style={{
+              background:
+                'linear-gradient(to bottom, color-mix(in srgb, var(--color-accent) 75%, transparent), transparent 55%)',
+            }}
+          />
+        </div>
 
         {/* Ambient "work is live here" glow — a slow breathing ring,
               suppressed while the receive glow is showing. */}
         <motion.div
           aria-hidden
-          className="pointer-events-none absolute inset-0 rounded-3xl"
+          className="pointer-events-none absolute inset-0"
           initial={false}
           animate={{ opacity: isOver ? 0 : active ? (reduce ? 0.22 : [0, 0.45, 0]) : 0 }}
           transition={
@@ -235,7 +237,7 @@ export default function BoardColumn({
         {/* Drag-over receive glow — the target lane breathes toward you. */}
         <motion.div
           aria-hidden
-          className="pointer-events-none absolute inset-0 rounded-3xl"
+          className="pointer-events-none absolute inset-0"
           initial={false}
           animate={{ opacity: isOver ? 1 : 0 }}
           transition={reduce ? { duration: 0 } : bodyEase}

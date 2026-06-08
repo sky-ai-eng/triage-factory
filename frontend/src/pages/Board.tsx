@@ -871,11 +871,12 @@ export default function Board() {
     >
       <GlassBackdrop />
 
-      {/* Full-height stage: the banner + team filter take what they need, the
-          scroll area fills the rest to the bottom of the viewport (with a hard
-          floor on short screens) so columns reach the page bottom instead of
-          stopping stubbily partway down. */}
-      <div className="flex h-[calc(100dvh-8rem)] min-h-[26rem] flex-col">
+      {/* Full-height stage. Pulled up under the nav (-mt) — this page wants the
+          columns close to the chrome, not floating in a big top gap like the
+          form pages do. The banner + team filter take what they need; the
+          scroll area fills the rest to the page bottom (hard floor on short
+          screens). */}
+      <div className="-mt-4 flex h-[calc(100dvh-7rem)] min-h-[26rem] flex-col">
         <HeldTakeoversBanner />
 
         {/* Per-page team filter. Renders nothing at ≤1 team. */}
@@ -888,17 +889,13 @@ export default function Board() {
         {/* SKY-330: horizontal-scroll container for 5 columns. Default scroll
             position (set on mount) shows Claimed → In Review; user scrolls left
             for Queued, right for Done. The dynamic mask dissolves columns into
-            the page at whichever edge still has more to scroll. */}
-        {/* SKY-330: horizontal-scroll container for 5 columns. Default scroll
-            position (set on mount) shows Claimed → In Review; user scrolls left
-            for Queued, right for Done. The dynamic mask dissolves columns into
-            the page at whichever edge still has more to scroll. py-* gives the
-            column drop-shadows room to bloom before the scrollport clips them
-            (overflow-x:auto forces overflow-y to clip). */}
+            the page at whichever edge still has more to scroll. Tight vertical
+            padding now that columns carry no drop-shadow to protect from the
+            scrollport clip. */}
         <div
           ref={scrollRef}
           onScroll={recomputeFade}
-          className="min-h-0 flex-1 overflow-x-auto px-2 py-8"
+          className="min-h-0 flex-1 overflow-x-auto px-2 pb-3 pt-1"
           style={fadeMask}
         >
           <div className="flex h-full gap-6 px-1">
