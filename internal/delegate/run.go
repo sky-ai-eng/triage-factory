@@ -208,7 +208,13 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		metadataJSON = ""
 	}
 
-	prompt := buildPrompt(task, metadataJSON, mission, cfg.scope, cfg.toolsRef, selfBin, runID)
+	// The run-root path the agent will actually observe: "/work" when the run
+	// is sandboxed (the run-root is bind-mounted there), the host run-root
+	// otherwise. Pre-expanding it into the prompt means the agent's file tools
+	// — which do no shell env expansion — write the memory file to a path the
+	// completion gate can find, regardless of sandbox mode.
+	agentRunRoot := agentproc.AgentVisibleRoot(cfg.runRoot)
+	prompt := buildPrompt(task, metadataJSON, mission, cfg.scope, cfg.toolsRef, selfBin, runID, agentRunRoot, namespace)
 
 	s.updateStatus(orgID, runID, "agent_starting")
 	if ctx.Err() != nil {

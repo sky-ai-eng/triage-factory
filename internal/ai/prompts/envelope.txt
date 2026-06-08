@@ -18,7 +18,7 @@ This is a one-shot pre-flight pass to gather context, not a loop. Once you've fe
 </linked_context>
 
 <project_knowledge>
-If `$TRIAGE_FACTORY_RUN_ROOT/_scratch/project-knowledge/` contains markdown files, they are project-level reference documentation curated by the human team — architecture notes, conventions, gotchas. Skim the filenames and read the ones that look relevant to your mission. They may have drifted from the current code, so treat them as orienting context, not ground truth — when project knowledge and what you read in the code disagree, the code wins.
+If `{{RUN_ROOT}}/_scratch/project-knowledge/` contains markdown files, they are project-level reference documentation curated by the human team — architecture notes, conventions, gotchas. Skim the filenames and read the ones that look relevant to your mission. They may have drifted from the current code, so treat them as orienting context, not ground truth — when project knowledge and what you read in the code disagree, the code wins.
 </project_knowledge>
 
 <guardrails>
@@ -43,12 +43,12 @@ The allowlisted shell tools include the usual text-processing suite (cat, head, 
 </scratch>
 
 <entity_memory>
-Entity memory lives under `$TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/`, organized as one folder per workflow run — there are no loose files at the top level. The env var resolves to your run's root directory regardless of where you've cd'd, so the path works whether you're at the run root or inside a materialized worktree subdir.
+Entity memory lives under `{{RUN_ROOT}}/_scratch/entity-memory/`, organized as one folder per workflow run — there are no loose files at the top level. That is an absolute path to your run's root directory, so it resolves regardless of where you've cd'd — it works whether you're at the run root or inside a materialized worktree subdir.
 
-- The folder named `$TRIAGE_FACTORY_BLUEPRINT_RUN_ID` holds the memory of earlier steps of YOUR CURRENT workflow run. Read those first — that is your handoff from the steps before you. (If you're the first or only step, this folder may be empty except for what you write.)
+- The folder named `{{BLUEPRINT_RUN_ID}}` holds the memory of earlier steps of YOUR CURRENT workflow run. Read those first — that is your handoff from the steps before you. (If you're the first or only step, this folder may be empty except for what you write.)
 - The other folders are history from prior, separate runs on this entity. Skim them for what past attempts tried and ruled out, and build on that rather than starting from scratch.
 
-Before finishing, write your own memory file to `$TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/$TRIAGE_FACTORY_BLUEPRINT_RUN_ID/{{RUN_ID}}.md`. This one file serves double duty: the durable record of this run on the entity AND the handoff to whatever comes next — the next step in this workflow, or a future run. Write it now, while you still have full context, so a cheaper later step never has to re-derive your reasoning from the diff. Capture, concisely:
+Before finishing, write your own memory file to `{{RUN_ROOT}}/_scratch/entity-memory/{{BLUEPRINT_RUN_ID}}/{{RUN_ID}}.md`. This one file serves double duty: the durable record of this run on the entity AND the handoff to whatever comes next — the next step in this workflow, or a future run. Write it now, while you still have full context, so a cheaper later step never has to re-derive your reasoning from the diff. Capture, concisely:
 - What you did and what changed — the state you're leaving behind.
 - How — the key approach and decisions, so the next stage doesn't redo them.
 - Why — the reasoning behind those decisions (the durable "why" a summary would lose).

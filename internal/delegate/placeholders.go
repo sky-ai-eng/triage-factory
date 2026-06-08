@@ -25,12 +25,31 @@ import (
 //
 // metadataJSON is the primary event's metadata blob — "" is fine; all
 // event-derived placeholders just stay empty.
-func BuildPromptReplacer(task domain.Task, metadataJSON, runID, binaryPath, scope, toolsRef string) *strings.Replacer {
+//
+// runRoot is the run-root path AS THE AGENT SEES IT (agentproc.AgentVisibleRoot
+// — "/work" under the sandbox, the host run-root otherwise); blueprintRunID is
+// the memory namespace folder. Both feed the run-root / entity-memory paths the
+// agent is told to write to. We register them under both the canonical
+// {{RUN_ROOT}} / {{BLUEPRINT_RUN_ID}} placeholders and the shell-style
+// $TRIAGE_FACTORY_RUN_ROOT / $TRIAGE_FACTORY_BLUEPRINT_RUN_ID names: the env
+// vars are exported for Bash, but the agent's file tools do no shell expansion,
+// so any prompt that references the bare env var would otherwise write to a
+// literal "$TRIAGE_FACTORY_RUN_ROOT/..." path the completion gate never finds.
+// Pre-expanding both forms makes the path resolve regardless of which tool the
+// agent reaches for or which form a (possibly user-authored) prompt used.
+//
+// {{SCOPE}} and {{TOOLS_REFERENCE}} are deliberately NOT handled here — buildPrompt
+// inlines those sections into the template text before this pass, because
+// strings.Replacer does not re-scan replacement values and the tools docs carry
+// their own placeholders ({{BINARY_PATH}}, the run-root memory paths).
+func BuildPromptReplacer(task domain.Task, metadataJSON, runID, binaryPath, runRoot, blueprintRunID string) *strings.Replacer {
 	pairs := []string{
 		"{{RUN_ID}}", runID,
 		"{{BINARY_PATH}}", binaryPath,
-		"{{SCOPE}}", scope,
-		"{{TOOLS_REFERENCE}}", toolsRef,
+		"{{RUN_ROOT}}", runRoot,
+		"{{BLUEPRINT_RUN_ID}}", blueprintRunID,
+		"$TRIAGE_FACTORY_RUN_ROOT", runRoot,
+		"$TRIAGE_FACTORY_BLUEPRINT_RUN_ID", blueprintRunID,
 		"{{TASK_TITLE}}", task.Title,
 		"{{EVENT_TYPE}}", task.EventType,
 		"{{EVENT_METADATA_JSON}}", metadataJSON,

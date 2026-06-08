@@ -37,7 +37,7 @@ func TestBuildPromptReplacer_CICheckFailed(t *testing.T) {
 		EntitySourceID: "owner/repo#18",
 	}
 
-	r := BuildPromptReplacer(task, string(metaJSON), "run-xyz", "/bin/triagefactory", "scope text", "tools ref")
+	r := BuildPromptReplacer(task, string(metaJSON), "run-xyz", "/bin/triagefactory", "/work", "bp-run-1")
 
 	template := `Download logs: {{BINARY_PATH}} exec gh actions download-logs {{WORKFLOW_RUN_ID}}
 Run ID: {{RUN_ID}}  Check: {{CHECK_NAME}}
@@ -81,7 +81,7 @@ func TestBuildPromptReplacer_ThirdPartyCI_ZeroWorkflowRun(t *testing.T) {
 		EntitySourceID: "owner/repo#18",
 	}
 
-	r := BuildPromptReplacer(task, string(metaJSON), "run-xyz", "/bin/triagefactory", "", "")
+	r := BuildPromptReplacer(task, string(metaJSON), "run-xyz", "/bin/triagefactory", "/work", "bp-run-1")
 
 	if got := interpolate(r, "wf={{WORKFLOW_RUN_ID}}"); got != "wf=" {
 		t.Errorf("expected empty workflow_run_id placeholder for third-party CI, got %q", got)
@@ -108,7 +108,7 @@ func TestBuildPromptReplacer_JiraAssigned(t *testing.T) {
 		EntitySourceID: "SKY-123",
 	}
 
-	r := BuildPromptReplacer(task, string(metaJSON), "run-xyz", "/bin/tf", "", "")
+	r := BuildPromptReplacer(task, string(metaJSON), "run-xyz", "/bin/tf", "/work", "bp-run-1")
 
 	got := interpolate(r, "{{ISSUE_KEY}} ({{PROJECT}}): {{SUMMARY}} [{{PRIORITY}}/{{STATUS}}]")
 	want := "SKY-123 (SKY): Fix the thing [High/To Do]"
@@ -138,7 +138,7 @@ func TestBuildPromptReplacer_EmptyMetadata(t *testing.T) {
 		EntitySourceID: "owner/repo#7",
 	}
 
-	r := BuildPromptReplacer(task, "", "run-xyz", "/bin/tf", "", "")
+	r := BuildPromptReplacer(task, "", "run-xyz", "/bin/tf", "/work", "bp-run-1")
 
 	got := interpolate(r, "{{OWNER}}/{{REPO}}#{{PR_NUMBER}} run={{WORKFLOW_RUN_ID}} head={{HEAD_SHA}}")
 	want := "owner/repo#7 run= head="
@@ -165,6 +165,29 @@ func TestBuildPromptReplacer_EventMetadataJSONEscapeHatch(t *testing.T) {
 	want := "meta=" + metaJSON
 	if got != want {
 		t.Errorf("got %q want %q", got, want)
+	}
+}
+
+func TestBuildPromptReplacer_RunRootAndBlueprintRunID(t *testing.T) {
+	// Both the canonical {{RUN_ROOT}} / {{BLUEPRINT_RUN_ID}} placeholders AND
+	// the shell-style $TRIAGE_FACTORY_* env-var references must be pre-expanded
+	// to the concrete agent-visible values. The agent's file tools do no shell
+	// expansion, so a bare env-var reference left verbatim would write the
+	// memory file to a literal "$TRIAGE_FACTORY_RUN_ROOT/..." path the
+	// completion gate never finds.
+	task := domain.Task{EntitySource: "github", EntitySourceID: "owner/repo#1"}
+	r := BuildPromptReplacer(task, "", "run-xyz", "/bin/tf", "/work", "bp-run-1")
+
+	got := interpolate(r, "ph={{RUN_ROOT}}/_scratch/entity-memory/{{BLUEPRINT_RUN_ID}}/{{RUN_ID}}.md")
+	want := "ph=/work/_scratch/entity-memory/bp-run-1/run-xyz.md"
+	if got != want {
+		t.Errorf("placeholder form: got %q want %q", got, want)
+	}
+
+	gotEnv := interpolate(r, "env=$TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/$TRIAGE_FACTORY_BLUEPRINT_RUN_ID/{{RUN_ID}}.md")
+	wantEnv := "env=/work/_scratch/entity-memory/bp-run-1/run-xyz.md"
+	if gotEnv != wantEnv {
+		t.Errorf("env-var form: got %q want %q", gotEnv, wantEnv)
 	}
 }
 

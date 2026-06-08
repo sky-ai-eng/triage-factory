@@ -31,4 +31,4 @@ Failure modes:
 - "repo has no clone URL on its profile; try re-profiling" — the user's repo profile is incomplete. Report `task_unsolvable` and surface the message; the user fixes it on the Settings page.
 - "only supported for Jira runs" — you're on a GitHub PR run with an eagerly-materialized worktree; you shouldn't be calling workspace at all.
 
-Don't `cd` outside the materialized worktrees for code work. Files outside `$TRIAGE_FACTORY_RUN_ROOT` are blocked by the session's file-access scope, and the only writable area outside the worktrees is `$TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/` (see <entity_memory> in the envelope).
+Don't `cd` outside the materialized worktrees for code work. Files outside `{{RUN_ROOT}}` are blocked by the session's file-access scope, and the only writable area outside the worktrees is `{{RUN_ROOT}}/_scratch/entity-memory/` (see <entity_memory> in the envelope).

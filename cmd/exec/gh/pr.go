@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -35,6 +36,31 @@ func lookupRun(host agenthost.Client) agenthost.RunInfo {
 		exitErr(err.Error())
 	}
 	return info
+}
+
+// agentMemoryFile returns the absolute path the delegated agent must write its
+// run-memory file to, composed from the run-scoped env vars the spawner exports
+// into the agent's environment (TRIAGE_FACTORY_RUN_ROOT / _BLUEPRINT_RUN_ID /
+// _RUN_ID — see internal/delegate/run.go). This mirrors the path the completion
+// gate reads (cwd/_scratch/entity-memory/<blueprint_run_id>/<run_id>.md), so
+// the "do not retry, finish by writing ..." messages below can point the agent
+// at the file concretely.
+//
+// The bare env-var reference these messages used to carry would be written
+// verbatim by the agent's Write tool — which does no shell expansion — so the
+// file landed at a literal "$TRIAGE_FACTORY_RUN_ROOT/..." path the gate never
+// found. Inside the sandbox TRIAGE_FACTORY_RUN_ROOT is already translated to
+// /work, so reading it here yields a path the agent can actually reach. Falls
+// back to the env-var-reference form if any piece is unset (subcommand invoked
+// outside a delegated run) so the message still reads coherently.
+func agentMemoryFile() string {
+	root := os.Getenv("TRIAGE_FACTORY_RUN_ROOT")
+	ns := os.Getenv("TRIAGE_FACTORY_BLUEPRINT_RUN_ID")
+	runID := os.Getenv("TRIAGE_FACTORY_RUN_ID")
+	if root == "" || ns == "" || runID == "" {
+		return "$TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/$TRIAGE_FACTORY_BLUEPRINT_RUN_ID/<run_id>.md"
+	}
+	return filepath.Join(root, "_scratch", "entity-memory", ns, runID+".md")
 }
 
 // getDiffShapes fetches the PR diff and returns both representations we
@@ -436,8 +462,8 @@ func prSubmitReview(client ghAPI, host agenthost.Client, args []string) {
 		err = host.LockReviewSubmission(ctx, reviewID, body, ghEvent)
 		if errors.Is(err, db.ErrPendingReviewAlreadySubmitted) {
 			exitErr(fmt.Sprintf(
-				"review %s has already been queued for human approval. Do not call submit-review again — your work on this review is complete. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
-				reviewID,
+				"review %s has already been queued for human approval. Do not call submit-review again — your work on this review is complete. Finish the run by writing %s and returning your completion JSON.",
+				reviewID, agentMemoryFile(),
 			))
 		}
 		exitOnErr(err)
@@ -455,7 +481,7 @@ func prSubmitReview(client ghAPI, host agenthost.Client, args []string) {
 			"review_id":       reviewID,
 			"event":           ghEvent,
 			"comments_queued": len(ghComments),
-			"next_step":       "Review is queued for human approval. Do not call submit-review again. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
+			"next_step":       "Review is queued for human approval. Do not call submit-review again. Finish the run by writing " + agentMemoryFile() + " and returning your completion JSON.",
 		})
 		return
 	}
@@ -628,8 +654,8 @@ func prCreate(client ghAPI, host agenthost.Client, args []string) {
 		}
 		if existing != nil {
 			exitErr(fmt.Sprintf(
-				"a PR for run %s has already been queued for human approval. Do not call pr create again — your work is complete. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
-				info.RunID,
+				"a PR for run %s has already been queued for human approval. Do not call pr create again — your work is complete. Finish the run by writing %s and returning your completion JSON.",
+				info.RunID, agentMemoryFile(),
 			))
 		}
 
@@ -656,14 +682,14 @@ func prCreate(client ghAPI, host agenthost.Client, args []string) {
 			// Lock call when the manual-branch tx hit the lock race.
 			if errors.Is(err, db.ErrPendingPRAlreadyQueued) {
 				exitErr(fmt.Sprintf(
-					"a PR for run %s has already been queued for human approval. Do not call pr create again — your work is complete. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
-					info.RunID,
+					"a PR for run %s has already been queued for human approval. Do not call pr create again — your work is complete. Finish the run by writing %s and returning your completion JSON.",
+					info.RunID, agentMemoryFile(),
 				))
 			}
 			if existing, lookupErr := host.GetPendingPRByRunID(ctx); lookupErr == nil && existing != nil {
 				exitErr(fmt.Sprintf(
-					"a PR for run %s has already been queued for human approval. Do not call pr create again — your work is complete. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
-					info.RunID,
+					"a PR for run %s has already been queued for human approval. Do not call pr create again — your work is complete. Finish the run by writing %s and returning your completion JSON.",
+					info.RunID, agentMemoryFile(),
 				))
 			}
 			exitErr("failed to insert pending PR: " + err.Error())
@@ -678,7 +704,7 @@ func prCreate(client ghAPI, host agenthost.Client, args []string) {
 			"base":      base,
 			"head_sha":  headSHA,
 			"draft":     draft,
-			"next_step": "PR is queued for human approval. Do not call pr create again. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
+			"next_step": "PR is queued for human approval. Do not call pr create again. Finish the run by writing " + agentMemoryFile() + " and returning your completion JSON.",
 		})
 		return
 	}

@@ -155,7 +155,7 @@ func (s *Spawner) resolvePrompt(orgID string, task domain.Task, explicitPromptID
 // through as literal braces so they're obvious to prompt authors on first
 // run. metadataJSON is the primary event's metadata blob ("" is fine —
 // event-derived placeholders just render empty).
-func buildPrompt(task domain.Task, metadataJSON, mission, scope, toolsRef, binaryPath, runID string) string {
+func buildPrompt(task domain.Task, metadataJSON, mission, scope, toolsRef, binaryPath, runID, runRoot, blueprintRunID string) string {
 	// Compatibility shim: some early prompts were written with the literal
 	// "triagefactory exec" prefix on CLI invocations, assuming the binary
 	// was on PATH. The binary lives at an absolute path in the worktree
@@ -163,7 +163,19 @@ func buildPrompt(task domain.Task, metadataJSON, mission, scope, toolsRef, binar
 	// use {{BINARY_PATH}} directly.
 	body := strings.ReplaceAll(mission, "triagefactory exec", binaryPath+" exec")
 	full := body + "\n\n" + ai.EnvelopeTemplate
-	return BuildPromptReplacer(task, metadataJSON, runID, binaryPath, scope, toolsRef).Replace(full)
+
+	// Inline the scope and tools sections into the template text FIRST.
+	// strings.Replacer does a single non-re-scanning pass, so a section
+	// injected as a replacement *value* keeps any placeholders it carries
+	// verbatim — and the tools docs reference {{BINARY_PATH}} and the
+	// run-root entity-memory paths. Folding them into the template here lets
+	// the single BuildPromptReplacer pass below interpolate them too.
+	full = strings.NewReplacer(
+		"{{TOOLS_REFERENCE}}", toolsRef,
+		"{{SCOPE}}", scope,
+	).Replace(full)
+
+	return BuildPromptReplacer(task, metadataJSON, runID, binaryPath, runRoot, blueprintRunID).Replace(full)
 }
 
 func (s *Spawner) cachedAgentTools() string {

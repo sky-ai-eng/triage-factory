@@ -18,7 +18,7 @@ Gotchas:
   ```
   `pr thread-view` is also asymmetric: `<pr_number> <comment_id>` (two positionals, no `--pr` flag). When in doubt, run `--help` on the subcommand.
 - The `--body` for `submit-review` should begin with a `##` title (e.g. "## Looks good — minor nits") followed by your summary. A top-level heading and metadata footer are added automatically; use `##` for yours.
-- `submit-review` is the **last** call in a delegated review run. It queues your review for human approval rather than posting it to GitHub directly — the response will be `{"status": "queued_for_human_approval", ...}`. After you see that response, do NOT call `submit-review` again (the second call will hard-error). Write your `$TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md` and return your completion JSON.
+- `submit-review` is the **last** call in a delegated review run. It queues your review for human approval rather than posting it to GitHub directly — the response will be `{"status": "queued_for_human_approval", ...}`. After you see that response, do NOT call `submit-review` again (the second call will hard-error). Write your `{{RUN_ROOT}}/_scratch/entity-memory/{{BLUEPRINT_RUN_ID}}/{{RUN_ID}}.md` memory file and return your completion JSON.
 - For multi-line `--body` arguments, use a heredoc:
   ```
   {{BINARY_PATH}} exec gh pr add-review-comment <review_id> --file <path> --line <N> --body "$(cat <<'EOF'
