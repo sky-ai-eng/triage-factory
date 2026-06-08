@@ -65,6 +65,12 @@ type Server struct {
 	// userID, fn)` so multi-mode RLS sees the user's identity. Local
 	// mode SQLite ignores userID.
 	tx db.TxRunner
+	// az is the org/team authorization layer — resolveTeamID, the
+	// require* gates, and the membership/role probes. It bundles db +
+	// tx so a handler holds one dependency for these cross-cutting
+	// checks instead of re-deriving them against raw fields. See
+	// authz.go.
+	az *authz
 	// allStores is the full bundle, retained so post-commit bootstrap
 	// helpers (db.BootstrapNewOrg / db.BootstrapNewTeam) — which take a
 	// db.Stores and must run outside WithTx on the admin pool — can be
@@ -404,6 +410,7 @@ func New(database *sql.DB, stores db.Stores, takeoverDir string, serverPort int)
 		githubApps:   stores.GitHubApps,
 		orgTemplate:  stores.OrgTemplate,
 		tx:           stores.Tx,
+		az:           &authz{db: database, tx: stores.Tx},
 		allStores:    stores,
 		takeoverDir:  takeoverDir,
 		serverPort:   serverPort,

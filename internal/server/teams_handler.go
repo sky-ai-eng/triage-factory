@@ -94,7 +94,7 @@ func (s *Server) handleTeamCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
-	isAdmin, err := s.userIsOrgAdmin(r.Context(), userID, orgID)
+	isAdmin, err := s.az.userIsOrgAdmin(r.Context(), userID, orgID)
 	if err != nil {
 		internalError(w, "teams", err)
 		return
