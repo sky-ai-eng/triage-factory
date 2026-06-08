@@ -19,9 +19,14 @@ import (
 // team- or org-scoped state. It owns the raw RLS-function probes
 // (tf.team_in_current_org, tf.user_is_team_admin, tf.user_has_org_access,
 // …) that execute on the app pool via db.WithTx, plus the friendly front
-// gates that translate a failed check into the right 403/404. Local mode
-// short-circuits every check to "allowed": N=1 has a single implicit
-// owner and the Postgres-only RLS plumbing has nothing to read.
+// gates that translate a failed check into the right 403/404. The gate
+// and count helpers short-circuit local mode to "allowed" (N=1 has a
+// single implicit owner, and the Postgres-only RLS plumbing has nothing
+// to read). The two raw probes — userHasOrgAccess and userIsOrgAdmin —
+// do NOT short-circuit; they always run the tf.* helpers via db.WithTx,
+// so they're multi-mode only and rely on their gate callers (and on
+// local-mode routing never mounting an {org_id} path) to avoid being
+// reached under local SQLite.
 //
 // It needs only the raw pool (for the RLS probes) and the transactional
 // store runner (for resolveTeamID's default-team lookup); handlers hold a
@@ -73,7 +78,7 @@ func (az *authz) verifyTeamInOrg(w http.ResponseWriter, r *http.Request, orgID, 
 		},
 	)
 	if err != nil {
-		log.Printf("[settings] team-in-org check %s/%s: %v", teamID, orgID, err)
+		log.Printf("[authz] team-in-org check %s/%s: %v", teamID, orgID, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return false
 	}
@@ -99,7 +104,7 @@ func (az *authz) requireTeamAdmin(w http.ResponseWriter, r *http.Request, orgID,
 		},
 	)
 	if err != nil {
-		log.Printf("[settings] team-admin check %s/%s/%s: %v", userID, orgID, teamID, err)
+		log.Printf("[authz] team-admin check %s/%s/%s: %v", userID, orgID, teamID, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return false
 	}
@@ -118,7 +123,7 @@ func (az *authz) requireOrgAdminRole(w http.ResponseWriter, r *http.Request, org
 	}
 	isAdmin, err := az.userIsOrgAdmin(r.Context(), userID, orgID)
 	if err != nil {
-		log.Printf("[settings] org-admin check %s/%s: %v", userID, orgID, err)
+		log.Printf("[authz] org-admin check %s/%s: %v", userID, orgID, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return false
 	}
@@ -242,7 +247,7 @@ func (az *authz) requireOrgMember(w http.ResponseWriter, r *http.Request) (orgID
 
 	hasAccess, err := az.userHasOrgAccess(r.Context(), userID, rawOrgID)
 	if err != nil {
-		log.Printf("[github-app] member check %s/%s: %v", userID, rawOrgID, err)
+		log.Printf("[authz] member check %s/%s: %v", userID, rawOrgID, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -277,7 +282,7 @@ func (az *authz) requireOrgAdmin(w http.ResponseWriter, r *http.Request) (orgID,
 
 	isAdmin, err := az.userIsOrgAdmin(r.Context(), userID, rawOrgID)
 	if err != nil {
-		log.Printf("[github-app] admin check %s/%s: %v", userID, rawOrgID, err)
+		log.Printf("[authz] admin check %s/%s: %v", userID, rawOrgID, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
