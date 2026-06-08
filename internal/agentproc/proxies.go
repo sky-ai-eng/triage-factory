@@ -434,13 +434,23 @@ func buildSandboxGitProxyEnv(proxyURL, upstream, incomingToken string) []string 
 	creds := gitProxyBasicUser + ":" + incomingToken
 	extraHeader := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(creds))
 
-	return []string{
-		"GIT_CONFIG_COUNT=2",
-		"GIT_CONFIG_KEY_0=url." + proxyBase + ".insteadOf",
-		"GIT_CONFIG_VALUE_0=" + upstreamPrefix,
-		"GIT_CONFIG_KEY_1=http." + proxyBase + ".extraHeader",
-		"GIT_CONFIG_VALUE_1=" + extraHeader,
+	// One git config entry per pair. GIT_CONFIG_COUNT is derived from the
+	// pair count rather than hardcoded: git stops reading at the declared
+	// count, so a literal that drifted from the entries below would
+	// silently drop settings with no compile- or run-time error.
+	pairs := [][2]string{
+		{"url." + proxyBase + ".insteadOf", upstreamPrefix},
+		{"http." + proxyBase + ".extraHeader", extraHeader},
 	}
+	env := make([]string, 0, 1+2*len(pairs))
+	env = append(env, fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(pairs)))
+	for i, kv := range pairs {
+		env = append(env,
+			fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", i, kv[0]),
+			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, kv[1]),
+		)
+	}
+	return env
 }
 
 // validateProxyUpstream is a pre-flight check that mirrors the

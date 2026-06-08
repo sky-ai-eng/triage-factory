@@ -533,7 +533,7 @@ func (s *Spawner) gitProxyConfigFor(ctx context.Context, orgID, owner string) *a
 
 	upstream := ""
 	if base, err := resolver.BaseURLFor(ctx, orgID); err != nil {
-		log.Printf("[delegate] resolve git host base for org %s: %v (defaulting to github.com)", orgID, err)
+		log.Printf("[delegate] resolve git host base for org %s: %v (leaving upstream empty; agentproc defaults to github.com)", orgID, err)
 	} else {
 		upstream = base
 	}
