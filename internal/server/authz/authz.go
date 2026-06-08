@@ -16,7 +16,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -89,8 +88,7 @@ func (az *Checker) VerifyTeamInOrg(w http.ResponseWriter, r *http.Request, orgID
 		},
 	)
 	if err != nil {
-		log.Printf("[authz] team-in-org check %s/%s: %v", teamID, orgID, err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		httpx.InternalError(w, "authz", fmt.Errorf("team-in-org check %s/%s: %w", teamID, orgID, err))
 		return false
 	}
 	if !belongs {
@@ -115,8 +113,7 @@ func (az *Checker) RequireTeamAdmin(w http.ResponseWriter, r *http.Request, orgI
 		},
 	)
 	if err != nil {
-		log.Printf("[authz] team-admin check %s/%s/%s: %v", userID, orgID, teamID, err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		httpx.InternalError(w, "authz", fmt.Errorf("team-admin check %s/%s/%s: %w", userID, orgID, teamID, err))
 		return false
 	}
 	if !isAdmin {
@@ -134,8 +131,7 @@ func (az *Checker) RequireOrgAdminRole(w http.ResponseWriter, r *http.Request, o
 	}
 	isAdmin, err := az.UserIsOrgAdmin(r.Context(), userID, orgID)
 	if err != nil {
-		log.Printf("[authz] org-admin check %s/%s: %v", userID, orgID, err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		httpx.InternalError(w, "authz", fmt.Errorf("org-admin check %s/%s: %w", userID, orgID, err))
 		return false
 	}
 	if !isAdmin {
@@ -258,8 +254,7 @@ func (az *Checker) RequireOrgMember(w http.ResponseWriter, r *http.Request) (org
 
 	hasAccess, err := az.UserHasOrgAccess(r.Context(), userID, rawOrgID)
 	if err != nil {
-		log.Printf("[authz] member check %s/%s: %v", userID, rawOrgID, err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		httpx.InternalError(w, "authz", fmt.Errorf("member check %s/%s: %w", userID, rawOrgID, err))
 		return
 	}
 	if !hasAccess {
@@ -292,8 +287,7 @@ func (az *Checker) RequireOrgAdmin(w http.ResponseWriter, r *http.Request) (orgI
 
 	isAdmin, err := az.UserIsOrgAdmin(r.Context(), userID, rawOrgID)
 	if err != nil {
-		log.Printf("[authz] admin check %s/%s: %v", userID, rawOrgID, err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		httpx.InternalError(w, "authz", fmt.Errorf("admin check %s/%s: %w", userID, rawOrgID, err))
 		return
 	}
 	if !isAdmin {
@@ -317,7 +311,15 @@ func (az *Checker) RequireOrgTemplate(w http.ResponseWriter, r *http.Request) (o
 	if !ok {
 		return "", "", false
 	}
-	userID = httpx.ClaimsFrom(r.Context()).Subject
+	claims := httpx.ClaimsFrom(r.Context())
+	if claims == nil {
+		// Fail closed per the httpx.ClaimsFrom contract — the session
+		// middleware populates claims before any multi-mode endpoint, so a
+		// nil here is a route-registration bug, not an anonymous caller.
+		httpx.WriteUnauth(w)
+		return "", "", false
+	}
+	userID = claims.Subject
 	if !az.RequireOrgAdminRole(w, r, orgID, userID) {
 		return "", "", false
 	}
