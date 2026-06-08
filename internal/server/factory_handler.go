@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
 
 // factoryHandler serves the factory snapshot endpoint, holding the
@@ -205,7 +206,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 	// Only the belt narrows here — the throughput counters stay at the
 	// viewer-union (a deliberate scope line; the belt is what "hides
 	// cross-team rows" refers to on the factory).
-	teamFilter := teamFilterParam(r)
+	teamFilter := teamscope.FilterParam(r)
 
 	// Session user's GitHub login drives the "mine" flag. Identity lives in
 	// user_github_identities, host-scoped (SKY-396) — resolve the org's

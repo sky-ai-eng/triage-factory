@@ -56,7 +56,7 @@ func (eh *eventHandlersHandler) handleEventHandlersList(w http.ResponseWriter, r
 	}
 	// ?team_id= narrows to one team's handlers (+ org-visible) on the
 	// multi-team prompts page; absent/solo returns everything visible.
-	teamID := singleTeamParam(r)
+	teamID := teamscope.SingleParam(r)
 	var handlers []domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error

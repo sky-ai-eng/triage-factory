@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -199,4 +200,56 @@ func ResolveRead(ctx context.Context, teams db.TeamsStore, users db.UsersStore, 
 		return myTeams[0].ID, nil
 	}
 	return "", nil
+}
+
+// FilterParam extracts the per-page multi-team read filter from the request —
+// the set of non-empty, deduped, valid-UUID ?team_id= values (a repeated query
+// param). Returns nil when none are present, which the stores treat as "the
+// union of the viewer's teams." This is the read-scope counterpart to ResolveRead:
+// the board/queue/factory show many teams at once, so they narrow by an IN-list
+// rather than a single target.
+//
+// Malformed values are dropped, not errored: these params are user-controlled
+// and also come from possibly-stale/corrupt localStorage (the device-local read
+// filter), so a junk id should degrade to "no narrow for that value" rather than
+// 500 the queue/board/factory when the raw string hits a Postgres ::uuid cast. A
+// team the caller isn't in is already filtered out downstream by the
+// RLS-mirroring predicate, so the only validation needed here is well-formedness.
+func FilterParam(r *http.Request) []string {
+	raw := r.URL.Query()["team_id"]
+	if len(raw) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if v == "" {
+			continue
+		}
+		if _, err := uuid.Parse(v); err != nil {
+			continue // drop malformed ids (stale localStorage, hand-edited URL)
+		}
+		if _, dup := seen[v]; dup {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
+}
+
+// SingleParam reads a single ?team_id= value for the single-team read surfaces
+// (the prompts page narrowed to one team). Like FilterParam it drops a malformed
+// id rather than erroring — the value is device-local view state (possibly stale
+// localStorage) and junk should degrade to "unfiltered", not 500 the page.
+// Returns "" when absent or malformed; the stores treat "" as no team narrow.
+func SingleParam(r *http.Request) string {
+	v := r.URL.Query().Get("team_id")
+	if v == "" {
+		return ""
+	}
+	if _, err := uuid.Parse(v); err != nil {
+		return "" // drop malformed (stale localStorage, hand-edited URL)
+	}
+	return v
 }

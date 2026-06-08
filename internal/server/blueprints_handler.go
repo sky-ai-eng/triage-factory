@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/server/prompts"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
 
@@ -33,7 +34,7 @@ func (bh *blueprintsHandler) handleBlueprintsList(w http.ResponseWriter, r *http
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	teamID := singleTeamParam(r)
+	teamID := teamscope.SingleParam(r)
 	var blueprints []domain.Blueprint
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -99,8 +100,8 @@ func (bh *blueprintsHandler) handleBlueprintCreate(w http.ResponseWriter, r *htt
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "first_prompt.body is required"})
 			return
 		}
-		if !validPromptModel(req.FirstPrompt.Model) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": invalidPromptModelError()})
+		if !prompts.ValidModel(req.FirstPrompt.Model) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": prompts.InvalidModelError()})
 			return
 		}
 		if req.Name == "" {
@@ -263,7 +264,7 @@ func (bh *blueprintsHandler) handleBlueprintDelete(w http.ResponseWriter, r *htt
 			if p == nil {
 				continue
 			}
-			if _, de := softDeletePromptBySource(r.Context(), tx, orgID, p); de != nil {
+			if _, de := prompts.SoftDeleteBySource(r.Context(), tx, orgID, p); de != nil {
 				return de
 			}
 		}
@@ -304,7 +305,7 @@ func (bh *blueprintsHandler) handleBlueprintStepsAll(w http.ResponseWriter, r *h
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	teamID := singleTeamParam(r)
+	teamID := teamscope.SingleParam(r)
 	var steps []domain.BlueprintStep
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error

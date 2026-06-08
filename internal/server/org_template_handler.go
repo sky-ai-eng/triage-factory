@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/prompts"
 )
 
 // orgTemplateHandler serves /api/org-template/* — the org-admin editor over
@@ -143,7 +144,7 @@ func (ot *orgTemplateHandler) handleOrgTemplatePromptCreate(w http.ResponseWrite
 	if !ok {
 		return
 	}
-	var req createPromptRequest
+	var req prompts.CreateRequest
 	if !decodeJSON(w, r, &req, "") {
 		return
 	}
@@ -155,8 +156,8 @@ func (ot *orgTemplateHandler) handleOrgTemplatePromptCreate(w http.ResponseWrite
 		badRequest(w, "body is required")
 		return
 	}
-	if !validPromptModel(req.Model) {
-		badRequest(w, invalidPromptModelError())
+	if !prompts.ValidModel(req.Model) {
+		badRequest(w, prompts.InvalidModelError())
 		return
 	}
 	prompt := domain.Prompt{
@@ -192,7 +193,7 @@ func (ot *orgTemplateHandler) handleOrgTemplatePromptPut(w http.ResponseWriter, 
 		return
 	}
 	id := r.PathValue("id")
-	var req updatePromptRequest
+	var req prompts.UpdateRequest
 	if !decodeJSON(w, r, &req, "") {
 		return
 	}
@@ -204,8 +205,8 @@ func (ot *orgTemplateHandler) handleOrgTemplatePromptPut(w http.ResponseWriter, 
 		badRequest(w, "body is required")
 		return
 	}
-	if !validPromptModel(req.Model) {
-		badRequest(w, invalidPromptModelError())
+	if !prompts.ValidModel(req.Model) {
+		badRequest(w, prompts.InvalidModelError())
 		return
 	}
 	var updated *domain.Prompt
@@ -336,8 +337,8 @@ func (ot *orgTemplateHandler) handleOrgTemplateBlueprintCreate(w http.ResponseWr
 			badRequest(w, "first_prompt.body is required")
 			return
 		}
-		if !validPromptModel(req.FirstPrompt.Model) {
-			badRequest(w, invalidPromptModelError())
+		if !prompts.ValidModel(req.FirstPrompt.Model) {
+			badRequest(w, prompts.InvalidModelError())
 			return
 		}
 		if name == "" {
