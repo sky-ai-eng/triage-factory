@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { Bot } from 'lucide-react'
 import type { Task, TeamMember, TeamBot } from '../../types'
 
 // AssigneePicker is SKY-330's per-card assignee selector. Replaces
@@ -272,13 +273,10 @@ function initialsFor(s: string): string {
 function AssigneeAvatar({ entry }: { entry: AssigneeEntry }) {
   switch (entry.kind) {
     case 'bot':
-      // Fixed centered box so the emoji's tall line-box doesn't drop the chip
-      // below its row-mates (elapsed / expand) in the agent card header.
-      return (
-        <span className="inline-flex h-3.5 w-3.5 items-center justify-center text-[11px] leading-none">
-          🤖
-        </span>
-      )
+      // A crisp lucide icon (inherits the chip's currentColor + hover) rather
+      // than an emoji — emoji glyphs sit low in their line-box and dropped the
+      // chip below its row-mates (elapsed / expand) in the agent card header.
+      return <Bot size={13} aria-hidden className="shrink-0" />
     case 'user':
       return <AvatarCircle initials={initialsFor(entry.label)} tone="user" small />
     case 'unknown':

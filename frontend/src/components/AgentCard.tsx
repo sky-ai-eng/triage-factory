@@ -135,7 +135,7 @@ export default function AgentCard({
                 to={orgHref(`/board/runs/${run.ID}`)}
                 aria-label="Expand run details"
                 title="Open full session view"
-                className="text-text-tertiary transition-colors hover:text-text-primary"
+                className="inline-flex items-center text-text-tertiary transition-colors hover:text-text-primary"
               >
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
                   <path
@@ -159,7 +159,7 @@ export default function AgentCard({
                       toast.error(`Failed to cancel run: ${(err as Error).message}`)
                     }
                   }}
-                  className="text-dismiss/40 transition-colors hover:text-dismiss"
+                  className="inline-flex items-center text-dismiss/40 transition-colors hover:text-dismiss"
                   title="Cancel run"
                 >
                   <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
