@@ -15,7 +15,7 @@ import {
 import TakeoverModal, { type TakeoverInfo } from './TakeoverModal'
 import YieldModal, { type YieldRequest } from './YieldModal'
 import { AttentionRow, CardPlane, EventTag, HudHeader, SourceTag } from './board/cardChrome'
-import { compactNum, runGlow, runTone, TONE_TEXT, type StepState } from './board/cardStyle'
+import { compactNum, runGlow, TONE_TEXT, type StepState } from './board/cardStyle'
 
 interface Props {
   task: Task
@@ -107,7 +107,6 @@ export default function AgentCard({
   const isHeldTakeover = run.Status === 'taken_over' && !!run.WorktreePath
   const [releasePending, setReleasePending] = useState(false)
 
-  const tone = runTone(run)
   const glow = runGlow(run)
   const stats = computeStats(messages, run)
 
@@ -124,7 +123,7 @@ export default function AgentCard({
 
   return (
     <div className="relative">
-      <CardPlane tone={tone} steps={hasChain ? stepStates : undefined} glow={glow}>
+      <CardPlane steps={hasChain ? stepStates : undefined} glow={glow}>
         <TakeoverModal info={takeoverInfo} onClose={() => setTakeoverInfo(null)} />
         {openYieldRequest && (
           <YieldModal

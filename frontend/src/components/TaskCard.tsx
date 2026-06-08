@@ -2,7 +2,7 @@ import { forwardRef } from 'react'
 import type { Task } from '../types'
 import RequestedReviewerBadge from './RequestedReviewerBadge'
 import { CardPlane, EventTag, HudHeader, SourceTag } from './board/cardChrome'
-import { formatAge, type Tone } from './board/cardStyle'
+import { formatAge } from './board/cardStyle'
 
 interface Props {
   task: Task
@@ -38,8 +38,6 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
     const snoozedUntil = parseFutureSnooze(task.snooze_until)
     const isSnoozed = snoozedUntil !== null
 
-    const tone: Tone = delegateFailed ? 'problem' : isSnoozed ? 'attention' : 'rust'
-
     return (
       <div
         ref={ref}
@@ -48,7 +46,6 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
         {...props}
       >
         <CardPlane
-          tone={tone}
           glow={delegateFailed ? { tone: 'problem', breathing: false } : undefined}
           dim={isSnoozed}
           dragging={isDragging}

@@ -21,14 +21,12 @@ import { STEP_VAR, TONE_TEXT, TONE_VAR, type Glow, type StepState, type Tone } f
 // for panel definition, rust corner brackets, the status spine (+ optional
 // chain notches), and — when a run is live — a status glow.
 export function CardPlane({
-  tone = 'rust',
   steps,
   glow,
   dim,
   dragging,
   children,
 }: {
-  tone?: Tone
   steps?: StepState[]
   glow?: Glow | null
   dim?: boolean
@@ -83,7 +81,6 @@ export function CardPlane({
         />
       )}
 
-      <Spine tone={tone} />
       {steps && steps.length > 0 && <SpineSteps steps={steps} />}
       <CornerBrackets />
     </div>

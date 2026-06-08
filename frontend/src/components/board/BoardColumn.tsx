@@ -83,6 +83,13 @@ const FADE_LAYERS = Array.from({ length: FADE_N }, (_, k) => {
   return { length: 2 * ARM * t, opacity: 0.46 * (1 - t) + 0.07 }
 })
 
+// The card scroll area dissolves its cards into the page at top + bottom rather
+// than hard-cutting them — a tall column melts its overflow into the field the
+// same way the board's horizontal scroll fades at its edges. A small top fade
+// (cards emerge from under the masthead) + a deeper bottom fade.
+const CARD_FADE_MASK =
+  'linear-gradient(to bottom, transparent 0, #000 8px, #000 calc(100% - 44px), transparent 100%)'
+
 const searchInputClass =
   'w-full rounded-lg bg-transparent py-1.5 pl-7 pr-7 text-[13px] text-text-primary placeholder:text-text-tertiary outline-none transition-colors focus:bg-[var(--color-surface-overlay)]/40'
 
@@ -316,8 +323,14 @@ export default function BoardColumn({
           </motion.div>
         </div>
 
-        {/* Cards scroll independently below the masthead. */}
-        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 pb-3 pt-1">{children}</div>
+        {/* Cards scroll independently below the masthead; the mask melts the
+            overflow into the page at top + bottom instead of a hard cutoff. */}
+        <div
+          className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 pb-3 pt-1"
+          style={{ maskImage: CARD_FADE_MASK, WebkitMaskImage: CARD_FADE_MASK }}
+        >
+          {children}
+        </div>
 
         {/* The rust L-bracket — concentric fading dashes (see TraceLayer). At
             rest they straddle the top-left corner as a soft-edged L; the lap
