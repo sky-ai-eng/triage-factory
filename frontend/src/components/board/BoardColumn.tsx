@@ -55,6 +55,8 @@ import type { Task } from '../../types'
 const TRACE_EASE = [0.65, 0, 0.35, 1] as const
 const TRACE_DUR = 1.4
 const TRACE_PEAK = 0.5
+// Resting opacity of the L-bracket (brightens to 1 on hover).
+const BRACKET_REST = 0.55
 
 const searchInputClass =
   'w-full rounded-lg bg-transparent py-1.5 pl-7 pr-7 text-[13px] text-text-primary placeholder:text-text-tertiary outline-none transition-colors focus:bg-[var(--color-surface-overlay)]/40'
@@ -126,14 +128,25 @@ export default function BoardColumn({
   // fresh BoardColumn), and loops while a card is dragged over (replacing the
   // old whole-column fill highlight). pathLength normalizes the rect to 100
   // units so the dash math is size-independent.
+  // The travelling light (`trace`) and the resting L-bracket (`bracket`) are
+  // two halves of one gesture: as the light peels off the top-left corner and
+  // laps the perimeter, the bracket fades out so there's no static L left
+  // behind to fight it; as the light returns to the corner, the bracket fades
+  // back in and reclaims it. They cross-fade at the corner, so it reads as one
+  // continuous thing rather than a bar gliding over a fixed frame.
   const trace = useAnimationControls()
-  // One lap, fading in at the top-left corner (where the bracket lives) and out
-  // again there, so the light looks like it peels off the bracket, runs the
-  // perimeter, and settles back in — no hard pop. Peak opacity matches the
-  // bracket's weight (TRACE_PEAK), not a bright bar.
+  const bracket = useAnimationControls()
+  // True while a lap/loop owns the bracket, so the hover effect doesn't fight
+  // it. Starts true: every column mounts mid-entrance-lap.
+  const tracing = useRef(true)
+
   const playTraceOnce = useCallback(() => {
-    if (reduce) return
+    if (reduce) {
+      tracing.current = false
+      return
+    }
     trace.set({ strokeDashoffset: 0, opacity: 0 })
+    bracket.set({ opacity: BRACKET_REST })
     trace.start({
       strokeDashoffset: -100,
       opacity: [0, TRACE_PEAK, TRACE_PEAK, 0],
@@ -142,9 +155,20 @@ export default function BoardColumn({
         opacity: { duration: TRACE_DUR, times: [0, 0.14, 0.82, 1] },
       },
     })
-  }, [reduce, trace])
+    bracket
+      .start({
+        opacity: [BRACKET_REST, 0, 0, BRACKET_REST],
+        transition: { duration: TRACE_DUR, times: [0, 0.14, 0.82, 1] },
+      })
+      .then(() => {
+        tracing.current = false
+      })
+  }, [reduce, trace, bracket])
+
   const playTraceLoop = useCallback(() => {
+    tracing.current = true
     trace.set({ strokeDashoffset: 0 })
+    bracket.start({ opacity: 0, transition: { duration: 0.25 } })
     if (reduce) {
       trace.set({ opacity: TRACE_PEAK })
       return
@@ -157,11 +181,17 @@ export default function BoardColumn({
         strokeDashoffset: { duration: TRACE_DUR, ease: TRACE_EASE, repeat: Infinity },
       },
     })
-  }, [reduce, trace])
+  }, [reduce, trace, bracket])
+
   const hideTrace = useCallback(() => {
     trace.stop()
     trace.start({ opacity: 0, transition: { duration: 0.35 } })
-  }, [trace])
+    bracket
+      .start({ opacity: hovered ? 1 : BRACKET_REST, transition: { duration: 0.35 } })
+      .then(() => {
+        tracing.current = false
+      })
+  }, [trace, bracket, hovered])
 
   // Play once on mount (page load + post-expand remount).
   useEffect(() => {
@@ -176,6 +206,13 @@ export default function BoardColumn({
     else if (!isOver && wasOver.current) hideTrace()
     wasOver.current = isOver
   }, [isOver, playTraceLoop, hideTrace])
+
+  // Hover brightens the resting bracket — but only when a lap/loop isn't
+  // currently driving it.
+  useEffect(() => {
+    if (tracing.current) return
+    bracket.start({ opacity: hovered ? 1 : BRACKET_REST, transition: { duration: 0.3 } })
+  }, [hovered, bracket])
 
   // Event-type chips reflect the unfiltered set so the user always sees what
   // types exist in this column, even after filtering them out.
@@ -313,10 +350,11 @@ export default function BoardColumn({
             edges, brightest at the hard top-left corner and dissolving toward
             the right / bottom. This is the column's structure now: Blade Runner
             HUD frame over liquid glass, no box, no shadow. Brightens on hover. */}
-        <div
+        <motion.div
           aria-hidden
-          className="pointer-events-none absolute inset-0 transition-opacity duration-500"
-          style={{ opacity: hovered ? 1 : 0.55 }}
+          className="pointer-events-none absolute inset-0"
+          initial={{ opacity: BRACKET_REST }}
+          animate={bracket}
         >
           <div
             className="absolute left-0 top-0 h-px w-full"
@@ -332,7 +370,7 @@ export default function BoardColumn({
                 'linear-gradient(to bottom, color-mix(in srgb, var(--color-accent) 75%, transparent), transparent 55%)',
             }}
           />
-        </div>
+        </motion.div>
 
         {/* Ambient "work is live here" glow — a slow breathing ring,
               suppressed while the receive glow is showing. */}
