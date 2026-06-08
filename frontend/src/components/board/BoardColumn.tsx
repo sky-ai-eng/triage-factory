@@ -36,7 +36,22 @@ const searchInputClass =
   'w-full rounded-xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/60 py-1.5 pl-8 pr-7 text-[12px] text-text-primary placeholder:text-text-tertiary backdrop-blur-md outline-none transition-[border-color,background-color,box-shadow] focus:border-accent/40 focus:bg-[var(--color-surface-overlay)] focus:shadow-[0_0_0_3px_var(--color-accent-soft)]'
 
 const dateInputClass =
-  'w-full rounded-lg border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/60 px-2 py-1 text-[11px] text-text-primary outline-none transition-colors focus:border-accent/40'
+  'flex-1 rounded-lg border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/60 px-2 py-1 text-[11px] text-text-primary outline-none transition-colors focus:border-accent/40'
+const timeInputClass =
+  'w-[5.5rem] rounded-lg border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/60 px-2 py-1 text-[11px] text-text-primary outline-none transition-colors focus:border-accent/40 disabled:opacity-40'
+
+// Split / join the stored datetime-local string ("YYYY-MM-DDTHH:mm") into its
+// date and time halves. The time is optional in the UI — a bare date stores
+// midnight, so the filter still has a valid instant to compare against.
+function splitDT(v: string): { date: string; time: string } {
+  if (!v) return { date: '', time: '' }
+  const [date, time = ''] = v.split('T')
+  return { date, time }
+}
+function joinDT(date: string, time: string): string {
+  if (!date) return '' // no date → the bound is cleared; a lone time means nothing
+  return `${date}T${time || '00:00'}`
+}
 
 interface Props {
   id: string
@@ -145,10 +160,8 @@ export default function BoardColumn({
                 aria-label="Sort & filter"
                 aria-expanded={controlsOpen}
                 onClick={() => setControlsOpen((v) => !v)}
-                className={`relative shrink-0 rounded-xl border bg-[var(--color-surface-overlay)]/60 p-1.5 backdrop-blur-md transition-colors ${
-                  controlsOpen || hasFilters
-                    ? 'border-accent/30 text-accent'
-                    : 'border-[var(--color-border-glass)] text-text-tertiary hover:text-text-secondary'
+                className={`relative shrink-0 rounded-xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/60 p-1.5 backdrop-blur-md transition-colors ${
+                  controlsOpen ? 'text-accent' : 'text-text-tertiary hover:text-text-secondary'
                 }`}
               >
                 <SlidersHorizontal size={14} />
@@ -233,6 +246,50 @@ function Group({ label, children }: { label: string; children: React.ReactNode }
     <div className="space-y-1.5">
       <p className="text-[10px] font-medium uppercase tracking-wide text-text-tertiary">{label}</p>
       <div className="flex flex-wrap items-center gap-1.5">{children}</div>
+    </div>
+  )
+}
+
+// DateTimeField is one bound of the created-date window: a required date plus
+// an optional time. Picking a date alone stores midnight; the time input is
+// enabled only once a date exists and edits the same combined value.
+function DateTimeField({
+  label,
+  value,
+  minDate,
+  maxDate,
+  onChange,
+}: {
+  label: string
+  value: string
+  minDate?: string
+  maxDate?: string
+  onChange: (v: string) => void
+}) {
+  const { date, time } = splitDT(value)
+  return (
+    <div className="space-y-1">
+      <span className="block text-[10px] text-text-tertiary">{label}</span>
+      <div className="flex items-center gap-1.5">
+        <input
+          type="date"
+          value={date}
+          min={minDate}
+          max={maxDate}
+          onChange={(e) => onChange(joinDT(e.target.value, time))}
+          style={{ colorScheme: 'light dark' }}
+          className={dateInputClass}
+        />
+        <input
+          type="time"
+          value={time}
+          disabled={!date}
+          aria-label={`${label} time (optional)`}
+          onChange={(e) => onChange(joinDT(date, e.target.value))}
+          style={{ colorScheme: 'light dark' }}
+          className={timeInputClass}
+        />
+      </div>
     </div>
   )
 }
@@ -326,29 +383,19 @@ function FilterControls({
       )}
 
       <Group label="Created">
-        <div className="flex w-full items-end gap-2">
-          <label className="flex-1">
-            <span className="mb-1 block text-[10px] text-text-tertiary">After</span>
-            <input
-              type="datetime-local"
-              value={filter.after}
-              max={filter.before || undefined}
-              onChange={(e) => onChange({ ...filter, after: e.target.value })}
-              style={{ colorScheme: 'light dark' }}
-              className={dateInputClass}
-            />
-          </label>
-          <label className="flex-1">
-            <span className="mb-1 block text-[10px] text-text-tertiary">Before</span>
-            <input
-              type="datetime-local"
-              value={filter.before}
-              min={filter.after || undefined}
-              onChange={(e) => onChange({ ...filter, before: e.target.value })}
-              style={{ colorScheme: 'light dark' }}
-              className={dateInputClass}
-            />
-          </label>
+        <div className="w-full space-y-2">
+          <DateTimeField
+            label="After"
+            value={filter.after}
+            maxDate={splitDT(filter.before).date || undefined}
+            onChange={(v) => onChange({ ...filter, after: v })}
+          />
+          <DateTimeField
+            label="Before"
+            value={filter.before}
+            minDate={splitDT(filter.after).date || undefined}
+            onChange={(v) => onChange({ ...filter, before: v })}
+          />
         </div>
         {(filter.after || filter.before) && (
           <button
