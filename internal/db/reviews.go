@@ -17,6 +17,13 @@ import (
 // SQL specifics through the call stack.
 var ErrPendingReviewAlreadySubmitted = errors.New("pending review already submitted to local approval queue")
 
+// ErrPendingReviewCommentNotFound is returned by ReviewStore.UpdateComment
+// and DeleteComment when no comment row matches the given id. The reviews
+// handler matches on it to return 404 for a stale edit/delete while letting
+// a real DB/RLS failure fall through to a redacted 500 — without it both
+// outcomes would collapse into the same misleading 404.
+var ErrPendingReviewCommentNotFound = errors.New("pending review comment not found")
+
 // ReviewStore owns the pending_reviews + pending_review_comments
 // tables — the agent-prepared GitHub review that sits in
 // `pending_approval` until the user accepts or discards it.

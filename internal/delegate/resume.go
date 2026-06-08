@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -441,6 +442,12 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		}
 	}
 
+	// Resume runs follow the sandbox branch in multi mode, so wire the
+	// same per-run git proxy the initial invocation got. The repo owner
+	// rides in RepoEnv ("owner/repo"); a Jira-only run leaves it empty,
+	// so gitProxyConfigFor returns nil and no git proxy is wired.
+	gitOwner, _, _ := strings.Cut(opts.RepoEnv, "/")
+
 	baseOpts := agentproc.RunOptions{
 		Cwd:            cwd,
 		Model:          model,
@@ -452,6 +459,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		TraceID:        runID,
 		OrgID:          orgID,
 		Secrets:        s.getRunSecrets(),
+		GitProxy:       s.gitProxyConfigFor(ctx, orgID, gitOwner),
 		StartAgentHost: startAgentHost,
 	}
 	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)

@@ -33,11 +33,10 @@ func TestHandleGitHubReachability_Reachable(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
-	s := &Server{}
 
 	// srv.URL is a non-github host, so APIBase derives the GHES /api/v3 mount;
 	// the test server answers 200 on any path.
-	code, res := postReachability(t, s.handleGitHubReachability, `{"url":"`+srv.URL+`"}`)
+	code, res := postReachability(t, handleGitHubReachability, `{"url":"`+srv.URL+`"}`)
 	if code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", code)
 	}
@@ -53,9 +52,8 @@ func TestHandleGitHubReachability_Unreachable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	addr := srv.URL
 	srv.Close() // nothing listens now
-	s := &Server{}
 
-	code, res := postReachability(t, s.handleGitHubReachability, `{"url":"`+addr+`"}`)
+	code, res := postReachability(t, handleGitHubReachability, `{"url":"`+addr+`"}`)
 	if code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (unreachable is a body verdict, not an HTTP error)", code)
 	}
@@ -68,7 +66,6 @@ func TestHandleGitHubReachability_Unreachable(t *testing.T) {
 }
 
 func TestHandleGitHubReachability_BadURL(t *testing.T) {
-	s := &Server{}
 	for _, body := range []string{
 		`{"url":""}`,
 		`{"url":"not a url"}`,
@@ -78,7 +75,7 @@ func TestHandleGitHubReachability_BadURL(t *testing.T) {
 		`{"url":"https://host.example.com#frag"}`,      // fragment likewise
 		`{"url":"https://user:pass@host.example.com"}`, // embedded credentials
 	} {
-		if code, _ := postReachability(t, s.handleGitHubReachability, body); code != http.StatusBadRequest {
+		if code, _ := postReachability(t, handleGitHubReachability, body); code != http.StatusBadRequest {
 			t.Errorf("body %s: status = %d, want 400", body, code)
 		}
 	}
@@ -89,9 +86,8 @@ func TestHandleJiraReachability_Reachable(t *testing.T) {
 		w.WriteHeader(http.StatusUnauthorized) // a 401 still proves reachability
 	}))
 	defer srv.Close()
-	s := &Server{}
 
-	code, res := postReachability(t, s.handleJiraReachability, `{"url":"`+srv.URL+`"}`)
+	code, res := postReachability(t, handleJiraReachability, `{"url":"`+srv.URL+`"}`)
 	if code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", code)
 	}
@@ -107,8 +103,7 @@ func TestHandleJiraReachability_Reachable(t *testing.T) {
 }
 
 func TestHandleJiraReachability_BadURL(t *testing.T) {
-	s := &Server{}
-	if code, _ := postReachability(t, s.handleJiraReachability, `{"url":"://bad"}`); code != http.StatusBadRequest {
+	if code, _ := postReachability(t, handleJiraReachability, `{"url":"://bad"}`); code != http.StatusBadRequest {
 		t.Errorf("malformed jira url: status = %d, want 400", code)
 	}
 }

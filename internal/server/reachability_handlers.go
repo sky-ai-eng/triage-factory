@@ -31,7 +31,7 @@ type reachabilityRequest struct {
 // 400: that's bad input, not an unreachable host.
 //
 // POST /api/github/reachability   body: {"url": "https://github.com"}
-func (s *Server) handleGitHubReachability(w http.ResponseWriter, r *http.Request) {
+func handleGitHubReachability(w http.ResponseWriter, r *http.Request) {
 	var req reachabilityRequest
 	if !decodeJSON(w, r, &req, "") {
 		return
@@ -50,7 +50,7 @@ func (s *Server) handleGitHubReachability(w http.ResponseWriter, r *http.Request
 // 400-on-malformed contract as the GitHub endpoint.
 //
 // POST /api/jira/reachability   body: {"url": "https://jira.example.com"}
-func (s *Server) handleJiraReachability(w http.ResponseWriter, r *http.Request) {
+func handleJiraReachability(w http.ResponseWriter, r *http.Request) {
 	var req reachabilityRequest
 	if !decodeJSON(w, r, &req, "") {
 		return

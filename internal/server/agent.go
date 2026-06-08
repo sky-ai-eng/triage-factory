@@ -13,8 +13,18 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-func (s *Server) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+// agentHandler serves the agent-run endpoints (status / messages / cancel /
+// takeover / release / respond / runs / held-takeovers). spawner is read
+// through a getter so the handler always sees the current delegation spawner.
+type agentHandler struct {
+	tx          db.TxRunner
+	ws          *websocket.Hub
+	takeoverDir string
+	spawner     func() *delegate.Spawner
+}
+
+func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -22,7 +32,7 @@ func (s *Server) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("runID")
 	var run *domain.AgentRun
 	var resp map[string]any
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		run, e = tx.AgentRuns.Get(r.Context(), orgID, runID)
 		if e != nil {
@@ -90,15 +100,15 @@ func runResponse(ctx context.Context, reviews db.ReviewStore, pendingPRs db.Pend
 	return out
 }
 
-func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (ag *agentHandler) handleAgentMessages(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	runID := r.PathValue("runID")
 	var messages []domain.AgentMessage
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		messages, e = tx.AgentRuns.Messages(r.Context(), orgID, runID)
 		return e
@@ -112,37 +122,39 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, messages)
 }
 
-func (s *Server) handleAgentCancel(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (ag *agentHandler) handleAgentCancel(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	runID := r.PathValue("runID")
-	if s.spawner == nil {
+	spawner := ag.spawner()
+	if spawner == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
 		return
 	}
-	if err := s.spawner.Cancel(orgID, runID, userID); err != nil {
+	if err := spawner.Cancel(orgID, runID, userID); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
 }
 
-func (s *Server) handleAgentTakeover(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (ag *agentHandler) handleAgentTakeover(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	runID := r.PathValue("runID")
-	if s.spawner == nil {
+	spawner := ag.spawner()
+	if spawner == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
 		return
 	}
 
-	baseDir, err := delegate.ResolveTakeoverDir(s.takeoverDir)
+	baseDir, err := delegate.ResolveTakeoverDir(ag.takeoverDir)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("resolve takeover dir: %v", err)})
 		return
@@ -152,7 +164,7 @@ func (s *Server) handleAgentTakeover(w http.ResponseWriter, r *http.Request) {
 	// (sets the takenOver flag and SIGKILLs the agent) the operation
 	// must run to completion or roll back cleanly; tying it to the
 	// request context would let a client disconnect destroy the run.
-	result, err := s.spawner.Takeover(orgID, runID, baseDir, userID)
+	result, err := spawner.Takeover(orgID, runID, baseDir, userID)
 	if err != nil {
 		writeJSON(w, takeoverErrorStatus(err), map[string]string{"error": err.Error()})
 		return
@@ -182,18 +194,19 @@ func shellQuote(s string) string {
 //   - 409: nothing held (wrong status, or already released)
 //   - 5xx: filesystem/git/DB failure during teardown — row stays held
 //     so a retry can finish the job
-func (s *Server) handleAgentRelease(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (ag *agentHandler) handleAgentRelease(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	runID := r.PathValue("runID")
-	if s.spawner == nil {
+	spawner := ag.spawner()
+	if spawner == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
 		return
 	}
-	if err := s.spawner.Release(orgID, runID, userID); err != nil {
+	if err := spawner.Release(orgID, runID, userID); err != nil {
 		writeJSON(w, releaseErrorStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
@@ -222,14 +235,14 @@ func releaseErrorStatus(err error) int {
 // fire the release endpoint by run id. The resume_command is rebuilt
 // server-side using the same shellQuote() rule the takeover endpoint
 // uses, so the banner's modal renders an identical paste-safe command.
-func (s *Server) handleHeldTakeovers(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (ag *agentHandler) handleHeldTakeovers(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	var runs []domain.TakenOverRun
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		runs, e = tx.AgentRuns.ListTakenOverForResume(r.Context(), orgID)
 		return e
@@ -271,8 +284,8 @@ func takeoverErrorStatus(err error) int {
 	}
 }
 
-func (s *Server) handleAgentRuns(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (ag *agentHandler) handleAgentRuns(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -284,7 +297,7 @@ func (s *Server) handleAgentRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	var runs []domain.AgentRun
 	var out []map[string]any
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		runs, e = tx.AgentRuns.ListForTask(r.Context(), orgID, taskID)
 		if e != nil {

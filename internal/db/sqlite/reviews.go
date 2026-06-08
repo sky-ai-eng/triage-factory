@@ -171,7 +171,7 @@ func (s *reviewStore) UpdateComment(ctx context.Context, orgID, commentID, body 
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("pending comment %s not found", commentID)
+		return fmt.Errorf("comment %s: %w", commentID, db.ErrPendingReviewCommentNotFound)
 	}
 	return nil
 }
@@ -186,7 +186,7 @@ func (s *reviewStore) DeleteComment(ctx context.Context, orgID, commentID string
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("pending comment %s not found", commentID)
+		return fmt.Errorf("comment %s: %w", commentID, db.ErrPendingReviewCommentNotFound)
 	}
 	return nil
 }

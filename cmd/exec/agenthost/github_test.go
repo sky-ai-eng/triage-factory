@@ -52,6 +52,10 @@ func (f fakeGitHubResolver) TokenFor(_ context.Context, _, _ string) (githubapp.
 	panic("TokenFor is not used by the host-routed gh surface")
 }
 
+func (f fakeGitHubResolver) BaseURLFor(_ context.Context, _ string) (string, error) {
+	panic("BaseURLFor is not used by the host-routed gh surface")
+}
+
 // ghRecorder captures what the fake GitHub backend saw. Mutex-guarded so the
 // handler goroutine and the test goroutine don't race under -race.
 type ghRecorder struct {

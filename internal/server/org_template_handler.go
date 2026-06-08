@@ -15,8 +15,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
+
+// orgTemplateHandler serves /api/org-template/* — the org-admin editor over
+// the org template that new teams are seeded from (SKY-381). Every endpoint
+// gates through az.requireOrgTemplate (multi-mode + org-admin) and reads/
+// writes via the transactional store runner; those two deps are all it needs.
+type orgTemplateHandler struct {
+	tx db.TxRunner
+	az *authz
+}
 
 // errTemplateBlueprintMissing signals (inside a WithTx closure) that a trigger's
 // referenced template blueprint doesn't exist, so the handler can 404 instead of
@@ -77,27 +85,6 @@ func templateBlueprintTriggered(ctx context.Context, tx db.TxStores, orgID, blue
 //	POST   /api/org-template/event-handlers/{id}/promote — rule → trigger
 //	PUT    /api/org-template/event-handlers/reorder      — rule sort_order
 
-// requireOrgTemplate gates an org-template endpoint: multi-mode only, active
-// org resolved, caller is an org admin. Returns (orgID, userID, true) on
-// success. Local mode 404s (no template concept) — mirrors the POST /api/teams
-// local-absent posture. The org-admin check is also enforced server-side by
-// the org_template_*_all RLS policies; this is the friendly front gate.
-func (s *Server) requireOrgTemplate(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
-	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
-		return "", "", false
-	}
-	orgID, ok = s.requireOrg(w, r)
-	if !ok {
-		return "", "", false
-	}
-	userID = ClaimsFrom(r.Context()).Subject
-	if !s.requireOrgAdminRole(w, r, orgID, userID) {
-		return "", "", false
-	}
-	return orgID, userID, true
-}
-
 // newTemplateSlug mints a stable system_slug for an admin-authored template
 // row. Every template row carries a non-empty slug so the per-team copy
 // dedupes on (org_id, team_id, system_slug) uniformly — shipped rows reuse
@@ -108,13 +95,13 @@ func newTemplateSlug() string {
 
 // --- prompts --------------------------------------------------------
 
-func (s *Server) handleOrgTemplatePromptsList(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgTemplate(w, r)
+func (ot *orgTemplateHandler) handleOrgTemplatePromptsList(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
 	var prompts []domain.Prompt
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		prompts, e = tx.OrgTemplate.ListPrompts(r.Context(), orgID)
 		return e
@@ -128,14 +115,14 @@ func (s *Server) handleOrgTemplatePromptsList(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, prompts)
 }
 
-func (s *Server) handleOrgTemplatePromptGet(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgTemplate(w, r)
+func (ot *orgTemplateHandler) handleOrgTemplatePromptGet(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
 	id := r.PathValue("id")
 	var prompt *domain.Prompt
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		prompt, e = tx.OrgTemplate.GetPrompt(r.Context(), orgID, id)
 		return e
@@ -150,8 +137,8 @@ func (s *Server) handleOrgTemplatePromptGet(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, prompt)
 }
 
-func (s *Server) handleOrgTemplatePromptCreate(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgTemplate(w, r)
+func (ot *orgTemplateHandler) handleOrgTemplatePromptCreate(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -180,7 +167,7 @@ func (s *Server) handleOrgTemplatePromptCreate(w http.ResponseWriter, r *http.Re
 		Model:      req.Model,
 	}
 	var created *domain.Prompt
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		if e := tx.OrgTemplate.CreatePrompt(r.Context(), orgID, prompt); e != nil {
 			return e
 		}
@@ -198,8 +185,8 @@ func (s *Server) handleOrgTemplatePromptCreate(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusCreated, created)
 }
 
-func (s *Server) handleOrgTemplatePromptPut(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgTemplate(w, r)
+func (ot *orgTemplateHandler) handleOrgTemplatePromptPut(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -221,7 +208,7 @@ func (s *Server) handleOrgTemplatePromptPut(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var updated *domain.Prompt
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		existing, e := tx.OrgTemplate.GetPrompt(r.Context(), orgID, id)
 		if e != nil || existing == nil {
 			return e
@@ -242,15 +229,15 @@ func (s *Server) handleOrgTemplatePromptPut(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, updated)
 }
 
-func (s *Server) handleOrgTemplatePromptDelete(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgTemplate(w, r)
+func (ot *orgTemplateHandler) handleOrgTemplatePromptDelete(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
 	id := r.PathValue("id")
 	var found bool
 	var conflictErr string
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		existing, e := tx.OrgTemplate.GetPrompt(r.Context(), orgID, id)
 		if e != nil || existing == nil {
 			return e
@@ -309,13 +296,13 @@ type orgTemplateBlueprintRequest struct {
 	FirstPrompt *firstPromptInput `json:"first_prompt"`
 }
 
-func (s *Server) handleOrgTemplateBlueprintsList(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgTemplate(w, r)
+func (ot *orgTemplateHandler) handleOrgTemplateBlueprintsList(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
 	var blueprints []domain.Blueprint
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		blueprints, e = tx.OrgTemplate.ListBlueprints(r.Context(), orgID)
 		return e
@@ -329,8 +316,8 @@ func (s *Server) handleOrgTemplateBlueprintsList(w http.ResponseWriter, r *http.
 	writeJSON(w, http.StatusOK, blueprints)
 }
 
-func (s *Server) handleOrgTemplateBlueprintCreate(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgTemplate(w, r)
+func (ot *orgTemplateHandler) handleOrgTemplateBlueprintCreate(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -367,7 +354,7 @@ func (s *Server) handleOrgTemplateBlueprintCreate(w http.ResponseWriter, r *http
 	}
 	var created *domain.Blueprint
 	var firstPromptID string
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// Auto-wrap: create the template prompt, then the blueprint, then bind
 		// the step — one tx, no orphan template prompt on partial failure.
 		if req.FirstPrompt != nil {
@@ -405,14 +392,14 @@ func (s *Server) handleOrgTemplateBlueprintCreate(w http.ResponseWriter, r *http
 	writeJSON(w, http.StatusCreated, blueprintCreateResponse{Blueprint: created, FirstPromptID: firstPromptID})
 }
 
-func (s *Server) handleOrgTemplateBlueprintGet(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgTemplate(w, r)
+func (ot *orgTemplateHandler) handleOrgTemplateBlueprintGet(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
 	id := r.PathValue("id")
 	var bp *domain.Blueprint
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		bp, e = tx.OrgTemplate.GetBlueprint(r.Context(), orgID, id)
 		return e
@@ -427,8 +414,8 @@ func (s *Server) handleOrgTemplateBlueprintGet(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, bp)
 }
 
-func (s *Server) handleOrgTemplateBlueprintPut(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgTemplate(w, r)
+func (ot *orgTemplateHandler) handleOrgTemplateBlueprintPut(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -442,7 +429,7 @@ func (s *Server) handleOrgTemplateBlueprintPut(w http.ResponseWriter, r *http.Re
 		return
 	}
 	var updated *domain.Blueprint
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		existing, e := tx.OrgTemplate.GetBlueprint(r.Context(), orgID, id)
 		if e != nil || existing == nil {
 			return e
@@ -463,14 +450,14 @@ func (s *Server) handleOrgTemplateBlueprintPut(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, updated)
 }
 
-func (s *Server) handleOrgTemplateBlueprintDelete(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgTemplate(w, r)
+func (ot *orgTemplateHandler) handleOrgTemplateBlueprintDelete(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
 	id := r.PathValue("id")
 	var found bool
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		existing, e := tx.OrgTemplate.GetBlueprint(r.Context(), orgID, id)
 		if e != nil || existing == nil {
 			return e
@@ -493,13 +480,13 @@ func (s *Server) handleOrgTemplateBlueprintDelete(w http.ResponseWriter, r *http
 // handleOrgTemplateBlueprintStepsAll is the template mirror of
 // handleBlueprintStepsAll — every template blueprint's steps in one read for the
 // canvas's bulk fetch.
-func (s *Server) handleOrgTemplateBlueprintStepsAll(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgTemplate(w, r)
+func (ot *orgTemplateHandler) handleOrgTemplateBlueprintStepsAll(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
 	var steps []domain.BlueprintStep
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		steps, e = tx.OrgTemplate.ListAllBlueprintSteps(r.Context(), orgID)
 		return e
@@ -513,15 +500,15 @@ func (s *Server) handleOrgTemplateBlueprintStepsAll(w http.ResponseWriter, r *ht
 	writeJSON(w, http.StatusOK, steps)
 }
 
-func (s *Server) handleOrgTemplateBlueprintStepsGet(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgTemplate(w, r)
+func (ot *orgTemplateHandler) handleOrgTemplateBlueprintStepsGet(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
 	id := r.PathValue("id")
 	var bp *domain.Blueprint
 	var steps []domain.BlueprintStep
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		bp, e = tx.OrgTemplate.GetBlueprint(r.Context(), orgID, id)
 		if e != nil || bp == nil {
@@ -543,8 +530,8 @@ func (s *Server) handleOrgTemplateBlueprintStepsGet(w http.ResponseWriter, r *ht
 	writeJSON(w, http.StatusOK, steps)
 }
 
-func (s *Server) handleOrgTemplateBlueprintStepsPut(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgTemplate(w, r)
+func (ot *orgTemplateHandler) handleOrgTemplateBlueprintStepsPut(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -572,7 +559,7 @@ func (s *Server) handleOrgTemplateBlueprintStepsPut(w http.ResponseWriter, r *ht
 
 	var bpMissing bool
 	var validationErr string
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		bp, e := tx.OrgTemplate.GetBlueprint(r.Context(), orgID, id)
 		if e != nil {
 			return e
@@ -628,8 +615,8 @@ func (s *Server) handleOrgTemplateBlueprintStepsPut(w http.ResponseWriter, r *ht
 // tables, org-admin gated. Request/response shapes are shared with the team
 // handlers (mergeBlueprintRequest / blueprintWithSteps / blueprintSplitResponse).
 
-func (s *Server) handleOrgTemplateBlueprintMerge(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgTemplate(w, r)
+func (ot *orgTemplateHandler) handleOrgTemplateBlueprintMerge(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -655,7 +642,7 @@ func (s *Server) handleOrgTemplateBlueprintMerge(w http.ResponseWriter, r *http.
 		failStatus   int
 		failMsg      string
 	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		if host, e = tx.OrgTemplate.GetBlueprint(r.Context(), orgID, hostID); e != nil {
 			return e
@@ -721,8 +708,8 @@ func (s *Server) handleOrgTemplateBlueprintMerge(w http.ResponseWriter, r *http.
 	writeJSON(w, http.StatusOK, blueprintWithSteps{Blueprint: merged, Steps: steps})
 }
 
-func (s *Server) handleOrgTemplateBlueprintSplit(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgTemplate(w, r)
+func (ot *orgTemplateHandler) handleOrgTemplateBlueprintSplit(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -747,7 +734,7 @@ func (s *Server) handleOrgTemplateBlueprintSplit(w http.ResponseWriter, r *http.
 		failStatus           int
 		failMsg              string
 	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		if bp, e = tx.OrgTemplate.GetBlueprint(r.Context(), orgID, id); e != nil || bp == nil {
 			return e
@@ -814,8 +801,8 @@ func (s *Server) handleOrgTemplateBlueprintSplit(w http.ResponseWriter, r *http.
 // handleBlueprintDuplicate: it deep-copies a flat set of template prompt ids
 // into new trigger-less template blueprint(s) following the induced-contiguous-
 // runs rule, in one transaction, against the org_template_* tables.
-func (s *Server) handleOrgTemplateBlueprintDuplicate(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgTemplate(w, r)
+func (ot *orgTemplateHandler) handleOrgTemplateBlueprintDuplicate(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -833,7 +820,7 @@ func (s *Server) handleOrgTemplateBlueprintDuplicate(w http.ResponseWriter, r *h
 		failStatus int
 		failMsg    string
 	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		newIDs, e := tx.OrgTemplate.DuplicateBlueprintPrompts(r.Context(), orgID, req.PromptIDs)
 		if e != nil {
 			switch {
@@ -880,8 +867,8 @@ func (s *Server) handleOrgTemplateBlueprintDuplicate(w http.ResponseWriter, r *h
 
 // --- event handlers -------------------------------------------------
 
-func (s *Server) handleOrgTemplateHandlersList(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgTemplate(w, r)
+func (ot *orgTemplateHandler) handleOrgTemplateHandlersList(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -891,7 +878,7 @@ func (s *Server) handleOrgTemplateHandlersList(w http.ResponseWriter, r *http.Re
 		return
 	}
 	var handlers []domain.EventHandler
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		handlers, e = tx.OrgTemplate.ListHandlers(r.Context(), orgID, kind)
 		return e
@@ -905,8 +892,8 @@ func (s *Server) handleOrgTemplateHandlersList(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, handlers)
 }
 
-func (s *Server) handleOrgTemplateHandlerCreate(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgTemplate(w, r)
+func (ot *orgTemplateHandler) handleOrgTemplateHandlerCreate(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -999,7 +986,7 @@ func (s *Server) handleOrgTemplateHandlerCreate(w http.ResponseWriter, r *http.R
 	}
 
 	var fresh *domain.EventHandler
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// A template trigger may only fire a template blueprint in the same org.
 		// Pre-check for a clean 404 instead of the downstream FK error.
 		if h.Kind == domain.EventHandlerKindTrigger {
@@ -1039,8 +1026,8 @@ func (s *Server) handleOrgTemplateHandlerCreate(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusCreated, fresh)
 }
 
-func (s *Server) handleOrgTemplateHandlerUpdate(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgTemplate(w, r)
+func (ot *orgTemplateHandler) handleOrgTemplateHandlerUpdate(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -1051,7 +1038,7 @@ func (s *Server) handleOrgTemplateHandlerUpdate(w http.ResponseWriter, r *http.R
 	}
 
 	var existing *domain.EventHandler
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		existing, e = tx.OrgTemplate.GetHandler(r.Context(), orgID, id)
 		return e
@@ -1134,7 +1121,7 @@ func (s *Server) handleOrgTemplateHandlerUpdate(w http.ResponseWriter, r *http.R
 
 	var matched bool
 	var fresh *domain.EventHandler
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		matched, e = tx.OrgTemplate.UpdateHandler(r.Context(), orgID, updated)
 		if e != nil {
@@ -1163,14 +1150,14 @@ func (s *Server) handleOrgTemplateHandlerUpdate(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, fresh)
 }
 
-func (s *Server) handleOrgTemplateHandlerDelete(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgTemplate(w, r)
+func (ot *orgTemplateHandler) handleOrgTemplateHandlerDelete(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
 	id := r.PathValue("id")
 	var found bool
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		existing, e := tx.OrgTemplate.GetHandler(r.Context(), orgID, id)
 		if e != nil || existing == nil {
 			return e
@@ -1192,8 +1179,8 @@ func (s *Server) handleOrgTemplateHandlerDelete(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-func (s *Server) handleOrgTemplateHandlerToggle(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgTemplate(w, r)
+func (ot *orgTemplateHandler) handleOrgTemplateHandlerToggle(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -1205,7 +1192,7 @@ func (s *Server) handleOrgTemplateHandlerToggle(w http.ResponseWriter, r *http.R
 		return
 	}
 	var existing *domain.EventHandler
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		existing, e = tx.OrgTemplate.GetHandler(r.Context(), orgID, id)
 		if e != nil || existing == nil {
@@ -1223,8 +1210,8 @@ func (s *Server) handleOrgTemplateHandlerToggle(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "enabled": req.Enabled})
 }
 
-func (s *Server) handleOrgTemplateHandlerPromote(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgTemplate(w, r)
+func (ot *orgTemplateHandler) handleOrgTemplateHandlerPromote(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -1245,7 +1232,7 @@ func (s *Server) handleOrgTemplateHandlerPromote(w http.ResponseWriter, r *http.
 	var existing *domain.EventHandler
 	var blueprint *domain.Blueprint
 	var blueprintHasTrigger bool
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		existing, e = tx.OrgTemplate.GetHandler(r.Context(), orgID, id)
 		if e != nil || existing == nil {
@@ -1303,7 +1290,7 @@ func (s *Server) handleOrgTemplateHandlerPromote(w http.ResponseWriter, r *http.
 		ScopePredicateJSON:     predicate,
 	}
 	var fresh *domain.EventHandler
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		if e := tx.OrgTemplate.PromoteHandler(r.Context(), orgID, id, target); e != nil {
 			return e
 		}
@@ -1325,8 +1312,8 @@ func (s *Server) handleOrgTemplateHandlerPromote(w http.ResponseWriter, r *http.
 	writeJSON(w, http.StatusOK, fresh)
 }
 
-func (s *Server) handleOrgTemplateHandlerReorder(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.requireOrgTemplate(w, r)
+func (ot *orgTemplateHandler) handleOrgTemplateHandlerReorder(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := ot.az.requireOrgTemplate(w, r)
 	if !ok {
 		return
 	}
@@ -1338,7 +1325,7 @@ func (s *Server) handleOrgTemplateHandlerReorder(w http.ResponseWriter, r *http.
 		badRequest(w, "empty ID list")
 		return
 	}
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := ot.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		return tx.OrgTemplate.ReorderHandlers(r.Context(), orgID, ids)
 	}); err != nil {
 		internalError(w, "org_template", err)

@@ -20,6 +20,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
+// settingsHandler serves the Jira-connect / Jira-statuses / GitHub SSH-preflight
+// settings endpoints, holding the transactional store runner.
+type settingsHandler struct {
+	tx db.TxRunner
+}
+
 // jiraProjectKeyRe matches Jira's standard project-key rule: a
 // leading uppercase letter followed by uppercase letters or digits.
 // Keys arriving through the API are uppercased before matching so
@@ -285,9 +291,9 @@ func projectKeysFromConfigs(projects []jiraProjectConfig) []string {
 //
 // Requires an active org because credentials write through the SecretStore
 // — see handleSettingsPost for the multi-mode rationale.
-func (s *Server) handleJiraConnect(w http.ResponseWriter, r *http.Request) {
+func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Request) {
 	userID := ClaimsFrom(r.Context()).Subject
-	orgID, ok := s.requireOrg(w, r)
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -321,7 +327,7 @@ func (s *Server) handleJiraConnect(w http.ResponseWriter, r *http.Request) {
 	// the dedicated bind surface (POST .../identity/jira/pat), so org access
 	// and user identity stay independent even when the same token connects
 	// the org.
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		creds, err := integrations.Load(r.Context(), tx.Secrets, orgID)
 		if err != nil {
 			return fmt.Errorf("load credentials: %w", err)
@@ -357,7 +363,7 @@ func (s *Server) handleJiraConnect(w http.ResponseWriter, r *http.Request) {
 
 // handleJiraStatuses returns available statuses for given Jira projects.
 // Query params: ?project=PROJ1&project=PROJ2 (or uses configured projects if omitted).
-func (s *Server) handleJiraStatuses(w http.ResponseWriter, r *http.Request) {
+func (se *settingsHandler) handleJiraStatuses(w http.ResponseWriter, r *http.Request) {
 	orgID := OrgIDFrom(r.Context())
 	userID := ClaimsFrom(r.Context()).Subject
 	projects := r.URL.Query()["project"]
@@ -365,7 +371,7 @@ func (s *Server) handleJiraStatuses(w http.ResponseWriter, r *http.Request) {
 	// through the app pool inside WithTx so vault_decrypt and
 	// team_settings_select run under the user's claims.
 	var creds auth.Credentials
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
 		if len(projects) > 0 {
 			return nil
@@ -445,7 +451,7 @@ func (s *Server) handleJiraStatuses(w http.ResponseWriter, r *http.Request) {
 // Logs both the success path and the failure stderr to the daemon's
 // log so users investigating issues see the exact ssh output even
 // when the UI only renders the friendly summary.
-func (s *Server) handleGitHubPreflightSSH(w http.ResponseWriter, r *http.Request) {
+func (se *settingsHandler) handleGitHubPreflightSSH(w http.ResponseWriter, r *http.Request) {
 	// SSH is local-mode-only. PreflightSSH writes the container's
 	// ~/.ssh/known_hosts (accept-new) and probes the operator's ssh-agent —
 	// neither exists in a hosted multi-mode container, and the clone path
@@ -469,7 +475,7 @@ func (s *Server) handleGitHubPreflightSSH(w http.ResponseWriter, r *http.Request
 	orgID := OrgIDFrom(r.Context())
 	userID := ClaimsFrom(r.Context()).Subject
 	var creds auth.Credentials
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
 		return nil
 	}); err != nil {

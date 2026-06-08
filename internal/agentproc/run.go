@@ -133,6 +133,19 @@ type RunOptions struct {
 	// threads it through.
 	OnResult func(*Result)
 
+	// GitProxy, when non-nil, wires a per-run git credential proxy into
+	// the sandbox branch so the agent can push/fetch over git-over-HTTPS
+	// without the real GitHub credential ever entering the box. The
+	// caller (delegate spawner) builds it over the GitHub resolver's
+	// TokenFor (App-or-PAT); the proxy holds the token host-side and the
+	// sandbox git is routed at it via injected GIT_CONFIG env entries.
+	//
+	// nil for runs with no git egress need — prompt-only scorer /
+	// classifier / profiler calls, and Jira-only runs that pre-clone
+	// nothing. Local-mode + non-sandbox paths ignore it (the agent runs
+	// directly on the host with the operator's own git credentials).
+	GitProxy *GitProxyConfig
+
 	// StartAgentHost, when non-nil, starts the per-run host agenthost
 	// daemon in the sandbox branch. The daemon owns the run identity
 	// and serves the RPCs the sandboxed `triagefactory exec`
@@ -390,7 +403,7 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 		// See proxies.go for the mapping from resolved creds to
 		// proxy provider / upstream.
 		configureProxies := func(s *sandbox.Sandbox) ([]string, error) {
-			bundle, proxyEnv, perr := startProxiesForSandbox(s.HostIP, creds)
+			bundle, proxyEnv, perr := startProxiesForSandbox(runCtx, s.HostIP, creds, opts.GitProxy)
 			if perr != nil {
 				return nil, perr
 			}

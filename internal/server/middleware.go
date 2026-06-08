@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -12,7 +11,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
-	tfdb "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sessions"
 )
@@ -231,7 +229,7 @@ func (s *Server) withOrg(next http.Handler) http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		ok, err := s.userHasOrgAccess(r.Context(), claims.Subject, orgID)
+		ok, err := s.az.userHasOrgAccess(r.Context(), claims.Subject, orgID)
 		if err != nil {
 			log.Printf("[auth] membership check %s/%s: %v", claims.Subject, orgID, err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -244,42 +242,6 @@ func (s *Server) withOrg(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), ctxKeyOrgID, orgID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
-}
-
-// userHasOrgAccess answers the OrgMiddleware question by delegating to
-// the tf.user_has_org_access SQL helper, which internally reads
-// request.jwt.claims via tf.current_user_id(). The claims-context
-// transaction means a missing/wrong claim → NULL → no membership,
-// even if a future bug allowed a wrong userID argument to land here.
-// Once D9 wires the app pool, the same query runs under RLS without
-// further edits.
-func (s *Server) userHasOrgAccess(ctx context.Context, userID, orgID string) (bool, error) {
-	var ok bool
-	err := tfdb.WithTx(ctx, s.db, tfdb.Claims{Sub: userID},
-		func(tx *sql.Tx) error {
-			return tx.QueryRowContext(ctx,
-				`SELECT tf.user_has_org_access($1::uuid)`, orgID,
-			).Scan(&ok)
-		},
-	)
-	return ok, err
-}
-
-// userIsOrgAdmin returns true when the calling user holds an 'owner'
-// or 'admin' role in the given org. Mirrors userHasOrgAccess but
-// delegates to tf.user_is_org_admin instead of tf.user_has_org_access.
-// Used by endpoints that gate on org-admin privilege (GitHub App
-// registration, future team management, etc.).
-func (s *Server) userIsOrgAdmin(ctx context.Context, userID, orgID string) (bool, error) {
-	var ok bool
-	err := tfdb.WithTx(ctx, s.db, tfdb.Claims{Sub: userID},
-		func(tx *sql.Tx) error {
-			return tx.QueryRowContext(ctx,
-				`SELECT tf.user_is_org_admin($1::uuid)`, orgID,
-			).Scan(&ok)
-		},
-	)
-	return ok, err
 }
 
 // needsRefresh is true when the JWT will expire within the refresh

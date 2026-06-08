@@ -10,9 +10,22 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
+
+// pendingPRsHandler serves the pending-PR endpoints. ghClient and spawner are
+// read through getters so the handler always sees the current values, which are
+// (re)wired onto the server after construction / on credential reload.
+type pendingPRsHandler struct {
+	tx        db.TxRunner
+	ws        *websocket.Hub
+	agentRuns db.AgentRunStore
+	ghClient  func() *ghclient.Client
+	spawner   func() *delegate.Spawner
+}
 
 // pendingPRJSON is the JSON shape the pending-PR overlay consumes.
 // Mirrors pendingReviewJSON but for PR queue state.
@@ -32,8 +45,8 @@ type pendingPRJSON struct {
 }
 
 // handlePendingPRGet returns a single pending PR.
-func (s *Server) handlePendingPRGet(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (pp *pendingPRsHandler) handlePendingPRGet(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -41,7 +54,7 @@ func (s *Server) handlePendingPRGet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
 	var pr *domain.PendingPR
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := pp.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		pr, e = tx.PendingPRs.Get(r.Context(), orgID, id)
 		return e
@@ -59,8 +72,8 @@ func (s *Server) handlePendingPRGet(w http.ResponseWriter, r *http.Request) {
 
 // handleRunPendingPR is the run-keyed lookup the frontend uses to find
 // "the pending PR for this delegated run." Mirrors handleRunReview.
-func (s *Server) handleRunPendingPR(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (pp *pendingPRsHandler) handleRunPendingPR(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -68,7 +81,7 @@ func (s *Server) handleRunPendingPR(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("runID")
 
 	var pr *domain.PendingPR
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := pp.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		pr, e = tx.PendingPRs.ByRunID(r.Context(), orgID, runID)
 		return e
@@ -88,8 +101,8 @@ func (s *Server) handleRunPendingPR(w http.ResponseWriter, r *http.Request) {
 // queued pending PR. Originals stay frozen via the COALESCE in
 // UpdatePendingPRTitleBody so the human-feedback diff at submit time
 // has a stable baseline.
-func (s *Server) handlePendingPRUpdate(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (pp *pendingPRsHandler) handlePendingPRUpdate(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -105,7 +118,7 @@ func (s *Server) handlePendingPRUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var pr *domain.PendingPR
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := pp.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		pr, e = tx.PendingPRs.Get(r.Context(), orgID, id)
 		return e
@@ -137,7 +150,7 @@ func (s *Server) handlePendingPRUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := pp.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		return tx.PendingPRs.UpdateTitleBody(r.Context(), orgID, id, title, body)
 	}); err != nil {
 		if errors.Is(err, db.ErrPendingPRSubmitted) {
@@ -159,8 +172,8 @@ func (s *Server) handlePendingPRUpdate(w http.ResponseWriter, r *http.Request) {
 // already maintain. The `git fetch origin <head>:<head>` first syncs
 // the bare's local ref to whatever the agent pushed (the bare
 // doesn't auto-update on push). Diff is capped at livePRDiffMaxBytes.
-func (s *Server) handlePendingPRDiff(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (pp *pendingPRsHandler) handlePendingPRDiff(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -168,7 +181,7 @@ func (s *Server) handlePendingPRDiff(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
 	var pr *domain.PendingPR
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := pp.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		pr, e = tx.PendingPRs.Get(r.Context(), orgID, id)
 		return e
@@ -217,15 +230,16 @@ func (s *Server) handlePendingPRDiff(w http.ResponseWriter, r *http.Request) {
 //  4. On success, capture human verdict in run_memory.human_content,
 //     delete the pending row, flip the run to completed, mark the
 //     task done, broadcast the WS event.
-func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+func (pp *pendingPRsHandler) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	id := r.PathValue("id")
 
-	if s.ghClient == nil {
+	gh := pp.ghClient()
+	if gh == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub credentials not configured"})
 		return
 	}
@@ -243,7 +257,7 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var pr *domain.PendingPR
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := pp.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		pr, e = tx.PendingPRs.Get(r.Context(), orgID, id)
 		return e
@@ -260,7 +274,7 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 	// on to call GitHub; the loser sees 409 and can retry once the
 	// winner finishes (which will release the guard on failure or
 	// delete the row on success).
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := pp.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		return tx.PendingPRs.MarkSubmitted(r.Context(), orgID, id)
 	}); err != nil {
 		if errors.Is(err, db.ErrPendingPRSubmitInFlight) {
@@ -272,7 +286,7 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build the final body with footer using actual run cost data.
-	finalBody := pr.Body + agentmeta.Build(s.agentRuns, orgID, pr.RunID, "PR")
+	finalBody := pr.Body + agentmeta.Build(pp.agentRuns, orgID, pr.RunID, "PR")
 
 	// Default draft to the row's persisted value (agent's hint). The
 	// overlay's checkbox initializes from the same field, so a user
@@ -283,7 +297,7 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 	if req.Draft != nil {
 		draft = *req.Draft
 	}
-	number, htmlURL, err := s.ghClient.CreatePR(pr.Owner, pr.Repo, pr.HeadBranch, pr.BaseBranch, pr.Title, finalBody, draft)
+	number, htmlURL, err := gh.CreatePR(pr.Owner, pr.Repo, pr.HeadBranch, pr.BaseBranch, pr.Title, finalBody, draft)
 	if err != nil {
 		// Release the guard so the user can retry. Pending row stays
 		// in place — they may want to edit title/body or push more
@@ -294,7 +308,7 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 		// request user's claims so the UPDATE passes RLS in
 		// multi-mode.
 		clearCtx := context.WithoutCancel(r.Context())
-		if clearErr := s.tx.WithTx(clearCtx, orgID, userID, func(tx db.TxStores) error {
+		if clearErr := pp.tx.WithTx(clearCtx, orgID, userID, func(tx db.TxStores) error {
 			return tx.PendingPRs.ClearSubmitted(clearCtx, orgID, id)
 		}); clearErr != nil {
 			log.Printf("[pending-prs] failed to release submit guard for %s after CreatePR failure: %v", id, clearErr)
@@ -321,7 +335,7 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 	// sees what the human changed vs the agent's draft.
 	if pr.RunID != "" {
 		humanContent := FormatHumanFeedbackPR(pr, pr.Title, pr.Body)
-		if err := s.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
+		if err := pp.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
 			return tx.TaskMemory.UpdateRunMemoryHumanContent(cleanupCtx, orgID, pr.RunID, humanContent)
 		}); err != nil {
 			log.Printf("[pending-prs] warning: failed to record human verdict for run %s: %v", pr.RunID, err)
@@ -333,7 +347,7 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 	// GitHub state — if the delete itself fails, the row stays
 	// visible (and the MarkSubmitted guard returns "in-flight" on
 	// retry), which is the same failure mode as before SKY-300.
-	if err := s.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
+	if err := pp.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
 		return tx.PendingPRs.Delete(cleanupCtx, orgID, id)
 	}); err != nil {
 		log.Printf("[pending-prs] warning: failed to clean up pending PR %s after submit: %v", id, err)
@@ -345,7 +359,7 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 	// step 2's failure path).
 	var blueprintRun *domain.BlueprintRun
 	if pr.RunID != "" {
-		if err := s.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
+		if err := pp.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
 			if _, err := tx.AgentRuns.MarkCompletedIfPendingApproval(cleanupCtx, orgID, pr.RunID); err != nil {
 				return fmt.Errorf("mark run completed: %w", err)
 			}
@@ -378,19 +392,20 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[pending-prs] warning: post-submit run bookkeeping for %s: %v", pr.RunID, err)
 		}
 
-		s.ws.Broadcast(websocket.Event{
+		pp.ws.Broadcast(websocket.Event{
 			Type:  "agent_run_update",
 			OrgID: orgID,
 			RunID: pr.RunID,
 			Data:  map[string]string{"status": "completed"},
 		})
-		if blueprintRun != nil && s.spawner != nil {
-			s.spawner.ResumeBlueprintAfterApproval(orgID, pr.RunID, userID)
-		} else if s.spawner != nil {
+		spawner := pp.spawner()
+		if blueprintRun != nil && spawner != nil {
+			spawner.ResumeBlueprintAfterApproval(orgID, pr.RunID, userID)
+		} else if spawner != nil {
 			// Standalone run: approval is its terminal, so drop the durable
 			// workspace snapshot taken when it parked in pending_approval. The
 			// blueprint mirror of this cleanup lives in terminateBlueprint.
-			s.spawner.DiscardWorkspaceSnapshot(orgID, pr.RunID)
+			spawner.DiscardWorkspaceSnapshot(orgID, pr.RunID)
 		}
 	}
 

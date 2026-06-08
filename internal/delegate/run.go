@@ -287,6 +287,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		SystemPrompt:   cfg.appendSysPrompt,
 		OrgID:          orgID,
 		Secrets:        s.getRunSecrets(),
+		GitProxy:       s.gitProxyConfigFor(ctx, orgID, cfg.owner),
 		StartAgentHost: startAgentHost,
 	}
 	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)
