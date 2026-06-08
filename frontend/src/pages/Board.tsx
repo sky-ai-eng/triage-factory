@@ -18,7 +18,7 @@ import PromptPicker from '../components/PromptPicker'
 import ReviewOverlay from '../components/ReviewOverlay'
 import PendingPROverlay from '../components/PendingPROverlay'
 import AssigneePicker from '../components/board/AssigneePicker'
-import BoardColumn from '../components/board/BoardColumn'
+import BoardColumn, { CollapsedColumn } from '../components/board/BoardColumn'
 import {
   applyColumnFilter,
   emptyFilter,
@@ -97,6 +97,38 @@ function defaultFilters(): FilterMap {
   }
 }
 
+// Collapse persistence: same per-user localStorage scheme as filters. Claimed
+// and In Review start collapsed — a fresh board greets you with Queued / In
+// Progress / Done (the lanes that hold work) plus two thin rails, so five lanes
+// fit without shrinking anything. (A per-user backend UI-prefs store is the
+// eventual home; localStorage holds the line until then.)
+type CollapseMap = Record<ColumnId, boolean>
+
+const COLLAPSE_STORAGE_PREFIX = 'sky330.board.collapsed.v1'
+
+function collapseStorageKey(userID: string): string {
+  return `${COLLAPSE_STORAGE_PREFIX}.${userID || 'anon'}`
+}
+
+function defaultCollapsed(): CollapseMap {
+  return { queued: false, claimed: true, in_progress: false, in_review: true, done: false }
+}
+
+function loadCollapsed(userID: string): CollapseMap {
+  try {
+    const raw = localStorage.getItem(collapseStorageKey(userID))
+    if (!raw) return defaultCollapsed()
+    const parsed = JSON.parse(raw) as Partial<CollapseMap>
+    const out = defaultCollapsed()
+    for (const col of ALL_COLUMNS) {
+      if (typeof parsed[col] === 'boolean') out[col] = parsed[col] as boolean
+    }
+    return out
+  } catch {
+    return defaultCollapsed()
+  }
+}
+
 export default function Board() {
   // SKY-330: one bucket per column. Bot/user auto-routing keeps these
   // disjoint at the backend, so a task only appears in one list.
@@ -165,6 +197,27 @@ export default function Board() {
       // Quota / disabled storage — silently skip; filters work in-memory.
     }
   }, [filters, filtersOwnerID, currentUserID])
+
+  // Collapsed-lane state — same per-user persistence dance as filters.
+  const [collapsed, setCollapsed] = useState<CollapseMap>(() => loadCollapsed(''))
+  const [collapsedOwnerID, setCollapsedOwnerID] = useState<string>('')
+  useEffect(() => {
+    if (!currentUserID) return
+    setCollapsed(loadCollapsed(currentUserID))
+    setCollapsedOwnerID(currentUserID)
+  }, [currentUserID])
+  useEffect(() => {
+    if (collapsedOwnerID !== currentUserID) return
+    try {
+      localStorage.setItem(collapseStorageKey(currentUserID), JSON.stringify(collapsed))
+    } catch {
+      // Quota / disabled storage — silently skip; collapse works in-memory.
+    }
+  }, [collapsed, collapsedOwnerID, currentUserID])
+  const toggleCollapse = useCallback(
+    (col: ColumnId) => setCollapsed((c) => ({ ...c, [col]: !c[col] })),
+    [],
+  )
 
   // Snoozed visibility toggle for the Queued column. Off by default;
   // snoozed tasks are intentionally deferred and don't need to clutter
@@ -567,20 +620,12 @@ export default function Board() {
     [queued, claimed, inProgress, inReview, done],
   )
 
-  // SKY-330: default scroll position centers Claimed/In Progress/
-  // In Review in the viewport on mount. Queued (left) and Done (right)
-  // require explicit scroll. The scroll container snaps once, then
-  // the user has full control.
+  // SKY-330: the board opens at the left (Queued first). With Claimed + In
+  // Review collapsed by default, the lane strip is compact enough that the
+  // work-bearing lanes fit without a forced scroll offset — so we start at the
+  // natural left edge rather than snapping past Queued (the old fixed 544px
+  // offset assumed every column was a full 520px, which no longer holds).
   const scrollRef = useRef<HTMLDivElement>(null)
-  const didInitialScroll = useRef(false)
-  useEffect(() => {
-    if (loading || didInitialScroll.current || !scrollRef.current) return
-    // Scroll so Claimed (the second column) is leftmost-visible.
-    // Each column is 520px wide + 24px gap (gap-6), so offset = 1
-    // column = 544. Width is set in BoardColumn.tsx; keep in sync.
-    scrollRef.current.scrollLeft = 544
-    didInitialScroll.current = true
-  }, [loading])
 
   // Dynamic edge-fade. The outermost walls — left of Queued, right of Done —
   // stay solid (there's nowhere further to scroll), and the fade ramps in on a
@@ -885,45 +930,56 @@ export default function Board() {
           style={fadeMask}
         >
           <div className="flex h-full gap-6 px-1">
-            {ALL_COLUMNS.map((colId, i) => (
-              <BoardColumn
-                key={colId}
-                id={colId}
-                index={i}
-                active={columnActive[colId]}
-                title={COLUMN_TITLES[colId]}
-                tasks={rawByColumn[colId]}
-                filter={filters[colId]}
-                onFilterChange={(next) => setFilters((prev) => ({ ...prev, [colId]: next }))}
-                headerExtra={colId === 'done' ? doneHeader : undefined}
-                snooze={
-                  colId === 'queued'
-                    ? { shown: showSnoozed, onToggle: () => setShowSnoozed((v) => !v) }
-                    : undefined
-                }
-              >
-                <ColumnContents
-                  colId={colId}
-                  tasks={filtered[colId]}
-                  agentRuns={agentRuns}
-                  agentMessages={agentMessages}
-                  chainStepRuns={chainStepRuns}
-                  currentUserID={currentUserID}
-                  members={members}
-                  bot={bot}
-                  delegateFailures={delegateFailures}
-                  onRequeue={handleRequeue}
-                  onPickerClaim={handlePickerClaim}
-                  onPickerUnclaim={handlePickerUnclaim}
-                  onPickerDelegate={handlePickerDelegate}
-                  onReview={(runID, kind) => setApprovalCtx({ runID, kind })}
-                  onRetry={(task) => {
-                    pendingDelegateTask.current = task
-                    setShowPromptPicker(true)
-                  }}
+            {ALL_COLUMNS.map((colId, i) =>
+              collapsed[colId] ? (
+                <CollapsedColumn
+                  key={colId}
+                  index={i}
+                  title={COLUMN_TITLES[colId]}
+                  count={rawByColumn[colId].length}
+                  onExpand={() => toggleCollapse(colId)}
                 />
-              </BoardColumn>
-            ))}
+              ) : (
+                <BoardColumn
+                  key={colId}
+                  id={colId}
+                  index={i}
+                  active={columnActive[colId]}
+                  title={COLUMN_TITLES[colId]}
+                  tasks={rawByColumn[colId]}
+                  filter={filters[colId]}
+                  onFilterChange={(next) => setFilters((prev) => ({ ...prev, [colId]: next }))}
+                  onCollapse={() => toggleCollapse(colId)}
+                  headerExtra={colId === 'done' ? doneHeader : undefined}
+                  snooze={
+                    colId === 'queued'
+                      ? { shown: showSnoozed, onToggle: () => setShowSnoozed((v) => !v) }
+                      : undefined
+                  }
+                >
+                  <ColumnContents
+                    colId={colId}
+                    tasks={filtered[colId]}
+                    agentRuns={agentRuns}
+                    agentMessages={agentMessages}
+                    chainStepRuns={chainStepRuns}
+                    currentUserID={currentUserID}
+                    members={members}
+                    bot={bot}
+                    delegateFailures={delegateFailures}
+                    onRequeue={handleRequeue}
+                    onPickerClaim={handlePickerClaim}
+                    onPickerUnclaim={handlePickerUnclaim}
+                    onPickerDelegate={handlePickerDelegate}
+                    onReview={(runID, kind) => setApprovalCtx({ runID, kind })}
+                    onRetry={(task) => {
+                      pendingDelegateTask.current = task
+                      setShowPromptPicker(true)
+                    }}
+                  />
+                </BoardColumn>
+              ),
+            )}
           </div>
         </div>
       </div>

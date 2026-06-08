@@ -1,7 +1,16 @@
 import { useMemo, useState } from 'react'
 import { useDroppable } from '@dnd-kit/core'
 import { motion, useReducedMotion } from 'motion/react'
-import { ArrowDown, ArrowUp, Search, SlidersHorizontal, X } from 'lucide-react'
+import {
+  ArrowDown,
+  ArrowUp,
+  ChevronDown,
+  ChevronsRightLeft,
+  ChevronUp,
+  Search,
+  SlidersHorizontal,
+  X,
+} from 'lucide-react'
 import EventBadge from '../EventBadge'
 import { bodyEase } from '../../pages/setup/glassStyle'
 import {
@@ -77,6 +86,8 @@ interface Props {
   // True when ≥1 autonomous run is actively turning in this lane — lights the
   // ambient breathing glow.
   active?: boolean
+  // When provided, renders a faint collapse affordance left of the title.
+  onCollapse?: () => void
   children: React.ReactNode
 }
 
@@ -90,6 +101,7 @@ export default function BoardColumn({
   snooze,
   index = 0,
   active = false,
+  onCollapse,
   children,
 }: Props) {
   const { setNodeRef, isOver } = useDroppable({ id, data: { type: 'column' } })
@@ -132,7 +144,22 @@ export default function BoardColumn({
             The filter panel melts down from here, pushing the cards down. */}
         <div className="px-3 pb-2 pt-3">
           <div className="mb-1.5 flex items-center justify-between px-0.5">
-            <h2 className="text-[15px] font-semibold tracking-tight text-text-primary">{title}</h2>
+            <div className="flex items-center gap-1.5">
+              {onCollapse && (
+                <button
+                  type="button"
+                  aria-label={`Collapse ${title}`}
+                  title="Collapse"
+                  onClick={onCollapse}
+                  className="text-text-tertiary/50 transition-colors hover:text-text-secondary"
+                >
+                  <ChevronsRightLeft size={14} />
+                </button>
+              )}
+              <h2 className="text-[15px] font-semibold tracking-tight text-text-primary">
+                {title}
+              </h2>
+            </div>
             {headerExtra}
           </div>
 
@@ -257,6 +284,61 @@ export default function BoardColumn({
         />
       </div>
     </motion.div>
+  )
+}
+
+// CollapsedColumn is the thin rail a collapsed lane shrinks to — a gray vertical
+// label flanked by inward chevrons (the "I'm collapsed, click to open me" cue),
+// with the task count. Hovering underlines the title and gives it a slow pulse.
+// Clicking expands the lane back to a full BoardColumn.
+export function CollapsedColumn({
+  title,
+  count,
+  index = 0,
+  onExpand,
+}: {
+  title: string
+  count: number
+  index?: number
+  onExpand: () => void
+}) {
+  const reduce = !!useReducedMotion()
+  const [hovered, setHovered] = useState(false)
+  return (
+    <motion.button
+      type="button"
+      aria-label={`Expand ${title}`}
+      title={`Expand ${title}`}
+      onClick={onExpand}
+      onHoverStart={() => setHovered(true)}
+      onHoverEnd={() => setHovered(false)}
+      className="group flex h-full w-12 shrink-0 cursor-pointer flex-col items-center justify-center gap-3 text-text-tertiary"
+      initial={reduce ? false : { opacity: 0, y: 14 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={reduce ? { duration: 0 } : { ...bodyEase, delay: index * 0.05 }}
+    >
+      <ChevronDown size={15} className="opacity-60 transition-opacity group-hover:opacity-100" />
+      <motion.div
+        className="flex flex-col items-center gap-2"
+        animate={hovered && !reduce ? { scale: [1, 1.06, 1] } : { scale: 1 }}
+        transition={
+          hovered && !reduce
+            ? { duration: 1.4, repeat: Infinity, ease: 'easeInOut' }
+            : { duration: 0.2 }
+        }
+      >
+        {count > 0 && (
+          <span className="text-[11px] font-medium tabular-nums text-text-tertiary">{count}</span>
+        )}
+        <span
+          className="text-[13px] font-medium tracking-wide text-text-secondary decoration-text-tertiary underline-offset-4 [writing-mode:vertical-rl] group-hover:underline"
+          style={{ textOrientation: 'mixed' }}
+        >
+          {title}
+        </span>
+      </motion.div>
+      <ChevronUp size={15} className="opacity-60 transition-opacity group-hover:opacity-100" />
+    </motion.button>
   )
 }
 
