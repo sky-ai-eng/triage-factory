@@ -54,13 +54,13 @@ func (s *Spawner) permTimeout() time.Duration {
 	return s.idleTimeout() / 2
 }
 
-// browserPermissionHandler returns a PermissionHandler that surfaces each
+// BrowserPermissionHandler returns a PermissionHandler that surfaces each
 // canUseTool prompt to the browser and parks the agent's turn until the user
 // answers (ResolvePermission) or permTimeout() elapses (deny). Safe to call
 // from the agentproc reader goroutine: it registers a 1-buffered channel keyed
 // by the request id, broadcasts a `permission_request`, waits, and always
 // deregisters.
-func (s *Spawner) browserPermissionHandler(orgID, runID string) agentproc.PermissionHandler {
+func (s *Spawner) BrowserPermissionHandler(orgID, runID string) agentproc.PermissionHandler {
 	return func(req agentproc.PermissionRequest) agentproc.PermissionDecision {
 		key := permKey(runID, req.RequestID)
 		ch := make(chan agentproc.PermissionDecision, 1)
@@ -100,8 +100,10 @@ func (s *Spawner) browserPermissionHandler(orgID, runID string) agentproc.Permis
 // ResolvePermission delivers a decision to a pending permission request,
 // unblocking the handler goroutine parked on it. The send is non-blocking (the
 // channel is 1-buffered with a single receiver). A request that isn't pending —
-// or whose pending entry belongs to a different run/org — is
-// ErrNoPendingPermission for the caller to map to 404.
+// or whose pending entry was registered for a different org — is
+// ErrNoPendingPermission for the caller to map to 404. The org check here is a
+// broker-level backstop; the permission endpoint additionally authorizes the
+// run under RLS (team-level) before calling this.
 func (s *Spawner) ResolvePermission(orgID, runID, requestID string, d agentproc.PermissionDecision) error {
 	s.mu.Lock()
 	p, ok := s.permPending[permKey(runID, requestID)]

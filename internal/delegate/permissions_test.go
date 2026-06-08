@@ -32,7 +32,7 @@ func waitForPending(t *testing.T, s *Spawner, runID, requestID string) {
 // ResolvePermission returns the user's decision to the parked handler.
 func TestBrowserPermissionHandler_ResolveAllow(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
-	h := s.browserPermissionHandler(runmode.LocalDefaultOrg, "run-1")
+	h := s.BrowserPermissionHandler(runmode.LocalDefaultOrg, "run-1")
 
 	got := make(chan agentproc.PermissionDecision, 1)
 	go func() {
@@ -58,7 +58,7 @@ func TestBrowserPermissionHandler_ResolveAllow(t *testing.T) {
 func TestBrowserPermissionHandler_TimeoutDenies(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
 	s.SetIdleHibernateTimeout(10 * time.Millisecond) // permTimeout = 5ms
-	h := s.browserPermissionHandler(runmode.LocalDefaultOrg, "run-1")
+	h := s.BrowserPermissionHandler(runmode.LocalDefaultOrg, "run-1")
 
 	d := h(agentproc.PermissionRequest{RequestID: "req-timeout", ToolName: "Bash"})
 	if d.Behavior != "deny" {
@@ -102,7 +102,7 @@ func TestResolvePermission_NoPending(t *testing.T) {
 func TestResolvePermission_WrongRun(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
 	s.SetIdleHibernateTimeout(2 * time.Second) // bound the goroutine if cleanup is missed
-	h := s.browserPermissionHandler(runmode.LocalDefaultOrg, "run-A")
+	h := s.BrowserPermissionHandler(runmode.LocalDefaultOrg, "run-A")
 	done := make(chan agentproc.PermissionDecision, 1)
 	go func() { done <- h(agentproc.PermissionRequest{RequestID: "req-x"}) }()
 	waitForPending(t, s, "run-A", "req-x")
@@ -125,8 +125,8 @@ func TestResolvePermission_WrongRun(t *testing.T) {
 // to its own decision.
 func TestBrowserPermissionHandler_ConcurrentRunsSameRequestID(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
-	hA := s.browserPermissionHandler(runmode.LocalDefaultOrg, "run-A")
-	hB := s.browserPermissionHandler(runmode.LocalDefaultOrg, "run-B")
+	hA := s.BrowserPermissionHandler(runmode.LocalDefaultOrg, "run-A")
+	hB := s.BrowserPermissionHandler(runmode.LocalDefaultOrg, "run-B")
 
 	gotA := make(chan agentproc.PermissionDecision, 1)
 	gotB := make(chan agentproc.PermissionDecision, 1)

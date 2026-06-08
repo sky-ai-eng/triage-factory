@@ -40,6 +40,11 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text st
 	}
 	// No warm process: only an `open` run can be woken. GetSystem is scoped by
 	// its orgID arg, so a run in another tenant reads as absent → not steerable.
+	// A getProc-nil → GetSystem race (the run registers a process between the two
+	// reads) can't slip a message past: a now-running run reads status != "open"
+	// → not steerable, and a concurrent resume that already flipped open →
+	// running makes ResumeOpenRun's MarkResuming lose the race →
+	// ErrRunNotResumable. Both map to 409, so the client just re-reads and retries.
 	run, err := s.agentRuns.GetSystem(ctx, orgID, runID)
 	if err != nil {
 		return fmt.Errorf("load run: %w", err)

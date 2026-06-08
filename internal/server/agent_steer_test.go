@@ -4,7 +4,9 @@ import (
 	"database/sql"
 	"net/http"
 	"testing"
+	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -129,5 +131,44 @@ func TestHandleAgentPermission_InvalidBehaviorRejected(t *testing.T) {
 	rec := doJSON(t, s, "POST", "/api/agent/runs/r1/permissions/req-x", map[string]string{"behavior": "maybe"})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (invalid behavior)", rec.Code)
+	}
+}
+
+// TestHandleAgentPermission_ResolvesLiveRequest exercises the endpoint → broker
+// wiring on the success path: a parked permission handler is resolved by a POST,
+// the parked goroutine receives the decision, and the endpoint returns 200.
+func TestHandleAgentPermission_ResolvesLiveRequest(t *testing.T) {
+	s := newTestServer(t)
+	spawner := delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6", "")
+	s.SetSpawner(spawner)
+	runID := seedSteerRun(t, s.db, "perm", "running")
+
+	// Park a permission prompt for the run: the broker registers synchronously,
+	// then the handler blocks until resolved (or it times out).
+	got := make(chan agentproc.PermissionDecision, 1)
+	h := spawner.BrowserPermissionHandler(runmode.LocalDefaultOrg, runID)
+	go func() { got <- h(agentproc.PermissionRequest{RequestID: "req-1", ToolName: "Bash"}) }()
+
+	// Registration races the POST, so retry until the broker has the entry (404
+	// until then), bounded.
+	var code int
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		code = doJSON(t, s, "POST", "/api/agent/runs/"+runID+"/permissions/req-1", map[string]string{"behavior": "allow"}).Code
+		if code != http.StatusNotFound {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if code != http.StatusOK {
+		t.Fatalf("resolve status = %d, want 200", code)
+	}
+	select {
+	case d := <-got:
+		if d.Behavior != "allow" {
+			t.Errorf("handler decision = %q, want allow", d.Behavior)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("handler did not receive the decision after resolve")
 	}
 }
