@@ -116,6 +116,8 @@ export default function ScreenTranscript({ messages, run }: Props) {
         ref={scrollRef}
         onScroll={onScroll}
         tabIndex={0}
+        role="log"
+        aria-label="Agent run transcript"
         className="absolute inset-0 overflow-y-auto px-5 py-5 focus:outline-none md:px-8"
       >
         <div ref={contentRef}>
@@ -295,14 +297,17 @@ function Pane({
 }) {
   const [expanded, setExpanded] = useState(false)
   const [copied, setCopied] = useState(false)
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => clearTimeout(copiedTimer.current ?? undefined), [])
   const text = String(children)
   const shown = !truncatable || expanded ? text : text.slice(0, 400)
 
   const onCopy = async () => {
     try {
       await navigator.clipboard.writeText(text)
+      clearTimeout(copiedTimer.current ?? undefined)
       setCopied(true)
-      window.setTimeout(() => setCopied(false), 1000)
+      copiedTimer.current = setTimeout(() => setCopied(false), 1000)
     } catch (err) {
       toast.error(`Failed to copy: ${(err as Error).message}`)
     }

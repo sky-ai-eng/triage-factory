@@ -152,9 +152,13 @@ function Readout({
 }
 
 // shortModel trims a verbose model id to its readable family/version, e.g.
-// "claude-opus-4-8-20260101" → "opus-4-8".
+// "claude-opus-4-8-20260101" → "opus-4-8". Also strips Bedrock cross-region /
+// region-less inference-profile prefixes ("us.anthropic.", "anthropic.").
 function shortModel(model: string): string {
-  const m = model.replace(/^claude-/, '').replace(/-\d{8}$/, '')
+  const m = model
+    .replace(/^(?:[a-z]{2,4}\.)?anthropic\./, '')
+    .replace(/^claude-/, '')
+    .replace(/-\d{8}$/, '')
   return m.length > 22 ? m.slice(0, 21) + '…' : m
 }
 

@@ -67,7 +67,7 @@ export default function RunDetail() {
           setChainSteps(padded)
         },
       )
-      .catch(() => {})
+      .catch((err) => console.warn('Failed to load blueprint chain steps:', err))
     return () => {
       cancelled = true
     }
