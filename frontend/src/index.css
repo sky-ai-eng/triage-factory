@@ -400,3 +400,129 @@ body {
 .review-markdown em {
   font-style: italic;
 }
+
+/* ── Run Station HMI ───────────────────────────────────────────────
+   The full-screen agent-run view (components/runstation/*) is a flat
+   machine interface: a warm "housing" (the app surface) cradling a dark
+   glass "screen" the transcript runs on. The screen stays dark in both
+   themes — it's a piece of equipment, not a page. Motion is the soul,
+   but it is all flat (no depth illusion) and halts under reduced-motion. */
+:root {
+  /* Light mode — the screen is a warm backlit-paper readout: dark ink on a pale
+     warm field, deep-teal accents, subtle dark scanlines. */
+  --hmi-screen: #f1ebdf;
+  --hmi-screen-lift: #fbf8f1;
+  --hmi-ink: #2b2520;
+  --hmi-ink-dim: #8a8174;
+  --hmi-cyan: #2c828d;
+  --hmi-cyan-bright: #126b76;
+  --hmi-vent: #cf7026;
+  --hmi-belt: #9a6850;
+  --hmi-scanline: rgba(0, 0, 0, 0.045);
+  --hmi-grain: rgba(0, 0, 0, 0.45);
+  --hmi-line: rgba(0, 0, 0, 0.07);
+  --hmi-code-bg: rgba(0, 0, 0, 0.05);
+  --hmi-strong: #17110b;
+  --hmi-recess: rgba(0, 0, 0, 0.1);
+}
+:root.dark {
+  /* Dark mode — the screen is dark glass: warm off-white ink, bright cyan
+     accents, white scanlines. */
+  --hmi-screen: #100e0b;
+  --hmi-screen-lift: #1a1611;
+  --hmi-ink: #d8d1c4;
+  --hmi-ink-dim: #8f877a;
+  --hmi-cyan: #54c6d4;
+  --hmi-cyan-bright: #a4f8ff;
+  --hmi-vent: #ff8a3a;
+  --hmi-belt: #9a6850;
+  --hmi-scanline: rgba(255, 255, 255, 0.035);
+  --hmi-grain: rgba(255, 255, 255, 0.5);
+  --hmi-line: rgba(255, 255, 255, 0.05);
+  --hmi-code-bg: rgba(0, 0, 0, 0.4);
+  --hmi-strong: #ffffff;
+  --hmi-recess: rgba(0, 0, 0, 0.55);
+}
+
+/* Scanner — a thin cyan line sweeping top→bottom across the screen while
+   a turn executes. Animating `top` on one 2px element is cheap. */
+@keyframes hmi-scan {
+  0% {
+    top: -4%;
+    opacity: 0;
+  }
+  10% {
+    opacity: 0.85;
+  }
+  90% {
+    opacity: 0.85;
+  }
+  100% {
+    top: 104%;
+    opacity: 0;
+  }
+}
+
+/* Conveyor — chevron lane scrolling along the machine's intake edge. */
+@keyframes hmi-belt {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 0 -34px;
+  }
+}
+
+/* Vent heat — the warm under-glow breathing as the machine runs hot. */
+@keyframes hmi-heat {
+  0%,
+  100% {
+    opacity: 0.5;
+    transform: scaleY(0.9);
+  }
+  50% {
+    opacity: 1;
+    transform: scaleY(1.08);
+  }
+}
+
+/* State frame — the emissive edge breathing while the run is live. */
+@keyframes hmi-breathe {
+  0%,
+  100% {
+    opacity: 0.34;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+
+/* Status core — the pulsing emissive node by the state readout. */
+@keyframes hmi-core {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.8;
+  }
+  50% {
+    transform: scale(1.18);
+    opacity: 1;
+  }
+}
+
+/* Screen grain — a barely-there flicker over the scanlines. */
+@keyframes hmi-flicker {
+  0%,
+  100% {
+    opacity: 0.05;
+  }
+  50% {
+    opacity: 0.09;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hmi-anim {
+    animation: none !important;
+  }
+}

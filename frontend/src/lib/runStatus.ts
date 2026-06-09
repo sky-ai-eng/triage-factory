@@ -23,65 +23,6 @@ export function isFailedStatus(status: string): boolean {
   return (FAILED_STATUSES as readonly string[]).includes(status)
 }
 
-export function statusLabel(status: string): string {
-  const map: Record<string, string> = {
-    initializing: 'Initializing',
-    cloning: 'Pulling repo',
-    fetching: 'Fetching PR details',
-    worktree_created: 'Creating worktree',
-    agent_starting: 'Starting Claude Code',
-    running: 'Running',
-    open: 'Open',
-    completed: 'Completed',
-    pending_approval: 'Pending Approval',
-    cancelled: 'Cancelled',
-    failed: 'Failed',
-    task_unsolvable: 'Unsolvable',
-    taken_over: 'Taken over',
-  }
-  return map[status] || status
-}
-
-export interface StatusDisplay {
-  color: string
-  icon: string
-  label: string
-}
-
-export function statusDisplay(run: AgentRun): StatusDisplay {
-  const isFailed = run.Status === 'failed'
-  const isCancelled = run.Status === 'cancelled'
-  const isUnsolvable = run.Status === 'task_unsolvable'
-  const isPendingApproval = run.Status === 'pending_approval'
-  const isOpen = run.Status === 'open'
-  const active = isActiveRun(run)
-
-  const color =
-    isFailed || isCancelled
-      ? 'text-dismiss'
-      : isUnsolvable || isPendingApproval || isOpen
-        ? 'text-snooze'
-        : active
-          ? 'text-delegate'
-          : 'text-claim'
-
-  const icon = isFailed
-    ? '✗'
-    : isCancelled
-      ? '◼'
-      : isUnsolvable
-        ? '⊘'
-        : isPendingApproval
-          ? '◉'
-          : isOpen
-            ? '◌'
-            : active
-              ? '●'
-              : '✓'
-
-  return { color, icon, label: statusLabel(run.Status) }
-}
-
 export function formatDurationMs(ms: number): string {
   const seconds = Math.floor(ms / 1000)
   if (seconds < 60) return `${seconds}s`

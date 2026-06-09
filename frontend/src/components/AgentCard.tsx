@@ -101,9 +101,11 @@ export default function AgentCard({
               </span>
               <HeaderDivider />
               <Link
-                to={orgHref(`/board/runs/${run.ID}`)}
+                to={orgHref(`/runs/${run.ID}`)}
+                target="_blank"
+                rel="noopener noreferrer"
                 aria-label="Expand run details"
-                title="Open full session view"
+                title="Open full session view (new tab)"
                 className="inline-flex items-center text-text-tertiary transition-colors hover:text-text-primary"
               >
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>

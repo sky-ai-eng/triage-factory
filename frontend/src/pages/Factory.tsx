@@ -17,6 +17,7 @@ import TeamScopeSelect from '../components/TeamScopeSelect'
 import { toast } from '../components/Toast/toastStore'
 import { createIsoScene, type ClickedStationInfo, type IsoSceneHandle } from '../factory/iso-scene'
 import { useWebSocket } from '../hooks/useWebSocket'
+import { useOrgHref } from '../hooks/useOrgHref'
 import {
   useTeams,
   useTeamFilter,
@@ -514,6 +515,7 @@ function StationDrawer({ info }: { info: ClickedStationInfo | null }) {
 // dark gaming HUD.
 function StationChassis({ info }: { info: ClickedStationInfo | null }) {
   const runs = info?.runs ?? []
+  const orgHref = useOrgHref()
   // Memoized so the per-render TrayItem identities don't churn
   // useDraggable's data prop on every parent render.
   const queueItems: TrayItem[] = useMemo(
@@ -556,6 +558,8 @@ function StationChassis({ info }: { info: ClickedStationInfo | null }) {
           key: r.run.ID,
           dot: runStatusColor(r.run.Status),
           body: <RunRow run={r.run} task={r.task} />,
+          // Clicking a run opens its full-screen station page in a new tab.
+          href: orgHref(`/runs/${r.run.ID}`),
         }))}
         dropId={RUNS_DROP_ID}
       />

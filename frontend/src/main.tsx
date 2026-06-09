@@ -149,7 +149,7 @@ function LocalRoutes() {
         <Route path="/" element={<Factory />} />
         <Route path="/triage" element={<Cards />} />
         <Route path="/board" element={<Board />} />
-        <Route path="/board/runs/:runID" element={<RunDetail />} />
+        <Route path="/runs/:runID" element={<RunDetail />} />
         <Route path="/prs" element={<PRDashboard />} />
         <Route path="/prompts" element={<Prompts />} />
         <Route path="/repos" element={<Repos />} />
@@ -227,7 +227,7 @@ function MultiRoutes() {
             <Route index element={<Factory />} />
             <Route path="triage" element={<Cards />} />
             <Route path="board" element={<Board />} />
-            <Route path="board/runs/:runID" element={<RunDetail />} />
+            <Route path="runs/:runID" element={<RunDetail />} />
             <Route path="prs" element={<PRDashboard />} />
             <Route path="prompts" element={<Prompts />} />
             {/* Org-template editor (SKY-381) — multi-mode only; the page
