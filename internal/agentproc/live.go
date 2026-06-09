@@ -23,6 +23,11 @@ import (
 //	{"kind":"permission_response","request_id":"<id>","behavior":"allow"|"deny","message":"...","updated_input":{...}}
 //	{"kind":"end"}
 //
+// On an allow, updated_input optionally overrides the tool input; when
+// omitted the wrapper echoes the original input back to the SDK (its CLI
+// requires updatedInput on every allow result, so "absent" cannot mean
+// "send nothing").
+//
 // stdout (wrapper → Go): the existing SDK envelopes (system/assistant/
 // user/result) the StreamState parser already consumes, PLUS control
 // lines this reader intercepts:
@@ -42,7 +47,8 @@ type PermissionRequest struct {
 
 // PermissionDecision is the handler's answer. Behavior is "allow" or
 // "deny"; Message is the (optional) deny reason; UpdatedInput, when set
-// on an allow, replaces the tool input the agent runs with.
+// on an allow, replaces the tool input the agent runs with — nil means
+// the agent runs with its original input unchanged.
 type PermissionDecision struct {
 	Behavior     string
 	Message      string
