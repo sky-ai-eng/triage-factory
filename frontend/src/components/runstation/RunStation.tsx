@@ -506,12 +506,10 @@ function IntakePort({ light }: { light: string }) {
 function StreamShimmer({ light }: { light: string }) {
   return (
     <span
-      aria-hidden
-      className="hmi-anim pointer-events-none absolute inset-x-0 top-0 h-px overflow-hidden"
       style={{
         background: `linear-gradient(90deg, transparent, ${light} 50%, transparent)`,
         backgroundSize: '40% 100%',
-        animation: 'hmi-belt 1.6s linear infinite',
+        animation: 'hmi-sweep 1.6s linear infinite',
         backgroundRepeat: 'no-repeat',
       }}
     />
