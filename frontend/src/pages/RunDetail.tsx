@@ -187,7 +187,7 @@ export default function RunDetail() {
   }
 
   return (
-    <div className="relative h-[calc(100vh-9rem)]">
+    <div className="relative h-screen p-3">
       <GlassBackdrop />
       <TakeoverModal info={takeoverInfo} onClose={() => setTakeoverInfo(null)} />
       <ReviewOverlay
@@ -232,7 +232,7 @@ function FloorMessage({
   return (
     <div className="relative">
       <GlassBackdrop />
-      <div className="flex min-h-[60vh] flex-col items-center justify-center gap-3">
+      <div className="flex min-h-screen flex-col items-center justify-center gap-3">
         <p className={`font-mono text-[12px] tracking-wide ${tone}`}>{children}</p>
         {back && (
           <Link
