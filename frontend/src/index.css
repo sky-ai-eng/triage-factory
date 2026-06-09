@@ -473,6 +473,15 @@ body {
   }
 }
 
+/* Stream shimmer — horizontal sweep used by the intake dock. */
+@keyframes hmi-sweep {
+  from {
+    background-position: -40% 0;
+  }
+  to {
+    background-position: 140% 0;
+  }
+}
 /* Vent heat — the warm under-glow breathing as the machine runs hot. */
 @keyframes hmi-heat {
   0%,
