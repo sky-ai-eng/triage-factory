@@ -202,22 +202,29 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 			// Hard cancel: the registered ctx cancel SIGKILLed the process.
 			// Close (idempotent) and surface the ctx error so the caller routes
 			// through its cancelled path.
+			log.Printf("[steer-debug] driver run=%s ctx.Done (hard cancel): %v", park.runID, ctx.Err())
 			_ = proc.Close()
 			return liveOutcome{err: ctx.Err()}
 
 		case r := <-results:
+			log.Printf("[steer-debug] driver run=%s RESULT IsError=%v Subtype=%q StopReason=%q numTurns=%d resultLen=%d",
+				park.runID, r.IsError, r.Subtype, r.StopReason, r.NumTurns, len(r.Result))
 			// An IsError result (max-turns, interrupt, runtime error) is terminal
 			// regardless of envelope shape — hand it back; processCompletion fails
 			// it.
 			if r.IsError {
+				log.Printf("[steer-debug] driver run=%s -> TERMINAL (IsError) — closing process", park.runID)
 				_ = proc.Close()
 				return liveOutcome{result: r}
 			}
 			class, _ := classifyAgentResult(r.Result)
+			log.Printf("[steer-debug] driver run=%s class=%d (0=none,1=invalid,2=valid) keepWarmOnNone=%v invalidAttempts=%d",
+				park.runID, class, keepWarmOnNone, invalidAttempts)
 			switch class {
 			case turnValid:
 				// A valid conclusion. Close the process (freeing the session) and
 				// hand it to processCompletion to orchestrate.
+				log.Printf("[steer-debug] driver run=%s -> TERMINAL (valid conclusion)", park.runID)
 				_ = proc.Close()
 				return liveOutcome{result: r}
 
@@ -227,6 +234,7 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 					// processCompletion records the failure (a knowable error) with
 					// the totals the live process folded across the correction turns,
 					// rather than dropping them on a bare error return.
+					log.Printf("[steer-debug] driver run=%s -> TERMINAL (invalid envelope, retries exhausted)", park.runID)
 					_ = proc.Close()
 					return liveOutcome{result: r}
 				}
@@ -245,6 +253,7 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 					// Bounded resume: no idle timer would ever close a warm process,
 					// so don't loop — hand the no-conclusion result back and let
 					// processCompletion mark the run open.
+					log.Printf("[steer-debug] driver run=%s -> hand back no-conclusion (bounded resume)", park.runID)
 					_ = proc.Close()
 					return liveOutcome{result: r}
 				}
@@ -255,6 +264,7 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 				// reconcile correctly leaves alone (nothing to resume). No retry, no
 				// fail, no claim about why. Re-arm idle and loop; idle later closes
 				// the warm process (status stays open).
+				log.Printf("[steer-debug] driver run=%s -> OPEN (no conclusion), staying warm + looping", park.runID)
 				s.markRunOpen(park)
 				resetIdleTimer(idle, idleTimeout)
 			}
@@ -266,6 +276,7 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 			// Quiet past the threshold with no input to act on — park the run open
 			// to a durable resume. The status flips to open here; whether a process
 			// was warm was never a status.
+			log.Printf("[steer-debug] driver run=%s idle timeout -> park open", park.runID)
 			_ = proc.Close()
 			s.parkRunOpen(park, proc.SessionID())
 			return liveOutcome{hibernated: true}
@@ -273,6 +284,7 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 		case <-proc.Done():
 			// The process exited on its own (crash, or a Close from elsewhere).
 			// Hand back whatever terminal result was folded, else the error.
+			log.Printf("[steer-debug] driver run=%s proc.Done (process exited): err=%v", park.runID, proc.Err())
 			return liveOutcome{result: proc.Result(), err: proc.Err()}
 		}
 	}

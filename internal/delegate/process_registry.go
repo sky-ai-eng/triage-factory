@@ -175,6 +175,7 @@ func (c inProcessController) Cancel(runID string) bool {
 	c.s.mu.Lock()
 	cancel, ok := c.s.cancels[runID]
 	c.s.mu.Unlock()
+	log.Printf("[steer-debug] controller.Cancel run=%s found=%v — invoking ctx cancel (SIGKILL)", runID, ok)
 	if ok {
 		cancel()
 	}
