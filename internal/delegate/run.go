@@ -319,11 +319,12 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 				creatorUserID: creatorUserID,
 			},
 			opts: baseOpts,
-			// Autonomous run: a nil permission handler makes the wrapper omit
-			// canUseTool, so the allowlist is the sole gate (off-allowlist
-			// tools auto-deny, no prompt) — byte-identical to the headless
-			// one-shot path. P3 wires the browser pass-through handler.
-			perms:       nil,
+			// Every run surfaces off-allowlist tools to the browser as a
+			// permission_request and parks the turn until the user answers
+			// (Allow/Deny) or permTimeout() denies it — kept below idleTimeout
+			// so an unwatched run degrades to a bounded deny, never a hang. A
+			// generous allowlist keeps prompts rare.
+			perms:       s.BrowserPermissionHandler(orgID, runID),
 			sink:        sink,
 			idleTimeout: s.idleTimeout(),
 		})

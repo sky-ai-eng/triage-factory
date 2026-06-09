@@ -473,9 +473,10 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	// is interruptible/steerable), falling back to the one-shot sandbox path
 	// in multi mode. idleTimeout 0 disables hibernation AND the driver's
 	// multi-turn loop: a resume is a bounded re-invoke that drives to one
-	// terminal result, not a fresh long-lived autonomous run. A nil permission
-	// handler keeps
-	// the same allowlist-only autonomous gate as the initial run.
+	// terminal result, not a fresh long-lived autonomous run. The browser
+	// permission handler matches the initial run: an off-allowlist tool
+	// surfaces a permission_request to watchers, denied at permTimeout if
+	// unanswered.
 	var out liveOutcome
 	if agentproc.InteractiveSupported() {
 		out = s.runLiveAndDrive(ctx, liveRunSpec{
@@ -492,7 +493,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 				creatorUserID: creatorUserID,
 			},
 			opts:        baseOpts,
-			perms:       nil,
+			perms:       s.BrowserPermissionHandler(orgID, runID),
 			sink:        sink,
 			idleTimeout: 0,
 		})

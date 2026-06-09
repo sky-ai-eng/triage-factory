@@ -1,8 +1,18 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { motion, useReducedMotion } from 'motion/react'
-import { ArrowLeft, ExternalLink, Square } from 'lucide-react'
+import {
+  ArrowLeft,
+  Check,
+  ExternalLink,
+  Pause,
+  Send,
+  ShieldQuestion,
+  Square,
+  X,
+} from 'lucide-react'
 import type { AgentMessage, AgentRun, Task } from '../../types'
+import type { PendingPermission, PermissionDecisionInput } from '../../hooks/useRunDetail'
 import {
   isActiveStatus,
   isFailedStatus,
@@ -24,6 +34,12 @@ export interface StationActions {
   onRequeue?: () => void
   onReview?: () => void
   onRelease?: () => void
+  /** Steer the run with a free-form message (live process or `open` resume). */
+  onMessage?: (text: string) => void
+  /** Pause the current turn (run → open), leaving the process warm. */
+  onInterrupt?: () => void
+  /** Answer a pending tool-permission prompt. */
+  onResolvePermission?: (requestID: string, decision: PermissionDecisionInput) => void
   takeoverPending?: boolean
   releasePending?: boolean
 }
@@ -43,6 +59,9 @@ interface Props {
   now: number
   chainSteps?: AgentRun[] | null
   actions: StationActions
+  /** Unanswered tool-permission prompts, head-first. The dock renders the head
+   *  with priority and surfaces an "N more" affordance for the rest. */
+  pendingPermissions?: PendingPermission[]
 }
 
 // RunStation — the full-screen agent run as a station on the factory line. The
@@ -50,7 +69,15 @@ interface Props {
 // screen (the transcript), lit by a single state-colored emissive frame, with
 // the work running hot through it — vent heat across the top, a conveyor idling
 // at the intake edge. All flat; the depth is light, motion, and texture.
-export default function RunStation({ run, task, messages, now, chainSteps, actions }: Props) {
+export default function RunStation({
+  run,
+  task,
+  messages,
+  now,
+  chainSteps,
+  actions,
+  pendingPermissions,
+}: Props) {
   const reduce = !!useReducedMotion()
   const orgHref = useOrgHref()
   const st = stationState(run)
@@ -111,7 +138,13 @@ export default function RunStation({ run, task, messages, now, chainSteps, actio
         <TelemetryRail run={run} messages={messages} state={st} now={now} />
       </div>
 
-      <IntakeDock run={run} state={st} active={active} actions={actions} />
+      <IntakeDock
+        run={run}
+        state={st}
+        active={active}
+        actions={actions}
+        pending={pendingPermissions ?? []}
+      />
     </motion.div>
   )
 }
@@ -377,19 +410,22 @@ function VentHeat({ heat, light, live }: { heat: number; light: string; live: bo
 
 // ── Intake dock ────────────────────────────────────────────────────────────
 // The station's intake port at the base — the machine's control panel and the
-// reserved home for the P4 (TFAC-303) steering composer. Today it carries the
-// honest run status on the left and the one contextual action on the right; no
-// fake input field until the composer lands here.
+// steering surface. Three stacked regions: a permission prompt (priority, when
+// the turn is parked on a tool approval), the honest run status + contextual
+// actions, and the steering composer (for a live or `open` run). The composer is
+// suppressed while a prompt is up — you answer the prompt first.
 function IntakeDock({
   run,
   state,
   active,
   actions,
+  pending,
 }: {
   run: AgentRun
   state: ReturnType<typeof stationState>
   active: boolean
   actions: StationActions
+  pending: PendingPermission[]
 }) {
   const isPending = run.Status === 'pending_approval'
   const isHeld = run.Status === 'taken_over' && !!run.WorktreePath
@@ -399,6 +435,9 @@ function IntakeDock({
     run.Status === 'task_unsolvable' ||
     run.Status === 'completed'
   const canTakeOver = run.Status === 'running' && !!run.SessionID
+  // A run takes steering when a turn is executing or it's idle-resumable.
+  const steerable = active || run.Status === 'open'
+  const hasPrompt = pending.length > 0
 
   const sublabel = isPending
     ? run.pending_kind === 'pr'
@@ -422,8 +461,18 @@ function IntakeDock({
 
   return (
     <div className="relative z-10 shrink-0 border-t border-border-subtle px-4 py-2.5">
-      {/* P4 (TFAC-303): the steering composer mounts in this dock. */}
       {active && <StreamShimmer light={state.light} />}
+
+      {/* Permission prompt — priority: it's blocking the agent's turn. */}
+      {hasPrompt && (
+        <PermissionPrompt
+          key={pending[0].request_id}
+          prompt={pending[0]}
+          remaining={pending.length - 1}
+          onResolve={actions.onResolvePermission}
+        />
+      )}
+
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2.5">
           <IntakePort light={state.light} />
@@ -459,6 +508,16 @@ function IntakeDock({
               {actions.takeoverPending ? 'Taking over…' : 'Take over'}
             </DockButton>
           )}
+          {/* Interrupt pauses the turn (→ open); distinct from Cancel's abandon. */}
+          {active && actions.onInterrupt && (
+            <DockButton
+              tone="var(--hmi-cyan)"
+              onClick={actions.onInterrupt}
+              icon={<Pause size={11} />}
+            >
+              Pause
+            </DockButton>
+          )}
           {active && actions.onCancel && (
             <DockButton
               tone="var(--color-dismiss)"
@@ -484,8 +543,180 @@ function IntakeDock({
           )}
         </div>
       </div>
+
+      {/* Steering composer — live + `open` runs, hidden behind a pending prompt. */}
+      {steerable && !hasPrompt && actions.onMessage && (
+        <DockComposer
+          state={state}
+          placeholder={active ? 'Steer the agent…' : 'Message to resume…'}
+          onSend={actions.onMessage}
+        />
+      )}
     </div>
   )
+}
+
+// PermissionPrompt — the head of the approval queue, rendered with priority
+// because it's parking the agent's turn. Tool name + a compact input summary,
+// Deny / Allow, and an "N more" count when parallel tool calls stacked up.
+function PermissionPrompt({
+  prompt,
+  remaining,
+  onResolve,
+}: {
+  prompt: PendingPermission
+  remaining: number
+  onResolve?: (requestID: string, decision: PermissionDecisionInput) => void
+}) {
+  const tone = 'var(--color-snooze)' // amber — a blocking "your move"
+  const summary = summarizePermissionInput(prompt.tool_name, prompt.input)
+  return (
+    <div
+      className="mb-2.5 flex items-center gap-2.5 rounded-[5px] px-3 py-2"
+      style={{ background: tint(tone, 10), boxShadow: `inset 0 0 0 1px ${tint(tone, 32)}` }}
+    >
+      <ShieldQuestion size={15} className="shrink-0" style={{ color: tone }} />
+      <span
+        className="shrink-0 font-mono text-[10px] font-semibold uppercase leading-none tracking-[0.12em]"
+        style={{ color: tone }}
+      >
+        Allow {prompt.tool_name}?
+      </span>
+      {summary && (
+        <span
+          className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-text-secondary"
+          title={summary}
+        >
+          {summary}
+        </span>
+      )}
+      {!summary && <span className="min-w-0 flex-1" />}
+      {remaining > 0 && (
+        <span
+          className="shrink-0 font-mono text-[10px] tabular-nums text-text-tertiary/80"
+          title={`${remaining} more prompt${remaining === 1 ? '' : 's'} queued`}
+        >
+          +{remaining} more
+        </span>
+      )}
+      <div className="flex shrink-0 items-center gap-2">
+        <DockButton
+          tone="var(--color-dismiss)"
+          onClick={() => onResolve?.(prompt.request_id, { behavior: 'deny' })}
+          icon={<X size={11} />}
+        >
+          Deny
+        </DockButton>
+        <DockButton
+          tone="var(--color-claim)"
+          solid
+          onClick={() => onResolve?.(prompt.request_id, { behavior: 'allow' })}
+          icon={<Check size={11} />}
+        >
+          Allow
+        </DockButton>
+      </div>
+    </div>
+  )
+}
+
+// DockComposer — the steering input. An auto-resizing textarea (Enter sends,
+// Shift+Enter inserts a newline), with a send key lit in the run's state tone.
+// State is local; the sent text round-trips back as an agent_message, so there's
+// no optimistic insert here.
+function DockComposer({
+  state,
+  placeholder,
+  onSend,
+}: {
+  state: ReturnType<typeof stationState>
+  placeholder: string
+  onSend: (text: string) => void
+}) {
+  const [draft, setDraft] = useState('')
+  const ref = useRef<HTMLTextAreaElement>(null)
+
+  // Measure on every change, clamp to ~5 rows so a long draft can't swallow the
+  // screen above the dock.
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = Math.min(el.scrollHeight, 120) + 'px'
+  }, [draft])
+
+  const submit = () => {
+    const text = draft.trim()
+    if (!text) return
+    onSend(text)
+    setDraft('')
+    ref.current?.focus()
+  }
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      submit()
+    }
+  }
+
+  return (
+    <div className="mt-2.5 flex items-end gap-2 rounded-[5px] border border-border-subtle bg-black/[0.02] px-2.5 py-1.5 transition-colors focus-within:border-[color:var(--hmi-cyan)]">
+      <textarea
+        ref={ref}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={onKeyDown}
+        rows={1}
+        placeholder={placeholder}
+        aria-label="Steer the run"
+        className="flex-1 resize-none bg-transparent py-1 text-[13px] leading-relaxed text-text-primary placeholder:text-text-tertiary/70 focus:outline-none"
+      />
+      <button
+        type="button"
+        onClick={submit}
+        disabled={!draft.trim()}
+        aria-label="Send message"
+        className="mb-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[4px] transition-opacity disabled:opacity-30"
+        style={{
+          color: 'var(--hmi-screen)',
+          background: state.light,
+          boxShadow: `0 0 14px -5px ${state.light}`,
+        }}
+      >
+        <Send size={13} />
+      </button>
+    </div>
+  )
+}
+
+// summarizePermissionInput renders a compact one-line preview of a tool call's
+// input for the permission prompt — the command for Bash, the path for file
+// tools, the pattern for search, else the first short string field or a trimmed
+// JSON blob. Collapsed whitespace, capped length.
+function summarizePermissionInput(tool: string, input: Record<string, unknown>): string {
+  const str = (k: string) => (typeof input[k] === 'string' ? (input[k] as string) : '')
+  let s = ''
+  if (tool === 'Bash') s = str('command')
+  else if (tool === 'Read' || tool === 'Write' || tool === 'Edit') s = str('file_path')
+  else if (tool === 'Glob' || tool === 'Grep') s = str('pattern')
+  if (!s) {
+    for (const v of Object.values(input)) {
+      if (typeof v === 'string' && v) {
+        s = v
+        break
+      }
+    }
+  }
+  if (!s) {
+    try {
+      s = JSON.stringify(input)
+    } catch {
+      s = ''
+    }
+  }
+  s = s.replace(/\s+/g, ' ').trim()
+  return s.length > 80 ? s.slice(0, 79) + '…' : s
 }
 
 // IntakePort — a tiny socket glyph marking this as the machine's input.

@@ -1,7 +1,32 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AgentMessage, AgentRun, Task, WSEvent } from '../types'
 import { readError } from '../lib/api'
+import { toast } from '../components/Toast/toastStore'
 import { useWebSocket } from './useWebSocket'
+
+// PendingPermission is one in-flight tool-approval prompt surfaced by a run
+// (the `permission_request` WS payload). Parallel tool calls can yield more
+// than one at a time, so the hook keeps a queue keyed by request_id.
+export interface PendingPermission {
+  request_id: string
+  tool_name: string
+  input: Record<string, unknown>
+}
+
+// PermissionDecisionInput is the user's answer to a prompt — the body the
+// resolve endpoint accepts (message is an optional deny reason / note).
+export interface PermissionDecisionInput {
+  behavior: 'allow' | 'deny'
+  message?: string
+}
+
+// Client-side TTL for a surfaced permission prompt, mirroring the backend's
+// permTimeout() (= DefaultIdleHibernateTimeout/2 = 5m/2). The backend denies an
+// unanswered prompt at that bound but emits no "expired" event, so without this
+// a timed-out prompt would linger in the dock forever. The timer is a backstop:
+// a user answer (200) or an already-resolved POST (404) clears the prompt first
+// in the common case.
+const PERMISSION_TTL_MS = 150_000
 
 export interface RunDetailState {
   run: AgentRun | null
@@ -11,6 +36,11 @@ export interface RunDetailState {
   notFound: boolean
   error: string | null
   refetch: () => void
+  /** Queue of unanswered tool-permission prompts for this run, head-first. */
+  pendingPermissions: PendingPermission[]
+  /** Answer a pending prompt; clears it from the queue on a definitive
+   *  response (200 resolved, or 404 already-resolved / timed-out). */
+  resolvePermission: (requestID: string, decision: PermissionDecisionInput) => void
 }
 
 // useRunDetail loads a single agent run, its messages, and the parent
@@ -26,6 +56,7 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
   const [notFound, setNotFound] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [refetchTick, setRefetchTick] = useState(0)
+  const [pendingPermissions, setPendingPermissions] = useState<PendingPermission[]>([])
 
   const refetch = useCallback(() => setRefetchTick((n) => n + 1), [])
 
@@ -34,12 +65,57 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
   // run (reset, otherwise message IDs from two runs would interleave).
   const lastRunIDRef = useRef<string | undefined>(runID)
 
+  // Per-request TTL timers for pending permission prompts, keyed by request_id.
+  // Cleared on resolve and on unmount so a fired timer never touches a stale
+  // queue. The ref object is stable, so the unmount cleanup below can capture it.
+  const permTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+
+  // dropPermission removes one prompt from the queue and cancels its TTL timer.
+  // Stable so the WS handler and the resolver can share it without re-subscribing.
+  const dropPermission = useCallback((requestID: string) => {
+    const t = permTimers.current.get(requestID)
+    if (t) {
+      clearTimeout(t)
+      permTimers.current.delete(requestID)
+    }
+    setPendingPermissions((prev) => prev.filter((p) => p.request_id !== requestID))
+  }, [])
+
+  // resolvePermission answers a pending prompt: POST the decision, then drop it
+  // on a definitive response — 200 (resolved) or 404 (already answered, or the
+  // backend timed out and deregistered it). A transient failure (5xx / network)
+  // keeps the prompt up so the user can retry, with a toast.
+  const resolvePermission = useCallback(
+    async (requestID: string, decision: PermissionDecisionInput) => {
+      if (!runID) return
+      try {
+        const res = await fetch(`/api/agent/runs/${runID}/permissions/${requestID}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(decision),
+        })
+        if (res.ok || res.status === 404) {
+          dropPermission(requestID)
+          return
+        }
+        toast.error(await readError(res, 'Failed to answer permission request'))
+      } catch (err) {
+        toast.error(`Failed to answer permission request: ${(err as Error).message}`)
+      }
+    },
+    [runID, dropPermission],
+  )
+
   useEffect(() => {
     if (lastRunIDRef.current !== runID) {
       lastRunIDRef.current = runID
       setRun(null)
       setTask(null)
       setMessages([])
+      // A new run starts with no prompts; drop the prior run's queue + timers.
+      for (const t of permTimers.current.values()) clearTimeout(t)
+      permTimers.current.clear()
+      setPendingPermissions([])
     }
     if (!runID) {
       setLoading(false)
@@ -134,10 +210,47 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
             })
             .catch(() => {})
         }
+        if (event.type === 'permission_request' && event.run_id === runID) {
+          const req = event.data
+          setPendingPermissions((prev) => {
+            // Dedup: a request id is unique within a run process, so a replayed
+            // event (e.g. a reconnect) must not double-queue the same prompt.
+            if (prev.some((p) => p.request_id === req.request_id)) return prev
+            return [...prev, req]
+          })
+          // Arm the client-side TTL once per request (a backstop for the
+          // backend's silent timeout-deny).
+          if (!permTimers.current.has(req.request_id)) {
+            permTimers.current.set(
+              req.request_id,
+              setTimeout(() => dropPermission(req.request_id), PERMISSION_TTL_MS),
+            )
+          }
+        }
       },
-      [runID],
+      [runID, dropPermission],
     ),
   )
 
-  return { run, task, messages, loading, notFound, error, refetch }
+  // Clear all TTL timers on unmount so a fired timer can't touch a torn-down
+  // component. The ref object is stable, so capturing it here is safe.
+  useEffect(() => {
+    const timers = permTimers.current
+    return () => {
+      for (const t of timers.values()) clearTimeout(t)
+      timers.clear()
+    }
+  }, [])
+
+  return {
+    run,
+    task,
+    messages,
+    loading,
+    notFound,
+    error,
+    refetch,
+    pendingPermissions,
+    resolvePermission,
+  }
 }

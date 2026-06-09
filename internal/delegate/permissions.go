@@ -6,10 +6,10 @@
 // broker (s.permPending) is in-memory only and keyed by the SDK-generated
 // request id.
 //
-// NOTE: the runLiveAndDrive call sites still pass perms:nil, so this handler is
-// dormant — no production run uses it yet. It's wired in (with the browser UI
-// that renders the prompt) in a follow-up; shipping the round-trip now keeps
-// that change to the call sites alone.
+// Both runLiveAndDrive call sites (the initial run and the resume) pass this
+// handler, so every run surfaces off-allowlist tools to the browser; the
+// RunStation dock renders the prompt and posts the answer back through
+// ResolvePermission.
 
 package delegate
 

@@ -15,6 +15,7 @@ interface Props {
 // actually has — no faked context meter (that arrives with P4's telemetry).
 export function TelemetryRail({ run, messages, state, now }: Props) {
   const tok = tokenTotals(messages)
+  const contextUsed = latestContextSize(messages)
   const started = run.StartedAt ? new Date(run.StartedAt) : null
   const duration =
     run.DurationMs != null && run.DurationMs > 0
@@ -35,6 +36,16 @@ export function TelemetryRail({ run, messages, state, now }: Props) {
           </div>
         )}
       </Section>
+
+      {/* Context — how full the model's window is, from the last prompt it
+          processed. Real token data (last-known for a dormant/terminal run);
+          the section is omitted entirely when no message carries usage yet, so
+          the rail never shows a faked bar. */}
+      {contextUsed != null && (
+        <Section label="Context">
+          <ContextGauge used={contextUsed} limit={contextLimit(run.Model)} light={state.light} />
+        </Section>
+      )}
 
       {/* Run figures */}
       <Section label="Run">
@@ -125,6 +136,32 @@ function TokenGauge({ input, output, light }: { input: number; output: number; l
   )
 }
 
+// ContextGauge — a single fill bar for how much of the model's context window
+// the last processed prompt occupied. The fill shifts to the dismiss tone as it
+// crowds the window, so a long run reads "getting tight" at a glance.
+function ContextGauge({ used, limit, light }: { used: number; limit: number; light: string }) {
+  const pct = Math.min(100, (used / limit) * 100)
+  const fill = pct >= 85 ? 'var(--color-dismiss)' : light
+  return (
+    <div>
+      <div className="mb-1.5 flex items-baseline justify-between font-mono text-[11px] tabular-nums">
+        <span className="text-text-tertiary/80">
+          {compactNum(used)} / {compactNum(limit)}
+        </span>
+        <span className="font-semibold" style={{ color: fill }}>
+          {Math.round(pct)}%
+        </span>
+      </div>
+      <div className="h-1.5 overflow-hidden rounded-full bg-black/[0.06]">
+        <span
+          className="block h-full rounded-full"
+          style={{ width: `${pct}%`, background: fill, boxShadow: `0 0 8px ${tint(fill, 70)}` }}
+        />
+      </div>
+    </div>
+  )
+}
+
 function Readout({
   k,
   v,
@@ -149,6 +186,29 @@ function Readout({
       </span>
     </div>
   )
+}
+
+// latestContextSize returns the prompt size (input + cache read + cache
+// creation) of the most recent message carrying token usage — the size the
+// model last processed. Trailing usage-less rows (tool results, the user's own
+// message) are skipped; null when no message has usage yet (render nothing).
+function latestContextSize(messages: AgentMessage[]): number | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    const size = (m.InputTokens ?? 0) + (m.CacheReadTokens ?? 0) + (m.CacheCreationTokens ?? 0)
+    if (size > 0) return size
+  }
+  return null
+}
+
+// contextLimit maps a model id to its context-window size in tokens. The Claude
+// families are 200k; the 1M-context variants (Sonnet's [1m] beta) are
+// 1,000,000. Anything unrecognized falls back to 200k — every current Claude
+// model.
+function contextLimit(model: string): number {
+  const m = (model || '').toLowerCase()
+  if (m.includes('[1m]') || /\b1m\b/.test(m)) return 1_000_000
+  return 200_000
 }
 
 // shortModel trims a verbose model id to its readable family/version, e.g.
