@@ -185,7 +185,7 @@ function buildRows(messages: AgentMessage[], run: AgentRun): React.ReactNode[] {
       for (const tc of msg.ToolCalls) {
         rows.push(
           <ScreenRow key={`c-${tc.id}`} time={time}>
-            <ToolLine call={tc} result={toolResults.get(tc.id)} />
+            <ToolLine call={tc} result={toolResults.get(tc.id)} worktree={run.WorktreePath} />
           </ScreenRow>,
         )
       }
@@ -217,11 +217,24 @@ function ScreenRow({ time, children }: { time: string; children: React.ReactNode
 
 // ToolLine — a tool call as a machine log entry: cyan tool tag + headline, the
 // input/result expandable beneath.
-function ToolLine({ call, result }: { call: ToolCall; result?: AgentMessage }) {
+function ToolLine({
+  call,
+  result,
+  worktree,
+}: {
+  call: ToolCall
+  result?: AgentMessage
+  worktree?: string
+}) {
   const [open, setOpen] = useState(false)
-  const headline = headlineForToolCall(call)
-  const inputJson = useMemo(() => safeJsonStringify(call.input), [call.input])
-  const resultText = result?.Content ?? ''
+  // Collapse the agent's absolute worktree paths to worktree-relative ones
+  // everywhere they show up — the headline, the input args, and the output.
+  const headline = stripWorktree(headlineForToolCall(call), worktree)
+  const inputJson = useMemo(
+    () => stripWorktree(safeJsonStringify(call.input), worktree),
+    [call.input, worktree],
+  )
+  const resultText = stripWorktree(result?.Content ?? '', worktree)
   const isError = !!result?.IsError
   const long = resultText.length > 400
 
@@ -424,4 +437,28 @@ function safeJsonStringify(v: unknown): string {
   } catch {
     return String(v)
   }
+}
+
+// stripWorktree collapses the agent's absolute worktree paths down to paths
+// relative to the run's worktree root, so the transcript shows
+// "frontend/src/index.css" instead of the
+// /private/var/folders/.../triagefactory-runs/<id>/frontend/src/index.css
+// mouthful. It runs over arbitrary strings (bash commands, JSON args, output),
+// not just structured file_path fields, since paths are embedded inside
+// commands. macOS resolves the temp root through the /private symlink, so the
+// agent's paths may carry a /private prefix the stored worktree path omits (or
+// vice versa) — we match both, longest first so the /private form is consumed
+// before the bare path it contains.
+function stripWorktree(text: string, worktree?: string): string {
+  if (!worktree || !text) return text
+  const wt = worktree.replace(/\/+$/, '')
+  const bare = wt.startsWith('/private/') ? wt.slice('/private'.length) : wt
+  const variants = Array.from(new Set([`/private${bare}`, wt, bare])).sort(
+    (a, b) => b.length - a.length,
+  )
+  let out = text
+  for (const v of variants) {
+    out = out.split(`${v}/`).join('').split(v).join('.')
+  }
+  return out
 }
