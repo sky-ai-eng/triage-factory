@@ -15,8 +15,7 @@ import { readError } from '../lib/api'
 // RunDetail — the data shell for the full-screen run station. It loads the run +
 // task + messages (live over websocket via useRunDetail), wires the real
 // actions (takeover, cancel, requeue, review/PR approval, keyboard shortcuts),
-// and hands it all to <RunStation>, which owns every pixel. The station is
-// prop-driven so the same machine renders here and in the mock demo harness.
+// and hands it all to <RunStation>, which owns every pixel.
 export default function RunDetail() {
   const { runID } = useParams<{ runID: string }>()
   const navigate = useNavigate()
