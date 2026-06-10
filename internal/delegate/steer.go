@@ -12,7 +12,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 )
 
 // ErrRunNotSteerable is returned by SendMessage when a run can take no message
@@ -37,7 +36,6 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text st
 	// A warm process is steered in place — getProc is the liveness gate, so the
 	// server stays out of s.procs entirely by routing through here.
 	if s.getProc(runID) != nil {
-		log.Printf("[steer-debug] SendMessage run=%s -> live process found, STEER in place", runID)
 		return s.Steer(ctx, runID, text)
 	}
 	// No warm process: only an `open` run can be woken. GetSystem is scoped by
@@ -52,13 +50,7 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text st
 		return fmt.Errorf("load run: %w", err)
 	}
 	if run == nil || run.Status != "open" {
-		st := "<nil run>"
-		if run != nil {
-			st = run.Status
-		}
-		log.Printf("[steer-debug] SendMessage run=%s -> NOT steerable (no live process; status=%s)", runID, st)
 		return ErrRunNotSteerable
 	}
-	log.Printf("[steer-debug] SendMessage run=%s -> no live process, status=open, RESUME", runID)
 	return s.ResumeOpenRun(orgID, runID, text, userID)
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 
@@ -199,7 +198,6 @@ func (ag *agentHandler) handleAgentMessage(w http.ResponseWriter, r *http.Reques
 	// the row id carried back onto msg.ID for the broadcast's client dedup).
 	msg := &domain.AgentMessage{RunID: runID, Role: "user", Subtype: "text", Content: body.Text}
 	var runExists bool
-	var runStatus string
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		run, e := tx.AgentRuns.Get(r.Context(), orgID, runID)
 		if e != nil {
@@ -209,7 +207,6 @@ func (ag *agentHandler) handleAgentMessage(w http.ResponseWriter, r *http.Reques
 			return nil
 		}
 		runExists = true
-		runStatus = run.Status
 		id, e := tx.AgentRuns.InsertMessage(r.Context(), orgID, msg)
 		if e != nil {
 			return e
@@ -224,7 +221,6 @@ func (ag *agentHandler) handleAgentMessage(w http.ResponseWriter, r *http.Reques
 		notFound(w, "run")
 		return
 	}
-	log.Printf("[steer-debug] handleAgentMessage run=%s status=%s text=%dB -> SendMessage", runID, runStatus, len(body.Text))
 	ag.ws.Broadcast(websocket.Event{
 		Type:  "agent_message",
 		OrgID: orgID,
@@ -233,11 +229,9 @@ func (ag *agentHandler) handleAgentMessage(w http.ResponseWriter, r *http.Reques
 	})
 
 	if err := spawner.SendMessage(r.Context(), orgID, runID, userID, body.Text); err != nil {
-		log.Printf("[steer-debug] handleAgentMessage run=%s SendMessage error: %v", runID, err)
 		writeJSON(w, steerErrorStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
-	log.Printf("[steer-debug] handleAgentMessage run=%s SendMessage OK (status=sent)", runID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
 }
 

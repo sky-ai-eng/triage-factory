@@ -213,11 +213,6 @@ func (l *LiveRun) Send(ctx context.Context, text string) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	preview := text
-	if len(preview) > 50 {
-		preview = preview[:50] + "…"
-	}
-	log.Printf("[steer-debug] LiveRun.Send user_message (len=%d): %q", len(text), preview)
 	return l.writeControl(map[string]any{"kind": "user_message", "text": text})
 }
 
@@ -403,7 +398,6 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 					// label it so callers can tell an interrupt apart
 					// from a natural end even if the SDK omits the
 					// error_during_execution subtype.
-					log.Printf("[steer-debug] reader run=%s control/interrupted received (interruptPending=true)", traceID)
 					interruptPending = true
 				case "permission_request":
 					l.handlePermission(ctl, perms)
@@ -435,8 +429,6 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 				}
 
 				if result != nil {
-					log.Printf("[steer-debug] reader run=%s parsed RESULT IsError=%v Subtype=%q StopReason=%q numTurns=%d interruptPending=%v",
-						traceID, result.IsError, result.Subtype, result.StopReason, result.NumTurns, interruptPending)
 					if interruptPending {
 						// This result closes the turn our interrupt() ended.
 						// parseResult already marks Interrupted from the SDK's
