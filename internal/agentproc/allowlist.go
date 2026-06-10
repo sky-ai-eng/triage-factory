@@ -115,6 +115,15 @@ func BuildAllowedTools(selfBin string) string {
 		"Bash(git -C * tag)", "Bash(git -C * tag *)",
 		"Bash(git worktree *)", "Bash(git -C * worktree *)",
 
+		// Shell navigation. `cd` executes nothing and moves only the
+		// persistent shell's cwd — every other subcommand in a compound
+		// still has to match this allowlist on its own, and the file
+		// tools' path checks don't consult cwd. Without it the Jira
+		// multi-repo flow (`<selfBin> exec workspace add` checks each
+		// repo out one level below the run root) trips an approval
+		// prompt on the natural `cd owner/repo && git status` follow-up.
+		"Bash(cd *)",
+
 		// File inspection - read-only. Keep these non-interactive in headless
 		// runs; use cat/head/tail instead of pagers like less/more.
 		"Bash(cat *)", "Bash(head *)", "Bash(tail *)",
