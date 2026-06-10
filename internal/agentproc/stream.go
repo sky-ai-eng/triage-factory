@@ -136,7 +136,19 @@ func (s *StreamState) handleAssistant(raw map[string]any, traceID string) []*dom
 
 		switch b["type"] {
 		case "thinking":
-			// Skip — too verbose to store.
+			// Reasoning surfaces as its own message row, emitted immediately
+			// so it lands ahead of the text/tool_use siblings that accumulate
+			// on s.current (same assistant message, flushed later) — matching
+			// the order the blocks were produced in.
+			if t, _ := b["thinking"].(string); t != "" {
+				flushed = append(flushed, &domain.AgentMessage{
+					RunID:   traceID,
+					Role:    "assistant",
+					Subtype: "thinking",
+					Content: t,
+					Model:   s.current.Model,
+				})
+			}
 
 		case "text":
 			text, _ := b["text"].(string)

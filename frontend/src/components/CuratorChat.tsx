@@ -426,10 +426,12 @@ function RequestBlock({
   linkifyCtx: LinkifyContext
   isLatest: boolean
 }) {
-  // Filter out hidden context-change audit rows. They exist on the
-  // server side to inform the agent's next turn, not the user.
+  // Filter out hidden context-change audit rows (server-side anchors for
+  // the agent's next turn) and reasoning rows — the chat shows the
+  // curator's answers, not its interior monologue.
   const visibleMessages = useMemo(
-    () => request.messages.filter((m) => m.subtype !== 'context_change'),
+    () =>
+      request.messages.filter((m) => m.subtype !== 'context_change' && m.subtype !== 'thinking'),
     [request.messages],
   )
 

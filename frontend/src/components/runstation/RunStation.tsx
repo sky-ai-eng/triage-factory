@@ -22,6 +22,7 @@ import {
 } from '../../lib/runStatus'
 import { EventTag, SourceTag } from '../board/cardChrome'
 import { STEP_VAR, type StepState } from '../board/cardStyle'
+import { stripWorktree } from '../../lib/worktree'
 import ScreenTranscript from './ScreenTranscript'
 import { TelemetryRail } from './StationInstruments'
 import { liveHeat, stationState, tint } from './stationStyle'
@@ -469,6 +470,7 @@ function IntakeDock({
           key={pending[0].request_id}
           prompt={pending[0]}
           remaining={pending.length - 1}
+          worktree={run.WorktreePath}
           onResolve={actions.onResolvePermission}
         />
       )}
@@ -562,14 +564,19 @@ function IntakeDock({
 function PermissionPrompt({
   prompt,
   remaining,
+  worktree,
   onResolve,
 }: {
   prompt: PendingPermission
   remaining: number
+  worktree?: string
   onResolve?: (requestID: string, decision: PermissionDecisionInput) => void
 }) {
   const tone = 'var(--color-snooze)' // amber — a blocking "your move"
-  const summary = summarizePermissionInput(prompt.tool_name, prompt.input)
+  // Worktree-relative paths, same as the transcript — but always the real
+  // command/input, never the agent's description: this is a security
+  // decision, so the user approves what will run, not what the agent says.
+  const summary = stripWorktree(summarizePermissionInput(prompt.tool_name, prompt.input), worktree)
   return (
     <div
       className="mb-2.5 flex items-center gap-2.5 rounded-[5px] px-3 py-2"

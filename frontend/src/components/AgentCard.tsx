@@ -273,6 +273,9 @@ function feedLines(messages: AgentMessage[]): FeedLine[] {
     if (msg.Role !== 'assistant') continue
     // Skip the raw JSON completion message (the agent's structured output).
     if (msg.Content && msg.Content.trimStart().startsWith('{"status":')) continue
+    // Reasoning stays off the ticker — it's a verbose stream; the expanded
+    // run view renders it under its own THINKING rows.
+    if (msg.Subtype === 'thinking') continue
     if (msg.Content) out.push({ id: `txt-${msg.ID}`, time, text: clip(msg.Content, 70) })
     if (msg.ToolCalls?.length) {
       for (const tc of msg.ToolCalls) {
@@ -382,6 +385,10 @@ function chainStepStates(
 
 function formatToolCall(name: string, input: Record<string, unknown>): string {
   if (name === 'Bash') {
+    // Prefer the agent-authored description — the human-readable intent.
+    // The curated exec mappings below cover description-less internal calls.
+    const desc = String(input.description || '')
+    if (desc) return desc
     const cmd = String(input.command || '')
     if (cmd.includes('triagefactory exec gh pr view')) return 'Fetching PR details'
     if (cmd.includes('triagefactory exec gh pr diff') && cmd.includes('--file'))

@@ -3,6 +3,7 @@ import Markdown from 'react-markdown'
 import { Check, Copy } from 'lucide-react'
 import type { AgentMessage, AgentRun, ToolCall } from '../../types'
 import { isActiveRun } from '../../lib/runStatus'
+import { stripWorktree } from '../../lib/worktree'
 import { toast } from '../Toast/toastStore'
 import { stationState } from './stationStyle'
 
@@ -170,6 +171,19 @@ function buildRows(messages: AgentMessage[], run: AgentRun): React.ReactNode[] {
     if (msg.Content && msg.Content.trimStart().startsWith('{"status":')) continue
     const time = clockTime(msg.CreatedAt)
 
+    // Reasoning gets its own quiet row — dim italic under a THINKING tag —
+    // so it reads as the agent's interior voice, distinct from prose output.
+    if (msg.Subtype === 'thinking') {
+      if (msg.Content) {
+        rows.push(
+          <ScreenRow key={`th-${msg.ID}`} time={time}>
+            <ThinkingLine text={msg.Content} />
+          </ScreenRow>,
+        )
+      }
+      continue
+    }
+
     if (msg.Content) {
       rows.push(
         <ScreenRow key={`t-${msg.ID}`} time={time}>
@@ -213,6 +227,41 @@ function ScreenRow({ time, children }: { time: string; children: React.ReactNode
         {time}
       </span>
       <div className="min-w-0 flex-1">{children}</div>
+    </div>
+  )
+}
+
+// ThinkingLine — the agent's reasoning, kept quiet on the screen: dim italic
+// ink under a small THINKING tag, clamped to a few lines until toggled open.
+function ThinkingLine({ text }: { text: string }) {
+  const [open, setOpen] = useState(false)
+  const long = text.length > 320
+  return (
+    <div>
+      <div className="mb-0.5 flex items-center gap-2">
+        <span
+          className="font-mono text-[9px] font-semibold uppercase tracking-[0.16em]"
+          style={{ color: 'var(--hmi-ink-dim)' }}
+        >
+          thinking
+        </span>
+        {long && (
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            className="font-mono text-[9px] uppercase tracking-wider hover:underline"
+            style={{ color: 'var(--hmi-cyan)' }}
+          >
+            {open ? 'less' : 'more'}
+          </button>
+        )}
+      </div>
+      <div
+        className={`whitespace-pre-wrap text-[12px] italic leading-relaxed ${open ? '' : 'line-clamp-3'}`}
+        style={{ color: 'var(--hmi-ink-dim)' }}
+      >
+        {text}
+      </div>
     </div>
   )
 }
@@ -424,7 +473,9 @@ function clockTime(iso: string): string {
 
 function headlineForToolCall(call: ToolCall): string {
   const input = call.input || {}
-  if (call.name === 'Bash') return String(input.command || '(no command)')
+  // Bash: prefer the agent-authored description — the human-readable intent.
+  // The raw command stays one click away in the expanded IN pane.
+  if (call.name === 'Bash') return String(input.description || input.command || '(no command)')
   if (call.name === 'Read' || call.name === 'Write' || call.name === 'Edit')
     return String(input.file_path || '(no path)')
   if (call.name === 'Glob') return String(input.pattern || '(no pattern)')
@@ -442,28 +493,4 @@ function safeJsonStringify(v: unknown): string {
   } catch {
     return String(v)
   }
-}
-
-// stripWorktree collapses the agent's absolute worktree paths down to paths
-// relative to the run's worktree root, so the transcript shows
-// "frontend/src/index.css" instead of the
-// /private/var/folders/.../triagefactory-runs/<id>/frontend/src/index.css
-// mouthful. It runs over arbitrary strings (bash commands, JSON args, output),
-// not just structured file_path fields, since paths are embedded inside
-// commands. macOS resolves the temp root through the /private symlink, so the
-// agent's paths may carry a /private prefix the stored worktree path omits (or
-// vice versa) — we match both, longest first so the /private form is consumed
-// before the bare path it contains.
-function stripWorktree(text: string, worktree?: string): string {
-  if (!worktree || !text) return text
-  const wt = worktree.replace(/\/+$/, '')
-  const bare = wt.startsWith('/private/') ? wt.slice('/private'.length) : wt
-  const variants = Array.from(new Set([`/private${bare}`, wt, bare])).sort(
-    (a, b) => b.length - a.length,
-  )
-  let out = text
-  for (const v of variants) {
-    out = out.split(`${v}/`).join('').split(v).join('.')
-  }
-  return out
 }

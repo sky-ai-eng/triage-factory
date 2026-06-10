@@ -46,6 +46,28 @@ func TestParseLine_CaptureSessionAndAccumulate(t *testing.T) {
 	}
 }
 
+// TestParseLine_ThinkingEmitsOwnMessage pins that a thinking block becomes
+// its own subtype:"thinking" message, emitted immediately — ahead of the
+// text sibling that accumulates on the shared assistant message and only
+// flushes on stop_reason.
+func TestParseLine_ThinkingEmitsOwnMessage(t *testing.T) {
+	s := NewStreamState()
+	msgs, _ := s.ParseLine([]byte(`{"type":"assistant","message":{"id":"m1","model":"sonnet","content":[{"type":"thinking","thinking":"let me reason"}]}}`), "t")
+	if len(msgs) != 1 {
+		t.Fatalf("expected immediate thinking message; got %d msgs", len(msgs))
+	}
+	th := msgs[0]
+	if th.Role != "assistant" || th.Subtype != "thinking" || th.Content != "let me reason" || th.Model != "sonnet" {
+		t.Errorf("thinking message wrong shape: %+v", th)
+	}
+
+	s.ParseLine([]byte(`{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"answer"}]}}`), "t")
+	flushed, _ := s.ParseLine([]byte(`{"type":"assistant","message":{"id":"m1","stop_reason":"end_turn","content":[]}}`), "t")
+	if len(flushed) != 1 || flushed[0].Subtype != "text" || flushed[0].Content != "answer" {
+		t.Fatalf("text sibling should flush separately after thinking; got %+v", flushed)
+	}
+}
+
 func TestParseLine_ToolUseAndToolResult(t *testing.T) {
 	s := NewStreamState()
 	// Tool use inside assistant turn.
