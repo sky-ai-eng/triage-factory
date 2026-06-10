@@ -9,6 +9,7 @@ package agentproc
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -200,6 +201,28 @@ func parseToolResult(raw map[string]any, traceID string) *domain.AgentMessage {
 	toolUseID, _ := b["tool_use_id"].(string)
 	isError, _ := b["is_error"].(bool)
 
+	// tool_result content arrives either as a plain string or as a block
+	// array ([{type:"text",text:...}, ...]); flatten the text blocks so the
+	// array form doesn't store an empty result.
+	if content == "" {
+		if blocks, ok := b["content"].([]any); ok {
+			var sb strings.Builder
+			for _, bl := range blocks {
+				m, ok := bl.(map[string]any)
+				if !ok || m["type"] != "text" {
+					continue
+				}
+				if t, _ := m["text"].(string); t != "" {
+					if sb.Len() > 0 {
+						sb.WriteString("\n")
+					}
+					sb.WriteString(t)
+				}
+			}
+			content = sb.String()
+		}
+	}
+
 	if content == "" {
 		if r, ok := raw["tool_use_result"].(string); ok {
 			content = r
@@ -233,6 +256,19 @@ type Result struct {
 	// uses "error_during_execution" to corroborate that a turn ended
 	// because the bridge called interrupt().
 	Subtype string
+
+	// Interrupted marks a turn that ended by interruption rather than
+	// completion. Primary source: the result's terminal_reason field
+	// ("aborted_streaming" / "aborted_tools") — the SDK's native marker;
+	// an interrupted turn deliberately rides an is_error /
+	// error_during_execution result, shape-identical to a runtime error,
+	// and terminal_reason is what distinguishes it. The interactive
+	// reader additionally sets this when the wrapper acks
+	// control/interrupted ahead of the result, corroborating the same
+	// signal for any path that omits terminal_reason. Consumers (the
+	// delegate driver) treat an interrupted turn as a pause, not a
+	// failure.
+	Interrupted bool
 }
 
 func parseResult(raw map[string]any) *Result {
@@ -250,6 +286,9 @@ func parseResult(raw map[string]any) *Result {
 	rc.StopReason, _ = raw["stop_reason"].(string)
 	rc.Result, _ = raw["result"].(string)
 	rc.Subtype, _ = raw["subtype"].(string)
+	if tr, _ := raw["terminal_reason"].(string); tr == "aborted_streaming" || tr == "aborted_tools" {
+		rc.Interrupted = true
+	}
 	return rc
 }
 

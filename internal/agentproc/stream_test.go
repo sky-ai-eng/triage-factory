@@ -151,3 +151,49 @@ func TestParseLine_IgnoresMalformedJSON(t *testing.T) {
 		t.Errorf("malformed line should be silently dropped; got msgs=%v res=%v", msgs, res)
 	}
 }
+
+// TestParseLine_ToolResultBlockArrayContent pins the block-array form of
+// tool_result content ([{type:"text",...}]) observed from the SDK stream —
+// it must flatten to text rather than store an empty result.
+func TestParseLine_ToolResultBlockArrayContent(t *testing.T) {
+	s := NewStreamState()
+	out, _ := s.ParseLine([]byte(`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"c1","content":[{"type":"text","text":"line one"},{"type":"text","text":"line two"}]}]}}`), "t")
+	if len(out) != 1 {
+		t.Fatalf("expected 1 tool message, got %d", len(out))
+	}
+	if out[0].Content != "line one\nline two" {
+		t.Errorf("content = %q, want flattened text blocks", out[0].Content)
+	}
+	if out[0].ToolCallID != "c1" {
+		t.Errorf("tool_call_id = %q, want c1", out[0].ToolCallID)
+	}
+}
+
+// TestParseLine_TerminalReasonMarksInterrupted pins the native interrupt
+// marker: the SDK reports an interrupted turn as an is_error /
+// error_during_execution result (deliberately shape-identical to a runtime
+// error) carrying terminal_reason aborted_streaming / aborted_tools — that
+// field, not the subtype, is what distinguishes a pause from a failure.
+func TestParseLine_TerminalReasonMarksInterrupted(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{"aborted_streaming", `{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"terminal_reason":"aborted_streaming"}`, true},
+		{"aborted_tools", `{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"terminal_reason":"aborted_tools"}`, true},
+		{"max_turns is not an interrupt", `{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":1,"terminal_reason":"max_turns"}`, false},
+		{"absent terminal_reason", `{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, res := NewStreamState().ParseLine([]byte(tc.line), "t")
+			if res == nil {
+				t.Fatal("expected Result")
+			}
+			if res.Interrupted != tc.want {
+				t.Errorf("Interrupted = %v, want %v", res.Interrupted, tc.want)
+			}
+		})
+	}
+}

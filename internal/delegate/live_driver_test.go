@@ -415,3 +415,82 @@ func TestDriveLiveRun_NoneFlipsStatusOpen(t *testing.T) {
 		t.Errorf("status = %q, want open (a no-conclusion turn flips the run open)", status)
 	}
 }
+
+// TestDriveLiveRun_InterruptParksOpenNotTerminal pins the pause semantics: a
+// result the reader marked Interrupted (our own interrupt() ended the turn)
+// is a pause, not a failure — the run flips open, the process stays warm, and
+// the driver keeps consuming turns. The follow-up valid conclusion proves the
+// loop survived the pause.
+func TestDriveLiveRun_InterruptParksOpenNotTerminal(t *testing.T) {
+	database := newTakeoverTestDB(t)
+	seedRun(t, database, "r-pause", "sess-pause", "/tmp/wt-pause")
+	if _, err := database.Exec(`UPDATE runs SET status='running' WHERE id='r-pause'`); err != nil {
+		t.Fatalf("set running: %v", err)
+	}
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6", "")
+
+	var taskID string
+	if err := database.QueryRow(`SELECT task_id FROM runs WHERE id='r-pause'`).Scan(&taskID); err != nil {
+		t.Fatalf("read task_id: %v", err)
+	}
+	proc := newFakeLiveProc("sess-pause")
+
+	results := make(chan *agentproc.Result, 8)
+	results <- &agentproc.Result{IsError: true, Subtype: "error_during_execution", Interrupted: true}
+	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
+	results <- want
+	park := liveParkContext{
+		orgID: runmode.LocalDefaultOrg, runID: "r-pause", taskID: taskID,
+		namespace: "seedbpr-r-pause", claudeCwd: "/tmp/wt-pause",
+		triggerType: "manual", creatorUserID: runmode.LocalDefaultUserID,
+	}
+
+	out := s.driveLiveRun(context.Background(), park, proc, results, make(chan struct{}), time.Minute)
+	if out.result != want {
+		t.Fatalf("result = %+v, want the valid conclusion after the pause (pause must not be terminal)", out.result)
+	}
+	var status string
+	if err := database.QueryRow(`SELECT status FROM runs WHERE id='r-pause'`).Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status != "open" {
+		t.Errorf("status = %q, want open (the paused turn flips the run open)", status)
+	}
+}
+
+// TestDriveLiveRun_ErrorWithoutInterruptStaysTerminal pins the inverse: the
+// same is_error/error_during_execution shape with NO pause in flight is a
+// genuine failure and stays terminal.
+func TestDriveLiveRun_ErrorWithoutInterruptStaysTerminal(t *testing.T) {
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	proc := newFakeLiveProc("sess-err")
+	results := make(chan *agentproc.Result, 1)
+	r := &agentproc.Result{IsError: true, Subtype: "error_during_execution"}
+	results <- r
+
+	out := s.driveLiveRun(context.Background(), liveParkContext{orgID: runmode.LocalDefaultOrg, runID: "r-err"}, proc, results, make(chan struct{}), time.Minute)
+	if out.result != r {
+		t.Fatalf("expected the error result back, got %+v", out)
+	}
+	if !proc.wasClosed() {
+		t.Error("a terminal error should close the process")
+	}
+}
+
+// TestDriveLiveRun_InterruptBoundedResumeParksOpen: pausing during a bounded
+// resume (no idle timer) can't loop — the driver closes the process and parks
+// the run open to a durable resume.
+func TestDriveLiveRun_InterruptBoundedResumeParksOpen(t *testing.T) {
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	proc := newFakeLiveProc("sess-bounded")
+
+	results := make(chan *agentproc.Result, 1)
+	results <- &agentproc.Result{IsError: true, Subtype: "error_during_execution", Interrupted: true}
+	out := s.driveLiveRun(context.Background(), liveParkContext{orgID: runmode.LocalDefaultOrg, runID: "r-bounded"}, proc, results, make(chan struct{}), 0)
+	if !out.hibernated {
+		t.Fatalf("bounded-resume pause should park open (hibernated), got %+v", out)
+	}
+	if !proc.wasClosed() {
+		t.Error("bounded-resume pause should close the process")
+	}
+}

@@ -438,6 +438,13 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 					log.Printf("[steer-debug] reader run=%s parsed RESULT IsError=%v Subtype=%q StopReason=%q numTurns=%d interruptPending=%v",
 						traceID, result.IsError, result.Subtype, result.StopReason, result.NumTurns, interruptPending)
 					if interruptPending {
+						// This result closes the turn our interrupt() ended.
+						// parseResult already marks Interrupted from the SDK's
+						// native terminal_reason; this corroborates it from the
+						// wrapper's control/interrupted ack — same goroutine as
+						// the result, so the pairing can't desync — covering any
+						// path that omits terminal_reason.
+						result.Interrupted = true
 						if result.Subtype == "" {
 							result.Subtype = "error_during_execution"
 						}

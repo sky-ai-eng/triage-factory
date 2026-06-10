@@ -1,6 +1,7 @@
 package agentproc
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -69,5 +70,39 @@ func TestLiveRunClose_ReturnsErrWhenDrained(t *testing.T) {
 	}
 	if canceled {
 		t.Error("Close should not SIGKILL when the run drains gracefully")
+	}
+}
+
+// TestConsumeStreamInteractive_InterruptMarksResult pins the reader-side
+// interrupt labeling: the wrapper's control/interrupted ack marks the NEXT
+// result as Interrupted (the SDK has no native subtype for interrupts — the
+// turn is wire-labeled is_error/error_during_execution, shape-identical to a
+// real runtime error), and only that one — a later result is unmarked. The
+// merged accounting result keeps the flag sticky (MergeResult), recording
+// that an interrupt happened somewhere in the conversation.
+func TestConsumeStreamInteractive_InterruptMarksResult(t *testing.T) {
+	input := strings.Join([]string{
+		`{"type":"control","subtype":"interrupted"}`,
+		`{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1}`,
+		`{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"ok"}`,
+	}, "\n") + "\n"
+
+	var got []*Result
+	l := &LiveRun{ready: make(chan struct{}), done: make(chan struct{})}
+	merged, err := l.consumeStreamInteractive(strings.NewReader(input), NoopSink{}, NewStreamState(), nil, func(r *Result) { got = append(got, r) }, "t")
+	if err != nil {
+		t.Fatalf("consumeStreamInteractive: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 per-turn results, got %d", len(got))
+	}
+	if !got[0].Interrupted {
+		t.Error("the result after control/interrupted must be marked Interrupted")
+	}
+	if got[1].Interrupted {
+		t.Error("a later result must not inherit the interrupt mark")
+	}
+	if merged == nil || !merged.Interrupted {
+		t.Error("merged accounting result should keep Interrupted sticky")
 	}
 }

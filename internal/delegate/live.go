@@ -209,9 +209,31 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 		case r := <-results:
 			log.Printf("[steer-debug] driver run=%s RESULT IsError=%v Subtype=%q StopReason=%q numTurns=%d resultLen=%d",
 				park.runID, r.IsError, r.Subtype, r.StopReason, r.NumTurns, len(r.Result))
-			// An IsError result (max-turns, interrupt, runtime error) is terminal
-			// regardless of envelope shape — hand it back; processCompletion fails
-			// it.
+			// A turn we interrupted ourselves is a pause, not a failure. The SDK
+			// wire-labels it is_error/error_during_execution — shape-identical
+			// to a real runtime error — but the agentproc reader marks it
+			// first-class (Result.Interrupted, from the wrapper's
+			// control/interrupted ack), the same signal Claude Code's own UI
+			// uses to render Esc gracefully. The session survives an interrupt,
+			// so park the run open with the process warm for the composer's
+			// next message.
+			if r.Interrupted {
+				if !keepWarmOnNone {
+					// Bounded resume: no idle timer will ever close the warm
+					// process — close it and park to a durable resume.
+					log.Printf("[steer-debug] driver run=%s -> PAUSED (interrupt, bounded resume): parking open", park.runID)
+					_ = proc.Close()
+					s.parkRunOpen(park, proc.SessionID())
+					return liveOutcome{hibernated: true}
+				}
+				log.Printf("[steer-debug] driver run=%s -> PAUSED (interrupt): open, staying warm", park.runID)
+				s.markRunOpen(park)
+				resetIdleTimer(idle, idleTimeout)
+				continue
+			}
+			// An IsError result (max-turns, runtime error) is terminal
+			// regardless of envelope shape — hand it back; processCompletion
+			// fails it.
 			if r.IsError {
 				log.Printf("[steer-debug] driver run=%s -> TERMINAL (IsError) — closing process", park.runID)
 				_ = proc.Close()
