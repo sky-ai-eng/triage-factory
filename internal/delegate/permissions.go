@@ -7,9 +7,11 @@
 // request id.
 //
 // Both runLiveAndDrive call sites (the initial run and the resume) pass this
-// handler, so every run surfaces off-allowlist tools to the browser; the
-// RunStation dock renders the prompt and posts the answer back through
-// ResolvePermission.
+// handler, so every interactive run surfaces off-allowlist tools to the
+// browser; the RunStation dock renders the prompt and posts the answer back
+// through ResolvePermission. The one-shot fallback (multi-mode sandbox, where
+// streaming-input isn't wired yet) takes no handler — off-allowlist tools
+// auto-deny there, same as before P3.
 
 package delegate
 

@@ -205,9 +205,11 @@ function latestContextSize(messages: AgentMessage[]): number | null {
 // Current as of 2026-06 — update when new families ship: Fable 5, Opus
 // 4.6/4.7/4.8, and Sonnet 4.6 are 1M-context natively (no [1m] variant id
 // needed); Haiku 4.5 and the pre-4.6 families (Sonnet/Opus 4.5 and earlier)
-// are 200k. Unknown families fall back to 200k on purpose: for a pressure
-// gauge the safe error is over-reporting fullness — a false alarm draws a
-// look — never hiding real exhaustion behind a too-large denominator.
+// are 200k (haiku has no clause below — it rides the fallback; if a future
+// haiku ships at 1M, add `haiku-4-[6-9]` to the pattern). Unknown families
+// fall back to 200k on purpose: for a pressure gauge the safe error is
+// over-reporting fullness — a false alarm draws a look — never hiding real
+// exhaustion behind a too-large denominator.
 function contextLimit(model: string): number {
   const m = (model || '').toLowerCase()
   if (m.includes('[1m]') || /\b1m\b/.test(m)) return 1_000_000

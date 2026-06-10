@@ -696,7 +696,7 @@ function DockComposer({
         onKeyDown={onKeyDown}
         rows={1}
         placeholder={placeholder}
-        aria-label="Steer the run"
+        aria-label={placeholder.replace(/…$/, '')}
         className="flex-1 resize-none bg-transparent py-1 text-[13px] leading-relaxed text-text-primary placeholder:text-text-tertiary/70 focus:outline-none"
       />
       <button
