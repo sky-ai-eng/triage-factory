@@ -603,10 +603,16 @@ export type WSEvent =
   | {
       // P3 steering: a run surfaced a tool-permission prompt (canUseTool),
       // answered via POST /api/agent/runs/{runID}/permissions/{requestID}.
-      // Type only for now — no rendering until the RunDetail console.
+      // timeout_ms is the prompt's server-side deadline (relative); the dock
+      // derives its dismiss TTL from it.
       type: 'permission_request'
       run_id: string
-      data: { request_id: string; tool_name: string; input: Record<string, unknown> }
+      data: {
+        request_id: string
+        tool_name: string
+        input: Record<string, unknown>
+        timeout_ms?: number
+      }
     }
   | { type: 'curator_message'; project_id: string; data: CuratorMessage }
   | {

@@ -7,10 +7,13 @@ import { useWebSocket } from './useWebSocket'
 // PendingPermission is one in-flight tool-approval prompt surfaced by a run
 // (the `permission_request` WS payload). Parallel tool calls can yield more
 // than one at a time, so the hook keeps a queue keyed by request_id.
+// timeout_ms is the prompt's server-side deadline (relative), used to derive
+// the client dismiss TTL; older payloads may lack it.
 export interface PendingPermission {
   request_id: string
   tool_name: string
   input: Record<string, unknown>
+  timeout_ms?: number
 }
 
 // PermissionDecisionInput is the user's answer to a prompt — the body the
@@ -20,13 +23,18 @@ export interface PermissionDecisionInput {
   message?: string
 }
 
-// Client-side TTL for a surfaced permission prompt, mirroring the backend's
-// permTimeout() (= DefaultIdleHibernateTimeout/2 = 5m/2). The backend denies an
-// unanswered prompt at that bound but emits no "expired" event, so without this
-// a timed-out prompt would linger in the dock forever. The timer is a backstop:
-// a user answer (200) or an already-resolved POST (404) clears the prompt first
-// in the common case.
-const PERMISSION_TTL_MS = 150_000
+// Fallback client-side TTL for a payload that carries no timeout_ms,
+// mirroring the backend's default permTimeout() (= 5m/2). The backend denies
+// an unanswered prompt at its bound but emits no "expired" event, so without
+// a timer a timed-out prompt would linger in the dock forever.
+const PERMISSION_TTL_FALLBACK_MS = 150_000
+
+// How long the prompt outlives the server deadline before the client drops
+// it. Deliberately AFTER the deadline, not racing it: the broker guarantees a
+// late answer 404s (never a dropped 200), and the resolver drops the prompt
+// on 404 — so a user clicking into the grace window gets a clean dismiss
+// instead of a prompt that vanished from under the cursor at t-0.
+const PERMISSION_TTL_GRACE_MS = 5_000
 
 export interface RunDetailState {
   run: AgentRun | null
@@ -39,8 +47,10 @@ export interface RunDetailState {
   /** Queue of unanswered tool-permission prompts for this run, head-first. */
   pendingPermissions: PendingPermission[]
   /** Answer a pending prompt; clears it from the queue on a definitive
-   *  response (200 resolved, or 404 already-resolved / timed-out). */
-  resolvePermission: (requestID: string, decision: PermissionDecisionInput) => void
+   *  response (200 resolved, or 404 already-resolved / timed-out). The
+   *  promise settles when the POST round-trip finishes — callers may await
+   *  it (e.g. to disable buttons) or fire-and-forget. */
+  resolvePermission: (requestID: string, decision: PermissionDecisionInput) => Promise<void>
 }
 
 // useRunDetail loads a single agent run, its messages, and the parent
@@ -219,11 +229,16 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
             return [...prev, req]
           })
           // Arm the client-side TTL once per request (a backstop for the
-          // backend's silent timeout-deny).
+          // backend's silent timeout-deny), derived from the payload's
+          // server-side deadline plus a small grace.
           if (!permTimers.current.has(req.request_id)) {
+            const ttl =
+              (typeof req.timeout_ms === 'number' && req.timeout_ms > 0
+                ? req.timeout_ms
+                : PERMISSION_TTL_FALLBACK_MS) + PERMISSION_TTL_GRACE_MS
             permTimers.current.set(
               req.request_id,
-              setTimeout(() => dropPermission(req.request_id), PERMISSION_TTL_MS),
+              setTimeout(() => dropPermission(req.request_id), ttl),
             )
           }
         }

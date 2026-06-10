@@ -74,7 +74,11 @@ func (s *Spawner) BrowserPermissionHandler(orgID, runID string) agentproc.Permis
 		}()
 
 		// Hub.Broadcast is nil-receiver-safe, so no guard is needed for the
-		// hub-less test spawner.
+		// hub-less test spawner. timeout_ms is the prompt's server-side
+		// deadline, sent relative so the client derives its dismiss TTL from
+		// the payload instead of mirroring this Go constant (and so clock
+		// skew between server and browser doesn't matter).
+		timeout := s.permTimeout()
 		s.wsHub.Broadcast(websocket.Event{
 			Type:  "permission_request",
 			OrgID: orgID,
@@ -83,16 +87,32 @@ func (s *Spawner) BrowserPermissionHandler(orgID, runID string) agentproc.Permis
 				"request_id": req.RequestID,
 				"tool_name":  req.ToolName,
 				"input":      req.Input,
+				"timeout_ms": timeout.Milliseconds(),
 			},
 		})
 
 		select {
 		case d := <-ch:
 			return d
-		case <-time.After(s.permTimeout()):
-			// Nobody answered before the bounded wait — deny so the turn resolves
-			// ahead of idle-hibernate. A generous allowlist keeps this rare.
-			return agentproc.PermissionDecision{Behavior: "deny", Message: "permission request timed out"}
+		case <-time.After(timeout):
+			// Nobody answered before the bounded wait — deny so the turn
+			// resolves ahead of idle-hibernate. A generous allowlist keeps
+			// this rare. Deregister BEFORE deciding, then drain once: a
+			// decision already in the buffer was acknowledged with a 200
+			// (ResolvePermission sends under s.mu while the entry is
+			// present), so honor it — covering both the instant where the
+			// resolve and the timer were simultaneously ready and select
+			// picked the timer, and the gap before the deferred delete.
+			// After the delete, a late resolve reliably misses (404).
+			s.mu.Lock()
+			delete(s.permPending, key)
+			s.mu.Unlock()
+			select {
+			case d := <-ch:
+				return d
+			default:
+				return agentproc.PermissionDecision{Behavior: "deny", Message: "permission request timed out"}
+			}
 		}
 	}
 }
@@ -104,10 +124,16 @@ func (s *Spawner) BrowserPermissionHandler(orgID, runID string) agentproc.Permis
 // ErrNoPendingPermission for the caller to map to 404. The org check here is a
 // broker-level backstop; the permission endpoint additionally authorizes the
 // run under RLS (team-level) before calling this.
+//
+// The send happens under s.mu, atomic with the pending-presence check. That
+// makes a nil return (the endpoint's 200) a real promise: the decision was
+// buffered while the entry was registered, and the handler's timeout path —
+// which deregisters under the same mutex before its final drain — is
+// guaranteed to observe it. A 200-acknowledged decision is never dropped.
 func (s *Spawner) ResolvePermission(orgID, runID, requestID string, d agentproc.PermissionDecision) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	p, ok := s.permPending[permKey(runID, requestID)]
-	s.mu.Unlock()
 	if !ok || p.orgID != orgID {
 		return ErrNoPendingPermission
 	}

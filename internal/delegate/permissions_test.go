@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -84,6 +85,44 @@ func TestPermTimeoutBelowIdle(t *testing.T) {
 	s.SetIdleHibernateTimeout(2 * time.Second)
 	if s.permTimeout() >= s.idleTimeout() {
 		t.Errorf("permTimeout %v must be < idleTimeout %v (injected)", s.permTimeout(), s.idleTimeout())
+	}
+}
+
+// TestResolvePermission_AcknowledgedResolveNeverDropped stress-pins the
+// 200⟹honored invariant at the timeout boundary: whenever ResolvePermission
+// returns nil (the endpoint's 200), the parked handler must return that
+// decision — even when the resolve lands at the same instant the timer fires
+// (select picks randomly between two ready cases) or in the gap before the
+// handler deregisters. The staggered sleep walks attempts across the
+// deadline so iterations land before, at, and after it; the after-deadline
+// ones assert the inverse (no ack ⟹ timeout deny, resolve 404s).
+func TestResolvePermission_AcknowledgedResolveNeverDropped(t *testing.T) {
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s.SetIdleHibernateTimeout(4 * time.Millisecond) // permTimeout = 2ms
+	h := s.BrowserPermissionHandler(runmode.LocalDefaultOrg, "run-race")
+
+	for i := 0; i < 50; i++ {
+		reqID := fmt.Sprintf("req-%d", i)
+		got := make(chan agentproc.PermissionDecision, 1)
+		go func() {
+			got <- h(agentproc.PermissionRequest{RequestID: reqID})
+		}()
+		waitForPending(t, s, "run-race", reqID)
+		time.Sleep(time.Duration(i%5) * time.Millisecond)
+
+		err := s.ResolvePermission(runmode.LocalDefaultOrg, "run-race", reqID, agentproc.PermissionDecision{Behavior: "allow"})
+		if err != nil && !errors.Is(err, ErrNoPendingPermission) {
+			t.Fatalf("iteration %d: ResolvePermission: %v", i, err)
+		}
+		acked := err == nil
+
+		d := <-got
+		if acked && d.Behavior != "allow" {
+			t.Fatalf("iteration %d: resolve was acknowledged (nil) but handler returned %q (%s) — acknowledged decision dropped", i, d.Behavior, d.Message)
+		}
+		if !acked && d.Behavior != "deny" {
+			t.Fatalf("iteration %d: no resolve acknowledged but handler returned %q", i, d.Behavior)
+		}
 	}
 }
 
