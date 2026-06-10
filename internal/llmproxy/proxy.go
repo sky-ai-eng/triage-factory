@@ -83,6 +83,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -296,6 +297,45 @@ func (s *Server) callerAuthorized(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(presented), []byte(s.cfg.IncomingToken)) == 1
 }
 
+// eofLatchedBody wraps the outgoing request body so that, once the
+// underlying body has returned io.EOF, every later Read reports io.EOF
+// without touching the underlying body again.
+//
+// It exists to break a stdlib race on the shared request body. Out.Body
+// IS In.Body (ReverseProxy passes it through), and two goroutines touch
+// it: the transport's writeLoop finishes a Content-Length'd outgoing
+// body with an extra drain read into io.Discard (transferWriter.writeBody)
+// to detect bodies longer than declared, while the proxy's own http.Server
+// closes that same body on the handler's first response write
+// (chunkWriter.writeHeader) to ready the client conn for reuse — after
+// which any Read returns ErrBodyReadAfterClose, even fully consumed. If
+// the upstream begins responding before the drain read runs, the close
+// can land first; the drain read then errors, Request.write fails, and
+// the transport tears down the upstream conn — severing an in-flight
+// streaming response mid-body. Latching EOF makes the post-consumption
+// drain read benign. A close that truncates a body NOT yet read to EOF
+// still surfaces as an error, as it must — the latch only engages after
+// every byte was delivered.
+//
+// No locking: the transport reads a request body from a single goroutine.
+type eofLatchedBody struct {
+	rc  io.ReadCloser
+	eof bool
+}
+
+func (b *eofLatchedBody) Read(p []byte) (int, error) {
+	if b.eof {
+		return 0, io.EOF
+	}
+	n, err := b.rc.Read(p)
+	if err == io.EOF {
+		b.eof = true
+	}
+	return n, err
+}
+
+func (b *eofLatchedBody) Close() error { return b.rc.Close() }
+
 // rewrite is the Go 1.20+ ReverseProxy hook (replacing Director). It
 // runs before the request is sent upstream and has explicit control
 // over Out — unlike Director, the stdlib does NOT add X-Forwarded-*
@@ -313,6 +353,12 @@ func (s *Server) rewrite(pr *httputil.ProxyRequest) {
 	// sets Out.Host. Since we validated the upstream URL has no path,
 	// SetURL preserves the incoming request path verbatim.
 	pr.SetURL(s.upstreamURL)
+
+	// Shield the upstream exchange from the server's response-time close
+	// of the shared request body (see eofLatchedBody).
+	if pr.Out.Body != nil {
+		pr.Out.Body = &eofLatchedBody{rc: pr.Out.Body}
+	}
 
 	// Defensive: if the incoming request happened to carry
 	// X-Forwarded-* headers (some misconfigured caller), drop them.

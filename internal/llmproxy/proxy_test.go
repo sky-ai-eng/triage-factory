@@ -175,6 +175,17 @@ func TestProxyStreamingResponsePassesThrough(t *testing.T) {
 	// — a buffering proxy can't get under it.
 	const interChunkSleep = 600 * time.Millisecond
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Consume the request body before responding, like a real LLM
+		// upstream (it can't stream a completion without reading the
+		// prompt). Responding to headers alone lets the response race
+		// the proxy transport's request-body write: the proxy server's
+		// first flush closes the shared body and the transport's
+		// writeLoop can hit ErrBodyReadAfterClose, killing the upstream
+		// conn mid-stream. eofLatchedBody (proxy.go) shields the
+		// post-EOF drain read; the ordering where the response outruns
+		// the body *data* read is reachable only when the upstream
+		// skips the body entirely, which no LLM API does.
+		_, _ = io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		flusher, _ := w.(http.Flusher)
