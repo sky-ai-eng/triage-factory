@@ -115,10 +115,15 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Require full Jira configuration (PAT + URL + at least one project) plus
-	// a stored identity so we can match the assignee field. Partial config
-	// would silently stall on "polling" forever because the poller never has
-	// anything to do.
-	if creds.JiraPAT == "" || creds.JiraURL == "" || len(jiraRules) == 0 || localAccountID == "" || localDisplayName == "" {
+	// a stored identity so we can match the assignee field. Gate on the
+	// account ID alone, not the display name: StableID() is always populated
+	// when connected (it falls back to the Server/DC key), and assignee
+	// matching keys on account ID — display name is only the legacy
+	// no-accountID fallback and the post-claim snapshot label, both of which
+	// degrade gracefully when it's blank (valid on some Server/DC installs).
+	// Partial config would silently stall on "polling" forever because the
+	// poller never has anything to do.
+	if creds.JiraPAT == "" || creds.JiraURL == "" || len(jiraRules) == 0 || localAccountID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Jira not configured"})
 		return
 	}
@@ -385,7 +390,9 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "stock", err)
 		return
 	}
-	if creds.JiraPAT == "" || creds.JiraURL == "" || len(jiraRules) == 0 || localAccountID == "" || localDisplayName == "" {
+	// Account ID alone gates the action (see handleJiraStockGet): display
+	// name is optional and degrades gracefully when blank.
+	if creds.JiraPAT == "" || creds.JiraURL == "" || len(jiraRules) == 0 || localAccountID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Jira not configured"})
 		return
 	}

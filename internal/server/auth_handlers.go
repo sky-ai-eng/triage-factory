@@ -643,10 +643,10 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 			           SELECT ji.account_id, ji.display_name
 			             FROM user_jira_identities ji
 			            WHERE ji.user_id = u.id
-			            ORDER BY (ji.jira_base_url = rtrim((
+			            ORDER BY (ji.jira_base_url = rtrim(trim((
 			                        SELECT os.jira_base_url FROM org_settings os
 			                         WHERE os.org_id = tf.current_org_id()
-			                      ), '/')) DESC NULLS LAST,
+			                      )), '/')) DESC NULLS LAST,
 			                     ji.verified_at DESC NULLS LAST
 			            LIMIT 1
 			       ) j ON true

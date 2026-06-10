@@ -53,3 +53,46 @@ func TestForSystem_KeysMatchIntegrations(t *testing.T) {
 		t.Fatal("ForSystem returned a nil client")
 	}
 }
+
+// TestCanonicalHostMatchesNormalizeJiraHost closes the second drift gap the
+// import cycle creates: db.NormalizeJiraHost (which keys every
+// user_jira_identities row) can't call jira.CanonicalHost (internal/jira
+// imports internal/db, so the reverse would cycle), so it reimplements the
+// trailing-slash + whitespace trim by hand. NormalizeJiraHost's doc reasons
+// in prose that the two agree on CanonicalHost's success path; this pins it in
+// code. A silent change to either trim would route a captured identity under a
+// host the read side never looks up, with no compile error. This external test
+// package sits outside the cycle, so it can hold both sides together.
+func TestCanonicalHostMatchesNormalizeJiraHost(t *testing.T) {
+	// Inputs CanonicalHost accepts (real http(s) origin): the normalized host
+	// it returns must equal what NormalizeJiraHost keys the row under.
+	valid := []string{
+		"https://jira.example.com",
+		"https://jira.example.com/",
+		"https://jira.example.com///",
+		"  https://jira.example.com  ",
+		" https://site.atlassian.net/ ",
+		"http://localhost:8080/",
+	}
+	for _, in := range valid {
+		canon, ok := jira.CanonicalHost(in)
+		if !ok {
+			t.Errorf("CanonicalHost(%q) ok=false; expected a valid origin", in)
+			continue
+		}
+		if norm := db.NormalizeJiraHost(in); canon != norm {
+			t.Errorf("host key drift for %q: CanonicalHost=%q, NormalizeJiraHost=%q (writers and readers would disagree)", in, canon, norm)
+		}
+	}
+
+	// Inputs CanonicalHost rejects (no real origin): the credential is never
+	// stored, so there's no identity row to key — agreement is moot, but the
+	// normalizer must not panic and returns its best-effort trim.
+	invalid := []string{"", "   ", "/", "not a url"}
+	for _, in := range invalid {
+		if _, ok := jira.CanonicalHost(in); ok {
+			t.Errorf("CanonicalHost(%q) ok=true; expected rejection", in)
+		}
+		_ = db.NormalizeJiraHost(in) // must not panic
+	}
+}
