@@ -241,6 +241,15 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 	// Store the credential AND derive the identity in one tx — all-or-nothing,
 	// so a partial bind (a stored token with no identity, or vice versa) can't
 	// land. The retention is the Jira difference: GitHub discards here.
+	//
+	// host is the resolveJiraHost(org_settings.jira_base_url) canonical form, and
+	// it is LOAD-BEARING beyond this write: assignee-centric routing's reverse
+	// lookup (internal/routing assigneeTeams → UserIDsForJiraAccountSystem) keys
+	// off the same org_settings.jira_base_url. If a future capture path keys the
+	// identity under a different host (e.g. the integrations creds.JiraURL the
+	// poller falls back to when jira_base_url is empty), the row would never be
+	// found by the router and assignee routing would silently drop tasks — keep
+	// this host derivation and that lookup's in agreement.
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		if err := tx.Secrets.PutUser(r.Context(), orgID, userID, jiraTokenKey(host), pat, "Jira user access token"); err != nil {
 			return fmt.Errorf("store jira credential: %w", err)

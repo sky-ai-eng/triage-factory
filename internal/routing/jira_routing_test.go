@@ -226,13 +226,16 @@ func TestAssigneeCentric_AssigneeOnTwoTeams_NullOwnerVisibleBoth(t *testing.T) {
 	}
 }
 
-// TestAssigneeCentric_BecameAtomicAndStatusAndCommented_RouteByAssignee:
-// became_atomic, status_changed, and commented all route by the assignee
-// identically to assigned — each owned by the assignee's one team.
-func TestAssigneeCentric_BecameAtomicAndStatusAndCommented_RouteByAssignee(t *testing.T) {
+// TestAssigneeCentric_NonAssignedTypes_RouteByAssignee: became_atomic,
+// status_changed, priority_changed, and commented all route by the assignee
+// identically to assigned — each owned by the assignee's one team. (Covers
+// every non-assigned member of assigneeCentricJiraEventTypes, so a typo
+// dropping a type from the set fails here.)
+func TestAssigneeCentric_NonAssignedTypes_RouteByAssignee(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		eventType string
+		dedup     string
 		metaJSON  func(accountID string) string
 	}{
 		{
@@ -246,8 +249,18 @@ func TestAssigneeCentric_BecameAtomicAndStatusAndCommented_RouteByAssignee(t *te
 		{
 			name:      "status_changed",
 			eventType: domain.EventJiraIssueStatusChanged,
+			dedup:     "In Progress",
 			metaJSON: func(a string) string {
 				b, _ := json.Marshal(events.JiraIssueStatusChangedMetadata{Assignee: "d", AssigneeAccountID: a, IssueKey: "SKY-1", Project: "SKY", NewStatus: "In Progress"})
+				return string(b)
+			},
+		},
+		{
+			name:      "priority_changed",
+			eventType: domain.EventJiraIssuePriorityChanged,
+			dedup:     "High",
+			metaJSON: func(a string) string {
+				b, _ := json.Marshal(events.JiraIssuePriorityChangedMetadata{Assignee: "d", AssigneeAccountID: a, IssueKey: "SKY-1", Project: "SKY", NewPriority: "High"})
 				return string(b)
 			},
 		},
@@ -272,14 +285,10 @@ func TestAssigneeCentric_BecameAtomicAndStatusAndCommented_RouteByAssignee(t *te
 			seedSystemJiraRule(t, database, teamB, tc.eventType)
 
 			entityID := jiraEntity(t, database, "SKY-"+tc.name)
-			dedup := ""
-			if tc.eventType == domain.EventJiraIssueStatusChanged {
-				dedup = "In Progress"
-			}
 			reviewRouter(database).HandleEvent(domain.Event{
 				EventType:    tc.eventType,
 				EntityID:     &entityID,
-				DedupKey:     dedup,
+				DedupKey:     tc.dedup,
 				MetadataJSON: tc.metaJSON("acct-aidan"),
 				OccurredAt:   time.Now(),
 				OrgID:        runmode.LocalDefaultOrg,
