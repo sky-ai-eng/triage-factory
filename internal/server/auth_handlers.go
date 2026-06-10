@@ -615,9 +615,12 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	err := tfdb.WithTx(r.Context(), s.db,
 		tfdb.Claims{Sub: claims.Subject, OrgID: resp.ActiveOrgID},
 		func(tx *sql.Tx) error {
-			// Identity is host-scoped: prefer the login bound to the active
-			// org's GitHub host, else the most recently verified row. An
-			// absent row scans to "" exactly as the old NULL column did.
+			// Identity is host-scoped for both providers (GitHub SKY-396,
+			// Jira SKY-397): prefer the row bound to the active org's host
+			// (GitHub login via the correlated subquery; Jira account_id +
+			// display_name via the LATERAL, which keeps the pair on one row),
+			// else the most recently verified row. An absent row scans to ""
+			// exactly as the old NULL columns did.
 			if err := tx.QueryRowContext(r.Context(), `
 				SELECT u.id::text,
 				       COALESCE(u.display_name, ''),
@@ -633,9 +636,20 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 					                     i.verified_at DESC NULLS LAST
 				            LIMIT 1
 				       ), ''),
-				       COALESCE(u.jira_account_id, ''),
-				       COALESCE(u.jira_display_name, '')
+				       COALESCE(j.account_id, ''),
+				       COALESCE(j.display_name, '')
 				  FROM public.users u
+			  LEFT JOIN LATERAL (
+			           SELECT ji.account_id, ji.display_name
+			             FROM user_jira_identities ji
+			            WHERE ji.user_id = u.id
+			            ORDER BY (ji.jira_base_url = rtrim((
+			                        SELECT os.jira_base_url FROM org_settings os
+			                         WHERE os.org_id = tf.current_org_id()
+			                      ), '/')) DESC NULLS LAST,
+			                     ji.verified_at DESC NULLS LAST
+			            LIMIT 1
+			       ) j ON true
 				 WHERE u.id = tf.current_user_id()
 			`).Scan(&resp.ID, &resp.DisplayName, &resp.AvatarURL, &resp.GitHubUsername, &resp.JiraAccountID, &resp.JiraDisplayName); err != nil {
 				return fmt.Errorf("user lookup: %w", err)
