@@ -6,6 +6,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"time"
 
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -327,6 +328,184 @@ func (r *Router) authorTeams(orgID string, evt domain.Event) []string {
 		}
 	}
 	return sortedKeys(set)
+}
+
+// assigneeCentricJiraOwner runs the owning-team ladder for an assignee-centric
+// jira event (first hit wins) — the Jira twin of authorCentricOwner. It returns
+// the single owning team plus the set of teams the ladder produced, with the
+// same NULL-owner semantics:
+//
+//	owner == team, ownerSet == {team}   — a structural owner (tier 1
+//	                                       owning_team_id override), a prior
+//	                                       owned assignee-centric task (tier 3),
+//	                                       or a single-team assignee (tier 4);
+//	owner == "",   ownerSet == {A,B,…}  — the assignee maps to multiple teams
+//	                                       (tier 4 ambiguous): no single owner,
+//	                                       visible to all of them, NULL owner;
+//	owner == "",   ownerSet == nil      — nothing resolved (the assignee isn't a
+//	                                       TF user, or the issue is unassigned):
+//	                                       no task unless an explicit watch rule
+//	                                       pulls a team in.
+//
+// Tiers 1 and 3 are provider-agnostic and shared with authorCentricOwner; only
+// the identity tier (4) differs — the Jira assignee account id instead of the
+// PR author login. Tier 2 (a team-visibility project's team) is DELIBERATELY
+// ABSENT: Jira projects are multi-team-tracked via jira_project_status_rules,
+// so a project confers no single owner — the assignee identity is the owner
+// signal. OwningTeamForEntitySystem (tier 1) would also return a team-visibility
+// project's team, but Jira entities are never attached to a `projects` row (that
+// table pins GitHub repos; the classifier assigns it for GitHub entities only),
+// so its project sub-tier is inert here and only the owning_team_id override can
+// fire.
+//
+// Claims-free ...System lookups throughout: the router runs on the eventbus
+// goroutine with no JWT context.
+func (r *Router) assigneeCentricJiraOwner(orgID string, evt domain.Event, entityID string) (owner string, ownerSet []string) {
+	// Tier 1 — structural owner (owning_team_id override). One store query.
+	if r.entities != nil {
+		if t, err := r.entities.OwningTeamForEntitySystem(context.Background(), orgID, entityID); err != nil {
+			log.Printf("[router] assignee-centric owner: structural lookup for entity %s: %v", entityID, err)
+		} else if t != "" {
+			return t, []string{t}
+		}
+	}
+
+	// Tier 3 — the most recent ACTIVE owned assignee-centric task on the
+	// entity. Unlike GitHub (a PR's authorship is stable for life, so a closed
+	// CI task still anchors its owner), a Jira issue is reassignable: a CLOSED
+	// prior task — e.g. one the reassignment close-check just retired when the
+	// issue left its owner — must NOT anchor the new assignee's event, or a
+	// reassignment to another member (or to a non-member) would keep minting
+	// tasks for the stale owner. Only a still-active owned task anchors, which
+	// gives related events on a stably-assigned issue (a comment whose
+	// metadata omits the assignee, an ambiguous-but-pinned owner) the same
+	// consistency GitHub gets without re-attaching to retired ownership. NULL-
+	// owned active tasks are skipped (an unresolved owner can't anchor).
+	if r.tasks != nil {
+		if t := r.latestActiveOwnedTaskTeam(orgID, entityID, assigneeCentricJiraEventSet); t != "" {
+			return t, []string{t}
+		}
+	}
+
+	// Tier 4 — the issue assignee's identity → TF user(s) → teams.
+	teams := r.assigneeTeams(orgID, evt)
+	switch len(teams) {
+	case 0:
+		return "", nil
+	case 1:
+		return teams[0], teams
+	default:
+		return "", teams
+	}
+}
+
+// assigneeTeams resolves a jira event's assignee account id to the union of
+// teams over every TF user the account maps to, on the org's Jira host. The
+// Jira twin of authorTeams (the set-valued reverse lookup is the regression
+// guard for one account bound to two users). Returns an empty slice when the
+// issue is unassigned, the assignee isn't a TF user (external collaborator), or
+// the identity stores are unwired.
+func (r *Router) assigneeTeams(orgID string, evt domain.Event) []string {
+	if r.users == nil || r.teams == nil || r.orgs == nil {
+		return nil
+	}
+	// Every assignee-centric jira metadata struct carries assignee_account_id
+	// (the Atlassian stable identifier) — a minimal unmarshal is enough.
+	var m struct {
+		AssigneeAccountID string `json:"assignee_account_id"`
+	}
+	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil || m.AssigneeAccountID == "" {
+		return nil
+	}
+	orgSet, err := r.orgs.GetSettingsSystem(context.Background(), orgID)
+	if err != nil {
+		log.Printf("[router] assignee-centric owner: read org settings for host: %v", err)
+		return nil
+	}
+	// The reverse lookup normalizes the host (db.NormalizeJiraHost) the same
+	// way the capture paths stored it, so the raw org_settings value resolves
+	// the identities bound under the canonical host. An empty host (Jira not
+	// configured) resolves nobody.
+	userIDs, err := r.users.UserIDsForJiraAccountSystem(context.Background(), orgSet.JiraBaseURL, m.AssigneeAccountID)
+	if err != nil {
+		log.Printf("[router] assignee-centric owner: reverse account lookup for %s: %v", m.AssigneeAccountID, err)
+		return nil
+	}
+	set := map[string]struct{}{}
+	for _, uid := range userIDs {
+		tids, terr := r.teams.TeamIDsForUserInOrgSystem(context.Background(), orgID, uid)
+		if terr != nil {
+			log.Printf("[router] assignee-centric owner: teams for user %s: %v", uid, terr)
+			continue
+		}
+		for _, t := range tids {
+			set[t] = struct{}{}
+		}
+	}
+	return sortedKeys(set)
+}
+
+// ownerLadderRouting computes the visibility set, owner, firing order, and seed
+// priority for an owning-team-ladder event (author-centric GitHub or
+// assignee-centric Jira) from the ladder's (owner, ownerSet) result and the
+// matched rules. Both provider branches share it so the NULL-owner and
+// visibility-union semantics stay identical:
+//
+//   - visibility = {owner set} ∪ {teams whose explicit user-authored rule
+//     matched}. System/default rules gate creation + the owner's automation but
+//     never grant visibility on their own; a team widens visibility beyond
+//     ownership only by opting in with its own rule (the deliberate watch);
+//   - ownerTeam is "" when the identity maps to multiple teams (or to none with
+//     a watch rule): the owner is unresolved, stored as NULL — the auto-fire
+//     gate for free, resolving on the first human claim;
+//   - only the owner's automation fires. A resolved owner fires its own matched
+//     triggers (acting = owner); a NULL owner fires nothing (the empty-team
+//     gate), so the bot never claims an unowned task.
+//
+// ok=false means the visibility set is empty (external identity, no watching
+// rule) → no task; the caller returns without creating one.
+func ownerLadderRouting(owner string, ownerSet []string, matchedRules []domain.EventHandler) (visibleTeams []string, ownerTeam string, orderedTeams []string, taskPriority float64, ok bool) {
+	vis := map[string]struct{}{}
+	for _, t := range ownerSet {
+		vis[t] = struct{}{}
+	}
+	for t := range explicitUserRuleTeams(matchedRules) {
+		vis[t] = struct{}{}
+	}
+	if len(vis) == 0 {
+		return nil, "", nil, 0, false
+	}
+	if owner != "" {
+		orderedTeams = []string{owner}
+	}
+	return sortedKeys(vis), owner, orderedTeams, maxRuleDefaultPriority(matchedRules), true
+}
+
+// latestActiveOwnedTaskTeam returns the owning team of the most recently
+// created ACTIVE task on the entity whose event_type is in types and whose
+// owner (team_id) is non-NULL, or "" when none qualifies. It is the
+// active-only tier-3 anchor for the assignee-centric Jira ladder — the
+// reassignable-entity counterpart to the all-statuses
+// OwnerTeamForLatestTaskInTypesSystem the GitHub ladder uses. Claims-free
+// (...System); the router runs on the eventbus goroutine with no JWT context.
+func (r *Router) latestActiveOwnedTaskTeam(orgID, entityID string, types map[string]bool) string {
+	active, err := r.tasks.FindActiveByEntitySystem(context.Background(), orgID, entityID)
+	if err != nil {
+		log.Printf("[router] assignee-centric owner: active-task lookup for entity %s: %v", entityID, err)
+		return ""
+	}
+	best := ""
+	var bestAt time.Time
+	for i := range active {
+		t := &active[i]
+		if t.TeamID == nil || *t.TeamID == "" || !types[t.EventType] {
+			continue
+		}
+		if best == "" || t.CreatedAt.After(bestAt) {
+			best, bestAt = *t.TeamID, t.CreatedAt
+		}
+	}
+	return best
 }
 
 // explicitUserRuleTeams returns the teams whose matched handler is a

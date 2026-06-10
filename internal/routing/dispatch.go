@@ -189,11 +189,13 @@ type eventRouting struct {
 // no mapped reviewer team; an author-centric event from an external author
 // with no team watching).
 //
-// Three routing axes override the default handler-team grouping:
+// Four routing axes override the default handler-team grouping:
 //   - review_requested → the requested reviewer's team(s), scoped at emit time;
 //   - author-centric github events → the entity's owning team via the
 //     owning-team ladder (the PR author's CI/conflict/feedback lifecycle);
-//   - everything else (Jira, etc.) → the handler-team grouping.
+//   - assignee-centric jira events → the assignee's owning team via the same
+//     ladder (the issue assignee's assignment/status/comment lifecycle);
+//   - everything else (jira:issue:available, etc.) → the handler-team grouping.
 //
 // The matched handlers still gate whether a task is created and supply the
 // priority; only the team set is overridden.
@@ -272,40 +274,34 @@ func (r *Router) resolveTeamRouting(orgID string, evt domain.Event, entityID str
 		}
 
 	case isAuthorCentricGitHubEvent(evt.EventType):
+		// The PR author's CI/conflict/feedback lifecycle → the entity's owning
+		// team via the owning-team ladder.
 		owner, ownerSet := r.authorCentricOwner(orgID, evt, entityID)
-		// Visibility = {owner set} ∪ {teams whose explicit user-authored rule
-		// matched}. System/default rules gate creation + the owner's automation
-		// but never grant visibility on their own; a team widens visibility
-		// beyond ownership only by opting in with its own rule (the deliberate
-		// watch — e.g. a platform team tracking CI it doesn't author).
-		vis := map[string]struct{}{}
-		for _, t := range ownerSet {
-			vis[t] = struct{}{}
-		}
-		for t := range explicitUserRuleTeams(matchedRules) {
-			vis[t] = struct{}{}
-		}
-		if len(vis) == 0 {
+		vt, ot, ord, pri, ok := ownerLadderRouting(owner, ownerSet, matchedRules)
+		if !ok {
 			// External/non-TF author (dependabot, renovate, outside
 			// contributors) and no team opted in via an explicit rule → record
 			// the event + durable entity only, no task. Deliberately silent:
 			// this is the expected high-volume path with nothing actionable.
 			return eventRouting{}, false
 		}
-		visibleTeams = sortedKeys(vis)
-		// ownerTeam "" when the author maps to multiple teams (or none with a
-		// watch rule): the owner is unresolved, stored as NULL — the auto-fire
-		// gate for free, resolving on the first human claim.
-		ownerTeam = owner
-		taskPriority = maxRuleDefaultPriority(matchedRules)
-		// Only the owner's automation fires. A resolved owner fires its own
-		// matched triggers (acting = owner); a NULL owner fires nothing (the
-		// empty-team gate), so the bot never claims an unowned task.
-		if owner != "" {
-			orderedTeams = []string{owner}
-		} else {
-			orderedTeams = nil
+		visibleTeams, ownerTeam, orderedTeams, taskPriority = vt, ot, ord, pri
+
+	case isAssigneeCentricJiraEvent(evt.EventType):
+		// The issue assignee's assignment/status/comment lifecycle → the
+		// assignee's owning team via the same ladder (jira:issue:available is
+		// excluded — it's the unassigned team-pool signal and stays on
+		// handler-team routing above).
+		owner, ownerSet := r.assigneeCentricJiraOwner(orgID, evt, entityID)
+		vt, ot, ord, pri, ok := ownerLadderRouting(owner, ownerSet, matchedRules)
+		if !ok {
+			// External/unassigned account (not a TF member) and no team opted
+			// in via an explicit watch rule → record the event + durable entity
+			// only, no task. Deliberately silent: this is the high-volume
+			// external-assignee path, the local N=1 over-creation fix.
+			return eventRouting{}, false
 		}
+		visibleTeams, ownerTeam, orderedTeams, taskPriority = vt, ot, ord, pri
 	}
 
 	return eventRouting{

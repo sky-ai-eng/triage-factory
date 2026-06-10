@@ -140,11 +140,34 @@ type UsersStore interface {
 	// GetJiraIdentitySystem mirrors GetJiraIdentity but routes through
 	// the admin pool in Postgres. The router's inline close-check on
 	// Jira reassignment consumes this from its eventbus subscriber
-	// goroutine, which has no JWT-claims context; the sqlite event_handlers
-	// seed reads it claims-free at startup to substitute the local user's
-	// account id into shipped Jira rules. Callers resolve the host the same
-	// way GetJiraIdentity's do (org_settings.jira_base_url).
+	// goroutine, which has no JWT-claims context. Callers resolve the host
+	// the same way GetJiraIdentity's do (org_settings.jira_base_url).
 	GetJiraIdentitySystem(ctx context.Context, userID, jiraBaseURL string) (accountID, displayName string, err error)
+
+	// UserIDsForJiraAccountSystem returns every TF user bound to accountID
+	// on jiraBaseURL in user_jira_identities — the reverse of
+	// GetJiraIdentity, and the Jira twin of UserIDsForGitHubLoginSystem.
+	// Host-scoped, org-agnostic (identity is keyed on (user_id,
+	// jira_base_url), no org). Empty slice (not error) when no binding
+	// exists. The assignee-routing router consumes it from its eventbus
+	// subscriber goroutine, which carries no JWT-claims context.
+	//
+	// Returns a set deliberately. The table's PK is (user_id,
+	// jira_base_url) — it constrains uniqueness per user, so nothing stops
+	// two TF users binding the same Atlassian account on one host (a shared
+	// service account, a stale pre-rename row). Callers union the resulting
+	// teams. jiraBaseURL is required and normalized the same way writes are
+	// (db.NormalizeJiraHost), so the key matches what the capture paths
+	// stored. source / verified_at are out of scope: every matching row is
+	// returned regardless of how it was captured or whether it has been
+	// host-verified.
+	//
+	// Admin pool / claims-free: system/router callers only. Exposing this
+	// reverse lookup to a request handler would be a cross-user identity
+	// probe (resolve any account → any user); a request-path consumer would
+	// need a separate claims-scoped method with its own RLS story, and none
+	// is needed today. SQLite collapses to one connection.
+	UserIDsForJiraAccountSystem(ctx context.Context, jiraBaseURL, accountID string) ([]string, error)
 
 	// GetLastActingTeam returns users.last_acting_team_id — the user's
 	// sticky default team — or "" if unset (NULL) or the row is missing.

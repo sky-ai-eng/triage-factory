@@ -134,6 +134,34 @@ func (s *usersStore) GetJiraIdentitySystem(ctx context.Context, userID, jiraBase
 	return getJiraIdentity(ctx, s.admin, userID, jiraBaseURL)
 }
 
+func (s *usersStore) UserIDsForJiraAccountSystem(ctx context.Context, jiraBaseURL, accountID string) ([]string, error) {
+	// Reverse of getJiraIdentity: (host, account_id) → user_id(s). Host is
+	// normalized the same way the writers store it so the key matches;
+	// account_id matches verbatim (Atlassian account ids are stable
+	// identifiers, stored as captured). Returns every matching row — two
+	// users may bind one account on a host (PK is per-user), and
+	// source/verified_at are out of scope.
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT user_id::text
+		FROM user_jira_identities
+		WHERE jira_base_url = $1 AND account_id = $2
+		ORDER BY user_id ASC
+	`, db.NormalizeJiraHost(jiraBaseURL), accountID)
+	if err != nil {
+		return nil, fmt.Errorf("read user_jira_identities by account: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan user_jira_identities.user_id: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 func getJiraIdentity(ctx context.Context, q queryer, userID, jiraBaseURL string) (string, string, error) {
 	var accountID, displayName sql.NullString
 	err := q.QueryRowContext(ctx,

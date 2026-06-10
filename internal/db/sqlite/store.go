@@ -39,7 +39,7 @@ func New(conn *sql.DB) db.Stores {
 		Swipes:         newSwipeStore(conn),
 		Dashboard:      newDashboardStore(conn),
 		Secrets:        secrets,
-		EventHandlers:  newEventHandlerStore(conn, users),
+		EventHandlers:  newEventHandlerStore(conn),
 		Blueprints:     newBlueprintStore(conn, conn),
 		Agents:         newAgentStore(conn, conn),
 		TeamAgents:     newTeamAgentStore(conn),

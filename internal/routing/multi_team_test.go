@@ -390,14 +390,16 @@ func TestTryAutoDelegate_PerTeamBotGate(t *testing.T) {
 
 // TestHandleEvent_MultipleTeams_OneBotRun pins the exclusive-claim
 // contention fix on the default (handler-team) routing path — a Jira
-// assignment, where multiple teams' rules legitimately fan to one shared
-// task. When two teams both have auto-delegation fully enabled and an
-// immediate trigger on the same event, the single shared task gets exactly
-// ONE bot run (the first team in priority/id order wins the claim and
-// becomes the owner), and the losing team hits the claim guard rather than
-// leaving a queued firing that would drain into a duplicate run.
-// (Author-centric github events route owner-only, so the cross-team
-// contention they used to exhibit now lives on this Jira path.)
+// issue:available (the unassigned team-pool signal), where multiple teams'
+// rules legitimately fan to one shared task. When two teams both have
+// auto-delegation fully enabled and an immediate trigger on the same event,
+// the single shared task gets exactly ONE bot run (the first team in
+// priority/id order wins the claim and becomes the owner), and the losing
+// team hits the claim guard rather than leaving a queued firing that would
+// drain into a duplicate run.
+// (Author-centric github events and assignee-centric jira events route
+// owner-only, so the cross-team contention lives on the handler-team path —
+// jira:issue:available being the canonical multi-team event there.)
 func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
@@ -435,11 +437,13 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 	insertPromptForTeam(t, database, "p-onerun-b", teamB)
 
 	// teamA's immediate trigger (createTriggerForTestRouting hard-codes
-	// LocalDefaultTeamID = teamA).
+	// LocalDefaultTeamID = teamA). jira:issue:available is the unassigned
+	// team-pool signal — it stays on the default handler-team routing path
+	// (not the assignee ladder), so two teams genuinely contend for it.
 	createTriggerForTestRouting(t, database, domain.EventHandler{
 		ID: "trigger-A-onerun", Kind: domain.EventHandlerKindTrigger,
 		BlueprintID: "p-onerun", TriggerType: domain.TriggerTypeEvent,
-		EventType: domain.EventJiraIssueAssigned, BreakerThreshold: intPtr(4),
+		EventType: domain.EventJiraIssueAvailable, BreakerThreshold: intPtr(4),
 		MinAutonomySuitability: floatPtr(0), Enabled: true,
 	})
 	// teamB's immediate trigger (raw insert for the second team), bound to
@@ -453,18 +457,18 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 			 created_at, updated_at)
 		VALUES (?, ?, ?, ?, 'trigger', ?, NULL, 1, 'user', ?, 4, 0, datetime('now'), datetime('now'))
 	`, "trigger-B-onerun", runmode.LocalDefaultOrg, teamB, runmode.LocalDefaultUserID,
-		domain.EventJiraIssueAssigned, bpOnerunB); err != nil {
+		domain.EventJiraIssueAvailable, bpOnerunB); err != nil {
 		t.Fatalf("seed team B trigger: %v", err)
 	}
 
-	meta := events.JiraIssueAssignedMetadata{Assignee: "aidan", IssueKey: "SKY-onerun", Project: "SKY", Status: "To Do"}
+	meta := events.JiraIssueAvailableMetadata{IssueKey: "SKY-onerun", Project: "SKY", Status: "To Do"}
 	metaJSON, _ := json.Marshal(meta)
 
 	stub := &stubDelegator{db: database}
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
 
 	router.HandleEvent(domain.Event{
-		EventType: domain.EventJiraIssueAssigned, EntityID: &entity.ID,
+		EventType: domain.EventJiraIssueAvailable, EntityID: &entity.ID,
 		MetadataJSON: string(metaJSON), OrgID: runmode.LocalDefaultOrg,
 	})
 
@@ -493,14 +497,16 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 }
 
 // TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam pins, on the
-// default (handler-team) routing path via a Jira assignment, that when the
-// highest-priority owner team has auto-delegation disabled and a
-// lower-priority team fires the bot, the owner is consolidated to the acting
-// team BEFORE the run is created — so the run (which inherits runs.team_id
-// from tasks.team_id) is attributed to the team that acted, not the stale
-// owner. The stub records the task's owner team at Delegate time.
-// (Author-centric github events route owner-only, so this cross-team
-// consolidation lives on the Jira path.)
+// default (handler-team) routing path via a Jira issue:available (the
+// unassigned team-pool signal), that when the highest-priority owner team has
+// auto-delegation disabled and a lower-priority team fires the bot, the owner
+// is consolidated to the acting team BEFORE the run is created — so the run
+// (which inherits runs.team_id from tasks.team_id) is attributed to the team
+// that acted, not the stale owner. The stub records the task's owner team at
+// Delegate time.
+// (Author-centric github events and assignee-centric jira events route
+// owner-only, so this cross-team consolidation lives on the handler-team
+// path — jira:issue:available being the canonical multi-team event there.)
 func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
@@ -543,13 +549,13 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 			(id, org_id, team_id, creator_user_id, kind, event_type,
 			 scope_predicate_json, enabled, source, name, default_priority, sort_order, created_at, updated_at)
 		VALUES (?, ?, ?, ?, 'rule', ?, NULL, 1, 'user', 'A rule', 0.9, 100, datetime('now'), datetime('now'))
-	`, "rule-A-attr", runmode.LocalDefaultOrg, teamA, runmode.LocalDefaultUserID, domain.EventJiraIssueAssigned); err != nil {
+	`, "rule-A-attr", runmode.LocalDefaultOrg, teamA, runmode.LocalDefaultUserID, domain.EventJiraIssueAvailable); err != nil {
 		t.Fatalf("seed team A rule: %v", err)
 	}
 	createTriggerForTestRouting(t, database, domain.EventHandler{
 		ID: "trigger-A-attr", Kind: domain.EventHandlerKindTrigger,
 		BlueprintID: "p-attr", TriggerType: domain.TriggerTypeEvent,
-		EventType: domain.EventJiraIssueAssigned, BreakerThreshold: intPtr(4),
+		EventType: domain.EventJiraIssueAvailable, BreakerThreshold: intPtr(4),
 		MinAutonomySuitability: floatPtr(0), Enabled: true,
 	})
 	// Team B (lower priority) also has a trigger and IS enabled.
@@ -560,18 +566,18 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 			 scope_predicate_json, enabled, source, blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
 		VALUES (?, ?, ?, ?, 'trigger', ?, NULL, 1, 'user', ?, 4, 0, datetime('now'), datetime('now'))
 	`, "trigger-B-attr", runmode.LocalDefaultOrg, teamB, runmode.LocalDefaultUserID,
-		domain.EventJiraIssueAssigned, bpAttrB); err != nil {
+		domain.EventJiraIssueAvailable, bpAttrB); err != nil {
 		t.Fatalf("seed team B trigger: %v", err)
 	}
 
-	meta := events.JiraIssueAssignedMetadata{Assignee: "aidan", IssueKey: "SKY-attr", Project: "SKY", Status: "To Do"}
+	meta := events.JiraIssueAvailableMetadata{IssueKey: "SKY-attr", Project: "SKY", Status: "To Do"}
 	metaJSON, _ := json.Marshal(meta)
 
 	stub := &stubDelegator{db: database}
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
 
 	router.HandleEvent(domain.Event{
-		EventType: domain.EventJiraIssueAssigned, EntityID: &entity.ID,
+		EventType: domain.EventJiraIssueAvailable, EntityID: &entity.ID,
 		MetadataJSON: string(metaJSON), OrgID: runmode.LocalDefaultOrg,
 	})
 

@@ -3,7 +3,6 @@ package sqlite
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -26,16 +25,12 @@ import (
 // pair at the DB level; this store branches on Kind where the SQL
 // diverges (Create / Update / Seed write different column sets per
 // kind).
-// users is plumbed in so Seed can read the local user's host-scoped
-// GitHub login through the canonical store (gets any forward-compat
-// behavior added there for free) rather than duplicating the SELECT here.
 type eventHandlerStore struct {
-	q     queryer
-	users db.UsersStore
+	q queryer
 }
 
-func newEventHandlerStore(q queryer, users db.UsersStore) db.EventHandlerStore {
-	return &eventHandlerStore{q: q, users: users}
+func newEventHandlerStore(q queryer) db.EventHandlerStore {
+	return &eventHandlerStore{q: q}
 }
 
 var _ db.EventHandlerStore = (*eventHandlerStore)(nil)
@@ -64,31 +59,17 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, blue
 	// seed-once rewrite had. The author_in field + matcher stay, as an
 	// optional per-member filter for user-authored rules.
 	//
-	// Jira keeps the seed-time fill: the shipped jira-assigned and
-	// jira-became-atomic rules ship `assignee_in: []` placeholders, and Jira
-	// routes via jira_project_status_rules (not an owner ladder), so the
-	// local user's Atlassian account id is substituted here so the rule
-	// matches without manual setup. Empty value (Jira not connected yet)
-	// leaves the allowlist empty → matches every assignee. INSERT OR IGNORE
-	// below means this only takes on first install / clean-slate; existing
-	// installs keep whatever the user saved via Settings.
-	// Jira identity is host-scoped (SKY-397): resolve the org's configured
-	// Jira host, then read the local user's binding for (user, host). At
-	// first-install seed time Jira is typically not connected yet, so this
-	// is usually "" — INSERT OR IGNORE means the substitution only takes on
-	// a fresh DB anyway; an absent host or row leaves the allowlist empty
-	// (match-all), exactly as before.
-	var jiraHost sql.NullString
-	_ = s.q.QueryRowContext(ctx,
-		`SELECT jira_base_url FROM org_settings WHERE org_id = ?`, orgID,
-	).Scan(&jiraHost)
-	localJiraAccountID, _, _ := s.users.GetJiraIdentitySystem(ctx, runmode.LocalDefaultUserID, jiraHost.String)
-
+	// Shipped Jira rules now ship `assignee_in: []` (match-all) verbatim too —
+	// the seed-time rewrite that scoped jira-assigned / jira-became-atomic to
+	// the local user's Atlassian account id is GONE, along with the org-host
+	// read it needed. Assignee-centric owner routing scopes these at event time
+	// instead (resolving the issue assignee's team via the owning-team ladder),
+	// matching the GitHub fix. The assignee_in field + matcher stay, as an
+	// optional per-member filter for user-authored rules.
 	for _, h := range db.ShippedEventHandlers {
-		predStr := substituteLocalJiraIdentity(h.Predicate, localJiraAccountID)
 		var pred any
-		if predStr != "" {
-			pred = predStr
+		if h.Predicate != "" {
+			pred = h.Predicate
 		}
 
 		// System rows materialize as visibility='team' with team_id=teamID.
@@ -486,70 +467,6 @@ func derefInt(p *int) int {
 		return 0
 	}
 	return *p
-}
-
-// substituteLocalJiraIdentity fills the shipped Jira-scoped rules' empty
-// `assignee_in: []` placeholder with the local user's jira_account_id at seed
-// time. Non-empty arrays are user-customizations and preserved; missing keys
-// stay missing; malformed JSON falls through unchanged.
-//
-// GitHub has no analog anymore — author-centric owner routing scopes the
-// shipped GitHub rules at event time, so they ship match-all and are not
-// rewritten at seed.
-//
-// Reporter / commenter allowlists are not currently shipped on any
-// system handler (they're predicate-only — exposed in the rule editor
-// for user-authored rules), so this helper covers `assignee_in` only.
-// Adding more keys here is the right extension if reporter / commenter
-// system handlers ever ship.
-func substituteLocalJiraIdentity(predJSON, localAccountID string) string {
-	return substituteEmptyAllowlists(predJSON, localAccountID, "assignee_in")
-}
-
-// substituteEmptyAllowlists is the shared body for the GitHub/Jira
-// substitution helpers. For each named key, if the predicate has the
-// key set to an empty array, replace it with `[identity]`. Pre-filled
-// arrays are preserved; missing keys are ignored; malformed predicate
-// JSON falls through unchanged.
-func substituteEmptyAllowlists(predJSON, identity string, keys ...string) string {
-	if predJSON == "" || identity == "" {
-		return predJSON
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(predJSON), &fields); err != nil {
-		return predJSON
-	}
-	changed := false
-	for _, key := range keys {
-		raw, ok := fields[key]
-		if !ok {
-			continue
-		}
-		var arr []string
-		if err := json.Unmarshal(raw, &arr); err != nil {
-			// Field exists but isn't a string slice — leave it alone,
-			// the validator will reject the row anyway.
-			continue
-		}
-		if len(arr) != 0 {
-			// User-customized; preserve.
-			continue
-		}
-		substituted, err := json.Marshal([]string{identity})
-		if err != nil {
-			continue
-		}
-		fields[key] = substituted
-		changed = true
-	}
-	if !changed {
-		return predJSON
-	}
-	out, err := json.Marshal(fields)
-	if err != nil {
-		return predJSON
-	}
-	return string(out)
 }
 
 // --- Admin-pool variants ---

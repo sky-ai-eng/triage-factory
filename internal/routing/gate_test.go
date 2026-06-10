@@ -264,6 +264,13 @@ func TestJiraGate_DisjointProjects_DropsUntrackingTeam(t *testing.T) {
 	seedMatchAllJiraAssignedRule(t, dbh, teamA)
 	seedMatchAllJiraAssignedRule(t, dbh, teamB)
 
+	// assigned routes by assignee (the owning-team ladder), so the assignee
+	// must resolve to a TF team for the owner assertion below; aidan is on
+	// teamA. The gate still bounds WHICH teams' handlers match (teamB tracks a
+	// different project), independent of ownership.
+	setJiraHost(t, dbh)
+	seedJiraUserOnTeam(t, dbh, teamA, "acct-aidan", "aidan")
+
 	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "jira", "SKY-1", "issue", "An issue", "https://example.com/SKY-1")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
@@ -312,7 +319,7 @@ func seedMatchAllJiraAssignedRule(t *testing.T, database *sql.DB, teamID string)
 func jiraAssignedEvent(t *testing.T, entityID, project string) domain.Event {
 	t.Helper()
 	meta := events.JiraIssueAssignedMetadata{
-		Assignee: "aidan", IssueKey: project + "-1", Project: project, Status: "To Do",
+		Assignee: "aidan", AssigneeAccountID: "acct-aidan", IssueKey: project + "-1", Project: project, Status: "To Do",
 	}
 	metaJSON, _ := json.Marshal(meta)
 	return domain.Event{

@@ -65,3 +65,46 @@ var authorCentricGitHubEventSet = func() map[string]bool {
 func isAuthorCentricGitHubEvent(eventType string) bool {
 	return authorCentricGitHubEventSet[eventType]
 }
+
+// assigneeCentricJiraEventTypes is every jira:issue:* event that concerns
+// whoever IS ASSIGNED the issue — assignment, atomic-discovery, status,
+// priority, and comment activity. These route to the assignee's owning team
+// via the owning-team ladder, not to whichever team's rule happened to match.
+// Two jira:issue:* types are deliberately EXCLUDED and stay on handler-team
+// routing:
+//
+//   - jira:issue:available — unassigned by definition (the team-pool /
+//     stock-discovery signal: "unclaimed work in a project this team
+//     tracks"). Routing it through the assignee ladder would always drop
+//     (no assignee → no owner) and silently kill the discovery deck, so it
+//     stays in resolveTeamRouting's default branch, bounded by the
+//     team↔project tracking gate.
+//   - jira:issue:completed — entity-terminating (EntityTerminatingEvents);
+//     it closes the entity before task creation, so it never creates a task
+//     and never reaches the ladder.
+//
+// Enumerated (not a jira: prefix test) so the set is auditable against
+// internal/domain/event.go and so the prior-task ladder tier keys on exactly
+// these types.
+var assigneeCentricJiraEventTypes = []string{
+	domain.EventJiraIssueAssigned,
+	domain.EventJiraIssueBecameAtomic,
+	domain.EventJiraIssueStatusChanged,
+	domain.EventJiraIssuePriorityChanged,
+	domain.EventJiraIssueCommented,
+}
+
+var assigneeCentricJiraEventSet = func() map[string]bool {
+	m := make(map[string]bool, len(assigneeCentricJiraEventTypes))
+	for _, et := range assigneeCentricJiraEventTypes {
+		m[et] = true
+	}
+	return m
+}()
+
+// isAssigneeCentricJiraEvent reports whether an event routes via the
+// owning-team ladder keyed on the issue's assignee (true) rather than the
+// default handler-team grouping (jira:issue:available, etc.).
+func isAssigneeCentricJiraEvent(eventType string) bool {
+	return assigneeCentricJiraEventSet[eventType]
+}

@@ -56,6 +56,8 @@ type IdentityRoutingFactory func(t *testing.T) (IdentityRoutingStores, IdentityR
 //     on no binding, normalizes the host (trailing-slash-insensitive,
 //     matching the writers), and is host-scoped (same login on another
 //     host does not match).
+//   - UserIDsForJiraAccountSystem (the Jira twin) pins the identical
+//     contract keyed on the Atlassian account id instead of a login.
 //   - TeamIDsForUserInOrgSystem returns exactly the user's teams in
 //     that org, excludes their teams in other orgs, and returns an
 //     empty slice for a non-member.
@@ -67,6 +69,7 @@ func RunIdentityRoutingConformance(t *testing.T, mk IdentityRoutingFactory) {
 	ctx := context.Background()
 
 	const host = "https://github.com"
+	const jiraHost = "https://acme.atlassian.net"
 
 	t.Run("UserIDsForGitHubLogin_ResolvesBoundUser", func(t *testing.T) {
 		stores, seed := mk(t)
@@ -147,6 +150,90 @@ func RunIdentityRoutingConformance(t *testing.T, mk IdentityRoutingFactory) {
 		}
 		if len(got) != 0 {
 			t.Errorf("UserIDsForGitHubLoginSystem(other host) = %v; want empty slice", got)
+		}
+	})
+
+	const acct = "557058:abc-aidan"
+
+	t.Run("UserIDsForJiraAccount_ResolvesBoundUser", func(t *testing.T) {
+		stores, seed := mk(t)
+		u := seed.User(t)
+		if err := stores.Users.UpsertJiraIdentity(ctx, u, jiraHost, acct, "Aidan", "pat"); err != nil {
+			t.Fatalf("UpsertJiraIdentity: %v", err)
+		}
+		got, err := stores.Users.UserIDsForJiraAccountSystem(ctx, jiraHost, acct)
+		if err != nil {
+			t.Fatalf("UserIDsForJiraAccountSystem: %v", err)
+		}
+		assertSameSet(t, "UserIDsForJiraAccountSystem", got, []string{u})
+	})
+
+	t.Run("UserIDsForJiraAccount_ReturnsAllUsersSharingAccount", func(t *testing.T) {
+		// The (user_id, jira_base_url) PK constrains uniqueness per user, so
+		// two TF users can bind the same Atlassian account on one host — the
+		// method must surface both (callers union the teams).
+		stores, seed := mk(t)
+		u1 := seed.User(t)
+		u2 := seed.User(t)
+		for _, u := range []string{u1, u2} {
+			if err := stores.Users.UpsertJiraIdentity(ctx, u, jiraHost, "shared-svc", "Shared", "pat"); err != nil {
+				t.Fatalf("UpsertJiraIdentity(%s): %v", u, err)
+			}
+		}
+		got, err := stores.Users.UserIDsForJiraAccountSystem(ctx, jiraHost, "shared-svc")
+		if err != nil {
+			t.Fatalf("UserIDsForJiraAccountSystem: %v", err)
+		}
+		assertSameSet(t, "UserIDsForJiraAccountSystem", got, []string{u1, u2})
+	})
+
+	t.Run("UserIDsForJiraAccount_EmptyOnNoBinding", func(t *testing.T) {
+		stores, seed := mk(t)
+		// Bind a different account so the table is non-empty — the absent
+		// row, not an empty table, is what must yield the empty slice.
+		u := seed.User(t)
+		if err := stores.Users.UpsertJiraIdentity(ctx, u, jiraHost, "somebody", "Somebody", "pat"); err != nil {
+			t.Fatalf("UpsertJiraIdentity: %v", err)
+		}
+		got, err := stores.Users.UserIDsForJiraAccountSystem(ctx, jiraHost, "nobody")
+		if err != nil {
+			t.Fatalf("UserIDsForJiraAccountSystem: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("UserIDsForJiraAccountSystem(no binding) = %v; want empty slice", got)
+		}
+	})
+
+	t.Run("UserIDsForJiraAccount_HostNormalization", func(t *testing.T) {
+		// Writer stores under the trailing-slash-trimmed host; a reader
+		// passing the trailing-slash form must still resolve it (both sides
+		// run db.NormalizeJiraHost).
+		stores, seed := mk(t)
+		u := seed.User(t)
+		if err := stores.Users.UpsertJiraIdentity(ctx, u, jiraHost, acct, "Aidan", "pat"); err != nil {
+			t.Fatalf("UpsertJiraIdentity: %v", err)
+		}
+		got, err := stores.Users.UserIDsForJiraAccountSystem(ctx, jiraHost+"/", acct)
+		if err != nil {
+			t.Fatalf("UserIDsForJiraAccountSystem: %v", err)
+		}
+		assertSameSet(t, "UserIDsForJiraAccountSystem(trailing slash)", got, []string{u})
+	})
+
+	t.Run("UserIDsForJiraAccount_HostScoped", func(t *testing.T) {
+		// Identity is keyed on (user_id, host); the same account on a
+		// different host is a different binding and must not match.
+		stores, seed := mk(t)
+		u := seed.User(t)
+		if err := stores.Users.UpsertJiraIdentity(ctx, u, jiraHost, acct, "Aidan", "pat"); err != nil {
+			t.Fatalf("UpsertJiraIdentity: %v", err)
+		}
+		got, err := stores.Users.UserIDsForJiraAccountSystem(ctx, "https://other.atlassian.net", acct)
+		if err != nil {
+			t.Fatalf("UserIDsForJiraAccountSystem: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("UserIDsForJiraAccountSystem(other host) = %v; want empty slice", got)
 		}
 	})
 
