@@ -13,10 +13,13 @@ import (
 
 // waitForPending blocks until the broker has registered (runID, requestID). The
 // handler registers synchronously on entry and then parks, so a test can resolve
-// it without racing the handler goroutine.
+// it without racing the handler goroutine. Only safe when permTimeout is far
+// longer than a poll interval — the entry must still be pending when the poll
+// runs. Tests that shrink permTimeout near the poll interval must use
+// waitForPendingOrDone instead.
 func waitForPending(t *testing.T, s *Spawner, runID, requestID string) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		s.mu.Lock()
 		_, ok := s.permPending[permKey(runID, requestID)]
@@ -27,6 +30,33 @@ func waitForPending(t *testing.T, s *Spawner, runID, requestID string) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("permission request %q (run %q) never registered", requestID, runID)
+}
+
+// waitForPendingOrDone polls until the prompt is observably pending (false) or
+// the handler has already returned its decision into got (true, decision in
+// *d). With a tiny permTimeout the whole pending window can open and close
+// between two polls on a starved runner — registration, timeout, deregistration
+// all inside one oversleep — so "handler already finished" must be a navigable
+// outcome, not a missed observation that fails the test.
+func waitForPendingOrDone(t *testing.T, s *Spawner, runID, requestID string, got <-chan agentproc.PermissionDecision, d *agentproc.PermissionDecision) bool {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		_, pending := s.permPending[permKey(runID, requestID)]
+		s.mu.Unlock()
+		if pending {
+			return false
+		}
+		select {
+		case *d = <-got:
+			return true
+		default:
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("permission request %q (run %q) neither registered nor returned", requestID, runID)
+	return false
 }
 
 // TestBrowserPermissionHandler_ResolveAllow: a prompt answered via
@@ -95,7 +125,9 @@ func TestPermTimeoutBelowIdle(t *testing.T) {
 // (select picks randomly between two ready cases) or in the gap before the
 // handler deregisters. The staggered sleep walks attempts across the
 // deadline so iterations land before, at, and after it; the after-deadline
-// ones assert the inverse (no ack ⟹ timeout deny, resolve 404s).
+// ones assert the inverse (no ack ⟹ timeout deny, resolve 404s). An iteration
+// whose prompt already timed out before the test could observe it pending
+// (loaded runner) is the same after-deadline case, asserted inline.
 func TestResolvePermission_AcknowledgedResolveNeverDropped(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
 	s.SetIdleHibernateTimeout(4 * time.Millisecond) // permTimeout = 2ms
@@ -107,7 +139,20 @@ func TestResolvePermission_AcknowledgedResolveNeverDropped(t *testing.T) {
 		go func() {
 			got <- h(agentproc.PermissionRequest{RequestID: reqID})
 		}()
-		waitForPending(t, s, "run-race", reqID)
+
+		// On a starved runner the 2ms pending window can elapse entirely
+		// between two polls; the handler then already timed out — that
+		// iteration is an after-deadline sample, asserted directly here.
+		var d agentproc.PermissionDecision
+		if done := waitForPendingOrDone(t, s, "run-race", reqID, got, &d); done {
+			if d.Behavior != "deny" {
+				t.Fatalf("iteration %d: unanswered prompt returned %q, want timeout deny", i, d.Behavior)
+			}
+			if err := s.ResolvePermission(runmode.LocalDefaultOrg, "run-race", reqID, agentproc.PermissionDecision{Behavior: "allow"}); !errors.Is(err, ErrNoPendingPermission) {
+				t.Fatalf("iteration %d: resolve after handler returned: err = %v, want ErrNoPendingPermission", i, err)
+			}
+			continue
+		}
 		time.Sleep(time.Duration(i%5) * time.Millisecond)
 
 		err := s.ResolvePermission(runmode.LocalDefaultOrg, "run-race", reqID, agentproc.PermissionDecision{Behavior: "allow"})
@@ -116,7 +161,7 @@ func TestResolvePermission_AcknowledgedResolveNeverDropped(t *testing.T) {
 		}
 		acked := err == nil
 
-		d := <-got
+		d = <-got
 		if acked && d.Behavior != "allow" {
 			t.Fatalf("iteration %d: resolve was acknowledged (nil) but handler returned %q (%s) — acknowledged decision dropped", i, d.Behavior, d.Message)
 		}
