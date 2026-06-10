@@ -307,26 +307,32 @@ func (r *Router) closeCheckReviewRequestRemoved(orgID string, evt domain.Event, 
 	return closed
 }
 
-// closeCheckJiraReassigned: when a Jira issue is reassigned, retire any active
-// jira:issue:assigned / jira:issue:available task on the entity that is NOT
-// still owned by the new assignee, so the prior owner's task closes and the new
-// jira:issue:assigned can mint a fresh task owned by the new assignee's team via
-// the owning-team ladder.
+// closeCheckJiraReassigned: when a Jira issue is reassigned, retire the active
+// jira:issue:assigned / jira:issue:available tasks on the entity that no longer
+// reflect the assignment, so the new jira:issue:assigned can mint a fresh task
+// owned by the new assignee's team via the owning-team ladder.
 //
-// Member-aware (the assignee-routing world): the new assignee is resolved to
-// its owning team(s) via the same reverse identity lookup the router uses, and
-// a task already owned by one of those teams is left open — a re-emit for the
-// same member must not close-and-recreate that member's own task (it would lose
-// the task's claim / in-flight run). A reassignment to ANOTHER TF member closes
-// the prior owner's task (the new event mints the new owner's); a reassignment
-// to a non-member closes the member's task and the ladder mints nothing. Full
-// cross-team ownership transfer of an in-flight task is out of scope.
+// The two task types retire on different conditions:
 //
-// A NULL-owned task (assignee bound to two TF users → ambiguous owner) is not
-// skipped — it closes on any reassignment, since there's no single owning team
-// to match the new assignee against. The "self" display-name fallback below
-// keeps the local Server/DC path (no Atlassian accountId) from auto-closing a
-// task still assigned to the local user.
+//   - jira:issue:assigned is the per-assignee task. It is left open ONLY when
+//     the issue is still assigned to the team that owns it — a re-emit for the
+//     same member must not close-and-recreate that member's own task (it would
+//     lose the task's claim / in-flight run). Reassignment to ANOTHER TF member
+//     closes it (the new event mints the new owner's); reassignment to a
+//     non-member closes it and the ladder mints nothing.
+//   - jira:issue:available is the unassigned team-pool / pickup-queue task, and
+//     its owner is the TRACKING team, not the assignee — so an owner match
+//     against the new assignee's team is coincidental. Once the issue is
+//     assigned it is no longer unclaimed, so the pool task ALWAYS retires
+//     (otherwise it lingers alongside the new assigned task — two cards for one
+//     entity).
+//
+// Member-awareness comes from resolving the new assignee to its owning team(s)
+// via the same reverse identity lookup the router uses. A NULL-owned assigned
+// task (assignee bound to two TF users → ambiguous owner) is not skipped — it
+// closes on any reassignment, since there's no single owning team to match. The
+// "self" display-name fallback keeps the local Server/DC path (no Atlassian
+// accountId) from auto-closing a task still assigned to the local user.
 func (r *Router) closeCheckJiraReassigned(orgID string, evt domain.Event, entityID string) bool {
 	var meta events.JiraIssueAssignedMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
@@ -359,7 +365,6 @@ func (r *Router) closeCheckJiraReassigned(orgID string, evt domain.Event, entity
 		}
 	}
 
-	// Close active assigned/available tasks that the new assignee does not own.
 	closed := false
 	for _, eventType := range []string{domain.EventJiraIssueAssigned, domain.EventJiraIssueAvailable} {
 		tasks, err := r.tasks.FindActiveByEntityAndTypeSystem(context.Background(), orgID, entityID, eventType)
@@ -367,9 +372,14 @@ func (r *Router) closeCheckJiraReassigned(orgID string, evt domain.Event, entity
 			continue
 		}
 		for _, t := range tasks {
-			if owner := teamIDValue(&t); owner != "" {
-				if _, ok := newOwnerTeams[owner]; ok {
-					continue // still owned by the new assignee — not a reassignment-away
+			// Only the per-assignee assigned task gets the same-owner skip; the
+			// available pool task always retires once the issue is assigned (its
+			// owner is the tracking team, so an assignee-team match is coincidental).
+			if eventType == domain.EventJiraIssueAssigned {
+				if owner := teamIDValue(&t); owner != "" {
+					if _, ok := newOwnerTeams[owner]; ok {
+						continue // still assigned to its owning team — not a reassignment-away
+					}
 				}
 			}
 			if err := r.closeTaskWithAudit(orgID, t.ID, evt.ID, "auto_closed_by_event", domain.EventJiraIssueAssigned); err != nil {

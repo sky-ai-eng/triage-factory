@@ -503,6 +503,56 @@ func TestAssigneeCentric_ReassignToMember_PriorOwnerCloses_NewOwnerMinted(t *tes
 	}
 }
 
+// TestAssigneeCentric_AssignClosesAvailablePoolTask: an unassigned issue with
+// an open jira:issue:available pool task owned by the tracking team is then
+// assigned to a MEMBER of that same team. The pool task must retire (the issue
+// is no longer unclaimed) even though its owner coincides with the new
+// assignee's team — leaving exactly the new assigned task, not two cards.
+func TestAssigneeCentric_AssignClosesAvailablePoolTask(t *testing.T) {
+	database := newTestDB(t)
+	seedHandlerFKTargets(t, database)
+	setJiraHost(t, database)
+
+	teamA := seedTeam(t, database, "team-a")
+	seedJiraUserOnTeam(t, database, teamA, "acct-aidan", "aidan")
+	seedUserJiraRule(t, database, teamA, domain.EventJiraIssueAvailable)
+	seedSystemJiraRule(t, database, teamA, domain.EventJiraIssueAssigned)
+
+	entityID := jiraEntity(t, database, "SKY-poolclaim")
+	router := reviewRouter(database)
+
+	// The pool task lands first (owned by teamA, the tracking team).
+	availMeta, _ := json.Marshal(events.JiraIssueAvailableMetadata{IssueKey: "SKY-poolclaim", Project: "SKY", Status: "To Do"})
+	router.HandleEvent(domain.Event{
+		EventType:    domain.EventJiraIssueAvailable,
+		EntityID:     &entityID,
+		MetadataJSON: string(availMeta),
+		OccurredAt:   time.Now(),
+		OrgID:        runmode.LocalDefaultOrg,
+	})
+	if avail, _ := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrg, entityID, domain.EventJiraIssueAvailable); len(avail) != 1 {
+		t.Fatalf("setup: expected 1 available pool task, got %d", len(avail))
+	}
+
+	// Now assigned to aidan, a member of teamA (the pool task's owner).
+	emitJiraAssigned(router, entityID, "acct-aidan")
+
+	avail, err := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrg, entityID, domain.EventJiraIssueAvailable)
+	if err != nil {
+		t.Fatalf("list available tasks: %v", err)
+	}
+	if len(avail) != 0 {
+		t.Errorf("available pool task should retire on assignment, still %d active", len(avail))
+	}
+	all, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	if err != nil || len(all) != 1 {
+		t.Fatalf("expected exactly 1 active task (the assigned one), got %d (err=%v)", len(all), err)
+	}
+	if all[0].EventType != domain.EventJiraIssueAssigned || teamIDValue(&all[0]) != teamA {
+		t.Errorf("surviving task = (%s, owner %q), want (assigned, %q)", all[0].EventType, teamIDValue(&all[0]), teamA)
+	}
+}
+
 // TestAssigneeCentric_ReassignSameMember_NoChurn: a re-emit of jira:issue:
 // assigned for the SAME member must not close-and-recreate that member's own
 // task (which would discard its claim / in-flight run) — the member-aware

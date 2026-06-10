@@ -424,8 +424,17 @@ func (r *Router) assigneeTeams(orgID string, evt domain.Event) []string {
 	}
 	// The reverse lookup normalizes the host (db.NormalizeJiraHost) the same
 	// way the capture paths stored it, so the raw org_settings value resolves
-	// the identities bound under the canonical host. An empty host (Jira not
-	// configured) resolves nobody.
+	// the identities bound under the canonical host.
+	//
+	// org_settings.jira_base_url is the right (and only correct) host key here,
+	// NOT the integrations creds.JiraURL the poller falls back to: Jira identity
+	// capture (handleJiraIdentityPAT) refuses to bind unless jira_base_url
+	// resolves to a valid host (jira.CanonicalHost), so every user_jira_identities
+	// row is keyed under NormalizeJiraHost(jira_base_url). Keying the reverse
+	// lookup off creds.JiraURL would only matter when jira_base_url is empty —
+	// and then no identity exists to find, so the two are never out of step.
+	// An empty host (Jira not configured for identity) therefore resolves
+	// nobody, correctly: there are no member identities to route to.
 	userIDs, err := r.users.UserIDsForJiraAccountSystem(context.Background(), orgSet.JiraBaseURL, m.AssigneeAccountID)
 	if err != nil {
 		log.Printf("[router] assignee-centric owner: reverse account lookup for %s: %v", m.AssigneeAccountID, err)
