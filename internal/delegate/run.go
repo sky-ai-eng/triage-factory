@@ -319,11 +319,11 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 				creatorUserID: creatorUserID,
 			},
 			opts: baseOpts,
-			// Every run surfaces off-allowlist tools to the browser as a
-			// permission_request and parks the turn until the user answers
-			// (Allow/Deny) or permTimeout() denies it — kept below idleTimeout
-			// so an unwatched run degrades to a bounded deny, never a hang. A
-			// generous allowlist keeps prompts rare.
+			// Interactive runs surface off-allowlist tools to the browser as a
+			// permission_request and park the turn until the user answers (Allow/Deny)
+			// or permTimeout() denies it — kept below idleTimeout so an unwatched run
+			// degrades to a bounded deny, never a hang. A generous allowlist keeps
+			// prompts rare.
 			perms:       s.BrowserPermissionHandler(orgID, runID),
 			sink:        sink,
 			idleTimeout: s.idleTimeout(),
