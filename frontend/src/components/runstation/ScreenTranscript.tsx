@@ -167,6 +167,19 @@ function buildRows(messages: AgentMessage[], run: AgentRun): React.ReactNode[] {
 
   const rows: React.ReactNode[] = []
   for (const msg of messages) {
+    // Steering input: the message endpoint records the user's words as a
+    // Role:"user" row before routing them to the process — render them as
+    // operator lines so a steer is visible in the feed it steered.
+    if (msg.Role === 'user') {
+      if (msg.Content) {
+        rows.push(
+          <ScreenRow key={`u-${msg.ID}`} time={clockTime(msg.CreatedAt)}>
+            <UserLine text={msg.Content} />
+          </ScreenRow>,
+        )
+      }
+      continue
+    }
     if (msg.Role !== 'assistant') continue
     if (msg.Content && msg.Content.trimStart().startsWith('{"status":')) continue
     const time = clockTime(msg.CreatedAt)
@@ -227,6 +240,30 @@ function ScreenRow({ time, children }: { time: string; children: React.ReactNode
         {time}
       </span>
       <div className="min-w-0 flex-1">{children}</div>
+    </div>
+  )
+}
+
+// UserLine — an operator message steered into the run: a YOU tag in the
+// run's input tone, the text rendered plain (it's the user's raw words, not
+// agent markdown).
+function UserLine({ text }: { text: string }) {
+  return (
+    <div>
+      <div className="mb-0.5">
+        <span
+          className="font-mono text-[9px] font-semibold uppercase tracking-[0.16em]"
+          style={{ color: 'var(--hmi-cyan)' }}
+        >
+          you
+        </span>
+      </div>
+      <div
+        className="whitespace-pre-wrap text-[13px] leading-relaxed"
+        style={{ color: 'var(--hmi-strong)' }}
+      >
+        {text}
+      </div>
     </div>
   )
 }

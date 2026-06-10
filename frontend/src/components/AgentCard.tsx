@@ -270,6 +270,12 @@ function feedLines(messages: AgentMessage[]): FeedLine[] {
       second: '2-digit',
       hour12: false,
     })
+    // Operator steers show on the ticker too — the card should reflect that
+    // someone redirected the run.
+    if (msg.Role === 'user' && msg.Content) {
+      out.push({ id: `u-${msg.ID}`, time, text: `you: ${clip(msg.Content, 64)}` })
+      continue
+    }
     if (msg.Role !== 'assistant') continue
     // Skip the raw JSON completion message (the agent's structured output).
     if (msg.Content && msg.Content.trimStart().startsWith('{"status":')) continue
