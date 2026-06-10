@@ -173,9 +173,9 @@ async function runStreamingInput(options, permissionPrompts) {
   // per-request on the abort signal) so the query can always drain
   // instead of hanging forever on a decision that will never arrive.
   const denyAllPending = (message) => {
-    const settles = [...pendingPerms.values()]
+    const pending = [...pendingPerms.values()]
     pendingPerms.clear()
-    for (const settle of settles) settle({ behavior: "deny", message })
+    for (const { settle } of pending) settle({ behavior: "deny", message })
   }
 
   // canUseTool is only honored in streaming-input mode, and only wired
@@ -211,7 +211,10 @@ async function runStreamingInput(options, permissionPrompts) {
           pendingPerms.delete(requestId)
           resolve(decision)
         }
-        pendingPerms.set(requestId, settle)
+        // Stash the original input alongside the settle: an allow
+        // response that doesn't override the input must echo it back
+        // as updatedInput (see the permission_response handler).
+        pendingPerms.set(requestId, { settle, toolInput })
         // If the turn is interrupted, the SDK aborts this signal — resolve
         // as a deny so the pending promise never strands the query.
         const signal = opts.signal
@@ -276,17 +279,22 @@ async function runStreamingInput(options, permissionPrompts) {
         break
 
       case "permission_response": {
-        const settle = pendingPerms.get(ctl.request_id)
-        if (!settle) {
+        const pending = pendingPerms.get(ctl.request_id)
+        if (!pending) {
           process.stderr.write(`wrapper: no pending permission ${ctl.request_id}\n`)
           break
         }
         if (ctl.behavior === "allow") {
-          const result = { behavior: "allow" }
-          if (ctl.updated_input) result.updatedInput = ctl.updated_input
-          settle(result)
+          // updatedInput is mandatory on an allow: sdk.d.ts declares it
+          // optional, but the CLI bundled with the SDK validates the
+          // result against a schema that requires it — a bare
+          // {behavior:"allow"} comes back as "Tool permission request
+          // failed: ZodError…" and the tool call is rejected. An allow
+          // with no explicit override therefore echoes the original
+          // input: approve means "run with the input you asked about".
+          pending.settle({ behavior: "allow", updatedInput: ctl.updated_input ?? pending.toolInput })
         } else {
-          settle({ behavior: "deny", message: ctl.message ?? "denied by user" })
+          pending.settle({ behavior: "deny", message: ctl.message ?? "denied by user" })
         }
         break
       }
