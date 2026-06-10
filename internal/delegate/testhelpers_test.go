@@ -53,7 +53,8 @@ func seedRunBlueprint(t *testing.T, database *sql.DB, suffix, taskID string) str
 	return brID
 }
 
-// seedRun inserts a run with the requested fields and returns its ID.
+// seedRun inserts a run (plus its entity/event/task/blueprint fixtures)
+// with the requested id, session id, and worktree path.
 // We bypass the spawner's Delegate flow because these tests don't need
 // a real goroutine — only a row in the runs table. Every run is a
 // blueprint step now (runs.blueprint_run_id NOT NULL), so it mints a 1-step

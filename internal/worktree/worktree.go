@@ -470,10 +470,6 @@ func makeWorktreeDir(runID string) (string, error) {
 	return wtDir, nil
 }
 
-func gitOutput(dir string, args ...string) (string, error) {
-	return gitOutputCtx(context.Background(), dir, args...)
-}
-
 func gitOutputCtx(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {
