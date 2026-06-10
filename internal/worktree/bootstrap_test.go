@@ -353,41 +353,6 @@ func TestCleanupPRConfig_OwnRepoIsNoOp(t *testing.T) {
 // `git push`. The right behavior is to skip tracking entirely so
 // `git push` (no args) errors with "no upstream branch" instead of
 // pushing to the wrong place.
-// TestCreateForBranch_BarePushSetsUpstream pins the feature-branch tracking
-// configured by createBranchWorktreeAt: a fresh feature branch must accept a
-// bare `git push` (no args, no -u) on the first try and land on
-// origin/<branch> — the form agents actually run. The tracking is
-// branch-scoped on purpose; a repo-wide push.* setting on the shared bare is
-// the leak TestCreateForPR_DeletedFork_PushFailsAfterPriorOwnRepoPR pins.
-func TestCreateForBranch_BarePushSetsUpstream(t *testing.T) {
-	withTestHome(t)
-	upstream := makeTestUpstream(t)
-
-	wtPath, err := CreateForBranch(context.Background(), "owner-branch-push", "repo-branch-push", upstream, "", "feature/TT-1", "branch-push-run")
-	if err != nil {
-		t.Fatalf("CreateForBranch: %v", err)
-	}
-	t.Cleanup(func() { _ = RemoveAt(wtPath, "branch-push-run") })
-
-	cmds := [][]string{
-		{"-C", wtPath, "config", "user.email", "x@y.z"},
-		{"-C", wtPath, "config", "user.name", "x"},
-		{"-C", wtPath, "commit", "--allow-empty", "-m", "agent work"},
-	}
-	for _, c := range cmds {
-		if out, err := exec.Command("git", c...).CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v: %s", c, err, out)
-		}
-	}
-
-	if out, err := exec.Command("git", "-C", wtPath, "push").CombinedOutput(); err != nil {
-		t.Fatalf("bare `git push` from a fresh feature branch should succeed: %v: %s", err, out)
-	}
-	if out, err := exec.Command("git", "-C", upstream, "show-ref", "--verify", "refs/heads/feature/TT-1").CombinedOutput(); err != nil {
-		t.Errorf("upstream missing refs/heads/feature/TT-1 after push: %v: %s", err, out)
-	}
-}
-
 func TestCreateForPR_DeletedFork_NoTrackingConfigured(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)

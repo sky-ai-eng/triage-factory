@@ -97,30 +97,6 @@ func createBranchWorktreeAt(ctx context.Context, owner, repo, cloneURL, baseBran
 		}
 	}
 
-	// Branch-scoped tracking so a bare `git push` works on the first try.
-	// A new feature branch has no upstream (the remote branch doesn't exist
-	// until that push), so without this git refuses with "no upstream
-	// branch" and the run stalls on a fixable nit. Same per-branch pattern
-	// as configureOwnRepoPRTracking — and deliberately NOT a repo-wide
-	// push.* setting on the shared bare, which would resurrect the
-	// deleted-fork stray-push leak pinned by
-	// TestCreateForPR_DeletedFork_PushFailsAfterPriorOwnRepoPR. No PR
-	// marker key: this tracking is durable branch metadata (a re-delegated
-	// run reattaches to the same branch), not run-scoped state for the
-	// sweep to reclaim. Set on both creation paths — a reattached branch
-	// may predate this config.
-	for _, args := range [][]string{
-		{"config", "branch." + featureBranch + ".remote", "origin"},
-		{"config", "branch." + featureBranch + ".merge", "refs/heads/" + featureBranch},
-	} {
-		if err := gitRunCtx(ctx, bareDir, args...); err != nil {
-			if rmErr := RemoveAt(wtDir, runID); rmErr != nil {
-				log.Printf("[worktree] rollback after tracking-config failure: %v", rmErr)
-			}
-			return "", fmt.Errorf("configure feature branch tracking: %w", err)
-		}
-	}
-
 	if err := addExcludesOrRollback(runID, wtDir); err != nil {
 		return "", err
 	}
