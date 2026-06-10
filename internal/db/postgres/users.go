@@ -150,6 +150,13 @@ func getJiraIdentity(ctx context.Context, q queryer, userID, jiraBaseURL string)
 }
 
 func (s *usersStore) UpsertJiraIdentity(ctx context.Context, userID, jiraBaseURL, accountID, displayName, source string) error {
+	// account_id is the assignee-match key, so an empty one is a useless
+	// row that never matches any check. NOT NULL only rejects SQL NULL,
+	// not "" — reject it here so the contract is self-enforcing for any
+	// future caller (the only caller today already guards on StableID()).
+	if accountID == "" {
+		return fmt.Errorf("upsert user_jira_identities: account_id required")
+	}
 	// FK on user_id enforces the row-exists contract: a missing user
 	// surfaces as a foreign_key_violation. display_name is nullable —
 	// "" stores NULL.

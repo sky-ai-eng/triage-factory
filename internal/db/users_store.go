@@ -77,9 +77,16 @@ type UsersStore interface {
 	// together); source records how the binding was captured ('pat' |
 	// 'connect_oauth' | 'scim'); verified_at is stamped to now() on
 	// every call (this IS the authenticated confirmation). Upserts on the
-	// (user_id, jira_base_url) key. Passing "" for display_name stores
-	// NULL. Returns an error when the user row does not exist — capture
-	// paths own row creation. Mirrors UpsertGitHubIdentity.
+	// (user_id, jira_base_url) key. account_id is required — it's the
+	// assignee-match key, so an empty one is rejected before touching the
+	// DB (NOT NULL only catches SQL NULL, not ""). Passing "" for
+	// display_name stores NULL. Returns an error when the user row does
+	// not exist — capture paths own row creation. Mirrors
+	// UpsertGitHubIdentity. App pool only: the sole writer
+	// (handleJiraIdentityPAT) is a claims-bearing request handler, so
+	// there's no `...System` variant yet — a future claims-free writer
+	// (SCIM, a boot-time sync) would need one added, same as the GitHub
+	// store.
 	UpsertJiraIdentity(ctx context.Context, userID, jiraBaseURL, accountID, displayName, source string) error
 
 	// ClearJiraIdentity deletes the user's Jira identity row for a host
@@ -87,7 +94,11 @@ type UsersStore interface {
 	// exists for that (user, host) pair. Mirrors ClearGitHubIdentity.
 	// Note: an org-credential disconnect deliberately does NOT call this
 	// — identity is owned by its own capture surface, never swept as a
-	// side effect of an org-access change.
+	// side effect of an org-access change. No live HTTP handler surfaces
+	// this yet: the /identity/jira routes are status + PAT-bind only, so
+	// a user-facing disconnect is still future capture-flow UI work
+	// (symmetric with ClearGitHubIdentity, which is likewise unwired). It
+	// exists now so that handler is a pure addition, not a store change.
 	ClearJiraIdentity(ctx context.Context, userID, jiraBaseURL string) error
 
 	// --- Admin-pool variants (`...System`) ---

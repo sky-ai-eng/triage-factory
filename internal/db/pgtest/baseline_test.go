@@ -3112,6 +3112,28 @@ func TestRLS_UserGitHubIdentitySelfAccess(t *testing.T) {
 		t.Fatalf("self identity read under empty org claim should succeed; got: %v", err)
 	}
 
+	// Cross-user read is filtered to zero rows by user_github_identities_select's
+	// USING clause (a SELECT denial is a 0-row result, not a 42501). otherUser
+	// must not see userID's row even when naming the key explicitly — the
+	// self-only read contract the multi-mode team-members endpoint leans on.
+	if err := h.WithUser(t, otherUser, "", func(tx *sql.Tx) error {
+		var login string
+		e := tx.QueryRowContext(context.Background(),
+			`SELECT login FROM public.user_github_identities WHERE user_id = $1 AND github_base_url = 'https://github.com'`,
+			userID,
+		).Scan(&login)
+		if e == nil {
+			t.Errorf("cross-user identity read returned %q; want no rows (RLS USING filter)", login)
+			return nil
+		}
+		if !errors.Is(e, sql.ErrNoRows) {
+			return e
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("cross-user read should filter to zero rows, not error: %v", err)
+	}
+
 	// Cross-user insert must be refused by user_github_identities_modify's
 	// WITH CHECK (user_id != current_user_id() → policy violation, SQLSTATE
 	// 42501).
@@ -3184,6 +3206,28 @@ func TestRLS_UserJiraIdentitySelfAccess(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("self identity read under empty org claim should succeed; got: %v", err)
+	}
+
+	// Cross-user read is filtered to zero rows by user_jira_identities_select's
+	// USING clause (a SELECT denial is a 0-row result, not a 42501). otherUser
+	// must not see userID's row even when naming the key explicitly — the
+	// self-only read contract the multi-mode team-members endpoint leans on.
+	if err := h.WithUser(t, otherUser, "", func(tx *sql.Tx) error {
+		var accountID string
+		e := tx.QueryRowContext(context.Background(),
+			`SELECT account_id FROM public.user_jira_identities WHERE user_id = $1 AND jira_base_url = $2`,
+			userID, host,
+		).Scan(&accountID)
+		if e == nil {
+			t.Errorf("cross-user identity read returned %q; want no rows (RLS USING filter)", accountID)
+			return nil
+		}
+		if !errors.Is(e, sql.ErrNoRows) {
+			return e
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("cross-user read should filter to zero rows, not error: %v", err)
 	}
 
 	// A GitHub row for the same user on the same backend must coexist with
