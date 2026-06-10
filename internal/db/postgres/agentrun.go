@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 
@@ -246,7 +245,7 @@ func markOpen(ctx context.Context, q queryer, orgID, runID string) (bool, error)
 		SET status = 'open'
 		WHERE org_id = $1 AND id = $2
 		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-		                     'pending_approval', 'taken_over', 'open')
+		                     'pending_approval', 'open')
 	`, orgID, runID)
 	if err != nil {
 		return false, err
@@ -351,7 +350,7 @@ func markFailedIfActive(ctx context.Context, q queryer, orgID, runID string) (bo
 		UPDATE runs SET status = 'failed', completed_at = COALESCE(completed_at, $1)
 		WHERE org_id = $2 AND id = $3
 		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
-		                     'pending_approval','taken_over')
+		                     'pending_approval')
 	`, time.Now().UTC(), orgID, runID)
 	if err != nil {
 		return false, err
@@ -398,113 +397,13 @@ func hasOtherActiveRunForTask(ctx context.Context, q queryer, orgID, taskID, exc
 		SELECT EXISTS(
 			SELECT 1 FROM runs
 			WHERE org_id = $1 AND task_id = $2 AND id != $3
-			  AND status NOT IN ('completed','failed','cancelled','task_unsolvable','taken_over','pending_approval')
+			  AND status NOT IN ('completed','failed','cancelled','task_unsolvable','pending_approval')
 		)
 	`, orgID, taskID, excludeRunID).Scan(&exists)
 	if err != nil {
 		return false, err
 	}
 	return exists, nil
-}
-
-func (s *agentRunStore) MarkTakenOver(ctx context.Context, orgID, runID, takeoverPath, claimUserID string) (bool, error) {
-	rolled, err := s.runScoped(ctx, func(tx queryer) error {
-		now := time.Now()
-		res, err := tx.ExecContext(ctx, `
-			UPDATE runs
-			SET status = 'taken_over',
-			    completed_at = $1,
-			    stop_reason = 'user_takeover',
-			    result_summary = $2,
-			    worktree_path = $3
-			WHERE org_id = $4 AND id = $5
-			  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-			                     'pending_approval', 'taken_over')
-		`, now, "Taken over by user → "+takeoverPath, takeoverPath, orgID, runID)
-		if err != nil {
-			return err
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			// Race-lost on the run flip — run is already terminal.
-			// errScopedRollback tells runScoped to roll back the
-			// scope (savepoint when composed, tx when standalone)
-			// and surface (false, nil) to the caller.
-			return errScopedRollback
-		}
-
-		if claimUserID != "" {
-			// Race-safety guards on the task UPDATE — only fire when
-			// the bot still holds the claim AND no user has stepped
-			// in. Postgres READ COMMITTED can let another tx commit
-			// changes to the task between our run UPDATE and this
-			// one; without the guards the takeover would silently
-			// overwrite a concurrent swipe-claim takeover or a
-			// /requeue's clear.
-			res, err := tx.ExecContext(ctx, `
-				UPDATE tasks
-				   SET claimed_by_user_id  = $1,
-				       claimed_by_agent_id = NULL
-				 WHERE org_id = $2
-				   AND id = (SELECT task_id FROM runs WHERE org_id = $2 AND id = $3)
-				   AND claimed_by_agent_id IS NOT NULL
-				   AND claimed_by_user_id  IS NULL
-			`, claimUserID, orgID, runID)
-			if err != nil {
-				return err
-			}
-			taskN, err := res.RowsAffected()
-			if err != nil {
-				return err
-			}
-			if taskN == 0 {
-				// Race-lost on the task claim axis. Rolling back
-				// the scope unwinds the run UPDATE too — both
-				// statements are atomic with respect to outer
-				// state.
-				return errScopedRollback
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return false, err
-	}
-	if rolled {
-		return false, nil
-	}
-	return true, nil
-}
-
-func (s *agentRunStore) MarkReleased(ctx context.Context, orgID, runID string) (bool, error) {
-	return markReleased(ctx, s.q, orgID, runID)
-}
-
-func (s *agentRunStore) MarkReleasedSystem(ctx context.Context, orgID, runID string) (bool, error) {
-	return markReleased(ctx, s.admin, orgID, runID)
-}
-
-func markReleased(ctx context.Context, q queryer, orgID, runID string) (bool, error) {
-	res, err := q.ExecContext(ctx, `
-		UPDATE runs
-		SET worktree_path = '',
-		    result_summary = CASE
-		        WHEN COALESCE(result_summary, '') = '' THEN 'released by user'
-		        ELSE result_summary || '; released by user'
-		    END
-		WHERE org_id = $1
-		  AND id = $2
-		  AND status = 'taken_over'
-		  AND COALESCE(worktree_path, '') != ''
-	`, orgID, runID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
 }
 
 func (s *agentRunStore) MarkCancelledIfActive(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error) {
@@ -522,7 +421,7 @@ func markCancelledIfActive(ctx context.Context, q queryer, orgID, runID, stopRea
 		SET status = 'cancelled', completed_at = $1, stop_reason = $2, result_summary = $3
 		WHERE org_id = $4 AND id = $5
 		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-		                     'pending_approval', 'taken_over')
+		                     'pending_approval')
 	`, now, stopReason, summary, orgID, runID)
 	if err != nil {
 		return false, err
@@ -649,7 +548,7 @@ func (s *agentRunStore) HasActiveForTask(ctx context.Context, orgID, taskID stri
 		SELECT COUNT(*) FROM runs
 		WHERE org_id = $1 AND task_id = $2
 		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-		                     'pending_approval', 'taken_over')
+		                     'pending_approval')
 	`, orgID, taskID).Scan(&count)
 	return count > 0, err
 }
@@ -675,7 +574,7 @@ func hasActiveAutoRunForEntity(ctx context.Context, q queryer, orgID, entityID s
 		  AND t.entity_id = $2
 		  AND r.trigger_type = 'event'
 		  AND r.status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-		                       'pending_approval', 'taken_over')
+		                       'pending_approval')
 	`, orgID, entityID).Scan(&count)
 	return count > 0, err
 }
@@ -693,36 +592,8 @@ func activeRunIDsForTask(ctx context.Context, q queryer, orgID, taskID string) (
 		SELECT id FROM runs
 		WHERE org_id = $1 AND task_id = $2
 		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-		                     'pending_approval', 'taken_over')
+		                     'pending_approval')
 	`, orgID, taskID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
-}
-
-func (s *agentRunStore) ListTakenOverIDs(ctx context.Context, orgID string) ([]string, error) {
-	return listTakenOverRunIDs(ctx, s.q, orgID)
-}
-
-func (s *agentRunStore) ListTakenOverIDsSystem(ctx context.Context, orgID string) ([]string, error) {
-	return listTakenOverRunIDs(ctx, s.admin, orgID)
-}
-
-func listTakenOverRunIDs(ctx context.Context, q queryer, orgID string) ([]string, error) {
-	rows, err := q.QueryContext(ctx, `
-		SELECT id FROM runs
-		WHERE org_id = $1 AND status = 'taken_over' AND COALESCE(worktree_path, '') != ''
-	`, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -766,48 +637,6 @@ func listParkedWorktreePaths(ctx context.Context, q queryer, orgID string) ([]st
 		paths = append(paths, p)
 	}
 	return paths, rows.Err()
-}
-
-func (s *agentRunStore) ListTakenOverForResume(ctx context.Context, orgID string) ([]domain.TakenOverRun, error) {
-	// Postgres' pgx round-trips timestamps cleanly even through
-	// COALESCE, so the SQLite-side dance around stripped type
-	// metadata isn't needed here. ORDER BY uses COALESCE directly.
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT r.id, COALESCE(r.session_id, ''), COALESCE(r.worktree_path, ''),
-		       COALESCE(e.title, ''), COALESCE(e.source_id, ''),
-		       r.completed_at, r.started_at
-		FROM runs r
-		LEFT JOIN tasks t ON t.id = r.task_id AND t.org_id = r.org_id
-		LEFT JOIN entities e ON e.id = t.entity_id AND e.org_id = t.org_id
-		WHERE r.org_id = $1
-		  AND r.status = 'taken_over'
-		  AND COALESCE(r.worktree_path, '') != ''
-		ORDER BY COALESCE(r.completed_at, r.started_at) DESC
-	`, orgID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []domain.TakenOverRun
-	for rows.Next() {
-		var r domain.TakenOverRun
-		var completedAt, startedAt sql.NullTime
-		if err := rows.Scan(&r.RunID, &r.SessionID, &r.WorktreePath, &r.TaskTitle, &r.SourceID, &completedAt, &startedAt); err != nil {
-			return nil, err
-		}
-		if r.SessionID == "" || r.WorktreePath == "" {
-			continue
-		}
-		switch {
-		case completedAt.Valid:
-			r.CompletedAt = completedAt.Time
-		case startedAt.Valid:
-			r.CompletedAt = startedAt.Time
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
 }
 
 func (s *agentRunStore) EntitiesWithOpenRuns(ctx context.Context, orgID string, entityIDs []string) (map[string]struct{}, error) {
@@ -1061,97 +890,6 @@ func finalizeAgentRun(r *domain.AgentRun, completedAt sql.NullTime, costUSD sql.
 		v := int(numTurns.Int64)
 		r.NumTurns = &v
 	}
-}
-
-// runScoped runs fn inside a rollback-safe scope:
-//
-//   - If s.q is *sql.DB (the standalone path — every store method
-//     called outside Stores.Tx.WithTx), runScoped opens a fresh tx,
-//     hands fn the *sql.Tx as a queryer, and commits on success or
-//     rolls back via defer on any error including the sentinel.
-//
-//   - If s.q is *sql.Tx (composed inside an outer WithTx), runScoped
-//     declares a SAVEPOINT, runs fn against the same tx, and either
-//     RELEASEs on success or ROLLBACK-TO-SAVEPOINTs on errScopedRollback
-//     — leaving the surrounding tx's other work intact.
-//
-// fn signals "roll back this scope but don't surface an error to the
-// caller" by returning errScopedRollback. runScoped translates that
-// into (rolledBack=true, nil); MarkTakenOver uses it to convert
-// takeover-race-lost into (false, nil) without poisoning an outer tx.
-//
-// Other errors bubble up unchanged — runScoped rolls back the scope
-// (savepoint or tx) and returns (false, err).
-//
-// Savepoint names are unique per call to avoid collisions if a
-// future caller composes two AgentRunStore methods inside one
-// outer tx.
-func (s *agentRunStore) runScoped(ctx context.Context, fn func(queryer) error) (rolledBack bool, err error) {
-	switch v := s.q.(type) {
-	case *sql.Tx:
-		sp := scopedSavepointName()
-		if _, err := v.ExecContext(ctx, "SAVEPOINT "+sp); err != nil {
-			return false, err
-		}
-		fnErr := fn(v)
-		if fnErr == nil {
-			if _, err := v.ExecContext(ctx, "RELEASE SAVEPOINT "+sp); err != nil {
-				return false, err
-			}
-			return false, nil
-		}
-		// Always roll back the savepoint on any error so partial work
-		// doesn't leak into the outer tx. The RELEASE after ROLLBACK
-		// TO is necessary in Postgres — the savepoint stays declared
-		// otherwise (SQLite's parser tolerates either; uniform shape
-		// keeps the helper simple).
-		if _, rerr := v.ExecContext(ctx, "ROLLBACK TO SAVEPOINT "+sp); rerr != nil {
-			return false, rerr
-		}
-		if _, rerr := v.ExecContext(ctx, "RELEASE SAVEPOINT "+sp); rerr != nil {
-			return false, rerr
-		}
-		if errors.Is(fnErr, errScopedRollback) {
-			return true, nil
-		}
-		return false, fnErr
-	case *sql.DB:
-		tx, err := v.BeginTx(ctx, nil)
-		if err != nil {
-			return false, err
-		}
-		defer func() { _ = tx.Rollback() }()
-		if fnErr := fn(tx); fnErr != nil {
-			if errors.Is(fnErr, errScopedRollback) {
-				return true, nil // deferred Rollback unwinds the tx
-			}
-			return false, fnErr
-		}
-		if err := tx.Commit(); err != nil {
-			return false, err
-		}
-		return false, nil
-	default:
-		return false, errors.New("postgres agentrun: unexpected queryer type")
-	}
-}
-
-// errScopedRollback is the sentinel fn returns when it wants
-// runScoped to roll back the current scope (savepoint or tx) and
-// surface (rolledBack=true, nil) to the caller. Used by
-// MarkTakenOver to model race-loss as a non-error rollback.
-var errScopedRollback = errors.New("agentrun: scoped rollback")
-
-// scopedSavepointName generates a unique savepoint identifier per
-// call. UnixNano + a process-local counter would be marginally safer
-// against same-nanosecond collisions but the helper is only called
-// inside a transaction, where SAVEPOINT names form a stack and
-// declaring two with the same name shadows the outer — the unique
-// suffix is defensive against logical collisions across nested
-// composed calls within one tx, not against time-resolution
-// collisions.
-func scopedSavepointName() string {
-	return fmt.Sprintf("agentrun_scope_%d", time.Now().UnixNano())
 }
 
 // nullIfEmpty is the small reusable helper many Postgres stores want

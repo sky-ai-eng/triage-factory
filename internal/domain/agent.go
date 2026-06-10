@@ -41,7 +41,7 @@ type AgentRun struct {
 	ID            string
 	TaskID        string
 	PromptID      string // FK to prompts.id — which prompt was used for this run
-	Status        string // lifecycle: "queued" | "initializing" | "cloning" | "fetching" | "worktree_created" | "agent_starting" | "running" | "open" (a turn ended without a conclusion — not executing, not concluded); terminal: "completed" | "failed" | "cancelled" | "task_unsolvable" | "pending_approval" | "taken_over"
+	Status        string // lifecycle: "queued" | "initializing" | "cloning" | "fetching" | "worktree_created" | "agent_starting" | "running" | "open" (a turn ended without a conclusion — not executing, not concluded); terminal: "completed" | "failed" | "cancelled" | "task_unsolvable" | "pending_approval"
 	Model         string
 	StartedAt     time.Time
 	CompletedAt   *time.Time

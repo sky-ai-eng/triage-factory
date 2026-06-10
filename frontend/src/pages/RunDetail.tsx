@@ -5,7 +5,6 @@ import { useRunDetail } from '../hooks/useRunDetail'
 import { useOrgHref } from '../hooks/useOrgHref'
 import { isActiveRun } from '../lib/runStatus'
 import RunStation, { type StationActions } from '../components/runstation/RunStation'
-import TakeoverModal, { type TakeoverInfo } from '../components/TakeoverModal'
 import ReviewOverlay from '../components/ReviewOverlay'
 import PendingPROverlay from '../components/PendingPROverlay'
 import { GlassBackdrop } from './setup/glass'
@@ -14,7 +13,7 @@ import { readError } from '../lib/api'
 
 // RunDetail — the data shell for the full-screen run station. It loads the run +
 // task + messages (live over websocket via useRunDetail), wires the real
-// actions (takeover, cancel, requeue, review/PR approval, keyboard shortcuts),
+// actions (message/interrupt steering, cancel, requeue, review/PR approval),
 // and hands it all to <RunStation>, which owns every pixel.
 export default function RunDetail() {
   const { runID } = useParams<{ runID: string }>()
@@ -34,9 +33,6 @@ export default function RunDetail() {
 
   const [chainSteps, setChainSteps] = useState<AgentRun[] | null>(null)
   const [now, setNow] = useState(() => Date.now())
-  const [takeoverInfo, setTakeoverInfo] = useState<TakeoverInfo | null>(null)
-  const [takeoverPending, setTakeoverPending] = useState(false)
-  const [releasePending, setReleasePending] = useState(false)
   const [interruptPending, setInterruptPending] = useState(false)
   const [approval, setApproval] = useState<{ runID: string; kind: 'review' | 'pr' } | null>(null)
 
@@ -84,23 +80,6 @@ export default function RunDetail() {
     }
   }, [run?.blueprint_run_id, run?.TaskID])
 
-  const handleTakeover = useCallback(async () => {
-    if (!run) return
-    setTakeoverPending(true)
-    try {
-      const res = await fetch(`/api/agent/runs/${run.ID}/takeover`, { method: 'POST' })
-      if (!res.ok) {
-        toast.error(await readError(res, 'Failed to take over run'))
-        return
-      }
-      setTakeoverInfo((await res.json()) as TakeoverInfo)
-    } catch (err) {
-      toast.error(`Failed to take over run: ${(err as Error).message}`)
-    } finally {
-      setTakeoverPending(false)
-    }
-  }, [run])
-
   const handleCancel = useCallback(async () => {
     if (!run) return
     try {
@@ -133,9 +112,8 @@ export default function RunDetail() {
 
   // Interrupt pauses the current turn (run → open), leaving the process warm —
   // distinct from Cancel, which abandons the run. The composer stays open.
-  // interruptPending mirrors takeoverPending/releasePending: it disables the
-  // Pause button while the POST is in flight so rapid clicks can't stack
-  // concurrent interrupts ahead of the WS status flip.
+  // interruptPending disables the Pause button while the POST is in flight so
+  // rapid clicks can't stack concurrent interrupts ahead of the WS status flip.
   const handleInterrupt = useCallback(async () => {
     if (!run || interruptPending) return
     setInterruptPending(true)
@@ -163,26 +141,12 @@ export default function RunDetail() {
     }
   }, [navigate, orgHref, run?.TaskID])
 
-  const handleRelease = useCallback(async () => {
-    if (!run) return
-    if (!confirm('Release this takeover? The worktree dir will be deleted.')) return
-    setReleasePending(true)
-    try {
-      const res = await fetch(`/api/agent/runs/${run.ID}/release`, { method: 'POST' })
-      if (!res.ok) toast.error(await readError(res, 'Failed to release takeover'))
-    } catch (err) {
-      toast.error(`Failed to release takeover: ${(err as Error).message}`)
-    } finally {
-      setReleasePending(false)
-    }
-  }, [run])
-
   const handleReview = useCallback(() => {
     if (!run) return
     setApproval({ runID: run.ID, kind: run.pending_kind === 'pr' ? 'pr' : 'review' })
   }, [run])
 
-  // Keyboard: Esc → back, t → take over.
+  // Keyboard: Esc → back.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLElement) {
@@ -192,19 +156,11 @@ export default function RunDetail() {
       if (e.key === 'Escape') {
         e.preventDefault()
         navigate(orgHref('/board'))
-      } else if (
-        (e.key === 't' || e.key === 'T') &&
-        run?.Status === 'running' &&
-        !!run.SessionID &&
-        !takeoverPending
-      ) {
-        e.preventDefault()
-        handleTakeover()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [navigate, orgHref, run?.Status, run?.SessionID, takeoverPending, handleTakeover])
+  }, [navigate, orgHref])
 
   if (loading)
     return <FloorMessage tone="text-text-tertiary">Spinning up the station…</FloorMessage>
@@ -226,23 +182,18 @@ export default function RunDetail() {
 
   const actions: StationActions = {
     onBack: () => navigate(orgHref('/board')),
-    onTakeover: handleTakeover,
     onCancel: handleCancel,
     onRequeue: handleRequeue,
-    onRelease: handleRelease,
     onReview: handleReview,
     onMessage: handleMessage,
     onInterrupt: handleInterrupt,
     interruptPending,
     onResolvePermission: resolvePermission,
-    takeoverPending,
-    releasePending,
   }
 
   return (
     <div className="relative h-screen p-3">
       <GlassBackdrop />
-      <TakeoverModal info={takeoverInfo} onClose={() => setTakeoverInfo(null)} />
       <ReviewOverlay
         runID={approval?.kind === 'review' ? approval.runID : ''}
         open={approval?.kind === 'review'}

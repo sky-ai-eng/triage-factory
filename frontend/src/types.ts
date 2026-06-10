@@ -109,16 +109,6 @@ export interface AgentRun {
   blueprint_step_index?: number | null
 }
 
-export interface HeldTakeover {
-  run_id: string
-  session_id: string
-  takeover_path: string
-  task_title: string
-  source_id: string
-  taken_over_at: string
-  resume_command: string
-}
-
 export interface AgentMessage {
   ID: number
   RunID: string

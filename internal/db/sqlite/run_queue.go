@@ -105,7 +105,7 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context) (int, error) {
 		UPDATE runs SET status = 'queued', claimed_at = NULL
 		WHERE status NOT IN (
 			'queued',
-			'completed','failed','cancelled','task_unsolvable','taken_over',
+			'completed','failed','cancelled','task_unsolvable',
 			'open','pending_approval'
 		)
 		AND blueprint_run_id IN (SELECT id FROM blueprint_runs WHERE status = 'running')

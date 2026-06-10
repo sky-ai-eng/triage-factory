@@ -82,7 +82,7 @@ func (a *App) buildAI() {
 func (a *App) buildExecution() error {
 	// Per-run credentials resolve through the run-credential seam, not a
 	// process-global hot-swap.
-	a.spawner = delegate.NewSpawner(a.database, a.stores, nil, a.wsHub, "", a.storedTakeoverDir)
+	a.spawner = delegate.NewSpawner(a.database, a.stores, nil, a.wsHub, "")
 	a.spawner.SetRunCredentialResolvers(a.ghResolver, a.runSecrets, a.modelFor)
 	// TFAC-300: the board→Jira lifecycle mirror resolves the org's system/bot
 	// Jira credential per write through this resolver (same construction the

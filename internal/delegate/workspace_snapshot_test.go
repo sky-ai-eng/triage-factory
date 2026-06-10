@@ -285,7 +285,7 @@ func newStorageSpawner(t *testing.T) *Spawner {
 	if err != nil {
 		t.Fatalf("storage.New: %v", err)
 	}
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetStorage(blobs)
 	return s
 }

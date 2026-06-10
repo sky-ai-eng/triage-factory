@@ -50,13 +50,13 @@ func (f *fakeDrainer) callsCopy() []drainCall {
 // without the explicit drain the per-entity firing queue would stick until some
 // other run terminated.
 func TestCancel_OpenAutoRun_DrainsQueue(t *testing.T) {
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	seedRun(t, database, "r1", "sess-1", "/tmp/wt-r1")
 	if _, err := database.Exec(`UPDATE runs SET status = 'open', trigger_type = 'event', creator_user_id = NULL WHERE id = 'r1'`); err != nil {
 		t.Fatalf("park run: %v", err)
 	}
 
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6", "")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	drainer := newFakeDrainer()
 	s.SetQueueDrainer(drainer)
 
@@ -88,7 +88,7 @@ func TestCancel_OpenAutoRun_DrainsQueue(t *testing.T) {
 // that filters trigger_type=manual, not the caller, so this is a regression
 // guard against someone later adding the filter at the call site instead.
 func TestCancel_OpenManualRun_NoDrain(t *testing.T) {
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-manual", "sess-2", "/tmp/wt-rm")
 	// Manual is the seedRun default but we set it explicitly for
 	// clarity and pin to `open`.
@@ -96,7 +96,7 @@ func TestCancel_OpenManualRun_NoDrain(t *testing.T) {
 		t.Fatalf("park run: %v", err)
 	}
 
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6", "")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	drainer := newFakeDrainer()
 	s.SetQueueDrainer(drainer)
 
@@ -120,7 +120,7 @@ func TestCancel_OpenManualRun_NoDrain(t *testing.T) {
 // "only on flipped == true" guard, a stale Cancel on a completed
 // run would fire a redundant drain.
 func TestCancel_AlreadyTerminal_NoDrain(t *testing.T) {
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-done", "sess-3", "/tmp/wt-rd")
 	// Trigger_type='event' requires creator_user_id IS NULL per the
 	// SKY-261 v0.9 CHECK invariant. seedRun defaults to manual +
@@ -129,7 +129,7 @@ func TestCancel_AlreadyTerminal_NoDrain(t *testing.T) {
 		t.Fatalf("complete run: %v", err)
 	}
 
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6", "")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	drainer := newFakeDrainer()
 	s.SetQueueDrainer(drainer)
 
@@ -151,13 +151,13 @@ func TestCancel_AlreadyTerminal_NoDrain(t *testing.T) {
 // 'running' forever (and its snapshot orphaned). seedRun links the run to a
 // 1-step blueprint_run "seedbpr-<runID>".
 func TestCancel_OpenStep_FinalizesBlueprintRun(t *testing.T) {
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-step", "sess-step", "/tmp/wt-rs")
 	if _, err := database.Exec(`UPDATE runs SET status = 'open' WHERE id = 'r-step'`); err != nil {
 		t.Fatalf("park run: %v", err)
 	}
 
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6", "")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	// User-initiated cancel.
 	if err := s.Cancel(runmode.LocalDefaultOrg, "r-step", runmode.LocalDefaultUserID); err != nil {

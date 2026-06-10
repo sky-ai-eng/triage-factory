@@ -107,26 +107,22 @@ func (a *App) openStores(ctx context.Context) error {
 }
 
 // readInstanceConfig loads the small remainder of process-wide boot state
-// (server port, takeover dir) from the local instance_config table. The
-// table is local-only — hosted multi-mode uses env vars for these — so the
-// read is skipped in multi mode and the port falls back to the default.
+// (server port) from the local instance_config table. The table is
+// local-only — hosted multi-mode uses env vars for these — so the read is
+// skipped in multi mode and the port falls back to the default.
 //
 // The stored port is surfaced to the Settings GET response; the actual
-// bind still wins from --port at boot. The takeover dir is plumbed into
-// the Server and Spawner constructors so neither reads settings per call.
+// bind still wins from --port at boot.
 func (a *App) readInstanceConfig(ctx context.Context) error {
 	a.storedPort = DefaultPort
 	if !a.local() {
 		return nil
 	}
 
-	var (
-		storedPort        int
-		storedTakeoverDir string
-	)
+	var storedPort int
 	if err := a.database.QueryRowContext(ctx,
-		`SELECT server_port, server_takeover_dir FROM instance_config WHERE id = 1`,
-	).Scan(&storedPort, &storedTakeoverDir); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		`SELECT server_port FROM instance_config WHERE id = 1`,
+	).Scan(&storedPort); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("read instance_config: %w", err)
 	}
 	// Default to the binary's DefaultPort when the row is missing or holds
@@ -135,7 +131,6 @@ func (a *App) readInstanceConfig(ctx context.Context) error {
 		storedPort = DefaultPort
 	}
 	a.storedPort = storedPort
-	a.storedTakeoverDir = storedTakeoverDir
 	return nil
 }
 

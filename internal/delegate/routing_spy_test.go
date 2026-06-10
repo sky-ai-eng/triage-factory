@@ -2,7 +2,7 @@ package delegate
 
 // Tests that pin the trigger-type-driven pool routing introduced to
 // close the PR #193 review-bot P2 findings (resolvePrompt visibility,
-// Takeover/Release preflight, Delegate.agentRuns.Create wrap). The
+// Cancel preflight, Delegate.agentRuns.Create wrap). The
 // behavior changes only become load-bearing under Postgres + RLS;
 // these unit tests use recording wrappers around real SQLite stores
 // to lock the routing contract so the manual-vs-event branch can't
@@ -69,16 +69,16 @@ func (r *recordingPromptStore) GetSystem(ctx context.Context, orgID, id string) 
 
 // newRoutingTestSpawner spins up a Spawner whose tx + prompts stores
 // are wrapped in recorders. The other stores are real SQLite-backed
-// so resolvePrompt / Takeover / Release have the rows they need.
+// so resolvePrompt / Cancel have the rows they need.
 func newRoutingTestSpawner(t *testing.T) (*Spawner, *recordingTxRunner, *recordingPromptStore, *sql.DB) {
 	t.Helper()
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	stores := sqlitestore.New(database)
 	tx := &recordingTxRunner{TxRunner: stores.Tx}
 	prompts := &recordingPromptStore{PromptStore: stores.Prompts}
 	stores.Tx = tx
 	stores.Prompts = prompts
-	s := NewSpawner(database, stores, nil, nil, "claude-sonnet-4-6", "")
+	s := NewSpawner(database, stores, nil, nil, "claude-sonnet-4-6")
 	return s, tx, prompts, database
 }
 
@@ -146,42 +146,6 @@ func TestResolvePrompt_EventStaysOnAdminPool(t *testing.T) {
 	}
 }
 
-// TestTakeover_PreflightUsesSyntheticClaims pins fix #5 for Takeover.
-// The preflight reads (run + task gates) must run under the
-// requesting user's claims so an unauthorized runID surfaces as
-// "not found" BEFORE any side effect (cancel handle drain, agent
-// SIGKILL, worktree copy). The original code used GetSystem here,
-// letting a user with a guessed runID destroy another user's run.
-//
-// In SQLite the synth-tx pass-through means Takeover still proceeds
-// past the preflight; this test asserts only that the routing
-// happened (the synth call was recorded with the right userID).
-// Multi-mode RLS isolation lands in D9-core's pgtest matrix.
-func TestTakeover_PreflightUsesSyntheticClaims(t *testing.T) {
-	const runID = "run-takeover-spy"
-	const callerID = "00000000-0000-0000-0000-000000000bbb"
-
-	database := newTakeoverTestDB(t)
-	seedRun(t, database, runID, "session-x", "/tmp/some-wt")
-
-	stores := sqlitestore.New(database)
-	tx := &recordingTxRunner{TxRunner: stores.Tx}
-	stores.Tx = tx
-	s := NewSpawner(database, stores, nil, nil, "", "")
-
-	// Takeover will fail downstream (no active cancel goroutine) but
-	// that's after the preflight read; the spy capture is what we're
-	// asserting.
-	_, _ = s.Takeover(runmode.LocalDefaultOrg, runID, "/tmp/dest", callerID)
-
-	if len(tx.synthCalls) != 1 {
-		t.Fatalf("SyntheticClaimsWithTx called %d times; want exactly 1 (Takeover preflight must route through synth claims)", len(tx.synthCalls))
-	}
-	if tx.synthCalls[0].userID != callerID {
-		t.Errorf("synth call userID = %q; want the calling user %q (preflight must check the caller's RLS scope, not a sentinel)", tx.synthCalls[0].userID, callerID)
-	}
-}
-
 // TestCancel_UserInitiated_PreflightUsesSyntheticClaims pins the
 // active-goroutine gate for user-initiated cancels. The cancels map
 // inside Spawner is keyed only by runID, so without an org-scoped
@@ -195,13 +159,13 @@ func TestCancel_UserInitiated_PreflightUsesSyntheticClaims(t *testing.T) {
 	const runID = "run-cancel-spy"
 	const callerID = "00000000-0000-0000-0000-000000000ddd"
 
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	seedRun(t, database, runID, "session-x", "/tmp/some-wt")
 
 	stores := sqlitestore.New(database)
 	tx := &recordingTxRunner{TxRunner: stores.Tx}
 	stores.Tx = tx
-	s := NewSpawner(database, stores, nil, nil, "", "")
+	s := NewSpawner(database, stores, nil, nil, "")
 
 	// No goroutine registered in s.cancels — Cancel will fall through
 	// to the DB path. The preflight runs first; the assertion is the
@@ -225,53 +189,18 @@ func TestCancel_UserInitiated_PreflightUsesSyntheticClaims(t *testing.T) {
 func TestCancel_SystemInitiated_PreflightSkipsSynthClaims(t *testing.T) {
 	const runID = "run-cancel-system-spy"
 
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	seedRun(t, database, runID, "session-x", "/tmp/some-wt")
 
 	stores := sqlitestore.New(database)
 	tx := &recordingTxRunner{TxRunner: stores.Tx}
 	stores.Tx = tx
-	s := NewSpawner(database, stores, nil, nil, "", "")
+	s := NewSpawner(database, stores, nil, nil, "")
 
 	_ = s.Cancel(runmode.LocalDefaultOrg, runID, "")
 
 	if len(tx.synthCalls) != 0 {
 		t.Errorf("SyntheticClaimsWithTx called %d times; want 0 for system-initiated cancel (must use admin pool, not synth claims)", len(tx.synthCalls))
-	}
-}
-
-// TestRelease_PreflightUsesSyntheticClaims pins fix #5 for Release.
-// Same shape as Takeover's preflight test: the run lookup that
-// gates the teardown machinery must run under the caller's claims
-// so a guessed runID belonging to another user surfaces as
-// ErrReleaseNothingHeld before the path-safety + cleanup code runs.
-func TestRelease_PreflightUsesSyntheticClaims(t *testing.T) {
-	const runID = "run-release-spy"
-	const callerID = "00000000-0000-0000-0000-000000000ccc"
-
-	database := newTakeoverTestDB(t)
-	seedRun(t, database, runID, "session-x", "/tmp/some-wt")
-	// Release requires status='taken_over' to do anything past the
-	// preflight; flip it so the seed row passes the post-read gate.
-	if _, err := database.Exec(`UPDATE runs SET status = 'taken_over' WHERE id = ?`, runID); err != nil {
-		t.Fatalf("flip status to taken_over: %v", err)
-	}
-
-	stores := sqlitestore.New(database)
-	tx := &recordingTxRunner{TxRunner: stores.Tx}
-	stores.Tx = tx
-	s := NewSpawner(database, stores, nil, nil, "", "")
-
-	// Release will likely fail downstream on the path-safety check
-	// (the seeded worktree_path is /tmp/some-wt which isn't under
-	// the configured takeover base); that's after the preflight.
-	_ = s.Release(runmode.LocalDefaultOrg, runID, callerID)
-
-	if len(tx.synthCalls) != 1 {
-		t.Fatalf("SyntheticClaimsWithTx called %d times; want exactly 1 (Release preflight must route through synth claims)", len(tx.synthCalls))
-	}
-	if tx.synthCalls[0].userID != callerID {
-		t.Errorf("synth call userID = %q; want the calling user %q (preflight must check the caller's RLS scope, not a sentinel)", tx.synthCalls[0].userID, callerID)
 	}
 }
 

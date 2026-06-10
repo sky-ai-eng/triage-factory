@@ -46,11 +46,10 @@ type App struct {
 	// Persistence. database is the primary pool (SQLite in local mode,
 	// the admin Postgres pool in multi mode); appDB is the multi-mode
 	// app/RLS pool, nil in local. Both are closed by Close.
-	database          *sql.DB
-	appDB             *sql.DB
-	stores            db.Stores
-	storedPort        int
-	storedTakeoverDir string
+	database   *sql.DB
+	appDB      *sql.DB
+	stores     db.Stores
+	storedPort int
 
 	// Infra.
 	bus   *eventbus.Bus

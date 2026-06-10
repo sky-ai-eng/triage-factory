@@ -5,13 +5,11 @@
 // the repo) still have a clean exit.
 //
 // What it removes:
-//   - ~/.triagefactory/ in full (db, config, bare repo clones, and
-//     default-location takeovers)
+//   - ~/.triagefactory/ in full (db, config, bare repo clones)
 //   - the corresponding ~/.claude/projects/<encoded> session JSONL dirs
-//     for any takeovers AND for any per-project Curator working
-//     directories (enumerated BEFORE ~/.triagefactory/ is deleted, so
-//     we can still resolve their absolute paths to compute the encoded
-//     name Claude Code uses)
+//     for any per-project Curator working directories (enumerated
+//     BEFORE ~/.triagefactory/ is deleted, so we can still resolve
+//     their absolute paths to compute the encoded name Claude Code uses)
 //   - all keychain entries under the "triagefactory" service
 //   - the symlink left by `triagefactory install` at its default
 //     destination, when present
@@ -29,7 +27,6 @@ package uninstall
 
 import (
 	"bufio"
-	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -39,8 +36,6 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -72,11 +67,10 @@ func Handle(args []string) {
 	// boundary, then thread them into the (pure) plan helpers. Safe to use
 	// the error-free resolvers now that the StateRootErr pre-flight above
 	// succeeded.
-	takeoversDir, takeoversDirErr := resolvedTakeoversDir(paths.DBPath(), paths.TakeoversRoot())
 	projectsDir := paths.ProjectsRoot(runmode.LocalDefaultOrg)
 	linkPath := defaultInstallLink()
 
-	plan := buildPlan(dataDir, takeoversDir, projectsDir, linkPath)
+	plan := buildPlan(dataDir, projectsDir, linkPath)
 	if plan.empty() {
 		fmt.Println("triagefactory: no on-disk local state found.")
 		fmt.Println("Stored keychain credentials may still be present and can be removed.")
@@ -115,33 +109,10 @@ func Handle(args []string) {
 
 	failed := false
 
-	if takeoversDirErr != nil {
-		fmt.Fprintf(os.Stderr, "  warn: resolve server.takeover_dir: %v (falling back to %s)\n", takeoversDirErr, takeoversDir)
-		failed = true
-	}
-
-	// Order: enumerate takeover/curator dirs and clear their Claude
-	// project entries BEFORE removing the trees, otherwise we lose the
-	// inputs needed to compute the encoded names.
-	if plan.hasTakeovers {
-		n, err := removeClaudeProjectsForTakeovers(plan.takeoversDir, home)
-		if n > 0 {
-			fmt.Printf("  removed %d Claude Code session entr%s for takeovers\n", n, plural(n, "y", "ies"))
-		}
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  warn: remove Claude Code session entries for takeovers: %v\n", err)
-			failed = true
-		}
-		if !isSubpathOf(plan.takeoversDir, dataDir) {
-			if err := os.RemoveAll(plan.takeoversDir); err != nil {
-				fmt.Fprintf(os.Stderr, "  warn: remove %s: %v\n", plan.takeoversDir, err)
-				failed = true
-			} else {
-				fmt.Printf("  removed %s\n", plan.takeoversDir)
-			}
-		}
-	}
-
+	// Order: enumerate the curator dirs and clear their Claude project
+	// entries BEFORE removing the trees, otherwise we lose the inputs
+	// needed to compute the encoded names.
+	//
 	// Curator's per-project working dirs at ~/.triagefactory/projects/<id>/
 	// each get a corresponding ~/.claude/projects/<encoded> entry where
 	// Claude Code stores the curator session JSONL. Walk and clear those
@@ -232,11 +203,9 @@ func Handle(args []string) {
 // were never there in the first place.
 type uninstallPlan struct {
 	dataDir        string
-	takeoversDir   string
 	projectsDir    string
 	linkPath       string
 	hasDataDir     bool
-	hasTakeovers   bool
 	hasProjects    bool
 	hasInstallLink bool
 }
@@ -247,17 +216,13 @@ func (p uninstallPlan) empty() bool {
 	// read each item. Probing here would prompt 6 times before the
 	// user even said yes. The Clear() call later is no-op for missing
 	// keys, so it's safe to always run.
-	return !p.hasDataDir && !p.hasTakeovers && !p.hasProjects && !p.hasInstallLink
+	return !p.hasDataDir && !p.hasProjects && !p.hasInstallLink
 }
 
 func (p uninstallPlan) summary() []string {
 	var lines []string
 	if p.hasDataDir {
 		lines = append(lines, fmt.Sprintf("%s/ (database, config, repo clones)", p.dataDir))
-	}
-	if p.hasTakeovers {
-		lines = append(lines, fmt.Sprintf("takeovers under %s", p.takeoversDir))
-		lines = append(lines, "Claude Code session entries under ~/.claude/projects/ for any takeovers")
 	}
 	if p.hasProjects {
 		lines = append(lines, "Claude Code session entries under ~/.claude/projects/ for any curator projects")
@@ -269,16 +234,11 @@ func (p uninstallPlan) summary() []string {
 	return lines
 }
 
-func buildPlan(dataDir, takeoversDir, projectsDir, linkPath string) uninstallPlan {
-	p := uninstallPlan{dataDir: dataDir, takeoversDir: takeoversDir, projectsDir: projectsDir, linkPath: linkPath}
+func buildPlan(dataDir, projectsDir, linkPath string) uninstallPlan {
+	p := uninstallPlan{dataDir: dataDir, projectsDir: projectsDir, linkPath: linkPath}
 
 	if info, err := os.Stat(dataDir); err == nil && info.IsDir() {
 		p.hasDataDir = true
-	}
-	if p.takeoversDir != "" {
-		if info, err := os.Stat(p.takeoversDir); err == nil && info.IsDir() {
-			p.hasTakeovers = true
-		}
 	}
 	if info, err := os.Stat(projectsDir); err == nil && info.IsDir() {
 		p.hasProjects = true
@@ -299,49 +259,10 @@ func buildPlan(dataDir, takeoversDir, projectsDir, linkPath string) uninstallPla
 // pulling in that package just for path encoding.
 var claudeProjectReplacer = strings.NewReplacer("/", "-", ".", "-")
 
-// removeClaudeProjectsForTakeovers walks takeover run dirs and deletes
-// the matching ~/.claude/projects/<encoded> dir for each.
-// Returns the number of project dirs successfully removed.
-func removeClaudeProjectsForTakeovers(takeoversDir, home string) (int, error) {
-	entries, err := os.ReadDir(takeoversDir)
-	if err != nil {
-		return 0, err
-	}
-	count := 0
-	var joinedErr error
-	for _, entry := range entries {
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "run-") {
-			continue
-		}
-		full := filepath.Join(takeoversDir, entry.Name())
-		resolved, err := filepath.EvalSymlinks(full)
-		if err != nil {
-			resolved = full
-		}
-		encoded := claudeProjectReplacer.Replace(resolved)
-		projectDir := filepath.Join(home, ".claude", "projects", encoded)
-		if _, err := os.Stat(projectDir); err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			joinedErr = errors.Join(joinedErr, fmt.Errorf("inspect %s: %w", projectDir, err))
-			continue
-		}
-		if err := os.RemoveAll(projectDir); err != nil {
-			joinedErr = errors.Join(joinedErr, fmt.Errorf("remove %s: %w", projectDir, err))
-			continue
-		}
-		count++
-	}
-	return count, joinedErr
-}
-
 // removeClaudeProjectsForCurator walks ~/.triagefactory/projects/<id>/
 // dirs (the Curator's per-project working directories) and deletes the
-// matching ~/.claude/projects/<encoded> dir for each. Symmetric to
-// removeClaudeProjectsForTakeovers — same encoding rule, different
-// source of cwds. Without this, curator session JSONLs orphan in
-// ~/.claude/projects/ after uninstall.
+// matching ~/.claude/projects/<encoded> dir for each. Without this,
+// curator session JSONLs orphan in ~/.claude/projects/ after uninstall.
 func removeClaudeProjectsForCurator(projectsDir, home string) (int, error) {
 	entries, err := os.ReadDir(projectsDir)
 	if err != nil {
@@ -350,9 +271,8 @@ func removeClaudeProjectsForCurator(projectsDir, home string) (int, error) {
 	count := 0
 	var joinedErr error
 	for _, entry := range entries {
-		// Every immediate subdir of projects/ is a project ID — there's
-		// no naming filter the way takeovers/ has run-* dirs alongside
-		// other state. Skip non-dirs defensively.
+		// Every immediate subdir of projects/ is a project ID. Skip
+		// non-dirs defensively.
 		if !entry.IsDir() {
 			continue
 		}
@@ -377,60 +297,6 @@ func removeClaudeProjectsForCurator(projectsDir, home string) (int, error) {
 		count++
 	}
 	return count, joinedErr
-}
-
-// resolvedTakeoversDir returns the takeovers dir to clean: the
-// instance_config.server_takeover_dir override if the DB at dbPath has
-// one, else fallback. dbPath and fallback are resolved by the caller
-// through internal/paths (paths.DBPath / paths.TakeoversRoot) so this
-// stays a pure function of its inputs and the path single-source-of-
-// truth lives in one place (Handle), not in literals scattered here.
-func resolvedTakeoversDir(dbPath, fallback string) (string, error) {
-	// instance_config.server_takeover_dir is the persisted override;
-	// read it directly here rather than via a wrapper package. Probe
-	// for the DB file first so a fresh machine (no DB) doesn't
-	// materialize state we're about to delete.
-	if _, err := os.Stat(dbPath); err != nil {
-		if os.IsNotExist(err) {
-			return fallback, nil
-		}
-		return fallback, err
-	}
-	conn, err := db.OpenAt(dbPath)
-	if err != nil {
-		return fallback, err
-	}
-	defer conn.Close()
-	if err := db.Migrate(conn, "sqlite3"); err != nil {
-		return fallback, err
-	}
-	var stored string
-	if err := conn.QueryRow(`SELECT server_takeover_dir FROM instance_config WHERE id = 1`).Scan(&stored); err != nil {
-		// No row → use fallback; any other error propagates.
-		if errors.Is(err, sql.ErrNoRows) {
-			return fallback, nil
-		}
-		return fallback, err
-	}
-	dir, err := delegate.ResolveTakeoverDir(stored)
-	if err != nil {
-		return fallback, err
-	}
-	if dir == "" {
-		return fallback, nil
-	}
-	return filepath.Clean(dir), nil
-}
-
-// isSubpathOf reports whether path is lexically contained by parent.
-// Used to avoid double-deleting takeover dirs already covered by
-// removing ~/.triagefactory itself.
-func isSubpathOf(path, parent string) bool {
-	rel, err := filepath.Rel(parent, path)
-	if err != nil {
-		return false
-	}
-	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
 }
 
 // defaultInstallLink mirrors the destination logic in cmd/install. We

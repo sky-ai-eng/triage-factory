@@ -7,7 +7,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/sky-ai-eng/triage-factory/cmd/install"
 	"github.com/sky-ai-eng/triage-factory/internal/app"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 
@@ -39,7 +38,7 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	// CLI subcommands short-circuit before any server wiring: exec/status
-	// are used by delegated Claude Code agents; resume/install/uninstall/
+	// are used by delegated Claude Code agents; install/uninstall/
 	// migrate/jwk-init are user-facing.
 	if handled, err := dispatchCLI(args[1:]); handled {
 		return err
@@ -70,8 +69,6 @@ func run(ctx context.Context, args []string) error {
 	}()
 
 	fmt.Printf("Triage Factory running at %s\n", cfg.BrowserURL)
-	// One-shot PATH hint so `triagefactory resume` works from any terminal.
-	install.HintIfMissing()
 	if !cfg.NoBrowser {
 		openBrowser(cfg.BrowserURL)
 	}

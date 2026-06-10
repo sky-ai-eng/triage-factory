@@ -122,33 +122,18 @@ type AgentRunStore interface {
 
 	// SetWorktreePath writes runs.worktree_path. Set as the
 	// spawner finishes worktree setup (GitHub PR clone, Jira
-	// run-root creation); takeover transitions use MarkTakenOver
-	// to set the path atomically with the status flip.
+	// run-root creation).
 	SetWorktreePath(ctx context.Context, orgID, runID, path string) error
-
-	// MarkTakenOver atomically flips runs.status to 'taken_over'
-	// AND (when claimUserID != "") flips the parent task's claim
-	// from the bot to the user in a single transaction. SKY-261
-	// B+ tightened this to atomic. ok=false means either the run
-	// or the task claim raced out from under us; caller calls
-	// abortTakeover to clean up.
-	MarkTakenOver(ctx context.Context, orgID, runID, takeoverPath, claimUserID string) (bool, error)
-
-	// MarkReleased flips a held takeover into the "released"
-	// sub-state: status stays 'taken_over', worktree_path cleared,
-	// result_summary appended. ok=false on double-click or
-	// release of a never-taken-over row.
-	MarkReleased(ctx context.Context, orgID, runID string) (bool, error)
 
 	// MarkCancelledIfActive marks a run cancelled with the given
 	// stop_reason / summary, but only if the row hasn't already
-	// reached a terminal state. Used by takeover-rollback.
+	// reached a terminal state. Used by the user-cancel path.
 	MarkCancelledIfActive(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error)
 
 	// MarkFailedIfActive flips a run to 'failed' iff it hasn't
 	// already reached a terminal state. The delegate spawner's
 	// failRun path uses this so a racing terminal write
-	// (takeover, cancel, completion) isn't clobbered. Returns
+	// (cancel, completion) isn't clobbered. Returns
 	// ok=false (no error) if the row is already terminal; the
 	// caller logs and continues — the racing path's terminal
 	// status stands.
@@ -169,8 +154,8 @@ type AgentRunStore interface {
 	// 'pending_approval' iff the row is currently 'completed'.
 	// The delegate spawner's processCompletion uses this when a
 	// pending review/PR side-table row gates the terminal status.
-	// Returns ok=false on a racing terminal write (cancel,
-	// takeover) so the racing path's status stands.
+	// Returns ok=false on a racing terminal write (cancel) so the
+	// racing path's status stands.
 	MarkPendingApprovalIfCompleted(ctx context.Context, orgID, runID string) (bool, error)
 
 	// MarkCompletedIfPendingApproval is the inverse transition: flips
@@ -178,7 +163,7 @@ type AgentRunStore interface {
 	// currently 'pending_approval'. The reviews / pending_prs handlers
 	// call this after the user submits the artifact (review posted or
 	// PR opened) so the run row leaves the approval queue. The guard
-	// prevents racing terminal writes (cancel, takeover, discard) from
+	// prevents racing terminal writes (cancel, discard) from
 	// being clobbered if they reach the row first.
 	MarkCompletedIfPendingApproval(ctx context.Context, orgID, runID string) (bool, error)
 
@@ -228,20 +213,6 @@ type AgentRunStore interface {
 	// → run-cancel cascade.
 	ActiveIDsForTask(ctx context.Context, orgID, taskID string) ([]string, error)
 
-	// ListTakenOverIDs returns the IDs of every run currently
-	// held in the taken_over state with a live takeover dir.
-	// Read at startup so the worktree-cleanup sweep preserves
-	// the corresponding ~/.claude/projects entries.
-	ListTakenOverIDs(ctx context.Context, orgID string) ([]string, error)
-
-	// ListTakenOverIDsSystem mirrors ListTakenOverIDs but routes
-	// through the admin pool in Postgres. The startup worktree-
-	// cleanup gate reads this before any JWT-claims context could
-	// exist — it has to see every user's taken-over runs to know
-	// which worktrees on disk to preserve. Same SKY-296 admin/app
-	// split as the rest of this wave.
-	ListTakenOverIDsSystem(ctx context.Context, orgID string) ([]string, error)
-
 	// ListParkedWorktreePaths returns the worktree_path of every run
 	// parked in `open` or pending_approval with a non-empty
 	// worktree_path. Read at startup so the worktree-cleanup sweep
@@ -266,11 +237,6 @@ type AgentRunStore interface {
 	// the admin pool in Postgres. The router's task-close cascade uses
 	// this to enumerate runs to cancel from its background goroutine.
 	ActiveIDsForTaskSystem(ctx context.Context, orgID, taskID string) ([]string, error)
-
-	// ListTakenOverForResume returns every taken-over run in the
-	// local DB, joined with its task + entity for display,
-	// ordered newest-first. Used by the CLI's resume command.
-	ListTakenOverForResume(ctx context.Context, orgID string) ([]domain.TakenOverRun, error)
 
 	// EntitiesWithOpenRuns returns the subset of entityIDs that have at
 	// least one run currently in the `open` state (a turn ended without a
@@ -311,9 +277,7 @@ type AgentRunStore interface {
 	//
 	// Create has no System counterpart — it routes internally on
 	// trigger_type so event-triggered runs land on the admin pool
-	// and manual runs on the app pool. MarkTakenOver also has no
-	// System variant: takeover is always user-initiated, so its
-	// path goes through synthetic-claims rather than the admin pool.
+	// and manual runs on the app pool.
 	GetSystem(ctx context.Context, orgID, runID string) (*domain.AgentRun, error)
 	// LookupOrgForRunSystem returns the owning orgID for the given
 	// runID, or the empty string with a nil error if no such run
@@ -330,7 +294,6 @@ type AgentRunStore interface {
 	SetSessionSystem(ctx context.Context, orgID, runID, sessionID string) error
 	SetStatusSystem(ctx context.Context, orgID, runID, status string) error
 	SetWorktreePathSystem(ctx context.Context, orgID, runID, path string) error
-	MarkReleasedSystem(ctx context.Context, orgID, runID string) (bool, error)
 	MarkCancelledIfActiveSystem(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error)
 	MarkFailedIfActiveSystem(ctx context.Context, orgID, runID string) (bool, error)
 	MarkPendingApprovalIfCompletedSystem(ctx context.Context, orgID, runID string) (bool, error)

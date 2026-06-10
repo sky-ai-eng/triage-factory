@@ -26,7 +26,7 @@ import (
 // step from the frozen length, not the shortened live list), and execution (the
 // SKILL.md the next claim would materialize carries the original prompt body).
 func TestBlueprintRun_StepPlanFrozenAgainstMidFlightEdit(t *testing.T) {
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrg
 	stores := sqlitestore.New(database)
@@ -108,7 +108,7 @@ func TestBlueprintRun_StepPlanFrozenAgainstMidFlightEdit(t *testing.T) {
 		t.Fatalf("ReplaceSteps (drop step 1): %v", err)
 	}
 
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6", "")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	// (1) The stored plan is untouched: still two steps, original step-1 body.
 	br := mustGetRun(t, s, org, brID)

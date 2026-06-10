@@ -66,9 +66,6 @@ export default function AgentCard({
   const isUnsolvable = run.Status === 'task_unsolvable'
   // A terminal run is settled — show its outcome, not a live feed.
   const isTerminal = isFailed || isCancelled || isUnsolvable || run.Status === 'completed'
-  // A "held" takeover has a live worktree on disk; releasing tears it down.
-  const isHeldTakeover = run.Status === 'taken_over' && !!run.WorktreePath
-  const [releasePending, setReleasePending] = useState(false)
 
   const glow = runGlow(run)
   const stats = computeStats(messages, run)
@@ -199,33 +196,6 @@ export default function AgentCard({
                 className="text-[12px] font-medium text-text-tertiary transition-colors hover:text-text-secondary"
               >
                 Return to queue
-              </button>
-            )}
-            {isHeldTakeover && (
-              <button
-                disabled={releasePending}
-                onClick={async () => {
-                  if (!confirm('Release this takeover? The worktree dir will be deleted.')) return
-                  setReleasePending(true)
-                  try {
-                    const res = await fetch(`/api/agent/runs/${run.ID}/release`, { method: 'POST' })
-                    if (!res.ok) {
-                      toast.error(await readError(res, 'Failed to release takeover'))
-                    }
-                  } catch (err) {
-                    toast.error(`Failed to release takeover: ${(err as Error).message}`)
-                  } finally {
-                    setReleasePending(false)
-                  }
-                }}
-                className="text-[12px] font-medium text-text-tertiary transition-colors hover:text-dismiss disabled:cursor-wait disabled:opacity-50"
-                title={
-                  releasePending
-                    ? 'Releasing the takeover dir…'
-                    : 'Tear down the takeover worktree so the next delegated run on this PR can run'
-                }
-              >
-                {releasePending ? 'Releasing…' : 'Release worktree'}
               </button>
             )}
             <a

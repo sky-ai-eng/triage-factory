@@ -111,8 +111,8 @@ func TestRecomputeBoard_MultiStepAggregate(t *testing.T) {
 	}
 }
 
-// Takeover is column-neutral: a user-claimed task is owned by the user, so the
-// recompute leaves their card alone even with a parked run.
+// A user claim is column-neutral: a user-claimed task is owned by the user, so
+// the recompute leaves their card alone even with a parked run.
 func TestRecomputeBoard_UserClaimedTaskNeutral(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "user-claim")
 	stampUserClaim(t, database, taskID)
@@ -182,9 +182,9 @@ func TestRecomputeBoard_NoActiveBlueprintRunNeutral(t *testing.T) {
 // state or the claim independently.
 func setupAdvanceFixture(t *testing.T, suffix string) (*Spawner, *sql.DB, string, string) {
 	t.Helper()
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	// Bot claim writes require an agents row to satisfy the FK on
-	// claimed_by_agent_id. newTakeoverTestDB seeds the tenant (orgs/teams)
+	// claimed_by_agent_id. newDelegateTestDB seeds the tenant (orgs/teams)
 	// via BootstrapSchemaForTest but not the agent — production seeds that
 	// through the explicit provision action (BootstrapLocalOrg). Insert
 	// the sentinel agent + team_agents rows directly so the test reaches
@@ -207,7 +207,7 @@ func setupAdvanceFixture(t *testing.T, suffix string) (*Spawner, *sql.DB, string
 	if err := database.QueryRow(`SELECT task_id FROM runs WHERE id = ?`, runID).Scan(&taskID); err != nil {
 		t.Fatalf("lookup task_id: %v", err)
 	}
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6", "")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	return s, database, runID, taskID
 }
 

@@ -161,7 +161,7 @@ func newAuthRig(t *testing.T) *authRig {
 	// admin for system reads, app (tf_app) for request-equivalent
 	// paths under RLS.
 	stores := pgstore.New(h.AdminDB, h.AppDB)
-	s := New(h.AdminDB, stores, "", 3000)
+	s := New(h.AdminDB, stores, 3000)
 
 	// Per-test context bound to t.Cleanup so the reaper goroutine
 	// spawned inside SetAuthDeps exits with the test rather than

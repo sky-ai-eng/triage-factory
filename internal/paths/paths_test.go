@@ -183,7 +183,6 @@ func TestResolvers_LocalLayout(t *testing.T) {
 		{"SandboxRootfsDir", SandboxRootfsDir("abc"), filepath.Join("/s", "sandbox", "rootfs-abc")},
 		{"SDKDir", SDKDir(), filepath.Join("/s", "sdk")},
 		{"DBPath", DBPath(), filepath.Join("/s", "triagefactory.db")},
-		{"TakeoversRoot", TakeoversRoot(), filepath.Join("/s", "takeovers")},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
@@ -209,7 +208,6 @@ func TestResolvers_MultiLayout(t *testing.T) {
 		{"SandboxRootfsDir", SandboxRootfsDir("abc"), filepath.Join("/s", "sandbox", "rootfs-abc")},
 		{"SDKDir", SDKDir(), filepath.Join("/s", "sdk")},
 		{"DBPath", DBPath(), filepath.Join("/s", "triagefactory.db")},
-		{"TakeoversRoot", TakeoversRoot(), filepath.Join("/s", "takeovers")},
 	}
 	for _, c := range cases {
 		if c.got != c.want {

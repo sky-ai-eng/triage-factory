@@ -17,9 +17,8 @@
 //     org-scoping them would re-multiply identical toolchains per org
 //     and defeat page-cache sharing, so they hang off StateRoot
 //     directly, never OrgRoot.
-//   - Class 3, local-only — the SQLite DB and takeover dirs. Multi mode
-//     uses Postgres and defers takeover to v2, so these hang off
-//     StateRoot with no org segment.
+//   - Class 3, local-only — the SQLite DB. Multi mode uses Postgres, so
+//     this hangs off StateRoot with no org segment.
 //
 // os.UserHomeDir and the ".triagefactory" path literal live ONLY in
 // this package; a forbidigo rule (.golangci.yml) plus a lint.sh grep
@@ -189,21 +188,13 @@ func DBPath() string {
 	return filepath.Join(StateRoot(), "triagefactory.db")
 }
 
-// TakeoversRoot is the default base for takeover worktrees:
-// <StateRoot>/takeovers. Local-mode UX; multi defers takeover to v2.
-// A user-configured override (instance_config.server_takeover_dir) is
-// resolved by the caller via ExpandHome, not here.
-func TakeoversRoot() string {
-	return filepath.Join(StateRoot(), "takeovers")
-}
-
 // --- home resolution (confined to this package) --------------------------
 
 // ExpandHome expands a leading "~" or "~/" in p against the user's home
 // directory and returns every other form unchanged. It exists so the
 // few callers that legitimately resolve a non-state, home-relative path
-// — the install/uninstall binary destination, a user-configured
-// takeover override — can do so without reaching for os.UserHomeDir
+// — the install/uninstall binary destination — can do so without
+// reaching for os.UserHomeDir
 // directly and tripping the forbidigo guard. Persistent TF state goes
 // through the resolvers above; this is only for those one-off
 // user-facing paths.

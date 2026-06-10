@@ -16,8 +16,7 @@ import (
 // deriving it from a runID — every previous "Remove(runID)" caller
 // had the path in scope already, and the runID-only convenience was
 // a footgun: it silently targeted runDir(runID) regardless of where
-// the worktree actually lived, which broke CopyForTakeover when the
-// source was passed in explicitly.
+// the worktree actually lived.
 //
 // runID is used only for the log line; pass "" if not available.
 func RemoveAt(path, runID string) error {
@@ -50,24 +49,13 @@ func Cleanup() {
 
 // CleanupOptions controls Cleanup behavior.
 type CleanupOptions struct {
-	// PreserveClaudeProjectFor names runIDs whose ~/.claude/projects entry
-	// must NOT be deleted because their session JSONL is still required
-	// for an interactive resume (taken_over runs). The orphaned worktree
-	// directory under $TMPDIR is still removed — it's the project dir
-	// holding the conversation state that needs to survive.
-	//
-	// Keys are run IDs. Both wt-style (<runID>) and no-cwd (<runID>-nocwd)
-	// directory names are matched. Ignored when SkipClaudeProjectCleanup
-	// is true.
-	PreserveClaudeProjectFor map[string]bool
-
 	// SkipClaudeProjectCleanup turns OFF deletion of every
-	// ~/.claude/projects entry, regardless of the preserve set. Used at
-	// startup when the caller can't reliably determine the preserve set
-	// (e.g., the DB query for taken-over run IDs failed): rather than
-	// risk wiping a session JSONL we should have kept, skip ALL project-
-	// dir cleanup for this sweep. The worktree dir removal and bare-repo
-	// pruning still run, so we don't leak large temp directories.
+	// ~/.claude/projects entry. Used at startup in non-local modes,
+	// where the parked-worktree preserve set is keyed by the synthetic
+	// sentinel org and has no real-tenant rows: rather than risk wiping
+	// a session JSONL we should have kept, skip ALL project-dir cleanup
+	// for this sweep. The worktree dir removal and bare-repo pruning
+	// still run, so we don't leak large temp directories.
 	SkipClaudeProjectCleanup bool
 
 	// PreserveWorktreeFor names worktree directories that must survive the
@@ -85,9 +73,9 @@ type CleanupOptions struct {
 	PreserveWorktreeFor map[string]bool
 }
 
-// CleanupWithOptions is the parameterized Cleanup the takeover flow uses
-// at startup to keep session JSONLs alive across crashes — see
-// CleanupOptions.PreserveClaudeProjectFor.
+// CleanupWithOptions is the parameterized Cleanup the startup sweep uses
+// to keep parked runs' warm worktrees alive across restarts — see
+// CleanupOptions.PreserveWorktreeFor.
 func CleanupWithOptions(opts CleanupOptions) {
 	// Orphaned-worktree (temp-dir) cleanup. A missing runs dir just means
 	// there's nothing to remove here — it must NOT skip the bare-repo
@@ -108,12 +96,11 @@ func CleanupWithOptions(opts CleanupOptions) {
 				if opts.PreserveWorktreeFor[runID] {
 					continue
 				}
-				// Project-dir deletion has two opt-outs: a global SkipAll
-				// (caller couldn't determine the preserve set) and a per-
-				// runID preserve (this run is in taken_over state). Either
-				// keeps the JSONL intact while we still remove the worktree
-				// dir below.
-				if !opts.SkipClaudeProjectCleanup && !opts.PreserveClaudeProjectFor[runID] {
+				// Project-dir deletion has one opt-out: a global SkipAll
+				// (non-local modes, where the preserve set can't be
+				// determined). It keeps the JSONL intact while we still
+				// remove the worktree dir below.
+				if !opts.SkipClaudeProjectCleanup {
 					// Each entry here was a live claude cwd at some point — nuke its
 					// ghost ~/.claude/projects entry before removing the dir itself
 					// (EvalSymlinks needs the dir to still exist to resolve).
@@ -170,9 +157,8 @@ func pruneAll(baseDir string) {
 // Targeting by path — rather than sweeping every locked=initializing
 // entry in the bare — is what makes this safe to call without the
 // per-repo lock: it can only ever touch this run's own dead add, never a
-// concurrent add against the same bare (e.g. CopyForTakeover's overlay
-// add, whose dir is run-<runID>, doesn't take lockRepo). os.RemoveAll is
-// a no-op when the entry was never created (add failed before mkdir).
+// concurrent add against the same bare. os.RemoveAll is a no-op when the
+// entry was never created (add failed before mkdir).
 func removeWorktreeRegFor(bareDir, wtDir string) {
 	adminDir := filepath.Join(bareDir, "worktrees", filepath.Base(wtDir))
 	if err := os.RemoveAll(adminDir); err != nil {
@@ -230,7 +216,7 @@ func isTFRunWorktreePath(p string) bool {
 //
 // CONCURRENCY: startup-only. An in-progress `git worktree add` is briefly
 // locked with its checkout not yet populated, so a concurrent sweep could
-// race it — but at startup no poller/spawner/takeover has begun. The
+// race it — but at startup no poller/spawner has begun. The
 // in-process reclaim (removeWorktreeRegFor) is the lock-free, path-scoped
 // counterpart used during normal operation.
 func clearStaleLockedWorktrees(bareDir string) int {

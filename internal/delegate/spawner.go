@@ -1,9 +1,9 @@
 // The Spawner type — central coordinator for delegated agent runs — and
 // the small cross-cutting helpers (status broadcasts, status updates,
 // drainer/classification wiring) every other file in this package
-// reaches for. The lifecycle methods (Delegate, Cancel, Takeover,
-// Release, ResumeOpenRun) live in their own files; this one is the
-// type definition + the bits that don't belong anywhere else.
+// reaches for. The lifecycle methods (Delegate, Cancel, ResumeOpenRun)
+// live in their own files; this one is the type definition + the bits
+// that don't belong anywhere else.
 
 package delegate
 
@@ -83,15 +83,6 @@ type Spawner struct {
 	// NewSpawner — a plain store ref like s.tasks, set once and never
 	// mutated, so it needs no mu guard (its sibling seam jiraResolver does).
 	jiraRules db.JiraStatusRulesStore
-	// takeoverDir is the raw instance_config.server_takeover_dir
-	// value read once at boot — may be empty, "~/..." or an
-	// absolute path. The Release path runs it through
-	// ResolveTakeoverDir to produce the actual filesystem path
-	// (and to apply the empty-string → ~/.triagefactory/takeovers
-	// default); the value held here is the unresolved input.
-	// Passed via the constructor so Release doesn't re-read
-	// instance_config on every request.
-	takeoverDir string
 	// tx runs synthetic-claims write batches for manual runs (the
 	// run's creator_user_id is the synthetic claim subject, so RLS
 	// policies on the writes pass under tf_app). Event-triggered runs
@@ -136,7 +127,6 @@ type Spawner struct {
 	cancels               map[string]context.CancelFunc                     // runID → cancel the entire run
 	dispatchWake          chan struct{}                                     // best-effort latency nudge for the run-queue dispatcher; non-blocking send on enqueue, buffered depth 1 so a missed wake only defers to the next scan tick
 	drainer               QueueDrainer                                      // nil-safe; set post-construction via SetQueueDrainer
-	takenOver             map[string]bool                                   // runIDs claimed by Takeover. Sticky-on for the rest of the goroutine's lifetime even after rollback — clearing the entry would let late-firing goroutine gates race the takeover/abort lifecycle. Suppresses every cleanup path in runAgent so Takeover/abortTakeover own the row's terminal state.
 	waitForClassification func(ctx context.Context, orgID, entityID string) // SKY-220 hook: blocks until the project classifier has decided this entity, or a timeout/ctx-cancel elapses. orgID scopes the classification read to the run's tenant (SKY-392 — the read goes through the org-scoped admin-pool store, not a raw query). Nil-safe (test setups skip it). Wired in main.go via SetWaitForClassification — keeps internal/delegate from importing internal/projectclassify.
 
 	// procs holds the live agent process handle for each run currently
@@ -144,8 +134,8 @@ type Spawner struct {
 	// turns because the spawner is the startup singleton, so a control op
 	// (interrupt/steer/cancel) arriving on a later request can still
 	// reach the process a delegation goroutine spawned. Distinct from
-	// cancels (the hard-kill ctx) and takenOver — a live run holds both a
-	// procs and a cancels entry at once. Guarded by s.mu; see the
+	// cancels (the hard-kill ctx) — a live run holds both a procs and a
+	// cancels entry at once. Guarded by s.mu; see the
 	// register/get/deregister accessors in process_registry.go.
 	procs map[string]*liveRunHandle
 	// controller routes the live-process control ops (interrupt, steer,
@@ -199,13 +189,12 @@ type Spawner struct {
 }
 
 // NewSpawner constructs a Spawner from the per-resource store
-// bundle plus the runtime knobs (GitHub client, WS hub, model,
-// takeover dir). The Spawner keeps individual store fields rather
-// than the full bundle so existing hot paths (s.tasks, s.entities,
-// ...) stay put; New just unpacks once. Tests that only exercise a
-// subset of stores can pass partial db.Stores{} — every field is a
-// nil-safe interface.
-func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, wsHub *websocket.Hub, model, takeoverDir string) *Spawner {
+// bundle plus the runtime knobs (GitHub client, WS hub, model). The
+// Spawner keeps individual store fields rather than the full bundle
+// so existing hot paths (s.tasks, s.entities, ...) stay put; New just
+// unpacks once. Tests that only exercise a subset of stores can pass
+// partial db.Stores{} — every field is a nil-safe interface.
+func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
 	s := &Spawner{
 		database:     database,
 		prompts:      stores.Prompts,
@@ -226,10 +215,8 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		ghClient:     ghClient,
 		wsHub:        wsHub,
 		model:        model,
-		takeoverDir:  takeoverDir,
 		cancels:      make(map[string]context.CancelFunc),
 		dispatchWake: make(chan struct{}, 1),
-		takenOver:    make(map[string]bool),
 		procs:        make(map[string]*liveRunHandle),
 		permPending:  make(map[string]*pendingPermission),
 		executorID:   uuid.New().String(),
@@ -280,30 +267,6 @@ func (s *Spawner) getStores() (db.Stores, bool) {
 		return db.Stores{}, false
 	}
 	return *s.stores, true
-}
-
-// wasTakenOver reports whether Takeover() has claimed this run. The
-// flag is set the moment Takeover validates state, BEFORE the worktree
-// hand-over and the DB mark — that's intentional: every cleanup path
-// in runAgent (worktree.Remove defers, RemoveClaudeProjectDir defer,
-// the natural-completion block, failRun, handleCancelled) checks this
-// and short-circuits, which is what keeps the source worktree on disk
-// while the hand-over runs and prevents a concurrent natural completion
-// from overwriting the taken_over status.
-//
-// The flag is sticky-on once set: neither successful takeovers nor
-// failed takeovers (rolled back via abortTakeover) ever clear the
-// entry. Clearing would let any late-firing gate in the runAgent
-// goroutine re-read wasTakenOver and proceed with normal cleanup,
-// racing whatever Takeover/abortTakeover is doing — the goroutine's
-// unconditional db.CompleteAgentRun would overwrite our terminal
-// stop_reason, and its RemoveClaudeProjectDir would run alongside
-// ours. Leaving the flag set keeps every gate closed and Takeover
-// /abortTakeover the sole writer of the row's terminal state.
-func (s *Spawner) wasTakenOver(runID string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.takenOver[runID]
 }
 
 // SetQueueDrainer wires the firing-queue drainer into the spawner. Done
@@ -619,9 +582,9 @@ func (s *Spawner) updateStatus(orgID, runID, status string) {
 // The rule has no step-count gate: a 1-step and a multi-step blueprint move
 // identically, bouncing in_progress ↔ in_review across however many
 // human-interaction points the blueprint has, and the aggregate-over-runs shape
-// is parallel-ready by construction (more concurrent runs just feed it). Takeover
-// is column-neutral: it flips the claim to the user, so the bot-claim guard below
-// short-circuits and the column doesn't move.
+// is parallel-ready by construction (more concurrent runs just feed it). A user
+// claim is column-neutral: it flips the claim to the user, so the bot-claim guard
+// below short-circuits and the column doesn't move.
 //
 // All failures are logged-not-fatal — the run state is already persisted and
 // broadcast; a failed board write leaves a recoverable state the next transition

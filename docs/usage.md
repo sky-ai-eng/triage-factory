@@ -33,27 +33,15 @@ The binary's subcommands fall into two audiences. Run `./triagefactory --help` f
 These are meant for you to invoke from a terminal.
 
 ```bash
-# Symlink the binary onto PATH so `triagefactory resume` works from
+# Symlink the binary onto PATH so the `triagefactory` CLI works from
 # any directory. Defaults: /usr/local/bin on macOS, ~/.local/bin on Linux.
 # Override with --dest /full/path/to/triagefactory.
 ./triagefactory install
-
-# Resume a Claude Code session you previously took over via the
-# "Take over" button on a delegated run's card.
-#
-#   bare:                auto-resumes when there's exactly one
-#                        taken-over session; picker on stdin otherwise.
-#   <short-id> arg:      disambiguate by run-ID prefix (the 8-char id
-#                        from the takeover modal).
-#
-# `triagefactory resume` cd's to the takeover working tree and execs
-# `claude --resume <session-id>`, replacing the current process so
-# your terminal becomes the interactive Claude Code session directly.
-triagefactory resume
-triagefactory resume abc12345
 ```
 
-The takeover working trees live under `~/.triagefactory/takeovers/run-<id>/` and persist across server restarts. `scripts/clean-slate.sh` wipes them when resetting local state.
+To take over a delegated run, open it in the browser run console (`/runs/:id`)
+and steer it live — send the agent a message, interrupt the current turn, or
+answer a tool-permission prompt. There is no separate eject-to-terminal step.
 
 ### Agent commands
 

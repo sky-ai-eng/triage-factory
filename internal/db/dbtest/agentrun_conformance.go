@@ -17,8 +17,7 @@ import (
 // RunAgentRunStoreConformance. Returns:
 //   - the wired AgentRunStore impl,
 //   - the orgID to pass to every call,
-//   - a userID for claim-flip assertions (MarkTakenOver wires this
-//     into the target task row),
+//   - a userID for user-attributed write paths,
 //   - an AgentRunSeeder for entity/task/run_memory/task-claim
 //     fixtures the harness needs but doesn't go through the store
 //     to provide.
@@ -64,10 +63,8 @@ type AgentRunSeeder struct {
 	BlueprintRun func(t *testing.T, taskID string) string
 
 	// StampAgentClaim sets the task's claimed_by_agent_id directly.
-	// Used to set up the MarkTakenOver atomic-flip preconditions:
-	// the takeover only flips the task claim when the bot still
-	// holds it. agentID matches the value MarkTakenOver expects to
-	// vacate.
+	// Used to set up task-claim preconditions for claim-flip
+	// assertions.
 	StampAgentClaim func(t *testing.T, taskID, agentID string)
 
 	// SetRunMemory upserts a run_memory row with the given
@@ -87,12 +84,8 @@ type AgentRunSeeder struct {
 //
 //   - Lifecycle methods (Create / Complete / AddPartialTotals /
 //     SetSession / MarkOpen / MarkResuming /
-//     MarkCancelledIfActive / MarkDiscarded / MarkReleased /
-//     MarkTakenOver) refuse terminal statuses and produce correct
-//     side effects when they accept.
-//   - MarkTakenOver is atomic with the parent task's claim flip —
-//     ok=true requires BOTH UPDATEs landed; race-loss on either
-//     axis rolls back the run flip and returns (false, nil).
+//     MarkCancelledIfActive / MarkDiscarded) refuse terminal
+//     statuses and produce correct side effects when they accept.
 //   - Queries return what they advertise (status filters, sort
 //     orders, JOIN-derived projections).
 //   - Transcript layer round-trips messages including JSONB
@@ -515,113 +508,6 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			t.Errorf("after discard: status=%q, want cancelled", got.Status)
 		}
 	})
-
-	t.Run("MarkReleased_OnlyFromTakenOverWithPath", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		// Seed taken-over via the store's atomic flip (sets worktree_path).
-		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
-		ok, _ := store.MarkTakenOver(ctx, orgID, runID, "/tmp/takeover-foo", "")
-		if !ok {
-			t.Fatalf("seed: MarkTakenOver failed")
-		}
-		ok, err := store.MarkReleased(ctx, orgID, runID)
-		if err != nil || !ok {
-			t.Fatalf("MarkReleased: ok=%v err=%v", ok, err)
-		}
-		got, _ := store.Get(ctx, orgID, runID)
-		if got.Status != "taken_over" {
-			t.Errorf("after release: status=%q, want taken_over (status stays)", got.Status)
-		}
-		if got.WorktreePath != "" {
-			t.Errorf("after release: worktree_path=%q, want empty", got.WorktreePath)
-		}
-		// Second release → refused.
-		ok, _ = store.MarkReleased(ctx, orgID, runID)
-		if ok {
-			t.Errorf("double-release succeeded")
-		}
-	})
-
-	t.Run("MarkTakenOver_AtomicWithClaim_Succeeds", func(t *testing.T) {
-		store, orgID, userID, seed := mk(t)
-		ctx := context.Background()
-		ent := seed.Entity(t, "to-claim")
-		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
-		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-		seed.StampAgentClaim(t, taskID, seed.AgentID)
-		runID := uuid.New().String()
-		if err := store.Create(ctx, orgID, domain.AgentRun{
-			ID: runID, TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: "running", Model: "m",
-			BlueprintRunID: seed.BlueprintRun(t, taskID),
-		}); err != nil {
-			t.Fatalf("Create: %v", err)
-		}
-		ok, err := store.MarkTakenOver(ctx, orgID, runID, "/tmp/takeover", userID)
-		if err != nil {
-			t.Fatalf("MarkTakenOver: %v", err)
-		}
-		if !ok {
-			t.Fatal("MarkTakenOver returned false, want true")
-		}
-		got, _ := store.Get(ctx, orgID, runID)
-		if got.Status != "taken_over" {
-			t.Errorf("status = %q, want taken_over", got.Status)
-		}
-		if got.WorktreePath != "/tmp/takeover" {
-			t.Errorf("worktree_path = %q, want /tmp/takeover", got.WorktreePath)
-		}
-	})
-
-	t.Run("MarkTakenOver_RollsBackOnRunRace", func(t *testing.T) {
-		store, orgID, userID, seed := mk(t)
-		ctx := context.Background()
-		// Run is already terminal → run-axis race-loss.
-		runID := seedAgentRunForTest(t, store, orgID, seed, "completed")
-		ok, err := store.MarkTakenOver(ctx, orgID, runID, "/tmp/takeover", userID)
-		if err != nil {
-			t.Fatalf("MarkTakenOver: %v", err)
-		}
-		if ok {
-			t.Error("MarkTakenOver returned true on terminal run, want false")
-		}
-		got, _ := store.Get(ctx, orgID, runID)
-		if got.Status != "completed" {
-			t.Errorf("status = %q, want completed (rollback should preserve)", got.Status)
-		}
-	})
-
-	t.Run("MarkTakenOver_RollsBackOnClaimRace", func(t *testing.T) {
-		store, orgID, userID, seed := mk(t)
-		ctx := context.Background()
-		// Task claim is empty (no agent stamp) → claim-axis race-loss
-		// when claimUserID is non-empty: the takeover refuses to
-		// flip a non-agent-claimed task. Run flip should roll back.
-		ent := seed.Entity(t, "claim-race")
-		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
-		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-		// Deliberately do NOT call StampAgentClaim — the bot hasn't
-		// claimed this task, so the claim-flip predicate fails.
-		runID := uuid.New().String()
-		if err := store.Create(ctx, orgID, domain.AgentRun{
-			ID: runID, TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: "running", Model: "m",
-			BlueprintRunID: seed.BlueprintRun(t, taskID),
-		}); err != nil {
-			t.Fatalf("Create: %v", err)
-		}
-		ok, err := store.MarkTakenOver(ctx, orgID, runID, "/tmp/claim-race", userID)
-		if err != nil {
-			t.Fatalf("MarkTakenOver: %v", err)
-		}
-		if ok {
-			t.Error("MarkTakenOver returned true with no agent claim, want false")
-		}
-		got, _ := store.Get(ctx, orgID, runID)
-		if got.Status != "running" {
-			t.Errorf("status = %q, want running (run flip should have rolled back)", got.Status)
-		}
-	})
-
 	t.Run("ListForTask_OrderedByStartedAtDesc", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
@@ -792,63 +678,6 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		id, _ = store.PendingApprovalIDForTask(ctx, orgID, taskID)
 		if id != runID {
 			t.Errorf("PendingApprovalID = %q, want %q", id, runID)
-		}
-	})
-
-	t.Run("ListTakenOverIDs_FiltersByWorktreePath", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		// One held takeover, one released takeover, one terminal.
-		held := seedAgentRunForTest(t, store, orgID, seed, "running")
-		ok, _ := store.MarkTakenOver(ctx, orgID, held, "/tmp/held", "")
-		if !ok {
-			t.Fatal("seed: held takeover failed")
-		}
-		released := seedAgentRunForTest(t, store, orgID, seed, "running")
-		ok, _ = store.MarkTakenOver(ctx, orgID, released, "/tmp/released", "")
-		if !ok {
-			t.Fatal("seed: released takeover failed")
-		}
-		if _, err := store.MarkReleased(ctx, orgID, released); err != nil {
-			t.Fatalf("MarkReleased: %v", err)
-		}
-		_ = seedAgentRunForTest(t, store, orgID, seed, "completed")
-
-		ids, err := store.ListTakenOverIDs(ctx, orgID)
-		if err != nil {
-			t.Fatalf("ListTakenOverIDs: %v", err)
-		}
-		got := map[string]bool{}
-		for _, id := range ids {
-			got[id] = true
-		}
-		if !got[held] {
-			t.Errorf("held takeover %s missing from ListTakenOverIDs", held)
-		}
-		if got[released] {
-			t.Errorf("released takeover %s leaked — worktree_path filter failed", released)
-		}
-
-		// SKY-296: ListTakenOverIDsSystem (admin pool) returns the
-		// same set as ListTakenOverIDs for the same orgID — the only
-		// difference is which pool runs the SELECT. The startup
-		// worktree-cleanup gate uses the System variant because it
-		// has no JWT-claims context.
-		sysIDs, err := store.ListTakenOverIDsSystem(ctx, orgID)
-		if err != nil {
-			t.Fatalf("ListTakenOverIDsSystem: %v", err)
-		}
-		sysGot := map[string]bool{}
-		for _, id := range sysIDs {
-			sysGot[id] = true
-		}
-		if len(sysGot) != len(got) {
-			t.Errorf("ListTakenOverIDsSystem returned %d ids, ListTakenOverIDs returned %d", len(sysGot), len(got))
-		}
-		for id := range got {
-			if !sysGot[id] {
-				t.Errorf("ListTakenOverIDsSystem missing id %s present in ListTakenOverIDs", id)
-			}
 		}
 	})
 

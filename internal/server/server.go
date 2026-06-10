@@ -47,13 +47,6 @@ type Server struct {
 	jiraRules    db.JiraStatusRulesStore // per-team Jira status rules (replaces the deleted config.Jira.Projects view)
 	githubApps   db.GitHubAppsStore      // per-org GitHub App registrations (manifest flow)
 	orgTemplate  db.OrgTemplateStore     // SKY-381: org-admin-editable template new teams are seeded from
-	// takeoverDir is the raw instance_config.server_takeover_dir
-	// value read once at boot — may be empty, "~/..." or an
-	// absolute path. Call sites (handleAgentTakeover, Spawner's
-	// Release path) run it through delegate.ResolveTakeoverDir to
-	// produce the actual filesystem path; the value held here is
-	// the unresolved input that helper takes.
-	takeoverDir string
 	// serverPort is the stored instance_config.server_port value
 	// surfaced to the settings GET response. The actual bind port
 	// comes from --port at boot, not this field — the Settings page
@@ -378,16 +371,15 @@ func (s *Server) agentEnabledForTeam(ctx context.Context, orgID, userID, teamID 
 }
 
 // New creates a new server with the given database + the full
-// per-resource store bundle + the boot-time deployment scalars
-// (takeover dir, stored server port), and registers all routes.
-// The Server retains individual store fields rather than a single
-// db.Stores struct so existing handler code keeps working — the
-// constructor just unpacks the bundle once instead of forcing every
-// caller to enumerate 20+ stores positionally.
+// per-resource store bundle + the boot-time stored server port, and
+// registers all routes. The Server retains individual store fields
+// rather than a single db.Stores struct so existing handler code keeps
+// working — the constructor just unpacks the bundle once instead of
+// forcing every caller to enumerate 20+ stores positionally.
 //
 // raw *sql.DB stays available for handlers that haven't been
 // ported to a store yet.
-func New(database *sql.DB, stores db.Stores, takeoverDir string, serverPort int) *Server {
+func New(database *sql.DB, stores db.Stores, serverPort int) *Server {
 	s := &Server{
 		db:           database,
 		prompts:      stores.Prompts,
@@ -412,7 +404,6 @@ func New(database *sql.DB, stores db.Stores, takeoverDir string, serverPort int)
 		tx:           stores.Tx,
 		az:           authz.New(database, stores.Tx),
 		allStores:    stores,
-		takeoverDir:  takeoverDir,
 		serverPort:   serverPort,
 		mux:          http.NewServeMux(),
 		ws:           websocket.NewHub(),
@@ -610,17 +601,14 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/tasks/{id}/requeue", s.handleRequeue)
 	s.apiMutating("POST /api/tasks/{id}/advance", s.handleTaskAdvance)
 
-	ag := &agentHandler{tx: s.tx, ws: s.ws, takeoverDir: s.takeoverDir, spawner: func() *delegate.Spawner { return s.spawner }}
+	ag := &agentHandler{tx: s.tx, ws: s.ws, spawner: func() *delegate.Spawner { return s.spawner }}
 	s.api("GET /api/agent/runs/{runID}", ag.handleAgentStatus)
 	s.api("GET /api/agent/runs/{runID}/messages", ag.handleAgentMessages)
 	s.apiMutating("POST /api/agent/runs/{runID}/cancel", ag.handleAgentCancel)
 	s.apiMutating("POST /api/agent/runs/{runID}/message", ag.handleAgentMessage)
 	s.apiMutating("POST /api/agent/runs/{runID}/interrupt", ag.handleAgentInterrupt)
 	s.apiMutating("POST /api/agent/runs/{runID}/permissions/{requestID}", ag.handleAgentPermission)
-	s.apiMutating("POST /api/agent/runs/{runID}/takeover", ag.handleAgentTakeover)
-	s.apiMutating("POST /api/agent/runs/{runID}/release", ag.handleAgentRelease)
 	s.api("GET /api/agent/runs", ag.handleAgentRuns)
-	s.api("GET /api/agent/takeovers/held", ag.handleHeldTakeovers)
 
 	// Projects (SKY-215). Pure CRUD over the projects table; the
 	// Curator runtime that populates curator_session_id lands in

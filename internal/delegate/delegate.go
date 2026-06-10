@@ -472,8 +472,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID string, task dom
 // passed cwd=runRoot to the original agentproc.Run). Even though Jira
 // runs don't have a single "the worktree" the way GitHub PR runs do,
 // the run-root IS the agent's session cwd, which is the load-bearing
-// invariant for resume. Takeover guards against Jira runs explicitly
-// further down.
+// invariant for resume.
 func (s *Spawner) setupJira(ctx context.Context, orgID, runID string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
 	runRoot, err := worktree.MakeRunRoot(runID)
 	if err != nil {

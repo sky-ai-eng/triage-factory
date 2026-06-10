@@ -12,7 +12,6 @@ import { useWebSocket } from '../hooks/useWebSocket'
 import { useTeams, useTeamFilter } from '../hooks/useTeams'
 import TeamScopeSelect from '../components/TeamScopeSelect'
 import AgentCard from '../components/AgentCard'
-import HeldTakeoversBanner from '../components/HeldTakeoversBanner'
 import TaskCard from '../components/TaskCard'
 import PromptPicker from '../components/PromptPicker'
 import ReviewOverlay from '../components/ReviewOverlay'
@@ -751,7 +750,7 @@ export default function Board() {
 
       // Bot-claimed tasks in In Progress / In Review are bot-managed —
       // the user shouldn't drag them around (status is set by the
-      // spawner's auto-advance). Takeover happens via the assignee
+      // spawner's auto-advance). Reassignment happens via the assignee
       // picker. Silently refuse the drag rather than nag.
       if (task.claimed_by_agent_id && (sourceCol === 'in_progress' || sourceCol === 'in_review')) {
         return
@@ -963,12 +962,9 @@ export default function Board() {
 
       {/* Full-height stage. Pulled up under the nav (-mt) — this page wants the
           columns close to the chrome, not floating in a big top gap like the
-          form pages do. The banner + team filter take what they need; the
-          scroll area fills the rest to the page bottom (hard floor on short
-          screens). */}
+          form pages do. The team filter takes what it needs; the scroll area
+          fills the rest to the page bottom (hard floor on short screens). */}
       <div className="-mt-4 flex h-[calc(100dvh-7rem)] min-h-[26rem] flex-col">
-        <HeldTakeoversBanner />
-
         {/* Per-page team filter. Renders nothing at ≤1 team. */}
         {teams.length >= 2 && (
           <div className="flex items-center justify-end px-1 pb-3">
@@ -1258,7 +1254,6 @@ const draggableRunStatuses = new Set([
   'pending_approval',
   'failed',
   'cancelled',
-  'taken_over',
   'completed',
   'task_unsolvable',
 ])
@@ -1300,7 +1295,7 @@ function SortableAgentCard({
     cursor: draggable ? 'grab' : undefined,
   }
   // SKY-330: assigneeSlot forwarded into AgentCard's header cluster
-  // so it shares the gap-2 spacing with elapsed/expand/takeover
+  // so it shares the gap-2 spacing with elapsed/expand/cancel
   // instead of overlapping them via absolute positioning. Same
   // reasoning as the TaskCard wrapper above.
   return (

@@ -521,7 +521,7 @@ func TestHandleSwipe_ClaimRefusedLeavesNoAuditRow(t *testing.T) {
 // Post: 409, no swipe_events, no state change.
 func TestHandleSwipe_DelegateRefusedLeavesNoAuditRow(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku", ""))
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
 	const eventType = "github:pr:opened"
 	const otherUserID = "00000000-0000-0000-0000-0000000004dd"
 
@@ -916,7 +916,7 @@ func TestHandleSnooze_RefusesOnClaimedTask(t *testing.T) {
 // transfer while still refusing different-user theft.
 func TestHandleSwipe_DelegateTransfersOwnUserClaim(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku", ""))
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
 
 	// Seed a queued task already claimed by the local user — the
 	// pre-condition right before a You → Agent drag fires the

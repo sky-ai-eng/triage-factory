@@ -208,7 +208,7 @@ func (r *fakeJiraResolver) systemCalls() int {
 // transitions into the InProgress bucket.
 func TestRunJiraMirror_InProgress_AssignsAndTransitions(t *testing.T) {
 	fake := newRecordingJiraServer(t, "To Do", "")
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
 	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
@@ -226,7 +226,7 @@ func TestRunJiraMirror_InProgress_AssignsAndTransitions(t *testing.T) {
 // finished ticket stays assigned to the bot.
 func TestRunJiraMirror_Done_TransitionsOnly_NoAssign(t *testing.T) {
 	fake := newRecordingJiraServer(t, "In Progress", "bot")
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
 	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), true)
@@ -245,7 +245,7 @@ func TestRunJiraMirror_Done_TransitionsOnly_NoAssign(t *testing.T) {
 // agent's own cmd/exec/jira moves.
 func TestRunJiraMirror_Idempotent_AlreadyInBucket_NoWrites(t *testing.T) {
 	fake := newRecordingJiraServer(t, "In Progress", "bot")
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
 	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
@@ -261,7 +261,7 @@ func TestRunJiraMirror_Idempotent_AlreadyInBucket_NoWrites(t *testing.T) {
 // pass finds the ticket already there and makes no distinct Jira move.
 func TestRunJiraMirror_InReviewCollapsesToInProgress_NoDistinctMove(t *testing.T) {
 	fake := newRecordingJiraServer(t, "To Do", "")
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
 	// First in-progress (board in_progress) — assign + transition.
@@ -281,7 +281,7 @@ func TestRunJiraMirror_InReviewCollapsesToInProgress_NoDistinctMove(t *testing.T
 // A disabled mirror (no resolver wired) is a clean no-op — the local /
 // test-fixture path.
 func TestRunJiraMirror_NoResolver_NoOp(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	// No SetJiraResolver → getJiraResolver returns nil.
 	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
 	// Reaching here without a panic / outbound call is the assertion.
@@ -293,7 +293,7 @@ func TestRunJiraMirror_NoResolver_NoOp(t *testing.T) {
 // mirror does nothing (not even an assign).
 func TestRunJiraMirror_InProgress_SkipsWhenAlreadyDone(t *testing.T) {
 	fake := newRecordingJiraServer(t, "Done", "")
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
 	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
@@ -312,7 +312,7 @@ func TestRunJiraMirror_InProgress_SkipsWhenAlreadyDone(t *testing.T) {
 // guard skips. Run under -race, this also exercises jiraMirrorLocks.
 func TestRunJiraMirror_ConcurrentInProgressAndDone_EndsInDone(t *testing.T) {
 	fake := newRecordingJiraServer(t, "To Do", "")
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 	rule := mirrorRule()
 
@@ -356,7 +356,7 @@ func TestShouldLogForSystemErr(t *testing.T) {
 func TestRunJiraMirror_InProgress_SkipsOnUnreadableState(t *testing.T) {
 	fake := newRecordingJiraServer(t, "Done", "bot") // ticket already Done...
 	fake.failClaimState = true                       // ...but the mirror can't read that
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
 	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
@@ -374,7 +374,7 @@ func TestRunJiraMirror_InProgress_SkipsOnUnreadableState(t *testing.T) {
 func TestRunJiraMirror_Done_ProceedsWhenStateUnreadable(t *testing.T) {
 	fake := newRecordingJiraServer(t, "In Progress", "bot") // can't confirm current status...
 	fake.failClaimState = true                              // ...GetClaimState returns nil
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
 	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), true)
@@ -390,7 +390,7 @@ func TestRunJiraMirror_Done_ProceedsWhenStateUnreadable(t *testing.T) {
 func TestRunJiraMirror_InProgress_AssignFails_SkipsTransition(t *testing.T) {
 	fake := newRecordingJiraServer(t, "To Do", "") // unassigned → assign needed
 	fake.failAssign = true
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
 	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
@@ -418,7 +418,7 @@ func seedJiraMirrorRule(t *testing.T, database *sql.DB) {
 }
 
 func TestLookupJiraRuleForTaskSystem_ResolvesForJiraTask(t *testing.T) {
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	seedJiraMirrorRule(t, database)
 	rules := sqlitestore.New(database).JiraStatusRules
 
@@ -434,7 +434,7 @@ func TestLookupJiraRuleForTaskSystem_ResolvesForJiraTask(t *testing.T) {
 }
 
 func TestLookupJiraRuleForTaskSystem_NonJiraTask_Nil(t *testing.T) {
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	seedJiraMirrorRule(t, database)
 	rules := sqlitestore.New(database).JiraStatusRules
 
@@ -446,7 +446,7 @@ func TestLookupJiraRuleForTaskSystem_NonJiraTask_Nil(t *testing.T) {
 }
 
 func TestLookupJiraRuleForTaskSystem_NoTeam_Nil(t *testing.T) {
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	seedJiraMirrorRule(t, database)
 	rules := sqlitestore.New(database).JiraStatusRules
 
@@ -457,7 +457,7 @@ func TestLookupJiraRuleForTaskSystem_NoTeam_Nil(t *testing.T) {
 }
 
 func TestLookupJiraRuleForTaskSystem_NoRuleForProject_Nil(t *testing.T) {
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	seedJiraMirrorRule(t, database) // only SKY configured
 	rules := sqlitestore.New(database).JiraStatusRules
 
@@ -476,7 +476,7 @@ func TestLookupJiraRuleForTaskSystem_NoRuleForProject_Nil(t *testing.T) {
 // sourced so the mirror has a rule + issue key to act on.
 func setupJiraMirrorFixture(t *testing.T, suffix string, status, assignee string) (*Spawner, *sql.DB, string, string, *recordingJiraServer, *fakeJiraResolver) {
 	t.Helper()
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	// Bot-claim writes need an agents row (FK on claimed_by_agent_id).
 	if _, err := database.Exec(
 		`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Triage Factory Bot')`,
@@ -501,7 +501,7 @@ func setupJiraMirrorFixture(t *testing.T, suffix string, status, assignee string
 
 	fake := newRecordingJiraServer(t, status, assignee)
 	res := &fakeJiraResolver{client: fake.client()}
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6", "")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	s.SetJiraResolver(res)
 	return s, database, runID, taskID, fake, res
 }

@@ -30,11 +30,9 @@ import { useOrgHref } from '../../hooks/useOrgHref'
 
 export interface StationActions {
   onBack: () => void
-  onTakeover?: () => void
   onCancel?: () => void
   onRequeue?: () => void
   onReview?: () => void
-  onRelease?: () => void
   /** Steer the run with a free-form message (live process or `open` resume). */
   onMessage?: (text: string) => void
   /** Pause the current turn (run → open), leaving the process warm. */
@@ -43,8 +41,6 @@ export interface StationActions {
    *  resolve POST finishes — PermissionPrompt awaits it to hold its
    *  single-flight guard. */
   onResolvePermission?: (requestID: string, decision: PermissionDecisionInput) => Promise<void>
-  takeoverPending?: boolean
-  releasePending?: boolean
   interruptPending?: boolean
 }
 
@@ -432,13 +428,11 @@ function IntakeDock({
   pending: PendingPermission[]
 }) {
   const isPending = run.Status === 'pending_approval'
-  const isHeld = run.Status === 'taken_over' && !!run.WorktreePath
   const isTerminal =
     run.Status === 'failed' ||
     run.Status === 'cancelled' ||
     run.Status === 'task_unsolvable' ||
     run.Status === 'completed'
-  const canTakeOver = run.Status === 'running' && !!run.SessionID
   // A run takes steering when a turn is executing or it's idle-resumable.
   const steerable = active || run.Status === 'open'
   const hasPrompt = pending.length > 0
@@ -459,9 +453,7 @@ function IntakeDock({
               ? 'run cancelled'
               : run.Status === 'task_unsolvable'
                 ? 'agent could not finish'
-                : isHeld
-                  ? 'held in your terminal'
-                  : run.Status
+                : run.Status
 
   return (
     <div className="relative z-10 shrink-0 border-t border-border-subtle px-4 py-2.5">
@@ -504,15 +496,6 @@ function IntakeDock({
               {run.pending_kind === 'pr' ? 'Open PR' : 'Review'} →
             </DockButton>
           )}
-          {canTakeOver && actions.onTakeover && (
-            <DockButton
-              tone="var(--color-accent)"
-              onClick={actions.onTakeover}
-              disabled={actions.takeoverPending}
-            >
-              {actions.takeoverPending ? 'Taking over…' : 'Take over'}
-            </DockButton>
-          )}
           {/* Interrupt pauses the turn (→ open); distinct from Cancel's abandon. */}
           {active && actions.onInterrupt && (
             <DockButton
@@ -536,15 +519,6 @@ function IntakeDock({
           {(isTerminal || isPending) && actions.onRequeue && (
             <DockButton tone="var(--color-text-tertiary)" onClick={actions.onRequeue}>
               Return to queue
-            </DockButton>
-          )}
-          {isHeld && actions.onRelease && (
-            <DockButton
-              tone="var(--color-dismiss)"
-              onClick={actions.onRelease}
-              disabled={actions.releasePending}
-            >
-              {actions.releasePending ? 'Releasing…' : 'Release worktree'}
             </DockButton>
           )}
         </div>

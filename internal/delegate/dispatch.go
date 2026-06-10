@@ -380,8 +380,8 @@ func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, ste
 	case "completed":
 		// fall through to the outcome decision below
 	default:
-		// taken_over or any unexpected non-terminal: the step is owned by the user
-		// now, so the blueprint can't sensibly continue.
+		// Any unexpected non-terminal status: the blueprint can't
+		// sensibly continue, so fail it.
 		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
 			domain.BlueprintRunStatusFailed, "step ended with status "+stepRun.Status, &stepIdx, false)
 		return

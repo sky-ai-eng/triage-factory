@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -156,7 +155,7 @@ func (s *agentRunStore) MarkOpen(ctx context.Context, orgID, runID string) (bool
 		SET status = 'open'
 		WHERE id = ?
 		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-		                     'pending_approval', 'taken_over', 'open')
+		                     'pending_approval', 'open')
 	`, runID)
 	if err != nil {
 		return false, err
@@ -225,7 +224,7 @@ func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID str
 		UPDATE runs SET status = 'failed', completed_at = COALESCE(completed_at, ?)
 		WHERE id = ?
 		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
-		                     'pending_approval','taken_over')
+		                     'pending_approval')
 	`, time.Now().UTC(), runID)
 	if err != nil {
 		return false, err
@@ -271,156 +270,13 @@ func (s *agentRunStore) HasOtherActiveRunForTask(ctx context.Context, orgID, tas
 		SELECT EXISTS(
 			SELECT 1 FROM runs
 			WHERE task_id = ? AND id != ?
-			  AND status NOT IN ('completed','failed','cancelled','task_unsolvable','taken_over','pending_approval')
+			  AND status NOT IN ('completed','failed','cancelled','task_unsolvable','pending_approval')
 		)
 	`, taskID, excludeRunID).Scan(&exists)
 	if err != nil {
 		return false, err
 	}
 	return exists, nil
-}
-
-func (s *agentRunStore) MarkTakenOver(ctx context.Context, orgID, runID, takeoverPath, claimUserID string) (bool, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return false, err
-	}
-	rolled, err := s.runScoped(ctx, func(tx queryer) error {
-		now := time.Now()
-		res, err := tx.ExecContext(ctx, `
-			UPDATE runs
-			SET status = 'taken_over',
-			    completed_at = ?,
-			    stop_reason = 'user_takeover',
-			    result_summary = ?,
-			    worktree_path = ?
-			WHERE id = ?
-			  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-			                     'pending_approval', 'taken_over')
-		`, now, "Taken over by user → "+takeoverPath, takeoverPath, runID)
-		if err != nil {
-			return err
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			// Race-lost on the run flip. errScopedRollback rolls
-			// back the scope (savepoint when composed, tx when
-			// standalone) and surfaces (false, nil) to the caller.
-			return errScopedRollback
-		}
-
-		if claimUserID != "" {
-			res, err := tx.ExecContext(ctx, `
-				UPDATE tasks
-				   SET claimed_by_user_id  = ?,
-				       claimed_by_agent_id = NULL
-				 WHERE id = (SELECT task_id FROM runs WHERE id = ?)
-				   AND claimed_by_agent_id IS NOT NULL
-				   AND claimed_by_user_id  IS NULL
-			`, claimUserID, runID)
-			if err != nil {
-				return err
-			}
-			taskN, err := res.RowsAffected()
-			if err != nil {
-				return err
-			}
-			if taskN == 0 {
-				return errScopedRollback
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return false, err
-	}
-	if rolled {
-		return false, nil
-	}
-	return true, nil
-}
-
-// runScoped runs fn inside a rollback-safe scope. See
-// internal/db/postgres/agentrun.go's runScoped for the full design;
-// the SQLite shape is identical (savepoint syntax is portable). When
-// s.q is a *sql.Tx (composed inside an outer WithTx), the scope is
-// a SAVEPOINT so partial failure doesn't leak; when s.q is *sql.DB,
-// runScoped opens a fresh tx.
-func (s *agentRunStore) runScoped(ctx context.Context, fn func(queryer) error) (rolledBack bool, err error) {
-	switch v := s.q.(type) {
-	case *sql.Tx:
-		sp := scopedSavepointName()
-		if _, err := v.ExecContext(ctx, "SAVEPOINT "+sp); err != nil {
-			return false, err
-		}
-		fnErr := fn(v)
-		if fnErr == nil {
-			if _, err := v.ExecContext(ctx, "RELEASE SAVEPOINT "+sp); err != nil {
-				return false, err
-			}
-			return false, nil
-		}
-		if _, rerr := v.ExecContext(ctx, "ROLLBACK TO SAVEPOINT "+sp); rerr != nil {
-			return false, rerr
-		}
-		if _, rerr := v.ExecContext(ctx, "RELEASE SAVEPOINT "+sp); rerr != nil {
-			return false, rerr
-		}
-		if errors.Is(fnErr, errScopedRollback) {
-			return true, nil
-		}
-		return false, fnErr
-	case *sql.DB:
-		tx, err := v.BeginTx(ctx, nil)
-		if err != nil {
-			return false, err
-		}
-		defer func() { _ = tx.Rollback() }()
-		if fnErr := fn(tx); fnErr != nil {
-			if errors.Is(fnErr, errScopedRollback) {
-				return true, nil
-			}
-			return false, fnErr
-		}
-		if err := tx.Commit(); err != nil {
-			return false, err
-		}
-		return false, nil
-	default:
-		return false, fmt.Errorf("sqlite agentrun: unexpected queryer type %T", v)
-	}
-}
-
-// errScopedRollback is the sentinel fn returns to ask runScoped for
-// a non-error rollback of the current scope.
-var errScopedRollback = errors.New("agentrun: scoped rollback")
-
-func scopedSavepointName() string {
-	return fmt.Sprintf("agentrun_scope_%d", time.Now().UnixNano())
-}
-
-func (s *agentRunStore) MarkReleased(ctx context.Context, orgID, runID string) (bool, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return false, err
-	}
-	res, err := s.q.ExecContext(ctx, `
-		UPDATE runs
-		SET worktree_path = '',
-		    result_summary = CASE
-		        WHEN COALESCE(result_summary, '') = '' THEN 'released by user'
-		        ELSE result_summary || '; released by user'
-		    END
-		WHERE id = ?
-		  AND status = 'taken_over'
-		  AND COALESCE(worktree_path, '') != ''
-	`, runID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
 }
 
 func (s *agentRunStore) MarkCancelledIfActive(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error) {
@@ -433,7 +289,7 @@ func (s *agentRunStore) MarkCancelledIfActive(ctx context.Context, orgID, runID,
 		SET status = 'cancelled', completed_at = ?, stop_reason = ?, result_summary = ?
 		WHERE id = ?
 		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-		                     'pending_approval', 'taken_over')
+		                     'pending_approval')
 	`, now, stopReason, summary, runID)
 	if err != nil {
 		return false, err
@@ -551,7 +407,7 @@ func (s *agentRunStore) HasActiveForTask(ctx context.Context, orgID, taskID stri
 	err := s.q.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM runs
 		WHERE task_id = ? AND status NOT IN ('completed', 'failed', 'cancelled',
-		                                      'task_unsolvable', 'pending_approval', 'taken_over')
+		                                      'task_unsolvable', 'pending_approval')
 	`, taskID).Scan(&count)
 	return count > 0, err
 }
@@ -571,7 +427,7 @@ func (s *agentRunStore) HasActiveAutoRunForEntity(ctx context.Context, orgID, en
 		WHERE t.entity_id = ?
 		  AND r.trigger_type = 'event'
 		  AND r.status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-		                       'pending_approval', 'taken_over')
+		                       'pending_approval')
 	`, entityID).Scan(&count)
 	return count > 0, err
 }
@@ -583,7 +439,7 @@ func (s *agentRunStore) ActiveIDsForTask(ctx context.Context, orgID, taskID stri
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT id FROM runs
 		WHERE task_id = ? AND status NOT IN ('completed', 'failed', 'cancelled',
-		                                      'task_unsolvable', 'pending_approval', 'taken_over')
+		                                      'task_unsolvable', 'pending_approval')
 	`, taskID)
 	if err != nil {
 		return nil, err
@@ -607,10 +463,6 @@ func (s *agentRunStore) ActiveIDsForTask(ctx context.Context, orgID, taskID stri
 // distinction doesn't exist; the wrappers are kept for signature
 // parity with Postgres. The delegate spawner consumes these from
 // its goroutine paths that detach from the request context.
-
-func (s *agentRunStore) ListTakenOverIDsSystem(ctx context.Context, orgID string) ([]string, error) {
-	return s.ListTakenOverIDs(ctx, orgID)
-}
 
 func (s *agentRunStore) HasActiveAutoRunForEntitySystem(ctx context.Context, orgID, entityID string) (bool, error) {
 	return s.HasActiveAutoRunForEntity(ctx, orgID, entityID)
@@ -673,37 +525,12 @@ func (s *agentRunStore) MarkPendingApprovalIfCompletedSystem(ctx context.Context
 	return s.MarkPendingApprovalIfCompleted(ctx, orgID, runID)
 }
 
-func (s *agentRunStore) MarkReleasedSystem(ctx context.Context, orgID, runID string) (bool, error) {
-	return s.MarkReleased(ctx, orgID, runID)
-}
-
 func (s *agentRunStore) MarkCancelledIfActiveSystem(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error) {
 	return s.MarkCancelledIfActive(ctx, orgID, runID, stopReason, summary)
 }
 
 func (s *agentRunStore) InsertMessageSystem(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error) {
 	return s.InsertMessage(ctx, orgID, msg)
-}
-
-func (s *agentRunStore) ListTakenOverIDs(ctx context.Context, orgID string) ([]string, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	rows, err := s.q.QueryContext(ctx,
-		`SELECT id FROM runs WHERE status = 'taken_over' AND COALESCE(worktree_path, '') != ''`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
 }
 
 func (s *agentRunStore) ListParkedWorktreePathsSystem(ctx context.Context, orgID string) ([]string, error) {
@@ -731,53 +558,6 @@ func (s *agentRunStore) ListParkedWorktreePaths(ctx context.Context, orgID strin
 		paths = append(paths, p)
 	}
 	return paths, rows.Err()
-}
-
-func (s *agentRunStore) ListTakenOverForResume(ctx context.Context, orgID string) ([]domain.TakenOverRun, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	// completed_at and started_at returned as raw columns rather than
-	// COALESCE'd into one — the SQLite driver can scan a column of
-	// declared DATETIME type into sql.NullTime, but a COALESCE
-	// expression strips the type metadata and the result comes back
-	// as an unparseable string. ORDER BY uses COALESCE because string
-	// sort over ISO-8601 happens to be correct ordering.
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT r.id, COALESCE(r.session_id, ''), COALESCE(r.worktree_path, ''),
-		       COALESCE(e.title, ''), COALESCE(e.source_id, ''),
-		       r.completed_at, r.started_at
-		FROM runs r
-		LEFT JOIN tasks t ON t.id = r.task_id
-		LEFT JOIN entities e ON e.id = t.entity_id
-		WHERE r.status = 'taken_over'
-		  AND COALESCE(r.worktree_path, '') != ''
-		ORDER BY COALESCE(r.completed_at, r.started_at) DESC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []domain.TakenOverRun
-	for rows.Next() {
-		var r domain.TakenOverRun
-		var completedAt, startedAt sql.NullTime
-		if err := rows.Scan(&r.RunID, &r.SessionID, &r.WorktreePath, &r.TaskTitle, &r.SourceID, &completedAt, &startedAt); err != nil {
-			return nil, err
-		}
-		if r.SessionID == "" || r.WorktreePath == "" {
-			continue
-		}
-		switch {
-		case completedAt.Valid:
-			r.CompletedAt = completedAt.Time
-		case startedAt.Valid:
-			r.CompletedAt = startedAt.Time
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
 }
 
 func (s *agentRunStore) EntitiesWithOpenRuns(ctx context.Context, orgID string, entityIDs []string) (map[string]struct{}, error) {

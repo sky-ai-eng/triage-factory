@@ -89,7 +89,7 @@ func TestResolveRunCredentials_MultiSeam(t *testing.T) {
 
 	// Constructor client/model are deliberately distinct sentinels so a
 	// pass can only come from the resolver/modelFor, never the fallback.
-	s := NewSpawner(nil, db.Stores{}, ghclient.NewClient("https://fallback", "fallback-tok"), nil, "fallback-model", "")
+	s := NewSpawner(nil, db.Stores{}, ghclient.NewClient("https://fallback", "fallback-tok"), nil, "fallback-model")
 	s.SetRunCredentialResolvers(resolver, secrets, func(_ context.Context, gotOrg, gotTeam string) string {
 		if gotOrg != orgID {
 			t.Errorf("modelFor got org %q; want %q", gotOrg, orgID)
@@ -132,7 +132,7 @@ func TestResolveRunCredentials_MultiSeam(t *testing.T) {
 // secrets reader is nil → the local ambient-subscription fallback.
 func TestResolveRunCredentials_FallbackWithoutSeam(t *testing.T) {
 	fallbackClient := ghclient.NewClient("https://fallback", "fallback-tok")
-	s := NewSpawner(nil, db.Stores{}, fallbackClient, nil, "fallback-model", "")
+	s := NewSpawner(nil, db.Stores{}, fallbackClient, nil, "fallback-model")
 
 	gotClient, gotModel := s.resolveRunCredentials(context.Background(), "org", "owner", "team")
 	if gotClient != fallbackClient {
@@ -152,7 +152,7 @@ func TestResolveRunCredentials_FallbackWithoutSeam(t *testing.T) {
 // silently route the run through a different org's process-global client.
 func TestResolveGHClient_ResolveErrorReturnsNil(t *testing.T) {
 	resolver := &fakeResolver{err: errors.New("vault down")}
-	s := NewSpawner(nil, db.Stores{}, ghclient.NewClient("https://fallback", "fallback-tok"), nil, "m", "")
+	s := NewSpawner(nil, db.Stores{}, ghclient.NewClient("https://fallback", "fallback-tok"), nil, "m")
 	s.SetRunCredentialResolvers(resolver, nil, nil)
 
 	if got := s.resolveGHClient(context.Background(), "org", "owner"); got != nil {
@@ -167,7 +167,7 @@ func TestResolveGHClient_ResolveErrorReturnsNil(t *testing.T) {
 // before any subprocess work (after the sessionID/cwd checks), so a bare
 // spawner with no stores is sufficient to exercise it.
 func TestResumeWithMessage_RequiresModel(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "fallback-model", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "fallback-model")
 	// Even with a constructor fallback model set, an empty opts.Model must
 	// NOT silently borrow it — the resume has to carry the run's own model.
 	_, err := s.ResumeWithMessage(context.Background(), "org", "run-1", "sess-1", "/tmp/wt", "hi", ResumeOptions{}, "manual", "user-1")
@@ -214,7 +214,7 @@ func TestResolveCloneToken(t *testing.T) {
 
 	t.Run("multi: wired resolver returns the token value", func(t *testing.T) {
 		runmode.SetForTest(t, runmode.ModeMulti)
-		s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+		s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 		s.SetRunCredentialResolvers(&fakeResolver{token: githubapp.Token{Value: "ghs_clone"}}, nil, nil)
 		if got := s.resolveCloneToken(context.Background(), orgID, owner); got != "ghs_clone" {
 			t.Errorf("resolveCloneToken = %q, want %q", got, "ghs_clone")
@@ -223,7 +223,7 @@ func TestResolveCloneToken(t *testing.T) {
 
 	t.Run("multi: no resolver returns empty", func(t *testing.T) {
 		runmode.SetForTest(t, runmode.ModeMulti)
-		s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+		s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 		if got := s.resolveCloneToken(context.Background(), orgID, owner); got != "" {
 			t.Errorf("resolveCloneToken with no resolver = %q, want empty", got)
 		}
@@ -231,7 +231,7 @@ func TestResolveCloneToken(t *testing.T) {
 
 	t.Run("multi: resolver error returns empty", func(t *testing.T) {
 		runmode.SetForTest(t, runmode.ModeMulti)
-		s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+		s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 		s.SetRunCredentialResolvers(&fakeResolver{err: errors.New("vault down")}, nil, nil)
 		if got := s.resolveCloneToken(context.Background(), orgID, owner); got != "" {
 			t.Errorf("resolveCloneToken on error = %q, want empty (clone proceeds unauthenticated)", got)
@@ -240,7 +240,7 @@ func TestResolveCloneToken(t *testing.T) {
 
 	t.Run("local: never injects even with a resolver wired", func(t *testing.T) {
 		runmode.SetForTest(t, runmode.ModeLocal)
-		s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+		s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 		s.SetRunCredentialResolvers(&fakeResolver{token: githubapp.Token{Value: "ghs_clone"}}, nil, nil)
 		if got := s.resolveCloneToken(context.Background(), orgID, owner); got != "" {
 			t.Errorf("resolveCloneToken in local mode = %q, want empty (local clones unchanged)", got)

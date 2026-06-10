@@ -59,12 +59,11 @@ func (a *App) startPolling(ctx context.Context) {
 	a.reloader.initialPoll(ctx)
 }
 
-// cleanupWorktrees removes orphaned worktrees from crashed runs. taken_over
-// and parked runs are preserved (their ~/.claude/projects session JSONL is
-// the warm resume cache). On a query error we still sweep worktree dirs +
-// bare repos — those leaks compound fast — but skip all ~/.claude/projects
-// deletions, since without the preserve set we can't distinguish a
-// taken-over run's JSONL from an orphan.
+// cleanupWorktrees removes orphaned worktrees from crashed runs. Parked
+// runs (open / pending_approval) are preserved whole — their worktree dir
+// and ~/.claude/projects session JSONL are the warm resume cache. A load
+// failure just forgoes that optimization; those runs still resume by
+// rehydrating from snapshot.
 //
 // Non-local modes get the worktree-dir + bare-repo sweep but skip
 // ~/.claude/projects entirely: the preserve set is keyed by the synthetic
@@ -75,20 +74,6 @@ func (a *App) cleanupWorktrees(ctx context.Context) {
 		return
 	}
 
-	preserveIDs, err := a.stores.AgentRuns.ListTakenOverIDsSystem(ctx, runmode.LocalDefaultOrgID)
-	if err != nil {
-		log.Printf("[server] WARNING: failed to load taken_over run ids — sweeping worktree dirs but skipping ~/.claude/projects cleanup to avoid clobbering active takeover sessions: %v", err)
-		worktree.CleanupWithOptions(worktree.CleanupOptions{SkipClaudeProjectCleanup: true})
-		return
-	}
-
-	preserveSet := make(map[string]bool, len(preserveIDs))
-	for _, id := range preserveIDs {
-		preserveSet[id] = true
-	}
-	// Parked runs (open / pending_approval) keep their whole
-	// worktree as the warm resume cache. A load failure just forgoes the
-	// optimization — those runs still resume by rehydrating from snapshot.
 	preserveWorktrees := map[string]bool{}
 	if parkedPaths, perr := a.stores.AgentRuns.ListParkedWorktreePathsSystem(ctx, runmode.LocalDefaultOrgID); perr != nil {
 		log.Printf("[server] WARNING: failed to load parked worktree paths; parked workspaces will rehydrate from snapshot rather than reuse the warm cache: %v", perr)
@@ -98,8 +83,7 @@ func (a *App) cleanupWorktrees(ctx context.Context) {
 		}
 	}
 	worktree.CleanupWithOptions(worktree.CleanupOptions{
-		PreserveClaudeProjectFor: preserveSet,
-		PreserveWorktreeFor:      preserveWorktrees,
+		PreserveWorktreeFor: preserveWorktrees,
 	})
 }
 

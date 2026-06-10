@@ -59,24 +59,13 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// idle hibernation flips it to `open` (runAgent, below), or processCompletion
 	// parks it in `pending_approval`. The per-run cleanup defers below read it to
 	// KEEP the worktree and session JSONL on disk as the warm resume cache —
-	// mirroring the wasTakenOver / isBlueprintStep skips. Captured by reference
+	// mirroring the isBlueprintStep skip. Captured by reference
 	// by the deferred closures, so they observe its final value at return.
 	var parked bool
 	if cfg.hasWT {
 		// GitHub PR cleanup. Best-effort cleanup on return; the worktree ID is unique per run
 		// so a failed remove just leaves a dangling directory under _worktrees.
-		// Skipped when the run was taken over — Takeover() needs the worktree
-		// to still exist for its copy and explicitly cleans up afterward.
 		defer func() {
-			if s.wasTakenOver(runID) {
-				// Taken-over runs leave their worktree in place for the
-				// user's interactive session; don't touch the per-PR
-				// config either, since the takeover dir still uses
-				// head-<n> for push. SweepStaleForkPRConfig reclaims
-				// that config on the next bootstrap once the takeover
-				// dir is gone.
-				return
-			}
 			if cfg.isBlueprintStep {
 				return
 			}
@@ -108,15 +97,8 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	} else if cfg.runRoot != "" {
 		// Jira lazy cleanup: the agent materialized zero or more worktrees
 		// under cfg.runRoot via `workspace add`. Iterate run_worktrees,
-		// nuke each, then remove the run-root parent. Same takeover gate
-		// as the GitHub branch above — multi-worktree takeover isn't
-		// implemented yet, but the Takeover() rejection on empty
-		// runs.worktree_path catches Jira runs before they get here, so
-		// the gate is defensive rather than load-bearing.
+		// nuke each, then remove the run-root parent.
 		defer func() {
-			if s.wasTakenOver(runID) {
-				return
-			}
 			if cfg.isBlueprintStep {
 				return
 			}
@@ -152,12 +134,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	claudeCwd := cfg.wtPath
 	// Nuke the ghost ~/.claude/projects/<encoded-cwd> that claude auto-creates
 	// for this cwd. Safety-railed to only touch entries under $TMPDIR.
-	// Skipped when the run was taken over by the user — the JSONL inside
-	// is the conversation state the resumed `claude --resume` reads.
 	defer func() {
-		if s.wasTakenOver(runID) {
-			return
-		}
 		if cfg.isBlueprintStep {
 			return
 		}
@@ -330,14 +307,6 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		})
 	} else {
 		out = s.runOneShot(ctx, baseOpts, sink)
-	}
-
-	// If Takeover() flipped the takenOver flag while we were streaming,
-	// every code path below — completion ingestion, status updates, fail
-	// paths, toasts — would step on the takeover lifecycle. Bail out
-	// silently: Takeover owns the DB row and the worktree from here on.
-	if s.wasTakenOver(runID) {
-		return
 	}
 
 	// Idle hibernation parked the run (status `open`, snapshot written) — a

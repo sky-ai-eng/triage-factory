@@ -140,14 +140,6 @@ func (s *Spawner) Cancel(orgID, runID, userID string) error {
 // goroutine returns through one of the early paths that doesn't reach
 // the defer (e.g., setupErr before the defer is installed).
 func (s *Spawner) handleCancelled(orgID, runID string, startTime time.Time, wtPath, triggerType, creatorUserID string) {
-	if s.wasTakenOver(runID) {
-		// Takeover owns the DB row, the worktree, and the broadcast from
-		// here on — it needs the temp worktree to stay on disk until its
-		// copy completes, then will explicitly remove it. The cancel
-		// that woke us up was just the mechanism for stopping the
-		// headless process; everything else is Takeover's job.
-		return
-	}
 	elapsed := int(time.Since(startTime).Milliseconds())
 	bgCtx := context.Background()
 	var completeErr error
@@ -169,20 +161,13 @@ func (s *Spawner) handleCancelled(orgID, runID string, startTime time.Time, wtPa
 }
 
 func (s *Spawner) failRun(orgID, runID, taskID, triggerType, creatorUserID, errMsg string) {
-	if s.wasTakenOver(runID) {
-		// Takeover finalized this run; whatever error the goroutine
-		// observed is downstream of the SIGKILL we sent it. Don't
-		// overwrite taken_over with failed.
-		return
-	}
 	log.Printf("[delegate] run %s failed: %s", runID, errMsg)
 
 	bgCtx := context.Background()
 
-	// Guarded — if a terminal racing path (takeover, cancel, natural
-	// completion) reached the row first, leave its status in place
-	// rather than clobbering. The wasTakenOver check above only
-	// covers takeover; cancel and completion can still race here.
+	// Guarded — if a terminal racing path (cancel, natural completion)
+	// reached the row first, leave its status in place rather than
+	// clobbering.
 	var markErr error
 	if triggerType == "manual" {
 		markErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {

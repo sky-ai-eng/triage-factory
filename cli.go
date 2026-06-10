@@ -8,7 +8,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/install"
 	"github.com/sky-ai-eng/triage-factory/cmd/jwkinit"
 	"github.com/sky-ai-eng/triage-factory/cmd/migrate"
-	"github.com/sky-ai-eng/triage-factory/cmd/resume"
 	"github.com/sky-ai-eng/triage-factory/cmd/uninstall"
 )
 
@@ -29,8 +28,6 @@ func dispatchCLI(args []string) (handled bool, err error) {
 		exec.Handle(args[1:])
 	case "status":
 		exec.HandleStatus(args[1:])
-	case "resume":
-		resume.Handle(args[1:])
 	case "install":
 		install.Handle(args[1:])
 	case "uninstall":
@@ -59,7 +56,7 @@ func dispatchCLI(args []string) (handled bool, err error) {
 // vs. human users) to the right surface. Agents almost always reach this
 // through accidental invocation when trying to run a scoped subcommand, so
 // the first thing they see is the `exec` pointer; humans typically want the
-// server flags and the takeover-resume shortcuts.
+// server flags.
 func printTopLevelHelp() {
 	fmt.Println(`triagefactory — local-first AI triage for engineering backlogs.
 
@@ -74,11 +71,8 @@ USER COMMANDS
   triagefactory --version                  print the binary's version
   triagefactory install [--dest <path>]    symlink the binary onto PATH
   triagefactory uninstall [--yes]          wipe local state (db, config,
-                                           keychain, takeovers); leaves
-                                           the binary itself in place
-  triagefactory resume [<short-id>]        resume a taken-over session
-                                           (auto-resumes when there's only
-                                           one; picker otherwise)
+                                           keychain); leaves the binary
+                                           itself in place
   triagefactory migrate up                 bring the schema to head
   triagefactory migrate status             list applied + pending migrations
 

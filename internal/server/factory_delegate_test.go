@@ -161,7 +161,7 @@ func TestHandleFactoryDelegate_400OnMalformedJSON(t *testing.T) {
 // success (claim committed, run didn't fire).
 func TestHandleFactoryDelegate_DelegateErrorPreservesClaim(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku", ""))
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
 
 	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#400p", "pr", "", "")
 	if err != nil {
@@ -248,7 +248,7 @@ func TestHandleFactoryDelegate_DelegateErrorPreservesClaim(t *testing.T) {
 // the factory drop UI.
 func TestHandleFactoryDelegate_RefusedWhenBotDisabled(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku", ""))
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
 
 	// Flip the bot OFF on the local team. Production path is
 	// team_agents.SetEnabled via a team-admin gesture; direct

@@ -482,14 +482,14 @@ func TestCreateForPR_DeletedFork_PushFailsAfterPriorOwnRepoPR(t *testing.T) {
 	}
 }
 
-// TestSweepStaleForkPRConfig_ReclaimsTakenOverOwnRepoPR is the
-// regression for the taken-over own-repo leak: when a run is taken
-// over by the user, the spawner's defer skips inline cleanup so the
-// takeover dir can keep using its tracking config. After the
-// takeover dir is destroyed, the sweep must reclaim
-// branch.<headRef>.* — which the older sweep that walked head-<n>
-// remotes would have missed, since own-repo PRs don't have one.
-func TestSweepStaleForkPRConfig_ReclaimsTakenOverOwnRepoPR(t *testing.T) {
+// TestSweepStaleForkPRConfig_ReclaimsOwnRepoPR is the regression for
+// the own-repo leak: when a run's inline cleanup doesn't fire (e.g. a
+// cancel above the runAgent defer, or a crash), the bare keeps the
+// branch.<headRef>.* tracking config. Once the worktree dir is gone,
+// the sweep must reclaim branch.<headRef>.* — which the older sweep
+// that walked head-<n> remotes would have missed, since own-repo PRs
+// don't have one.
+func TestSweepStaleForkPRConfig_ReclaimsOwnRepoPR(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
 
@@ -518,9 +518,9 @@ func TestSweepStaleForkPRConfig_ReclaimsTakenOverOwnRepoPR(t *testing.T) {
 		t.Fatalf("CreateForPR: %v", err)
 	}
 
-	// Simulate a taken-over run: the worktree dir gets removed
-	// (taken over → eventually the takeover dir is destroyed), but
-	// inline cleanup never ran. Just remove the worktree.
+	// Simulate a run whose inline cleanup never ran: the worktree dir
+	// gets removed, but the per-PR config cleanup didn't fire. Just
+	// remove the worktree.
 	if err := RemoveAt(wtPath, "takeover-test-run"); err != nil {
 		t.Fatalf("RemoveAt: %v", err)
 	}
@@ -708,10 +708,9 @@ func TestSweepStaleForkPRConfig_RemovesOrphanedRemotes(t *testing.T) {
 
 // TestSweepStaleForkPRConfig_PreservesLiveWorktree is the safety
 // regression: the sweep must NOT remove a head-<n> remote whose
-// synthetic branch is checked out by a live worktree (the takeover
-// case — user is still using the takeover dir for push/pull). With
-// the worktree present, both the remote and the branch tracking
-// config must survive the sweep.
+// synthetic branch is checked out by a live worktree (a delegated run
+// is still using it for push/pull). With the worktree present, both
+// the remote and the branch tracking config must survive the sweep.
 func TestSweepStaleForkPRConfig_PreservesLiveWorktree(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
@@ -962,8 +961,8 @@ func assertReAddSucceeds(t *testing.T, bareDir, branch string) {
 // add that plain prune can't reclaim pins its branch and blocks the next
 // run for the same PR. removeWorktreeRegFor must drop exactly that run's
 // registration — and, crucially, ONLY that one, so it's safe to call
-// without lockRepo while a concurrent add (e.g. CopyForTakeover's
-// lock-free overlay) is in flight against the same bare.
+// without lockRepo while a concurrent add is in flight against the same
+// bare.
 func TestRemoveWorktreeRegFor_UnwedgesAndIsolated(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)

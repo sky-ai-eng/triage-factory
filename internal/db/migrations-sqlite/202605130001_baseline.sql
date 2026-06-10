@@ -137,14 +137,13 @@ CREATE TABLE preferences (
 );
 
 -- Host-level config: SQLite-only. PG has no analog because in multi mode
--- the port comes from container env and there is no takeover concept.
+-- the port comes from container env.
 -- Single-row table (CHECK id=1) so config.Load/Save can upsert
 -- without a WHERE-search.
 CREATE TABLE instance_config (
-    id                  INTEGER PRIMARY KEY CHECK (id = 1),
-    server_port         INTEGER NOT NULL DEFAULT 3000,
-    server_takeover_dir TEXT NOT NULL DEFAULT '',
-    updated_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    server_port INTEGER NOT NULL DEFAULT 3000,
+    updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- === Tenancy (orgs / teams / users) ======================================
@@ -1324,8 +1323,8 @@ CREATE UNIQUE INDEX curator_requests_id_org_unique ON curator_requests (id, org_
 --
 -- instance_config is a singleton (id=1 enforced by CHECK). The seed
 -- materializes the row so the boot-time read in main.go always finds it
--- instead of degrading to sql.ErrNoRows; column DEFAULTs supply
--- server_port and server_takeover_dir.
+-- instead of degrading to sql.ErrNoRows; the column DEFAULT supplies
+-- server_port.
 INSERT OR IGNORE INTO instance_config (id) VALUES (1);
 
 -- events_catalog seed (system-managed event type registry). Mirrors the

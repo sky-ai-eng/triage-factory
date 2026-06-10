@@ -24,7 +24,7 @@ func TestGitProxyConfigFor(t *testing.T) {
 
 	newMultiSpawner := func(resolver ghclient.Resolver) *Spawner {
 		runmode.SetForTest(t, runmode.ModeMulti)
-		s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+		s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 		if resolver != nil {
 			s.SetRunCredentialResolvers(resolver, nil, nil)
 		}
@@ -33,7 +33,7 @@ func TestGitProxyConfigFor(t *testing.T) {
 
 	t.Run("local mode disables the git proxy", func(t *testing.T) {
 		runmode.SetForTest(t, runmode.ModeLocal)
-		s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+		s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 		s.SetRunCredentialResolvers(&fakeResolver{token: githubapp.Token{Value: "ghs"}}, nil, nil)
 		if cfg := s.gitProxyConfigFor(context.Background(), orgID, owner); cfg != nil {
 			t.Errorf("gitProxyConfigFor in local mode = %+v, want nil", cfg)

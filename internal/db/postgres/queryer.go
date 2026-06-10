@@ -29,10 +29,9 @@ type queryer interface {
 // skeleton rows for new ones inside one tx so the table can't
 // observe a partial mid-sync state.
 //
-// AgentRunStore + BlueprintStore inline their own tx wrappers because
-// they need savepoint-on-claim-race semantics (see
-// errScopedRollback). Stores without that requirement should use
-// this helper.
+// BlueprintStore inlines its own tx wrapper because it needs
+// savepoint-on-claim-race semantics. Stores without that requirement
+// should use this helper.
 func inTx(ctx context.Context, q queryer, fn func(queryer) error) error {
 	switch v := q.(type) {
 	case *sql.Tx:

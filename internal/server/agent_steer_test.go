@@ -42,7 +42,7 @@ func seedSteerRun(t *testing.T, database *sql.DB, suffix, status string) string 
 // not steerable → 409. Asserts the 409 and the recorded row (role/subtype/body).
 func TestHandleAgentMessage_RecordsThenConflictsOnTerminal(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6", ""))
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
 	runID := seedSteerRun(t, s.db, "msg", "completed")
 
 	rec := doJSON(t, s, "POST", "/api/agent/runs/"+runID+"/message", map[string]string{"text": "pick this back up"})
@@ -63,7 +63,7 @@ func TestHandleAgentMessage_RecordsThenConflictsOnTerminal(t *testing.T) {
 // the caller's org is 404 (the authz gate), before anything is recorded.
 func TestHandleAgentMessage_UnknownRunNotFound(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6", ""))
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
 
 	rec := doJSON(t, s, "POST", "/api/agent/runs/r_absent/message", map[string]string{"text": "hello"})
 	if rec.Code != http.StatusNotFound {
@@ -75,7 +75,7 @@ func TestHandleAgentMessage_UnknownRunNotFound(t *testing.T) {
 // run is even looked up.
 func TestHandleAgentMessage_EmptyTextRejected(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6", ""))
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
 
 	rec := doJSON(t, s, "POST", "/api/agent/runs/whatever/message", map[string]string{"text": "   "})
 	if rec.Code != http.StatusBadRequest {
@@ -87,7 +87,7 @@ func TestHandleAgentMessage_EmptyTextRejected(t *testing.T) {
 // that has no live process is 409 (nothing to interrupt).
 func TestHandleAgentInterrupt_NoLiveProcessConflict(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6", ""))
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
 	runID := seedSteerRun(t, s.db, "int", "running")
 
 	rec := doJSON(t, s, "POST", "/api/agent/runs/"+runID+"/interrupt", nil)
@@ -101,7 +101,7 @@ func TestHandleAgentInterrupt_NoLiveProcessConflict(t *testing.T) {
 // another tenant's process.
 func TestHandleAgentInterrupt_UnknownRunNotFound(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6", ""))
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
 
 	rec := doJSON(t, s, "POST", "/api/agent/runs/r_absent/interrupt", nil)
 	if rec.Code != http.StatusNotFound {
@@ -115,7 +115,7 @@ func TestHandleAgentInterrupt_UnknownRunNotFound(t *testing.T) {
 // (otherwise this would test the run-not-found 404 instead).
 func TestHandleAgentPermission_NotPendingNotFound(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6", ""))
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
 	runID := seedSteerRun(t, s.db, "noperm", "running")
 
 	rec := doJSON(t, s, "POST", "/api/agent/runs/"+runID+"/permissions/req-ghost", map[string]string{"behavior": "allow"})
@@ -129,7 +129,7 @@ func TestHandleAgentPermission_NotPendingNotFound(t *testing.T) {
 // mirrors the message/interrupt authz gate.
 func TestHandleAgentPermission_UnknownRunNotFound(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6", ""))
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
 
 	rec := doJSON(t, s, "POST", "/api/agent/runs/r_absent/permissions/req-1", map[string]string{"behavior": "allow"})
 	if rec.Code != http.StatusNotFound {
@@ -141,7 +141,7 @@ func TestHandleAgentPermission_UnknownRunNotFound(t *testing.T) {
 // deny — anything else is 400 before the broker is consulted.
 func TestHandleAgentPermission_InvalidBehaviorRejected(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6", ""))
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
 
 	rec := doJSON(t, s, "POST", "/api/agent/runs/r1/permissions/req-x", map[string]string{"behavior": "maybe"})
 	if rec.Code != http.StatusBadRequest {
@@ -154,7 +154,7 @@ func TestHandleAgentPermission_InvalidBehaviorRejected(t *testing.T) {
 // the parked goroutine receives the decision, and the endpoint returns 200.
 func TestHandleAgentPermission_ResolvesLiveRequest(t *testing.T) {
 	s := newTestServer(t)
-	spawner := delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6", "")
+	spawner := delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6")
 	s.SetSpawner(spawner)
 	runID := seedSteerRun(t, s.db, "perm", "running")
 

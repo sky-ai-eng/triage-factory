@@ -22,7 +22,7 @@ import (
 // namespace folder outright or (b) failed the final memory write because the
 // parent dir didn't exist.
 func TestMaterializePriorMemories_CreatesDirEvenWithNoPriors(t *testing.T) {
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	cwd := t.TempDir()
 
 	stores := sqlitestore.New(database)
@@ -66,7 +66,7 @@ func TestMaterializePriorMemories_CreatesDirEvenWithNoPriors(t *testing.T) {
 // TestMaterializePriorMemories_WritesPriors verifies the existing
 // happy-path behavior survives the mkdir-first refactor.
 func TestMaterializePriorMemories_WritesPriors(t *testing.T) {
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	cwd := t.TempDir()
 
 	stores := sqlitestore.New(database)
@@ -130,7 +130,7 @@ func TestMaterializePriorMemories_WritesPriors(t *testing.T) {
 // materializes priors it finds step 1's memory in its own namespace folder —
 // that's the handoff. Also pins the "no top-level .md files" invariant.
 func TestMaterializePriorMemories_BlueprintSiblingsShareFolder(t *testing.T) {
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	cwd := t.TempDir()
 	stores := sqlitestore.New(database)
 	ctx := context.Background()

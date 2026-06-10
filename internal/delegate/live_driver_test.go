@@ -91,7 +91,7 @@ func (f *fakeLiveProc) exit(result *agentproc.Result, err error) {
 // closes the process (freeing the session for the gate's resume) and is
 // handed back for processCompletion — no hibernation.
 func TestDriveLiveRun_TerminalResultClosesAndReturns(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	results := make(chan *agentproc.Result, 1)
 	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
@@ -114,7 +114,7 @@ func TestDriveLiveRun_TerminalResultClosesAndReturns(t *testing.T) {
 // closes the process and surfaces the ctx error so the caller routes through
 // its cancelled handling.
 func TestDriveLiveRun_CtxCancelReturnsErr(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -137,7 +137,7 @@ func TestDriveLiveRun_CtxCancelReturnsErr(t *testing.T) {
 // results channel), the driver hands back the folded result for
 // processCompletion — and does not hibernate.
 func TestDriveLiveRun_ProcessExitCarriesResult(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"exited"}`}
 	proc.exit(want, nil) // process already gone, Done() closed, with a result set
@@ -156,7 +156,7 @@ func TestDriveLiveRun_ProcessExitCarriesResult(t *testing.T) {
 // branch: an exit with no result surfaces the process error so the caller
 // routes through failRun.
 func TestDriveLiveRun_ProcessExitCarriesErr(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	wantErr := errors.New("agent runtime exited with error")
 	proc.exit(nil, wantErr)
@@ -175,12 +175,12 @@ func TestDriveLiveRun_ProcessExitCarriesErr(t *testing.T) {
 // hibernation: a live run quiet past the (injected short) threshold closes
 // its process and parks to `open`, keeping the worktree.
 func TestDriveLiveRun_IdleHibernates(t *testing.T) {
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-idle", "sess-idle", "/tmp/wt-idle")
 	if _, err := database.Exec(`UPDATE runs SET status='running' WHERE id='r-idle'`); err != nil {
 		t.Fatalf("set running: %v", err)
 	}
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6", "")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	var taskID string
 	if err := database.QueryRow(`SELECT task_id FROM runs WHERE id='r-idle'`).Scan(&taskID); err != nil {
@@ -215,7 +215,7 @@ func TestDriveLiveRun_IdleHibernates(t *testing.T) {
 // activity well past the idle window, then deliver a terminal result — if the
 // timer reset correctly the run returns the result rather than hibernating.
 func TestDriveLiveRun_ActivityDefersHibernation(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	results := make(chan *agentproc.Result, 1)
 	activity := make(chan struct{}, 8)
@@ -256,7 +256,7 @@ pumping:
 // delivering prose first and a valid conclusion second: the driver returns the
 // valid result, which it could only reach by looping past the prose.
 func TestDriveLiveRun_NoneKeepsProcOpenAndLoops(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	results := make(chan *agentproc.Result, 8)
 	results <- &agentproc.Result{Result: "Some prose with no completion envelope at all."}
@@ -284,7 +284,7 @@ func TestDriveLiveRun_NoneKeepsProcOpenAndLoops(t *testing.T) {
 // TestProcessCompletion_InvalidEnvelopeFails). Each correction here produces
 // another invalid turn, so the bound is exhausted.
 func TestDriveLiveRun_InvalidRepromptsToBoundThenHandsBack(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	results := make(chan *agentproc.Result, 8)
 	invalid := &agentproc.Result{Result: `{"outcome":"frobnicate"}`}
@@ -312,7 +312,7 @@ func TestDriveLiveRun_InvalidRepromptsToBoundThenHandsBack(t *testing.T) {
 // just like an autonomous run — the fix for the asymmetry where a resume used
 // to accept an invalid envelope uncorrected.
 func TestDriveLiveRun_BoundedResumeRepromptsInvalid(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	results := make(chan *agentproc.Result, 8)
 	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"fixed"}`}
@@ -333,7 +333,7 @@ func TestDriveLiveRun_BoundedResumeRepromptsInvalid(t *testing.T) {
 // has no idle timer to close a warm process, so a no-conclusion turn is handed
 // straight back (not looped) for processCompletion to mark open.
 func TestDriveLiveRun_BoundedResumeNoneHandsBack(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	results := make(chan *agentproc.Result, 1)
 	none := &agentproc.Result{Result: "prose, no envelope"}
@@ -353,7 +353,7 @@ func TestDriveLiveRun_BoundedResumeNoneHandsBack(t *testing.T) {
 // once and the corrected turn is a valid conclusion → the driver returns it
 // (no failure).
 func TestDriveLiveRun_InvalidThenValidReturns(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	results := make(chan *agentproc.Result, 8)
 	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"fixed"}`}
@@ -381,12 +381,12 @@ func TestDriveLiveRun_InvalidThenValidReturns(t *testing.T) {
 // result, and the row is left `open` from the no-conclusion turn (driveLiveRun
 // records the conclusion via processCompletion, not here).
 func TestDriveLiveRun_NoneFlipsStatusOpen(t *testing.T) {
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-none", "sess-none", "/tmp/wt-none")
 	if _, err := database.Exec(`UPDATE runs SET status='running' WHERE id='r-none'`); err != nil {
 		t.Fatalf("set running: %v", err)
 	}
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6", "")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	var taskID string
 	if err := database.QueryRow(`SELECT task_id FROM runs WHERE id='r-none'`).Scan(&taskID); err != nil {
@@ -422,12 +422,12 @@ func TestDriveLiveRun_NoneFlipsStatusOpen(t *testing.T) {
 // the driver keeps consuming turns. The follow-up valid conclusion proves the
 // loop survived the pause.
 func TestDriveLiveRun_InterruptParksOpenNotTerminal(t *testing.T) {
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-pause", "sess-pause", "/tmp/wt-pause")
 	if _, err := database.Exec(`UPDATE runs SET status='running' WHERE id='r-pause'`); err != nil {
 		t.Fatalf("set running: %v", err)
 	}
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6", "")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	var taskID string
 	if err := database.QueryRow(`SELECT task_id FROM runs WHERE id='r-pause'`).Scan(&taskID); err != nil {
@@ -462,7 +462,7 @@ func TestDriveLiveRun_InterruptParksOpenNotTerminal(t *testing.T) {
 // same is_error/error_during_execution shape with NO pause in flight is a
 // genuine failure and stays terminal.
 func TestDriveLiveRun_ErrorWithoutInterruptStaysTerminal(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess-err")
 	results := make(chan *agentproc.Result, 1)
 	r := &agentproc.Result{IsError: true, Subtype: "error_during_execution"}
@@ -481,7 +481,7 @@ func TestDriveLiveRun_ErrorWithoutInterruptStaysTerminal(t *testing.T) {
 // resume (no idle timer) can't loop — the driver closes the process and parks
 // the run open to a durable resume.
 func TestDriveLiveRun_InterruptBoundedResumeParksOpen(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess-bounded")
 
 	results := make(chan *agentproc.Result, 1)

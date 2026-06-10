@@ -33,7 +33,7 @@ func newTenantlessServer(t *testing.T) (*Server, *sql.DB) {
 	if err := db.Migrate(database, "sqlite3"); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	return New(database, sqlitestore.New(database), "", 3000), database
+	return New(database, sqlitestore.New(database), 3000), database
 }
 
 func countTable(t *testing.T, database *sql.DB, table string) int {

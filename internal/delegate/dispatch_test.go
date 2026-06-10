@@ -18,7 +18,7 @@ import (
 // blueprint_run id, task id, and the step-0 run id.
 func reactorFixture(t *testing.T, suffix string, nSteps int, step0Status, step0Outcome string) (*Spawner, *sql.DB, string, string, string) {
 	t.Helper()
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrg
 	stores := sqlitestore.New(database)
@@ -82,7 +82,7 @@ func reactorFixture(t *testing.T, suffix string, nSteps int, step0Status, step0O
 		t.Fatalf("set step0 outcome: %v", err)
 	}
 
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6", "")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	return s, database, brID, task.ID, run0
 }
 

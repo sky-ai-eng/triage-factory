@@ -213,8 +213,8 @@ func forkPRRemoteName(prNumber int) string {
 // configureForkPRTracking and configureOwnRepoPRTracking; the sweep
 // reads it via `git config --get-regexp` to identify orphaned
 // branches that need cleanup, including own-repo branches the
-// fork-only sweep would otherwise miss after a takeover dir is
-// destroyed. The value is the PR number — preserved as the source
+// fork-only sweep would otherwise miss after a run's worktree is
+// removed. The value is the PR number — preserved as the source
 // of truth for the head-<n> remote name when one exists.
 //
 // Git lower-cases config variable names internally, so the regex
@@ -288,9 +288,9 @@ func CleanupPRConfig(owner, repo, headBranch string, prNumber int) {
 //
 // Branch deletion is safe because we always call this AFTER RemoveAt
 // has destroyed the worktree dir; git refuses `branch -D` for a
-// branch checked out by any live worktree, so a takeover dir or
-// concurrent delegation would force this to no-op rather than
-// silently break a live checkout.
+// branch checked out by any live worktree, so a concurrent
+// delegation would force this to no-op rather than silently break a
+// live checkout.
 //
 // All commands tolerate "already absent": git remote remove errors
 // when the remote isn't there, --remove-section errors when the
@@ -322,12 +322,6 @@ func removePRConfigLocked(ctx context.Context, bareDir, headBranch string, prNum
 // live worktree. Backstop for the cases where inline CleanupPRConfig
 // in the runAgent defer doesn't fire:
 //
-//   - Run was taken over: the runAgent defer's wasTakenOver gate
-//     skips cleanup so the user's takeover dir can keep using its
-//     tracking config for push. Once the takeover dir is destroyed,
-//     this sweep reclaims the leak on the next bootstrap pass —
-//     covers both fork PRs (head-<n>) and own-repo PRs
-//     (branch.<headRef>.*).
 //   - Run was cancelled at a layer above the runAgent defer (rare):
 //     inline cleanup never runs.
 //
@@ -336,9 +330,9 @@ func removePRConfigLocked(ctx context.Context, bareDir, headBranch string, prNum
 // approach could find, but own-repo PRs have only the branch config
 // block, which the marker exposes generically.
 //
-// Safe to call while takeovers are still in use because `git worktree
-// list` reports them and we only reclaim branches with no live
-// checkout. Best-effort: orphan-detection failures or partial
+// Safe to call while runs are still in flight because `git worktree
+// list` reports their checkouts and we only reclaim branches with no
+// live checkout. Best-effort: orphan-detection failures or partial
 // removes correct themselves on the next bootstrap.
 func SweepStaleForkPRConfig(owner, repo string) {
 	mu := lockRepo(owner, repo)
@@ -497,8 +491,7 @@ func configureForkPRTracking(ctx context.Context, bareDir string, prNumber int, 
 // well beyond what this tool targets.
 //
 // Also writes the trackedBranchMarkerKey so the sweep can reclaim
-// this block after a takeover dir is destroyed without the spawner's
-// inline cleanup (which the wasTakenOver gate skips).
+// this block when the spawner's inline cleanup doesn't fire.
 func configureOwnRepoPRTracking(ctx context.Context, bareDir, localBranch string, prNumber int) error {
 	prMarker := strconv.Itoa(prNumber)
 	cfgs := [][]string{

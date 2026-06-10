@@ -18,9 +18,9 @@ import (
 // identity (local HMAC key / multi-mode GoTrue auth stack), serves the
 // embedded frontend, and exposes the websocket hub the rest of the graph
 // broadcasts through. Must run after openStores (it needs the stores +
-// the boot-time takeover dir/port).
+// the boot-time port).
 func (a *App) buildServer(ctx context.Context, static fs.FS) error {
-	a.srv = server.New(a.database, a.stores, a.storedTakeoverDir, a.storedPort)
+	a.srv = server.New(a.database, a.stores, a.storedPort)
 	a.wsHub = a.srv.WSHub()
 
 	if a.local() {

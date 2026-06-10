@@ -1,6 +1,6 @@
 // Package install implements the `triagefactory install` CLI
 // subcommand that puts the currently-running binary on the user's PATH
-// so `triagefactory resume` works from any terminal without a full
+// so the `triagefactory` CLI works from any terminal without a full
 // path. Implemented as a symlink (not a copy) so future builds of the
 // binary auto-propagate without re-running install.
 //

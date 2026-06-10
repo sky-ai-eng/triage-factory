@@ -15,7 +15,7 @@ import (
 // control seam depends on: a registered run is reachable by id and gone
 // after deregister, an unregistered run reads nil.
 func TestProcRegistry_RegisterGetDeregister(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	if s.getProc("missing") != nil {
 		t.Fatal("expected nil for an unregistered run")
 	}
@@ -39,7 +39,7 @@ func TestProcRegistry_RegisterGetDeregister(t *testing.T) {
 // found=true, and reports found=false for an unregistered run (the caller's
 // DB-only branch).
 func TestController_CancelRoutesToRegisteredCancel(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	called := false
 	s.cancels["run-x"] = func() { called = true }
 
@@ -58,7 +58,7 @@ func TestController_CancelRoutesToRegisteredCancel(t *testing.T) {
 // branch the P3 endpoints will surface as a 4xx: Interrupt/Steer error
 // rather than panic when the run has no registered handle.
 func TestController_InterruptSteerNoProcErrors(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	if err := s.Interrupt(context.Background(), "nope"); !errors.Is(err, ErrNoLiveProcess) {
 		t.Errorf("Interrupt err = %v, want ErrNoLiveProcess when no live process is registered", err)
 	}
@@ -71,8 +71,8 @@ func TestController_InterruptSteerNoProcErrors(t *testing.T) {
 // gets its own executor identity — the N=1 model where one process owns its
 // runs, and a restart re-stamps re-claimed runs under a fresh id.
 func TestSpawnerExecutorIDDistinctPerInstance(t *testing.T) {
-	a := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
-	b := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	a := NewSpawner(nil, db.Stores{}, nil, nil, "")
+	b := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	if a.executorID == "" || b.executorID == "" {
 		t.Fatal("expected non-empty executor ids")
 	}
@@ -84,9 +84,9 @@ func TestSpawnerExecutorIDDistinctPerInstance(t *testing.T) {
 // TestStampExecutor_WritesExecutorID is the acceptance check for "a live run
 // stamps executor_id": stampExecutor writes the instance id onto the row.
 func TestStampExecutor_WritesExecutorID(t *testing.T) {
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-exec", "sess", "/tmp/wt")
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6", "")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	s.stampExecutor(runmode.LocalDefaultOrg, "r-exec")
 
@@ -103,9 +103,9 @@ func TestStampExecutor_WritesExecutorID(t *testing.T) {
 // path: an active run (a registered cancel handle) is killed via the
 // controller rather than the DB-only path.
 func TestCancel_ActiveRun_RoutesThroughController(t *testing.T) {
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-active", "sess", "/tmp/wt") // status running
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6", "")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	fired := make(chan struct{}, 1)
 	s.cancels["r-active"] = func() { fired <- struct{}{} }
 

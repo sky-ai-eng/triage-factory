@@ -12,7 +12,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -170,67 +169,6 @@ func newSQLiteAgentRunSeeder(conn *sql.DB) dbtest.AgentRunSeeder {
 			}
 		},
 		AgentID: runmode.LocalDefaultAgentID,
-	}
-}
-
-// TestAgentRunStore_SQLite_MarkTakenOver_SavepointRollbackInsideTx
-// pins the SKY-285 review-bot finding: when AgentRunStore is composed
-// inside an outer WithTx and MarkTakenOver hits a claim-race, the
-// run UPDATE must NOT survive the outer commit. Pre-fix the run
-// flip leaked through to the parent tx; the savepoint inside
-// runScoped rolls it back cleanly.
-//
-// Scenario: seed a running run on a task with NO agent claim, call
-// MarkTakenOver with a non-empty claimUserID from inside WithTx.
-// The run UPDATE matches (status='running'), the task UPDATE
-// affects 0 rows (no agent claim to vacate), savepoint rolls back.
-// Outer tx commits. Assertion: run is still 'running' after
-// commit.
-func TestAgentRunStore_SQLite_MarkTakenOver_SavepointRollbackInsideTx(t *testing.T) {
-	conn := newSQLiteForAgentRunTest(t)
-	stores := sqlitestore.New(conn)
-	seed := newSQLiteAgentRunSeeder(conn)
-	ctx := t.Context()
-
-	ent := seed.Entity(t, "savepoint")
-	ev := seed.Event(t, ent, "github:pr:opened")
-	taskID := seed.Task(t, ent, "github:pr:opened", ev)
-	// Deliberately do NOT stamp a bot claim on the task — the claim
-	// UPDATE inside MarkTakenOver will affect 0 rows and trigger
-	// errScopedRollback. Run starts in 'running'.
-	runID := "test-run-savepoint"
-	if err := stores.AgentRuns.Create(ctx, runmode.LocalDefaultOrg, domain.AgentRun{
-		ID: runID, TaskID: taskID, PromptID: "p_agentrun_test", Status: "running", Model: "m",
-		BlueprintRunID: seed.BlueprintRun(t, taskID),
-	}); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	if err := stores.Tx.WithTx(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, func(tx db.TxStores) error {
-		ok, err := tx.AgentRuns.MarkTakenOver(ctx, runmode.LocalDefaultOrg, runID, "/tmp/savepoint-test", runmode.LocalDefaultUserID)
-		if err != nil {
-			return err
-		}
-		if ok {
-			t.Errorf("MarkTakenOver returned true; want false (claim race-loss)")
-		}
-		// Return nil so the outer tx COMMITS. The savepoint should
-		// have rolled back the partial run UPDATE; the commit only
-		// persists nothing for AgentRuns.
-		return nil
-	}); err != nil {
-		t.Fatalf("WithTx: %v", err)
-	}
-
-	// Read the run back. Status must still be 'running' — if the
-	// savepoint didn't roll back the inner UPDATE, the outer commit
-	// would have persisted status='taken_over'.
-	got, err := stores.AgentRuns.Get(ctx, runmode.LocalDefaultOrg, runID)
-	if err != nil || got == nil {
-		t.Fatalf("Get: err=%v got=%v", err, got)
-	}
-	if got.Status != "running" {
-		t.Errorf("run.Status = %q after composed-tx race-loss; want 'running' (savepoint rollback failed)", got.Status)
 	}
 }
 

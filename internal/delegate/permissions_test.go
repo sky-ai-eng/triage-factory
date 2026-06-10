@@ -32,7 +32,7 @@ func waitForPending(t *testing.T, s *Spawner, runID, requestID string) {
 // TestBrowserPermissionHandler_ResolveAllow: a prompt answered via
 // ResolvePermission returns the user's decision to the parked handler.
 func TestBrowserPermissionHandler_ResolveAllow(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	h := s.BrowserPermissionHandler(runmode.LocalDefaultOrg, "run-1")
 
 	got := make(chan agentproc.PermissionDecision, 1)
@@ -57,7 +57,7 @@ func TestBrowserPermissionHandler_ResolveAllow(t *testing.T) {
 // TestBrowserPermissionHandler_TimeoutDenies: with no answer, the prompt denies
 // once permTimeout elapses (made tiny here via a short idle window).
 func TestBrowserPermissionHandler_TimeoutDenies(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetIdleHibernateTimeout(10 * time.Millisecond) // permTimeout = 5ms
 	h := s.BrowserPermissionHandler(runmode.LocalDefaultOrg, "run-1")
 
@@ -78,7 +78,7 @@ func TestBrowserPermissionHandler_TimeoutDenies(t *testing.T) {
 // is strictly below the idle-hibernate window, so a prompt never blocks past
 // hibernation. Holds for the default and an injected idle.
 func TestPermTimeoutBelowIdle(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	if s.permTimeout() >= s.idleTimeout() {
 		t.Errorf("permTimeout %v must be < idleTimeout %v (default)", s.permTimeout(), s.idleTimeout())
 	}
@@ -97,7 +97,7 @@ func TestPermTimeoutBelowIdle(t *testing.T) {
 // deadline so iterations land before, at, and after it; the after-deadline
 // ones assert the inverse (no ack ⟹ timeout deny, resolve 404s).
 func TestResolvePermission_AcknowledgedResolveNeverDropped(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetIdleHibernateTimeout(4 * time.Millisecond) // permTimeout = 2ms
 	h := s.BrowserPermissionHandler(runmode.LocalDefaultOrg, "run-race")
 
@@ -129,7 +129,7 @@ func TestResolvePermission_AcknowledgedResolveNeverDropped(t *testing.T) {
 // TestResolvePermission_NoPending: resolving an unknown request id errors so the
 // endpoint can 404.
 func TestResolvePermission_NoPending(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	if err := s.ResolvePermission(runmode.LocalDefaultOrg, "run-1", "ghost", agentproc.PermissionDecision{Behavior: "allow"}); !errors.Is(err, ErrNoPendingPermission) {
 		t.Errorf("err = %v, want ErrNoPendingPermission", err)
 	}
@@ -139,7 +139,7 @@ func TestResolvePermission_NoPending(t *testing.T) {
 // satisfy a pending prompt — the broker keys by request id but verifies the
 // run/tenant the entry was registered for.
 func TestResolvePermission_WrongRun(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetIdleHibernateTimeout(2 * time.Second) // bound the goroutine if cleanup is missed
 	h := s.BrowserPermissionHandler(runmode.LocalDefaultOrg, "run-A")
 	done := make(chan agentproc.PermissionDecision, 1)
@@ -163,7 +163,7 @@ func TestResolvePermission_WrongRun(t *testing.T) {
 // them isolated — each registers without clobbering the other and each resolves
 // to its own decision.
 func TestBrowserPermissionHandler_ConcurrentRunsSameRequestID(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	hA := s.BrowserPermissionHandler(runmode.LocalDefaultOrg, "run-A")
 	hB := s.BrowserPermissionHandler(runmode.LocalDefaultOrg, "run-B")
 

@@ -140,7 +140,7 @@ func TestMaterializeProjectKnowledge_MissingKnowledgeDir_NoOp(t *testing.T) {
 // e.ProjectID always reads as nil — making materializeProjectKnowledge
 // a no-op for every assigned entity.
 func TestLookupEntityProjectID_RoundTrips(t *testing.T) {
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 
 	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#1", "pr", "T", "https://x/1")
 	if err != nil {

@@ -46,7 +46,7 @@ func (f *fakeController) Cancel(string) bool { return false }
 // TestSendMessage_LiveRoutesToSteer: a run with a registered live process is
 // steered in place through the control seam — asserted via a fake controller.
 func TestSendMessage_LiveRoutesToSteer(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	fc := &fakeController{}
 	s.controller = fc
 	// getProc is SendMessage's liveness gate; register a handle so it routes to
@@ -67,12 +67,12 @@ func TestSendMessage_LiveRoutesToSteer(t *testing.T) {
 // resume goroutine fails fast here for lack of a warm worktree, exactly as in
 // TestResumeOpenRun_InitiatesResume; what matters is that resume was entered.
 func TestSendMessage_OpenRoutesToResume(t *testing.T) {
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-open", "sess-open", "/tmp/does-not-exist-open")
 	if _, err := database.Exec(`UPDATE runs SET status='open' WHERE id='r-open'`); err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6", "")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrg, "r-open", runmode.LocalDefaultUserID, "go on"); err != nil {
 		t.Fatalf("SendMessage: %v", err)
@@ -104,12 +104,12 @@ func TestSendMessage_OpenRoutesToResume(t *testing.T) {
 // open) can take no message — SendMessage returns ErrRunNotSteerable for the
 // handler to map to 409.
 func TestSendMessage_TerminalNotSteerable(t *testing.T) {
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-done", "sess", "/tmp/wt")
 	if _, err := database.Exec(`UPDATE runs SET status='completed' WHERE id='r-done'`); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m", "")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
 	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrg, "r-done", runmode.LocalDefaultUserID, "hi")
 	if !errors.Is(err, ErrRunNotSteerable) {
@@ -120,8 +120,8 @@ func TestSendMessage_TerminalNotSteerable(t *testing.T) {
 // TestSendMessage_MissingRunNotSteerable: an unknown run id (no process, no
 // row) is not steerable.
 func TestSendMessage_MissingRunNotSteerable(t *testing.T) {
-	database := newTakeoverTestDB(t)
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m", "")
+	database := newDelegateTestDB(t)
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
 	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrg, "ghost", runmode.LocalDefaultUserID, "hi")
 	if !errors.Is(err, ErrRunNotSteerable) {
@@ -132,7 +132,7 @@ func TestSendMessage_MissingRunNotSteerable(t *testing.T) {
 // TestInterrupt_LiveRoutesToController: Spawner.Interrupt drives the live
 // process through the control seam — asserted via a fake controller.
 func TestInterrupt_LiveRoutesToController(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	fc := &fakeController{}
 	s.controller = fc
 

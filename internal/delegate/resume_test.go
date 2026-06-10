@@ -14,7 +14,7 @@ import (
 // resuming user's identity (its writes route under that user's synthetic
 // claims). No DB touched.
 func TestResumeOpenRun_EmptyUserID(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "", "")
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	if err := s.ResumeOpenRun(runmode.LocalDefaultOrg, "any", "msg", ""); err == nil {
 		t.Fatal("expected an error for an empty user id")
 	}
@@ -36,7 +36,7 @@ func TestResumeOpenRun_ValidationGuards(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			database := newTakeoverTestDB(t)
+			database := newDelegateTestDB(t)
 			seedRun(t, database, "r-guard", "sess", "/tmp/wt")
 			if _, err := database.Exec(`UPDATE runs SET status='open' WHERE id='r-guard'`); err != nil {
 				t.Fatalf("open: %v", err)
@@ -44,7 +44,7 @@ func TestResumeOpenRun_ValidationGuards(t *testing.T) {
 			if _, err := database.Exec(tc.mutate, "r-guard"); err != nil {
 				t.Fatalf("mutate: %v", err)
 			}
-			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m", "")
+			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
 			err := s.ResumeOpenRun(runmode.LocalDefaultOrg, "r-guard", "msg", runmode.LocalDefaultUserID)
 			if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
@@ -59,12 +59,12 @@ func TestResumeOpenRun_ValidationGuards(t *testing.T) {
 // woken — MarkResuming flips only from `open`, so the resume returns
 // ErrRunNotResumable for the caller to map to 409.
 func TestResumeOpenRun_NotOpen(t *testing.T) {
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-term", "sess", "/tmp/wt")
 	if _, err := database.Exec(`UPDATE runs SET status='completed' WHERE id='r-term'`); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m", "")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
 	err := s.ResumeOpenRun(runmode.LocalDefaultOrg, "r-term", "msg", runmode.LocalDefaultUserID)
 	if !errors.Is(err, ErrRunNotResumable) {
@@ -80,12 +80,12 @@ func TestResumeOpenRun_NotOpen(t *testing.T) {
 // "wakes as a new LiveRun resuming the session" path is covered by the live SDK
 // smokes.
 func TestResumeOpenRun_InitiatesResume(t *testing.T) {
-	database := newTakeoverTestDB(t)
+	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-wake", "sess-wake", "/tmp/does-not-exist-wake")
 	if _, err := database.Exec(`UPDATE runs SET status='open' WHERE id='r-wake'`); err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6", "")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	if err := s.ResumeOpenRun(runmode.LocalDefaultOrg, "r-wake", "the answer", runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("ResumeOpenRun: %v", err)

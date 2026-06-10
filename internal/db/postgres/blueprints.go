@@ -997,7 +997,7 @@ func blueprintActiveStepRunIDs(ctx context.Context, q queryer, orgID, blueprintR
 		SELECT id FROM runs
 		WHERE org_id = $1 AND blueprint_run_id = $2
 		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
-		                     'pending_approval','taken_over','open')
+		                     'pending_approval','open')
 	`, orgID, blueprintRunID)
 	if err != nil {
 		return nil, err

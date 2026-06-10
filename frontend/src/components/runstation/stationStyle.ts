@@ -22,7 +22,6 @@ export type StationKey =
   | 'failed'
   | 'cancelled'
   | 'unsolvable'
-  | 'held'
 
 export interface StationState {
   key: StationKey
@@ -127,16 +126,6 @@ export function stationState(run: AgentRun): StationState {
         key: 'unsolvable',
         light: 'var(--color-snooze)',
         label: 'UNSOLVABLE',
-        live: false,
-        scanner: false,
-        heat: 0.1,
-        belt: 0,
-      }
-    case 'taken_over':
-      return {
-        key: 'held',
-        light: 'var(--color-text-tertiary)',
-        label: 'HELD',
         live: false,
         scanner: false,
         heat: 0.1,
