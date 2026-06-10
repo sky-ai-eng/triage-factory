@@ -1093,3 +1093,90 @@ func TestCleanup_SweepsBareGhostWithoutRunsDir(t *testing.T) {
 	}
 	assertReAddSucceeds(t, bareDir, "main")
 }
+
+// TestCreateForPR_SnapshotBundleIsBounded pins the refs/remotes mirror written
+// at PR fetch time and its consequence. A bare clone keeps everything under
+// refs/heads/*, so a repo that only ever hosted PR-review runs had ZERO
+// remote-tracking refs — the workspace snapshot's `git bundle <rev> --not
+// --remotes` excluded nothing and packed the repo's FULL history (minutes of
+// CPU on a real repo). With the mirror recording GitHub's known tip, the
+// bundle carries only the agent's local commits: it has prerequisites, so
+// verifying it in an empty repo must FAIL, where a self-contained
+// full-history bundle would pass.
+func TestCreateForPR_SnapshotBundleIsBounded(t *testing.T) {
+	withTestHome(t)
+	upstream := makeTestUpstream(t)
+
+	work := filepath.Join(t.TempDir(), "work-bundle")
+	if out, err := exec.Command("git", "init", "-b", "main", work).CombinedOutput(); err != nil {
+		t.Fatalf("git init work: %v: %s", err, out)
+	}
+	cmds := [][]string{
+		{"-C", work, "config", "user.email", "me@example.com"},
+		{"-C", work, "config", "user.name", "Me"},
+		{"-C", work, "remote", "add", "origin", upstream},
+		{"-C", work, "fetch", "origin", "main"},
+		{"-C", work, "checkout", "-b", "bundle-feature", "FETCH_HEAD"},
+		{"-C", work, "commit", "--allow-empty", "-m", "PR commit"},
+		{"-C", work, "push", "origin", "bundle-feature:refs/heads/bundle-feature"},
+		{"-C", work, "push", "origin", "bundle-feature:refs/pull/9/head"},
+	}
+	for _, c := range cmds {
+		if out, err := exec.Command("git", c...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", c, err, out)
+		}
+	}
+	out, err := exec.Command("git", "-C", work, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse work HEAD: %v", err)
+	}
+	prTip := strings.TrimSpace(string(out))
+
+	wtPath, err := CreateForPR(context.Background(), "owner-bundle-test", "repo-bundle-test", upstream, upstream, "bundle-feature", 9, "bundle-test-run")
+	if err != nil {
+		t.Fatalf("CreateForPR: %v", err)
+	}
+	t.Cleanup(func() { _ = RemoveAt(wtPath, "bundle-test-run") })
+
+	// The mirror ref records GitHub's known tip in the namespace the
+	// snapshot's bundle excludes.
+	bareDir, _ := repoDir("owner-bundle-test", "repo-bundle-test")
+	out, err = exec.Command("git", "-C", bareDir, "rev-parse", "refs/remotes/origin/bundle-feature").Output()
+	if err != nil {
+		t.Fatalf("mirror ref refs/remotes/origin/bundle-feature missing from bare: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != prTip {
+		t.Errorf("mirror ref = %q, want PR tip %q", got, prTip)
+	}
+
+	// Agent makes one local commit; the snapshot delta must carry only it.
+	agentCmds := [][]string{
+		{"-C", wtPath, "config", "user.email", "agent@example.com"},
+		{"-C", wtPath, "config", "user.name", "Agent"},
+		{"-C", wtPath, "commit", "--allow-empty", "-m", "agent WIP"},
+	}
+	for _, c := range agentCmds {
+		if out, err := exec.Command("git", c...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", c, err, out)
+		}
+	}
+	delta, err := CaptureWorkspaceGit(context.Background(), wtPath)
+	if err != nil {
+		t.Fatalf("CaptureWorkspaceGit: %v", err)
+	}
+	if delta == nil || len(delta.Bundle) == 0 {
+		t.Fatal("expected a non-empty bundle for a local-only commit")
+	}
+
+	bundleFile := filepath.Join(t.TempDir(), "snap.bundle")
+	if err := os.WriteFile(bundleFile, delta.Bundle, 0o644); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	emptyRepo := filepath.Join(t.TempDir(), "empty")
+	if out, err := exec.Command("git", "init", "-b", "main", emptyRepo).CombinedOutput(); err != nil {
+		t.Fatalf("git init empty: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", emptyRepo, "bundle", "verify", bundleFile).CombinedOutput(); err == nil {
+		t.Errorf("bundle verified in an empty repo — it is self-contained full history, not a bounded delta:\n%s", out)
+	}
+}

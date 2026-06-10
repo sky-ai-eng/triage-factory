@@ -75,12 +75,21 @@ func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneUR
 	}
 
 	branchRef := fmt.Sprintf("+refs/pull/%d/head:refs/heads/%s", prNumber, localBranch)
+	// Mirror the fetched tip into a remote-tracking ref alongside the local
+	// branch. The workspace snapshot bounds its git bundle with `--not
+	// --remotes` ("commits GitHub doesn't already have"), and a bare clone
+	// keeps everything under refs/heads/* — a repo that only ever hosted
+	// PR-review runs would have ZERO remote-tracking refs, making that
+	// exclusion empty and the bundle a full-history pack (minutes of CPU on
+	// a real repo). The mirror records "GitHub already knows this tip" in
+	// the namespace the bundle excludes.
+	mirrorRef := fmt.Sprintf("+refs/pull/%d/head:refs/remotes/origin/%s", prNumber, localBranch)
 	start := time.Now()
 	// origin == upstreamCloneURL (just ensured), so the same credential that
 	// authorized the clone authorizes this fetch. The fork's head is reached
 	// via the upstream's refs/pull/<n>/head, so no separate fork credential
 	// is needed here.
-	if err := gitRunCtxAuth(ctx, bareDir, auth, "fetch", "origin", branchRef); err != nil {
+	if err := gitRunCtxAuth(ctx, bareDir, auth, "fetch", "origin", branchRef, mirrorRef); err != nil {
 		return "", fmt.Errorf("fetch PR #%d head into %s: %w", prNumber, localBranch, err)
 	}
 	log.Printf("[worktree] fetch PR #%d (refs/pull/%d/head -> %s) completed in %s", prNumber, prNumber, localBranch, time.Since(start).Round(time.Millisecond))
