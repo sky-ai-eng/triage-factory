@@ -141,16 +141,31 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 	out.sessionID = lr.SessionID()
 	out.stderr = lr.Stderr()
 	// The driver hands back the per-turn result it decided on; the live process
-	// folds every turn (the conclusion plus any re-prompt-to-fix correction
-	// turns) into its merged Result, so prefer that for cumulative cost /
-	// duration / turn accounting. MergeResult keeps the latest turn's text, so
-	// the conclusion the driver classified is preserved.
+	// folds every turn (pause turns, re-prompt corrections, the conclusion)
+	// into its merged Result. Take ONLY the accounting fields from that fold —
+	// disposition (IsError, Subtype, StopReason, the envelope text,
+	// Interrupted) stays with the turn the driver classified. Replacing the
+	// result wholesale would let MergeResult's sticky IsError from a benign
+	// interrupted (pause) turn flip a valid conclusion into status=failed
+	// downstream — processCompletion checks IsError before the envelope.
 	if out.result != nil {
 		if merged := lr.Result(); merged != nil {
-			out.result = merged
+			out.result = foldAccounting(out.result, merged)
 		}
 	}
 	return out
+}
+
+// foldAccounting returns the classified turn's result carrying the
+// conversation-cumulative accounting (cost, duration, turns) from the merged
+// fold. Everything else — the disposition processCompletion acts on — is the
+// classified turn's own.
+func foldAccounting(classified, merged *agentproc.Result) *agentproc.Result {
+	r := *classified
+	r.CostUSD = merged.CostUSD
+	r.DurationMs = merged.DurationMs
+	r.NumTurns = merged.NumTurns
+	return &r
 }
 
 // driveLiveRun is the select loop that resolves a live process into a
