@@ -39,10 +39,13 @@ export interface StationActions {
   onMessage?: (text: string) => void
   /** Pause the current turn (run → open), leaving the process warm. */
   onInterrupt?: () => void
-  /** Answer a pending tool-permission prompt. */
-  onResolvePermission?: (requestID: string, decision: PermissionDecisionInput) => void
+  /** Answer a pending tool-permission prompt. The promise settles when the
+   *  resolve POST finishes — PermissionPrompt awaits it to hold its
+   *  single-flight guard. */
+  onResolvePermission?: (requestID: string, decision: PermissionDecisionInput) => Promise<void>
   takeoverPending?: boolean
   releasePending?: boolean
+  interruptPending?: boolean
 }
 
 // A blueprint chain segment: its lifecycle state, plus the run page to open when
@@ -515,9 +518,10 @@ function IntakeDock({
             <DockButton
               tone="var(--hmi-cyan)"
               onClick={actions.onInterrupt}
+              disabled={actions.interruptPending}
               icon={<Pause size={11} />}
             >
-              Pause
+              {actions.interruptPending ? 'Pausing…' : 'Pause'}
             </DockButton>
           )}
           {active && actions.onCancel && (
@@ -570,9 +574,23 @@ function PermissionPrompt({
   prompt: PendingPermission
   remaining: number
   worktree?: string
-  onResolve?: (requestID: string, decision: PermissionDecisionInput) => void
+  onResolve?: (requestID: string, decision: PermissionDecisionInput) => Promise<void>
 }) {
   const tone = 'var(--color-snooze)' // amber — a blocking "your move"
+  // Single-flight: the first click wins. Without it a quick Deny→Allow puts
+  // two resolves in flight and the broker honors whichever lands first —
+  // non-deterministic from the user's view. Resolving resets on settle so a
+  // transient failure (prompt stays up) remains answerable.
+  const [resolving, setResolving] = useState(false)
+  const resolve = async (behavior: 'allow' | 'deny') => {
+    if (resolving || !onResolve) return
+    setResolving(true)
+    try {
+      await onResolve(prompt.request_id, { behavior })
+    } finally {
+      setResolving(false)
+    }
+  }
   // Worktree-relative paths, same as the transcript — but always the real
   // command/input, never the agent's description: this is a security
   // decision, so the user approves what will run, not what the agent says.
@@ -609,7 +627,8 @@ function PermissionPrompt({
       <div className="flex shrink-0 items-center gap-2">
         <DockButton
           tone="var(--color-dismiss)"
-          onClick={() => onResolve?.(prompt.request_id, { behavior: 'deny' })}
+          onClick={() => void resolve('deny')}
+          disabled={resolving}
           icon={<X size={11} />}
         >
           Deny
@@ -617,7 +636,8 @@ function PermissionPrompt({
         <DockButton
           tone="var(--color-claim)"
           solid
-          onClick={() => onResolve?.(prompt.request_id, { behavior: 'allow' })}
+          onClick={() => void resolve('allow')}
+          disabled={resolving}
           icon={<Check size={11} />}
         >
           Allow

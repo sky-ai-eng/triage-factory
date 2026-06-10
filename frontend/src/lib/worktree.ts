@@ -8,6 +8,11 @@
 // agent's paths may carry a /private prefix the stored worktree path omits (or
 // vice versa) — we match both, longest first so the /private form is consumed
 // before the bare path it contains.
+//
+// A bare match (the root itself, no trailing slash) deliberately renders as
+// "." — the shell idiom for "right here" — so `cd <root>` reads as `cd .` and
+// a file_path equal to the root reads as the working directory, not as an
+// empty string.
 export function stripWorktree(text: string, worktree?: string): string {
   if (!worktree || !text) return text
   const wt = worktree.replace(/\/+$/, '')

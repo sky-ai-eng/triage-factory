@@ -37,6 +37,7 @@ export default function RunDetail() {
   const [takeoverInfo, setTakeoverInfo] = useState<TakeoverInfo | null>(null)
   const [takeoverPending, setTakeoverPending] = useState(false)
   const [releasePending, setReleasePending] = useState(false)
+  const [interruptPending, setInterruptPending] = useState(false)
   const [approval, setApproval] = useState<{ runID: string; kind: 'review' | 'pr' } | null>(null)
 
   // Tick while live so elapsed + the vent-heat flare stay current.
@@ -132,15 +133,21 @@ export default function RunDetail() {
 
   // Interrupt pauses the current turn (run → open), leaving the process warm —
   // distinct from Cancel, which abandons the run. The composer stays open.
+  // interruptPending mirrors takeoverPending/releasePending: it disables the
+  // Pause button while the POST is in flight so rapid clicks can't stack
+  // concurrent interrupts ahead of the WS status flip.
   const handleInterrupt = useCallback(async () => {
-    if (!run) return
+    if (!run || interruptPending) return
+    setInterruptPending(true)
     try {
       const res = await fetch(`/api/agent/runs/${run.ID}/interrupt`, { method: 'POST' })
       if (!res.ok) toast.error(await readError(res, 'Failed to interrupt run'))
     } catch (err) {
       toast.error(`Failed to interrupt run: ${(err as Error).message}`)
+    } finally {
+      setInterruptPending(false)
     }
-  }, [run])
+  }, [run, interruptPending])
 
   const handleRequeue = useCallback(async () => {
     if (!run?.TaskID) return
@@ -226,6 +233,7 @@ export default function RunDetail() {
     onReview: handleReview,
     onMessage: handleMessage,
     onInterrupt: handleInterrupt,
+    interruptPending,
     onResolvePermission: resolvePermission,
     takeoverPending,
     releasePending,
