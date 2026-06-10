@@ -29,12 +29,13 @@ var envKeys = map[string]string{
 }
 
 // Credentials holds the stored ORG auth configuration (PAT_1, the bot
-// credential). Identity facts that aren't secrets live on the users row, not
-// here. Per-user identity — GitHub (this user's @login) and Jira
-// (jira_account_id + jira_display_name, plus the user's own stored credential)
-// alike — is captured by its own surface: the setup wizard's User step / the
-// Connect gate page → POST .../identity/{github,jira}*. It is never derived
-// from these org credentials.
+// credential). Identity facts that aren't secrets live in their own host-scoped
+// tables, not here. Per-user identity — GitHub (this user's @login in
+// user_github_identities) and Jira (account_id + display_name in
+// user_jira_identities, plus the user's own stored credential) alike — is
+// captured by its own surface: the setup wizard's User step / the Connect gate
+// page → POST .../identity/{github,jira}*. It is never derived from these org
+// credentials.
 type Credentials struct {
 	GitHubURL string
 	GitHubPAT string

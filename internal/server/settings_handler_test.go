@@ -505,14 +505,15 @@ func TestJiraConnect_DoesNotWriteUserIdentity(t *testing.T) {
 	s := newTestServer(t)
 	ctx := t.Context()
 
-	// Seed a pre-existing per-user Jira identity, as the bind flow would have.
-	if err := s.users.SetJiraIdentity(ctx, runmode.LocalDefaultUserID, "user-acct", "User Name"); err != nil {
-		t.Fatalf("seed identity: %v", err)
-	}
-
 	// The org connects Jira with a credential whose /myself maps to a DIFFERENT
 	// account (the org bot). The connect must not overwrite the user's identity.
 	jiraStub := jiraMyselfStub(t, `{"accountId":"org-bot","displayName":"Org Bot"}`, nil)
+
+	// Seed a pre-existing per-user Jira identity, as the bind flow would have,
+	// keyed on the org's Jira host (SKY-397).
+	if err := s.users.UpsertJiraIdentity(ctx, runmode.LocalDefaultUserID, jiraStub.URL, "user-acct", "User Name", "pat"); err != nil {
+		t.Fatalf("seed identity: %v", err)
+	}
 
 	rec := doJSON(t, s, "POST", "/api/jira/connect",
 		map[string]any{"url": jiraStub.URL, "pat": "org_pat"})
@@ -520,7 +521,7 @@ func TestJiraConnect_DoesNotWriteUserIdentity(t *testing.T) {
 		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
 
-	accountID, displayName, err := s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID)
+	accountID, displayName, err := s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID, jiraStub.URL)
 	if err != nil {
 		t.Fatalf("GetJiraIdentity: %v", err)
 	}
@@ -545,14 +546,15 @@ func TestOrgSettingsPost_JiraPAT_DoesNotWriteUserIdentity(t *testing.T) {
 	if err := integrations.Save(ctx, s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{JiraURL: jiraStub.URL}); err != nil {
 		t.Fatalf("seed creds url: %v", err)
 	}
-	// A pre-existing user identity the org PAT save must leave alone.
-	if err := s.users.SetJiraIdentity(ctx, runmode.LocalDefaultUserID, "user-acct", "User Name"); err != nil {
+	// A pre-existing user identity (keyed on the org's Jira host) the org PAT
+	// save must leave alone.
+	if err := s.users.UpsertJiraIdentity(ctx, runmode.LocalDefaultUserID, jiraStub.URL, "user-acct", "User Name", "pat"); err != nil {
 		t.Fatalf("seed identity: %v", err)
 	}
 
 	postJSONResp(t, s, "/api/settings/org", map[string]any{"jira_pat": "org_pat"})
 
-	accountID, displayName, err := s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID)
+	accountID, displayName, err := s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID, jiraStub.URL)
 	if err != nil {
 		t.Fatalf("GetJiraIdentity: %v", err)
 	}
@@ -575,14 +577,14 @@ func TestOrgSettingsPost_JiraURLClear_PreservesUserIdentity(t *testing.T) {
 	if err := integrations.Save(ctx, s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{JiraURL: host, JiraPAT: "org-pat"}); err != nil {
 		t.Fatalf("seed creds: %v", err)
 	}
-	if err := s.users.SetJiraIdentity(ctx, runmode.LocalDefaultUserID, "user-acct", "User Name"); err != nil {
+	if err := s.users.UpsertJiraIdentity(ctx, runmode.LocalDefaultUserID, host, "user-acct", "User Name", "pat"); err != nil {
 		t.Fatalf("seed identity: %v", err)
 	}
 
 	// Disconnect the org's Jira access: clear the Jira URL.
 	postJSONResp(t, s, "/api/settings/org", map[string]any{"jira_base_url": ""})
 
-	accountID, displayName, err := s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID)
+	accountID, displayName, err := s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID, host)
 	if err != nil {
 		t.Fatalf("GetJiraIdentity after clear: %v", err)
 	}

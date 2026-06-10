@@ -572,17 +572,19 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		// rig still works while production calls (always wired)
 		// populate identity from the users row.
 		if s.users != nil {
-			// Identity is host-scoped (SKY-396): resolve the local org's
-			// GitHub host, then look up the login for (user, host). s.orgs
-			// is wired by New(); guard like s.users for the bare-rig test.
-			var ghHost string
+			// Identity is host-scoped (GitHub SKY-396, Jira SKY-397):
+			// resolve the local org's GitHub + Jira hosts, then look up
+			// each binding for (user, host). s.orgs is wired by New();
+			// guard like s.users for the bare-rig test.
+			var ghHost, jiraHost string
 			if s.orgs != nil {
 				if orgSet, err := s.orgs.GetSettings(r.Context(), runmode.LocalDefaultOrgID); err == nil {
 					ghHost = orgSet.GitHubBaseURL
+					jiraHost = orgSet.JiraBaseURL
 				}
 			}
 			resp.GitHubUsername, _ = s.users.GetGitHubLogin(r.Context(), runmode.LocalDefaultUserID, ghHost)
-			resp.JiraAccountID, resp.JiraDisplayName, _ = s.users.GetJiraIdentity(r.Context(), runmode.LocalDefaultUserID)
+			resp.JiraAccountID, resp.JiraDisplayName, _ = s.users.GetJiraIdentity(r.Context(), runmode.LocalDefaultUserID, jiraHost)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)

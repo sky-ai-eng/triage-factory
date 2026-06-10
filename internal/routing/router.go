@@ -50,7 +50,7 @@ type Router struct {
 	handlers     dbpkg.EventHandlerStore
 	agents       dbpkg.AgentStore
 	teamAgents   dbpkg.TeamAgentStore        // SKY-261: read team_agents.enabled before auto-firing triggers
-	users        dbpkg.UsersStore            // SKY-270: read local user's jira_account_id for inline close gates
+	users        dbpkg.UsersStore            // SKY-270: read local user's host-scoped Jira identity for inline close gates
 	tasks        dbpkg.TaskStore             // SKY-283: task lifecycle, dedup, claims, breaker
 	agentRuns    dbpkg.AgentRunStore         // SKY-285: lookup active runs for the task-close cancel cascade
 	entities     dbpkg.EntityStore           // SKY-284: closed-entity guard + entity-terminating close cascade

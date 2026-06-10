@@ -1485,8 +1485,6 @@ CREATE TABLE public.users (
     timezone text DEFAULT 'UTC'::text NOT NULL,
     default_org_id uuid,
     last_acting_team_id uuid,
-    jira_account_id text,
-    jira_display_name text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
@@ -1521,6 +1519,44 @@ CREATE TABLE public.user_github_identities (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT user_github_identities_source_check CHECK ((source = ANY (ARRAY['pat'::text, 'connect_oauth'::text, 'scim'::text, 'login_claim'::text])))
+);
+
+
+--
+-- Name: user_jira_identities; Type: TABLE; Schema: public; Owner: -
+--
+
+-- Host-scoped Jira identity bindings (SKY-397). The Jira sibling of
+-- user_github_identities: it replaces the single-valued users.jira_account_id
+-- / users.jira_display_name columns. One human can hold a different Jira
+-- account on each Jira site (a Cloud site for one org, a Server/DC host for
+-- another), so the natural key is (user_id, jira_base_url), not a lone column.
+-- For the first self-deploy (one org, one host) this is exactly one row per
+-- user.
+--
+-- The access layer already keys per-(user, host): the per-user Jira PAT is
+-- custodied as "jira_token/<host>" (SKY-442). This table makes IDENTITY
+-- symmetric with that access — both on the same canonical host — so a second
+-- Jira site can't overwrite the first's identity the way the single column did.
+--
+-- account_id is the Atlassian StableID (Cloud accountId, else Server/DC key);
+-- display_name is the Jira-side display name. source records HOW the binding
+-- was captured ('pat' | 'connect_oauth' | 'scim') — 'pat' is the only writer
+-- today (DC paste-a-PAT); Cloud OAuth and SCIM are later tickets. verified_at
+-- timestamps the last authenticated /myself confirmation (nullable for a
+-- future SCIM directory sync; today's pat writer always stamps it). An absent
+-- row is a durable, supported state (the NULL-degrades-gracefully contract
+-- from SKY-264).
+CREATE TABLE public.user_jira_identities (
+    user_id uuid NOT NULL,
+    jira_base_url text NOT NULL,
+    account_id text NOT NULL,
+    display_name text,
+    source text NOT NULL,
+    verified_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT user_jira_identities_source_check CHECK ((source = ANY (ARRAY['pat'::text, 'connect_oauth'::text, 'scim'::text])))
 );
 
 
@@ -2064,6 +2100,14 @@ ALTER TABLE ONLY public.user_github_identities
 
 
 --
+-- Name: user_jira_identities user_jira_identities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_jira_identities
+    ADD CONSTRAINT user_jira_identities_pkey PRIMARY KEY (user_id, jira_base_url);
+
+
+--
 -- Name: user_settings user_settings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2581,6 +2625,13 @@ CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.teams FOR EACH ROW EXECUTE
 --
 
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.user_github_identities FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+
+
+--
+-- Name: user_jira_identities set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.user_jira_identities FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
 
 
 --
@@ -3439,6 +3490,14 @@ ALTER TABLE ONLY public.teams
 
 ALTER TABLE ONLY public.user_github_identities
     ADD CONSTRAINT user_github_identities_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: user_jira_identities user_jira_identities_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_jira_identities
+    ADD CONSTRAINT user_jira_identities_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -4424,6 +4483,29 @@ CREATE POLICY user_github_identities_select ON public.user_github_identities FOR
 
 
 --
+-- Name: user_jira_identities; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.user_jira_identities ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: user_jira_identities user_jira_identities_modify; Type: POLICY; Schema: public; Owner: -
+--
+
+-- Self-only read/write, mirroring user_github_identities_modify. No org_id
+-- leg: a pre-org multi-mode signup must still be able to bind a PAT-derived
+-- identity. Any future team-roster read goes through an explicit membership
+-- join, never a blanket org read of this table.
+CREATE POLICY user_jira_identities_modify ON public.user_jira_identities USING ((user_id = tf.current_user_id())) WITH CHECK ((user_id = tf.current_user_id()));
+
+--
+-- Name: user_jira_identities user_jira_identities_select; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_jira_identities_select ON public.user_jira_identities FOR SELECT USING ((user_id = tf.current_user_id()));
+
+
+--
 -- Name: user_settings; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -5125,6 +5207,17 @@ GRANT ALL ON TABLE public.user_github_identities TO anon;
 GRANT ALL ON TABLE public.user_github_identities TO authenticated;
 GRANT ALL ON TABLE public.user_github_identities TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.user_github_identities TO tf_app;
+
+
+--
+-- Name: TABLE user_jira_identities; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.user_jira_identities TO postgres;
+GRANT ALL ON TABLE public.user_jira_identities TO anon;
+GRANT ALL ON TABLE public.user_jira_identities TO authenticated;
+GRANT ALL ON TABLE public.user_jira_identities TO service_role;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.user_jira_identities TO tf_app;
 
 
 --

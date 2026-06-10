@@ -57,7 +57,9 @@ func (s *Server) handleUserSettingsGet(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.GitHubUsername = ghUsername
 
-		jiraAccountID, _, err := tx.Users.GetJiraIdentity(r.Context(), userID)
+		// Jira identity is host-scoped too (SKY-397): look it up for the
+		// org's Jira host (same org_settings already loaded above).
+		jiraAccountID, _, err := tx.Users.GetJiraIdentity(r.Context(), userID, orgSet.JiraBaseURL)
 		if err != nil {
 			return fmt.Errorf("jira identity: %w", err)
 		}

@@ -95,7 +95,7 @@ func (s *Server) handleTeamMembers(w http.ResponseWriter, r *http.Request) {
 		orgSet, _ := tx.Orgs.GetSettings(r.Context(), orgID)
 		username, _ = tx.Users.GetGitHubLogin(r.Context(), userID, orgSet.GitHubBaseURL)
 		displayName, _ = tx.Users.GetDisplayName(r.Context(), userID)
-		jiraAccount, _, _ = tx.Users.GetJiraIdentity(r.Context(), userID)
+		jiraAccount, _, _ = tx.Users.GetJiraIdentity(r.Context(), userID, orgSet.JiraBaseURL)
 		return nil
 	})
 	var login, jiraID *string

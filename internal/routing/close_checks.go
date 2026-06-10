@@ -326,7 +326,18 @@ func (r *Router) closeCheckJiraReassigned(orgID string, evt domain.Event, entity
 		// member's next poll reopens via discovery). Resolving this
 		// needs a product decision about team-membership-driven
 		// semantics, tracked separately from D9-core.
-		localAccountID, localDisplayName, err := r.users.GetJiraIdentitySystem(context.Background(), runmode.LocalDefaultUserID)
+		// Identity is host-scoped (SKY-397): resolve the org's Jira host
+		// (admin pool — this subscriber carries no claims), then read the
+		// local user's binding for (user, host). An unresolvable host or
+		// absent row leaves both empty, degrading to "don't treat as
+		// assigned-to-me" exactly as a NULL column did.
+		var jiraHost string
+		if r.orgs != nil {
+			if orgSet, serr := r.orgs.GetSettingsSystem(context.Background(), orgID); serr == nil {
+				jiraHost = orgSet.JiraBaseURL
+			}
+		}
+		localAccountID, localDisplayName, err := r.users.GetJiraIdentitySystem(context.Background(), runmode.LocalDefaultUserID, jiraHost)
 		if err == nil {
 			if meta.AssigneeAccountID != "" && localAccountID != "" && strings.EqualFold(meta.AssigneeAccountID, localAccountID) {
 				return false // assigned to me — not a reassignment-away

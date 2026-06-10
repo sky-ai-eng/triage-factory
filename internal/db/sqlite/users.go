@@ -80,23 +80,23 @@ func (s *usersStore) GetDisplayName(ctx context.Context, userID string) (string,
 	return name.String, nil
 }
 
-func (s *usersStore) GetJiraIdentity(ctx context.Context, userID string) (string, string, error) {
+func (s *usersStore) GetJiraIdentity(ctx context.Context, userID, jiraBaseURL string) (string, string, error) {
 	var accountID, displayName sql.NullString
 	err := s.q.QueryRowContext(ctx,
-		`SELECT jira_account_id, jira_display_name FROM users WHERE id = ?`,
-		userID,
+		`SELECT account_id, display_name FROM user_jira_identities WHERE user_id = ? AND jira_base_url = ?`,
+		userID, db.NormalizeJiraHost(jiraBaseURL),
 	).Scan(&accountID, &displayName)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", nil
 	}
 	if err != nil {
-		return "", "", fmt.Errorf("read users.jira_account_id/jira_display_name: %w", err)
+		return "", "", fmt.Errorf("read user_jira_identities: %w", err)
 	}
 	return accountID.String, displayName.String, nil
 }
 
-func (s *usersStore) GetJiraIdentitySystem(ctx context.Context, userID string) (string, string, error) {
-	return s.GetJiraIdentity(ctx, userID)
+func (s *usersStore) GetJiraIdentitySystem(ctx context.Context, userID, jiraBaseURL string) (string, string, error) {
+	return s.GetJiraIdentity(ctx, userID, jiraBaseURL)
 }
 
 func (s *usersStore) GetGitHubLoginSystem(ctx context.Context, userID, githubBaseURL string) (string, error) {
@@ -131,27 +131,37 @@ func (s *usersStore) UserIDsForGitHubLoginSystem(ctx context.Context, githubBase
 	return out, rows.Err()
 }
 
-func (s *usersStore) SetJiraIdentity(ctx context.Context, userID, accountID, displayName string) error {
-	var accVal, nameVal any
-	if accountID != "" {
-		accVal = accountID
-	}
+func (s *usersStore) UpsertJiraIdentity(ctx context.Context, userID, jiraBaseURL, accountID, displayName, source string) error {
+	// FK on user_id enforces the row-exists contract: a missing user
+	// surfaces as a FOREIGN KEY constraint error. display_name is
+	// nullable — "" stores NULL.
+	var nameVal any
 	if displayName != "" {
 		nameVal = displayName
 	}
-	result, err := s.q.ExecContext(ctx,
-		`UPDATE users SET jira_account_id = ?, jira_display_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		accVal, nameVal, userID,
-	)
+	_, err := s.q.ExecContext(ctx, `
+		INSERT INTO user_jira_identities
+			(user_id, jira_base_url, account_id, display_name, source, verified_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT(user_id, jira_base_url) DO UPDATE SET
+			account_id   = excluded.account_id,
+			display_name = excluded.display_name,
+			source       = excluded.source,
+			verified_at  = excluded.verified_at,
+			updated_at   = CURRENT_TIMESTAMP
+	`, userID, db.NormalizeJiraHost(jiraBaseURL), accountID, nameVal, source)
 	if err != nil {
-		return fmt.Errorf("update users.jira_account_id/jira_display_name: %w", err)
+		return fmt.Errorf("upsert user_jira_identities: %w", err)
 	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("read users.jira_identity update result: %w", err)
-	}
-	if rows == 0 {
-		return fmt.Errorf("update users.jira_identity: user %q not found", userID)
+	return nil
+}
+
+func (s *usersStore) ClearJiraIdentity(ctx context.Context, userID, jiraBaseURL string) error {
+	if _, err := s.q.ExecContext(ctx,
+		`DELETE FROM user_jira_identities WHERE user_id = ? AND jira_base_url = ?`,
+		userID, db.NormalizeJiraHost(jiraBaseURL),
+	); err != nil {
+		return fmt.Errorf("delete user_jira_identities: %w", err)
 	}
 	return nil
 }

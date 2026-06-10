@@ -121,11 +121,11 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 			return nil
 		}
 
-		// Identity (users.jira_account_id / jira_display_name) is single-valued
-		// per user, not host-scoped — derived from the credential at capture
-		// time. Prefer the display name for the human-facing label, falling
-		// back to the stable account id.
-		accountID, displayName, lerr := tx.Users.GetJiraIdentity(r.Context(), userID)
+		// Identity (user_jira_identities) is host-scoped (SKY-397), keyed on
+		// the same canonical host the credential is stored under — read it
+		// for the host we just resolved. Prefer the display name for the
+		// human-facing label, falling back to the stable account id.
+		accountID, displayName, lerr := tx.Users.GetJiraIdentity(r.Context(), userID, jiraHost)
 		if lerr != nil {
 			return lerr
 		}
@@ -245,8 +245,8 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 		if err := tx.Secrets.PutUser(r.Context(), orgID, userID, jiraTokenKey(host), pat, "Jira user access token"); err != nil {
 			return fmt.Errorf("store jira credential: %w", err)
 		}
-		if err := tx.Users.SetJiraIdentity(r.Context(), userID, jiraUser.StableID(), jiraUser.DisplayName); err != nil {
-			return fmt.Errorf("persist users.jira_identity: %w", err)
+		if err := tx.Users.UpsertJiraIdentity(r.Context(), userID, host, jiraUser.StableID(), jiraUser.DisplayName, "pat"); err != nil {
+			return fmt.Errorf("persist jira identity: %w", err)
 		}
 		return nil
 	}); err != nil {

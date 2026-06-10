@@ -179,15 +179,12 @@ CREATE TABLE users (
     -- simply ignores (membership re-validation drops it), so no cascade
     -- is needed and the column stays declaration-order-independent.
     last_acting_team_id TEXT,
-    -- jira_account_id is the Atlassian-side stable identifier
-    -- (Cloud: accountId; Server/DC: legacy key). Used by the
-    -- assignee_in / reporter_in / commenter_in predicate matchers.
-    -- jira_display_name is the Jira-side display name, used by stock
-    -- handlers for "is this assigned to me" checks and the optimistic
-    -- post-claim snapshot update. Both captured from auth.ValidateJira
-    -- at PAT setup, persisted by bootstrapLocalJiraIdentity at boot.
-    jira_account_id   TEXT,
-    jira_display_name TEXT,
+    -- Per-user Jira identity (account_id + display_name) is NOT a column:
+    -- it moved to the host-scoped user_jira_identities sibling below
+    -- (SKY-397), mirroring how the GitHub login moved to
+    -- user_github_identities. A single human can hold a different Jira
+    -- account on each host, so the identity is keyed (user_id, host),
+    -- never a lone column.
     created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -220,6 +217,43 @@ CREATE TABLE user_github_identities (
     created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (user_id, github_base_url)
+);
+
+-- user_jira_identities — host-scoped Jira identity bindings (SKY-397).
+-- The Jira sibling of user_github_identities: it replaces the single-valued
+-- users.jira_account_id / users.jira_display_name columns. One human can hold
+-- a different Jira account on each Jira site (a Cloud site for one org, a
+-- Server/DC host for another), so the natural key is (user_id, jira_base_url),
+-- not a lone column. For the first self-deploy (one org, one host) this is
+-- exactly one row per user — the column behaviour, with a future-proof key.
+--
+-- The access layer already keys per-(user, host): the per-user Jira PAT is
+-- custodied as "jira_token/<host>" (SKY-442). This table makes IDENTITY
+-- symmetric with that access — both keyed on the same canonical host — so a
+-- second Jira site can't overwrite the first's identity the way the single
+-- column did.
+--
+-- account_id is the Atlassian StableID (Cloud accountId, else Server/DC key —
+-- auth.JiraUser.StableID()); display_name is the Jira-side display name. Both
+-- are captured together from the /myself validation at PAT-bind time. source
+-- records HOW the binding was captured ('pat' | 'connect_oauth' | 'scim') —
+-- 'pat' is the only writer today (DC paste-a-PAT); Cloud OAuth and SCIM are
+-- later tickets. verified_at timestamps the last authenticated /myself
+-- confirmation against the host (nullable for a future SCIM directory sync
+-- that learns an account without a round-trip; today's pat writer always
+-- stamps it). An absent row is a durable, supported state: the
+-- NULL-degrades-gracefully contract from SKY-264 carries over unchanged.
+CREATE TABLE user_jira_identities (
+    user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    jira_base_url TEXT NOT NULL,
+    account_id    TEXT NOT NULL,
+    display_name  TEXT,
+    source        TEXT NOT NULL
+                      CHECK (source IN ('pat', 'connect_oauth', 'scim')),
+    verified_at   TIMESTAMP,
+    created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, jira_base_url)
 );
 
 CREATE TABLE org_memberships (

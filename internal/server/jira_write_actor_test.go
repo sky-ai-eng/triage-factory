@@ -255,7 +255,9 @@ func TestStockPost_QueueOnly_SkipsJiraResolver(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed jira rule: %v", err)
 	}
-	if err := s.users.SetJiraIdentity(ctx, runmode.LocalDefaultUserID, "acc-1", "Tester"); err != nil {
+	// Identity is host-scoped (SKY-397) — key it on the same Jira host the
+	// org creds (and thus the stock handler's read) use.
+	if err := s.users.UpsertJiraIdentity(ctx, runmode.LocalDefaultUserID, "https://jira.example.com", "acc-1", "Tester", "pat"); err != nil {
 		t.Fatalf("set jira identity: %v", err)
 	}
 

@@ -236,6 +236,7 @@ var orgScopedTables = []string{
 	"team_github_groups", "team_github_repos",
 	"preferences",
 	"user_github_identities",
+	"user_jira_identities",
 	// TF data:
 	"curator_pending_context", "curator_messages", "curator_requests",
 	"pending_review_comments", "pending_reviews",

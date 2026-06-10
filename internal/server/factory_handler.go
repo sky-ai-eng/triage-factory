@@ -402,9 +402,9 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 				}
 			}
 			// Jira "mine" = assigned to the session user. The session user's
-			// Jira display name lives on users.jira_display_name (read via
-			// UsersStore.GetJiraIdentity); keep this empty for v1 and let
-			// the UI fall back to the other tint.
+			// Jira display name lives in user_jira_identities (read via
+			// UsersStore.GetJiraIdentity for the org's host); keep this empty
+			// for v1 and let the UI fall back to the other tint.
 		}
 		entities = append(entities, ej)
 	}

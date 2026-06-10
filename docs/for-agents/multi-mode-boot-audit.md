@@ -21,10 +21,10 @@
   org credential. The local user binds their login through that step like any
   other user; nothing happens silently at boot.
 
-### 3. Local Jira-identity bootstrap — same as above
-- **Where:** `main.go:583` → `bootstrapLocalJiraIdentity` (`main.go:206-234`)
-- **Local purpose:** Derives `users.jira_account_id` + `jira_display_name`.
-- **Multi-mode:** Already mode-gated at line 207. DONE.
+### 3. Local Jira-identity capture — same as above
+- **Where:** `internal/server/jira_connect.go` → `handleJiraIdentityPAT` (the boot-time `bootstrapLocalJiraIdentity` was removed by SKY-461).
+- **Local purpose:** The per-user Jira PAT bind flow validates the token, stores it host-scoped, and derives the user's host-scoped identity into `user_jira_identities` (SKY-397) — like the GitHub bind in #2, never derived from the org credential at boot. Nothing happens silently at boot.
+- **Multi-mode:** Request-scoped capture under the caller's claims; the identity row is RLS-gated self-only. DONE.
 
 ### 4. `seedDefaultPrompts` iterates a single hardcoded `(LocalDefaultOrg, LocalDefaultTeamID)` pair
 - **Where:** `seed.go:48` — `orgs := []orgTeam{{runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID}}` (called unconditionally at `main.go:586`)
@@ -109,9 +109,9 @@
 - **Multi-mode:** In steady state this branch is unreachable (every handler is team-scoped post-SKY-295). If it IS reached in multi mode, the fallback writes a task with `team_id = local sentinel`, which will FK-fail in Postgres. The log line is enough — the fallback should be deleted in multi mode (let the FK fail loudly rather than mint a wrong-team task). Same shape at `router.go:450` (the `task.TeamID == ""` branch in `tryAutoDelegate`).
 
 ### 18. Router inline close-check reads the local user's Jira identity
-- **Where:** `internal/routing/router.go:1347` — `r.users.GetJiraIdentitySystem(ctx, runmode.LocalDefaultUserID)` inside `closeCheckJiraReassigned`
+- **Where:** `internal/routing/close_checks.go` — `r.users.GetJiraIdentitySystem(ctx, runmode.LocalDefaultUserID, jiraHost)` inside `closeCheckJiraReassigned`, where `jiraHost` comes from `r.orgs.GetSettingsSystem(...).JiraBaseURL` (host-scoped identity, SKY-397).
 - **Local purpose:** Inline auto-close: when a Jira issue is reassigned away from "me," close active assigned-to-me tasks. "Me" is the local user.
-- **Multi-mode:** Already acknowledged in the docstring (`router.go:1339-1346` — "no single 'the user' whose Jira identity counts ... current sentinel-keyed read keeps local-mode behavior intact and over-closes in multi-mode"). Documented as acceptable. Leave as-is.
+- **Multi-mode:** Already acknowledged in the docstring ("no single 'the user' whose Jira identity counts ... current sentinel-keyed read keeps local-mode behavior intact and over-closes in multi-mode"). Documented as acceptable. Leave as-is.
 
 ## Phase 5: CLI surface (delegated-agent entry points)
 

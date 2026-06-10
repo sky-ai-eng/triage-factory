@@ -72,7 +72,17 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, blue
 	// leaves the allowlist empty → matches every assignee. INSERT OR IGNORE
 	// below means this only takes on first install / clean-slate; existing
 	// installs keep whatever the user saved via Settings.
-	localJiraAccountID, _, _ := s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID)
+	// Jira identity is host-scoped (SKY-397): resolve the org's configured
+	// Jira host, then read the local user's binding for (user, host). At
+	// first-install seed time Jira is typically not connected yet, so this
+	// is usually "" — INSERT OR IGNORE means the substitution only takes on
+	// a fresh DB anyway; an absent host or row leaves the allowlist empty
+	// (match-all), exactly as before.
+	var jiraHost sql.NullString
+	_ = s.q.QueryRowContext(ctx,
+		`SELECT jira_base_url FROM org_settings WHERE org_id = ?`, orgID,
+	).Scan(&jiraHost)
+	localJiraAccountID, _, _ := s.users.GetJiraIdentitySystem(ctx, runmode.LocalDefaultUserID, jiraHost.String)
 
 	for _, h := range db.ShippedEventHandlers {
 		predStr := substituteLocalJiraIdentity(h.Predicate, localJiraAccountID)

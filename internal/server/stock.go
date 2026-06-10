@@ -105,7 +105,9 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		if e != nil {
 			return fmt.Errorf("list jira rules: %w", e)
 		}
-		localAccountID, localDisplayName, e = tx.Users.GetJiraIdentity(r.Context(), userID)
+		// Jira identity is host-scoped (SKY-397): look it up for the org's
+		// Jira host (org_settings already loaded above).
+		localAccountID, localDisplayName, e = tx.Users.GetJiraIdentity(r.Context(), userID, orgSet.JiraBaseURL)
 		return e
 	}); err != nil {
 		internalError(w, "stock", err)
@@ -371,7 +373,10 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 		if e != nil {
 			return fmt.Errorf("list jira rules: %w", e)
 		}
-		localAccountID, localDisplayName, e = tx.Users.GetJiraIdentity(r.Context(), userID)
+		// Jira identity is host-scoped (SKY-397): creds.JiraURL mirrors
+		// org_settings.jira_base_url (both set from the same field), so it
+		// is the canonical host this identity was captured under.
+		localAccountID, localDisplayName, e = tx.Users.GetJiraIdentity(r.Context(), userID, creds.JiraURL)
 		return e
 	}); err != nil {
 		if teamscope.WriteIfSelectionError(w, err) {

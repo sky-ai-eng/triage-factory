@@ -1,8 +1,9 @@
 # Per-user integration identity
 
-How TF stores "who this user is on the providers it acts against" — GitHub today
-(`user_github_identities`, SKY-396), Jira and Linear as planned siblings
-(SKY-397 / SKY-398). This is the *integration-identity* layer; it is not login.
+How TF stores "who this user is on the providers it acts against" — GitHub
+(`user_github_identities`, SKY-396) and Jira (`user_jira_identities`, SKY-397)
+today, Linear as a planned sibling (SKY-398). This is the *integration-identity*
+layer; it is not login.
 
 ## Two layers TF must not conflate
 
@@ -40,7 +41,7 @@ Each provider gets its own host/scope-scoped table:
 
 ```
 user_github_identities (user_id, github_base_url, login,          source, verified_at, …)  -- SKY-396, shipped
-user_jira_identities   (user_id, jira_base_url,   account_id, display_name, source, verified_at, …)  -- SKY-397
+user_jira_identities   (user_id, jira_base_url,   account_id, display_name, source, verified_at, …)  -- SKY-397, shipped
 user_linear_identities (user_id, workspace_id,    linear_user_id, display_name, source, verified_at, …)  -- SKY-398
 ```
 
@@ -109,8 +110,10 @@ state post-onboarding — runtime stays tolerant regardless of the onboarding ga
 ## Tickets
 
 - **SKY-396** — `user_github_identities` (shipped here).
-- **SKY-397** — `user_jira_identities` (moves `users.jira_account_id` /
-  `jira_display_name` off the row; blocks SKY-270).
+- **SKY-397** — `user_jira_identities` (shipped; moved `users.jira_account_id` /
+  `jira_display_name` off the row into a host-scoped table keyed on
+  `jira.CanonicalHost`, symmetric with the per-(user, host) PAT vault key from
+  SKY-442; blocks SKY-270).
 - **SKY-398** — `user_linear_identities` (workspace-scoped; gated on a Linear
   integration existing).
 - **SKY-271** — capture flows + onboarding gate (consumes these tables).

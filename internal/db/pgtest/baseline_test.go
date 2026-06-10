@@ -21,7 +21,7 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 	h.Reset(t)
 
 	expectedTables := []string{
-		"orgs", "teams", "users", "user_github_identities", "memberships", "org_memberships", "sessions", "project_knowledge",
+		"orgs", "teams", "users", "user_github_identities", "user_jira_identities", "memberships", "org_memberships", "sessions", "project_knowledge",
 		"org_settings", "team_settings", "user_settings", "jira_project_status_rules",
 		"team_github_groups", "team_github_repos",
 		"prompts", "projects", "events_catalog", "entities", "entity_links", "events",
@@ -3002,9 +3002,10 @@ func TestRLS_TasksClaimXorRejection(t *testing.T) {
 // tf.current_org_id() — pre-org users (multi-mode signups before
 // active_org_id is set on the session) need this path to work so
 // integrations setup, Jira connect, and settings updates can persist
-// per-user identity (display_name, jira_account_id, plus the host-scoped
-// GitHub binding in user_github_identities — see
-// TestRLS_UserGitHubIdentitySelfAccess) before the user has joined an org.
+// per-user identity (display_name, plus the host-scoped GitHub and Jira
+// bindings in user_github_identities / user_jira_identities — see
+// TestRLS_UserGitHubIdentitySelfAccess and TestRLS_UserJiraIdentitySelfAccess)
+// before the user has joined an org.
 //
 // The settings.go / credentials.go handlers extract orgID via
 // OrgIDFrom(r.Context()) and pass it through to s.tx.WithTx; in the
@@ -3136,6 +3137,107 @@ func TestRLS_UserGitHubIdentitySelfAccess(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("otherUser identity rows = %d, want 0", n)
+	}
+}
+
+// TestRLS_UserJiraIdentitySelfAccess pins the SKY-397 acceptance
+// criterion: a user can read/write only their own user_jira_identities
+// rows, mirroring the GitHub sibling above. The policies
+// (user_jira_identities_modify / _select) gate purely on
+// (user_id = tf.current_user_id()) with no org leg, so a pre-org signup
+// can bind a PAT-derived identity before joining an org. Two halves: self
+// insert+read succeeds under an empty org claim; a cross-user insert is
+// refused by the WITH CHECK.
+func TestRLS_UserJiraIdentitySelfAccess(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	userID := SeedUser(t, h, "jira-ident-self")
+	otherUser := SeedUser(t, h, "jira-ident-other")
+
+	const host = "https://jira.example.com"
+
+	// Self write under empty org claim must succeed.
+	if err := h.WithUser(t, userID, "", func(tx *sql.Tx) error {
+		_, e := tx.ExecContext(context.Background(), `
+			INSERT INTO public.user_jira_identities
+				(user_id, jira_base_url, account_id, display_name, source, verified_at)
+			VALUES ($1, $2, $3, $4, 'pat', now())
+		`, userID, host, "acc-self", "Self Jira")
+		return e
+	}); err != nil {
+		t.Fatalf("self identity write under empty org claim should succeed; got: %v", err)
+	}
+
+	// Self read returns the row under the same claim.
+	if err := h.WithUser(t, userID, "", func(tx *sql.Tx) error {
+		var accountID string
+		if e := tx.QueryRowContext(context.Background(),
+			`SELECT account_id FROM public.user_jira_identities WHERE user_id = $1 AND jira_base_url = $2`,
+			userID, host,
+		).Scan(&accountID); e != nil {
+			return e
+		}
+		if accountID != "acc-self" {
+			t.Errorf("self identity read = %q, want %q", accountID, "acc-self")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("self identity read under empty org claim should succeed; got: %v", err)
+	}
+
+	// A GitHub row for the same user on the same backend must coexist with
+	// the Jira row — distinct sibling tables, no collision (acceptance
+	// criterion: one user holds a GitHub row and a Jira row simultaneously).
+	if err := h.WithUser(t, userID, "", func(tx *sql.Tx) error {
+		_, e := tx.ExecContext(context.Background(), `
+			INSERT INTO public.user_github_identities
+				(user_id, github_base_url, login, source, verified_at)
+			VALUES ($1, 'https://github.com', 'octo', 'pat', now())
+		`, userID)
+		return e
+	}); err != nil {
+		t.Fatalf("coexisting GitHub identity write should succeed; got: %v", err)
+	}
+
+	// A second Jira site for the same user is a distinct row (the UNIQUE is
+	// (user_id, jira_base_url), so two hosts don't collide).
+	if err := h.WithUser(t, userID, "", func(tx *sql.Tx) error {
+		_, e := tx.ExecContext(context.Background(), `
+			INSERT INTO public.user_jira_identities
+				(user_id, jira_base_url, account_id, display_name, source, verified_at)
+			VALUES ($1, 'https://other.atlassian.net', 'acc-other-site', 'Self Elsewhere', 'pat', now())
+		`, userID)
+		return e
+	}); err != nil {
+		t.Fatalf("second Jira-site identity write should succeed (distinct host); got: %v", err)
+	}
+
+	// Cross-user insert must be refused by user_jira_identities_modify's
+	// WITH CHECK (user_id != current_user_id() → policy violation, SQLSTATE
+	// 42501).
+	if err := h.WithUser(t, userID, "", func(tx *sql.Tx) error {
+		_, e := tx.ExecContext(context.Background(), `
+			INSERT INTO public.user_jira_identities
+				(user_id, jira_base_url, account_id, display_name, source, verified_at)
+			VALUES ($1, $2, $3, $4, 'pat', now())
+		`, otherUser, host, "acc-spoof", "Spoofed")
+		return e
+	}); err == nil {
+		t.Fatal("cross-user identity insert should violate WITH CHECK, but succeeded")
+	} else {
+		assertPgCode(t, err, "42501", "cross-user Jira identity insert")
+	}
+
+	// And the spoofed row must not exist.
+	var n int
+	if err := h.AdminDB.QueryRow(
+		`SELECT count(*) FROM public.user_jira_identities WHERE user_id = $1`, otherUser,
+	).Scan(&n); err != nil {
+		t.Fatalf("read-back count: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("otherUser Jira identity rows = %d, want 0", n)
 	}
 }
 

@@ -30,9 +30,10 @@ const (
 )
 
 // legacyJiraDisplayName is the legacy key that held the Jira display
-// name in the keychain. Jira identity now lives on the users row, but
-// ClearJira and Clear still sweep this so an upgrade from an older
-// install leaves no orphan keychain row.
+// name in the keychain. Jira identity now lives in the host-scoped
+// user_jira_identities table (SKY-397), but ClearJira and Clear still
+// sweep this key so an upgrade from an older install leaves no orphan
+// keychain row.
 const legacyJiraDisplayName = "jira_display_name"
 
 // AllKeys returns every credential key the SecretStore manages for an

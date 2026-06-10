@@ -7,10 +7,11 @@ import (
 )
 
 // UsersStore owns the users table — identity facts that aren't secrets
-// (display_name, jira_*) live on the row, plus the host-scoped GitHub
-// identity bindings in user_github_identities (SKY-396). The keychain
-// holds only actual credentials (PATs in local mode); usernames and
-// display names live in the DB so local mode and multi mode share storage.
+// (display_name) live on the row, plus the host-scoped per-provider
+// identity bindings in user_github_identities (SKY-396) and
+// user_jira_identities (SKY-397). The keychain holds only actual
+// credentials (PATs in local mode); usernames and display names live in
+// the DB so local mode and multi mode share storage.
 //
 // Local mode iterates a single synthetic LocalDefaultUserID row;
 // multi mode (post-SKY-251) has one row per authenticated user.
@@ -55,23 +56,39 @@ type UsersStore interface {
 	// Variant B's roster dropdown.
 	GetDisplayName(ctx context.Context, userID string) (string, error)
 
-	// GetJiraIdentity returns (jira_account_id, jira_display_name) for
-	// a user row, both "" if the columns are NULL or the row does not
-	// exist. Used by the SKY-270 predicate matcher (assignee_in /
-	// reporter_in / commenter_in allowlists), the stock handler's
-	// "is this assigned to me" check, and the optimistic post-claim
-	// snapshot update.
-	GetJiraIdentity(ctx context.Context, userID string) (accountID, displayName string, err error)
+	// GetJiraIdentity returns the user's Jira (account_id, display_name)
+	// on a specific host (user_jira_identities, keyed on (user_id,
+	// jira_base_url)), both "" when no row exists for that (user, host)
+	// pair. Used by the SKY-270 predicate matcher (assignee_in /
+	// reporter_in / commenter_in allowlists), the stock handler's "is
+	// this assigned to me" check, and the optimistic post-claim snapshot
+	// update. Callers resolve the host from the org's
+	// org_settings.jira_base_url (via jira.CanonicalHost) so the lookup
+	// matches the host the binding was captured against. An absent row
+	// degrades exactly as the old NULL jira_* columns did. The host is
+	// normalized (db.NormalizeJiraHost) so a raw org_settings value and
+	// the canonical capture-time host agree.
+	GetJiraIdentity(ctx context.Context, userID, jiraBaseURL string) (accountID, displayName string, err error)
 
-	// SetJiraIdentity writes both jira_account_id and jira_display_name
-	// for an existing user row in a single UPDATE. Both come from one
-	// auth.ValidateJira call (Atlassian's /myself endpoint returns
-	// them together), so pairing them keeps the columns consistent.
-	// Passing "" for either clears the column (NULL). Returns an error
-	// when the target row does not exist — bootstrap paths own row
-	// creation; this store only mutates existing rows. Idempotent on
-	// identical input.
-	SetJiraIdentity(ctx context.Context, userID, accountID, displayName string) error
+	// UpsertJiraIdentity writes (or refreshes) the user's Jira identity
+	// for a host. The host is an explicit parameter so callers bind to
+	// the org's host deliberately. account_id + display_name come from
+	// one auth.ValidateJira call (Atlassian's /myself returns them
+	// together); source records how the binding was captured ('pat' |
+	// 'connect_oauth' | 'scim'); verified_at is stamped to now() on
+	// every call (this IS the authenticated confirmation). Upserts on the
+	// (user_id, jira_base_url) key. Passing "" for display_name stores
+	// NULL. Returns an error when the user row does not exist — capture
+	// paths own row creation. Mirrors UpsertGitHubIdentity.
+	UpsertJiraIdentity(ctx context.Context, userID, jiraBaseURL, accountID, displayName, source string) error
+
+	// ClearJiraIdentity deletes the user's Jira identity row for a host
+	// (the dedicated disconnect surface). No-op (nil error) when no row
+	// exists for that (user, host) pair. Mirrors ClearGitHubIdentity.
+	// Note: an org-credential disconnect deliberately does NOT call this
+	// — identity is owned by its own capture surface, never swept as a
+	// side effect of an org-access change.
+	ClearJiraIdentity(ctx context.Context, userID, jiraBaseURL string) error
 
 	// --- Admin-pool variants (`...System`) ---
 	//
@@ -112,8 +129,11 @@ type UsersStore interface {
 	// GetJiraIdentitySystem mirrors GetJiraIdentity but routes through
 	// the admin pool in Postgres. The router's inline close-check on
 	// Jira reassignment consumes this from its eventbus subscriber
-	// goroutine, which has no JWT-claims context.
-	GetJiraIdentitySystem(ctx context.Context, userID string) (accountID, displayName string, err error)
+	// goroutine, which has no JWT-claims context; the sqlite event_handlers
+	// seed reads it claims-free at startup to substitute the local user's
+	// account id into shipped Jira rules. Callers resolve the host the same
+	// way GetJiraIdentity's do (org_settings.jira_base_url).
+	GetJiraIdentitySystem(ctx context.Context, userID, jiraBaseURL string) (accountID, displayName string, err error)
 
 	// GetLastActingTeam returns users.last_acting_team_id — the user's
 	// sticky default team — or "" if unset (NULL) or the row is missing.

@@ -128,8 +128,9 @@ func TestJiraIdentityPAT_StoresCredentialAndBindsIdentity(t *testing.T) {
 		t.Errorf("stored credential = %q, want the supplied PAT", stored)
 	}
 
-	// Identity is derived from the validated /myself response (accountId wins).
-	accountID, displayName, err := s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID)
+	// Identity is derived from the validated /myself response (accountId wins),
+	// keyed on the org's Jira host (SKY-397).
+	accountID, displayName, err := s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID, jiraStub.URL)
 	if err != nil {
 		t.Fatalf("GetJiraIdentity: %v", err)
 	}

@@ -54,8 +54,8 @@ type JiraUser struct {
 
 // StableID returns the deployment-appropriate stable identifier for this
 // Jira user — accountId on Cloud, falling back to the legacy key on
-// Server / DC. This is the value persisted to users.jira_account_id and
-// the value predicate matchers compare against.
+// Server / DC. This is the value persisted to user_jira_identities.account_id
+// (host-scoped, SKY-397) and the value predicate matchers compare against.
 func (u JiraUser) StableID() string {
 	if u.AccountID != "" {
 		return u.AccountID
