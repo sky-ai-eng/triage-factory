@@ -794,7 +794,12 @@ func TestGitHubAppRegister_Callback_ReturnToRedirect(t *testing.T) {
 			t.Fatalf("seed org_settings: %v", err)
 		}
 		state := appRegisterState{
-			OrgID:     org.String(),
+			OrgID: org.String(),
+			// The production launch flow always signs a validated owner type into
+			// the state, which the callback persists; set it here so the token
+			// matches a real one and stays valid if callback-side owner-type
+			// validation is ever tightened.
+			OwnerType: "user",
 			ReturnTo:  returnTo,
 			ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
 		}

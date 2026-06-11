@@ -640,9 +640,12 @@ type appRegisterState struct {
 	OwnerType string `json:"ot"`
 	// ReturnTo ("setup"/"settings") records where registration was launched
 	// from so the callback redirects the user back there instead of always
-	// assuming Settings. Carried in the signed state — the source of truth at
-	// callback time — and omitted (defaulting to the Settings redirect) for a
-	// Settings-launched flow, which keeps older signed tokens valid.
+	// assuming Settings. The launch handler always populates it (an unknown or
+	// absent return_to defaults to "settings"), so a current token carries an
+	// explicit value; omitempty only drops a zero value, which an older token
+	// minted before this field existed carries. The callback reads any value
+	// other than "setup" as the Settings redirect, so an omitted/empty rt stays
+	// valid.
 	ReturnTo  string `json:"rt,omitempty"`
 	ExpiresAt int64  `json:"exp"`
 }
