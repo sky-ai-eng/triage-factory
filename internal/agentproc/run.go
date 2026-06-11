@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -252,186 +253,33 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 		return nil, fmt.Errorf("agent runtime: %w", err)
 	}
 
-	// exec.CommandContext owns the cancel watcher: it spawns a goroutine
-	// at Start time that selects on runCtx.Done() vs. an internal "wait
-	// finished" channel, and exits whichever fires first. That's
-	// important here because the subprocess may exit naturally well
-	// before runCtx ever cancels — without this binding, a stray goroutine
-	// would block on <-runCtx.Done() and, when runCtx finally cancelled,
-	// SIGKILL whatever process happened to be reusing the original
-	// pgid. The Cancel hook below customizes the kill to target the
-	// process group (Setpgid is set), so child processes the agent
-	// spawned go down with it.
+	// We spawn the SDK via `node wrapper.mjs <flags>` rather than the
+	// `claude` CLI: the wrapper translates the flag-based argv BuildArgs
+	// emits into Agent SDK Options, so the call site stays runtime-agnostic,
+	// and the SDK shares Claude Code's auth / config / session store so
+	// behavior is identical for the user.
 	//
-	// We spawn the SDK via `node wrapper.mjs <flags>` instead of the
-	// `claude` CLI. The wrapper translates the flag-based argv emitted
-	// by BuildArgs into Agent SDK Options, so the call site stays
-	// runtime-agnostic. The SDK uses the same auth / config / session
-	// store as Claude Code, so behavior is identical for the user.
-	nodeArgs := append([]string{wrapperPath}, BuildArgs(opts)...)
-
-	// Branch: multi-mode + Linux routes through the gVisor sandbox
-	// for tenant isolation. Local-mode + non-Linux take the direct
-	// subprocess path (unchanged behavior).
-	var (
-		cmd     *exec.Cmd
-		sb      *sandbox.Sandbox
-		proxies *runProxies
-	)
-	// Proxy shutdown runs unconditionally on Run exit — covers normal
-	// completion, ctx cancellation, and stream errors. Detached
-	// context so a cancelled run still gets a clean Shutdown drain
-	// rather than a torn TCP close that leaks the proxy goroutine.
-	defer func() {
-		if proxies == nil {
-			return
-		}
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer shutdownCancel()
-		if err := proxies.Shutdown(shutdownCtx); err != nil {
-			log.Printf("[agentproc] proxy shutdown: %v", err)
-		}
-	}()
-
+	// Branch: multi-mode + Linux routes through the gVisor sandbox for
+	// tenant isolation (newSandboxCommand — shared with the interactive
+	// RunInteractive); local-mode + non-Linux take the direct subprocess
+	// path (newDirectCommand, unchanged behavior; its Setpgid + Cancel hook
+	// own the SIGKILL-the-process-group teardown). For the sandbox branch,
+	// cleanup bundles every teardown (sandbox, agenthost daemon, scratch
+	// dir, proxies); deferring it here fires it on every exit, including the
+	// StdoutPipe / Start error returns in the shared tail below.
+	var cmd *exec.Cmd
 	if shouldSandbox() {
-		// PROPERTY B INVARIANT: the sandbox path resolves credentials
-		// on the host side, then routes them through a per-run LLM
-		// proxy bound to the sandbox's host-side veth IP. The agent's
-		// env carries only the proxy URL + a placeholder credential;
-		// the real key lives in the proxy process on the host and is
-		// injected into the upstream HTTP request right before it
-		// leaves the box.
-		sdkDir := filepath.Dir(wrapperPath)
-
-		creds, err := resolveCredentials(runCtx, opts.Secrets, opts.OrgID)
-		if err != nil {
-			return nil, fmt.Errorf("resolve credentials for org %q: %w", opts.OrgID, err)
+		sandboxCmd, cleanup, serr := newSandboxCommand(runCtx, opts, wrapperPath)
+		if serr != nil {
+			return nil, serr
 		}
-
-		// Some callers (scorer, classifier stage1, profiler) are
-		// prompt-only — they send a prompt, get JSON back, and never
-		// touch the host filesystem. They have no natural Cwd. The
-		// sandbox still needs *something* to bind-mount at /work,
-		// so when the caller didn't pass one, materialize a per-run
-		// scratch tmpdir. Cleaned up alongside the sandbox in defer
-		// below.
-		workCwd := opts.Cwd
-		var scratchCwd string
-		if workCwd == "" {
-			scratchCwd, err = os.MkdirTemp("", "agentproc-scratch-")
-			if err != nil {
-				return nil, fmt.Errorf("sandbox: scratch cwd: %w", err)
-			}
-			workCwd = scratchCwd
-			defer func() { _ = os.RemoveAll(scratchCwd) }()
-		}
-		if err := chownWorktreeForSandbox(workCwd); err != nil {
-			return nil, fmt.Errorf("sandbox: chown worktree: %w", err)
-		}
-		// Translate any host-path env values (e.g. TRIAGE_FACTORY_RUN_ROOT)
-		// to /work-relative paths before the sandbox sees them.
-		sbExtraEnv := translateEnvForSandbox(opts.ExtraEnv, workCwd)
-		sbEnv := buildSandboxEnv(sbExtraEnv)
-
-		// Translate AddDirs (host paths under workCwd) into their
-		// /work-relative equivalents inside the sandbox. Without this
-		// the agent's `--add-dir` flags reference paths that don't
-		// exist inside the sandbox rootfs and Claude Code's per-tool
-		// path checks reject every write attempt to those subtrees.
-		// Build a shallow copy of opts so BuildArgs picks up the
-		// translated paths without mutating the caller's struct.
-		sandboxOpts := opts
-		sandboxOpts.AddDirs = translateAddDirsForSandbox(opts.AddDirs, workCwd)
-		// Rewrite the --allowedTools selfBin pattern to point at the
-		// in-sandbox path. BuildAllowedTools embeds os.Executable() in
-		// its `Bash(<selfBin> exec *)` rule; inside the sandbox that
-		// host path doesn't exist, so the agent's per-tool path check
-		// would reject every `triagefactory exec` invocation. Re-point
-		// to the canonical /usr/local/bin/triagefactory path we
-		// bind-mount below.
-		hostSelfBin, _ := os.Executable()
-		sandboxOpts.AllowedTools = rewriteAllowedToolsForSandbox(opts.AllowedTools, hostSelfBin)
-
-		// Extra bind mounts the sandbox needs:
-		//
-		//   1. The host TF binary at /usr/local/bin/triagefactory (RO).
-		//      The agent's `triagefactory exec ...` invocations exec
-		//      this path; without the bind-mount they ENOENT because
-		//      the host path isn't visible inside the alpine rootfs.
-		//
-		//   2. The per-run agenthost unix socket at /run/tf.sock (RW).
-		//      Started below when Stores is supplied. Caller-side
-		//      hostAgentHost handles chown/chmod so the sandbox UID
-		//      can connect.
-		extraMounts := []sandbox.Mount{}
-		if hostSelfBin != "" {
-			extraMounts = append(extraMounts, sandbox.Mount{
-				Source:      hostSelfBin,
-				Destination: sandboxTFBinary,
-				Options:     []string{"ro"},
-			})
-		}
-
-		// Start the per-run agenthost daemon (when wired). The socket
-		// must exist on disk before sandbox.Wrap reads the spec, since
-		// the spec references the source path of every bind mount.
-		// Defer Close in this branch so a Wrap failure tears the
-		// daemon down cleanly.
-		if opts.StartAgentHost != nil {
-			mount, closer, ahErr := opts.StartAgentHost()
-			if ahErr != nil {
-				return nil, fmt.Errorf("sandbox: start agenthost daemon: %w", ahErr)
-			}
-			extraMounts = append(extraMounts, mount)
-			defer func() { _ = closer.Close() }()
-		}
-
-		// The sandbox's argv targets /usr/bin/node (the apk-installed
-		// nodejs in the cached alpine rootfs) + /sdk/wrapper.mjs (the
-		// SDK bind-mount destination), not host paths. Build the
-		// sandbox-side argv from scratch.
-		argv := append(
-			[]string{"/usr/bin/node", "/sdk/wrapper.mjs"},
-			BuildArgs(sandboxOpts)...,
-		)
-
-		// Multi-mode credential injection: when the sandbox calls
-		// ConfigureProxies after wiring the netns, we start the LLM
-		// proxy on the host-side veth IP and return the env entries
-		// naming it. The proxy holds the real key on the host side;
-		// the sandbox env carries only the proxy URL + placeholder.
-		// See proxies.go for the mapping from resolved creds to
-		// proxy provider / upstream.
-		configureProxies := func(s *sandbox.Sandbox) ([]string, error) {
-			bundle, proxyEnv, perr := startProxiesForSandbox(runCtx, s.HostIP, creds, opts.GitProxy)
-			if perr != nil {
-				return nil, perr
-			}
-			// Hand the bundle to the outer scope so the deferred
-			// Shutdown above tears down the proxy on every exit
-			// path (normal, error, ctx cancellation).
-			proxies = bundle
-			return proxyEnv, nil
-		}
-
-		sandboxCmd, sboxObj, err := sandbox.Wrap(runCtx, sandbox.Config{
-			RunID:            opts.TraceID,
-			Worktree:         workCwd,
-			SDKDir:           sdkDir,
-			Argv:             argv,
-			Env:              sbEnv,
-			ExtraMounts:      extraMounts,
-			ConfigureProxies: configureProxies,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("sandbox: %w", err)
-		}
-		cmd, sb = sandboxCmd, sboxObj
-		defer func() { _ = sb.Close() }()
+		defer cleanup()
+		cmd = sandboxCmd
 	} else {
-		directCmd, err := newDirectCommand(runCtx, opts, nodeArgs)
-		if err != nil {
-			return nil, err
+		nodeArgs := append([]string{wrapperPath}, BuildArgs(opts)...)
+		directCmd, derr := newDirectCommand(runCtx, opts, nodeArgs)
+		if derr != nil {
+			return nil, derr
 		}
 		cmd = directCmd
 	}
@@ -483,6 +331,194 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 	}
 
 	return outcome, nil
+}
+
+// newSandboxCommand builds the gVisor-sandboxed `node /sdk/wrapper.mjs`
+// command for one multi-mode run and returns it alongside a cleanup func
+// that tears down everything the bring-up allocated. Shared by the one-shot
+// Run and the interactive RunInteractive so both spawn — and tear down —
+// sandbox runs identically.
+//
+// cleanup bundles the teardowns in defer-LIFO order — sb.Close() → agenthost
+// closer.Close() → scratch-dir remove → proxies.Shutdown() — matching the
+// inline-defer order the one-shot Run used before this extraction. It is
+// idempotent (a sync.Once guards the body), so a caller may defer it even on
+// a path that also invokes it directly. The proxy shutdown runs on a fresh
+// 5 s detached context so a cancelled run still drains cleanly rather than
+// tearing the TCP close and leaking the proxy goroutine.
+//
+// On error, cleanup has already run for whatever was half-allocated (mirroring
+// sandbox.Wrap's own self-cleanup contract); the returned cleanup is then a
+// spent no-op, safe to defer or ignore.
+//
+// PROPERTY B INVARIANT: credentials are resolved here on the host side, then
+// routed through a per-run LLM proxy bound to the sandbox's host-side veth IP
+// (see the configureProxies callback). The agent's env carries only the proxy
+// URL + a per-run placeholder credential; the real key lives in the proxy
+// process on the host and is injected into the upstream HTTP request right
+// before it leaves the box.
+func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath string) (*exec.Cmd, func(), error) {
+	// Teardown state, accumulated as each setup step below succeeds. cleanup
+	// runs the undos in LIFO order and is single-shot via once, so the error
+	// paths can invoke it eagerly and the caller can still defer it safely.
+	var (
+		proxies    *runProxies
+		scratchCwd string
+		ahCloser   io.Closer
+		sb         *sandbox.Sandbox
+		once       sync.Once
+	)
+	cleanup := func() {
+		once.Do(func() {
+			if sb != nil {
+				_ = sb.Close()
+			}
+			if ahCloser != nil {
+				_ = ahCloser.Close()
+			}
+			if scratchCwd != "" {
+				_ = os.RemoveAll(scratchCwd)
+			}
+			if proxies != nil {
+				// Detached context so a cancelled run still gets a clean
+				// Shutdown drain rather than a torn TCP close that leaks the
+				// proxy goroutine.
+				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer shutdownCancel()
+				if err := proxies.Shutdown(shutdownCtx); err != nil {
+					log.Printf("[agentproc] proxy shutdown: %v", err)
+				}
+			}
+		})
+	}
+
+	sdkDir := filepath.Dir(wrapperPath)
+
+	creds, err := resolveCredentials(runCtx, opts.Secrets, opts.OrgID)
+	if err != nil {
+		cleanup()
+		return nil, cleanup, fmt.Errorf("resolve credentials for org %q: %w", opts.OrgID, err)
+	}
+
+	// Some callers (scorer, classifier stage1, profiler) are prompt-only —
+	// they send a prompt, get JSON back, and never touch the host filesystem.
+	// They have no natural Cwd. The sandbox still needs *something* to
+	// bind-mount at /work, so when the caller didn't pass one, materialize a
+	// per-run scratch tmpdir. Removed by cleanup.
+	workCwd := opts.Cwd
+	if workCwd == "" {
+		scratch, mkErr := os.MkdirTemp("", "agentproc-scratch-")
+		if mkErr != nil {
+			cleanup()
+			return nil, cleanup, fmt.Errorf("sandbox: scratch cwd: %w", mkErr)
+		}
+		scratchCwd = scratch
+		workCwd = scratch
+	}
+	if err := chownWorktreeForSandbox(workCwd); err != nil {
+		cleanup()
+		return nil, cleanup, fmt.Errorf("sandbox: chown worktree: %w", err)
+	}
+
+	// Translate any host-path env values (e.g. TRIAGE_FACTORY_RUN_ROOT) to
+	// /work-relative paths before the sandbox sees them.
+	sbExtraEnv := translateEnvForSandbox(opts.ExtraEnv, workCwd)
+	sbEnv := buildSandboxEnv(sbExtraEnv)
+
+	// Translate AddDirs (host paths under workCwd) into their /work-relative
+	// equivalents inside the sandbox. Without this the agent's `--add-dir`
+	// flags reference paths that don't exist inside the sandbox rootfs and
+	// Claude Code's per-tool path checks reject every write attempt to those
+	// subtrees. Build a shallow copy of opts so BuildArgs picks up the
+	// translated paths without mutating the caller's struct.
+	sandboxOpts := opts
+	sandboxOpts.AddDirs = translateAddDirsForSandbox(opts.AddDirs, workCwd)
+	// Rewrite the --allowedTools selfBin pattern to point at the in-sandbox
+	// path. BuildAllowedTools embeds os.Executable() in its
+	// `Bash(<selfBin> exec *)` rule; inside the sandbox that host path
+	// doesn't exist, so the agent's per-tool path check would reject every
+	// `triagefactory exec` invocation. Re-point to the canonical
+	// /usr/local/bin/triagefactory path we bind-mount below.
+	hostSelfBin, _ := os.Executable()
+	sandboxOpts.AllowedTools = rewriteAllowedToolsForSandbox(opts.AllowedTools, hostSelfBin)
+
+	// Extra bind mounts the sandbox needs:
+	//
+	//   1. The host TF binary at /usr/local/bin/triagefactory (RO). The
+	//      agent's `triagefactory exec ...` invocations exec this path;
+	//      without the bind-mount they ENOENT because the host path isn't
+	//      visible inside the alpine rootfs.
+	//
+	//   2. The per-run agenthost unix socket at /run/tf.sock (RW). Started
+	//      below when StartAgentHost is supplied. Caller-side hostAgentHost
+	//      handles chown/chmod so the sandbox UID can connect.
+	extraMounts := []sandbox.Mount{}
+	if hostSelfBin != "" {
+		extraMounts = append(extraMounts, sandbox.Mount{
+			Source:      hostSelfBin,
+			Destination: sandboxTFBinary,
+			Options:     []string{"ro"},
+		})
+	}
+
+	// Start the per-run agenthost daemon (when wired). The socket must exist
+	// on disk before sandbox.Wrap reads the spec, since the spec references
+	// the source path of every bind mount. cleanup owns the daemon's Close so
+	// a Wrap failure (or run exit) tears it down cleanly.
+	if opts.StartAgentHost != nil {
+		mount, closer, ahErr := opts.StartAgentHost()
+		if ahErr != nil {
+			cleanup()
+			return nil, cleanup, fmt.Errorf("sandbox: start agenthost daemon: %w", ahErr)
+		}
+		extraMounts = append(extraMounts, mount)
+		ahCloser = closer
+	}
+
+	// The sandbox's argv targets /usr/bin/node (the apk-installed nodejs in
+	// the cached alpine rootfs) + /sdk/wrapper.mjs (the SDK bind-mount
+	// destination), not host paths. Build the sandbox-side argv from scratch.
+	argv := append(
+		[]string{"/usr/bin/node", "/sdk/wrapper.mjs"},
+		BuildArgs(sandboxOpts)...,
+	)
+
+	// Multi-mode credential injection: when the sandbox calls ConfigureProxies
+	// after wiring the netns, we start the LLM proxy on the host-side veth IP
+	// and return the env entries naming it. The proxy holds the real key on
+	// the host side; the sandbox env carries only the proxy URL + placeholder.
+	// See proxies.go for the mapping from resolved creds to proxy provider /
+	// upstream.
+	configureProxies := func(s *sandbox.Sandbox) ([]string, error) {
+		bundle, proxyEnv, perr := startProxiesForSandbox(runCtx, s.HostIP, creds, opts.GitProxy)
+		if perr != nil {
+			return nil, perr
+		}
+		// Hand the bundle to the enclosing scope so cleanup tears down the
+		// proxy on every exit path (normal, error, ctx cancellation).
+		proxies = bundle
+		return proxyEnv, nil
+	}
+
+	sandboxCmd, sboxObj, err := sandbox.Wrap(runCtx, sandbox.Config{
+		RunID:            opts.TraceID,
+		Worktree:         workCwd,
+		SDKDir:           sdkDir,
+		Argv:             argv,
+		Env:              sbEnv,
+		ExtraMounts:      extraMounts,
+		ConfigureProxies: configureProxies,
+	})
+	if err != nil {
+		// Wrap cleaned up its own partial state, but configureProxies may
+		// have started the proxies before a later Wrap step failed — cleanup
+		// shuts them down (plus the agenthost daemon + scratch dir).
+		cleanup()
+		return nil, cleanup, fmt.Errorf("sandbox: %w", err)
+	}
+	sb = sboxObj
+
+	return sandboxCmd, cleanup, nil
 }
 
 // newDirectCommand builds the direct (non-sandbox) `node wrapper.mjs`
