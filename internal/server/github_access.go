@@ -420,7 +420,7 @@ func (s *Server) appInstallationReposUnion(ctx context.Context, orgID, base stri
 	}
 	key, err := githubapp.ParsePrivateKey([]byte(pem))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse app pem: %w", err)
 	}
 	appID, err := strconv.ParseInt(app.AppID, 10, 64)
 	if err != nil {
@@ -428,7 +428,7 @@ func (s *Server) appInstallationReposUnion(ctx context.Context, orgID, base stri
 	}
 	minter, err := githubapp.NewMinter(githubapp.Config{PrivateKey: key, AppID: appID, APIBase: ghclient.APIBase(base)})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("init app token minter: %w", err)
 	}
 
 	byName := make(map[string]ghclient.UserRepo)
