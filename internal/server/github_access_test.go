@@ -476,6 +476,9 @@ func TestGitHubAppCutoverPreflight_Diff(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 	stub := newGitHubAccessStub(t, ghAccessStub{
+		// The preflight reconciles the mirror first, so /app/installations must
+		// report installation 1 or the backfill would prune the seeded row.
+		appInstalls:  []stubInstall{{ID: 1, Login: "acme"}},
 		installRepos: map[string][]string{"1": {"acme/web"}}, // installation 1 grants web only
 	})
 	setOrgGitHubBase(t, s, stub.URL)

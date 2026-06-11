@@ -147,8 +147,10 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 	// at least one — cutting over to an App installed nowhere would dark the
 	// org. The backfill works for a staged App (its active gate was removed).
 	if err := s.githubApps.BackfillInstallationsFromAPI(ctx, orgID); err != nil {
+		// The detail (which can carry vault/keychain topology) goes to the log,
+		// not the response body — even though this is org-admin-only.
 		log.Printf("[github-app] cutover: backfill installations for org %s: %v", orgID, err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to sync App installations from GitHub"})
 		return
 	}
 	insts, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
@@ -262,6 +264,11 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 		if err := tx.GitHubApps.DeleteForOrg(ctx, orgID); err != nil {
 			return fmt.Errorf("delete app: %w", err)
 		}
+		// Secrets last. If this fails after DeleteForOrg has committed (in
+		// Postgres the registration-row delete is in this tx; in local mode the
+		// SQLite row delete already ran), the worst case is orphan secrets whose
+		// refs no longer exist on any row — unreachable dead weight, never a
+		// credential risk (the App row, and thus tier-1 minting, is already gone).
 		return teardownAppSecrets(ctx, tx, orgID, app)
 	}); err != nil {
 		internalError(w, "github-app", err)
@@ -338,10 +345,20 @@ func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) 
 	// installation tokens (a staged App never minted any, but stay defensive).
 	s.invalidateInstallationTokens(orgID, insts)
 
+	// The App still exists on GitHub after a local discard, same as after a
+	// switch-to-pat — surface the host's apps-settings URL so the UI can guide
+	// deletion there. Best-effort: a base-URL read failure degrades to "".
+	settingsURL := ""
+	if base, berr := s.ghResolver.BaseURLFor(ctx, orgID); berr == nil {
+		settingsURL = base + "/settings/apps"
+	} else {
+		log.Printf("[github-app] discard: resolve github base for org %s: %v", orgID, berr)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":                     "discarded",
 		"github_app_deleted_locally": true,
-		"github_app_settings_url":    "",
+		"github_app_settings_url":    settingsURL,
 	})
 }
 
@@ -368,6 +385,17 @@ func (s *Server) handleGitHubAppCutoverPreflight(w http.ResponseWriter, r *http.
 		return
 	}
 
+	// Reconcile the installation mirror against GitHub first, the same call the
+	// cutover commit runs, so the preview reflects what the cutover would
+	// actually see — otherwise an admin who just installed the App (mirror still
+	// empty in local mode, where no webhook arrives) would see every tracked
+	// repo as dark and might wrongly abort. Best-effort: this is inform-only, so
+	// a backfill failure logs and falls through to whatever's already mirrored
+	// rather than failing the preview.
+	if berr := s.githubApps.BackfillInstallationsFromAPI(ctx, orgID); berr != nil {
+		log.Printf("[github-app] cutover-preflight: backfill installations for org %s: %v (using current mirror)", orgID, berr)
+	}
+
 	insts, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
@@ -388,8 +416,11 @@ func (s *Server) handleGitHubAppCutoverPreflight(w http.ResponseWriter, r *http.
 		// partial union is fine for an inform-only preview.
 		reachable, err = s.appInstallationReposUnion(ctx, orgID, base, app, insts)
 		if err != nil {
+			// The detail (which can carry vault/keychain topology from the PEM
+			// read) goes to the log, not the response body.
+			log.Printf("[github-app] cutover-preflight: enumerate App repos for org %s: %v", orgID, err)
 			writeJSON(w, http.StatusBadGateway, map[string]string{
-				"error": "failed to enumerate App repositories: " + err.Error(),
+				"error": "failed to enumerate App repositories",
 			})
 			return
 		}
