@@ -110,7 +110,7 @@ func (s *teamGitHubReposStore) ListOrgReposWithTeamsSystem(ctx context.Context, 
 
 // scanTrackedRepoTeams collapses (owner, repo, team_name) rows ordered by
 // (owner, repo, team_name) into one TrackedRepoTeams per repo with its team
-// list. Shared by the SQLite and Postgres impls.
+// list.
 func scanTrackedRepoTeams(rows *sql.Rows) ([]domain.TrackedRepoTeams, error) {
 	out := []domain.TrackedRepoTeams{}
 	for rows.Next() {
