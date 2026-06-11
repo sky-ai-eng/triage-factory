@@ -33,6 +33,7 @@ import {
   GitHubModeStep,
   GitHubAccountTypeStep,
   GitHubAppStep,
+  GitHubAppInstallStep,
   GitHubPatStep,
   GitHubCloneStep,
   DEFAULT_GITHUB_URL,
@@ -54,7 +55,7 @@ import { UserIdentityStep } from './UserIdentityStep'
 import { JiraUserAccessStep } from './JiraUserAccessStep'
 import { captureGitHubIdentityPat } from '../../lib/githubIdentity'
 import { captureJiraIdentityPat } from '../../lib/jiraIdentity'
-import { getGitHubAppStatus } from '../../lib/githubApp'
+import { getGitHubAppStatus, refreshGitHubAppInstallations } from '../../lib/githubApp'
 import { apiJSON } from '../../lib/apiClient'
 import type { GitHubIdentityStatus, JiraIdentityStatus } from '../../types'
 import PollerTimingGroup from '../settings/PollerTimingGroup'
@@ -90,6 +91,8 @@ export const initialWizardState = (): WizardState => ({
   githubUrlConfirmed: false,
   githubAccessTab: null,
   githubAppOwnerType: 'user',
+  githubAppInstalled: false,
+  githubAppInstallCount: 0,
   isLocal: false,
   jiraConnected: false,
   jiraUrlConfirmed: false,
@@ -358,17 +361,76 @@ const connectedSummary = (s: WizardState) =>
 // Step · GitHub App (mandatory, visible when App is the chosen method). The App
 // registration is GitHubAppPanel's external Register launch (a redirect can't
 // fold into Continue), so persist is a no-op — Continue just advances once the
-// App is registered+installed (github_ready), which validate gates.
+// App is registered (github_ready, which registration alone flips), which
+// validate gates. Installation is the NEXT step (githubAppInstallStep), split
+// out so a registered-but-uninstalled App can't sail past into the repo picker.
+// The render passes returnTo='setup' so the post-registration callback lands
+// back on /setup, resuming on the install step rather than teleporting ahead.
 const githubAppStep: WizardStep = {
   id: 'org-github-app',
   section: 'org',
   title: 'GitHub App',
   visible: (s) => s.githubAccessTab === 'app',
   isComplete: (s) => s.githubReady,
-  validate: (s) => (s.githubReady ? null : 'Register and install your GitHub App to continue.'),
+  validate: (s) => (s.githubReady ? null : 'Register your GitHub App to continue.'),
   persist: async () => {},
   collapsedSummary: connectedSummary,
-  render: (ctx) => <GitHubAppStep {...ctx} />,
+  render: (ctx) => <GitHubAppStep {...ctx} returnTo="setup" />,
+}
+
+// loadGitHubAppInstall seeds the install step's gate from the live installation
+// mirror: githubAppInstalled / githubAppInstallCount come straight off the App
+// status, so a returning, already-installed org resumes past the step. Best-
+// effort and self-contained — a missing orgId or a failed read resolves to {}
+// (the step keeps its "not installed" default), since its persist re-verifies
+// against the refresh endpoint regardless. An org with no App reads zero
+// installations, which is the same "not installed" default and harmless on the
+// PAT path where the step is invisible anyway.
+export async function loadGitHubAppInstall(ctx: LoadContext): Promise<Partial<WizardState>> {
+  if (!ctx.orgId) return {}
+  try {
+    const status = await getGitHubAppStatus(ctx.orgId)
+    const n = status.installations.length
+    return { githubAppInstalled: n > 0, githubAppInstallCount: n }
+  } catch {
+    return {}
+  }
+}
+
+// Step · Install the App (mandatory, visible when App is the chosen method).
+// Splits "the App is registered" (the prior step) from "the App is actually
+// installed somewhere" — the gate that was missing, which let users sail past a
+// registered-but-uninstalled App into the repo picker that then dead-ends.
+// Continue is refresh-then-verify: it reconciles the installation mirror against
+// GitHub (the refresh endpoint, which is the authoritative discovery path in
+// local mode where webhooks never arrive) and only advances when ≥1 installation
+// comes back, throwing inline otherwise so the wizard stays on the step. An
+// already-installed step short-circuits (no needless GitHub round trip), mirroring
+// the PAT/Jira access steps.
+const githubAppInstallStep: WizardStep = {
+  id: 'org-github-app-install',
+  section: 'org',
+  title: 'Install the App',
+  visible: (s) => s.githubAccessTab === 'app',
+  load: loadGitHubAppInstall,
+  isComplete: (s) => s.githubAppInstalled,
+  persist: async ({ state, orgId, patch }) => {
+    if (state.githubAppInstalled) return
+    if (!orgId) throw new Error('No organization context.')
+    const status = await refreshGitHubAppInstallations(orgId)
+    const n = status.installations.length
+    if (n === 0) {
+      throw new Error(
+        "We can't see the App installed on any account yet — install it on GitHub, then continue.",
+      )
+    }
+    patch({ githubAppInstalled: true, githubAppInstallCount: n })
+  },
+  collapsedSummary: (s) =>
+    s.githubAppInstalled
+      ? `Installed on ${s.githubAppInstallCount} account${s.githubAppInstallCount === 1 ? '' : 's'}`
+      : 'Not installed',
+  render: (ctx) => <GitHubAppInstallStep {...ctx} />,
 }
 
 // Step · Personal access token (mandatory, visible when PAT is the chosen
@@ -871,6 +933,7 @@ export const WIZARD_STEPS: WizardStep[] = [
   githubModeStep,
   githubAccountStep,
   githubAppStep,
+  githubAppInstallStep,
   githubPatStep,
   githubCloneStep,
   githubPollerStep,

@@ -41,6 +41,21 @@ export async function getGitHubAppStatus(orgId: string): Promise<GitHubAppStatus
   return (await res.json()) as GitHubAppStatus
 }
 
+// refreshGitHubAppInstallations reconciles the org's App installation mirror
+// against GitHub on demand (TFAC-324's POST endpoint) and returns the refreshed
+// status. This is the authoritative install-discovery path in local mode, where
+// webhook deliveries never reach the NAT'd host — a plain getGitHubAppStatus
+// reads a mirror a brand-new install hasn't touched yet, so the wizard's install
+// step and Settings' "Check installation" action POST here to actually find it.
+export async function refreshGitHubAppInstallations(orgId: string): Promise<GitHubAppStatus> {
+  const res = await fetch(
+    `/api/orgs/${encodeURIComponent(orgId)}/github-app/installations/refresh`,
+    { method: 'POST' },
+  )
+  if (!res.ok) throw new Error(await readError(res, 'Failed to refresh GitHub App installations'))
+  return (await res.json()) as GitHubAppStatus
+}
+
 export async function getGitHubAppInstallURL(orgId: string): Promise<string> {
   const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github-app/install-url`)
   if (!res.ok) throw new Error(await readError(res, 'Failed to load install URL'))
@@ -72,14 +87,18 @@ function isHttpUrl(url: string): boolean {
 // page then renders the manifest form under its own per-response CSP
 // (scoped to the org's GitHub host) and does the cross-origin POST when
 // the user clicks "Continue to GitHub". GitHub redirects back to the
-// callback, landing the browser on Settings with #github-app.
+// callback, which lands the browser back where registration was launched
+// from: `return_to` ('setup' from the wizard, 'settings' from Settings) is
+// threaded through the signed state so the user resumes where they left off
+// rather than always being dropped on Settings.
 export function startGitHubAppRegistration(
   orgId: string,
-  payload: { owner_type: 'user' | 'org'; owner_login: string },
+  payload: { owner_type: 'user' | 'org'; owner_login: string; return_to: 'setup' | 'settings' },
 ): void {
   const params = new URLSearchParams({
     owner_type: payload.owner_type,
     owner_login: payload.owner_login,
+    return_to: payload.return_to,
   })
   window.location.assign(
     `/api/orgs/${encodeURIComponent(orgId)}/github-app/register/launch?${params.toString()}`,

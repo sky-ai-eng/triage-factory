@@ -23,6 +23,8 @@
 
 import GitHubAccessGroup from '../settings/GitHubAccessGroup'
 import GitHubAppPanel from '../settings/GitHubAppPanel'
+import { GitHubAppInstallView } from '../settings/GitHubAppInstallView'
+import { useGitHubAppInstall } from '../../hooks/useGitHubAppInstall'
 import { UrlField, ChoiceCards } from './parts'
 import type { StepContext, GitHubAccessMode } from './types'
 
@@ -141,14 +143,57 @@ export function GitHubAccountTypeStep({ state, patch, advance }: StepContext) {
 }
 
 // GitHubAppStep body — the GitHub App registration (GitHubAppPanel owns the
-// external Register launch + install-status polling). The owner type is
-// controlled from the prior account-type step, so the panel hides its own
-// toggle.
-export function GitHubAppStep({ orgId, state }: StepContext) {
+// external Register launch). The owner type is controlled from the prior
+// account-type step, so the panel hides its own toggle. `returnTo` is passed by
+// the render site, not carried on StepContext: the wizard passes 'setup' (so the
+// post-registration redirect lands back on /setup at the install step), while
+// the Settings reuse passes 'settings'. Installation itself is the NEXT step
+// (GitHubAppInstallStep) — the panel no longer owns an install affordance.
+export function GitHubAppStep({
+  orgId,
+  state,
+  returnTo,
+}: StepContext & { returnTo: 'setup' | 'settings' }) {
   return orgId ? (
-    <GitHubAppPanel orgId={orgId} showHeading={false} bare ownerType={state.githubAppOwnerType} />
+    <GitHubAppPanel
+      orgId={orgId}
+      showHeading={false}
+      bare
+      ownerType={state.githubAppOwnerType}
+      returnTo={returnTo}
+    />
   ) : (
     <p className="text-[12px] italic text-text-tertiary">Resolving your workspace…</p>
+  )
+}
+
+// GitHubAppInstallStep body — the gated "Install the App" step. The App is
+// registered by the prior step; here the user installs it on GitHub (the
+// deep-link + the accounts it's already installed on come from
+// useGitHubAppInstall, which refetches on focus so returning from the install
+// tab updates the list). The step's Continue (steps.tsx) is refresh-then-verify
+// — it reconciles the installation mirror and only advances once GitHub reports
+// an installation — so this body carries no action of its own.
+export function GitHubAppInstallStep({ orgId }: StepContext) {
+  // Hook called unconditionally (stable hook order), then branch on orgId.
+  const { status, installUrl } = useGitHubAppInstall(orgId)
+  if (!orgId) {
+    return <p className="text-[12px] italic text-text-tertiary">Resolving your workspace…</p>
+  }
+  return (
+    <div className="space-y-5">
+      <div className="space-y-1.5">
+        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+          Install the App
+        </h2>
+        <p className="text-[13px] leading-relaxed text-text-tertiary">
+          The App is registered, but GitHub only grants repository access once it&rsquo;s installed.
+          Install it on your account or organization, choose all or selected repositories, then come
+          back and continue — we&rsquo;ll verify the installation before moving on.
+        </p>
+      </div>
+      <GitHubAppInstallView installations={status?.installations ?? []} installUrl={installUrl} />
+    </div>
   )
 }
 

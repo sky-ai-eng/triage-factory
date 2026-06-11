@@ -112,7 +112,7 @@ func isPubliclyReachable(rawURL string) bool {
 // Returns errOrgAppExists if the org already has an App registered,
 // errOrgNotFound if the org row is missing, or errInvalidGitHubBase if
 // the org's configured GitHub base URL isn't a valid http(s) origin.
-func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, ownerType, ownerLogin string) (manifestPostURL, manifestJSON, ghWebOrigin string, err error) {
+func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, ownerType, ownerLogin, returnTo string) (manifestPostURL, manifestJSON, ghWebOrigin string, err error) {
 	var existing *domain.OrgGitHubApp
 	var org *domain.Org
 	var orgSettings domain.OrgSettings
@@ -231,6 +231,7 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 	st := appRegisterState{
 		OrgID:     orgID,
 		OwnerType: ownerType,
+		ReturnTo:  returnTo,
 		ExpiresAt: timeNow().Add(10 * time.Minute).Unix(),
 	}
 	signed, err := st.sign(s.deployCfg.hmacKey)
@@ -322,7 +323,17 @@ func (s *Server) handleGitHubAppRegisterLaunch(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	manifestPostURL, manifestJSON, ghWebOrigin, err := s.buildManifestAndState(r.Context(), orgID, userID, ownerType, ownerLogin)
+	// return_to records the surface registration was launched from so the
+	// callback can send the user back there. Validate against the allowlist,
+	// defaulting to "settings" (the historical assumption) for any other or
+	// absent value — the callback's redirect is the only thing it drives, so an
+	// unknown value degrades to the safe Settings landing rather than erroring.
+	returnTo := r.URL.Query().Get("return_to")
+	if returnTo != "setup" && returnTo != "settings" {
+		returnTo = "settings"
+	}
+
+	manifestPostURL, manifestJSON, ghWebOrigin, err := s.buildManifestAndState(r.Context(), orgID, userID, ownerType, ownerLogin, returnTo)
 	if err != nil {
 		switch {
 		case errors.Is(err, errOrgAppExists):
@@ -551,6 +562,16 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 
 	log.Printf("[github-app] registered app_id=%s slug=%s for org=%s", appIDStr, convResp.Slug, orgID)
 
+	// Land the user back where they launched registration from. The wizard
+	// (rt=setup) returns to /setup, which resumes on the now-current "Install
+	// the App" step rather than teleporting past it into team config; a
+	// Settings launch (the default) returns to the GitHub panel. /setup is a
+	// live route in both local and multi mode, so no mode branch is needed —
+	// only the Settings path differs per mode (settingsRedirectPath).
+	if state.ReturnTo == "setup" {
+		http.Redirect(w, r, "/setup", http.StatusFound)
+		return
+	}
 	http.Redirect(w, r, settingsRedirectPath(orgID)+"#github-app", http.StatusFound)
 }
 
@@ -617,6 +638,12 @@ type appRegisterState struct {
 	// source of truth at callback time, not a re-supplied query param, so it
 	// can't be tampered with mid-flow.
 	OwnerType string `json:"ot"`
+	// ReturnTo ("setup"/"settings") records where registration was launched
+	// from so the callback redirects the user back there instead of always
+	// assuming Settings. Carried in the signed state — the source of truth at
+	// callback time — and omitted (defaulting to the Settings redirect) for a
+	// Settings-launched flow, which keeps older signed tokens valid.
+	ReturnTo  string `json:"rt,omitempty"`
 	ExpiresAt int64  `json:"exp"`
 }
 

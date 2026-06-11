@@ -136,7 +136,16 @@ export default function RepoPickerModal({
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
         console.error('Failed to fetch repos:', data.error || `HTTP ${res.status}`)
-        setError('Failed to fetch repositories')
+        // TFAC-324's distinct 400: an active App installed on zero accounts (and
+        // no PAT to borrow) dead-ends the picker here. Point the user at the
+        // install affordance rather than the generic "couldn't fetch" copy.
+        if (data.error === 'GitHub App is not installed on any account') {
+          setError(
+            'Your GitHub App isn’t installed on any account yet. Install it from the “Install the App” step (or the App installation section in Settings), then try again.',
+          )
+        } else {
+          setError('Failed to fetch repositories')
+        }
         return
       }
       const data: GitHubRepo[] = await res.json()

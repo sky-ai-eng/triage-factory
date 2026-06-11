@@ -81,6 +81,15 @@ export interface WizardState {
   // The GitHub App owner type (personal vs org), chosen in its own step when App
   // is the method; fed into GitHubAppPanel's registration. Defaults to 'user'.
   githubAppOwnerType: 'user' | 'org'
+  // Whether the org's registered App is installed on ≥1 GitHub account — the
+  // gate for the "Install the App" step, distinct from githubReady (which
+  // registration alone satisfies). Seeded from the installation mirror on load
+  // and re-verified by the step's refresh-then-verify Continue. Default false.
+  githubAppInstalled: boolean
+  // How many accounts the App is installed on — drives the install step's
+  // collapsed summary ("Installed on N account(s)"). Kept in lockstep with
+  // githubAppInstalled. Default 0.
+  githubAppInstallCount: number
   // Whether the wizard is running in local mode — seeded from the load context.
   // Gates the clone-protocol step (local-only; multi hardwires HTTPS).
   isLocal: boolean

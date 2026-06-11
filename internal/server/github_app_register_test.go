@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -190,7 +191,7 @@ func TestGitHubAppRegister_LocalManifest_PlaceholderHookAndNoInstallationEvents(
 	s.SetDeployConfig("http://localhost:3000", key)
 
 	_, manifestJSON, _, err := s.buildManifestAndState(context.Background(),
-		runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "user", "testuser")
+		runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "user", "testuser", "settings")
 	if err != nil {
 		t.Fatalf("buildManifestAndState: %v", err)
 	}
@@ -683,6 +684,146 @@ func TestSettingsRedirectPath(t *testing.T) {
 		runmode.SetForTest(t, runmode.ModeMulti)
 		if got := settingsRedirectPath("org-x"); got != "/orgs/org-x/settings" {
 			t.Errorf("multi redirect = %q, want /orgs/org-x/settings", got)
+		}
+	})
+}
+
+// extractLaunchStateParam pulls the signed state token out of the launch
+// bounce page's form action (action="…?state=<token>"). The token charset
+// (base64url plus '.') is both URL- and HTML-safe, so it survives template
+// rendering verbatim between "?state=" and the closing quote.
+func extractLaunchStateParam(t *testing.T, body string) string {
+	t.Helper()
+	const marker = "?state="
+	i := strings.Index(body, marker)
+	if i < 0 {
+		t.Fatalf("launch page has no ?state= param: %s", body)
+	}
+	rest := body[i+len(marker):]
+	end := strings.IndexByte(rest, '"')
+	if end < 0 {
+		t.Fatalf("launch page action attr is unterminated: %s", body)
+	}
+	raw, err := url.QueryUnescape(rest[:end])
+	if err != nil {
+		t.Fatalf("unescape state: %v", err)
+	}
+	return raw
+}
+
+// TestGitHubAppRegister_Launch_ReturnTo pins the launch handler's return_to
+// validation: a recognized value ("setup"/"settings") is carried into the
+// signed state verbatim, and any other or absent value defaults to "settings"
+// (so the callback's redirect degrades to the safe Settings landing rather
+// than erroring). Decodes the signed state out of the bounce page to assert
+// the value the callback will actually read.
+func TestGitHubAppRegister_Launch_ReturnTo(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	var key [32]byte
+	if _, err := rand.Read(key[:]); err != nil {
+		t.Fatalf("seed key: %v", err)
+	}
+	s.SetDeployConfig("http://localhost:3000", key)
+
+	cases := []struct {
+		name   string
+		query  string
+		wantRT string
+	}{
+		{"setup", "&return_to=setup", "setup"},
+		{"settings", "&return_to=settings", "settings"},
+		{"bogus_defaults_to_settings", "&return_to=team-config", "settings"},
+		{"absent_defaults_to_settings", "", "settings"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doJSON(t, s, "GET",
+				"/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/register/launch?owner_type=user&owner_login=testuser"+tc.query, nil)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
+			}
+			st, err := parseAppRegisterState(extractLaunchStateParam(t, rec.Body.String()), key)
+			if err != nil {
+				t.Fatalf("parse state: %v", err)
+			}
+			if st.ReturnTo != tc.wantRT {
+				t.Errorf("ReturnTo=%q, want %q", st.ReturnTo, tc.wantRT)
+			}
+		})
+	}
+}
+
+// TestGitHubAppRegister_Callback_ReturnToRedirect pins the callback's
+// post-registration redirect: a signed state carrying rt=setup lands the
+// browser on /setup (so the wizard resumes on the "Install the App" step
+// instead of teleporting past it), while a Settings-launched flow (no rt)
+// returns to the org's Settings GitHub panel.
+func TestGitHubAppRegister_Callback_ReturnToRedirect(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	rig := newAuthRig(t)
+
+	ghStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{
+			"id": 24680,
+			"slug": "tf-returnto",
+			"client_id": "Iv1.rt",
+			"client_secret": "secret",
+			"pem": "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----",
+			"webhook_secret": "whsec"
+		}`)
+	}))
+	t.Cleanup(ghStub.Close)
+
+	// driveOnce registers an App for a fresh alice-owned org, signing the state
+	// with the given ReturnTo, and returns the callback's redirect Location plus
+	// the org id. A fresh org per call sidesteps the one-App-per-org conflict.
+	driveOnce := func(t *testing.T, name, returnTo string) (loc, orgID string) {
+		t.Helper()
+		alice := rig.seedUser()
+		org, _ := rig.seedOrg(alice, name)
+		resp, _ := rig.driveCallback(alice)
+		sid := rig.sidFromResp(resp)
+		if _, err := rig.h.AdminDB.Exec(`
+			INSERT INTO org_settings (org_id, github_base_url)
+			VALUES ($1, $2)
+			ON CONFLICT (org_id) DO UPDATE SET github_base_url = $2
+		`, org.String(), ghStub.URL); err != nil {
+			t.Fatalf("seed org_settings: %v", err)
+		}
+		state := appRegisterState{
+			OrgID:     org.String(),
+			ReturnTo:  returnTo,
+			ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
+		}
+		signed, err := state.sign(rig.srv.deployCfg.hmacKey)
+		if err != nil {
+			t.Fatalf("sign state: %v", err)
+		}
+		req := httptest.NewRequest("GET",
+			"/api/orgs/"+org.String()+"/github-app/register/callback?code=c&state="+signed, nil)
+		req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: sid})
+		rec := httptest.NewRecorder()
+		rig.srv.mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusFound {
+			t.Fatalf("callback status=%d body=%s, want 302", rec.Code, rec.Body.String())
+		}
+		return rec.Header().Get("Location"), org.String()
+	}
+
+	t.Run("rt_setup_lands_on_setup", func(t *testing.T) {
+		loc, _ := driveOnce(t, "rt-setup-org", "setup")
+		if loc != "/setup" {
+			t.Errorf("redirect=%q, want /setup", loc)
+		}
+	})
+
+	t.Run("default_lands_on_settings", func(t *testing.T) {
+		loc, orgID := driveOnce(t, "rt-settings-org", "")
+		if want := "/orgs/" + orgID + "/settings#github-app"; loc != want {
+			t.Errorf("redirect=%q, want %q", loc, want)
 		}
 	})
 }

@@ -210,7 +210,10 @@ export default function GitHubAccessGroup({
   return (
     <>
       {bare ? inner : <Section>{inner}</Section>}
-      {showAppPanel && orgId && <GitHubAppPanel orgId={orgId} />}
+      {/* The combined access group is a Settings-context surface (the wizard
+          drives App vs PAT as separate steps with showAppPanel false), so the
+          panel's post-registration callback returns to Settings. */}
+      {showAppPanel && orgId && <GitHubAppPanel orgId={orgId} returnTo="settings" />}
     </>
   )
 }

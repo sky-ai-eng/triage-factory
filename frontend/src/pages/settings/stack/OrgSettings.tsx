@@ -45,6 +45,9 @@ import JiraAccessGroup from '../JiraAccessGroup'
 import TeamManagementSection from '../../../components/TeamManagementSection'
 import { saveOrgConfig, type OrgConfigForm } from '../orgConfig'
 import { connectJira } from '../jiraConnect'
+import { refreshGitHubAppInstallations } from '../../../lib/githubApp'
+import { GitHubAppInstallView } from '../GitHubAppInstallView'
+import { useGitHubAppInstall } from '../../../hooks/useGitHubAppInstall'
 import SettingsSection from './SettingsSection'
 
 const TIER_LABELS: Record<string, string> = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus' }
@@ -240,9 +243,14 @@ export default function OrgSettings({
           title="GitHub App"
           summary={draft.githubReady ? 'Connected' : 'Not registered'}
         >
-          <GitHubAppStep {...ctx} />
+          <GitHubAppStep {...ctx} returnTo="settings" />
         </SettingsSection>
       )}
+
+      {/* ── App installation (App only; the install affordance + verify) ──
+          Mirrors the wizard's install step so the PAT→App switch path, which
+          never sees the wizard, still has somewhere to install + verify. */}
+      {isApp && orgId && <AppInstallationSection orgId={orgId} />}
 
       {/* ── Personal access token (PAT only) ── */}
       {isPat && (
@@ -463,6 +471,61 @@ export default function OrgSettings({
         <DangerZone />
       </SettingsSection>
     </div>
+  )
+}
+
+// AppInstallationSection — the Settings mirror of the wizard's "Install the App"
+// step. Required because a user can configure a PAT first, use the product, then
+// switch to an App later — a path that never sees the wizard, so the install
+// affordance + verify must exist here too. Self-contained (owns its status fetch
+// via useGitHubAppInstall); "Check installation" runs the same
+// refresh-then-verify the wizard's Continue does — reconcile the mirror against
+// GitHub, report the result, and fold the reconciled installations back into the
+// view and the collapsed summary.
+function AppInstallationSection({ orgId }: { orgId: string }) {
+  const { status, setStatus, installUrl } = useGitHubAppInstall(orgId)
+  const [checking, setChecking] = useState(false)
+  const installations = status?.installations ?? []
+  const n = installations.length
+  const summary = n > 0 ? `Installed on ${n} account${n === 1 ? '' : 's'}` : 'Not installed'
+
+  const check = async () => {
+    if (checking) return
+    setChecking(true)
+    try {
+      const fresh = await refreshGitHubAppInstallations(orgId)
+      setStatus(fresh)
+      const count = fresh.installations.length
+      if (count === 0) {
+        toast.error(
+          "We can't see the App installed on any account yet — install it on GitHub, then check again.",
+        )
+      } else {
+        toast.success(`Installed on ${count} account${count === 1 ? '' : 's'}`)
+      }
+    } catch (err) {
+      toast.error((err as Error).message)
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  return (
+    <SettingsSection title="App installation" summary={summary}>
+      <p className="text-[13px] leading-relaxed text-text-tertiary">
+        GitHub only grants repository access once the App is installed. Install it on your account
+        or organization, then check the installation here.
+      </p>
+      <GitHubAppInstallView installations={installations} installUrl={installUrl} />
+      <button
+        type="button"
+        onClick={() => void check()}
+        disabled={checking}
+        className="rounded-xl border border-accent/20 px-4 py-2 text-[13px] text-accent transition-colors hover:border-accent/30 hover:text-accent/80 disabled:opacity-40"
+      >
+        {checking ? 'Checking…' : 'Check installation'}
+      </button>
+    </SettingsSection>
   )
 }
 

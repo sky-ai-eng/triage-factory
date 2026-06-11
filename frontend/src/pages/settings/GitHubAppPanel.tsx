@@ -1,9 +1,7 @@
 import { useEffect, useState } from 'react'
-import { ChevronDown, ChevronRight, ExternalLink } from 'lucide-react'
-import { toast } from '../../components/Toast/toastStore'
+import { ChevronDown, ChevronRight } from 'lucide-react'
 import {
   getGitHubAppStatus,
-  getGitHubAppInstallURL,
   startGitHubAppRegistration,
   type GitHubAppStatus,
 } from '../../lib/githubApp'
@@ -20,13 +18,14 @@ import {
  * GitHubAppPanel is the org/workspace-scope "GitHub access" block — the
  * App-registration alternative to a PAT. A registered App polls under its
  * own bot identity and supports multiple installations. It's self-contained
- * (owns its load/error/register/install state) so it drops identically into
- * the Settings workspace tab and the org-create configure step.
+ * (owns its load/error/register state) so it drops identically into the
+ * Settings workspace tab and the org-create configure step.
  *
- * The manifest-callback lands the browser back here with #github-app, so
- * the panel refetches on window focus too: returning focus after
- * "Install on another account" opened GitHub in a new tab is the cue that a
- * fresh installation may exist.
+ * Installation lives elsewhere now — the wizard's "Install the App" step and
+ * Settings' "App installation" section own that affordance (one place per
+ * surface), so the panel is registration plus the connected/registered display
+ * only. It still refetches on window focus, which keeps the connected display's
+ * installation count current after an install happens in another tab.
  *
  * orgId is null in multi mode until the active org resolves — stay loading
  * rather than fetch the wrong org. A focus-refetch failure keeps any
@@ -37,6 +36,7 @@ export default function GitHubAppPanel({
   showHeading = true,
   bare = false,
   ownerType: ownerTypeProp,
+  returnTo,
 }: {
   orgId: string | null
   // Suppressed in the setup wizard, which already labels the step "GitHub
@@ -51,6 +51,11 @@ export default function GitHubAppPanel({
   // in its own prior step. Absent (Settings) ⇒ the toggle is shown and the
   // choice is internal.
   ownerType?: 'user' | 'org'
+  // Where the post-registration callback should land the browser: 'setup' (the
+  // wizard resumes on the install step) or 'settings' (back to this panel).
+  // Required so every render site is explicit — a wizard reuse that forgot it
+  // would silently drop the user on Settings mid-setup.
+  returnTo: 'setup' | 'settings'
 }) {
   const fieldCls = bare ? glassInputClass : inputClass
   // Discriminated so the panel can tell "still resolving" / "load failed"
@@ -102,17 +107,8 @@ export default function GitHubAppPanel({
     startGitHubAppRegistration(orgId, {
       owner_type: ghAppOwnerType,
       owner_login: ghAppOwnerLogin.trim(),
+      return_to: returnTo,
     })
-  }
-
-  const openInstallOnAccount = async () => {
-    if (!orgId) return
-    try {
-      const url = await getGitHubAppInstallURL(orgId)
-      window.open(url, '_blank', 'noopener,noreferrer')
-    } catch (err) {
-      toast.error((err as Error).message)
-    }
   }
 
   const status = ghAppState.kind === 'loaded' ? ghAppState.status : null
@@ -199,40 +195,6 @@ export default function GitHubAppPanel({
                     ))}
                   </div>
                 )}
-              </div>
-            )}
-
-            {status.installations.length === 0 ? (
-              <div className="space-y-2">
-                <button
-                  type="button"
-                  onClick={openInstallOnAccount}
-                  className="inline-flex items-center gap-1.5 text-[12px] text-accent hover:text-accent/80 border border-accent/20 rounded-xl px-4 py-2 transition-colors"
-                >
-                  <ExternalLink size={13} />
-                  Install the App on your repositories
-                </button>
-                <p className="text-[11px] text-text-tertiary leading-relaxed">
-                  Registering created the App, but GitHub doesn&rsquo;t grant repo access until
-                  it&rsquo;s installed. Install it to choose which repositories Triage Factory can
-                  see — pick &ldquo;All&rdquo; for parity with PAT behavior, or specific repos for
-                  tighter scope. This choice does not inherit from your PAT.
-                </p>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                <button
-                  type="button"
-                  onClick={openInstallOnAccount}
-                  className="inline-flex items-center gap-1.5 text-[12px] text-accent hover:text-accent/80 border border-accent/20 rounded-xl px-4 py-2 transition-colors"
-                >
-                  <ExternalLink size={13} />
-                  Install on another GitHub account
-                </button>
-                <p className="text-[11px] text-text-tertiary leading-relaxed">
-                  GitHub will ask which repositories to grant. This choice does not inherit from
-                  your PAT.
-                </p>
               </div>
             )}
           </div>

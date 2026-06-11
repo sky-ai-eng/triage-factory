@@ -153,7 +153,7 @@ func TestGitHubConnect_ManifestIncludesConnectCallback(t *testing.T) {
 	s.SetDeployConfig("http://localhost:3000", key)
 
 	org := runmode.LocalDefaultOrgID
-	_, manifestJSON, _, err := s.buildManifestAndState(context.Background(), org, runmode.LocalDefaultUserID, "user", "testuser")
+	_, manifestJSON, _, err := s.buildManifestAndState(context.Background(), org, runmode.LocalDefaultUserID, "user", "testuser", "settings")
 	if err != nil {
 		t.Fatalf("buildManifestAndState: %v", err)
 	}
