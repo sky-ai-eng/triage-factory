@@ -311,43 +311,45 @@ func (s *Server) handleGitHubAppRegisterLaunch(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// return_to records the surface registration was launched from so both the
+	// callback redirect and the error page's back-link can send the user back
+	// there. Parse it BEFORE the owner-field validations so even those early
+	// failures return a wizard launcher to /setup rather than dropping them on
+	// Settings. Validate against the allowlist, defaulting to "settings" (the
+	// historical assumption) for any other or absent value — an unknown value
+	// degrades to the safe Settings landing rather than erroring.
+	returnTo := r.URL.Query().Get("return_to")
+	if returnTo != "setup" && returnTo != "settings" {
+		returnTo = "settings"
+	}
+
 	ownerType := r.URL.Query().Get("owner_type")
 	ownerLogin := r.URL.Query().Get("owner_login")
 	if ownerType == "" || ownerLogin == "" {
-		s.renderLaunchError(w, http.StatusBadRequest, orgID,
+		s.renderLaunchError(w, http.StatusBadRequest, orgID, returnTo,
 			"Choose a GitHub account or organization before continuing.")
 		return
 	}
 	if ownerType != "user" && ownerType != "org" {
-		s.renderLaunchError(w, http.StatusBadRequest, orgID, "Invalid GitHub owner type.")
+		s.renderLaunchError(w, http.StatusBadRequest, orgID, returnTo, "Invalid GitHub owner type.")
 		return
-	}
-
-	// return_to records the surface registration was launched from so the
-	// callback can send the user back there. Validate against the allowlist,
-	// defaulting to "settings" (the historical assumption) for any other or
-	// absent value — the callback's redirect is the only thing it drives, so an
-	// unknown value degrades to the safe Settings landing rather than erroring.
-	returnTo := r.URL.Query().Get("return_to")
-	if returnTo != "setup" && returnTo != "settings" {
-		returnTo = "settings"
 	}
 
 	manifestPostURL, manifestJSON, ghWebOrigin, err := s.buildManifestAndState(r.Context(), orgID, userID, ownerType, ownerLogin, returnTo)
 	if err != nil {
 		switch {
 		case errors.Is(err, errOrgAppExists):
-			s.renderLaunchError(w, http.StatusConflict, orgID,
+			s.renderLaunchError(w, http.StatusConflict, orgID, returnTo,
 				"This workspace already has a GitHub App registered. Remove it before registering another.")
 		case errors.Is(err, errOrgNotFound):
-			s.renderLaunchError(w, http.StatusNotFound, orgID, "Workspace not found.")
+			s.renderLaunchError(w, http.StatusNotFound, orgID, returnTo, "Workspace not found.")
 		case errors.Is(err, errInvalidGitHubBase):
 			log.Printf("[github-app] launch: invalid github base url for org %s", orgID)
-			s.renderLaunchError(w, http.StatusInternalServerError, orgID,
+			s.renderLaunchError(w, http.StatusInternalServerError, orgID, returnTo,
 				"The configured GitHub base URL is invalid. Update it in Workspace Settings.")
 		default:
 			log.Printf("[github-app] launch: %v", err)
-			s.renderLaunchError(w, http.StatusInternalServerError, orgID,
+			s.renderLaunchError(w, http.StatusInternalServerError, orgID, returnTo,
 				"Something went wrong preparing the registration. Please try again.")
 		}
 		return
@@ -374,16 +376,18 @@ func (s *Server) handleGitHubAppRegisterLaunch(w http.ResponseWriter, r *http.Re
 }
 
 // registerLaunchErrorData feeds the launch-failure page: a human message
-// and a link back to the Settings GitHub panel.
+// and a back-link to where registration was launched from (the wizard's
+// /setup or the Settings GitHub panel), with a matching label.
 type registerLaunchErrorData struct {
-	Message     string
-	SettingsURL string
+	Message   string
+	BackURL   string
+	BackLabel string
 }
 
 // registerLaunchErrorTemplate renders a small failure page. The launch
 // endpoint is reached via a top-level navigation, so a JSON body would
-// dead-end the tab; this states what went wrong and links back to
-// Settings. No form on the page, so its CSP needs no form-action.
+// dead-end the tab; this states what went wrong and links back to wherever
+// the user came from. No form on the page, so its CSP needs no form-action.
 var registerLaunchErrorTemplate = template.Must(template.New("ghapp-launch-error").Parse(`<!doctype html>
 <html lang="en">
 <head>
@@ -403,22 +407,32 @@ a:hover{text-decoration:underline}
 <div class="card">
 <h1>Couldn't start registration</h1>
 <p>{{.Message}}</p>
-<p><a href="{{.SettingsURL}}">&larr; Back to Settings</a></p>
+<p><a href="{{.BackURL}}">&larr; {{.BackLabel}}</a></p>
 </div>
 </body>
 </html>`))
 
 // renderLaunchError writes the failure page with a per-response CSP and
 // no-store. It overrides the global CSP the security-headers wrapper set.
-func (s *Server) renderLaunchError(w http.ResponseWriter, status int, orgID, msg string) {
+// returnTo mirrors the launch's return_to so the back-link returns the user to
+// where they started: "setup" → /setup, anything else (the default) → the
+// org's Settings GitHub panel.
+func (s *Server) renderLaunchError(w http.ResponseWriter, status int, orgID, returnTo, msg string) {
 	w.Header().Set("Content-Security-Policy",
 		"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
+	backURL := settingsRedirectPath(orgID) + "#github-app"
+	backLabel := "Back to Settings"
+	if returnTo == "setup" {
+		backURL = "/setup"
+		backLabel = "Back to setup"
+	}
 	if err := registerLaunchErrorTemplate.Execute(w, registerLaunchErrorData{
-		Message:     msg,
-		SettingsURL: settingsRedirectPath(orgID) + "#github-app",
+		Message:   msg,
+		BackURL:   backURL,
+		BackLabel: backLabel,
 	}); err != nil {
 		log.Printf("[github-app] render launch error page: %v", err)
 	}

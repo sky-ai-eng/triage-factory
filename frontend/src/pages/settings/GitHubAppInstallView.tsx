@@ -20,7 +20,7 @@ export function GitHubAppInstallView({
 }) {
   return (
     <div className="space-y-3">
-      {installUrl && (
+      {installUrl ? (
         <a
           href={installUrl}
           target="_blank"
@@ -30,6 +30,14 @@ export function GitHubAppInstallView({
           <ExternalLink size={13} />
           Install the App on GitHub
         </a>
+      ) : (
+        // installUrl is blank only when its fetch failed; without a fallback the
+        // view would render nothing actionable (no link, and no accounts yet on
+        // first run) — a silent dead-end. Point the user at GitHub directly.
+        <p className="text-[11px] leading-relaxed text-text-tertiary">
+          Couldn&rsquo;t load the install link. Open your GitHub App&rsquo;s page on GitHub to
+          install it, then continue.
+        </p>
       )}
       {installations.length > 0 && (
         <div className="space-y-1 pt-1">

@@ -76,9 +76,10 @@ func TestGitHubAppRegister_LocalMode_WithDeployConfig_Works(t *testing.T) {
 }
 
 // TestGitHubAppRegister_Launch_ErrorPageOnBadInput verifies a launch
-// failure renders a graceful HTML page (with a link back to Settings)
-// rather than a JSON dead-end — important because the user arrives via a
-// top-level navigation, not a fetch.
+// failure renders a graceful HTML page (with a back-link) rather than a JSON
+// dead-end — important because the user arrives via a top-level navigation, not
+// a fetch — and that the back-link honors return_to: a Settings launch (the
+// default) links back to Settings, a wizard launch back to /setup.
 func TestGitHubAppRegister_Launch_ErrorPageOnBadInput(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -88,17 +89,30 @@ func TestGitHubAppRegister_Launch_ErrorPageOnBadInput(t *testing.T) {
 	}
 	s.SetDeployConfig("http://localhost:3000", key)
 
-	// owner_login omitted.
-	rec := doJSON(t, s, "GET",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/register/launch?owner_type=user", nil)
+	base := "/api/orgs/" + runmode.LocalDefaultOrgID + "/github-app/register/launch?owner_type=user"
+
+	// owner_login omitted, no return_to → defaults to the Settings back-link.
+	rec := doJSON(t, s, "GET", base, nil)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d, want 400", rec.Code)
 	}
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Errorf("Content-Type=%q, want an HTML error page", ct)
 	}
-	if !strings.Contains(rec.Body.String(), "Back to Settings") {
-		t.Errorf("error page missing settings link: %s", rec.Body.String())
+	if body := rec.Body.String(); !strings.Contains(body, "Back to Settings") ||
+		!strings.Contains(body, `href="/settings#github-app"`) {
+		t.Errorf("default error page missing Settings back-link: %s", body)
+	}
+
+	// Same failure launched from the wizard (return_to=setup) → /setup back-link,
+	// so an early validation failure doesn't strand a wizard user on Settings.
+	recSetup := doJSON(t, s, "GET", base+"&return_to=setup", nil)
+	if recSetup.Code != http.StatusBadRequest {
+		t.Fatalf("setup status=%d, want 400", recSetup.Code)
+	}
+	if body := recSetup.Body.String(); !strings.Contains(body, "Back to setup") ||
+		!strings.Contains(body, `href="/setup"`) {
+		t.Errorf("setup error page missing /setup back-link: %s", body)
 	}
 }
 
@@ -252,6 +266,7 @@ func TestGitHubAppRegister_StateToken_RoundTrip(t *testing.T) {
 	st := appRegisterState{
 		OrgID:     "00000000-0000-0000-0000-000000000099",
 		OwnerType: "org",
+		ReturnTo:  "setup",
 		ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
 	}
 	signed, err := st.sign(key)
@@ -268,6 +283,9 @@ func TestGitHubAppRegister_StateToken_RoundTrip(t *testing.T) {
 	}
 	if parsed.OwnerType != st.OwnerType {
 		t.Errorf("owner_type = %q, want %q", parsed.OwnerType, st.OwnerType)
+	}
+	if parsed.ReturnTo != st.ReturnTo {
+		t.Errorf("return_to = %q, want %q", parsed.ReturnTo, st.ReturnTo)
 	}
 
 	t.Run("expired", func(t *testing.T) {
@@ -623,7 +641,10 @@ func TestGitHubAppRegister_Callback_HooklessNoWebhookSecret(t *testing.T) {
 	}
 
 	state := appRegisterState{
-		OrgID:     orgA.String(),
+		OrgID: orgA.String(),
+		// The production launch flow always signs a validated owner type, which
+		// the callback persists; set it so this token matches a real one.
+		OwnerType: "user",
 		ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
 	}
 	signed, err := state.sign(rig.srv.deployCfg.hmacKey)
