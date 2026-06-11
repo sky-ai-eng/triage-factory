@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -208,6 +209,33 @@ func TestHandleGitHubRepos_AppActiveZeroInstallations(t *testing.T) {
 	}
 	if want := "GitHub App is not installed on any account"; out["error"] != want {
 		t.Errorf("error=%q, want %q", out["error"], want)
+	}
+}
+
+// A failed installations read (transient DB/store error) leaves insts nil,
+// which must NOT be reported as "not installed" — that claim is only valid on a
+// positive read of zero installations. The handler degrades to the PAT path and
+// returns the generic "not configured" instead. Guards the regression where the
+// swallowed read error masqueraded as an empty install set.
+func TestHandleGitHubRepos_AppListInstallationsErrorNotReportedAsUninstalled(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	srv.githubApps = &fakeGitHubAppsStore{
+		app:     &domain.OrgGitHubApp{OrgID: runmode.LocalDefaultOrgID, AppID: "123", Slug: "acme-bot", Active: true},
+		listErr: errors.New("transient store failure"),
+	}
+
+	rec := doJSON(t, srv, http.MethodGet, "/api/github/repos", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("GET /api/github/repos = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	var out map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out["error"] != "GitHub not configured" {
+		t.Errorf("error=%q, want generic %q (a failed read must not report 'not installed')",
+			out["error"], "GitHub not configured")
 	}
 }
 

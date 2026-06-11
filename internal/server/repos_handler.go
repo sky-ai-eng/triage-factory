@@ -39,12 +39,20 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 	// by middleware); a read error degrades to the PAT path rather than
 	// blanking the picker.
 	var (
-		app   *domain.OrgGitHubApp
-		insts []domain.OrgGitHubAppInstallation
+		app      *domain.OrgGitHubApp
+		insts    []domain.OrgGitHubAppInstallation
+		instsErr error
 	)
 	if s.githubApps != nil {
 		app, _ = s.githubApps.GetForOrgSystem(r.Context(), orgID)
-		insts, _ = s.githubApps.ListInstallationsForOrgSystem(r.Context(), orgID)
+		insts, instsErr = s.githubApps.ListInstallationsForOrgSystem(r.Context(), orgID)
+		if instsErr != nil {
+			// Degrade to the PAT path (per above) but record it: a failed read
+			// leaves insts nil, which must not later masquerade as a positive
+			// "installed on zero accounts" below — and the silence is exactly
+			// the untraceability TFAC-324 is removing.
+			log.Printf("[repos] org %s: list installations failed, falling back to PAT path: %v", orgID, instsErr)
+		}
 	}
 
 	var repos []ghclient.UserRepo
@@ -85,12 +93,18 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 			// Surface that as its own 400 the picker can key install guidance
 			// off, instead of the generic "not configured" that reads as
 			// "add a PAT". This is the first-run dead-end TFAC-324 unblocks.
-			if app != nil && app.Active && len(insts) == 0 {
+			//
+			// instsErr == nil is load-bearing: only a *successful* read of zero
+			// installations means "not installed". A failed read also leaves
+			// insts empty, and reporting that as "not installed" would mislead
+			// on a transient store error — so it falls through to the generic
+			// message instead.
+			if app != nil && app.Active && instsErr == nil && len(insts) == 0 {
 				log.Printf("[repos] org %s: app registered + active but installed on zero accounts, and no PAT configured", orgID)
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub App is not installed on any account"})
 				return
 			}
-			log.Printf("[repos] org %s: GitHub not configured (no app installations and no PAT)", orgID)
+			log.Printf("[repos] org %s: GitHub not configured (no usable App installation and no PAT)", orgID)
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub not configured"})
 			return
 		}

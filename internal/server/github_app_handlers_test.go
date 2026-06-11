@@ -24,6 +24,7 @@ type fakeGitHubAppsStore struct {
 	db.GitHubAppsStore
 	app           *domain.OrgGitHubApp
 	insts         []domain.OrgGitHubAppInstallation
+	listErr       error
 	backfillErr   error
 	backfillCalls int
 }
@@ -38,7 +39,7 @@ func (f *fakeGitHubAppsStore) BackfillInstallationsFromAPI(context.Context, stri
 }
 
 func (f *fakeGitHubAppsStore) ListInstallationsForOrgSystem(context.Context, string) ([]domain.OrgGitHubAppInstallation, error) {
-	return f.insts, nil
+	return f.insts, f.listErr
 }
 
 // TestGitHubAppStatus_LocalMode_NoApp returns app:null + empty
