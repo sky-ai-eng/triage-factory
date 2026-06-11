@@ -419,7 +419,9 @@ func (l *LiveRun) readLoop(runCtx context.Context, cmd *exec.Cmd, stdout io.Read
 	}
 	l.mu.Unlock()
 
-	// Release the derived context's resources now the process is gone.
+	// Release the derived context now the process is gone. Idempotent: on the
+	// stream-error path above this already fired (to SIGKILL the group), so
+	// here it's a no-op; on the normal path this is the release.
 	l.cancel()
 
 	// Tear down the sandbox bring-up (sandbox + proxies + agenthost daemon +

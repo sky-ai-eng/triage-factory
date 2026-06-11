@@ -197,8 +197,11 @@ func TestIntegration_InteractiveSandbox_Interrupt(t *testing.T) {
 	}
 	defer func() { _ = lr.Close() }()
 
-	// Wait for the session id (emitted early), let the turn get underway,
-	// then interrupt mid-flight.
+	// Interrupt mid-flight, which means we can't wait on an assistant turn:
+	// the assistant message only flushes at stop_reason (the very turn-end
+	// we're pre-empting). So gate on the session id (emitted early in the
+	// stream) and give the turn a few seconds to get underway before the
+	// interrupt — same timing assumption as the non-sandbox smoke test.
 	waitSession(t, lr, 120*time.Second)
 	time.Sleep(3 * time.Second)
 
