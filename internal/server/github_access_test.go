@@ -491,6 +491,11 @@ func TestGitHubAppCutoverPreflight_Diff(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("cutover-preflight = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
+	// This GET reconciles the installation mirror, so its 200 body must not be
+	// cached (a cached preview would skip the reconcile).
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store (GET has a write side-effect)", cc)
+	}
 	var out struct {
 		Tracked   int `json:"tracked"`
 		Reachable int `json:"reachable"`

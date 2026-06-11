@@ -365,7 +365,10 @@ func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) 
 // handleGitHubAppCutoverPreflight returns the inform-only reachability diff for
 // a PAT→App cutover: how many of the org's tracked repos the App's
 // installations reach, and which would go dark. 404 unless an App is
-// registered. Stores nothing. Org-admin only.
+// registered. Org-admin only. Persists no credentials, but it does reconcile
+// the installation mirror as a side effect (so the preview is accurate) — hence
+// Cache-Control: no-store below, and why it can't be treated as a pure-safe GET
+// despite the verb.
 //
 // GET /api/orgs/{org_id}/github-app/cutover-preflight
 func (s *Server) handleGitHubAppCutoverPreflight(w http.ResponseWriter, r *http.Request) {
@@ -373,6 +376,11 @@ func (s *Server) handleGitHubAppCutoverPreflight(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
+	// This GET has a write side-effect (the installation-mirror reconcile
+	// below) and returns a 200 body, so make it explicitly uncacheable rather
+	// than relying on s.api never adding cache headers — a cached 200 would
+	// serve a stale preview without re-running the reconcile.
+	w.Header().Set("Cache-Control", "no-store")
 	ctx := r.Context()
 
 	app, err := s.githubApps.GetForOrgSystem(ctx, orgID)
@@ -542,8 +550,11 @@ func (s *Server) handleGitHubAccessPATPreflight(w http.ResponseWriter, r *http.R
 
 	repos, err := ghclient.NewClient(base, pat).ListUserRepos()
 	if err != nil {
+		// The detail (ListUserRepos folds GitHub's response body into the
+		// error) goes to the log, not the response body.
+		log.Printf("[github-access] pat-preflight: enumerate repos for org %s: %v", orgID, err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{
-			"error": "failed to enumerate repositories for that token: " + err.Error(),
+			"error": "failed to enumerate repositories for that token",
 		})
 		return
 	}
