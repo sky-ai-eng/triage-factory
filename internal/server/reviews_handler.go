@@ -15,15 +15,17 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// reviewsHandler serves the pending-review endpoints. ghClient and spawner are
-// read through getters so the handler always sees the current values, which are
-// (re)wired onto the server after construction / on credential reload.
+// reviewsHandler serves the pending-review endpoints. ghResolver picks the
+// right GitHub client (org App installation token → PAT) per repo at call
+// time, so App-only orgs (no PAT) work identically to PAT orgs. spawner is
+// read through a getter so the handler always sees the current value, (re)wired
+// onto the server after construction.
 type reviewsHandler struct {
-	tx        db.TxRunner
-	ws        *websocket.Hub
-	agentRuns db.AgentRunStore
-	ghClient  func() *ghclient.Client
-	spawner   func() *delegate.Spawner
+	tx         db.TxRunner
+	ws         *websocket.Hub
+	agentRuns  db.AgentRunStore
+	ghResolver ghclient.Resolver
+	spawner    func() *delegate.Spawner
 }
 
 type pendingReviewJSON struct {
@@ -117,12 +119,6 @@ func (rh *reviewsHandler) handleReviewSubmit(w http.ResponseWriter, r *http.Requ
 	userID := ClaimsFrom(r.Context()).Subject
 	reviewID := r.PathValue("id")
 
-	gh := rh.ghClient()
-	if gh == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub credentials not configured"})
-		return
-	}
-
 	var review *domain.PendingReview
 	var comments []domain.PendingReviewComment
 	if err := rh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -150,6 +146,23 @@ func (rh *reviewsHandler) handleReviewSubmit(w http.ResponseWriter, r *http.Requ
 	}
 	if review.ReviewEvent == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "review has not been submitted by the agent yet"})
+		return
+	}
+
+	// Resolve the GitHub client for this review's repo (org App installation
+	// token → PAT). The review row carries Owner/Repo, so resolve per-repo so a
+	// selective App install that doesn't cover this repo falls through to the
+	// PAT instead of minting a token that 403s on the submit. Posting as the App
+	// bot (App-mode) vs the PAT owner (PAT-mode) is intentional — agent outputs
+	// carry the org's bot identity.
+	gh, err := rh.ghResolver.ClientForRepo(r.Context(), orgID, review.Owner, review.Repo)
+	if err != nil {
+		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+			log.Printf("[reviews] org %s: GitHub not configured for %s/%s: %v", orgID, review.Owner, review.Repo, err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub credentials not configured"})
+			return
+		}
+		internalError(w, "reviews", err)
 		return
 	}
 
@@ -448,12 +461,6 @@ func (rh *reviewsHandler) handleReviewDiff(w http.ResponseWriter, r *http.Reques
 	userID := ClaimsFrom(r.Context()).Subject
 	reviewID := r.PathValue("id")
 
-	gh := rh.ghClient()
-	if gh == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub credentials not configured"})
-		return
-	}
-
 	var review *domain.PendingReview
 	if err := rh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -465,6 +472,20 @@ func (rh *reviewsHandler) handleReviewDiff(w http.ResponseWriter, r *http.Reques
 	}
 	if review == nil {
 		notFound(w, "review")
+		return
+	}
+
+	// Resolve per-repo (org App installation token → PAT) after loading the
+	// row, which carries Owner/Repo — App-only orgs (no PAT) resolve a client
+	// here instead of 503-ing on a nil global client.
+	gh, err := rh.ghResolver.ClientForRepo(r.Context(), orgID, review.Owner, review.Repo)
+	if err != nil {
+		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+			log.Printf("[reviews] org %s: GitHub not configured for %s/%s: %v", orgID, review.Owner, review.Repo, err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub credentials not configured"})
+			return
+		}
+		internalError(w, "reviews", err)
 		return
 	}
 

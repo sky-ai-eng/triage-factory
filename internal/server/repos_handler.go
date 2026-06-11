@@ -334,13 +334,28 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.ghClient == nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub not configured"})
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
+
+	// Resolve per-repo (org App installation token → PAT) so App-only orgs
+	// (no PAT) list branches through the installation client instead of 400-ing
+	// on a nil global client. owner/repo are path values; a selective App
+	// install that doesn't cover this repo falls through to the PAT.
+	client, err := s.ghResolver.ClientForRepo(r.Context(), orgID, owner, repo)
+	if err != nil {
+		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+			log.Printf("[repos] org %s: GitHub not configured for %s/%s: %v", orgID, owner, repo, err)
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub not configured"})
+			return
+		}
+		internalError(w, "repos", err)
 		return
 	}
 
 	query := r.URL.Query().Get("q")
-	branches, err := s.ghClient.ListBranches(owner, repo, query, 30)
+	branches, err := client.ListBranches(owner, repo, query, 30)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch branches: " + err.Error()})
 		return

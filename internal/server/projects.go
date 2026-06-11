@@ -217,14 +217,23 @@ func (s *Server) handleProjectGet(w http.ResponseWriter, r *http.Request) {
 }
 
 type projectBundleGitHubProbe struct {
-	client *ghclient.Client
+	resolver ghclient.Resolver
+	orgID    string
 }
 
-func (p projectBundleGitHubProbe) CloneURLForRepo(_ context.Context, owner, repo string) (string, error) {
-	if p.client == nil {
+func (p projectBundleGitHubProbe) CloneURLForRepo(ctx context.Context, owner, repo string) (string, error) {
+	if p.resolver == nil {
 		return "", errors.New("GitHub is not configured")
 	}
-	meta, err := p.client.GetRepoMeta(owner, repo)
+	// Resolve per repo (org App installation token → PAT) so App-only orgs
+	// (no PAT) probe the clone URL through the installation client. A
+	// no-credentials resolve surfaces through preflightPinnedRepos as the
+	// existing MissingReposError import-failure shape.
+	client, err := p.resolver.ClientForRepo(ctx, p.orgID, owner, repo)
+	if err != nil {
+		return "", err
+	}
+	meta, err := client.GetRepoMeta(owner, repo)
 	if err != nil {
 		return "", err
 	}
@@ -368,7 +377,7 @@ func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 		userID,
 		file,
 		size,
-		projectBundleGitHubProbe{client: s.ghClient},
+		projectBundleGitHubProbe{resolver: s.ghResolver, orgID: orgID},
 	)
 	if err != nil {
 		var dupNameErr *projectbundle.DuplicateNameError

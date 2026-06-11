@@ -16,15 +16,17 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// pendingPRsHandler serves the pending-PR endpoints. ghClient and spawner are
-// read through getters so the handler always sees the current values, which are
-// (re)wired onto the server after construction / on credential reload.
+// pendingPRsHandler serves the pending-PR endpoints. ghResolver picks the
+// right GitHub client (org App installation token → PAT) per repo at call
+// time, so App-only orgs (no PAT) work identically to PAT orgs. spawner is
+// read through a getter so the handler always sees the current value, (re)wired
+// onto the server after construction.
 type pendingPRsHandler struct {
-	tx        db.TxRunner
-	ws        *websocket.Hub
-	agentRuns db.AgentRunStore
-	ghClient  func() *ghclient.Client
-	spawner   func() *delegate.Spawner
+	tx         db.TxRunner
+	ws         *websocket.Hub
+	agentRuns  db.AgentRunStore
+	ghResolver ghclient.Resolver
+	spawner    func() *delegate.Spawner
 }
 
 // pendingPRJSON is the JSON shape the pending-PR overlay consumes.
@@ -238,12 +240,6 @@ func (pp *pendingPRsHandler) handlePendingPRSubmit(w http.ResponseWriter, r *htt
 	userID := ClaimsFrom(r.Context()).Subject
 	id := r.PathValue("id")
 
-	gh := pp.ghClient()
-	if gh == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub credentials not configured"})
-		return
-	}
-
 	// Pointer so we can distinguish "client sent draft=false" from
 	// "client didn't send draft." A missing field falls back to the
 	// row's persisted value (the agent's queue-time --draft hint).
@@ -267,6 +263,24 @@ func (pp *pendingPRsHandler) handlePendingPRSubmit(w http.ResponseWriter, r *htt
 	}
 	if pr == nil {
 		notFound(w, "pending PR")
+		return
+	}
+
+	// Resolve the GitHub client for this PR's repo BEFORE taking the
+	// concurrent-submit guard — a resolution failure must not leave the guard
+	// set with the row stuck "in flight" (the guard is released only on a
+	// CreatePR failure below). The row carries Owner/Repo, so resolve per-repo:
+	// a selective App install that doesn't cover this repo falls through to the
+	// PAT. App-mode posts the PR as the App bot, PAT-mode as the PAT owner —
+	// intentional (agent outputs carry the org's bot identity).
+	gh, err := pp.ghResolver.ClientForRepo(r.Context(), orgID, pr.Owner, pr.Repo)
+	if err != nil {
+		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+			log.Printf("[pending-prs] org %s: GitHub not configured for %s/%s: %v", orgID, pr.Owner, pr.Repo, err)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub credentials not configured"})
+			return
+		}
+		internalError(w, "pending-prs", err)
 		return
 	}
 

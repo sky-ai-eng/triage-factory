@@ -74,11 +74,11 @@ type Server struct {
 	ws        *websocket.Hub
 	spawner   *delegate.Spawner
 	curator   *curator.Curator
-	ghClient  *ghclient.Client
 	// ghResolver picks the right GitHub credential (org App installation
-	// token → PAT) per request, given the org + target account. Replaces
-	// the raw NewClient(baseURL, pat) construction in the dashboard
-	// handlers. Built in New from the stores, so it's never nil — handlers
+	// token → PAT) per request, given the org + target account. It is the
+	// sole GitHub-credential path for request handlers (reviews, pending-PRs,
+	// branches, dashboard, project-bundle probe) — there is no process-global
+	// PAT client. Built in New from the stores, so it's never nil — handlers
 	// don't need a guard.
 	ghResolver ghclient.Resolver
 	// jiraResolver routes Jira writes by provenance (SKY-463): ForSystem for
@@ -694,7 +694,7 @@ func (s *Server) routes() {
 	s.api("GET /api/jira/stock", s.handleJiraStockGet)
 	s.apiMutating("POST /api/jira/stock", s.handleJiraStockPost)
 
-	rh := &reviewsHandler{tx: s.tx, ws: s.ws, agentRuns: s.agentRuns, ghClient: func() *ghclient.Client { return s.ghClient }, spawner: func() *delegate.Spawner { return s.spawner }}
+	rh := &reviewsHandler{tx: s.tx, ws: s.ws, agentRuns: s.agentRuns, ghResolver: s.ghResolver, spawner: func() *delegate.Spawner { return s.spawner }}
 	s.api("GET /api/reviews/{id}", rh.handleReviewGet)
 	s.apiMutating("PATCH /api/reviews/{id}", rh.handleReviewUpdate)
 	s.api("GET /api/reviews/{id}/diff", rh.handleReviewDiff)
@@ -703,7 +703,7 @@ func (s *Server) routes() {
 	s.apiMutating("DELETE /api/reviews/{id}/comments/{commentId}", rh.handleReviewCommentDelete)
 	s.api("GET /api/agent/runs/{runID}/review", rh.handleRunReview)
 
-	pp := &pendingPRsHandler{tx: s.tx, ws: s.ws, agentRuns: s.agentRuns, ghClient: func() *ghclient.Client { return s.ghClient }, spawner: func() *delegate.Spawner { return s.spawner }}
+	pp := &pendingPRsHandler{tx: s.tx, ws: s.ws, agentRuns: s.agentRuns, ghResolver: s.ghResolver, spawner: func() *delegate.Spawner { return s.spawner }}
 	s.api("GET /api/pending-prs/{id}", pp.handlePendingPRGet)
 	s.apiMutating("PATCH /api/pending-prs/{id}", pp.handlePendingPRUpdate)
 	s.api("GET /api/pending-prs/{id}/diff", pp.handlePendingPRDiff)
@@ -927,11 +927,6 @@ func (s *Server) SetOnJiraChanged(fn func(orgID string)) {
 // next poll cycle.
 func (s *Server) SetScorerTrigger(fn func(orgID string)) {
 	s.scorerTrigger = fn
-}
-
-// SetGitHubClient sets the GitHub client for review approval submissions.
-func (s *Server) SetGitHubClient(client *ghclient.Client) {
-	s.ghClient = client
 }
 
 // SetEventBus wires the in-process event bus so the GitHub webhook
