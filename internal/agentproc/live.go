@@ -205,6 +205,12 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		// StdinPipe already succeeded, but on this path neither Start nor
+		// Wait runs — and it's Wait that auto-closes the StdinPipe write end —
+		// so close the pipe we own explicitly to avoid leaking the fd. (The
+		// normal exit path needs no such close: readLoop always reaches
+		// cmd.Wait, which closes it.)
+		_ = stdin.Close()
 		cleanup()
 		cancel()
 		return nil, fmt.Errorf("stdout pipe: %w", err)
