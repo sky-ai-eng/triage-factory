@@ -40,6 +40,86 @@ func seedSQLiteApp(t *testing.T, conn *sql.DB, orgID, appID, pemRef string) {
 	}
 }
 
+// TestGitHubAppsStore_SQLite_CreateGetRoundTrip pins the CreateForOrg →
+// GetForOrg round-trip with a focus on owner_type (TFAC-325): an App
+// registered under an organization reads back as "org".
+func TestGitHubAppsStore_SQLite_CreateGetRoundTrip(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	orgID := runmode.LocalDefaultOrgID
+	seedSQLiteOrgForApps(t, conn, orgID)
+
+	// Empty table → nil, no error.
+	got, err := stores.GitHubApps.GetForOrg(ctx, orgID)
+	if err != nil {
+		t.Fatalf("GetForOrg (empty): %v", err)
+	}
+	if got != nil {
+		t.Fatalf("GetForOrg on empty table = %+v, want nil", got)
+	}
+
+	if err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
+		OrgID:            orgID,
+		AppID:            "4242",
+		Slug:             "tf-roundtrip",
+		ClientID:         "Iv1.roundtrip",
+		ClientSecretRef:  "cs_ref",
+		PEMRef:           "pem_ref",
+		WebhookSecretRef: "wh_ref",
+		OwnerType:        "org",
+	}); err != nil {
+		t.Fatalf("CreateForOrg: %v", err)
+	}
+
+	got, err = stores.GitHubApps.GetForOrg(ctx, orgID)
+	if err != nil {
+		t.Fatalf("GetForOrg: %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetForOrg returned nil after Create")
+	}
+	if got.OwnerType != "org" {
+		t.Errorf("OwnerType = %q, want org", got.OwnerType)
+	}
+	if got.AppID != "4242" || got.Slug != "tf-roundtrip" {
+		t.Errorf("round-trip mismatch: app_id=%q slug=%q", got.AppID, got.Slug)
+	}
+}
+
+// TestGitHubAppsStore_SQLite_OwnerTypeDefaultsToUser pins that an App
+// created without an explicit OwnerType reads back as "user" — the store
+// folds the empty value (NormalizedOwnerType) so the persisted value is
+// never an empty string, matching the column default.
+func TestGitHubAppsStore_SQLite_OwnerTypeDefaultsToUser(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	orgID := runmode.LocalDefaultOrgID
+	seedSQLiteOrgForApps(t, conn, orgID)
+
+	if err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
+		OrgID:            orgID,
+		AppID:            "9001",
+		Slug:             "tf-default",
+		ClientID:         "Iv1.default",
+		ClientSecretRef:  "cs",
+		PEMRef:           "pem",
+		WebhookSecretRef: "wh",
+		// OwnerType intentionally unset.
+	}); err != nil {
+		t.Fatalf("CreateForOrg: %v", err)
+	}
+
+	got, err := stores.GitHubApps.GetForOrg(ctx, orgID)
+	if err != nil {
+		t.Fatalf("GetForOrg: %v", err)
+	}
+	if got == nil || got.OwnerType != "user" {
+		t.Fatalf("OwnerType = %+v, want user (unset folds to default)", got)
+	}
+}
+
 // TestGitHubAppsStore_SQLite_InstallationLifecycle pins Upsert →
 // MarkRemoved → Upsert-revive against the active-only read.
 func TestGitHubAppsStore_SQLite_InstallationLifecycle(t *testing.T) {

@@ -443,6 +443,10 @@ CREATE TABLE org_github_apps (
     client_secret_ref      TEXT NOT NULL,
     pem_ref                TEXT NOT NULL,
     webhook_secret_ref     TEXT NOT NULL,
+    -- 'user' (personal account) or 'org' (organization). Captured from the
+    -- signed registration state at callback time so the App account type
+    -- survives a reload; the picker default is 'user'.
+    owner_type             TEXT NOT NULL DEFAULT 'user',
     registered_at          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     registered_by_user_id  TEXT REFERENCES users(id) ON DELETE SET NULL,
     active                 INTEGER NOT NULL DEFAULT 1

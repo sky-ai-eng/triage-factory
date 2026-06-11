@@ -54,6 +54,7 @@ import { UserIdentityStep } from './UserIdentityStep'
 import { JiraUserAccessStep } from './JiraUserAccessStep'
 import { captureGitHubIdentityPat } from '../../lib/githubIdentity'
 import { captureJiraIdentityPat } from '../../lib/jiraIdentity'
+import { getGitHubAppStatus } from '../../lib/githubApp'
 import { apiJSON } from '../../lib/apiClient'
 import type { GitHubIdentityStatus, JiraIdentityStatus } from '../../types'
 import PollerTimingGroup from '../settings/PollerTimingGroup'
@@ -307,17 +308,41 @@ const githubModeStep: WizardStep = {
   render: (ctx) => <GitHubModeStep {...ctx} />,
 }
 
+// loadGitHubAppOwnerType seeds the App account-type picker from an
+// already-registered App's persisted owner_type, so returning to Setup or
+// Settings after registering an org-owned App shows "Organization account"
+// rather than re-defaulting to Personal. Best-effort and self-contained: a
+// missing orgId, an org with no App, or a failed status read all return {} —
+// the picker keeps its 'user' default. It catches internally rather than
+// throwing because the step is a pure picker whose persist is a no-op, so a
+// transient status-read failure must not flag the step as load-errored.
+export async function loadGitHubAppOwnerType(ctx: LoadContext): Promise<Partial<WizardState>> {
+  if (!ctx.orgId) return {}
+  try {
+    const status = await getGitHubAppStatus(ctx.orgId)
+    if (!status.app) return {}
+    // owner_type is a free string on the wire; narrow to the picker's union,
+    // folding anything that isn't 'org' to 'user'.
+    return { githubAppOwnerType: status.app.owner_type === 'org' ? 'org' : 'user' }
+  } catch {
+    return {}
+  }
+}
+
 // Step · App account type (visible when App is the chosen method, before the
 // registration step). Personal vs Organization — which GitHub account the App
 // is registered under — as a flush two-panel picker, action-on-click
-// (selfAdvancing). Always complete (defaults to Personal); the value rides
-// state.githubAppOwnerType into the registration step.
+// (selfAdvancing). Its load seeds the choice from a registered App's persisted
+// owner_type (so it survives a reload); absent an App it stays at the Personal
+// default. Always complete; the value rides state.githubAppOwnerType into the
+// registration step.
 const githubAccountStep: WizardStep = {
   id: 'org-github-account',
   section: 'org',
   title: 'App account type',
   visible: (s) => s.githubAccessTab === 'app',
   selfAdvancing: true,
+  load: loadGitHubAppOwnerType,
   isComplete: () => true,
   persist: async () => {},
   collapsedSummary: (s) =>

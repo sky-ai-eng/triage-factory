@@ -35,13 +35,13 @@ func (s *gitHubAppsStore) GetForOrg(ctx context.Context, orgID string) (*domain.
 	err := s.q.QueryRowContext(ctx, `
 		SELECT org_id, app_id, slug, client_id,
 		       client_secret_ref, pem_ref, webhook_secret_ref,
-		       registered_at, registered_by_user_id, active
+		       owner_type, registered_at, registered_by_user_id, active
 		  FROM org_github_apps
 		 WHERE org_id = ?
 	`, orgID).Scan(
 		&a.OrgID, &a.AppID, &a.Slug, &a.ClientID,
 		&a.ClientSecretRef, &a.PEMRef, &a.WebhookSecretRef,
-		&a.RegisteredAt, &regBy, &a.Active,
+		&a.OwnerType, &a.RegisteredAt, &regBy, &a.Active,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -65,12 +65,12 @@ func (s *gitHubAppsStore) CreateForOrg(ctx context.Context, app domain.OrgGitHub
 		INSERT INTO org_github_apps (
 			org_id, app_id, slug, client_id,
 			client_secret_ref, pem_ref, webhook_secret_ref,
-			registered_by_user_id
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			owner_type, registered_by_user_id
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		app.OrgID, app.AppID, app.Slug, app.ClientID,
 		app.ClientSecretRef, app.PEMRef, app.WebhookSecretRef,
-		nullStringValue(app.RegisteredByUserID),
+		app.NormalizedOwnerType(), nullStringValue(app.RegisteredByUserID),
 	)
 	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed") {
 		return &db.ErrGitHubAppExists{OrgID: app.OrgID}

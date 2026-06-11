@@ -45,6 +45,7 @@ func TestGitHubAppsStore_Postgres_RoundTrip(t *testing.T) {
 			ClientSecretRef:    "github_app_42_client_secret",
 			PEMRef:             "github_app_42_pem",
 			WebhookSecretRef:   "github_app_42_webhook_secret",
+			OwnerType:          "org",
 			RegisteredByUserID: userID,
 		}
 		if err := stores.GitHubApps.CreateForOrg(ctx, app); err != nil {
@@ -66,6 +67,9 @@ func TestGitHubAppsStore_Postgres_RoundTrip(t *testing.T) {
 		}
 		if got.ClientID != "Iv1.abc123" {
 			t.Errorf("ClientID = %q, want Iv1.abc123", got.ClientID)
+		}
+		if got.OwnerType != "org" {
+			t.Errorf("OwnerType = %q, want org", got.OwnerType)
 		}
 		if !got.Active {
 			t.Error("Active = false, want true (default)")

@@ -250,6 +250,7 @@ func TestGitHubAppRegister_StateToken_RoundTrip(t *testing.T) {
 
 	st := appRegisterState{
 		OrgID:     "00000000-0000-0000-0000-000000000099",
+		OwnerType: "org",
 		ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
 	}
 	signed, err := st.sign(key)
@@ -263,6 +264,9 @@ func TestGitHubAppRegister_StateToken_RoundTrip(t *testing.T) {
 	}
 	if parsed.OrgID != st.OrgID {
 		t.Errorf("org_id = %q, want %q", parsed.OrgID, st.OrgID)
+	}
+	if parsed.OwnerType != st.OwnerType {
+		t.Errorf("owner_type = %q, want %q", parsed.OwnerType, st.OwnerType)
 	}
 
 	t.Run("expired", func(t *testing.T) {
@@ -452,9 +456,11 @@ func TestGitHubAppRegister_CallbackEndpoint_MultiMode(t *testing.T) {
 		t.Fatalf("seed org_settings: %v", err)
 	}
 
-	// Sign a valid state token.
+	// Sign a valid state token. owner_type=org rides the signed state — the
+	// callback persists it from there (not a re-supplied query param).
 	state := appRegisterState{
 		OrgID:     orgA.String(),
+		OwnerType: "org",
 		ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
 	}
 	signed, err := state.sign(rig.srv.deployCfg.hmacKey)
@@ -478,11 +484,12 @@ func TestGitHubAppRegister_CallbackEndpoint_MultiMode(t *testing.T) {
 			t.Errorf("redirect location=%q, want %q", loc, wantLoc)
 		}
 
-		// Verify the org_github_apps row was written.
-		var appID, slug string
+		// Verify the org_github_apps row was written, including the owner_type
+		// captured from the signed state.
+		var appID, slug, ownerType string
 		if err := rig.h.AdminDB.QueryRow(`
-			SELECT app_id, slug FROM org_github_apps WHERE org_id = $1
-		`, orgA.String()).Scan(&appID, &slug); err != nil {
+			SELECT app_id, slug, owner_type FROM org_github_apps WHERE org_id = $1
+		`, orgA.String()).Scan(&appID, &slug, &ownerType); err != nil {
 			t.Fatalf("read org_github_apps: %v", err)
 		}
 		if appID != "12345" {
@@ -490,6 +497,32 @@ func TestGitHubAppRegister_CallbackEndpoint_MultiMode(t *testing.T) {
 		}
 		if slug != "triage-factory-test" {
 			t.Errorf("slug=%q, want triage-factory-test", slug)
+		}
+		if ownerType != "org" {
+			t.Errorf("owner_type=%q, want org (from signed state)", ownerType)
+		}
+	})
+
+	t.Run("status_carries_owner_type", func(t *testing.T) {
+		// The row registered above must surface owner_type through the status
+		// endpoint so Setup/Settings can seed the App account-type summary.
+		req := httptest.NewRequest("GET", "/api/orgs/"+orgA.String()+"/github-app", nil)
+		req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: sidA})
+		rec := httptest.NewRecorder()
+		rig.srv.mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
+		}
+		var out githubAppStatusResponse
+		if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if out.App == nil {
+			t.Fatal("app=nil, want registered App")
+		}
+		if out.App.OwnerType != "org" {
+			t.Errorf("status owner_type=%q, want org", out.App.OwnerType)
 		}
 	})
 

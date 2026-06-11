@@ -24,6 +24,7 @@ type githubAppStatusResponse struct {
 type githubAppInfo struct {
 	AppID                   string `json:"app_id"`
 	Slug                    string `json:"slug"`
+	OwnerType               string `json:"owner_type"`
 	RegisteredAt            string `json:"registered_at"`
 	RegisteredByDisplayName string `json:"registered_by_display_name"`
 }
@@ -81,6 +82,7 @@ func (s *Server) handleGitHubAppStatus(w http.ResponseWriter, r *http.Request) {
 		resp.App = &githubAppInfo{
 			AppID:                   app.AppID,
 			Slug:                    app.Slug,
+			OwnerType:               app.NormalizedOwnerType(),
 			RegisteredAt:            app.RegisteredAt.UTC().Format(time.RFC3339),
 			RegisteredByDisplayName: registeredByName,
 		}

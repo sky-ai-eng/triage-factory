@@ -38,7 +38,7 @@ import {
   GitHubCloneStep,
 } from '../../setup/GitHubStep'
 import { OrgModelStep } from '../../setup/ModelStep'
-import { initialWizardState, loadOrg } from '../../setup/steps'
+import { initialWizardState, loadOrg, loadGitHubAppOwnerType } from '../../setup/steps'
 import type { StepContext, WizardState } from '../../setup/types'
 import PollerTimingGroup from '../PollerTimingGroup'
 import JiraAccessGroup from '../JiraAccessGroup'
@@ -85,10 +85,17 @@ export default function OrgSettings({
   const load = useCallback(() => {
     let cancelled = false
     setLoadError(null)
-    loadOrg({ orgId, teamId: 'default', isLocal })
-      .then((slice) => {
+    // Seed the App account-type summary from a registered App's persisted
+    // owner_type, the same way the wizard's account-type step does, so an
+    // org-owned App doesn't render as "Personal account" on every reload.
+    // loadGitHubAppOwnerType catches internally and resolves to {} on any
+    // failure, so it never rejects the Promise.all — only a loadOrg failure
+    // surfaces the retry.
+    const loadCtx = { orgId, teamId: 'default', isLocal }
+    Promise.all([loadOrg(loadCtx), loadGitHubAppOwnerType(loadCtx)])
+      .then(([slice, ownerSlice]) => {
         if (cancelled) return
-        const seeded: WizardState = { ...initialWizardState(), ...slice, isLocal }
+        const seeded: WizardState = { ...initialWizardState(), ...slice, ...ownerSlice, isLocal }
         setBaseline(seeded)
         setDraft(seeded)
         setLoaded(true)

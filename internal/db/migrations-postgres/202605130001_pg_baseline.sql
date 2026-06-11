@@ -5660,6 +5660,7 @@ CREATE TABLE public.org_github_apps (
     client_secret_ref text NOT NULL,
     pem_ref text NOT NULL,
     webhook_secret_ref text NOT NULL,
+    owner_type text DEFAULT 'user'::text NOT NULL,
     registered_at timestamp with time zone DEFAULT now() NOT NULL,
     registered_by_user_id uuid,
     active boolean DEFAULT true NOT NULL

@@ -21,6 +21,10 @@ export interface GitHubAppInstallation {
 export interface GitHubAppInfo {
   app_id: string
   slug: string
+  // 'user' (personal account) or 'org' (organization) — the account the App
+  // was registered under, persisted at registration and used to seed the
+  // "App account type" picker so it doesn't re-default to Personal on reload.
+  owner_type: string
   registered_at: string
   registered_by_display_name: string
 }

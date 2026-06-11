@@ -40,7 +40,7 @@ func scanGitHubApp(row interface{ Scan(...any) error }) (*domain.OrgGitHubApp, e
 	err := row.Scan(
 		&a.OrgID, &a.AppID, &a.Slug, &a.ClientID,
 		&a.ClientSecretRef, &a.PEMRef, &a.WebhookSecretRef,
-		&registeredAt, &regBy, &a.Active,
+		&a.OwnerType, &registeredAt, &regBy, &a.Active,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -58,7 +58,7 @@ func scanGitHubApp(row interface{ Scan(...any) error }) (*domain.OrgGitHubApp, e
 const selectGitHubAppCols = `
 	SELECT org_id, app_id, slug, client_id,
 	       client_secret_ref, pem_ref, webhook_secret_ref,
-	       registered_at, registered_by_user_id, active
+	       owner_type, registered_at, registered_by_user_id, active
 	  FROM org_github_apps
 	 WHERE org_id = $1`
 
@@ -82,12 +82,12 @@ func (s *gitHubAppsStore) CreateForOrg(ctx context.Context, app domain.OrgGitHub
 		INSERT INTO org_github_apps (
 			org_id, app_id, slug, client_id,
 			client_secret_ref, pem_ref, webhook_secret_ref,
-			registered_by_user_id
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			owner_type, registered_by_user_id
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 	`,
 		app.OrgID, app.AppID, app.Slug, app.ClientID,
 		app.ClientSecretRef, app.PEMRef, app.WebhookSecretRef,
-		nullString(app.RegisteredByUserID),
+		app.NormalizedOwnerType(), nullString(app.RegisteredByUserID),
 	)
 	var pgErr *pgconn.PgError
 	if err != nil && errors.As(err, &pgErr) && pgErr.Code == "23505" {

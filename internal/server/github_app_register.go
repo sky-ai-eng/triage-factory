@@ -230,6 +230,7 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 
 	st := appRegisterState{
 		OrgID:     orgID,
+		OwnerType: ownerType,
 		ExpiresAt: timeNow().Add(10 * time.Minute).Unix(),
 	}
 	signed, err := st.sign(s.deployCfg.hmacKey)
@@ -510,6 +511,7 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 			ClientSecretRef:    clientSecretKey,
 			PEMRef:             pemKey,
 			WebhookSecretRef:   webhookSecretKey,
+			OwnerType:          state.OwnerType,
 			RegisteredByUserID: userID,
 		}); err != nil {
 			return err
@@ -609,7 +611,12 @@ func exchangeManifestCode(ctx context.Context, conversionURL string) (*manifestC
 // --- state token (HMAC-signed, ~10min TTL) ---
 
 type appRegisterState struct {
-	OrgID     string `json:"org_id"`
+	OrgID string `json:"org_id"`
+	// OwnerType ("user"/"org") is carried in the signed state so the callback
+	// persists the owner the user picked at launch — the signed token is the
+	// source of truth at callback time, not a re-supplied query param, so it
+	// can't be tampered with mid-flow.
+	OwnerType string `json:"ot"`
 	ExpiresAt int64  `json:"exp"`
 }
 

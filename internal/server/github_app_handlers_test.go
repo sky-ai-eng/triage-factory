@@ -124,6 +124,11 @@ func TestGitHubAppStatus_MultiMode(t *testing.T) {
 		if out.App.Slug != "acme-bot" {
 			t.Errorf("slug=%q, want acme-bot", out.App.Slug)
 		}
+		// The seed INSERT omits owner_type, so the column default flows
+		// through to the status response.
+		if out.App.OwnerType != "user" {
+			t.Errorf("owner_type=%q, want user (column default)", out.App.OwnerType)
+		}
 		if len(out.Installations) != 1 || out.Installations[0].AccountLogin != "acme-eng" {
 			t.Errorf("installations=%+v, want one acme-eng row", out.Installations)
 		}
