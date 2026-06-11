@@ -805,6 +805,22 @@ func (s *Server) routes() {
 	// same API backfill the poller runs, so it rides apiMutating (CSRF).
 	s.apiMutating("POST /api/orgs/{org_id}/github-app/installations/refresh", s.handleGitHubAppInstallationsRefresh)
 
+	// GitHub access either/or transitions (TFAC-328). GitHub access is
+	// strictly App XOR PAT per org; these commit the switches and surface the
+	// inform-only reachability diffs. All org-admin (gated inside the handler).
+	//   - cutover: commit a staged PAT→App switch (activate App + delete PAT).
+	//   - switch-to-pat: full App teardown, validate + store the new PAT.
+	//   - DELETE github-app: discard a staged (not-yet-live) App registration.
+	//   - cutover-preflight / pat-preflight: inform-only reachability diffs.
+	// The two commits + the discard mutate state (apiMutating, CSRF); the
+	// cutover-preflight is a read (api); pat-preflight POSTs a token to probe
+	// reach but stores nothing — still apiMutating for the same-origin guard.
+	s.apiMutating("POST /api/orgs/{org_id}/github-app/cutover", s.handleGitHubAppCutover)
+	s.apiMutating("POST /api/orgs/{org_id}/github-access/switch-to-pat", s.handleGitHubAccessSwitchToPAT)
+	s.apiMutating("DELETE /api/orgs/{org_id}/github-app", s.handleGitHubAppDiscard)
+	s.api("GET /api/orgs/{org_id}/github-app/cutover-preflight", s.handleGitHubAppCutoverPreflight)
+	s.apiMutating("POST /api/orgs/{org_id}/github-access/pat-preflight", s.handleGitHubAccessPATPreflight)
+
 	// "Connect GitHub" user-to-server OAuth — binds a host-verified GitHub
 	// login to the signed-in user (identity, not access, not login).
 	// start redirects to {github_base_url}/login/oauth/authorize;

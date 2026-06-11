@@ -67,6 +67,37 @@ func (s *teamGitHubReposStore) ListForOrgSystem(ctx context.Context, orgID strin
 	return listTeamGitHubReposForOrg(ctx, s.admin, orgID)
 }
 
+func (s *teamGitHubReposStore) ListOrgReposWithTeamsSystem(ctx context.Context, orgID string) ([]domain.TrackedRepoTeams, error) {
+	// Admin pool: the preflight's org admin must see every team's tracking,
+	// including teams they don't belong to (the app-pool SELECT policy is
+	// team-membership-scoped). Org scope rides the teams join + the org_id
+	// filter, mirroring listTeamGitHubReposForOrg.
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT g.owner, g.repo, t.name
+		FROM team_github_repos g
+		JOIN teams t ON t.id = g.team_id
+		WHERE t.org_id = $1
+		ORDER BY g.owner ASC, g.repo ASC, t.name ASC
+	`, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("read team_github_repos with teams: %w", err)
+	}
+	defer rows.Close()
+	out := []domain.TrackedRepoTeams{}
+	for rows.Next() {
+		var owner, repo, team string
+		if err := rows.Scan(&owner, &repo, &team); err != nil {
+			return nil, fmt.Errorf("scan team_github_repos with teams: %w", err)
+		}
+		if n := len(out); n > 0 && out[n-1].Owner == owner && out[n-1].Repo == repo {
+			out[n-1].Teams = append(out[n-1].Teams, team)
+			continue
+		}
+		out = append(out, domain.TrackedRepoTeams{Owner: owner, Repo: repo, Teams: []string{team}})
+	}
+	return out, rows.Err()
+}
+
 func scanRepoRows(rows *sql.Rows, err error) ([]domain.TeamGitHubRepo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read team_github_repos union: %w", err)

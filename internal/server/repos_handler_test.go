@@ -97,7 +97,7 @@ func seedApp(t *testing.T, s *Server, stub *httptest.Server, installs []domain.O
 		t.Fatalf("store pem: %v", err)
 	}
 	if err := s.githubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
-		OrgID: org, AppID: "123", Slug: "test-bot", PEMRef: "pem",
+		OrgID: org, AppID: "123", Slug: "test-bot", PEMRef: "pem", Active: true,
 	}); err != nil {
 		t.Fatalf("create app: %v", err)
 	}

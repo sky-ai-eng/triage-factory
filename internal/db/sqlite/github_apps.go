@@ -65,18 +65,45 @@ func (s *gitHubAppsStore) CreateForOrg(ctx context.Context, app domain.OrgGitHub
 		INSERT INTO org_github_apps (
 			org_id, app_id, slug, client_id,
 			client_secret_ref, pem_ref, webhook_secret_ref,
-			owner_type, registered_by_user_id
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			owner_type, registered_by_user_id, active
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		app.OrgID, app.AppID, app.Slug, app.ClientID,
 		app.ClientSecretRef, app.PEMRef, app.WebhookSecretRef,
-		app.NormalizedOwnerType(), nullStringValue(app.RegisteredByUserID),
+		app.NormalizedOwnerType(), nullStringValue(app.RegisteredByUserID), app.Active,
 	)
 	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed") {
 		return &db.ErrGitHubAppExists{OrgID: app.OrgID}
 	}
 	if err != nil {
 		return fmt.Errorf("insert org_github_apps: %w", err)
+	}
+	return nil
+}
+
+func (s *gitHubAppsStore) SetActive(ctx context.Context, orgID string, active bool) error {
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE org_github_apps SET active = ? WHERE org_id = ?
+	`, active, orgID)
+	if err != nil {
+		return fmt.Errorf("set org_github_apps active: %w", err)
+	}
+	return nil
+}
+
+func (s *gitHubAppsStore) DeleteForOrg(ctx context.Context, orgID string) error {
+	// Installations first, then the registration row. SQLite is one
+	// connection (inside the caller's tx when run through TxStores), so both
+	// land atomically — no cross-pool split like Postgres.
+	if _, err := s.q.ExecContext(ctx, `
+		DELETE FROM org_github_app_installations WHERE org_id = ?
+	`, orgID); err != nil {
+		return fmt.Errorf("delete org_github_app_installations: %w", err)
+	}
+	if _, err := s.q.ExecContext(ctx, `
+		DELETE FROM org_github_apps WHERE org_id = ?
+	`, orgID); err != nil {
+		return fmt.Errorf("delete org_github_apps: %w", err)
 	}
 	return nil
 }
@@ -172,11 +199,14 @@ func (s *gitHubAppsStore) activeInstallationIDs(ctx context.Context, orgID strin
 
 func (s *gitHubAppsStore) BackfillInstallationsFromAPI(ctx context.Context, orgID string) error {
 	var appID, pemRef, baseURL string
+	// No active gate: a staged App (active=0, mid PAT→App switch) must still
+	// discover its installations for the cutover preflight + install
+	// verification. The poller gates its own backfill on active separately.
 	err := s.q.QueryRowContext(ctx, `
 		SELECT a.app_id, a.pem_ref, COALESCE(s.github_base_url, '')
 		  FROM org_github_apps a
 		  LEFT JOIN org_settings s ON s.org_id = a.org_id
-		 WHERE a.org_id = ? AND a.active = 1
+		 WHERE a.org_id = ?
 	`, orgID).Scan(&appID, &pemRef, &baseURL)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil // no registered App for this org — nothing to backfill

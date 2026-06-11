@@ -120,6 +120,76 @@ func TestGitHubAppsStore_SQLite_OwnerTypeDefaultsToUser(t *testing.T) {
 	}
 }
 
+// TestGitHubAppsStore_SQLite_SetActive flips the staged/live bit and reads it
+// back — the cutover mechanism (TFAC-328). A staged App (active=false) becomes
+// live on SetActive(true).
+func TestGitHubAppsStore_SQLite_SetActive(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	orgID := runmode.LocalDefaultOrgID
+	seedSQLiteOrgForApps(t, conn, orgID)
+
+	if err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
+		OrgID: orgID, AppID: "1", Slug: "staged", ClientID: "Iv1.x",
+		ClientSecretRef: "cs", PEMRef: "pem", WebhookSecretRef: "wh",
+		Active: false, // staged
+	}); err != nil {
+		t.Fatalf("CreateForOrg: %v", err)
+	}
+	got, _ := stores.GitHubApps.GetForOrg(ctx, orgID)
+	if got == nil || got.Active {
+		t.Fatalf("after staged create got %+v, want Active=false", got)
+	}
+
+	if err := stores.GitHubApps.SetActive(ctx, orgID, true); err != nil {
+		t.Fatalf("SetActive: %v", err)
+	}
+	got, _ = stores.GitHubApps.GetForOrg(ctx, orgID)
+	if got == nil || !got.Active {
+		t.Fatalf("after SetActive(true) got %+v, want Active=true", got)
+	}
+
+	// SetActive on an org with no row is a no-op, no error.
+	if err := stores.GitHubApps.SetActive(ctx, "00000000-0000-0000-0000-0000000000ff", true); err != nil {
+		t.Errorf("SetActive on absent row = %v, want nil", err)
+	}
+}
+
+// TestGitHubAppsStore_SQLite_DeleteForOrg tears down the registration row AND
+// its installations — the switch-to-PAT / discard teardown (TFAC-328).
+func TestGitHubAppsStore_SQLite_DeleteForOrg(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	orgID := runmode.LocalDefaultOrgID
+	seedSQLiteOrgForApps(t, conn, orgID)
+	seedSQLiteApp(t, conn, orgID, "1", "pem")
+
+	for _, login := range []string{"acme", "globex"} {
+		if err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+			InstallationID: "inst-" + login, OrgID: orgID, AccountType: "Organization", AccountLogin: login,
+		}); err != nil {
+			t.Fatalf("seed installation %s: %v", login, err)
+		}
+	}
+
+	if err := stores.GitHubApps.DeleteForOrg(ctx, orgID); err != nil {
+		t.Fatalf("DeleteForOrg: %v", err)
+	}
+	if got, _ := stores.GitHubApps.GetForOrg(ctx, orgID); got != nil {
+		t.Errorf("GetForOrg after delete = %+v, want nil", got)
+	}
+	if insts, _ := stores.GitHubApps.ListInstallationsForOrg(ctx, orgID); len(insts) != 0 {
+		t.Errorf("installations after delete = %+v, want none", insts)
+	}
+
+	// DeleteForOrg on an org with no registration is a no-op, no error.
+	if err := stores.GitHubApps.DeleteForOrg(ctx, orgID); err != nil {
+		t.Errorf("DeleteForOrg on absent row = %v, want nil", err)
+	}
+}
+
 // TestGitHubAppsStore_SQLite_InstallationLifecycle pins Upsert →
 // MarkRemoved → Upsert-revive against the active-only read.
 func TestGitHubAppsStore_SQLite_InstallationLifecycle(t *testing.T) {

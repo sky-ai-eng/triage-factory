@@ -389,28 +389,44 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 
 	isLocal := runmode.Current() == runmode.ModeLocal
 
-	var installs []domain.OrgGitHubAppInstallation
-	if m.apps != nil {
-		installs, err = m.apps.ListInstallationsForOrgSystem(ctx, orgID)
-		if err != nil {
-			log.Printf("[github] org %s: list installations: %v", orgID, err)
-		}
+	// GitHub access is strictly either/or (TFAC-328): only an ACTIVE App
+	// registration engages the per-installation App path. A staged App
+	// (registered but active=false during a PAT→App switch) keeps the PAT live,
+	// so it polls via the PAT path directly — never poll a staged App. Its
+	// tier-1 mint is gated off (resolver skips inactive apps), so entering the
+	// App path with one would fail every mint and, pre-TFAC-328, stumble into
+	// the PAT fallback. orgHasRegisteredApp is the existing Active-gated probe.
+	appActive := m.orgHasRegisteredApp(ctx, orgID)
+	if !appActive {
+		// No App, or a staged App → the PAT is the live credential.
+		m.pollGitHubPAT(ctx, orgID, repos, isLocal)
+		return
+	}
 
-		// Local-NAT bonus: webhooks don't reach a local instance, so the
-		// installation mirror can't be kept fresh by the webhook receiver.
-		// When the org has a registered App, backfill installations from the
-		// API on the cycle and re-read. No-op when there's no App.
-		if isLocal && m.orgHasRegisteredApp(ctx, orgID) {
-			if berr := m.apps.BackfillInstallationsFromAPI(ctx, orgID); berr != nil {
-				log.Printf("[github] org %s: installation backfill: %v", orgID, berr)
-			} else if installs, err = m.apps.ListInstallationsForOrgSystem(ctx, orgID); err != nil {
-				log.Printf("[github] org %s: re-list installations after backfill: %v", orgID, err)
-			}
+	installs, err := m.apps.ListInstallationsForOrgSystem(ctx, orgID)
+	if err != nil {
+		log.Printf("[github] org %s: list installations: %v", orgID, err)
+	}
+
+	// Local-NAT bonus: webhooks don't reach a local instance, so the
+	// installation mirror can't be kept fresh by the webhook receiver. The App
+	// is active here (appActive gate above), so backfill from the API on the
+	// cycle and re-read.
+	if isLocal {
+		if berr := m.apps.BackfillInstallationsFromAPI(ctx, orgID); berr != nil {
+			log.Printf("[github] org %s: installation backfill: %v", orgID, berr)
+		} else if installs, err = m.apps.ListInstallationsForOrgSystem(ctx, orgID); err != nil {
+			log.Printf("[github] org %s: re-list installations after backfill: %v", orgID, err)
 		}
 	}
 
+	// Active App installed on no accounts. Under XOR there is no PAT to fall
+	// back to, so this is a degraded-health condition, not a silent skip:
+	// surface it and skip the cycle rather than polling as some other identity.
 	if len(installs) == 0 {
-		m.pollGitHubPAT(ctx, orgID, repos, isLocal)
+		degraded := errors.New("github app is active but installed on no accounts")
+		log.Printf("[github] org %s: %v — skipping cycle", orgID, degraded)
+		m.reportError("github", orgID, degraded)
 		return
 	}
 
@@ -419,15 +435,10 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// isolated per installation — a failed mint on A must not starve B/C.
 	//
 	// anyFunctional tracks whether at least one installation yielded a usable
-	// installation token. ListInstallationRepos is installation-token-only,
-	// so a successful call proves we hold one; a failure can mean the
-	// resolver fell back to a PAT client (mint failed but a PAT is
-	// configured), which 403s on this endpoint. If NO installation is
-	// functional we'd otherwise leave the org unpolled despite an available
-	// PAT — so fall through to the PAT path in that case.
-	// App tokens have no "me", so the resolver is store-backed (host from
-	// org_settings). Built once per org cycle — host is stable across the
-	// per-installation loop below.
+	// installation token. ListInstallationRepos is installation-token-only, so
+	// a successful call proves we hold one. App tokens have no "me", so the
+	// resolver is store-backed (host from org_settings). Built once per org
+	// cycle — host is stable across the per-installation loop below.
 	resolver := m.reviewerResolver(ctx, orgID, "", nil)
 
 	covered := make(map[string]bool, len(repos))
@@ -459,18 +470,19 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	}
 
 	// No installation produced a usable installation token (every mint/list
-	// failed). The resolver may have a working PAT behind those failures —
-	// poll the configured set through it rather than leaving the org dark.
-	// ErrNoGitHubCredentials inside pollGitHubPAT means there's genuinely no
-	// fallback, and it skips silently.
+	// failed). Under XOR there is no PAT behind these failures to fall back to
+	// — the previous cross-mode fallback would silently do nothing (no PAT) or,
+	// worse, act as a leaked PAT if one ever crept back in. Surface degraded
+	// health and skip rather than masking it.
 	if !anyFunctional {
-		m.pollGitHubPAT(ctx, orgID, repos, isLocal)
+		degraded := errors.New("github app is active but no installation produced a usable token")
+		log.Printf("[github] org %s: %v — skipping cycle", orgID, degraded)
+		m.reportError("github", orgID, degraded)
 		return
 	}
 
 	// Configured repos that no functional installation grants — the App isn't
-	// installed on them. Log once so the gap is visible without being an
-	// error. (Skipped when we fell back to PAT above, which polls them all.)
+	// installed on them. Log once so the gap is visible without being an error.
 	for _, r := range repos {
 		if !covered[r] {
 			log.Printf("[github] org %s: configured repo %s not in any App installation grant — skipping", orgID, r)

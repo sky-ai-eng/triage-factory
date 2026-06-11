@@ -59,33 +59,34 @@ func (f *fakeResolver) BaseURLFor(ctx context.Context, orgID string) (string, er
 	return ghclient.DefaultBaseURL, nil
 }
 
-// fakeInstallsStore embeds db.GitHubAppsStore (nil) and overrides only
-// ListInstallationsForOrgSystem — the only method runGitHubCycleForOrg
-// reaches in multi mode (the local-NAT backfill + orgHasRegisteredApp reads
-// are gated to local mode).
+// fakeInstallsStore embeds db.GitHubAppsStore (nil) and overrides the reads
+// runGitHubCycleForOrg reaches in multi mode: GetForOrgSystem (the App
+// registration, consulted by orgHasRegisteredApp to gate the App-vs-PAT path)
+// and ListInstallationsForOrgSystem. A nil app field means "no App registered".
 type fakeInstallsStore struct {
 	db.GitHubAppsStore
+	app      *domain.OrgGitHubApp
 	installs []domain.OrgGitHubAppInstallation
+}
+
+func (f *fakeInstallsStore) GetForOrgSystem(ctx context.Context, orgID string) (*domain.OrgGitHubApp, error) {
+	return f.app, nil
 }
 
 func (f *fakeInstallsStore) ListInstallationsForOrgSystem(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
 	return append([]domain.OrgGitHubAppInstallation(nil), f.installs...), nil
 }
 
-// TestRunGitHubCycleForOrg_PATFallbackWhenInstallationTokenUnusable pins the
-// reviewer's case: an org HAS an installation, but minting its token fails
-// and the resolver hands back a PAT client. The installation-only
-// /installation/repositories 403s, so the App loop covers nothing — and
-// because a PAT is available the org must still be polled via the PAT path
-// (REST open-PR enumeration), not left dark.
-func TestRunGitHubCycleForOrg_PATFallbackWhenInstallationTokenUnusable(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti) // skip local-NAT backfill + username read
-
+// pollerTestServer is the shared GitHub stub: /installation/repositories 403s
+// (model a non-installation-token client hitting the App-only endpoint), and
+// the REST/GraphQL PR-discovery endpoints serve one open PR. A request to
+// /pulls means the PAT path ran; a request to /installation/repositories means
+// the App path ran. The default case fails the test on any unexpected path.
+func pollerTestServer(t *testing.T) *httptest.Server {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.Contains(r.URL.Path, "/installation/repositories"):
-			// A PAT cannot use the installation endpoint — 403, exactly as
-			// happens when ClientFor falls back to the PAT after a mint failure.
 			http.Error(w, `{"message":"requires installation token"}`, http.StatusForbidden)
 		case strings.HasSuffix(r.URL.Path, "/graphql"):
 			_, _ = w.Write([]byte(`{"data":{"nodes":[null]}}`))
@@ -98,7 +99,17 @@ func TestRunGitHubCycleForOrg_PATFallbackWhenInstallationTokenUnusable(t *testin
 		}
 	}))
 	t.Cleanup(srv.Close)
+	return srv
+}
 
+// TestRunGitHubCycleForOrg_StagedAppPollsViaPAT pins the either/or staging
+// rule (TFAC-328): a registered-but-inactive App (mid PAT→App switch) keeps the
+// PAT live, so the cycle must poll via the PAT path — the App path (and its
+// /installation/repositories call) is never entered for a staged App.
+func TestRunGitHubCycleForOrg_StagedAppPollsViaPAT(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti) // skip local-NAT backfill + username read
+
+	srv := pollerTestServer(t)
 	ctx := context.Background()
 	database := newMigratedSQLiteForPoller(t)
 	stores := sqlitestore.New(database)
@@ -116,7 +127,12 @@ func TestRunGitHubCycleForOrg_PATFallbackWhenInstallationTokenUnusable(t *testin
 		tasks:    stores.Tasks,
 		entities: stores.Entities,
 		repos:    stores.Repos,
-		apps:     &fakeInstallsStore{installs: []domain.OrgGitHubAppInstallation{{InstallationID: "1", AccountLogin: "octo"}}},
+		// A staged App: registered (a row exists) but active=false, plus an
+		// installation that would otherwise pull us into the App path.
+		apps: &fakeInstallsStore{
+			app:      &domain.OrgGitHubApp{OrgID: org, AppID: "1", Active: false},
+			installs: []domain.OrgGitHubAppInstallation{{InstallationID: "1", AccountLogin: "octo"}},
+		},
 		resolver: &fakeResolver{client: ghclient.NewClient(srv.URL, "pat")},
 	}
 
@@ -127,10 +143,60 @@ func TestRunGitHubCycleForOrg_PATFallbackWhenInstallationTokenUnusable(t *testin
 		t.Fatalf("ListActiveSystem: %v", err)
 	}
 	if len(ents) != 1 {
-		t.Fatalf("got %d entities; want 1 — the PAT fallback must poll the configured repo when the installation token is unusable", len(ents))
+		t.Fatalf("got %d entities; want 1 — a staged App must poll the configured repo via the live PAT", len(ents))
 	}
 	if ents[0].SourceID != "octo/repo#42" {
 		t.Errorf("entity SourceID = %q; want octo/repo#42", ents[0].SourceID)
+	}
+}
+
+// TestRunGitHubCycleForOrg_ActiveAppNoFunctionalInstallationDegrades pins the
+// removal of the cross-mode PAT fallback (TFAC-328): an ACTIVE App whose
+// installation can't produce a usable token must surface degraded health and
+// skip the cycle — never poll as a PAT (under XOR there is none). The stub's
+// /installation/repositories 403s (no usable token); a /pulls request would
+// mean the forbidden PAT fallback ran and fails the test.
+func TestRunGitHubCycleForOrg_ActiveAppNoFunctionalInstallationDegrades(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+
+	srv := pollerTestServer(t)
+	ctx := context.Background()
+	database := newMigratedSQLiteForPoller(t)
+	stores := sqlitestore.New(database)
+	org := runmode.LocalDefaultOrgID
+	if err := stores.Repos.SetConfigured(ctx, org, []string{"octo/repo"}); err != nil {
+		t.Fatalf("SetConfigured: %v", err)
+	}
+
+	bus := eventbus.New()
+	t.Cleanup(bus.Close)
+
+	var reportedErr error
+	m := &Manager{
+		database: database,
+		pub:      bus,
+		tasks:    stores.Tasks,
+		entities: stores.Entities,
+		repos:    stores.Repos,
+		apps: &fakeInstallsStore{
+			app:      &domain.OrgGitHubApp{OrgID: org, AppID: "1", Active: true},
+			installs: []domain.OrgGitHubAppInstallation{{InstallationID: "1", AccountLogin: "octo"}},
+		},
+		resolver: &fakeResolver{client: ghclient.NewClient(srv.URL, "pat")},
+		OnError:  func(source, orgID string, err error) { reportedErr = err },
+	}
+
+	m.runGitHubCycleForOrg(ctx, org)
+
+	ents, err := stores.Entities.ListActiveSystem(ctx, org, "github")
+	if err != nil {
+		t.Fatalf("ListActiveSystem: %v", err)
+	}
+	if len(ents) != 0 {
+		t.Fatalf("got %d entities; want 0 — an active App with no usable installation token must not fall back to a PAT", len(ents))
+	}
+	if reportedErr == nil {
+		t.Fatal("OnError was not called; an active App that can't mint a usable token must report degraded health")
 	}
 }
 

@@ -82,12 +82,12 @@ func (s *gitHubAppsStore) CreateForOrg(ctx context.Context, app domain.OrgGitHub
 		INSERT INTO org_github_apps (
 			org_id, app_id, slug, client_id,
 			client_secret_ref, pem_ref, webhook_secret_ref,
-			owner_type, registered_by_user_id
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			owner_type, registered_by_user_id, active
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 	`,
 		app.OrgID, app.AppID, app.Slug, app.ClientID,
 		app.ClientSecretRef, app.PEMRef, app.WebhookSecretRef,
-		app.NormalizedOwnerType(), nullString(app.RegisteredByUserID),
+		app.NormalizedOwnerType(), nullString(app.RegisteredByUserID), app.Active,
 	)
 	var pgErr *pgconn.PgError
 	if err != nil && errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -95,6 +95,43 @@ func (s *gitHubAppsStore) CreateForOrg(ctx context.Context, app domain.OrgGitHub
 	}
 	if err != nil {
 		return fmt.Errorf("insert org_github_apps: %w", err)
+	}
+	return nil
+}
+
+func (s *gitHubAppsStore) SetActive(ctx context.Context, orgID string, active bool) error {
+	if !isValidUUID(orgID) {
+		return nil
+	}
+	// App pool: the org_github_apps_update RLS policy gates this by org admin,
+	// which is exactly the claims context the cutover handler runs under.
+	_, err := s.app.ExecContext(ctx, `
+		UPDATE org_github_apps SET active = $2 WHERE org_id = $1
+	`, orgID, active)
+	return wrapAppPoolPermErr(err, "github_apps.SetActive")
+}
+
+func (s *gitHubAppsStore) DeleteForOrg(ctx context.Context, orgID string) error {
+	if !isValidUUID(orgID) {
+		return nil
+	}
+	// Registration row on the app pool (org_github_apps_delete RLS gates by org
+	// admin). Installations on the admin pool: tf_app is denied every write to
+	// org_github_app_installations by RLS, so the mirror is maintained
+	// exclusively by system code. The two are not one transaction (the admin
+	// half autonomous-commits outside any surrounding tx, the same shape
+	// UpsertInstallation / MarkInstallationRemoved use); a lingering
+	// installation row after the registration row is gone is a harmless orphan
+	// (the resolver short-circuits on the absent App before reading it).
+	if _, err := s.admin.ExecContext(ctx, `
+		DELETE FROM org_github_app_installations WHERE org_id = $1
+	`, orgID); err != nil {
+		return fmt.Errorf("delete org_github_app_installations: %w", err)
+	}
+	if _, err := s.app.ExecContext(ctx, `
+		DELETE FROM org_github_apps WHERE org_id = $1
+	`, orgID); err != nil {
+		return wrapAppPoolPermErr(err, "github_apps.DeleteForOrg")
 	}
 	return nil
 }
@@ -209,11 +246,14 @@ func (s *gitHubAppsStore) BackfillInstallationsFromAPI(ctx context.Context, orgI
 		return nil
 	}
 	var appID, pemRef, baseURL string
+	// No active gate: a staged App (active=false, mid PAT→App switch) must
+	// still discover its installations for the cutover preflight + install
+	// verification. The poller gates its own backfill on active separately.
 	err := s.admin.QueryRowContext(ctx, `
 		SELECT a.app_id, a.pem_ref, COALESCE(s.github_base_url, '')
 		  FROM org_github_apps a
 		  LEFT JOIN org_settings s ON s.org_id = a.org_id
-		 WHERE a.org_id = $1 AND a.active
+		 WHERE a.org_id = $1
 	`, orgID).Scan(&appID, &pemRef, &baseURL)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil // no registered App for this org — nothing to backfill

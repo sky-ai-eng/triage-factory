@@ -411,6 +411,27 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// XOR guard (TFAC-328): GitHub access is strictly App XOR PAT per org. An
+	// org that has a registered GitHub App (staged or active) switches
+	// credentials through the dedicated switch flow, never by dropping a PAT
+	// into the settings field. Reject setting a non-empty PAT while an App is
+	// registered; clearing the field (empty string / nil) stays allowed so
+	// disconnect + the switch flow's own teardown aren't blocked.
+	if req.GitHubPAT != nil && *req.GitHubPAT != "" {
+		app, err := s.githubApps.GetForOrgSystem(r.Context(), orgID)
+		if err != nil {
+			internalError(w, "settings/org", err)
+			return
+		}
+		if app != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "this workspace uses a GitHub App — use the switch flow",
+				"field": "github_pat",
+			})
+			return
+		}
+	}
+
 	var prevOrgSet domain.OrgSettings
 	var creds auth.Credentials
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {

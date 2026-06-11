@@ -87,6 +87,46 @@ func listTeamGitHubReposUnion(ctx context.Context, q queryer) ([]domain.TeamGitH
 	return out, rows.Err()
 }
 
+func (s *teamGitHubReposStore) ListOrgReposWithTeamsSystem(ctx context.Context, orgID string) ([]domain.TrackedRepoTeams, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT g.owner, g.repo, t.name
+		FROM team_github_repos g
+		JOIN teams t ON t.id = g.team_id
+		ORDER BY g.owner ASC, g.repo ASC, t.name ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("read team_github_repos with teams: %w", err)
+	}
+	defer rows.Close()
+	out, err := scanTrackedRepoTeams(rows)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// scanTrackedRepoTeams collapses (owner, repo, team_name) rows ordered by
+// (owner, repo, team_name) into one TrackedRepoTeams per repo with its team
+// list. Shared by the SQLite and Postgres impls.
+func scanTrackedRepoTeams(rows *sql.Rows) ([]domain.TrackedRepoTeams, error) {
+	out := []domain.TrackedRepoTeams{}
+	for rows.Next() {
+		var owner, repo, team string
+		if err := rows.Scan(&owner, &repo, &team); err != nil {
+			return nil, fmt.Errorf("scan team_github_repos with teams: %w", err)
+		}
+		if n := len(out); n > 0 && out[n-1].Owner == owner && out[n-1].Repo == repo {
+			out[n-1].Teams = append(out[n-1].Teams, team)
+			continue
+		}
+		out = append(out, domain.TrackedRepoTeams{Owner: owner, Repo: repo, Teams: []string{team}})
+	}
+	return out, rows.Err()
+}
+
 func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID string, repos []domain.TeamGitHubRepo) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err

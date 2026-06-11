@@ -47,6 +47,7 @@ func TestGitHubAppsStore_Postgres_RoundTrip(t *testing.T) {
 			WebhookSecretRef:   "github_app_42_webhook_secret",
 			OwnerType:          "org",
 			RegisteredByUserID: userID,
+			Active:             true,
 		}
 		if err := stores.GitHubApps.CreateForOrg(ctx, app); err != nil {
 			return fmt.Errorf("CreateForOrg: %w", err)
@@ -72,7 +73,7 @@ func TestGitHubAppsStore_Postgres_RoundTrip(t *testing.T) {
 			t.Errorf("OwnerType = %q, want org", got.OwnerType)
 		}
 		if !got.Active {
-			t.Error("Active = false, want true (default)")
+			t.Error("Active = false, want true (CreateForOrg writes the flag verbatim)")
 		}
 		return nil
 	}); err != nil {
@@ -304,6 +305,63 @@ func TestGitHubAppsStore_Postgres_InstallationCrossOrg(t *testing.T) {
 	}
 	if got, _ := stores.GitHubApps.ListInstallationsForOrg(ctx, orgA); len(got) != 1 {
 		t.Errorf("orgA lost its row to orgB's delete: %+v", got)
+	}
+}
+
+// TestGitHubAppsStore_Postgres_SetActiveAndDelete exercises the staged/live
+// flip (SetActive) and the full teardown (DeleteForOrg: row + installations) —
+// the either/or switch mechanics (TFAC-328). Both pools wire to AdminDB so the
+// SQL is exercised independent of the auth path.
+func TestGitHubAppsStore_Postgres_SetActiveAndDelete(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID := seedPgOrgAndUserForGitHubApps(t, h)
+	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
+		OrgID: orgID, AppID: "1", Slug: "staged", ClientID: "Iv1.x",
+		ClientSecretRef: "cs", PEMRef: "pem", WebhookSecretRef: "wh",
+		RegisteredByUserID: userID, Active: false, // staged
+	}); err != nil {
+		t.Fatalf("CreateForOrg (staged): %v", err)
+	}
+	if got, _ := stores.GitHubApps.GetForOrg(ctx, orgID); got == nil || got.Active {
+		t.Fatalf("after staged create got %+v, want Active=false", got)
+	}
+
+	if err := stores.GitHubApps.SetActive(ctx, orgID, true); err != nil {
+		t.Fatalf("SetActive: %v", err)
+	}
+	if got, _ := stores.GitHubApps.GetForOrg(ctx, orgID); got == nil || !got.Active {
+		t.Fatalf("after SetActive(true) got %+v, want Active=true", got)
+	}
+
+	// Seed installations, then tear the whole registration down.
+	for _, login := range []string{"acme", "globex"} {
+		if err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+			InstallationID: "inst-" + login, OrgID: orgID, AccountType: "Organization", AccountLogin: login,
+		}); err != nil {
+			t.Fatalf("seed installation %s: %v", login, err)
+		}
+	}
+	if err := stores.GitHubApps.DeleteForOrg(ctx, orgID); err != nil {
+		t.Fatalf("DeleteForOrg: %v", err)
+	}
+	if got, _ := stores.GitHubApps.GetForOrg(ctx, orgID); got != nil {
+		t.Errorf("GetForOrg after delete = %+v, want nil", got)
+	}
+	if insts, _ := stores.GitHubApps.ListInstallationsForOrg(ctx, orgID); len(insts) != 0 {
+		t.Errorf("installations survived DeleteForOrg = %+v, want none", insts)
+	}
+
+	// Both ops are no-ops (no error) on an org with no registration.
+	if err := stores.GitHubApps.SetActive(ctx, orgID, true); err != nil {
+		t.Errorf("SetActive on absent row = %v, want nil", err)
+	}
+	if err := stores.GitHubApps.DeleteForOrg(ctx, orgID); err != nil {
+		t.Errorf("DeleteForOrg on absent row = %v, want nil", err)
 	}
 }
 

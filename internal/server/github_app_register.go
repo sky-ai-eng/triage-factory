@@ -22,6 +22,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -527,7 +528,19 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 		secretKeys = append(secretKeys, webhookSecretKey)
 	}
 
+	// Stage the registration when an org PAT is still live (PAT→App switch):
+	// write active=false so the PAT stays the live credential — polling never
+	// blips — until an atomic cutover flips the bit and deletes the PAT. A
+	// fresh setup (no PAT) registers active=true as before, so the App is
+	// immediately live. GitHub access is strictly either/or (TFAC-328): the
+	// staged bit is how the old credential stays live across the switch window
+	// without a separate mode column.
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		creds, _ := integrations.Load(r.Context(), tx.Secrets, orgID)
+		staged := creds.GitHubPAT != ""
+		if staged {
+			log.Printf("[github-app] org %s has a live PAT — staging app_id=%s as active=false until cutover", orgID, appIDStr)
+		}
 		if err := tx.GitHubApps.CreateForOrg(r.Context(), domain.OrgGitHubApp{
 			OrgID:              orgID,
 			AppID:              appIDStr,
@@ -538,6 +551,7 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 			WebhookSecretRef:   webhookSecretKey,
 			OwnerType:          state.OwnerType,
 			RegisteredByUserID: userID,
+			Active:             !staged,
 		}); err != nil {
 			return err
 		}

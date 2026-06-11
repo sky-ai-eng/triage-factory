@@ -60,6 +60,16 @@ type TeamGitHubReposStore interface {
 	// union spans teams the caller may not belong to.
 	ListForOrgSystem(ctx context.Context, orgID string) ([]domain.TeamGitHubRepo, error)
 
+	// ListOrgReposWithTeamsSystem returns each tracked (owner, repo) in the
+	// org together with the display names of the teams tracking it, ordered by
+	// (owner, repo) then team name. It is the tracked-set source for the
+	// GitHub-access switch reachability preflights (TFAC-328): a repo that goes
+	// dark under the new credential is reported with the teams that own it.
+	// Admin pool in Postgres — the org admin running a preflight must see every
+	// team's tracking, including teams they don't belong to, so this is a
+	// claims-free system read scoped by org_id in the query.
+	ListOrgReposWithTeamsSystem(ctx context.Context, orgID string) ([]domain.TrackedRepoTeams, error)
+
 	// ReplaceForTeam upserts one row per entry in repos and deletes rows
 	// whose (owner, repo) is no longer in the input — bulk-replace
 	// semantics mirroring JiraStatusRulesStore.ReplaceForTeam. Passing an

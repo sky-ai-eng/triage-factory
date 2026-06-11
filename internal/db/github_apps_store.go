@@ -38,10 +38,41 @@ type GitHubAppsStore interface {
 	// the claims-checked GetForOrg.
 	GetForOrgSystem(ctx context.Context, orgID string) (*domain.OrgGitHubApp, error)
 
-	// CreateForOrg inserts a new org_github_apps row. Returns an
-	// error wrapping ErrGitHubAppExists if the org already has a
-	// registration (the PK constraint fires).
+	// CreateForOrg inserts a new org_github_apps row. The row is written
+	// with app.Active verbatim: a fresh setup (no org PAT) registers an
+	// active App; a registration staged during a PAT→App switch (an org PAT
+	// is still live) writes active=false so the PAT stays the live credential
+	// until an atomic cutover (TFAC-328). Returns an error wrapping
+	// ErrGitHubAppExists if the org already has a registration (the PK
+	// constraint fires) — a staged App occupies the slot just as an active one
+	// does; DeleteForOrg frees it.
 	CreateForOrg(ctx context.Context, app domain.OrgGitHubApp) error
+
+	// SetActive flips the registration's active flag for orgID. The bit is the
+	// staged/live discriminator in the GitHub-access either/or model: a staged
+	// App (active=false) is registered but not yet minting tokens (resolver
+	// tier 1 skips it, github_ready ignores it) while the org PAT stays live;
+	// the PAT→App cutover flips it true in the same transaction it deletes the
+	// org PAT, so XOR holds after the commit. A no-op (no error) on an org with
+	// no registration row.
+	SetActive(ctx context.Context, orgID string, active bool) error
+
+	// DeleteForOrg hard-deletes the org's App registration row AND every
+	// org_github_app_installations row for the org. It is the "switch to PAT"
+	// teardown and the "discard a staged switch" exit (TFAC-328): a torn-down
+	// App has nothing to mirror, and the installations mirror is rebuildable
+	// from the API if the App is ever re-registered, so the rows are removed
+	// rather than soft-deleted. The App's Vault secrets (client_secret, PEM,
+	// webhook_secret) are NOT deleted here — their refs live on the row the
+	// caller still holds, so the handler deletes them alongside this call.
+	// A no-op (no error) on an org with no registration. In Postgres the
+	// registration-row delete is an app-pool (RLS org-admin-gated) write while
+	// the installations delete routes to the admin pool (tf_app is denied all
+	// writes to org_github_app_installations); the two are not one transaction,
+	// but a lingering installation row is a harmless orphan once the
+	// registration row is gone (the resolver short-circuits on the absent App
+	// before ever reading installations).
+	DeleteForOrg(ctx context.Context, orgID string) error
 
 	// ListInstallationsForOrg returns the org's active App
 	// installations (removed_at IS NULL), ordered by account_login.
@@ -89,6 +120,13 @@ type GitHubAppsStore interface {
 	// orgID. A no-op when the org has no registered App. Runs in all
 	// modes; the invocation (poller cycle + UI refresh) is a separate
 	// concern.
+	//
+	// Reconciles for any REGISTERED App regardless of its active flag: a
+	// staged App (active=false, mid PAT→App switch) must still be able to
+	// discover its installations so the cutover preflight + install
+	// verification can run before the bit is flipped (TFAC-328). The poller
+	// only invokes this for active Apps (its own gate), so widening here
+	// doesn't make a staged App poll.
 	BackfillInstallationsFromAPI(ctx context.Context, orgID string) error
 }
 

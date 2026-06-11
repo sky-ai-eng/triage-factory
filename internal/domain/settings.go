@@ -212,6 +212,22 @@ type TeamGitHubRepo struct {
 // id and the shape every repo-list caller passes around.
 func (r TeamGitHubRepo) Slug() string { return r.Owner + "/" + r.Repo }
 
+// TrackedRepoTeams is one tracked (owner, repo) in an org together with the
+// display names of every team that tracks it. It backs the GitHub-access
+// switch reachability preflights (TFAC-328): when a switch would leave a
+// tracked repo unreachable by the new credential, the diff names which teams
+// own that now-dark repo so the admin knows who's affected. The team list is
+// deterministic (ordered by team name); a repo with no teams never appears
+// (it wouldn't be tracked).
+type TrackedRepoTeams struct {
+	Owner string
+	Repo  string
+	Teams []string
+}
+
+// Slug returns the canonical "owner/repo" form, matching TeamGitHubRepo.Slug.
+func (r TrackedRepoTeams) Slug() string { return r.Owner + "/" + r.Repo }
+
 // NormalizeTeamGitHubRepos trims every repo's owner + name, drops entries
 // with an empty field, and de-duplicates on (owner, repo) — the
 // canonical form persisted by ReplaceForTeam. Unlike the github-team
