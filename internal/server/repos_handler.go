@@ -44,13 +44,18 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 		instsErr error
 	)
 	if s.githubApps != nil {
-		app, _ = s.githubApps.GetForOrgSystem(r.Context(), orgID)
+		// Both reads degrade to the PAT path on error (per above) rather than
+		// blanking the picker, but log either failure — these silent points are
+		// what made the original dead-end untraceable (TFAC-324). instsErr is
+		// also load-bearing below: a failed installations read leaves insts nil,
+		// which must not masquerade as a positive "installed on zero accounts".
+		var appErr error
+		app, appErr = s.githubApps.GetForOrgSystem(r.Context(), orgID)
+		if appErr != nil {
+			log.Printf("[repos] org %s: read app registration failed, falling back to PAT path: %v", orgID, appErr)
+		}
 		insts, instsErr = s.githubApps.ListInstallationsForOrgSystem(r.Context(), orgID)
 		if instsErr != nil {
-			// Degrade to the PAT path (per above) but record it: a failed read
-			// leaves insts nil, which must not later masquerade as a positive
-			// "installed on zero accounts" below — and the silence is exactly
-			// the untraceability TFAC-324 is removing.
 			log.Printf("[repos] org %s: list installations failed, falling back to PAT path: %v", orgID, instsErr)
 		}
 	}

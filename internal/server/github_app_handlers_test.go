@@ -323,12 +323,14 @@ func TestGitHubAppInstallationsRefresh_MultiMode_AdminGate(t *testing.T) {
 	})
 
 	t.Run("admin_clears_gate", func(t *testing.T) {
-		// alice is the org owner/admin, so the gate passes. The real backfill
-		// then runs against a non-existent App PEM secret and fails fast (no
-		// network) — so the response is a 502. The assertion is only that the
-		// admin is NOT rejected at the gate (404).
-		if resp := rig.requestWithSid("POST", path, sidA); resp.StatusCode == http.StatusNotFound {
-			t.Errorf("admin status=%d, want the admin gate to pass (not a 404 rejection)", resp.StatusCode)
+		// alice is the org owner/admin, so the gate passes and the real backfill
+		// runs. The App's PEM secret was never stored, so the reconcile fails
+		// fast (no network — DiscoverAppInstallations reads the PEM first) and
+		// the handler returns 502. Asserting exactly 502 confirms both that the
+		// admin cleared the RequireOrgAdmin gate (not a 404) and that the
+		// failure is the reconcile rather than authorization.
+		if resp := rig.requestWithSid("POST", path, sidA); resp.StatusCode != http.StatusBadGateway {
+			t.Errorf("admin status=%d, want 502 (gate passes, backfill fails on the missing PEM)", resp.StatusCode)
 		}
 	})
 }
