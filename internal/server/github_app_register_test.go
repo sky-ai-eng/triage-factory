@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -784,17 +785,24 @@ func TestGitHubAppRegister_Callback_ReturnToRedirect(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rig := newAuthRig(t)
 
+	// driveOnce registers a fresh org each call, and org_github_apps.app_id is
+	// globally UNIQUE — a constant id would 23505-collide on the second
+	// registration (the failure that pinned this test red on main). Mint a
+	// distinct app_id + slug per conversion; the subtests assert only on the
+	// redirect Location, so the exact id doesn't matter.
+	var appIDSeq atomic.Int64
 	ghStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		fmt.Fprint(w, `{
-			"id": 24680,
-			"slug": "tf-returnto",
+		id := 24680 + appIDSeq.Add(1)
+		fmt.Fprintf(w, `{
+			"id": %d,
+			"slug": "tf-returnto-%d",
 			"client_id": "Iv1.rt",
 			"client_secret": "secret",
 			"pem": "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----",
 			"webhook_secret": "whsec"
-		}`)
+		}`, id, id)
 	}))
 	t.Cleanup(ghStub.Close)
 

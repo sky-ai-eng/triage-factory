@@ -75,11 +75,14 @@ type Server struct {
 	spawner   *delegate.Spawner
 	curator   *curator.Curator
 	// ghResolver picks the right GitHub credential (org App installation
-	// token → PAT) per request, given the org + target account. It is the
-	// sole GitHub-credential path for request handlers (reviews, pending-PRs,
-	// branches, dashboard, project-bundle probe) — there is no process-global
-	// PAT client. Built in New from the stores, so it's never nil — handlers
-	// don't need a guard.
+	// token → PAT) per request, given the org + target account. The per-repo
+	// handler operations migrated off the old process-global PAT client —
+	// review diff/submit, pending-PR submit, branches, dashboard, and the
+	// project-bundle probe — resolve through it, and there is no longer a
+	// process-global PAT client. (A few handlers still build a request-scoped
+	// PAT client directly where they intentionally need the PAT identity — the
+	// repo picker's PAT fallback and GitHub-teams discovery.) Built in New from
+	// the stores, so it's never nil — handlers don't need a guard.
 	ghResolver ghclient.Resolver
 	// jiraResolver routes Jira writes by provenance (SKY-463): ForSystem for
 	// the org/bot service cred, ForUser for the acting user's own stored

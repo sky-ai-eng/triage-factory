@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -65,14 +64,17 @@ func acmeInstall() []domain.OrgGitHubAppInstallation {
 }
 
 // captureLog redirects the standard logger to a buffer for the duration of the
-// test so a handler's "GitHub not configured" log line can be asserted. The
-// handler tests don't run in parallel and newTestServer starts no background
+// test so a handler's "GitHub not configured" log line can be asserted. It
+// restores the prior writer (not a hardcoded os.Stderr) so it composes safely
+// if anything else has already redirected the default logger. The handler
+// tests don't run in parallel and newTestServer starts no background
 // goroutines, so the global swap is safe.
 func captureLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
+	prev := log.Writer()
 	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	t.Cleanup(func() { log.SetOutput(prev) })
 	return &buf
 }
 

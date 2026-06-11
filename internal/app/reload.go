@@ -108,10 +108,11 @@ func (r *reloader) onJiraChanged(orgID string) {
 	r.pollerMgr.PollSoon("jira", orgID) // apply now, don't wait out the interval
 }
 
-// initialPoll starts polling at boot. Local mode additionally wires the
-// process-global GitHub identity (server request-handler client) and kicks
-// the first profile+score; multi mode just starts the process-global loop,
-// which fans out over every active tenant and self-gates Jira off.
+// initialPoll starts polling at boot. Local mode additionally kicks the first
+// profile+score when GitHub is configured; multi mode just starts the
+// process-global loop, which fans out over every active tenant and self-gates
+// Jira off. Request handlers resolve GitHub clients per-request through the
+// credential resolver, so there's no process-global client to wire here.
 func (r *reloader) initialPoll(ctx context.Context) {
 	if runmode.Current() != runmode.ModeLocal {
 		// runGitHubCycle fans out over ListActiveSystem each wake; orgs and
