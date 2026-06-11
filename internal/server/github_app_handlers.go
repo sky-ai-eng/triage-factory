@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"time"
@@ -35,44 +36,14 @@ type githubAppInstallation struct {
 	InstalledAt    string `json:"installed_at"`
 }
 
-// handleGitHubAppStatus returns the org's GitHub App registration +
-// installation state. Read-only; any org member (or local-mode user).
-//
-// GET /api/orgs/{org_id}/github-app
-func (s *Server) handleGitHubAppStatus(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := s.az.RequireOrgMember(w, r)
-	if !ok {
-		return
-	}
-
-	var app *domain.OrgGitHubApp
-	var insts []domain.OrgGitHubAppInstallation
-	var registeredByName string
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var lerr error
-		app, lerr = tx.GitHubApps.GetForOrg(r.Context(), orgID)
-		if lerr != nil {
-			return lerr
-		}
-		insts, lerr = tx.GitHubApps.ListInstallationsForOrg(r.Context(), orgID)
-		if lerr != nil {
-			return lerr
-		}
-		if app != nil && app.RegisteredByUserID != "" {
-			// Best-effort: a missing/failed display-name lookup leaves the
-			// field empty but shouldn't fail the whole status read.
-			name, derr := tx.Users.GetDisplayName(r.Context(), app.RegisteredByUserID)
-			if derr != nil {
-				log.Printf("[github-app] display name for %s: %v", app.RegisteredByUserID, derr)
-			}
-			registeredByName = name
-		}
-		return nil
-	}); err != nil {
-		internalError(w, "github-app", err)
-		return
-	}
-
+// newGitHubAppStatusResponse assembles the read-only status payload from a
+// loaded App registration, its installations, and the registrant's display
+// name. Shared by the member-readable status GET (handleGitHubAppStatus) and
+// the admin-only refresh POST (handleGitHubAppInstallationsRefresh) so the two
+// can never drift in shape. A nil app yields app:null (the org has no
+// registration); registeredByName may be empty when the registrant is unknown
+// or the lookup was skipped.
+func newGitHubAppStatusResponse(app *domain.OrgGitHubApp, insts []domain.OrgGitHubAppInstallation, registeredByName string) githubAppStatusResponse {
 	resp := githubAppStatusResponse{
 		Installations:      make([]githubAppInstallation, 0, len(insts)),
 		UsingHostedDefault: false,
@@ -93,7 +64,117 @@ func (s *Server) handleGitHubAppStatus(w http.ResponseWriter, r *http.Request) {
 			InstalledAt:    inst.InstalledAt.UTC().Format(time.RFC3339),
 		})
 	}
-	writeJSON(w, http.StatusOK, resp)
+	return resp
+}
+
+// registrantDisplayName best-effort resolves the display name of the user who
+// registered the org's App, for the status payload's
+// registered_by_display_name. The field is cosmetic, so a missing user or a
+// read error degrades to "" (logged) rather than failing the caller; "" is
+// also returned when the App records no registrant.
+func (s *Server) registrantDisplayName(ctx context.Context, orgID, userID string, app *domain.OrgGitHubApp) string {
+	if app == nil || app.RegisteredByUserID == "" {
+		return ""
+	}
+	var name string
+	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		var derr error
+		name, derr = tx.Users.GetDisplayName(ctx, app.RegisteredByUserID)
+		return derr
+	}); err != nil {
+		log.Printf("[github-app] display name for %s: %v", app.RegisteredByUserID, err)
+		return ""
+	}
+	return name
+}
+
+// handleGitHubAppStatus returns the org's GitHub App registration +
+// installation state. Read-only; any org member (or local-mode user).
+//
+// GET /api/orgs/{org_id}/github-app
+func (s *Server) handleGitHubAppStatus(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := s.az.RequireOrgMember(w, r)
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+
+	var app *domain.OrgGitHubApp
+	var insts []domain.OrgGitHubAppInstallation
+	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		var lerr error
+		app, lerr = tx.GitHubApps.GetForOrg(ctx, orgID)
+		if lerr != nil {
+			return lerr
+		}
+		insts, lerr = tx.GitHubApps.ListInstallationsForOrg(ctx, orgID)
+		return lerr
+	}); err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, newGitHubAppStatusResponse(app, insts, s.registrantDisplayName(ctx, orgID, userID, app)))
+}
+
+// handleGitHubAppInstallationsRefresh reconciles the org's App installation
+// mirror against GitHub on demand, then returns the refreshed status payload.
+//
+// This is the UI-driven half of installation discovery the D11 umbrella always
+// planned ("API backfill on poller cycle + UI panel refresh") — the refresh
+// call site that was never built. It breaks a local-mode chicken-and-egg: App
+// installations are otherwise only discovered inside the GitHub poll cycle,
+// which returns early when the org has zero configured repos — exactly the
+// first-run state in which the repo picker needs them. The setup wizard's
+// install step and the Settings App panel are the (admin-only) callers.
+//
+// Mode-agnostic by design: multi-mode keeps the mirror fresh via webhooks, but
+// a manual reconcile is the same harmless GET /app/installations the poller
+// runs, so it's offered everywhere rather than gated on runmode.
+//
+// POST /api/orgs/{org_id}/github-app/installations/refresh
+func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+
+	// A reconcile only makes sense for an org that has registered an App; with
+	// none there are no live installations to list. 404 with the same shape
+	// handleGitHubAppInstallURL uses. The App mirror is read through the System
+	// (claims-free) door here — the admin gate already authorized orgID, and
+	// the backfill below is itself a System operation.
+	app, err := s.githubApps.GetForOrgSystem(ctx, orgID)
+	if err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
+	if app == nil {
+		notFound(w, "github app")
+		return
+	}
+
+	// The reconcile: mint an App JWT, GET /app/installations, upsert every live
+	// installation and soft-remove any GitHub no longer reports — the same call
+	// the poller cycle makes. A failure here is GitHub or the App credential,
+	// not the request, so it's a 502 (and logged: the silent failure path is
+	// what made the original picker dead-end untraceable).
+	if err := s.githubApps.BackfillInstallationsFromAPI(ctx, orgID); err != nil {
+		log.Printf("[github-app] refresh installations for org %s: %v", orgID, err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+
+	// Re-read the freshly-reconciled mirror so the caller gets current
+	// installation state in one round trip, in the same shape the status GET
+	// serves.
+	insts, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
+	if err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, newGitHubAppStatusResponse(app, insts, s.registrantDisplayName(ctx, orgID, userID, app)))
 }
 
 // handleGitHubAppInstallURL returns the GitHub deep-link the panel's

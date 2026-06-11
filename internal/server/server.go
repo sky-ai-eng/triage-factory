@@ -795,6 +795,12 @@ func (s *Server) routes() {
 	// Any org member (read), so requireOrgMember rather than requireOrgAdmin.
 	s.api("GET /api/orgs/{org_id}/github-app", s.handleGitHubAppStatus)
 	s.api("GET /api/orgs/{org_id}/github-app/install-url", s.handleGitHubAppInstallURL)
+	// On-demand installation reconcile — the "UI panel refresh" half of D11
+	// installation discovery (the poller cycle is the other). Admin-only (the
+	// setup wizard's install step + the Settings App panel call it) and
+	// mode-agnostic. Mutating: it reconciles the installation mirror via the
+	// same API backfill the poller runs, so it rides apiMutating (CSRF).
+	s.apiMutating("POST /api/orgs/{org_id}/github-app/installations/refresh", s.handleGitHubAppInstallationsRefresh)
 
 	// "Connect GitHub" user-to-server OAuth — binds a host-verified GitHub
 	// login to the signed-in user (identity, not access, not login).

@@ -185,6 +185,32 @@ func TestHandleGitHubRepos_AppListFailureSurfacesError(t *testing.T) {
 	}
 }
 
+// App org whose App is registered + active but installed on zero accounts,
+// with no PAT to fall back to: the picker returns a distinct 400 the frontend
+// keys install guidance off — not the generic "GitHub not configured" that
+// reads as "add a PAT". This is the first-run dead-end TFAC-324 makes
+// diagnosable.
+func TestHandleGitHubRepos_AppActiveZeroInstallations(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	// The stub is only here to wire the org's base URL + PEM; the zero-install
+	// case falls into the PAT path and never makes a GitHub call.
+	stub := newAppRepoStub(t, nil)
+	seedApp(t, srv, stub, nil) // active App, zero installations
+
+	rec := doJSON(t, srv, http.MethodGet, "/api/github/repos", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("GET /api/github/repos = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	var out map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if want := "GitHub App is not installed on any account"; out["error"] != want {
+		t.Errorf("error=%q, want %q", out["error"], want)
+	}
+}
+
 // App org with multiple installations: the picker returns the union of every
 // installation's repos, deduped by full name and sorted stably.
 func TestHandleGitHubRepos_AppMultiInstallationDedup(t *testing.T) {

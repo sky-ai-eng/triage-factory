@@ -53,6 +53,7 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 		repos, err = s.installationReposUnion(r.Context(), orgID, insts)
 		if err != nil {
 			if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+				log.Printf("[repos] org %s: app installed but resolver produced no credentials for any installation: %v", orgID, err)
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub not configured"})
 				return
 			}
@@ -79,6 +80,17 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if creds.GitHubPAT == "" || creds.GitHubURL == "" {
+			// An active App installed on zero accounts dead-ends here in the
+			// PAT fallback — no installation token to use, no PAT to borrow.
+			// Surface that as its own 400 the picker can key install guidance
+			// off, instead of the generic "not configured" that reads as
+			// "add a PAT". This is the first-run dead-end TFAC-324 unblocks.
+			if app != nil && app.Active && len(insts) == 0 {
+				log.Printf("[repos] org %s: app registered + active but installed on zero accounts, and no PAT configured", orgID)
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub App is not installed on any account"})
+				return
+			}
+			log.Printf("[repos] org %s: GitHub not configured (no app installations and no PAT)", orgID)
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub not configured"})
 			return
 		}
