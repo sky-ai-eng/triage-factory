@@ -16,6 +16,7 @@ package delegate
 
 import (
 	"archive/tar"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -31,9 +32,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// Snapshot tar member names. The blob is one tar holding the git delta, the
-// ephemeral _scratch tree, the Claude session transcript, and a manifest;
-// rehydrate demuxes by these names.
+// Snapshot tar member names. The blob is one gzip-compressed tar holding the
+// git delta, the ephemeral _scratch tree, the Claude session transcript, and a
+// manifest; rehydrate demuxes by these names.
 const (
 	snapManifest      = "manifest.json"
 	snapBundle        = "repo.bundle"
@@ -63,6 +64,10 @@ type snapshotManifest struct {
 // one blueprint shares the one workspace blob. It is exactly the value
 // memoryNamespace yields and the value the on-disk worktree directory is named
 // after, so the key, the namespace, and the dir name stay in lockstep.
+//
+// The "workspace.tar" leaf is the bare tar's name; the blob is gzipped inside
+// it. Keeping the leaf avoids a dual-key dance at every discard/delete site for
+// zero benefit — nothing reads the key's extension to decide the format.
 func snapshotKey(orgID, keyID string) string {
 	return orgID + "/" + keyID + "/workspace.tar"
 }
@@ -100,16 +105,29 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, keyID, wtPath, s
 	// Stage the tar on disk, then stream it into Put. A large workspace (the
 	// _scratch tree especially) never buffers whole in memory: scratch files
 	// are copied into the tar file by file, and Put reads the staged tar back
-	// incrementally rather than from a single in-RAM buffer.
-	f, err := os.CreateTemp("", "tf-snapshot-*.tar")
+	// incrementally rather than from a single in-RAM buffer. The stream is
+	// gzipped on its way to the staging file — the transcript and ci-logs
+	// members that dominate the blob are highly compressible text — without
+	// touching the member-by-member streaming inside writeSnapshotTar.
+	f, err := os.CreateTemp("", "tf-snapshot-*.tar.gz")
 	if err != nil {
 		return fmt.Errorf("snapshot: tempfile: %w", err)
 	}
 	name := f.Name()
 	defer func() { _ = os.Remove(name) }()
-	if err := writeSnapshotTar(f, delta, wtPath, sessionID); err != nil {
+	gzw := gzip.NewWriter(f)
+	if err := writeSnapshotTar(gzw, delta, wtPath, sessionID); err != nil {
 		_ = f.Close()
 		return err
+	}
+	if err := gzw.Close(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("snapshot: close gzip: %w", err)
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return fmt.Errorf("snapshot: stat staged tar: %w", err)
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		_ = f.Close()
@@ -120,6 +138,9 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, keyID, wtPath, s
 	if putErr != nil {
 		return fmt.Errorf("snapshot: put: %w", putErr)
 	}
+	// Parked-window storage cost is a live sizing question; log every
+	// snapshot's real compressed footprint so it's answerable from the field.
+	log.Printf("[delegate] snapshot: wrote %s (%d bytes gzipped)", snapshotKey(orgID, keyID), fi.Size())
 	return nil
 }
 
@@ -240,7 +261,13 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, owner, repo, cloneU
 	defer func() { _ = os.RemoveAll(scratchStaging) }() // no-op once renamed into place
 	sawScratch := false
 
-	tr := tar.NewReader(r)
+	// Snapshots are gzipped tars (the writer's gzip.Writer wrapper).
+	gzr, err := gzip.NewReader(r)
+	if err != nil {
+		return fmt.Errorf("rehydrate: open gzip: %w", err)
+	}
+	defer func() { _ = gzr.Close() }()
+	tr := tar.NewReader(gzr)
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
