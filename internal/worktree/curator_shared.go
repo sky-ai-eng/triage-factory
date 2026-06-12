@@ -176,6 +176,16 @@ func EnsureSharedCuratorWorktree(ctx context.Context, orgID, owner, repo, branch
 		if err := os.MkdirAll(filepath.Dir(wtDir), 0o755); err != nil {
 			return "", nil, fmt.Errorf("mkdir parent: %w", err)
 		}
+		// Prune stale registrations first. If a prior checkout was removed out
+		// from under the bare (operator cleanup, or a crash mid-eviction where
+		// removeRegisteredWorktrees ran but os.RemoveAll(bareDir) didn't), the
+		// bare still carries an admin entry for wtDir and `worktree add` would
+		// fail "already registered as a linked worktree", stranding every
+		// session pinning this repo until a manual prune. Best-effort under the
+		// per-repo lock — prune only drops entries whose checkout is already
+		// gone, so a live sibling worktree is untouched; the add error below
+		// still surfaces any real failure.
+		_ = gitRunCtx(ctx, bareDir, "worktree", "prune")
 		if err := gitRunCtx(ctx, bareDir, "worktree", "add", "--detach", wtDir, remoteRef); err != nil {
 			return "", nil, fmt.Errorf("worktree add %s/%s %s: %w", owner, repo, branch, err)
 		}

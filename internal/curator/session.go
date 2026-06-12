@@ -289,7 +289,15 @@ func (s *projectSession) dispatch(item queueItem) {
 		PinnedRepos:        project.PinnedRepos,
 		JiraProjectKey:     project.JiraProjectKey,
 		LinearProjectKey:   project.LinearProjectKey,
-		BinaryPath:         selfBin,
+		// Sandbox-visible binary path: the envelope's {{BINARY_PATH}} feeds the
+		// system prompt, which agentproc does NOT rewrite for the jail (only the
+		// AllowedTools selfBin pattern is, via rewriteAllowedToolsForSandbox).
+		// In multi mode the host binary is bind-mounted at sandboxTFBinary, so
+		// telling the agent the host selfBin would ENOENT inside the jail and
+		// every `exec gh|jira` would fail. AgentVisibleBinary returns the
+		// in-jail path when sandboxed, the host path otherwise — mirrors the
+		// spawner (internal/delegate/run.go).
+		BinaryPath: agentproc.AgentVisibleBinary(selfBin),
 	}
 	systemPrompt := renderEnvelope(envelope)
 

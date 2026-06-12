@@ -101,7 +101,11 @@ func readOnlyRepoMounts(mounts []ReadOnlyRepoMount) []sandbox.Mount {
 		out = append(out, sandbox.Mount{
 			Source:      m.Source,
 			Destination: filepath.Join(sandboxWorkRoot, rel),
-			Options:     []string{"ro"},
+			// Only "ro" here — sandbox.mountsFromExtra auto-prepends "rbind" for
+			// every extra mount (asserted by TestBuildSpec_ReadOnlyRepoMountIsRO),
+			// so the final mount is a recursive read-only bind. Don't duplicate
+			// "rbind" or it'd appear twice in the spec.
+			Options: []string{"ro"},
 		})
 	}
 	return out

@@ -276,3 +276,41 @@ func TestPerProjectWorktree_StillPinsBare(t *testing.T) {
 		t.Error("a per-project curator worktree must keep its bare live by existence (unchanged)")
 	}
 }
+
+// TestEnsureSharedCuratorWorktree_RecreatesAfterExternalRemoval is the
+// self-heal contract: if the checkout is removed out from under the bare
+// (operator cleanup / crash mid-eviction) while the bare keeps the admin
+// registration, the next Acquire prunes the stale entry and re-materializes
+// instead of failing "already registered as a linked worktree" — which would
+// otherwise strand every session pinning this repo.
+func TestEnsureSharedCuratorWorktree_RecreatesAfterExternalRemoval(t *testing.T) {
+	withTestHome(t)
+	upstream := makeTestUpstream(t)
+	if _, err := EnsureBareClone(context.Background(), "o", "r", upstream); err != nil {
+		t.Fatalf("seed bare: %v", err)
+	}
+
+	wt, release, err := EnsureSharedCuratorWorktree(context.Background(), sharedOrg, "o", "r", "main")
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	release()
+
+	// Remove the checkout out-of-band; the bare keeps the admin registration.
+	if err := os.RemoveAll(wt); err != nil {
+		t.Fatalf("remove checkout: %v", err)
+	}
+
+	// Next acquire must prune the stale entry and recreate, not fail.
+	wt2, release2, err := EnsureSharedCuratorWorktree(context.Background(), sharedOrg, "o", "r", "main")
+	if err != nil {
+		t.Fatalf("re-acquire after external removal: %v (prune-before-add should self-heal)", err)
+	}
+	defer release2()
+	if wt2 != wt {
+		t.Errorf("recreated worktree path = %q, want %q", wt2, wt)
+	}
+	if _, err := os.Stat(filepath.Join(wt2, ".git")); err != nil {
+		t.Errorf("recreated worktree missing .git: %v", err)
+	}
+}
