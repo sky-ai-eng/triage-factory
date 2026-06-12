@@ -202,7 +202,7 @@ export default function GitHubAccessControl({
   // to the register step.
   if (phase.kind === 'to-app-account') {
     return (
-      <Frame onCancel={reset}>
+      <Frame onCancel={reset} busy={busy}>
         <GitHubAccountTypeStep {...ctx} advance={() => setPhase({ kind: 'to-app-register' })} />
       </Frame>
     )
@@ -212,7 +212,7 @@ export default function GitHubAccessControl({
   // redirects to GitHub and the user returns on the staged banner.
   if (phase.kind === 'to-app-register') {
     return (
-      <Frame onCancel={reset}>
+      <Frame onCancel={reset} busy={busy}>
         <p className="text-[13px] leading-relaxed text-text-tertiary">
           Register the GitHub App. Your personal access token stays the live credential until you
           install the App and switch over — nothing changes yet.
@@ -225,7 +225,7 @@ export default function GitHubAccessControl({
   // to-app-install — install the App, then Continue runs the reachability diff.
   if (phase.kind === 'to-app-install') {
     return (
-      <Frame onCancel={reset}>
+      <Frame onCancel={reset} busy={busy}>
         <div className="space-y-1.5">
           <h3 className="text-[15px] font-medium text-text-primary">Install the App</h3>
           <p className="text-[13px] leading-relaxed text-text-tertiary">
@@ -251,7 +251,7 @@ export default function GitHubAccessControl({
   // to-app-diff — the cutover reachability diff + confirm.
   if (phase.kind === 'to-app-diff') {
     return (
-      <Frame onCancel={reset}>
+      <Frame onCancel={reset} busy={busy}>
         <AccessDiffScreen
           diff={phase.diff}
           confirmLabel="Switch to the GitHub App"
@@ -266,7 +266,7 @@ export default function GitHubAccessControl({
   // to-pat-token — enter the PAT; Continue validates it and fetches the diff.
   if (phase.kind === 'to-pat-token') {
     return (
-      <Frame onCancel={reset}>
+      <Frame onCancel={reset} busy={busy}>
         <TokenScreen busy={busy} error={error} onSubmit={(pat) => void toPatPreflight(pat)} />
       </Frame>
     )
@@ -275,7 +275,7 @@ export default function GitHubAccessControl({
   // to-pat-diff — the validated login + reachability diff + confirm.
   if (phase.kind === 'to-pat-diff') {
     return (
-      <Frame onCancel={reset}>
+      <Frame onCancel={reset} busy={busy}>
         <AccessDiffScreen
           diff={phase.diff}
           login={phase.login}
@@ -365,9 +365,9 @@ export default function GitHubAccessControl({
         <>
           <p className="text-[13px] leading-relaxed text-text-tertiary">
             Triage Factory connects to GitHub through your registered App
-            {slug ? ` (${slug})` : ''}, polling under its own bot identity across{' '}
-            {s.githubAppInstallCount} installation
-            {s.githubAppInstallCount === 1 ? '' : 's'}.
+            {slug ? ` (${slug})` : ''}, polling under its own bot identity across {installCount}{' '}
+            installation
+            {installCount === 1 ? '' : 's'}.
           </p>
           <button
             type="button"
@@ -399,14 +399,26 @@ export default function GitHubAccessControl({
 
 // Frame wraps a stepper screen with a Cancel escape that returns to idle. The
 // per-screen Actions own the primary button; this only guarantees an exit.
-function Frame({ children, onCancel }: { children: React.ReactNode; onCancel: () => void }) {
+// Cancel is disabled while an operation is in flight: reset() would clear busy
+// and snap to idle, but the in-flight async still resolves and calls setPhase
+// afterward — yanking the user into a phase (e.g. the diff) they just cancelled.
+function Frame({
+  children,
+  onCancel,
+  busy,
+}: {
+  children: React.ReactNode
+  onCancel: () => void
+  busy?: boolean
+}) {
   return (
     <div className="space-y-5">
       {children}
       <button
         type="button"
         onClick={onCancel}
-        className="text-[12px] text-text-tertiary underline transition-colors hover:text-text-secondary"
+        disabled={busy}
+        className="text-[12px] text-text-tertiary underline transition-colors hover:text-text-secondary disabled:opacity-40"
       >
         Cancel switch
       </button>
