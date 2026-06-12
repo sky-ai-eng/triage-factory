@@ -7,7 +7,9 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
+	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
@@ -77,8 +79,16 @@ func (r *reloader) onGitHubChanged(orgID string) {
 
 	ctx := context.Background()
 	creds, _ := integrations.Load(ctx, r.stores.Secrets, orgID)
+	app, appErr := r.stores.GitHubApps.GetForOrgSystem(ctx, orgID)
+	if appErr != nil {
+		// Best-effort, same discipline as github_ready in the status handler:
+		// a read failure leaves the App signal off and the PAT branch still
+		// stands. Worth a log — an App-only org silently failing here would
+		// reintroduce the TFAC-331 "never profiles" symptom this fix closes.
+		log.Printf("[server] org %s: read GitHub App registration: %v (treating as no App)", orgID, appErr)
+	}
 
-	if creds.GitHubPAT != "" && creds.GitHubURL != "" {
+	if githubConfigured(creds, app) {
 		// invalidate=true (creds changed); pollSoon=true (apply now rather
 		// than wait out the interval).
 		r.reprofileRestartAndScore(orgID, true, true)
@@ -125,9 +135,13 @@ func (r *reloader) initialPoll(ctx context.Context) {
 
 	orgID := runmode.LocalDefaultOrgID
 	creds, _ := integrations.Load(ctx, r.stores.Secrets, orgID)
+	app, appErr := r.stores.GitHubApps.GetForOrgSystem(ctx, orgID)
+	if appErr != nil {
+		log.Printf("[delegate] org %s: read GitHub App registration: %v (treating as no App)", orgID, appErr)
+	}
 	repoCount, _ := r.stores.Repos.CountConfiguredSystem(ctx, orgID)
 
-	if creds.GitHubPAT != "" && creds.GitHubURL != "" && repoCount > 0 {
+	if githubConfigured(creds, app) && repoCount > 0 {
 		log.Printf("[delegate] spawner ready (%d repos configured)", repoCount)
 		// invalidate=false (fresh boot, profiles may still be warm);
 		// pollSoon=false (the restarted loop polls on its own schedule).
@@ -162,4 +176,25 @@ func (r *reloader) reprofileRestartAndScore(orgID string, invalidate, pollSoon b
 		r.scorer.Trigger(orgID)
 		bootstrapBareClones(r.stores.Repos)
 	}()
+}
+
+// githubConfigured reports whether the org has a live GitHub access path the
+// profiler can fetch repo docs through: a PAT (with a base URL) OR an active
+// App registration. It is the profiler-trigger gate shared by onGitHubChanged
+// and initialPoll, mirroring the server's github_ready signal
+// (internal/server/credentials.go): an App counts only when it is active and
+// carries a client_id. A *staged* App (active=false, mid PAT→App switch per
+// TFAC-328) is registered but not yet minting tokens, so it must NOT count —
+// the live credential is still the PAT, already covered by the first clause.
+//
+// TFAC-331: the old condition gated profiling on the PAT alone, so App-only
+// orgs never profiled — every tracked repo sat as an unprofiled skeleton
+// ("profile cannot be generated"). The App path needs no base-URL check here:
+// App orgs resolve their host from org_settings inside the resolver, and may
+// carry no github_url secret at all.
+func githubConfigured(creds auth.Credentials, app *domain.OrgGitHubApp) bool {
+	if creds.GitHubPAT != "" && creds.GitHubURL != "" {
+		return true
+	}
+	return app != nil && app.Active && app.ClientID != ""
 }

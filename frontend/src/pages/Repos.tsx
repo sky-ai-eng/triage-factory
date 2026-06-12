@@ -234,15 +234,18 @@ function BranchPicker({
 }
 
 // --- StatusDot -------------------------------------------------------------
-// LED indicator with three states:
+// LED indicator with four states:
 //   ready     — filled accent with soft halo; docs present + profile generated
 //   profiling — hollow, pulsing; docs present but summary not back yet
-//   no-docs   — hollow, rust (dismiss color); profiling can never run
+//   pending   — hollow, muted; not yet inspected (skeleton row awaiting the
+//               first profiler pass, or a repo whose doc fetch errored and was
+//               left for retry — TFAC-331)
+//   no-docs   — hollow, rust (dismiss color); inspected, genuinely no docs
 //
 // The halo is a box-shadow rather than a filter so it stays crisp through
 // the card's backdrop-blur and doesn't smear with the glass.
 
-type DotState = 'ready' | 'profiling' | 'no-docs'
+type DotState = 'ready' | 'profiling' | 'pending' | 'no-docs'
 
 // Accessible labels for the status LED. Same string goes on title
 // (sighted hover) and aria-label (screen reader / AT), so the signal
@@ -250,6 +253,7 @@ type DotState = 'ready' | 'profiling' | 'no-docs'
 const DOT_LABELS: Record<DotState, string> = {
   ready: 'Profile ready',
   profiling: 'Profiling in progress',
+  pending: 'Profiling pending',
   'no-docs': 'No documentation files — profile cannot be generated',
 }
 
@@ -278,6 +282,19 @@ function StatusDot({ state }: { state: DotState }) {
           className="absolute inset-0 rounded-full border border-[var(--color-accent)]"
         />
       </span>
+    )
+  }
+  if (state === 'pending') {
+    // Muted hollow dot — distinct from the rust no-docs dot: this repo
+    // hasn't been inspected yet (or is queued for retry), not a dead end.
+    return (
+      <span
+        role="img"
+        aria-label={label}
+        title={label}
+        className="block h-2 w-2 shrink-0 rounded-full border"
+        style={{ borderColor: 'var(--color-text-tertiary)' }}
+      />
     )
   }
   // no-docs
@@ -406,8 +423,21 @@ function RepoCard({
   }, [profile.profile_text, expanded])
 
   const hasAnyDocs = profile.has_readme || profile.has_claude_md || profile.has_agents_md
+  // A row with no docs AND no default_branch was never successfully
+  // inspected: either profiling hasn't run yet, or its doc fetch errored and
+  // the row was left untouched for retry (TFAC-331). The profiler only
+  // populates default_branch after a successful repo-meta fetch, so its
+  // presence is the "this repo was actually checked" signal — it separates a
+  // pending skeleton from a genuinely doc-less repo without a new schema column.
+  const neverChecked = !hasAnyDocs && !profile.default_branch
 
-  const state: DotState = !hasAnyDocs ? 'no-docs' : profile.profile_text ? 'ready' : 'profiling'
+  const state: DotState = hasAnyDocs
+    ? profile.profile_text
+      ? 'ready'
+      : 'profiling'
+    : neverChecked
+      ? 'pending'
+      : 'no-docs'
 
   return (
     <article
@@ -483,6 +513,8 @@ function RepoCard({
             <div className="h-2.5 w-5/6 animate-pulse rounded-full bg-black/[0.05]" />
             <div className="h-2.5 w-4/6 animate-pulse rounded-full bg-black/[0.05]" />
           </div>
+        ) : neverChecked ? (
+          <p className="text-[12px] italic text-text-tertiary">Profiling pending…</p>
         ) : (
           <p className="text-[12px] italic text-text-tertiary">
             No README, CLAUDE.md, or AGENTS.md — profile cannot be generated.

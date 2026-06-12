@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -151,36 +152,37 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			continue
 		}
 
-		readme, err := client.GetFileContent(owner, repo, "README.md")
-		if err != nil {
-			log.Printf("[repoprofile] %s: get README.md: %v", name, err)
+		// GetFileContent returns ("", nil) only for a genuine 404 — a real
+		// fetch failure (401/403, network, 5xx) comes back as a non-nil error
+		// (internal/github/events.go). GetRepoMeta likewise errors on any
+		// non-2xx. Collect all four outcomes so we can tell "the repo
+		// genuinely lacks this file" from "we couldn't reach GitHub."
+		readme, readmeErr := client.GetFileContent(owner, repo, "README.md")
+		claudeMd, claudeErr := client.GetFileContent(owner, repo, "CLAUDE.md")
+		agentsMd, agentsErr := client.GetFileContent(owner, repo, "AGENTS.md")
+		meta, metaErr := client.GetRepoMeta(owner, repo)
+
+		// TFAC-331 root cause 2: error ≠ absence. If ANY fetch failed, skip
+		// the repo entirely — no upsert, no broadcast, no docs
+		// classification — leaving the existing row untouched so the next
+		// profiler run retries. Persisting false has_* flags here would turn a
+		// transient or auth failure into a durable "this repo has no docs"
+		// that suppresses AI profiling forever. Genuine 404s (nil error, empty
+		// content) fall through; their false flags are then correct.
+		if ferr := errors.Join(readmeErr, claudeErr, agentsErr, metaErr); ferr != nil {
+			log.Printf("[repoprofile] %s: doc fetch failed, leaving row untouched for retry: %v", name, ferr)
+			continue
 		}
 
-		claudeMd, err := client.GetFileContent(owner, repo, "CLAUDE.md")
-		if err != nil {
-			log.Printf("[repoprofile] %s: get CLAUDE.md: %v", name, err)
-		}
-
-		agentsMd, err := client.GetFileContent(owner, repo, "AGENTS.md")
-		if err != nil {
-			log.Printf("[repoprofile] %s: get AGENTS.md: %v", name, err)
-		}
-
-		// Fetch repo metadata (default branch, clone URL). Both HTTPS
-		// and SSH forms come back from the same /repos/:owner/:repo
-		// response, so picking is a one-line branch on the result.
-		// Empty SSHURL (legacy GHE deployments without ssh_url
-		// surfaced) falls back to HTTPS so we always have *some* URL
-		// on the row.
-		var defaultBranch, cloneURL string
-		if meta, err := client.GetRepoMeta(owner, repo); err != nil {
-			log.Printf("[repoprofile] %s: get repo meta: %v", name, err)
-		} else {
-			defaultBranch = meta.DefaultBranch
-			cloneURL = meta.CloneURL
-			if preferSSH && meta.SSHURL != "" {
-				cloneURL = meta.SSHURL
-			}
+		// All fetches succeeded (metaErr nil ⇒ meta non-nil). Both HTTPS and
+		// SSH clone forms come back from the same /repos/:owner/:repo
+		// response, so picking is a one-line branch. Empty SSHURL (legacy GHE
+		// deployments without ssh_url surfaced) falls back to HTTPS so we
+		// always have *some* URL on the row.
+		defaultBranch := meta.DefaultBranch
+		cloneURL := meta.CloneURL
+		if preferSSH && meta.SSHURL != "" {
+			cloneURL = meta.SSHURL
 		}
 
 		prof := domain.RepoProfile{
