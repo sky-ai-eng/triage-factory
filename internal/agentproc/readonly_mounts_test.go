@@ -37,6 +37,56 @@ func TestReadOnlyRepoMounts_TranslatesToROUnderWork(t *testing.T) {
 	}
 }
 
+// TestReadOnlyRepoMounts_DropsUnsafeRelPath is the sandbox-boundary guard: a
+// RelPath that is absolute or climbs out via ".." must be dropped, never
+// mounted — an absolute RelPath would make filepath.Join discard /work and
+// expose Source at an arbitrary in-sandbox path (e.g. /etc).
+func TestReadOnlyRepoMounts_DropsUnsafeRelPath(t *testing.T) {
+	for _, rel := range []string{
+		"/etc",               // absolute → would escape /work
+		"../../etc",          // climbs out
+		"repos/../../../etc", // climbs out after cleaning
+		"..",                 // parent of cwd
+		".",                  // cwd itself (would shadow /work)
+		"",                   // empty
+	} {
+		got := readOnlyRepoMounts([]ReadOnlyRepoMount{{Source: "/data/shared", RelPath: rel}})
+		if len(got) != 0 {
+			t.Errorf("RelPath %q produced a mount %+v; unsafe paths must be dropped", rel, got)
+		}
+	}
+	// A path that cleans to a safe subpath is kept.
+	got := readOnlyRepoMounts([]ReadOnlyRepoMount{{Source: "/data/shared", RelPath: "repos/../repos/o/r"}})
+	if len(got) != 1 || got[0].Destination != "/work/repos/o/r" {
+		t.Errorf("safe-after-clean RelPath not normalized: %+v", got)
+	}
+}
+
+// TestEnsureRepoMountPoints_DropsUnsafeRelPath confirms the mount-point creator
+// applies the same guard, so it never MkdirAll's outside workCwd.
+func TestEnsureRepoMountPoints_DropsUnsafeRelPath(t *testing.T) {
+	cwd := t.TempDir()
+	mounts := []ReadOnlyRepoMount{
+		{Source: "/data/shared", RelPath: "/etc"},
+		{Source: "/data/shared", RelPath: "../escape"},
+		{Source: "", RelPath: "repos/o/r"}, // no source
+	}
+	if err := ensureRepoMountPoints(cwd, mounts); err != nil {
+		t.Fatalf("ensureRepoMountPoints: %v", err)
+	}
+	// Nothing created under cwd, and crucially nothing outside it.
+	entries, err := os.ReadDir(cwd)
+	if err != nil {
+		t.Fatalf("read cwd: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("created %d entries for all-unsafe/empty input, want 0", len(entries))
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(cwd), "escape")); err == nil {
+		t.Errorf("traversing RelPath created a dir OUTSIDE cwd — boundary breached")
+	}
+}
+
 // TestEnsureRepoMountPoints_CreatesDirsUnderCwd verifies the empty mount-point
 // dirs are created under workCwd (so they're chowned with the rest of /work
 // and exist as bind targets), and that nothing is created outside it.

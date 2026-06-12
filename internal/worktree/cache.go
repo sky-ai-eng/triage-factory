@@ -346,6 +346,38 @@ func bareCacheRoots() []string {
 	return roots
 }
 
+// curatorSharedRoots returns every dir tree that holds shared curator
+// worktrees: <StateRoot>/curator-repos and (multi) <StateRoot>/orgs/*/curator-repos.
+// Mirrors bareCacheRoots so the reaper recognizes a shared-worktree checkout
+// regardless of org layout. Returns nil when the state root can't be resolved.
+func curatorSharedRoots() []string {
+	if _, err := paths.StateRootErr(); err != nil {
+		return nil
+	}
+	roots := []string{paths.CuratorSharedReposRoot(runmode.LocalDefaultOrg)}
+	if runmode.Current() == runmode.ModeMulti {
+		if matches, err := filepath.Glob(filepath.Join(paths.StateRoot(), "orgs", "*", "curator-repos")); err == nil {
+			roots = append(roots, matches...)
+		}
+	}
+	return roots
+}
+
+// isCuratorSharedWorktree reports whether wt is a shared curator worktree
+// checkout (strictly under a curator-shared-repos root). Such a checkout's
+// liveness is the sharedReaders refcount, not mere on-disk existence, so the
+// reaper can reclaim a quiescent one (TFAC-61) — unlike a per-project curator
+// worktree (under the project KB dir) or a delegation worktree, which stay
+// live by existence.
+func isCuratorSharedWorktree(wt string) bool {
+	for _, root := range curatorSharedRoots() {
+		if strings.HasPrefix(wt, root+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
 // dirSize sums the size of every regular file under dir. Used to account
 // a bare's on-disk footprint for the budget pass.
 func dirSize(dir string) int64 {
@@ -402,9 +434,22 @@ func bareHasLiveWorktrees(bareDir string) bool {
 		if wt == "" {
 			continue
 		}
-		if _, err := os.Stat(wt); err == nil {
-			return true
+		if _, err := os.Stat(wt); err != nil {
+			continue // checkout gone → this entry isn't live
 		}
+		// The checkout exists. A shared curator worktree (TFAC-61) is live only
+		// while a jail is actively reading it (sharedReaders > 0); a quiescent
+		// one is cold cache the reaper may reclaim — evictBare removes the
+		// checkout and EnsureSharedCuratorWorktree re-materializes it on the
+		// next turn. Every other worktree (delegation run, per-project curator)
+		// is live by mere existence, as before. The per-repo lock evictBare
+		// holds while it re-checks this serializes against a concurrent
+		// EnsureSharedCuratorWorktree, which takes the same lock before it can
+		// bump the reader count — so a reader can't appear mid-eviction.
+		if isCuratorSharedWorktree(wt) && sharedReadersCount(wt) == 0 {
+			continue
+		}
+		return true
 	}
 	return false
 }

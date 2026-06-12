@@ -40,18 +40,43 @@ func WillSandbox() bool {
 	return shouldSandbox()
 }
 
+// cleanRepoMountRelPath validates and normalizes a ReadOnlyRepoMount.RelPath
+// as a safe subpath under the agent's Cwd. RelPath is caller-built
+// ("repos/<owner>/<repo>"), but this is a sandbox-setup security boundary, so
+// reject anything that could place the mount point / bind destination OUTSIDE
+// /work: an empty value, an absolute path (filepath.Join would discard the
+// /work or Cwd prefix — e.g. RelPath="/etc" → destination "/etc"), the cwd
+// itself ("."), or a path that climbs out via "..". Returns the cleaned
+// relative path and ok; callers drop the entry on !ok.
+func cleanRepoMountRelPath(rel string) (string, bool) {
+	if rel == "" {
+		return "", false
+	}
+	cleaned := filepath.Clean(rel)
+	if filepath.IsAbs(cleaned) || cleaned == "." || cleaned == ".." ||
+		strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return cleaned, true
+}
+
 // ensureRepoMountPoints creates the empty mount-point directories the
 // read-only repo bind-mounts (opts.ReadOnlyRepoMounts) land on, under workCwd.
 // They must exist before the per-run chown (so they're owned by the sandbox
 // UID like the rest of /work) and before sandbox.Wrap (so each nested bind
 // mount has a target inside the /work mount). The shared worktree each mount
 // exposes lives OUTSIDE workCwd and is never created or chowned here.
+//
+// Entries are filtered identically to readOnlyRepoMounts (empty Source or an
+// unsafe/empty RelPath dropped), so the mount points created here line up
+// exactly with the bind mounts added there — no orphan dir, no missing target.
 func ensureRepoMountPoints(workCwd string, mounts []ReadOnlyRepoMount) error {
 	for _, m := range mounts {
-		if m.RelPath == "" {
+		rel, ok := cleanRepoMountRelPath(m.RelPath)
+		if m.Source == "" || !ok {
 			continue
 		}
-		mp := filepath.Join(workCwd, m.RelPath)
+		mp := filepath.Join(workCwd, rel)
 		if err := os.MkdirAll(mp, 0o755); err != nil {
 			return fmt.Errorf("create repo mount point %s: %w", mp, err)
 		}
@@ -63,16 +88,19 @@ func ensureRepoMountPoints(workCwd string, mounts []ReadOnlyRepoMount) error {
 // mounts: each Source (a shared worktree, a host path outside Cwd) exposed
 // read-only at /work/<RelPath>. The "ro" option is the enforcement boundary —
 // it makes an in-jail write to the shared tree fail, so one session can't
-// mutate what another reads. Entries missing a Source or RelPath are dropped.
+// mutate what another reads. Entries with no Source or an unsafe/empty RelPath
+// (see cleanRepoMountRelPath) are dropped so a bad descriptor can never mount
+// Source outside /work.
 func readOnlyRepoMounts(mounts []ReadOnlyRepoMount) []sandbox.Mount {
 	out := make([]sandbox.Mount, 0, len(mounts))
 	for _, m := range mounts {
-		if m.Source == "" || m.RelPath == "" {
+		rel, ok := cleanRepoMountRelPath(m.RelPath)
+		if m.Source == "" || !ok {
 			continue
 		}
 		out = append(out, sandbox.Mount{
 			Source:      m.Source,
-			Destination: filepath.Join(sandboxWorkRoot, m.RelPath),
+			Destination: filepath.Join(sandboxWorkRoot, rel),
 			Options:     []string{"ro"},
 		})
 	}

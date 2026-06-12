@@ -75,7 +75,10 @@ func TestEnsureSharedCuratorWorktree_SharesSingleCheckout(t *testing.T) {
 	// Exactly one worktree is registered against the bare (single
 	// materialization, no per-session duplication). Each linked worktree gets
 	// a subdir under <bare>/worktrees/; count them directly.
-	bareDir, _ := repoDir("o", "r")
+	bareDir, err := repoDir("o", "r")
+	if err != nil {
+		t.Fatalf("repoDir: %v", err)
+	}
 	if n := linkedWorktreeCount(t, bareDir); n != 1 {
 		t.Errorf("linked worktree count = %d, want 1 (one shared checkout)", n)
 	}
@@ -219,5 +222,57 @@ func TestEnsureSharedCuratorWorktree_RejectsMissingBareWithoutURL(t *testing.T) 
 	_, _, err := EnsureSharedCuratorWorktree(context.Background(), sharedOrg, "ghost", "repo", "main")
 	if err == nil {
 		t.Fatal("expected error for missing bare with no clone URL")
+	}
+}
+
+// TestSharedWorktree_QuiescentDoesNotPinBare is the reaper-interaction
+// contract (TFAC-61): a shared worktree pins its bare (non-evictable) only
+// while a jail is actively reading it; once quiescent (readers==0) the bare is
+// reclaimable, so a shared checkout can't defeat the bounded bare cache.
+func TestSharedWorktree_QuiescentDoesNotPinBare(t *testing.T) {
+	withTestHome(t)
+	upstream := makeTestUpstream(t)
+	if _, err := EnsureBareClone(context.Background(), "o", "r", upstream); err != nil {
+		t.Fatalf("seed bare: %v", err)
+	}
+	bareDir, err := repoDir("o", "r")
+	if err != nil {
+		t.Fatalf("repoDir: %v", err)
+	}
+
+	_, release, err := EnsureSharedCuratorWorktree(context.Background(), sharedOrg, "o", "r", "main")
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if !bareHasLiveWorktrees(bareDir) {
+		t.Error("bare with an actively-read shared worktree must be live (non-evictable)")
+	}
+
+	release()
+	if bareHasLiveWorktrees(bareDir) {
+		t.Error("bare with only a QUIESCENT shared worktree must be evictable (readers==0)")
+	}
+}
+
+// TestPerProjectWorktree_StillPinsBare is the regression guard: the
+// reaper-liveness change is scoped to shared worktrees — a per-project curator
+// worktree (under the project KB dir, not curator-repos) still keeps its bare
+// live by mere existence, exactly as before.
+func TestPerProjectWorktree_StillPinsBare(t *testing.T) {
+	withTestHome(t)
+	upstream := makeTestUpstream(t)
+	if _, err := EnsureBareClone(context.Background(), "o", "r", upstream); err != nil {
+		t.Fatalf("seed bare: %v", err)
+	}
+	bareDir, err := repoDir("o", "r")
+	if err != nil {
+		t.Fatalf("repoDir: %v", err)
+	}
+	projectDir := filepath.Join(t.TempDir(), "proj")
+	if _, err := EnsureCuratorWorktree(context.Background(), "o", "r", "main", projectDir); err != nil {
+		t.Fatalf("curator worktree: %v", err)
+	}
+	if !bareHasLiveWorktrees(bareDir) {
+		t.Error("a per-project curator worktree must keep its bare live by existence (unchanged)")
 	}
 }
