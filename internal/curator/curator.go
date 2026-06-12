@@ -199,8 +199,10 @@ func (c *Curator) SendMessage(ctx context.Context, projectID, orgID, creatorUser
 		// "curator is shut down" path runs from the handler goroutine
 		// (not the per-project goroutine) with no synthetic-claims tx in
 		// scope, so the RLS-gated app pool would reject the UPDATE and
-		// leave the freshly created row dangling. TFAC-64.
-		_, _ = c.stores.Curator.MarkRequestCancelledIfActiveSystem(ctx, orgID, requestID, "curator is shut down")
+		// leave the freshly created row dangling. WithoutCancel so a
+		// canceled/timed-out request ctx can't skip the terminal
+		// write — that would re-introduce the dangling row. TFAC-64.
+		_, _ = c.stores.Curator.MarkRequestCancelledIfActiveSystem(context.WithoutCancel(ctx), orgID, requestID, "curator is shut down")
 		return "", errors.New("curator is shut down")
 	}
 
@@ -213,8 +215,10 @@ func (c *Curator) SendMessage(ctx context.Context, projectID, orgID, creatorUser
 		// Queue is full — should not happen at the per-project depth
 		// we configure, but if it ever does, fail the row up-front
 		// rather than blocking the HTTP handler. Admin-pool …System door
-		// for the same no-claims reason as the shutdown path above. TFAC-64.
-		_, _ = c.stores.Curator.CompleteRequestSystem(ctx, orgID, requestID, "failed", "curator queue full", 0, 0, 0)
+		// for the same no-claims reason as the shutdown path above;
+		// WithoutCancel so a canceled request ctx can't skip the
+		// terminal write and strand the row in `queued`. TFAC-64.
+		_, _ = c.stores.Curator.CompleteRequestSystem(context.WithoutCancel(ctx), orgID, requestID, "failed", "curator queue full", 0, 0, 0)
 		c.broadcastRequestUpdate(orgID, projectID, requestID, "failed")
 		return "", errors.New("curator queue is full")
 	}
