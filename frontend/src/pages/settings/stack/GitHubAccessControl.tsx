@@ -24,6 +24,7 @@
 import { useState } from 'react'
 import { ExternalLink } from 'lucide-react'
 import { toast } from '../../../components/Toast/toastStore'
+import { isHttpUrl } from '../../../lib/reachability'
 import { GitHubAccountTypeStep, GitHubAppStep } from '../../setup/GitHubStep'
 import { GitHubAppInstallView } from '../GitHubAppInstallView'
 import { useGitHubAppInstall } from '../../../hooks/useGitHubAppInstall'
@@ -182,8 +183,12 @@ export default function GitHubAccessControl({
     try {
       const res = await switchToPat(orgId, pat)
       // Success screen first (the delete-on-GitHub + re-identify guidance); the
-      // mode header flips when the user dismisses it and we reload.
-      setPhase({ kind: 'to-pat-success', settingsUrl: res.github_app_settings_url })
+      // mode header flips when the user dismisses it and we reload. Gate the URL
+      // to http(s) before it becomes an <a href> — defense in depth (the backend
+      // derives it from the validated base URL, but a javascript: href would
+      // still execute despite rel=noopener), mirroring getGitHubAppInstallURL.
+      const settingsUrl = isHttpUrl(res.github_app_settings_url) ? res.github_app_settings_url : ''
+      setPhase({ kind: 'to-pat-success', settingsUrl })
       setBusy(false)
     } catch (e) {
       setError((e as Error).message)
@@ -511,7 +516,6 @@ function AccessDiffScreen({
   busy,
   error,
   onConfirm,
-  onCancel,
 }: {
   diff: AccessDiff
   login?: string
@@ -519,7 +523,6 @@ function AccessDiffScreen({
   busy: boolean
   error: string | null
   onConfirm: () => void
-  onCancel?: () => void
 }) {
   const dark = diff.dark_repos
   const [ack, setAck] = useState(false)
@@ -583,38 +586,26 @@ function AccessDiffScreen({
         onConfirm={onConfirm}
         confirmDisabled={needsAck && !ack}
         busy={busy}
-        onCancel={onCancel}
       />
     </div>
   )
 }
 
-// Actions is the shared Confirm (+ optional Cancel) footer for a stepper screen.
+// Actions is the shared Confirm footer for a stepper screen. Cancel is owned by
+// the wrapping Frame ("Cancel switch"), so this footer carries only the primary.
 function Actions({
   confirmLabel,
   onConfirm,
   confirmDisabled = false,
   busy,
-  onCancel,
 }: {
   confirmLabel: string
   onConfirm: () => void
   confirmDisabled?: boolean
   busy: boolean
-  onCancel?: () => void
 }) {
   return (
     <div className="flex items-center justify-end gap-2">
-      {onCancel && (
-        <button
-          type="button"
-          onClick={onCancel}
-          disabled={busy}
-          className="rounded-xl px-3 py-2 text-[13px] font-medium text-text-tertiary transition-colors hover:text-text-secondary disabled:opacity-40"
-        >
-          Cancel
-        </button>
-      )}
       <button
         type="button"
         onClick={onConfirm}

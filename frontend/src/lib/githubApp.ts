@@ -5,6 +5,7 @@
 // under /api/orgs/{org_id}/github-app.
 
 import { readError } from './api'
+import { isHttpUrl } from './reachability'
 
 // Local mode runs single-org against the synthetic sentinel org. Mirrors
 // runmode.LocalDefaultOrgID on the backend; the org-scoped App endpoints
@@ -74,16 +75,6 @@ export async function getGitHubAppInstallURL(orgId: string): Promise<string> {
     throw new Error('GitHub App install URL has an unsupported scheme')
   }
   return body.url
-}
-
-// isHttpUrl reports whether url parses and uses an http(s) scheme.
-function isHttpUrl(url: string): boolean {
-  try {
-    const { protocol } = new URL(url)
-    return protocol === 'http:' || protocol === 'https:'
-  } catch {
-    return false
-  }
 }
 
 // startGitHubAppRegistration kicks off the manifest flow with a top-level

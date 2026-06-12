@@ -39,12 +39,7 @@ import {
 } from '../../../lib/reachability'
 import { GitHubUrlStep, GitHubCloneStep } from '../../setup/GitHubStep'
 import { OrgModelStep } from '../../setup/ModelStep'
-import {
-  initialWizardState,
-  loadOrg,
-  loadGitHubAppOwnerType,
-  loadGitHubAppInstall,
-} from '../../setup/steps'
+import { initialWizardState, loadOrg, loadGitHubAppInstall } from '../../setup/steps'
 import type { StepContext, WizardState } from '../../setup/types'
 import PollerTimingGroup from '../PollerTimingGroup'
 import JiraAccessGroup from '../JiraAccessGroup'
@@ -92,23 +87,22 @@ export default function OrgSettings({
   const load = useCallback(() => {
     let cancelled = false
     setLoadError(null)
-    // Seed the App account-type summary from a registered App's persisted
-    // owner_type, the same way the wizard's account-type step does, so an
-    // org-owned App doesn't render as "Personal account" on every reload.
-    // loadGitHubAppInstall surfaces the staged/registered/installed App state
-    // (the same staged-aware derivation the wizard uses) so the mode header, the
-    // staged banner, and the clone-protocol gate read the LIVE mode. Both catch
-    // internally and resolve to {} on any failure, so neither rejects the
-    // Promise.all — only a loadOrg failure surfaces the retry. The app slice
-    // merges LAST so its tab/staged override wins over loadOrg's naive value.
+    // loadGitHubAppInstall is the single App-status loader: it surfaces the
+    // staged/registered/installed App state (the same staged-aware derivation the
+    // wizard uses) so the mode header, the staged banner, and the clone-protocol
+    // gate read the LIVE mode, AND it seeds the App account-type from the App's
+    // persisted owner_type (so an org-owned App doesn't render as "Personal" on
+    // reload) — one GET /github-app, not two. Both loaders catch internally and
+    // resolve to {} on any failure, so neither rejects the Promise.all — only a
+    // loadOrg failure surfaces the retry. The app slice merges LAST so its
+    // tab/staged override wins over loadOrg's naive value.
     const loadCtx = { orgId, teamId: 'default', isLocal }
-    Promise.all([loadOrg(loadCtx), loadGitHubAppOwnerType(loadCtx), loadGitHubAppInstall(loadCtx)])
-      .then(([slice, ownerSlice, appSlice]) => {
+    Promise.all([loadOrg(loadCtx), loadGitHubAppInstall(loadCtx)])
+      .then(([slice, appSlice]) => {
         if (cancelled) return
         const seeded: WizardState = {
           ...initialWizardState(),
           ...slice,
-          ...ownerSlice,
           ...appSlice,
           isLocal,
         }

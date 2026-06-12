@@ -320,41 +320,20 @@ const githubModeStep: WizardStep = {
   render: (ctx) => <GitHubModeStep {...ctx} />,
 }
 
-// loadGitHubAppOwnerType seeds the App account-type picker from an
-// already-registered App's persisted owner_type, so returning to Setup or
-// Settings after registering an org-owned App shows "Organization account"
-// rather than re-defaulting to Personal. Best-effort and self-contained: a
-// missing orgId, an org with no App, or a failed status read all return {} —
-// the picker keeps its 'user' default. It catches internally rather than
-// throwing because the step is a pure picker whose persist is a no-op, so a
-// transient status-read failure must not flag the step as load-errored.
-export async function loadGitHubAppOwnerType(ctx: LoadContext): Promise<Partial<WizardState>> {
-  if (!ctx.orgId) return {}
-  try {
-    const status = await getGitHubAppStatus(ctx.orgId)
-    if (!status.app) return {}
-    // owner_type is a free string on the wire; narrow to the picker's union,
-    // folding anything that isn't 'org' to 'user'.
-    return { githubAppOwnerType: status.app.owner_type === 'org' ? 'org' : 'user' }
-  } catch {
-    return {}
-  }
-}
-
 // Step · App account type (visible when App is the chosen method, before the
 // registration step). Personal vs Organization — which GitHub account the App
 // is registered under — as a flush two-panel picker, action-on-click
-// (selfAdvancing). Its load seeds the choice from a registered App's persisted
-// owner_type (so it survives a reload); absent an App it stays at the Personal
-// default. Always complete; the value rides state.githubAppOwnerType into the
-// registration step.
+// (selfAdvancing). The choice is seeded from a registered App's persisted
+// owner_type by the shared App-status loader (loadGitHubAppInstall), so it
+// survives a reload without a fetch of its own; absent an App it stays at the
+// Personal default. Always complete; the value rides state.githubAppOwnerType
+// into the registration step.
 const githubAccountStep: WizardStep = {
   id: 'org-github-account',
   section: 'org',
   title: 'App account type',
   visible: (s) => s.githubAccessTab === 'app',
   selfAdvancing: true,
-  load: loadGitHubAppOwnerType,
   isComplete: () => true,
   persist: async () => {},
   collapsedSummary: (s) =>
@@ -403,6 +382,12 @@ const githubAppStep: WizardStep = {
 // stands. This relies on loadGitHubAppInstall merging AFTER loadOrg, which it
 // does — both are org-section steps and the install step is the later of the
 // two in WIZARD_STEPS.
+//
+// It is the SINGLE App-status loader: it also seeds githubAppOwnerType (the
+// account-type picker's value), so the account step needs no load of its own
+// and Settings needs only this one fetch — every step's load() fans out in
+// parallel on mount, so a separate owner-type loader would just duplicate this
+// GET /github-app.
 export async function loadGitHubAppInstall(ctx: LoadContext): Promise<Partial<WizardState>> {
   if (!ctx.orgId) return {}
   try {
@@ -416,9 +401,15 @@ export async function loadGitHubAppInstall(ctx: LoadContext): Promise<Partial<Wi
       githubAppInstalled: n > 0,
       githubAppInstallCount: n,
     }
-    // Registered (staged → resume the switch; live → it's the live credential)
-    // ⇒ App tab. Absent ⇒ leave the tab to loadOrg's PAT/null derivation.
-    if (app) slice.githubAccessTab = 'app'
+    if (app) {
+      // Registered (staged → resume the switch; live → it's the live credential)
+      // ⇒ App tab. Absent ⇒ leave the tab to loadOrg's PAT/null derivation.
+      slice.githubAccessTab = 'app'
+      // owner_type is a free string on the wire; narrow to the picker's union,
+      // folding anything that isn't 'org' to 'user'. Absent an App, the default
+      // 'user' stands (key omitted).
+      slice.githubAppOwnerType = app.owner_type === 'org' ? 'org' : 'user'
+    }
     return slice
   } catch {
     return {}

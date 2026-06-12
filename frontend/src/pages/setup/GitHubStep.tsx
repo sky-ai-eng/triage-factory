@@ -78,7 +78,9 @@ function appModeStatus(s: WizardState): string | undefined {
   const tag = s.githubAppSlug ? ` (${s.githubAppSlug})` : ''
   if (s.githubAppStaged) return `Registered${tag} — switch pending`
   if (s.githubAppRegistered) {
-    return s.githubAppInstalled ? 'Registered + installed' : `Registered${tag} — not installed yet`
+    return s.githubAppInstalled
+      ? `Registered${tag} — installed`
+      : `Registered${tag} — not installed yet`
   }
   return undefined
 }
