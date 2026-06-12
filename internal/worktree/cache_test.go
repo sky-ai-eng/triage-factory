@@ -187,6 +187,68 @@ func TestEnforceBudget_SkipsInUseBare(t *testing.T) {
 	}
 }
 
+// TestEvictBare_AlreadyGoneIsNoop covers the externally-deleted bare: a
+// concurrent call or a manual rm can remove the bare between scanBares and
+// the eviction attempt. evictBare must return 0 (nothing reclaimed) and
+// clear the stale LRU stamp rather than panic.
+func TestEvictBare_AlreadyGoneIsNoop(t *testing.T) {
+	withTestHome(t)
+	dir := seedBare(t, "o", "vanished")
+	setBareLastUsed(dir, time.Now().Add(-time.Hour))
+
+	// Remove the bare out from under the reaper, simulating an external
+	// delete after the scan captured this entry.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("remove bare: %v", err)
+	}
+
+	if n := evictBare(bareEntry{dir: dir, sizeB: 4096, lastUsed: time.Now().Add(-time.Hour)}); n != 0 {
+		t.Errorf("evictBare on a gone dir reclaimed %d, want 0", n)
+	}
+	// The stale LRU stamp must be cleared.
+	lastUsedMu.Lock()
+	_, present := lastUsed[dir]
+	lastUsedMu.Unlock()
+	if present {
+		t.Error("evictBare left a stale lastUsed entry for a gone bare")
+	}
+}
+
+// TestEnforceBudget_TTLPassDropsExternallyDeletedSize is the accounting
+// guard for finding #1: a TTL-evictable bare that's already gone must not
+// keep inflating the carried-forward total into the budget pass. Here a
+// stale (past-TTL) bare is deleted externally; a warm in-budget bare must
+// survive because the budget pass should NOT see the gone bare's bytes.
+func TestEnforceBudget_TTLPassDropsExternallyDeletedSize(t *testing.T) {
+	withTestHome(t)
+	gone := seedBare(t, "o", "gone")
+	warm := seedBare(t, "o", "warm")
+	setBareLastUsed(gone, time.Now().Add(-48*time.Hour)) // past TTL
+	setBareLastUsed(warm, time.Now())
+
+	// Total footprint as the scan will see it, then delete the stale bare
+	// out-of-band so its eviction attempt is a no-op.
+	var total int64
+	for _, e := range scanBares() {
+		total += e.sizeB
+	}
+	if err := os.RemoveAll(gone); err != nil {
+		t.Fatalf("remove gone bare: %v", err)
+	}
+
+	// Budget set just under the *pre-delete* total: if the gone bare's size
+	// were wrongly carried forward, the budget pass would think it's still
+	// over and evict the warm bare. With correct re-summing the warm bare's
+	// own size is under budget, so it survives.
+	evicted, _ := EnforceBudget(context.Background(), Policy{MaxBytes: total - 1, TTL: 24 * time.Hour})
+	if evicted != 0 {
+		t.Errorf("evicted=%d, want 0 — the only past-TTL bare was already gone; the warm bare must not be over-evicted", evicted)
+	}
+	if _, err := os.Stat(warm); err != nil {
+		t.Errorf("warm bare over-evicted due to inflated total: %v", err)
+	}
+}
+
 // TestOwnerRepoFromBareDir pins the path → (owner, repo) recovery the
 // reaper uses to take the per-repo lock before evicting.
 func TestOwnerRepoFromBareDir(t *testing.T) {

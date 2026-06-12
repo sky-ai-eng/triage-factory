@@ -197,13 +197,27 @@ func EnforceBudget(ctx context.Context, policy Policy) (evicted int, reclaimed i
 				if n := evictBare(e); n > 0 {
 					evicted++
 					reclaimed += n
-					total -= n
+					continue // evicted — drop from kept
+				}
+				// evictBare returned 0: either the bare is in use (keep it)
+				// or it vanished externally between the scan and now (drop
+				// it). Distinguish so an already-gone bare doesn't linger in
+				// the kept set and inflate the budget pass's total.
+				if _, err := os.Stat(e.dir); os.IsNotExist(err) {
+					forgetBare(e.dir)
 					continue
 				}
 			}
 			kept = append(kept, e)
 		}
 		entries = kept
+		// Re-sum from what actually remains so the budget pass starts from an
+		// accurate footprint regardless of what the TTL pass evicted or what
+		// disappeared underneath it.
+		total = 0
+		for _, e := range entries {
+			total += e.sizeB
+		}
 	}
 
 	// Budget pass: evict coldest-first until under the byte budget.
@@ -219,15 +233,40 @@ func EnforceBudget(ctx context.Context, policy Policy) (evicted int, reclaimed i
 				evicted++
 				reclaimed += n
 				total -= n
+				continue
+			}
+			// evictBare returned 0: if the bare vanished externally, drop its
+			// size from total so we don't over-evict the next coldest. An
+			// in-use bare leaves total untouched (its disk is still occupied).
+			if _, err := os.Stat(e.dir); os.IsNotExist(err) {
+				total -= e.sizeB
 			}
 		}
 	}
 
 	if evicted > 0 {
-		log.Printf("[worktree] cache reaper evicted %d bare(s), reclaimed %d bytes (budget %d, ttl %s)",
-			evicted, reclaimed, policy.MaxBytes, policy.TTL)
+		log.Printf("[worktree] cache reaper evicted %d bare(s), reclaimed %d bytes (budget %s, ttl %s)",
+			evicted, reclaimed, budgetLabel(policy.MaxBytes), ttlLabel(policy.TTL))
 	}
 	return evicted, reclaimed
+}
+
+// budgetLabel renders a byte budget for the reaper log line — "off" when
+// the disk-budget pass is disabled (<= 0), the byte count otherwise.
+func budgetLabel(maxBytes int64) string {
+	if maxBytes <= 0 {
+		return "off"
+	}
+	return strconv.FormatInt(maxBytes, 10)
+}
+
+// ttlLabel renders a TTL for the reaper log line — "off" when the TTL pass
+// is disabled (<= 0), the duration otherwise.
+func ttlLabel(ttl time.Duration) string {
+	if ttl <= 0 {
+		return "off"
+	}
+	return ttl.String()
 }
 
 // StartReaper runs EnforceBudget on a ticker until ctx is cancelled,

@@ -88,21 +88,22 @@ func EnsureCuratorWorktree(ctx context.Context, owner, repo, branch, projectDir 
 		}
 		// Bare missing — seed it on demand (TFAC-60/-62). This is exactly
 		// what delegation already does; the curator was the lone holdout.
-		// We hold the per-repo lock, so call ensureBareCloneLocked directly.
-		// Without a clone URL there's nothing to seed from (the misleading
-		// "repo profiling has not run yet" message is gone — profiling is
-		// API-based and never touches a bare).
+		// We hold the per-repo lock, so call ensureBareCloneLocked directly
+		// (which also stamps the LRU). Without a clone URL there's nothing
+		// to seed from (the misleading "repo profiling has not run yet"
+		// message is gone — profiling is API-based and never touches a bare).
 		if cfg.seedURL == "" {
 			return "", fmt.Errorf("bare clone for %s/%s missing and no clone URL provided to seed it", owner, repo)
 		}
 		if _, err := ensureBareCloneLocked(ctx, owner, repo, cfg.seedURL, auth); err != nil {
 			return "", fmt.Errorf("seed bare for %s/%s: %w", owner, repo, err)
 		}
+	} else {
+		// Bare already existed (seed branch stamps via ensureBareCloneLocked).
+		// Account this dispatch's read for the bounded-cache LRU so a repo
+		// read this turn is treated as warm by the reaper.
+		touchBare(bareDir)
 	}
-	// Account the access for the bounded-cache LRU (cache.go) — ensures a
-	// repo read this dispatch is treated as warm by the reaper even when
-	// the bare already existed and we skipped the seed branch above.
-	touchBare(bareDir)
 
 	wtDir := filepath.Join(absProjectDir, "repos", CuratorRepoSubpath(owner, repo))
 	remoteRef := "refs/remotes/origin/" + branch
