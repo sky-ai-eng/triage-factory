@@ -32,6 +32,7 @@ func TestGitHubConfigured(t *testing.T) {
 		// can't reach GitHub); the App branch deliberately does not, since App
 		// orgs resolve their host from org_settings inside the resolver.
 		{"pat without base url, no app", auth.Credentials{GitHubPAT: "ghp_x"}, nil, false},
+		{"pat without base url but active app, app branch wins", auth.Credentials{GitHubPAT: "ghp_x"}, activeApp, true},
 		{"pat and active app", auth.Credentials{GitHubPAT: "ghp_x", GitHubURL: baseURL}, activeApp, true},
 		{"pat live alongside a staged app still true via pat", auth.Credentials{GitHubPAT: "ghp_x", GitHubURL: baseURL}, stagedApp, true},
 	}

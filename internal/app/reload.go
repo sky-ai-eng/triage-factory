@@ -181,17 +181,22 @@ func (r *reloader) reprofileRestartAndScore(orgID string, invalidate, pollSoon b
 // githubConfigured reports whether the org has a live GitHub access path the
 // profiler can fetch repo docs through: a PAT (with a base URL) OR an active
 // App registration. It is the profiler-trigger gate shared by onGitHubChanged
-// and initialPoll. For the App branch, this matches github_ready in
-// internal/server/credentials.go: an App counts only when it is active and
-// carries a client_id. A *staged* App (active=false, mid PAT→App switch per
-// TFAC-328) is registered but not yet minting tokens, so it must NOT count —
-// the live credential is still the PAT, already covered by the first clause.
+// and initialPoll.
+//
+// The App branch matches the server's github_ready signal
+// (internal/server/credentials.go) exactly: an App counts only when it is
+// active and carries a client_id. A *staged* App (active=false, mid PAT→App
+// switch per TFAC-328) is registered but not yet minting tokens, so it must
+// NOT count — the live credential is still the PAT, already covered by the
+// first clause. The PAT branch is deliberately stricter than github_ready
+// (which accepts a bare PAT): the profiler needs a host to call, so it also
+// requires a base URL. The App branch needs no base-URL check — App orgs
+// resolve their host from org_settings inside the resolver and may carry no
+// github_url secret at all.
 //
 // TFAC-331: the old condition gated profiling on the PAT alone, so App-only
 // orgs never profiled — every tracked repo sat as an unprofiled skeleton
-// ("profile cannot be generated"). The App path needs no base-URL check here:
-// App orgs resolve their host from org_settings inside the resolver, and may
-// carry no github_url secret at all.
+// ("profile cannot be generated").
 func githubConfigured(creds auth.Credentials, app *domain.OrgGitHubApp) bool {
 	if creds.GitHubPAT != "" && creds.GitHubURL != "" {
 		return true

@@ -27,8 +27,10 @@ func TestProfiler_FetchErrorLeavesRowUntouched(t *testing.T) {
 		path := strings.TrimPrefix(r.URL.Path, "/api/v3/repos/")
 		switch {
 		case strings.HasPrefix(path, "bad/errors"):
-			// One failed fetch is enough to skip the whole repo: README 500s,
-			// the rest would 404 but the skip fires before they matter.
+			// README 500s; CLAUDE/AGENTS still get requested and 404 (all four
+			// fetches always run). The errors.Join skip fires after they
+			// complete but before any upsert, so those 404 results never matter
+			// — one non-nil error is enough to skip the whole repo.
 			if strings.HasSuffix(path, "/contents/README.md") {
 				w.WriteHeader(http.StatusInternalServerError)
 				return
