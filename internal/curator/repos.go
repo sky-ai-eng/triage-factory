@@ -101,10 +101,20 @@ func materializeSharedPinnedRepos(ctx context.Context, repos db.RepoStore, token
 			r()
 		}
 	}
+	// Dedup by slug. pinned_repos is uniqueness-validated at the API layer
+	// (validatePinnedRepos), but this builds sandbox mounts from a raw slice:
+	// a repeated slug would emit two bind mounts at the same /work/repos/<o>/<r>
+	// destination (undefined under gVisor) and double-acquire the shared
+	// reader. Guard it here so the function is self-contained.
+	seen := make(map[string]bool, len(pinnedRepos))
 	for _, slug := range pinnedRepos {
 		if ctx.Err() != nil {
 			return mounts, releaseAll
 		}
+		if seen[slug] {
+			continue
+		}
+		seen[slug] = true
 		owner, repo, ok := splitOwnerRepo(slug)
 		if !ok {
 			log.Printf("[curator] project %s: malformed pinned repo %q (skipping)", projectID, slug)

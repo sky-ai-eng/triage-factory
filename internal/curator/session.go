@@ -332,6 +332,12 @@ func (s *projectSession) dispatch(item queueItem) {
 	// Code's rm policy treats the cwd as the sole allowed dir; without
 	// these the agent can read/write files via Edit/Write but cannot
 	// delete obsolete knowledge notes.
+	//
+	// `repos` is listed in both modes for a uniform path model. In local mode
+	// it holds the per-project worktrees (writable, reset each turn). In
+	// sandbox mode the pinned repos are read-only bind mounts, so this add-dir
+	// is inert for them — the ro mount, not the rm policy, is the write
+	// boundary — and reads work regardless (the paths are under cwd).
 	addDirs := []string{
 		filepath.Join(cwd, "knowledge-base"),
 		filepath.Join(cwd, "repos"),
