@@ -181,8 +181,8 @@ func (r *reloader) reprofileRestartAndScore(orgID string, invalidate, pollSoon b
 // githubConfigured reports whether the org has a live GitHub access path the
 // profiler can fetch repo docs through: a PAT (with a base URL) OR an active
 // App registration. It is the profiler-trigger gate shared by onGitHubChanged
-// and initialPoll, mirroring the server's github_ready signal
-// (internal/server/credentials.go): an App counts only when it is active and
+// and initialPoll. For the App branch, this matches github_ready in
+// internal/server/credentials.go: an App counts only when it is active and
 // carries a client_id. A *staged* App (active=false, mid PAT→App switch per
 // TFAC-328) is registered but not yet minting tokens, so it must NOT count —
 // the live credential is still the PAT, already covered by the first clause.
