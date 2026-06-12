@@ -45,6 +45,13 @@ type Curator struct {
 	ghResolver ghclient.Resolver
 	sessions   map[string]*projectSession // projectID → goroutine handle
 
+	// runAgent dispatches one agent turn. Defaults to agentproc.Run in
+	// New; the multi-mode capstone pgtest (TFAC-65) overrides it to drive
+	// SendMessage → dispatch → terminal without spawning the claude
+	// subprocess or booting the gVisor jail. Production never reassigns it,
+	// so the live path is byte-for-byte the direct agentproc.Run call.
+	runAgent func(context.Context, agentproc.RunOptions, agentproc.Sink) (*agentproc.Outcome, error)
+
 	// closed is set during Shutdown; SendMessage rejects after this.
 	closed bool
 }
@@ -66,6 +73,7 @@ func New(stores db.Stores, wsHub *websocket.Hub, model string) *Curator {
 		wsHub:    wsHub,
 		model:    model,
 		sessions: make(map[string]*projectSession),
+		runAgent: agentproc.Run,
 	}
 }
 

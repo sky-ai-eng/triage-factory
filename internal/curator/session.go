@@ -379,7 +379,7 @@ func (s *projectSession) dispatch(item queueItem) {
 		return mount, hd, nil
 	}
 
-	outcome, runErr := agentproc.Run(msgCtx, agentproc.RunOptions{
+	outcome, runErr := s.curator.runAgent(msgCtx, agentproc.RunOptions{
 		Cwd:          cwd,
 		Model:        model,
 		SessionID:    project.CuratorSessionID,

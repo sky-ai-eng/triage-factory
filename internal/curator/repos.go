@@ -44,7 +44,12 @@ func materializePinnedRepos(ctx context.Context, repos db.RepoStore, tokenFor fu
 			log.Printf("[curator] project %s: malformed pinned repo %q (skipping)", projectID, slug)
 			continue
 		}
-		profile, err := repos.Get(ctx, orgID, slug)
+		// GetSystem: this dispatch goroutine holds no synthetic-claims tx,
+		// so an app-pool Get would 42501 on the grant-less authenticator in
+		// multi mode and silently skip the repo (no bare seeded, no mounts
+		// built); the org-scoped profile read goes through the admin pool,
+		// like the spawner's *System reads from its detached goroutines. TFAC-65.
+		profile, err := repos.GetSystem(ctx, orgID, slug)
 		if err != nil {
 			log.Printf("[curator] project %s: load profile for %s: %v (skipping)", projectID, slug, err)
 			continue
@@ -120,7 +125,12 @@ func materializeSharedPinnedRepos(ctx context.Context, repos db.RepoStore, token
 			log.Printf("[curator] project %s: malformed pinned repo %q (skipping)", projectID, slug)
 			continue
 		}
-		profile, err := repos.Get(ctx, orgID, slug)
+		// GetSystem: this dispatch goroutine holds no synthetic-claims tx,
+		// so an app-pool Get would 42501 on the grant-less authenticator in
+		// multi mode and silently skip the repo (no bare seeded, no mounts
+		// built); the org-scoped profile read goes through the admin pool,
+		// like the spawner's *System reads from its detached goroutines. TFAC-65.
+		profile, err := repos.GetSystem(ctx, orgID, slug)
 		if err != nil {
 			log.Printf("[curator] project %s: load profile for %s: %v (skipping)", projectID, slug, err)
 			continue

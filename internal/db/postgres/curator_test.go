@@ -443,6 +443,13 @@ func setProjectSession(t *testing.T, h *pgtest.Harness, projectID, sessionID str
 // cancelled. The boot path has no JWT-claims context, so the impl
 // routes through the admin pool (BYPASSRLS); this test seeds rows
 // under two distinct orgs and asserts both are affected.
+//
+// This is the TFAC-65 orphan-cleanup audit: it confirms the sweep is
+// admin-pooled. The load-bearing wiring is pgstore.New(AdminDB, AppDB) —
+// an app-pool variant run with no claims would match zero rows under RLS
+// and silently strand a prior process's orphans across every tenant. The
+// boot caller (internal/app/subsystems.go) invokes this on exactly that
+// admin-pooled store before constructing the Curator.
 func TestCuratorStore_Postgres_CancelOrphanedNonTerminalRequests(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
