@@ -197,7 +197,7 @@ func EnforceBudget(ctx context.Context, policy Policy) (evicted int, reclaimed i
 				if n := evictBare(e); n > 0 {
 					evicted++
 					reclaimed += n
-					total -= e.sizeB
+					total -= n
 					continue
 				}
 			}
@@ -218,7 +218,7 @@ func EnforceBudget(ctx context.Context, policy Policy) (evicted int, reclaimed i
 			if n := evictBare(e); n > 0 {
 				evicted++
 				reclaimed += n
-				total -= e.sizeB
+				total -= n
 			}
 		}
 	}
@@ -257,8 +257,9 @@ func StartReaper(ctx context.Context, policy Policy, interval time.Duration) {
 
 // scanBares walks every cache root and returns one entry per bare
 // (owner/repo .git dir) with its on-disk size and effective last-used
-// time. Walk is bounded by SkipDir at the .git boundary so a fat
-// monorepo's pack tree isn't descended.
+// time. The root walk SkipDirs at each .git boundary so it doesn't
+// recurse looking for (impossible) nested bares; the per-bare footprint
+// is then summed by dirSize, which does traverse that bare's tree.
 func scanBares() []bareEntry {
 	var out []bareEntry
 	for _, root := range bareCacheRoots() {
@@ -343,7 +344,11 @@ func ownerRepoFromBareDir(dir string) (owner, repo string, ok bool) {
 func bareHasLiveWorktrees(bareDir string) bool {
 	entries, err := os.ReadDir(filepath.Join(bareDir, "worktrees"))
 	if err != nil {
-		return false // no admin dir → no linked worktrees
+		// A missing admin dir means no linked worktrees → safe to evict.
+		// Any OTHER error (permission, I/O) means we couldn't evaluate the
+		// guard; fail safe by reporting "in use" so eviction skips a bare
+		// we can't prove is cold.
+		return !os.IsNotExist(err)
 	}
 	for _, e := range entries {
 		if !e.IsDir() {
