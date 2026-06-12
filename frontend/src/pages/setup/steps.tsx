@@ -60,6 +60,7 @@ import {
   refreshGitHubAppInstallations,
   cutoverToApp,
   switchToPat,
+  discardStagedApp,
 } from '../../lib/githubApp'
 import { apiJSON } from '../../lib/apiClient'
 import type { GitHubIdentityStatus, JiraIdentityStatus } from '../../types'
@@ -492,10 +493,17 @@ const githubAppInstallStep: WizardStep = {
 // does NOT re-validate, so confirm against the server's github_ready signal
 // rather than optimistically marking connected.
 //
-// Cross-pick (an App is registered, user picked PAT to switch): Continue calls
-// switch-to-pat — a full App teardown that validates + stores the new token —
-// instead of the plain settings save (which 409s while an App exists anyway).
-// The step body warns about the teardown; nothing is destroyed until Continue.
+// Cross-pick (an App is registered, user picked PAT to switch): Continue tears
+// the App down instead of the plain settings save (which 409s while an App
+// exists anyway). Two sub-cases, because in a STAGED switch the PAT is still the
+// live credential:
+//   - Staged App + live PAT, field blank → DISCARD the staged App (the PAT
+//     stays). This is the "changed my mind mid-switch" exit — it must NOT force
+//     re-typing a token the user may not have on hand.
+//   - Otherwise (a live App, which by XOR has no PAT; or the user typed a new
+//     token to rotate) → switch-to-pat, a full teardown that validates + stores
+//     the supplied token.
+// The body warns about the teardown; nothing is destroyed until Continue.
 // `githubReady` alone can't gate completion here (an App makes it true), so the
 // step is complete only once a PAT is live AND no App remains.
 const githubPatStep: WizardStep = {
@@ -506,9 +514,11 @@ const githubPatStep: WizardStep = {
   isComplete: (s) => s.githubReady && !s.githubAppRegistered,
   validate: (s) => {
     if (s.githubReady && !s.githubAppRegistered) return null
-    // Switching from a registered App: switch-to-pat has no "keep current" —
-    // it validates and stores exactly what's sent, so a token is required.
     if (s.githubAppRegistered) {
+      // A staged App keeps the live PAT, so a blank field is valid — it discards
+      // the staged App and keeps the current token. A live App has no PAT (XOR),
+      // so switching off it requires a typed token.
+      if (s.githubAppStaged && s.hasGitHubPat) return null
       return s.org.github_pat.trim() === ''
         ? 'Enter a personal access token to switch to PAT access.'
         : null
@@ -519,11 +529,19 @@ const githubPatStep: WizardStep = {
   },
   persist: async ({ state, orgId, patch }) => {
     if (state.githubReady && !state.githubAppRegistered) return
-    // Cross-pick: tear down the App and switch to the typed PAT. Pre-repos in
-    // the wizard, so no reachability diff — confirm-and-go.
+    // Cross-pick: tear down the App. Pre-repos in the wizard, so no reachability
+    // diff — confirm-and-go.
     if (state.githubAppRegistered) {
       if (!orgId) throw new Error('No organization context.')
-      await switchToPat(orgId, state.org.github_pat.trim())
+      const typed = state.org.github_pat.trim()
+      // Blank is only valid for a staged App (validate blocks a live App + blank),
+      // where the live PAT stays — so discard the staged App rather than re-enter
+      // a token. A typed token rotates via the full teardown.
+      if (typed === '') {
+        await discardStagedApp(orgId)
+      } else {
+        await switchToPat(orgId, typed)
+      }
       patch({
         githubReady: true,
         hasGitHubPat: true,

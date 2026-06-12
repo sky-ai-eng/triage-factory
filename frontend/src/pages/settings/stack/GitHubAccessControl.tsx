@@ -233,12 +233,12 @@ export default function GitHubAccessControl({
           installUrl={installUrl}
         />
         {error && <p className="text-[12px] text-dismiss">{error}</p>}
-        <Actions
-          confirmLabel="Continue"
-          onConfirm={() => void toAppPreflight()}
-          confirmDisabled={installCount === 0}
-          busy={busy}
-        />
+        {/* Continue is NOT gated on installCount: useGitHubAppInstall swallows
+            read failures and can sit at a stale/null status, and toAppPreflight
+            runs the authoritative refresh itself (showing its own inline error
+            when nothing's installed) — disabling here would lock the user out of
+            the very discovery that unsticks them. */}
+        <Actions confirmLabel="Continue" onConfirm={() => void toAppPreflight()} busy={busy} />
       </Frame>
     )
   }
@@ -375,15 +375,16 @@ export default function GitHubAccessControl({
       ) : (
         <>
           <p className="text-[13px] leading-relaxed text-text-tertiary">
-            Triage Factory connects to GitHub with a personal access token. Switch to a GitHub App
-            to poll under its own bot identity with support for multiple installations.
+            {s.hasGitHubPat
+              ? 'Triage Factory connects to GitHub with a personal access token. Switch to a GitHub App to poll under its own bot identity with support for multiple installations.'
+              : 'GitHub access isn’t configured for this workspace yet. Register a GitHub App to poll under its own bot identity with support for multiple installations.'}
           </p>
           <button
             type="button"
             onClick={() => setPhase({ kind: 'to-app-account' })}
             className="rounded-xl border border-border-glass px-4 py-2 text-[13px] font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary"
           >
-            Switch to GitHub App…
+            {s.hasGitHubPat ? 'Switch to GitHub App…' : 'Set up a GitHub App…'}
           </button>
         </>
       )}

@@ -258,9 +258,21 @@ export function GitHubPatStep({ orgId, isLocal, state, patch }: StepContext) {
     <div className="space-y-5">
       {state.githubAppRegistered && (
         <SwitchNotice>
-          You&rsquo;ve registered a GitHub App
-          {state.githubAppSlug ? ` (${state.githubAppSlug})` : ''}. Entering a personal access token
-          will remove that registration — the App itself stays on GitHub and can be deleted there.
+          {state.githubAppStaged && state.hasGitHubPat ? (
+            <>
+              You have a staged GitHub App
+              {state.githubAppSlug ? ` (${state.githubAppSlug})` : ''}. Continue to discard it and
+              keep your current token — or enter a new token to replace it. The App stays on GitHub
+              and can be deleted there.
+            </>
+          ) : (
+            <>
+              You&rsquo;ve registered a GitHub App
+              {state.githubAppSlug ? ` (${state.githubAppSlug})` : ''}. Entering a personal access
+              token will remove that registration — the App itself stays on GitHub and can be
+              deleted there.
+            </>
+          )}
         </SwitchNotice>
       )}
       <GitHubAccessGroup
@@ -270,7 +282,11 @@ export function GitHubPatStep({ orgId, isLocal, state, patch }: StepContext) {
           github_clone_protocol: state.org.github_clone_protocol,
         }}
         onChange={(p) => patch({ org: { ...state.org, ...p } })}
-        hasToken={state.hasGitHubPat && !state.githubAppRegistered}
+        // A staged App keeps the live PAT, so "leave blank to keep current" still
+        // holds (blank → discard the staged App, PAT stays). A live App has no
+        // PAT (XOR), so hasGitHubPat is already false there — no special-casing
+        // the App-registered flag is needed.
+        hasToken={state.hasGitHubPat}
         isLocal={isLocal}
         orgId={orgId}
         showAppPanel={false}
