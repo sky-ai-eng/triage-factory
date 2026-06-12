@@ -286,19 +286,10 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	regMu.(*sync.Mutex).Lock()
 	defer regMu.(*sync.Mutex).Unlock()
 
-	// One-slot rule + the org's GitHub base URL (for the API calls below). A
-	// staged app occupies the slot too — the discard endpoint frees it.
-	var existing *domain.OrgGitHubApp
-	var orgSettings domain.OrgSettings
-	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		var lerr error
-		existing, lerr = tx.GitHubApps.GetForOrg(ctx, orgID)
-		if lerr != nil {
-			return lerr
-		}
-		orgSettings, lerr = tx.Orgs.GetSettings(ctx, orgID)
-		return lerr
-	}); err != nil {
+	// One-slot rule. A staged app occupies the slot too — the discard endpoint
+	// frees it. System read: the admin gate already authorized orgID.
+	existing, err := s.githubApps.GetForOrgSystem(ctx, orgID)
+	if err != nil {
 		internalError(w, "github-app", err)
 		return
 	}
@@ -309,7 +300,20 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apiBase := ghclient.APIBase(ghclient.ResolveBaseURL(orgSettings.GitHubBaseURL))
+	// Resolve the org's GitHub base URL through the resolver so the validation
+	// calls below hit the right host. BaseURLFor applies the same precedence the
+	// poller / git paths use — org_settings.github_base_url, then the github_url
+	// secret (load-bearing for GHES / local-mode orgs whose host lives only in
+	// the keychain, with the settings column empty), then public github.com —
+	// and propagates a read error rather than papering a possibly-GHES org over
+	// with github.com. Deriving from org_settings alone would mint the app JWT
+	// against the wrong host for exactly those orgs.
+	base, err := s.ghResolver.BaseURLFor(ctx, orgID)
+	if err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
+	apiBase := ghclient.APIBase(base)
 
 	// Parse the PEM (garbage → 422).
 	key, err := githubapp.ParsePrivateKey([]byte(req.PEM))

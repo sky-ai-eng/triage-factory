@@ -192,6 +192,34 @@ func TestGitHubAppImport_StagedWhenPATLive(t *testing.T) {
 	}
 }
 
+// TestGitHubAppImport_BaseURLFromSecret pins the resolver-precedence fix: an org
+// with an empty org_settings.github_base_url but a stored github_url secret (a
+// supported GHES / local-mode shape, where the host lives only in the keychain)
+// resolves the validation host from the secret rather than defaulting to public
+// github.com — so GET /app reaches the right host and the import succeeds. With
+// the old settings-only derivation this would target github.com and fail.
+func TestGitHubAppImport_BaseURLFromSecret(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+
+	stub := newImportStub(t, importStubCfg{appID: 77, slug: "ghes-bot", clientID: "Iv1.x"})
+	// Deliberately do NOT set org_settings.github_base_url; the host lives only
+	// in the github_url secret — the keychain-first state BaseURLFor handles.
+	if err := s.secrets.Put(context.Background(), runmode.LocalDefaultOrgID, integrations.KeyGitHubURL, stub.URL, ""); err != nil {
+		t.Fatalf("seed github_url secret: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/import",
+		importBody("77", testRSAPEM(t), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("import = %d, want 200 (base URL resolved from the github_url secret); body=%s", rec.Code, rec.Body.String())
+	}
+	if app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID); app == nil {
+		t.Error("no app row written — import didn't reach the secret-derived host")
+	}
+}
+
 // TestGitHubAppImport_AppIDMismatch rejects a PEM whose App reports a different
 // id than the submitted app_id, and writes no row.
 func TestGitHubAppImport_AppIDMismatch(t *testing.T) {
