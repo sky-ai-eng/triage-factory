@@ -18,11 +18,13 @@ import (
 // Wires the app pool in Postgres for the curator goroutine's normal
 // dispatch path — each turn opens short-lived txs under the
 // requesting user's identity (read from curator_requests.creator_user_id
-// at dequeue time). System-service paths that lack a real user
-// (process shutdown, project-delete fan-out, handler cancels prior to
-// D9) still call the package-level helpers in internal/db/curator.go
-// against *sql.DB; those are out of scope for this ticket and tracked
-// by SKY-253.
+// at dequeue time). The curator's own system-service cancel paths
+// (process shutdown, project-delete drain, SendMessage shutdown /
+// queue-full fallbacks) route through the admin-pool …System methods
+// below (TFAC-64). The one raw-*sql.DB curator helper still live is the
+// handler-side user-cancel in internal/server/curator.go — that has a
+// real request context and is the D9 handler sweep's job (TFAC-168),
+// out of scope here.
 //
 // Read methods (Get/List) mostly live in the package-level helpers
 // for now — the goroutine's writes are the auth surface that matters

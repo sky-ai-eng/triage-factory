@@ -297,6 +297,14 @@ func (c *Curator) Shutdown() {
 // project to cancelled. Called from CancelProject (handler-side) and
 // from the fallback path in SendMessage when the curator is shut down.
 //
+// Only `queued` rows are drained — `running` rows are covered by two
+// orthogonal paths that both complete before this runs: the startup
+// sweep (CancelOrphanedNonTerminalRequests) retires a previous
+// process's in-flight rows, and CancelProject's session.shutdown waits
+// (<-s.done) for the goroutine to mark the current in-flight row
+// terminal before this drain fires. So no `running` row is observable
+// here.
+//
 // System-driven cancel: there is no live request/JWT context here (the
 // rows may have been enqueued by any user, possibly in a previous
 // process), so both the list and the per-row cancel route through the
