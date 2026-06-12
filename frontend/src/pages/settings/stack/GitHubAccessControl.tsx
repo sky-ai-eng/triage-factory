@@ -25,7 +25,9 @@ import { useState } from 'react'
 import { ExternalLink } from 'lucide-react'
 import { toast } from '../../../components/Toast/toastStore'
 import { isHttpUrl } from '../../../lib/reachability'
-import { GitHubAccountTypeStep, GitHubAppStep } from '../../setup/GitHubStep'
+import { GitHubAccountTypeStep, GitHubAppSourcePicker, GitHubAppStep } from '../../setup/GitHubStep'
+import GitHubAppImportForm from '../GitHubAppImportForm'
+import { appImportedPatch } from '../../setup/githubAppImported'
 import { GitHubAppInstallView } from '../GitHubAppInstallView'
 import { useGitHubAppInstall } from '../../../hooks/useGitHubAppInstall'
 import {
@@ -45,8 +47,10 @@ import type { StepContext } from '../../setup/types'
 // away, and the user returns to `idle` on the staged banner.
 type Phase =
   | { kind: 'idle' }
+  | { kind: 'to-app-source' }
   | { kind: 'to-app-account' }
   | { kind: 'to-app-register' }
+  | { kind: 'to-app-import' }
   | { kind: 'to-app-install' }
   | { kind: 'to-app-diff'; diff: AccessDiff }
   | { kind: 'to-pat-token' }
@@ -197,6 +201,52 @@ export default function GitHubAccessControl({
   }
 
   // ─────────────────────────────── render ───────────────────────────────
+
+  // to-app-source — the create-vs-connect fork (same chooser the wizard uses).
+  // Create continues to the account-type/register path; connect goes to the
+  // import form. onChoose routes on the argument, and patches ctx so a later
+  // cancel reads a coherent source.
+  if (phase.kind === 'to-app-source') {
+    return (
+      <Frame onCancel={reset} busy={busy}>
+        <GitHubAppSourcePicker
+          selected={s.githubAppSource}
+          onChoose={(kind) => {
+            ctx.patch({ githubAppSource: kind })
+            setPhase(kind === 'existing' ? { kind: 'to-app-import' } : { kind: 'to-app-account' })
+          }}
+        />
+      </Frame>
+    )
+  }
+
+  // to-app-import — the bring-your-own-App import form. On success the App is
+  // persisted (staged if a PAT is live, else immediately active): a staged import
+  // continues to install → diff → cutover; a fresh active import (no PAT) is the
+  // live credential already, so reload to the live-App view.
+  if (phase.kind === 'to-app-import' && orgId) {
+    return (
+      <Frame onCancel={reset} busy={busy}>
+        <div className="space-y-1.5">
+          <h3 className="text-[15px] font-medium text-text-primary">Connect an existing App</h3>
+        </div>
+        <GitHubAppImportForm
+          orgId={orgId}
+          isLocal={ctx.isLocal}
+          onImported={(result) => {
+            ctx.patch(appImportedPatch(result))
+            if (result.app && !result.app.active) {
+              setPhase({ kind: 'to-app-install' })
+            } else {
+              toast.success('Connected your GitHub App')
+              reset()
+              reload()
+            }
+          }}
+        />
+      </Frame>
+    )
+  }
 
   // to-app-account — reuse the wizard's account-type picker; choosing advances
   // to the register step.
@@ -386,7 +436,7 @@ export default function GitHubAccessControl({
           </p>
           <button
             type="button"
-            onClick={() => setPhase({ kind: 'to-app-account' })}
+            onClick={() => setPhase({ kind: 'to-app-source' })}
             className="rounded-xl border border-border-glass px-4 py-2 text-[13px] font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary"
           >
             {s.hasGitHubPat ? 'Switch to GitHub App…' : 'Set up a GitHub App…'}

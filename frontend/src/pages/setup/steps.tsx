@@ -31,8 +31,10 @@
 import {
   GitHubUrlStep,
   GitHubModeStep,
+  GitHubAppSourceStep,
   GitHubAccountTypeStep,
   GitHubAppStep,
+  GitHubAppImportStep,
   GitHubAppInstallStep,
   GitHubPatStep,
   GitHubCloneStep,
@@ -97,6 +99,7 @@ export const initialWizardState = (): WizardState => ({
   githubUrlConfirmed: false,
   githubAccessTab: null,
   githubAppOwnerType: 'user',
+  githubAppSource: null,
   githubAppRegistered: false,
   githubAppStaged: false,
   githubAppSlug: '',
@@ -320,10 +323,39 @@ const githubModeStep: WizardStep = {
   render: (ctx) => <GitHubModeStep {...ctx} />,
 }
 
-// Step · App account type (visible when App is the chosen method, before the
-// registration step). Personal vs Organization — which GitHub account the App
-// is registered under — as a flush two-panel picker, action-on-click
-// (selfAdvancing). The choice is seeded from a registered App's persisted
+// Step · App source (visible when App is the chosen method, before the account
+// type). Create a new App vs connect an existing one (bring-your-own), as a
+// flush two-panel picker, action-on-click (selfAdvancing). The choice gates the
+// account-type/register steps (create) vs the import step (existing). Complete
+// once a source is chosen, OR once an App is already registered — so a returning
+// org with a live/staged App (whose source value resets to null on reload, since
+// it isn't persisted) resumes past it showing the connection rather than
+// re-prompting.
+const githubAppSourceStep: WizardStep = {
+  id: 'org-github-app-source',
+  section: 'org',
+  title: 'App source',
+  visible: (s) => s.githubAccessTab === 'app',
+  selfAdvancing: true,
+  isComplete: (s) => s.githubAppSource !== null || s.githubAppRegistered,
+  persist: async () => {},
+  collapsedSummary: (s) =>
+    s.githubAppRegistered
+      ? `Connected${s.githubAppSlug ? ` (${s.githubAppSlug})` : ''}`
+      : s.githubAppSource === 'existing'
+        ? 'Connect an existing App'
+        : s.githubAppSource === 'create'
+          ? 'Create a new App'
+          : 'Not chosen',
+  render: (ctx) => <GitHubAppSourceStep {...ctx} />,
+}
+
+// Step · App account type (visible when App is the chosen method AND the create
+// source, before the registration step). Personal vs Organization — which GitHub
+// account the App is registered under — as a flush two-panel picker,
+// action-on-click (selfAdvancing). Hidden on the connect-existing branch
+// (owner_type comes from GET /app), but kept visible once an App is registered
+// (source resets to null on reload) so resume shows coherent collapsed history. The choice is seeded from a registered App's persisted
 // owner_type by the shared App-status loader (loadGitHubAppInstall), so it
 // survives a reload without a fetch of its own; absent an App it stays at the
 // Personal default. Always complete; the value rides state.githubAppOwnerType
@@ -332,7 +364,7 @@ const githubAccountStep: WizardStep = {
   id: 'org-github-account',
   section: 'org',
   title: 'App account type',
-  visible: (s) => s.githubAccessTab === 'app',
+  visible: (s) => s.githubAccessTab === 'app' && s.githubAppSource !== 'existing',
   selfAdvancing: true,
   isComplete: () => true,
   persist: async () => {},
@@ -358,12 +390,36 @@ const githubAppStep: WizardStep = {
   id: 'org-github-app',
   section: 'org',
   title: 'GitHub App',
-  visible: (s) => s.githubAccessTab === 'app',
+  visible: (s) => s.githubAccessTab === 'app' && s.githubAppSource !== 'existing',
   isComplete: (s) => s.githubReady,
   validate: (s) => (s.githubReady ? null : 'Register your GitHub App to continue.'),
   persist: async () => {},
   collapsedSummary: connectedSummary,
   render: (ctx) => <GitHubAppStep {...ctx} returnTo="setup" />,
+}
+
+// Step · Connect an existing App (visible when App is the chosen method, the
+// connect-existing source, and no App is registered yet). The bring-your-own-App
+// import form: App ID + private key, optional OAuth client secret + webhook
+// secret. The form owns its own submit (selfAdvancing — no wizard Continue);
+// validating + importing happens there, and on success it patches the same state
+// the register path patches and advances to the install step. Disappears once an
+// App is registered (the install step takes over). A 422 (bad pair, permission
+// gap) stays inline in the form; the wizard never leaves the step until success.
+const githubAppImportStep: WizardStep = {
+  id: 'org-github-app-import',
+  section: 'org',
+  title: 'Connect your App',
+  visible: (s) =>
+    s.githubAccessTab === 'app' && s.githubAppSource === 'existing' && !s.githubAppRegistered,
+  selfAdvancing: true,
+  isComplete: (s) => s.githubAppRegistered,
+  persist: async () => {},
+  collapsedSummary: (s) =>
+    s.githubAppRegistered
+      ? `Connected${s.githubAppSlug ? ` (${s.githubAppSlug})` : ''}`
+      : 'Not connected',
+  render: (ctx) => <GitHubAppImportStep {...ctx} />,
 }
 
 // loadGitHubAppInstall seeds the App-presence + install gate from the live App
@@ -1022,8 +1078,10 @@ const jiraUserAccessStep: WizardStep = {
 export const WIZARD_STEPS: WizardStep[] = [
   githubUrlStep,
   githubModeStep,
+  githubAppSourceStep,
   githubAccountStep,
   githubAppStep,
+  githubAppImportStep,
   githubAppInstallStep,
   githubPatStep,
   githubCloneStep,

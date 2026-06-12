@@ -20,6 +20,14 @@ type githubAppStatusResponse struct {
 	App                *githubAppInfo          `json:"app"`
 	Installations      []githubAppInstallation `json:"installations"`
 	UsingHostedDefault bool                    `json:"using_hosted_default"`
+	// ConnectCallbackURL is the absolute redirect_uri the App owner must register
+	// on the App for per-user "Connect GitHub" OAuth to work. It's the
+	// same URL buildManifestAndState bakes into a manifest-created App's
+	// callback_urls — harmless there (already registered at creation), load-bearing
+	// for a bring-your-own-App import whose owner must register it by hand. Empty
+	// when no deployment identity is configured (deployCfg nil — e.g. a unit-test
+	// server); the field is only actioned by an admin enabling OAuth.
+	ConnectCallbackURL string `json:"connect_callback_url"`
 }
 
 type githubAppInfo struct {
@@ -51,10 +59,14 @@ type githubAppInstallation struct {
 // can never drift in shape. A nil app yields app:null (the org has no
 // registration); registeredByName may be empty when the registrant is unknown
 // or the lookup was skipped.
-func newGitHubAppStatusResponse(app *domain.OrgGitHubApp, insts []domain.OrgGitHubAppInstallation, registeredByName string) githubAppStatusResponse {
+// connectCallbackURL is the org's Connect OAuth redirect_uri (or "" when no
+// deployment identity is configured), carried so the import/connect form can
+// show the exact URL the App owner must register.
+func newGitHubAppStatusResponse(app *domain.OrgGitHubApp, insts []domain.OrgGitHubAppInstallation, registeredByName, connectCallbackURL string) githubAppStatusResponse {
 	resp := githubAppStatusResponse{
 		Installations:      make([]githubAppInstallation, 0, len(insts)),
 		UsingHostedDefault: false,
+		ConnectCallbackURL: connectCallbackURL,
 	}
 	if app != nil {
 		resp.App = &githubAppInfo{
@@ -124,7 +136,20 @@ func (s *Server) handleGitHubAppStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, newGitHubAppStatusResponse(app, insts, s.registrantDisplayName(ctx, orgID, userID, app)))
+	writeJSON(w, http.StatusOK, newGitHubAppStatusResponse(app, insts, s.registrantDisplayName(ctx, orgID, userID, app), s.connectCallbackURLSafe(orgID)))
+}
+
+// connectCallbackURLSafe returns the org's Connect OAuth callback URL, or ""
+// when no deployment identity is configured (deployCfg nil). connectCallbackURL
+// itself dereferences s.deployCfg.publicURL and so assumes a configured
+// deployment (its other callers gate on s.deployCfg != nil first); this wrapper
+// lets the status payload carry the field unconditionally, degrading to "" for a
+// deployment-less server (a unit-test rig) instead of panicking.
+func (s *Server) connectCallbackURLSafe(orgID string) string {
+	if s.deployCfg == nil {
+		return ""
+	}
+	return s.connectCallbackURL(orgID)
 }
 
 // handleGitHubAppInstallationsRefresh reconciles the org's App installation
@@ -184,7 +209,7 @@ func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *h
 		internalError(w, "github-app", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, newGitHubAppStatusResponse(app, insts, s.registrantDisplayName(ctx, orgID, userID, app)))
+	writeJSON(w, http.StatusOK, newGitHubAppStatusResponse(app, insts, s.registrantDisplayName(ctx, orgID, userID, app), s.connectCallbackURLSafe(orgID)))
 }
 
 // handleGitHubAppInstallURL returns the GitHub deep-link the panel's

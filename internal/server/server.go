@@ -794,6 +794,13 @@ func (s *Server) routes() {
 	// r.PathValue("org_id"). Works in both local and multi mode.
 	s.api("GET /api/orgs/{org_id}/github-app/register/launch", s.handleGitHubAppRegisterLaunch)
 	s.api("GET /api/orgs/{org_id}/github-app/register/callback", s.handleGitHubAppRegisterCallback)
+	// Bring-your-own-App import: the second way into App mode for orgs
+	// that can't or shouldn't create the App themselves. Validates an App ID +
+	// private key via an app-JWT GET /app, permission-preflights, and persists
+	// through the same path the manifest callback uses (staging rule unchanged).
+	// A JSON fetch from the SPA (not a top-level navigation like launch/callback),
+	// so it rides apiMutating (CSRF). Org-admin (gated inside the handler).
+	s.apiMutating("POST /api/orgs/{org_id}/github-app/import", s.handleGitHubAppImport)
 	// Read-only status + install deep-link for the Workspace Settings panel.
 	// Any org member (read), so requireOrgMember rather than requireOrgAdmin.
 	s.api("GET /api/orgs/{org_id}/github-app", s.handleGitHubAppStatus)

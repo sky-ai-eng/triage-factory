@@ -351,7 +351,15 @@ func (s *Server) handleGitHubIdentityStatus(w http.ResponseWriter, r *http.Reque
 		if lerr != nil {
 			return lerr
 		}
-		connectAvailable = app != nil && app.ClientID != ""
+		// Connect (the user-to-server OAuth code exchange) needs BOTH the App's
+		// client_id AND a stored client_secret — the exchange at :259 already
+		// requires the secret. An imported App may have no secret
+		// (the BYOA owner often skips it), so requiring only client_id here would
+		// advertise an OAuth flow that can't complete; the gate page would offer
+		// Connect, the user would consent, and the callback would dead-end on the
+		// missing secret. Requiring the ref too makes the gate fall back to the
+		// always-available PAT-capture identity path instead.
+		connectAvailable = app != nil && app.ClientID != "" && app.ClientSecretRef != ""
 		return nil
 	}); err != nil {
 		internalError(w, "github-identity", err)

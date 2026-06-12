@@ -40,6 +40,11 @@ export interface GitHubAppStatus {
   app: GitHubAppInfo | null
   installations: GitHubAppInstallation[]
   using_hosted_default: boolean
+  // The absolute redirect_uri the App owner must register on the App for per-user
+  // "Connect GitHub" OAuth to work. Same URL a manifest-created App already has
+  // registered (harmless there); load-bearing for a bring-your-own App whose
+  // owner registers it by hand. Empty when no deployment identity is configured.
+  connect_callback_url: string
 }
 
 export async function getGitHubAppStatus(orgId: string): Promise<GitHubAppStatus> {
@@ -75,6 +80,95 @@ export async function getGitHubAppInstallURL(orgId: string): Promise<string> {
     throw new Error('GitHub App install URL has an unsupported scheme')
   }
   return body.url
+}
+
+// ── Bring-your-own-App import ─────────────────────────────────────────────
+// The second way into App mode: supply an App ID + private key for an App that
+// already exists, validated server-side via an app-JWT GET /app round trip. The
+// backend derives slug/owner/permissions from the App itself, permission-
+// preflights, and persists through the same path the manifest callback uses.
+
+// GitHubAppPermissionRow is one entry in the import preflight's granted-vs-
+// required table. severity is 'required' (a hard gap blocks the import) or
+// 'optional' (a soft gap blocks only until accept_partial acknowledges it);
+// feature names the capability an unmet optional permission degrades.
+export interface GitHubAppPermissionRow {
+  permission: string
+  required: string
+  granted: string
+  satisfied: boolean
+  severity: string
+  feature?: string
+}
+
+// GitHubAppImportInput is the import request body. client_secret (enables OAuth
+// Connect), webhook_secret (multi mode only), and accept_partial (acknowledges
+// soft permission gaps) are optional.
+export interface GitHubAppImportInput {
+  app_id: string
+  pem: string
+  client_secret?: string
+  webhook_secret?: string
+  accept_partial?: boolean
+}
+
+// GitHubAppImportResult is the success body: the status payload plus the
+// preflight table and the client-secret validation outcome.
+export interface GitHubAppImportResult extends GitHubAppStatus {
+  permissions: GitHubAppPermissionRow[]
+  client_secret_stored: boolean
+  client_secret_validated: boolean
+}
+
+// GitHubAppImportOutcome discriminates a successful import from a rejection. On
+// failure, `permissions` + `blocking` are present for a permission gap (blocking
+// = a hard gap accept_partial can't override; !blocking = a soft gap the caller
+// resubmits past with accept_partial); `field` is present for a field-level
+// rejection (bad PEM, app-id mismatch, bad client secret).
+export type GitHubAppImportOutcome =
+  | { ok: true; result: GitHubAppImportResult }
+  | {
+      ok: false
+      error: string
+      permissions?: GitHubAppPermissionRow[]
+      blocking?: boolean
+      field?: string
+    }
+
+// importGitHubApp validates and imports an existing GitHub App. It returns a
+// structured outcome rather than throwing, so the form can render the permission
+// table on a gap (instead of a bare error string).
+//
+// POST /api/orgs/{org_id}/github-app/import
+export async function importGitHubApp(
+  orgId: string,
+  input: GitHubAppImportInput,
+): Promise<GitHubAppImportOutcome> {
+  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github-app/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  if (res.ok) {
+    return { ok: true, result: (await res.json()) as GitHubAppImportResult }
+  }
+  try {
+    const body = (await res.json()) as {
+      error?: string
+      permissions?: GitHubAppPermissionRow[]
+      blocking?: boolean
+      field?: string
+    }
+    return {
+      ok: false,
+      error: body.error || 'Failed to import the GitHub App.',
+      permissions: body.permissions,
+      blocking: body.blocking,
+      field: body.field,
+    }
+  } catch {
+    return { ok: false, error: 'Failed to import the GitHub App.' }
+  }
 }
 
 // startGitHubAppRegistration kicks off the manifest flow with a top-level

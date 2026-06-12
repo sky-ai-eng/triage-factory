@@ -48,6 +48,12 @@ export type TrackerKind = 'none' | 'jira' | 'linear'
 // the App vs PAT config steps. App is the default in both modes.
 export type GitHubAccessMode = 'app' | 'pat'
 
+// Which way into App mode the user takes: 'create' registers a brand-new App via
+// GitHub's manifest flow; 'existing' connects an App that already exists by App
+// ID + private key (bring-your-own-App). Gates the account-type/register steps
+// vs the import step. Null until chosen.
+export type GitHubAppSource = 'create' | 'existing'
+
 export interface WizardState {
   org: OrgConfigForm
   // True once the org form has been seeded from the server (the GitHub step's
@@ -81,6 +87,12 @@ export interface WizardState {
   // The GitHub App owner type (personal vs org), chosen in its own step when App
   // is the method; fed into GitHubAppPanel's registration. Defaults to 'user'.
   githubAppOwnerType: 'user' | 'org'
+  // Which way into App mode — create a new App (manifest flow) vs connect an
+  // existing one (App ID + private key import). Its own picker step, gating the
+  // account-type/register steps vs the import step. Null until chosen; a
+  // returning org with a registered App leaves this null (its source step
+  // resolves complete from the App's presence, not from this value).
+  githubAppSource: GitHubAppSource | null
   // Whether the org has a registered GitHub App at all (staged OR live), from
   // the App status. Distinct from githubReady (a PAT also satisfies that) and
   // from the access tab (a registered App always resolves the tab to 'app').

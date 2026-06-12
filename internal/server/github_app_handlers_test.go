@@ -88,7 +88,7 @@ func TestNewGitHubAppStatusResponse_CarriesActive(t *testing.T) {
 				Slug:   "acme-bot",
 				Active: tc.active,
 			}
-			resp := newGitHubAppStatusResponse(app, nil, "")
+			resp := newGitHubAppStatusResponse(app, nil, "", "")
 			if resp.App == nil {
 				t.Fatal("App=nil, want the mapped registration")
 			}

@@ -23,10 +23,12 @@
 
 import GitHubAccessGroup from '../settings/GitHubAccessGroup'
 import GitHubAppPanel from '../settings/GitHubAppPanel'
+import GitHubAppImportForm from '../settings/GitHubAppImportForm'
 import { GitHubAppInstallView } from '../settings/GitHubAppInstallView'
 import { useGitHubAppInstall } from '../../hooks/useGitHubAppInstall'
 import { UrlField, ChoiceCards } from './parts'
-import type { StepContext, GitHubAccessMode, WizardState } from './types'
+import type { StepContext, GitHubAccessMode, GitHubAppSource, WizardState } from './types'
+import { appImportedPatch } from './githubAppImported'
 
 export const DEFAULT_GITHUB_URL = 'https://github.com'
 
@@ -138,6 +140,66 @@ export function GitHubModeStep({ state, patch, advance }: StepContext) {
   )
 }
 
+const SOURCE_CARDS: { kind: GitHubAppSource; title: string; detail: string }[] = [
+  {
+    kind: 'create',
+    title: 'Create a new App',
+    detail: 'Triage Factory registers a new GitHub App for you via the manifest flow.',
+  },
+  {
+    kind: 'existing',
+    title: 'Connect an existing App',
+    detail: 'You have an App ID and private key — bring your own, no org-owner consent needed.',
+  },
+]
+
+// GitHubAppSourcePicker is the shared create-vs-connect chooser — the ChoiceCards
+// plus heading — reused by the wizard's source step and the Settings switch flow.
+// onChoose receives the kind directly so callers route on the argument (not a
+// not-yet-flushed state read).
+export function GitHubAppSourcePicker({
+  selected,
+  onChoose,
+}: {
+  selected: GitHubAppSource | null
+  onChoose: (kind: GitHubAppSource) => void
+}) {
+  return (
+    <div className="space-y-5">
+      <div className="space-y-1.5">
+        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+          New App or one you already have?
+        </h2>
+        <p className="text-[13px] leading-relaxed text-text-tertiary">
+          Register a fresh GitHub App, or connect one that already exists — useful when only a
+          platform team may create org Apps, or you&rsquo;re reusing an App across deployments.
+        </p>
+      </div>
+      <ChoiceCards
+        ariaLabel="GitHub App source"
+        options={SOURCE_CARDS}
+        selected={selected}
+        onChoose={onChoose}
+      />
+    </div>
+  )
+}
+
+// GitHubAppSourceStep body — App only: create a new App vs connect an existing
+// one. Action-on-click (selfAdvancing); the choice rides state.githubAppSource,
+// gating the account-type/register steps (create) vs the import step (existing).
+export function GitHubAppSourceStep({ state, patch, advance }: StepContext) {
+  return (
+    <GitHubAppSourcePicker
+      selected={state.githubAppSource}
+      onChoose={(kind) => {
+        patch({ githubAppSource: kind })
+        advance?.()
+      }}
+    />
+  )
+}
+
 const ACCOUNT_CARDS: { kind: 'user' | 'org'; title: string; detail: string }[] = [
   {
     kind: 'user',
@@ -208,6 +270,25 @@ export function GitHubAppStep({
       bare
       ownerType={state.githubAppOwnerType}
       returnTo={returnTo}
+    />
+  ) : (
+    <p className="text-[12px] italic text-text-tertiary">Resolving your workspace…</p>
+  )
+}
+
+// GitHubAppImportStep body — App + existing source: the bring-your-own-App
+// import form. The form owns its own submit (the step is selfAdvancing — no
+// wizard Continue); on a successful import it patches the same state the register
+// path patches (via appImportedPatch) and advances to the install step.
+export function GitHubAppImportStep({ orgId, isLocal, patch, advance }: StepContext) {
+  return orgId ? (
+    <GitHubAppImportForm
+      orgId={orgId}
+      isLocal={isLocal}
+      onImported={(result) => {
+        patch(appImportedPatch(result))
+        advance?.()
+      }}
     />
   ) : (
     <p className="text-[12px] italic text-text-tertiary">Resolving your workspace…</p>

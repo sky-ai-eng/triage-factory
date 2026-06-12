@@ -404,6 +404,90 @@ func (m *Minter) ListInstallations(ctx context.Context) ([]Installation, error) 
 	return out, nil
 }
 
+// App is the App's own metadata, returned by GET /app authenticated with an
+// app-level JWT. A GitHub App authenticates itself: minting a JWT off the App's
+// private key and calling /app yields the App's slug, owner, granted permission
+// set, subscribed events, and client_id in one round trip — which is what the
+// bring-your-own-App import validates the App-ID/key pair with and derives the
+// registration row from (owner_type from Owner.Type is better provenance than
+// the manifest path's query param).
+type App struct {
+	ID          int64
+	Slug        string
+	OwnerLogin  string
+	OwnerType   string // GitHub's verbatim "User" / "Organization"
+	Permissions map[string]string
+	Events      []string
+	ClientID    string
+}
+
+// appResponse is the subset of GET /app we parse. GitHub returns far more
+// (name, description, html_url, created_at, …); the import flow only needs the
+// identity (id/slug/client_id), the owner (login + account type), and the
+// granted permissions + events for the preflight.
+type appResponse struct {
+	ID       int64  `json:"id"`
+	Slug     string `json:"slug"`
+	ClientID string `json:"client_id"`
+	Owner    struct {
+		Login string `json:"login"`
+		Type  string `json:"type"`
+	} `json:"owner"`
+	Permissions map[string]string `json:"permissions"`
+	Events      []string          `json:"events"`
+}
+
+// GetApp fetches the App's own metadata via GET /app, authenticated with an
+// app-level JWT (no installation needed — the App authenticates as itself).
+// This is the read the BYOA import uses to (a) prove the submitted App-ID +
+// private key are a valid pair — GitHub 401s a JWT whose iss doesn't match the
+// signing key — and (b) derive everything the manifest path would have
+// collected (slug, owner login + type, permissions, events, client_id). A
+// non-2xx (notably 401 on a bad ID/key pair) or malformed JSON surfaces as an
+// error with the HTTP status and a truncated body.
+func (m *Minter) GetApp(ctx context.Context) (App, error) {
+	appJWT, err := m.AppJWT()
+	if err != nil {
+		return App{}, err
+	}
+
+	url := m.apiBase + "/app"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return App{}, fmt.Errorf("githubapp: build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+appJWT)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", "triage-factory-githubapp")
+
+	resp, err := m.httpClient.Do(req)
+	if err != nil {
+		return App{}, fmt.Errorf("githubapp: get app: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return App{}, fmt.Errorf("githubapp: get app: status %d, body: %s",
+			resp.StatusCode, truncate(string(body), 512))
+	}
+
+	var parsed appResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return App{}, fmt.Errorf("githubapp: parse app response: %w", err)
+	}
+	return App{
+		ID:          parsed.ID,
+		Slug:        parsed.Slug,
+		OwnerLogin:  parsed.Owner.Login,
+		OwnerType:   parsed.Owner.Type,
+		Permissions: parsed.Permissions,
+		Events:      parsed.Events,
+		ClientID:    parsed.ClientID,
+	}, nil
+}
+
 // nextPageURL extracts the rel="next" URL from a GitHub Link header, or ""
 // when there's no next page. The header looks like:
 //
