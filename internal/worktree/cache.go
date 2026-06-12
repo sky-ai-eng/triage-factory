@@ -304,6 +304,11 @@ func scanBares() []bareEntry {
 	for _, root := range bareCacheRoots() {
 		_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
+				// A walk error on a subdir skips whatever bares live under it
+				// — the safe direction for eviction (don't reclaim what you
+				// can't see), but log it so a misconfigured permissions setup
+				// is diagnosable rather than silently under-accounting disk.
+				log.Printf("[worktree] cache scan: walk %s: %v", path, err)
 				return nil
 			}
 			if info.IsDir() && strings.HasSuffix(path, ".git") {

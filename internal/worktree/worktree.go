@@ -246,6 +246,11 @@ func WithCloneAuth(auth CloneAuth) CloneOption {
 // itself via the same idempotent path delegation uses, rather than erroring
 // with the misleading "repo profiling has not run yet". Empty is a no-op —
 // the entry point falls back to whatever its no-URL behavior was.
+//
+// Only EnsureCuratorWorktree honors this option. EnsureBareClone,
+// CreateForPR, and CreateForBranch* already take the clone URL as an
+// explicit positional parameter, so passing WithCloneURL to them is a
+// silent no-op — use the positional argument there.
 func WithCloneURL(url string) CloneOption {
 	return func(c *cloneConfig) { c.seedURL = url }
 }
