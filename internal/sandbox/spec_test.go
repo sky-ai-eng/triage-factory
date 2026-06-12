@@ -223,6 +223,85 @@ func TestBuildSpec_ExtraMountsAppended(t *testing.T) {
 	}
 }
 
+// TestBuildSpec_ReadOnlyRepoMountIsRO is the TFAC-61 enforcement test: a
+// read-only repo mount nested under /work lands with the "ro" option (plus
+// the auto-prepended "rbind"), at the nested destination, so an in-jail write
+// to the shared pinned-repo tree fails. If the "ro" ever drops out, one
+// curator session could mutate the checkout another is reading.
+func TestBuildSpec_ReadOnlyRepoMountIsRO(t *testing.T) {
+	cfg := canonicalConfig()
+	cfg.ExtraMounts = []Mount{
+		{Source: "/data/orgs/acme/curator-repos/o/r", Destination: "/work/repos/o/r", Options: []string{"ro"}},
+	}
+	spec, err := buildSpec(cfg, "/var/run/netns/tf-test")
+	if err != nil {
+		t.Fatalf("buildSpec: %v", err)
+	}
+	var found bool
+	for _, m := range spec.Mounts {
+		if m.Destination != "/work/repos/o/r" {
+			continue
+		}
+		found = true
+		if m.Source != "/data/orgs/acme/curator-repos/o/r" {
+			t.Errorf("repo mount source = %q, want the shared worktree path", m.Source)
+		}
+		if !hasOption(m.Options, "ro") {
+			t.Errorf("repo mount options = %v, MUST contain \"ro\" (in-jail writes must fail)", m.Options)
+		}
+		if !hasOption(m.Options, "rbind") {
+			t.Errorf("repo mount options = %v, want auto-prepended \"rbind\"", m.Options)
+		}
+	}
+	if !found {
+		t.Error("read-only repo mount not present in spec")
+	}
+}
+
+// TestBuildSpec_NoHostMountOutsideDeclaredSet is the "no escape" test: the
+// only bind mounts that expose a host path are the worktree, the SDK, the CA
+// certs, and the caller's explicit ExtraMounts. Nothing else from the host is
+// reachable — so a path outside the project/repo set cannot be read from
+// inside the jail. A regression that mounted, say, the whole org root or a
+// sibling repo would trip this.
+func TestBuildSpec_NoHostMountOutsideDeclaredSet(t *testing.T) {
+	cfg := canonicalConfig()
+	cfg.ExtraMounts = []Mount{
+		{Source: "/usr/local/bin/triagefactory", Destination: "/usr/local/bin/triagefactory", Options: []string{"ro"}},
+		{Source: "/run/tf/abc.sock", Destination: "/run/tf.sock"},
+		{Source: "/data/orgs/acme/curator-repos/o/r", Destination: "/work/repos/o/r", Options: []string{"ro"}},
+	}
+	spec, err := buildSpec(cfg, "/var/run/netns/tf-test")
+	if err != nil {
+		t.Fatalf("buildSpec: %v", err)
+	}
+	allowed := map[string]bool{
+		cfg.Worktree:                        true,
+		cfg.SDKDir:                          true,
+		hostSSLCertsDir():                   true,
+		"/usr/local/bin/triagefactory":      true,
+		"/run/tf/abc.sock":                  true,
+		"/data/orgs/acme/curator-repos/o/r": true,
+	}
+	for _, m := range spec.Mounts {
+		if m.Type != "bind" {
+			continue // tmpfs/proc/sysfs/devpts expose no host path
+		}
+		if !allowed[m.Source] {
+			t.Errorf("unexpected host bind mount: %s -> %s (escapes the declared mount set)", m.Source, m.Destination)
+		}
+	}
+}
+
+func hasOption(opts []string, want string) bool {
+	for _, o := range opts {
+		if o == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestBuildSpec_SeccompSet(t *testing.T) {
 	spec, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test")
 	if err != nil {

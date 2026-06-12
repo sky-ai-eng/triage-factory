@@ -3,7 +3,9 @@ package curator
 import (
 	"context"
 	"log"
+	"path/filepath"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -74,6 +76,74 @@ func materializePinnedRepos(ctx context.Context, repos db.RepoStore, tokenFor fu
 			continue
 		}
 	}
+}
+
+// materializeSharedPinnedRepos is the multi-mode (sandboxed) counterpart of
+// materializePinnedRepos. Instead of a per-project worktree under the project
+// dir, it materializes (or reuses) the single SHARED read-only worktree per
+// (org, repo) and returns the read-only bind-mount descriptors agentproc adds
+// to the sandbox spec, so every member's jail reads the same on-disk checkout
+// rather than duplicating one per session (TFAC-61).
+//
+// Each successful repo registers a jail reader on its shared worktree; the
+// returned release func decrements every one and MUST be deferred by the
+// caller until after agentproc.Run returns (the jail has exited). Per-repo
+// failures are logged and skipped — same best-effort contract as the local
+// path: the agent still gets whatever subset materialized. The returned
+// release is always non-nil and safe to call even when nothing materialized.
+func materializeSharedPinnedRepos(ctx context.Context, repos db.RepoStore, tokenFor func(ctx context.Context, owner string) string, orgID, projectID string, pinnedRepos []string) ([]agentproc.ReadOnlyRepoMount, func()) {
+	var (
+		mounts   []agentproc.ReadOnlyRepoMount
+		releases []func()
+	)
+	releaseAll := func() {
+		for _, r := range releases {
+			r()
+		}
+	}
+	for _, slug := range pinnedRepos {
+		if ctx.Err() != nil {
+			return mounts, releaseAll
+		}
+		owner, repo, ok := splitOwnerRepo(slug)
+		if !ok {
+			log.Printf("[curator] project %s: malformed pinned repo %q (skipping)", projectID, slug)
+			continue
+		}
+		profile, err := repos.Get(ctx, orgID, slug)
+		if err != nil {
+			log.Printf("[curator] project %s: load profile for %s: %v (skipping)", projectID, slug, err)
+			continue
+		}
+		if profile == nil {
+			log.Printf("[curator] project %s: no profile for pinned repo %s — repo was removed from config after pinning (skipping)", projectID, slug)
+			continue
+		}
+		branch := profile.BaseBranch
+		if branch == "" {
+			branch = profile.DefaultBranch
+		}
+		if branch == "" {
+			log.Printf("[curator] project %s: %s has no branch in profile (skipping)", projectID, slug)
+			continue
+		}
+		var auth worktree.CloneAuth
+		if tokenFor != nil {
+			auth = worktree.CloneAuthFor(profile.CloneURL, tokenFor(ctx, owner))
+		}
+		wtDir, release, err := worktree.EnsureSharedCuratorWorktree(ctx, orgID, owner, repo, branch,
+			worktree.WithCloneAuth(auth), worktree.WithCloneURL(profile.CloneURL))
+		if err != nil {
+			log.Printf("[curator] project %s: materialize shared %s @ %s failed: %v (skipping)", projectID, slug, branch, err)
+			continue
+		}
+		releases = append(releases, release)
+		mounts = append(mounts, agentproc.ReadOnlyRepoMount{
+			Source:  wtDir,
+			RelPath: filepath.Join("repos", owner, repo),
+		})
+	}
+	return mounts, releaseAll
 }
 
 // splitOwnerRepo splits "owner/repo" once. Defensive — pinned_repos

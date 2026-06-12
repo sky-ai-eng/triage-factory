@@ -30,6 +30,55 @@ func shouldSandbox() bool {
 // the translateEnvForSandbox / translateAddDirsForSandbox rewrites.
 const sandboxWorkRoot = "/work"
 
+// WillSandbox reports whether a Run on this host will route through the gVisor
+// sandbox (multi mode + Linux). Callers that must pre-stage sandbox-only
+// inputs branch on this: the Curator materializes its pinned repos as shared
+// read-only mounts only when a jail is active, and keeps the per-project
+// on-disk worktree on the local/non-Linux path. Exported form of the internal
+// shouldSandbox gate so the predicate stays single-sourced.
+func WillSandbox() bool {
+	return shouldSandbox()
+}
+
+// ensureRepoMountPoints creates the empty mount-point directories the
+// read-only repo bind-mounts (opts.ReadOnlyRepoMounts) land on, under workCwd.
+// They must exist before the per-run chown (so they're owned by the sandbox
+// UID like the rest of /work) and before sandbox.Wrap (so each nested bind
+// mount has a target inside the /work mount). The shared worktree each mount
+// exposes lives OUTSIDE workCwd and is never created or chowned here.
+func ensureRepoMountPoints(workCwd string, mounts []ReadOnlyRepoMount) error {
+	for _, m := range mounts {
+		if m.RelPath == "" {
+			continue
+		}
+		mp := filepath.Join(workCwd, m.RelPath)
+		if err := os.MkdirAll(mp, 0o755); err != nil {
+			return fmt.Errorf("create repo mount point %s: %w", mp, err)
+		}
+	}
+	return nil
+}
+
+// readOnlyRepoMounts translates opts.ReadOnlyRepoMounts into sandbox bind
+// mounts: each Source (a shared worktree, a host path outside Cwd) exposed
+// read-only at /work/<RelPath>. The "ro" option is the enforcement boundary —
+// it makes an in-jail write to the shared tree fail, so one session can't
+// mutate what another reads. Entries missing a Source or RelPath are dropped.
+func readOnlyRepoMounts(mounts []ReadOnlyRepoMount) []sandbox.Mount {
+	out := make([]sandbox.Mount, 0, len(mounts))
+	for _, m := range mounts {
+		if m.Source == "" || m.RelPath == "" {
+			continue
+		}
+		out = append(out, sandbox.Mount{
+			Source:      m.Source,
+			Destination: filepath.Join(sandboxWorkRoot, m.RelPath),
+			Options:     []string{"ro"},
+		})
+	}
+	return out
+}
+
 // AgentVisibleRoot returns the absolute path the agent observes for hostRoot
 // when hostRoot is the run's Cwd (the run-root). In sandbox mode the run-root
 // is always bind-mounted at /work, so the agent sees "/work" regardless of

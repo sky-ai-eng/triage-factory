@@ -163,6 +163,28 @@ func ProjectKBDir(orgID, projectID string) string {
 	return filepath.Join(ProjectsRoot(orgID), projectID)
 }
 
+// CuratorSharedReposRoot is the parent of the per-(org, repo) SHARED curator
+// worktrees: <OrgRoot>/curator-repos. In multi mode the Curator materializes
+// one worktree per pinned repo here and bind-mounts it read-only into every
+// member's sandbox, so N concurrent sessions on the same repo share ~1x
+// storage instead of a per-session checkout (TFAC-61). Org-scoped (never
+// host-global) by design: unlike the shared read-only rootfs cache (Class 2),
+// a repo's checked-out files are tenant data and must not cross the org
+// boundary even read-only — the shared mount is safe precisely because it is
+// one trust domain (a single org) plus the ro mount option.
+func CuratorSharedReposRoot(orgID string) string {
+	return filepath.Join(OrgRoot(orgID), "curator-repos")
+}
+
+// CuratorSharedRepoDir is the shared worktree path for one pinned repo:
+// <OrgRoot>/curator-repos/<owner>/<repo>. The nested <owner>/<repo> leaf
+// mirrors the per-project layout under ProjectKBDir so the agent's
+// ./repos/<owner>/<repo> mental model is identical whether the tree is a
+// per-project worktree (local) or a shared mount (multi).
+func CuratorSharedRepoDir(orgID, owner, repo string) string {
+	return filepath.Join(CuratorSharedReposRoot(orgID), owner, repo)
+}
+
 // --- Class 2: host-global persistent (NEVER org-scoped) ------------------
 
 // SandboxRootfsDir is the cached sandbox rootfs for a toolchain cache

@@ -170,6 +170,33 @@ type RunOptions struct {
 	// because no agenthost client will ever try to dial in those
 	// flows.
 	StartAgentHost func() (mount sandbox.Mount, closer io.Closer, err error)
+
+	// ReadOnlyRepoMounts are extra host directories bind-mounted READ-ONLY
+	// into the sandbox under Cwd. The Curator populates this with its shared
+	// per-(org, repo) pinned-repo worktrees so the agent reads them without a
+	// per-session checkout copy and cannot write them (the mount is ro, so an
+	// in-jail write fails). Each Source MUST live outside Cwd — the per-run
+	// chown of the writable Cwd never touches the shared tree.
+	//
+	// Sandbox-only: the direct (local / non-Linux) path ignores these entirely
+	// because local materializes the worktree under Cwd directly (N=1, no jail,
+	// no cross-session sharing). See ReadOnlyRepoMount. TFAC-61.
+	ReadOnlyRepoMounts []ReadOnlyRepoMount
+}
+
+// ReadOnlyRepoMount is one host directory exposed read-only inside the sandbox
+// at RelPath under the agent's Cwd (/work). agentproc creates the empty
+// mount-point directory under Cwd (so it's owned by the sandbox UID like the
+// rest of /work and exists as a bind target inside the /work mount), then adds
+// a `ro`-option nested bind mount of Source onto /work/<RelPath>.
+type ReadOnlyRepoMount struct {
+	// Source is the host path of the shared worktree to expose read-only. It
+	// MUST be outside the run's Cwd so chownWorktreeForSandbox never recurses
+	// into it (chowning a shared tree to one session's UID is the bug this
+	// avoids).
+	Source string
+	// RelPath is the mount location relative to Cwd, e.g. "repos/owner/repo".
+	RelPath string
 }
 
 // NoopSink discards all stream events. Suitable for one-shot agent
@@ -415,6 +442,16 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 		scratchCwd = scratch
 		workCwd = scratch
 	}
+	// Create the empty mount-point dirs the read-only repo bind-mounts land on
+	// BEFORE the chown — so they're owned by the sandbox UID like the rest of
+	// /work, and exist as bind targets inside the /work mount when Wrap runs.
+	// The shared worktree each one exposes lives outside workCwd and is never
+	// chowned here (skipping the per-session chown of the shared tree is the
+	// whole point — TFAC-61).
+	if err := ensureRepoMountPoints(workCwd, opts.ReadOnlyRepoMounts); err != nil {
+		cleanup()
+		return nil, cleanup, fmt.Errorf("sandbox: %w", err)
+	}
 	if err := chownWorktreeForSandbox(workCwd); err != nil {
 		cleanup()
 		return nil, cleanup, fmt.Errorf("sandbox: chown worktree: %w", err)
@@ -474,6 +511,14 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 		extraMounts = append(extraMounts, mount)
 		ahCloser = closer
 	}
+
+	// Shared read-only pinned-repo worktrees (Curator multi-mode). Each is
+	// nested under /work — the base spec mounts /work first, then these
+	// overlay onto the empty mount points created above, exactly as /dev/pts
+	// nests under /dev. The "ro" option is load-bearing: it's what makes an
+	// in-jail write to the shared tree fail, so one session can't mutate what
+	// another reads.
+	extraMounts = append(extraMounts, readOnlyRepoMounts(opts.ReadOnlyRepoMounts)...)
 
 	// The sandbox's argv targets /usr/bin/node (the apk-installed nodejs in
 	// the cached alpine rootfs) + /sdk/wrapper.mjs (the SDK bind-mount

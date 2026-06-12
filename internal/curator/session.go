@@ -5,14 +5,17 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"sync"
 
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
 // projectSession is the per-project goroutine handle. One queue, one
@@ -209,15 +212,36 @@ func (s *projectSession) dispatch(item queueItem) {
 
 	// Refresh pinned-repo worktrees before spawning the agent so its
 	// view of the world matches upstream HEAD on the user-configured
-	// branch (profile.BaseBranch || profile.DefaultBranch). One fetch
-	// + reset --hard per repo per dispatch — bounded by the bare's
-	// per-repo lock so concurrent dispatches in different projects
-	// pinning the same repo queue rather than race. Per-repo
+	// branch (profile.BaseBranch || profile.DefaultBranch). Per-repo
 	// failures are non-fatal: the agent still gets the project's
 	// knowledge files plus whatever subset of repos materialized.
-	materializePinnedRepos(msgCtx, s.curator.stores.Repos,
-		func(ctx context.Context, owner string) string { return s.curator.cloneTokenFor(ctx, item.orgID, owner) },
-		item.orgID, s.projectID, cwd, project.PinnedRepos)
+	//
+	// Multi-mode (jailed) reads each pinned repo from a SHARED read-only
+	// worktree per (org, repo) bind-mounted into the sandbox, so N concurrent
+	// member sessions on the same repo share one on-disk checkout instead of N
+	// (TFAC-61). The shared tree is refreshed host-side only when no jail is
+	// reading it, and a reader is held for the life of the dispatch (released
+	// on return, after agentproc.Run). Local mode keeps the per-project
+	// worktree under <cwd>/repos (N=1, no jail, no sharing) on its existing path.
+	//
+	// The jail mounts only the worktree files (the bare is intentionally NOT
+	// mounted — sharing one bare across orgs is a tenancy boundary), so the
+	// agent inspects repos with its file tools (Read/Grep/Glob), and the
+	// curator never depends on in-jail commit/push/fetch: pinned-repo fetches
+	// run host-side here, and in-jail git history is out of scope (TFAC-71).
+	cloneTokenFor := func(ctx context.Context, owner string) string {
+		return s.curator.cloneTokenFor(ctx, item.orgID, owner)
+	}
+	var roRepoMounts []agentproc.ReadOnlyRepoMount
+	if agentproc.WillSandbox() {
+		var releaseRepos func()
+		roRepoMounts, releaseRepos = materializeSharedPinnedRepos(msgCtx, s.curator.stores.Repos,
+			cloneTokenFor, item.orgID, s.projectID, project.PinnedRepos)
+		defer releaseRepos()
+	} else {
+		materializePinnedRepos(msgCtx, s.curator.stores.Repos,
+			cloneTokenFor, item.orgID, s.projectID, cwd, project.PinnedRepos)
+	}
 	if msgCtx.Err() != nil {
 		// Cancel fired during repo refresh (one big bare clone can
 		// take seconds on a fresh fetch). Don't waste cycles spawning
@@ -319,11 +343,28 @@ func (s *projectSession) dispatch(item queueItem) {
 		log.Printf("[curator] warning: materialize jira formatting skill for project %s: %v", s.projectID, err)
 	}
 
-	// TODO(SKY-403): no StartAgentHost is passed, so in multi-mode the agent is
-	// jailed (shouldSandbox is global) but has no in-sandbox `triagefactory
-	// exec` daemon, and the pinned-worktree / knowledge-dir bind-mounts into the
-	// jail are unverified. Wire agenthost.Start (or prove the curator's tools are
-	// exec-free and constrain them) before multi-mode curator ships.
+	// In-sandbox exec daemon (TFAC-61). The curator envelope advertises a real
+	// `triagefactory exec gh|jira` surface, so in multi mode the jailed agent
+	// needs the per-run agenthost socket to answer those calls host-side —
+	// without it, exec would fail in the jail (no DB, no keychain). Mirrors the
+	// spawner (internal/delegate/run.go). The closure is only invoked in the
+	// sandbox branch (multi+linux); local/non-sandbox runs never call it.
+	// RunID is the curator request id (unique per turn → unique socket);
+	// identity is the requesting user's (org, user). IsEventTriggered is false
+	// — every curator turn is user-driven.
+	startAgentHost := func() (sandbox.Mount, io.Closer, error) {
+		hd, mount, err := agenthost.Start(s.curator.stores, agenthost.RunInfo{
+			OrgID:            item.orgID,
+			UserID:           item.creatorUserID,
+			RunID:            requestID,
+			IsEventTriggered: false,
+		})
+		if err != nil {
+			return sandbox.Mount{}, nil, err
+		}
+		return mount, hd, nil
+	}
+
 	outcome, runErr := agentproc.Run(msgCtx, agentproc.RunOptions{
 		Cwd:          cwd,
 		Model:        model,
@@ -336,9 +377,11 @@ func (s *projectSession) dispatch(item queueItem) {
 			"TRIAGE_FACTORY_CURATOR_PROJECT_ID=" + s.projectID,
 			"TRIAGE_FACTORY_CURATOR_REQUEST_ID=" + requestID,
 		},
-		TraceID: requestID,
-		OrgID:   item.orgID,
-		Secrets: s.curator.getSecrets(),
+		TraceID:            requestID,
+		OrgID:              item.orgID,
+		Secrets:            s.curator.getSecrets(),
+		StartAgentHost:     startAgentHost,
+		ReadOnlyRepoMounts: roRepoMounts,
 	}, newRequestSink(s.curator, s.projectID, requestID, item.orgID, item.creatorUserID))
 
 	// Cancellation observed → terminal cancelled status. Distinguish
