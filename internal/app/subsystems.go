@@ -121,7 +121,7 @@ func (a *App) buildExecution() error {
 	} else if n > 0 {
 		log.Printf("[curator] cancelled %d stranded turn(s) from prior process", n)
 	}
-	a.curator = curator.New(a.database, a.stores, a.wsHub, "")
+	a.curator = curator.New(a.stores, a.wsHub, "")
 	a.curator.SetRunCredentialResolvers(a.ghResolver, a.runSecrets, a.modelFor)
 	a.srv.SetCurator(a.curator)
 	return nil

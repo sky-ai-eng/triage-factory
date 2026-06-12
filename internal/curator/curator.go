@@ -2,7 +2,6 @@ package curator
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -26,9 +25,8 @@ import (
 // store call in stores.Tx.SyntheticClaimsWithTx so multi-mode RLS
 // policies on (org_id, creator_user_id) gate the writes. SKY-298.
 type Curator struct {
-	database *sql.DB
-	stores   db.Stores
-	wsHub    *websocket.Hub
+	stores db.Stores
+	wsHub  *websocket.Hub
 
 	mu    sync.Mutex
 	model string
@@ -56,16 +54,14 @@ type Curator struct {
 // before constructing — see main.go wiring.
 //
 // stores carries the Tx runner (for SyntheticClaimsWithTx wraps), the
-// CuratorStore (per-turn writes), the ProjectStore (session-id
-// bookkeeping), the PromptStore (skill materialization), and the
-// RepoStore (pinned-repo materialization). The package-level
-// *sql.DB is retained for handler-side helpers (cancel paths, queued
-// drain on project delete) still tracked by SKY-253 — those run
-// outside the per-project goroutine and are not on the synthetic-
-// claims path yet.
-func New(database *sql.DB, stores db.Stores, wsHub *websocket.Hub, model string) *Curator {
+// CuratorStore (per-turn writes plus the admin-pool …System cancel
+// variants the system-driven cleanup paths use), the ProjectStore
+// (session-id bookkeeping), the PromptStore (skill materialization),
+// and the RepoStore (pinned-repo materialization). Every row read/write
+// the curator issues now goes through a claims-bound tx or an
+// admin-pool door, so no raw *sql.DB handle is retained (TFAC-64).
+func New(stores db.Stores, wsHub *websocket.Hub, model string) *Curator {
 	return &Curator{
-		database: database,
 		stores:   stores,
 		wsHub:    wsHub,
 		model:    model,
@@ -199,12 +195,12 @@ func (c *Curator) SendMessage(ctx context.Context, projectID, orgID, creatorUser
 
 	session := c.getOrStartSession(orgID, projectID)
 	if session == nil {
-		// Best-effort cancel on the package-level helper — the
+		// Best-effort cancel via the admin-pool …System door — the
 		// "curator is shut down" path runs from the handler goroutine
-		// (not the per-project goroutine).
-		// TODO(SKY-401): raw c.database write with no claims — rejected under
-		// multi-mode RLS; route via the admin pool (…System variant).
-		_, _ = db.MarkCuratorRequestCancelledIfActive(c.database, requestID, "curator is shut down")
+		// (not the per-project goroutine) with no synthetic-claims tx in
+		// scope, so the RLS-gated app pool would reject the UPDATE and
+		// leave the freshly created row dangling. TFAC-64.
+		_, _ = c.stores.Curator.MarkRequestCancelledIfActiveSystem(ctx, orgID, requestID, "curator is shut down")
 		return "", errors.New("curator is shut down")
 	}
 
@@ -216,10 +212,9 @@ func (c *Curator) SendMessage(ctx context.Context, projectID, orgID, creatorUser
 	default:
 		// Queue is full — should not happen at the per-project depth
 		// we configure, but if it ever does, fail the row up-front
-		// rather than blocking the HTTP handler.
-		// TODO(SKY-401): same raw c.database / no-claims RLS gap as the
-		// shutdown path above — route via the admin pool.
-		_, _ = db.CompleteCuratorRequest(c.database, requestID, "failed", "curator queue full", 0, 0, 0)
+		// rather than blocking the HTTP handler. Admin-pool …System door
+		// for the same no-claims reason as the shutdown path above. TFAC-64.
+		_, _ = c.stores.Curator.CompleteRequestSystem(ctx, orgID, requestID, "failed", "curator queue full", 0, 0, 0)
 		c.broadcastRequestUpdate(orgID, projectID, requestID, "failed")
 		return "", errors.New("curator queue is full")
 	}
@@ -298,24 +293,24 @@ func (c *Curator) Shutdown() {
 // project to cancelled. Called from CancelProject (handler-side) and
 // from the fallback path in SendMessage when the curator is shut down.
 //
-// TODO(SKY-401) (curator slice of the SKY-253/D9 claims sweep): both QueuedCuratorRequestsForProject and
-// MarkCuratorRequestCancelledIfActive run against *sql.DB without JWT
-// claims set. In multi-mode Postgres tf_app + RLS will hide the rows
-// from the SELECT and reject the UPDATE, leaving queued rows dangling
-// after a project-delete or shutdown. Must be routed through a
-// per-user synthetic-claims wrap (looping over requesting users) or
-// through admin-pool `...System` variants before multi-mode curator
-// ships. Identity-per-row is recoverable from curator_requests.creator_user_id;
-// the harder question is which pool (admin vs. per-user) attribution
-// belongs to for system-driven cancels.
+// System-driven cancel: there is no live request/JWT context here (the
+// rows may have been enqueued by any user, possibly in a previous
+// process), so both the list and the per-row cancel route through the
+// admin-pool …System doors. Under multi-mode RLS the app pool would
+// hide the queued rows from the SELECT and reject the UPDATE, leaving
+// them dangling past the project FK cascade. The row already records
+// its creator (creator_user_id) for audit; a system cancel isn't a user
+// action, so it doesn't reconstruct per-user claims. orgID scopes the
+// admin-pool query. TFAC-64.
 func (c *Curator) cancelQueuedRows(orgID, projectID, reason string) {
-	queued, err := db.QueuedCuratorRequestsForProject(c.database, projectID)
+	ctx := context.Background()
+	queued, err := c.stores.Curator.QueuedRequestsForProjectSystem(ctx, orgID, projectID)
 	if err != nil {
 		log.Printf("[curator] warning: failed to list queued requests for project %s: %v", projectID, err)
 		return
 	}
 	for _, req := range queued {
-		flipped, err := db.MarkCuratorRequestCancelledIfActive(c.database, req.ID, reason)
+		flipped, err := c.stores.Curator.MarkRequestCancelledIfActiveSystem(ctx, orgID, req.ID, reason)
 		if err != nil {
 			log.Printf("[curator] warning: cancel queued request %s: %v", req.ID, err)
 			continue

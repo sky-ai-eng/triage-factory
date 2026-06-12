@@ -47,7 +47,7 @@ func seedProject(t *testing.T, database *sql.DB, name string) string {
 func TestCurator_SendMessage_RejectsAfterShutdown(t *testing.T) {
 	database := newTestDB(t)
 	projectID := seedProject(t, database, "p")
-	c := New(database, sqlitestore.New(database), nil, "")
+	c := New(sqlitestore.New(database), nil, "")
 	c.Shutdown()
 
 	_, err := c.SendMessage(t.Context(), projectID, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "hi")
@@ -81,7 +81,7 @@ func TestCurator_CancelProject_FlipsQueuedRows(t *testing.T) {
 	id1, _ := db.CreateCuratorRequest(database, projectID, "first")
 	id2, _ := db.CreateCuratorRequest(database, projectID, "second")
 
-	c := New(database, sqlitestore.New(database), nil, "")
+	c := New(sqlitestore.New(database), nil, "")
 	t.Cleanup(c.Shutdown)
 	c.CancelProject(runmode.LocalDefaultOrgID, projectID)
 
@@ -104,7 +104,7 @@ func TestCurator_CancelProject_KillsActiveSession(t *testing.T) {
 	projectID := seedProject(t, database, "active")
 
 	hub := websocket.NewHub()
-	c := New(database, sqlitestore.New(database), hub, "")
+	c := New(sqlitestore.New(database), hub, "")
 	t.Cleanup(c.Shutdown)
 
 	// SendMessage spawns the per-project goroutine if absent. The
@@ -142,7 +142,7 @@ func TestCurator_CrossProjectParallel(t *testing.T) {
 	projectA := seedProject(t, database, "A")
 	projectB := seedProject(t, database, "B")
 
-	c := New(database, sqlitestore.New(database), nil, "")
+	c := New(sqlitestore.New(database), nil, "")
 	t.Cleanup(c.Shutdown)
 
 	var wg sync.WaitGroup

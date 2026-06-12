@@ -117,6 +117,51 @@ func (s *curatorStore) MarkRequestCancelledIfActive(ctx context.Context, orgID, 
 	return n > 0, err
 }
 
+// MarkRequestCancelledIfActiveSystem and CompleteRequestSystem are the
+// admin-pool variants the curator's system-cancel paths call. SQLite is
+// single-tenant with no RLS, so there is no separate admin connection —
+// they delegate to the claims-equivalent base methods. TFAC-64.
+func (s *curatorStore) MarkRequestCancelledIfActiveSystem(ctx context.Context, orgID, id, errMsg string) (bool, error) {
+	return s.MarkRequestCancelledIfActive(ctx, orgID, id, errMsg)
+}
+
+func (s *curatorStore) CompleteRequestSystem(ctx context.Context, orgID, id, status, errMsg string, costUSD float64, durationMs, numTurns int) (bool, error) {
+	return s.CompleteRequest(ctx, orgID, id, status, errMsg, costUSD, durationMs, numTurns)
+}
+
+// QueuedRequestsForProjectSystem lists queued rows for the
+// project-delete drain. orgID is asserted local; the query keys on
+// project_id (single tenant). TFAC-64.
+func (s *curatorStore) QueuedRequestsForProjectSystem(ctx context.Context, orgID, projectID string) ([]domain.CuratorRequest, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT id, project_id, status, user_input, error_msg,
+		       cost_usd, duration_ms, num_turns,
+		       started_at, finished_at, created_at, creator_user_id
+		FROM curator_requests
+		WHERE project_id = ? AND status = 'queued'
+		ORDER BY created_at ASC, id ASC
+	`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []domain.CuratorRequest{}
+	for rows.Next() {
+		req, err := scanCuratorRequestWithUser(rows)
+		if err != nil {
+			return nil, err
+		}
+		if req != nil {
+			out = append(out, *req)
+		}
+	}
+	return out, rows.Err()
+}
+
 func (s *curatorStore) InsertMessage(ctx context.Context, orgID string, msg *domain.CuratorMessage) (int64, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return 0, err

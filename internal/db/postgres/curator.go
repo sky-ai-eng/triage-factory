@@ -84,11 +84,22 @@ func (s *curatorStore) MarkRequestRunning(ctx context.Context, orgID, id string)
 }
 
 func (s *curatorStore) CompleteRequest(ctx context.Context, orgID, id, status, errMsg string, costUSD float64, durationMs, numTurns int) (bool, error) {
+	return completeCuratorRequest(ctx, s.q, orgID, id, status, errMsg, costUSD, durationMs, numTurns)
+}
+
+// CompleteRequestSystem routes the terminal write through the admin
+// pool for the SendMessage queue-full fallback (no JWT-claims context).
+// See db.CuratorStore.CompleteRequestSystem.
+func (s *curatorStore) CompleteRequestSystem(ctx context.Context, orgID, id, status, errMsg string, costUSD float64, durationMs, numTurns int) (bool, error) {
+	return completeCuratorRequest(ctx, s.admin, orgID, id, status, errMsg, costUSD, durationMs, numTurns)
+}
+
+func completeCuratorRequest(ctx context.Context, q queryer, orgID, id, status, errMsg string, costUSD float64, durationMs, numTurns int) (bool, error) {
 	var errBind any
 	if errMsg != "" {
 		errBind = errMsg
 	}
-	res, err := s.q.ExecContext(ctx, `
+	res, err := q.ExecContext(ctx, `
 		UPDATE curator_requests
 		SET status = $1, error_msg = $2, cost_usd = $3, duration_ms = $4, num_turns = $5, finished_at = now()
 		WHERE org_id = $6 AND id = $7 AND status NOT IN ('done', 'cancelled', 'failed')
@@ -101,11 +112,23 @@ func (s *curatorStore) CompleteRequest(ctx context.Context, orgID, id, status, e
 }
 
 func (s *curatorStore) MarkRequestCancelledIfActive(ctx context.Context, orgID, id, errMsg string) (bool, error) {
+	return markCuratorRequestCancelledIfActive(ctx, s.q, orgID, id, errMsg)
+}
+
+// MarkRequestCancelledIfActiveSystem routes the cancel write through the
+// admin pool for the curator's system-driven cancel paths (shutdown,
+// project-delete drain, SendMessage shutdown fallback). See
+// db.CuratorStore.MarkRequestCancelledIfActiveSystem.
+func (s *curatorStore) MarkRequestCancelledIfActiveSystem(ctx context.Context, orgID, id, errMsg string) (bool, error) {
+	return markCuratorRequestCancelledIfActive(ctx, s.admin, orgID, id, errMsg)
+}
+
+func markCuratorRequestCancelledIfActive(ctx context.Context, q queryer, orgID, id, errMsg string) (bool, error) {
 	var errBind any
 	if errMsg != "" {
 		errBind = errMsg
 	}
-	res, err := s.q.ExecContext(ctx, `
+	res, err := q.ExecContext(ctx, `
 		UPDATE curator_requests
 		SET status = 'cancelled', error_msg = $1, finished_at = now()
 		WHERE org_id = $2 AND id = $3 AND status NOT IN ('done', 'cancelled', 'failed')
@@ -115,6 +138,36 @@ func (s *curatorStore) MarkRequestCancelledIfActive(ctx context.Context, orgID, 
 	}
 	n, err := res.RowsAffected()
 	return n > 0, err
+}
+
+// QueuedRequestsForProjectSystem lists queued rows via the admin pool
+// for the project-delete drain. See
+// db.CuratorStore.QueuedRequestsForProjectSystem.
+func (s *curatorStore) QueuedRequestsForProjectSystem(ctx context.Context, orgID, projectID string) ([]domain.CuratorRequest, error) {
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT id::text, project_id::text, status, user_input, error_msg,
+		       cost_usd, duration_ms, num_turns,
+		       started_at, finished_at, created_at, creator_user_id::text
+		FROM curator_requests
+		WHERE org_id = $1 AND project_id = $2 AND status = 'queued'
+		ORDER BY created_at ASC, id ASC
+	`, orgID, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []domain.CuratorRequest{}
+	for rows.Next() {
+		req, err := scanPgCuratorRequest(rows)
+		if err != nil {
+			return nil, err
+		}
+		if req != nil {
+			out = append(out, *req)
+		}
+	}
+	return out, rows.Err()
 }
 
 func (s *curatorStore) InsertMessage(ctx context.Context, orgID string, msg *domain.CuratorMessage) (int64, error) {

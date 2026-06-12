@@ -499,22 +499,16 @@ func (s *projectSession) shutdown(reason string) {
 
 	// If a request was in flight, flip it explicitly with the
 	// reason. The goroutine's own ctx.Err handler may also flip
-	// it; MarkCuratorRequestCancelledIfActive's status filter
-	// makes the second write a no-op.
+	// it; the status filter makes the second write a no-op.
 	//
-	// TODO(SKY-253/D9): this call goes through *sql.DB without JWT
-	// claims set. In multi-mode Postgres tf_app + RLS will reject
-	// the UPDATE, leaving the in-flight row stuck in `running`.
-	// Must be replaced with a synthetic-claims variant before
-	// multi-mode curator ships. The shutdown caller has no
-	// queueItem in scope (the request may not have been dequeued
-	// yet, or its identity was never captured).
-	// TODO(SKY-401): raw s.curator.database write with no claims — rejected
-	// under multi-mode RLS. Resolution will either thread identity through the
-	// per-project session state or route this single write through the admin
-	// pool via a future `MarkRequestCancelledIfActiveSystem` variant.
+	// System-driven cancel via the admin-pool …System door: shutdown
+	// fires outside any request/JWT context (the in-flight request's
+	// identity was captured for the goroutine's claims-bound writes but
+	// shutdown runs from the caller's goroutine, and the row may not
+	// have been dequeued yet), so the RLS-gated app pool would reject
+	// the UPDATE and strand the row in `running`. TFAC-64.
 	if inFlightID != "" {
-		if flipped, err := db.MarkCuratorRequestCancelledIfActive(s.curator.database, inFlightID, reason); err == nil && flipped {
+		if flipped, err := s.curator.stores.Curator.MarkRequestCancelledIfActiveSystem(context.Background(), s.orgID, inFlightID, reason); err == nil && flipped {
 			s.curator.broadcastRequestUpdate(s.orgID, s.projectID, inFlightID, "cancelled")
 		}
 	}

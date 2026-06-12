@@ -24,7 +24,7 @@ func curatorTestSetup(t *testing.T) (*Server, *curator.Curator, string) {
 	t.Helper()
 	srv := newTestServer(t)
 	hub := websocket.NewHub()
-	c := curator.New(srv.db, sqlitestore.New(srv.db), hub, "")
+	c := curator.New(sqlitestore.New(srv.db), hub, "")
 	srv.SetCurator(c)
 	t.Cleanup(c.Shutdown)
 
