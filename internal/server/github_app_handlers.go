@@ -8,7 +8,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
 
 // githubAppStatusResponse is the read-only shape the Workspace Settings
@@ -224,14 +223,9 @@ func (s *Server) handleGitHubAppInstallURL(w http.ResponseWriter, r *http.Reques
 	}
 
 	var app *domain.OrgGitHubApp
-	var orgSettings domain.OrgSettings
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error
 		app, lerr = tx.GitHubApps.GetForOrg(r.Context(), orgID)
-		if lerr != nil {
-			return lerr
-		}
-		orgSettings, lerr = tx.Orgs.GetSettings(r.Context(), orgID)
 		return lerr
 	}); err != nil {
 		internalError(w, "github-app", err)
@@ -242,7 +236,14 @@ func (s *Server) handleGitHubAppInstallURL(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	ghBase := ghclient.ResolveBaseURL(orgSettings.GitHubBaseURL)
+	// Resolve the install deep-link host through the resolver (settings →
+	// github_url secret → github.com) so a GHES / local-mode org whose host lives
+	// only in the credential bundle links to the right host instead of github.com.
+	ghBase, err := s.ghResolver.BaseURLFor(r.Context(), orgID)
+	if err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"url": ghBase + "/apps/" + app.Slug + "/installations/new",
 	})

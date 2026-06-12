@@ -116,7 +116,6 @@ func isPubliclyReachable(rawURL string) bool {
 func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, ownerType, ownerLogin, returnTo string) (manifestPostURL, manifestJSON, ghWebOrigin string, err error) {
 	var existing *domain.OrgGitHubApp
 	var org *domain.Org
-	var orgSettings domain.OrgSettings
 	if err = s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var lerr error
 		existing, lerr = tx.GitHubApps.GetForOrg(ctx, orgID)
@@ -124,10 +123,6 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 			return lerr
 		}
 		org, lerr = tx.Orgs.GetOrg(ctx, orgID)
-		if lerr != nil {
-			return lerr
-		}
-		orgSettings, lerr = tx.Orgs.GetSettings(ctx, orgID)
 		return lerr
 	}); err != nil {
 		return "", "", "", err
@@ -139,7 +134,16 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 		return "", "", "", errOrgNotFound
 	}
 
-	origin, ok := gitHubWebOrigin(ghclient.ResolveBaseURL(orgSettings.GitHubBaseURL))
+	// Resolve the GitHub web host through the resolver, not the org_settings
+	// column alone: BaseURLFor applies the canonical precedence (settings →
+	// github_url secret → github.com), so a GHES / local-mode org whose host
+	// lives only in the credential bundle still targets the right host. A read
+	// failure propagates rather than silently defaulting to github.com.
+	ghBase, err := s.ghResolver.BaseURLFor(ctx, orgID)
+	if err != nil {
+		return "", "", "", fmt.Errorf("resolve github base for org %s: %w", orgID, err)
+	}
+	origin, ok := gitHubWebOrigin(ghBase)
 	if !ok {
 		return "", "", "", errInvalidGitHubBase
 	}
@@ -480,15 +484,10 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 	regMu.(*sync.Mutex).Lock()
 	defer regMu.(*sync.Mutex).Unlock()
 
-	var orgSettings domain.OrgSettings
 	var existing *domain.OrgGitHubApp
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error
 		existing, lerr = tx.GitHubApps.GetForOrg(r.Context(), orgID)
-		if lerr != nil {
-			return lerr
-		}
-		orgSettings, lerr = tx.Orgs.GetSettings(r.Context(), orgID)
 		return lerr
 	}); err != nil {
 		internalError(w, "github-app", err)
@@ -501,7 +500,15 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 		return
 	}
 
-	ghBase := ghclient.ResolveBaseURL(orgSettings.GitHubBaseURL)
+	// Resolve the conversion host through the resolver (settings → github_url
+	// secret → github.com), not the org_settings column alone, so a GHES /
+	// local-mode org whose host lives only in the credential bundle exchanges the
+	// manifest against the right host.
+	ghBase, err := s.ghResolver.BaseURLFor(r.Context(), orgID)
+	if err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
 	apiBase := ghclient.APIBase(ghBase)
 
 	conversionURL := apiBase + "/app-manifests/" + url.PathEscape(code) + "/conversions"
