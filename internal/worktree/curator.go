@@ -36,10 +36,14 @@ func CuratorRepoSubpath(owner, repo string) string {
 //
 // Behavior:
 //
-//   - If the bare clone is missing, returns an error. SKY-214's
-//     bootstrap is the producer; calling this on an unconfigured repo
-//     should never happen because validatePinnedRepos guards POST/
-//     PATCH at the API layer.
+//   - If the bare clone is missing, it is seeded on demand from the
+//     caller-supplied upstream URL (WithCloneURL) via the same idempotent
+//     path delegation uses — authenticated in multi (WithCloneAuth carries
+//     the App token), credential-free in local. This retires the old
+//     refuse-to-seed (TFAC-60/-62): a curator dispatch on a private pinned
+//     repo never delegated against now materializes instead of erroring.
+//     Without a URL there's nothing to seed from, so a missing bare still
+//     surfaces a clear error.
 //   - If the worktree directory doesn't exist yet, creates it via
 //     `git worktree add` checked out to `branch`.
 //   - If it already exists, runs `git fetch origin <branch>` then
@@ -54,7 +58,8 @@ func CuratorRepoSubpath(owner, repo string) string {
 // lock throughout so concurrent curator dispatches that pin the
 // same repo queue rather than race on git state.
 func EnsureCuratorWorktree(ctx context.Context, owner, repo, branch, projectDir string, opts ...CloneOption) (string, error) {
-	auth := resolveCloneOptions(opts).auth
+	cfg := resolveCloneOptions(opts)
+	auth := cfg.auth
 	if owner == "" || repo == "" {
 		return "", fmt.Errorf("ensure curator worktree: owner/repo required")
 	}
@@ -78,15 +83,26 @@ func EnsureCuratorWorktree(ctx context.Context, owner, repo, branch, projectDir 
 		return "", fmt.Errorf("resolve repo dir: %w", err)
 	}
 	if _, err := os.Stat(bareDir); err != nil {
-		// Bare missing — bootstrap hasn't run for this repo yet, or
-		// it failed. Don't lazy-clone here: the curator runtime calls
-		// us per dispatch, and a missing bare for a pinned repo is a
-		// configuration problem the user needs to see.
-		if os.IsNotExist(err) {
-			return "", fmt.Errorf("bare clone for %s/%s missing — repo profiling has not run yet", owner, repo)
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("stat bare: %w", err)
 		}
-		return "", fmt.Errorf("stat bare: %w", err)
+		// Bare missing — seed it on demand (TFAC-60/-62). This is exactly
+		// what delegation already does; the curator was the lone holdout.
+		// We hold the per-repo lock, so call ensureBareCloneLocked directly.
+		// Without a clone URL there's nothing to seed from (the misleading
+		// "repo profiling has not run yet" message is gone — profiling is
+		// API-based and never touches a bare).
+		if cfg.seedURL == "" {
+			return "", fmt.Errorf("bare clone for %s/%s missing and no clone URL provided to seed it", owner, repo)
+		}
+		if _, err := ensureBareCloneLocked(ctx, owner, repo, cfg.seedURL, auth); err != nil {
+			return "", fmt.Errorf("seed bare for %s/%s: %w", owner, repo, err)
+		}
 	}
+	// Account the access for the bounded-cache LRU (cache.go) — ensures a
+	// repo read this dispatch is treated as warm by the reaper even when
+	// the bare already existed and we skipped the seed branch above.
+	touchBare(bareDir)
 
 	wtDir := filepath.Join(absProjectDir, "repos", CuratorRepoSubpath(owner, repo))
 	remoteRef := "refs/remotes/origin/" + branch

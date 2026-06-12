@@ -18,27 +18,35 @@ type BootstrapTarget struct {
 	CloneURL string
 }
 
-// BootstrapBareClones ensures every target has a bare clone with the
-// configured upstream URL. Idempotent — repeat calls are no-ops once
-// the bare exists and origin is correctly configured.
-// Intended to run after repo profiling completes (so CloneURLs are
-// populated), removing the first-delegation clone latency that the
-// lazy path inside CreateForPR / CreateForBranch would otherwise pay.
+// BootstrapBareClones is the budget-aware warmer: it pre-populates the
+// bounded cache with every target's bare clone, then reclaims back down to
+// the mode's policy budget so a warm pass can't blow past the per-pod cap.
+// Idempotent — repeat calls are no-ops once the bare exists and origin is
+// correctly configured.
+//
+// Once a correctness prerequisite ("bootstrap is the producer"), now an
+// optional latency optimization: everything self-seeds on demand
+// (delegation always did; the curator does after TFAC-60), so the warmer
+// only hides the first-dispatch clone cost. It runs after repo profiling
+// (so CloneURLs are populated).
 //
 // Iteration is serial under per-repo locks. Parallelism would only
 // help the cold-start case where every repo needs its initial clone,
 // and even then bandwidth is the limiting factor — serial keeps
 // network pressure predictable.
 //
-// **Best-effort, not a hard prereq.** Bootstrap is purely additive:
-// if a delegation arrives for a repo before bootstrap reaches it,
+// **Best-effort, not a hard prereq.** The warmer is purely additive:
+// if a delegation arrives for a repo before the warmer reaches it,
 // CreateForPR / CreateForBranch will lazily clone via the same
 // per-repo lockRepo() mutex this function takes. The two paths
 // serialize against each other (no double-clone) but the lazy path
-// pays the cold-clone cost itself. That's the same behavior as
-// before bootstrap existed; gating delegations on bootstrap completion
-// would only convert a "slow first delegation" into a hang if
-// profiling/cloning ever fails, which is strictly worse.
+// pays the cold-clone cost itself.
+//
+// After warming, EnforceBudget(DefaultPolicy()) reclaims the coldest
+// bares if the warm pass pushed the cache over budget. In local
+// (unbounded policy) that's a no-op, so local still warms + persists every
+// configured repo exactly like before; in multi it keeps a large
+// configured set from exceeding the per-pod disk budget.
 func BootstrapBareClones(ctx context.Context, targets []BootstrapTarget) {
 	if len(targets) == 0 {
 		return
@@ -51,7 +59,7 @@ func BootstrapBareClones(ctx context.Context, targets []BootstrapTarget) {
 			continue
 		}
 		if _, err := EnsureBareClone(ctx, t.Owner, t.Repo, t.CloneURL); err != nil {
-			log.Printf("[worktree] bootstrap %s/%s: %v", t.Owner, t.Repo, err)
+			log.Printf("[worktree] warm %s/%s: %v", t.Owner, t.Repo, err)
 			failed++
 			continue
 		}
@@ -62,6 +70,8 @@ func BootstrapBareClones(ctx context.Context, targets []BootstrapTarget) {
 		SweepStaleForkPRConfig(t.Owner, t.Repo)
 		ensured++
 	}
-	log.Printf("[worktree] bootstrap complete in %s (%d ensured, %d skipped no-url, %d failed)",
+	log.Printf("[worktree] warm complete in %s (%d ensured, %d skipped no-url, %d failed)",
 		time.Since(start).Round(time.Millisecond), ensured, skipped, failed)
+
+	EnforceBudget(ctx, DefaultPolicy())
 }

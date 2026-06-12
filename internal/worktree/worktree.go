@@ -228,7 +228,8 @@ func gitConfigCount(env []string) int {
 type CloneOption func(*cloneConfig)
 
 type cloneConfig struct {
-	auth CloneAuth
+	auth    CloneAuth
+	seedURL string
 }
 
 // WithCloneAuth attaches an HTTPS credential to the host-side git clone +
@@ -236,6 +237,17 @@ type cloneConfig struct {
 // or empty token) is a no-op, so callers can pass it unconditionally.
 func WithCloneAuth(auth CloneAuth) CloneOption {
 	return func(c *cloneConfig) { c.auth = auth }
+}
+
+// WithCloneURL supplies the upstream clone URL an entry point may use to
+// seed a missing bare on demand. EnsureCuratorWorktree consumes it to
+// retire its old refuse-to-seed behavior (TFAC-60/-62): a curator dispatch
+// on a pinned repo that was never delegated against now seeds the bare
+// itself via the same idempotent path delegation uses, rather than erroring
+// with the misleading "repo profiling has not run yet". Empty is a no-op —
+// the entry point falls back to whatever its no-URL behavior was.
+func WithCloneURL(url string) CloneOption {
+	return func(c *cloneConfig) { c.seedURL = url }
 }
 
 func resolveCloneOptions(opts []CloneOption) cloneConfig {
@@ -402,6 +414,10 @@ func ensureBareCloneLocked(ctx context.Context, owner, repo, cloneURL string, au
 			return "", fmt.Errorf("repair origin url: %w", err)
 		}
 	}
+	// Account the access for the bounded-cache LRU (cache.go). Stamping on
+	// every seed/refresh keeps the reaper's coldest-first ordering honest;
+	// in local (unbounded policy) the stamp is harmless bookkeeping.
+	touchBare(bareDir)
 	return bareDir, nil
 }
 

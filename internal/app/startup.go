@@ -50,6 +50,14 @@ func (a *App) startWorkers(ctx context.Context) {
 	// Run-queue dispatcher: drains the run queue the spawner enqueues
 	// blueprint steps onto, reconciling crash-stranded runs on boot.
 	go a.spawner.RunDispatcher(ctx, delegate.DefaultRunScanInterval)
+
+	// Bounded bare+worktree cache reaper (TFAC-60). One mechanism, policy
+	// per mode: started in both modes so the eviction path is exercised in
+	// local dev daily, but DefaultPolicy hands local an unbounded budget so
+	// every sweep is a cheap no-op (no silent eviction of the user's own
+	// repos). Multi gets a real per-pod disk budget + cold-bare TTL,
+	// bounding at-rest storage across tenants.
+	worktree.StartReaper(ctx, worktree.DefaultPolicy(), 0)
 }
 
 // startPolling kicks the first poll cycle (and, in local mode, wires the

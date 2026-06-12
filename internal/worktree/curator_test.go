@@ -2,6 +2,7 @@ package worktree
 
 import (
 	"context"
+	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -182,20 +183,78 @@ func TestCreateForBranchInRoot_CoexistsWithCuratorWorktree(t *testing.T) {
 	}
 }
 
-func TestEnsureCuratorWorktree_RejectsMissingBare(t *testing.T) {
-	// Pin: validatePinnedRepos is supposed to enforce existence at
-	// the API layer. If somehow a curator dispatch reaches this
-	// function without a bare clone, we surface a clear error rather
-	// than lazy-cloning (which would silently succeed against a
-	// stale URL).
+func TestEnsureCuratorWorktree_RejectsMissingBareWithoutURL(t *testing.T) {
+	// Seed-on-demand (TFAC-60) retires the refuse-to-seed, but only when
+	// the caller supplies a clone URL to seed FROM. With no URL there's
+	// nothing to clone, so a missing bare still surfaces a clear error
+	// rather than a confusing downstream git failure.
 	withTestHome(t)
 	projectDir := filepath.Join(t.TempDir(), "proj")
 	_, err := EnsureCuratorWorktree(context.Background(), "ghost", "repo", "main", projectDir)
 	if err == nil {
-		t.Fatal("expected error for missing bare, got nil")
+		t.Fatal("expected error for missing bare with no clone URL, got nil")
 	}
 	if !strings.Contains(err.Error(), "missing") {
 		t.Errorf("error message should mention missing: %q", err.Error())
+	}
+}
+
+// TestEnsureCuratorWorktree_SeedsMissingBareWithURL is the core TFAC-60/-62
+// behavior: a curator dispatch on a pinned repo whose bare was never
+// materialized (no prior delegation) seeds the bare on demand from the
+// supplied clone URL and materializes the worktree — no error, no skip.
+func TestEnsureCuratorWorktree_SeedsMissingBareWithURL(t *testing.T) {
+	withTestHome(t)
+	upstream := makeTestUpstream(t)
+
+	// No prior EnsureBareClone — the bare does not exist yet.
+	if dir, _ := repoDir("seed-owner", "seed-repo"); dirExists(dir) {
+		t.Fatalf("precondition: bare should not exist yet")
+	}
+
+	projectDir := filepath.Join(t.TempDir(), "proj")
+	wt, err := EnsureCuratorWorktree(context.Background(), "seed-owner", "seed-repo", "main", projectDir,
+		WithCloneURL(upstream))
+	if err != nil {
+		t.Fatalf("EnsureCuratorWorktree with seed URL: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(wt, ".git")); err != nil {
+		t.Errorf("worktree not materialized: %v", err)
+	}
+	// The bare itself now exists — the seed landed in the cache.
+	bareDir, _ := repoDir("seed-owner", "seed-repo")
+	if !dirExists(bareDir) {
+		t.Errorf("bare was not seeded at %s", bareDir)
+	}
+}
+
+func dirExists(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && info.IsDir()
+}
+
+// TestEnsureCuratorWorktree_SeedCarriesAuthHeader proves the multi-mode
+// seed path authenticates: when WithCloneURL + WithCloneAuth are supplied
+// for a missing bare, the host-scoped Authorization header reaches the
+// wire (the App-token clone). Mirrors clone_auth_test.go's TLS-capture
+// pattern. The local path (no auth) is covered by the credential-free seed
+// in TestEnsureCuratorWorktree_SeedsMissingBareWithURL above.
+func TestEnsureCuratorWorktree_SeedCarriesAuthHeader(t *testing.T) {
+	withTestHome(t)
+	t.Setenv("GIT_SSL_NO_VERIFY", "true")
+
+	base, authHeader := startRefsCaptureServer(t)
+	cloneURL := base + "/acme/repo.git"
+
+	projectDir := filepath.Join(t.TempDir(), "proj")
+	// The clone fails (server serves no repo); we assert only the header
+	// the seed carried, which is what authenticates a private clone.
+	_, _ = EnsureCuratorWorktree(context.Background(), "acme", "curator-seed-auth", "main", projectDir,
+		WithCloneURL(cloneURL), WithCloneAuth(CloneAuthFor(cloneURL, "ghs_curator_seed")))
+
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:ghs_curator_seed"))
+	if got := authHeader(); got != want {
+		t.Errorf("seed info/refs Authorization = %q, want %q", got, want)
 	}
 }
 

@@ -63,12 +63,13 @@ func materializePinnedRepos(ctx context.Context, repos db.RepoStore, tokenFor fu
 		if tokenFor != nil {
 			auth = worktree.CloneAuthFor(profile.CloneURL, tokenFor(ctx, owner))
 		}
-		// TODO(SKY-400): EnsureCuratorWorktree refuses to seed a missing bare,
-		// and multi-mode has no eager bootstrap, so a private pinned repo never
-		// delegated against is silently skipped here. Seed it on demand
-		// (EnsureBareClone + WithCloneAuth) before refreshing once the
-		// seed-vs-eager-bootstrap design call lands.
-		if _, err := worktree.EnsureCuratorWorktree(ctx, owner, repo, branch, projectDir, worktree.WithCloneAuth(auth)); err != nil {
+		// Seed-on-demand (TFAC-60/-62): pass the upstream clone URL so a
+		// missing bare — a private pinned repo never delegated against —
+		// self-seeds via the bounded cache instead of being skipped. Auth
+		// is mode-appropriate: the App token in multi (WithCloneAuth above),
+		// nil/no-op over the existing anon/SSH path in local.
+		if _, err := worktree.EnsureCuratorWorktree(ctx, owner, repo, branch, projectDir,
+			worktree.WithCloneAuth(auth), worktree.WithCloneURL(profile.CloneURL)); err != nil {
 			log.Printf("[curator] project %s: materialize %s @ %s failed: %v (skipping)", projectID, slug, branch, err)
 			continue
 		}
