@@ -365,6 +365,71 @@ func TestGitHubAppImport_BadClientSecret(t *testing.T) {
 	}
 }
 
+// TestGitHubAppImport_ClientSecretUnknown_StoresUnvalidated pins the
+// inconclusive branch of the check-token contract: a status that's neither 401
+// (bad) nor 404 (valid) stores the secret anyway and flags
+// client_secret_validated=false — the only path that persists a potentially-bad
+// credential, so its behavior is documented.
+func TestGitHubAppImport_ClientSecretUnknown_StoresUnvalidated(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+
+	stub := newImportStub(t, importStubCfg{
+		appID: 21, slug: "b", clientID: "Iv1.x",
+		tokenStatus: http.StatusInternalServerError, // neither 401 nor 404 → inconclusive
+	})
+	setOrgGitHubBase(t, s, stub.URL)
+
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/import",
+		importBody("21", testRSAPEM(t), map[string]any{"client_secret": "maybe-good"}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("import = %d, want 200 (inconclusive check stores unvalidated); body=%s", rec.Code, rec.Body.String())
+	}
+	var out githubAppImportResponse
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !out.ClientSecretStored {
+		t.Error("client_secret_stored = false, want true (the secret was stored)")
+	}
+	if out.ClientSecretValidated {
+		t.Error("client_secret_validated = true, want false (inconclusive check)")
+	}
+	// The secret is persisted despite being unvalidated.
+	app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID)
+	if app == nil || app.ClientSecretRef == "" {
+		t.Fatalf("app = %+v, want a stored client secret ref", app)
+	}
+	if v := getSecret(t, s, app.ClientSecretRef); v != "maybe-good" {
+		t.Errorf("stored client secret = %q, want maybe-good", v)
+	}
+}
+
+// TestGitHubAppImport_PersonalOwnerType covers mapAppOwnerType's non-org branch:
+// GitHub's "User" account type maps to owner_type "user".
+func TestGitHubAppImport_PersonalOwnerType(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+
+	stub := newImportStub(t, importStubCfg{appID: 31, slug: "personal-bot", clientID: "Iv1.x", ownerType: "User"})
+	setOrgGitHubBase(t, s, stub.URL)
+
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/import",
+		importBody("31", testRSAPEM(t), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("import = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID)
+	if app == nil {
+		t.Fatal("no app row written")
+	}
+	if app.OwnerType != "user" {
+		t.Errorf("owner_type = %q, want user (mapped from GitHub's User)", app.OwnerType)
+	}
+}
+
 // TestGitHubAppImport_OccupiedSlot 409s when the org already has an App (a
 // staged one occupies the slot too).
 func TestGitHubAppImport_OccupiedSlot(t *testing.T) {

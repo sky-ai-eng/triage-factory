@@ -219,6 +219,8 @@ func checkAppClientSecret(ctx context.Context, apiBase, clientID, clientSecret s
 	req.Header.Set("User-Agent", "triage-factory-githubapp")
 	req.Header.Set("Content-Type", "application/json")
 
+	// Reuse the package's GitHub HTTP client (a plain 30s-timeout client defined
+	// in github_app_register.go) — fine for this one-shot probe.
 	resp, err := manifestHTTPClient.Do(req)
 	if err != nil {
 		return clientSecretUnknown
@@ -460,6 +462,10 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		}); err != nil {
 			return err
 		}
+		// Store the PEM verbatim (req.PEM, not a trimmed copy): a private key's
+		// internal newlines are load-bearing, ParsePrivateKey tolerates the
+		// surrounding whitespace, and the resolver reads it back through the same
+		// parser — so the original round-trips correctly.
 		if err := tx.Secrets.Put(ctx, orgID, pemKey, req.PEM, "GitHub App private key"); err != nil {
 			return fmt.Errorf("vault put pem: %w", err)
 		}
