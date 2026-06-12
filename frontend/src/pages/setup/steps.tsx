@@ -55,7 +55,12 @@ import { UserIdentityStep } from './UserIdentityStep'
 import { JiraUserAccessStep } from './JiraUserAccessStep'
 import { captureGitHubIdentityPat } from '../../lib/githubIdentity'
 import { captureJiraIdentityPat } from '../../lib/jiraIdentity'
-import { getGitHubAppStatus, refreshGitHubAppInstallations } from '../../lib/githubApp'
+import {
+  getGitHubAppStatus,
+  refreshGitHubAppInstallations,
+  cutoverToApp,
+  switchToPat,
+} from '../../lib/githubApp'
 import { apiJSON } from '../../lib/apiClient'
 import type { GitHubIdentityStatus, JiraIdentityStatus } from '../../types'
 import PollerTimingGroup from '../settings/PollerTimingGroup'
@@ -91,6 +96,9 @@ export const initialWizardState = (): WizardState => ({
   githubUrlConfirmed: false,
   githubAccessTab: null,
   githubAppOwnerType: 'user',
+  githubAppRegistered: false,
+  githubAppStaged: false,
+  githubAppSlug: '',
   githubAppInstalled: false,
   githubAppInstallCount: 0,
   isLocal: false,
@@ -378,20 +386,39 @@ const githubAppStep: WizardStep = {
   render: (ctx) => <GitHubAppStep {...ctx} returnTo="setup" />,
 }
 
-// loadGitHubAppInstall seeds the install step's gate from the live installation
-// mirror: githubAppInstalled / githubAppInstallCount come straight off the App
-// status, so a returning, already-installed org resumes past the step. Best-
-// effort and self-contained — a missing orgId or a failed read resolves to {}
-// (the step keeps its "not installed" default), since its persist re-verifies
-// against the refresh endpoint regardless. An org with no App reads zero
-// installations, which is the same "not installed" default and harmless on the
-// PAT path where the step is invisible anyway.
+// loadGitHubAppInstall seeds the App-presence + install gate from the live App
+// status: githubAppInstalled / githubAppInstallCount drive the install step's
+// resume, while githubAppRegistered / githubAppStaged / githubAppSlug drive the
+// mode-card status lines, the cross-pick confirm, and the install step's
+// cutover-vs-refresh branch. Best-effort and self-contained — a missing orgId
+// or a failed read resolves to {} (the step keeps its defaults), since its
+// persist re-verifies against the refresh/cutover endpoint regardless.
+//
+// It also OWNS the staged-window tab override: an org with ANY registered App
+// (staged or live) resolves the access tab to 'app'. This corrects loadOrg's
+// naive `has_github_pat ? 'pat'` derivation (steps.tsx), which would otherwise
+// dump a mid-switch user (staged App + still-live PAT) back onto the PAT path.
+// No registered App ⇒ the tab key is omitted, so loadOrg's PAT/null derivation
+// stands. This relies on loadGitHubAppInstall merging AFTER loadOrg, which it
+// does — both are org-section steps and the install step is the later of the
+// two in WIZARD_STEPS.
 export async function loadGitHubAppInstall(ctx: LoadContext): Promise<Partial<WizardState>> {
   if (!ctx.orgId) return {}
   try {
     const status = await getGitHubAppStatus(ctx.orgId)
+    const app = status.app
     const n = status.installations.length
-    return { githubAppInstalled: n > 0, githubAppInstallCount: n }
+    const slice: Partial<WizardState> = {
+      githubAppRegistered: !!app,
+      githubAppStaged: !!app && !app.active,
+      githubAppSlug: app?.slug ?? '',
+      githubAppInstalled: n > 0,
+      githubAppInstallCount: n,
+    }
+    // Registered (staged → resume the switch; live → it's the live credential)
+    // ⇒ App tab. Absent ⇒ leave the tab to loadOrg's PAT/null derivation.
+    if (app) slice.githubAccessTab = 'app'
+    return slice
   } catch {
     return {}
   }
@@ -401,22 +428,46 @@ export async function loadGitHubAppInstall(ctx: LoadContext): Promise<Partial<Wi
 // Splits "the App is registered" (the prior step) from "the App is actually
 // installed somewhere" — the gate that was missing, which let users sail past a
 // registered-but-uninstalled App into the repo picker that then dead-ends.
-// Continue is refresh-then-verify: it reconciles the installation mirror against
-// GitHub (the refresh endpoint, which is the authoritative discovery path in
-// local mode where webhooks never arrive) and only advances when ≥1 installation
-// comes back, throwing inline otherwise so the wizard stays on the step. An
-// already-installed step short-circuits (no needless GitHub round trip), mirroring
-// the PAT/Jira access steps.
+//
+// Two Continue behaviours, on whether the App is staged (mid PAT→App switch):
+//   - Fresh App (not staged): refresh-then-verify — reconcile the installation
+//     mirror (the authoritative discovery path in local mode where webhooks
+//     never arrive) and advance once ≥1 installation comes back.
+//   - Staged App (the user had a PAT): CUTOVER — one call that reconciles,
+//     verifies ≥1 installation, activates the App, and deletes the PAT
+//     atomically. Its 409 ("install the App before switching") surfaces inline
+//     exactly like the refresh path's "no installation yet" throw.
+// Either way a no-installation state throws and the wizard stays on the step. A
+// done step (installed AND not staged) short-circuits, mirroring the PAT/Jira
+// access steps; a staged-but-installed App is NOT done until the cutover runs.
 const githubAppInstallStep: WizardStep = {
   id: 'org-github-app-install',
   section: 'org',
   title: 'Install the App',
   visible: (s) => s.githubAccessTab === 'app',
   load: loadGitHubAppInstall,
-  isComplete: (s) => s.githubAppInstalled,
+  isComplete: (s) => s.githubAppInstalled && !s.githubAppStaged,
   persist: async ({ state, orgId, patch }) => {
-    if (state.githubAppInstalled) return
+    if (state.githubAppInstalled && !state.githubAppStaged) return
     if (!orgId) throw new Error('No organization context.')
+    if (state.githubAppStaged) {
+      // Commit the switch: cutover does refresh → verify → activate → delete
+      // PAT in one call, throwing the backend's 409 if nothing's installed yet.
+      await cutoverToApp(orgId)
+      // The App is now the live credential and the PAT is gone. Re-read status
+      // for an accurate install count (the cutover body doesn't carry it);
+      // degrade to the loaded count (≥1, since cutover succeeded) on a read slip.
+      const fresh = await getGitHubAppStatus(orgId).catch(() => null)
+      const n = fresh?.installations.length ?? Math.max(state.githubAppInstallCount, 1)
+      patch({
+        githubAppStaged: false,
+        githubAppInstalled: true,
+        githubAppInstallCount: n,
+        githubReady: true,
+        hasGitHubPat: false,
+      })
+      return
+    }
     const status = await refreshGitHubAppInstallations(orgId)
     const n = status.installations.length
     if (n === 0) {
@@ -440,20 +491,51 @@ const githubAppInstallStep: WizardStep = {
 // successful save; an empty field relied on a *stored* token, which the save
 // does NOT re-validate, so confirm against the server's github_ready signal
 // rather than optimistically marking connected.
+//
+// Cross-pick (an App is registered, user picked PAT to switch): Continue calls
+// switch-to-pat — a full App teardown that validates + stores the new token —
+// instead of the plain settings save (which 409s while an App exists anyway).
+// The step body warns about the teardown; nothing is destroyed until Continue.
+// `githubReady` alone can't gate completion here (an App makes it true), so the
+// step is complete only once a PAT is live AND no App remains.
 const githubPatStep: WizardStep = {
   id: 'org-github-pat',
   section: 'org',
   title: 'Personal access token',
   visible: (s) => s.githubAccessTab === 'pat',
-  isComplete: (s) => s.githubReady,
+  isComplete: (s) => s.githubReady && !s.githubAppRegistered,
   validate: (s) => {
-    if (s.githubReady) return null
+    if (s.githubReady && !s.githubAppRegistered) return null
+    // Switching from a registered App: switch-to-pat has no "keep current" —
+    // it validates and stores exactly what's sent, so a token is required.
+    if (s.githubAppRegistered) {
+      return s.org.github_pat.trim() === ''
+        ? 'Enter a personal access token to switch to PAT access.'
+        : null
+    }
     return !s.hasGitHubPat && s.org.github_pat.trim() === ''
       ? 'Enter a personal access token to connect.'
       : null
   },
-  persist: async ({ state, patch }) => {
-    if (state.githubReady) return
+  persist: async ({ state, orgId, patch }) => {
+    if (state.githubReady && !state.githubAppRegistered) return
+    // Cross-pick: tear down the App and switch to the typed PAT. Pre-repos in
+    // the wizard, so no reachability diff — confirm-and-go.
+    if (state.githubAppRegistered) {
+      if (!orgId) throw new Error('No organization context.')
+      await switchToPat(orgId, state.org.github_pat.trim())
+      patch({
+        githubReady: true,
+        hasGitHubPat: true,
+        githubAppRegistered: false,
+        githubAppStaged: false,
+        githubAppInstalled: false,
+        githubAppInstallCount: 0,
+        githubAppSlug: '',
+        org: { ...state.org, github_pat: '' },
+      })
+      return
+    }
     const result = await saveOrgConfig(state.org)
     if (!result.ok) throw new Error(result.error)
     if (state.org.github_pat.trim() === '') {

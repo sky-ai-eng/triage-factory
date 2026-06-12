@@ -26,9 +26,21 @@ import GitHubAppPanel from '../settings/GitHubAppPanel'
 import { GitHubAppInstallView } from '../settings/GitHubAppInstallView'
 import { useGitHubAppInstall } from '../../hooks/useGitHubAppInstall'
 import { UrlField, ChoiceCards } from './parts'
-import type { StepContext, GitHubAccessMode } from './types'
+import type { StepContext, GitHubAccessMode, WizardState } from './types'
 
 export const DEFAULT_GITHUB_URL = 'https://github.com'
+
+// SwitchNotice is the inline banner the cross-pick steps render when the user
+// is changing GitHub access method (not a fresh setup): an amber-tinted note
+// explaining what the switch does. Nothing is destroyed by reading it — the
+// teardown/cutover only happens on the relevant step's Continue.
+function SwitchNotice({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.08] px-4 py-2.5 text-[12px] leading-relaxed text-amber-600 dark:text-amber-400">
+      {children}
+    </div>
+  )
+}
 
 // GitHubUrlStep body — just the base-URL field. The reachability probe and the
 // base-URL persist are the step's Continue (steps.tsx); `error` turns the box
@@ -58,27 +70,50 @@ export function GitHubUrlStep({ state, patch, error }: StepContext) {
   )
 }
 
-const MODE_CARDS: { kind: GitHubAccessMode; title: string; detail: string }[] = [
-  {
-    kind: 'app',
-    title: 'GitHub App',
-    detail: 'Polls under its own bot identity and supports multiple installations.',
-  },
-  {
-    kind: 'pat',
-    title: 'Personal access token',
-    detail: 'A classic token with repo + read:org scopes — the simpler setup.',
-  },
-]
+// appModeStatus / patModeStatus derive each mode card's "persisted reality"
+// status line from wizard state (no new fetches — the install-state loader
+// already surfaced these). The App line distinguishes staged (switch pending),
+// installed, and registered-not-installed; the PAT line reports a live token.
+function appModeStatus(s: WizardState): string | undefined {
+  const tag = s.githubAppSlug ? ` (${s.githubAppSlug})` : ''
+  if (s.githubAppStaged) return `Registered${tag} — switch pending`
+  if (s.githubAppRegistered) {
+    return s.githubAppInstalled ? 'Registered + installed' : `Registered${tag} — not installed yet`
+  }
+  return undefined
+}
+
+function patModeStatus(s: WizardState): string | undefined {
+  // A live PAT reads "Connected". During a staged PAT→App switch the PAT is
+  // still live, so this correctly shows alongside the App card's "switch
+  // pending" — both states are true at once.
+  return s.hasGitHubPat ? 'Connected' : undefined
+}
 
 // GitHubModeStep body — the access-method picker. Action-on-click (the step is
 // selfAdvancing): it opens unselected, and clicking a panel records the choice
-// and advances to that method's first config step.
+// and advances to that method's first config step. Each card carries a status
+// line reflecting what's actually persisted, so a returning/mid-switch user
+// sees reality rather than two blank options.
 export function GitHubModeStep({ state, patch, advance }: StepContext) {
   const choose = (kind: GitHubAccessMode) => {
     patch({ githubAccessTab: kind })
     advance?.()
   }
+  const options = [
+    {
+      kind: 'app' as const,
+      title: 'GitHub App',
+      detail: 'Polls under its own bot identity and supports multiple installations.',
+      status: appModeStatus(state),
+    },
+    {
+      kind: 'pat' as const,
+      title: 'Personal access token',
+      detail: 'A classic token with repo + read:org scopes — the simpler setup.',
+      status: patModeStatus(state),
+    },
+  ]
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
@@ -93,7 +128,7 @@ export function GitHubModeStep({ state, patch, advance }: StepContext) {
       </div>
       <ChoiceCards
         ariaLabel="GitHub access method"
-        options={MODE_CARDS}
+        options={options}
         selected={state.githubAccessTab}
         onChoose={choose}
       />
@@ -116,12 +151,16 @@ const ACCOUNT_CARDS: { kind: 'user' | 'org'; title: string; detail: string }[] =
 
 // GitHubAccountTypeStep body — App only: which account the App registers under.
 // Action-on-click; the choice rides state.githubAppOwnerType into the
-// registration step.
+// registration step. When the org already has a live PAT (a PAT→App switch),
+// it leads with the staged-switch notice so the user knows the PAT stays the
+// live credential until the App is installed and cut over.
 export function GitHubAccountTypeStep({ state, patch, advance }: StepContext) {
   const choose = (kind: 'user' | 'org') => {
     patch({ githubAppOwnerType: kind })
     advance?.()
   }
+  // hasGitHubPat with no live App yet ⇒ this is a switch, not a fresh setup.
+  const switching = state.hasGitHubPat && !state.githubAppRegistered
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
@@ -132,6 +171,12 @@ export function GitHubAccountTypeStep({ state, patch, advance }: StepContext) {
           Where the App is registered — your personal account, or an organization you administer.
         </p>
       </div>
+      {switching && (
+        <SwitchNotice>
+          Your personal access token stays active until the App is installed, then it&rsquo;s
+          removed.
+        </SwitchNotice>
+      )}
       <ChoiceCards
         ariaLabel="App account type"
         options={ACCOUNT_CARDS}
@@ -174,7 +219,7 @@ export function GitHubAppStep({
 // tab updates the list). The step's Continue (steps.tsx) is refresh-then-verify
 // — it reconciles the installation mirror and only advances once GitHub reports
 // an installation — so this body carries no action of its own.
-export function GitHubAppInstallStep({ orgId }: StepContext) {
+export function GitHubAppInstallStep({ orgId, state }: StepContext) {
   // Hook called unconditionally (stable hook order), then branch on orgId.
   const { status, installUrl } = useGitHubAppInstall(orgId)
   if (!orgId) {
@@ -192,6 +237,12 @@ export function GitHubAppInstallStep({ orgId }: StepContext) {
           back and continue — we&rsquo;ll verify the installation before moving on.
         </p>
       </div>
+      {state.githubAppStaged && (
+        <SwitchNotice>
+          When you continue, Triage Factory verifies the installation, switches over to the App, and
+          removes your personal access token.
+        </SwitchNotice>
+      )}
       <GitHubAppInstallView installations={status?.installations ?? []} installUrl={installUrl} />
     </div>
   )
@@ -199,25 +250,36 @@ export function GitHubAppInstallStep({ orgId }: StepContext) {
 
 // GitHubPatStep body — the PAT token field alone (clone protocol is its own
 // step now, so showCloneProtocol is false). No Connect button: the step's
-// Continue performs the connect (steps.tsx).
+// Continue performs the connect (steps.tsx). When an App is registered, the
+// step is a cross-pick — Continue tears the App down and switches to the typed
+// PAT — so it leads with the teardown warning. Nothing happens until Continue.
 export function GitHubPatStep({ orgId, isLocal, state, patch }: StepContext) {
   return (
-    <GitHubAccessGroup
-      value={{
-        github_url: state.org.github_url,
-        github_pat: state.org.github_pat,
-        github_clone_protocol: state.org.github_clone_protocol,
-      }}
-      onChange={(p) => patch({ org: { ...state.org, ...p } })}
-      hasToken={state.hasGitHubPat}
-      isLocal={isLocal}
-      orgId={orgId}
-      showAppPanel={false}
-      showBaseUrl={false}
-      showHeading={false}
-      showCloneProtocol={false}
-      bare
-    />
+    <div className="space-y-5">
+      {state.githubAppRegistered && (
+        <SwitchNotice>
+          You&rsquo;ve registered a GitHub App
+          {state.githubAppSlug ? ` (${state.githubAppSlug})` : ''}. Entering a personal access token
+          will remove that registration — the App itself stays on GitHub and can be deleted there.
+        </SwitchNotice>
+      )}
+      <GitHubAccessGroup
+        value={{
+          github_url: state.org.github_url,
+          github_pat: state.org.github_pat,
+          github_clone_protocol: state.org.github_clone_protocol,
+        }}
+        onChange={(p) => patch({ org: { ...state.org, ...p } })}
+        hasToken={state.hasGitHubPat && !state.githubAppRegistered}
+        isLocal={isLocal}
+        orgId={orgId}
+        showAppPanel={false}
+        showBaseUrl={false}
+        showHeading={false}
+        showCloneProtocol={false}
+        bare
+      />
+    </div>
   )
 }
 

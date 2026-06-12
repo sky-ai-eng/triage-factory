@@ -1,9 +1,17 @@
 // The Organization group of the Settings stack — rendered only for org admins.
-// Each section's BODY is the actual /setup step component (GitHubUrlStep,
-// GitHubModeStep, GitHubAppStep, GitHubPatStep, GitHubCloneStep, OrgModelStep,
-// …) fed a WizardState draft, so Settings and /setup are literally the same
-// components — same visuals, same copy, same granularity (GitHub is split into
-// its individual items: URL · access method · account type · App/token · clone).
+// Most sections' BODY is the actual /setup step component (GitHubUrlStep,
+// GitHubCloneStep, OrgModelStep, …) fed a WizardState draft, so Settings and
+// /setup are literally the same components — same visuals, same copy.
+//
+// GitHub *access* is the exception (TFAC-328/329): it's either/or per org, so
+// the old independently-editable selector / account-type / App-register /
+// App-install / free-form-PAT sections are replaced by ONE "GitHub access"
+// section — a mode header plus an explicit guided switch (GitHubAccessControl),
+// which composes the same step components internally (account type, App panel,
+// install view) but gates credential changes behind the switch flow + an
+// inform-only reachability diff. Setting a PAT through the plain settings save
+// while an App is registered 409s on the backend, so the switch flow is the
+// only credential-mutation path here.
 //
 // What Settings adds over /setup is the per-section Save model (the approved
 // design): expand a section, edit its draft, Save (or Cancel/discard). The
@@ -29,25 +37,21 @@ import {
   checkGitHubReachability,
   reachabilityMessage,
 } from '../../../lib/reachability'
-import {
-  GitHubUrlStep,
-  GitHubModeStep,
-  GitHubAccountTypeStep,
-  GitHubAppStep,
-  GitHubPatStep,
-  GitHubCloneStep,
-} from '../../setup/GitHubStep'
+import { GitHubUrlStep, GitHubCloneStep } from '../../setup/GitHubStep'
 import { OrgModelStep } from '../../setup/ModelStep'
-import { initialWizardState, loadOrg, loadGitHubAppOwnerType } from '../../setup/steps'
+import {
+  initialWizardState,
+  loadOrg,
+  loadGitHubAppOwnerType,
+  loadGitHubAppInstall,
+} from '../../setup/steps'
 import type { StepContext, WizardState } from '../../setup/types'
 import PollerTimingGroup from '../PollerTimingGroup'
 import JiraAccessGroup from '../JiraAccessGroup'
 import TeamManagementSection from '../../../components/TeamManagementSection'
 import { saveOrgConfig, type OrgConfigForm } from '../orgConfig'
 import { connectJira } from '../jiraConnect'
-import { refreshGitHubAppInstallations } from '../../../lib/githubApp'
-import { GitHubAppInstallView } from '../GitHubAppInstallView'
-import { useGitHubAppInstall } from '../../../hooks/useGitHubAppInstall'
+import GitHubAccessControl from './GitHubAccessControl'
 import SettingsSection from './SettingsSection'
 
 const TIER_LABELS: Record<string, string> = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus' }
@@ -91,14 +95,23 @@ export default function OrgSettings({
     // Seed the App account-type summary from a registered App's persisted
     // owner_type, the same way the wizard's account-type step does, so an
     // org-owned App doesn't render as "Personal account" on every reload.
-    // loadGitHubAppOwnerType catches internally and resolves to {} on any
-    // failure, so it never rejects the Promise.all — only a loadOrg failure
-    // surfaces the retry.
+    // loadGitHubAppInstall surfaces the staged/registered/installed App state
+    // (the same staged-aware derivation the wizard uses) so the mode header, the
+    // staged banner, and the clone-protocol gate read the LIVE mode. Both catch
+    // internally and resolve to {} on any failure, so neither rejects the
+    // Promise.all — only a loadOrg failure surfaces the retry. The app slice
+    // merges LAST so its tab/staged override wins over loadOrg's naive value.
     const loadCtx = { orgId, teamId: 'default', isLocal }
-    Promise.all([loadOrg(loadCtx), loadGitHubAppOwnerType(loadCtx)])
-      .then(([slice, ownerSlice]) => {
+    Promise.all([loadOrg(loadCtx), loadGitHubAppOwnerType(loadCtx), loadGitHubAppInstall(loadCtx)])
+      .then(([slice, ownerSlice, appSlice]) => {
         if (cancelled) return
-        const seeded: WizardState = { ...initialWizardState(), ...slice, ...ownerSlice, isLocal }
+        const seeded: WizardState = {
+          ...initialWizardState(),
+          ...slice,
+          ...ownerSlice,
+          ...appSlice,
+          isLocal,
+        }
         setBaseline(seeded)
         setDraft(seeded)
         setLoaded(true)
@@ -178,8 +191,20 @@ export default function OrgSettings({
   // record the choice). orgId/teamId/isLocal ride along for the App panel etc.
   const ctx: StepContext = { orgId, teamId: 'default', isLocal, state: draft, patch, advance: noop }
 
-  const isPat = draft.githubAccessTab === 'pat'
-  const isApp = draft.githubAccessTab === 'app'
+  // Live GitHub mode — derived from the App registration's active bit, NOT the
+  // access tab (a staged App + live PAT is PAT mode with a pending switch). A
+  // live App is registered AND active; everything else is PAT (a staged App
+  // shows the staged banner inside the access section). This gates the
+  // clone-protocol section, which is a PAT-mode + local-only concern.
+  const liveApp = draft.githubAppRegistered && !draft.githubAppStaged
+  const isPat = !liveApp
+  const ghAccessSummary = liveApp
+    ? `GitHub App — installed on ${draft.githubAppInstallCount} account${
+        draft.githubAppInstallCount === 1 ? '' : 's'
+      }`
+    : draft.hasGitHubPat
+      ? 'Personal access token — connected'
+      : 'Not configured'
   const capSummary = baseline.org.max_llm_model_tier
     ? `Capped at ${TIER_LABELS[baseline.org.max_llm_model_tier] ?? baseline.org.max_llm_model_tier}`
     : 'No cap'
@@ -219,63 +244,21 @@ export default function OrgSettings({
         <GitHubUrlStep {...ctx} error={urlError} />
       </SettingsSection>
 
-      {/* ── GitHub access method (selector; gates the App/PAT items below) ── */}
+      {/* ── GitHub access (one mode header + explicit guided switch) ──
+          Either/or per org (TFAC-328): the section states the live mode and
+          offers exactly one affordance — switch to the other mode, with a
+          reachability diff + confirm — plus the staged-switch banner. It
+          replaces the old independently-editable selector / account-type /
+          register / install / free-form-PAT sections (the backend 409s a plain
+          PAT save while an App is registered, so the switch flow is the only
+          path). Auto-opens on a staged switch so the banner is visible. */}
       <SettingsSection
         title="GitHub access"
-        summary={isPat ? 'Personal access token' : 'GitHub App'}
+        summary={ghAccessSummary}
+        defaultExpanded={draft.githubAppStaged}
       >
-        <GitHubModeStep {...ctx} />
+        <GitHubAccessControl ctx={ctx} reload={load} />
       </SettingsSection>
-
-      {/* ── App account type (App only; feeds the register panel) ── */}
-      {isApp && (
-        <SettingsSection
-          title="App account type"
-          summary={draft.githubAppOwnerType === 'org' ? 'Organization account' : 'Personal account'}
-        >
-          <GitHubAccountTypeStep {...ctx} />
-        </SettingsSection>
-      )}
-
-      {/* ── GitHub App register (App only; external register, self-managed) ── */}
-      {isApp && (
-        <SettingsSection
-          title="GitHub App"
-          summary={draft.githubReady ? 'Connected' : 'Not registered'}
-        >
-          <GitHubAppStep {...ctx} returnTo="settings" />
-        </SettingsSection>
-      )}
-
-      {/* ── App installation (App only; the install affordance + verify) ──
-          Mirrors the wizard's install step so the PAT→App switch path, which
-          never sees the wizard, still has somewhere to install + verify. */}
-      {isApp && orgId && <AppInstallationSection orgId={orgId} />}
-
-      {/* ── Personal access token (PAT only) ── */}
-      {isPat && (
-        <SettingsSection
-          title="Personal access token"
-          summary={baseline.hasGitHubPat ? 'Token set' : 'No token'}
-          dirty={draft.org.github_pat.trim() !== ''}
-          saving={isSaving('gh-pat')}
-          onSave={async () => {
-            const ok = await commitOrgSlice(
-              'gh-pat',
-              { github_pat: draft.org.github_pat },
-              'GitHub token',
-            )
-            if (ok) {
-              setDraft((d) => ({ ...d, hasGitHubPat: true, org: { ...d.org, github_pat: '' } }))
-              setBaseline((b) => ({ ...b, hasGitHubPat: true }))
-            }
-            return ok
-          }}
-          onCancel={() => revertOrg(['github_pat'])}
-        >
-          <GitHubPatStep {...ctx} />
-        </SettingsSection>
-      )}
 
       {/* ── Clone protocol (PAT + local only) ── */}
       {isPat && isLocal && (
@@ -471,61 +454,6 @@ export default function OrgSettings({
         <DangerZone />
       </SettingsSection>
     </div>
-  )
-}
-
-// AppInstallationSection — the Settings mirror of the wizard's "Install the App"
-// step. Required because a user can configure a PAT first, use the product, then
-// switch to an App later — a path that never sees the wizard, so the install
-// affordance + verify must exist here too. Self-contained (owns its status fetch
-// via useGitHubAppInstall); "Check installation" runs the same
-// refresh-then-verify the wizard's Continue does — reconcile the mirror against
-// GitHub, report the result, and fold the reconciled installations back into the
-// view and the collapsed summary.
-function AppInstallationSection({ orgId }: { orgId: string }) {
-  const { status, setStatus, installUrl } = useGitHubAppInstall(orgId)
-  const [checking, setChecking] = useState(false)
-  const installations = status?.installations ?? []
-  const n = installations.length
-  const summary = n > 0 ? `Installed on ${n} account${n === 1 ? '' : 's'}` : 'Not installed'
-
-  const check = async () => {
-    if (checking) return
-    setChecking(true)
-    try {
-      const fresh = await refreshGitHubAppInstallations(orgId)
-      setStatus(fresh)
-      const count = fresh.installations.length
-      if (count === 0) {
-        toast.error(
-          "We can't see the App installed on any account yet — install it on GitHub, then check again.",
-        )
-      } else {
-        toast.success(`Installed on ${count} account${count === 1 ? '' : 's'}`)
-      }
-    } catch (err) {
-      toast.error((err as Error).message)
-    } finally {
-      setChecking(false)
-    }
-  }
-
-  return (
-    <SettingsSection title="App installation" summary={summary}>
-      <p className="text-[13px] leading-relaxed text-text-tertiary">
-        GitHub only grants repository access once the App is installed. Install it on your account
-        or organization, then check the installation here.
-      </p>
-      <GitHubAppInstallView installations={installations} installUrl={installUrl} />
-      <button
-        type="button"
-        onClick={() => void check()}
-        disabled={checking}
-        className="rounded-xl border border-accent/20 px-4 py-2 text-[13px] text-accent transition-colors hover:border-accent/30 hover:text-accent/80 disabled:opacity-40"
-      >
-        {checking ? 'Checking…' : 'Check installation'}
-      </button>
-    </SettingsSection>
   )
 }
 

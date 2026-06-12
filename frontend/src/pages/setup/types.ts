@@ -81,6 +81,20 @@ export interface WizardState {
   // The GitHub App owner type (personal vs org), chosen in its own step when App
   // is the method; fed into GitHubAppPanel's registration. Defaults to 'user'.
   githubAppOwnerType: 'user' | 'org'
+  // Whether the org has a registered GitHub App at all (staged OR live), from
+  // the App status. Distinct from githubReady (a PAT also satisfies that) and
+  // from the access tab (a registered App always resolves the tab to 'app').
+  // Drives the mode-card status lines and the cross-pick confirm (picking PAT
+  // while an App exists is a teardown, not a silent fork). Default false.
+  githubAppRegistered: boolean
+  // Whether the registered App is STAGED — registered during a PAT→App switch
+  // but not yet cut over (org_github_apps.active=false), so the PAT is still the
+  // live credential. Gates the install step's Continue between a plain
+  // refresh-then-verify (fresh App) and a cutover (mid-switch). Default false.
+  githubAppStaged: boolean
+  // The registered App's slug, for the mode-card status line ("Registered
+  // (slug) — …"). Empty when no App is registered. Default ''.
+  githubAppSlug: string
   // Whether the org's registered App is installed on ≥1 GitHub account — the
   // gate for the "Install the App" step, distinct from githubReady (which
   // registration alone satisfies). Seeded from the installation mirror on load

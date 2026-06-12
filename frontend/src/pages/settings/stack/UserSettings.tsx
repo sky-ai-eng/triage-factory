@@ -89,11 +89,22 @@ function GitHubIdentitySection({ orgId }: { orgId: string | null }) {
               onClick={() => setReentering(true)}
               className="text-[11px] text-text-tertiary underline transition-colors hover:text-text-secondary"
             >
-              Reconnect
+              {connectAvailable ? 'Reconnect' : 'Re-identify with a PAT'}
             </button>
           </div>
         ) : (
           <div className="space-y-2.5">
+            {/* After an App→PAT teardown the org has no App client_id, so
+                one-click Connect is gone (connect_available=false). Existing
+                host-verified logins survive; anyone who needs to (re)bind uses
+                the capture-and-discard PAT path — say so, so the missing Connect
+                button doesn't read as a regression. */}
+            {!connectAvailable && (
+              <p className="text-[12px] leading-relaxed text-text-tertiary">
+                This workspace switched to PAT access; identity capture now uses a personal token
+                that is verified and discarded.
+              </p>
+            )}
             {connectAvailable && (
               <button
                 type="button"

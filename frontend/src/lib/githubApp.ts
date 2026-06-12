@@ -27,6 +27,12 @@ export interface GitHubAppInfo {
   owner_type: string
   registered_at: string
   registered_by_display_name: string
+  // false while the registration is STAGED — registered during a PAT→App
+  // switch but not yet cut over, so the PAT is still the live credential
+  // (TFAC-328). The Setup/Settings UX reads this to resolve the live mode,
+  // paint the "switch pending" mode-card state, and show the staged-switch
+  // banner. true once a cutover activates it.
+  active: boolean
 }
 
 export interface GitHubAppStatus {
@@ -103,4 +109,121 @@ export function startGitHubAppRegistration(
   window.location.assign(
     `/api/orgs/${encodeURIComponent(orgId)}/github-app/register/launch?${params.toString()}`,
   )
+}
+
+// ── PAT ↔ App switching (TFAC-328 endpoints) ──────────────────────────────
+// These drive the guided switch flows in the wizard and Settings. The backend
+// enforces the either/or invariant; the UI's job is to preview the consequence
+// (the reachability diff), confirm, and commit.
+
+// A repo the target credential can't reach after a switch, with the teams that
+// track it — what the inform-only diff lists so an admin knows who's affected.
+export interface DarkRepo {
+  repo: string
+  teams: string[]
+}
+
+// The inform-only reachability diff both switch preflights return: how many of
+// the org's tracked repos the target credential reaches, and which go dark.
+export interface AccessDiff {
+  tracked: number
+  reachable: number
+  dark_repos: DarkRepo[]
+}
+
+// pat-preflight's body — the diff plus the login the PAT authenticates as.
+export interface PatPreflight extends AccessDiff {
+  login: string
+}
+
+// switch-to-pat's success body. github_app_settings_url points at the org
+// host's apps page so the UI can guide deleting the (still-existing) App on
+// GitHub; github_app_deleted_locally is always true on success (the local
+// registration + secrets are gone).
+export interface SwitchToPatResult {
+  status: string
+  github_app_deleted_locally: boolean
+  github_app_settings_url: string
+}
+
+// switchError returns the backend's clean user-facing `error` message (no
+// fallback prefix), so an inline error reads as the server wrote it (e.g.
+// cutover's 409 "install the App before switching"). Falls back to a generic
+// line when the body carries no error field.
+async function switchError(res: Response, fallback: string): Promise<string> {
+  try {
+    const body = (await res.clone().json()) as { error?: string }
+    if (body && typeof body.error === 'string' && body.error) return body.error
+  } catch {
+    // Non-JSON body — use the fallback.
+  }
+  return fallback
+}
+
+// cutoverToApp commits a staged PAT→App switch: the backend reconciles
+// installations, verifies ≥1, then activates the App and deletes the PAT
+// atomically. Rejects with the backend's message — notably the 409 "install
+// the App before switching" when no installation is found yet.
+//
+// POST /api/orgs/{org_id}/github-app/cutover
+export async function cutoverToApp(orgId: string): Promise<void> {
+  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github-app/cutover`, {
+    method: 'POST',
+  })
+  if (!res.ok) throw new Error(await switchError(res, 'Failed to switch to the GitHub App.'))
+}
+
+// cutoverPreflight returns the inform-only reachability diff for a PAT→App
+// cutover (which tracked repos the App's installations would leave dark). Has a
+// server-side write side-effect (it reconciles the installation mirror), so the
+// endpoint is uncacheable — call it right before showing the diff screen.
+//
+// GET /api/orgs/{org_id}/github-app/cutover-preflight
+export async function cutoverPreflight(orgId: string): Promise<AccessDiff> {
+  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github-app/cutover-preflight`)
+  if (!res.ok) throw new Error(await switchError(res, 'Failed to check repository reachability.'))
+  return (await res.json()) as AccessDiff
+}
+
+// switchToPat performs the App→PAT switch — a full App teardown. The backend
+// validates the PAT, stores it, and deletes the App registration + secrets in
+// one transaction; the App still exists on GitHub (the result flags that).
+//
+// POST /api/orgs/{org_id}/github-access/switch-to-pat
+export async function switchToPat(orgId: string, pat: string): Promise<SwitchToPatResult> {
+  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github-access/switch-to-pat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pat }),
+  })
+  if (!res.ok)
+    throw new Error(await switchError(res, 'Failed to switch to a personal access token.'))
+  return (await res.json()) as SwitchToPatResult
+}
+
+// patPreflight validates a candidate PAT and returns the inform-only
+// reachability diff for an App→PAT switch plus the login it authenticates as.
+// Stores nothing — switchToPat re-validates on commit.
+//
+// POST /api/orgs/{org_id}/github-access/pat-preflight
+export async function patPreflight(orgId: string, pat: string): Promise<PatPreflight> {
+  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github-access/pat-preflight`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pat }),
+  })
+  if (!res.ok) throw new Error(await switchError(res, 'That token could not be validated.'))
+  return (await res.json()) as PatPreflight
+}
+
+// discardStagedApp tears down a STAGED App registration — the exit for an
+// abandoned PAT→App switch. The live PAT is untouched. 409s for an active App
+// (use switchToPat to remove a live one).
+//
+// DELETE /api/orgs/{org_id}/github-app
+export async function discardStagedApp(orgId: string): Promise<void> {
+  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github-app`, {
+    method: 'DELETE',
+  })
+  if (!res.ok) throw new Error(await switchError(res, 'Failed to discard the staged GitHub App.'))
 }

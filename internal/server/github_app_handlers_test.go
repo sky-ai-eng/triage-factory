@@ -67,6 +67,38 @@ func TestGitHubAppStatus_LocalMode_NoApp(t *testing.T) {
 	}
 }
 
+// TestNewGitHubAppStatusResponse_CarriesActive pins the §4 contract the
+// PAT↔App switching UX depends on: the status payload's `active` flag mirrors
+// the registration's Active bit for both a staged (active=false, mid-switch)
+// and a live (active=true) App, so the frontend can tell the staged window
+// apart from a live App. A pure mapping test — no DB, no Docker — so it always
+// runs.
+func TestNewGitHubAppStatusResponse_CarriesActive(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		active bool
+	}{
+		{"staged", false},
+		{"live", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app := &domain.OrgGitHubApp{
+				OrgID:  runmode.LocalDefaultOrgID,
+				AppID:  "123",
+				Slug:   "acme-bot",
+				Active: tc.active,
+			}
+			resp := newGitHubAppStatusResponse(app, nil, "")
+			if resp.App == nil {
+				t.Fatal("App=nil, want the mapped registration")
+			}
+			if resp.App.Active != tc.active {
+				t.Errorf("active=%v, want %v", resp.App.Active, tc.active)
+			}
+		})
+	}
+}
+
 // TestGitHubAppStatus_BadOrgID rejects a non-UUID path segment with 404.
 func TestGitHubAppStatus_BadOrgID(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -161,6 +193,11 @@ func TestGitHubAppStatus_MultiMode(t *testing.T) {
 		// through to the status response.
 		if out.App.OwnerType != "user" {
 			t.Errorf("owner_type=%q, want user (column default)", out.App.OwnerType)
+		}
+		// The seed INSERT omits `active`, so the column default (true) flows
+		// through — a live App reports active=true (§4 over the real handler).
+		if !out.App.Active {
+			t.Errorf("active=%v, want true (column default → live App)", out.App.Active)
 		}
 		if len(out.Installations) != 1 || out.Installations[0].AccountLogin != "acme-eng" {
 			t.Errorf("installations=%+v, want one acme-eng row", out.Installations)

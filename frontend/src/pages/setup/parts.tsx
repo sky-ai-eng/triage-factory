@@ -14,13 +14,18 @@ import { glassInputClass } from '../settings/primitives'
 // in on hover to signal it advances. Action-on-click — the caller's onChoose
 // both records the choice and advances (the step is selfAdvancing), so there's
 // no Continue. The currently-selected option (when revisiting) reads in accent.
+//
+// An option may carry an optional `status` — a short line reflecting persisted
+// reality (the GitHub mode cards use it for "Registered (slug) — not installed
+// yet" / "Connected"), rendered under the detail in the claim tint so it reads
+// as state, not description.
 export function ChoiceCards<T extends string>({
   options,
   selected,
   onChoose,
   ariaLabel,
 }: {
-  options: { kind: T; title: string; detail: string }[]
+  options: { kind: T; title: string; detail: string; status?: string }[]
   selected: T | null
   onChoose: (kind: T) => void
   ariaLabel?: string
@@ -78,6 +83,11 @@ export function ChoiceCards<T extends string>({
               />
             </span>
             <span className="text-[11px] leading-snug text-text-tertiary">{opt.detail}</span>
+            {opt.status && (
+              <span className="mt-0.5 text-[11px] font-medium leading-snug text-claim">
+                {opt.status}
+              </span>
+            )}
           </button>
         )
       })}

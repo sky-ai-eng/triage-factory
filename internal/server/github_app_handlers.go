@@ -28,6 +28,13 @@ type githubAppInfo struct {
 	OwnerType               string `json:"owner_type"`
 	RegisteredAt            string `json:"registered_at"`
 	RegisteredByDisplayName string `json:"registered_by_display_name"`
+	// Active is false while the registration is STAGED — registered during a
+	// PAT→App switch but not yet cut over, so the PAT is still the live
+	// credential (TFAC-328). The Setup/Settings UX reads this to resolve the
+	// live mode, paint the "switch pending" mode-card state, and show the
+	// staged-switch banner; without it a staged-app-plus-PAT org is
+	// indistinguishable from a live App. true once a cutover activates it.
+	Active bool `json:"active"`
 }
 
 type githubAppInstallation struct {
@@ -56,6 +63,7 @@ func newGitHubAppStatusResponse(app *domain.OrgGitHubApp, insts []domain.OrgGitH
 			OwnerType:               app.NormalizedOwnerType(),
 			RegisteredAt:            app.RegisteredAt.UTC().Format(time.RFC3339),
 			RegisteredByDisplayName: registeredByName,
+			Active:                  app.Active,
 		}
 	}
 	for _, inst := range insts {
