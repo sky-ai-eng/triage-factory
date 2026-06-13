@@ -322,11 +322,13 @@ type AgentRunStore interface {
 	// open run resumed repeatedly past the TTL is keyed off its initial start,
 	// not its last park — its snapshot can be reaped while still in use. The
 	// blast radius is bounded: the warm worktree (the primary resume path) is
-	// untouched, so this only degrades the cold backstop, and a true `parked_at`
-	// column is deferred to coordinate with the baseline-freeze gate rather than
-	// adding a schema change here. System-wide / no org scoping — the retention
-	// sweep is a maintenance job that spans tenants; the admin pool is the right
-	// door (BYPASSRLS) since the reaper holds no JWT claims.
+	// untouched, so this only degrades the cold backstop. The fix — a dedicated
+	// parked_at column stamped on park and cleared on resume — is purely
+	// additive (a normal forward migration, not a baseline-shape change),
+	// deferred until the long-lived-session use case that needs it lands.
+	// System-wide / no org scoping — the retention sweep is a maintenance job
+	// that spans tenants; the admin pool is the right door (BYPASSRLS) since the
+	// reaper holds no JWT claims.
 	ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error)
 
 	// TokenTotalsSystem mirrors TokenTotals but routes through the
