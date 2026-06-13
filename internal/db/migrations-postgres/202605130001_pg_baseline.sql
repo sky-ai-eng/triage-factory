@@ -1250,6 +1250,12 @@ CREATE TABLE public.runs (
     stop_reason text,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     completed_at timestamp with time zone,
+    -- parked_at is stamped when the run enters the `open` parked state and
+    -- cleared on resume, so the snapshot-retention sweep can key an open run off
+    -- its last park rather than started_at (which never resets across resumes).
+    -- NULL whenever the run is not parked open; the pending_approval and
+    -- completed+abort terminals use completed_at for the same purpose.
+    parked_at timestamp with time zone,
     duration_ms integer,
     num_turns integer,
     total_cost_usd real,

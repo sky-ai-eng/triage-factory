@@ -152,11 +152,11 @@ func (s *agentRunStore) MarkOpen(ctx context.Context, orgID, runID string) (bool
 	}
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE runs
-		SET status = 'open'
+		SET status = 'open', parked_at = ?
 		WHERE id = ?
 		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
 		                     'pending_approval', 'open')
-	`, runID)
+	`, time.Now().UTC(), runID)
 	if err != nil {
 		return false, err
 	}
@@ -173,7 +173,7 @@ func (s *agentRunStore) MarkResuming(ctx context.Context, orgID, runID string) (
 	// finish run (completed + outcome='finish') is excluded and a racing
 	// approval/resume that already moved the row loses this compare-and-swap.
 	res, err := s.q.ExecContext(ctx, `
-		UPDATE runs SET status = 'running'
+		UPDATE runs SET status = 'running', parked_at = NULL
 		WHERE id = ?
 		  AND (status IN ('open', 'pending_approval')
 		       OR (status = 'completed' AND outcome = 'abort'))
@@ -510,17 +510,20 @@ func (s *agentRunStore) MarkResumingSystem(ctx context.Context, orgID, runID str
 func (s *agentRunStore) ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error) {
 	// Resumable-state runs (open / pending_approval / completed+abort) grouped by
 	// their shared snapshot key (org, blueprint_run_id); a key is reapable once
-	// its newest resumable run parked/terminated before the cutoff. datetime()
-	// normalizes the mixed on-disk timestamp formats (started_at's
-	// CURRENT_TIMESTAMP text vs completed_at's Go-bound value) so the MAX
-	// comparison is consistent; the cutoff binds as a canonical UTC string.
+	// its newest resumable run last parked before the cutoff. The park timestamp
+	// is COALESCE(parked_at, completed_at, started_at): parked_at for an open run
+	// (re-stamped each park, so resumes don't age it), completed_at for the
+	// pending_approval / completed+abort terminals, started_at a legacy fallback.
+	// datetime() normalizes the mixed on-disk timestamp formats (CURRENT_TIMESTAMP
+	// text vs Go-bound values) so the MAX is consistent; the cutoff binds as a
+	// canonical UTC string.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT org_id, blueprint_run_id
 		FROM runs
 		WHERE status IN ('open', 'pending_approval')
 		   OR (status = 'completed' AND outcome = 'abort')
 		GROUP BY org_id, blueprint_run_id
-		HAVING MAX(datetime(COALESCE(completed_at, started_at))) < datetime(?)
+		HAVING MAX(datetime(COALESCE(parked_at, completed_at, started_at))) < datetime(?)
 	`, cutoff.UTC().Format("2006-01-02 15:04:05"))
 	if err != nil {
 		return nil, err

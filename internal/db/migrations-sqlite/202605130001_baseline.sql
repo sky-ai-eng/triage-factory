@@ -865,6 +865,12 @@ CREATE TABLE runs (
     stop_reason     TEXT,
     started_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     completed_at    DATETIME,
+    -- parked_at is stamped when the run enters the `open` parked state and
+    -- cleared on resume, so the snapshot-retention sweep can key an open run off
+    -- its last park rather than started_at (which never resets across resumes).
+    -- NULL whenever the run is not parked open; the pending_approval and
+    -- completed+abort terminals use completed_at for the same purpose.
+    parked_at       DATETIME,
     duration_ms     INTEGER,
     num_turns       INTEGER,
     total_cost_usd  REAL,

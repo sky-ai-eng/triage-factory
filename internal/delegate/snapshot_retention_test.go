@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 	"testing"
 	"time"
@@ -200,7 +201,83 @@ func TestListReapableSnapshotKeys_SharedBlueprintNeedsAllPastTTL(t *testing.T) {
 	}
 }
 
+// TestMarkOpenResuming_StampsAndClearsParkedAt pins the park-timestamp
+// lifecycle: MarkOpen stamps parked_at (so retention keys off the last park),
+// MarkResuming clears it (the run is no longer parked).
+func TestMarkOpenResuming_StampsAndClearsParkedAt(t *testing.T) {
+	s, database, run, _ := setupAdvanceFixture(t, "parked-stamp")
+	ctx := context.Background()
+
+	if _, err := s.agentRuns.MarkOpen(ctx, runmode.LocalDefaultOrg, run); err != nil {
+		t.Fatalf("MarkOpen: %v", err)
+	}
+	if !parkedAtSet(t, database, run) {
+		t.Error("MarkOpen did not stamp parked_at")
+	}
+
+	if _, err := s.agentRuns.MarkResuming(ctx, runmode.LocalDefaultOrg, run); err != nil {
+		t.Fatalf("MarkResuming: %v", err)
+	}
+	if parkedAtSet(t, database, run) {
+		t.Error("MarkResuming did not clear parked_at")
+	}
+}
+
+// TestListReapableSnapshotKeys_OpenRunKeysOffParkedAt is the fix for the
+// retention-timestamp concern: a long-lived open run started weeks ago but
+// re-parked recently must NOT be reaped (retention keys off the last park via
+// parked_at, not the never-resetting started_at); once the park itself ages past
+// the TTL it becomes reapable.
+func TestListReapableSnapshotKeys_OpenRunKeysOffParkedAt(t *testing.T) {
+	s, database, run, _ := setupAdvanceFixture(t, "reap-parked")
+	bpr := blueprintRunIDForRun(t, database, run)
+	cutoff := time.Now().Add(-14 * 24 * time.Hour)
+
+	// Started 30 days ago, last re-parked just now → must survive.
+	if _, err := database.Exec(`UPDATE runs SET status='open', started_at=datetime('now','-30 days'), parked_at=datetime('now') WHERE id=?`, run); err != nil {
+		t.Fatalf("seed recently-parked open run: %v", err)
+	}
+	if keysContain(reapKeys(t, s, cutoff), bpr) {
+		t.Errorf("recently re-parked open run %s reaped on its old started_at; retention must key off parked_at", bpr)
+	}
+
+	// Age the park past the TTL → now reapable.
+	if _, err := database.Exec(`UPDATE runs SET parked_at=datetime('now','-30 days') WHERE id=?`, run); err != nil {
+		t.Fatalf("age park: %v", err)
+	}
+	if !keysContain(reapKeys(t, s, cutoff), bpr) {
+		t.Errorf("open run parked 30 days ago not reaped; want reapable past the TTL")
+	}
+}
+
 // --- helpers ---------------------------------------------------------------
+
+func parkedAtSet(t *testing.T, database *sql.DB, runID string) bool {
+	t.Helper()
+	var pa sql.NullString
+	if err := database.QueryRow(`SELECT parked_at FROM runs WHERE id=?`, runID).Scan(&pa); err != nil {
+		t.Fatalf("read parked_at: %v", err)
+	}
+	return pa.Valid
+}
+
+func reapKeys(t *testing.T, s *Spawner, cutoff time.Time) []domain.SnapshotReapKey {
+	t.Helper()
+	keys, err := s.agentRuns.ListReapableSnapshotKeysSystem(context.Background(), cutoff)
+	if err != nil {
+		t.Fatalf("ListReapableSnapshotKeysSystem: %v", err)
+	}
+	return keys
+}
+
+func keysContain(keys []domain.SnapshotReapKey, blueprintRunID string) bool {
+	for _, k := range keys {
+		if k.BlueprintRunID == blueprintRunID {
+			return true
+		}
+	}
+	return false
+}
 
 func wireBlobStore(t *testing.T, s *Spawner) {
 	t.Helper()

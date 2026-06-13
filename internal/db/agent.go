@@ -89,8 +89,10 @@ type AgentRunStore interface {
 	AddPartialTotals(ctx context.Context, orgID, runID string, costUSD float64, durationMs, numTurns int) error
 
 	// MarkOpen flips a running run to `open` — a turn ended without a
-	// conclusion (or the live process idle-closed). Returns ok=false (no
-	// error) if the row already reached a terminal state.
+	// conclusion (or the live process idle-closed). Stamps parked_at to the
+	// current time so the snapshot-retention sweep keys this open run off its
+	// last park rather than started_at. Returns ok=false (no error) if the row
+	// already reached a terminal state.
 	MarkOpen(ctx context.Context, orgID, runID string) (bool, error)
 
 	// MarkResuming flips a resumable run back to running when it is woken by a
@@ -101,7 +103,8 @@ type AgentRunStore interface {
 	// longer resumable (a concurrent resume already flipped it running, or an
 	// approval/finish finalized it), so the caller must not spawn the resume and
 	// maps the miss to 409. A finish run (completed + outcome='finish') is
-	// deliberately excluded.
+	// deliberately excluded. Clears parked_at on the wake (the run is no longer
+	// parked) so an open run's next park stamps a fresh timestamp.
 	MarkResuming(ctx context.Context, orgID, runID string) (bool, error)
 
 	// SetSession stores the Claude Code session_id captured from
@@ -309,26 +312,17 @@ type AgentRunStore interface {
 
 	// ListReapableSnapshotKeysSystem returns the (org, blueprint_run_id) of
 	// every blueprint_run all of whose resumable-state runs (open /
-	// pending_approval / completed+abort) parked/terminated before cutoff — the
+	// pending_approval / completed+abort) last parked before cutoff — the
 	// workspace snapshot keys the retention reaper may safely drop. A
 	// blueprint_run with any resumable run still within the TTL is omitted (its
-	// shared blob is still wanted). The parked/terminal timestamp is
-	// COALESCE(completed_at, started_at): completed_at is set on the
-	// pending_approval and completed+abort terminal writes, and an `open` run
-	// (no completed_at) falls back to started_at, a safe lower bound since a run
-	// parks open within moments of starting.
-	//
-	// Known limit: started_at does not reset across resumes, so a long-lived
-	// open run resumed repeatedly past the TTL is keyed off its initial start,
-	// not its last park — its snapshot can be reaped while still in use. The
-	// blast radius is bounded: the warm worktree (the primary resume path) is
-	// untouched, so this only degrades the cold backstop. The fix — a dedicated
-	// parked_at column stamped on park and cleared on resume — is purely
-	// additive (a normal forward migration, not a baseline-shape change),
-	// deferred until the long-lived-session use case that needs it lands.
-	// System-wide / no org scoping — the retention sweep is a maintenance job
-	// that spans tenants; the admin pool is the right door (BYPASSRLS) since the
-	// reaper holds no JWT claims.
+	// shared blob is still wanted). The park timestamp is COALESCE(parked_at,
+	// completed_at, started_at): parked_at tracks an open run's last park (stamped
+	// by MarkOpen, cleared by MarkResuming, so a repeatedly-resumed long-lived
+	// run is keyed off its most recent park rather than its initial start),
+	// completed_at covers the pending_approval / completed+abort terminals, and
+	// started_at is a legacy fallback. System-wide / no org scoping — the
+	// retention sweep is a maintenance job that spans tenants; the admin pool is
+	// the right door (BYPASSRLS) since the reaper holds no JWT claims.
 	ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error)
 
 	// TokenTotalsSystem mirrors TokenTotals but routes through the
