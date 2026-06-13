@@ -1115,6 +1115,12 @@ CREATE TABLE blueprint_runs (
     -- Pair trigger_type with creator_user_id nullability (mirrors
     -- runs_creator_matches_trigger_type) so the firing path can't drift back to
     -- a sentinel creator on an event run or a NULL creator on a manual one.
+    -- This CHECK is exhaustive over the two current trigger_type values: a
+    -- future third value would fail BOTH branches and be rejected, so adding
+    -- one needs a new migration to widen this CHECK (and the runs twin). That's
+    -- the deliberate contrast with blueprint_runs.status (§D item 6), which is
+    -- left app-validated precisely because its value SET is expected to grow;
+    -- the trigger_type pairing is a structural invariant, not an open set.
     CONSTRAINT blueprint_runs_creator_matches_trigger_type CHECK (
         (trigger_type = 'manual' AND creator_user_id IS NOT NULL)
         OR

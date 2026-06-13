@@ -38,7 +38,7 @@ type OrgSettings struct {
 
 	AnthropicAPIKeyRef    string
 	BedrockCredentialsRef string
-	MaxLLMModelTier       string // "haiku" | "sonnet" | "opus" | ""
+	MaxLLMModelTier       string // app-validated, NOT DB-constrained; known values "haiku" | "sonnet" | "opus" | "" (no cap) — not an exhaustive set
 }
 
 // DefaultOrgSettings returns the NOT NULL DEFAULT values from the

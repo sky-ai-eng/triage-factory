@@ -82,7 +82,11 @@ type ReviewStore interface {
 	// DeleteByRunID does the same teardown keyed on the run that
 	// produced the review. Used by the spawner's discard cleanup
 	// (SKY-206) so a transient failure in a separate lookup-by-id
-	// doesn't strand the review row.
+	// doesn't strand the review row. No-op on a run with no pending
+	// review; safe to call unconditionally. NOTE: pending_reviews.run_id
+	// is ON DELETE SET NULL, so this must be called BEFORE the run row
+	// is deleted — once the run is gone the FK has nulled run_id and the
+	// review survives detached (intentional), no longer matched here.
 	DeleteByRunID(ctx context.Context, orgID, runID string) error
 
 	// SetSubmission stores the deferred review body + event,
