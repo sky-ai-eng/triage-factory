@@ -170,6 +170,53 @@ func TestSnapshotWorkspace_StoresGzip(t *testing.T) {
 	}
 }
 
+// TestEnsureWorkspace_ColdPath_CorruptGzipChecksumErrors: a stored blob whose
+// gzip CRC-32 trailer no longer matches its contents must fail the rehydrate
+// rather than silently rebuild onto corrupt state. The tar reader stops at the
+// archive's end-of-archive marker before the gzip footer, so the integrity
+// check only fires because rehydrate drains the reader to EOF; this guards that
+// drain. A non-git run-root keeps the focus on the integrity gate, which runs
+// before any worktree mutation.
+func TestEnsureWorkspace_ColdPath_CorruptGzipChecksumErrors(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	setupGitTestEnv(t)
+	s := newStorageSpawner(t)
+
+	const runID = "wt-corrupt"
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, "_scratch", "ci-logs", "x.log"), "log bytes the gzip trailer checksums over")
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrg, runID, src, ""); err != nil {
+		t.Fatalf("snapshotWorkspace: %v", err)
+	}
+
+	// Flip a byte in the gzip footer's CRC-32 (the last 8 bytes are CRC-32 +
+	// ISIZE) so the decompressed bytes no longer match the stored checksum.
+	key := snapshotKey(runmode.LocalDefaultOrg, runID)
+	rc, err := s.Storage().Get(context.Background(), key)
+	if err != nil {
+		t.Fatalf("get snapshot blob: %v", err)
+	}
+	blob, err := io.ReadAll(rc)
+	_ = rc.Close()
+	if err != nil {
+		t.Fatalf("read snapshot blob: %v", err)
+	}
+	if len(blob) < 8 {
+		t.Fatalf("snapshot blob too small to corrupt: %d bytes", len(blob))
+	}
+	blob[len(blob)-8] ^= 0xff
+	if err := s.Storage().Put(context.Background(), key, bytes.NewReader(blob)); err != nil {
+		t.Fatalf("put corrupted blob: %v", err)
+	}
+
+	// Cold path: the warm worktree is absent, so the resume can only come from
+	// the (now corrupt) blob — which must surface as an error.
+	run := &domain.AgentRun{ID: runID, WorktreePath: filepath.Join(t.TempDir(), "gone"), BlueprintRunID: runID}
+	if _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrg, run, "", "", ""); err == nil {
+		t.Fatal("ensureWorkspace accepted a snapshot with a corrupted gzip checksum; want an integrity error")
+	}
+}
+
 // TestSnapshotWorkspace_CompressionShrinksTranscriptHeavyBlob: a JSONL-heavy
 // workspace — the dominant real-world shape, where the transcript carries
 // every tool call and result verbatim — must store measurably smaller than

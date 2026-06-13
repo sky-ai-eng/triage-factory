@@ -305,6 +305,18 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, owner, repo, cloneU
 		}
 	}
 
+	// gzip validates the CRC-32 / ISIZE trailer only when the stream is read to
+	// its footer, but the tar reader stops at the archive's end-of-archive
+	// marker — which precedes that footer — so member reads alone never trigger
+	// the check (and gzip.Reader.Close does not force it either). Drain the
+	// remainder (a few trailing bytes for our own writes) to validate the whole
+	// blob, and do it here, before any worktree mutation: a checksum mismatch
+	// means the snapshot is corrupt, so fail the rehydrate rather than rebuild
+	// onto untrustworthy state.
+	if _, err := io.Copy(io.Discard, gzr); err != nil {
+		return fmt.Errorf("rehydrate: gzip integrity: %w", err)
+	}
+
 	if man.HasGit {
 		delta := &worktree.GitDelta{Branch: man.Branch, Head: man.Head, Bundle: bundle, Patch: patch}
 		if err := worktree.RestoreWorkspaceGit(ctx, owner, repo, wtDir, delta, cloneURL); err != nil {
