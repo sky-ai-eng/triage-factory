@@ -339,6 +339,61 @@ func TestBlueprintStore_SQLite_MarkRunStatus_Guarded(t *testing.T) {
 	}
 }
 
+// TestBlueprintStore_SQLite_ReopenRunForResume pins the resume re-open CAS: an
+// aborted blueprint_run flips back to running (clearing its abort metadata) so a
+// resume of its completed+abort step can re-finalize; a non-aborted row is a
+// guarded no-op.
+func TestBlueprintStore_SQLite_ReopenRunForResume(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	blueprints := sqlitestore.New(conn).Blueprints
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrg
+
+	task := seedEntityEventTask(t, conn, "reopen")
+	insertBlueprintForTest(t, conn, "reopen-blueprint", "Reopen Blueprint")
+	brID, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+		ID: "reopen-run", BlueprintID: "reopen-blueprint", TaskID: task.ID,
+		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	// A running blueprint is not re-openable (the CAS guards on status='aborted').
+	if reopened, err := blueprints.ReopenRunForResume(ctx, org, brID); err != nil || reopened {
+		t.Errorf("ReopenRunForResume on running: reopened=%v err=%v, want false", reopened, err)
+	}
+
+	// Abort it (recording reason + step), then re-open: flips back to running and
+	// clears the abort metadata so the resumed step re-finalizes cleanly.
+	step := 2
+	if _, err := blueprints.MarkRunStatus(ctx, org, brID, domain.BlueprintRunStatusAborted, "stopped for review", &step); err != nil {
+		t.Fatalf("MarkRunStatus(aborted): %v", err)
+	}
+	reopened, err := blueprints.ReopenRunForResume(ctx, org, brID)
+	if err != nil || !reopened {
+		t.Fatalf("ReopenRunForResume on aborted: reopened=%v err=%v, want true", reopened, err)
+	}
+	cr, err := blueprints.GetRun(ctx, org, brID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if cr.Status != domain.BlueprintRunStatusRunning {
+		t.Errorf("status = %q, want running", cr.Status)
+	}
+	if cr.AbortReason != "" {
+		t.Errorf("abort_reason = %q, want cleared on re-open", cr.AbortReason)
+	}
+	if cr.AbortedAtStep != nil {
+		t.Errorf("aborted_at_step = %v, want cleared on re-open", *cr.AbortedAtStep)
+	}
+
+	// Idempotent: a second re-open on the now-running row is a guarded no-op.
+	if reopened, _ := blueprints.ReopenRunForResume(ctx, org, brID); reopened {
+		t.Error("second ReopenRunForResume on running succeeded; want no-op false")
+	}
+}
+
 // TestBlueprintStore_SQLite_CreateRun_RequiresTriggerType verifies the
 // upfront validation: empty TriggerType errors rather than silently
 // defaulting.

@@ -410,6 +410,18 @@ type BlueprintStore interface {
 	// updated, (false, nil) when the guard rejected the write.
 	MarkRunStatus(ctx context.Context, orgID string, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (changed bool, err error)
 
+	// ReopenRunForResume flips an `aborted` blueprint_run back to `running` (a
+	// compare-and-swap guarded on status='aborted'), clearing its abort metadata,
+	// so a resume of the run's completed+abort step can re-run and re-finalize
+	// through the normal post-resume disposition. The blueprint terminated when
+	// the step aborted, so without this the resumed step's new conclusion would
+	// find a terminal blueprint and never advance/close it. Returns (true, nil)
+	// when it re-opened the row, (false, nil) when the blueprint was not aborted
+	// (already running for an open/pending_approval resume, or finalized by a
+	// racing path). Runs inside the same tx as MarkResuming so the run flip and
+	// the blueprint re-open commit atomically.
+	ReopenRunForResume(ctx context.Context, orgID string, id string) (reopened bool, err error)
+
 	// SetRunCurrentStepSystem stamps the blueprint_run's durable
 	// current_step_index — the queue-driven reactor's sequencing pointer,
 	// bumped as it enqueues each next step so a mid-flight blueprint resumes by

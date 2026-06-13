@@ -92,9 +92,15 @@ type AgentRunStore interface {
 	// error) if the row already reached a terminal state.
 	MarkOpen(ctx context.Context, orgID, runID string) (bool, error)
 
-	// MarkResuming flips an `open` run back to running when it is woken
-	// (a resume goroutine is about to spawn). ok=false means the run is no
-	// longer `open` — caller must not spawn the resume.
+	// MarkResuming flips a resumable run back to running when it is woken by a
+	// follow-up message (a resume goroutine is about to spawn). The resumable
+	// set is every non-finish parked/terminal state: `open`, `pending_approval`,
+	// and an aborted run (completed + outcome='abort'). The (status, outcome)
+	// compare-and-swap is the wake race gate — ok=false means the run is no
+	// longer resumable (a concurrent resume already flipped it running, or an
+	// approval/finish finalized it), so the caller must not spawn the resume and
+	// maps the miss to 409. A finish run (completed + outcome='finish') is
+	// deliberately excluded.
 	MarkResuming(ctx context.Context, orgID, runID string) (bool, error)
 
 	// SetSession stores the Claude Code session_id captured from

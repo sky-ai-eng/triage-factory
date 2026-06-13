@@ -19,6 +19,7 @@ import {
   formatDurationMs,
   formatElapsed,
   isActiveRun,
+  isResumableRun,
 } from '../../lib/runStatus'
 import { EventTag, SourceTag } from '../board/cardChrome'
 import { STEP_VAR, type StepState } from '../board/cardStyle'
@@ -433,8 +434,9 @@ function IntakeDock({
     run.Status === 'cancelled' ||
     run.Status === 'task_unsolvable' ||
     run.Status === 'completed'
-  // A run takes steering when a turn is executing or it's idle-resumable.
-  const steerable = active || run.Status === 'open'
+  // A run takes steering when a turn is executing or it's resumable by message
+  // (open / pending_approval / completed+abort — same gate the backend wakes on).
+  const steerable = active || isResumableRun(run)
   const hasPrompt = pending.length > 0
 
   const sublabel = isPending
@@ -446,7 +448,9 @@ function IntakeDock({
       : run.Status === 'open'
         ? 'open — idle, resumable'
         : run.Status === 'completed'
-          ? 'work complete'
+          ? run.Outcome === 'abort'
+            ? 'aborted — resumable'
+            : 'work complete'
           : run.Status === 'failed'
             ? 'run failed'
             : run.Status === 'cancelled'

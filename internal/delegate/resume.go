@@ -23,17 +23,22 @@ import (
 )
 
 // ErrRunNotResumable is returned by ResumeOpenRun when the run can't be
-// resumed in its current state — typically a concurrent cancel or takeover
-// flipped it terminal between the caller's validation read and our status flip
-// (MarkResuming only flips from `open`). Callers map this to 409 Conflict so
-// the client can refresh and see the actual state.
-var ErrRunNotResumable = errors.New("resume: run not in open state")
+// resumed in its current state — typically a concurrent cancel, approval, or a
+// competing resume moved it between the caller's validation read and our status
+// flip (MarkResuming only flips a resumable run: open / pending_approval /
+// completed+abort). Callers map this to 409 Conflict so the client can refresh
+// and see the actual state.
+var ErrRunNotResumable = errors.New("resume: run not in a resumable state")
 
-// ResumeOpenRun wakes an `open` run (one whose turn ended without a conclusion
-// and then idle-closed) with a new message. This method:
+// ResumeOpenRun wakes a parked/terminal-but-resumable run (open,
+// pending_approval, or completed+abort — see resumableState) with a new
+// message. This method:
 //  1. validates the run is resumable (session id, worktree path, task)
 //  2. registers a cancellation handle in s.cancels[runID]
-//  3. flips status open → running (with race guard)
+//  3. flips the run to running (a (status, outcome) compare-and-swap race
+//     guard), and — for a completed+abort run whose blueprint already
+//     terminated aborted — re-opens that blueprint in the same tx so the
+//     resumed step can re-finalize it
 //  4. spawns the goroutine that re-invokes Claude with the message and runs
 //     the resulting completion through the same processCompletion path the
 //     initial run uses
@@ -117,6 +122,13 @@ func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error
 	// <namespace>/ folder as the initial invocation.
 	blueprintRunID := run.BlueprintRunID
 	namespace := memoryNamespace(blueprintRunID, runID)
+	// A completed+abort run's blueprint already terminated (aborted) when the
+	// step stopped. Re-open it to running in the same tx as the run flip (below)
+	// so the resumed step's new conclusion re-finalizes the blueprint through the
+	// normal post-resume disposition (ResumeBlueprintAfterResume). An
+	// open/pending_approval resume leaves its still-running blueprint alone —
+	// ReopenRunForResume's CAS (status='aborted') is a no-op there.
+	reopenAbortedBlueprint := run.Status == "completed" && domain.RunOutcome(run.Outcome) == domain.RunOutcomeAbort
 	// trigger_type is non-null in the schema (the CHECK pairs it
 	// with creator_user_id nullability), so this fallback only
 	// defends against legacy / test fixture rows that left the
@@ -165,8 +177,22 @@ func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error
 	var flipped bool
 	err = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, userID, func(ts db.TxStores) error {
 		f, fErr := ts.AgentRuns.MarkResuming(bgCtx, orgID, runID)
+		if fErr != nil {
+			return fErr
+		}
 		flipped = f
-		return fErr
+		if !f {
+			return nil // lost the wake CAS — nothing to re-open
+		}
+		// Re-open the aborted blueprint atomically with the run flip. A failure
+		// rolls back the run flip too, so run + blueprint never split across the
+		// resumable/terminal boundary.
+		if reopenAbortedBlueprint && blueprintRunID != "" {
+			if _, rErr := ts.Blueprints.ReopenRunForResume(bgCtx, orgID, blueprintRunID); rErr != nil {
+				return rErr
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		s.mu.Lock()
@@ -188,7 +214,22 @@ func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error
 	s.recomputeTaskBoardColumn(orgID, taskCopy.ID)
 
 	go func() {
+		// disposed is set once the body reaches its post-resume disposition
+		// (processCompletion + the inline finalize/re-park below). It stays false
+		// on an early failure/cancel exit, which is the only case the defer's
+		// blueprint re-finalize has to cover.
+		var disposed bool
 		defer func() {
+			// A failed/cancelled resume of a run whose aborted blueprint we
+			// re-opened to running (reopenAbortedBlueprint) must re-finalize that
+			// blueprint, or it strands running with a terminal step. The success
+			// path already disposed (disposed=true); this only fires on the early
+			// exits. ResumeBlueprintAfterResume reads the run's terminal status and
+			// leaves a still-parked (open/pending_approval) run alone, so it's a
+			// safe no-op when the run didn't actually end terminal.
+			if reopenAbortedBlueprint && !disposed {
+				s.ResumeBlueprintAfterResume(orgID, runID, userID)
+			}
 			s.mu.Lock()
 			delete(s.cancels, runID)
 			s.mu.Unlock()
@@ -292,6 +333,9 @@ func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error
 		if !parked {
 			s.ResumeBlueprintAfterResume(orgID, runID, userID)
 		}
+		// The body owns the disposition now (re-parked, or finalized above), so
+		// the defer's re-finalize must not fire on top of it.
+		disposed = true
 	}()
 	return nil
 }

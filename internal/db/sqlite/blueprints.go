@@ -885,6 +885,27 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 	return n > 0, nil
 }
 
+func (s *blueprintStore) ReopenRunForResume(ctx context.Context, orgID, id string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	// CAS aborted → running, clearing the stale abort metadata. The resumed step
+	// re-finalizes the blueprint through the normal post-resume disposition.
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE blueprint_runs
+		SET status = 'running', abort_reason = NULL, aborted_at_step = NULL, completed_at = NULL
+		WHERE id = ? AND status = 'aborted'
+	`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (s *blueprintStore) SetRunCurrentStepSystem(ctx context.Context, orgID, id string, stepIndex int) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err

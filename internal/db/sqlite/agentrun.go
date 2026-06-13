@@ -168,9 +168,15 @@ func (s *agentRunStore) MarkResuming(ctx context.Context, orgID, runID string) (
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
+	// Wake any non-finish parked/terminal state: open, pending_approval, or an
+	// aborted run (completed + outcome='abort'). Keyed on (status, outcome) so a
+	// finish run (completed + outcome='finish') is excluded and a racing
+	// approval/resume that already moved the row loses this compare-and-swap.
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE runs SET status = 'running'
-		WHERE id = ? AND status = 'open'
+		WHERE id = ?
+		  AND (status IN ('open', 'pending_approval')
+		       OR (status = 'completed' AND outcome = 'abort'))
 	`, runID)
 	if err != nil {
 		return false, err

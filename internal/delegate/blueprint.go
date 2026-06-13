@@ -152,11 +152,17 @@ func (s *Spawner) terminateBlueprint(
 	}
 
 	// Drop the durable workspace snapshot now the blueprint is terminal so the
-	// blob store doesn't orphan it. Keyed by blueprint_run_id (the shared
-	// workspace's key); idempotent, so this is a no-op for a blueprint that
-	// never parked and never snapshotted. Covers every terminal path through
-	// here: clean finish, abort/fail, cancel, and the approval-resume finalize.
-	s.discardWorkspaceSnapshot(bgCtx, orgID, blueprintRunID)
+	// blob store doesn't orphan it — EXCEPT an aborted terminal, whose
+	// completed+abort step run stays message-resumable. An abort snapshot is
+	// retained for the resume path (the worktree above was cleaned, so a resume
+	// cold-rehydrates from this blob) and reaped by the retention TTL sweep once
+	// it ages out; discarding it here would defeat resume. Keyed by
+	// blueprint_run_id (the shared workspace's key); idempotent, so the discard
+	// is a no-op for a blueprint that never snapshotted. Covers the non-abort
+	// terminals: clean finish, fail, cancel.
+	if status != domain.BlueprintRunStatusAborted {
+		s.discardWorkspaceSnapshot(bgCtx, orgID, blueprintRunID)
+	}
 
 	// Drain the per-entity queue exactly once for the blueprint (independent
 	// of how many steps ran).

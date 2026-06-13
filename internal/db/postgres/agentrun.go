@@ -263,9 +263,15 @@ func (s *agentRunStore) MarkResumingSystem(ctx context.Context, orgID, runID str
 }
 
 func markResuming(ctx context.Context, q queryer, orgID, runID string) (bool, error) {
+	// Wake any non-finish parked/terminal state: open, pending_approval, or an
+	// aborted run (completed + outcome='abort'). Keyed on (status, outcome) so a
+	// finish run (completed + outcome='finish') is excluded and a racing
+	// approval/resume that already moved the row loses this compare-and-swap.
 	res, err := q.ExecContext(ctx, `
 		UPDATE runs SET status = 'running'
-		WHERE org_id = $1 AND id = $2 AND status = 'open'
+		WHERE org_id = $1 AND id = $2
+		  AND (status IN ('open', 'pending_approval')
+		       OR (status = 'completed' AND outcome = 'abort'))
 	`, orgID, runID)
 	if err != nil {
 		return false, err

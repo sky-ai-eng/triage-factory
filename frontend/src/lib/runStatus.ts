@@ -23,6 +23,20 @@ export function isFailedStatus(status: string): boolean {
   return (FAILED_STATUSES as readonly string[]).includes(status)
 }
 
+// isResumableRun mirrors the backend resumableState gate: a run with no live
+// turn can still take a follow-up message (waking a durable resume) when it
+// parked `open`, parked `pending_approval` (a queued review/PR — conversation is
+// independent of approval), or aborted (completed + outcome='abort'). A finish
+// run (completed + outcome='finish') is excluded. The composer keys off this so
+// the same 409-refresh path covers every resumable state.
+export function isResumableRun(run: AgentRun): boolean {
+  return (
+    run.Status === 'open' ||
+    run.Status === 'pending_approval' ||
+    (run.Status === 'completed' && run.Outcome === 'abort')
+  )
+}
+
 export function formatDurationMs(ms: number): string {
   const seconds = Math.floor(ms / 1000)
   if (seconds < 60) return `${seconds}s`

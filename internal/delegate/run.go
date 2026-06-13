@@ -539,24 +539,31 @@ func (s *Spawner) processCompletion(
 				status = "pending_approval"
 				// Dormant: keep the worktree as the warm cache.
 				parked = true
-				// No workspace snapshot on the finish path: approval finalizes
-				// the blueprint without re-invoking the agent
-				// (ResumeBlueprintAfterApproval), the approval UI renders from
-				// the pending_reviews/pending_prs rows, and terminateBlueprint
-				// deletes the blob unread — it was minutes of git-bundle cost
-				// for write-only data. An abort that queued an action is the
-				// one case that may carry resumable WIP (uncommitted/unpushed
-				// work a future follow-up could continue), so it keeps the
-				// durable backstop — written AFTER the flip: the snapshot only
-				// matters once the warm worktree is gone (host loss / sandbox
-				// reclaim, minutes away at best), never in the
-				// flip-to-visible window. Keyed by namespace (blueprint_run_id
-				// for a step, else run_id).
-				if domain.RunOutcome(outcome) == domain.RunOutcomeAbort {
-					if err := s.snapshotWorkspace(ctx, orgID, namespace, claudeCwd, sessionID); err != nil {
-						log.Printf("[delegate] warning: failed to snapshot workspace for aborted run %s after pending_approval: %v", runID, err)
-					}
+				// Snapshot every pending_approval flip, whatever the outcome: a
+				// run parked in any non-finish state is message-resumable, and a
+				// user can message it (resuming the session) before approving the
+				// queued artifact — a resume that lands without the warm worktree
+				// (host loss / sandbox reclaim) must rebuild from this blob.
+				// Written AFTER the flip: the snapshot only matters once the warm
+				// worktree is gone, never in the flip-to-visible window, so
+				// nothing user-visible waits on the git-bundle cost. Keyed by
+				// namespace (blueprint_run_id). A finish-coerced flip's blob is
+				// dropped by terminateBlueprint on approval if never resumed;
+				// retention is otherwise bounded by the TTL sweep.
+				if err := s.snapshotWorkspace(ctx, orgID, namespace, claudeCwd, sessionID); err != nil {
+					log.Printf("[delegate] warning: failed to snapshot workspace for run %s after pending_approval: %v", runID, err)
 				}
+			}
+		} else if domain.RunOutcome(outcome) == domain.RunOutcomeAbort {
+			// A plain abort (completed + outcome=abort, no queued artifact) is
+			// message-resumable, so snapshot its workspace now — while the
+			// worktree and session transcript are still on disk — then let the
+			// per-run cleanup defers tear the worktree down (parked stays false:
+			// keeping every aborted run's worktree warm is not acceptable, so
+			// cold rehydrate from this blob is the resume path). terminateBlueprint
+			// retains the blob for an aborted terminal; the TTL sweep reaps it.
+			if err := s.snapshotWorkspace(ctx, orgID, namespace, claudeCwd, sessionID); err != nil {
+				log.Printf("[delegate] warning: failed to snapshot workspace for aborted run %s: %v", runID, err)
 			}
 		}
 	}

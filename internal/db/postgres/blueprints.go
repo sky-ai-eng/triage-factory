@@ -945,6 +945,29 @@ func markBlueprintRunStatus(ctx context.Context, q queryer, orgID, id string, st
 	return n > 0, nil
 }
 
+func (s *blueprintStore) ReopenRunForResume(ctx context.Context, orgID, id string) (bool, error) {
+	if !isValidUUID(id) {
+		return false, nil
+	}
+	// CAS aborted → running, clearing the stale abort metadata. The resumed step
+	// re-finalizes the blueprint through the normal post-resume disposition.
+	// App pool — runs inside the resume's synthetic-claims tx alongside the run
+	// flip, so the two commit atomically.
+	res, err := s.app.ExecContext(ctx, `
+		UPDATE blueprint_runs
+		SET status = 'running', abort_reason = NULL, aborted_at_step = NULL, completed_at = NULL
+		WHERE org_id = $1 AND id = $2 AND status = 'aborted'
+	`, orgID, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (s *blueprintStore) SetRunCurrentStepSystem(ctx context.Context, orgID, id string, stepIndex int) error {
 	if !isValidUUID(id) {
 		return nil

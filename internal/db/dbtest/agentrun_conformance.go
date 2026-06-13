@@ -416,27 +416,50 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
-	t.Run("MarkResuming_OnlyFromOpen", func(t *testing.T) {
+	t.Run("MarkResuming_FromResumableStates", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
+
+		// running → refused (not a parked/terminal resumable state).
 		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
-		// Running → refused.
-		ok, err := store.MarkResuming(ctx, orgID, runID)
-		if err != nil || ok {
+		if ok, err := store.MarkResuming(ctx, orgID, runID); err != nil || ok {
 			t.Errorf("Resuming on running: ok=%v err=%v, want false", ok, err)
 		}
-		// Open it, then resume → ok.
+		// open → ok; the second call (now running) is refused.
 		if _, err := store.MarkOpen(ctx, orgID, runID); err != nil {
 			t.Fatalf("open: %v", err)
 		}
-		ok, err = store.MarkResuming(ctx, orgID, runID)
-		if err != nil || !ok {
+		if ok, err := store.MarkResuming(ctx, orgID, runID); err != nil || !ok {
 			t.Fatalf("Resuming from open: ok=%v err=%v", ok, err)
 		}
-		// Second resume → refused (back to running).
-		ok, _ = store.MarkResuming(ctx, orgID, runID)
-		if ok {
-			t.Errorf("double-resume succeeded")
+		if ok, _ := store.MarkResuming(ctx, orgID, runID); ok {
+			t.Errorf("double-resume from running succeeded; want refused")
+		}
+
+		// pending_approval → ok (a queued review/PR is message-resumable; the
+		// conversation is independent of approval).
+		paRun := seedAgentRunForTest(t, store, orgID, seed, "pending_approval")
+		if ok, err := store.MarkResuming(ctx, orgID, paRun); err != nil || !ok {
+			t.Errorf("Resuming from pending_approval: ok=%v err=%v, want true", ok, err)
+		}
+
+		// completed + outcome=abort → ok (an aborted run is message-resumable).
+		abortRun := seedAgentRunForTest(t, store, orgID, seed, "running")
+		if err := store.Complete(ctx, orgID, abortRun, "completed", 0, 0, 0, "", "stopped", "abort", "needs a human"); err != nil {
+			t.Fatalf("complete+abort: %v", err)
+		}
+		if ok, err := store.MarkResuming(ctx, orgID, abortRun); err != nil || !ok {
+			t.Errorf("Resuming from completed+abort: ok=%v err=%v, want true", ok, err)
+		}
+
+		// completed + outcome=finish → refused (finish runs are deliberately
+		// excluded from the resumable set).
+		finishRun := seedAgentRunForTest(t, store, orgID, seed, "running")
+		if err := store.Complete(ctx, orgID, finishRun, "completed", 0, 0, 0, "", "shipped", "finish", ""); err != nil {
+			t.Fatalf("complete+finish: %v", err)
+		}
+		if ok, _ := store.MarkResuming(ctx, orgID, finishRun); ok {
+			t.Errorf("Resuming from completed+finish succeeded; want refused (finish excluded)")
 		}
 	})
 
