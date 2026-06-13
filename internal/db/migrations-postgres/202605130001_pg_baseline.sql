@@ -30,9 +30,13 @@
 --      uniques so row-level security can pin tenant scope; SQLite uses
 --      single-column FKs (one connection, no RLS). Every *_org_id composite FK
 --      / unique here is this category, not a divergence.
---   3. creator_user_id (and other user refs). Postgres FK-constrains them with
---      ON DELETE CASCADE; SQLite leaves them bare TEXT (or NO-ACTION on runs).
---      Deliberate: local mode is N=1 and the sentinel user is never deleted.
+--   3. Attribution refs (creator_user_id and the like — the "who authored
+--      this" columns). Postgres FK-constrains these with ON DELETE CASCADE;
+--      SQLite leaves them bare TEXT (or NO-ACTION on runs). Deliberate: local
+--      mode is N=1 and the sentinel user is never deleted. NARROW scope — this
+--      does NOT cover identity/ownership user_id PKs (preferences,
+--      user_settings, user_github/jira_identities, memberships, org_memberships),
+--      which carry the users(id) FK in BOTH dialects.
 --   4. Tables that exist in one dialect only. instance_config is SQLite-only
 --      (host port lives in container env under multi mode). sessions and
 --      project_knowledge are Postgres-only (multi-mode auth + shared KB).
