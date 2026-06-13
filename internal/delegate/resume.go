@@ -246,14 +246,18 @@ func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error
 		// blueprint re-finalize has to cover.
 		var disposed bool
 		defer func() {
-			// A failed/cancelled resume of a run whose aborted blueprint we
-			// re-opened to running (reopenAbortedBlueprint) must re-finalize that
-			// blueprint, or it strands running with a terminal step. The success
-			// path already disposed (disposed=true); this only fires on the early
-			// exits. ResumeBlueprintAfterResume reads the run's terminal status and
-			// leaves a still-parked (open/pending_approval) run alone, so it's a
-			// safe no-op when the run didn't actually end terminal.
-			if reopenAbortedBlueprint && !disposed {
+			// An early exit (failure / cancel before processCompletion) leaves the
+			// step terminal but the blueprint un-finalized — for any resumable
+			// state, not just the re-opened abort case. Without finalizing here:
+			// the blueprint strands `running`, and its snapshot is orphaned (the
+			// reaper skips it once the run is cancelled/failed, i.e. no longer in a
+			// resumable state). So re-finalize for every blueprint step that didn't
+			// dispose. ResumeBlueprintAfterResume is the safe single authority: a
+			// cancelled/failed step maps to a terminal blueprint (terminateBlueprint
+			// discards the snapshot), a still-parked (open/pending_approval) step or
+			// an already-terminal blueprint early-returns. The success path set
+			// disposed=true, so this never doubles up.
+			if blueprintRunID != "" && !disposed {
 				s.ResumeBlueprintAfterResume(orgID, runID, userID)
 			}
 			s.mu.Lock()
@@ -420,8 +424,8 @@ type ResumeOptions struct {
 	// would be rejected on resume.
 	ExtraAllowedTools string
 
-	// Namespace is the run's memory namespace — its blueprint_run_id, else the
-	// run's own id (see memoryNamespace). Exported to the resumed subprocess as
+	// Namespace is the run's memory namespace — its blueprint_run_id (see
+	// memoryNamespace). Exported to the resumed subprocess as
 	// TRIAGE_FACTORY_BLUEPRINT_RUN_ID so the agent's <entity_memory> contract
 	// names the same folder it read and wrote on the initial invocation.
 	// Required for the resume to stay consistent with the initial env; callers
