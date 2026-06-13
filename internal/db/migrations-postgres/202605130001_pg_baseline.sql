@@ -1279,10 +1279,19 @@ CREATE TABLE public.runs (
     creator_user_id uuid,
     team_id uuid NOT NULL,
     visibility text DEFAULT 'team'::text NOT NULL,
-    task_id uuid NOT NULL,
-    prompt_id text NOT NULL,
+    -- task_id / prompt_id are NULLABLE (relaxed from NOT NULL at the v1.11.0
+    -- freeze) so a run need not descend from a task or a saved prompt — headroom
+    -- for a future user-initiated interactive run (no event, no task, no saved
+    -- prompt). runs_origin_requires_parents pins them for origin 'blueprint'
+    -- (every run today). The interactive parent (agent_sessions + a
+    -- runs.agent_session_id FK) is deferred — additive post-freeze.
+    task_id uuid,
+    prompt_id text,
     trigger_id uuid,
     trigger_type text DEFAULT 'manual'::text NOT NULL,
+    -- origin discriminates blueprint-step runs from a future interactive kind;
+    -- app-validated (no value CHECK, mirrors source). See the SQLite twin.
+    origin text DEFAULT 'blueprint'::text NOT NULL,
     status text DEFAULT 'cloning'::text NOT NULL,
     model text,
     session_id text,
@@ -1303,7 +1312,10 @@ CREATE TABLE public.runs (
     num_turns integer,
     total_cost_usd real,
     actor_agent_id uuid,
-    blueprint_run_id uuid NOT NULL,
+    -- blueprint_run_id is NULLABLE (relaxed from NOT NULL at the v1.11.0 freeze);
+    -- pinned for origin 'blueprint' by runs_origin_requires_parents, so every
+    -- run today still has it. See the SQLite twin + task_id above.
+    blueprint_run_id uuid,
     blueprint_step_index integer,
     triggering_event_id uuid,
     -- Run-queue claim columns (mirror event_queue). A blueprint step is
@@ -1321,7 +1333,12 @@ CREATE TABLE public.runs (
     executor_id text,
     CONSTRAINT runs_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL)))),
     CONSTRAINT runs_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
-    CONSTRAINT runs_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text])))
+    CONSTRAINT runs_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text]))),
+    -- A 'blueprint'-origin run carries its full parentage (blueprint_run + task
+    -- + prompt), preserving the pre-freeze NOT-NULL invariant for every run
+    -- today; origin <> 'blueprint' (a future interactive/ad-hoc run) is left
+    -- unconstrained here. See the SQLite twin.
+    CONSTRAINT runs_origin_requires_parents CHECK (((origin = 'blueprint'::text AND blueprint_run_id IS NOT NULL AND task_id IS NOT NULL AND prompt_id IS NOT NULL) OR (origin <> 'blueprint'::text)))
 );
 
 
@@ -1863,13 +1880,12 @@ ALTER TABLE ONLY public.pending_prs
     ADD CONSTRAINT pending_prs_pkey PRIMARY KEY (id);
 
 
---
--- Name: pending_prs pending_prs_run_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pending_prs
-    ADD CONSTRAINT pending_prs_run_id_key UNIQUE (run_id);
-
+-- NOTE: the pending_prs_run_id_key UNIQUE (run_id) constraint was dropped at
+-- the v1.11.0 freeze — one run may open PRs across several repos, so one-PR-
+-- per-run is no longer a DB invariant (validated app-side where it still
+-- holds). The non-unique idx_pending_prs_run index keeps the by-run lookup
+-- fast. pending_reviews.run_id is likewise non-unique (symmetric for the
+-- two-PRs-reviewed-in-one-run case).
 
 --
 -- Name: pending_review_comments pending_review_comments_pkey; Type: CONSTRAINT; Schema: public; Owner: -

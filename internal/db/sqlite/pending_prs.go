@@ -36,11 +36,20 @@ func (s *pendingPRStore) Create(ctx context.Context, orgID string, p domain.Pend
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	_, err := s.q.ExecContext(ctx,
+	// One active pending PR per run is now an APP-LAYER guard: the DB
+	// UNIQUE(run_id) was dropped at the v1.11.0 freeze so a multi-repo run can
+	// eventually queue several PRs. Until that feature lands we still block a
+	// second PR per run, as a guarded INSERT ... WHERE NOT EXISTS — a single
+	// statement (no TOCTOU under SQLite's single writer) that surfaces a dupe
+	// as the clean ErrPendingPRAlreadyQueued the `pr create` flow already
+	// teaches the agent on, rather than a raw SQL constraint error. Relax to
+	// per-(run, repo) when multi-repo PR opening ships.
+	res, err := s.q.ExecContext(ctx,
 		`INSERT INTO pending_prs
 		   (id, run_id, owner, repo, head_branch, head_sha, base_branch,
 		    title, body, original_title, original_body, draft)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		  WHERE NOT EXISTS (SELECT 1 FROM pending_prs WHERE run_id = ?)`,
 		p.ID, p.RunID, p.Owner, p.Repo, p.HeadBranch, p.HeadSHA, p.BaseBranch,
 		p.Title, nullIfEmpty(p.Body),
 		// Snapshot the agent's draft as originals at insert time so
@@ -48,8 +57,19 @@ func (s *pendingPRStore) Create(ctx context.Context, orgID string, p domain.Pend
 		// user edits before the agent has called Lock.
 		p.Title, nullIfEmpty(p.Body),
 		boolToInt(p.Draft),
+		p.RunID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return db.ErrPendingPRAlreadyQueued
+	}
+	return nil
 }
 
 func (s *pendingPRStore) Get(ctx context.Context, orgID, id string) (*domain.PendingPR, error) {

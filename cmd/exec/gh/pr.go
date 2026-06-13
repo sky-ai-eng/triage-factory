@@ -643,12 +643,13 @@ func prCreate(client ghAPI, host agenthost.Client, args []string) {
 			exitErr("git rev-parse HEAD returned empty; refusing to queue a pending PR with no head sha")
 		}
 
-		// SKY-212-style anti-retry. The schema's UNIQUE(run_id) on
-		// pending_prs would already block a second insert, but it
-		// surfaces as a generic SQL constraint error that doesn't
-		// teach the agent to stop calling. Check up front so the
-		// agent gets a clear "already queued" message on retry,
-		// matching what submit-review does for reviews.
+		// SKY-212-style anti-retry. The store's app-layer one-per-run
+		// guard (PendingPRs.Create returns ErrPendingPRAlreadyQueued; the
+		// DB UNIQUE(run_id) was dropped at the v1.11.0 freeze for future
+		// multi-repo PRs) blocks a second insert, but checking up front
+		// gives the agent a clear "already queued" message rather than
+		// relying on the create error, matching what submit-review does
+		// for reviews.
 		existing, lookupErr := host.GetPendingPRByRunID(ctx)
 		if lookupErr != nil {
 			exitErr("lookup existing pending PR for run: " + lookupErr.Error())
@@ -672,13 +673,12 @@ func prCreate(client ghAPI, host agenthost.Client, args []string) {
 		if err != nil {
 			// The pre-check above is racy: two concurrent `pr create`
 			// invocations on different DB connections can both pass
-			// it before either has inserted, then one wins the
-			// UNIQUE(run_id) insert and the other lands here with a
-			// generic SQL constraint error. Re-check by run_id; if a
-			// row exists, treat this as the same SKY-212 retry case
-			// the pre-check normally catches and surface the clean
-			// "already queued" message instead of a confusing SQL
-			// error the agent doesn't know how to interpret. Also
+			// it before either has inserted. The store's app-layer
+			// one-per-run guard (INSERT ... WHERE NOT EXISTS) then
+			// returns ErrPendingPRAlreadyQueued to the loser instead
+			// of inserting a duplicate — treat that as the same
+			// SKY-212 retry case the pre-check normally catches and
+			// surface the clean "already queued" message. Also
 			// catches the ErrPendingPRAlreadyQueued from the inner
 			// Lock call when the manual-branch tx hit the lock race.
 			if errors.Is(err, db.ErrPendingPRAlreadyQueued) {

@@ -923,10 +923,30 @@ CREATE INDEX        idx_task_teams_team       ON task_teams(team_id);
 
 CREATE TABLE runs (
     id              TEXT PRIMARY KEY,
-    task_id         TEXT NOT NULL REFERENCES tasks(id),
-    prompt_id       TEXT NOT NULL REFERENCES prompts(id),
+    -- task_id / prompt_id are NULLABLE (relaxed from NOT NULL at the v1.11.0
+    -- freeze) so a run need not descend from a tracked entity's task or a saved
+    -- prompt. Today's runs are all blueprint steps and always carry both; the
+    -- runs_origin_requires_parents CHECK below enforces that for origin
+    -- 'blueprint'. The headroom is for a future user-initiated *interactive*
+    -- run (the "pick repos/branches and just type" surface) — no upstream
+    -- event, no task, no saved prompt; its instruction lives in run_messages.
+    -- Differentiating that properly needed nullable here, which is a
+    -- table-rebuild post-freeze, so it lands now. The interactive parent itself
+    -- (an agent_sessions table + a runs.agent_session_id FK — note: NOT the
+    -- existing session_id column, which is the Claude SDK resume handle) is
+    -- deliberately deferred: CREATE TABLE + ALTER ADD COLUMN are cheap in both
+    -- dialects post-freeze, so the undesigned session shape ships with its
+    -- feature, not here.
+    task_id         TEXT REFERENCES tasks(id),
+    prompt_id       TEXT REFERENCES prompts(id),
     trigger_id      TEXT REFERENCES event_handlers(id),
     trigger_type    TEXT NOT NULL DEFAULT 'manual',
+    -- origin discriminates how the run was created: 'blueprint' (a step of a
+    -- blueprint_run — every run today) vs a future user-initiated kind
+    -- ('interactive', …). App-validated, NOT value-CHECK-constrained (mirrors
+    -- source / max_llm_model_tier) so new origins need no DDL; the pairing CHECK
+    -- below only constrains the 'blueprint' shape, tolerating any other value.
+    origin          TEXT NOT NULL DEFAULT 'blueprint',
     status          TEXT NOT NULL DEFAULT 'cloning',
     model           TEXT,
     session_id      TEXT,
@@ -964,11 +984,14 @@ CREATE TABLE runs (
                        CHECK (visibility IN ('private','team','org')),
     actor_agent_id  TEXT REFERENCES agents(id) ON DELETE SET NULL,
     -- blueprint_run_id / blueprint_step_index link a step run back to its
-    -- parent blueprint instance. NOT NULL: every run is a step of a
-    -- blueprint_run now (a single prompt is a 1-step blueprint), so the
-    -- execution model is uniform and the per-run namespace/workspace keys
-    -- never fall back to the run id. See the Blueprints section below.
-    blueprint_run_id     TEXT NOT NULL REFERENCES blueprint_runs(id),
+    -- parent blueprint instance. NULLABLE (relaxed from NOT NULL at the v1.11.0
+    -- freeze): every run is a blueprint step *today* (a single prompt is a
+    -- 1-step blueprint), and the runs_origin_requires_parents CHECK pins it for
+    -- origin 'blueprint', so the uniform-execution invariant is unchanged in
+    -- practice. The NULL headroom is for a future origin<>'blueprint' run that
+    -- isn't a blueprint step (see task_id/origin above). See the Blueprints
+    -- section below.
+    blueprint_run_id     TEXT REFERENCES blueprint_runs(id),
     blueprint_step_index INTEGER,
     -- triggering_event_id is the event instance that auto-fired this run
     -- (SKY-424). NULL for manual runs and blueprint-step runs. The
@@ -1001,6 +1024,19 @@ CREATE TABLE runs (
     ),
     CONSTRAINT runs_team_visibility_requires_team CHECK (
         visibility <> 'team' OR team_id IS NOT NULL
+    ),
+    -- A 'blueprint'-origin run carries its full parentage (it is a step of a
+    -- blueprint_run, descended from a task, executing a prompt) — preserving
+    -- the pre-freeze NOT-NULL invariant for every run today. The tolerant
+    -- origin <> 'blueprint' branch leaves a future interactive/ad-hoc run
+    -- unconstrained here; its own integrity (an agent_session_id link, etc.)
+    -- is enforced app-side and by additive columns when that feature lands.
+    CONSTRAINT runs_origin_requires_parents CHECK (
+        (origin = 'blueprint'
+            AND blueprint_run_id IS NOT NULL
+            AND task_id IS NOT NULL
+            AND prompt_id IS NOT NULL)
+        OR origin <> 'blueprint'
     )
 );
 CREATE INDEX        idx_runs_task           ON runs(task_id);
@@ -1276,7 +1312,13 @@ CREATE INDEX idx_run_worktrees_run ON run_worktrees(run_id);
 -- === Pending PRs =========================================================
 CREATE TABLE pending_prs (
     id             TEXT PRIMARY KEY,
-    run_id         TEXT NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+    -- run_id is NOT unique (the UNIQUE was dropped at the v1.11.0 freeze): one
+    -- run may open PRs across several repos (a multi-repo blueprint step, or a
+    -- future interactive session). One-PR-per-run is no longer a DB invariant;
+    -- where it still holds it is validated app-side. The non-unique index below
+    -- keeps the by-run lookup fast. pending_reviews.run_id is likewise
+    -- non-unique (the two-PRs-reviewed-in-one-run case is symmetric).
+    run_id         TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     owner          TEXT NOT NULL,
     repo           TEXT NOT NULL,
     head_branch    TEXT NOT NULL,

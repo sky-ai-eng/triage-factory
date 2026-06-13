@@ -56,17 +56,38 @@ func createPendingPR(ctx context.Context, q queryer, orgID string, p domain.Pend
 	// the SQLite impl's nullIfEmpty(body), which exists so the
 	// human-feedback formatter can distinguish "no body captured"
 	// (NULL) from "body was a real empty string."
-	_, err := q.ExecContext(ctx, `
+	//
+	// One active pending PR per run is an APP-LAYER guard now (the
+	// pending_prs_run_id_key UNIQUE was dropped at the v1.11.0 freeze so a
+	// multi-repo run can eventually queue several PRs). Until that ships we
+	// still block a second PR per run via a guarded INSERT ... WHERE NOT
+	// EXISTS that returns the clean ErrPendingPRAlreadyQueued. This is a
+	// best-effort soft guard (NOT race-proof at READ COMMITTED without the
+	// UNIQUE) — deliberate "block for now" per the freeze decision, and the
+	// realistic caller is a single agent per run. Relax to per-(run, repo)
+	// when multi-repo PR opening lands.
+	res, err := q.ExecContext(ctx, `
 		INSERT INTO pending_prs
 		  (id, org_id, run_id, owner, repo, head_branch, head_sha, base_branch,
 		   title, body, original_title, original_body, draft)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-		        $9, NULLIF($10, ''), $9, NULLIF($10, ''), $11)
+		SELECT $1, $2, $3, $4, $5, $6, $7, $8,
+		       $9, NULLIF($10, ''), $9, NULLIF($10, ''), $11
+		 WHERE NOT EXISTS (SELECT 1 FROM pending_prs WHERE org_id = $2 AND run_id = $3)
 	`,
 		p.ID, orgID, p.RunID, p.Owner, p.Repo, p.HeadBranch, p.HeadSHA, p.BaseBranch,
 		p.Title, p.Body, p.Draft,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return db.ErrPendingPRAlreadyQueued
+	}
+	return nil
 }
 
 func (s *pendingPRStore) Get(ctx context.Context, orgID, id string) (*domain.PendingPR, error) {

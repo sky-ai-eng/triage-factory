@@ -146,10 +146,12 @@ func RunPendingPRStoreConformance(t *testing.T, mk PendingPRStoreFactory) {
 		}
 	})
 
-	t.Run("Create_run_id_is_unique", func(t *testing.T) {
-		// One pending PR per run — same contract as reviews. Second
-		// Create with the same run_id violates the UNIQUE constraint
-		// and surfaces as a SQL error.
+	t.Run("Create_one_pending_pr_per_run_app_guard", func(t *testing.T) {
+		// One pending PR per run is now an APP-LAYER guard, not a DB
+		// constraint: the UNIQUE(run_id) was dropped at the v1.11.0 freeze
+		// (so a future multi-repo run can queue several PRs), but the store
+		// still blocks a second PR per run for now and surfaces it as the
+		// clean ErrPendingPRAlreadyQueued — not a raw SQL constraint error.
 		s, orgID, seed := mk(t)
 		runID := seed.Run(t)
 		base := domain.PendingPR{
@@ -164,8 +166,9 @@ func RunPendingPRStoreConformance(t *testing.T, mk PendingPRStoreFactory) {
 		}
 		second := base
 		second.ID = uuid.New().String() // distinct PR id, same run_id
-		if err := s.Create(ctx, orgID, second); err == nil {
-			t.Errorf("expected UNIQUE-constraint error on second Create with same run_id")
+		err := s.Create(ctx, orgID, second)
+		if !errors.Is(err, db.ErrPendingPRAlreadyQueued) {
+			t.Errorf("second Create for same run: got %v, want ErrPendingPRAlreadyQueued (app-layer one-per-run guard)", err)
 		}
 	})
 
