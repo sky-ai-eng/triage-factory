@@ -700,10 +700,19 @@ func (s *blueprintStore) CreateRun(ctx context.Context, orgID string, br domain.
 	if err != nil {
 		return "", fmt.Errorf("marshal step plan: %w", err)
 	}
+	// creator_user_id is paired with trigger_type by the
+	// blueprint_runs_creator_matches_trigger_type CHECK: NULL for event-fired
+	// runs (no human author), the sentinel local user for manual runs. Mirrors
+	// the runs insert and the Postgres createRunManual/createRunEventTriggered
+	// split (which are one method here — SQLite is N=1, single connection).
+	var creatorUserID any
+	if br.TriggerType != domain.BlueprintTriggerEvent {
+		creatorUserID = runmode.LocalDefaultUserID
+	}
 	if _, err := s.q.ExecContext(ctx, `
-		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id, status, step_plan, worktree_path, abort_reason, completed_at, started_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-	`, br.ID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), br.Status, stepPlan, br.WorktreePath, abortReason, completedAt); err != nil {
+		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id, status, step_plan, worktree_path, abort_reason, completed_at, creator_user_id, started_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	`, br.ID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), br.Status, stepPlan, br.WorktreePath, abortReason, completedAt, creatorUserID); err != nil {
 		return "", fmt.Errorf("insert blueprint_run: %w", err)
 	}
 	return br.ID, nil
@@ -732,8 +741,8 @@ func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID st
 		return false, fmt.Errorf("marshal step plan: %w", err)
 	}
 	res, err := s.q.ExecContext(ctx, `
-		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id, status, step_plan, worktree_path, started_at)
-		VALUES (?, ?, ?, 'event', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id, status, step_plan, worktree_path, creator_user_id, started_at)
+		VALUES (?, ?, ?, 'event', ?, ?, ?, ?, ?, NULL, CURRENT_TIMESTAMP)
 		ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
 	`, br.ID, br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID, br.Status, stepPlan, br.WorktreePath)
 	if err != nil {

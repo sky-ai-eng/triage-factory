@@ -34,7 +34,9 @@ func (s *reviewStore) Create(ctx context.Context, orgID string, r domain.Pending
 	_, err := s.q.ExecContext(ctx,
 		`INSERT INTO pending_reviews (id, pr_number, owner, repo, commit_sha, diff_lines, diff_hunks, run_id)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.PRNumber, r.Owner, r.Repo, r.CommitSHA, r.DiffLines, r.DiffHunks, r.RunID,
+		// run_id is FK'd to runs(id) ON DELETE SET NULL now — store NULL (not
+		// "") for runless reviews so the FK is satisfied.
+		r.ID, r.PRNumber, r.Owner, r.Repo, r.CommitSHA, r.DiffLines, r.DiffHunks, nullIfEmpty(r.RunID),
 	)
 	return err
 }

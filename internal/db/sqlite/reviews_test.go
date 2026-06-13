@@ -67,14 +67,14 @@ func newSQLiteForReviewTest(t *testing.T) *sql.DB {
 }
 
 // newSQLiteReviewSeeder returns the bag of raw-SQL helpers the
-// conformance suite drives. SQLite has no FK enforcement on
-// pending_reviews.run_id, so the Run seeder just returns a uuid
-// without needing to chain an entity/event/task to back it.
+// conformance suite drives. pending_reviews.run_id is now FK'd to runs(id)
+// ON DELETE SET NULL (v1.11.0 freeze, matching PG), so the Run seeder must
+// chain a real entity/event/task/blueprint_run/run for the FK to resolve.
 func newSQLiteReviewSeeder(conn *sql.DB) dbtest.ReviewSeeder {
 	return dbtest.ReviewSeeder{
 		Run: func(t *testing.T) string {
 			t.Helper()
-			return uuid.New().String()
+			return seedSQLiteRunForReview(t, conn)
 		},
 		SetReviewOriginals: func(t *testing.T, reviewID string, body, event *string) {
 			t.Helper()
@@ -102,4 +102,48 @@ func newSQLiteReviewSeeder(conn *sql.DB) dbtest.ReviewSeeder {
 			}
 		},
 	}
+}
+
+// seedSQLiteRunForReview chains a real entity/event/task/blueprint_run/run so a
+// runs row exists for pending_reviews.run_id to FK-point at. Returns the run id.
+// Each test gets a fresh in-memory DB, so the fixed prompt id is collision-free.
+func seedSQLiteRunForReview(t *testing.T, conn *sql.DB) string {
+	t.Helper()
+	entityID := uuid.New().String()
+	sourceID := "review-run-" + entityID
+	if _, err := conn.Exec(`
+		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json)
+		VALUES (?, 'github', ?, 'pr', 'Review Conformance', 'https://example/x', '{}')
+	`, entityID, sourceID); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	eventID := uuid.New().String()
+	const eventType = "github:pr:opened"
+	if _, err := conn.Exec(`
+		INSERT INTO events (id, entity_id, event_type, dedup_key) VALUES (?, ?, ?, '')
+	`, eventID, entityID, eventType); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := conn.Exec(`
+		INSERT OR IGNORE INTO prompts (id, name, body, creator_user_id, team_id)
+		VALUES ('p_review', 'Review', 'body', ?, ?)
+	`, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
+		t.Fatalf("seed prompt: %v", err)
+	}
+	taskID := uuid.New().String()
+	if _, err := conn.Exec(`
+		INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
+		VALUES (?, ?, ?, ?, 'queued')
+	`, taskID, entityID, eventType, eventID); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	runID := uuid.New().String()
+	blueprintRunID := seedBlueprintRunForRun(t, conn, taskID)
+	if _, err := conn.Exec(`
+		INSERT INTO runs (id, task_id, prompt_id, status, model, blueprint_run_id)
+		VALUES (?, ?, 'p_review', 'running', 'm', ?)
+	`, runID, taskID, blueprintRunID); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	return runID
 }

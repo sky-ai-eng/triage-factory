@@ -14,6 +14,37 @@
 -- Future Postgres schema changes go in NEW NNN-numbered migration files in
 -- this directory. NEVER edit this baseline. Down is a no-op.
 --
+-- === Deliberate cross-dialect divergence (do NOT "fix" post-freeze) ======
+-- This baseline and its SQLite twin
+-- (internal/db/migrations-sqlite/202605130001_baseline.sql) differ in the
+-- following ways ON PURPOSE. A mechanical (table,col,target,on_delete) or
+-- CHECK diff will flag each as a "gap" — it is not. Post-freeze migration
+-- authors must not converge these:
+--
+--   1. Type representation. Postgres uses native enum TYPES
+--      (public.membership_role, public.org_role) plus uuid / timestamptz /
+--      jsonb / interval / array column types; SQLite uses TEXT / INTEGER plus
+--      CHECKs. A CHECK-only diff falsely reports PG "missing" the role CHECKs
+--      on memberships.role / org_memberships.role — same domain, enum type.
+--   2. RLS keys. Postgres carries composite (id, org_id) FKs and (id, org_id)
+--      uniques so row-level security can pin tenant scope; SQLite uses
+--      single-column FKs (one connection, no RLS). Every *_org_id composite FK
+--      / unique here is this category, not a divergence.
+--   3. creator_user_id (and other user refs). Postgres FK-constrains them with
+--      ON DELETE CASCADE; SQLite leaves them bare TEXT (or NO-ACTION on runs).
+--      Deliberate: local mode is N=1 and the sentinel user is never deleted.
+--   4. Tables that exist in one dialect only. instance_config is SQLite-only
+--      (host port lives in container env under multi mode). sessions and
+--      project_knowledge are Postgres-only (multi-mode auth + shared KB).
+--   5. PG-only RLS apparatus. Row-level-security policies, the tf.* helper
+--      functions, the auth.users FK, and admin-only columns
+--      (orgs.owner_user_id, teams.created_by_user_id, users.default_org_id,
+--      sessions.active_org_id) have no SQLite analog.
+--   6. blueprint_runs.status. Postgres enforces the value set with a CHECK
+--      (cheap to ALTER pre-tenant); SQLite leaves it app-validated (widening a
+--      SQLite CHECK means a full-table rebuild, so the absence of the CHECK is
+--      the headroom). Both accept the same values; the app is source of truth.
+--
 -- Target image: supabase/postgres:15.1.0.147 — pre-loads supabase_vault,
 -- pgsodium, pgcrypto, pgjwt, uuid-ossp, pg_graphql via
 -- shared_preload_libraries, and pre-creates the auth + vault + extensions
@@ -718,8 +749,11 @@ CREATE TABLE public.event_handlers (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT event_handlers_kind_check CHECK ((kind = ANY (ARRAY['rule'::text, 'trigger'::text]))),
     CONSTRAINT event_handlers_rule_shape CHECK (((kind <> 'rule'::text) OR ((blueprint_id IS NULL) AND (breaker_threshold IS NULL) AND (min_autonomy_suitability IS NULL) AND (name IS NOT NULL) AND (default_priority IS NOT NULL) AND (sort_order IS NOT NULL)))),
-    CONSTRAINT event_handlers_source_check CHECK ((source = ANY (ARRAY['system'::text, 'user'::text]))),
-    CONSTRAINT event_handlers_system_has_no_creator CHECK ((((source = 'system'::text) AND (creator_user_id IS NULL)) OR ((source = 'user'::text) AND (creator_user_id IS NOT NULL)))),
+    -- source is app-validated, not CHECK-constrained (the source_check was
+    -- dropped in the v1.11.0 freeze, both dialects) so new provenance values
+    -- are addable without DDL. The creator pairing below was harmonized from
+    -- source='user' to source<>'system' to tolerate any non-system source.
+    CONSTRAINT event_handlers_system_has_no_creator CHECK ((((source = 'system'::text) AND (creator_user_id IS NULL)) OR ((source <> 'system'::text) AND (creator_user_id IS NOT NULL)))),
     CONSTRAINT event_handlers_trigger_shape CHECK (((kind <> 'trigger'::text) OR ((blueprint_id IS NOT NULL) AND (breaker_threshold IS NOT NULL) AND (min_autonomy_suitability IS NOT NULL) AND (default_priority IS NULL) AND (sort_order IS NULL) AND (name IS NULL))))
 );
 
@@ -879,13 +913,16 @@ CREATE TABLE public.org_settings (
     -- without touching this row.
     anthropic_api_key_ref text,
     bedrock_credentials_ref text,
-    -- Max Claude tier the org permits teams/users to pick. NULL means no
-    -- cap (any tier allowed). The inheritance helper (sibling ticket) reads
-    -- this to clamp team_settings.default_model and per-prompt overrides.
+    -- Max model tier the org permits teams/users to pick. NULL means no cap.
+    -- App-validated, not CHECK-constrained (the max_llm_model_tier_check was
+    -- dropped in the v1.11.0 freeze, both dialects): an opaque, provider-agnostic
+    -- model/capability identifier. The app knows 'haiku'|'sonnet'|'opus' today
+    -- (validated in the settings handler), but dropping the CHECK lets OpenAI /
+    -- future families be added with zero DDL; a richer provider/model split stays
+    -- additive (new columns). Column not renamed; app layer unchanged.
     max_llm_model_tier text,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT org_settings_github_clone_protocol_check CHECK ((github_clone_protocol = ANY (ARRAY['https'::text, 'ssh'::text]))),
-    CONSTRAINT org_settings_max_llm_model_tier_check CHECK ((max_llm_model_tier IS NULL OR max_llm_model_tier = ANY (ARRAY['haiku'::text, 'sonnet'::text, 'opus'::text])))
+    CONSTRAINT org_settings_github_clone_protocol_check CHECK ((github_clone_protocol = ANY (ARRAY['https'::text, 'ssh'::text])))
 );
 
 
@@ -1104,7 +1141,9 @@ CREATE TABLE public.prompts (
     -- every new prompt is auto-wrapped as a 1-step blueprint (the step FK is
     -- RESTRICT), so hard-delete is impossible.
     deleted_at timestamp with time zone,
-    CONSTRAINT prompts_source_check CHECK ((source = ANY (ARRAY['system'::text, 'user'::text, 'imported'::text]))),
+    -- source is app-validated, not CHECK-constrained (source_check dropped in
+    -- the v1.11.0 freeze, both dialects). The system_has_no_creator pairing is
+    -- the only source invariant the DB still enforces.
     CONSTRAINT prompts_system_has_no_creator CHECK ((((source = 'system'::text) AND (creator_user_id IS NULL)) OR ((source <> 'system'::text) AND (creator_user_id IS NOT NULL))))
 );
 
@@ -5386,7 +5425,9 @@ CREATE TABLE public.blueprints (
     deleted_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT blueprints_source_check CHECK ((source = ANY (ARRAY['system'::text, 'user'::text, 'imported'::text]))),
+    -- source is app-validated, not CHECK-constrained (source_check dropped in
+    -- the v1.11.0 freeze, both dialects). The system_has_no_creator pairing is
+    -- the only source invariant the DB still enforces.
     CONSTRAINT blueprints_system_has_no_creator CHECK ((((source = 'system'::text) AND (creator_user_id IS NULL)) OR ((source <> 'system'::text) AND (creator_user_id IS NOT NULL))))
 );
 
@@ -5793,8 +5834,9 @@ CREATE TABLE public.org_template_prompts (
     allowed_tools text DEFAULT ''::text NOT NULL,
     model text DEFAULT ''::text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT org_template_prompts_source_check CHECK ((source = ANY (ARRAY['system'::text, 'user'::text])))
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    -- source app-validated, not CHECK-constrained (source_check dropped in the
+    -- v1.11.0 freeze, both dialects; mirrors prompts).
 );
 
 -- Template blueprints + their ordered steps. Org-scoped (no team_id) like the
@@ -5809,8 +5851,9 @@ CREATE TABLE public.org_template_blueprints (
     name text NOT NULL,
     source text DEFAULT 'user'::text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT org_template_blueprints_source_check CHECK ((source = ANY (ARRAY['system'::text, 'user'::text])))
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    -- source app-validated, not CHECK-constrained (source_check dropped in the
+    -- v1.11.0 freeze, both dialects; mirrors blueprints).
 );
 
 CREATE TABLE public.org_template_blueprint_steps (
@@ -5840,7 +5883,8 @@ CREATE TABLE public.org_template_handlers (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT org_template_handlers_kind_check CHECK ((kind = ANY (ARRAY['rule'::text, 'trigger'::text]))),
-    CONSTRAINT org_template_handlers_source_check CHECK ((source = ANY (ARRAY['system'::text, 'user'::text]))),
+    -- source app-validated, not CHECK-constrained (source_check dropped in the
+    -- v1.11.0 freeze, both dialects; mirrors event_handlers).
     CONSTRAINT org_template_handlers_rule_shape CHECK (((kind <> 'rule'::text) OR ((blueprint_id IS NULL) AND (breaker_threshold IS NULL) AND (min_autonomy_suitability IS NULL) AND (name IS NOT NULL) AND (default_priority IS NOT NULL) AND (sort_order IS NOT NULL)))),
     CONSTRAINT org_template_handlers_trigger_shape CHECK (((kind <> 'trigger'::text) OR ((blueprint_id IS NOT NULL) AND (breaker_threshold IS NOT NULL) AND (min_autonomy_suitability IS NOT NULL) AND (default_priority IS NULL) AND (sort_order IS NULL) AND (name IS NULL))))
 );

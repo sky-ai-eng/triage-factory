@@ -246,31 +246,33 @@ func TestBaseline_JiraStatusRulesPopulated_CHECKsFire(t *testing.T) {
 	}
 }
 
-// TestBaseline_OrgSettingsMaxLLMTier_CHECKFires pins the
-// org_settings_max_llm_model_tier_check CHECK constraint added with the
-// org-scope cost-control fields. NULL ("no cap") and the three valid
-// tiers must succeed; anything else must error with SQLSTATE 23514.
-// The SQLite mirror is covered in internal/config — this is the
-// authoritative Postgres test the ticket's acceptance asks for.
-func TestBaseline_OrgSettingsMaxLLMTier_CHECKFires(t *testing.T) {
+// TestBaseline_OrgSettingsMaxLLMTier_AppValidated pins the v1.11.0-freeze
+// decision that org_settings.max_llm_model_tier is an opaque, app-validated,
+// provider-agnostic identifier with NO DB CHECK. NULL ("no cap"), the three
+// app-known tiers, AND a value the app doesn't know today (a future
+// OpenAI/Bedrock family) must all insert at the DB layer — the settings
+// handler is the validation gate, not the column. Dropping the CHECK is what
+// lets new model families land with zero DDL post-freeze.
+func TestBaseline_OrgSettingsMaxLLMTier_AppValidated(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
 
 	owner := SeedUser(t, h, "tier-owner")
 	orgID := SeedOrg(t, h, "tier-org", owner)
 
-	// Happy paths: NULL + each of the three valid tiers round-trip.
 	for _, tier := range []sql.NullString{
 		{Valid: false},
 		{String: "haiku", Valid: true},
 		{String: "sonnet", Valid: true},
 		{String: "opus", Valid: true},
+		// Not an app-known tier today — must still pass the DB (no CHECK).
+		{String: "gpt-5-future", Valid: true},
 	} {
 		name := "null"
 		if tier.Valid {
 			name = tier.String
 		}
-		t.Run("allowed/"+name, func(t *testing.T) {
+		t.Run("accepted/"+name, func(t *testing.T) {
 			if _, err := h.AdminDB.Exec(
 				`DELETE FROM org_settings WHERE org_id = $1`, orgID,
 			); err != nil {
@@ -284,37 +286,61 @@ func TestBaseline_OrgSettingsMaxLLMTier_CHECKFires(t *testing.T) {
 				`INSERT INTO org_settings (org_id, max_llm_model_tier) VALUES ($1, $2)`,
 				orgID, arg,
 			); err != nil {
-				t.Errorf("INSERT max_llm_model_tier=%v: %v (want allowed by CHECK)", arg, err)
+				t.Errorf("INSERT max_llm_model_tier=%v: %v (column must be app-validated, no DB CHECK)", arg, err)
 			}
 		})
 	}
+}
 
-	t.Run("rejected/invalid", func(t *testing.T) {
-		if _, err := h.AdminDB.Exec(
-			`DELETE FROM org_settings WHERE org_id = $1`, orgID,
-		); err != nil {
-			t.Fatalf("reset org_settings: %v", err)
-		}
-		_, err := h.AdminDB.Exec(
-			`INSERT INTO org_settings (org_id, max_llm_model_tier) VALUES ($1, 'invalid')`,
-			orgID,
-		)
-		if err == nil {
-			t.Fatalf("INSERT with max_llm_model_tier='invalid' succeeded; want CHECK failure")
-		}
-		var pgErr *pgconn.PgError
-		if !errors.As(err, &pgErr) {
-			t.Fatalf("expected pg error, got %T: %v", err, err)
-		}
-		if pgErr.Code != "23514" {
-			t.Errorf("expected SQLSTATE 23514 (check_violation), got %s: %v", pgErr.Code, err)
-		}
-		if !strings.Contains(pgErr.ConstraintName, "max_llm_model_tier") &&
-			!strings.Contains(pgErr.Message, "max_llm_model_tier") {
-			t.Errorf("expected constraint name to mention max_llm_model_tier, got constraint=%q msg=%q",
-				pgErr.ConstraintName, pgErr.Message)
-		}
-	})
+// TestBaseline_SourceCHECKsDropped pins the v1.11.0-freeze decision that the
+// `source IN (...)` enum CHECK is dropped on prompts / blueprints /
+// event_handlers, making `source` uniformly app-validated. The structural
+// pairing CHECK survives in its harmonized `source <> 'system'` form: a
+// non-system source still requires a creator. The acceptance anchor —
+// inserting a hypothetical source='imported' handler WITH a creator passes —
+// is the event_handlers case.
+func TestBaseline_SourceCHECKsDropped(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := SeedOrgWithUser(t, h, "alice")
+
+	// event_handlers: source='imported' (not in the old enum) + a creator
+	// passes the harmonized source<>'system' pairing CHECK.
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO event_handlers (org_id, creator_user_id, team_id, kind, event_type, source, name, default_priority, sort_order)
+		VALUES ($1, $2, $3, 'rule', 'github:pr:opened', 'imported', 'imported-rule', 0.5, 0)
+	`, orgA, alice, teamA); err != nil {
+		t.Errorf("INSERT event_handlers source='imported' with creator: %v (source CHECK must be dropped, pairing must tolerate non-system)", err)
+	}
+
+	// The harmonized pairing still bites: source='imported' with NULL creator
+	// must fail the system_has_no_creator CHECK.
+	_, err := h.AdminDB.Exec(`
+		INSERT INTO event_handlers (org_id, creator_user_id, team_id, kind, event_type, source, name, default_priority, sort_order)
+		VALUES ($1, NULL, $2, 'rule', 'github:pr:opened', 'imported', 'imported-rule-2', 0.5, 0)
+	`, orgA, teamA)
+	if err == nil {
+		t.Fatalf("INSERT source='imported' with NULL creator succeeded; want system_has_no_creator CHECK failure")
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+		t.Errorf("err = %v, want SQLSTATE 23514 (system_has_no_creator)", err)
+	}
+
+	// prompts + blueprints: source='imported' + creator inserts cleanly.
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO prompts (org_id, creator_user_id, team_id, name, body, source)
+		VALUES ($1, $2, $3, 'imported-prompt', '', 'imported')
+	`, orgA, alice, teamA); err != nil {
+		t.Errorf("INSERT prompts source='imported': %v (source CHECK must be dropped)", err)
+	}
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO blueprints (org_id, creator_user_id, team_id, name, source)
+		VALUES ($1, $2, $3, 'imported-blueprint', 'imported')
+	`, orgA, alice, teamA); err != nil {
+		t.Errorf("INSERT blueprints source='imported': %v (source CHECK must be dropped)", err)
+	}
 }
 
 // TestRLS_AdminConnectionBypassesRLS pins the harness contract: tests

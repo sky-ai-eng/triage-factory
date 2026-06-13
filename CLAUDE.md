@@ -42,7 +42,7 @@ Triage Factory is a **single Go binary** (HTTP server + pollers + delegated-agen
 
 ### Core data model (target state)
 
-Documented in full in `docs/data-model-target.md`. Four levels, each with its own lifecycle:
+The product vision and direction live in `docs/where-tf-is-going.html`. Four levels, each with its own lifecycle:
 
 ```
 Entity (PR #18 / Jira SKY-123)     ← long-lived, from first poll until closed/merged
@@ -108,7 +108,7 @@ React 19 + Vite + TypeScript + Tailwind v4. Router routes live in `frontend/src/
 
 ## Reference docs
 
-- `docs/data-model-target.md` — authoritative spec for the entity/event/task/run model (the big ongoing rewrite).
+- `docs/where-tf-is-going.html` — product vision + direction for the entity/event/task/run model.
 - `docs/tracked-events.md` — GitHub/Jira event taxonomy + snapshot field list.
 - `docs/usage.md` — CLI flags, config reference, polling details.
 - `docs/for-agents/auto-delegation-briefing.md` — briefing for delegated agents.

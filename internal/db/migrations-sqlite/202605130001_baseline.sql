@@ -19,14 +19,52 @@
 -- one — never edit this baseline. Down migrations are not supported
 -- (see internal/db/migrations.go); the trailing Down block is a
 -- deliberate no-op.
+--
+-- === Deliberate cross-dialect divergence (do NOT "fix" post-freeze) ======
+-- This baseline and its Postgres twin
+-- (internal/db/migrations-postgres/202605130001_pg_baseline.sql) differ in
+-- the following ways ON PURPOSE. A mechanical (table,col,target,on_delete)
+-- or CHECK diff will flag each as a "gap" — it is not. Post-freeze migration
+-- authors must not converge these:
+--
+--   1. Type representation. Postgres uses native enum TYPES
+--      (membership_role, org_role) plus uuid / timestamptz / jsonb /
+--      interval / array column types; SQLite uses TEXT / INTEGER plus
+--      CHECKs (and TEXT-encoded durations, JSON-in-TEXT). Same domain,
+--      different mechanism. A CHECK-only diff falsely reports PG "missing"
+--      the role CHECKs.
+--   2. RLS keys. Postgres carries composite (id, org_id) FKs and (id, org_id)
+--      uniques so row-level security can pin tenant scope; SQLite uses
+--      single-column FKs (one connection, no RLS). Every *_org_id composite
+--      FK / unique on the PG side is this category, not a divergence.
+--   3. creator_user_id (and other user refs). Postgres FK-constrains them with
+--      ON DELETE CASCADE; SQLite leaves them bare TEXT (or NO-ACTION on runs).
+--      Deliberate: local mode is N=1 and the sentinel user is never deleted,
+--      so there is no referential hazard to guard. Do not add the FKs here.
+--   4. Tables that exist in one dialect only. instance_config is SQLite-only
+--      (host port lives in container env under multi mode). sessions and
+--      project_knowledge are Postgres-only (multi-mode auth + shared KB).
+--   5. PG-only RLS apparatus. Row-level-security policies, the tf.* helper
+--      functions, the auth.users FK, and admin-only columns (orgs.owner_user_id,
+--      teams.created_by_user_id, users.default_org_id, sessions.active_org_id)
+--      have no SQLite analog — local mode has a single trusted connection.
+--   6. blueprint_runs.status. Postgres enforces the value set with a CHECK
+--      (cheap to ALTER pre-tenant); SQLite leaves it app-validated (a
+--      full-table rebuild is the only way to widen a SQLite CHECK, so the
+--      headroom is the absence of the CHECK). Both accept the same values;
+--      the app is the source of truth.
 
 -- === Prompts =============================================================
 CREATE TABLE prompts (
     id              TEXT PRIMARY KEY,
     name            TEXT NOT NULL,
     body            TEXT NOT NULL,
-    source          TEXT NOT NULL DEFAULT 'user'
-                        CHECK (source IN ('system', 'user', 'imported')),
+    -- source is app-validated, not CHECK-constrained: today's writers use
+    -- 'system' | 'user' | 'imported', but new provenance values (marketplace
+    -- copies, future import kinds) must be addable without a SQLite table
+    -- rebuild. The structural pairing below (a non-system row needs a creator)
+    -- is the only invariant the DB still enforces on source.
+    source          TEXT NOT NULL DEFAULT 'user',
     usage_count     INTEGER DEFAULT 0,
     hidden          BOOLEAN DEFAULT 0,
     created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -90,8 +128,11 @@ CREATE TABLE system_prompt_versions (
 CREATE TABLE blueprints (
     id              TEXT PRIMARY KEY,
     name            TEXT NOT NULL,
-    source          TEXT NOT NULL DEFAULT 'user'
-                        CHECK (source IN ('system', 'user', 'imported')),
+    -- source is app-validated, not CHECK-constrained (mirrors prompts): new
+    -- provenance values must be addable without a SQLite table rebuild. The
+    -- *_system_has_no_creator pairing below is the only source invariant the
+    -- DB still enforces.
+    source          TEXT NOT NULL DEFAULT 'user',
     usage_count     INTEGER DEFAULT 0,
     hidden          BOOLEAN DEFAULT 0,
     created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -130,8 +171,12 @@ CREATE TABLE events_catalog (
 );
 
 -- === Preferences / settings ==============================================
+-- Per-user, keyed on user_id (matches the Postgres baseline so local=multi at
+-- N=1). The summary_md is the user's personalized dashboard brief. In local
+-- mode the single row hangs off the sentinel local user. ON DELETE CASCADE so
+-- a removed user takes their preferences with them.
 CREATE TABLE preferences (
-    id          INTEGER PRIMARY KEY,
+    user_id     TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     summary_md  TEXT,
     updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -237,7 +282,12 @@ CREATE TABLE user_github_identities (
 -- are captured together from the /myself validation at PAT-bind time. source
 -- records HOW the binding was captured ('pat' | 'connect_oauth' | 'scim') —
 -- 'pat' is the only writer today (DC paste-a-PAT); Cloud OAuth and SCIM are
--- later tickets. verified_at timestamps the last authenticated /myself
+-- later tickets. The source CHECK is KEPT (here and on user_github_identities)
+-- on purpose: identity provenance is security-relevant and the value set is
+-- closed. The asymmetry — GitHub allows 'login_claim', Jira does not — is also
+-- deliberate: a GitHub login can be minted from a delegated-run PR's claimed
+-- author, but a Jira account is never inferred from a login claim. verified_at
+-- timestamps the last authenticated /myself
 -- confirmation against the host (nullable for a future SCIM directory sync
 -- that learns an account without a round-trip; today's pat writer always
 -- stamps it). An absent row is a durable, supported state: the
@@ -293,12 +343,18 @@ CREATE TABLE org_settings (
     -- both NULL and supply ANTHROPIC_API_KEY via env to the spawner.
     anthropic_api_key_ref   TEXT,
     bedrock_credentials_ref TEXT,
-    -- Max Claude tier the org permits teams/users to pick. NULL means no
-    -- cap (any tier allowed). The inheritance helper (sibling ticket) reads
-    -- this to clamp team_settings.default_model and per-prompt overrides.
-    max_llm_model_tier      TEXT
-                                CHECK (max_llm_model_tier IS NULL
-                                       OR max_llm_model_tier IN ('haiku', 'sonnet', 'opus')),
+    -- Max model tier the org permits teams/users to pick. NULL means no cap
+    -- (any tier allowed). The inheritance helper reads this to clamp
+    -- team_settings.default_model and per-prompt overrides.
+    --
+    -- App-validated, not CHECK-constrained: the column is an opaque,
+    -- provider-agnostic model/capability identifier. The app knows
+    -- 'haiku' | 'sonnet' | 'opus' today (validated in the settings handler),
+    -- but dropping the CHECK lets OpenAI / future model families be added with
+    -- zero DDL. A richer provider/model split (separate provider + tier
+    -- columns) stays additive — new columns, freeze-safe — so the column is
+    -- not renamed and the app layer is unchanged.
+    max_llm_model_tier      TEXT,
     updated_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -583,8 +639,11 @@ CREATE TABLE event_handlers (
     event_type           TEXT NOT NULL REFERENCES events_catalog(id) ON DELETE RESTRICT,
     scope_predicate_json TEXT,
     enabled              BOOLEAN NOT NULL DEFAULT 1,
-    source               TEXT NOT NULL DEFAULT 'user'
-                            CHECK (source IN ('system', 'user')),
+    -- source is app-validated, not CHECK-constrained (mirrors prompts /
+    -- blueprints): 'system' | 'user' today, but new provenance values must be
+    -- addable without a SQLite table rebuild. The creator pairing below is the
+    -- only source invariant the DB still enforces.
+    source               TEXT NOT NULL DEFAULT 'user',
     -- system_slug is the stable shipped identifier ("system-rule-ci-check-failed",
     -- "system-trigger-ci-fix", …) for source='system' rows; NULL for user
     -- handlers. The id is a random UUID per team copy, so re-seed idempotency
@@ -628,9 +687,13 @@ CREATE TABLE event_handlers (
         AND sort_order IS NULL
         AND name IS NULL
     )),
+    -- Harmonized to the tolerant source<>'system' form (was source='user')
+    -- so it survives the source CHECK drop above: any non-system provenance
+    -- (a future 'imported'/marketplace handler) still requires a creator,
+    -- matching the prompts / blueprints pairing.
     CONSTRAINT event_handlers_system_has_no_creator CHECK (
         (source = 'system' AND creator_user_id IS NULL)
-        OR (source = 'user' AND creator_user_id IS NOT NULL)
+        OR (source <> 'system' AND creator_user_id IS NOT NULL)
     ),
     -- Per-team re-seed idempotency key: each team gets one copy of each
     -- shipped handler (same system_slug, distinct team_id). NULLs distinct,
@@ -672,7 +735,9 @@ CREATE TABLE org_template_prompts (
     -- source drives the per-team copy's source (and the editor's delete-vs-keep
     -- affordance): 'system' rows copy as system (creator NULL); 'user' rows are
     -- admin-authored org defaults and copy as team-owned user prompts.
-    source        TEXT NOT NULL DEFAULT 'user' CHECK (source IN ('system', 'user')),
+    -- App-validated, not CHECK-constrained (mirrors prompts), so new provenance
+    -- values copy through without a table rebuild.
+    source        TEXT NOT NULL DEFAULT 'user',
     allowed_tools TEXT NOT NULL DEFAULT '',
     model         TEXT NOT NULL DEFAULT '',
     created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -697,7 +762,8 @@ CREATE TABLE org_template_blueprints (
     org_id        TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
     system_slug   TEXT NOT NULL,
     name          TEXT NOT NULL,
-    source        TEXT NOT NULL DEFAULT 'user' CHECK (source IN ('system', 'user')),
+    -- source app-validated, not CHECK-constrained (mirrors blueprints).
+    source        TEXT NOT NULL DEFAULT 'user',
     created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT org_template_blueprints_org_slug_unique UNIQUE (org_id, system_slug)
@@ -736,7 +802,8 @@ CREATE TABLE org_template_handlers (
     -- trigger in the template makes every new team get it enabled (the value
     -- prop — shipped triggers ship disabled, but the org opts in once here).
     enabled         BOOLEAN NOT NULL DEFAULT 1,
-    source          TEXT NOT NULL DEFAULT 'user' CHECK (source IN ('system','user')),
+    -- source app-validated, not CHECK-constrained (mirrors event_handlers).
+    source          TEXT NOT NULL DEFAULT 'user',
     name             TEXT,
     default_priority REAL,
     sort_order       INTEGER,
@@ -779,6 +846,12 @@ CREATE TABLE tasks (
     event_type           TEXT NOT NULL REFERENCES events_catalog(id) ON DELETE RESTRICT,
     dedup_key            TEXT NOT NULL DEFAULT '',
     primary_event_id     TEXT NOT NULL REFERENCES events(id),
+    -- status CHECK is KEPT (deliberately, unlike the source / max-tier CHECKs
+    -- dropped elsewhere in this freeze). This is the board state-machine: a
+    -- closed, stable 6-value set that the UI filters on heavily. The "queue"
+    -- is a derived filter over these, not a seventh value, and resume is a
+    -- run-level concept — so the enum is complete and not expected to grow.
+    -- The DB CHECK is the backstop against a typo'd status from any write path.
     status               TEXT NOT NULL DEFAULT 'queued'
                             CHECK (status IN ('queued','in_progress','in_review','done','dismissed','snoozed')),
     priority_score       REAL,
@@ -985,6 +1058,13 @@ CREATE TABLE blueprint_runs (
     task_id         TEXT NOT NULL REFERENCES tasks(id),
     trigger_type    TEXT NOT NULL DEFAULT 'manual',
     trigger_id      TEXT REFERENCES event_handlers(id),
+    -- creator_user_id mirrors runs: the sentinel local user for manual runs,
+    -- NULL for event-fired runs (no human author). The trigger-type pairing
+    -- CHECK below pins the two together so the firing path can't drift. No FK
+    -- in SQLite (the creator_user_id deliberate-divergence category — N=1, the
+    -- sentinel user is never deleted); PG FK-constrains it ON DELETE CASCADE.
+    -- This closes the runs-has-it / blueprint_runs-doesn't inconsistency.
+    creator_user_id TEXT DEFAULT '00000000-0000-0000-0000-000000000100',
     -- triggering_event_id is the event instance that auto-fired this blueprint
     -- run. NULL for manual runs. The blueprint_run is the firing unit, so the
     -- replay fence lives here (relocated off runs): the
@@ -993,7 +1073,12 @@ CREATE TABLE blueprint_runs (
     -- the at-least-once router queue can't mint a second blueprint_run. Step
     -- runs are not separately fenced (orchestrator-internal).
     triggering_event_id TEXT REFERENCES events(id),
-    -- 'running' | 'completed' | 'aborted' | 'failed' | 'cancelled'
+    -- 'running' | 'completed' | 'aborted' | 'failed' | 'cancelled'. App-validated,
+    -- NOT CHECK-constrained on purpose (deliberate-divergence item 6): the
+    -- Postgres twin carries a CHECK (cheap to ALTER pre-tenant), but widening a
+    -- SQLite CHECK means a full-table rebuild, so the absence of the CHECK IS the
+    -- headroom on a table that can't cheaply ALTER. 'aborted' is the
+    -- blueprint-level status, distinct from a step run's outcome='abort'.
     status          TEXT NOT NULL DEFAULT 'running',
     -- Durable sequencing for the queue-driven reactor: current_step_index is
     -- the 0-based step the blueprint is on (the step that is queued / running /
@@ -1020,7 +1105,15 @@ CREATE TABLE blueprint_runs (
     aborted_at_step INTEGER,
     worktree_path   TEXT NOT NULL,
     started_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    completed_at    DATETIME
+    completed_at    DATETIME,
+    -- Pair trigger_type with creator_user_id nullability (mirrors
+    -- runs_creator_matches_trigger_type) so the firing path can't drift back to
+    -- a sentinel creator on an event run or a NULL creator on a manual one.
+    CONSTRAINT blueprint_runs_creator_matches_trigger_type CHECK (
+        (trigger_type = 'manual' AND creator_user_id IS NOT NULL)
+        OR
+        (trigger_type = 'event'  AND creator_user_id IS NULL)
+    )
 );
 CREATE INDEX idx_blueprint_runs_task   ON blueprint_runs(task_id);
 CREATE INDEX idx_blueprint_runs_status ON blueprint_runs(status);
@@ -1197,7 +1290,11 @@ CREATE TABLE pending_reviews (
     repo                  TEXT NOT NULL,
     commit_sha            TEXT NOT NULL,
     diff_lines            TEXT,
-    run_id                TEXT,
+    -- run_id is FK'd ON DELETE SET NULL (matches PG and the pending_prs.run_id
+    -- sibling, which is FK'd on both dialects): a delegated run that opened a
+    -- pending review can be deleted without orphaning the review, and the
+    -- review survives detached. Nullable to match the SET NULL behavior.
+    run_id                TEXT REFERENCES runs(id) ON DELETE SET NULL,
     review_body           TEXT,
     review_event          TEXT,
     created_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
