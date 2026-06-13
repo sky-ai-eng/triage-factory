@@ -58,6 +58,11 @@ func (a *App) startWorkers(ctx context.Context) {
 	// repos). Multi gets a real per-pod disk budget + cold-bare TTL,
 	// bounding at-rest storage across tenants.
 	worktree.StartReaper(ctx, worktree.DefaultPolicy(), 0)
+
+	// Workspace-snapshot retention reaper: bounds the durable parked/aborted-run
+	// snapshot blobs by a TTL (default 14 days), sweeping at startup then hourly.
+	// A no-op when no blob store is wired.
+	go a.spawner.RunSnapshotReaper(ctx, delegate.DefaultSnapshotReapInterval)
 }
 
 // startPolling kicks the first poll cycle (and, in local mode, wires the

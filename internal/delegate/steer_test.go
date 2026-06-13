@@ -9,6 +9,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -63,16 +64,20 @@ func TestSendMessage_LiveRoutesToSteer(t *testing.T) {
 }
 
 // TestSendMessage_OpenRoutesToResume: a run with no live process but status
-// `open` is woken via ResumeOpenRun. Proven by the run leaving `open` — the
-// resume goroutine fails fast here for lack of a warm worktree, exactly as in
-// TestResumeOpenRun_InitiatesResume; what matters is that resume was entered.
+// `open` is woken via ResumeOpenRun. Proven by the run leaving `open` — a
+// durable snapshot satisfies the workspace pre-flight, then the resume goroutine
+// fails fast at the cold rehydrate of the stub blob (no subprocess), exactly as
+// in TestResumeOpenRun_InitiatesResume; what matters is that resume was entered.
 func TestSendMessage_OpenRoutesToResume(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-open", "sess-open", "/tmp/does-not-exist-open")
 	if _, err := database.Exec(`UPDATE runs SET status='open' WHERE id='r-open'`); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	wireBlobStore(t, s)
+	putTestSnapshot(t, s, blueprintRunIDForRun(t, database, "r-open"))
 
 	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrg, "r-open", runmode.LocalDefaultUserID, "go on"); err != nil {
 		t.Fatalf("SendMessage: %v", err)

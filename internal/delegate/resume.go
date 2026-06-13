@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"strings"
 
@@ -29,6 +30,13 @@ import (
 // completed+abort). Callers map this to 409 Conflict so the client can refresh
 // and see the actual state.
 var ErrRunNotResumable = errors.New("resume: run not in a resumable state")
+
+// ErrWorkspaceExpired is returned by ResumeOpenRun when a resumable run's
+// workspace is gone for good: its warm worktree was swept AND its durable
+// snapshot was reaped by the retention TTL. The run's status is left unchanged
+// (no flip), so the user gets a clear "this workspace has expired" signal rather
+// than seeing the run silently fail mid-resume. Callers map it to 410 Gone.
+var ErrWorkspaceExpired = errors.New("resume: this run's workspace has expired and can no longer be resumed")
 
 // ResumeOpenRun wakes a parked/terminal-but-resumable run (open,
 // pending_approval, or completed+abort — see resumableState) with a new
@@ -70,6 +78,14 @@ func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error
 	}
 	if run == nil {
 		return fmt.Errorf("run not found")
+	}
+	// Only a resumable run (open / pending_approval / completed+abort) can be
+	// woken; a finish/failed/cancelled or actively-running run is rejected up
+	// front so the workspace pre-flight below never mislabels a non-resumable run
+	// as "expired". The MarkResuming compare-and-swap re-checks under the row
+	// lock, so this early-out doesn't relax the race guard.
+	if !resumableState(run.Status, run.Outcome) {
+		return ErrRunNotResumable
 	}
 	if run.SessionID == "" {
 		return fmt.Errorf("run has no session id; cannot resume")
@@ -147,6 +163,16 @@ func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error
 		triggerType = "manual"
 	}
 
+	// Pre-flight the workspace before any side effect: a resume rebuilds from the
+	// warm worktree, or failing that the durable snapshot. If both are gone — the
+	// worktree was swept AND the snapshot was reaped by the retention TTL — the
+	// workspace has expired. Surface that as a clear error WITHOUT flipping the
+	// run (its status is unchanged at expiry), so the user learns the WIP is gone
+	// rather than watching the run flip to failed mid-resume.
+	if !s.workspaceRecoverable(context.Background(), orgID, run) {
+		return ErrWorkspaceExpired
+	}
+
 	// Step 1: register the cancel handle synchronously. Once this
 	// runs, a concurrent Cancel(runID) finds the entry and calls
 	// cancel() on the ctx instead of falling through to the
@@ -165,14 +191,14 @@ func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error
 	s.cancels[runID] = cancel
 	s.mu.Unlock()
 
-	// Step 2: flip status open → running. This must happen AFTER cancel
-	// registration: if the order is reversed, a Cancel() arriving in the gap
-	// sees no goroutine, falls through to the DB path, and races the resume into
-	// the "row cancelled but goroutine still running" state. With the cancel
-	// handle already in place, any Cancel() now hits cancel(ctx) and the
-	// goroutine handles the terminal write. Routed under the resuming user's
-	// synthetic claims (resume is always user-initiated regardless of the run's
-	// original trigger).
+	// Step 2: flip the run (from its resumable state) to running. This must
+	// happen AFTER cancel registration: if the order is reversed, a Cancel()
+	// arriving in the gap sees no goroutine, falls through to the DB path, and
+	// races the resume into the "row cancelled but goroutine still running"
+	// state. With the cancel handle already in place, any Cancel() now hits
+	// cancel(ctx) and the goroutine handles the terminal write. Routed under the
+	// resuming user's synthetic claims (resume is always user-initiated
+	// regardless of the run's original trigger).
 	bgCtx := context.Background()
 	var flipped bool
 	err = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, userID, func(ts db.TxStores) error {
@@ -338,6 +364,30 @@ func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error
 		disposed = true
 	}()
 	return nil
+}
+
+// workspaceRecoverable reports whether a parked run can still be resumed: its
+// warm worktree survives on disk, or its durable snapshot is present to
+// cold-rehydrate from. False means the workspace expired — the retention reaper
+// dropped the snapshot after the warm worktree had already been swept. A
+// blob-store read error is treated as recoverable (logged, not fatal): a
+// transient storage hiccup must not strand a resumable run as "expired".
+func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, run *domain.AgentRun) bool {
+	if run.WorktreePath != "" {
+		if _, err := os.Stat(run.WorktreePath); err == nil {
+			return true // warm worktree on disk
+		}
+	}
+	blobs := s.Storage()
+	if blobs == nil {
+		return false
+	}
+	ok, err := blobs.Exists(ctx, snapshotKey(orgID, memoryNamespace(run.BlueprintRunID, run.ID)))
+	if err != nil {
+		log.Printf("[delegate] resume: snapshot existence check for run %s: %v", run.ID, err)
+		return true
+	}
+	return ok
 }
 
 // ResumeOptions configures a ResumeWithMessage invocation. Callers

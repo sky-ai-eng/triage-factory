@@ -118,6 +118,15 @@ type AgentRun struct {
 	ExecutorID string `json:"-"`
 }
 
+// SnapshotReapKey identifies a parked workspace snapshot eligible for retention
+// reaping: the owning org and the blueprint_run_id (which is the snapshot key
+// id — every run is a blueprint step, so one blueprint_run shares one workspace
+// blob). The retention reaper enumerates these from the DB and discards each.
+type SnapshotReapKey struct {
+	OrgID          string
+	BlueprintRunID string
+}
+
 // AgentMessage represents a single message within an agent run.
 type AgentMessage struct {
 	ID                  int

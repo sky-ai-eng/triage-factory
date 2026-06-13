@@ -170,6 +170,11 @@ type Spawner struct {
 	// DefaultIdleHibernateTimeout; tests inject a short value via
 	// SetIdleHibernateTimeout. Read through idleTimeout().
 	idleHibernateTimeout time.Duration
+	// snapshotRetentionTTL bounds how long a parked/aborted run's durable
+	// workspace snapshot is kept before the retention reaper discards it. Zero
+	// means use DefaultSnapshotRetentionTTL; tests inject a short value via
+	// SetSnapshotRetentionTTL. Read through snapshotRetention().
+	snapshotRetentionTTL time.Duration
 
 	agentToolsOnce  sync.Once
 	agentToolsCache string

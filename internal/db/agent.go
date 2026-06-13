@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -305,6 +306,20 @@ type AgentRunStore interface {
 	MarkPendingApprovalIfCompletedSystem(ctx context.Context, orgID, runID string) (bool, error)
 	HasOtherActiveRunForTaskSystem(ctx context.Context, orgID, taskID, excludeRunID string) (bool, error)
 	InsertMessageSystem(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error)
+
+	// ListReapableSnapshotKeysSystem returns the (org, blueprint_run_id) of
+	// every blueprint_run all of whose resumable-state runs (open /
+	// pending_approval / completed+abort) parked/terminated before cutoff — the
+	// workspace snapshot keys the retention reaper may safely drop. A
+	// blueprint_run with any resumable run still within the TTL is omitted (its
+	// shared blob is still wanted). The parked/terminal timestamp is
+	// COALESCE(completed_at, started_at): completed_at is set on the
+	// pending_approval and completed+abort terminal writes, and an `open` run
+	// (no completed_at) falls back to started_at, a safe lower bound since a run
+	// parks open within moments of starting. System-wide / no org scoping — the
+	// retention sweep is a maintenance job that spans tenants; the admin pool is
+	// the right door (BYPASSRLS) since the reaper holds no JWT claims.
+	ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error)
 
 	// TokenTotalsSystem mirrors TokenTotals but routes through the
 	// admin pool in Postgres. Consumed by agentmeta.Build, which

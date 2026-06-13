@@ -262,6 +262,36 @@ func (s *agentRunStore) MarkResumingSystem(ctx context.Context, orgID, runID str
 	return markResuming(ctx, s.admin, orgID, runID)
 }
 
+func (s *agentRunStore) ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error) {
+	// Resumable-state runs (open / pending_approval / completed+abort) grouped by
+	// their shared snapshot key (org, blueprint_run_id); a key is reapable once
+	// its newest resumable run parked/terminated before the cutoff. completed_at
+	// is the terminal/park timestamp; an `open` run (no completed_at) falls back
+	// to started_at. Admin pool — the retention sweep is a tenant-spanning system
+	// job with no JWT claims.
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT org_id, blueprint_run_id
+		FROM runs
+		WHERE status IN ('open', 'pending_approval')
+		   OR (status = 'completed' AND outcome = 'abort')
+		GROUP BY org_id, blueprint_run_id
+		HAVING MAX(COALESCE(completed_at, started_at)) < $1
+	`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var keys []domain.SnapshotReapKey
+	for rows.Next() {
+		var k domain.SnapshotReapKey
+		if err := rows.Scan(&k.OrgID, &k.BlueprintRunID); err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, rows.Err()
+}
+
 func markResuming(ctx context.Context, q queryer, orgID, runID string) (bool, error) {
 	// Wake any non-finish parked/terminal state: open, pending_approval, or an
 	// aborted run (completed + outcome='abort'). Keyed on (status, outcome) so a

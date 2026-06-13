@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -54,14 +55,14 @@ func TestResumeOpenRun_ValidationGuards(t *testing.T) {
 	}
 }
 
-// TestResumeOpenRun_NotOpen pins the race guard: a run that reached a terminal
-// state (e.g. a cancel won between the caller's read and the resume) can't be
-// woken — MarkResuming flips only from `open`, so the resume returns
-// ErrRunNotResumable for the caller to map to 409.
-func TestResumeOpenRun_NotOpen(t *testing.T) {
+// TestResumeOpenRun_NotResumable pins the resumable-state guard: a finish
+// terminal (completed without an abort outcome) can't be woken — ResumeOpenRun
+// returns ErrRunNotResumable for the caller to map to 409, before any workspace
+// pre-flight runs.
+func TestResumeOpenRun_NotResumable(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-term", "sess", "/tmp/wt")
-	if _, err := database.Exec(`UPDATE runs SET status='completed' WHERE id='r-term'`); err != nil {
+	if _, err := database.Exec(`UPDATE runs SET status='completed', outcome='finish' WHERE id='r-term'`); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
@@ -72,20 +73,52 @@ func TestResumeOpenRun_NotOpen(t *testing.T) {
 	}
 }
 
+// TestResumeOpenRun_ExpiredWorkspace pins the retention-expiry semantics: a
+// resumable run whose warm worktree is gone AND whose snapshot was reaped can't
+// rebuild a workspace, so the resume returns ErrWorkspaceExpired and — crucially
+// — leaves the run's status UNCHANGED (no flip), so the user sees a clear
+// "expired" error rather than the run silently failing.
+func TestResumeOpenRun_ExpiredWorkspace(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-exp", "sess-exp", "/tmp/does-not-exist-exp")
+	if _, err := database.Exec(`UPDATE runs SET status='open' WHERE id='r-exp'`); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	wireBlobStore(t, s) // store wired, but no snapshot for this run → expired
+
+	err := s.ResumeOpenRun(runmode.LocalDefaultOrg, "r-exp", "go on", runmode.LocalDefaultUserID)
+	if !errors.Is(err, ErrWorkspaceExpired) {
+		t.Fatalf("err = %v, want ErrWorkspaceExpired", err)
+	}
+	var status string
+	if err := database.QueryRow(`SELECT status FROM runs WHERE id='r-exp'`).Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status != "open" {
+		t.Errorf("status = %q, want open unchanged (status must not change at expiry)", status)
+	}
+}
+
 // TestResumeOpenRun_InitiatesResume proves the resume entry wakes an open run:
-// it flips open -> running and drives the run via the resume goroutine. Here the
-// warm worktree is absent and no snapshot is wired, so the goroutine fails fast
-// at ensureWorkspace (no subprocess spawned) and the run lands terminal — what
+// it flips open -> running and drives the run via the resume goroutine. The warm
+// worktree is absent but a durable snapshot is present (so the workspace
+// pre-flight passes); the goroutine then fails fast at the cold rehydrate of
+// this stub blob (no subprocess spawned) and the run lands terminal — what
 // matters is that it LEFT `open`, i.e. the resume was initiated. The full
 // "wakes as a new LiveRun resuming the session" path is covered by the live SDK
 // smokes.
 func TestResumeOpenRun_InitiatesResume(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-wake", "sess-wake", "/tmp/does-not-exist-wake")
 	if _, err := database.Exec(`UPDATE runs SET status='open' WHERE id='r-wake'`); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	wireBlobStore(t, s)
+	putTestSnapshot(t, s, blueprintRunIDForRun(t, database, "r-wake"))
 
 	if err := s.ResumeOpenRun(runmode.LocalDefaultOrg, "r-wake", "the answer", runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("ResumeOpenRun: %v", err)

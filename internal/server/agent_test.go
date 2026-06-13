@@ -12,7 +12,8 @@ import (
 // TestSteerErrorStatus locks the SendMessage/Interrupt error → HTTP code map
 // the message and interrupt endpoints depend on: a not-right-now run state
 // (no live process, not steerable, lost resume race) is 409 so the client
-// re-checks; everything else is 500.
+// re-checks, an expired workspace is 410 Gone (retry won't help), and
+// everything else is 500.
 func TestSteerErrorStatus(t *testing.T) {
 	cases := []struct {
 		name string
@@ -23,6 +24,8 @@ func TestSteerErrorStatus(t *testing.T) {
 		{"NoLiveProcess wrapped", fmt.Errorf("wrap: %w", delegate.ErrNoLiveProcess), http.StatusConflict},
 		{"NotSteerable", delegate.ErrRunNotSteerable, http.StatusConflict},
 		{"NotResumable", delegate.ErrRunNotResumable, http.StatusConflict},
+		{"WorkspaceExpired", delegate.ErrWorkspaceExpired, http.StatusGone},
+		{"WorkspaceExpired wrapped", fmt.Errorf("wrap: %w", delegate.ErrWorkspaceExpired), http.StatusGone},
 		{"random server error", errors.New("db down"), http.StatusInternalServerError},
 	}
 	for _, tc := range cases {

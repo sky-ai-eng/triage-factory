@@ -270,9 +270,14 @@ func (ag *agentHandler) handleAgentInterrupt(w http.ResponseWriter, r *http.Requ
 // run that can't take the op right now — no live process (ErrNoLiveProcess),
 // not steerable (ErrRunNotSteerable), or a lost resume race
 // (ErrRunNotResumable) — is 409 Conflict so the client refreshes and re-reads
-// the run's state. Everything else is a server-side 500.
+// the run's state. An expired workspace (ErrWorkspaceExpired) is 410 Gone: the
+// run's saved state was reaped after the retention window, so retrying won't
+// help — the client surfaces the clear error rather than a transient conflict.
+// Everything else is a server-side 500.
 func steerErrorStatus(err error) int {
 	switch {
+	case errors.Is(err, delegate.ErrWorkspaceExpired):
+		return http.StatusGone
 	case errors.Is(err, delegate.ErrNoLiveProcess),
 		errors.Is(err, delegate.ErrRunNotSteerable),
 		errors.Is(err, delegate.ErrRunNotResumable):

@@ -113,6 +113,93 @@ func TestTerminateBlueprint_FinishDiscardsSnapshot(t *testing.T) {
 	assertSnapshotPresent(t, s, bpr, false)
 }
 
+// TestReapExpiredSnapshots_DropsExpiredKeepsFresh is the end-to-end retention
+// sweep: a completed+abort run parked past the TTL has its snapshot reaped, while
+// a freshly-parked one within the TTL survives.
+func TestReapExpiredSnapshots_DropsExpiredKeepsFresh(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	s, database, oldRun, _ := setupAdvanceFixture(t, "reap-old")
+	wireBlobStore(t, s)
+
+	oldBpr := blueprintRunIDForRun(t, database, oldRun)
+	if _, err := database.Exec(`UPDATE runs SET status='completed', outcome='abort', completed_at=datetime('now','-20 days') WHERE id=?`, oldRun); err != nil {
+		t.Fatalf("age old run: %v", err)
+	}
+	putTestSnapshot(t, s, oldBpr)
+
+	seedRun(t, database, "r-fresh", "sess-fresh", "/tmp/wt-fresh")
+	freshBpr := blueprintRunIDForRun(t, database, "r-fresh")
+	if _, err := database.Exec(`UPDATE runs SET status='completed', outcome='abort', completed_at=datetime('now') WHERE id='r-fresh'`); err != nil {
+		t.Fatalf("complete fresh run: %v", err)
+	}
+	putTestSnapshot(t, s, freshBpr)
+
+	s.ReapExpiredSnapshots(context.Background())
+
+	assertSnapshotPresent(t, s, oldBpr, false)  // parked past the TTL → reaped
+	assertSnapshotPresent(t, s, freshBpr, true) // within the TTL → kept
+}
+
+// TestListReapableSnapshotKeys_ExcludesFinishAndInTTL pins the query rules: a
+// past-TTL completed+abort key is eligible, a past-TTL finish run is excluded
+// (not resumable), and a within-TTL open run is not yet eligible.
+func TestListReapableSnapshotKeys_ExcludesFinishAndInTTL(t *testing.T) {
+	s, database, abortRun, _ := setupAdvanceFixture(t, "reap-rules")
+	abortBpr := blueprintRunIDForRun(t, database, abortRun)
+	if _, err := database.Exec(`UPDATE runs SET status='completed', outcome='abort', completed_at=datetime('now','-30 days') WHERE id=?`, abortRun); err != nil {
+		t.Fatalf("age abort run: %v", err)
+	}
+
+	seedRun(t, database, "r-fin2", "s", "/tmp/wt")
+	if _, err := database.Exec(`UPDATE runs SET status='completed', outcome='finish', completed_at=datetime('now','-30 days') WHERE id='r-fin2'`); err != nil {
+		t.Fatalf("finish run: %v", err)
+	}
+	seedRun(t, database, "r-open2", "s", "/tmp/wt")
+	if _, err := database.Exec(`UPDATE runs SET status='open', completed_at=NULL, started_at=datetime('now') WHERE id='r-open2'`); err != nil {
+		t.Fatalf("open run: %v", err)
+	}
+
+	cutoff := time.Now().Add(-14 * 24 * time.Hour)
+	keys, err := s.agentRuns.ListReapableSnapshotKeysSystem(context.Background(), cutoff)
+	if err != nil {
+		t.Fatalf("ListReapableSnapshotKeysSystem: %v", err)
+	}
+	if len(keys) != 1 || keys[0].BlueprintRunID != abortBpr {
+		t.Fatalf("reapable keys = %+v, want exactly the old abort key %s (finish excluded, fresh open excluded)", keys, abortBpr)
+	}
+	if keys[0].OrgID != runmode.LocalDefaultOrg {
+		t.Errorf("key org = %q, want %q", keys[0].OrgID, runmode.LocalDefaultOrg)
+	}
+}
+
+// TestListReapableSnapshotKeys_SharedBlueprintNeedsAllPastTTL pins the shared-key
+// rule: blueprint steps share one snapshot blob, so a blueprint whose runs span
+// the TTL boundary (one old, one fresh) is NOT reaped until every resumable run
+// is past the TTL.
+func TestListReapableSnapshotKeys_SharedBlueprintNeedsAllPastTTL(t *testing.T) {
+	s, database, run1, taskID := setupAdvanceFixture(t, "reap-shared")
+	bpr := blueprintRunIDForRun(t, database, run1)
+	if _, err := database.Exec(`UPDATE runs SET status='completed', outcome='abort', completed_at=datetime('now','-30 days') WHERE id=?`, run1); err != nil {
+		t.Fatalf("age step 1: %v", err)
+	}
+	// A second step on the SAME blueprint_run, also completed+abort but fresh.
+	addStepRun(t, database, bpr, taskID, "run2-shared", 1, "running")
+	if _, err := database.Exec(`UPDATE runs SET status='completed', outcome='abort', completed_at=datetime('now') WHERE id='run2-shared'`); err != nil {
+		t.Fatalf("complete step 2: %v", err)
+	}
+
+	cutoff := time.Now().Add(-14 * 24 * time.Hour)
+	keys, err := s.agentRuns.ListReapableSnapshotKeysSystem(context.Background(), cutoff)
+	if err != nil {
+		t.Fatalf("ListReapableSnapshotKeysSystem: %v", err)
+	}
+	for _, k := range keys {
+		if k.BlueprintRunID == bpr {
+			t.Errorf("shared blueprint %s reaped while a step is still within the TTL", bpr)
+		}
+	}
+}
+
 // --- helpers ---------------------------------------------------------------
 
 func wireBlobStore(t *testing.T, s *Spawner) {

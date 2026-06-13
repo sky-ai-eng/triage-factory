@@ -507,6 +507,36 @@ func (s *agentRunStore) MarkResumingSystem(ctx context.Context, orgID, runID str
 	return s.MarkResuming(ctx, orgID, runID)
 }
 
+func (s *agentRunStore) ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error) {
+	// Resumable-state runs (open / pending_approval / completed+abort) grouped by
+	// their shared snapshot key (org, blueprint_run_id); a key is reapable once
+	// its newest resumable run parked/terminated before the cutoff. datetime()
+	// normalizes the mixed on-disk timestamp formats (started_at's
+	// CURRENT_TIMESTAMP text vs completed_at's Go-bound value) so the MAX
+	// comparison is consistent; the cutoff binds as a canonical UTC string.
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT org_id, blueprint_run_id
+		FROM runs
+		WHERE status IN ('open', 'pending_approval')
+		   OR (status = 'completed' AND outcome = 'abort')
+		GROUP BY org_id, blueprint_run_id
+		HAVING MAX(datetime(COALESCE(completed_at, started_at))) < datetime(?)
+	`, cutoff.UTC().Format("2006-01-02 15:04:05"))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var keys []domain.SnapshotReapKey
+	for rows.Next() {
+		var k domain.SnapshotReapKey
+		if err := rows.Scan(&k.OrgID, &k.BlueprintRunID); err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, rows.Err()
+}
+
 func (s *agentRunStore) SetSessionSystem(ctx context.Context, orgID, runID, sessionID string) error {
 	return s.SetSession(ctx, orgID, runID, sessionID)
 }
