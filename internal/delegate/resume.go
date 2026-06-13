@@ -133,8 +133,8 @@ func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error
 	taskCopy := *task
 	// The run's blueprint_run_id drives both the resumed env's memory namespace
 	// and processCompletion's namespacing + task disposition. Capture the raw
-	// value and derive the namespace (blueprint_run_id, else the run's own id)
-	// so the resumed agent reads/writes the same _scratch/entity-memory/
+	// value and derive the namespace (blueprint_run_id — every run is a blueprint
+	// step) so the resumed agent reads/writes the same _scratch/entity-memory/
 	// <namespace>/ folder as the initial invocation.
 	blueprintRunID := run.BlueprintRunID
 	namespace := memoryNamespace(blueprintRunID, runID)

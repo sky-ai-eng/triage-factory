@@ -30,7 +30,7 @@ const DefaultSnapshotReapInterval = time.Hour
 
 // SetSnapshotRetentionTTL overrides the snapshot retention window. Call once at
 // startup (tests inject a short value to drive the reaper deterministically). A
-// value below 1 is ignored so a misconfiguration can't reap every snapshot
+// non-positive value is ignored so a misconfiguration can't reap every snapshot
 // immediately.
 func (s *Spawner) SetSnapshotRetentionTTL(d time.Duration) {
 	if d <= 0 {
@@ -59,6 +59,11 @@ func (s *Spawner) RunSnapshotReaper(ctx context.Context, interval time.Duration)
 	if s.agentRuns == nil || s.Storage() == nil {
 		log.Printf("[delegate] snapshot reaper not started: no store / blob store wired")
 		return
+	}
+	// time.NewTicker panics on a non-positive duration; default rather than
+	// crash if a caller / future refactor passes one.
+	if interval <= 0 {
+		interval = DefaultSnapshotReapInterval
 	}
 	s.ReapExpiredSnapshots(ctx)
 	t := time.NewTicker(interval)

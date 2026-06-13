@@ -316,9 +316,17 @@ type AgentRunStore interface {
 	// COALESCE(completed_at, started_at): completed_at is set on the
 	// pending_approval and completed+abort terminal writes, and an `open` run
 	// (no completed_at) falls back to started_at, a safe lower bound since a run
-	// parks open within moments of starting. System-wide / no org scoping — the
-	// retention sweep is a maintenance job that spans tenants; the admin pool is
-	// the right door (BYPASSRLS) since the reaper holds no JWT claims.
+	// parks open within moments of starting.
+	//
+	// Known limit: started_at does not reset across resumes, so a long-lived
+	// open run resumed repeatedly past the TTL is keyed off its initial start,
+	// not its last park — its snapshot can be reaped while still in use. The
+	// blast radius is bounded: the warm worktree (the primary resume path) is
+	// untouched, so this only degrades the cold backstop, and a true `parked_at`
+	// column is deferred to coordinate with the baseline-freeze gate rather than
+	// adding a schema change here. System-wide / no org scoping — the retention
+	// sweep is a maintenance job that spans tenants; the admin pool is the right
+	// door (BYPASSRLS) since the reaper holds no JWT claims.
 	ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error)
 
 	// TokenTotalsSystem mirrors TokenTotals but routes through the
