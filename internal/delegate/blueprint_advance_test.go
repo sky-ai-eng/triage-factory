@@ -171,6 +171,62 @@ func TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow(t *testing.T) 
 	}
 }
 
+// TestResumeBlueprintAfterApproval_AbortFinalizesBlueprintTaskOpen is the Part-1
+// floor fix: a blueprint step that queues an external artifact AND aborts in the
+// same turn parks pending_approval with outcome=abort (the coercion's one
+// exception). On approval, ResumeBlueprintAfterApproval must finalize the
+// blueprint — terminate it aborted, leaving the task open — rather than
+// stranding it in 'running' forever (the bug). Mirrors the handler path: flip
+// pending_approval → completed, then call the resume.
+func TestResumeBlueprintAfterApproval_AbortFinalizesBlueprintTaskOpen(t *testing.T) {
+	s, database, runID, taskID := setupAdvanceFixture(t, "approve-abort")
+	stampBotClaim(t, database, taskID)
+	makeRunBlueprintStep(t, database, runID, taskID)
+	blueprintRunID := "bpr-" + runID
+
+	// Queue a PR for approval, then conclude the same turn with abort: the step
+	// lands pending_approval with outcome=abort (no continue→finish coercion —
+	// abort is the exception the run.go coercion exempts).
+	if err := s.pendingPRs.CreateSystem(context.Background(), runmode.LocalDefaultOrg, domain.PendingPR{
+		ID: "pp-" + runID, RunID: runID, Owner: "o", Repo: "r",
+		HeadBranch: "h", HeadSHA: "sha", BaseBranch: "main", Title: "queued PR",
+	}); err != nil {
+		t.Fatalf("seed pending PR: %v", err)
+	}
+	task := loadTask(t, s, taskID)
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, blueprintRunID, task,
+		res(`{"outcome":"abort","summary":"opened a draft PR","reason":"approach is wrong; needs a human"}`),
+		t.TempDir(), "", "event", "")
+
+	if got := loadRun(t, s, runID); got.Status != "pending_approval" || got.Outcome != "abort" {
+		t.Fatalf("pre-approval run = {status:%q outcome:%q}, want {pending_approval abort}", got.Status, got.Outcome)
+	}
+
+	// Approve: the handler flips pending_approval → completed, then resumes the
+	// blueprint. With the fix, abort is a legal terminal shape (not a strand).
+	if _, err := s.agentRuns.MarkCompletedIfPendingApproval(context.Background(), runmode.LocalDefaultOrg, runID); err != nil {
+		t.Fatalf("flip pending_approval → completed: %v", err)
+	}
+	s.ResumeBlueprintAfterApproval(runmode.LocalDefaultOrg, runID, runmode.LocalDefaultUserID)
+
+	// Blueprint reaches a terminal status (aborted), never stranded running, with
+	// the step's abort reason recorded in the terminal note.
+	var bpStatus, abortReason string
+	if err := database.QueryRow(`SELECT status, COALESCE(abort_reason, '') FROM blueprint_runs WHERE id = ?`, blueprintRunID).Scan(&bpStatus, &abortReason); err != nil {
+		t.Fatalf("read blueprint_run: %v", err)
+	}
+	if bpStatus != "aborted" {
+		t.Errorf("blueprint_run.status = %q, want aborted (approved abort finalizes the blueprint, never strands running)", bpStatus)
+	}
+	if abortReason != "approach is wrong; needs a human" {
+		t.Errorf("blueprint_run.abort_reason = %q, want the step's abort reason recorded", abortReason)
+	}
+	// Abort leaves the task open for a human — never closed done.
+	if got := readTaskStatus(t, database, taskID); got == "done" {
+		t.Errorf("task.status = done; an approved abort must leave the task open")
+	}
+}
+
 // makeRunBlueprintStep turns the fixture's run into a blueprint step: it seeds
 // a blueprint + blueprint_runs row and points the run at it so
 // processCompletion's isBlueprintStep branch trips. Mirrors the setup the

@@ -531,18 +531,26 @@ func blueprintTerminalForResumedStep(stepRun *domain.AgentRun, isFinal bool) (do
 }
 
 // ResumeBlueprintAfterApproval is invoked by the reviews / pending-PR
-// approval handlers after they flip a step run from pending_approval
-// back to completed. It only handles the finish-outcome case (the only
-// shape under which a blueprint step is allowed to land in pending_approval
-// — see the multi-step coercion in spawner.processCompletion, which forces a
-// step that queued a terminal external action to runs.outcome='finish'):
-// terminate the blueprint as completed, close the task, and clean the shared
-// worktree.
+// approval handlers after they flip a step run from pending_approval back to
+// completed. Two outcomes legally reach pending_approval — both gated by the
+// external-action coercion in processCompletion, which forces a step that
+// queued a terminal external action to finish UNLESS the agent explicitly
+// aborted:
 //
-// If the step run's outcome is missing or is not finish, the blueprint stays
-// in 'running' on the assumption that something raced or the step recorded
-// the wrong outcome; a human can inspect blueprint_runs and resolve manually
-// rather than have us guess.
+//   - finish → the work is done; terminate the blueprint completed, which
+//     closes the task and mirrors the Jira ticket to Done. The historical case.
+//   - abort  → the agent queued an artifact (a draft PR / review) and then
+//     deliberately stopped in the same turn ("opened a draft, decided the
+//     approach is wrong"). The approved artifact still landed, but an abort
+//     leaves the task open for a human (the run.go coercion's one exception),
+//     so terminate the blueprint aborted carrying the abort reason. Without
+//     this arm the blueprint stranded in 'running' forever — the bug this
+//     resolves.
+//
+// Any other outcome can't legitimately reach here post-coercion (continue and
+// a missing outcome are both coerced to finish before the pending_approval
+// flip); the blueprint is left running for a human to inspect rather than
+// guessing at a terminal disposition.
 //
 // userID identifies the approving user for audit. Local mode passes
 // runmode.LocalDefaultUserID; multi-mode handlers extract it from JWT
@@ -561,8 +569,22 @@ func (s *Spawner) ResumeBlueprintAfterApproval(orgID, stepRunID, userID string) 
 		log.Printf("[blueprint] approval-resume run %s: read step run: %v", stepRunID, err)
 		return
 	}
-	if domain.RunOutcome(stepRun.Outcome) != domain.RunOutcomeFinish {
-		log.Printf("[blueprint] approval-resume blueprint_run %s step run %s: outcome %q is not finish; blueprint left running", cr.ID, stepRunID, stepRun.Outcome)
+	// Map the approved step's recorded outcome to the blueprint's terminal shape.
+	// finish closes the task; abort leaves it open (terminateBlueprint keys task
+	// disposition off the status). Anything else is an illegal pending_approval
+	// outcome → leave the blueprint running for manual resolution.
+	var (
+		terminalStatus domain.BlueprintRunStatus
+		abortReason    string
+	)
+	switch domain.RunOutcome(stepRun.Outcome) {
+	case domain.RunOutcomeFinish:
+		terminalStatus = domain.BlueprintRunStatusCompleted
+	case domain.RunOutcomeAbort:
+		terminalStatus = domain.BlueprintRunStatusAborted
+		abortReason = stepRun.OutcomeReason
+	default:
+		log.Printf("[blueprint] approval-resume blueprint_run %s step run %s: outcome %q is neither finish nor abort; blueprint left running", cr.ID, stepRunID, stepRun.Outcome)
 		return
 	}
 
@@ -591,5 +613,5 @@ func (s *Spawner) ResumeBlueprintAfterApproval(orgID, stepRunID, userID string) 
 	}
 
 	s.terminateBlueprint(orgID, cr.ID, cr.TaskID, "manual", userID, cr.StartedAt, cfg,
-		domain.BlueprintRunStatusCompleted, "", stepIdx, false)
+		terminalStatus, abortReason, stepIdx, false)
 }
