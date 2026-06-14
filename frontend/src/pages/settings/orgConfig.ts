@@ -39,7 +39,10 @@ export interface OrgSettingsData {
   has_github_pat: boolean
   jira_base_url: string
   jira_poll_interval: string
-  has_jira_pat: boolean
+  // True when a Jira service credential is stored for the org's auth-method
+  // marker (DC PAT or Cloud email + API token) — not the presence of a PAT
+  // specifically, so a Cloud org reports true despite having no PAT.
+  has_jira_credential: boolean
   max_llm_model_tier?: string
   has_anthropic_api_key: boolean
   has_bedrock_credentials: boolean
@@ -61,7 +64,7 @@ export const emptyOrgConfig = (): OrgConfigForm => ({
 
 // orgConfigFromSettings seeds the editable form from a GET response.
 // Token fields stay blank (presence is carried separately via
-// has_github_pat / has_jira_pat) so a save without a re-typed token
+// has_github_pat / has_jira_credential) so a save without a re-typed token
 // leaves the stored secret untouched.
 export function orgConfigFromSettings(org: OrgSettingsData): OrgConfigForm {
   return {

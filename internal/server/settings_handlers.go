@@ -318,10 +318,14 @@ type orgSettingsResponse struct {
 	HasGitHubPAT        bool   `json:"has_github_pat"`
 	JiraBaseURL         string `json:"jira_base_url"`
 	JiraPollInterval    string `json:"jira_poll_interval"`
-	HasJiraPAT          bool   `json:"has_jira_pat"`
-	MaxLLMModelTier     string `json:"max_llm_model_tier,omitempty"`
-	HasAnthropicAPIKey  bool   `json:"has_anthropic_api_key"`
-	HasBedrockCreds     bool   `json:"has_bedrock_credentials"`
+	// HasJiraCredential reports whether a usable Jira service credential is
+	// stored for the org's auth-method marker — a Data Center PAT or a Cloud
+	// email + API token — rather than the presence of a specific key, so a
+	// Cloud org (which has no PAT) still reports true.
+	HasJiraCredential  bool   `json:"has_jira_credential"`
+	MaxLLMModelTier    string `json:"max_llm_model_tier,omitempty"`
+	HasAnthropicAPIKey bool   `json:"has_anthropic_api_key"`
+	HasBedrockCreds    bool   `json:"has_bedrock_credentials"`
 	// MemberCount is the number of members in this org. Feeds the
 	// frontend's N=1 collapse alongside the team member count. A property
 	// of the org, so it rides the org-scope response rather than /api/me.
@@ -368,6 +372,10 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Marker-based "is Jira connected" (matches the integrations-status signal),
+	// so a Cloud org with no PAT still reports a stored credential.
+	_, hasJiraCred := integrations.JiraSystemConfig(creds)
+
 	writeJSON(w, http.StatusOK, orgSettingsResponse{
 		GitHubBaseURL:       ghBaseURL,
 		GitHubPollInterval:  orgSet.GitHubPollInterval.String(),
@@ -375,7 +383,7 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 		HasGitHubPAT:        creds.GitHubPAT != "",
 		JiraBaseURL:         jiraBaseURL,
 		JiraPollInterval:    orgSet.JiraPollInterval.String(),
-		HasJiraPAT:          creds.JiraPAT != "",
+		HasJiraCredential:   hasJiraCred,
 		MaxLLMModelTier:     orgSet.MaxLLMModelTier,
 		HasAnthropicAPIKey:  orgSet.AnthropicAPIKeyRef != "",
 		HasBedrockCreds:     orgSet.BedrockCredentialsRef != "",

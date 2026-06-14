@@ -83,7 +83,7 @@ export default function JiraAccessGroup({
       credCleared = true
       // Follow with an explicit org POST so the URL column also clears,
       // otherwise reloading would show the stale URL prefilled with
-      // has_jira_pat:false. This is a deliberately sparse body: the
+      // has_jira_credential:false. This is a deliberately sparse body: the
       // /api/settings/org handler treats absent fields as nil/unchanged
       // (pointer fields) or empty-omit (interval strings), so the GitHub
       // URL/PAT, poll intervals, and model cap are untouched.
