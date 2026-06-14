@@ -5,7 +5,7 @@
 // the repo) still have a clean exit.
 //
 // What it removes:
-//   - ~/.triagefactory/ in full (db, config, bare repo clones)
+//   - ~/.triagefactory/ in full (db, config, bare repo clones, workspace snapshot blobs)
 //   - the corresponding ~/.claude/projects/<encoded> session JSONL dirs
 //     for any per-project Curator working directories (enumerated
 //     BEFORE ~/.triagefactory/ is deleted, so we can still resolve
@@ -222,7 +222,7 @@ func (p uninstallPlan) empty() bool {
 func (p uninstallPlan) summary() []string {
 	var lines []string
 	if p.hasDataDir {
-		lines = append(lines, fmt.Sprintf("%s/ (database, config, repo clones)", p.dataDir))
+		lines = append(lines, fmt.Sprintf("%s/ (database, config, repo clones, workspace snapshot blobs)", p.dataDir))
 	}
 	if p.hasProjects {
 		lines = append(lines, "Claude Code session entries under ~/.claude/projects/ for any curator projects")
