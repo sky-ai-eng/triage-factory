@@ -1,0 +1,39 @@
+name: linear-release
+
+# Records each GA release in Linear. Scans the commits between the
+# previous v* tag and this one for Linear issue identifiers (TFAC-*,
+# SKY-*) and PR references, then creates the matching release in the
+# Linear pipeline. Pure tracking — it does NOT build or publish
+# anything; release.yml (goreleaser) owns shipping the binaries.
+#
+# Triggered on v* tag push, the same surface as release.yml. The tag is
+# pushed by release-please using RELEASES_TOKEN (a PAT), so — unlike a
+# GITHUB_TOKEN push — it DOES trigger this workflow. (Same reason
+# release-please.yml uses the PAT; see its header.)
+#
+# Requires the LINEAR_ACCESS_KEY repo secret (the pipeline access key
+# generated in the Linear UI under Settings -> Releases).
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  linear-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the CLI can scan commits since the last release.
+          fetch-depth: 0
+
+      - uses: linear/linear-release-action@v0
+        with:
+          access_key: ${{ secrets.LINEAR_ACCESS_KEY }}
+          # Names the Linear release after the git tag (e.g. v1.11.0)
+          # instead of the default commit SHA.
+          version: ${{ github.ref_name }}
