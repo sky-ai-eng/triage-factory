@@ -611,7 +611,11 @@ const githubPatStep: WizardStep = {
       return
     }
     const typedPat = state.org.github_pat.trim()
-    const result = await saveOrgConfig(state.org)
+    // Save the org credential with the TRIMMED token: a whitespace-only entry
+    // collapses to '' ("leave blank to keep current" — so it never clobbers a
+    // good stored token), and a padded real token is normalized — matching the
+    // other capture paths (ConnectGitHub / UserSettings use pat.trim()).
+    const result = await saveOrgConfig({ ...state.org, github_pat: typedPat })
     if (!result.ok) throw new Error(result.error)
     if (typedPat === '') {
       const { githubReady } = await fetchIntegrationsState()
@@ -795,7 +799,9 @@ const jiraAccessStep: WizardStep = {
   persist: async ({ state, orgId, patch }) => {
     if (state.jiraConnected) return
     const typedPat = state.org.jira_pat.trim()
-    const result = await connectJira(state.org.jira_url, state.org.jira_pat)
+    // Connect with the TRIMMED token, normalizing whitespace consistently with
+    // the GitHub path and the other capture paths.
+    const result = await connectJira(state.org.jira_url, typedPat)
     if (!result.ok) throw new Error(result.error)
     // Local-mode convenience — the Jira sibling of the GitHub PAT step's reuse
     // (see there for the rationale + the navigation-safety note). Reuse the
