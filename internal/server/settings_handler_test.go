@@ -607,6 +607,33 @@ func TestJiraConnect_Cloud_RequiresBothHalves(t *testing.T) {
 	}
 }
 
+// TestJiraConnect_Cloud_MismatchHint pins the deployment-mismatch hint: when the
+// user picks Cloud (sends email + token) but the host rejects the credential AND
+// the URL isn't a Cloud host, the 422 message nudges them toward the Data Center
+// scheme rather than only saying "bad token". The hint is advisory — validation,
+// not the hostname, gates storage, so a working combo is never blocked.
+func TestJiraConnect_Cloud_MismatchHint(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	// A non-atlassian.net host (DeploymentForHost → Data Center) that rejects
+	// the Cloud credential.
+	jiraStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"message":"Unauthorized"}`, http.StatusUnauthorized)
+	}))
+	t.Cleanup(jiraStub.Close)
+
+	rec := doJSON(t, s, "POST", "/api/jira/connect",
+		map[string]any{"url": jiraStub.URL, "email": "bot@acme.com", "token": "tok"})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Data Center URL") {
+		t.Errorf("expected a Data Center deployment hint, got: %s", rec.Body.String())
+	}
+}
+
 // TestOrgSettingsPost_JiraPAT_DoesNotWriteUserIdentity covers the org settings
 // save path (POST /api/settings/org with jira_pat → handleOrgSettingsPost):
 // saving the org Jira PAT (PAT_1) validates the token but must not bind the

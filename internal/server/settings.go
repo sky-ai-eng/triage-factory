@@ -347,7 +347,21 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 
 	jiraUser, err := auth.ValidateJira(r.Context(), cfg)
 	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		// A mismatched scheme (Cloud creds against a DC host, or vice versa)
+		// fails validation here rather than being stored — so we never persist a
+		// credential that can't authenticate. When the chosen scheme disagrees
+		// with the URL's host shape, the likeliest cause is the wrong deployment
+		// pick, not a bad token, so append a hint. The host shape is ONLY a hint:
+		// the validation above is the real authority (custom domains exist), so
+		// this never blocks a combo that actually authenticates.
+		msg := err.Error()
+		switch hostDeployment := jira.DeploymentForHost(req.URL); {
+		case cloud && hostDeployment == jira.DeploymentDataCenter:
+			msg += " — this looks like a Data Center URL, which uses a personal access token rather than an email + API token. Double-check your Jira deployment."
+		case !cloud && hostDeployment == jira.DeploymentCloud:
+			msg += " — this looks like an Atlassian Cloud URL, which uses an email + API token rather than a personal access token. Double-check your Jira deployment."
+		}
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": msg})
 		return
 	}
 
