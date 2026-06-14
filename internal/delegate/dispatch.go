@@ -456,8 +456,12 @@ func stepModelOrInherit(stepModel, inherited string) string {
 	if stepModel == "" {
 		return inherited
 	}
-	if st := domain.ParseTier(stepModel); st != domain.TierUnknown && st < domain.ParseTier(inherited) {
-		return stepModel
+	stepTier := domain.ParseTier(stepModel)
+	if stepTier == domain.TierUnknown {
+		return inherited
+	}
+	if stepTier < domain.ParseTier(inherited) {
+		return stepTier.String()
 	}
 	return inherited
 }
