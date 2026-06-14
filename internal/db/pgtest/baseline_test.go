@@ -2393,8 +2393,10 @@ func seedBlueprint(t *testing.T, h *Harness, orgID, creatorID, name string) stri
 }
 
 // seedBlueprintRun mints a blueprint + blueprint_run for taskID so a runs row
-// can satisfy runs.blueprint_run_id (NOT NULL → blueprint_runs(id)). Returns the
-// blueprint_run id. Admin-pool insert (creator routing isn't under test here).
+// can reference blueprint_runs(id). The column is nullable, but the
+// runs_origin_requires_parents CHECK requires it (plus task_id/prompt_id) to be
+// set when origin='blueprint' (the default). Returns the blueprint_run id.
+// Admin-pool insert (creator routing isn't under test here).
 func seedBlueprintRun(t *testing.T, h *Harness, orgID, creatorID, taskID string) string {
 	t.Helper()
 	bpID := seedBlueprint(t, h, orgID, creatorID, "bp-"+taskID[:8])
@@ -2879,9 +2881,14 @@ func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
 	`, orgA, entityA).Scan(&evtID); err != nil {
 		t.Fatalf("seed event: %v", err)
 	}
-	// Parent task + prompt for the runs INSERT case below.
+	// Parent task + prompt + blueprint_run for the runs INSERT case below.
+	// blueprint_run_id must be set so the runs row clears the
+	// runs_origin_requires_parents CHECK (origin defaults to 'blueprint');
+	// otherwise the INSERT would fail at the CHECK level and never exercise
+	// the RLS admin gate this test is asserting.
 	parentTaskID := seedTask(t, h, orgA, alice, entityA, "github:pr:opened")
 	parentPromptID := seedPrompt(t, h, orgA, alice, "p-org-insert")
+	parentBPRunID := seedBlueprintRun(t, h, orgA, alice, parentTaskID)
 
 	// Each INSERT below would succeed without the admin gate (carol IS
 	// an org member, IS on teamA). The gate adds:
@@ -2907,9 +2914,9 @@ func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
 		},
 		{
 			label: "runs",
-			stmt: `INSERT INTO runs (org_id, creator_user_id, team_id, visibility, task_id, prompt_id)
-				VALUES ($1, $2, $3, 'org', $4, $5)`,
-			args: []any{orgA, carol, teamA, parentTaskID, parentPromptID},
+			stmt: `INSERT INTO runs (org_id, creator_user_id, team_id, visibility, task_id, prompt_id, blueprint_run_id)
+				VALUES ($1, $2, $3, 'org', $4, $5, $6)`,
+			args: []any{orgA, carol, teamA, parentTaskID, parentPromptID, parentBPRunID},
 		},
 		{
 			label: "prompts",
