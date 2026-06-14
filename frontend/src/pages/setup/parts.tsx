@@ -140,6 +140,40 @@ export function UrlField({
   )
 }
 
+// ReuseCredentialCheckbox is the local-mode-only "use this token as my own
+// identity too" toggle the org GitHub-PAT and Jira-access steps render under
+// their token field. Checking it reuses the just-entered org credential (PAT_1)
+// to bind the operator's own identity (PAT_2) on connect, so a solo local
+// operator — whose org and personal token are usually the same — doesn't paste
+// it again on the User step. Multi never renders it (org creds stay non-user);
+// the step bodies gate on isLocal.
+export function ReuseCredentialCheckbox({
+  checked,
+  onChange,
+  label,
+  hint,
+}: {
+  checked: boolean
+  onChange: (checked: boolean) => void
+  label: string
+  hint: string
+}) {
+  return (
+    <label className="flex cursor-pointer items-start gap-2.5">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="mt-0.5 accent-accent"
+      />
+      <span className="block">
+        <span className="block text-[13px] text-text-secondary">{label}</span>
+        <span className="mt-0.5 block text-[11px] leading-relaxed text-text-tertiary">{hint}</span>
+      </span>
+    </label>
+  )
+}
+
 // SectionDivider labels a group of steps ("Organization settings" / "Team
 // settings (first team)"). Rendered as the group's heading so the collapsed
 // stack stays screen-reader navigable by section.

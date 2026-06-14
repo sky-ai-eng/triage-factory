@@ -29,7 +29,7 @@ import {
   JIRA_DEPLOYMENT_OPTIONS,
   type JiraDeployment,
 } from '../settings/jiraConnect'
-import { UrlField, ChoiceCards } from './parts'
+import { UrlField, ChoiceCards, ReuseCredentialCheckbox } from './parts'
 import type { StepContext } from './types'
 
 // JiraUrlStep body — just the base-URL field; the reachability probe is the
@@ -94,32 +94,48 @@ export function JiraModeStep({ state, patch, advance }: StepContext) {
 // on success), so there's no Connect button here. A disconnect clears the
 // connection and re-opens the URL step (jiraUrlConfirmed drops). The deployment
 // chosen in JiraModeStep selects which fields render.
-export function JiraAccessStep({ state, patch }: StepContext) {
+export function JiraAccessStep({ state, patch, isLocal }: StepContext) {
+  const deployment = state.jiraDeployment ?? 'data_center'
   return (
-    <JiraAccessGroup
-      value={{
-        jira_url: state.org.jira_url,
-        jira_pat: state.org.jira_pat,
-        jira_email: state.org.jira_email,
-        jira_api_token: state.org.jira_api_token,
-      }}
-      onChange={(p) => patch({ org: { ...state.org, ...p } })}
-      connected={state.jiraConnected}
-      deployment={state.jiraDeployment ?? 'data_center'}
-      onDisconnected={() =>
-        // JiraAccessGroup blanks the credential fields via its onChange immediately
-        // before this fires; rebuild org from this render's state (which still holds
-        // the URL) and drop only the secrets, so a same-session reconnect keeps the
-        // URL + deployment. jiraUrlConfirmed:false re-opens the URL step to re-probe
-        // before reconnecting.
-        patch({
-          jiraConnected: false,
-          jiraUrlConfirmed: false,
-          org: { ...state.org, jira_pat: '', jira_email: '', jira_api_token: '' },
-        })
-      }
-      showBaseUrl={false}
-      bare
-    />
+    <div className="space-y-5">
+      <JiraAccessGroup
+        value={{
+          jira_url: state.org.jira_url,
+          jira_pat: state.org.jira_pat,
+          jira_email: state.org.jira_email,
+          jira_api_token: state.org.jira_api_token,
+        }}
+        onChange={(p) => patch({ org: { ...state.org, ...p } })}
+        connected={state.jiraConnected}
+        deployment={deployment}
+        onDisconnected={() =>
+          // JiraAccessGroup blanks the credential fields via its onChange immediately
+          // before this fires; rebuild org from this render's state (which still holds
+          // the URL) and drop only the secrets, so a same-session reconnect keeps the
+          // URL + deployment. jiraUrlConfirmed:false re-opens the URL step to re-probe
+          // before reconnecting.
+          patch({
+            jiraConnected: false,
+            jiraUrlConfirmed: false,
+            org: { ...state.org, jira_pat: '', jira_email: '', jira_api_token: '' },
+          })
+        }
+        showBaseUrl={false}
+        bare
+      />
+      {/* Local-mode only: reuse the org Jira PAT as the operator's own STORED
+          Jira credential so they don't paste it again on the User step. Shown
+          only while connecting (no PAT to reuse once connected) and only for
+          Data Center — the per-user bind takes a PAT; per-user Cloud (email +
+          API token) is a separate ticket, so there's nothing to reuse yet. */}
+      {isLocal && !state.jiraConnected && deployment === 'data_center' && (
+        <ReuseCredentialCheckbox
+          checked={state.duplicateJiraToUser}
+          onChange={(v) => patch({ duplicateJiraToUser: v })}
+          label="Also use this token as my own Jira identity"
+          hint="Saves re-entering it on the “Your Jira access” step. Your token is stored (not just your username) so Triage Factory can act as you on Jira."
+        />
+      )}
+    </div>
   )
 }

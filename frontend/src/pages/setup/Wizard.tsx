@@ -187,7 +187,11 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                     // the body's recede (exit) and expand (enter). The header
                     // swaps between the active heading and the collapsed bar; the
                     // body only mounts while active. Actions live OUTSIDE the
-                    // height-animated body so the Continue glow is never clipped.
+                    // height-animated body so the Continue glow is never clipped;
+                    // the body can't move its inputs out, so instead it pads
+                    // horizontally (px-1.5) and cancels the pad with -mx-1.5 — the
+                    // fields stay aligned while their focus ring clears the
+                    // overflow-hidden clip edge the height animation requires.
                     return (
                       <li key={step.id} ref={isActive ? cardRef : undefined} className="relative">
                         {/* Marker on the thread, in the left gutter (bg masks the
@@ -245,6 +249,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                                   : { height: 0, opacity: 0, filter: 'blur(6px)' }
                               }
                               transition={reduce ? { duration: 0 } : bodyEase}
+                              className="-mx-1.5 px-1.5"
                               style={{ overflow: 'hidden' }}
                             >
                               <div className="space-y-6 pt-4">

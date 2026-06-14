@@ -188,6 +188,23 @@ export interface WizardState {
   // (validated → stored → account derived) on the Jira user step's Continue,
   // then cleared.
   jiraUserPat: string
+
+  // ── Local-mode credential reuse (the setup-only "use this token as my own
+  //    identity too" checkboxes) ──
+  // When the operator connects the ORG GitHub PAT (PAT_1) in local mode, reuse
+  // that same token to bind their OWN GitHub identity (PAT_2) — so a solo local
+  // operator, whose org and personal token are almost always the same, doesn't
+  // paste it twice. The org GitHub-PAT step's persist drives the existing
+  // identity capture with the typed token on a successful connect; the
+  // User-section identity step then resumes already-bound. Local-only (multi
+  // keeps org creds non-user), a no-op when no token is typed, and it marks ONLY
+  // the User step — never org/team steps — so it can't short-circuit onboarding.
+  // Default mirrors isLocal (seeded in loadOrg); the checkbox lets the operator
+  // opt out.
+  duplicateGitHubToUser: boolean
+  // The Jira sibling: reuse the org Jira PAT as the operator's own STORED Jira
+  // access credential. Same local-only reuse, same default.
+  duplicateJiraToUser: boolean
 }
 
 // Identity the host resolves once and threads to every step. The org/team

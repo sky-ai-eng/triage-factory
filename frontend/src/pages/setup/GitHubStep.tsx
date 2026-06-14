@@ -26,7 +26,7 @@ import GitHubAppPanel from '../settings/GitHubAppPanel'
 import GitHubAppImportForm from '../settings/GitHubAppImportForm'
 import { GitHubAppInstallView } from '../settings/GitHubAppInstallView'
 import { useGitHubAppInstall } from '../../hooks/useGitHubAppInstall'
-import { UrlField, ChoiceCards } from './parts'
+import { UrlField, ChoiceCards, ReuseCredentialCheckbox } from './parts'
 import type { StepContext, GitHubAccessMode, GitHubAppSource, WizardState } from './types'
 import { appImportedPatch } from './githubAppImported'
 
@@ -378,6 +378,18 @@ export function GitHubPatStep({ orgId, isLocal, state, patch }: StepContext) {
         showCloneProtocol={false}
         bare
       />
+      {/* Local-mode only: reuse the org PAT as the operator's own GitHub identity
+          (PAT_2) so they don't paste it again on the User step. Hidden during an
+          App→PAT cross-pick (a re-config teardown, where reuse doesn't apply) and
+          once GitHub is already connected (nothing fresh to reuse). */}
+      {isLocal && !state.githubAppRegistered && !state.githubReady && (
+        <ReuseCredentialCheckbox
+          checked={state.duplicateGitHubToUser}
+          onChange={(v) => patch({ duplicateGitHubToUser: v })}
+          label="Also use this token as my own GitHub identity"
+          hint="Saves re-entering it on the “Your GitHub identity” step. Only your username is read — the token isn’t stored as your identity."
+        />
+      )}
     </div>
   )
 }
