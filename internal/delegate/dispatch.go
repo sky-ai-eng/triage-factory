@@ -414,7 +414,7 @@ func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, ste
 		if err := s.blueprints.SetRunCurrentStepSystem(context.Background(), orgID, br.ID, next); err != nil {
 			log.Printf("[dispatch] warning: set current_step_index for blueprint_run %s: %v", br.ID, err)
 		}
-		if err := s.enqueueBlueprintStep(context.Background(), orgID, br.ID, *task, plan[next].Step(br.BlueprintID), stepRun.Model, triggerType, creatorUserID); err != nil {
+		if err := s.enqueueBlueprintStep(context.Background(), orgID, br.ID, *task, plan[next].Step(br.BlueprintID), stepModelOrInherit(plan[next].Model, stepRun.Model), triggerType, creatorUserID); err != nil {
 			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
 				domain.BlueprintRunStatusFailed, fmt.Sprintf("enqueue step %d: %v", next, err), &stepIdx, false)
 			return
@@ -435,6 +435,31 @@ func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, ste
 		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
 			domain.BlueprintRunStatusAborted, reason, &stepIdx, false)
 	}
+}
+
+// stepModelOrInherit resolves the model a blueprint step runs on from its
+// per-step override (Prompt.Model, frozen into the plan as
+// BlueprintPlanStep.Model) and the run's inherited model — the team default for
+// step 0, the prior step's model on an advance. `inherited` has already been
+// through the org max-tier cap (domain.EffectiveModel in resolveAIModelForTeam).
+//
+// The override is DOWNGRADE-ONLY: it applies only when it names a known, cheaper
+// tier than `inherited`. A same-or-higher — or unrecognized — override is
+// ignored. This lets a step pick a cheaper model (the shipped PR-review
+// blueprint runs Opus reviewers, then drops its aggregator step to Haiku)
+// while making it structurally impossible for a per-step value to escalate past
+// the org cap baked into `inherited`. An empty override inherits unchanged,
+// preserving the long-standing one-model-per-blueprint behavior. Honoring a
+// within-cap escalation would require threading the org cap down to here; no
+// shipped or known use needs it yet.
+func stepModelOrInherit(stepModel, inherited string) string {
+	if stepModel == "" {
+		return inherited
+	}
+	if st := domain.ParseTier(stepModel); st != domain.TierUnknown && st < domain.ParseTier(inherited) {
+		return stepModel
+	}
+	return inherited
 }
 
 // enqueueBlueprintStep mints a queued runs row for step stepIndex of a

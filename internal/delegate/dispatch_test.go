@@ -201,3 +201,35 @@ func mustGetRun(t *testing.T, s *Spawner, org, brID string) *domain.BlueprintRun
 	}
 	return br
 }
+
+// TestStepModelOrInherit pins the per-step model resolution used when a
+// blueprint advances: a per-step Prompt.Model override is
+// downgrade-only — it applies only when it names a known, cheaper tier than the
+// run's already tier-capped inherited model, so the shipped PR-review aggregator
+// can drop to Haiku while no per-step value can ever escalate past the org cap
+// baked into `inherited`. An empty override inherits unchanged.
+func TestStepModelOrInherit(t *testing.T) {
+	cases := []struct {
+		name      string
+		step      string
+		inherited string
+		want      string
+	}{
+		{"empty inherits", "", "opus", "opus"},
+		{"empty inherits sonnet", "", "sonnet", "sonnet"},
+		{"haiku downgrades from opus", "haiku", "opus", "haiku"},
+		{"sonnet downgrades from opus", "sonnet", "opus", "sonnet"},
+		{"haiku downgrades from sonnet", "haiku", "sonnet", "haiku"},
+		{"opus cannot escalate from sonnet", "opus", "sonnet", "sonnet"},
+		{"opus cannot escalate from haiku", "opus", "haiku", "haiku"},
+		{"same tier is a no-op", "opus", "opus", "opus"},
+		{"unknown override is ignored", "gpt-9", "opus", "opus"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := stepModelOrInherit(c.step, c.inherited); got != c.want {
+				t.Errorf("stepModelOrInherit(%q, %q) = %q; want %q", c.step, c.inherited, got, c.want)
+			}
+		})
+	}
+}

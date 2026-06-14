@@ -43,7 +43,9 @@ func TestShippedPromptsParse(t *testing.T) {
 // the prompt slugs so a rename is a visible, reviewed diff.
 func TestShippedPromptSlugsStable(t *testing.T) {
 	want := map[string]bool{
-		"system-pr-review":              true,
+		"system-pr-review-security":     true,
+		"system-pr-review-correctness":  true,
+		"system-pr-review-aggregate":    true,
 		"system-conflict-resolution":    true,
 		"system-ci-fix":                 true,
 		"system-jira-implement":         true,

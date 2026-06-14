@@ -88,6 +88,59 @@ func TestOrgTemplate_UpdateHandler_MatchedSemantics(t *testing.T) {
 	}
 }
 
+// TestOrgTemplate_MaterializesMultiStepPRReview pins that the shipped PR-review
+// blueprint — the one multi-step shipped blueprint — materializes
+// into a team as three ordered steps (security → correctness → aggregate), with
+// the aggregator carrying its per-step haiku model override and the two reviewer
+// steps inheriting (empty model). It is the first shipped blueprint with N>1
+// steps, so it's the first to exercise the org-template multi-step copy path
+// (SeedFromShipped → MaterializeIntoTeam) end to end; a regression that collapsed
+// it back to one step would otherwise ship silently.
+func TestOrgTemplate_MaterializesMultiStepPRReview(t *testing.T) {
+	conn := openInMemorySQLite(t)
+	stores := sqlitestore.New(conn)
+	ctx := t.Context()
+	org := runmode.LocalDefaultOrg
+	team := runmode.LocalDefaultTeamID
+
+	if err := db.BootstrapNewOrg(ctx, stores, org, team, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+		t.Fatalf("BootstrapNewOrg: %v", err)
+	}
+
+	bp, err := stores.Blueprints.GetBySystemSlug(ctx, org, team, "system-pr-review")
+	if err != nil || bp == nil {
+		t.Fatalf("GetBySystemSlug(system-pr-review): bp=%v err=%v", bp, err)
+	}
+	steps, err := stores.Blueprints.ListSteps(ctx, org, bp.ID)
+	if err != nil {
+		t.Fatalf("ListSteps: %v", err)
+	}
+
+	want := []struct{ slug, model string }{
+		{"system-pr-review-security", ""},
+		{"system-pr-review-correctness", ""},
+		{"system-pr-review-aggregate", "haiku"},
+	}
+	if len(steps) != len(want) {
+		t.Fatalf("materialized PR-review blueprint has %d steps; want %d (security, correctness, aggregate)", len(steps), len(want))
+	}
+	for i, w := range want {
+		if steps[i].StepIndex != i {
+			t.Errorf("step %d has step_index %d; want %d (steps must be densely 0..N)", i, steps[i].StepIndex, i)
+		}
+		p, err := stores.Prompts.Get(ctx, org, steps[i].StepPromptID)
+		if err != nil || p == nil {
+			t.Fatalf("Get step %d prompt: p=%v err=%v", i, p, err)
+		}
+		if p.SystemSlug != w.slug {
+			t.Errorf("step %d prompt slug = %q; want %q (wrong order or wrong prompt)", i, p.SystemSlug, w.slug)
+		}
+		if p.Model != w.model {
+			t.Errorf("step %d (%s) model = %q; want %q", i, w.slug, p.Model, w.model)
+		}
+	}
+}
+
 // TestOrgTemplate_CopyOnly_OwnerAndUniqueConstraint pins the template mirror of
 // the copy-only invariant: a template prompt is a step in at most one template
 // blueprint (the unique index refuses a second), and BlueprintStepPromptOwner

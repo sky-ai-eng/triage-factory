@@ -34,14 +34,17 @@ PR Creation:
 
 Review Lifecycle (managed locally, submitted atomically):
   gh pr start-review <number> [--repo o/r]                Start a local pending review
-  gh pr add-review-comment <review_id> --file <path> --line <N> --body <text> [--start-line <N>] [--severity <level>]
+  gh pr add-review-comment <review_id> --file <path> --line <N> (--body <text> | --body-file <path>) [--start-line <N>] [--severity <level>]
+                                                          --body-file reads the body from a file ("-" for
+                                                          stdin), mutually exclusive with --body — safer
+                                                          than a heredoc when the body has backticks.
                                                           --severity tags the finding's level. Valid
                                                           values (case-insensitive): BLOCKER, MAJOR,
                                                           MINOR, CLEAN. Renders as a chip in the human
                                                           approval UI and a badge on the posted comment.
                                                           Optional — omit for an un-badged comment.
   gh pr comment-list-pending <review_id>                  List pending review comments
-  gh pr submit-review <review_id> --event <approve|comment|request_changes> --body <text>
+  gh pr submit-review <review_id> --event <approve|comment|request_changes> (--body <text> | --body-file <path>)
 
 Direct Comments (hit GitHub API immediately):
   gh pr add-comment <number> --body <text>                Add top-level comment

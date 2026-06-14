@@ -28,8 +28,18 @@ var GHToolsTemplate string
 //go:embed prompts/jira-tools.txt
 var JiraToolsTemplate string
 
-//go:embed prompts/pr-review.txt
-var PRReviewPromptTemplate string
+// PR review is a three-step blueprint: a security pass and a
+// correctness pass each write findings to _scratch, then a cheap aggregator
+// posts and submits the review. See ShippedBlueprints.
+//
+//go:embed prompts/pr-review-security.txt
+var PRReviewSecurityPromptTemplate string
+
+//go:embed prompts/pr-review-correctness.txt
+var PRReviewCorrectnessPromptTemplate string
+
+//go:embed prompts/pr-review-aggregate.txt
+var PRReviewAggregatePromptTemplate string
 
 //go:embed prompts/jira-implement.txt
 var JiraImplementPromptTemplate string

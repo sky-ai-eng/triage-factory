@@ -301,12 +301,12 @@ func TestBootstrapNewOrg_SeedsFullStack(t *testing.T) {
 
 	// Prompts seeded. The id is a random UUID per team copy now (SKY-380),
 	// so resolve by system_slug rather than by id.
-	got, err := stores.Prompts.GetBySystemSlug(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, "system-pr-review")
+	got, err := stores.Prompts.GetBySystemSlug(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, "system-pr-review-security")
 	if err != nil {
 		t.Fatalf("Get prompt: %v", err)
 	}
 	if got == nil {
-		t.Error("shipped prompt system-pr-review missing after BootstrapNewOrg")
+		t.Error("shipped prompt system-pr-review-security missing after BootstrapNewOrg")
 	}
 
 	// Handlers seeded on the default team.

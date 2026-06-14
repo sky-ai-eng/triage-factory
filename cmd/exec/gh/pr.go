@@ -287,15 +287,38 @@ func prStartReview(client ghAPI, host agenthost.Client, args []string) {
 
 func prAddReviewComment(host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: gh pr add-review-comment <review_id> --file <path> --line <N> --body <text> [--start-line <N>] [--severity <blocker|major|minor|clean>]")
+		exitErr("usage: gh pr add-review-comment <review_id> --file <path> --line <N> (--body <text> | --body-file <path>) [--start-line <N>] [--severity <blocker|major|minor|clean>]")
 	}
 	reviewID := args[0]
 	file := flagVal(args, "--file")
 	line := mustInt(flagVal(args, "--line"), "line")
 	body := flagVal(args, "--body")
+	bodyFile := flagVal(args, "--body-file")
+
+	// --body-file mirrors `pr create`: read the comment body from a file (or
+	// "-" for stdin) so a multi-line body — diagnosis prose plus a ```suggestion
+	// block whose backticks would otherwise need shell escaping — can be passed
+	// without a fragile heredoc. The blueprint review aggregator relies on this
+	// to relay each reviewer's verbatim body straight from its findings file.
+	if body != "" && bodyFile != "" {
+		exitErr("--body and --body-file are mutually exclusive; pass one or the other")
+	}
+	if bodyFile != "" {
+		var data []byte
+		var err error
+		if bodyFile == "-" {
+			data, err = io.ReadAll(os.Stdin)
+		} else {
+			data, err = os.ReadFile(bodyFile)
+		}
+		if err != nil {
+			exitErr("read --body-file: " + err.Error())
+		}
+		body = string(data)
+	}
 
 	if file == "" || body == "" {
-		exitErr("--file and --body are required")
+		exitErr("--file and --body (or --body-file) are required")
 	}
 
 	// --severity tags the finding's level; surfaced as a chip in the
@@ -402,11 +425,32 @@ func prAddReviewComment(host agenthost.Client, args []string) {
 
 func prSubmitReview(client ghAPI, host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: gh pr submit-review <review_id> --event <approve|comment|request_changes> --body <text>")
+		exitErr("usage: gh pr submit-review <review_id> --event <approve|comment|request_changes> (--body <text> | --body-file <path>)")
 	}
 	reviewID := args[0]
 	event := flagVal(args, "--event")
 	body := flagVal(args, "--body")
+	bodyFile := flagVal(args, "--body-file")
+
+	// --body-file mirrors `pr create` / `add-review-comment`: read the summary
+	// body from a file (or "-" for stdin), so the blueprint review aggregator
+	// can assemble a multi-line summary without shell escaping.
+	if body != "" && bodyFile != "" {
+		exitErr("--body and --body-file are mutually exclusive; pass one or the other")
+	}
+	if bodyFile != "" {
+		var data []byte
+		var err error
+		if bodyFile == "-" {
+			data, err = io.ReadAll(os.Stdin)
+		} else {
+			data, err = os.ReadFile(bodyFile)
+		}
+		if err != nil {
+			exitErr("read --body-file: " + err.Error())
+		}
+		body = string(data)
+	}
 
 	if event == "" {
 		exitErr("--event is required (approve, comment, request_changes)")

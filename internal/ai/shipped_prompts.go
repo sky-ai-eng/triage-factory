@@ -22,11 +22,16 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // This stays the content source; only the seed writer changed.
 func ShippedPrompts() []domain.Prompt {
 	return []domain.Prompt{
-		// Default PR review prompt — manual only. The user picks when
-		// to review a PR; no automation makes sense for reviewing
-		// (including reviewing one's own draft — that's just running
-		// this prompt by hand).
-		{SystemSlug: "system-pr-review", Name: "PR Code Review", Body: PRReviewPromptTemplate, Source: "system"},
+		// PR review is a three-step blueprint (system-pr-review, see
+		// ShippedBlueprints): a security pass and a correctness pass each
+		// write findings to _scratch, then a cheap aggregator posts and
+		// submits the review. The two reviewer steps inherit the team
+		// default model; the aggregator is mechanical assembly, so it runs
+		// on haiku (a downgrade — stepModelOrInherit never lets a per-step
+		// model escalate past the team's tier).
+		{SystemSlug: "system-pr-review-security", Name: "PR Review: Security", Body: PRReviewSecurityPromptTemplate, Source: "system"},
+		{SystemSlug: "system-pr-review-correctness", Name: "PR Review: Correctness", Body: PRReviewCorrectnessPromptTemplate, Source: "system"},
+		{SystemSlug: "system-pr-review-aggregate", Name: "PR Review: Assemble & Submit", Body: PRReviewAggregatePromptTemplate, Source: "system", Model: "haiku"},
 
 		// Merge conflict resolution prompt — auto-fired on merge
 		// conflicts on the user's own PRs via the matching trigger.
@@ -55,18 +60,41 @@ func ShippedPrompts() []domain.Prompt {
 	}
 }
 
-// ShippedBlueprints returns one 1-step blueprint per shipped prompt: a
-// blueprint reuses the wrapped prompt's system_slug (distinct table, no
-// collision) and its single step points at that prompt's slug. Every shipped
-// prompt is either fired by a trigger (CI-fix, conflict-resolution, PR-review,
-// jira-implement, fix-review-feedback) or used by the curator
-// (system-ticket-spec), so wrapping each one keeps both the trigger→blueprint
-// and project→blueprint references resolvable. The seeder seeds prompts first,
-// then these blueprints + steps, then wires triggers to the blueprint slugs.
+// ShippedBlueprints returns the shipped blueprints. Most are a 1-step blueprint
+// wrapping a single prompt: the blueprint reuses the wrapped prompt's
+// system_slug (distinct table, no collision) and its single step points at that
+// prompt's slug. Each such prompt is either fired by a trigger
+// (CI-fix, conflict-resolution, jira-implement, fix-review-feedback) or used by
+// the curator (system-ticket-spec), so wrapping it keeps both the
+// trigger→blueprint and project→blueprint references resolvable.
+//
+// The exception is PR review (system-pr-review), the one multi-step shipped
+// blueprint: security → correctness → aggregate. Its step prompts
+// are NOT auto-wrapped below — a prompt can be a step in at most one blueprint
+// (unique index on blueprint_steps.step_prompt_id), and these three belong to
+// this chain. The blueprint keeps the slug `system-pr-review` so the
+// system-trigger-pr-review handler's blueprint_id still resolves.
+//
+// The seeder seeds prompts first, then these blueprints + steps, then wires
+// triggers to the blueprint slugs.
 func ShippedBlueprints() []domain.SeedBlueprint {
-	prompts := ShippedPrompts()
-	out := make([]domain.SeedBlueprint, 0, len(prompts))
-	for _, p := range prompts {
+	prReviewSteps := []string{
+		"system-pr-review-security",
+		"system-pr-review-correctness",
+		"system-pr-review-aggregate",
+	}
+	isPRReviewStep := make(map[string]bool, len(prReviewSteps))
+	for _, s := range prReviewSteps {
+		isPRReviewStep[s] = true
+	}
+
+	out := []domain.SeedBlueprint{
+		{SystemSlug: "system-pr-review", Name: "PR Code Review", StepPromptSlugs: prReviewSteps},
+	}
+	for _, p := range ShippedPrompts() {
+		if isPRReviewStep[p.SystemSlug] {
+			continue // a step of the multi-step PR-review blueprint, not its own wrapper
+		}
 		out = append(out, domain.SeedBlueprint{
 			SystemSlug:      p.SystemSlug,
 			Name:            p.Name,
