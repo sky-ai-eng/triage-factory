@@ -1,8 +1,11 @@
 package server
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -11,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -527,6 +531,79 @@ func TestJiraConnect_DoesNotWriteUserIdentity(t *testing.T) {
 	}
 	if accountID != "user-acct" || displayName != "User Name" {
 		t.Errorf("org Jira connect overwrote the caller's identity: got (%q, %q), want (user-acct, User Name)", accountID, displayName)
+	}
+}
+
+// TestJiraConnect_Cloud_StoresAPITokenCredential covers the Cloud org-access
+// variant: posting an email + API token validates against the Cloud config
+// (Basic auth, REST v3 /myself) and stores the Cloud credential pair plus the
+// auth-method marker, so the system resolver later rebuilds a Cloud client. No
+// DC PAT is written.
+func TestJiraConnect_Cloud_StoresAPITokenCredential(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit() // in-memory keychain — the sandbox has no dbus backend
+	s := newTestServer(t)
+	ctx := t.Context()
+
+	var gotAuth, gotPath string
+	jiraStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth, gotPath = r.Header.Get("Authorization"), r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"accountId":"cloud-bot","displayName":"Cloud Bot"}`)
+	}))
+	t.Cleanup(jiraStub.Close)
+
+	rec := doJSON(t, s, "POST", "/api/jira/connect",
+		map[string]any{"url": jiraStub.URL, "email": "bot@acme.com", "token": "cloud_tok"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+
+	// Validated through the Cloud config: Basic email:token against REST v3.
+	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("bot@acme.com:cloud_tok"))
+	if gotAuth != wantAuth {
+		t.Errorf("validate Authorization = %q, want %q (Cloud uses Basic email:token)", gotAuth, wantAuth)
+	}
+	if gotPath != "/rest/api/3/myself" {
+		t.Errorf("validate path = %q, want /rest/api/3/myself (Cloud uses REST v3)", gotPath)
+	}
+
+	// Stored under the Cloud keys + marker; no DC PAT written.
+	creds, err := integrations.Load(ctx, s.secrets, runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if creds.JiraEmail != "bot@acme.com" || creds.JiraAPIToken != "cloud_tok" {
+		t.Errorf("stored cloud creds = (%q, %q), want (bot@acme.com, cloud_tok)", creds.JiraEmail, creds.JiraAPIToken)
+	}
+	if creds.JiraAuthMethod != string(jira.AuthMethodCloudAPIToken) {
+		t.Errorf("auth-method marker = %q, want %q", creds.JiraAuthMethod, jira.AuthMethodCloudAPIToken)
+	}
+	if creds.JiraPAT != "" {
+		t.Errorf("DC PAT unexpectedly stored on a Cloud connect: %q", creds.JiraPAT)
+	}
+}
+
+// TestJiraConnect_Cloud_RequiresBothHalves pins that a half-filled Cloud form
+// (email without token) is a 400 and stores nothing, rather than silently
+// falling through to the Data Center path.
+func TestJiraConnect_Cloud_RequiresBothHalves(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	ctx := t.Context()
+
+	rec := doJSON(t, s, "POST", "/api/jira/connect",
+		map[string]any{"url": "https://acme.atlassian.net", "email": "bot@acme.com"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+	creds, err := integrations.Load(ctx, s.secrets, runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if creds.JiraEmail != "" || creds.JiraAPIToken != "" || creds.JiraAuthMethod != "" {
+		t.Errorf("partial Cloud form persisted credentials: %+v", creds)
 	}
 }
 

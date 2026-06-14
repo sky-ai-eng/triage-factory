@@ -1,10 +1,13 @@
 import { Section, Field, inputClass, glassInputClass } from './primitives'
 import { toast } from '../../components/Toast/toastStore'
 import { readError } from '../../lib/api'
+import type { JiraDeployment } from './jiraConnect'
 
 interface JiraAccessValue {
   jira_url: string
   jira_pat: string
+  jira_email: string
+  jira_api_token: string
 }
 
 /**
@@ -23,8 +26,12 @@ interface JiraAccessValue {
  * Project tracking + status rules are TEAM-level (a separate surface), so
  * they live outside this group.
  *
- * Multi-mode Jira OAuth (3LO/2LO) is unbuilt; until it lands the only
- * connect affordance is this PAT path, which works in both modes.
+ * Which credential fields render is driven by the `deployment` prop, chosen
+ * explicitly upstream (the wizard's deployment-picker step / the Settings
+ * deployment toggle), not sniffed from the URL: Cloud shows the Atlassian
+ * account email + API token (Basic auth); Data Center shows the single PAT
+ * (Bearer). Cloud OAuth (one-click Connect) is a later Cloud-tier ticket;
+ * until it lands the paste paths here are the only connect affordances.
  *
  * showBaseUrl (default true) mirrors GitHubAccessGroup: the setup wizard
  * confirms the Jira URL in its own reachability sub-step and feeds it in via
@@ -40,6 +47,7 @@ export default function JiraAccessGroup({
   value,
   onChange,
   connected,
+  deployment,
   onDisconnected,
   showBaseUrl = true,
   bare = false,
@@ -47,10 +55,17 @@ export default function JiraAccessGroup({
   value: JiraAccessValue
   onChange: (patch: Partial<JiraAccessValue>) => void
   connected: boolean
+  // The deployment chosen upstream (the wizard's deployment-picker step / the
+  // Settings deployment toggle). It decides which credential fields render —
+  // Cloud shows the Atlassian email + API token, Data Center the single PAT.
+  // The choice is NOT inferred from the URL here: it's made explicitly so the
+  // fields the user fills always match the scheme the connect sends.
+  deployment: JiraDeployment
   onDisconnected?: () => void
   showBaseUrl?: boolean
   bare?: boolean
 }) {
+  const cloud = deployment === 'cloud'
   const field = bare ? glassInputClass : inputClass
 
   const disconnect = async () => {
@@ -93,7 +108,7 @@ export default function JiraAccessGroup({
       )
       if (!credCleared) return
     }
-    onChange({ jira_url: '', jira_pat: '' })
+    onChange({ jira_url: '', jira_pat: '', jira_email: '', jira_api_token: '' })
     onDisconnected?.()
   }
 
@@ -132,15 +147,51 @@ export default function JiraAccessGroup({
               />
             </Field>
           )}
-          <Field label="Personal Access Token">
-            <input
-              type="password"
-              placeholder="Jira Personal Access Token"
-              value={value.jira_pat}
-              onChange={(e) => onChange({ jira_pat: e.target.value })}
-              className={field}
-            />
-          </Field>
+          {cloud ? (
+            <>
+              <Field label="Account email">
+                <input
+                  type="email"
+                  placeholder="bot@yourcompany.com"
+                  autoComplete="email"
+                  value={value.jira_email}
+                  onChange={(e) => onChange({ jira_email: e.target.value })}
+                  className={field}
+                />
+              </Field>
+              <Field label="API token">
+                <input
+                  type="password"
+                  placeholder="Atlassian API token"
+                  value={value.jira_api_token}
+                  onChange={(e) => onChange({ jira_api_token: e.target.value })}
+                  className={field}
+                />
+                <p className="mt-1.5 text-[11px] leading-snug text-text-tertiary">
+                  Create one at{' '}
+                  <a
+                    href="https://id.atlassian.com/manage-profile/security/api-tokens"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-accent hover:underline"
+                  >
+                    id.atlassian.com/manage/api-tokens
+                  </a>
+                  . Paired with the account email above for Basic auth.
+                </p>
+              </Field>
+            </>
+          ) : (
+            <Field label="Personal Access Token">
+              <input
+                type="password"
+                placeholder="Jira Personal Access Token"
+                value={value.jira_pat}
+                onChange={(e) => onChange({ jira_pat: e.target.value })}
+                className={field}
+              />
+            </Field>
+          )}
         </div>
       ) : (
         /* Connected — status + (bare) the Disconnect the carded layout puts on

@@ -45,7 +45,8 @@ import PollerTimingGroup from '../PollerTimingGroup'
 import JiraAccessGroup from '../JiraAccessGroup'
 import TeamManagementSection from '../../../components/TeamManagementSection'
 import { saveOrgConfig, type OrgConfigForm } from '../orgConfig'
-import { connectJira } from '../jiraConnect'
+import { connectJira, JIRA_DEPLOYMENT_OPTIONS } from '../jiraConnect'
+import { ChoiceCards } from '../../setup/parts'
 import GitHubAccessControl from './GitHubAccessControl'
 import SettingsSection from './SettingsSection'
 
@@ -322,14 +323,23 @@ export default function OrgSettings({
           summary={`Connected · ${hostOf(baseline.org.jira_url)}`}
         >
           <JiraAccessGroup
-            value={{ jira_url: draft.org.jira_url, jira_pat: draft.org.jira_pat }}
+            value={{
+              jira_url: draft.org.jira_url,
+              jira_pat: draft.org.jira_pat,
+              jira_email: draft.org.jira_email,
+              jira_api_token: draft.org.jira_api_token,
+            }}
             onChange={(p) => patch({ org: { ...draft.org, ...p } })}
             connected
+            // The connected view shows only a status line, so the deployment
+            // doesn't pick fields here; loadOrg seeded it from the stored host.
+            deployment={draft.jiraDeployment ?? 'data_center'}
             onDisconnected={() => {
               setDraft((d) => ({
                 ...d,
                 jiraConnected: false,
-                org: { ...d.org, jira_url: '', jira_pat: '' },
+                jiraDeployment: null,
+                org: { ...d.org, jira_url: '', jira_pat: '', jira_email: '', jira_api_token: '' },
               }))
               setBaseline((b) => ({ ...b, jiraConnected: false, org: { ...b.org, jira_url: '' } }))
             }}
@@ -342,18 +352,31 @@ export default function OrgSettings({
           summary="Not connected"
           saveLabel="Connect"
           // dirty reflects any draft change against the baseline — it arms the
-          // discard guard + unsaved dot, so a partially-typed URL/PAT isn't
-          // silently dropped on collapse. The "needs BOTH fields" rule that
-          // gates the connect lives in saveDisabled instead (mirrors the old
-          // Connect button's disabled condition).
-          dirty={draft.org.jira_url !== baseline.org.jira_url || draft.org.jira_pat.trim() !== ''}
-          saveDisabled={draft.org.jira_url.trim() === '' || draft.org.jira_pat.trim() === ''}
+          // discard guard + unsaved dot, so a partially-typed URL/credential or a
+          // deployment pick isn't silently dropped on collapse. The "needs the
+          // right fields filled" rule that gates the connect lives in
+          // saveDisabled instead (mirrors the old Connect button's condition).
+          dirty={
+            draft.org.jira_url !== baseline.org.jira_url ||
+            draft.jiraDeployment !== null ||
+            draft.org.jira_pat.trim() !== '' ||
+            draft.org.jira_email.trim() !== '' ||
+            draft.org.jira_api_token.trim() !== ''
+          }
+          saveDisabled={
+            draft.org.jira_url.trim() === '' ||
+            draft.jiraDeployment === null ||
+            (draft.jiraDeployment === 'cloud'
+              ? draft.org.jira_email.trim() === '' || draft.org.jira_api_token.trim() === ''
+              : draft.org.jira_pat.trim() === '')
+          }
           saving={isSaving('jira-connect')}
           onSave={async () => {
             setSavingKey('jira-connect', true)
             try {
               const url = normalizeBaseUrl(draft.org.jira_url)
-              const result = await connectJira(url, draft.org.jira_pat)
+              const deployment = draft.jiraDeployment ?? 'data_center'
+              const result = await connectJira(url, deployment, draft.org)
               if (!result.ok) {
                 toast.error(result.error)
                 return false
@@ -361,23 +384,51 @@ export default function OrgSettings({
               setDraft((d) => ({
                 ...d,
                 jiraConnected: true,
-                org: { ...d.org, jira_url: url, jira_pat: '' },
+                jiraDeployment: deployment,
+                org: { ...d.org, jira_url: url, jira_pat: '', jira_api_token: '' },
               }))
-              setBaseline((b) => ({ ...b, jiraConnected: true, org: { ...b.org, jira_url: url } }))
+              setBaseline((b) => ({
+                ...b,
+                jiraConnected: true,
+                jiraDeployment: deployment,
+                org: { ...b.org, jira_url: url },
+              }))
               toast.success('Jira connected')
               return true
             } finally {
               setSavingKey('jira-connect', false)
             }
           }}
-          onCancel={() => revertOrg(['jira_url', 'jira_pat'])}
+          onCancel={() => {
+            revertOrg(['jira_url', 'jira_pat', 'jira_email', 'jira_api_token'])
+            patch({ jiraDeployment: baseline.jiraDeployment })
+          }}
         >
-          <JiraAccessGroup
-            value={{ jira_url: draft.org.jira_url, jira_pat: draft.org.jira_pat }}
-            onChange={(p) => patch({ org: { ...draft.org, ...p } })}
-            connected={false}
-            bare
-          />
+          {/* Deployment picker first (the explicit Cloud-vs-DC choice), then the
+              matching credential fields once a deployment is chosen — the
+              Settings analog of the wizard's mode → access step split. */}
+          <div className="space-y-4">
+            <ChoiceCards
+              ariaLabel="Jira deployment"
+              options={JIRA_DEPLOYMENT_OPTIONS}
+              selected={draft.jiraDeployment}
+              onChoose={(d) => patch({ jiraDeployment: d })}
+            />
+            {draft.jiraDeployment !== null && (
+              <JiraAccessGroup
+                value={{
+                  jira_url: draft.org.jira_url,
+                  jira_pat: draft.org.jira_pat,
+                  jira_email: draft.org.jira_email,
+                  jira_api_token: draft.org.jira_api_token,
+                }}
+                onChange={(p) => patch({ org: { ...draft.org, ...p } })}
+                connected={false}
+                deployment={draft.jiraDeployment}
+                bare
+              />
+            )}
+          </div>
         </SettingsSection>
       )}
 

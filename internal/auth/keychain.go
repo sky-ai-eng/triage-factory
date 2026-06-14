@@ -41,6 +41,17 @@ type Credentials struct {
 	GitHubPAT string
 	JiraURL   string
 	JiraPAT   string
+
+	// Jira Cloud service credential (Basic auth, REST v3). JiraEmail +
+	// JiraAPIToken are the Atlassian account email and API token; JiraPAT
+	// above stays the Data Center service credential (Bearer, REST v2).
+	// JiraAuthMethod is the jira.AuthMethod marker ("dc_pat" |
+	// "cloud_api_token", carried as a string) recording which scheme the
+	// stored credential uses, so the resolver knows which fields to read. An
+	// empty marker is a pre-Cloud org and resolves as Data Center.
+	JiraEmail      string
+	JiraAPIToken   string
+	JiraAuthMethod string
 }
 
 // EnvProvided returns which credential groups have values supplied by

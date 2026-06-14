@@ -19,6 +19,12 @@ export interface OrgConfigForm {
   github_poll_interval: string
   jira_url: string
   jira_pat: string
+  // Jira Cloud service credential (Basic auth): the Atlassian account email +
+  // API token. Data Center uses jira_pat (Bearer) instead; the onboarding
+  // deployment picker decides which pair the connect sends. Both stay blank on
+  // load (secrets never leave the vault) like jira_pat.
+  jira_email: string
+  jira_api_token: string
   jira_poll_interval: string
   max_llm_model_tier: string
 }
@@ -47,6 +53,8 @@ export const emptyOrgConfig = (): OrgConfigForm => ({
   github_poll_interval: '5m0s',
   jira_url: '',
   jira_pat: '',
+  jira_email: '',
+  jira_api_token: '',
   jira_poll_interval: '5m0s',
   max_llm_model_tier: '',
 })
@@ -63,6 +71,8 @@ export function orgConfigFromSettings(org: OrgSettingsData): OrgConfigForm {
     github_poll_interval: org.github_poll_interval,
     jira_url: org.jira_base_url || '',
     jira_pat: '',
+    jira_email: '',
+    jira_api_token: '',
     jira_poll_interval: org.jira_poll_interval,
     max_llm_model_tier: org.max_llm_model_tier || '',
   }

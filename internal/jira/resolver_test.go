@@ -2,6 +2,7 @@ package jira
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"testing"
 
@@ -134,6 +135,77 @@ func TestForSystem_CanonicalizesBaseURL(t *testing.T) {
 	}
 	if _, path := rec.read(); path != "/rest/api/2/issue/PROJ-1" {
 		t.Errorf("path = %q, want /rest/api/2/issue/PROJ-1 (trailing slash not trimmed)", path)
+	}
+}
+
+// TestForSystem_BuildsCloudClient pins the Cloud system path: an org whose
+// stored auth-method marker is cloud_api_token resolves to a Basic / REST v3
+// client built from the email + API token, talking to the org host.
+func TestForSystem_BuildsCloudClient(t *testing.T) {
+	srv, rec := captureServer(t, `{"key":"PROJ-1"}`)
+	secrets := &fakeSecrets{sys: map[string]string{
+		keyJiraURL:        srv.URL,
+		keyJiraAuthMethod: string(AuthMethodCloudAPIToken),
+		keyJiraEmail:      "bot@acme.com",
+		keyJiraAPIToken:   "cloud-token",
+	}}
+	r := NewResolver(secrets, &fakeOrgs{})
+
+	c, err := r.ForSystem(context.Background(), testOrgID)
+	if err != nil {
+		t.Fatalf("ForSystem: %v", err)
+	}
+	if _, err := c.GetIssue(context.Background(), "PROJ-1"); err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	auth, path := rec.read()
+	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("bot@acme.com:cloud-token"))
+	if auth != wantAuth {
+		t.Errorf("Authorization = %q, want %q (cloud uses Basic email:token)", auth, wantAuth)
+	}
+	if path != "/rest/api/3/issue/PROJ-1" {
+		t.Errorf("path = %q, want /rest/api/3/issue/PROJ-1 (cloud uses REST v3)", path)
+	}
+}
+
+// TestForSystem_CloudMissingCredential pins that a Cloud marker without the
+// email/token pair is ErrNoJiraSystemCredential — the resolver never falls back
+// to a DC PAT for a Cloud-marked org.
+func TestForSystem_CloudMissingCredential(t *testing.T) {
+	cases := map[string]map[string]string{
+		"no email or token": {keyJiraURL: "https://acme.atlassian.net", keyJiraAuthMethod: string(AuthMethodCloudAPIToken)},
+		"token only":        {keyJiraURL: "https://acme.atlassian.net", keyJiraAuthMethod: string(AuthMethodCloudAPIToken), keyJiraAPIToken: "t"},
+		"email only":        {keyJiraURL: "https://acme.atlassian.net", keyJiraAuthMethod: string(AuthMethodCloudAPIToken), keyJiraEmail: "e@x.com"},
+	}
+	for name, sys := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := NewResolver(&fakeSecrets{sys: sys}, &fakeOrgs{}).ForSystem(context.Background(), testOrgID)
+			if !errors.Is(err, ErrNoJiraSystemCredential) {
+				t.Errorf("ForSystem err = %v, want ErrNoJiraSystemCredential", err)
+			}
+		})
+	}
+}
+
+// TestDeploymentForMarker pins the marker→deployment routing: a stored marker is
+// authoritative (and overrides the host shape); an absent marker falls back to
+// host-shape detection, so a pre-Cloud org (DC host, no marker) stays DC and a
+// Cloud host with no marker is inferred Cloud.
+func TestDeploymentForMarker(t *testing.T) {
+	cases := []struct {
+		method AuthMethod
+		host   string
+		want   Deployment
+	}{
+		{AuthMethodCloudAPIToken, "https://jira.dc.example", DeploymentCloud},
+		{AuthMethodDCPAT, "https://acme.atlassian.net", DeploymentDataCenter},
+		{"", "https://acme.atlassian.net", DeploymentCloud},
+		{"", "https://jira.dc.example", DeploymentDataCenter},
+	}
+	for _, tc := range cases {
+		if got := DeploymentForMarker(tc.method, tc.host); got != tc.want {
+			t.Errorf("DeploymentForMarker(%q, %q) = %q, want %q", tc.method, tc.host, got, tc.want)
+		}
 	}
 }
 

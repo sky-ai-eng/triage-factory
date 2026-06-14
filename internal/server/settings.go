@@ -285,9 +285,16 @@ func projectKeysFromConfigs(projects []jiraProjectConfig) []string {
 	return keys
 }
 
-// handleJiraConnect validates and stores Jira credentials without saving
-// the rest of the settings. This powers the two-stage settings flow: connect
-// first, then configure projects and statuses.
+// handleJiraConnect validates and stores the org's Jira service credential
+// without saving the rest of the settings. This powers the two-stage settings
+// flow: connect first, then configure projects and statuses.
+//
+// It accepts both backends, keyed off the credential shape the client sends
+// (the deployment is chosen explicitly in the onboarding step's picker): a
+// Cloud site is connected with an Atlassian API token (email + token, Basic /
+// REST v3); a Data Center host with a personal access token (Bearer / REST
+// v2). The chosen scheme is recorded as an auth-method marker so the system
+// resolver (jira.Resolver.ForSystem) rebuilds the matching client.
 //
 // Requires an active org because credentials write through the SecretStore
 // — see handleSettingsPost for the multi-mode rationale.
@@ -298,18 +305,47 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var req struct {
-		URL string `json:"url"`
-		PAT string `json:"pat"`
+		URL   string `json:"url"`
+		PAT   string `json:"pat"`
+		Email string `json:"email"`
+		Token string `json:"token"`
 	}
 	if !decodeJSON(w, r, &req, "") {
 		return
 	}
-	if req.URL == "" || req.PAT == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url and pat are required"})
+	if req.URL == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url is required"})
 		return
 	}
 
-	jiraUser, err := auth.ValidateJira(r.Context(), jira.DataCenterPAT(req.URL, req.PAT))
+	// The deployment is chosen explicitly upstream (the onboarding step's
+	// Cloud-vs-Data-Center picker) and carried by which credential shape the
+	// client sends: a Cloud API token (email + token → Basic, REST v3) or a
+	// Data Center PAT (Bearer, REST v2). Honoring the sent shape — rather than
+	// re-sniffing the host here — keeps the fields the user filled and the
+	// scheme we validate in agreement; a host that disagrees with the chosen
+	// scheme simply fails the /myself validation below. Any Cloud field present
+	// commits to the Cloud path (and requires both halves), so a half-filled
+	// Cloud form reports the Cloud error rather than silently falling to DC. The
+	// chosen scheme is persisted as a marker so the system resolver
+	// (jira.Resolver.ForSystem) rebuilds the matching client.
+	cloud := req.Email != "" || req.Token != ""
+	var cfg jira.Config
+	if cloud {
+		if req.Email == "" || req.Token == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "email and API token are required for Jira Cloud"})
+			return
+		}
+		cfg = jira.CloudAPIToken(req.URL, req.Email, req.Token)
+	} else {
+		if req.PAT == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url and pat are required"})
+			return
+		}
+		cfg = jira.DataCenterPAT(req.URL, req.PAT)
+	}
+
+	jiraUser, err := auth.ValidateJira(r.Context(), cfg)
 	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
@@ -337,7 +373,14 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 			return fmt.Errorf("load org settings: %w", err)
 		}
 		creds.JiraURL = req.URL
-		creds.JiraPAT = req.PAT
+		if cloud {
+			creds.JiraEmail = req.Email
+			creds.JiraAPIToken = req.Token
+			creds.JiraAuthMethod = string(jira.AuthMethodCloudAPIToken)
+		} else {
+			creds.JiraPAT = req.PAT
+			creds.JiraAuthMethod = string(jira.AuthMethodDCPAT)
+		}
 		orgSet.JiraBaseURL = req.URL
 		if err := integrations.Save(r.Context(), tx.Secrets, orgID, creds); err != nil {
 			return fmt.Errorf("store credentials: %w", err)
@@ -390,7 +433,12 @@ func (se *settingsHandler) handleJiraStatuses(w http.ResponseWriter, r *http.Req
 		internalError(w, "settings", err)
 		return
 	}
-	if creds.JiraPAT == "" || creds.JiraURL == "" {
+	// Build the system client from the loaded creds, routed Cloud-vs-DC by the
+	// stored auth-method marker (the request-path analog of the resolver's
+	// ForSystem) — a Cloud org has no PAT, so gating/constructing on JiraPAT
+	// alone would 400 a configured Cloud org here.
+	cfg, ok := integrations.JiraSystemConfig(creds)
+	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Jira not configured"})
 		return
 	}
@@ -399,7 +447,7 @@ func (se *settingsHandler) handleJiraStatuses(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	client := jira.NewClient(jira.DataCenterPAT(creds.JiraURL, creds.JiraPAT))
+	client := jira.NewClient(cfg)
 
 	// Intersect statuses across all projects — only return statuses that
 	// exist in every project. A union would let users pick a status that

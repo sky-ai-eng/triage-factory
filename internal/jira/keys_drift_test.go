@@ -54,6 +54,30 @@ func TestForSystem_KeysMatchIntegrations(t *testing.T) {
 	}
 }
 
+// TestForSystem_CloudKeysMatchIntegrations is the Cloud sibling of the test
+// above: it closes the same drift gap for the Cloud credential keys
+// (jira.keyJiraEmail/keyJiraAPIToken/keyJiraAuthMethod hand-copied from
+// integrations.KeyJira*). Storing the Cloud credential under the integrations
+// keys + marker and resolving through ForSystem proves the resolver reads them
+// under the same names integrations writes — a silent rename of either side
+// would make ForSystem return ErrNoJiraSystemCredential with no compile error.
+func TestForSystem_CloudKeysMatchIntegrations(t *testing.T) {
+	secrets := keyedSecrets{vals: map[string]string{
+		integrations.KeyJiraURL:        "https://acme.atlassian.net",
+		integrations.KeyJiraEmail:      "bot@acme.com",
+		integrations.KeyJiraAPIToken:   "tok",
+		integrations.KeyJiraAuthMethod: string(jira.AuthMethodCloudAPIToken),
+	}}
+	c, err := jira.NewResolver(secrets, stubOrgs{}).ForSystem(context.Background(), "org-1")
+	if err != nil {
+		t.Fatalf("ForSystem with integrations-keyed cloud secrets: %v\n"+
+			"jira.keyJira{Email,APIToken,AuthMethod} have drifted from integrations.KeyJira*", err)
+	}
+	if c == nil {
+		t.Fatal("ForSystem returned a nil client")
+	}
+}
+
 // TestCanonicalHostMatchesNormalizeJiraHost closes the second drift gap the
 // import cycle creates: db.NormalizeJiraHost (which keys every
 // user_jira_identities row) can't call jira.CanonicalHost (internal/jira

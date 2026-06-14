@@ -726,10 +726,11 @@ func (m *Manager) runJiraCycle() {
 			continue
 		}
 		rules := m.loadJiraRules(ctx, orgID)
-		if creds.JiraPAT == "" || creds.JiraURL == "" || len(rules) == 0 {
-			// Not configured for Jira (or rules missing). Skip
-			// silently — adding/removing a tenant's Jira config
-			// doesn't need a poller restart this way.
+		if (creds.JiraPAT == "" && creds.JiraAPIToken == "") || creds.JiraURL == "" || len(rules) == 0 {
+			// Not configured for Jira (or rules missing). A configured org has
+			// a URL plus either a Data Center PAT or a Cloud API token. Skip
+			// silently — adding/removing a tenant's Jira config doesn't need a
+			// poller restart this way.
 			continue
 		}
 		baseURL := orgSet.JiraBaseURL
@@ -737,9 +738,10 @@ func (m *Manager) runJiraCycle() {
 			baseURL = creds.JiraURL
 		}
 		// creds load above gates configuration + supplies the baseURL fallback;
-		// ForSystem (reading the same jira_url/jira_pat secrets) builds the
-		// authenticated client. The gate guarantees presence, so ForSystem
-		// won't report ErrNoJiraSystemCredential here — handle errors defensively.
+		// ForSystem (reading the same secrets, routed Cloud-vs-DC by the stored
+		// auth-method marker) builds the authenticated client. The gate
+		// guarantees a credential is present, so ForSystem won't report
+		// ErrNoJiraSystemCredential here — handle errors defensively.
 		client, cerr := sysResolver.ForSystem(ctx, orgID)
 		if cerr != nil {
 			log.Printf("[jira] org %s: resolve system client: %v", orgID, cerr)

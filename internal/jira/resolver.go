@@ -27,14 +27,22 @@ var (
 	ErrNoJiraUserCredential = errors.New("jira: no user credential for org/user")
 )
 
-// keyJiraURL / keyJiraPAT are the two well-known org-level Jira secret keys.
-// They mirror integrations.KeyJiraURL / KeyJiraPAT verbatim and are kept as
-// local constants on purpose: internal/integrations transitively imports
-// internal/jira (via internal/auth.ValidateJira), so importing it here would
-// be a cycle. Keep them in sync with internal/integrations.
+// The well-known org-level Jira secret keys. They mirror integrations.KeyJira*
+// verbatim and are kept as local constants on purpose: internal/integrations
+// transitively imports internal/jira (via internal/auth.ValidateJira), so
+// importing it here would be a cycle. Keep them in sync with
+// internal/integrations; keys_drift_test pins the agreement.
+//
+// keyJiraURL is shared by both backends. The remaining keys split by scheme:
+// keyJiraPAT is the Data Center PAT (Bearer); keyJiraEmail + keyJiraAPIToken
+// are the Cloud API-token pair (Basic); keyJiraAuthMethod is the AuthMethod
+// marker recording which of the two the org uses.
 const (
-	keyJiraURL = "jira_url"
-	keyJiraPAT = "jira_pat"
+	keyJiraURL        = "jira_url"
+	keyJiraPAT        = "jira_pat"
+	keyJiraEmail      = "jira_email"
+	keyJiraAPIToken   = "jira_api_token"
+	keyJiraAuthMethod = "jira_auth_method"
 )
 
 // CanonicalHost canonicalizes an org's configured Jira base URL into the value
@@ -91,25 +99,56 @@ func NewResolver(secrets db.SecretStore, orgs db.OrgsStore) Resolver {
 	return &resolver{secrets: secrets, orgs: orgs}
 }
 
-// ForSystem resolves the org's Jira service credential into a DC-PAT client.
-// The base URL is the org's stored jira_url secret, canonicalized through
-// CanonicalHost so the system client talks to the exact same trimmed/validated
-// origin a per-user client does (ForUser) — no drift from a stray trailing
-// slash or whitespace in the stored value. Returns ErrNoJiraSystemCredential
-// when the URL is absent/unusable or the PAT is absent; a backend read error
-// propagates so a transient vault/keychain outage isn't misreported as "not
-// configured".
+// ForSystem resolves the org's Jira service credential into an authenticated
+// client, routed by the stored auth-method marker: a Cloud org gets a Basic /
+// REST v3 client (CloudAPIToken, email + token), a Data Center org a Bearer /
+// REST v2 one (DataCenterPAT). The base URL is the org's stored jira_url
+// secret, canonicalized through CanonicalHost so the system client talks to
+// the exact same trimmed/validated origin a per-user client does (ForUser) —
+// no drift from a stray trailing slash or whitespace in the stored value.
+//
+// An absent marker is an org onboarded before Cloud support landed, so the
+// deployment is inferred from the host shape (DeploymentForHost) — which
+// classifies every such org as Data Center, preserving the historical
+// behavior, since a Cloud org would have written the marker. Returns
+// ErrNoJiraSystemCredential when the URL is absent/unusable or the
+// scheme-appropriate credential is absent; a backend read error propagates so
+// a transient vault/keychain outage isn't misreported as "not configured".
 func (r *resolver) ForSystem(ctx context.Context, orgID string) (*Client, error) {
 	rawURL, err := r.secrets.GetSystem(ctx, orgID, keyJiraURL)
 	if err != nil {
 		return nil, fmt.Errorf("resolve jira url for org %s: %w", orgID, err)
 	}
+	host, ok := CanonicalHost(rawURL)
+	if !ok {
+		return nil, fmt.Errorf("%w: org=%s", ErrNoJiraSystemCredential, orgID)
+	}
+
+	method, err := r.secrets.GetSystem(ctx, orgID, keyJiraAuthMethod)
+	if err != nil {
+		return nil, fmt.Errorf("resolve jira auth method for org %s: %w", orgID, err)
+	}
+
+	if DeploymentForMarker(AuthMethod(method), host) == DeploymentCloud {
+		email, err := r.secrets.GetSystem(ctx, orgID, keyJiraEmail)
+		if err != nil {
+			return nil, fmt.Errorf("resolve jira email for org %s: %w", orgID, err)
+		}
+		token, err := r.secrets.GetSystem(ctx, orgID, keyJiraAPIToken)
+		if err != nil {
+			return nil, fmt.Errorf("resolve jira api token for org %s: %w", orgID, err)
+		}
+		if email == "" || token == "" {
+			return nil, fmt.Errorf("%w: org=%s", ErrNoJiraSystemCredential, orgID)
+		}
+		return NewClient(CloudAPIToken(host, email, token)), nil
+	}
+
 	pat, err := r.secrets.GetSystem(ctx, orgID, keyJiraPAT)
 	if err != nil {
 		return nil, fmt.Errorf("resolve jira pat for org %s: %w", orgID, err)
 	}
-	host, ok := CanonicalHost(rawURL)
-	if !ok || pat == "" {
+	if pat == "" {
 		return nil, fmt.Errorf("%w: org=%s", ErrNoJiraSystemCredential, orgID)
 	}
 	return NewClient(DataCenterPAT(host, pat)), nil

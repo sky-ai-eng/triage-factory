@@ -298,11 +298,17 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		setupStep = "team"
 	}
 
+	// Jira is "connected" if either backend's service credential is present: a
+	// Data Center PAT (Bearer) or a Cloud API token (Basic, email + token). A
+	// Cloud org has no PAT, so keying solely on JiraPAT would report a connected
+	// Cloud org as unconnected.
+	jiraConnected := creds.JiraPAT != "" || creds.JiraAPIToken != ""
+
 	result := map[string]any{
 		"configured":     tenantExists,
 		"github":         creds.GitHubPAT != "",
 		"github_ready":   githubReady,
-		"jira":           creds.JiraPAT != "",
+		"jira":           jiraConnected,
 		"github_repos":   repoCount,
 		"env_provided":   auth.EnvProvided(),
 		"setup_complete": setupComplete,

@@ -12,6 +12,7 @@
 
 import type { ReactNode } from 'react'
 import type { OrgConfigForm } from '../settings/orgConfig'
+import type { JiraDeployment } from '../settings/jiraConnect'
 import type { TeamConfigForm } from '../settings/teamConfig'
 
 // The three divider sections the stack groups steps under, in order:
@@ -126,6 +127,12 @@ export interface WizardState {
   // of githubUrlConfirmed, satisfying the Jira URL step so the Jira access step
   // can follow. Seeded from jiraConnected on load.
   jiraUrlConfirmed: boolean
+  // Which Jira backend the org connects to — its own picker step (the Jira
+  // mirror of githubAccessTab), gating which credential fields the access step
+  // shows and which scheme the connect sends. Null until chosen; seeded for a
+  // returning connected org from its stored host shape. Cloud authenticates
+  // with an Atlassian API token (email + token), Data Center with a PAT.
+  jiraDeployment: JiraDeployment | null
   // Which tracker the user selected in the Trackers step. Seeded from
   // jiraConnected on load (a connected org resumes on "Jira").
   tracker: TrackerKind

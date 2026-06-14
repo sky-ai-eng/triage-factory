@@ -41,7 +41,7 @@ import {
   DEFAULT_GITHUB_URL,
 } from './GitHubStep'
 import TrackersStep from './TrackersStep'
-import { JiraUrlStep, JiraAccessStep } from './JiraStep'
+import { JiraUrlStep, JiraModeStep, JiraAccessStep } from './JiraStep'
 import {
   hostOf,
   isHttpUrl,
@@ -75,7 +75,7 @@ import {
   orgConfigFromSettings,
   saveOrgConfig,
 } from '../settings/orgConfig'
-import { connectJira } from '../settings/jiraConnect'
+import { connectJira, isJiraCloudHost } from '../settings/jiraConnect'
 import {
   emptyTeamConfig,
   fetchTeamRepos,
@@ -108,6 +108,7 @@ export const initialWizardState = (): WizardState => ({
   isLocal: false,
   jiraConnected: false,
   jiraUrlConfirmed: false,
+  jiraDeployment: null,
   tracker: 'none',
   team: emptyTeamConfig(),
   teamLoaded: false,
@@ -194,6 +195,16 @@ export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
     githubAccessTab: org.has_github_pat ? 'pat' : integrations.githubReady ? 'app' : null,
     jiraConnected: integrations.jiraConnected,
     jiraUrlConfirmed: integrations.jiraConnected,
+    // A returning connected org resumes past the deployment picker with its
+    // backend pre-resolved from the stored host shape (Cloud is always
+    // *.atlassian.net); a fresh/unconnected org starts unselected so the picker
+    // opens and the choice is made explicitly. The credential the org actually
+    // authenticates with is the stored one — this only labels the picker.
+    jiraDeployment: integrations.jiraConnected
+      ? isJiraCloudHost(orgForm.jira_url)
+        ? 'cloud'
+        : 'data_center'
+      : null,
     tracker: integrations.jiraConnected ? 'jira' : 'none',
   }
 }
@@ -723,14 +734,39 @@ const jiraUrlStep: WizardStep = {
   render: (ctx) => <JiraUrlStep {...ctx} />,
 }
 
+// Step · Jira deployment (visible only when Jira is the chosen tracker). The
+// Jira mirror of the GitHub mode picker: a self-advancing Cloud-vs-Data-Center
+// choice that gates which credential the access step asks for. Made explicit
+// (not sniffed from the URL) so the fields the user fills always match the
+// scheme the connect sends. Complete once chosen — OR once connected, so a
+// returning org (whose deployment loadOrg pre-resolves from the host) resumes
+// past it.
+const jiraModeStep: WizardStep = {
+  id: 'org-jira-mode',
+  section: 'org',
+  title: 'Jira deployment',
+  selfAdvancing: true,
+  visible: (s) => s.tracker === 'jira',
+  isComplete: (s) => s.jiraDeployment !== null || s.jiraConnected,
+  persist: async () => {},
+  collapsedSummary: (s) =>
+    s.jiraDeployment === 'cloud'
+      ? 'Atlassian Cloud'
+      : s.jiraDeployment === 'data_center'
+        ? 'Data Center / Server'
+        : 'Not chosen',
+  render: (ctx) => <JiraModeStep {...ctx} />,
+}
+
 // Step · Jira access (visible only when Jira is the chosen tracker). The Jira
 // mirror of the GitHub PAT step: no separate Connect button — Continue performs
 // the connect via the shared connectJira helper (POST /api/jira/connect, which
-// validates url+PAT server-side and 4xxs on a bad token). On success the step
-// marks connected and advances; the disconnect half stays inside
-// JiraAccessGroup. Mandatory while Jira is selected — its isComplete blocks
-// finishing a half-connected Jira — but invisible (and so non-blocking) once
-// the tracker is None.
+// validates the credential server-side and 4xxs on a bad one). The credential
+// shape follows the deployment chosen in the prior step: Cloud sends an email +
+// API token, Data Center a PAT. On success the step marks connected and
+// advances; the disconnect half stays inside JiraAccessGroup. Mandatory while
+// Jira is selected — its isComplete blocks finishing a half-connected Jira —
+// but invisible (and so non-blocking) once the tracker is None.
 const jiraAccessStep: WizardStep = {
   id: 'org-jira-access',
   section: 'org',
@@ -744,16 +780,27 @@ const jiraAccessStep: WizardStep = {
     // (now-incomplete) URL bar above rather than connecting against an
     // unconfirmed host.
     if (!s.jiraUrlConfirmed) return 'Re-confirm your Jira URL above to reconnect.'
+    if (s.jiraDeployment === null) return 'Choose your Jira deployment above to continue.'
+    if (s.jiraDeployment === 'cloud') {
+      if (s.org.jira_email.trim() === '') return 'Enter your Atlassian account email to connect.'
+      return s.org.jira_api_token.trim() === '' ? 'Enter an API token to connect.' : null
+    }
     return s.org.jira_pat.trim() === '' ? 'Enter a personal access token to connect.' : null
   },
   persist: async ({ state, patch }) => {
     if (state.jiraConnected) return
-    const result = await connectJira(state.org.jira_url, state.org.jira_pat)
+    // jiraDeployment is non-null here (the mode step gates this one), but fall
+    // back defensively so the connect never sends an undefined scheme.
+    const result = await connectJira(
+      state.org.jira_url,
+      state.jiraDeployment ?? 'data_center',
+      state.org,
+    )
     if (!result.ok) throw new Error(result.error)
     patch({
       jiraConnected: true,
       jiraUrlConfirmed: true,
-      org: { ...state.org, jira_pat: '' },
+      org: { ...state.org, jira_pat: '', jira_api_token: '' },
     })
   },
   collapsedSummary: (s) =>
@@ -1088,6 +1135,7 @@ export const WIZARD_STEPS: WizardStep[] = [
   githubPollerStep,
   trackersStep,
   jiraUrlStep,
+  jiraModeStep,
   jiraAccessStep,
   jiraPollerStep,
   orgModelStep,

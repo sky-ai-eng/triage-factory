@@ -76,6 +76,37 @@ func TestCloudAPITokenConfig(t *testing.T) {
 	}
 }
 
+// TestDeploymentForHost pins the Cloud-vs-DC classifier: any host under
+// *.atlassian.net (case-insensitive, scheme/port/path-insensitive, full URL or
+// bare host) is Cloud; everything else — including a look-alike that merely
+// contains "atlassian.net" without the dot boundary — is Data Center.
+func TestDeploymentForHost(t *testing.T) {
+	cases := []struct {
+		in   string
+		want Deployment
+	}{
+		{"https://acme.atlassian.net", DeploymentCloud},
+		{"https://acme.atlassian.net/", DeploymentCloud},
+		{"  https://acme.atlassian.net  ", DeploymentCloud},
+		{"https://ACME.Atlassian.NET", DeploymentCloud},
+		{"https://team.atlassian.net:443/jira", DeploymentCloud},
+		{"acme.atlassian.net", DeploymentCloud},
+		{"atlassian.net", DeploymentCloud},
+		{"https://jira.company.com", DeploymentDataCenter},
+		{"https://jira.company.com/jira", DeploymentDataCenter},
+		{"jira.internal", DeploymentDataCenter},
+		{"https://atlassian.net.evil.example", DeploymentDataCenter},
+		{"https://notatlassian.net", DeploymentDataCenter},
+		{"", DeploymentDataCenter},
+		{"   ", DeploymentDataCenter},
+	}
+	for _, tc := range cases {
+		if got := DeploymentForHost(tc.in); got != tc.want {
+			t.Errorf("DeploymentForHost(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // TestBearerAuthApply checks the scheme renders "Bearer <token>".
 func TestBearerAuthApply(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodGet, "http://example.test", nil)

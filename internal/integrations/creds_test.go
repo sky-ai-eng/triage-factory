@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -144,6 +145,65 @@ func TestClearJira_LeavesGitHub(t *testing.T) {
 	}
 }
 
+// TestLoadSave_CloudRoundtrip pins that the Cloud credential fields (email +
+// API token + auth-method marker) round-trip through Save/Load alongside the
+// URL, the same way the DC PAT does.
+func TestLoadSave_CloudRoundtrip(t *testing.T) {
+	stores := openStores(t)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrg
+
+	want := auth.Credentials{
+		JiraURL:        "https://acme.atlassian.net",
+		JiraEmail:      "bot@acme.com",
+		JiraAPIToken:   "cloud-token",
+		JiraAuthMethod: "cloud_api_token",
+	}
+	if err := integrations.Save(ctx, stores.Secrets, org, want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := integrations.Load(ctx, stores.Secrets, org)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got != want {
+		t.Errorf("Load got=%+v want=%+v", got, want)
+	}
+}
+
+// TestClearJira_SweepsCloudKeys pins that ClearJira removes the Cloud halves
+// (email, API token, marker) too — not just the URL + DC PAT — while leaving
+// GitHub untouched, so a disconnect leaves no orphaned Cloud secret.
+func TestClearJira_SweepsCloudKeys(t *testing.T) {
+	stores := openStores(t)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrg
+
+	if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
+		GitHubURL:      "https://github.example.com",
+		GitHubPAT:      "ghp-test",
+		JiraURL:        "https://acme.atlassian.net",
+		JiraEmail:      "bot@acme.com",
+		JiraAPIToken:   "cloud-token",
+		JiraAuthMethod: "cloud_api_token",
+	}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := integrations.ClearJira(ctx, stores.Secrets, org); err != nil {
+		t.Fatalf("ClearJira: %v", err)
+	}
+	got, err := integrations.Load(ctx, stores.Secrets, org)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.JiraURL != "" || got.JiraEmail != "" || got.JiraAPIToken != "" || got.JiraAuthMethod != "" {
+		t.Errorf("Jira cloud creds survived ClearJira: %+v", got)
+	}
+	if got.GitHubURL == "" || got.GitHubPAT == "" {
+		t.Errorf("GitHub creds disappeared after ClearJira: %+v", got)
+	}
+}
+
 func TestClear_WipesEverything(t *testing.T) {
 	stores := openStores(t)
 	ctx := context.Background()
@@ -166,6 +226,76 @@ func TestClear_WipesEverything(t *testing.T) {
 	}
 	if (got != auth.Credentials{}) {
 		t.Errorf("Clear left residue: %+v", got)
+	}
+}
+
+// TestJiraSystemConfig pins the request-path creds→config builder: the marker
+// routes Cloud (Basic, REST v3) vs DC (Bearer, REST v2); an empty marker falls
+// back to host-shape detection; and ok=false when the URL or the scheme's
+// credential half is missing. It's the request-path mirror of the resolver's
+// ForSystem routing, so a Cloud org's status/stock reads build the right client.
+func TestJiraSystemConfig(t *testing.T) {
+	cases := []struct {
+		name       string
+		creds      auth.Credentials
+		wantOK     bool
+		wantDeploy jira.Deployment
+		wantVer    jira.APIVersion
+	}{
+		{
+			name: "cloud marker",
+			creds: auth.Credentials{
+				JiraURL: "https://acme.atlassian.net/", JiraEmail: "bot@acme.com",
+				JiraAPIToken: "tok", JiraAuthMethod: "cloud_api_token",
+			},
+			wantOK: true, wantDeploy: jira.DeploymentCloud, wantVer: jira.APIv3,
+		},
+		{
+			name: "dc marker",
+			creds: auth.Credentials{
+				JiraURL: "https://jira.corp.example", JiraPAT: "pat", JiraAuthMethod: "dc_pat",
+			},
+			wantOK: true, wantDeploy: jira.DeploymentDataCenter, wantVer: jira.APIv2,
+		},
+		{
+			name: "empty marker, cloud host inferred",
+			creds: auth.Credentials{
+				JiraURL: "https://acme.atlassian.net", JiraEmail: "bot@acme.com", JiraAPIToken: "tok",
+			},
+			wantOK: true, wantDeploy: jira.DeploymentCloud, wantVer: jira.APIv3,
+		},
+		{
+			name:       "empty marker, dc host inferred",
+			creds:      auth.Credentials{JiraURL: "https://jira.corp.example", JiraPAT: "pat"},
+			wantOK:     true,
+			wantDeploy: jira.DeploymentDataCenter, wantVer: jira.APIv2,
+		},
+		{name: "no url", creds: auth.Credentials{JiraPAT: "pat"}, wantOK: false},
+		{
+			name: "cloud marker missing token",
+			creds: auth.Credentials{
+				JiraURL: "https://acme.atlassian.net", JiraEmail: "bot@acme.com", JiraAuthMethod: "cloud_api_token",
+			},
+			wantOK: false,
+		},
+		{name: "dc missing pat", creds: auth.Credentials{JiraURL: "https://jira.corp.example"}, wantOK: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, ok := integrations.JiraSystemConfig(tc.creds)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if cfg.Deployment != tc.wantDeploy {
+				t.Errorf("Deployment = %q, want %q", cfg.Deployment, tc.wantDeploy)
+			}
+			if cfg.APIVersion != tc.wantVer {
+				t.Errorf("APIVersion = %q, want %q", cfg.APIVersion, tc.wantVer)
+			}
+		})
 	}
 }
 
