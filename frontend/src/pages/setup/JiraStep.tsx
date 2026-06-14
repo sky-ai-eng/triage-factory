@@ -112,11 +112,15 @@ export function JiraAccessStep({ state, patch, isLocal }: StepContext) {
           // JiraAccessGroup blanks the credential fields via its onChange immediately
           // before this fires; rebuild org from this render's state (which still holds
           // the URL) and drop only the secrets, so a same-session reconnect keeps the
-          // URL + deployment. jiraUrlConfirmed:false re-opens the URL step to re-probe
-          // before reconnecting.
+          // URL. jiraUrlConfirmed:false re-opens the URL step to re-probe, and
+          // jiraDeployment:null re-opens the deployment picker so the operator
+          // re-picks explicitly — host-shape inference can be wrong (Cloud custom
+          // domains, a changed URL), and the backend treats the credential shape as
+          // authoritative, so we never silently reconnect under a stale guess.
           patch({
             jiraConnected: false,
             jiraUrlConfirmed: false,
+            jiraDeployment: null,
             org: { ...state.org, jira_pat: '', jira_email: '', jira_api_token: '' },
           })
         }

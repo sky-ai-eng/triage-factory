@@ -108,10 +108,12 @@ func NewResolver(secrets db.SecretStore, orgs db.OrgsStore) Resolver {
 // no drift from a stray trailing slash or whitespace in the stored value.
 //
 // An absent marker is an org onboarded before Cloud support landed, so the
-// deployment is inferred from the host shape (DeploymentForHost) — which
-// classifies every such org as Data Center, preserving the historical
-// behavior, since a Cloud org would have written the marker. Returns
-// ErrNoJiraSystemCredential when the URL is absent/unusable or the
+// deployment is inferred from the host shape (DeploymentForMarker →
+// DeploymentForHost): a *.atlassian.net host resolves Cloud, any other origin
+// Data Center. Every genuine pre-Cloud org is non-*.atlassian.net (Cloud
+// onboarding always writes a marker), so this preserves the historical Data
+// Center behavior for them while still classifying a Cloud host correctly.
+// Returns ErrNoJiraSystemCredential when the URL is absent/unusable or the
 // scheme-appropriate credential is absent; a backend read error propagates so
 // a transient vault/keychain outage isn't misreported as "not configured".
 func (r *resolver) ForSystem(ctx context.Context, orgID string) (*Client, error) {

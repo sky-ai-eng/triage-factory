@@ -339,7 +339,7 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		cfg = jira.CloudAPIToken(req.URL, req.Email, req.Token)
 	} else {
 		if req.PAT == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url and pat are required"})
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a personal access token is required for Jira Data Center"})
 			return
 		}
 		cfg = jira.DataCenterPAT(req.URL, req.PAT)
@@ -398,6 +398,13 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		orgSet.JiraBaseURL = req.URL
 		if err := integrations.Save(r.Context(), tx.Secrets, orgID, creds); err != nil {
 			return fmt.Errorf("store credentials: %w", err)
+		}
+		// Save skips empty values (never deletes), so switching schemes (DC↔Cloud)
+		// would otherwise leave the prior scheme's secret behind — a stale
+		// credential a later read could mistake for the org's auth. Drop the
+		// scheme not in use so the stored set matches the marker exactly.
+		if err := integrations.ClearJiraOtherScheme(r.Context(), tx.Secrets, orgID, jira.AuthMethod(creds.JiraAuthMethod)); err != nil {
+			return fmt.Errorf("clear stale jira credential: %w", err)
 		}
 		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
 			return fmt.Errorf("save org settings: %w", err)

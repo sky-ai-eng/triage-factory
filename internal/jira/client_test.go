@@ -91,7 +91,10 @@ func TestDeploymentForHost(t *testing.T) {
 		{"https://ACME.Atlassian.NET", DeploymentCloud},
 		{"https://team.atlassian.net:443/jira", DeploymentCloud},
 		{"acme.atlassian.net", DeploymentCloud},
+		{"acme.atlassian.net:443", DeploymentCloud},       // bare host + port
+		{"acme.atlassian.net:8443/jira", DeploymentCloud}, // bare host + port + path
 		{"atlassian.net", DeploymentCloud},
+		{"jira.corp.example:8080", DeploymentDataCenter}, // bare DC host + port
 		{"https://jira.company.com", DeploymentDataCenter},
 		{"https://jira.company.com/jira", DeploymentDataCenter},
 		{"jira.internal", DeploymentDataCenter},

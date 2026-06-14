@@ -204,6 +204,67 @@ func TestClearJira_SweepsCloudKeys(t *testing.T) {
 	}
 }
 
+// TestClearJiraOtherScheme pins the scheme-switch cleanup: storing one Jira auth
+// scheme then clearing the other removes only the unused scheme's secrets (and
+// leaves the URL + marker + in-use scheme intact), so a DC↔Cloud switch can't
+// leave a stale credential behind.
+func TestClearJiraOtherScheme(t *testing.T) {
+	t.Run("cloud in use clears the DC PAT", func(t *testing.T) {
+		stores := openStores(t)
+		ctx := context.Background()
+		org := runmode.LocalDefaultOrg
+
+		// Org was DC, now reconnected as Cloud: both schemes' secrets present.
+		if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
+			JiraURL: "https://acme.atlassian.net", JiraPAT: "stale-dc-pat",
+			JiraEmail: "bot@acme.com", JiraAPIToken: "cloud-token",
+			JiraAuthMethod: "cloud_api_token",
+		}); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		if err := integrations.ClearJiraOtherScheme(ctx, stores.Secrets, org, jira.AuthMethodCloudAPIToken); err != nil {
+			t.Fatalf("ClearJiraOtherScheme: %v", err)
+		}
+		got, err := integrations.Load(ctx, stores.Secrets, org)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if got.JiraPAT != "" {
+			t.Errorf("stale DC PAT survived a Cloud switch: %q", got.JiraPAT)
+		}
+		if got.JiraEmail != "bot@acme.com" || got.JiraAPIToken != "cloud-token" || got.JiraURL == "" {
+			t.Errorf("Cloud scheme / URL wrongly cleared: %+v", got)
+		}
+	})
+
+	t.Run("dc in use clears the Cloud pair", func(t *testing.T) {
+		stores := openStores(t)
+		ctx := context.Background()
+		org := runmode.LocalDefaultOrg
+
+		if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
+			JiraURL: "https://jira.corp.example", JiraPAT: "dc-pat",
+			JiraEmail: "stale@acme.com", JiraAPIToken: "stale-cloud-token",
+			JiraAuthMethod: "dc_pat",
+		}); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		if err := integrations.ClearJiraOtherScheme(ctx, stores.Secrets, org, jira.AuthMethodDCPAT); err != nil {
+			t.Fatalf("ClearJiraOtherScheme: %v", err)
+		}
+		got, err := integrations.Load(ctx, stores.Secrets, org)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if got.JiraEmail != "" || got.JiraAPIToken != "" {
+			t.Errorf("stale Cloud pair survived a DC switch: %+v", got)
+		}
+		if got.JiraPAT != "dc-pat" || got.JiraURL == "" {
+			t.Errorf("DC scheme / URL wrongly cleared: %+v", got)
+		}
+	})
+}
+
 func TestClear_WipesEverything(t *testing.T) {
 	stores := openStores(t)
 	ctx := context.Background()

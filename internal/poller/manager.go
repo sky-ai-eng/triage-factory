@@ -726,11 +726,14 @@ func (m *Manager) runJiraCycle() {
 			continue
 		}
 		rules := m.loadJiraRules(ctx, orgID)
-		if (creds.JiraPAT == "" && creds.JiraAPIToken == "") || creds.JiraURL == "" || len(rules) == 0 {
-			// Not configured for Jira (or rules missing). A configured org has
-			// a URL plus either a Data Center PAT or a Cloud API token. Skip
-			// silently — adding/removing a tenant's Jira config doesn't need a
-			// poller restart this way.
+		// "Configured" is decided by the auth-method marker (via JiraSystemConfig),
+		// not key presence: a configured org has a URL plus the scheme's secret
+		// matching its jira_auth_method (DC PAT, or Cloud email + token). Reading
+		// the marker keeps this gate in lockstep with the client ForSystem builds
+		// below, so the two can't disagree. Skip silently when unconfigured or
+		// rules are missing — adding/removing a tenant's Jira config doesn't need
+		// a poller restart this way.
+		if _, ok := integrations.JiraSystemConfig(creds); !ok || len(rules) == 0 {
 			continue
 		}
 		baseURL := orgSet.JiraBaseURL

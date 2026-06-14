@@ -161,6 +161,24 @@ func ClearJira(ctx context.Context, secrets db.SecretStore, orgID string) error 
 	return clearKeys(ctx, secrets, orgID, KeyJiraURL, KeyJiraPAT, KeyJiraEmail, KeyJiraAPIToken, KeyJiraAuthMethod, legacyJiraDisplayName)
 }
 
+// ClearJiraOtherScheme deletes the stored credential keys for the Jira auth
+// scheme NOT in use, so switching an org between Data Center (PAT) and Cloud
+// (email + API token) doesn't leave a stale secret behind — which wastes
+// vault/keychain space and could let a later read mistake the org for the other
+// scheme. Pass the method now in use; the opposite scheme's keys are removed.
+// The shared keys (URL, marker) are left intact. A no-op for an unknown/empty
+// method (nothing to disambiguate).
+func ClearJiraOtherScheme(ctx context.Context, secrets db.SecretStore, orgID string, inUse jira.AuthMethod) error {
+	switch inUse {
+	case jira.AuthMethodCloudAPIToken:
+		return clearKeys(ctx, secrets, orgID, KeyJiraPAT)
+	case jira.AuthMethodDCPAT:
+		return clearKeys(ctx, secrets, orgID, KeyJiraEmail, KeyJiraAPIToken)
+	default:
+		return nil
+	}
+}
+
 // Clear removes both GitHub and Jira credentials for orgID. Includes
 // the legacy jira_display_name sweep — see ClearJira.
 func Clear(ctx context.Context, secrets db.SecretStore, orgID string) error {

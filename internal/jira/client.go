@@ -42,7 +42,19 @@ const (
 func DeploymentForHost(host string) Deployment {
 	h := strings.ToLower(strings.TrimSpace(host))
 	if u, err := url.Parse(h); err == nil && u.Hostname() != "" {
+		// Full URL (has a scheme): Hostname() already drops the port.
 		h = u.Hostname()
+	} else {
+		// Bare host (no scheme): url.Parse won't populate Hostname(), so strip
+		// any path then a trailing :port by hand — mirroring the frontend
+		// helper, so "acme.atlassian.net:443" classifies as Cloud and the two
+		// sides can't drift.
+		if i := strings.IndexByte(h, '/'); i >= 0 {
+			h = h[:i]
+		}
+		if i := strings.LastIndexByte(h, ':'); i >= 0 {
+			h = h[:i]
+		}
 	}
 	if h == "atlassian.net" || strings.HasSuffix(h, ".atlassian.net") {
 		return DeploymentCloud
@@ -78,10 +90,14 @@ const (
 
 // DeploymentForMarker resolves the effective deployment from a stored
 // auth-method marker and the canonical host. The marker is authoritative when
-// set; an empty marker is a pre-Cloud org, so it falls back to host-shape
-// detection (DeploymentForHost), which classifies every such org as Data
-// Center. Shared by the system resolver and the request-path config builders
-// (internal/integrations) so the Cloud-vs-DC decision is made one way.
+// set; an empty marker (a pre-Cloud org, which predates the marker) falls back
+// to host-shape detection via DeploymentForHost — so a *.atlassian.net host
+// still resolves Cloud and any other origin Data Center. In practice every
+// genuine pre-Cloud org is non-*.atlassian.net (Cloud onboarding always writes
+// a marker), so the fallback preserves the historical Data Center behavior
+// without hard-coding it. Shared by the system resolver and the request-path
+// config builders (internal/integrations) so the Cloud-vs-DC decision is made
+// one way.
 func DeploymentForMarker(method AuthMethod, host string) Deployment {
 	switch method {
 	case AuthMethodCloudAPIToken:

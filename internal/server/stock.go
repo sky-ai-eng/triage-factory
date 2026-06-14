@@ -123,7 +123,10 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 	// degrade gracefully when it's blank (valid on some Server/DC installs).
 	// Partial config would silently stall on "polling" forever because the
 	// poller never has anything to do.
-	if (creds.JiraPAT == "" && creds.JiraAPIToken == "") || creds.JiraURL == "" || len(jiraRules) == 0 || localAccountID == "" {
+	// "Configured" reads the auth-method marker (via JiraSystemConfig), not key
+	// presence, so DC and Cloud orgs both gate correctly and consistently with
+	// the resolver.
+	if _, ok := integrations.JiraSystemConfig(creds); !ok || len(jiraRules) == 0 || localAccountID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Jira not configured"})
 		return
 	}
@@ -392,7 +395,10 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 	}
 	// Account ID alone gates the action (see handleJiraStockGet): display
 	// name is optional and degrades gracefully when blank.
-	if (creds.JiraPAT == "" && creds.JiraAPIToken == "") || creds.JiraURL == "" || len(jiraRules) == 0 || localAccountID == "" {
+	// "Configured" reads the auth-method marker (via JiraSystemConfig), not key
+	// presence, so DC and Cloud orgs both gate correctly and consistently with
+	// the resolver.
+	if _, ok := integrations.JiraSystemConfig(creds); !ok || len(jiraRules) == 0 || localAccountID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Jira not configured"})
 		return
 	}

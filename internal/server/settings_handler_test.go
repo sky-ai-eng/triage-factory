@@ -634,6 +634,68 @@ func TestJiraConnect_Cloud_MismatchHint(t *testing.T) {
 	}
 }
 
+// TestJiraConnect_SchemeSwitch_ClearsStaleCredential pins the scheme-switch
+// cleanup: reconnecting an org under a different Jira auth scheme drops the
+// previous scheme's stored secret, so no stale credential lingers and no later
+// read can mistake the org for the old scheme. DC → Cloud here; the DC PAT must
+// be gone afterward.
+func TestJiraConnect_SchemeSwitch_ClearsStaleCredential(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	ctx := t.Context()
+
+	// One stub answering both REST v2 (DC validate) and v3 (Cloud validate).
+	jiraStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"accountId":"acct","displayName":"Bot"}`)
+	}))
+	t.Cleanup(jiraStub.Close)
+
+	// 1) Connect as Data Center (PAT).
+	rec := doJSON(t, s, "POST", "/api/jira/connect",
+		map[string]any{"url": jiraStub.URL, "pat": "dc_pat"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("DC connect status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	creds, _ := integrations.Load(ctx, s.secrets, runmode.LocalDefaultOrgID)
+	if creds.JiraPAT != "dc_pat" || creds.JiraAuthMethod != string(jira.AuthMethodDCPAT) {
+		t.Fatalf("after DC connect, unexpected creds: %+v", creds)
+	}
+
+	// 2) Reconnect the same org as Cloud (email + API token).
+	rec = doJSON(t, s, "POST", "/api/jira/connect",
+		map[string]any{"url": jiraStub.URL, "email": "bot@acme.com", "token": "cloud_tok"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Cloud connect status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	creds, _ = integrations.Load(ctx, s.secrets, runmode.LocalDefaultOrgID)
+	if creds.JiraAuthMethod != string(jira.AuthMethodCloudAPIToken) {
+		t.Errorf("auth-method marker = %q, want cloud_api_token", creds.JiraAuthMethod)
+	}
+	if creds.JiraEmail != "bot@acme.com" || creds.JiraAPIToken != "cloud_tok" {
+		t.Errorf("cloud creds not stored: %+v", creds)
+	}
+	if creds.JiraPAT != "" {
+		t.Errorf("stale DC PAT survived the switch to Cloud: %q", creds.JiraPAT)
+	}
+
+	// 3) Switch back to Data Center — the Cloud pair must now be gone, leaving
+	//    exactly the DC scheme.
+	rec = doJSON(t, s, "POST", "/api/jira/connect",
+		map[string]any{"url": jiraStub.URL, "pat": "dc_pat_2"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("DC reconnect status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	creds, _ = integrations.Load(ctx, s.secrets, runmode.LocalDefaultOrgID)
+	if creds.JiraAuthMethod != string(jira.AuthMethodDCPAT) || creds.JiraPAT != "dc_pat_2" {
+		t.Errorf("after switch back to DC, unexpected creds: %+v", creds)
+	}
+	if creds.JiraEmail != "" || creds.JiraAPIToken != "" {
+		t.Errorf("stale Cloud pair survived the switch to DC: email=%q token=%q", creds.JiraEmail, creds.JiraAPIToken)
+	}
+}
+
 // TestOrgSettingsPost_JiraPAT_DoesNotWriteUserIdentity covers the org settings
 // save path (POST /api/settings/org with jira_pat → handleOrgSettingsPost):
 // saving the org Jira PAT (PAT_1) validates the token but must not bind the
