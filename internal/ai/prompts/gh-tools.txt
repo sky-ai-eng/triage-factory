@@ -27,4 +27,4 @@ Gotchas:
   EOF
   )"
   ```
-  Or pass `--body-file <path>` (mutually exclusive with `--body`, `-` for stdin) — more reliable than a heredoc when the body contains backticks (e.g. a ```suggestion block), since there's no shell escaping. Works for both `add-review-comment` and `pr create`.
+  Or pass `--body-file <path>` (mutually exclusive with `--body`, `-` for stdin) — more reliable than a heredoc when the body contains backticks (e.g. a ```suggestion block), since there's no shell escaping. Works for `add-review-comment`, `submit-review`, and `pr create`.
