@@ -164,9 +164,9 @@ func DataCenterPAT(baseURL, pat string) Config {
 }
 
 // CloudAPIToken builds a Config for an Atlassian Cloud API token: Basic auth
-// (base64(email:token)), REST v3. No caller constructs this yet — Cloud
-// onboarding (capturing the email + Cloud marker + storage) is a separate
-// SKY-347 sub-ticket; this constructor just makes Cloud expressible in code.
+// (base64(email:token)), REST v3. Built by the system resolver (ForSystem) and
+// the request-path config builder (integrations.JiraSystemConfig) once an org
+// has onboarded a Cloud credential, and by validation at connect time.
 func CloudAPIToken(baseURL, email, token string) Config {
 	return Config{
 		BaseURL:    baseURL,

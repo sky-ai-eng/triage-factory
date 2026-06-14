@@ -302,8 +302,10 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 	// stored auth-method marker — Data Center PAT or Cloud email + API token.
 	// JiraSystemConfig reads the marker (not key presence), so this matches the
 	// client the resolver would build and a Cloud org (which has no PAT) reports
-	// connected.
-	_, jiraConnected := integrations.JiraSystemConfig(creds)
+	// connected. cfg.Deployment is the authoritative Cloud-vs-DC answer (from the
+	// marker), surfaced below so the frontend seeds its deployment picker without
+	// re-guessing from the host shape (which is wrong for Cloud custom domains).
+	jiraCfg, jiraConnected := integrations.JiraSystemConfig(creds)
 
 	result := map[string]any{
 		"configured":     tenantExists,
@@ -321,6 +323,9 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 	}
 	if creds.JiraURL != "" {
 		result["jira_url"] = creds.JiraURL
+	}
+	if jiraConnected {
+		result["jira_deployment"] = string(jiraCfg.Deployment)
 	}
 
 	writeJSON(w, http.StatusOK, result)

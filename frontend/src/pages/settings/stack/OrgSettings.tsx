@@ -385,7 +385,7 @@ export default function OrgSettings({
                 ...d,
                 jiraConnected: true,
                 jiraDeployment: deployment,
-                org: { ...d.org, jira_url: url, jira_pat: '', jira_api_token: '' },
+                org: { ...d.org, jira_url: url, jira_pat: '', jira_email: '', jira_api_token: '' },
               }))
               setBaseline((b) => ({
                 ...b,

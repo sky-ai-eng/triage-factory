@@ -75,7 +75,7 @@ import {
   orgConfigFromSettings,
   saveOrgConfig,
 } from '../settings/orgConfig'
-import { connectJira, isJiraCloudHost } from '../settings/jiraConnect'
+import { connectJira, type JiraDeployment } from '../settings/jiraConnect'
 import {
   emptyTeamConfig,
   fetchTeamRepos,
@@ -145,17 +145,35 @@ function intervalLabel(d: string): string {
 // endpoint. Best-effort: a failure leaves both false, and the org GET still
 // seeds the URL/PAT-presence fields, so the step degrades to "not connected"
 // rather than blocking the load.
-async function fetchIntegrationsState(): Promise<{ githubReady: boolean; jiraConnected: boolean }> {
+async function fetchIntegrationsState(): Promise<{
+  githubReady: boolean
+  jiraConnected: boolean
+  jiraDeployment: JiraDeployment | null
+}> {
+  const empty = { githubReady: false, jiraConnected: false, jiraDeployment: null }
   try {
     const res = await fetch('/api/integrations/status')
-    if (!res.ok) return { githubReady: false, jiraConnected: false }
-    const data = (await res.json()) as { github_ready?: boolean; jira?: boolean; jira_url?: string }
+    if (!res.ok) return empty
+    const data = (await res.json()) as {
+      github_ready?: boolean
+      jira?: boolean
+      jira_url?: string
+      jira_deployment?: string
+    }
     return {
       githubReady: !!data.github_ready,
       jiraConnected: !!data.jira && !!data.jira_url,
+      // The backend's authoritative deployment (from the auth-method marker);
+      // null when not connected or an unexpected value.
+      jiraDeployment:
+        data.jira_deployment === 'cloud'
+          ? 'cloud'
+          : data.jira_deployment === 'data_center'
+            ? 'data_center'
+            : null,
     }
   } catch {
-    return { githubReady: false, jiraConnected: false }
+    return empty
   }
 }
 
@@ -205,15 +223,13 @@ export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
     jiraConnected: integrations.jiraConnected,
     jiraUrlConfirmed: integrations.jiraConnected,
     // A returning connected org resumes past the deployment picker with its
-    // backend pre-resolved from the stored host shape (Cloud is always
-    // *.atlassian.net); a fresh/unconnected org starts unselected so the picker
-    // opens and the choice is made explicitly. The credential the org actually
-    // authenticates with is the stored one — this only labels the picker.
-    jiraDeployment: integrations.jiraConnected
-      ? isJiraCloudHost(orgForm.jira_url)
-        ? 'cloud'
-        : 'data_center'
-      : null,
+    // backend taken from the authoritative auth-method marker (surfaced by the
+    // status endpoint), NOT re-guessed from the host shape — so a Cloud org on a
+    // custom domain still labels as Cloud. A fresh/unconnected org starts
+    // unselected so the picker opens and the choice is made explicitly. This
+    // only labels the picker; the credential the org authenticates with is the
+    // stored one.
+    jiraDeployment: integrations.jiraConnected ? integrations.jiraDeployment : null,
     tracker: integrations.jiraConnected ? 'jira' : 'none',
   }
 }
@@ -871,7 +887,7 @@ const jiraAccessStep: WizardStep = {
           jiraUserAccount: id.account,
           jiraUserHost: id.host,
           jiraUserPat: '',
-          org: { ...state.org, jira_pat: '', jira_api_token: '' },
+          org: { ...state.org, jira_pat: '', jira_email: '', jira_api_token: '' },
         })
         return
       } catch {
@@ -880,7 +896,7 @@ const jiraAccessStep: WizardStep = {
           jiraConnected: true,
           jiraUrlConfirmed: true,
           jiraUserPat: typedPat,
-          org: { ...state.org, jira_pat: '', jira_api_token: '' },
+          org: { ...state.org, jira_pat: '', jira_email: '', jira_api_token: '' },
         })
         return
       }
@@ -888,7 +904,7 @@ const jiraAccessStep: WizardStep = {
     patch({
       jiraConnected: true,
       jiraUrlConfirmed: true,
-      org: { ...state.org, jira_pat: '', jira_api_token: '' },
+      org: { ...state.org, jira_pat: '', jira_email: '', jira_api_token: '' },
     })
   },
   collapsedSummary: (s) =>
