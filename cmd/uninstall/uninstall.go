@@ -222,7 +222,7 @@ func (p uninstallPlan) empty() bool {
 func (p uninstallPlan) summary() []string {
 	var lines []string
 	if p.hasDataDir {
-		lines = append(lines, fmt.Sprintf("%s/ (database, config, repo clones, workspace snapshot blobs)", p.dataDir))
+		lines = append(lines, fmt.Sprintf("%s/ (database, config, bare repo clones, workspace snapshot blobs)", p.dataDir))
 	}
 	if p.hasProjects {
 		lines = append(lines, "Claude Code session entries under ~/.claude/projects/ for any curator projects")
