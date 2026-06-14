@@ -649,7 +649,7 @@ const githubPatStep: WizardStep = {
         })
         return
       } catch {
-        toast.info('GitHub connected. Confirm your own GitHub identity on the last step.')
+        toast.info("GitHub connected. We've pre-filled it on the last step — just hit Continue.")
         patch({
           githubReady: true,
           hasGitHubPat: true,
@@ -823,7 +823,7 @@ const jiraAccessStep: WizardStep = {
         })
         return
       } catch {
-        toast.info('Jira connected. Confirm your own Jira access on the last step.')
+        toast.info("Jira connected. We've pre-filled it on the last step — just hit Continue.")
         patch({
           jiraConnected: true,
           jiraUrlConfirmed: true,

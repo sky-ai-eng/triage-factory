@@ -76,7 +76,7 @@ export function JiraAccessStep({ state, patch, isLocal }: StepContext) {
           checked={state.duplicateJiraToUser}
           onChange={(v) => patch({ duplicateJiraToUser: v })}
           label="Also use this token as my own Jira identity"
-          hint="Saves re-entering it on the “Your Jira access” step. Like the org connection, this token is stored so Triage Factory can act as you on Jira."
+          hint="Saves re-entering it on the “Your Jira access” step. Your token is stored (not just your username) so Triage Factory can act as you on Jira."
         />
       )}
     </div>
