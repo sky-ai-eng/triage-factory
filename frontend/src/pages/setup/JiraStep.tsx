@@ -17,7 +17,7 @@
 // URL field is the shared UrlField, the same one the GitHub URL step uses.
 
 import JiraAccessGroup from '../settings/JiraAccessGroup'
-import { UrlField } from './parts'
+import { UrlField, ReuseCredentialCheckbox } from './parts'
 import type { StepContext } from './types'
 
 // JiraUrlStep body — just the base-URL field; the reachability probe is the
@@ -46,26 +46,39 @@ export function JiraUrlStep({ state, patch, error }: StepContext) {
 // jiraConnected on success), so there's no Connect button here. A disconnect
 // clears the connection and re-opens the URL step (jiraUrlConfirmed drops, so
 // the upstream Jira URL step becomes incomplete again).
-export function JiraAccessStep({ state, patch }: StepContext) {
+export function JiraAccessStep({ state, patch, isLocal }: StepContext) {
   return (
-    <JiraAccessGroup
-      value={{ jira_url: state.org.jira_url, jira_pat: state.org.jira_pat }}
-      onChange={(p) => patch({ org: { ...state.org, ...p } })}
-      connected={state.jiraConnected}
-      onDisconnected={() =>
-        // JiraAccessGroup blanks jira_url via its onChange immediately before
-        // this fires; rebuild org from this render's state (which still holds
-        // the URL) and drop only the PAT, so a same-session reconnect keeps the
-        // URL pre-filled. jiraUrlConfirmed:false re-opens the URL step to
-        // re-probe before reconnecting.
-        patch({
-          jiraConnected: false,
-          jiraUrlConfirmed: false,
-          org: { ...state.org, jira_pat: '' },
-        })
-      }
-      showBaseUrl={false}
-      bare
-    />
+    <div className="space-y-5">
+      <JiraAccessGroup
+        value={{ jira_url: state.org.jira_url, jira_pat: state.org.jira_pat }}
+        onChange={(p) => patch({ org: { ...state.org, ...p } })}
+        connected={state.jiraConnected}
+        onDisconnected={() =>
+          // JiraAccessGroup blanks jira_url via its onChange immediately before
+          // this fires; rebuild org from this render's state (which still holds
+          // the URL) and drop only the PAT, so a same-session reconnect keeps the
+          // URL pre-filled. jiraUrlConfirmed:false re-opens the URL step to
+          // re-probe before reconnecting.
+          patch({
+            jiraConnected: false,
+            jiraUrlConfirmed: false,
+            org: { ...state.org, jira_pat: '' },
+          })
+        }
+        showBaseUrl={false}
+        bare
+      />
+      {/* Local-mode only: reuse the org Jira PAT as the operator's own STORED
+          Jira credential so they don't paste it again on the User step. Shown
+          only while connecting (no PAT to reuse once connected). */}
+      {isLocal && !state.jiraConnected && (
+        <ReuseCredentialCheckbox
+          checked={state.duplicateJiraToUser}
+          onChange={(v) => patch({ duplicateJiraToUser: v })}
+          label="Also use this token as my own Jira identity"
+          hint="Saves re-entering it on the “Your Jira access” step. Like the org connection, this token is stored so Triage Factory can act as you on Jira."
+        />
+      )}
+    </div>
   )
 }

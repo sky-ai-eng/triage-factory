@@ -121,6 +121,8 @@ export const initialWizardState = (): WizardState => ({
   jiraUserHost: '',
   jiraUserConnectAvailable: false,
   jiraUserPat: '',
+  duplicateGitHubToUser: false,
+  duplicateJiraToUser: false,
 })
 
 const TIER_LABELS: Record<string, string> = {
@@ -181,6 +183,13 @@ export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
     org: orgForm,
     orgLoaded: true,
     isLocal: ctx.isLocal,
+    // Default the local-mode "use this token as my own identity too" reuse
+    // checkboxes to checked: in local mode the org and personal token are almost
+    // always the same, so opt the operator into the streamline by default. The
+    // checkboxes (shown only in local mode) let them opt out. Always false in
+    // multi, where they never render anyway.
+    duplicateGitHubToUser: ctx.isLocal,
+    duplicateJiraToUser: ctx.isLocal,
     hasGitHubPat: org.has_github_pat,
     githubReady: integrations.githubReady,
     // Seeded only from a live connection — NOT from a stored base URL. A stored
@@ -601,12 +610,49 @@ const githubPatStep: WizardStep = {
       })
       return
     }
+    const typedPat = state.org.github_pat.trim()
     const result = await saveOrgConfig(state.org)
     if (!result.ok) throw new Error(result.error)
-    if (state.org.github_pat.trim() === '') {
+    if (typedPat === '') {
       const { githubReady } = await fetchIntegrationsState()
       if (!githubReady) {
         throw new Error('Couldn’t verify your stored GitHub token. Re-enter it to reconnect.')
+      }
+    }
+    // Local-mode convenience (the "use this token as my own GitHub identity too"
+    // checkbox): reuse the just-connected org PAT to also bind the operator's own
+    // identity (PAT_2), so a solo local operator doesn't paste the same token
+    // again on the User step. Only when a token was actually typed this session.
+    //
+    // This marks ONLY the User-section step complete — it never touches org/team
+    // step state, and wizard navigation is linear (advance → next visible step;
+    // resume opens the first incomplete step; Finish needs every visible step), so
+    // org/team onboarding is never short-circuited by it. Best-effort: a capture
+    // failure must not fail the org connect (which already succeeded), so fall
+    // back to carrying the token into the User step's draft and let that step
+    // surface the real error.
+    if (state.isLocal && state.duplicateGitHubToUser && typedPat !== '' && orgId) {
+      try {
+        const id = await captureGitHubIdentityPat(orgId, typedPat)
+        patch({
+          githubReady: true,
+          hasGitHubPat: true,
+          userIdentityConnected: true,
+          userIdentityLogin: id.login,
+          userIdentityHost: id.host,
+          userGitHubPat: '',
+          org: { ...state.org, github_pat: '' },
+        })
+        return
+      } catch {
+        toast.info('GitHub connected. Confirm your own GitHub identity on the last step.')
+        patch({
+          githubReady: true,
+          hasGitHubPat: true,
+          userGitHubPat: typedPat,
+          org: { ...state.org, github_pat: '' },
+        })
+        return
       }
     }
     patch({ githubReady: true, hasGitHubPat: true, org: { ...state.org, github_pat: '' } })
@@ -746,10 +792,41 @@ const jiraAccessStep: WizardStep = {
     if (!s.jiraUrlConfirmed) return 'Re-confirm your Jira URL above to reconnect.'
     return s.org.jira_pat.trim() === '' ? 'Enter a personal access token to connect.' : null
   },
-  persist: async ({ state, patch }) => {
+  persist: async ({ state, orgId, patch }) => {
     if (state.jiraConnected) return
+    const typedPat = state.org.jira_pat.trim()
     const result = await connectJira(state.org.jira_url, state.org.jira_pat)
     if (!result.ok) throw new Error(result.error)
+    // Local-mode convenience — the Jira sibling of the GitHub PAT step's reuse
+    // (see there for the rationale + the navigation-safety note). Reuse the
+    // just-connected org Jira PAT as the operator's own STORED Jira credential,
+    // so they don't paste it again on the User step. Marks only the User step;
+    // org/team flow is untouched. Best-effort: a capture failure never fails the
+    // org connect.
+    if (state.isLocal && state.duplicateJiraToUser && typedPat !== '' && orgId) {
+      try {
+        const id = await captureJiraIdentityPat(orgId, typedPat)
+        patch({
+          jiraConnected: true,
+          jiraUrlConfirmed: true,
+          jiraUserConnected: true,
+          jiraUserAccount: id.account,
+          jiraUserHost: id.host,
+          jiraUserPat: '',
+          org: { ...state.org, jira_pat: '' },
+        })
+        return
+      } catch {
+        toast.info('Jira connected. Confirm your own Jira access on the last step.')
+        patch({
+          jiraConnected: true,
+          jiraUrlConfirmed: true,
+          jiraUserPat: typedPat,
+          org: { ...state.org, jira_pat: '' },
+        })
+        return
+      }
+    }
     patch({
       jiraConnected: true,
       jiraUrlConfirmed: true,
