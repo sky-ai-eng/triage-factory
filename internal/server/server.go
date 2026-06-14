@@ -344,7 +344,7 @@ func (s *Server) agentEnabledForTeam(ctx context.Context, orgID, userID, teamID 
 		if teamID == "" {
 			// No team supplied (teamless org). Production installs always
 			// have a team (multi-mode org provisioning; local-mode
-			// v1.11.0 baseline migration), so this is a bootstrap bug —
+			// baseline migration), so this is a bootstrap bug —
 			// surface as disabled rather than minting a wrong-team row.
 			teamMissing = true
 			return nil

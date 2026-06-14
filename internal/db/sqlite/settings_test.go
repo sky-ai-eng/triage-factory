@@ -11,14 +11,14 @@ import (
 // TestSettingsStores_SQLite runs the shared settings conformance suite
 // against the SQLite impl (Orgs/Teams/Users/JiraStatusRules together).
 // Local mode resolves every method to the runmode.LocalDefault* sentinel
-// rows seeded by the v1.11.0 baseline migration; each subtest opens a
+// rows seeded by the baseline migration; each subtest opens a
 // fresh in-memory DB so row state doesn't leak across cases.
 func TestSettingsStores_SQLite(t *testing.T) {
 	dbtest.RunSettingsStoresConformance(t, func(t *testing.T) (dbtest.SettingsStores, dbtest.SettingsIDs) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		// Conformance subtests assert behavior against an *unseeded*
-		// settings row — the v1.11.0 baseline migration seeds rows
+		// settings row — the baseline migration seeds rows
 		// for the local sentinel org/team to keep production paths
 		// honest, but those defaults collide with the round-trip
 		// + "empty row returns store defaults" assertions. Drop the

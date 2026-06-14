@@ -10,7 +10,7 @@ import (
 
 // TestOrgsStore_SQLite_ListActiveSystem_ReturnsSentinel pins the
 // local-mode behavior: the only active org is the
-// runmode.LocalDefaultOrgID sentinel seeded by the v1.11.0 baseline
+// runmode.LocalDefaultOrgID sentinel seeded by the baseline
 // migration. Background-service callers (poller, tracker,
 // projectclassify, repoprofile) collapse their per-org loop to N=1
 // against this row.

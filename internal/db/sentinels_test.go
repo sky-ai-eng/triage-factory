@@ -11,7 +11,7 @@ import (
 )
 
 // TestMigrationDefaults_MatchRuntimeConstants catches drift between
-// the v1.11.0 baseline's DEFAULT '00000000-...' literals on
+// the baseline's DEFAULT '00000000-...' literals on
 // org_id / team_id / creator_user_id columns and the runmode
 // constants those literals are meant to mirror.
 //

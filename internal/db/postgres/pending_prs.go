@@ -58,12 +58,12 @@ func createPendingPR(ctx context.Context, q queryer, orgID string, p domain.Pend
 	// (NULL) from "body was a real empty string."
 	//
 	// One active pending PR per run is an APP-LAYER guard now (the
-	// pending_prs_run_id_key UNIQUE was dropped at the v1.11.0 freeze so a
+	// pending_prs_run_id_key UNIQUE was dropped at this baseline so a
 	// multi-repo run can eventually queue several PRs). Until that ships we
 	// still block a second PR per run via a guarded INSERT ... WHERE NOT
 	// EXISTS that returns the clean ErrPendingPRAlreadyQueued. This is a
 	// best-effort soft guard (NOT race-proof at READ COMMITTED without the
-	// UNIQUE) — deliberate "block for now" per the freeze decision, and the
+	// UNIQUE) — deliberate "block for now" per the baseline decision, and the
 	// realistic caller is a single agent per run. Relax to per-(run, repo)
 	// when multi-repo PR opening lands.
 	res, err := q.ExecContext(ctx, `

@@ -22,7 +22,7 @@ type tenantSeedExecer interface {
 // tenant rows — the orgs / users / org_memberships / teams / memberships
 // / org_settings / team_settings rows for the runmode.LocalDefault*
 // sentinels. It is the runtime analog of the static INSERT block that
-// used to live in the v1.11.0 SQLite baseline: provisioning is now an
+// used to live in the SQLite baseline: provisioning is now an
 // explicit user action ("Start your factory"), not a boot-time
 // or migration-time side effect, so the rows are written here when the
 // action fires rather than seeded on every fresh install.

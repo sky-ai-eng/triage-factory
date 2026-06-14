@@ -246,13 +246,13 @@ func TestBaseline_JiraStatusRulesPopulated_CHECKsFire(t *testing.T) {
 	}
 }
 
-// TestBaseline_OrgSettingsMaxLLMTier_AppValidated pins the v1.11.0-freeze
+// TestBaseline_OrgSettingsMaxLLMTier_AppValidated pins the baseline
 // decision that org_settings.max_llm_model_tier is an opaque, app-validated,
 // provider-agnostic identifier with NO DB CHECK. NULL ("no cap"), the three
 // app-known tiers, AND a value the app doesn't know today (a future
 // OpenAI/Bedrock family) must all insert at the DB layer — the settings
 // handler is the validation gate, not the column. Dropping the CHECK is what
-// lets new model families land with zero DDL post-freeze.
+// lets new model families land with zero DDL in a later migration.
 func TestBaseline_OrgSettingsMaxLLMTier_AppValidated(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
@@ -292,7 +292,7 @@ func TestBaseline_OrgSettingsMaxLLMTier_AppValidated(t *testing.T) {
 	}
 }
 
-// TestBaseline_SourceCHECKsDropped pins the v1.11.0-freeze decision that the
+// TestBaseline_SourceCHECKsDropped pins the baseline decision that the
 // `source IN (...)` enum CHECK is dropped on prompts / blueprints /
 // event_handlers, making `source` uniformly app-validated. The structural
 // pairing CHECK survives in its harmonized `source <> 'system'` form: a

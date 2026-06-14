@@ -1,11 +1,11 @@
 -- +goose Up
--- v1.11.0 consolidated baseline (2026-05-13). Captures the cumulative
+-- Consolidated baseline (2026-05-13). Captures the cumulative
 -- post-state of the schema chain that ran from the SKY-245 D1 baseline
 -- through every post-baseline migration up to and including 202605120012.
 --
--- v1.11.0 is a hard reset: any database that does not have *this*
+-- This baseline is a hard reset: any database that does not have *this*
 -- migration applied (via goose_db_version) is refused at boot. There
--- is no upgrade path from pre-v1.11.0 installs — operators wipe
+-- is no upgrade path from a pre-baseline install — operators wipe
 -- ~/.triagefactory/ and reinstall. The brick check lives in
 -- internal/db/migrations.go.
 --
@@ -20,11 +20,11 @@
 -- (see internal/db/migrations.go); the trailing Down block is a
 -- deliberate no-op.
 --
--- === Deliberate cross-dialect divergence (do NOT "fix" post-freeze) ======
+-- === Deliberate cross-dialect divergence (do NOT "fix" in a later migration) ======
 -- This baseline and its Postgres twin
 -- (internal/db/migrations-postgres/202605130001_pg_baseline.sql) differ in
 -- the following ways ON PURPOSE. A mechanical (table,col,target,on_delete)
--- or CHECK diff will flag each as a "gap" — it is not. Post-freeze migration
+-- or CHECK diff will flag each as a "gap" — it is not. Later migration
 -- authors must not converge these:
 --
 --   1. Type representation. Postgres uses native enum TYPES
@@ -358,7 +358,7 @@ CREATE TABLE org_settings (
     -- 'haiku' | 'sonnet' | 'opus' today (validated in the settings handler),
     -- but dropping the CHECK lets OpenAI / future model families be added with
     -- zero DDL. A richer provider/model split (separate provider + tier
-    -- columns) stays additive — new columns, freeze-safe — so the column is
+    -- columns) stays additive — new columns, additive — so the column is
     -- not renamed and the app layer is unchanged.
     max_llm_model_tier      TEXT,
     updated_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -853,7 +853,7 @@ CREATE TABLE tasks (
     dedup_key            TEXT NOT NULL DEFAULT '',
     primary_event_id     TEXT NOT NULL REFERENCES events(id),
     -- status CHECK is KEPT (deliberately, unlike the source / max-tier CHECKs
-    -- dropped elsewhere in this freeze). This is the board state-machine: a
+    -- dropped elsewhere in this baseline). This is the board state-machine: a
     -- closed, stable 6-value set that the UI filters on heavily. The "queue"
     -- is a derived filter over these, not a seventh value, and resume is a
     -- run-level concept — so the enum is complete and not expected to grow.
@@ -923,19 +923,19 @@ CREATE INDEX        idx_task_teams_team       ON task_teams(team_id);
 
 CREATE TABLE runs (
     id              TEXT PRIMARY KEY,
-    -- task_id / prompt_id are NULLABLE (relaxed from NOT NULL at the v1.11.0
-    -- freeze) so a run need not descend from a tracked entity's task or a saved
+    -- task_id / prompt_id are NULLABLE (relaxed from NOT NULL in this
+    -- baseline) so a run need not descend from a tracked entity's task or a saved
     -- prompt. Today's runs are all blueprint steps and always carry both; the
     -- runs_origin_requires_parents CHECK below enforces that for origin
     -- 'blueprint'. The headroom is for a future user-initiated *interactive*
     -- run (the "pick repos/branches and just type" surface) — no upstream
     -- event, no task, no saved prompt; its instruction lives in run_messages.
     -- Differentiating that properly needed nullable here, which is a
-    -- table-rebuild post-freeze, so it lands now. The interactive parent itself
+    -- table-rebuild in a later migration, so it lands now. The interactive parent itself
     -- (an agent_sessions table + a runs.agent_session_id FK — note: NOT the
     -- existing session_id column, which is the Claude SDK resume handle) is
     -- deliberately deferred: CREATE TABLE + ALTER ADD COLUMN are cheap in both
-    -- dialects post-freeze, so the undesigned session shape ships with its
+    -- dialects in a later migration, so the undesigned session shape ships with its
     -- feature, not here.
     task_id         TEXT REFERENCES tasks(id),
     prompt_id       TEXT REFERENCES prompts(id),
@@ -984,8 +984,8 @@ CREATE TABLE runs (
                        CHECK (visibility IN ('private','team','org')),
     actor_agent_id  TEXT REFERENCES agents(id) ON DELETE SET NULL,
     -- blueprint_run_id / blueprint_step_index link a step run back to its
-    -- parent blueprint instance. NULLABLE (relaxed from NOT NULL at the v1.11.0
-    -- freeze): every run is a blueprint step *today* (a single prompt is a
+    -- parent blueprint instance. NULLABLE (relaxed from NOT NULL in this
+    -- baseline): every run is a blueprint step *today* (a single prompt is a
     -- 1-step blueprint), and the runs_origin_requires_parents CHECK pins it for
     -- origin 'blueprint', so the uniform-execution invariant is unchanged in
     -- practice. The NULL headroom is for a future origin<>'blueprint' run that
@@ -1027,7 +1027,7 @@ CREATE TABLE runs (
     ),
     -- A 'blueprint'-origin run carries its full parentage (it is a step of a
     -- blueprint_run, descended from a task, executing a prompt) — preserving
-    -- the pre-freeze NOT-NULL invariant for every run today. The tolerant
+    -- the previous NOT-NULL invariant for every run today. The tolerant
     -- origin <> 'blueprint' branch leaves a future interactive/ad-hoc run
     -- unconstrained here; its own integrity (an agent_session_id link, etc.)
     -- is enforced app-side and by additive columns when that feature lands.
@@ -1312,7 +1312,7 @@ CREATE INDEX idx_run_worktrees_run ON run_worktrees(run_id);
 -- === Pending PRs =========================================================
 CREATE TABLE pending_prs (
     id             TEXT PRIMARY KEY,
-    -- run_id is NOT unique (the UNIQUE was dropped at the v1.11.0 freeze): one
+    -- run_id is NOT unique (the UNIQUE was dropped at this baseline): one
     -- run may open PRs across several repos (a multi-repo blueprint step, or a
     -- future interactive session). One-PR-per-run is no longer a DB invariant;
     -- where it still holds it is validated app-side. The non-unique index below

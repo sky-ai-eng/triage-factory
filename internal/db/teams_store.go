@@ -49,7 +49,7 @@ type TeamsStore interface {
 	// Returns the empty string with a nil error if the org has no
 	// teams. Callers treat that as a hard error — every org gets a
 	// default team at create time (multi-mode via SKY-257 D14 org
-	// provisioning; local mode via the v1.11.0 baseline migration),
+	// provisioning; local mode via the baseline migration),
 	// and a teamless org is a bootstrap bug.
 	GetDefaultForOrgSystem(ctx context.Context, orgID string) (string, error)
 

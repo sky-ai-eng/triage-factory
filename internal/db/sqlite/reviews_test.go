@@ -68,7 +68,7 @@ func newSQLiteForReviewTest(t *testing.T) *sql.DB {
 
 // newSQLiteReviewSeeder returns the bag of raw-SQL helpers the
 // conformance suite drives. pending_reviews.run_id is now FK'd to runs(id)
-// ON DELETE SET NULL (v1.11.0 freeze, matching PG), so the Run seeder must
+// ON DELETE SET NULL (this baseline, matching PG), so the Run seeder must
 // chain a real entity/event/task/blueprint_run/run for the FK to resolve.
 func newSQLiteReviewSeeder(conn *sql.DB) dbtest.ReviewSeeder {
 	return dbtest.ReviewSeeder{

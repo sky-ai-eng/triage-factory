@@ -37,7 +37,7 @@ func (s *pendingPRStore) Create(ctx context.Context, orgID string, p domain.Pend
 		return err
 	}
 	// One active pending PR per run is now an APP-LAYER guard: the DB
-	// UNIQUE(run_id) was dropped at the v1.11.0 freeze so a multi-repo run can
+	// UNIQUE(run_id) was dropped at this baseline so a multi-repo run can
 	// eventually queue several PRs. Until that feature lands we still block a
 	// second PR per run, as a guarded INSERT ... WHERE NOT EXISTS — a single
 	// statement (no TOCTOU under SQLite's single writer) that surfaces a dupe

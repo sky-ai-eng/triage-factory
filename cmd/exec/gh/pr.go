@@ -645,7 +645,7 @@ func prCreate(client ghAPI, host agenthost.Client, args []string) {
 
 		// SKY-212-style anti-retry. The store's app-layer one-per-run
 		// guard (PendingPRs.Create returns ErrPendingPRAlreadyQueued; the
-		// DB UNIQUE(run_id) was dropped at the v1.11.0 freeze for future
+		// DB UNIQUE(run_id) was dropped at this baseline for future
 		// multi-repo PRs) blocks a second insert, but checking up front
 		// gives the agent a clear "already queued" message rather than
 		// relying on the create error, matching what submit-review does

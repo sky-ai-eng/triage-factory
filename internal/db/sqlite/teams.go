@@ -14,7 +14,7 @@ import (
 )
 
 // teamsStore is the SQLite impl of db.TeamsStore. Local mode seeds a
-// single "default" team for runmode.LocalDefaultOrgID via the v1.11.0
+// single "default" team for runmode.LocalDefaultOrgID via the
 // baseline migration; GetDefaultForOrgSystem returns its id by the
 // "oldest row wins" rule. The settings methods read/write
 // team_settings; SQLite stores jira_projects as a JSON text blob
@@ -134,7 +134,7 @@ func (s *teamsStore) TeamIDsForUserInOrgSystem(ctx context.Context, orgID, userI
 	// Postgres impl so both backends pin to one result. Unlike
 	// ListForUser (which short-circuits the join because SQLite is N=1),
 	// this takes an explicit userID and honors the membership rows, so
-	// the v1.11.0 baseline's seeded local-user membership is what
+	// the baseline's seeded local-user membership is what
 	// resolves the one synthetic user to its team in N=1.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT t.id

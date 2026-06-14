@@ -148,7 +148,7 @@ func RunPendingPRStoreConformance(t *testing.T, mk PendingPRStoreFactory) {
 
 	t.Run("Create_one_pending_pr_per_run_app_guard", func(t *testing.T) {
 		// One pending PR per run is now an APP-LAYER guard, not a DB
-		// constraint: the UNIQUE(run_id) was dropped at the v1.11.0 freeze
+		// constraint: the UNIQUE(run_id) was dropped at this baseline
 		// (so a future multi-repo run can queue several PRs), but the store
 		// still blocks a second PR per run for now and surfaces it as the
 		// clean ErrPendingPRAlreadyQueued — not a raw SQL constraint error.

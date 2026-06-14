@@ -15,7 +15,7 @@ import (
 // orgsStore is the SQLite impl of db.OrgsStore. The local-mode orgs
 // table has no soft-delete column — every row is considered active.
 // In practice this returns the single runmode.LocalDefaultOrgID
-// sentinel seeded by the v1.11.0 baseline migration, but the SQL
+// sentinel seeded by the baseline migration, but the SQL
 // makes no assumption about that count so a hypothetical future test
 // fixture that inserts additional rows iterates them correctly.
 //
