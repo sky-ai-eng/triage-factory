@@ -480,6 +480,16 @@ func prSubmitReview(client ghAPI, host agenthost.Client, args []string) {
 	pendingComments, err := host.ListPendingReviewComments(ctx, reviewID)
 	exitOnErr(err)
 
+	// A comment / request_changes review must carry something actionable: a
+	// top-level body, inline comments, or both. An empty body with no comments
+	// is a meaningless review GitHub rejects — surface it as a clear CLI error
+	// instead of an opaque API failure later. An approve needs no body (the
+	// approval is the signal), and an empty body with inline comments is valid,
+	// so this only fires on the genuinely-empty case.
+	if body == "" && ghEvent != "APPROVE" && len(pendingComments) == 0 {
+		exitErr(fmt.Sprintf("a %s review needs --body/--body-file or at least one inline comment", event))
+	}
+
 	// Convert to GitHub format. Prepend the severity badge to the body
 	// here, at GitHub-post time — the stored body stays badge-free so
 	// edits don't fight the markdown and the local UI can render a

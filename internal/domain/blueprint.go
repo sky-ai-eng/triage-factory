@@ -54,9 +54,10 @@ type Blueprint struct {
 // SeedBlueprint is a shipped blueprint definition used by the boot seeder:
 // the header (system_slug + name) plus the ordered prompt system_slugs its
 // steps wrap. The seeder resolves each slug to the team's prompt-copy id when
-// materializing the steps. All shipped blueprints are 1-step today (each wraps
-// one shipped prompt a trigger fires or the curator uses), but the shape
-// carries N slugs so a multi-step shipped blueprint is representable.
+// materializing the steps. Most shipped blueprints are 1-step (each wraps one
+// shipped prompt a trigger fires or the curator uses); system-pr-review is the
+// first multi-step shipped blueprint (security → correctness → aggregate), so
+// StepPromptSlugs carries its N ordered slugs.
 type SeedBlueprint struct {
 	SystemSlug      string
 	Name            string
