@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo, useCallback, useId, useRef } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import { Layers } from 'lucide-react'
 import type { Blueprint, BlueprintStep, Prompt } from '../types'
@@ -109,6 +109,11 @@ export default function PromptPicker({
   // item, NOT a commit — onSelect fires only from the Run button / Enter /
   // double-click. null when nothing is selectable yet.
   const [selId, setSelId] = useState<string | null>(null)
+  // Per-row refs so ↑/↓ can keep the active row in view, and a stable id base
+  // for the combobox/listbox ARIA wiring on the filter input + rows below.
+  const rowRefs = useRef(new Map<string, HTMLButtonElement>())
+  const listboxId = useId()
+  const optionId = (id: string) => `${listboxId}-opt-${id}`
 
   // Derived: "loading" means open, no items cached yet, AND the last fetch
   // hasn't failed. The fetchFailed flag is what breaks us out of the skeleton
@@ -148,10 +153,7 @@ export default function PromptPicker({
       // The 'prompts' source is already a flat list carrying bodies + models.
       if (source !== 'blueprints') {
         const data: Prompt[] = await fetch(`/api/prompts${q}`).then((r) => r.json())
-        if (!cancelled) {
-          setItems(data.map((p) => ({ ...p })))
-          setFetchFailed(false)
-        }
+        if (!cancelled) setItems(data.map((p) => ({ ...p })))
         return
       }
 
@@ -203,10 +205,7 @@ export default function PromptPicker({
           steps,
         }
       })
-      if (!cancelled) {
-        setItems(normalized)
-        setFetchFailed(false)
-      }
+      if (!cancelled) setItems(normalized)
     }
 
     load().catch(() => {
@@ -245,6 +244,12 @@ export default function PromptPicker({
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setSelId(next)
   }, [open, visible, selId, selectedId])
+
+  // Keep the highlighted row visible when ↑/↓ moves the selection past the
+  // fold. block:'nearest' is a no-op when the row is already in view (a click).
+  useEffect(() => {
+    if (selId) rowRefs.current.get(selId)?.scrollIntoView({ block: 'nearest' })
+  }, [selId])
 
   const selected = useMemo(() => visible.find((it) => it.id === selId) ?? null, [visible, selId])
 
@@ -346,10 +351,22 @@ export default function PromptPicker({
                       onChange={(e) => setQuery(e.target.value)}
                       placeholder="Filter…"
                       autoFocus
+                      // Combobox over the listbox below: the input keeps focus
+                      // while ↑/↓ moves the active option (aria-activedescendant),
+                      // so AT announces the highlighted row without focus leaving
+                      // the field.
+                      role="combobox"
+                      aria-expanded={visible.length > 0}
+                      aria-controls={listboxId}
+                      aria-activedescendant={selId ? optionId(selId) : undefined}
+                      aria-autocomplete="list"
                       className="w-full px-2.5 py-1.5 rounded-lg border border-border-subtle bg-white/50 text-[12px] text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors"
                     />
                   </div>
                   <div
+                    id={listboxId}
+                    role="listbox"
+                    aria-label={title}
                     className={`flex-1 overflow-y-auto px-2 py-2 space-y-1 ${
                       selectionDisabled ? 'opacity-50' : ''
                     }`}
@@ -371,9 +388,15 @@ export default function PromptPicker({
                       visible.map((it) => (
                         <button
                           key={it.id}
+                          ref={(el) => {
+                            if (el) rowRefs.current.set(it.id, el)
+                            else rowRefs.current.delete(it.id)
+                          }}
+                          id={optionId(it.id)}
+                          role="option"
+                          aria-selected={selId === it.id}
                           onClick={() => setSelId(it.id)}
                           onDoubleClick={() => commit(it.id)}
-                          aria-current={selId === it.id}
                           className={`group flex w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-left transition-all duration-150 ${
                             selId === it.id
                               ? 'border-accent/60 bg-accent/[0.06] ring-1 ring-accent/20'
@@ -403,14 +426,6 @@ export default function PromptPicker({
                       ))
                     )}
                   </div>
-                  {onEditPrompts && (
-                    <button
-                      onClick={onEditPrompts}
-                      className="shrink-0 border-t border-border-subtle px-3 py-2.5 text-left text-[12px] text-text-tertiary hover:text-accent transition-colors"
-                    >
-                      + New Prompt
-                    </button>
-                  )}
                 </div>
 
                 {/* Detail pane */}
