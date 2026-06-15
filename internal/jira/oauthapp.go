@@ -71,9 +71,29 @@ func FirstPartyOAuthAppFromEnv() OAuthApp {
 // authorize/callback flow that consumes the resolved app is a separate
 // concern. Mirrors internal/github.Resolver in shape (a system operation, so
 // the store read uses the claims-free ...System door).
+//
+// Resolve also reports which tier won (the OAuthAppSource), so a caller that
+// renders config state — the settings card — reflects what actually resolves
+// rather than the raw DB row: a per-org row whose secret has gone missing
+// resolves SourceFirstParty (or SourceNone), not SourceOrgOverride, so the card
+// doesn't claim "configured" for a dead override.
 type OAuthAppResolver interface {
-	Resolve(ctx context.Context, orgID string) (OAuthApp, error)
+	Resolve(ctx context.Context, orgID string) (OAuthApp, OAuthAppSource, error)
 }
+
+// OAuthAppSource identifies which tier of the precedence resolved the app, so
+// the status surface can distinguish a live per-org override from the hosted
+// default (and from nothing).
+type OAuthAppSource int
+
+const (
+	// SourceNone means nothing resolved (returned alongside ErrNoAtlassianOAuthApp).
+	SourceNone OAuthAppSource = iota
+	// SourceOrgOverride means the org's own per-org row resolved (its secret is present).
+	SourceOrgOverride
+	// SourceFirstParty means the deployment first-party app resolved (hosted default).
+	SourceFirstParty
+)
 
 type oauthAppResolver struct {
 	apps       db.JiraAppsStore
@@ -88,21 +108,21 @@ func NewOAuthAppResolver(apps db.JiraAppsStore, secrets db.SecretStore, firstPar
 	return &oauthAppResolver{apps: apps, secrets: secrets, firstParty: firstParty}
 }
 
-func (r *oauthAppResolver) Resolve(ctx context.Context, orgID string) (OAuthApp, error) {
+func (r *oauthAppResolver) Resolve(ctx context.Context, orgID string) (OAuthApp, OAuthAppSource, error) {
 	// Tier 1: the org's per-org override. A backend read error propagates
 	// rather than being misreported as "not configured" — a transient
 	// vault/DB outage must not silently fall through to the first-party app.
 	app, err := r.apps.GetForOrgSystem(ctx, orgID)
 	if err != nil {
-		return OAuthApp{}, fmt.Errorf("read jira oauth app for org %s: %w", orgID, err)
+		return OAuthApp{}, SourceNone, fmt.Errorf("read jira oauth app for org %s: %w", orgID, err)
 	}
 	if app != nil && app.ClientID != "" {
 		secret, err := r.secrets.GetSystem(ctx, orgID, app.ClientSecretRef)
 		if err != nil {
-			return OAuthApp{}, fmt.Errorf("read jira oauth client secret for org %s: %w", orgID, err)
+			return OAuthApp{}, SourceNone, fmt.Errorf("read jira oauth client secret for org %s: %w", orgID, err)
 		}
 		if secret != "" {
-			return OAuthApp{ClientID: app.ClientID, ClientSecret: secret}, nil
+			return OAuthApp{ClientID: app.ClientID, ClientSecret: secret}, SourceOrgOverride, nil
 		}
 		// A row exists but its secret read clean-and-empty (the secret was
 		// deleted out from under the row, or never landed). Treat the override
@@ -114,8 +134,8 @@ func (r *oauthAppResolver) Resolve(ctx context.Context, orgID string) (OAuthApp,
 	// local mode, so this is skipped and the org falls to the not-configured
 	// error unless it supplied a BYO row above.
 	if r.firstParty.Configured() {
-		return r.firstParty, nil
+		return r.firstParty, SourceFirstParty, nil
 	}
 
-	return OAuthApp{}, fmt.Errorf("%w: org=%s", ErrNoAtlassianOAuthApp, orgID)
+	return OAuthApp{}, SourceNone, fmt.Errorf("%w: org=%s", ErrNoAtlassianOAuthApp, orgID)
 }

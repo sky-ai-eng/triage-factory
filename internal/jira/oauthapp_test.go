@@ -29,12 +29,15 @@ func TestResolveOAuthApp_PerOrgOverride(t *testing.T) {
 	secrets := &fakeSecrets{sys: map[string]string{jiraSecretRef: "org-secret"}}
 	r := NewOAuthAppResolver(apps, secrets, OAuthApp{ClientID: "fp-client", ClientSecret: "fp-secret"})
 
-	got, err := r.Resolve(context.Background(), testOrgID)
+	got, source, err := r.Resolve(context.Background(), testOrgID)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 	if got.ClientID != "org-client" || got.ClientSecret != "org-secret" {
 		t.Fatalf("Resolve = %+v, want org override", got)
+	}
+	if source != SourceOrgOverride {
+		t.Fatalf("source = %v, want SourceOrgOverride", source)
 	}
 }
 
@@ -43,12 +46,15 @@ func TestResolveOAuthApp_PerOrgOverride(t *testing.T) {
 func TestResolveOAuthApp_FirstPartyFallback(t *testing.T) {
 	r := NewOAuthAppResolver(&fakeJiraApps{}, &fakeSecrets{}, OAuthApp{ClientID: "fp-client", ClientSecret: "fp-secret"})
 
-	got, err := r.Resolve(context.Background(), testOrgID)
+	got, source, err := r.Resolve(context.Background(), testOrgID)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 	if got.ClientID != "fp-client" || got.ClientSecret != "fp-secret" {
 		t.Fatalf("Resolve = %+v, want first-party", got)
+	}
+	if source != SourceFirstParty {
+		t.Fatalf("source = %v, want SourceFirstParty", source)
 	}
 }
 
@@ -57,9 +63,12 @@ func TestResolveOAuthApp_FirstPartyFallback(t *testing.T) {
 func TestResolveOAuthApp_NotConfigured(t *testing.T) {
 	r := NewOAuthAppResolver(&fakeJiraApps{}, &fakeSecrets{}, OAuthApp{})
 
-	_, err := r.Resolve(context.Background(), testOrgID)
+	_, source, err := r.Resolve(context.Background(), testOrgID)
 	if !errors.Is(err, ErrNoAtlassianOAuthApp) {
 		t.Fatalf("Resolve err = %v, want ErrNoAtlassianOAuthApp", err)
+	}
+	if source != SourceNone {
+		t.Fatalf("source = %v, want SourceNone", source)
 	}
 }
 
@@ -70,12 +79,17 @@ func TestResolveOAuthApp_OverrideMissingSecretFallsThrough(t *testing.T) {
 	apps := &fakeJiraApps{app: &domain.OrgJiraApp{ClientID: "org-client", ClientSecretRef: jiraSecretRef}}
 	r := NewOAuthAppResolver(apps, &fakeSecrets{}, OAuthApp{ClientID: "fp-client", ClientSecret: "fp-secret"})
 
-	got, err := r.Resolve(context.Background(), testOrgID)
+	got, source, err := r.Resolve(context.Background(), testOrgID)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 	if got.ClientID != "fp-client" {
 		t.Fatalf("Resolve = %+v, want first-party fallback", got)
+	}
+	// The dead override must NOT be reported as the live source — this is the
+	// state that would otherwise make the settings card claim "configured".
+	if source != SourceFirstParty {
+		t.Fatalf("source = %v, want SourceFirstParty (dead override falls through)", source)
 	}
 }
 
@@ -86,7 +100,7 @@ func TestResolveOAuthApp_StoreErrorPropagates(t *testing.T) {
 	boom := errors.New("db down")
 	r := NewOAuthAppResolver(&fakeJiraApps{err: boom}, &fakeSecrets{}, OAuthApp{ClientID: "fp", ClientSecret: "fp"})
 
-	_, err := r.Resolve(context.Background(), testOrgID)
+	_, _, err := r.Resolve(context.Background(), testOrgID)
 	if !errors.Is(err, boom) {
 		t.Fatalf("Resolve err = %v, want wrapped db error", err)
 	}
@@ -102,7 +116,7 @@ func TestResolveOAuthApp_SecretErrorPropagates(t *testing.T) {
 	apps := &fakeJiraApps{app: &domain.OrgJiraApp{ClientID: "org-client", ClientSecretRef: jiraSecretRef}}
 	r := NewOAuthAppResolver(apps, &fakeSecrets{sysErr: boom}, OAuthApp{})
 
-	_, err := r.Resolve(context.Background(), testOrgID)
+	_, _, err := r.Resolve(context.Background(), testOrgID)
 	if !errors.Is(err, boom) {
 		t.Fatalf("Resolve err = %v, want wrapped vault error", err)
 	}

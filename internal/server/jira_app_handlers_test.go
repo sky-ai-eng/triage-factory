@@ -133,6 +133,48 @@ func TestJiraApp_LocalMode_DeleteClearsConnectAvailable(t *testing.T) {
 	}
 }
 
+// TestJiraApp_DeadOverrideRowNotShownAsConfigured: a per-org row whose secret
+// has gone missing must NOT read as a configured override — the status summary
+// is driven by what the resolver actually resolves, not the raw row. In local
+// mode (no first-party), the dead row resolves to nothing: app:null,
+// connect_available=false.
+func TestJiraApp_DeadOverrideRowNotShownAsConfigured(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	if rec := doJSON(t, s, "POST", jiraAppPath(), map[string]string{
+		"client_id":     "atl-client-xyz",
+		"client_secret": "shhh-secret",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("import status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+
+	// Drop the secret out from under the row (the row persists). Mirrors the
+	// edge the resolver documents: a secret deleted without the row.
+	if _, err := s.secrets.Delete(context.Background(), runmode.LocalDefaultOrgID, jiraOAuthClientSecretKey); err != nil {
+		t.Fatalf("delete secret: %v", err)
+	}
+
+	rec := doJSON(t, s, "GET", jiraAppPath(), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	var out jiraAppStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.App != nil {
+		t.Errorf("app=%+v, want nil (dead override must not read as configured)", out.App)
+	}
+	if out.ConnectAvailable {
+		t.Error("connect_available=true, want false (dead override, no first-party in local)")
+	}
+	if out.UsingHostedDefault {
+		t.Error("using_hosted_default=true, want false (no first-party in local)")
+	}
+}
+
 // TestJiraApp_ImportRejectsMissingFields: both client_id and client_secret are
 // required; a blank one is a 422 with the offending field.
 func TestJiraApp_ImportRejectsMissingFields(t *testing.T) {

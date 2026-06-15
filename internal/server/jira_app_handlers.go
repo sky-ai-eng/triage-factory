@@ -80,18 +80,24 @@ type jiraAppStatusResponse struct {
 	ConnectCallbackURL string       `json:"connect_callback_url"`
 }
 
-// newJiraAppStatusResponse assembles the status payload from a loaded per-org
-// override, the resolver's connect-available verdict, and the registrant's
-// display name. A nil app yields app:null (no per-org override). When no
-// per-org app is set but connect is still available, that's the hosted
-// first-party app covering the org.
-func newJiraAppStatusResponse(app *domain.OrgJiraApp, connectAvailable bool, registeredByName, connectCallbackURL string) jiraAppStatusResponse {
+// newJiraAppStatusResponse assembles the status payload from the loaded per-org
+// row and the source the resolver actually resolved from. The summary is driven
+// by the resolved source, NOT the raw row, so the three states never diverge:
+//   - SourceOrgOverride → the row is the live app; show it, using_hosted_default=false.
+//   - SourceFirstParty  → app:null + using_hosted_default=true (the hosted app
+//     covers the org — including the case where a per-org row exists but its
+//     secret has gone missing, so the resolver fell through to the first-party).
+//   - SourceNone        → app:null, connect_available=false.
+//
+// registeredByName is only meaningful for an override (the row's registrant) and
+// is ignored otherwise.
+func newJiraAppStatusResponse(app *domain.OrgJiraApp, source jira.OAuthAppSource, registeredByName, connectCallbackURL string) jiraAppStatusResponse {
 	resp := jiraAppStatusResponse{
-		ConnectAvailable:   connectAvailable,
-		UsingHostedDefault: app == nil && connectAvailable,
+		ConnectAvailable:   source != jira.SourceNone,
+		UsingHostedDefault: source == jira.SourceFirstParty,
 		ConnectCallbackURL: connectCallbackURL,
 	}
-	if app != nil {
+	if source == jira.SourceOrgOverride && app != nil {
 		resp.App = &jiraAppInfo{
 			ClientID:                app.ClientID,
 			RegisteredAt:            app.RegisteredAt.UTC().Format(time.RFC3339),
@@ -120,20 +126,29 @@ func (s *Server) jiraRegistrantDisplayName(ctx context.Context, orgID, userID st
 	return name
 }
 
-// connectAvailableForOrg reports whether an Atlassian OAuth app resolves for
-// the org (per-org override or, in hosted, the deployment first-party). A
-// not-configured outcome is the expected false; a backend read error is logged
-// and treated as false (the signal degrades closed rather than failing the
-// caller — both the card status and the per-user Jira status read it). System
-// read: the caller has already authorized orgID.
-func (s *Server) connectAvailableForOrg(r *http.Request, orgID string) bool {
-	if _, err := s.jiraOAuthApps.Resolve(r.Context(), orgID); err != nil {
+// resolveOAuthAppSource reports which tier resolves the org's Atlassian OAuth
+// app (override / first-party / none). A not-configured outcome is the expected
+// SourceNone; a backend read error is logged and degraded to SourceNone (the
+// signal fails closed rather than failing the caller — both the card status and
+// the per-user Jira status read it). System read: the caller has already
+// authorized orgID.
+func (s *Server) resolveOAuthAppSource(r *http.Request, orgID string) jira.OAuthAppSource {
+	_, source, err := s.jiraOAuthApps.Resolve(r.Context(), orgID)
+	if err != nil {
 		if !errors.Is(err, jira.ErrNoAtlassianOAuthApp) {
 			log.Printf("[jira-app] resolve oauth app for org %s: %v", orgID, err)
 		}
-		return false
+		return jira.SourceNone
 	}
-	return true
+	return source
+}
+
+// connectAvailableForOrg reports whether an Atlassian OAuth app resolves for the
+// org (per-org override or, in hosted, the deployment first-party) — the signal
+// the per-user Jira status endpoint surfaces to gate the one-click Connect
+// button.
+func (s *Server) connectAvailableForOrg(r *http.Request, orgID string) bool {
+	return s.resolveOAuthAppSource(r, orgID) != jira.SourceNone
 }
 
 // handleJiraAppStatus returns the org's Atlassian OAuth app config state. Read-
@@ -157,12 +172,20 @@ func (s *Server) handleJiraAppStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, newJiraAppStatusResponse(
-		app,
-		s.connectAvailableForOrg(r, orgID),
-		s.jiraRegistrantDisplayName(r.Context(), orgID, userID, app),
-		s.jiraConnectCallbackURLSafe(orgID),
-	))
+	writeJSON(w, http.StatusOK, s.jiraAppStatusPayload(r, orgID, userID, app))
+}
+
+// jiraAppStatusPayload builds the status response for a loaded per-org row,
+// resolving the effective source so the summary reflects what actually resolves
+// (a row with a missing secret reads as the hosted default, not a live
+// override). The registrant lookup runs only when the override is the live app.
+func (s *Server) jiraAppStatusPayload(r *http.Request, orgID, userID string, app *domain.OrgJiraApp) jiraAppStatusResponse {
+	source := s.resolveOAuthAppSource(r, orgID)
+	registeredBy := ""
+	if source == jira.SourceOrgOverride {
+		registeredBy = s.jiraRegistrantDisplayName(r.Context(), orgID, userID, app)
+	}
+	return newJiraAppStatusResponse(app, source, registeredBy, s.jiraConnectCallbackURLSafe(orgID))
 }
 
 // jiraAppImportRequest is the import endpoint body — a bring-your-own
@@ -238,12 +261,7 @@ func (s *Server) handleJiraAppImport(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "jira-app", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, newJiraAppStatusResponse(
-		app,
-		s.connectAvailableForOrg(r, orgID),
-		s.jiraRegistrantDisplayName(r.Context(), orgID, userID, app),
-		s.jiraConnectCallbackURLSafe(orgID),
-	))
+	writeJSON(w, http.StatusOK, s.jiraAppStatusPayload(r, orgID, userID, app))
 }
 
 // handleJiraAppDelete removes the org's bring-your-own Atlassian OAuth app —
@@ -274,10 +292,7 @@ func (s *Server) handleJiraAppDelete(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[jira-app] removed atlassian oauth app for org=%s (by user=%s)", orgID, userID)
 
-	writeJSON(w, http.StatusOK, newJiraAppStatusResponse(
-		nil,
-		s.connectAvailableForOrg(r, orgID),
-		"",
-		s.jiraConnectCallbackURLSafe(orgID),
-	))
+	// The row is gone; the payload now reflects whatever still resolves (the
+	// hosted first-party app, or nothing).
+	writeJSON(w, http.StatusOK, s.jiraAppStatusPayload(r, orgID, userID, nil))
 }
