@@ -131,11 +131,16 @@ export default function PromptPicker({
     // curator callers that don't scope). Refetching on teamValue keeps rows
     // matched to the header's team so a user can't preview another team's item.
     const q = teamValue ? `?team_id=${encodeURIComponent(teamValue)}` : ''
+    // Clear the prior failure so this attempt (first open, reopen, team switch)
+    // shows the loading skeleton again rather than getting stuck on the
+    // "Failed to load." message while the refetch is in flight; the .catch below
+    // re-raises it if this attempt also fails.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setFetchFailed(false)
     // On a team switch, drop the prior team's rows so the skeleton shows during
     // the refetch and a stale cross-team item can't be committed. Only when
     // team-scoped — unscoped callers keep their across-opens cache.
     if (teamValue !== undefined) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setItems([])
     }
 
@@ -348,7 +353,7 @@ export default function PromptPicker({
                     className={`flex-1 overflow-y-auto px-2 py-2 space-y-1 ${
                       selectionDisabled ? 'opacity-50' : ''
                     }`}
-                    aria-busy={selectionDisabled}
+                    aria-busy={loading}
                   >
                     {loading ? (
                       [...Array(6)].map((_, i) => (
