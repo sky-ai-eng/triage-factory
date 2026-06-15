@@ -320,6 +320,7 @@ export default function Cards() {
         source="blueprints"
         title="Choose a blueprint"
         subtitle="Select a blueprint to run for this task"
+        selectLabel="Run"
         onSelect={delegateWithPrompt}
         onClose={() => setShowPromptPicker(false)}
         onEditPrompts={() => {

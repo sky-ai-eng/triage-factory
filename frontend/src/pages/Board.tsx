@@ -1054,6 +1054,7 @@ export default function Board() {
         source="blueprints"
         title="Choose a blueprint"
         subtitle="Select a blueprint to run for this task"
+        selectLabel="Run"
         onSelect={handlePromptSelected}
         onClose={() => {
           setShowPromptPicker(false)

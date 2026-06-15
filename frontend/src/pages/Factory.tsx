@@ -467,6 +467,7 @@ export default function Factory() {
         source="blueprints"
         title="Choose a blueprint"
         subtitle="Select a blueprint to run for this task"
+        selectLabel="Run"
         onSelect={handlePromptSelected}
         onClose={() => setPendingDelegate(null)}
         onEditPrompts={() => {

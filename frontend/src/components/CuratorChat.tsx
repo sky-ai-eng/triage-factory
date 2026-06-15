@@ -270,6 +270,7 @@ export default function CuratorChat({ project, onPatch }: Props) {
         open={pickerOpen}
         title="Curator spec skill"
         subtitle="The Curator uses this prompt as a Claude Code skill when authoring tickets. Edits take effect on the next turn."
+        selectLabel="Use skill"
         selectedId={effectiveSpecPromptID}
         onSelect={handleSpecSelect}
         onClose={() => setPickerOpen(false)}

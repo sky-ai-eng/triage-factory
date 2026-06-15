@@ -204,6 +204,11 @@ export interface Prompt {
   name: string
   body: string
   source: string
+  // Per-prompt model override; '' = inherit the team default at dispatch.
+  // Optional on the wire shape some callers build, but `/api/prompts`
+  // serializes it (domain.Prompt.Model) — the picker's detail pane reads it
+  // to show a per-step model chip.
+  model?: string
   usage_count: number
   created_at: string
   updated_at: string
@@ -219,6 +224,10 @@ export interface Blueprint {
   // authored ones. Optional because not every Blueprint-shaped response sets it.
   source?: string
   team_id?: string
+  // How many runs have used this blueprint. `/api/blueprints` serializes it
+  // (domain.Blueprint.UsageCount); the picker surfaces it in the detail pane.
+  // Optional because not every Blueprint-shaped response carries it.
+  usage_count?: number
   created_at: string
   updated_at: string
 }
