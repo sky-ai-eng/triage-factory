@@ -262,6 +262,9 @@ func New(admin, app *sql.DB) db.Stores {
 		// no-claims reads the webhook receiver + backfill need; secrets
 		// for the backfill's App-PEM GetSystem read.
 		GitHubApps: newGitHubAppsStore(app, admin, secrets),
+		// JiraApps: app pool for request-handler reads/writes (RLS-gated);
+		// admin pool for the no-claims read the OAuth-app resolver needs.
+		JiraApps: newJiraAppsStore(app, admin),
 		// OrgTemplate needs both pools: the editor CRUD runs on app
 		// (org_template_*_all RLS gates on tf.user_is_org_admin), while
 		// SeedFromShipped + MaterializeIntoTeam run on admin (claims-less
@@ -336,6 +339,7 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		// GetSystem would hit tf_app and be denied here — tests that exercise
 		// it use New(admin, app) directly, same as the SecretStore tests.
 		GitHubApps:  newGitHubAppsStore(tx, tx, newSecretStore(tx, tx)),
+		JiraApps:    newJiraAppsStore(tx, tx),
 		OrgTemplate: newTxOrgTemplateStore(tx),
 	}
 }

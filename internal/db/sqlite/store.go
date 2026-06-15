@@ -99,6 +99,7 @@ func New(conn *sql.DB) db.Stores {
 		// package-level *sql.DB calls until D9.
 		Curator:    newCuratorStore(conn),
 		GitHubApps: newGitHubAppsStore(conn, secrets),
+		JiraApps:   newJiraAppsStore(conn),
 		// OrgTemplate is a multi-mode concept; SQLite wires it so the
 		// db-package bootstrap tests can run without Postgres. Local mode
 		// never seeds or reads it.

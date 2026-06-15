@@ -43,6 +43,7 @@ import { initialWizardState, loadOrg, loadGitHubAppInstall } from '../../setup/s
 import type { StepContext, WizardState } from '../../setup/types'
 import PollerTimingGroup from '../PollerTimingGroup'
 import JiraAccessGroup from '../JiraAccessGroup'
+import AtlassianOAuthAppCard from '../AtlassianOAuthAppCard'
 import TeamManagementSection from '../../../components/TeamManagementSection'
 import { saveOrgConfig, type OrgConfigForm } from '../orgConfig'
 import { connectJira, JIRA_DEPLOYMENT_OPTIONS } from '../jiraConnect'
@@ -429,6 +430,17 @@ export default function OrgSettings({
               />
             )}
           </div>
+        </SettingsSection>
+      )}
+
+      {/* ── Atlassian OAuth app (Cloud only) ── The credential layer the
+          per-user one-click "Connect Jira" flow runs against. Cloud-only: OAuth
+          3LO is a Cloud concept (Data Center uses a per-user PAT), so it shows
+          only for a connected Cloud org. An action section — the card commits
+          its own store/remove inline, so there's no Save footer. */}
+      {orgId && draft.jiraConnected && draft.jiraDeployment === 'cloud' && (
+        <SettingsSection title="Atlassian OAuth app" summary="One-click Connect for Jira">
+          <AtlassianOAuthAppCard orgId={orgId} />
         </SettingsSection>
       )}
 

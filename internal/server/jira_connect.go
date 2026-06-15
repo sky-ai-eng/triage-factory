@@ -64,7 +64,9 @@ func jiraTokenKey(host string) string {
 // credential, because Jira's user level holds access, not just identity.
 // `account` is the bound display name (the human-recognizable label, the Jira
 // analog of GitHub's @login); `host` is the org's Jira host the credential is
-// keyed under. `connect_available` is false until Cloud OAuth lands.
+// keyed under. `connect_available` reflects whether an Atlassian OAuth app
+// resolves for the org (per-org override / deployment first-party) — the gate
+// for offering the one-click Cloud "Connect" button.
 type jiraIdentityStatusResponse struct {
 	Connected        bool   `json:"connected"`
 	Account          string `json:"account,omitempty"`
@@ -140,11 +142,17 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// connect_available is true exactly when an Atlassian OAuth app resolves
+	// for the org (per-org override or, in hosted, the deployment first-party).
+	// The frontend shows the one-click "Connect" button only then; otherwise it
+	// offers just the paste-a-PAT/token path. The authorize/callback flow that
+	// the button kicks off is a later ticket — this only advertises that the
+	// app credential it needs is in place.
 	writeJSON(w, http.StatusOK, jiraIdentityStatusResponse{
 		Connected:        connected,
 		Account:          account,
 		Host:             host,
-		ConnectAvailable: false, // no Cloud OAuth yet (DC = paste-a-PAT)
+		ConnectAvailable: s.connectAvailableForOrg(r, orgID),
 	})
 }
 

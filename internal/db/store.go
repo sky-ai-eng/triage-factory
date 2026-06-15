@@ -242,6 +242,13 @@ type Stores struct {
 	// org_github_apps for the same manifest-flow path.
 	GitHubApps GitHubAppsStore
 
+	// JiraApps owns the org_jira_apps table — per-org Atlassian OAuth (3LO)
+	// app registrations (the BYO-app override / local-supplied app). App pool
+	// in Postgres (RLS gates reads by org membership, writes by org admin);
+	// admin pool for the resolver's no-claims GetForOrgSystem. SQLite is wired
+	// in local mode for the local-supplied BYO app.
+	JiraApps JiraAppsStore
+
 	// OrgTemplate owns org_template_prompts + org_template_handlers — the
 	// per-org, org-admin-editable template BootstrapNewOrg/NewTeam copy into
 	// each new team's prompts + event_handlers (SKY-381). App pool for the
@@ -294,6 +301,7 @@ type TxStores struct {
 	TeamGitHubRepos  TeamGitHubReposStore
 	Curator          CuratorStore
 	GitHubApps       GitHubAppsStore
+	JiraApps         JiraAppsStore
 	OrgTemplate      OrgTemplateStore
 }
 

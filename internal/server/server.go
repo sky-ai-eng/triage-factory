@@ -90,6 +90,17 @@ type Server struct {
 	// ForUser so the write is attributed to the user, not the service account.
 	// Built in New from the stores, so it's never nil — handlers don't guard.
 	jiraResolver jira.Resolver
+	// jiraApps owns the org_jira_apps table — per-org Atlassian OAuth app
+	// registrations (the BYO-app override / local-supplied app). The settings
+	// handlers read/write it; the resolver reads it (system door) to resolve
+	// the app the per-user Connect flow runs against.
+	jiraApps db.JiraAppsStore
+	// jiraOAuthApps resolves the Atlassian OAuth app for an org (per-org
+	// override → deployment first-party in hosted; local-supplied BYO else
+	// not-configured). Backs the jira-app settings card's status + the
+	// connect_available signal the per-user Jira status endpoint returns.
+	// Built in New, so it's never nil — handlers don't guard.
+	jiraOAuthApps jira.OAuthAppResolver
 	// Change callbacks accept the orgID of the tenant whose integration
 	// creds just rotated, so the closure can re-resolve via SecretStore.
 	// Local mode always passes runmode.LocalDefaultOrgID; multi-mode
@@ -403,6 +414,7 @@ func New(database *sql.DB, stores db.Stores, serverPort int) *Server {
 		orgs:         stores.Orgs,
 		jiraRules:    stores.JiraStatusRules,
 		githubApps:   stores.GitHubApps,
+		jiraApps:     stores.JiraApps,
 		orgTemplate:  stores.OrgTemplate,
 		tx:           stores.Tx,
 		az:           authz.New(database, stores.Tx),
@@ -422,6 +434,12 @@ func New(database *sql.DB, stores db.Stores, serverPort int) *Server {
 	// ForUser (acting user's cred). Constructed here like ghResolver so a
 	// Server is always usable without external wiring.
 	s.jiraResolver = jira.NewResolver(stores.Secrets, stores.Orgs)
+	// Atlassian OAuth app resolver (TFAC-337): per-org override → deployment
+	// first-party (hosted) / local-supplied (local). The first-party app is
+	// read from the deployment env, and only in hosted mode — local has no
+	// first-party default, so FirstPartyOAuthAppFromEnv returns the zero app
+	// there and the resolver relies on the org's BYO row.
+	s.jiraOAuthApps = jira.NewOAuthAppResolver(stores.JiraApps, stores.Secrets, jira.FirstPartyOAuthAppFromEnv())
 	s.onInstallationRemoved = func(orgID, installationID string) {
 		ghTokenCache.Invalidate(orgID, installationID)
 	}
@@ -850,10 +868,23 @@ func (s *Server) routes() {
 	// (jira_connect.go). status reports connected from a STORED credential
 	// (Jira's user level holds access, not just identity); the PAT path
 	// validates the token, STORES it (per-user vault scope), and derives the
-	// user's Jira identity. DC = paste-a-PAT; Cloud OAuth is a later ticket
-	// (connect_available stays false). Any org member binds their own access.
+	// user's Jira identity. DC = paste-a-PAT; connect_available now reflects
+	// whether an Atlassian OAuth app resolves (the Cloud Connect gate). Any org
+	// member binds their own access.
 	s.api("GET /api/orgs/{org_id}/identity/jira", s.handleJiraIdentityStatus)
 	s.apiMutating("POST /api/orgs/{org_id}/identity/jira/pat", s.handleJiraIdentityPAT)
+
+	// Per-org Atlassian OAuth (3LO) app config — the credential layer the
+	// per-user "Connect Jira" flow runs against (the flow itself is a later
+	// ticket). The Jira sibling of the GitHub App import card: an admin enters
+	// a bring-your-own Atlassian app (client_id + client_secret), which becomes
+	// the per-org override over the deployment first-party app (hosted) / is the
+	// app itself (local). status is any-member (the card renders for everyone);
+	// import + delete are admin (gated inside the handler). The two mutators are
+	// JSON fetches from the SPA, so they ride apiMutating (CSRF).
+	s.api("GET /api/orgs/{org_id}/jira-app", s.handleJiraAppStatus)
+	s.apiMutating("POST /api/orgs/{org_id}/jira-app", s.handleJiraAppImport)
+	s.apiMutating("DELETE /api/orgs/{org_id}/jira-app", s.handleJiraAppDelete)
 
 	// Per-org GitHub App webhook receiver. Pre-auth (GitHub has no
 	// session) and identified by org_id from the path; the handler
