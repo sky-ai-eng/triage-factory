@@ -113,7 +113,7 @@ export function JiraUserAccessStep({ state, patch, error }: StepContext) {
                 rel="noreferrer"
                 className="text-accent hover:underline"
               >
-                id.atlassian.com/manage/api-tokens
+                Atlassian API token settings
               </a>
               . Unlike GitHub, it&rsquo;s stored — Triage Factory needs it to act as you on Jira. It
               stays in your workspace&rsquo;s secret store and is never shared with other users.

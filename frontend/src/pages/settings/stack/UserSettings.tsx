@@ -312,7 +312,7 @@ function JiraIdentitySection({ orgId }: { orgId: string | null }) {
                     rel="noreferrer"
                     className="text-accent hover:underline"
                   >
-                    id.atlassian.com/manage/api-tokens
+                    Atlassian API token settings
                   </a>
                   .
                 </p>

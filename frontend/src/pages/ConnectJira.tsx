@@ -258,7 +258,7 @@ export default function ConnectJira() {
               rel="noreferrer"
               className="text-accent hover:underline"
             >
-              id.atlassian.com/manage/api-tokens
+              Atlassian API token settings
             </a>
             . Unlike GitHub, it&apos;s stored — it&apos;s needed to act as you on Jira. It stays in
             your workspace&apos;s secret store and is never shared with other users.

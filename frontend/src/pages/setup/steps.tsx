@@ -860,28 +860,27 @@ const jiraAccessStep: WizardStep = {
     // jiraDeployment is non-null here (the mode step gates this one), but fall
     // back defensively so the connect never sends an undefined scheme.
     const deployment = state.jiraDeployment ?? 'data_center'
-    // typedPat is the trimmed DC PAT for the local-mode reuse branch below (DC
-    // only); connectJira trims the credential it actually sends.
+    // The just-typed org credential, captured before connectJira clears it, for
+    // the local-mode reuse branch below. The shape follows the deployment: Cloud
+    // reuses the email + API token, DC the PAT.
     const typedPat = state.org.jira_pat.trim()
+    const typedEmail = state.org.jira_email.trim()
+    const typedToken = state.org.jira_api_token.trim()
     const result = await connectJira(state.org.jira_url, deployment, state.org)
     if (!result.ok) throw new Error(result.error)
     // Local-mode convenience — the Jira sibling of the GitHub PAT step's reuse
     // (see there for the rationale + the navigation-safety note). Reuse the
-    // just-connected org Jira PAT as the operator's own STORED Jira credential,
-    // so they don't paste it again on the User step. Marks only the User step;
-    // org/team flow is untouched. Best-effort: a capture failure never fails the
-    // org connect.
-    // DC only — captureJiraIdentityPat binds a PAT; per-user Cloud (email + API
-    // token) is a separate ticket, so a Cloud org has nothing to reuse here.
-    if (
-      state.isLocal &&
-      state.duplicateJiraToUser &&
-      deployment === 'data_center' &&
-      typedPat !== '' &&
-      orgId
-    ) {
+    // just-connected org Jira credential as the operator's own STORED Jira
+    // credential, so they don't paste it again on the User step. Marks only the
+    // User step; org/team flow is untouched. Best-effort: a capture failure never
+    // fails the org connect — it pre-fills the User step drafts instead.
+    const cloudReuse = deployment === 'cloud' && typedEmail !== '' && typedToken !== ''
+    const dcReuse = deployment === 'data_center' && typedPat !== ''
+    if (state.isLocal && state.duplicateJiraToUser && orgId && (cloudReuse || dcReuse)) {
       try {
-        const id = await captureJiraIdentityPat(orgId, typedPat)
+        const id = cloudReuse
+          ? await captureJiraIdentityApiToken(orgId, typedEmail, typedToken)
+          : await captureJiraIdentityPat(orgId, typedPat)
         patch({
           jiraConnected: true,
           jiraUrlConfirmed: true,
@@ -889,6 +888,8 @@ const jiraAccessStep: WizardStep = {
           jiraUserAccount: id.account,
           jiraUserHost: id.host,
           jiraUserPat: '',
+          jiraUserEmail: '',
+          jiraUserApiToken: '',
           org: { ...state.org, jira_pat: '', jira_email: '', jira_api_token: '' },
         })
         return
@@ -897,7 +898,11 @@ const jiraAccessStep: WizardStep = {
         patch({
           jiraConnected: true,
           jiraUrlConfirmed: true,
-          jiraUserPat: typedPat,
+          // Pre-fill the User step drafts in the deployment's shape so Continue
+          // captures them there.
+          ...(cloudReuse
+            ? { jiraUserEmail: typedEmail, jiraUserApiToken: typedToken }
+            : { jiraUserPat: typedPat }),
           org: { ...state.org, jira_pat: '', jira_email: '', jira_api_token: '' },
         })
         return
@@ -1181,6 +1186,15 @@ export async function loadJiraUserAccess(ctx: LoadContext): Promise<Partial<Wiza
     jiraUserAccount: data.account ?? '',
     jiraUserHost: data.host ?? '',
     jiraUserConnectAvailable: data.connect_available,
+    // Seed the deployment from the identity endpoint — the canonical source for
+    // THIS step (it owns the user-access load). The org-connect load
+    // (fetchIntegrationsState) seeds jiraDeployment too, but it fires in
+    // parallel and can be null if the org isn't fully resolved; keying the
+    // Cloud-vs-DC field choice off this step's own fetch removes that implicit
+    // ordering dependency. Only overwrite on a recognized value.
+    ...(data.deployment === 'cloud' || data.deployment === 'data_center'
+      ? { jiraDeployment: data.deployment }
+      : {}),
   }
 }
 

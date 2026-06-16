@@ -175,7 +175,7 @@ export default function JiraAccessGroup({
                     rel="noreferrer"
                     className="text-accent hover:underline"
                   >
-                    id.atlassian.com/manage/api-tokens
+                    Atlassian API token settings
                   </a>
                   . Paired with the account email above for Basic auth.
                 </p>

@@ -127,17 +127,21 @@ export function JiraAccessStep({ state, patch, isLocal }: StepContext) {
         showBaseUrl={false}
         bare
       />
-      {/* Local-mode only: reuse the org Jira PAT as the operator's own STORED
-          Jira credential so they don't paste it again on the User step. Shown
-          only while connecting (no PAT to reuse once connected) and only for
-          Data Center — the per-user bind takes a PAT; per-user Cloud (email +
-          API token) is a separate ticket, so there's nothing to reuse yet. */}
-      {isLocal && !state.jiraConnected && deployment === 'data_center' && (
+      {/* Local-mode only: reuse the just-typed org Jira credential as the
+          operator's own STORED Jira credential so they don't paste it again on
+          the User step. Shown only while connecting (nothing to reuse once
+          connected). The credential reused follows the deployment: Cloud reuses
+          the email + API token, Data Center the PAT. */}
+      {isLocal && !state.jiraConnected && (
         <ReuseCredentialCheckbox
           checked={state.duplicateJiraToUser}
           onChange={(v) => patch({ duplicateJiraToUser: v })}
-          label="Also use this token as my own Jira identity"
-          hint="Saves re-entering it on the “Your Jira access” step. Your token is stored (not just your username) so Triage Factory can act as you on Jira."
+          label={
+            deployment === 'cloud'
+              ? 'Also use this email + API token as my own Jira identity'
+              : 'Also use this token as my own Jira identity'
+          }
+          hint="Saves re-entering it on the “Your Jira access” step. Your credential is stored (not just your username) so Triage Factory can act as you on Jira."
         />
       )}
     </div>

@@ -298,8 +298,54 @@ func TestJiraIdentityStatus(t *testing.T) {
 	if out.Host != jiraStub.URL {
 		t.Errorf("host = %q, want %q", out.Host, jiraStub.URL)
 	}
+	// No auth-method marker seeded + a non-*.atlassian.net host → deployment
+	// resolves Data Center, so the paste surfaces render the PAT field.
+	if out.Deployment != "data_center" {
+		t.Errorf("deployment = %q, want data_center", out.Deployment)
+	}
 	if out.ConnectAvailable {
 		t.Errorf("connect_available=true, want false (no Cloud OAuth yet): %+v", out)
+	}
+}
+
+// TestJiraIdentityStatus_StaleCrossSchemeCredential_NotConnected pins the
+// status reader's deployment-match guard: a user with a stored Data Center PAT
+// whose org later flips to Cloud (a DC→Cloud cutover) reports connected=false —
+// the stale cred isn't usable for the resolved Cloud deployment, so the paste UI
+// re-renders for a re-bind rather than reporting connected and failing every
+// write. Also pins that the status deployment follows the marker (cloud).
+func TestJiraIdentityStatus_StaleCrossSchemeCredential_NotConnected(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	// Bind a DC PAT first (no marker yet → host-shape DC), storing a dc_pat
+	// envelope under the host-scoped key.
+	jiraStub := jiraMyselfStub(t, `{"accountId":"acc-9","displayName":"Octo Jira"}`, nil)
+	seedLocalOrgJiraHost(t, s, jiraStub.URL)
+	rec := doJSON(t, s, "POST",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira/pat",
+		map[string]any{"pat": "tok"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("capture status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+
+	// Org cuts over to Cloud — the marker is now authoritative.
+	seedLocalOrgJiraAuthMethod(t, s, "cloud_api_token")
+
+	statusRec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira", nil)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s, want 200", statusRec.Code, statusRec.Body.String())
+	}
+	var out jiraIdentityStatusResponse
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Deployment != "cloud" {
+		t.Errorf("deployment = %q, want cloud (marker authoritative)", out.Deployment)
+	}
+	if out.Connected {
+		t.Errorf("connected=true for a DC PAT on a Cloud org: %+v (want false — stale cross-scheme cred)", out)
 	}
 }
 
