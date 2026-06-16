@@ -4,7 +4,7 @@ The two findings files are:
 - `{{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/security.json`
 - `{{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/correctness.json`
 
-Each is a JSON object: `{"findings": [ {file, line, start_line, severity, in_diff, body}, ... ], "summary": "..."}`. A file may be missing if that pass found nothing or did not run — treat a missing or unreadable file as `{"findings": [], "summary": ""}` and continue. Do not fail the run over a missing file.
+Each is a JSON object: `{"findings": [ {file, line, start_line, severity, in_diff, body}, ... ], "summary": "..."}`. A file may be missing if that pass found nothing or did not run — treat a missing or unreadable file as `{"findings": [], "summary": ""}` and continue. Do not fail the run over a missing file. If either file is absent, write that JSON to its canonical path (`{{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/security.json` or `…/correctness.json`) before proceeding, so the `jq` calls in STEP 4 always have a readable file at the expected location.
 
 Work through these steps in order. Use the Bash tool; `jq` is available.
 
@@ -24,9 +24,9 @@ It prints JSON containing a `review_id`. Capture that value; you pass it to ever
 STEP 4 — Post each finding that has `in_diff` == true.
 For each such finding, extract its `severity` into a shell variable and write its `body` to a file with `jq` — both come straight from the finding, so pull them mechanically rather than typing them by hand (the body may contain code blocks and quotes that `--body-file` keeps safe from shell-escaping):
 
-    # for this finding (replace <FILE>/<I> with the source file and array index)
-    SEV=$(jq -r '.findings[<I>].severity' <FILE>.json)
-    jq -r '.findings[<I>].body' <FILE>.json > {{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/body.md
+    # for this finding (replace <FILE> with security or correctness, <I> with the array index)
+    SEV=$(jq -r '.findings[<I>].severity' {{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/<FILE>.json)
+    jq -r '.findings[<I>].body' {{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/<FILE>.json > {{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/body.md
 
     {{BINARY_PATH}} exec gh pr add-review-comment "$REVIEW_ID" \
       --file "<file>" --line <line> --severity "$SEV" \

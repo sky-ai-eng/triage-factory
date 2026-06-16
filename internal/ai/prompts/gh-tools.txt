@@ -21,7 +21,7 @@ Gotchas:
 - `submit-review` is the **last** call in a delegated review run. It queues your review for human approval rather than posting it to GitHub directly — the response will be `{"status": "queued_for_human_approval", ...}`. After you see that response, do NOT call `submit-review` again (the second call will hard-error). Write your `{{RUN_ROOT}}/_scratch/entity-memory/{{BLUEPRINT_RUN_ID}}/{{RUN_ID}}.md` memory file and return your completion JSON.
 - For multi-line `--body` arguments, use a heredoc:
   ```
-  {{BINARY_PATH}} exec gh pr add-review-comment <review_id> --file <path> --line <N> --body "$(cat <<'EOF'
+  {{BINARY_PATH}} exec gh pr add-review-comment <review_id> --file <path> --line <N> --severity <blocker|major|minor|clean> --body "$(cat <<'EOF'
   Your comment here.
   Can span multiple lines, include "quotes", and code blocks.
   EOF
