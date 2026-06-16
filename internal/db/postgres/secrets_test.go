@@ -582,6 +582,94 @@ func TestSecretStore_Postgres_GetUserSystem_TfAppDenied(t *testing.T) {
 	}
 }
 
+// TestSecretStore_Postgres_PutUserSystem_NoClaimsWriteBack pins the OAuth
+// rotation write-back door: a claims-less system caller can rotate a user's
+// secret via PutUserSystem (admin pool → vault_put_user_secret_system), and the
+// new value reads back through both the system door and the claims-checked one.
+// The write-side mirror of GetUserSystem_NoClaimsRead.
+func TestSecretStore_Postgres_PutUserSystem_NoClaimsWriteBack(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID := seedPgOrgAndUserForSecrets(t, h)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const key = "jira_token/acme.atlassian.net"
+
+	// First write via the claims-checked path (the Connect callback's initial
+	// store), then ROTATE via the claims-less system door (the minter).
+	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+		return pgstore.NewForTx(tx).Secrets.PutUser(ctx, orgID, userID, key, "envelope_v1", "Jira user access token")
+	}); err != nil {
+		t.Fatalf("seed via PutUser: %v", err)
+	}
+
+	stores := pgstore.New(h.AdminDB, h.AppDB)
+	if err := stores.Secrets.PutUserSystem(ctx, orgID, userID, key, "envelope_v2", "Jira user access token"); err != nil {
+		t.Fatalf("PutUserSystem (no claims): %v", err)
+	}
+
+	// System-door read sees the rotated value.
+	if got, err := stores.Secrets.GetUserSystem(ctx, orgID, userID, key); err != nil || got != "envelope_v2" {
+		t.Fatalf("GetUserSystem after rotation = (%q, %v), want envelope_v2", got, err)
+	}
+	// Claims-checked read sees it too (single Vault row, not a separate bag).
+	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+		got, err := pgstore.NewForTx(tx).Secrets.GetUser(ctx, orgID, userID, key)
+		if err != nil {
+			return err
+		}
+		if got != "envelope_v2" {
+			t.Errorf("GetUser after PutUserSystem rotation = %q, want envelope_v2", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("GetUser after rotation: %v", err)
+	}
+}
+
+// TestSecretStore_Postgres_PutUserSystem_TfAppDenied is the write-side mirror of
+// GetUserSystem_TfAppDenied: tf_app and the standard Supabase roles must have no
+// EXECUTE on vault_put_user_secret_system, so the unchecked write door stays
+// closed to the app pool.
+func TestSecretStore_Postgres_PutUserSystem_TfAppDenied(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID := seedPgOrgAndUserForSecrets(t, h)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const fn = "public.vault_put_user_secret_system(uuid, uuid, text, text, text)"
+	var tfAppHas bool
+	if err := h.AdminDB.QueryRow(`SELECT has_function_privilege('tf_app', $1, 'EXECUTE')`, fn).Scan(&tfAppHas); err != nil {
+		t.Fatalf("has_function_privilege(tf_app): %v", err)
+	}
+	if tfAppHas {
+		t.Errorf("tf_app HAS EXECUTE on %s — must not; the system write door must stay closed to the app pool", fn)
+	}
+
+	for _, role := range []string{"tf_app", "anon", "authenticated", "service_role"} {
+		role := role
+		t.Run(role, func(t *testing.T) {
+			tx, err := h.AppDB.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatalf("begin: %v", err)
+			}
+			defer func() { _ = tx.Rollback() }()
+
+			if _, err := tx.ExecContext(ctx, `SET LOCAL ROLE `+role); err != nil {
+				t.Fatalf("set role %s: %v", role, err)
+			}
+			claims := fmt.Sprintf(`{"sub":"%s","org_id":"%s"}`, userID, orgID)
+			if _, err := tx.ExecContext(ctx, `SELECT set_config('request.jwt.claims', $1, true)`, claims); err != nil {
+				t.Fatalf("set claims: %v", err)
+			}
+			_, err = tx.ExecContext(ctx, `SELECT public.vault_put_user_secret_system($1::uuid, $2::uuid, 'k', 'v', NULL)`, orgID, userID)
+			pgtest.AssertRLSViolation(t, err)
+		})
+	}
+}
+
 // TestSecretStore_Postgres_PerUser_NonTfAppRoleRefused pins the grant
 // matrix on the claims-checked per-user trio: REVOKE'd from
 // anon/authenticated/service_role, GRANT'd only to tf_app. Mirrors the

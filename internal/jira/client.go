@@ -86,7 +86,23 @@ const (
 	// AuthMethodCloudAPIToken is an Atlassian Cloud API token: Basic auth over
 	// email + token, REST v3.
 	AuthMethodCloudAPIToken AuthMethod = "cloud_api_token"
+	// AuthMethodCloudOAuth is an Atlassian Cloud OAuth 3LO credential: a
+	// rotating refresh token is the durable per-user secret, and a short-lived
+	// Bearer access token (REST v3, against the api.atlassian.com gateway) is
+	// minted from it on demand. Unlike the static schemes above, the stored
+	// credential carries no token usable directly — it holds the refresh token
+	// + the resolved cloud_id (see UserCredential).
+	AuthMethodCloudOAuth AuthMethod = "cloud_oauth"
 )
+
+// CloudGatewayBaseURL is the api.atlassian.com OAuth gateway base for a
+// resolved Cloud site: a CloudOAuth client talks to
+// "https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/..." rather than the
+// raw "<site>.atlassian.net" host (which only speaks Basic/API-token auth). The
+// cloud_id is the site identifier from the accessible-resources lookup.
+func CloudGatewayBaseURL(cloudID string) string {
+	return "https://api.atlassian.com/ex/jira/" + cloudID
+}
 
 // DeploymentForMarker resolves the effective deployment from a stored
 // auth-method marker and the canonical host. The marker is authoritative when
@@ -100,7 +116,7 @@ const (
 // one way.
 func DeploymentForMarker(method AuthMethod, host string) Deployment {
 	switch method {
-	case AuthMethodCloudAPIToken:
+	case AuthMethodCloudAPIToken, AuthMethodCloudOAuth:
 		return DeploymentCloud
 	case AuthMethodDCPAT:
 		return DeploymentDataCenter
@@ -115,12 +131,10 @@ func DeploymentForMarker(method AuthMethod, host string) Deployment {
 type authScheme interface{ apply(*http.Request) }
 
 // bearerAuth is the "Authorization: Bearer <token>" scheme. It authenticates
-// Data Center PATs today.
-//
-// Extension point — Cloud OAuth (SKY-347, out of scope here): a Cloud OAuth
-// 3LO access token is also a bearer token, so bearerAuth is reused as-is for
-// that flow. Only token acquisition/refresh and the gateway BaseURL (see
-// Config.BaseURL) get added there; the scheme itself does not change.
+// both Data Center PATs (DataCenterPAT) and Cloud OAuth 3LO access tokens
+// (CloudOAuth) — an OAuth access token is also a bearer token, so the scheme is
+// shared verbatim; only token acquisition/refresh and the gateway BaseURL (see
+// Config.BaseURL) differ between the two.
 type bearerAuth struct{ token string }
 
 func (a bearerAuth) apply(req *http.Request) {
@@ -139,12 +153,11 @@ func (a basicAuth) apply(req *http.Request) {
 // Build one with a named constructor (DataCenterPAT / CloudAPIToken); the
 // auth scheme is unexported so it can only be set that way.
 type Config struct {
-	// BaseURL is the site/host URL as given; it is treated as opaque.
-	//
-	// Extension point — Cloud OAuth (SKY-347, out of scope here): for the
-	// OAuth flow this will hold the api.atlassian.com/ex/jira/{cloud_id}
-	// gateway URL rather than the raw site URL. No request-building code
-	// here changes for that — the path stays {BaseURL}/rest/api/{version}/...
+	// BaseURL is the site/host URL as given; it is treated as opaque. For the
+	// Cloud OAuth flow (CloudOAuth) it holds the
+	// api.atlassian.com/ex/jira/{cloud_id} gateway URL rather than the raw site
+	// URL; no request-building code changes for that — the path stays
+	// {BaseURL}/rest/api/{version}/...
 	BaseURL    string
 	Deployment Deployment
 	APIVersion APIVersion
@@ -173,6 +186,22 @@ func CloudAPIToken(baseURL, email, token string) Config {
 		Deployment: DeploymentCloud,
 		APIVersion: APIv3,
 		auth:       basicAuth{email: email, token: token},
+	}
+}
+
+// CloudOAuth builds a Config for an Atlassian Cloud OAuth 3LO access token:
+// Bearer auth, REST v3, against the api.atlassian.com gateway for the resolved
+// site (cloud_id). The access token is short-lived and minted on demand from
+// the stored refresh token (see internal/jiraoauth); this constructor just
+// wraps whatever access token the caller minted. The bearer scheme is shared
+// with DataCenterPAT — only the gateway BaseURL + v3 differ — so no request-
+// building code changes for the OAuth path.
+func CloudOAuth(cloudID, accessToken string) Config {
+	return Config{
+		BaseURL:    CloudGatewayBaseURL(cloudID),
+		Deployment: DeploymentCloud,
+		APIVersion: APIv3,
+		auth:       bearerAuth{token: accessToken},
 	}
 }
 

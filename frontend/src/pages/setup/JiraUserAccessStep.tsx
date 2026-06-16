@@ -4,10 +4,12 @@
 // discards the token; Jira captures *access* and STORES the token, because the
 // user acts as themselves on board claims.
 //
-// DC = paste-a-PAT (this step). Cloud OAuth (one-click Connect) is a later
-// Cloud-tier ticket; until it lands there's no Connect button — the PAT paste
-// is the only capture path. The PAT path is Continue-driven (steps.tsx persist:
-// validate the token, store it, derive the account, then mark connected).
+// DC = paste-a-PAT (this step). Cloud adds a one-click Connect (OAuth 3LO) when
+// an Atlassian app resolves (jiraUserConnectAvailable) — an external redirect
+// that returns to /setup, where the step's load re-reads identity and resumes
+// complete; the paste path stays as the universal fallback. The PAT path is
+// Continue-driven (steps.tsx persist: validate the token, store it, derive the
+// account, then mark connected).
 
 import { glassInputClass } from '../settings/primitives'
 import type { StepContext } from './types'
@@ -18,11 +20,21 @@ const JiraMark = () => (
   </svg>
 )
 
-export function JiraUserAccessStep({ state, patch, error }: StepContext) {
+export function JiraUserAccessStep({ state, patch, orgId, error }: StepContext) {
   const host = state.jiraUserHost || 'Jira'
   // The credential fields follow the org's deployment: Cloud binds an Atlassian
   // email + API token (Basic), Data Center a single personal access token.
   const cloud = state.jiraDeployment === 'cloud'
+  // One-click Connect is offered when an Atlassian OAuth app resolves for the
+  // org (Cloud only). An OAuth round-trip can't fold into Continue, so it's an
+  // external redirect back to /setup; the paste path stays available below.
+  const connectAvailable = state.jiraUserConnectAvailable
+
+  const startConnect = () => {
+    if (!orgId) return
+    window.location.href =
+      '/api/orgs/' + encodeURIComponent(orgId) + '/jira/connect/start?return_to=/setup'
+  }
 
   // Already bound (a stored credential from a prior session or this one) — just
   // confirm it; the wizard's Continue finishes.
@@ -61,12 +73,30 @@ export function JiraUserAccessStep({ state, patch, error }: StepContext) {
         <p className="text-[13px] leading-relaxed text-text-tertiary">
           Triage Factory acts as you on{' '}
           <span className="font-medium text-text-secondary">{host}</span> — so the tickets it claims
-          and updates are attributed to you, not a shared bot. Paste your personal Jira token to
-          link your account.
+          and updates are attributed to you, not a shared bot.
+          {connectAvailable
+            ? ' Authorize with Atlassian, or paste a token, to link your account.'
+            : ' Paste your personal Jira token to link your account.'}
         </p>
       </div>
 
+      {connectAvailable && (
+        <button
+          type="button"
+          onClick={startConnect}
+          className="flex w-full items-center justify-center gap-2 rounded-xl bg-text-primary px-4 py-2.5 text-[13px] font-medium text-white transition-colors hover:bg-text-primary/90"
+        >
+          <JiraMark />
+          Connect Jira
+        </button>
+      )}
+
       <div className="space-y-2">
+        {connectAvailable && (
+          <span className="block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+            {cloud ? 'Or paste an email + API token' : 'Or paste a personal access token'}
+          </span>
+        )}
         {cloud ? (
           <>
             <label className="block">

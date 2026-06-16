@@ -186,6 +186,18 @@ function JiraIdentitySection({ orgId }: { orgId: string | null }) {
   // The credential shape follows the org's deployment: Cloud binds an Atlassian
   // email + API token, Data Center a single personal access token.
   const cloud = state.status === 'ready' && state.data.deployment === 'cloud'
+  // One-click Connect (Cloud OAuth) is offered when an Atlassian OAuth app
+  // resolves for the org; the paste path stays as the fallback.
+  const connectAvailable = state.status === 'ready' && state.data.connect_available
+
+  const startConnect = () => {
+    if (!orgId) return
+    window.location.href =
+      '/api/orgs/' +
+      encodeURIComponent(orgId) +
+      '/jira/connect/start?return_to=' +
+      encodeURIComponent('/settings')
+  }
 
   const summary =
     state.status === 'ready'
@@ -261,11 +273,22 @@ function JiraIdentitySection({ orgId }: { orgId: string | null }) {
           </div>
         ) : (
           <div className="space-y-2.5">
+            {connectAvailable && (
+              <button
+                type="button"
+                onClick={startConnect}
+                className="w-full rounded-xl bg-text-primary px-4 py-2.5 text-[13px] font-medium text-white transition-colors hover:bg-text-primary/90"
+              >
+                Connect Jira
+              </button>
+            )}
             {cloud ? (
               <>
                 <label className="block">
                   <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
-                    Atlassian account email
+                    {connectAvailable
+                      ? 'Or paste an Atlassian account email'
+                      : 'Atlassian account email'}
                   </span>
                   <input
                     type="email"

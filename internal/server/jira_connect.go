@@ -1,17 +1,22 @@
 package server
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/jiraoauth"
 )
 
 // Per-user Jira access — the Jira sibling of the GitHub per-user identity flow
@@ -381,4 +386,304 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[jira-identity] bound user=%s account=%s host=%s org=%s source=%s (credential stored)", userID, jiraUser.StableID(), host, orgID, source)
 
 	writeJSON(w, http.StatusOK, jiraIdentityCaptureResponse{Account: account, Host: host})
+}
+
+// ---- Cloud OAuth 3LO "Connect" (per-user) ----
+//
+// The one-click counterpart of the paste path above, mirroring the GitHub
+// Connect flow (github_connect.go). It binds the signed-in user's Atlassian
+// Cloud account via OAuth consent and stores a ROTATING refresh token as the
+// durable per-user credential; short-lived access tokens are minted from it on
+// demand (internal/jiraoauth). Unlike GitHub Connect — which captures identity
+// and discards the token — Jira Connect captures access, so the refresh token is
+// retained (Jira's user level must act as the user).
+//
+// Available only when an Atlassian OAuth app resolves for the org (per-org
+// override or, hosted, the deployment first-party) — the same connect_available
+// gate the status endpoint surfaces. Cloud only: a Data Center org has no
+// OAuth, and the start handler bounces it back to the paste path.
+
+const jiraConnectStateCookieName = "tf_jira_connect_state"
+
+// jiraConnectStatePath scopes the state cookie to the Jira connect callback for
+// a specific org — the Jira sibling of connectStatePath.
+func jiraConnectStatePath(orgID string) string {
+	return "/api/orgs/" + orgID + "/jira/connect/"
+}
+
+// handleJiraConnectStart kicks off the Atlassian OAuth 3LO dance: redirect the
+// browser to auth.atlassian.com/authorize with the org's resolved app client_id
+// and an HMAC-signed CSRF state. Any org member binds their own access.
+//
+// GET /api/orgs/{org_id}/jira/connect/start?return_to=/some/path
+func (s *Server) handleJiraConnectStart(w http.ResponseWriter, r *http.Request) {
+	if s.deployCfg == nil {
+		http.NotFound(w, r)
+		return
+	}
+	orgID, userID, ok := s.az.RequireOrgMember(w, r)
+	if !ok {
+		return
+	}
+
+	returnTo := normalizeReturnTo(r.URL.Query().Get("return_to"))
+
+	// The org's Jira host — also needed at the callback to pin the cloud_id, but
+	// resolved here too so we fail fast (and so a non-Cloud / misconfigured org
+	// never reaches Atlassian).
+	var orgSet domain.OrgSettings
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var lerr error
+		orgSet, lerr = tx.Orgs.GetSettings(r.Context(), orgID)
+		return lerr
+	}); err != nil {
+		internalError(w, "jira-connect", err)
+		return
+	}
+	if _, okHost := resolveJiraHost(orgSet.JiraBaseURL); !okHost {
+		log.Printf("[jira-connect] invalid jira base url for org %s", orgID)
+		s.redirectJiraConnect(w, r, orgID, returnTo, "bad_host")
+		return
+	}
+
+	// Resolve the org's Atlassian OAuth app (per-org override → first-party).
+	// A system read (the caller already authorized orgID); ErrNoAtlassianOAuthApp
+	// is the expected "no app configured" state, not a backend failure.
+	app, _, err := s.jiraOAuthApps.Resolve(r.Context(), orgID)
+	if err != nil {
+		if errors.Is(err, jira.ErrNoAtlassianOAuthApp) {
+			s.redirectJiraConnect(w, r, orgID, returnTo, "no_app")
+			return
+		}
+		internalError(w, "jira-connect", err)
+		return
+	}
+
+	csrfRaw := make([]byte, 16)
+	if _, err := rand.Read(csrfRaw); err != nil {
+		internalError(w, "jira-connect", err)
+		return
+	}
+	st := connectState{
+		OrgID:     orgID,
+		UserID:    userID,
+		CSRF:      hex.EncodeToString(csrfRaw),
+		ReturnTo:  returnTo,
+		ExpiresAt: timeNow().Add(10 * time.Minute).Unix(),
+	}
+	signed, err := st.sign(s.deployCfg.hmacKey)
+	if err != nil {
+		internalError(w, "jira-connect", err)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     jiraConnectStateCookieName,
+		Value:    signed,
+		Path:     jiraConnectStatePath(orgID),
+		HttpOnly: true,
+		Secure:   s.cookieSecure(r),
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   600,
+	})
+
+	// Only the CSRF nonce travels through Atlassian; the org/user/return_to stay
+	// in the signed cookie, off Atlassian's logs and the URL bar.
+	target := jiraoauth.AuthorizeURL(app, s.jiraConnectCallbackURL(orgID), st.CSRF)
+	http.Redirect(w, r, target, http.StatusFound)
+}
+
+// handleJiraConnectCallback completes the dance: validate state/CSRF, exchange
+// the code for {access, refresh} tokens, resolve the cloud_id by matching the
+// org's configured site against accessible-resources, derive the bound account
+// from /myself, and store the rotating refresh token as the per-user credential
+// envelope ({method:cloud_oauth, cloud_id, refresh_token}). The access token is
+// never stored. On any failure it redirects back to the gate page with a
+// distinguishing error code.
+//
+// GET /api/orgs/{org_id}/jira/connect/callback?code=...&state=...
+func (s *Server) handleJiraConnectCallback(w http.ResponseWriter, r *http.Request) {
+	if s.deployCfg == nil {
+		http.NotFound(w, r)
+		return
+	}
+	orgID, userID, ok := s.az.RequireOrgMember(w, r)
+	if !ok {
+		return
+	}
+
+	// State cookie carries the signed flow context; clear it once read so a
+	// stale cookie can't be replayed.
+	cookie, cookieErr := r.Cookie(jiraConnectStateCookieName)
+	s.clearJiraConnectCookie(w, r, orgID)
+	if cookieErr != nil {
+		s.redirectJiraConnect(w, r, orgID, "", "state")
+		return
+	}
+	cs, err := parseConnectState(cookie.Value, s.deployCfg.hmacKey)
+	if err != nil {
+		log.Printf("[jira-connect] state cookie: %v", err)
+		s.redirectJiraConnect(w, r, orgID, "", "state")
+		return
+	}
+	if cs.CSRF == "" || r.URL.Query().Get("state") != cs.CSRF || cs.OrgID != orgID || cs.UserID != userID {
+		s.redirectJiraConnect(w, r, orgID, cs.ReturnTo, "state")
+		return
+	}
+
+	returnTo := normalizeReturnTo(cs.ReturnTo)
+	if returnTo == "/" {
+		returnTo = "/orgs/" + orgID
+	}
+
+	// User denied consent (or Atlassian reported another OAuth error).
+	if oErr := r.URL.Query().Get("error"); oErr != "" {
+		log.Printf("[jira-connect] atlassian error=%s org=%s", oErr, orgID)
+		s.redirectJiraConnect(w, r, orgID, returnTo, "denied")
+		return
+	}
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		s.redirectJiraConnect(w, r, orgID, returnTo, "connect_failed")
+		return
+	}
+
+	// Read the org's host + resolve its OAuth app (client_id + client_secret).
+	var orgSet domain.OrgSettings
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var lerr error
+		orgSet, lerr = tx.Orgs.GetSettings(r.Context(), orgID)
+		return lerr
+	}); err != nil {
+		internalError(w, "jira-connect", err)
+		return
+	}
+	host, okHost := resolveJiraHost(orgSet.JiraBaseURL)
+	if !okHost {
+		s.redirectJiraConnect(w, r, orgID, returnTo, "bad_host")
+		return
+	}
+	app, _, err := s.jiraOAuthApps.Resolve(r.Context(), orgID)
+	if err != nil {
+		if errors.Is(err, jira.ErrNoAtlassianOAuthApp) {
+			s.redirectJiraConnect(w, r, orgID, returnTo, "no_app")
+			return
+		}
+		internalError(w, "jira-connect", err)
+		return
+	}
+
+	// Exchange the code → {access, refresh}. The access token is used only to
+	// resolve the cloud_id + whoami; the refresh token is what we store.
+	tok, err := s.jiraOAuthMinter.ExchangeCode(r.Context(), app, code, s.jiraConnectCallbackURL(orgID))
+	if err != nil {
+		log.Printf("[jira-connect] code exchange org=%s: %v", orgID, err)
+		s.redirectJiraConnect(w, r, orgID, returnTo, "connect_failed")
+		return
+	}
+
+	// Resolve the cloud_id: list the sites this token can reach and match the
+	// org's configured host. Single-site v1 — extra sites are ignored, and a
+	// configured site that's not in the list is a clear, actionable error.
+	resources, err := s.jiraOAuthMinter.AccessibleResources(r.Context(), tok.AccessToken)
+	if err != nil {
+		log.Printf("[jira-connect] accessible-resources org=%s: %v", orgID, err)
+		s.redirectJiraConnect(w, r, orgID, returnTo, "connect_failed")
+		return
+	}
+	cloudID, okCloud := matchCloudResource(resources, host)
+	if !okCloud {
+		log.Printf("[jira-connect] no accessible site matches host=%s for org=%s (sites=%d)", host, orgID, len(resources))
+		s.redirectJiraConnect(w, r, orgID, returnTo, "site_mismatch")
+		return
+	}
+
+	// Derive the bound account from /myself against the gateway, using the
+	// freshly-minted access token — the same client shape the resolver builds.
+	jiraUser, err := auth.ValidateJira(r.Context(), jira.CloudOAuth(cloudID, tok.AccessToken))
+	if err != nil {
+		log.Printf("[jira-connect] whoami org=%s: %v", orgID, err)
+		s.redirectJiraConnect(w, r, orgID, returnTo, "connect_failed")
+		return
+	}
+	if jiraUser.StableID() == "" {
+		s.redirectJiraConnect(w, r, orgID, returnTo, "connect_failed")
+		return
+	}
+
+	envelope, err := jira.MarshalUserCredential(jira.UserCredential{
+		Method:       jira.AuthMethodCloudOAuth,
+		CloudID:      cloudID,
+		RefreshToken: tok.RefreshToken,
+	})
+	if err != nil {
+		internalError(w, "jira-connect", err)
+		return
+	}
+
+	// Store the rotating refresh token AND derive the identity in one tx —
+	// all-or-nothing, mirroring the paste handler. The credential is keyed under
+	// the same host the assignee-routing reverse lookup uses (see the note in
+	// handleJiraIdentityPAT).
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		if err := tx.Secrets.PutUser(r.Context(), orgID, userID, jiraTokenKey(host), envelope, "Jira user access token"); err != nil {
+			return fmt.Errorf("store jira oauth credential: %w", err)
+		}
+		if err := tx.Users.UpsertJiraIdentity(r.Context(), userID, host, jiraUser.StableID(), jiraUser.DisplayName, "connect_oauth"); err != nil {
+			return fmt.Errorf("persist jira identity: %w", err)
+		}
+		return nil
+	}); err != nil {
+		internalError(w, "jira-connect", err)
+		return
+	}
+
+	log.Printf("[jira-connect] bound user=%s account=%s host=%s cloud_id=%s org=%s source=connect_oauth (refresh token stored)",
+		userID, jiraUser.StableID(), host, cloudID, orgID)
+	http.Redirect(w, r, returnTo, http.StatusFound)
+}
+
+// matchCloudResource finds the cloud_id of the accessible site whose URL
+// matches the org's configured Jira host. Comparison is case-insensitive and
+// trailing-slash-insensitive; host is already canonical (resolveJiraHost). v1
+// is single-site, so the first exact match wins and extra sites are ignored.
+func matchCloudResource(resources []jiraoauth.Resource, host string) (string, bool) {
+	want := strings.ToLower(strings.TrimRight(host, "/"))
+	for _, res := range resources {
+		if strings.ToLower(strings.TrimRight(res.URL, "/")) == want {
+			return res.ID, true
+		}
+	}
+	return "", false
+}
+
+// redirectJiraConnect bounces a failed/aborted Jira Connect flow back to the FE
+// gate page with an error code (and the original return_to). The Jira sibling
+// of redirectConnect; errCode "" means a bare redirect with no banner.
+func (s *Server) redirectJiraConnect(w http.ResponseWriter, r *http.Request, orgID, returnTo, errCode string) {
+	q := url.Values{}
+	if errCode != "" {
+		q.Set("error", errCode)
+	}
+	if rt := normalizeReturnTo(returnTo); rt != "" && rt != "/" {
+		q.Set("return_to", rt)
+	}
+	dest := "/orgs/" + orgID + "/connect-jira"
+	if enc := q.Encode(); enc != "" {
+		dest += "?" + enc
+	}
+	http.Redirect(w, r, dest, http.StatusFound)
+}
+
+// clearJiraConnectCookie expires the Jira connect state cookie. Its
+// Secure/SameSite/Path must match the SetCookie in the start handler.
+func (s *Server) clearJiraConnectCookie(w http.ResponseWriter, r *http.Request, orgID string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     jiraConnectStateCookieName,
+		Value:    "",
+		Path:     jiraConnectStatePath(orgID),
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   s.cookieSecure(r),
+		SameSite: http.SameSiteLaxMode,
+	})
 }

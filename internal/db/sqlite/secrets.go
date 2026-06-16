@@ -104,6 +104,17 @@ func (*secretStore) PutUser(_ context.Context, orgID, userID, key, value, _ stri
 	return auth.PutSecret(userKeychainKey(userID, key), value)
 }
 
+// PutUserSystem == PutUser in local mode. The system/claims-checked split only
+// exists in multi mode's Postgres impl; local is N=1 (one user, one keychain
+// bag, no RLS), so both write the same namespaced keychain entry. assertLocalOrg
+// still fires so a stray real UUID surfaces as a caller bug.
+func (*secretStore) PutUserSystem(_ context.Context, orgID, userID, key, value, _ string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	return auth.PutSecret(userKeychainKey(userID, key), value)
+}
+
 func (*secretStore) GetUser(_ context.Context, orgID, userID, key string) (string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", err

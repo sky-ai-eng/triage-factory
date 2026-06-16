@@ -19,15 +19,47 @@ import { captureJiraIdentityPat, captureJiraIdentityApiToken } from '../lib/jira
  *
  * The paste path follows the org's deployment: a Data Center org binds a single
  * personal access token; a Cloud org binds the Atlassian account email + API
- * token. One-click Connect (Cloud OAuth, 3LO) is a later Cloud-tier ticket; the
- * button below is gated on connect_available (false until then), so it stays
- * hidden and the page offers only the paste path.
+ * token. One-click Connect (Cloud OAuth, 3LO) is offered alongside the paste
+ * path when connect_available is true (a Cloud org with an Atlassian OAuth app
+ * resolved); otherwise the button is hidden and only the paste path shows.
  *
  * Runs in BOTH modes — the org id comes from the route param
  * (/orgs/:org_id/connect-jira), so it needs no OrgContext (absent in local
  * mode). Rendered outside RequireJiraIdentity (its own route) so it isn't gated
  * by the very check it satisfies — no redirect loop.
  */
+
+/** jiraErrorBanner maps a Connect callback error code (redirectJiraConnect) to
+ *  user-facing copy. Mirrors ConnectGitHub's errorBanner. */
+function jiraErrorBanner(code: string | null, host: string): { text: string } | null {
+  switch (code) {
+    case null:
+    case '':
+      return null
+    case 'denied':
+      return {
+        text: 'Jira authorization was cancelled before it finished. Connect again to complete setup.',
+      }
+    case 'bad_host':
+      return {
+        text: "Your workspace's Jira URL looks misconfigured. Ask your admin to fix it in Workspace Settings, then try again.",
+      }
+    case 'no_app':
+      return {
+        text: 'One-click Connect needs an Atlassian OAuth app, which isn’t configured for this workspace. Paste an API token below instead, or ask your admin to add the app.',
+      }
+    case 'site_mismatch':
+      return {
+        text: `The Atlassian account you authorized can't reach ${host || 'this Jira site'}. Sign in with an account that has access to it, or paste an API token below.`,
+      }
+    case 'state':
+      return { text: 'That connection attempt expired. Please try again.' }
+    default:
+      return {
+        text: 'Something went wrong connecting your Jira. Please try again, or paste an API token below.',
+      }
+  }
+}
 
 function Card({ children }: { children: React.ReactNode }) {
   return (
@@ -53,6 +85,7 @@ export default function ConnectJira() {
   const [capturing, setCapturing] = useState(false)
   const [patError, setPatError] = useState<string | null>(null)
 
+  const errorCode = new URLSearchParams(location.search).get('error')
   const returnTo = useMemo(() => {
     const rt = new URLSearchParams(location.search).get('return_to')
     if (rt && rt.startsWith('/') && !rt.startsWith('//')) return rt
@@ -103,10 +136,9 @@ export default function ConnectJira() {
     return <Navigate to={returnTo} replace />
   }
 
-  // Dormant until Cloud OAuth (3LO) lands: connect_available stays false on
-  // Data Center, so the button this drives is hidden and the target
-  // (/jira/connect/start, not yet implemented) is unreachable for now. It lights
-  // up automatically when the backend flips connect_available for a Cloud org.
+  // Cloud OAuth (3LO) one-click Connect. Gated on connect_available — true only
+  // for a Cloud org with an Atlassian OAuth app resolved — so the button stays
+  // hidden on Data Center / app-less orgs and the paste path is the only one.
   const startConnect = () => {
     window.location.href =
       '/api/orgs/' +
@@ -115,6 +147,7 @@ export default function ConnectJira() {
       encodeURIComponent(returnTo)
   }
 
+  const banner = jiraErrorBanner(errorCode, host)
   const submitReady = cloud ? email.trim() !== '' && apiToken.trim() !== '' : pat.trim() !== ''
   const submit = async () => {
     if (!submitReady || capturing) return
@@ -152,6 +185,12 @@ export default function ConnectJira() {
           connection.
         </p>
       </div>
+
+      {banner && (
+        <div className="rounded-xl border border-dismiss/30 bg-dismiss/[0.06] px-4 py-2.5 text-[12px] leading-relaxed text-dismiss">
+          {banner.text}
+        </div>
+      )}
 
       {connect_available && (
         <button

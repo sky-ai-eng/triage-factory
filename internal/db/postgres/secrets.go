@@ -145,6 +145,24 @@ func (s *secretStore) PutUser(ctx context.Context, orgID, userID, key, value, de
 	return err
 }
 
+// PutUserSystem writes a per-user secret on the supabase_admin pool via
+// vault_put_user_secret_system — no request JWT, no current_org_id() /
+// current_user_id() check; the passed orgID + userID are trusted. tf_app has no
+// EXECUTE on the system function, so this path is reachable only from system
+// code holding the admin pool (the Cloud OAuth refresh-token rotation
+// write-back). The write-side mirror of GetUserSystem.
+func (s *secretStore) PutUserSystem(ctx context.Context, orgID, userID, key, value, description string) error {
+	var desc any
+	if description != "" {
+		desc = description
+	}
+	_, err := s.admin.ExecContext(ctx,
+		`SELECT public.vault_put_user_secret_system($1::uuid, $2::uuid, $3::text, $4::text, $5)`,
+		orgID, userID, key, value, desc,
+	)
+	return err
+}
+
 func (s *secretStore) GetUser(ctx context.Context, orgID, userID, key string) (string, error) {
 	var got sql.NullString
 	// vault_get_user_secret always returns exactly one row — NULL when

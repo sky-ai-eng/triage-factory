@@ -258,6 +258,19 @@ func TestSecretStore_SQLite_PerUserKeychainRoundTrip(t *testing.T) {
 		t.Errorf("GetUserSystem got=%q want pat-v2 (== GetUser)", sysGot)
 	}
 
+	// PutUserSystem == PutUser locally (the OAuth rotation write-back door):
+	// rotate via the system door, read back via the claims door.
+	if err := stores.Secrets.PutUserSystem(ctx, org, userID, key, "pat-v3", ""); err != nil {
+		t.Fatalf("PutUserSystem: %v", err)
+	}
+	got, err = stores.Secrets.GetUser(ctx, org, userID, key)
+	if err != nil {
+		t.Fatalf("GetUser after PutUserSystem: %v", err)
+	}
+	if got != "pat-v3" {
+		t.Errorf("after PutUserSystem got=%q want pat-v3", got)
+	}
+
 	// Missing key: GetUser returns "" without an error.
 	got, err = stores.Secrets.GetUser(ctx, org, userID, "nonexistent")
 	if err != nil {
@@ -374,6 +387,9 @@ func TestSecretStore_SQLite_PerUserRejectsNonLocalOrg(t *testing.T) {
 	}
 	if _, err := stores.Secrets.GetUserSystem(ctx, realOrgUUID, userID, "k"); err == nil {
 		t.Errorf("GetUserSystem with non-local orgID succeeded; want error")
+	}
+	if err := stores.Secrets.PutUserSystem(ctx, realOrgUUID, userID, "k", "v", ""); err == nil {
+		t.Errorf("PutUserSystem with non-local orgID succeeded; want error")
 	}
 	if _, err := stores.Secrets.DeleteUser(ctx, realOrgUUID, userID, "k"); err == nil {
 		t.Errorf("DeleteUser with non-local orgID succeeded; want error")

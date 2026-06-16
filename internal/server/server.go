@@ -21,6 +21,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/jiraoauth"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -101,6 +102,12 @@ type Server struct {
 	// connect_available signal the per-user Jira status endpoint returns.
 	// Built in New, so it's never nil — handlers don't guard.
 	jiraOAuthApps jira.OAuthAppResolver
+	// jiraOAuthMinter performs the stateless Atlassian OAuth HTTP exchanges for
+	// the per-user Connect flow (authorize-code exchange, accessible-resources).
+	// The per-request refresh + rotation write-back lives in the token cache
+	// wired into jiraResolver; this minter is the connect handlers' direct seam.
+	// Built in New, never nil.
+	jiraOAuthMinter *jiraoauth.Minter
 	// Change callbacks accept the orgID of the tenant whose integration
 	// creds just rotated, so the closure can re-resolve via SecretStore.
 	// Local mode always passes runmode.LocalDefaultOrgID; multi-mode
@@ -430,16 +437,24 @@ func New(database *sql.DB, stores db.Stores, serverPort int) *Server {
 	// the dead token from the cache via onInstallationRemoved.
 	ghTokenCache := ghclient.NewMemoryTokenCache()
 	s.ghResolver = ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, ghTokenCache)
-	// Jira write-actor resolver (SKY-463): ForSystem (org/bot cred) +
-	// ForUser (acting user's cred). Constructed here like ghResolver so a
-	// Server is always usable without external wiring.
-	s.jiraResolver = jira.NewResolver(stores.Secrets, stores.Orgs)
 	// Atlassian OAuth app resolver (TFAC-337): per-org override → deployment
 	// first-party (hosted) / local-supplied (local). The first-party app is
 	// read from the deployment env, and only in hosted mode — local has no
 	// first-party default, so FirstPartyOAuthAppFromEnv returns the zero app
 	// there and the resolver relies on the org's BYO row.
 	s.jiraOAuthApps = jira.NewOAuthAppResolver(stores.JiraApps, stores.Secrets, jira.FirstPartyOAuthAppFromEnv())
+	// Cloud OAuth minter + per-user access-token cache. The cache reads the
+	// stored refresh token, mints an access token, and writes the rotated
+	// refresh token back (PutUserSystem) — the structural difference from the
+	// static PAT/API-token creds. It's the OAuth source the resolver delegates
+	// its AuthMethodCloudOAuth branch to.
+	s.jiraOAuthMinter = jiraoauth.NewMinter()
+	jiraTokenCache := jiraoauth.NewTokenCache(s.jiraOAuthMinter, s.jiraOAuthApps, stores.Secrets)
+	// Jira write-actor resolver (SKY-463): ForSystem (org/bot cred) +
+	// ForUser (acting user's cred, incl. the Cloud OAuth mint path).
+	// Constructed here like ghResolver so a Server is always usable without
+	// external wiring.
+	s.jiraResolver = jira.NewResolverWithOAuth(stores.Secrets, stores.Orgs, jiraTokenCache)
 	s.onInstallationRemoved = func(orgID, installationID string) {
 		ghTokenCache.Invalidate(orgID, installationID)
 	}
@@ -873,6 +888,16 @@ func (s *Server) routes() {
 	// member binds their own access.
 	s.api("GET /api/orgs/{org_id}/identity/jira", s.handleJiraIdentityStatus)
 	s.apiMutating("POST /api/orgs/{org_id}/identity/jira/pat", s.handleJiraIdentityPAT)
+
+	// Per-user "Connect Jira" Cloud OAuth (3LO) — the one-click counterpart of
+	// the paste path, gated on connect_available (an Atlassian app resolves).
+	// start redirects to auth.atlassian.com/authorize; callback exchanges the
+	// code, resolves the cloud_id, whoamis, and STORES the rotating refresh
+	// token (source='connect_oauth'). Both are GETs reached via top-level
+	// navigation, so they ride s.api (withSession, no CSRF wrap) and carry their
+	// own OAuth state-cookie CSRF defense — the GitHub Connect pattern.
+	s.api("GET /api/orgs/{org_id}/jira/connect/start", s.handleJiraConnectStart)
+	s.api("GET /api/orgs/{org_id}/jira/connect/callback", s.handleJiraConnectCallback)
 
 	// Per-org Atlassian OAuth (3LO) app config — the credential layer the
 	// per-user "Connect Jira" flow runs against (the flow itself is a later

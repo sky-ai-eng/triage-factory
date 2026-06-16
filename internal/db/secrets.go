@@ -107,6 +107,24 @@ type SecretStore interface {
 	// cannot reach this door — they use the claims-checked GetUser.
 	GetUserSystem(ctx context.Context, orgID, userID, key string) (string, error)
 
+	// PutUserSystem writes (or rotates) a per-user secret WITHOUT a request
+	// JWT — the write-side mirror of GetUserSystem, for system code acting as
+	// a user. The motivating caller is the Cloud OAuth access-token minter:
+	// Atlassian rotates the refresh token on every refresh, so the minter must
+	// persist the new refresh token back into the user's credential envelope,
+	// and it runs on the system/background pool (the write-actor resolver holds
+	// a claims-free store), so the claims-checked PutUser is unreachable.
+	//
+	// Takes orgID + userID explicitly: in multi mode it runs on the
+	// system/admin pool via vault_put_user_secret_system, which trusts the
+	// passed args and performs no current_org_id() / current_user_id() check;
+	// local mode forwards to the keychain (single-user, no RLS, no claims).
+	//
+	// System-code-only, same discipline as GetUserSystem. tf_app has no
+	// EXECUTE on the underlying system function, so request handlers cannot
+	// reach this door — they use the claims-checked PutUser.
+	PutUserSystem(ctx context.Context, orgID, userID, key, value, description string) error
+
 	// DeleteUser removes a per-user secret. Returns ok=false when no
 	// row matched, mirroring Delete. Claims-checked like GetUser.
 	DeleteUser(ctx context.Context, orgID, userID, key string) (ok bool, err error)

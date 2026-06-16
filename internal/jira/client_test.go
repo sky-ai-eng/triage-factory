@@ -76,6 +76,36 @@ func TestCloudAPITokenConfig(t *testing.T) {
 	}
 }
 
+// TestCloudOAuthConfig pins the {Bearer, v3, Cloud} shape + the gateway base
+// URL: a CloudOAuth client talks to api.atlassian.com/ex/jira/{cloud_id}, not
+// the raw site host, and reuses the bearer scheme.
+func TestCloudOAuthConfig(t *testing.T) {
+	cfg := CloudOAuth("cloud-9", "acc-tok")
+	if cfg.Deployment != DeploymentCloud {
+		t.Errorf("Deployment = %q, want %q", cfg.Deployment, DeploymentCloud)
+	}
+	if cfg.APIVersion != APIv3 {
+		t.Errorf("APIVersion = %q, want %q", cfg.APIVersion, APIv3)
+	}
+	if cfg.BaseURL != "https://api.atlassian.com/ex/jira/cloud-9" {
+		t.Errorf("BaseURL = %q, want the cloud-9 gateway", cfg.BaseURL)
+	}
+	if _, ok := cfg.auth.(bearerAuth); !ok {
+		t.Errorf("auth = %T, want bearerAuth", cfg.auth)
+	}
+	if got := cfg.restURL("myself"); got != "https://api.atlassian.com/ex/jira/cloud-9/rest/api/3/myself" {
+		t.Errorf("restURL = %q, want the gateway v3 myself path", got)
+	}
+}
+
+// TestDeploymentForMarker_CloudOAuth pins that the cloud_oauth marker resolves
+// Cloud regardless of host shape (the gateway host isn't *.atlassian.net).
+func TestDeploymentForMarker_CloudOAuth(t *testing.T) {
+	if got := DeploymentForMarker(AuthMethodCloudOAuth, "https://acme.example.com"); got != DeploymentCloud {
+		t.Errorf("DeploymentForMarker(cloud_oauth) = %q, want %q", got, DeploymentCloud)
+	}
+}
+
 // TestDeploymentForHost pins the Cloud-vs-DC classifier: any host under
 // *.atlassian.net (case-insensitive, scheme/port/path-insensitive, full URL or
 // bare host) is Cloud; everything else — including a look-alike that merely

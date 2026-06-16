@@ -81,14 +81,28 @@ func UserTokenKey(host string) string {
 // resolver dispatches on Method exactly as ForSystem dispatches on the org
 // marker.
 //
-// Cloud OAuth (the one-click Connect path) is a later ticket; it extends this
-// envelope with a third method without touching the two cases here.
+// Cloud OAuth (the one-click Connect path) adds a third method to this envelope:
+// AuthMethodCloudOAuth stores a rotating RefreshToken + the resolved CloudID and
+// carries no directly-usable Token (the short-lived access token is minted on
+// demand and never persisted).
 type UserCredential struct {
 	Method AuthMethod `json:"method"`
 	// Email is the Atlassian account email; set only for AuthMethodCloudAPIToken
-	// (the Basic-auth pair), empty for a DC PAT.
+	// (the Basic-auth pair), empty for a DC PAT or a Cloud OAuth credential.
 	Email string `json:"email,omitempty"`
-	Token string `json:"token"`
+	// Token is the static credential value: a DC PAT or a Cloud API token.
+	// Empty for AuthMethodCloudOAuth (no static token — the access token is
+	// minted from RefreshToken on demand).
+	Token string `json:"token,omitempty"`
+	// CloudID is the Atlassian site identifier (from accessible-resources),
+	// set only for AuthMethodCloudOAuth — it selects the api.atlassian.com
+	// gateway base the minted access token talks to.
+	CloudID string `json:"cloud_id,omitempty"`
+	// RefreshToken is the durable, ROTATING OAuth refresh token, set only for
+	// AuthMethodCloudOAuth. Atlassian returns a fresh refresh token on every
+	// refresh, so the minter writes a new envelope back after each mint — this
+	// field is the one that changes under rotation.
+	RefreshToken string `json:"refresh_token,omitempty"`
 }
 
 // MarshalUserCredential renders a UserCredential to the JSON envelope persisted
@@ -134,6 +148,8 @@ func (c UserCredential) UsableFor(d Deployment) bool {
 	switch c.Method {
 	case AuthMethodCloudAPIToken:
 		return d == DeploymentCloud && c.Email != "" && c.Token != ""
+	case AuthMethodCloudOAuth:
+		return d == DeploymentCloud && c.CloudID != "" && c.RefreshToken != ""
 	case AuthMethodDCPAT:
 		return d == DeploymentDataCenter && c.Token != ""
 	default:
@@ -158,14 +174,44 @@ type Resolver interface {
 	ForUser(ctx context.Context, orgID, userID string) (*Client, error)
 }
 
+// UserAccessTokenSource mints a short-lived Cloud OAuth access token for a
+// user, handling refresh-token rotation write-back internally. It is the seam
+// the resolver's AuthMethodCloudOAuth branch delegates to — implemented by
+// internal/jiraoauth, wired in at construction so internal/jira doesn't import
+// the OAuth/HTTP machinery (and there's no import cycle: jiraoauth imports jira,
+// not the reverse). A nil source means OAuth minting isn't wired (the system
+// resolver used by background board-mirror callers, where ForUser-OAuth never
+// runs); ForUser surfaces a clear error rather than panicking in that case.
+//
+// host is the canonical org Jira host the credential is keyed under (the same
+// value ForUser already resolved); the implementation reads the stored
+// envelope, mints/refreshes, persists the rotated refresh token, and returns
+// the cloud_id + access token to build a CloudOAuth client.
+type UserAccessTokenSource interface {
+	AccessTokenForUser(ctx context.Context, orgID, userID, host string) (cloudID, accessToken string, err error)
+}
+
 type resolver struct {
 	secrets db.SecretStore
 	orgs    db.OrgsStore
+	oauth   UserAccessTokenSource // nil when OAuth minting isn't wired
 }
 
-// NewResolver builds a Resolver from the secret + org-settings stores.
+// NewResolver builds a Resolver from the secret + org-settings stores, without
+// Cloud OAuth minting. Use NewResolverWithOAuth on the request-serving path
+// where per-user Cloud OAuth Connect credentials must resolve; the OAuth-free
+// form is for background callers that only ever take ForSystem (the board-mirror
+// spawner) or that predate Cloud OAuth.
 func NewResolver(secrets db.SecretStore, orgs db.OrgsStore) Resolver {
 	return &resolver{secrets: secrets, orgs: orgs}
+}
+
+// NewResolverWithOAuth builds a Resolver that can mint per-user Cloud OAuth
+// access tokens via the given source (internal/jiraoauth). Everything else is
+// identical to NewResolver; only the AuthMethodCloudOAuth branch of ForUser
+// depends on the source.
+func NewResolverWithOAuth(secrets db.SecretStore, orgs db.OrgsStore, oauth UserAccessTokenSource) Resolver {
+	return &resolver{secrets: secrets, orgs: orgs, oauth: oauth}
 }
 
 // ForSystem resolves the org's Jira service credential into an authenticated
@@ -289,6 +335,25 @@ func (r *resolver) ForUser(ctx context.Context, orgID, userID string) (*Client, 
 			return NewClient(CloudAPIToken(host, cred.Email, cred.Token)), nil
 		}
 		return NewClient(DataCenterPAT(host, cred.Token)), nil
+	case AuthMethodCloudOAuth:
+		// Same usability gate as the static schemes: a Cloud OAuth credential
+		// left over after a Cloud→DC cutover (or one missing its cloud_id /
+		// refresh token) is an absent-credential boundary, fixed by re-binding.
+		if !cred.UsableFor(deployment) {
+			return nil, fmt.Errorf("%w: org=%s user=%s host=%s (credential not usable for %s deployment)", ErrNoJiraUserCredential, orgID, userID, host, deployment)
+		}
+		// The refresh-token → access-token mint (with rotation write-back) lives
+		// in the OAuth source. A nil source means this resolver wasn't built with
+		// OAuth wiring (a background board-mirror resolver) — not an absent
+		// credential, so surface it directly rather than as "connect your Jira".
+		if r.oauth == nil {
+			return nil, fmt.Errorf("resolve jira user credential for org %s user %s: cloud oauth minting not configured", orgID, userID)
+		}
+		cloudID, accessToken, err := r.oauth.AccessTokenForUser(ctx, orgID, userID, host)
+		if err != nil {
+			return nil, fmt.Errorf("mint jira oauth access token for org %s user %s: %w", orgID, userID, err)
+		}
+		return NewClient(CloudOAuth(cloudID, accessToken)), nil
 	default:
 		// An unknown/empty method is corruption or a forward-version credential
 		// (e.g. a future OAuth method this build predates). Surface it rather than

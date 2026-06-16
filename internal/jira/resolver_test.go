@@ -373,7 +373,10 @@ func TestForUser_StaleCrossScheme_NoClient(t *testing.T) {
 // ErrNoJiraUserCredential (the credential exists; re-binding isn't the fix).
 func TestForUser_UnknownMethod_Errors(t *testing.T) {
 	const base = "https://acme.atlassian.net"
-	env, err := MarshalUserCredential(UserCredential{Method: "cloud_oauth", Token: "tok"})
+	// A forward-version method this build predates (cloud_oauth is now a known
+	// method, so it can no longer stand in for "unknown" — use a value no build
+	// recognizes).
+	env, err := MarshalUserCredential(UserCredential{Method: "saml_bearer_v9", Token: "tok"})
 	if err != nil {
 		t.Fatalf("MarshalUserCredential: %v", err)
 	}
@@ -407,7 +410,11 @@ func TestUserCredential_UsableFor(t *testing.T) {
 		{"dc ok", UserCredential{Method: AuthMethodDCPAT, Token: "t"}, DeploymentDataCenter, true},
 		{"dc no token", UserCredential{Method: AuthMethodDCPAT}, DeploymentDataCenter, false},
 		{"dc on cloud host", UserCredential{Method: AuthMethodDCPAT, Token: "t"}, DeploymentCloud, false},
-		{"unknown method", UserCredential{Method: "cloud_oauth", Token: "t"}, DeploymentCloud, false},
+		{"cloud oauth ok", UserCredential{Method: AuthMethodCloudOAuth, CloudID: "c", RefreshToken: "r"}, DeploymentCloud, true},
+		{"cloud oauth no refresh", UserCredential{Method: AuthMethodCloudOAuth, CloudID: "c"}, DeploymentCloud, false},
+		{"cloud oauth no cloud_id", UserCredential{Method: AuthMethodCloudOAuth, RefreshToken: "r"}, DeploymentCloud, false},
+		{"cloud oauth on dc host", UserCredential{Method: AuthMethodCloudOAuth, CloudID: "c", RefreshToken: "r"}, DeploymentDataCenter, false},
+		{"unknown method", UserCredential{Method: "saml_bearer_v9", Token: "t"}, DeploymentCloud, false},
 	}
 	for _, tc := range cases {
 		if got := tc.cred.UsableFor(tc.dep); got != tc.want {
@@ -525,5 +532,107 @@ func TestCanonicalHostAndKey(t *testing.T) {
 				t.Errorf("UserTokenKey(%q) = %q, want %q", host, got, tt.wantKey)
 			}
 		}
+	}
+}
+
+// fakeOAuthSource records the args ForUser hands it and returns a canned
+// (cloudID, accessToken). It's the seam the AuthMethodCloudOAuth branch
+// delegates the mint + rotation write-back to (internal/jiraoauth in prod).
+type fakeOAuthSource struct {
+	cloudID, access          string
+	err                      error
+	gotOrg, gotUser, gotHost string
+	calls                    int
+}
+
+func (f *fakeOAuthSource) AccessTokenForUser(_ context.Context, orgID, userID, host string) (string, string, error) {
+	f.calls++
+	f.gotOrg, f.gotUser, f.gotHost = orgID, userID, host
+	return f.cloudID, f.access, f.err
+}
+
+// TestForUser_CloudOAuthEnvelope pins the Cloud OAuth path: a stored cloud_oauth
+// envelope routes through the OAuth source (by org/user/host) and yields a
+// Bearer / REST v3 client against the api.atlassian.com gateway — never the org
+// service cred.
+func TestForUser_CloudOAuthEnvelope(t *testing.T) {
+	const base = "https://acme.atlassian.net"
+	env, err := MarshalUserCredential(UserCredential{
+		Method: AuthMethodCloudOAuth, CloudID: "cloud-9", RefreshToken: "r1",
+	})
+	if err != nil {
+		t.Fatalf("MarshalUserCredential: %v", err)
+	}
+	secrets := &fakeSecrets{
+		sys:  map[string]string{keyJiraURL: base, keyJiraAuthMethod: string(AuthMethodCloudOAuth)},
+		user: map[string]string{UserTokenKey(base): env},
+	}
+	src := &fakeOAuthSource{cloudID: "cloud-9", access: "acc-tok"}
+	r := NewResolverWithOAuth(secrets, &fakeOrgs{jiraBase: base}, src)
+
+	c, err := r.ForUser(context.Background(), testOrgID, testUserID)
+	if err != nil {
+		t.Fatalf("ForUser: %v", err)
+	}
+	if c == nil {
+		t.Fatal("ForUser returned a nil client")
+	}
+	if src.calls != 1 || src.gotOrg != testOrgID || src.gotUser != testUserID || src.gotHost != base {
+		t.Errorf("source called with (calls=%d org=%q user=%q host=%q), want (1, %q, %q, %q)",
+			src.calls, src.gotOrg, src.gotUser, src.gotHost, testOrgID, testUserID, base)
+	}
+	// The built client must target the gateway with the minted bearer token.
+	req, err := c.cfg.NewAPIRequest(context.Background(), "GET", "myself", nil)
+	if err != nil {
+		t.Fatalf("NewAPIRequest: %v", err)
+	}
+	if got := req.URL.String(); got != "https://api.atlassian.com/ex/jira/cloud-9/rest/api/3/myself" {
+		t.Errorf("request URL = %q, want the cloud-9 gateway v3 path", got)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer acc-tok" {
+		t.Errorf("Authorization = %q, want Bearer acc-tok", got)
+	}
+}
+
+// TestForUser_CloudOAuth_NoSource: a cloud_oauth envelope on a resolver built
+// without OAuth wiring is a configuration error — NOT ErrNoJiraUserCredential
+// (the credential exists; the minter just isn't wired), so handlers don't tell
+// the user to re-connect when that wouldn't be the fix.
+func TestForUser_CloudOAuth_NoSource(t *testing.T) {
+	const base = "https://acme.atlassian.net"
+	env, _ := MarshalUserCredential(UserCredential{
+		Method: AuthMethodCloudOAuth, CloudID: "cloud-9", RefreshToken: "r1",
+	})
+	secrets := &fakeSecrets{
+		sys:  map[string]string{keyJiraURL: base, keyJiraAuthMethod: string(AuthMethodCloudOAuth)},
+		user: map[string]string{UserTokenKey(base): env},
+	}
+	r := NewResolver(secrets, &fakeOrgs{jiraBase: base}) // no OAuth source
+	_, err := r.ForUser(context.Background(), testOrgID, testUserID)
+	if err == nil {
+		t.Fatal("ForUser err = nil, want a config error")
+	}
+	if errors.Is(err, ErrNoJiraUserCredential) {
+		t.Errorf("a missing OAuth source must not collapse to ErrNoJiraUserCredential: %v", err)
+	}
+}
+
+// TestForUser_CloudOAuthIncomplete treats a cloud_oauth envelope missing the
+// refresh token (or cloud_id) as absent — ErrNoJiraUserCredential, re-Connect is
+// the fix — never a half-built client or an org fallback.
+func TestForUser_CloudOAuthIncomplete(t *testing.T) {
+	const base = "https://acme.atlassian.net"
+	env, _ := MarshalUserCredential(UserCredential{Method: AuthMethodCloudOAuth, CloudID: "cloud-9"})
+	secrets := &fakeSecrets{
+		sys:  map[string]string{keyJiraURL: base, keyJiraAuthMethod: string(AuthMethodCloudOAuth)},
+		user: map[string]string{UserTokenKey(base): env},
+	}
+	src := &fakeOAuthSource{cloudID: "cloud-9", access: "acc-tok"}
+	r := NewResolverWithOAuth(secrets, &fakeOrgs{jiraBase: base}, src)
+	if _, err := r.ForUser(context.Background(), testOrgID, testUserID); !errors.Is(err, ErrNoJiraUserCredential) {
+		t.Fatalf("ForUser err = %v, want ErrNoJiraUserCredential", err)
+	}
+	if src.calls != 0 {
+		t.Errorf("OAuth source called %d times for an unusable envelope, want 0", src.calls)
 	}
 }
