@@ -73,14 +73,13 @@ const PROVIDER_CARDS: ProviderCard[] = [
 // Shared by the wizard key step and the Settings section.
 export function ClaudeProviderCards() {
   return (
-    <div role="radiogroup" aria-label="Claude provider" className="grid gap-2 sm:grid-cols-2">
+    <div role="group" aria-label="Claude provider" className="grid gap-2 sm:grid-cols-2">
       {PROVIDER_CARDS.map((card) => {
         const selected = card.kind === 'anthropic'
         return (
           <div
             key={card.kind}
-            role="radio"
-            aria-checked={selected}
+            aria-current={selected ? 'true' : undefined}
             aria-disabled={card.disabled}
             className={`flex flex-col items-start gap-1 rounded-xl border px-3.5 py-3 text-left ${
               card.disabled
