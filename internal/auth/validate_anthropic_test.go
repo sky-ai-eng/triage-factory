@@ -9,8 +9,9 @@ import (
 )
 
 // TestValidateAnthropicAPIKey_OK pins the happy path: a 200 from the models
-// endpoint is a valid key, and the required headers (x-api-key +
-// anthropic-version) are sent exactly as Anthropic documents.
+// endpoint is a valid key; the request hits the configured /v1/models path
+// (not some rewritten endpoint) with GET and the required headers (x-api-key +
+// anthropic-version) sent exactly as Anthropic documents.
 func TestValidateAnthropicAPIKey_OK(t *testing.T) {
 	var gotKey, gotVersion, gotMethod, gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -24,7 +25,10 @@ func TestValidateAnthropicAPIKey_OK(t *testing.T) {
 		_, _ = w.Write([]byte(`{"data":[]}`))
 	}))
 	t.Cleanup(srv.Close)
-	SetAnthropicModelsURLForTest(t, srv.URL)
+	// Include the real endpoint path so the request-path assertion below proves
+	// the validator hits /v1/models verbatim, catching a regression that points
+	// it at the wrong endpoint.
+	SetAnthropicModelsURLForTest(t, srv.URL+"/v1/models")
 
 	if err := ValidateAnthropicAPIKey(context.Background(), "sk-ant-good"); err != nil {
 		t.Fatalf("ValidateAnthropicAPIKey returned %v, want nil", err)
@@ -32,10 +36,8 @@ func TestValidateAnthropicAPIKey_OK(t *testing.T) {
 	if gotMethod != http.MethodGet {
 		t.Errorf("method = %q, want GET", gotMethod)
 	}
-	if gotPath != "/" {
-		// The stub serves the whole URL path; the production URL is .../v1/models,
-		// but httptest hands us the root — assert we hit it, not that we rewrote it.
-		t.Logf("path = %q", gotPath)
+	if gotPath != "/v1/models" {
+		t.Errorf("request path = %q, want /v1/models", gotPath)
 	}
 	if gotKey != "sk-ant-good" {
 		t.Errorf("x-api-key = %q, want the supplied key", gotKey)
