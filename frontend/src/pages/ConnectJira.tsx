@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Navigate, useLocation, useParams } from 'react-router-dom'
 import { useJiraIdentity } from '../hooks/useJiraIdentity'
-import { captureJiraIdentityPat } from '../lib/jiraIdentity'
+import { captureJiraIdentityPat, captureJiraIdentityApiToken } from '../lib/jiraIdentity'
 
 /**
  * ConnectJira is the blocking onboarding gate for per-user Jira access — the
@@ -17,9 +17,11 @@ import { captureJiraIdentityPat } from '../lib/jiraIdentity'
  * the Jira user level must act as the user. So the copy is honest about
  * retention: your token is stored, in your workspace's secret store.
  *
- * DC = paste-a-PAT (this page today). One-click Connect (Cloud OAuth, 3LO) is a
- * later Cloud-tier ticket; the button below is gated on connect_available
- * (false until then), so it stays hidden and the page offers only the PAT path.
+ * The paste path follows the org's deployment: a Data Center org binds a single
+ * personal access token; a Cloud org binds the Atlassian account email + API
+ * token. One-click Connect (Cloud OAuth, 3LO) is a later Cloud-tier ticket; the
+ * button below is gated on connect_available (false until then), so it stays
+ * hidden and the page offers only the paste path.
  *
  * Runs in BOTH modes — the org id comes from the route param
  * (/orgs/:org_id/connect-jira), so it needs no OrgContext (absent in local
@@ -42,9 +44,12 @@ export default function ConnectJira() {
   const location = useLocation()
   const { state, refresh } = useJiraIdentity(orgId ?? null)
 
-  // PAT capture state — the only path on Data Center. On success we refresh(),
-  // which re-reads identity → connected → navigates to returnTo below.
+  // Paste-capture state. On success we refresh(), which re-reads identity →
+  // connected → navigates to returnTo below. Which fields are used follows the
+  // org's deployment: DC uses pat, Cloud uses email + apiToken.
   const [pat, setPat] = useState('')
+  const [email, setEmail] = useState('')
+  const [apiToken, setApiToken] = useState('')
   const [capturing, setCapturing] = useState(false)
   const [patError, setPatError] = useState<string | null>(null)
 
@@ -87,7 +92,10 @@ export default function ConnectJira() {
     )
   }
 
-  const { connected, host, connect_available } = state.data
+  const { connected, host, connect_available, deployment } = state.data
+  // The paste fields follow the org's deployment: Cloud binds an email + API
+  // token, Data Center a single PAT.
+  const cloud = deployment === 'cloud'
 
   // Already bound (direct navigation, or a stale tab after a successful
   // capture) — send the user where they were headed.
@@ -107,16 +115,21 @@ export default function ConnectJira() {
       encodeURIComponent(returnTo)
   }
 
-  const submitPat = async () => {
-    if (pat.trim() === '' || capturing) return
+  const submitReady = cloud ? email.trim() !== '' && apiToken.trim() !== '' : pat.trim() !== ''
+  const submit = async () => {
+    if (!submitReady || capturing) return
     setCapturing(true)
     setPatError(null)
     try {
-      await captureJiraIdentityPat(orgId, pat.trim())
+      if (cloud) {
+        await captureJiraIdentityApiToken(orgId, email.trim(), apiToken.trim())
+      } else {
+        await captureJiraIdentityPat(orgId, pat.trim())
+      }
       // Re-read status; the connected branch above then redirects to returnTo.
       refresh()
     } catch (e) {
-      setPatError(e instanceof Error ? e.message : 'Could not verify that token.')
+      setPatError(e instanceof Error ? e.message : 'Could not verify that credential.')
     } finally {
       // Always clear the in-flight flag — even on success. If refresh() comes
       // back connected we navigate away regardless; if it lags (propagation) or
@@ -150,47 +163,112 @@ export default function ConnectJira() {
         </button>
       )}
 
-      {/* PAT path — always offered, and the sole capture path on Data Center
-          (connect_available=false until Cloud OAuth lands). */}
+      {/* Paste path — always offered, and the sole capture path until Cloud
+          OAuth lands (connect_available=false). The fields follow the org's
+          deployment: Cloud = email + API token, Data Center = a single PAT. */}
       <div className="space-y-2">
-        <label className="block">
-          <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
-            {connect_available
-              ? 'Or paste a personal access token'
-              : 'Paste a personal access token'}
-          </span>
-          <input
-            type="password"
-            autoComplete="off"
-            value={pat}
-            placeholder="Your Jira token"
-            onChange={(e) => {
-              setPat(e.target.value)
-              if (patError) setPatError(null)
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') void submitPat()
-            }}
-            aria-invalid={!!patError || undefined}
-            className={`w-full rounded-xl border bg-surface px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 transition-colors ${
-              patError ? 'border-dismiss/50' : 'border-border-glass focus:border-accent/40'
-            }`}
-          />
-        </label>
+        {cloud ? (
+          <>
+            <label className="block">
+              <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+                {connect_available ? 'Or paste an email + API token' : 'Atlassian account email'}
+              </span>
+              <input
+                type="email"
+                autoComplete="email"
+                value={email}
+                placeholder="you@yourcompany.com"
+                onChange={(e) => {
+                  setEmail(e.target.value)
+                  if (patError) setPatError(null)
+                }}
+                aria-invalid={!!patError || undefined}
+                className={`w-full rounded-xl border bg-surface px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 transition-colors ${
+                  patError ? 'border-dismiss/50' : 'border-border-glass focus:border-accent/40'
+                }`}
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+                API token
+              </span>
+              <input
+                type="password"
+                autoComplete="off"
+                value={apiToken}
+                placeholder="Your Atlassian API token"
+                onChange={(e) => {
+                  setApiToken(e.target.value)
+                  if (patError) setPatError(null)
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void submit()
+                }}
+                aria-invalid={!!patError || undefined}
+                className={`w-full rounded-xl border bg-surface px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 transition-colors ${
+                  patError ? 'border-dismiss/50' : 'border-border-glass focus:border-accent/40'
+                }`}
+              />
+            </label>
+          </>
+        ) : (
+          <label className="block">
+            <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+              {connect_available
+                ? 'Or paste a personal access token'
+                : 'Paste a personal access token'}
+            </span>
+            <input
+              type="password"
+              autoComplete="off"
+              value={pat}
+              placeholder="Your Jira token"
+              onChange={(e) => {
+                setPat(e.target.value)
+                if (patError) setPatError(null)
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void submit()
+              }}
+              aria-invalid={!!patError || undefined}
+              className={`w-full rounded-xl border bg-surface px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 transition-colors ${
+                patError ? 'border-dismiss/50' : 'border-border-glass focus:border-accent/40'
+              }`}
+            />
+          </label>
+        )}
         {patError && <p className="text-[12px] text-dismiss leading-relaxed">{patError}</p>}
         <button
           type="button"
-          onClick={() => void submitPat()}
-          disabled={pat.trim() === '' || capturing}
+          onClick={() => void submit()}
+          disabled={!submitReady || capturing}
           className="w-full rounded-xl border border-border-glass px-4 py-2.5 text-[13px] font-medium text-text-secondary hover:text-text-primary hover:border-accent/40 disabled:opacity-40 disabled:hover:border-border-glass transition-colors"
         >
-          {capturing ? 'Verifying…' : 'Verify token'}
+          {capturing ? 'Verifying…' : cloud ? 'Verify credential' : 'Verify token'}
         </button>
       </div>
 
       <p className="text-[11px] text-text-tertiary leading-relaxed">
-        Unlike GitHub, your token is stored — it&apos;s needed to act as you on Jira. It stays in
-        your workspace&apos;s secret store and is never shared with other users.
+        {cloud ? (
+          <>
+            Create a token at{' '}
+            <a
+              href="https://id.atlassian.com/manage-profile/security/api-tokens"
+              target="_blank"
+              rel="noreferrer"
+              className="text-accent hover:underline"
+            >
+              id.atlassian.com/manage/api-tokens
+            </a>
+            . Unlike GitHub, it&apos;s stored — it&apos;s needed to act as you on Jira. It stays in
+            your workspace&apos;s secret store and is never shared with other users.
+          </>
+        ) : (
+          <>
+            Unlike GitHub, your token is stored — it&apos;s needed to act as you on Jira. It stays
+            in your workspace&apos;s secret store and is never shared with other users.
+          </>
+        )}
       </p>
     </Card>
   )

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/zalando/go-keyring"
 )
@@ -79,6 +81,112 @@ func jiraMyselfStub(t *testing.T, body string, gotAuth *string) *httptest.Server
 	return srv
 }
 
+// jiraCloudMyselfStub is the Cloud sibling of jiraMyselfStub: it answers the
+// REST v3 /myself a Cloud API token (Basic) probes, capturing the Authorization
+// header sent.
+func jiraCloudMyselfStub(t *testing.T, body string, gotAuth *string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/rest/api/3/myself" {
+			http.NotFound(w, r)
+			return
+		}
+		if gotAuth != nil {
+			*gotAuth = r.Header.Get("Authorization")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// seedLocalOrgJiraAuthMethod writes the org's Jira auth-method marker (the value
+// the capture + status handlers resolve the deployment from). Used to drive the
+// Cloud branch against a local stub, where the host shape alone would classify
+// as Data Center.
+func seedLocalOrgJiraAuthMethod(t *testing.T, s *Server, method string) {
+	t.Helper()
+	if err := s.secrets.Put(context.Background(), runmode.LocalDefaultOrgID, "jira_auth_method", method, ""); err != nil {
+		t.Fatalf("seed org jira auth method: %v", err)
+	}
+}
+
+// TestJiraIdentityPAT_Cloud_StoresEnvelopeAndBindsIdentity drives the Cloud
+// capture path: an org marked cloud_api_token binds the user's email + API token
+// (validated via Basic / REST v3 /myself), stores a cloud_api_token envelope,
+// and derives the identity from /myself.
+func TestJiraIdentityPAT_Cloud_StoresEnvelopeAndBindsIdentity(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	var gotAuth string
+	jiraStub := jiraCloudMyselfStub(t, `{"accountId":"acc-cloud","displayName":"Cloud User"}`, &gotAuth)
+	seedLocalOrgJiraHost(t, s, jiraStub.URL)
+	seedLocalOrgJiraAuthMethod(t, s, "cloud_api_token")
+
+	rec := doJSON(t, s, "POST",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira/pat",
+		map[string]any{"email": "me@acme.com", "token": "cloud-tok"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+
+	var out jiraIdentityCaptureResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Account != "Cloud User" {
+		t.Errorf("account = %q, want Cloud User", out.Account)
+	}
+	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("me@acme.com:cloud-tok"))
+	if gotAuth != wantAuth {
+		t.Errorf("myself Authorization = %q, want %q (Basic email:token)", gotAuth, wantAuth)
+	}
+
+	// The stored secret is a cloud_api_token envelope carrying the email + token.
+	stored, err := s.secrets.GetUserSystem(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "jira_token/"+jiraStub.URL)
+	if err != nil {
+		t.Fatalf("GetUserSystem: %v", err)
+	}
+	cred, err := jira.ParseUserCredential(stored)
+	if err != nil {
+		t.Fatalf("ParseUserCredential(%q): %v", stored, err)
+	}
+	if cred.Method != jira.AuthMethodCloudAPIToken || cred.Email != "me@acme.com" || cred.Token != "cloud-tok" {
+		t.Errorf("stored credential = %+v, want a cloud_api_token envelope", cred)
+	}
+
+	// Identity is derived from /myself, keyed on the org host.
+	accountID, displayName, err := s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID, jiraStub.URL)
+	if err != nil {
+		t.Fatalf("GetJiraIdentity: %v", err)
+	}
+	if accountID != "acc-cloud" || displayName != "Cloud User" {
+		t.Errorf("identity = (%q, %q), want (acc-cloud, Cloud User)", accountID, displayName)
+	}
+}
+
+// TestJiraIdentityPAT_Cloud_MissingHalf_Returns400 pins that a Cloud org bind
+// missing either half of the email + token pair is rejected before any host
+// round-trip.
+func TestJiraIdentityPAT_Cloud_MissingHalf_Returns400(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	seedLocalOrgJiraHost(t, s, "https://acme.atlassian.net")
+	seedLocalOrgJiraAuthMethod(t, s, "cloud_api_token")
+
+	rec := doJSON(t, s, "POST",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira/pat",
+		map[string]any{"email": "me@acme.com"}) // no token
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+}
+
 // TestJiraIdentityPAT_StoresCredentialAndBindsIdentity drives the capture path
 // against a stubbed DC host: the supplied PAT validates (GET /rest/api/2/myself
 // with Bearer auth), the credential is STORED under "jira_token/<host>" (the
@@ -119,13 +227,18 @@ func TestJiraIdentityPAT_StoresCredentialAndBindsIdentity(t *testing.T) {
 
 	// The credential is STORED — round-trips via SKY-442 GetUserSystem under the
 	// host-scoped key. This is the structural difference from GitHub (PAT_2),
-	// which retains no credential.
+	// which retains no credential. It is now a UserCredential envelope (a dc_pat
+	// for a Data Center host), not the bare token the original DC bind wrote.
 	stored, err := s.secrets.GetUserSystem(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "jira_token/"+jiraStub.URL)
 	if err != nil {
 		t.Fatalf("GetUserSystem: %v", err)
 	}
-	if stored != "jira_secret_token" {
-		t.Errorf("stored credential = %q, want the supplied PAT", stored)
+	cred, err := jira.ParseUserCredential(stored)
+	if err != nil {
+		t.Fatalf("ParseUserCredential(%q): %v", stored, err)
+	}
+	if cred.Method != jira.AuthMethodDCPAT || cred.Token != "jira_secret_token" {
+		t.Errorf("stored credential = %+v, want dc_pat envelope with the supplied PAT", cred)
 	}
 
 	// Identity is derived from the validated /myself response (accountId wins),
@@ -312,12 +425,17 @@ func TestJiraIdentityPAT_HostUnreachable_Returns502(t *testing.T) {
 	}
 }
 
-// TestJiraIdentityPAT_EmptyToken_Returns400 pins that an empty PAT is rejected
-// before any host round-trip (the empty check precedes host resolution).
+// TestJiraIdentityPAT_EmptyToken_Returns400 pins that an empty PAT for a Data
+// Center org is rejected before any host round-trip (the empty check precedes
+// validation). A DC host is seeded so the handler resolves the DC branch and
+// checks the PAT field; no /myself call happens because the empty PAT short-
+// circuits first.
 func TestJiraIdentityPAT_EmptyToken_Returns400(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
+	// A DC-shaped host (not *.atlassian.net) → DC branch, which expects a PAT.
+	seedLocalOrgJiraHost(t, s, "https://jira.example.com")
 
 	rec := doJSON(t, s, "POST",
 		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira/pat",

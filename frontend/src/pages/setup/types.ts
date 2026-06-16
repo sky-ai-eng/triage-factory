@@ -184,10 +184,15 @@ export interface WizardState {
   // Whether one-click Connect is offerable — false until Cloud OAuth lands
   // (DC = paste-a-PAT), so the step offers only the token path for now.
   jiraUserConnectAvailable: boolean
-  // The draft token the user pastes when binding Jira access. Captured
-  // (validated → stored → account derived) on the Jira user step's Continue,
-  // then cleared.
+  // The draft token the user pastes when binding Jira access. For a Data Center
+  // org this is the personal access token; captured (validated → stored →
+  // account derived) on the Jira user step's Continue, then cleared.
   jiraUserPat: string
+  // The draft Cloud credential pair the user pastes when the org's Jira is
+  // Cloud — the Atlassian account email + API token (Basic auth). Captured the
+  // same way as jiraUserPat and cleared on success. Unused for a Data Center org.
+  jiraUserEmail: string
+  jiraUserApiToken: string
 
   // ── Local-mode credential reuse (the setup-only "use this token as my own
   //    identity too" checkboxes) ──

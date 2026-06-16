@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 )
 
@@ -72,6 +73,12 @@ type jiraIdentityStatusResponse struct {
 	Account          string `json:"account,omitempty"`
 	Host             string `json:"host"`
 	ConnectAvailable bool   `json:"connect_available"`
+	// Deployment is the org's Jira backend ("cloud" / "data_center"), resolved
+	// from the org's stored auth-method marker (falling back to host shape for a
+	// pre-Cloud org). The bind surfaces key off it to render the right paste
+	// fields — a Cloud org pastes an email + API token, a Data Center org a
+	// single PAT. Empty when no Jira host is configured.
+	Deployment string `json:"deployment,omitempty"`
 }
 
 // handleJiraIdentityStatus reports whether the caller has a stored Jira access
@@ -89,9 +96,10 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 	}
 
 	var (
-		connected bool
-		account   string
-		host      string
+		connected  bool
+		account    string
+		host       string
+		deployment string
 	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		orgSet, lerr := tx.Orgs.GetSettings(r.Context(), orgID)
@@ -107,6 +115,18 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 			return nil
 		}
 		host = jiraHost
+
+		// Resolve the org's deployment the same way the system resolver and the
+		// capture handler do — from the stored auth-method marker, falling back
+		// to host shape for a pre-Cloud org — so the bind surfaces render the
+		// paste fields that match the scheme this handler will validate. The
+		// marker is a claims-scoped org-secret read (the same door
+		// integrations.Load uses on the request path).
+		method, lerr := tx.Secrets.Get(r.Context(), orgID, integrations.KeyJiraAuthMethod)
+		if lerr != nil {
+			return lerr
+		}
+		deployment = string(jira.DeploymentForMarker(jira.AuthMethod(method), jiraHost))
 
 		// Claims-checked GetUser (NOT GetUserSystem): this is a request
 		// handler, so the credential read runs on the app pool under the
@@ -153,15 +173,20 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 		Account:          account,
 		Host:             host,
 		ConnectAvailable: s.connectAvailableForOrg(r, orgID),
+		Deployment:       deployment,
 	})
 }
 
-// jiraIdentityPATRequest carries a user-supplied Jira PAT for the
-// capture-and-STORE access path. Unlike the GitHub sibling, the token is
-// retained (per-user vault scope) — the user acts as themselves on board
-// claims, so the credential must outlive the request.
+// jiraIdentityPATRequest carries the user-supplied Jira credential for the
+// capture-and-STORE access path. Which fields are populated depends on the org's
+// deployment: a Data Center org sends a personal access token (PAT, Bearer); a
+// Cloud org sends the Atlassian account Email + API Token (Basic). Unlike the
+// GitHub sibling, the credential is retained (per-user vault scope) — the user
+// acts as themselves on board claims, so it must outlive the request.
 type jiraIdentityPATRequest struct {
-	PAT string `json:"pat"`
+	PAT   string `json:"pat"`
+	Email string `json:"email"`
+	Token string `json:"token"`
 }
 
 // jiraIdentityCaptureResponse is the success shape of the PAT-capture path: the
@@ -172,16 +197,22 @@ type jiraIdentityCaptureResponse struct {
 	Host    string `json:"host"`
 }
 
-// handleJiraIdentityPAT binds the caller's Jira access from a personal access
-// token they supply, STORING the token (per-user vault scope, SKY-442). It
-// resolves the org's Jira host, validates the PAT against it (GET /myself),
-// persists the credential under "jira_token/<host>", and derives the user's
-// Jira identity from the validated /myself response. This is the Jira mirror of
-// handleGitHubIdentityPAT with one difference: GitHub discards the token
-// (identity only); Jira keeps it (it's access).
+// handleJiraIdentityPAT binds the caller's Jira access from a credential they
+// supply, STORING it (per-user vault scope, SKY-442) as a UserCredential
+// envelope. It resolves the org's Jira host + deployment, validates the
+// credential against it (GET /myself), persists the envelope under
+// "jira_token/<host>", and derives the user's Jira identity from the validated
+// /myself response. This is the Jira mirror of handleGitHubIdentityPAT with one
+// difference: GitHub discards the token (identity only); Jira keeps it (access).
+//
+// The credential shape follows the org's deployment, the same dispatch the
+// system resolver uses: a Data Center org binds a PAT (Bearer, REST v2); a Cloud
+// org binds an Atlassian email + API token (Basic, REST v3). The route is stable
+// across both — the branch is internal. Cloud OAuth (one-click Connect) is a
+// later ticket that extends the stored envelope with a third method.
 //
 // Distinct failure shapes, like the GitHub handler: a host TF couldn't reach is
-// a 502 (infra), a token the host rejected is a 422 (your action).
+// a 502 (infra), a credential the host rejected is a 422 (your action).
 //
 // POST /api/orgs/{org_id}/identity/jira/pat
 func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
@@ -193,18 +224,24 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req, "") {
 		return
 	}
-	pat := strings.TrimSpace(req.PAT)
-	if pat == "" {
-		badRequest(w, "A Jira personal access token is required.")
-		return
-	}
 
-	// Resolve the org's Jira host the same way the status reader does, so the
-	// (user, host) credential key always agrees across surfaces.
-	var orgSet domain.OrgSettings
+	// Resolve the org's Jira host + deployment the same way the status reader
+	// does, so the (user, host) credential key always agrees across surfaces and
+	// the scheme we validate matches the one the resolver will rebuild. The
+	// deployment comes from the org's stored auth-method marker (falling back to
+	// host shape for a pre-Cloud org) — a claims-scoped org-secret read, the same
+	// door integrations.Load uses on the request path.
+	var (
+		orgSet     domain.OrgSettings
+		authMethod string
+	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error
 		orgSet, lerr = tx.Orgs.GetSettings(r.Context(), orgID)
+		if lerr != nil {
+			return lerr
+		}
+		authMethod, lerr = tx.Secrets.Get(r.Context(), orgID, integrations.KeyJiraAuthMethod)
 		return lerr
 	}); err != nil {
 		internalError(w, "jira-identity", err)
@@ -218,30 +255,81 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	cloud := jira.DeploymentForMarker(jira.AuthMethod(authMethod), host) == jira.DeploymentCloud
 
-	// Validate against the org's host using the DC config form (Bearer, REST
-	// v2) — the same scheme the resolver will use at request time.
-	jiraUser, err := auth.ValidateJira(r.Context(), jira.DataCenterPAT(host, pat))
+	// Build the validation Config + the credential envelope from the right
+	// fields. `field` names the form input an error points at, so the surface can
+	// highlight the offending field per deployment.
+	var (
+		cfg      jira.Config
+		envelope string
+		source   string
+		field    string
+	)
+	if cloud {
+		email := strings.TrimSpace(req.Email)
+		token := strings.TrimSpace(req.Token)
+		field = "jira_api_token"
+		if email == "" || token == "" {
+			badRequest(w, "Your Atlassian account email and an API token are both required.")
+			return
+		}
+		cfg = jira.CloudAPIToken(host, email, token)
+		env, err := jira.MarshalUserCredential(jira.UserCredential{
+			Method: jira.AuthMethodCloudAPIToken,
+			Email:  email,
+			Token:  token,
+		})
+		if err != nil {
+			internalError(w, "jira-identity", err)
+			return
+		}
+		envelope = env
+		source = string(jira.AuthMethodCloudAPIToken)
+	} else {
+		pat := strings.TrimSpace(req.PAT)
+		field = "jira_pat"
+		if pat == "" {
+			badRequest(w, "A Jira personal access token is required.")
+			return
+		}
+		cfg = jira.DataCenterPAT(host, pat)
+		env, err := jira.MarshalUserCredential(jira.UserCredential{
+			Method: jira.AuthMethodDCPAT,
+			Token:  pat,
+		})
+		if err != nil {
+			internalError(w, "jira-identity", err)
+			return
+		}
+		envelope = env
+		// Identity source marker stays "pat" for Data Center (unchanged).
+		source = "pat"
+	}
+
+	// Validate against the org's host using the scheme its deployment dictates —
+	// the same scheme + version the resolver will use at request time.
+	jiraUser, err := auth.ValidateJira(r.Context(), cfg)
 	if err != nil {
 		// Keep the two failure shapes distinct, like the GitHub flow: a host we
-		// couldn't reach (infra) vs. a token the host rejected (your action).
+		// couldn't reach (infra) vs. a credential the host rejected (your action).
 		if errors.Is(err, auth.ErrJiraHostUnreachable) {
 			writeJSON(w, http.StatusBadGateway, map[string]string{
-				"error": fmt.Sprintf("Couldn't reach %s. This is a connectivity issue between Triage Factory and your Jira server, not the token — try again.", host),
-				"field": "jira_pat",
+				"error": fmt.Sprintf("Couldn't reach %s. This is a connectivity issue between Triage Factory and your Jira server, not the credential — try again.", host),
+				"field": field,
 			})
 			return
 		}
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "That token didn't validate against " + host + ". Double-check it and try again.",
-			"field": "jira_pat",
+			"error": "That credential didn't validate against " + host + ". Double-check it and try again.",
+			"field": field,
 		})
 		return
 	}
 	if jiraUser.StableID() == "" {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "Jira didn't return an account for that token.",
-			"field": "jira_pat",
+			"error": "Jira didn't return an account for that credential.",
+			"field": field,
 		})
 		return
 	}
@@ -259,10 +347,10 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 	// found by the router and assignee routing would silently drop tasks — keep
 	// this host derivation and that lookup's in agreement.
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if err := tx.Secrets.PutUser(r.Context(), orgID, userID, jiraTokenKey(host), pat, "Jira user access token"); err != nil {
+		if err := tx.Secrets.PutUser(r.Context(), orgID, userID, jiraTokenKey(host), envelope, "Jira user access token"); err != nil {
 			return fmt.Errorf("store jira credential: %w", err)
 		}
-		if err := tx.Users.UpsertJiraIdentity(r.Context(), userID, host, jiraUser.StableID(), jiraUser.DisplayName, "pat"); err != nil {
+		if err := tx.Users.UpsertJiraIdentity(r.Context(), userID, host, jiraUser.StableID(), jiraUser.DisplayName, source); err != nil {
 			return fmt.Errorf("persist jira identity: %w", err)
 		}
 		return nil
@@ -275,7 +363,7 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 	if account == "" {
 		account = jiraUser.StableID()
 	}
-	log.Printf("[jira-identity] bound user=%s account=%s host=%s org=%s source=pat (credential stored)", userID, jiraUser.StableID(), host, orgID)
+	log.Printf("[jira-identity] bound user=%s account=%s host=%s org=%s source=%s (credential stored)", userID, jiraUser.StableID(), host, orgID, source)
 
 	writeJSON(w, http.StatusOK, jiraIdentityCaptureResponse{Account: account, Host: host})
 }

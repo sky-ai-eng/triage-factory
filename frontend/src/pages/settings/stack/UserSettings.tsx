@@ -8,7 +8,7 @@ import { useState } from 'react'
 import { useGitHubIdentity } from '../../../hooks/useGitHubIdentity'
 import { useJiraIdentity } from '../../../hooks/useJiraIdentity'
 import { captureGitHubIdentityPat } from '../../../lib/githubIdentity'
-import { captureJiraIdentityPat } from '../../../lib/jiraIdentity'
+import { captureJiraIdentityPat, captureJiraIdentityApiToken } from '../../../lib/jiraIdentity'
 import { getStoredTheme, setTheme, type ThemeMode } from '../../../lib/theme'
 import SettingsSection from './SettingsSection'
 
@@ -177,9 +177,15 @@ function GitHubIdentitySection({ orgId }: { orgId: string | null }) {
 function JiraIdentitySection({ orgId }: { orgId: string | null }) {
   const { state, refresh } = useJiraIdentity(orgId)
   const [pat, setPat] = useState('')
+  const [email, setEmail] = useState('')
+  const [apiToken, setApiToken] = useState('')
   const [capturing, setCapturing] = useState(false)
   const [patError, setPatError] = useState<string | null>(null)
   const [reentering, setReentering] = useState(false)
+
+  // The credential shape follows the org's deployment: Cloud binds an Atlassian
+  // email + API token, Data Center a single personal access token.
+  const cloud = state.status === 'ready' && state.data.deployment === 'cloud'
 
   const summary =
     state.status === 'ready'
@@ -190,17 +196,27 @@ function JiraIdentitySection({ orgId }: { orgId: string | null }) {
         ? 'Status unavailable'
         : 'Loading…'
 
-  const submitPat = async () => {
-    if (!orgId || pat.trim() === '' || capturing) return
+  // submit captures whichever credential the deployment dictates, validates +
+  // stores it, then refreshes the bound status.
+  const submit = async () => {
+    if (!orgId || capturing) return
+    const ready = cloud ? email.trim() !== '' && apiToken.trim() !== '' : pat.trim() !== ''
+    if (!ready) return
     setCapturing(true)
     setPatError(null)
     try {
-      await captureJiraIdentityPat(orgId, pat.trim())
+      if (cloud) {
+        await captureJiraIdentityApiToken(orgId, email.trim(), apiToken.trim())
+      } else {
+        await captureJiraIdentityPat(orgId, pat.trim())
+      }
       setPat('')
+      setEmail('')
+      setApiToken('')
       setReentering(false)
       refresh()
     } catch (e) {
-      setPatError(e instanceof Error ? e.message : 'Could not verify that token.')
+      setPatError(e instanceof Error ? e.message : 'Could not verify that credential.')
     } finally {
       setCapturing(false)
     }
@@ -208,6 +224,8 @@ function JiraIdentitySection({ orgId }: { orgId: string | null }) {
 
   const connected = state.status === 'ready' && state.data.connected
   const host = state.status === 'ready' ? state.data.host : 'Jira'
+  const submitDisabled =
+    capturing || (cloud ? email.trim() === '' || apiToken.trim() === '' : pat.trim() === '')
 
   // Jira is an optional tracker, so — unlike the always-shown GitHub section —
   // only surface this when the org actually has a Jira host configured. A
@@ -243,37 +261,95 @@ function JiraIdentitySection({ orgId }: { orgId: string | null }) {
           </div>
         ) : (
           <div className="space-y-2.5">
-            <label className="block">
-              <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
-                Paste a personal access token
-              </span>
-              <input
-                type="password"
-                autoComplete="off"
-                value={pat}
-                placeholder="Your Jira token"
-                onChange={(e) => {
-                  setPat(e.target.value)
-                  if (patError) setPatError(null)
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') void submitPat()
-                }}
-                aria-invalid={!!patError || undefined}
-                className={`w-full rounded-xl border bg-surface px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary transition-colors focus:outline-none focus:ring-2 focus:ring-accent/30 ${
-                  patError ? 'border-dismiss/50' : 'border-border-glass focus:border-accent/40'
-                }`}
-              />
-            </label>
+            {cloud ? (
+              <>
+                <label className="block">
+                  <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+                    Atlassian account email
+                  </span>
+                  <input
+                    type="email"
+                    autoComplete="email"
+                    value={email}
+                    placeholder="you@yourcompany.com"
+                    onChange={(e) => {
+                      setEmail(e.target.value)
+                      if (patError) setPatError(null)
+                    }}
+                    aria-invalid={!!patError || undefined}
+                    className={`w-full rounded-xl border bg-surface px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary transition-colors focus:outline-none focus:ring-2 focus:ring-accent/30 ${
+                      patError ? 'border-dismiss/50' : 'border-border-glass focus:border-accent/40'
+                    }`}
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+                    API token
+                  </span>
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={apiToken}
+                    placeholder="Your Atlassian API token"
+                    onChange={(e) => {
+                      setApiToken(e.target.value)
+                      if (patError) setPatError(null)
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') void submit()
+                    }}
+                    aria-invalid={!!patError || undefined}
+                    className={`w-full rounded-xl border bg-surface px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary transition-colors focus:outline-none focus:ring-2 focus:ring-accent/30 ${
+                      patError ? 'border-dismiss/50' : 'border-border-glass focus:border-accent/40'
+                    }`}
+                  />
+                </label>
+                <p className="text-[11px] leading-relaxed text-text-tertiary">
+                  Create a token at{' '}
+                  <a
+                    href="https://id.atlassian.com/manage-profile/security/api-tokens"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-accent hover:underline"
+                  >
+                    id.atlassian.com/manage/api-tokens
+                  </a>
+                  .
+                </p>
+              </>
+            ) : (
+              <label className="block">
+                <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+                  Paste a personal access token
+                </span>
+                <input
+                  type="password"
+                  autoComplete="off"
+                  value={pat}
+                  placeholder="Your Jira token"
+                  onChange={(e) => {
+                    setPat(e.target.value)
+                    if (patError) setPatError(null)
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void submit()
+                  }}
+                  aria-invalid={!!patError || undefined}
+                  className={`w-full rounded-xl border bg-surface px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary transition-colors focus:outline-none focus:ring-2 focus:ring-accent/30 ${
+                    patError ? 'border-dismiss/50' : 'border-border-glass focus:border-accent/40'
+                  }`}
+                />
+              </label>
+            )}
             {patError && <p className="text-[12px] leading-relaxed text-dismiss">{patError}</p>}
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => void submitPat()}
-                disabled={pat.trim() === '' || capturing}
+                onClick={() => void submit()}
+                disabled={submitDisabled}
                 className="rounded-xl border border-border-glass px-4 py-2 text-[13px] font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary disabled:opacity-40"
               >
-                {capturing ? 'Verifying…' : 'Verify token'}
+                {capturing ? 'Verifying…' : cloud ? 'Verify credential' : 'Verify token'}
               </button>
               {connected && reentering && (
                 <button
@@ -281,6 +357,8 @@ function JiraIdentitySection({ orgId }: { orgId: string | null }) {
                   onClick={() => {
                     setReentering(false)
                     setPat('')
+                    setEmail('')
+                    setApiToken('')
                     setPatError(null)
                   }}
                   className="text-[12px] text-text-tertiary transition-colors hover:text-text-secondary"

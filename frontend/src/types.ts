@@ -414,6 +414,10 @@ export interface JiraIdentityStatus {
   /** Whether one-click Connect is offerable. False until Cloud OAuth lands
    *  (DC = paste-a-PAT), so the surfaces offer only the token path for now. */
   connect_available: boolean
+  /** The org's Jira backend ("cloud" / "data_center"), so the paste surfaces
+   *  render the right fields — a Cloud org binds an email + API token, a Data
+   *  Center org a single PAT. Empty/absent when no Jira host is configured. */
+  deployment?: 'cloud' | 'data_center'
 }
 
 /** GET /api/team/members row. Backs Variant B's searchable multi-select.

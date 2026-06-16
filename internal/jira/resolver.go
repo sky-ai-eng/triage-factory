@@ -2,6 +2,7 @@ package jira
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -70,6 +71,58 @@ func CanonicalHost(orgBase string) (string, bool) {
 // writer (server.handleJiraIdentityPAT) and this resolver stay in lockstep.
 func UserTokenKey(host string) string {
 	return "jira_token/" + host
+}
+
+// UserCredential is the structured per-user Jira access secret stored under
+// UserTokenKey(host). The method marker lets ForUser rebuild the right client
+// without re-sniffing the host: a Cloud API token (Basic auth over email +
+// token, REST v3) or a Data Center PAT (Bearer, REST v2, token only). It is the
+// per-user mirror of the org-side jira_auth_method marker (integrations) — the
+// resolver dispatches on Method exactly as ForSystem dispatches on the org
+// marker.
+//
+// Cloud OAuth (the one-click Connect path) is a later ticket; it extends this
+// envelope with a third method without touching the two cases here.
+type UserCredential struct {
+	Method AuthMethod `json:"method"`
+	// Email is the Atlassian account email; set only for AuthMethodCloudAPIToken
+	// (the Basic-auth pair), empty for a DC PAT.
+	Email string `json:"email,omitempty"`
+	Token string `json:"token"`
+}
+
+// MarshalUserCredential renders a UserCredential to the JSON envelope persisted
+// under the per-user secret key.
+func MarshalUserCredential(c UserCredential) (string, error) {
+	b, err := json.Marshal(c)
+	if err != nil {
+		return "", fmt.Errorf("jira: marshal user credential: %w", err)
+	}
+	return string(b), nil
+}
+
+// ParseUserCredential decodes a stored per-user secret into a UserCredential.
+// It accepts two shapes: the JSON envelope written by the current bind flow, and
+// a bare token — the pre-envelope shape the original Data Center bind wrote
+// directly under the key — which is read back as a dc_pat for back-compat. The
+// envelope is recognized by a leading '{' (neither a DC PAT nor a Cloud API
+// token is JSON), so the two never collide. A malformed envelope is an error
+// (corruption, not absence) — the caller propagates it rather than degrading to
+// the org service credential.
+func ParseUserCredential(raw string) (UserCredential, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return UserCredential{}, errors.New("jira: empty user credential")
+	}
+	if strings.HasPrefix(raw, "{") {
+		var c UserCredential
+		if err := json.Unmarshal([]byte(raw), &c); err != nil {
+			return UserCredential{}, fmt.Errorf("jira: parse user credential envelope: %w", err)
+		}
+		return c, nil
+	}
+	// Back-compat: a bare token from the original DC bind, before the envelope.
+	return UserCredential{Method: AuthMethodDCPAT, Token: raw}, nil
 }
 
 // Resolver produces an authenticated *Client routed by provenance:
@@ -156,11 +209,18 @@ func (r *resolver) ForSystem(ctx context.Context, orgID string) (*Client, error)
 	return NewClient(DataCenterPAT(host, pat)), nil
 }
 
-// ForUser resolves the acting user's own Jira credential into a DC-PAT client,
-// keyed under and talking to the org's Jira host. REQUIRED — an absent
-// credential is ErrNoJiraUserCredential, NEVER a fall-back to the org service
-// cred (that would mis-attribute the user's write to the bot). A backend read
-// error propagates rather than being misreported as "not connected".
+// ForUser resolves the acting user's own Jira credential into an authenticated
+// client, keyed under and talking to the org's Jira host. The stored secret is
+// a UserCredential envelope whose method marker selects the scheme: a Cloud API
+// token yields a Basic / REST v3 client, a Data Center PAT a Bearer / REST v2
+// one — the per-user mirror of ForSystem's marker dispatch. A bare token from
+// the pre-envelope DC bind is read back as a dc_pat (ParseUserCredential).
+//
+// REQUIRED — an absent credential is ErrNoJiraUserCredential, NEVER a fall-back
+// to the org service cred (that would mis-attribute the user's write to the
+// bot). A backend read error propagates rather than being misreported as "not
+// connected"; a corrupt envelope likewise propagates rather than silently
+// degrading to the bot.
 func (r *resolver) ForUser(ctx context.Context, orgID, userID string) (*Client, error) {
 	orgSet, err := r.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
@@ -173,12 +233,29 @@ func (r *resolver) ForUser(ctx context.Context, orgID, userID string) (*Client, 
 		// transient error.
 		return nil, fmt.Errorf("%w: org=%s user=%s (org has no jira host)", ErrNoJiraUserCredential, orgID, userID)
 	}
-	token, err := r.secrets.GetUserSystem(ctx, orgID, userID, UserTokenKey(host))
+	raw, err := r.secrets.GetUserSystem(ctx, orgID, userID, UserTokenKey(host))
 	if err != nil {
 		return nil, fmt.Errorf("resolve jira user credential for org %s user %s: %w", orgID, userID, err)
 	}
-	if token == "" {
+	if raw == "" {
 		return nil, fmt.Errorf("%w: org=%s user=%s host=%s", ErrNoJiraUserCredential, orgID, userID, host)
 	}
-	return NewClient(DataCenterPAT(host, token)), nil
+	cred, err := ParseUserCredential(raw)
+	if err != nil {
+		return nil, fmt.Errorf("resolve jira user credential for org %s user %s: %w", orgID, userID, err)
+	}
+	switch cred.Method {
+	case AuthMethodCloudAPIToken:
+		if cred.Email == "" || cred.Token == "" {
+			return nil, fmt.Errorf("%w: org=%s user=%s host=%s (incomplete cloud credential)", ErrNoJiraUserCredential, orgID, userID, host)
+		}
+		return NewClient(CloudAPIToken(host, cred.Email, cred.Token)), nil
+	default:
+		// dc_pat — and the back-compat bare token, which ParseUserCredential
+		// already normalized to AuthMethodDCPAT.
+		if cred.Token == "" {
+			return nil, fmt.Errorf("%w: org=%s user=%s host=%s", ErrNoJiraUserCredential, orgID, userID, host)
+		}
+		return NewClient(DataCenterPAT(host, cred.Token)), nil
+	}
 }

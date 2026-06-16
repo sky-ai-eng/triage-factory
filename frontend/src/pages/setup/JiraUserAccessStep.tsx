@@ -20,6 +20,9 @@ const JiraMark = () => (
 
 export function JiraUserAccessStep({ state, patch, error }: StepContext) {
   const host = state.jiraUserHost || 'Jira'
+  // The credential fields follow the org's deployment: Cloud binds an Atlassian
+  // email + API token (Basic), Data Center a single personal access token.
+  const cloud = state.jiraDeployment === 'cloud'
 
   // Already bound (a stored credential from a prior session or this one) — just
   // confirm it; the wizard's Continue finishes.
@@ -64,28 +67,84 @@ export function JiraUserAccessStep({ state, patch, error }: StepContext) {
       </div>
 
       <div className="space-y-2">
-        <label className="block">
-          <span className="mb-2 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
-            Personal access token
-          </span>
-          <input
-            type="password"
-            autoComplete="off"
-            value={state.jiraUserPat}
-            placeholder="Your Jira token"
-            onChange={(e) => patch({ jiraUserPat: e.target.value })}
-            aria-invalid={!!error || undefined}
-            className={`${glassInputClass}${
-              error
-                ? ' !border-[var(--color-dismiss)] focus:!border-[var(--color-dismiss)] focus:!shadow-[0_0_0_4px_rgba(168,69,69,0.16)]'
-                : ''
-            }`}
-          />
-        </label>
-        <p className="text-[11px] leading-relaxed text-text-tertiary">
-          Unlike GitHub, this token is stored — Triage Factory needs it to act as you on Jira. It
-          stays in your workspace&rsquo;s secret store and is never shared with other users.
-        </p>
+        {cloud ? (
+          <>
+            <label className="block">
+              <span className="mb-2 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+                Atlassian account email
+              </span>
+              <input
+                type="email"
+                autoComplete="email"
+                value={state.jiraUserEmail}
+                placeholder="you@yourcompany.com"
+                onChange={(e) => patch({ jiraUserEmail: e.target.value })}
+                aria-invalid={!!error || undefined}
+                className={`${glassInputClass}${
+                  error
+                    ? ' !border-[var(--color-dismiss)] focus:!border-[var(--color-dismiss)] focus:!shadow-[0_0_0_4px_rgba(168,69,69,0.16)]'
+                    : ''
+                }`}
+              />
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+                API token
+              </span>
+              <input
+                type="password"
+                autoComplete="off"
+                value={state.jiraUserApiToken}
+                placeholder="Your Atlassian API token"
+                onChange={(e) => patch({ jiraUserApiToken: e.target.value })}
+                aria-invalid={!!error || undefined}
+                className={`${glassInputClass}${
+                  error
+                    ? ' !border-[var(--color-dismiss)] focus:!border-[var(--color-dismiss)] focus:!shadow-[0_0_0_4px_rgba(168,69,69,0.16)]'
+                    : ''
+                }`}
+              />
+            </label>
+            <p className="text-[11px] leading-relaxed text-text-tertiary">
+              Create a token at{' '}
+              <a
+                href="https://id.atlassian.com/manage-profile/security/api-tokens"
+                target="_blank"
+                rel="noreferrer"
+                className="text-accent hover:underline"
+              >
+                id.atlassian.com/manage/api-tokens
+              </a>
+              . Unlike GitHub, it&rsquo;s stored — Triage Factory needs it to act as you on Jira. It
+              stays in your workspace&rsquo;s secret store and is never shared with other users.
+            </p>
+          </>
+        ) : (
+          <>
+            <label className="block">
+              <span className="mb-2 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+                Personal access token
+              </span>
+              <input
+                type="password"
+                autoComplete="off"
+                value={state.jiraUserPat}
+                placeholder="Your Jira token"
+                onChange={(e) => patch({ jiraUserPat: e.target.value })}
+                aria-invalid={!!error || undefined}
+                className={`${glassInputClass}${
+                  error
+                    ? ' !border-[var(--color-dismiss)] focus:!border-[var(--color-dismiss)] focus:!shadow-[0_0_0_4px_rgba(168,69,69,0.16)]'
+                    : ''
+                }`}
+              />
+            </label>
+            <p className="text-[11px] leading-relaxed text-text-tertiary">
+              Unlike GitHub, this token is stored — Triage Factory needs it to act as you on Jira.
+              It stays in your workspace&rsquo;s secret store and is never shared with other users.
+            </p>
+          </>
+        )}
       </div>
     </div>
   )
