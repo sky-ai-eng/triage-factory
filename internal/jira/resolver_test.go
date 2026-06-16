@@ -326,27 +326,44 @@ func TestForUser_CloudEnvelopeIncomplete(t *testing.T) {
 	}
 }
 
-// TestForUser_StaleCrossScheme_NoClient pins the deployment gate: a Cloud
-// credential on an org whose marker now says Data Center (a Cloud→DC cutover)
+// TestForUser_StaleCrossScheme_NoClient pins the deployment gate in both cutover
+// directions: a credential whose scheme no longer matches the org's marker
+// (Cloud token after a Cloud→DC cutover, or a DC PAT after a DC→Cloud cutover)
 // resolves to ErrNoJiraUserCredential — never a wrong-scheme client — matching
-// the status reader's connected=false. The credential is complete; only the
+// the status reader's connected=false. Each credential is complete; only the
 // scheme-vs-deployment mismatch makes it unusable.
 func TestForUser_StaleCrossScheme_NoClient(t *testing.T) {
-	const base = "https://jira.dc.example" // non-cloud host
-	env, err := MarshalUserCredential(UserCredential{
-		Method: AuthMethodCloudAPIToken, Email: "u@acme.com", Token: "cloud-tok",
-	})
-	if err != nil {
-		t.Fatalf("MarshalUserCredential: %v", err)
+	cases := map[string]struct {
+		host   string
+		marker AuthMethod
+		cred   UserCredential
+	}{
+		"cloud cred on dc-marked org": {
+			host:   "https://jira.dc.example", // non-cloud host
+			marker: AuthMethodDCPAT,
+			cred:   UserCredential{Method: AuthMethodCloudAPIToken, Email: "u@acme.com", Token: "cloud-tok"},
+		},
+		"dc cred on cloud-marked org": {
+			host:   "https://acme.atlassian.net",
+			marker: AuthMethodCloudAPIToken,
+			cred:   UserCredential{Method: AuthMethodDCPAT, Token: "dc-pat"},
+		},
 	}
-	secrets := &fakeSecrets{
-		// Marker says Data Center — the org cut over away from Cloud.
-		sys:  map[string]string{keyJiraURL: base, keyJiraAuthMethod: string(AuthMethodDCPAT)},
-		user: map[string]string{UserTokenKey(base): env},
-	}
-	r := NewResolver(secrets, &fakeOrgs{jiraBase: base})
-	if _, err := r.ForUser(context.Background(), testOrgID, testUserID); !errors.Is(err, ErrNoJiraUserCredential) {
-		t.Fatalf("ForUser err = %v, want ErrNoJiraUserCredential (stale cross-scheme cred)", err)
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			env, err := MarshalUserCredential(tc.cred)
+			if err != nil {
+				t.Fatalf("MarshalUserCredential: %v", err)
+			}
+			secrets := &fakeSecrets{
+				sys:  map[string]string{keyJiraURL: tc.host, keyJiraAuthMethod: string(tc.marker)},
+				user: map[string]string{UserTokenKey(tc.host): env},
+			}
+			r := NewResolver(secrets, &fakeOrgs{jiraBase: tc.host})
+			if _, err := r.ForUser(context.Background(), testOrgID, testUserID); !errors.Is(err, ErrNoJiraUserCredential) {
+				t.Fatalf("ForUser err = %v, want ErrNoJiraUserCredential (stale cross-scheme cred)", err)
+			}
+		})
 	}
 }
 
