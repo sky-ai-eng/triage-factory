@@ -110,22 +110,29 @@ func elapsedFromRun(run *domain.AgentRun) string {
 //
 // The authoring run's cost prefers run.TotalCostUSD (canonical,
 // populated at CompleteAgentRun) and falls back to recomputing from
-// RunTokenTotals for the still-running CLI mode — the "~" prefix flags
-// that approximate-from-tokens estimate so a reader can tell a settled
-// cost from a live one. Sibling steps are all terminal by the time a
-// footer is built (the blueprint advanced past them), so their
-// total_cost_usd is settled; a failed sibling-cost read just omits
-// their contribution rather than blocking the submit.
+// RunTokenTotals for the still-running CLI mode. Whenever the
+// authoring run's settled cost is unavailable — whether we recovered a
+// token estimate or the estimate read also failed — the "~" prefix
+// flags that the figure is approximate, so a reader never reads a
+// sibling-only total as the settled blueprint cost. Sibling steps are
+// all terminal by the time a footer is built (the blueprint advanced
+// past them), so their total_cost_usd is settled; a failed sibling-cost
+// read just omits their contribution rather than blocking the submit.
 func costFromRun(ctx context.Context, agentRuns db.AgentRunStore, orgID, runID string, run *domain.AgentRun) (cost float64, prefix string) {
 	if run.TotalCostUSD != nil {
 		cost = *run.TotalCostUSD
-	} else if totals, err := agentRuns.TokenTotalsSystem(ctx, orgID, runID); err == nil {
-		model := totals.Model
-		if model == "" {
-			model = run.Model
-		}
-		cost = ai.CalculateCostUSD(model, totals.InputTokens, totals.OutputTokens, totals.CacheReadTokens, totals.CacheCreationTokens)
+	} else {
+		// The authoring run's own cost is unsettled — the rendered figure
+		// is approximate regardless of whether the token-estimate read
+		// below succeeds, so flag it now.
 		prefix = "~"
+		if totals, err := agentRuns.TokenTotalsSystem(ctx, orgID, runID); err == nil {
+			model := totals.Model
+			if model == "" {
+				model = run.Model
+			}
+			cost = ai.CalculateCostUSD(model, totals.InputTokens, totals.OutputTokens, totals.CacheReadTokens, totals.CacheCreationTokens)
+		}
 	}
 
 	if run.BlueprintRunID != "" {

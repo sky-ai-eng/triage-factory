@@ -972,6 +972,26 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if !near(sib, 0) {
 			t.Errorf("sibling cost for empty blueprint_run = %v, want 0", sib)
 		}
+
+		// An unsettled sibling (created, never completed → NULL
+		// total_cost_usd) contributes 0, not an error: SUM skips the NULL
+		// and COALESCE floors the all-NULL case at 0. Add a third,
+		// never-completed step and re-query for step2 — the settled total
+		// is unchanged (step1's 0.01 only).
+		step3 := uuid.New().String()
+		if err := store.Create(ctx, orgID, domain.AgentRun{
+			ID: step3, TaskID: taskID, PromptID: agentRunTestPrompt(t),
+			Status: "running", Model: "m", BlueprintRunID: brID,
+		}); err != nil {
+			t.Fatalf("Create step3: %v", err)
+		}
+		sib, err = store.BlueprintSiblingCostUSDSystem(ctx, orgID, brID, step2)
+		if err != nil {
+			t.Fatalf("BlueprintSiblingCostUSDSystem(step2, unsettled sibling): %v", err)
+		}
+		if !near(sib, 0.01) {
+			t.Errorf("sibling cost with an unsettled step = %v, want 0.01 (NULL cost omitted)", sib)
+		}
 	})
 
 	t.Run("MemoryMissing_DerivedFromRunMemoryJOIN", func(t *testing.T) {
