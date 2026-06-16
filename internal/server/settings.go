@@ -491,6 +491,14 @@ func (se *settingsHandler) handleAnthropicConnect(w http.ResponseWriter, r *http
 		return
 	}
 
+	// One WithTx for the vault write + the ref update, like handleJiraConnect.
+	// The admin gate is enforced at the DB layer in multi mode: UpdateSettings
+	// goes through org_settings_update RLS, which gates on the org-admin role, so
+	// a non-admin member's call is rejected there. Because the Secrets.Put and
+	// UpdateSettings share one transaction, that rejection rolls back the vault
+	// write too — the key can never land for a non-admin. (Same rationale as
+	// handleJiraConnect / handleSettingsPost; no handler-level RequireOrgAdmin,
+	// matching the Jira sibling.)
 	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
 		if err != nil {

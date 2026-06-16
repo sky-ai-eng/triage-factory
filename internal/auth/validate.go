@@ -214,8 +214,10 @@ func ValidateAnthropicAPIKey(ctx context.Context, key string) error {
 	if err != nil {
 		// A dial/TLS/timeout failure — the host never answered. Surface the
 		// "couldn't reach" state, not "bad key", so the UI doesn't tell the user
-		// to fix a key that may be fine.
-		return ErrAnthropicUnreachable
+		// to fix a key that may be fine. Keep the underlying cause via %v (as
+		// ValidateGitHub / ValidateJira do) so operator logs can tell DNS from
+		// TLS from timeout; errors.Is still matches the sentinel in the chain.
+		return fmt.Errorf("%w: %v", ErrAnthropicUnreachable, err)
 	}
 	defer resp.Body.Close()
 	// Drain (bounded) so the keep-alive connection can be reused; the body is

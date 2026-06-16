@@ -79,7 +79,10 @@ export function ClaudeProviderCards() {
         return (
           <div
             key={card.kind}
-            aria-current={selected ? 'true' : undefined}
+            // No aria-current here: this is a presentational provider display
+            // (Anthropic is fixed-selected, Bedrock disabled), not a navigation
+            // set — the accent styling carries the emphasis, and the card text
+            // ("Anthropic API" / "Amazon Bedrock" + "Soon") is read as-is.
             aria-disabled={card.disabled}
             className={`flex flex-col items-start gap-1 rounded-xl border px-3.5 py-3 text-left ${
               card.disabled
