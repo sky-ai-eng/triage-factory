@@ -108,6 +108,12 @@ type Server struct {
 	// wired into jiraResolver; this minter is the connect handlers' direct seam.
 	// Built in New, never nil.
 	jiraOAuthMinter *jiraoauth.Minter
+	// jiraTokenCache is the per-user Cloud OAuth access-token cache backing
+	// jiraResolver's OAuth branch. Retained on the Server (not just handed to
+	// the resolver) so the connect callback + a paste-over-OAuth re-bind can
+	// Invalidate the stale cached token — mirrors how ghTokenCache is reachable
+	// via onInstallationRemoved. Built in New, never nil.
+	jiraTokenCache *jiraoauth.TokenCache
 	// Change callbacks accept the orgID of the tenant whose integration
 	// creds just rotated, so the closure can re-resolve via SecretStore.
 	// Local mode always passes runmode.LocalDefaultOrgID; multi-mode
@@ -449,12 +455,12 @@ func New(database *sql.DB, stores db.Stores, serverPort int) *Server {
 	// static PAT/API-token creds. It's the OAuth source the resolver delegates
 	// its AuthMethodCloudOAuth branch to.
 	s.jiraOAuthMinter = jiraoauth.NewMinter()
-	jiraTokenCache := jiraoauth.NewTokenCache(s.jiraOAuthMinter, s.jiraOAuthApps, stores.Secrets)
+	s.jiraTokenCache = jiraoauth.NewTokenCache(s.jiraOAuthMinter, s.jiraOAuthApps, stores.Secrets)
 	// Jira write-actor resolver (SKY-463): ForSystem (org/bot cred) +
 	// ForUser (acting user's cred, incl. the Cloud OAuth mint path).
 	// Constructed here like ghResolver so a Server is always usable without
 	// external wiring.
-	s.jiraResolver = jira.NewResolverWithOAuth(stores.Secrets, stores.Orgs, jiraTokenCache)
+	s.jiraResolver = jira.NewResolverWithOAuth(stores.Secrets, stores.Orgs, s.jiraTokenCache)
 	s.onInstallationRemoved = func(orgID, installationID string) {
 		ghTokenCache.Invalidate(orgID, installationID)
 	}

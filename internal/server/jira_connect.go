@@ -379,6 +379,11 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// If this user previously bound via OAuth, an access token may be cached
+	// against the now-overwritten refresh token; drop it so the next read
+	// reflects the credential just pasted rather than the superseded OAuth one.
+	s.jiraTokenCache.Invalidate(orgID, userID, host)
+
 	account := jiraUser.DisplayName
 	if account == "" {
 		account = jiraUser.StableID()
@@ -656,6 +661,11 @@ func (s *Server) handleJiraConnectCallback(w http.ResponseWriter, r *http.Reques
 		internalError(w, "jira-connect", err)
 		return
 	}
+
+	// Drop any access token cached against the SUPERSEDED refresh token — a
+	// re-Connect mints a new credential, and the next per-user write must refresh
+	// off the just-stored refresh token rather than serve a stale cached token.
+	s.jiraTokenCache.Invalidate(orgID, userID, host)
 
 	log.Printf("[jira-connect] bound user=%s account=%s host=%s cloud_id=%s org=%s source=connect_oauth (refresh token stored)",
 		userID, jiraUser.StableID(), host, cloudID, orgID)

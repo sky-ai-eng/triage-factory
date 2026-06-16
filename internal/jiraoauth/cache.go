@@ -104,7 +104,13 @@ func (c *TokenCache) AccessTokenForUser(ctx context.Context, orgID, userID, host
 	}
 	c.mu.Unlock()
 
-	// Slow path: coalesce concurrent refreshes for this user into one.
+	// Slow path: coalesce concurrent refreshes for this user into one. Note the
+	// standard singleflight tradeoff — the shared call runs under the FIRST
+	// caller's ctx, so if that caller's context is cancelled before the refresh
+	// completes, every coalesced waiter (even ones with ample deadline) gets the
+	// cancellation. This is intentional (the same shape ghclient's token cache
+	// uses); don't "fix" it by threading per-caller contexts, which would defeat
+	// the coalescing the rotating refresh token depends on.
 	res, err, _ := c.group.Do(key, func() (any, error) {
 		// Re-check the cache under the singleflight — a sibling caller may have
 		// just refreshed while we waited.

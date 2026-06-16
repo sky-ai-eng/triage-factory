@@ -188,7 +188,10 @@ func (m *Minter) requestToken(ctx context.Context, form url.Values) (Token, erro
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	var parsed tokenResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return Token{}, fmt.Errorf("jiraoauth: parse token response (status %d): %w", resp.StatusCode, err)
+		// A non-JSON body (e.g. a proxy/load-balancer "502 Bad Gateway") would
+		// otherwise drop its content behind the unmarshal error — surface a
+		// truncated copy so the failure is diagnosable.
+		return Token{}, fmt.Errorf("jiraoauth: parse token response (status %d): %w: body: %s", resp.StatusCode, err, truncate(string(body), 200))
 	}
 	if resp.StatusCode != http.StatusOK || parsed.Error != "" {
 		detail := parsed.Error

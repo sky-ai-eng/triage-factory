@@ -192,6 +192,34 @@ func TestTokenCache_CachesWithinExpiry(t *testing.T) {
 	}
 }
 
+// TestTokenCache_Invalidate forces the next read to mint fresh: after a
+// re-Connect / paste-over-OAuth the cached token is tied to a superseded refresh
+// token, so Invalidate must drop it even well within the access token's lifetime.
+func TestTokenCache_Invalidate(t *testing.T) {
+	secrets := newFakeSecrets()
+	seedOAuthEnvelope(t, secrets, "ref-0")
+
+	clock := time.Date(2026, 6, 16, 0, 0, 0, 0, time.UTC)
+	now := func() time.Time { return clock }
+	ref := &fakeRefresher{expires: time.Hour, now: now}
+	cache := newTokenCache(ref, fakeAppResolver{}, secrets)
+	cache.now = now
+
+	if _, _, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	cache.Invalidate(cOrg, cUser, cHost)
+
+	// Still within the hour, but the cache was invalidated — must refresh again.
+	clock = clock.Add(time.Minute)
+	if _, access, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost); err != nil || access != "acc-2" {
+		t.Fatalf("post-invalidate read = %q, %v; want acc-2, nil", access, err)
+	}
+	if ref.n != 2 {
+		t.Errorf("refresh called %d times, want 2 (invalidate should force a fresh mint)", ref.n)
+	}
+}
+
 // TestTokenCache_NoCredential errors clearly when there's no stored envelope.
 func TestTokenCache_NoCredential(t *testing.T) {
 	secrets := newFakeSecrets()
