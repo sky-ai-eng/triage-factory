@@ -46,8 +46,8 @@ const anthropicAPIVersion = "2023-06-01"
 var ErrAnthropicKeyInvalid = errors.New("the Anthropic API key was rejected — double-check it and try again")
 
 // ErrAnthropicUnreachable is returned when TF couldn't reach the Anthropic API
-// at all (a transport failure, or an unexpected non-2xx status). The connect
-// handler can key on this via errors.Is to separate "your key is wrong" from
+// at all (a transport failure, or an unexpected non-2xx status). Callers can
+// key on this via errors.Is to separate "your key is wrong" from
 // "we couldn't talk to Anthropic"; the message is user-facing too.
 var ErrAnthropicUnreachable = errors.New("couldn't reach Anthropic — check your connection and try again")
 
