@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/zalando/go-keyring"
@@ -107,7 +108,7 @@ func jiraCloudMyselfStub(t *testing.T, body string, gotAuth *string) *httptest.S
 // as Data Center.
 func seedLocalOrgJiraAuthMethod(t *testing.T, s *Server, method string) {
 	t.Helper()
-	if err := s.secrets.Put(context.Background(), runmode.LocalDefaultOrgID, "jira_auth_method", method, ""); err != nil {
+	if err := s.secrets.Put(context.Background(), runmode.LocalDefaultOrgID, integrations.KeyJiraAuthMethod, method, ""); err != nil {
 		t.Fatalf("seed org jira auth method: %v", err)
 	}
 }

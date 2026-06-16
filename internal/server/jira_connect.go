@@ -126,7 +126,8 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 		if lerr != nil {
 			return lerr
 		}
-		deployment = string(jira.DeploymentForMarker(jira.AuthMethod(method), jiraHost))
+		deploymentEnum := jira.DeploymentForMarker(jira.AuthMethod(method), jiraHost)
+		deployment = string(deploymentEnum)
 
 		// Claims-checked GetUser (NOT GetUserSystem): this is a request
 		// handler, so the credential read runs on the app pool under the
@@ -134,11 +135,25 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 		// admin-pool door reserved for system code (the resolver, a later
 		// ticket) — a request handler reaching for it would be denied on
 		// tf_app. In local mode both collapse to the same keychain read.
-		token, lerr := tx.Secrets.GetUser(r.Context(), orgID, userID, jiraTokenKey(jiraHost))
+		raw, lerr := tx.Secrets.GetUser(r.Context(), orgID, userID, jiraTokenKey(jiraHost))
 		if lerr != nil {
 			return lerr
 		}
-		connected = token != ""
+		if raw == "" {
+			return nil // no stored credential → not connected
+		}
+		// "Connected" must mean the same thing as "ForUser would succeed": a
+		// stored credential that's well-formed FOR THIS DEPLOYMENT. A corrupt
+		// envelope, or a stale credential whose scheme no longer matches the org
+		// (e.g. a DC PAT left over after a Cloud cutover), reports not-connected
+		// so the paste UI re-renders and the user can re-bind — rather than
+		// reporting connected and then failing every write at request time.
+		cred, perr := jira.ParseUserCredential(raw)
+		if perr != nil {
+			log.Printf("[jira-identity] user=%s org=%s host=%s stored credential unparsable, reporting not-connected: %v", userID, orgID, jiraHost, perr)
+			return nil
+		}
+		connected = cred.UsableFor(deploymentEnum)
 		if !connected {
 			return nil
 		}

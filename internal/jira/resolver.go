@@ -125,6 +125,22 @@ func ParseUserCredential(raw string) (UserCredential, error) {
 	return UserCredential{Method: AuthMethodDCPAT, Token: raw}, nil
 }
 
+// UsableFor reports whether the credential is well-formed for the given
+// deployment — the network-free precondition ForUser enforces before building a
+// client. A method that doesn't match the deployment, or a missing required
+// field, is not usable. Shared by ForUser's dispatch and the status reader so
+// "connected" means the same thing as "ForUser would succeed".
+func (c UserCredential) UsableFor(d Deployment) bool {
+	switch c.Method {
+	case AuthMethodCloudAPIToken:
+		return d == DeploymentCloud && c.Email != "" && c.Token != ""
+	case AuthMethodDCPAT:
+		return d == DeploymentDataCenter && c.Token != ""
+	default:
+		return false
+	}
+}
+
 // Resolver produces an authenticated *Client routed by provenance:
 //
 //   - ForSystem: the org's Jira service credential — the poller's read path and
@@ -250,12 +266,19 @@ func (r *resolver) ForUser(ctx context.Context, orgID, userID string) (*Client, 
 			return nil, fmt.Errorf("%w: org=%s user=%s host=%s (incomplete cloud credential)", ErrNoJiraUserCredential, orgID, userID, host)
 		}
 		return NewClient(CloudAPIToken(host, cred.Email, cred.Token)), nil
-	default:
-		// dc_pat — and the back-compat bare token, which ParseUserCredential
-		// already normalized to AuthMethodDCPAT.
+	case AuthMethodDCPAT:
+		// Includes the back-compat bare token, which ParseUserCredential already
+		// normalized to AuthMethodDCPAT.
 		if cred.Token == "" {
 			return nil, fmt.Errorf("%w: org=%s user=%s host=%s", ErrNoJiraUserCredential, orgID, userID, host)
 		}
 		return NewClient(DataCenterPAT(host, cred.Token)), nil
+	default:
+		// An unknown/empty method is corruption or a forward-version credential
+		// (e.g. a future OAuth method this build predates). Surface it rather than
+		// silently misrouting to a DC client — it is NOT ErrNoJiraUserCredential
+		// (the credential exists, it's just unreadable), so handlers don't tell
+		// the user to "connect Jira" when re-binding wouldn't be the fix.
+		return nil, fmt.Errorf("resolve jira user credential for org %s user %s: unknown credential method %q", orgID, userID, cred.Method)
 	}
 }

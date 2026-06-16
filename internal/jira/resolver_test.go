@@ -319,6 +319,55 @@ func TestForUser_CloudEnvelopeIncomplete(t *testing.T) {
 	}
 }
 
+// TestForUser_UnknownMethod_Errors pins that an envelope with an unrecognized
+// method (corruption, or a forward-version credential this build predates) is
+// surfaced as a hard error rather than misrouted to a DC client — and is NOT
+// ErrNoJiraUserCredential (the credential exists; re-binding isn't the fix).
+func TestForUser_UnknownMethod_Errors(t *testing.T) {
+	const base = "https://acme.atlassian.net"
+	env, err := MarshalUserCredential(UserCredential{Method: "cloud_oauth", Token: "tok"})
+	if err != nil {
+		t.Fatalf("MarshalUserCredential: %v", err)
+	}
+	secrets := &fakeSecrets{
+		sys:  map[string]string{keyJiraURL: base, keyJiraPAT: "org-pat"},
+		user: map[string]string{UserTokenKey(base): env},
+	}
+	r := NewResolver(secrets, &fakeOrgs{jiraBase: base})
+	_, err = r.ForUser(context.Background(), testOrgID, testUserID)
+	if err == nil {
+		t.Fatal("ForUser err = nil, want an unknown-method error")
+	}
+	if errors.Is(err, ErrNoJiraUserCredential) {
+		t.Errorf("an unknown method must not collapse to ErrNoJiraUserCredential: %v", err)
+	}
+}
+
+// TestUserCredential_UsableFor pins the network-free precondition the status
+// reader and ForUser share: a credential is usable only when its method matches
+// the deployment and the required fields are present.
+func TestUserCredential_UsableFor(t *testing.T) {
+	cases := []struct {
+		name string
+		cred UserCredential
+		dep  Deployment
+		want bool
+	}{
+		{"cloud ok", UserCredential{Method: AuthMethodCloudAPIToken, Email: "e", Token: "t"}, DeploymentCloud, true},
+		{"cloud no email", UserCredential{Method: AuthMethodCloudAPIToken, Token: "t"}, DeploymentCloud, false},
+		{"cloud on dc host", UserCredential{Method: AuthMethodCloudAPIToken, Email: "e", Token: "t"}, DeploymentDataCenter, false},
+		{"dc ok", UserCredential{Method: AuthMethodDCPAT, Token: "t"}, DeploymentDataCenter, true},
+		{"dc no token", UserCredential{Method: AuthMethodDCPAT}, DeploymentDataCenter, false},
+		{"dc on cloud host", UserCredential{Method: AuthMethodDCPAT, Token: "t"}, DeploymentCloud, false},
+		{"unknown method", UserCredential{Method: "cloud_oauth", Token: "t"}, DeploymentCloud, false},
+	}
+	for _, tc := range cases {
+		if got := tc.cred.UsableFor(tc.dep); got != tc.want {
+			t.Errorf("%s: UsableFor(%q) = %v, want %v", tc.name, tc.dep, got, tc.want)
+		}
+	}
+}
+
 // TestParseUserCredential pins the envelope decode + the bare-token back-compat
 // the resolver leans on: a JSON envelope round-trips, a bare token reads back as
 // a dc_pat, and empty/malformed inputs error rather than silently passing.
