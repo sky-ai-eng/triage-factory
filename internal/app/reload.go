@@ -99,23 +99,29 @@ func (r *reloader) onGitHubChanged(orgID string) {
 	}
 }
 
-// onJiraChanged reacts to a Jira credential/config change: in local mode it
-// restarts the in-process Jira poller and re-dues the changed org so the new
-// config applies now rather than after the interval. Multi mode can't
-// selectively restart a process-global loop without re-polling every tenant
-// against shared API budgets, so — mirroring onGitHubChanged — it just re-dues
-// the changed org; the poller, now running in multi via the claims-free
-// system-creds reads, picks the change up on that org's next cycle.
+// onJiraChanged reacts to a Jira credential/config change. Local mode restarts
+// the in-process Jira poller, arms the one-shot "config took effect" toast, and
+// re-dues the changed org so the new config applies now rather than after the
+// interval. Multi mode can't selectively restart a process-global loop without
+// re-polling every tenant against shared API budgets, so — mirroring
+// onGitHubChanged — it just re-dues the changed org; the poller (running in
+// multi via the claims-free system-creds reads) picks the change up on that
+// org's next cycle.
+//
+// The announce-pending flag is left unset in multi on purpose: the announcer is
+// keyed by source only (not org), so arming it would let the next Jira poll
+// completion for ANY org consume it and ship the toast to the wrong tenant
+// (poll-tracker routes by evt.OrgID). The one-shot toast stays a local-mode
+// (N=1) affordance.
 func (r *reloader) onJiraChanged(orgID string) {
-	log.Println("[server] Jira config changed, restarting Jira poller...")
-	r.announce.setPending("jira")
-
 	if runmode.Current() != runmode.ModeLocal {
-		log.Printf("[server] Jira changed for org %s: multi-mode re-dues that org only (no fleet restart)", orgID)
+		log.Printf("[server] Jira config changed for org %s: multi-mode re-dues that org only (no fleet restart)", orgID)
 		r.pollerMgr.PollSoon("jira", orgID)
 		return
 	}
 
+	log.Println("[server] Jira config changed, restarting Jira poller...")
+	r.announce.setPending("jira")
 	// SKY-463: the server no longer holds a process-global Jira write client —
 	// user writes resolve per-user via jira.Resolver, system reads via the
 	// poller's ForSystem. Restarting the poller is all this callback needs to do.
