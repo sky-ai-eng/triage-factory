@@ -48,6 +48,10 @@ function jiraErrorBanner(code: string | null, host: string): { text: string } | 
       return {
         text: 'One-click Connect needs an Atlassian OAuth app, which isn’t configured for this workspace. Paste an API token below instead, or ask your admin to add the app.',
       }
+    case 'not_cloud':
+      return {
+        text: 'One-click Connect is for Atlassian Cloud only. This workspace’s Jira is self-hosted (Data Center), so paste a personal access token below to connect.',
+      }
     case 'site_mismatch':
       return {
         text: `The Atlassian account you authorized can't reach ${host || 'this Jira site'}. Sign in with an account that has access to it, or paste an API token below.`,

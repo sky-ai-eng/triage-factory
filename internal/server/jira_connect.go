@@ -428,21 +428,41 @@ func (s *Server) handleJiraConnectStart(w http.ResponseWriter, r *http.Request) 
 
 	returnTo := normalizeReturnTo(r.URL.Query().Get("return_to"))
 
-	// The org's Jira host — also needed at the callback to pin the cloud_id, but
-	// resolved here too so we fail fast (and so a non-Cloud / misconfigured org
-	// never reaches Atlassian).
-	var orgSet domain.OrgSettings
+	// The org's Jira host + deployment marker — also needed at the callback to
+	// pin the cloud_id, but resolved here too so we fail fast (and so a non-Cloud
+	// / misconfigured org never reaches Atlassian).
+	var (
+		orgSet     domain.OrgSettings
+		authMethod string
+	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error
 		orgSet, lerr = tx.Orgs.GetSettings(r.Context(), orgID)
+		if lerr != nil {
+			return lerr
+		}
+		authMethod, lerr = tx.Secrets.Get(r.Context(), orgID, integrations.KeyJiraAuthMethod)
 		return lerr
 	}); err != nil {
 		internalError(w, "jira-connect", err)
 		return
 	}
-	if _, okHost := resolveJiraHost(orgSet.JiraBaseURL); !okHost {
+	host, okHost := resolveJiraHost(orgSet.JiraBaseURL)
+	if !okHost {
 		log.Printf("[jira-connect] invalid jira base url for org %s", orgID)
 		s.redirectJiraConnect(w, r, orgID, returnTo, "bad_host")
+		return
+	}
+	// OAuth 3LO is Cloud-only — Data Center authenticates with a PAT, not an
+	// Atlassian app. An app can resolve for a DC org (the resolver doesn't gate
+	// on deployment), so without this check connect_available could be true and
+	// a DC user would be bounced through Atlassian only to fail at the cloud_id
+	// match. Resolve the deployment the same way the status reader does (stored
+	// marker, falling back to host shape) and bounce non-Cloud orgs back to the
+	// paste path BEFORE any external round-trip.
+	if jira.DeploymentForMarker(jira.AuthMethod(authMethod), host) != jira.DeploymentCloud {
+		log.Printf("[jira-connect] connect attempted on non-cloud org %s; redirecting to paste path", orgID)
+		s.redirectJiraConnect(w, r, orgID, returnTo, "not_cloud")
 		return
 	}
 

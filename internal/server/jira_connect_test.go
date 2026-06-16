@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -580,5 +581,34 @@ func TestJiraIdentityPAT_EmptyAccount_Returns422(t *testing.T) {
 	stored, _ := s.secrets.GetUserSystem(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "jira_token/"+jiraStub.URL)
 	if stored != "" {
 		t.Errorf("credential stored despite empty account: %q", stored)
+	}
+}
+
+// TestJiraConnectStart_DataCenterOrg_BouncesToPaste pins that the OAuth Connect
+// start handler refuses a Data Center org BEFORE any external round-trip: even
+// though the host is a well-formed http(s) URL, a DC deployment has no Atlassian
+// OAuth app to authenticate against, so the user is redirected straight back to
+// the paste path with error=not_cloud rather than into auth.atlassian.com (where
+// it could only fail later at the cloud_id match).
+func TestJiraConnectStart_DataCenterOrg_BouncesToPaste(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	s.SetDeployConfig("http://localhost:3000", [32]byte{})
+
+	// A well-formed DC host + the dc_pat marker → DeploymentDataCenter.
+	seedLocalOrgJiraHost(t, s, "https://jira.corp.example.com")
+	seedLocalOrgJiraAuthMethod(t, s, "dc_pat")
+
+	rec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/connect/start", nil)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status=%d body=%s, want 302", rec.Code, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+	if strings.Contains(loc, "auth.atlassian.com") {
+		t.Fatalf("a DC org was redirected into Atlassian OAuth: %q", loc)
+	}
+	if !strings.Contains(loc, "/connect-jira") || !strings.Contains(loc, "error=not_cloud") {
+		t.Errorf("Location=%q, want a bounce to /connect-jira with error=not_cloud", loc)
 	}
 }
