@@ -24,11 +24,12 @@ import (
 // the same local-mode profile→restart→score sequence (reprofileRestartAndScore),
 // which is why they live together.
 //
-// Everything here is gated to local mode: the callbacks wire process-global
-// state shaped for a single-tenant binary, and the integrations.Load reads
-// would fail under Postgres RLS from a claims-free goroutine. Multi mode
-// does the equivalent work per tenant inside the request handlers and per
-// cycle inside the poller; these methods early-return for it.
+// The heavy profile→restart→score sequence is gated to local mode: it wires
+// process-global state shaped for a single-tenant binary, and its
+// integrations.Load reads would fail under Postgres RLS from a claims-free
+// goroutine. In multi the cred-change callbacks do only a lightweight PollSoon
+// to re-due the changed org — the poller does the equivalent profiling/scoring
+// per cycle — and initialPoll just starts the process-global loop.
 type reloader struct {
 	stores     db.Stores
 	database   *sql.DB
