@@ -255,7 +255,14 @@ func TestForUser_CloudEnvelope(t *testing.T) {
 	}
 	secrets := &fakeSecrets{
 		// Org service cred present — ForUser must still use the user envelope.
-		sys:  map[string]string{keyJiraURL: srv.URL, keyJiraPAT: "org-pat"},
+		// The cloud marker makes the org's deployment Cloud (the httptest host is
+		// 127.0.0.1, which host-shape-classifies as DC) so the cloud user cred is
+		// usable for it.
+		sys: map[string]string{
+			keyJiraURL:        srv.URL,
+			keyJiraPAT:        "org-pat",
+			keyJiraAuthMethod: string(AuthMethodCloudAPIToken),
+		},
 		user: map[string]string{UserTokenKey(srv.URL): env},
 	}
 	r := NewResolver(secrets, &fakeOrgs{jiraBase: srv.URL})
@@ -316,6 +323,30 @@ func TestForUser_CloudEnvelopeIncomplete(t *testing.T) {
 	r := NewResolver(secrets, &fakeOrgs{jiraBase: base})
 	if _, err := r.ForUser(context.Background(), testOrgID, testUserID); !errors.Is(err, ErrNoJiraUserCredential) {
 		t.Fatalf("ForUser err = %v, want ErrNoJiraUserCredential", err)
+	}
+}
+
+// TestForUser_StaleCrossScheme_NoClient pins the deployment gate: a Cloud
+// credential on an org whose marker now says Data Center (a Cloud→DC cutover)
+// resolves to ErrNoJiraUserCredential — never a wrong-scheme client — matching
+// the status reader's connected=false. The credential is complete; only the
+// scheme-vs-deployment mismatch makes it unusable.
+func TestForUser_StaleCrossScheme_NoClient(t *testing.T) {
+	const base = "https://jira.dc.example" // non-cloud host
+	env, err := MarshalUserCredential(UserCredential{
+		Method: AuthMethodCloudAPIToken, Email: "u@acme.com", Token: "cloud-tok",
+	})
+	if err != nil {
+		t.Fatalf("MarshalUserCredential: %v", err)
+	}
+	secrets := &fakeSecrets{
+		// Marker says Data Center — the org cut over away from Cloud.
+		sys:  map[string]string{keyJiraURL: base, keyJiraAuthMethod: string(AuthMethodDCPAT)},
+		user: map[string]string{UserTokenKey(base): env},
+	}
+	r := NewResolver(secrets, &fakeOrgs{jiraBase: base})
+	if _, err := r.ForUser(context.Background(), testOrgID, testUserID); !errors.Is(err, ErrNoJiraUserCredential) {
+		t.Fatalf("ForUser err = %v, want ErrNoJiraUserCredential (stale cross-scheme cred)", err)
 	}
 }
 

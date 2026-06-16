@@ -169,9 +169,17 @@ export default function ConnectJira() {
       <div className="space-y-2">
         {cloud ? (
           <>
+            {/* When the one-click Connect button is offered above, this "Or
+                paste…" preamble draws the contrast — it's a section heading for
+                the email + token pair, NOT the first field's label. */}
+            {connect_available && (
+              <p className="text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+                Or paste an email + API token
+              </p>
+            )}
             <label className="block">
               <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
-                {connect_available ? 'Or paste an email + API token' : 'Atlassian account email'}
+                Atlassian account email
               </span>
               <input
                 type="email"

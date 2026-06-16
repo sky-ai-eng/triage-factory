@@ -171,20 +171,67 @@ func TestJiraIdentityPAT_Cloud_StoresEnvelopeAndBindsIdentity(t *testing.T) {
 }
 
 // TestJiraIdentityPAT_Cloud_MissingHalf_Returns400 pins that a Cloud org bind
-// missing either half of the email + token pair is rejected before any host
-// round-trip.
+// missing EITHER half of the email + token pair is rejected before any host
+// round-trip (both halves are required, symmetrically).
 func TestJiraIdentityPAT_Cloud_MissingHalf_Returns400(t *testing.T) {
+	cases := map[string]map[string]any{
+		"no token": {"email": "me@acme.com"},
+		"no email": {"token": "cloud-tok"},
+		"empty":    {},
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			runmode.SetForTest(t, runmode.ModeLocal)
+			keyring.MockInit()
+			s := newTestServer(t)
+			seedLocalOrgJiraHost(t, s, "https://acme.atlassian.net")
+			seedLocalOrgJiraAuthMethod(t, s, "cloud_api_token")
+
+			rec := doJSON(t, s, "POST",
+				"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira/pat", body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestJiraIdentityStatus_Cloud_Connected pins the positive Cloud status read:
+// after a Cloud user binds their email + API token, the status endpoint reports
+// connected=true with deployment="cloud" and the bound account — the Cloud
+// mirror of the DC happy path in TestJiraIdentityStatus.
+func TestJiraIdentityStatus_Cloud_Connected(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
-	seedLocalOrgJiraHost(t, s, "https://acme.atlassian.net")
+
+	jiraStub := jiraCloudMyselfStub(t, `{"accountId":"acc-cloud","displayName":"Cloud User"}`, nil)
+	seedLocalOrgJiraHost(t, s, jiraStub.URL)
 	seedLocalOrgJiraAuthMethod(t, s, "cloud_api_token")
 
 	rec := doJSON(t, s, "POST",
 		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira/pat",
-		map[string]any{"email": "me@acme.com"}) // no token
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
+		map[string]any{"email": "me@acme.com", "token": "cloud-tok"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("capture status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+
+	statusRec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira", nil)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s, want 200", statusRec.Code, statusRec.Body.String())
+	}
+	var out jiraIdentityStatusResponse
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !out.Connected {
+		t.Errorf("connected=false after a Cloud bind: %+v", out)
+	}
+	if out.Deployment != "cloud" {
+		t.Errorf("deployment = %q, want cloud", out.Deployment)
+	}
+	if out.Account != "Cloud User" {
+		t.Errorf("account = %q, want Cloud User", out.Account)
 	}
 }
 

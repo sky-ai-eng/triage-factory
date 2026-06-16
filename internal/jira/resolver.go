@@ -232,11 +232,17 @@ func (r *resolver) ForSystem(ctx context.Context, orgID string) (*Client, error)
 // one — the per-user mirror of ForSystem's marker dispatch. A bare token from
 // the pre-envelope DC bind is read back as a dc_pat (ParseUserCredential).
 //
-// REQUIRED — an absent credential is ErrNoJiraUserCredential, NEVER a fall-back
-// to the org service cred (that would mis-attribute the user's write to the
-// bot). A backend read error propagates rather than being misreported as "not
-// connected"; a corrupt envelope likewise propagates rather than silently
-// degrading to the bot.
+// The credential is gated on UsableFor(<org deployment>), the SAME predicate the
+// status reader uses — so "ForUser succeeds" means exactly what the status
+// endpoint reports as connected. A stale cross-scheme credential (e.g. a Cloud
+// token left after a Cloud→DC cutover) is therefore ErrNoJiraUserCredential, not
+// a wrong-scheme client built against the new host.
+//
+// REQUIRED — an absent (or unusable) credential is ErrNoJiraUserCredential,
+// NEVER a fall-back to the org service cred (that would mis-attribute the user's
+// write to the bot). A backend read error propagates rather than being
+// misreported as "not connected"; a corrupt envelope or an unknown method
+// likewise propagates rather than silently degrading to the bot.
 func (r *resolver) ForUser(ctx context.Context, orgID, userID string) (*Client, error) {
 	orgSet, err := r.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
@@ -260,17 +266,27 @@ func (r *resolver) ForUser(ctx context.Context, orgID, userID string) (*Client, 
 	if err != nil {
 		return nil, fmt.Errorf("resolve jira user credential for org %s user %s: %w", orgID, userID, err)
 	}
+
+	// Resolve the org's deployment from its stored auth-method marker (falling
+	// back to host shape for a pre-Cloud org) — the same dispatch ForSystem and
+	// the status reader use — so the credential's scheme is checked against the
+	// org's CURRENT deployment, not just its own self-description.
+	method, err := r.secrets.GetSystem(ctx, orgID, keyJiraAuthMethod)
+	if err != nil {
+		return nil, fmt.Errorf("resolve jira auth method for org %s: %w", orgID, err)
+	}
+	deployment := DeploymentForMarker(AuthMethod(method), host)
+
 	switch cred.Method {
-	case AuthMethodCloudAPIToken:
-		if cred.Email == "" || cred.Token == "" {
-			return nil, fmt.Errorf("%w: org=%s user=%s host=%s (incomplete cloud credential)", ErrNoJiraUserCredential, orgID, userID, host)
+	case AuthMethodCloudAPIToken, AuthMethodDCPAT:
+		// A known scheme that's incomplete OR doesn't match the org's current
+		// deployment (a stale cross-scheme cred) is an absent-credential boundary
+		// — re-binding is the fix, so surface ErrNoJiraUserCredential.
+		if !cred.UsableFor(deployment) {
+			return nil, fmt.Errorf("%w: org=%s user=%s host=%s (credential not usable for %s deployment)", ErrNoJiraUserCredential, orgID, userID, host, deployment)
 		}
-		return NewClient(CloudAPIToken(host, cred.Email, cred.Token)), nil
-	case AuthMethodDCPAT:
-		// Includes the back-compat bare token, which ParseUserCredential already
-		// normalized to AuthMethodDCPAT.
-		if cred.Token == "" {
-			return nil, fmt.Errorf("%w: org=%s user=%s host=%s", ErrNoJiraUserCredential, orgID, userID, host)
+		if cred.Method == AuthMethodCloudAPIToken {
+			return NewClient(CloudAPIToken(host, cred.Email, cred.Token)), nil
 		}
 		return NewClient(DataCenterPAT(host, cred.Token)), nil
 	default:
