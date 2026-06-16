@@ -100,6 +100,46 @@ func Load(ctx context.Context, secrets db.SecretStore, orgID string) (auth.Crede
 	return creds, nil
 }
 
+// LoadSystem is the system/background twin of Load: it reads the exact same
+// integration secrets for orgID into the same auth.Credentials shape, but
+// through the claims-free SecretStore.GetSystem door instead of the
+// claims-checked Get. It exists for callers that hold no request JWT — the
+// multi-mode pollers being the motivating case: their goroutines have no
+// request.jwt.claims, so the Postgres vault wrapper would reject Get (RLS
+// enforces org_id == current_org_id()). GetSystem runs on the system/admin
+// pool, trusts the passed orgID, and performs no current_org_id() check.
+//
+// System-code-only — same discipline as SecretStore.GetSystem. Request
+// handlers must use the claims-checked Load; reaching for LoadSystem inside a
+// request handler bypasses the per-tenant RLS gate. In local mode GetSystem
+// forwards to the keychain exactly as Get does, so LoadSystem is identical to
+// Load at N=1.
+func LoadSystem(ctx context.Context, secrets db.SecretStore, orgID string) (auth.Credentials, error) {
+	var (
+		creds auth.Credentials
+		errs  []error
+	)
+	get := func(key string, dst *string) {
+		v, err := secrets.GetSystem(ctx, orgID, key)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("get %s: %w", key, err))
+			return
+		}
+		*dst = v
+	}
+	get(KeyGitHubURL, &creds.GitHubURL)
+	get(KeyGitHubPAT, &creds.GitHubPAT)
+	get(KeyJiraURL, &creds.JiraURL)
+	get(KeyJiraPAT, &creds.JiraPAT)
+	get(KeyJiraEmail, &creds.JiraEmail)
+	get(KeyJiraAPIToken, &creds.JiraAPIToken)
+	get(KeyJiraAuthMethod, &creds.JiraAuthMethod)
+	if len(errs) > 0 {
+		return creds, errors.Join(errs...)
+	}
+	return creds, nil
+}
+
 // Save writes the four-string bundle. Empty strings are skipped (not
 // written as "") — handlers that want to clear a field call the
 // targeted Clear* helpers instead.

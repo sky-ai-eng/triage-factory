@@ -99,15 +99,20 @@ func (r *reloader) onGitHubChanged(orgID string) {
 	}
 }
 
-// onJiraChanged restarts only the Jira poller and refreshes the server's
-// Jira client. Local-only: multi-mode Jira polling needs per-org system
-// creds and the process-global Jira client is itself a local-mode construct.
+// onJiraChanged reacts to a Jira credential/config change: in local mode it
+// restarts the in-process Jira poller and re-dues the changed org so the new
+// config applies now rather than after the interval. Multi mode can't
+// selectively restart a process-global loop without re-polling every tenant
+// against shared API budgets, so — mirroring onGitHubChanged — it just re-dues
+// the changed org; the poller, now running in multi via the claims-free
+// system-creds reads, picks the change up on that org's next cycle.
 func (r *reloader) onJiraChanged(orgID string) {
 	log.Println("[server] Jira config changed, restarting Jira poller...")
 	r.announce.setPending("jira")
 
 	if runmode.Current() != runmode.ModeLocal {
-		log.Println("[server] Jira changed: multi-mode skips process-global refresh")
+		log.Printf("[server] Jira changed for org %s: multi-mode re-dues that org only (no fleet restart)", orgID)
+		r.pollerMgr.PollSoon("jira", orgID)
 		return
 	}
 
@@ -120,9 +125,11 @@ func (r *reloader) onJiraChanged(orgID string) {
 
 // initialPoll starts polling at boot. Local mode additionally kicks the first
 // profile+score when GitHub is configured; multi mode just starts the
-// process-global loop, which fans out over every active tenant and self-gates
-// Jira off. Request handlers resolve GitHub clients per-request through the
-// credential resolver, so there's no process-global client to wire here.
+// process-global loop, which fans out over every active tenant — GitHub and
+// Jira alike, since Jira now reads service creds through the claims-free system
+// door and so polls in multi too. Request handlers resolve GitHub clients
+// per-request through the credential resolver, so there's no process-global
+// client to wire here.
 func (r *reloader) initialPoll(ctx context.Context) {
 	if runmode.Current() != runmode.ModeLocal {
 		// runGitHubCycle fans out over ListActiveSystem each wake; orgs and

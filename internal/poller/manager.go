@@ -137,9 +137,9 @@ func (m *Manager) RestartAll() {
 	m.startJira()
 }
 
-// RestartJira stops and restarts only the Jira polling loop. Multi-mode
-// Jira polling is gated off inside startJira until per-org system creds
-// land, so the restart is a no-op past the stop in multi mode.
+// RestartJira stops and restarts only the Jira polling loop. Runs in both
+// modes — startJira reads service creds through the claims-free system door,
+// so the restarted ticker polls multi-mode tenants just like local.
 func (m *Manager) RestartJira() {
 	m.mu.Lock()
 	if m.jiraStop != nil {
@@ -640,22 +640,14 @@ func intersectConfigured(configured []string, grant []ghclient.UserRepo, covered
 // PAT, no URL, no rules) are silently skipped each cycle, so adding/removing
 // a tenant's Jira config doesn't need a poller restart.
 //
-// Gated to local mode (the gate startGitHub used to share). The per-org loop
-// shape is correct, but SecretStore.Get in Postgres requires
-// request.jwt.claims (vault_* enforces org_id == tf.current_org_id()), and
-// the poller goroutine has no claims context. Multi-mode Jira polling needs
-// either a SystemGet-style SecretStore variant or per-org
-// SyntheticClaimsWithTx routing. Until then, multi-mode tenants don't get
-// background Jira polling; their data refreshes on the next interactive flow.
-//
-// TODO: multi-mode Jira polling — add system-mode SecretStore
-// access path (SKY-347 / D11 follow-up) then drop the gate below.
+// Runs in both modes, mirroring startGitHub. The per-org loop reads every
+// secret through the claims-free system door (integrations.LoadSystem,
+// resolver.ForSystem), so it works without a request JWT: in multi mode those
+// reads run on the system/admin pool (trusting the passed orgID, no
+// current_org_id() check); in local mode they forward to the keychain. A
+// configured multi-mode tenant therefore mints Jira tasks in the background
+// without waiting for an interactive request.
 func (m *Manager) startJira() {
-	if runmode.Current() != runmode.ModeLocal {
-		log.Println("[jira] tracker not started — multi-mode Jira polling requires per-org system credentials (see TODO in startJira)")
-		return
-	}
-
 	stop := make(chan struct{})
 	m.mu.Lock()
 	m.jiraStop = stop
@@ -719,7 +711,7 @@ func (m *Manager) runJiraCycle() {
 		// keeps this slot, so a likely-persistent auth failure backs off to the
 		// org's own cadence instead of hammering every base tick.
 		m.schedulePoll("jira", orgID, now.Add(clampPollInterval(orgSet.JiraPollInterval)))
-		creds, lerr := integrations.Load(ctx, m.secrets, orgID)
+		creds, lerr := integrations.LoadSystem(ctx, m.secrets, orgID)
 		if lerr != nil {
 			log.Printf("[jira] org %s: load creds: %v", orgID, lerr)
 			m.reportError("jira", orgID, lerr)

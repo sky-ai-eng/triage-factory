@@ -107,12 +107,14 @@ func TestManager_StartGitHub_StartsInMultiMode(t *testing.T) {
 	m.StopAll()
 }
 
-// TestManager_RestartAll_StartsGitHubNotJiraInMultiMode pins the boot/config-
-// change entry point main.go uses: RestartAll must start the process-global
-// GitHub poller in multi mode (SKY-386 — nothing ever started a poll loop in
-// multi, so no entities were discovered). Jira stays gated off until per-org
-// system creds land, so RestartAll must NOT start the Jira loop in multi.
-func TestManager_RestartAll_StartsGitHubNotJiraInMultiMode(t *testing.T) {
+// TestManager_RestartAll_StartsBothInMultiMode pins the boot/config-change
+// entry point main.go uses: RestartAll must start the process-global GitHub
+// poller in multi mode (SKY-386 — nothing ever started a poll loop in multi, so
+// no entities were discovered) AND the Jira poller. Jira polling now reads
+// service creds through the claims-free system door (integrations.LoadSystem,
+// resolver.ForSystem), so it no longer needs a request JWT and runs in multi
+// just like local — RestartAll starts both loops in both modes.
+func TestManager_RestartAll_StartsBothInMultiMode(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	m := &Manager{orgs: &fakeOrgsStore{}}
 
@@ -125,8 +127,8 @@ func TestManager_RestartAll_StartsGitHubNotJiraInMultiMode(t *testing.T) {
 	if !gh {
 		t.Errorf("RestartAll in multi mode did not start the GitHub poller (ghStop == nil) — SKY-386 regression")
 	}
-	if jira {
-		t.Errorf("RestartAll in multi mode started the Jira poller (jiraStop != nil); want it gated off until per-org system creds land")
+	if !jira {
+		t.Errorf("RestartAll in multi mode did not start the Jira poller (jiraStop == nil); multi-mode Jira polling reads creds via the system door")
 	}
 }
 

@@ -3,6 +3,7 @@ package integrations_test
 import (
 	"context"
 	"database/sql"
+	"slices"
 	"testing"
 
 	"github.com/zalando/go-keyring"
@@ -381,5 +382,93 @@ func TestLoad_EnvOverlayWins(t *testing.T) {
 	}
 	if got.GitHubURL != "https://kept-keychain.example.com" {
 		t.Errorf("non-env field changed: got=%q", got.GitHubURL)
+	}
+}
+
+// TestLoadSystem_Roundtrip pins that LoadSystem reads back what Save wrote and
+// returns the same bundle Load does in local mode (GetSystem → keychain, same
+// as Get) — the "local mode unchanged" half of the multi-mode poller fix.
+func TestLoadSystem_Roundtrip(t *testing.T) {
+	stores := openStores(t)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrg
+
+	want := auth.Credentials{
+		GitHubURL:      "https://github.example.com",
+		GitHubPAT:      "ghp-test",
+		JiraURL:        "https://acme.atlassian.net",
+		JiraEmail:      "bot@acme.com",
+		JiraAPIToken:   "cloud-token",
+		JiraAuthMethod: "cloud_api_token",
+	}
+	if err := integrations.Save(ctx, stores.Secrets, org, want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	gotSystem, err := integrations.LoadSystem(ctx, stores.Secrets, org)
+	if err != nil {
+		t.Fatalf("LoadSystem: %v", err)
+	}
+	if gotSystem != want {
+		t.Errorf("LoadSystem got=%+v want=%+v", gotSystem, want)
+	}
+	gotLoad, err := integrations.Load(ctx, stores.Secrets, org)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if gotSystem != gotLoad {
+		t.Errorf("LoadSystem and Load disagree in local mode:\n  LoadSystem=%+v\n  Load      =%+v", gotSystem, gotLoad)
+	}
+}
+
+// recordingSecrets records which credential keys are read through the
+// claims-checked Get door vs the claims-free GetSystem door, so a test can
+// prove Load and LoadSystem read the same key set and that LoadSystem never
+// touches Get. The embedded db.SecretStore is nil and never dereferenced: Load
+// calls only Get, LoadSystem only GetSystem, both overridden below.
+type recordingSecrets struct {
+	db.SecretStore
+	viaGet       []string
+	viaGetSystem []string
+}
+
+func (r *recordingSecrets) Get(_ context.Context, _ string, key string) (string, error) {
+	r.viaGet = append(r.viaGet, key)
+	return "", nil
+}
+
+func (r *recordingSecrets) GetSystem(_ context.Context, _ string, key string) (string, error) {
+	r.viaGetSystem = append(r.viaGetSystem, key)
+	return "", nil
+}
+
+// TestLoadSystem_SameKeySetAsLoad pins that LoadSystem reads exactly the keys
+// Load reads — but through the claims-free GetSystem door, never the
+// claims-checked Get. If a new credential key lands in one and not the other the
+// sets diverge and this fails; if LoadSystem ever regresses to Get its GetSystem
+// set goes empty and this fails. The background/poller twin of the resolver's
+// keys-drift guard, and the guard behind the poll path's "no claims-scoped Get"
+// invariant.
+func TestLoadSystem_SameKeySetAsLoad(t *testing.T) {
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrg
+
+	rec := &recordingSecrets{}
+	if _, err := integrations.Load(ctx, rec, org); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, err := integrations.LoadSystem(ctx, rec, org); err != nil {
+		t.Fatalf("LoadSystem: %v", err)
+	}
+
+	if len(rec.viaGet) == 0 {
+		t.Fatal("Load read no keys via Get — stub wired wrong")
+	}
+	if len(rec.viaGetSystem) == 0 {
+		t.Fatal("LoadSystem read no keys via the claims-free GetSystem door")
+	}
+	loadKeys := slices.Sorted(slices.Values(rec.viaGet))
+	systemKeys := slices.Sorted(slices.Values(rec.viaGetSystem))
+	if !slices.Equal(systemKeys, loadKeys) {
+		t.Errorf("LoadSystem key set drifted from Load:\n  LoadSystem (GetSystem) = %v\n  Load       (Get)       = %v", systemKeys, loadKeys)
 	}
 }
