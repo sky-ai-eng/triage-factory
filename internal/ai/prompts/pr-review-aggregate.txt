@@ -22,15 +22,17 @@ It prints JSON containing a `review_id`. Capture that value; you pass it to ever
     REVIEW_ID=$({{BINARY_PATH}} exec gh pr start-review {{PR_NUMBER}} | jq -r '.review_id')
 
 STEP 4 — Post each finding that has `in_diff` == true.
-For each such finding, write its `body` to a file and post it with `--body-file` (this avoids any shell-escaping of the body, which may contain code blocks and quotes):
+For each such finding, extract its `severity` into a shell variable and write its `body` to a file with `jq` — both come straight from the finding, so pull them mechanically rather than typing them by hand (the body may contain code blocks and quotes that `--body-file` keeps safe from shell-escaping):
 
-    # write this finding's body to a temp file (replace <FILE>/<I> with the source file and array index)
+    # for this finding (replace <FILE>/<I> with the source file and array index)
+    SEV=$(jq -r '.findings[<I>].severity' <FILE>.json)
     jq -r '.findings[<I>].body' <FILE>.json > {{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/body.md
 
     {{BINARY_PATH}} exec gh pr add-review-comment "$REVIEW_ID" \
-      --file "<file>" --line <line> --severity <severity> \
+      --file "<file>" --line <line> --severity "$SEV" \
       --body-file {{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/body.md
 
+Always pass `--severity "$SEV"` — it is what renders the severity badge (CLEAN / MINOR / MAJOR / BLOCKER) on the posted comment. Never drop the flag; a comment posted without it loses its badge silently. The finding's `severity` is always one of blocker | major | minor | clean.
 Include `--start-line <start_line>` only when the finding's `start_line` is not null.
 If `add-review-comment` exits with an error (for example, the line is not a valid position in the diff), do NOT stop and do NOT retry with a different line. Skip the inline comment for that finding and add a one-line note about it to the summary in STEP 6 instead. Reuse the same body.md file for each finding in turn.
 
