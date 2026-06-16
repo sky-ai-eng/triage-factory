@@ -334,4 +334,13 @@ type AgentRunStore interface {
 	// footer-building utility from having to construct a synthetic-
 	// claims tx just to read one aggregate row.
 	TokenTotalsSystem(ctx context.Context, orgID, runID string) (*domain.TokenTotals, error)
+
+	// BlueprintSiblingCostUSDSystem sums runs.total_cost_usd across every
+	// run in blueprintRunID EXCEPT excludeRunID, counting only settled
+	// (non-NULL) costs. agentmeta.Build adds this to the authoring run's
+	// own cost so a multi-step blueprint's published review/PR discloses
+	// the total spend across all steps, not just the step that authored
+	// it. Routes through the admin pool in Postgres — the footer builds
+	// from claims-less contexts (agent subprocess, post-approval submit).
+	BlueprintSiblingCostUSDSystem(ctx context.Context, orgID, blueprintRunID, excludeRunID string) (float64, error)
 }

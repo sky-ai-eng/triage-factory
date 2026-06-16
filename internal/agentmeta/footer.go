@@ -3,23 +3,29 @@
 // like issue comments). Consolidates what used to live as two near-
 // duplicate builders in cmd/exec/gh/pr.go and internal/server/
 // reviews_handler.go — both did the same job (compute elapsed + cost,
-// pretty-print model name, render markdown footer) but disagreed on
-// the cost source.
+// render markdown footer) but disagreed on the cost source.
 //
-// The cost source is now uniform: read runs.total_cost_usd if it's
-// populated (the standard path; CompleteAgentRun fills it in at run
-// terminal). Fall back to recomputing from RunTokenTotals only when
-// the column is nil — that branch covers the still-running standalone
-// CLI mode where the run hasn't completed yet. With the queue-then-
-// approve flow, both review submit and PR submit run AFTER the
-// agent has terminated, so the column is always populated and the
-// fallback is rare.
+// The footer discloses Time + Cost only — no model name. A multi-step
+// blueprint may run several different models across its steps, so a
+// single "Model:" line would be a half-truth (it would name only the
+// step that authored the published review/PR); dropping it is the
+// honest answer.
+//
+// Cost is summed across every step of the run's blueprint, not just
+// the step that authored the content. The authoring run's own cost
+// reads runs.total_cost_usd when populated (the standard path;
+// CompleteAgentRun fills it in at run terminal), falling back to a
+// token-estimate from RunTokenTotals only while that column is nil —
+// the still-running standalone CLI case. The sibling steps' settled
+// costs are added on top via BlueprintSiblingCostUSDSystem. With the
+// queue-then-approve flow, review/PR submit run AFTER the agent has
+// terminated, so the authoring run's column is always populated and
+// the estimate fallback is rare.
 package agentmeta
 
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
@@ -69,13 +75,12 @@ func Build(agentRuns db.AgentRunStore, orgID, runID, kind string) string {
 		return bare
 	}
 
-	model := prettyModel(run.Model)
 	elapsed := elapsedFromRun(run)
 	cost, costPrefix := costFromRun(ctx, agentRuns, orgID, runID, run)
 
 	return fmt.Sprintf(
-		"\n\n---\n%s\n\nTime: %s | Model: %s | Cost: %s$%.3f",
-		disclaimer, elapsed, model, costPrefix, cost,
+		"\n\n---\n%s\n\nTime: %s | Cost: %s$%.3f",
+		disclaimer, elapsed, costPrefix, cost,
 	)
 }
 
@@ -97,42 +102,38 @@ func elapsedFromRun(run *domain.AgentRun) string {
 	return "?"
 }
 
-// costFromRun resolves the cost USD value plus the "~" prefix
-// indicator. Prefers run.TotalCostUSD (canonical, populated at
-// CompleteAgentRun); falls back to recomputing from RunTokenTotals
-// for the still-running CLI mode. The "~" prefix flags the
-// approximate-from-tokens estimate so a reader can tell apart the
-// settled cost from a live estimate.
+// costFromRun resolves the total cost USD across the run's whole
+// blueprint plus the "~" prefix indicator. It sums the authoring run's
+// own cost with the settled cost of every sibling step in the same
+// blueprint_run, so a published review/PR discloses the total spend of
+// the multi-step blueprint rather than just the step that authored it.
+//
+// The authoring run's cost prefers run.TotalCostUSD (canonical,
+// populated at CompleteAgentRun) and falls back to recomputing from
+// RunTokenTotals for the still-running CLI mode — the "~" prefix flags
+// that approximate-from-tokens estimate so a reader can tell a settled
+// cost from a live one. Sibling steps are all terminal by the time a
+// footer is built (the blueprint advanced past them), so their
+// total_cost_usd is settled; a failed sibling-cost read just omits
+// their contribution rather than blocking the submit.
 func costFromRun(ctx context.Context, agentRuns db.AgentRunStore, orgID, runID string, run *domain.AgentRun) (cost float64, prefix string) {
 	if run.TotalCostUSD != nil {
-		return *run.TotalCostUSD, ""
+		cost = *run.TotalCostUSD
+	} else if totals, err := agentRuns.TokenTotalsSystem(ctx, orgID, runID); err == nil {
+		model := totals.Model
+		if model == "" {
+			model = run.Model
+		}
+		cost = ai.CalculateCostUSD(model, totals.InputTokens, totals.OutputTokens, totals.CacheReadTokens, totals.CacheCreationTokens)
+		prefix = "~"
 	}
-	totals, err := agentRuns.TokenTotalsSystem(ctx, orgID, runID)
-	if err != nil {
-		return 0, ""
-	}
-	model := totals.Model
-	if model == "" {
-		model = run.Model
-	}
-	return ai.CalculateCostUSD(model, totals.InputTokens, totals.OutputTokens, totals.CacheReadTokens, totals.CacheCreationTokens), "~"
-}
 
-// prettyModel turns a verbose model id like "claude-sonnet-4-6" into
-// a marketing-friendly "Claude Sonnet". Unknown models pass through
-// unchanged so a future model id at least reads as itself rather than
-// getting silently relabeled.
-func prettyModel(model string) string {
-	switch {
-	case strings.Contains(model, "opus"):
-		return "Claude Opus"
-	case strings.Contains(model, "sonnet"):
-		return "Claude Sonnet"
-	case strings.Contains(model, "haiku"):
-		return "Claude Haiku"
-	default:
-		return model
+	if run.BlueprintRunID != "" {
+		if siblings, err := agentRuns.BlueprintSiblingCostUSDSystem(ctx, orgID, run.BlueprintRunID, runID); err == nil {
+			cost += siblings
+		}
 	}
+	return cost, prefix
 }
 
 // prettyDurationMs formats a millisecond count as e.g. "42s",

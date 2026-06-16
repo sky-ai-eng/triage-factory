@@ -89,10 +89,14 @@ func seedFooterRun(t *testing.T, database *sql.DB, fix runFooterFixture) {
 			t.Fatalf("prompt: %v", err)
 		}
 	}
+	brID := fix.BlueprintRunID
+	if brID == "" {
+		brID = seedBlueprintRun(t, database, task.ID)
+	}
 	if err := sqlitestore.New(database).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
 		ID: fix.ID, TaskID: task.ID, PromptID: "footer-test-prompt",
 		Status: "running", Model: fix.Model, StartedAt: fix.StartedAt,
-		BlueprintRunID: seedBlueprintRun(t, database, task.ID),
+		BlueprintRunID: brID,
 	}); err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -119,6 +123,11 @@ type runFooterFixture struct {
 	CompletedAt  *time.Time
 	DurationMs   *int
 	TotalCostUSD *float64
+	// BlueprintRunID, when set, attaches the run to an existing
+	// blueprint_run instead of minting a fresh one — so two fixtures can
+	// be seeded as sibling steps of the same blueprint for the
+	// cost-aggregation test. Empty mints a new single-step blueprint_run.
+	BlueprintRunID string
 }
 
 // TestBuild_NoRunID returns an empty string. A human running the CLI
@@ -175,8 +184,8 @@ func TestBuild_HappyPath_UsesStoredCostAndDuration(t *testing.T) {
 	if !strings.Contains(got, "Time: 1m 30s") {
 		t.Errorf("missing/wrong Time: %q", got)
 	}
-	if !strings.Contains(got, "Model: Claude Sonnet") {
-		t.Errorf("missing/wrong Model pretty-print: %q", got)
+	if strings.Contains(got, "Model:") {
+		t.Errorf("footer should no longer disclose a model name: %q", got)
 	}
 	if !strings.Contains(got, "Cost: $0.012") {
 		t.Errorf("missing/wrong Cost (expected settled, no '~'): %q", got)
@@ -205,17 +214,56 @@ func TestBuild_LegacyFallback_FlagsApproximateCost(t *testing.T) {
 	if !strings.Contains(got, "Cost: ~$") {
 		t.Errorf("legacy fallback should prefix Cost with '~': %q", got)
 	}
-	if !strings.Contains(got, "Model: Claude Haiku") {
-		t.Errorf("model pretty-print broken on legacy path: %q", got)
+	if strings.Contains(got, "Model:") {
+		t.Errorf("footer should no longer disclose a model name: %q", got)
 	}
 }
 
-// TestPrettyModel_UnknownPassesThrough — a future model id reads as
-// itself rather than getting silently relabeled.
-func TestPrettyModel_UnknownPassesThrough(t *testing.T) {
-	got := prettyModel("claude-future-9-99")
-	if got != "claude-future-9-99" {
-		t.Errorf("prettyModel(unknown) = %q, want pass-through", got)
+// TestBuild_SumsCostAcrossBlueprintSteps covers the multi-step case:
+// the footer for the step that authored the published review/PR sums
+// the cost of every step in the blueprint, not just its own. Two
+// sibling runs share one blueprint_run; the authoring run's footer
+// reports their combined cost.
+func TestBuild_SumsCostAcrossBlueprintSteps(t *testing.T) {
+	database := newTestDB(t)
+
+	// Seed step 1 to mint the shared blueprint_run, then read its id back
+	// so step 2 (the authoring step) attaches to the same run.
+	step1Cost := 0.01
+	seedFooterRun(t, database, runFooterFixture{
+		ID:           "bp-step-1",
+		Model:        "claude-haiku-4-5",
+		StartedAt:    time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
+		TotalCostUSD: &step1Cost,
+	})
+	var brID string
+	if err := database.QueryRow(`SELECT blueprint_run_id FROM runs WHERE id = ?`, "bp-step-1").Scan(&brID); err != nil {
+		t.Fatalf("read blueprint_run_id: %v", err)
+	}
+
+	completedAt := time.Date(2026, 1, 1, 12, 1, 30, 0, time.UTC)
+	durationMs := 90_000
+	step2Cost := 0.02
+	seedFooterRun(t, database, runFooterFixture{
+		ID:             "bp-step-2",
+		Model:          "claude-opus-4-8",
+		StartedAt:      time.Date(2026, 1, 1, 12, 0, 30, 0, time.UTC),
+		CompletedAt:    &completedAt,
+		DurationMs:     &durationMs,
+		TotalCostUSD:   &step2Cost,
+		BlueprintRunID: brID,
+	})
+
+	got := Build(sqlitestore.New(database).AgentRuns, runmode.LocalDefaultOrg, "bp-step-2", "review")
+	// 0.01 (step 1) + 0.02 (authoring step 2) = 0.030.
+	if !strings.Contains(got, "Cost: $0.030") {
+		t.Errorf("expected summed cost across blueprint steps (Cost: $0.030): %q", got)
+	}
+	if strings.Contains(got, "Cost: ~$") {
+		t.Errorf("all steps settled — should not show '~' prefix: %q", got)
+	}
+	if strings.Contains(got, "Model:") {
+		t.Errorf("footer should no longer disclose a model name: %q", got)
 	}
 }
 

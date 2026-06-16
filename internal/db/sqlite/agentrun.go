@@ -770,6 +770,22 @@ func (s *agentRunStore) TokenTotalsSystem(ctx context.Context, orgID, runID stri
 	return s.TokenTotals(ctx, orgID, runID)
 }
 
+func (s *agentRunStore) BlueprintSiblingCostUSDSystem(ctx context.Context, orgID, blueprintRunID, excludeRunID string) (float64, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return 0, err
+	}
+	var cost sql.NullFloat64
+	err := s.q.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(total_cost_usd), 0)
+		FROM runs
+		WHERE blueprint_run_id = ? AND id <> ?
+	`, blueprintRunID, excludeRunID).Scan(&cost)
+	if err != nil {
+		return 0, err
+	}
+	return cost.Float64, nil
+}
+
 // --- Helpers ---
 
 func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {

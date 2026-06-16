@@ -919,6 +919,61 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
+	t.Run("BlueprintSiblingCostUSDSystem_SumsSettledExcludingSelf", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "bp-cost")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		brID := seed.BlueprintRun(t, taskID)
+
+		// Two runs sharing one blueprint_run — sibling steps. (The seeder
+		// mints a fresh blueprint_run per call, so we reuse brID directly
+		// to stage the multi-step shape the footer aggregates over.)
+		step1, step2 := uuid.New().String(), uuid.New().String()
+		for _, id := range []string{step1, step2} {
+			if err := store.Create(ctx, orgID, domain.AgentRun{
+				ID: id, TaskID: taskID, PromptID: agentRunTestPrompt(t),
+				Status: "running", Model: "m", BlueprintRunID: brID,
+			}); err != nil {
+				t.Fatalf("Create %s: %v", id, err)
+			}
+		}
+		if err := store.Complete(ctx, orgID, step1, "completed", 0.01, 1000, 1, "ok", "", "finish", ""); err != nil {
+			t.Fatalf("Complete step1: %v", err)
+		}
+		if err := store.Complete(ctx, orgID, step2, "completed", 0.02, 1000, 1, "ok", "", "finish", ""); err != nil {
+			t.Fatalf("Complete step2: %v", err)
+		}
+
+		near := func(got, want float64) bool { return got-want < 1e-9 && want-got < 1e-9 }
+
+		// Querying for step2 returns step1's settled cost only (self excluded).
+		sib, err := store.BlueprintSiblingCostUSDSystem(ctx, orgID, brID, step2)
+		if err != nil {
+			t.Fatalf("BlueprintSiblingCostUSDSystem(step2): %v", err)
+		}
+		if !near(sib, 0.01) {
+			t.Errorf("sibling cost excluding step2 = %v, want 0.01 (step1 only)", sib)
+		}
+		// Symmetric: querying for step1 returns step2's cost.
+		sib, err = store.BlueprintSiblingCostUSDSystem(ctx, orgID, brID, step1)
+		if err != nil {
+			t.Fatalf("BlueprintSiblingCostUSDSystem(step1): %v", err)
+		}
+		if !near(sib, 0.02) {
+			t.Errorf("sibling cost excluding step1 = %v, want 0.02 (step2 only)", sib)
+		}
+		// A blueprint_run with no other runs sums to 0, not an error.
+		sib, err = store.BlueprintSiblingCostUSDSystem(ctx, orgID, uuid.New().String(), step1)
+		if err != nil {
+			t.Fatalf("BlueprintSiblingCostUSDSystem(empty): %v", err)
+		}
+		if !near(sib, 0) {
+			t.Errorf("sibling cost for empty blueprint_run = %v, want 0", sib)
+		}
+	})
+
 	t.Run("MemoryMissing_DerivedFromRunMemoryJOIN", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
