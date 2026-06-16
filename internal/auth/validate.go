@@ -31,6 +31,26 @@ var ErrGitHubHostUnreachable = errors.New("github host unreachable")
 // state) rather than the 422 it returns for a token the host rejected.
 var ErrJiraHostUnreachable = errors.New("jira host unreachable")
 
+// anthropicModelsURL is Anthropic's documented lightweight key-check endpoint:
+// listing models authenticates the key without spending tokens, so a GET here
+// is the cheapest "is this key valid" probe. It's a var (not a const) only so
+// tests can point it at a stub host; production never reassigns it.
+// anthropicAPIVersion is the required anthropic-version header value.
+var anthropicModelsURL = "https://api.anthropic.com/v1/models"
+
+const anthropicAPIVersion = "2023-06-01"
+
+// ErrAnthropicKeyInvalid is returned by ValidateAnthropicAPIKey when Anthropic
+// rejects the key (401/403). Its message is user-facing — the connect handler
+// surfaces it verbatim — so it reads as guidance rather than a status code.
+var ErrAnthropicKeyInvalid = errors.New("the Anthropic API key was rejected — double-check it and try again")
+
+// ErrAnthropicUnreachable is returned when TF couldn't reach the Anthropic API
+// at all (a transport failure, or an unexpected non-2xx status). The connect
+// handler can key on this via errors.Is to separate "your key is wrong" from
+// "we couldn't talk to Anthropic"; the message is user-facing too.
+var ErrAnthropicUnreachable = errors.New("couldn't reach Anthropic — check your connection and try again")
+
 // GitHubUser is the subset of fields we extract from the GitHub user endpoint.
 type GitHubUser struct {
 	Login     string `json:"login"`
@@ -167,4 +187,47 @@ func ValidateJira(ctx context.Context, cfg jira.Config) (*JiraUser, error) {
 	}
 
 	return &user, nil
+}
+
+// ValidateAnthropicAPIKey checks an Anthropic API key against the live API and
+// returns nil when it authenticates — the Claude-credentials sibling of
+// ValidateGitHub / ValidateJira. It GETs the models endpoint (Anthropic's
+// documented lightweight check: no token cost) with the x-api-key +
+// anthropic-version headers:
+//
+//   - 200            → nil (valid)
+//   - 401 / 403      → ErrAnthropicKeyInvalid (the host rejected the key)
+//   - transport / other non-2xx → ErrAnthropicUnreachable
+//
+// Both error values carry user-facing messages; the connect handler surfaces
+// err.Error() verbatim. The caller is responsible for not passing an empty key
+// (an empty key is the "use system credentials" clear path, not a validation).
+func ValidateAnthropicAPIKey(ctx context.Context, key string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, anthropicModelsURL, nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("x-api-key", key)
+	req.Header.Set("anthropic-version", anthropicAPIVersion)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		// A dial/TLS/timeout failure — the host never answered. Surface the
+		// "couldn't reach" state, not "bad key", so the UI doesn't tell the user
+		// to fix a key that may be fine.
+		return ErrAnthropicUnreachable
+	}
+	defer resp.Body.Close()
+	// Drain (bounded) so the keep-alive connection can be reused; the body is
+	// irrelevant — the status code is the whole signal.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return nil
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return ErrAnthropicKeyInvalid
+	default:
+		return fmt.Errorf("%w (Anthropic returned HTTP %d)", ErrAnthropicUnreachable, resp.StatusCode)
+	}
 }

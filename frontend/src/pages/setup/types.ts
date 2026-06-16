@@ -136,6 +136,21 @@ export interface WizardState {
   // Which tracker the user selected in the Trackers step. Seeded from
   // jiraConnected on load (a connected org resumes on "Jira").
   tracker: TrackerKind
+
+  // ── Org Claude credentials ──
+  // How the org's delegated runs (and the scorer) authenticate with Claude.
+  //   'system' — use the machine's Claude Code subscription / inherited
+  //              ANTHROPIC_API_KEY (local only; no key stored).
+  //   'byok'   — a stored, validated org Anthropic API key.
+  //   null     — not yet chosen (pre-load only; loadOrg seeds it from whether a
+  //              key is stored, defaulting fresh-local to 'system').
+  // The source picker step is local-only — multi has no system-creds option
+  // (cross-tenant bleed), so multi is always effectively 'byok'.
+  anthropicKeySource: 'system' | 'byok' | null
+  // Whether a validated org Anthropic key is stored — the in-flow mirror of
+  // has_anthropic_api_key. Drives the key step's isComplete (mandatory in multi
+  // and local-BYOK) and the "leave blank to keep current" guard on its persist.
+  anthropicConnected: boolean
   team: TeamConfigForm
   // True once the team form has been seeded from the server (the Repositories
   // step's load). The team mirror of orgLoaded: the team GET runs ONCE — on the

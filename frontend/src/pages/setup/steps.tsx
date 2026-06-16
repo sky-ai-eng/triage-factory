@@ -2,8 +2,9 @@
 // ORGANIZATION steps (GitHub URL → GitHub access method → [App: account type →
 // register | PAT: token → clone protocol (local only)] → GitHub poll interval →
 // Trackers → [Jira URL → Jira access → Jira poll interval, shown only when Jira
-// is the chosen/connected tracker] → org max model tier) and the four TEAM
-// steps for
+// is the chosen/connected tracker] → org max model tier → Claude credentials
+// [source (local only) → Anthropic key (multi always; local when BYOK)]) and
+// the four TEAM steps for
 // the first team (Repositories, GitHub teams, Jira projects, team default
 // model), composing the existing shared field groups into the same step
 // contract with no new host plumbing.
@@ -53,6 +54,7 @@ import {
 import { toast } from '../../components/Toast/toastStore'
 import RepoPickerModal from '../../components/RepoPickerModal'
 import { OrgModelStep, TeamModelStep } from './ModelStep'
+import { OrgClaudeSourceStep, OrgClaudeKeyStep } from './ClaudeStep'
 import { UserIdentityStep } from './UserIdentityStep'
 import { JiraUserAccessStep } from './JiraUserAccessStep'
 import { captureGitHubIdentityPat } from '../../lib/githubIdentity'
@@ -76,6 +78,7 @@ import {
   saveOrgConfig,
 } from '../settings/orgConfig'
 import { connectJira, type JiraDeployment } from '../settings/jiraConnect'
+import { connectAnthropic } from '../settings/anthropicConnect'
 import {
   emptyTeamConfig,
   fetchTeamRepos,
@@ -110,6 +113,8 @@ export const initialWizardState = (): WizardState => ({
   jiraUrlConfirmed: false,
   jiraDeployment: null,
   tracker: 'none',
+  anthropicKeySource: null,
+  anthropicConnected: false,
   team: emptyTeamConfig(),
   teamLoaded: false,
   userIdentityConnected: false,
@@ -233,6 +238,12 @@ export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
     // stored one.
     jiraDeployment: integrations.jiraConnected ? integrations.jiraDeployment : null,
     tracker: integrations.jiraConnected ? 'jira' : 'none',
+    // Claude credentials: a stored key resumes as BYOK (in either mode); multi
+    // is always BYOK-effective (no system-creds option); a fresh local org
+    // defaults to "system" (the local default), so the source step auto-resolves
+    // and a zero-config local setup uses the subscription/env path.
+    anthropicConnected: org.has_anthropic_api_key,
+    anthropicKeySource: org.has_anthropic_api_key || !ctx.isLocal ? 'byok' : 'system',
   }
 }
 
@@ -972,6 +983,74 @@ const orgModelStep: WizardStep = {
   render: (ctx) => <OrgModelStep {...ctx} />,
 }
 
+// Step · Claude credential source (local only). The system-vs-BYOK picker, a
+// self-advancing ChoiceCards (no Continue): "system" records the choice and its
+// persist clears any stored key so the resolver falls back to the
+// subscription/env path; "byok" advances to the key step. Hidden in multi —
+// multi has no system-creds option (cross-tenant bleed), so it jumps straight to
+// the key step. Always complete once a source is set (loadOrg seeds it), so it
+// never blocks; the mandatory gate (in multi / local-BYOK) lives on the key
+// step. Mirrors the github-mode picker's self-advancing shape.
+const orgClaudeSourceStep: WizardStep = {
+  id: 'org-claude-source',
+  section: 'org',
+  title: 'Claude credentials',
+  selfAdvancing: true,
+  visible: (s) => s.isLocal,
+  isComplete: (s) => s.anthropicKeySource !== null,
+  persist: async ({ state, patch }) => {
+    // Selecting "system" ensures no key is stored: POST an empty key to clear
+    // any prior BYOK key (idempotent when none is stored). "byok" defers the
+    // write to the key step.
+    if (state.anthropicKeySource === 'system') {
+      const r = await connectAnthropic('')
+      if (!r.ok) throw new Error(r.error)
+      patch({ anthropicConnected: false, org: { ...state.org, anthropic_api_key: '' } })
+    }
+  },
+  collapsedSummary: (s) =>
+    s.anthropicKeySource === 'byok'
+      ? 'Your Anthropic API key'
+      : s.anthropicKeySource === 'system'
+        ? 'System Claude Code credentials'
+        : 'Not chosen',
+  render: (ctx) => <OrgClaudeSourceStep {...ctx} />,
+}
+
+// Step · Claude provider + key. Visible in multi always; in local only when BYOK
+// was chosen (so "system" hides it). Continue validates the pasted key via the
+// connectAnthropic endpoint and blocks advancing on failure (the error reddens
+// the field and shows in the host error line). Mandatory while visible: a run
+// can't execute without a credential, so isComplete requires a validated+stored
+// key — which blocks Finish in multi and local-BYOK until one is set. Mirrors the
+// org-jira-access persist shape.
+const orgClaudeKeyStep: WizardStep = {
+  id: 'org-claude-key',
+  section: 'org',
+  title: 'Anthropic API key',
+  visible: (s) => !s.isLocal || s.anthropicKeySource === 'byok',
+  isComplete: (s) => s.anthropicConnected,
+  validate: (s) => {
+    // Already connected (resuming) with no new entry: valid — the stored key
+    // stays ("leave blank to keep current").
+    if (s.anthropicConnected && s.org.anthropic_api_key.trim() === '') return null
+    return s.org.anthropic_api_key.trim() === ''
+      ? 'Paste your Anthropic API key to continue.'
+      : null
+  },
+  persist: async ({ state, patch }) => {
+    const typed = state.org.anthropic_api_key.trim()
+    // Resuming with a stored key and no new entry: nothing to do — don't re-POST
+    // an empty key, which would CLEAR the stored one.
+    if (state.anthropicConnected && typed === '') return
+    const r = await connectAnthropic(typed)
+    if (!r.ok) throw new Error(r.error)
+    patch({ anthropicConnected: true, org: { ...state.org, anthropic_api_key: '' } })
+  },
+  collapsedSummary: (s) => (s.anthropicConnected ? 'Connected · Anthropic' : 'Not connected'),
+  render: (ctx) => <OrgClaudeKeyStep {...ctx} />,
+}
+
 // Step 5 · Repositories (first team step). Embeds the shared RepoPickerModal
 // inline (footer hidden — the wizard owns Continue/Back) and runs the single
 // team load. Persisting the repo set writes repo_profiles, which is BOTH half
@@ -1279,6 +1358,8 @@ export const WIZARD_STEPS: WizardStep[] = [
   jiraAccessStep,
   jiraPollerStep,
   orgModelStep,
+  orgClaudeSourceStep,
+  orgClaudeKeyStep,
   reposStep,
   githubTeamsStep,
   jiraProjectsStep,

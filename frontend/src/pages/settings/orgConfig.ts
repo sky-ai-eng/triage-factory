@@ -27,6 +27,11 @@ export interface OrgConfigForm {
   jira_api_token: string
   jira_poll_interval: string
   max_llm_model_tier: string
+  // The org's Anthropic API key (BYOK). Blank on load — it's a secret that never
+  // leaves the vault, like jira_pat. It is captured ONLY via the validated
+  // connectAnthropic endpoint and is deliberately NOT sent by saveOrgConfig, so
+  // the bulk settings POST can't be an unvalidated write path.
+  anthropic_api_key: string
 }
 
 // OrgSettingsData mirrors the GET /api/settings/org response. Token fields
@@ -60,6 +65,7 @@ export const emptyOrgConfig = (): OrgConfigForm => ({
   jira_api_token: '',
   jira_poll_interval: '5m0s',
   max_llm_model_tier: '',
+  anthropic_api_key: '',
 })
 
 // orgConfigFromSettings seeds the editable form from a GET response.
@@ -78,6 +84,10 @@ export function orgConfigFromSettings(org: OrgSettingsData): OrgConfigForm {
     jira_api_token: '',
     jira_poll_interval: org.jira_poll_interval,
     max_llm_model_tier: org.max_llm_model_tier || '',
+    // Secret — never returned by the GET (presence rides has_anthropic_api_key),
+    // so it stays blank and a save without a re-typed key leaves the vault key
+    // untouched.
+    anthropic_api_key: '',
   }
 }
 

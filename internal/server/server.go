@@ -732,6 +732,9 @@ func (s *Server) routes() {
 	s.api("GET /api/repos/{owner}/{repo}/branches", s.handleRepoBranches)
 	s.apiMutating("POST /api/jira/reachability", handleJiraReachability)
 	s.apiMutating("POST /api/jira/connect", se.handleJiraConnect)
+	// Validated org Anthropic-key capture — the single write path for the
+	// anthropic_api_key vault secret (an empty key clears it for "system creds").
+	s.apiMutating("POST /api/anthropic/connect", se.handleAnthropicConnect)
 	s.api("GET /api/jira/statuses", se.handleJiraStatuses)
 	s.api("GET /api/jira/stock", s.handleJiraStockGet)
 	s.apiMutating("POST /api/jira/stock", s.handleJiraStockPost)

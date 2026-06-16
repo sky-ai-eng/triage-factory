@@ -47,6 +47,8 @@ import AtlassianOAuthAppCard from '../AtlassianOAuthAppCard'
 import TeamManagementSection from '../../../components/TeamManagementSection'
 import { saveOrgConfig, type OrgConfigForm } from '../orgConfig'
 import { connectJira, JIRA_DEPLOYMENT_OPTIONS } from '../jiraConnect'
+import { connectAnthropic, CLAUDE_SOURCE_OPTIONS } from '../anthropicConnect'
+import { ClaudeProviderCards, AnthropicKeyField } from '../../setup/ClaudeStep'
 import { ChoiceCards } from '../../setup/parts'
 import GitHubAccessControl from './GitHubAccessControl'
 import SettingsSection from './SettingsSection'
@@ -204,6 +206,24 @@ export default function OrgSettings({
   const capSummary = baseline.org.max_llm_model_tier
     ? `Capped at ${TIER_LABELS[baseline.org.max_llm_model_tier] ?? baseline.org.max_llm_model_tier}`
     : 'No cap'
+
+  // ── Claude credentials ── Captured via the validated connectAnthropic
+  // endpoint (never the bulk org POST). Local shows the system-vs-BYOK source
+  // radio; multi shows provider+key only (no system-creds option). "Configured"
+  // reflects has_anthropic_api_key (seeded into anthropicConnected by loadOrg).
+  const claudeConfigured = baseline.anthropicConnected
+  const claudeWantsByok = !isLocal || draft.anthropicKeySource === 'byok'
+  const claudeKeyTyped = draft.org.anthropic_api_key.trim() !== ''
+  const claudeSummary = claudeConfigured
+    ? 'Configured'
+    : isLocal
+      ? 'System Claude credentials'
+      : 'Not configured'
+  // Dirty on a source switch (local) or a typed key.
+  const claudeDirty =
+    (isLocal && draft.anthropicKeySource !== baseline.anthropicKeySource) || claudeKeyTyped
+  // BYOK needs a key unless one is already stored ("leave blank to keep current").
+  const claudeSaveDisabled = claudeWantsByok && !claudeKeyTyped && !claudeConfigured
 
   return (
     <div className="divide-y divide-border-subtle">
@@ -494,6 +514,85 @@ export default function OrgSettings({
         onCancel={() => revertOrg(['max_llm_model_tier'])}
       >
         <OrgModelStep {...ctx} />
+      </SettingsSection>
+
+      {/* ── Claude credentials ── Save drives the validated connectAnthropic
+          endpoint (not the bulk org POST). Local: source radio, then provider +
+          key when BYOK. Multi: provider + key only. */}
+      <SettingsSection
+        title="Claude credentials"
+        summary={claudeSummary}
+        dirty={claudeDirty}
+        saving={isSaving('claude')}
+        saveDisabled={claudeSaveDisabled}
+        onSave={async () => {
+          setSavingKey('claude', true)
+          try {
+            const useSystem = isLocal && draft.anthropicKeySource === 'system'
+            const key = draft.org.anthropic_api_key.trim()
+            // BYOK + blank + already configured = "leave blank to keep current":
+            // a no-op that must NOT POST an empty key (which would clear it).
+            if (!useSystem && key === '') {
+              if (claudeConfigured) {
+                patch({ org: { ...draft.org, anthropic_api_key: '' } })
+                return true
+              }
+              toast.error('Paste an Anthropic API key.')
+              return false
+            }
+            const r = await connectAnthropic(useSystem ? '' : key)
+            if (!r.ok) {
+              toast.error(r.error)
+              return false
+            }
+            const nowConfigured = !useSystem
+            const nextSource = isLocal ? (useSystem ? 'system' : 'byok') : draft.anthropicKeySource
+            setBaseline((b) => ({
+              ...b,
+              anthropicConnected: nowConfigured,
+              anthropicKeySource: nextSource,
+              org: { ...b.org, anthropic_api_key: '' },
+            }))
+            setDraft((d) => ({
+              ...d,
+              anthropicConnected: nowConfigured,
+              anthropicKeySource: nextSource,
+              org: { ...d.org, anthropic_api_key: '' },
+            }))
+            toast.success(useSystem ? 'Using system Claude credentials' : 'Claude API key saved')
+            return true
+          } finally {
+            setSavingKey('claude', false)
+          }
+        }}
+        onCancel={() =>
+          setDraft((d) => ({
+            ...d,
+            anthropicKeySource: baseline.anthropicKeySource,
+            org: { ...d.org, anthropic_api_key: '' },
+          }))
+        }
+      >
+        <div className="space-y-4">
+          {isLocal && (
+            <ChoiceCards
+              ariaLabel="Claude credential source"
+              options={CLAUDE_SOURCE_OPTIONS}
+              selected={draft.anthropicKeySource}
+              onChoose={(k) => patch({ anthropicKeySource: k })}
+            />
+          )}
+          {claudeWantsByok && (
+            <>
+              <ClaudeProviderCards />
+              <AnthropicKeyField
+                value={draft.org.anthropic_api_key}
+                onChange={(v) => patch({ org: { ...draft.org, anthropic_api_key: v } })}
+                hasKey={claudeConfigured}
+              />
+            </>
+          )}
+        </div>
       </SettingsSection>
 
       {/* Add-team is hosted-only (POST /api/teams 404s in local). */}

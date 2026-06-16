@@ -26,6 +26,12 @@ type settingsHandler struct {
 	tx db.TxRunner
 }
 
+// secretKeyAnthropicAPIKey is the vault key the org's Anthropic API key is
+// stored under (and the value AnthropicAPIKeyRef points at). It matches the key
+// the credential resolver reads (internal/agentproc) and the GET presence flag;
+// named here so the connect handler isn't the third copy of a magic string.
+const secretKeyAnthropicAPIKey = "anthropic_api_key"
+
 // jiraProjectKeyRe matches Jira's standard project-key rule: a
 // leading uppercase letter followed by uppercase letters or digits.
 // Keys arriving through the API are uppercased before matching so
@@ -423,6 +429,85 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		"status":       "connected",
 		"display_name": jiraUser.DisplayName,
 	})
+}
+
+// handleAnthropicConnect validates and stores the org's Anthropic API key — the
+// Claude-credentials analog of handleJiraConnect, and the SINGLE validated write
+// path for the anthropic_api_key vault secret (the bulk org-settings POST no
+// longer accepts it, so a key reaching the vault has always passed
+// ValidateAnthropicAPIKey here).
+//
+// An empty key is the "use system Claude Code credentials" selection (local
+// only): it clears any stored key so the credential resolver falls back to the
+// inherited-env / subscription path. There's nothing to validate, so it skips
+// straight to the Delete arm. A non-empty key is validated against Anthropic
+// first; a rejected or unreachable key returns 422 and nothing is written.
+//
+// Requires an active org because the write goes through the SecretStore — same
+// multi-mode rationale as handleJiraConnect / handleSettingsPost.
+func (se *settingsHandler) handleAnthropicConnect(w http.ResponseWriter, r *http.Request) {
+	userID := ClaimsFrom(r.Context()).Subject
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		APIKey string `json:"api_key"`
+	}
+	if !decodeJSON(w, r, &req, "") {
+		return
+	}
+	key := strings.TrimSpace(req.APIKey)
+
+	// Empty key ⟺ "system credentials": clear the stored key (and its ref) so the
+	// resolver degrades to the local subscription/env fallback. Idempotent — a
+	// Delete with no matching row is not an error.
+	if key == "" {
+		if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+			if _, err := tx.Secrets.Delete(r.Context(), orgID, secretKeyAnthropicAPIKey); err != nil {
+				return fmt.Errorf("clear Anthropic key: %w", err)
+			}
+			orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
+			if err != nil {
+				return fmt.Errorf("load org settings: %w", err)
+			}
+			orgSet.AnthropicAPIKeyRef = ""
+			return tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet)
+		}); err != nil {
+			log.Printf("[settings] handleAnthropicConnect clear failed: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update Claude credentials"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
+		return
+	}
+
+	// Validate before storing. Both failure modes (rejected key, unreachable) are
+	// surfaced verbatim as a 422 — mirroring handleJiraConnect, which also folds
+	// "bad credential" and "couldn't reach the host" into one 422 for the connect
+	// surface.
+	if err := auth.ValidateAnthropicAPIKey(r.Context(), key); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+
+	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
+		if err != nil {
+			return fmt.Errorf("load org settings: %w", err)
+		}
+		if err := tx.Secrets.Put(r.Context(), orgID, secretKeyAnthropicAPIKey, key, "Org's Anthropic API key"); err != nil {
+			return fmt.Errorf("store Anthropic key: %w", err)
+		}
+		orgSet.AnthropicAPIKeyRef = secretKeyAnthropicAPIKey
+		return tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet)
+	}); err != nil {
+		log.Printf("[settings] handleAnthropicConnect persist failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to store Claude credentials"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "connected"})
 }
 
 // handleJiraStatuses returns available statuses for given Jira projects.

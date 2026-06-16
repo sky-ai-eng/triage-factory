@@ -400,7 +400,11 @@ type orgSettingsUpdate struct {
 	JiraPAT             *string `json:"jira_pat"`
 	JiraPollInterval    string  `json:"jira_poll_interval,omitempty"`
 	MaxLLMModelTier     *string `json:"max_llm_model_tier"`
-	AnthropicAPIKey     *string `json:"anthropic_api_key"`
+	// NOTE: the Anthropic API key is deliberately NOT a field here. It is
+	// writable only through the validated POST /api/anthropic/connect endpoint
+	// (which clears it on an empty key), so the bulk settings form can never be
+	// an unvalidated back door into the vault. A stray anthropic_api_key in the
+	// request body is ignored by the decoder, not stored.
 }
 
 func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
@@ -624,19 +628,9 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 		if err := integrations.Save(r.Context(), tx.Secrets, orgID, creds); err != nil {
 			return fmt.Errorf("save credentials: %w", err)
 		}
-		if req.AnthropicAPIKey != nil {
-			if *req.AnthropicAPIKey == "" {
-				if _, err := tx.Secrets.Delete(r.Context(), orgID, "anthropic_api_key"); err != nil {
-					return fmt.Errorf("clear Anthropic key: %w", err)
-				}
-				orgSet.AnthropicAPIKeyRef = ""
-			} else {
-				if err := tx.Secrets.Put(r.Context(), orgID, "anthropic_api_key", *req.AnthropicAPIKey, "Org's Anthropic API key"); err != nil {
-					return fmt.Errorf("save Anthropic key: %w", err)
-				}
-				orgSet.AnthropicAPIKeyRef = "anthropic_api_key"
-			}
-		}
+		// The Anthropic API key is intentionally not written here — it has its
+		// own validated capture endpoint (POST /api/anthropic/connect). See the
+		// note on orgSettingsUpdate.
 		return tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet)
 	}); err != nil {
 		internalError(w, "settings/org", err)
