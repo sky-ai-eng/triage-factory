@@ -57,19 +57,24 @@ func newReloader(a *App) *reloader {
 // profiles → stop pollers → re-profile → restart. Multi mode can't
 // selectively restart a process-global loop without re-polling every tenant
 // against shared API budgets, so it just re-dues the changed org.
+//
+// The announce-pending flags are armed only on the local path: the announcer
+// is keyed by source (not org), so arming "github" before the multi early
+// return would let the next GitHub completion for ANY org consume it and ship
+// the "first poll complete" toast to the wrong tenant (poll-tracker routes by
+// evt.OrgID). The one-shot toast stays a local-mode (N=1) affordance.
 func (r *reloader) onGitHubChanged(orgID string) {
-	log.Println("[server] GitHub config changed, full restart...")
-	r.announce.setPending("github")
-
 	if runmode.Current() != runmode.ModeLocal {
-		log.Printf("[server] GitHub changed for org %s: multi-mode re-dues that org only (no fleet restart)", orgID)
+		log.Printf("[server] GitHub config changed for org %s: multi-mode re-dues that org only (no fleet restart)", orgID)
 		r.pollerMgr.PollSoon("github", orgID)
 		return
 	}
 
-	// Local mode also restarts the Jira poller below, so announce its next
-	// completion too. Multi mode took the early return above without touching
-	// Jira, so it must not arm a spurious "first Jira poll" toast.
+	log.Println("[server] GitHub config changed, full restart...")
+	// Local mode restarts both pollers below (N=1, no fleet to stampede), so arm
+	// the one-shot "config took effect" toast for each; the first post-restart
+	// completion of each source clears its flag.
+	r.announce.setPending("github")
 	r.announce.setPending("jira")
 
 	// Local mode: N=1, so there's no fleet to stampede. The spawner +
