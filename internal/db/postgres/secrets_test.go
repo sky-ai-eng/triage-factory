@@ -643,6 +643,24 @@ func TestSecretStore_Postgres_PutUserSystem_NoClaimsWriteBack(t *testing.T) {
 	}
 }
 
+// TestSecretStore_Postgres_EmptyKeyRejected pins the org_secrets_key_nonempty
+// CHECK: a secret must have a name. An empty key is a caller bug and is
+// refused at write time rather than silently stored under "".
+func TestSecretStore_Postgres_EmptyKeyRejected(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID := seedPgOrgAndUserForSecrets(t, h)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+		return pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.Put(ctx, orgID, "", "v", "")
+	})
+	if err == nil {
+		t.Fatalf("Put with empty key succeeded; org_secrets_key_nonempty CHECK missing")
+	}
+}
+
 func seedPgOrgAndUserForSecrets(t *testing.T, h *pgtest.Harness) (orgID, userID string) {
 	t.Helper()
 	orgID = uuid.New().String()

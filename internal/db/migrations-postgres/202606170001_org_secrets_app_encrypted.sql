@@ -20,6 +20,12 @@
 -- functions are dropped at the bottom of this migration.
 
 CREATE TABLE public.org_secrets (
+    -- Surrogate PK. The natural key (org_id, COALESCE(user_id, …), key) can't
+    -- serve as one — it's an expression over a nullable column — so a surrogate
+    -- id carries the PK that the rest of this schema, logical replication / CDC,
+    -- and the Supabase tooling all expect. The unique index below is what
+    -- actually dedups and what the UPSERTs target.
+    id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     org_id      uuid NOT NULL REFERENCES public.orgs(id) ON DELETE CASCADE,
     -- NULL for org-scope secrets; the owning user's id for per-user
     -- secrets (the Jira "act as yourself" credential). The two scopes
@@ -34,7 +40,15 @@ CREATE TABLE public.org_secrets (
     nonce       bytea NOT NULL,
     description text NOT NULL DEFAULT '',
     created_at  timestamptz NOT NULL DEFAULT now(),
-    updated_at  timestamptz NOT NULL DEFAULT now()
+    updated_at  timestamptz NOT NULL DEFAULT now(),
+    -- Schema-level invariants (defense-in-depth — the app is the only writer
+    -- and always satisfies them). A secret must have a name; AES-256-GCM uses a
+    -- 12-byte nonce and appends a 16-byte auth tag, so ciphertext is never
+    -- shorter than the tag. Corruption or a manual mis-insert trips here at
+    -- write time instead of surfacing as a decrypt failure much later.
+    CONSTRAINT org_secrets_key_nonempty CHECK (key <> ''),
+    CONSTRAINT org_secrets_nonce_len CHECK (octet_length(nonce) = 12),
+    CONSTRAINT org_secrets_ciphertext_len CHECK (octet_length(ciphertext) >= 16)
 );
 
 -- At most one row per (scope, key). user_id NULL (org scope) collapses to

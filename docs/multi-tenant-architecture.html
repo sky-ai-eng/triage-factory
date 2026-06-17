@@ -1768,6 +1768,7 @@ Set-Cookie: sid=<span class="num">a1b2c3d4-...</span>;     <span class="com">// 
 <span class="com">-- Postgres-side key to lose. vault/pgsodium stay installed but unused.</span>
 
 <span class="kw">CREATE TABLE</span> org_secrets (
+  id          <span class="kw">UUID PRIMARY KEY DEFAULT</span> gen_random_uuid(),  <span class="com">-- surrogate PK (natural key is an expr over a nullable col)</span>
   org_id      <span class="kw">UUID NOT NULL REFERENCES</span> orgs(id) <span class="kw">ON DELETE CASCADE</span>,
   user_id     <span class="kw">UUID REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,   <span class="com">-- NULL = org scope</span>
   key         <span class="kw">TEXT NOT NULL</span>,                                    <span class="com">-- e.g. 'github_pat', 'jira_token/&lt;host&gt;'</span>
@@ -1775,7 +1776,10 @@ Set-Cookie: sid=<span class="num">a1b2c3d4-...</span>;     <span class="com">// 
   nonce       <span class="kw">BYTEA NOT NULL</span>,                                   <span class="com">-- 12-byte GCM nonce</span>
   description <span class="kw">TEXT NOT NULL DEFAULT</span> <span class="str">''</span>,
   created_at  <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now(),
-  updated_at  <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now()
+  updated_at  <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now(),
+  <span class="kw">CONSTRAINT</span> org_secrets_key_nonempty   <span class="kw">CHECK</span> (key &lt;&gt; <span class="str">''</span>),
+  <span class="kw">CONSTRAINT</span> org_secrets_nonce_len      <span class="kw">CHECK</span> (octet_length(nonce) = 12),
+  <span class="kw">CONSTRAINT</span> org_secrets_ciphertext_len <span class="kw">CHECK</span> (octet_length(ciphertext) &gt;= 16)
 );
 <span class="com">-- One row per (scope, key); org scope collapses NULL user_id to the zero UUID.</span>
 <span class="kw">CREATE UNIQUE INDEX</span> org_secrets_scope_key_uniq <span class="kw">ON</span> org_secrets (

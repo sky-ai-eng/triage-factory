@@ -50,6 +50,13 @@ const EnvSecretEncryptionKey = "TF_SECRET_ENCRYPTION_KEY"
 // security property is identical to the vault gate; only a cross-tenant
 // *read* shifts from "raise" to "empty", which actually matches the
 // SecretStore "missing → ("", nil)" contract.
+//
+// The AES-GCM envelope is intentionally NOT bound to its row identity via
+// additional authenticated data, so a direct-DB-write attacker bypassing
+// the app layer could relocate a ciphertext between rows. That's outside
+// the primary threat model (the SecretStore API only ever encrypts a
+// supplied plaintext, and RLS gates the normal paths) and is tracked as a
+// hardening follow-up in TFAC-403.
 type secretStore struct {
 	app   queryer
 	admin queryer
@@ -65,7 +72,9 @@ var _ db.SecretStore = (*secretStore)(nil)
 // upsertSQL writes (or rotates) one row. $2 is the user_id: pass nil for
 // org-scope (stored NULL), the user's id for per-user. The ON CONFLICT
 // target names the exact expression of org_secrets_scope_key_uniq so
-// rotations overwrite in place.
+// rotations overwrite in place — including description, so passing ""
+// on rotation clears it (parity with the prior vault behavior;
+// description is informational only).
 const upsertSQL = `
 INSERT INTO public.org_secrets (org_id, user_id, key, ciphertext, nonce, description)
 VALUES ($1::uuid, $2::uuid, $3::text, $4, $5, $6)
