@@ -5,8 +5,10 @@ import (
 	cryptorand "crypto/rand"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/url"
 	"os"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -67,7 +69,7 @@ func (a *App) wireAuth(ctx context.Context) error {
 		return err
 	}
 
-	verifier, err := verify.NewVerifier(
+	verifier, err := newVerifierWithRetry(
 		ctx,
 		os.Getenv("TF_GOTRUE_JWKS_URL"),
 		os.Getenv("TF_GOTRUE_ISSUER"),
@@ -98,6 +100,42 @@ func (a *App) wireAuth(ctx context.Context) error {
 		return fmt.Errorf("wire auth deps: %w", err)
 	}
 	return nil
+}
+
+// newVerifierWithRetry builds the JWKS verifier, tolerating a GoTrue that
+// is still coming up. verify.NewVerifier blocks on the initial JWKS fetch
+// and fails fast on any error — including the "connection refused" of a
+// GoTrue that hasn't bound its port yet. Behind docker-compose that race
+// can't happen (depends_on: gotrue: service_healthy gates this boot), but
+// Fly and a bare `docker run` have no such ordering, so a cold-start race
+// would crash-loop the container. This mirrors entrypoint.sh's bounded
+// retry around `migrate up` against a not-yet-ready Postgres: ride out the
+// transient window, surface the real error if it never resolves. A
+// cancelled ctx (SIGTERM during boot) aborts immediately.
+func newVerifierWithRetry(ctx context.Context, jwksURL, issuer, audience string) (*verify.Verifier, error) {
+	const (
+		attempts = 30
+		backoff  = 2 * time.Second
+	)
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		v, err := verify.NewVerifier(ctx, jwksURL, issuer, audience)
+		if err == nil {
+			return v, nil
+		}
+		lastErr = err
+		if attempt == attempts {
+			break
+		}
+		log.Printf("[auth] JWKS verifier not ready (attempt %d/%d): %v; retrying in %s",
+			attempt, attempts, err, backoff)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(backoff):
+		}
+	}
+	return nil, fmt.Errorf("after %d attempts: %w", attempts, lastErr)
 }
 
 // validateHTTPURL parses raw and rejects anything that isn't an absolute

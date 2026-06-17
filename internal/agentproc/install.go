@@ -65,7 +65,8 @@ func doInstall() (string, error) {
 		return "", fmt.Errorf("resolve sdk dir: %w", err)
 	}
 	// Host-global install: the SDK toolchain is identical for every
-	// tenant, so it lives under the state root with no org segment.
+	// tenant, so it lives under the toolchain root (TF_TOOLCHAIN_ROOT,
+	// else the state root) with no org segment.
 	sdkDir := paths.SDKDir()
 	if err := os.MkdirAll(sdkDir, 0o755); err != nil {
 		return "", fmt.Errorf("create %s: %w", sdkDir, err)

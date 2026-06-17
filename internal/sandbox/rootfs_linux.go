@@ -75,8 +75,9 @@ func doEnsureRootfs(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("rootfs: %w", err)
 	}
 	// Host-global cache: shared read-only across all tenants, so it hangs
-	// off the state root with no org segment (org-scoping it would
-	// re-extract an identical toolchain per org).
+	// off the toolchain root (TF_TOOLCHAIN_ROOT, else the state root) with
+	// no org segment (org-scoping it would re-extract an identical
+	// toolchain per org).
 	cacheDir := paths.SandboxRootfsDir(cacheKey)
 
 	// Sentinel file marking a successful extraction + toolchain

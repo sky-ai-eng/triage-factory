@@ -15,8 +15,9 @@
 //   - Class 2, host-global persistent — the sandbox rootfs cache and the
 //     Agent SDK install. Shared read-only across every tenant by design;
 //     org-scoping them would re-multiply identical toolchains per org
-//     and defeat page-cache sharing, so they hang off StateRoot
-//     directly, never OrgRoot.
+//     and defeat page-cache sharing, so they hang off ToolchainRoot (the
+//     runtime image pins it via TF_TOOLCHAIN_ROOT to the fixed bake path;
+//     it otherwise falls back to StateRoot), never OrgRoot.
 //   - Class 3, local-only — the SQLite DB. Multi mode uses Postgres, so
 //     this hangs off StateRoot with no org segment.
 //
@@ -53,6 +54,12 @@ const defaultMultiStateRoot = "/data"
 
 // envStateRoot overrides the multi-mode state-root base.
 const envStateRoot = "TF_STATE_ROOT"
+
+// envToolchainRoot overrides the toolchain-root base (the Agent SDK
+// install + sandbox rootfs cache). The runtime image sets it so the
+// baked toolchain resolves to a fixed path independent of where
+// TF_STATE_ROOT points the tenant data. See ToolchainRoot.
+const envToolchainRoot = "TF_TOOLCHAIN_ROOT"
 
 // testRoot, when non-empty, overrides StateRoot for the duration of a
 // test (set via SetForTest, restored through t.Cleanup). Guarded by
@@ -187,19 +194,46 @@ func CuratorSharedRepoDir(orgID, owner, repo string) string {
 
 // --- Class 2: host-global persistent (NEVER org-scoped) ------------------
 
-// SandboxRootfsDir is the cached sandbox rootfs for a toolchain cache
-// key: <StateRoot>/sandbox/rootfs-<cacheKey>. Mounted read-only and
-// shared across all tenants, hence StateRoot rather than OrgRoot —
-// org-scoping it would re-extract an identical multi-hundred-MB
-// toolchain per org and defeat page-cache sharing.
-func SandboxRootfsDir(cacheKey string) string {
-	return filepath.Join(StateRoot(), "sandbox", "rootfs-"+cacheKey)
+// ToolchainRoot is the base for image-baked, host-global toolchain
+// artifacts — the Agent SDK install and the sandbox rootfs cache. It
+// resolves TF_TOOLCHAIN_ROOT if set, else falls back to StateRoot.
+//
+// The fallback preserves the historical layout: with the env unset
+// (every laptop, and host-binary multi-mode dev runs) the toolchain
+// lives under the state root exactly as before, so on-disk paths are
+// byte-for-byte unchanged and EnsureSDK still installs somewhere
+// writable.
+//
+// The override exists for the one thing the state root can't serve: the
+// runtime image bakes the SDK at BUILD time at a fixed path, but
+// StateRoot is operator-configurable (TF_STATE_ROOT) and doubles as the
+// data-volume mount point. Resolving the baked toolchain through
+// StateRoot would let a TF_STATE_ROOT override — or a Fly/k8s volume
+// mounted at the data root — shadow or orphan the baked files, and the
+// runtime layer has no node/npm to reinstall them. So the image sets
+// TF_TOOLCHAIN_ROOT to the fixed bake path (/opt/triagefactory), pinning
+// the toolchain there in every mode while TF_STATE_ROOT stays free for
+// tenant data.
+func ToolchainRoot() string {
+	if env := strings.TrimSpace(os.Getenv(envToolchainRoot)); env != "" {
+		return env
+	}
+	return StateRoot()
 }
 
-// SDKDir is the Agent SDK install: <StateRoot>/sdk. The toolchain is
-// identical for every tenant, so it is host-global, not org-scoped.
+// SandboxRootfsDir is the cached sandbox rootfs for a toolchain cache
+// key: <ToolchainRoot>/sandbox/rootfs-<cacheKey>. Mounted read-only and
+// shared across all tenants — host-global, never org-scoped (org-scoping
+// it would re-extract an identical multi-hundred-MB tree per org and
+// defeat page-cache sharing).
+func SandboxRootfsDir(cacheKey string) string {
+	return filepath.Join(ToolchainRoot(), "sandbox", "rootfs-"+cacheKey)
+}
+
+// SDKDir is the Agent SDK install: <ToolchainRoot>/sdk. Identical for
+// every tenant, so host-global rather than org-scoped.
 func SDKDir() string {
-	return filepath.Join(StateRoot(), "sdk")
+	return filepath.Join(ToolchainRoot(), "sdk")
 }
 
 // --- Class 3: local-only -------------------------------------------------

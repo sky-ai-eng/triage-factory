@@ -299,12 +299,19 @@ services:
       - apparmor=unconfined
       - seccomp=unconfined
     volumes:
-      # Persist the SDK + sandbox rootfs cache + .env across container
-      # restarts. Without this, every `docker compose down/up` would
-      # re-run `npm ci` and re-download the alpine rootfs (~5 minutes
-      # cold).  Compose-managed volume so a host-path bind doesn't
-      # need to be created up front.
-      - tf-home:/root/.triagefactory
+      # Host-global toolchain cache: the runtime-extracted sandbox rootfs
+      # (~hundreds of MB). Kept warm across `docker compose down/up` so a
+      # restart doesn't re-extract the alpine tree (~5 min cold). The Agent
+      # SDK is baked into the image at /opt/triagefactory/sdk (a sibling of
+      # this mount) and deliberately NOT volume-mounted: a named volume over
+      # it would shadow the image's copy and pin a stale SDK across image
+      # bumps, so the image always wins for the SDK while only the cache
+      # persists here.
+      - tf-rootfs:/opt/triagefactory/sandbox
+      # Tenant-data caches under StateRoot (/data in multi): per-org worktree
+      # bare clones + curator shared repos. Re-seedable on demand, but
+      # persisting avoids a full re-clone on every restart.
+      - tf-data:/data
     ports:
       - "3000:3000"
     healthcheck:
@@ -316,5 +323,6 @@ services:
 
 volumes:
   pg-data:
-  tf-home:
+  tf-rootfs:
+  tf-data:
   minio-data:

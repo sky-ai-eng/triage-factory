@@ -173,6 +173,7 @@ func TestOrgRoot_MultiDefaultSentinelStripped(t *testing.T) {
 func TestResolvers_LocalLayout(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	SetForTest(t, "/s")
+	t.Setenv(envToolchainRoot, "") // hermetic: ignore any ambient TF_TOOLCHAIN_ROOT
 	cases := []struct{ name, got, want string }{
 		{"StateRoot", StateRoot(), "/s"},
 		{"OrgRoot", OrgRoot(realOrg), "/s"},
@@ -198,6 +199,7 @@ func TestResolvers_LocalLayout(t *testing.T) {
 func TestResolvers_MultiLayout(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	SetForTest(t, "/s")
+	t.Setenv(envToolchainRoot, "") // hermetic: ignore any ambient TF_TOOLCHAIN_ROOT
 	orgBase := filepath.Join("/s", "orgs", realOrg)
 	cases := []struct{ name, got, want string }{
 		// Class 1 — org-scoped.
@@ -217,6 +219,48 @@ func TestResolvers_MultiLayout(t *testing.T) {
 		if c.got != c.want {
 			t.Errorf("%s = %q, want %q", c.name, c.got, c.want)
 		}
+	}
+}
+
+// TestToolchainRoot_EnvOverrideDecouplesFromStateRoot pins the fix for
+// the multi-mode container state-root mismatch: when TF_TOOLCHAIN_ROOT is
+// set (the runtime image does this), the Class-2 toolchain resolvers land
+// on that fixed path regardless of StateRoot — so an image-baked SDK is
+// never shadowed by wherever TF_STATE_ROOT points tenant data.
+func TestToolchainRoot_EnvOverrideDecouplesFromStateRoot(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	SetForTest(t, "/data")
+	t.Setenv(envToolchainRoot, "/opt/triagefactory")
+
+	if got := ToolchainRoot(); got != "/opt/triagefactory" {
+		t.Errorf("ToolchainRoot() = %q, want the TF_TOOLCHAIN_ROOT override", got)
+	}
+	if got, want := SDKDir(), filepath.Join("/opt/triagefactory", "sdk"); got != want {
+		t.Errorf("SDKDir() = %q, want %q (decoupled from StateRoot)", got, want)
+	}
+	if got, want := SandboxRootfsDir("abc"), filepath.Join("/opt/triagefactory", "sandbox", "rootfs-abc"); got != want {
+		t.Errorf("SandboxRootfsDir() = %q, want %q", got, want)
+	}
+	// StateRoot (tenant data) is untouched by the toolchain override.
+	if got := StateRoot(); got != "/data" {
+		t.Errorf("StateRoot() = %q, want /data (unaffected by TF_TOOLCHAIN_ROOT)", got)
+	}
+}
+
+// TestToolchainRoot_UnsetFollowsStateRoot is the back-compat guarantee:
+// with no override the toolchain lives under the state root exactly as it
+// did before the split (every laptop, and host-binary multi-mode dev runs),
+// so existing on-disk layouts are unchanged.
+func TestToolchainRoot_UnsetFollowsStateRoot(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	SetForTest(t, "/s")
+	t.Setenv(envToolchainRoot, "")
+
+	if got := ToolchainRoot(); got != "/s" {
+		t.Errorf("ToolchainRoot() = %q, want StateRoot when env unset", got)
+	}
+	if got, want := SDKDir(), filepath.Join("/s", "sdk"); got != want {
+		t.Errorf("SDKDir() = %q, want %q", got, want)
 	}
 }
 

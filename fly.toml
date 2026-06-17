@@ -40,6 +40,15 @@ primary_region = "iad"
 [env]
   TF_MODE = "multi"
 
+# State paths on Fly: the Agent SDK is baked into the image at
+# /opt/triagefactory/sdk and pinned there via TF_TOOLCHAIN_ROOT (set in
+# docker/Dockerfile, inherited by this deploy), so it always ships in the
+# image layer — no volume required. The sandbox rootfs cache
+# (/opt/triagefactory/sandbox) and the tenant-data caches (StateRoot = /data:
+# per-org worktree + curator clones) are re-derived on demand and run
+# ephemeral here (no [[mounts]]); add a [[mounts]] for either path to keep it
+# warm across machine restarts.
+
 [deploy]
   # Idempotent forward migrations. Runs in a one-shot Machine before
   # rolling new Machines, so a schema-breaking release is caught

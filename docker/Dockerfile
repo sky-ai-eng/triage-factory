@@ -150,9 +150,19 @@ RUN set -eux; \
     echo "${EXPECTED_SHA}  /usr/local/bin/runsc" | sha512sum -c -; \
     chmod 0755 /usr/local/bin/runsc
 
-# Pre-installed Agent SDK. EnsureSDK reads os.UserHomeDir() → /root
-# in the container and matches against this path.
-COPY --from=sdk-builder /sdk-install /root/.triagefactory/sdk
+# Pre-installed Agent SDK. EnsureSDK resolves it via paths.SDKDir() =
+# <ToolchainRoot>/sdk, and ToolchainRoot honors TF_TOOLCHAIN_ROOT (set
+# below), so the binary finds this baked copy at /opt/triagefactory/sdk
+# in every mode — decoupled from wherever TF_STATE_ROOT points tenant
+# data. The runtime layer has no node/npm, so this bake is the ONLY copy
+# the sandbox ever gets.
+COPY --from=sdk-builder /sdk-install /opt/triagefactory/sdk
+
+# Pin the host-global toolchain root to the baked path above so BOTH the
+# default local mode and multi mode (TF_MODE=multi at deploy) resolve the
+# SDK + sandbox rootfs cache here, never under TF_STATE_ROOT (which
+# operators repoint at a tenant-data volume). See internal/paths.ToolchainRoot.
+ENV TF_TOOLCHAIN_ROOT=/opt/triagefactory
 
 # The TF binary itself.
 COPY --from=go-builder /out/triagefactory /usr/local/bin/triagefactory
