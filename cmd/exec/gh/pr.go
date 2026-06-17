@@ -154,21 +154,25 @@ func prView(client ghAPI, args []string) {
 // HTTP-406 fallback path where full.diff was reassembled from per-file
 // patches rather than fetched verbatim.
 type diffManifest struct {
-	Owner        string             `json:"owner"`
-	Repo         string             `json:"repo"`
-	Number       int                `json:"number"`
-	HeadSHA      string             `json:"head_sha"`
-	BaseRef      string             `json:"base_ref"`
-	ChangedFiles int                `json:"changed_files"`
-	Additions    int                `json:"additions"`
-	Deletions    int                `json:"deletions"`
-	Dir          string             `json:"dir"`
-	FullDiffPath string             `json:"full_diff_path"`
-	Truncated    bool               `json:"truncated"`
-	Files        []diffManifestFile `json:"files"`
+	Owner        string        `json:"owner"`
+	Repo         string        `json:"repo"`
+	Number       int           `json:"number"`
+	HeadSHA      string        `json:"head_sha"`
+	BaseRef      string        `json:"base_ref"`
+	ChangedFiles int           `json:"changed_files"`
+	Additions    int           `json:"additions"`
+	Deletions    int           `json:"deletions"`
+	Dir          string        `json:"dir"`
+	FullDiffPath string        `json:"full_diff_path"`
+	Truncated    bool          `json:"truncated"`
+	Files        []fileSummary `json:"files"`
 }
 
-type diffManifestFile struct {
+// fileSummary is the per-file overview shared by `pr diff`'s manifest and
+// `pr files`: path, change status, line counts, a binary hint, and the
+// pre-rename path. Deliberately omits the patch — diff content is served by
+// `pr diff`'s full.diff, never inlined into these listings.
+type fileSummary struct {
 	Path             string `json:"path"`
 	Status           string `json:"status"`
 	Additions        int    `json:"additions"`
@@ -297,7 +301,7 @@ func persistPRDiff(client ghAPI, cwd, owner, repo string, number int) (diffManif
 		Dir:          destDir,
 		FullDiffPath: fullDiffPath,
 		Truncated:    truncated,
-		Files:        make([]diffManifestFile, 0, len(files)),
+		Files:        make([]fileSummary, 0, len(files)),
 	}
 	// Some hosts don't populate the PR-level counts; fall back to the file
 	// list length so changed_files is never a misleading zero.
@@ -305,7 +309,7 @@ func persistPRDiff(client ghAPI, cwd, owner, repo string, number int) (diffManif
 		manifest.ChangedFiles = len(files)
 	}
 	for _, f := range files {
-		manifest.Files = append(manifest.Files, diffManifestFile{
+		manifest.Files = append(manifest.Files, fileSummary{
 			Path:             f.Filename,
 			Status:           f.Status,
 			Additions:        f.Additions,
@@ -421,11 +425,51 @@ func singleFileDiff(files []ghclient.PRFile, path string) string {
 	return ""
 }
 
+// prFilesResult is the slim overview `pr files` prints: PR-level totals plus a
+// per-file summary, with no patch content. The diff itself is served by
+// `pr diff` — `pr files` is the cheapest "what changed, how big" look (one API
+// call, no full-diff fetch, no disk write).
+type prFilesResult struct {
+	Owner        string        `json:"owner"`
+	Repo         string        `json:"repo"`
+	Number       int           `json:"number"`
+	ChangedFiles int           `json:"changed_files"`
+	Additions    int           `json:"additions"`
+	Deletions    int           `json:"deletions"`
+	Files        []fileSummary `json:"files"`
+}
+
+// buildPRFilesResult assembles the slim envelope from the raw file list,
+// summing the per-file counts for the PR-level totals (so `pr files` needs no
+// extra GetPR call) and dropping the patch.
+func buildPRFilesResult(owner, repo string, number int, files []ghclient.PRFile) prFilesResult {
+	result := prFilesResult{
+		Owner:        owner,
+		Repo:         repo,
+		Number:       number,
+		ChangedFiles: len(files),
+		Files:        make([]fileSummary, 0, len(files)),
+	}
+	for _, f := range files {
+		result.Additions += f.Additions
+		result.Deletions += f.Deletions
+		result.Files = append(result.Files, fileSummary{
+			Path:             f.Filename,
+			Status:           f.Status,
+			Additions:        f.Additions,
+			Deletions:        f.Deletions,
+			Binary:           isBinaryFile(f),
+			PreviousFilename: f.PreviousFilename,
+		})
+	}
+	return result
+}
+
 func prFiles(client ghAPI, args []string) {
 	owner, repo, number := parseRepoAndNumber(args)
 	files, err := client.GetPRFiles(owner, repo, number)
 	exitOnErr(err)
-	printJSON(files)
+	printJSON(buildPRFilesResult(owner, repo, number, files))
 }
 
 func prThreadView(client ghAPI, args []string) {

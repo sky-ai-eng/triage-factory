@@ -429,7 +429,7 @@ func TestPersistPRDiff_BinaryAndRename(t *testing.T) {
 	if err != nil {
 		t.Fatalf("persistPRDiff: %v", err)
 	}
-	byPath := map[string]diffManifestFile{}
+	byPath := map[string]fileSummary{}
 	for _, f := range m.Files {
 		byPath[f.Path] = f
 	}
@@ -601,6 +601,58 @@ func TestPersistPRDiff_RejectsSymlinkedScratch(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "symlinked path component") {
 		t.Errorf("error should mention symlink, got: %v", err)
+	}
+}
+
+// TestBuildPRFilesResult verifies the slim `pr files` envelope: totals are
+// summed from the file list, the patch is never carried, binary/rename
+// metadata is populated, and an empty file list yields an empty (non-null)
+// files array.
+func TestBuildPRFilesResult(t *testing.T) {
+	files := []ghclient.PRFile{
+		{Filename: "main.go", Status: "modified", Additions: 12, Deletions: 3, Patch: "@@ -1 +1,2 @@\n a\n+b"},
+		{Filename: "image.png", Status: "added", Additions: 0, Deletions: 0},                                             // binary
+		{Filename: "new.go", Status: "renamed", PreviousFilename: "old.go", Additions: 1, Deletions: 1, Patch: "@@..@@"}, // rename w/ edits
+	}
+	got := buildPRFilesResult("owner", "repo", 42, files)
+
+	if got.Owner != "owner" || got.Repo != "repo" || got.Number != 42 {
+		t.Errorf("envelope identity mismatch: %+v", got)
+	}
+	if got.ChangedFiles != 3 {
+		t.Errorf("changed_files = %d, want 3", got.ChangedFiles)
+	}
+	if got.Additions != 13 || got.Deletions != 4 {
+		t.Errorf("totals = +%d -%d, want +13 -4", got.Additions, got.Deletions)
+	}
+	byPath := map[string]fileSummary{}
+	for _, f := range got.Files {
+		byPath[f.Path] = f
+	}
+	if !byPath["image.png"].Binary {
+		t.Error("image.png should be flagged binary")
+	}
+	if byPath["new.go"].PreviousFilename != "old.go" || byPath["new.go"].Binary {
+		t.Errorf("rename row wrong: %+v", byPath["new.go"])
+	}
+
+	// The patch must never survive into the output. fileSummary has no patch
+	// field, so a round-trip through JSON must not contain any hunk text.
+	blob, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(blob), "@@") || strings.Contains(string(blob), "patch") {
+		t.Errorf("serialized pr files output must not carry patch content; got:\n%s", blob)
+	}
+
+	// Empty file list → empty, non-null array (so JSON is [] not null).
+	empty := buildPRFilesResult("owner", "repo", 7, nil)
+	if empty.Files == nil {
+		t.Error("Files should be an empty slice, not nil")
+	}
+	if empty.ChangedFiles != 0 || empty.Additions != 0 || empty.Deletions != 0 {
+		t.Errorf("empty PR totals should be zero: %+v", empty)
 	}
 }
 
