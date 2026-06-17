@@ -37,6 +37,7 @@ func TestComponentTagsRecords(t *testing.T) {
 	log := Component("router")
 
 	SetLevel(slog.LevelInfo)
+	t.Cleanup(func() { SetLevel(slog.LevelInfo) })
 	log.Debug("filtered out")
 	if buf.Len() != 0 {
 		t.Fatalf("debug record emitted at info level: %q", buf.String())

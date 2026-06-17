@@ -4,11 +4,11 @@ import "github.com/sky-ai-eng/triage-factory/internal/logging"
 
 // Component loggers for the HTTP server package (see internal/logging). Each
 // var carries a component= attribute that replaces the old "[prefix]" log
-// tags; the names below are the prefixes the handlers used before the slog
-// migration, so log filtering stays the same.
+// tags. auth/server and jira/server are scoped to distinguish them from the
+// canonical auth and jira packages that own those component names.
 var (
 	approvalDiscardLog = logging.Component("approval-discard")
-	authLog            = logging.Component("auth")
+	authLog            = logging.Component("auth/server")
 	backfillLog        = logging.Component("backfill")
 	dashboardLog       = logging.Component("dashboard")
 	entitiesLog        = logging.Component("entities")
@@ -19,7 +19,7 @@ var (
 	githubConnectLog   = logging.Component("github-connect")
 	githubGroupsLog    = logging.Component("github-groups")
 	githubIdentityLog  = logging.Component("github-identity")
-	jiraLog            = logging.Component("jira")
+	jiraLog            = logging.Component("jira/server")
 	jiraAppLog         = logging.Component("jira-app")
 	jiraConnectLog     = logging.Component("jira-connect")
 	jiraIdentityLog    = logging.Component("jira-identity")

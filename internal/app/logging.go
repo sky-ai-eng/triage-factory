@@ -26,7 +26,7 @@ var (
 	curatorLog     = logging.Component("curator")
 	appLog         = logging.Component("app")
 	pollTrackerLog = logging.Component("poll-tracker")
-	authLog        = logging.Component("auth")
+	authLog        = logging.Component("auth/app")
 	serverLog      = logging.Component("server")
 	bootstrapLog   = logging.Component("bootstrap")
 	cloneStatusLog = logging.Component("clone-status")
