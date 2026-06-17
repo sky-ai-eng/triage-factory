@@ -91,6 +91,36 @@ The headless file backend **requires `TF_SECRET_ENCRYPTION_KEY`** — 32 bytes, 
 
 `TF_SECRETS_BACKEND` overrides the auto-selection: `auto` (default), `keychain` (force the keychain; error if unavailable), or `file` (force the encrypted file). Unlike the four `TRIAGE_FACTORY_*` org-credential overlays, the file backend is writable, so credentials entered in Settings (the Anthropic key, a GitHub App, your per-user Jira token) persist across restarts on a headless box.
 
+### Running headless on a Linux server
+
+Local mode runs fine on a headless server (no desktop, no browser, no OS keychain). This is **single-user local mode** — *not* the multi-tenant deployment in [self-host setup](self-host-setup.md), which is the only thing that needs Postgres, GoTrue, or Docker. All you need here is the binary and one extra environment variable.
+
+1. **Install the binary** (Homebrew or `go build` — see the [README](../README.md)). `$HOME` must be set; state lands in `~/.triagefactory/`.
+
+2. **Generate a secret key.** With no keychain reachable, secrets are kept in an encrypted file (see [Secret storage](#secret-storage) above), which requires `TF_SECRET_ENCRYPTION_KEY`:
+
+   ```bash
+   export TF_SECRET_ENCRYPTION_KEY=$(openssl rand -hex 32)
+   ```
+
+   Persist it where the process reads its environment (a systemd unit's `Environment=`, an `.env`, your shell profile). The server refuses to start headless without it, and losing or changing it means re-entering your credentials.
+
+3. **Run without a browser**, reachable from where you'll use it:
+
+   ```bash
+   ./triagefactory --no-browser --host 0.0.0.0
+   ```
+
+   `--host 0.0.0.0` exposes the API on all interfaces. The HTTP API is unauthenticated, so only do that on a trusted network — otherwise keep the default loopback bind and reach it over an SSH tunnel:
+
+   ```bash
+   ssh -L 3000:localhost:3000 you@server   # then open http://localhost:3000
+   ```
+
+4. **Finish setup in the browser.** Open the tunneled (or exposed) URL and complete the setup wizard normally — paste your GitHub / Jira / Anthropic credentials once and they persist (encrypted) across restarts.
+
+That's the whole difference from a desktop install: one env key plus `--no-browser`/`--host` or a tunnel.
+
 ### Logging
 
 Logs are structured (Go's `log/slog`) and written to stderr. Two environment variables tune output:
