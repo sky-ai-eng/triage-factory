@@ -10,7 +10,7 @@ import (
 // safeScratchSubdir resolves cwd/<parts...> with a symlink safety check at
 // every path component that already exists. It's the shared dest-resolution
 // primitive behind both `actions download-logs` (ci-logs/<run_id>) and
-// `pr diff` (pr-diffs/<owner>__<repo>__<number>/<sha>): any command that
+// `pr diff` (pr-diffs/<owner>__<repo>__<number>): any command that
 // RemoveAll / MkdirAll / writes under _scratch must route through it so a
 // symlinked component (accidental or malicious) can't redirect those
 // filesystem operations outside the working directory.

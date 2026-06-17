@@ -12,7 +12,7 @@ const HelpText = `GitHub PR Commands:
   gh pr view <number> [--repo o/r] [-v]                  PR details + reviews + comments
   gh pr diff <number> [--repo o/r] [--file <path>] [--stdout]
                                                           Persists the diff to
-                                                          ./_scratch/pr-diffs/<owner>__<repo>__<number>/<sha>/
+                                                          ./_scratch/pr-diffs/<owner>__<repo>__<number>/
                                                           (full.diff + manifest.json) and prints the
                                                           manifest JSON. Use Read/Grep on full.diff.
                                                           --file <path>: print one file's diff inline.

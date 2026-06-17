@@ -232,21 +232,16 @@ func prDiff(client ghAPI, args []string) {
 }
 
 // persistPRDiff fetches the PR's diff + metadata, writes full.diff and
-// manifest.json into a SHA-keyed directory under _scratch/, and returns the
-// manifest. The directory is keyed by (owner, repo, number, head_sha) so a
-// later blueprint step that re-diffs after the branch moved writes a sibling
-// directory instead of clobbering content an earlier step may still
-// reference; re-diffing the *same* head SHA clobbers only that SHA's
-// directory (idempotent re-run).
+// manifest.json into a per-PR directory under _scratch/, and returns the
+// manifest. The directory is keyed by (owner, repo, number) — the task's
+// identity, which the agent always knows — so a later blueprint step can
+// locate an earlier capture without first looking up the head SHA. Each
+// `pr diff` overwrites the capture in place; the manifest records head_sha so
+// a reader that cares about freshness can compare it to the live head.
 func persistPRDiff(client ghAPI, cwd, owner, repo string, number int) (diffManifest, error) {
 	pr, err := client.GetPR(owner, repo, number, false)
 	if err != nil {
 		return diffManifest{}, fmt.Errorf("fetch PR #%d: %w", number, err)
-	}
-	if pr.HeadSHA == "" {
-		return diffManifest{}, fmt.Errorf(
-			"PR #%d has no head SHA — the diff cannot be keyed to a commit; the PR/worktree appears to be in a bad state",
-			number)
 	}
 
 	// GetPRFiles is needed for the per-file manifest rows and doubles as the
@@ -261,19 +256,18 @@ func persistPRDiff(client ghAPI, cwd, owner, repo string, number int) (diffManif
 		return diffManifest{}, err
 	}
 
-	// Key on the full head SHA (not a truncation) so the directory name the
-	// agent sees here matches the SHA it gets verbatim from `pr view` — no
-	// "did you mean the short form?" mismatch when it goes looking for an
-	// earlier capture.
+	// Key on the task identity (owner, repo, number) the agent always knows,
+	// so it can locate an earlier capture without first resolving the head
+	// SHA. head_sha goes in the manifest for freshness comparison.
 	dirKey := owner + "__" + repo + "__" + strconv.Itoa(number)
-	destDir, err := safeScratchSubdir(cwd, "_scratch", "pr-diffs", dirKey, pr.HeadSHA)
+	destDir, err := safeScratchSubdir(cwd, "_scratch", "pr-diffs", dirKey)
 	if err != nil {
 		return diffManifest{}, err
 	}
 
-	// Clobber any prior capture for this exact SHA so a re-run is
-	// deterministic — stale rows from an older fetch of the same commit
-	// would otherwise mislead the agent reading them back.
+	// Overwrite any prior capture for this PR so a re-diff is deterministic —
+	// stale files from an older fetch (a renamed-away file, a now-current
+	// hunk) would otherwise sit alongside the fresh ones and mislead a reader.
 	if err := os.RemoveAll(destDir); err != nil {
 		return diffManifest{}, fmt.Errorf("clear stale diff directory: %w", err)
 	}

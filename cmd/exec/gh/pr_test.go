@@ -326,7 +326,7 @@ func readManifestFromDisk(t *testing.T, dir string) diffManifest {
 }
 
 // TestPersistPRDiff_WritesFullDiffAndManifest is the happy path: the diff is
-// fetched verbatim, written to a SHA-keyed dir, and the manifest reflects the
+// fetched verbatim, written to a per-PR dir, and the manifest reflects the
 // PR metadata + per-file rows.
 func TestPersistPRDiff_WritesFullDiffAndManifest(t *testing.T) {
 	const sha = "abcdef0123456789abcdef"
@@ -347,7 +347,7 @@ func TestPersistPRDiff_WritesFullDiffAndManifest(t *testing.T) {
 		t.Fatalf("persistPRDiff: %v", err)
 	}
 
-	wantDir := filepath.Join(cwd, "_scratch", "pr-diffs", "owner__repo__42", sha)
+	wantDir := filepath.Join(cwd, "_scratch", "pr-diffs", "owner__repo__42")
 	if m.Dir != wantDir {
 		t.Errorf("Dir = %q, want %q", m.Dir, wantDir)
 	}
@@ -489,72 +489,77 @@ func TestSingleFileDiff(t *testing.T) {
 	}
 }
 
-// TestPersistPRDiff_NoHeadSHAFails guards the hard-fail when the PR has no head
-// SHA — the diff can't be keyed to a commit.
-func TestPersistPRDiff_NoHeadSHAFails(t *testing.T) {
+// TestPersistPRDiff_MissingHeadSHATolerated confirms a PR with no head SHA no
+// longer hard-fails (the dir is keyed by PR number, not SHA): the capture is
+// written and head_sha is simply empty in the manifest.
+func TestPersistPRDiff_MissingHeadSHATolerated(t *testing.T) {
 	srv := newPRDiffServer(t, prDiffBackend{
 		prJSON:    prJSON(t, "", "main", 0, 0, 0),
-		diffBody:  "",
-		filesBody: []byte(`[]`),
+		diffBody:  "diff --git a/foo.go b/foo.go\n@@ -1 +1,2 @@\n a\n+b\n",
+		filesBody: jsonPRFiles(t, []map[string]any{{"filename": "foo.go", "status": "modified", "additions": 1, "deletions": 0, "patch": "@@ -1 +1,2 @@\n a\n+b"}}),
 	})
 	cwd := t.TempDir()
 	client := ghclient.NewClient(srv.URL, "test-token")
-	if _, err := persistPRDiff(client, cwd, "owner", "repo", 42); err == nil {
-		t.Fatal("expected error on missing head SHA, got nil")
+	m, err := persistPRDiff(client, cwd, "owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("persistPRDiff with empty head SHA: %v", err)
+	}
+	if m.HeadSHA != "" {
+		t.Errorf("HeadSHA = %q, want empty", m.HeadSHA)
+	}
+	if _, err := os.Stat(m.FullDiffPath); err != nil {
+		t.Errorf("expected full.diff written: %v", err)
 	}
 }
 
-// TestPersistPRDiff_ReDiff verifies the SHA-keying contract: re-diffing the
-// same SHA clobbers that dir (idempotent), while a moved branch (new SHA)
-// writes a sibling dir and leaves the prior capture intact.
+// TestPersistPRDiff_ReDiff verifies the number-keying contract: re-diffing the
+// same PR overwrites the capture in place (same dir, stale files gone,
+// content/head_sha refreshed) — there is no per-SHA proliferation.
 func TestPersistPRDiff_ReDiff(t *testing.T) {
 	cwd := t.TempDir()
-	const sha1 = "aaaaaaaaaaaa1111"
 	files := jsonPRFiles(t, []map[string]any{
 		{"filename": "foo.go", "status": "modified", "additions": 1, "deletions": 0, "patch": "@@ -1 +1,2 @@\n a\n+b"},
 	})
 	srv1 := newPRDiffServer(t, prDiffBackend{
-		prJSON:    prJSON(t, sha1, "main", 1, 0, 1),
+		prJSON:    prJSON(t, "aaaaaaaaaaaa1111", "main", 1, 0, 1),
 		diffBody:  "diff --git a/foo.go b/foo.go\n@@ -1 +1,2 @@\n a\n+b\n",
 		filesBody: files,
 	})
-	client1 := ghclient.NewClient(srv1.URL, "test-token")
-
-	m1, err := persistPRDiff(client1, cwd, "owner", "repo", 42)
+	m1, err := persistPRDiff(ghclient.NewClient(srv1.URL, "test-token"), cwd, "owner", "repo", 42)
 	if err != nil {
 		t.Fatalf("first persistPRDiff: %v", err)
 	}
-	// Drop a stale file into the SHA dir; a re-diff of the same SHA must clobber it.
+	// Drop a stale file into the dir; the re-diff must clobber it.
 	stale := filepath.Join(m1.Dir, "stale.txt")
 	if err := os.WriteFile(stale, []byte("stale"), 0o644); err != nil {
 		t.Fatalf("write stale file: %v", err)
 	}
-	if _, err := persistPRDiff(client1, cwd, "owner", "repo", 42); err != nil {
-		t.Fatalf("re-diff same SHA: %v", err)
-	}
-	if _, err := os.Stat(stale); !os.IsNotExist(err) {
-		t.Errorf("stale file should have been clobbered on same-SHA re-diff (stat err: %v)", err)
-	}
 
-	// Branch moves: a new SHA writes a sibling dir, leaving m1.Dir intact.
-	const sha2 = "bbbbbbbbbbbb2222"
+	// Branch moved (new head SHA + new content). Same PR → same dir, overwritten.
 	srv2 := newPRDiffServer(t, prDiffBackend{
-		prJSON:    prJSON(t, sha2, "main", 1, 0, 1),
+		prJSON:    prJSON(t, "bbbbbbbbbbbb2222", "main", 1, 0, 1),
 		diffBody:  "diff --git a/foo.go b/foo.go\n@@ -1 +1,2 @@\n a\n+c\n",
 		filesBody: files,
 	})
-	client2 := ghclient.NewClient(srv2.URL, "test-token")
-	m2, err := persistPRDiff(client2, cwd, "owner", "repo", 42)
+	m2, err := persistPRDiff(ghclient.NewClient(srv2.URL, "test-token"), cwd, "owner", "repo", 42)
 	if err != nil {
-		t.Fatalf("second-SHA persistPRDiff: %v", err)
+		t.Fatalf("re-diff: %v", err)
 	}
-	if m1.Dir == m2.Dir {
-		t.Fatalf("different SHAs should map to different dirs, both = %q", m1.Dir)
+	if m1.Dir != m2.Dir {
+		t.Fatalf("same PR should map to the same dir; got %q then %q", m1.Dir, m2.Dir)
 	}
-	for _, d := range []string{m1.Dir, m2.Dir} {
-		if _, err := os.Stat(filepath.Join(d, "full.diff")); err != nil {
-			t.Errorf("expected full.diff under %q: %v", d, err)
-		}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("stale file should have been clobbered on re-diff (stat err: %v)", err)
+	}
+	if m2.HeadSHA != "bbbbbbbbbbbb2222" {
+		t.Errorf("manifest head_sha = %q, want the refreshed SHA", m2.HeadSHA)
+	}
+	got, err := os.ReadFile(m2.FullDiffPath)
+	if err != nil {
+		t.Fatalf("read full.diff: %v", err)
+	}
+	if !strings.Contains(string(got), "+c") {
+		t.Errorf("full.diff should hold the refreshed content; got:\n%s", got)
 	}
 }
 
