@@ -21,7 +21,7 @@ func TestDashboardBackfillMarker_Postgres(t *testing.T) {
 	dbtest.RunDashboardBackfillMarkerConformance(t, func(t *testing.T) (db.UsersStore, func(t *testing.T) string) {
 		t.Helper()
 		h.Reset(t)
-		stores := pgstore.New(h.AdminDB, h.AdminDB)
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		var n int
 		seedUser := func(t *testing.T) string {
 			t.Helper()
