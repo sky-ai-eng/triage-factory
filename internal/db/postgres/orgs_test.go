@@ -31,7 +31,7 @@ func TestOrgsStore_Postgres_ListActiveSystem_ExcludesSoftDeleted(t *testing.T) {
 		t.Fatalf("soft-delete org: %v", err)
 	}
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	got, err := stores.Orgs.ListActiveSystem(context.Background())
 	if err != nil {
 		t.Fatalf("ListActiveSystem: %v", err)

@@ -24,7 +24,7 @@ import (
 func TestCurator_Postgres_CancelProject_DrainsQueuedRowsUnderRLS(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
@@ -79,7 +79,7 @@ func TestCurator_Postgres_CancelProject_DrainsQueuedRowsUnderRLS(t *testing.T) {
 func TestCurator_Postgres_SystemCancel_FlipsRunningRow(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")

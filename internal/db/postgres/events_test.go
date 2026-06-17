@@ -25,7 +25,7 @@ import (
 // org_id filter and the policy directly.
 func TestEventStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	dbtest.RunEventStoreConformance(t, func(t *testing.T) (db.EventStore, string, dbtest.EventStoreSeeder) {
 		t.Helper()
@@ -49,7 +49,7 @@ func TestEventStore_Postgres(t *testing.T) {
 func TestEventStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	orgA := seedPgOrgForEvents(t, h)
 	orgB := seedPgOrgForEvents(t, h)
@@ -111,7 +111,7 @@ func TestEventStore_Postgres_RLS_AppPoolRequiresClaims(t *testing.T) {
 	t.Run("no_claims_refuses_record", func(t *testing.T) {
 		// Construct a Store wired only against AppDB so Record routes
 		// through the RLS-active pool with no claims set.
-		stores := pgstore.New(h.AppDB, h.AppDB)
+		stores := pgstore.New(h.AppDB, h.AppDB, pgtest.SecretKey)
 		_, err := stores.Events.Record(ctx, orgA, domain.Event{
 			EntityID:  &eid,
 			EventType: domain.EventGitHubPROpened,
@@ -133,7 +133,7 @@ func TestEventStore_Postgres_RLS_AppPoolRequiresClaims(t *testing.T) {
 	// claims principal.
 	t.Run("matching_org_claims_succeeds", func(t *testing.T) {
 		err := h.WithUser(t, aliceA, orgA, func(tx *sql.Tx) error {
-			txStores := pgstore.NewForTx(tx)
+			txStores := pgstore.NewForTx(tx, pgtest.SecretKey)
 			id, err := txStores.Events.Record(ctx, orgA, domain.Event{
 				EntityID:  &eid,
 				EventType: domain.EventGitHubPRMerged,
@@ -159,7 +159,7 @@ func TestEventStore_Postgres_RLS_AppPoolRequiresClaims(t *testing.T) {
 	// different org — Record into orgA's events row is refused.
 	t.Run("cross_org_claims_denied", func(t *testing.T) {
 		err := h.WithUser(t, bobB, orgB, func(tx *sql.Tx) error {
-			txStores := pgstore.NewForTx(tx)
+			txStores := pgstore.NewForTx(tx, pgtest.SecretKey)
 			_, err := txStores.Events.Record(ctx, orgA, domain.Event{
 				EntityID:  &eid,
 				EventType: domain.EventGitHubPRClosed,

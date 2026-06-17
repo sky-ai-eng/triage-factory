@@ -23,7 +23,7 @@ func TestIdentityRouting_Postgres(t *testing.T) {
 	dbtest.RunIdentityRoutingConformance(t, func(t *testing.T) (dbtest.IdentityRoutingStores, dbtest.IdentityRoutingSeeder) {
 		t.Helper()
 		h.Reset(t)
-		stores := pgstore.New(h.AdminDB, h.AdminDB)
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 		var n int // per-subtest uniqueness for emails / slugs
 		seed := dbtest.IdentityRoutingSeeder{

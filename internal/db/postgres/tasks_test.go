@@ -32,7 +32,7 @@ func TestTaskStore_Postgres(t *testing.T) {
 	// AdminDB is fine for behavior conformance; the cross-org leakage
 	// test below exercises the defense-in-depth org_id filter
 	// directly. Same pattern as TestSwipeStore_Postgres.
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	dbtest.RunTaskStoreConformance(t, func(t *testing.T) (db.TaskStore, string, string, string, string, dbtest.TaskSeeder, dbtest.TeamSeeder) {
 		t.Helper()
@@ -159,7 +159,7 @@ func TestTaskStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	entA, _, taskA := seedPgTaskChain(t, h.AdminDB, orgA, userA, "cross-A")
 	_, _, taskB := seedPgTaskChain(t, h.AdminDB, orgB, userB, "cross-B")
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	// Org A's view shouldn't see B's task.
@@ -216,7 +216,7 @@ func TestTaskStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("same_org_user_can_read", func(t *testing.T) {
 		err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-			task, err := pgstore.NewForTx(tx).Tasks.Get(ctx, orgA, taskA)
+			task, err := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.Get(ctx, orgA, taskA)
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -232,7 +232,7 @@ func TestTaskStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("cross_org_read_filtered", func(t *testing.T) {
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			task, err := pgstore.NewForTx(tx).Tasks.Get(ctx, orgA, taskA)
+			task, err := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.Get(ctx, orgA, taskA)
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -257,7 +257,7 @@ func TestTaskStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		entityID, eventID := seedPgEntityEvent(t, h.AdminDB, orgA, "rls-write")
 		orgATeam := firstTeamForOrg(t, h, orgA)
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			_, _, e := pgstore.NewForTx(tx).Tasks.FindOrCreate(
+			_, _, e := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.FindOrCreate(
 				ctx, orgA, orgATeam,
 				entityID, "github:pr:ci_check_failed", "", eventID, 0.5,
 			)
@@ -279,7 +279,7 @@ func TestTaskStore_Postgres_OrgHandlerSentinel(t *testing.T) {
 	orgID, _, _ := seedPgOrgUserAgent(t, h)
 	entityID, eventID := seedPgEntityEvent(t, h.AdminDB, orgID, "sentinel")
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	task, created, err := stores.Tasks.FindOrCreate(

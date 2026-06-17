@@ -32,7 +32,7 @@ func TestSyntheticClaimsWithTx_Postgres_RunsFn_UnderClaimsAndRole(t *testing.T) 
 	h.Reset(t)
 	orgID, userID := seedSyntheticClaimsOrg(t, h, "sc-runs-fn")
 
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 
 	called := false
 	if err := stores.Tx.SyntheticClaimsWithTx(context.Background(), orgID, userID, func(tx db.TxStores) error {
@@ -71,7 +71,7 @@ func TestSyntheticClaimsWithTx_Postgres_CrossOrgLeakage(t *testing.T) {
 		t.Fatalf("seed orgB repo: %v", err)
 	}
 
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 
 	// Run SyntheticClaimsWithTx with userA's claims (orgA). Inside
 	// fn, try to read orgB's repos via the app-pool RepoStore. RLS
@@ -113,7 +113,7 @@ func TestSyntheticClaimsWithTx_Postgres_RejectsLocalDefaultUserID(t *testing.T) 
 	h.Reset(t)
 	orgID, _ := seedSyntheticClaimsOrg(t, h, "sc-reject")
 
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 
 	err := stores.Tx.SyntheticClaimsWithTx(context.Background(), orgID, runmode.LocalDefaultUserID, func(tx db.TxStores) error {
 		t.Errorf("fn should not have run when LocalDefaultUserID was passed")
@@ -138,7 +138,7 @@ func TestSyntheticClaimsWithTx_Postgres_RejectsEmptyUserID(t *testing.T) {
 	h.Reset(t)
 	orgID, _ := seedSyntheticClaimsOrg(t, h, "sc-empty")
 
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 
 	err := stores.Tx.SyntheticClaimsWithTx(context.Background(), orgID, "", func(tx db.TxStores) error {
 		t.Errorf("fn should not have run when userID was empty")
@@ -160,7 +160,7 @@ func TestSyntheticClaimsWithTx_Postgres_RollsBackOnError(t *testing.T) {
 	h.Reset(t)
 	orgID, userID := seedSyntheticClaimsOrg(t, h, "sc-rollback")
 
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	sentinel := errors.New("forced rollback")
 
 	err := stores.Tx.SyntheticClaimsWithTx(context.Background(), orgID, userID, func(tx db.TxStores) error {
@@ -199,7 +199,7 @@ func TestWithTx_Postgres_SurvivesCancelledOriginCtx(t *testing.T) {
 	h.Reset(t)
 	orgID, userID := seedSyntheticClaimsOrg(t, h, "withtx-detached")
 
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 
 	// Build a parent ctx and cancel it immediately — the standin
 	// for "request returned, r.Context() is done."

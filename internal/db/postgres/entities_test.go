@@ -21,7 +21,7 @@ import (
 // exercise the org_id filter through the app pool.
 func TestEntityStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	dbtest.RunEntityStoreConformance(t, func(t *testing.T) (db.EntityStore, string, dbtest.EntitySeeder) {
 		t.Helper()
@@ -41,7 +41,7 @@ func TestEntityStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	orgA, userA := seedPgEntityOrg(t, h)
 	orgB, _ := seedPgEntityOrg(t, h)
@@ -123,7 +123,7 @@ func TestEntityStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	_ = bob
 
 	// Seed an entity in orgA via admin so the row exists.
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 	entA, _, err := stores.Entities.FindOrCreateSystem(ctx, orgA, "github", "owner/repo#rls", "pr", "RLS Entity", "https://example/rls")
 	if err != nil {
@@ -132,7 +132,7 @@ func TestEntityStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("same_org_user_can_read", func(t *testing.T) {
 		err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx).Entities.Get(ctx, orgA, entA.ID)
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Entities.Get(ctx, orgA, entA.ID)
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -148,7 +148,7 @@ func TestEntityStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("cross_org_read_filtered", func(t *testing.T) {
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx).Entities.Get(ctx, orgA, entA.ID)
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Entities.Get(ctx, orgA, entA.ID)
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -168,7 +168,7 @@ func TestEntityStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// WITH CHECK requires org_id = tf.current_org_id(), so 42501
 		// is the expected outcome.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			_, _, e := pgstore.NewForTx(tx).Entities.FindOrCreate(
+			_, _, e := pgstore.NewForTx(tx, pgtest.SecretKey).Entities.FindOrCreate(
 				ctx, orgA, "github", "owner/repo#rls-write", "pr", "Cross-org write", "",
 			)
 			return e
@@ -204,7 +204,7 @@ func seedPgJiraRule(t *testing.T, h *pgtest.Harness, teamID, projectKey string) 
 func TestEntityStore_Postgres_ListActiveJiraTeamScoped(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgID, ownerID := seedPgEntityOrg(t, h)
@@ -303,7 +303,7 @@ func TestEntityStore_Postgres_ListActiveJiraTeamScoped_RLS(t *testing.T) {
 	seedPgJiraRule(t, h, teamA, "AAA")
 	seedPgJiraRule(t, h, teamB, "BBB")
 
-	admin := pgstore.New(h.AdminDB, h.AdminDB)
+	admin := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	entA, _, err := admin.Entities.FindOrCreateSystem(ctx, orgID, "jira", "AAA-1", "issue", "A", "")
 	if err != nil {
 		t.Fatalf("seed AAA-1: %v", err)
@@ -317,7 +317,7 @@ func TestEntityStore_Postgres_ListActiveJiraTeamScoped_RLS(t *testing.T) {
 		t.Helper()
 		ids := map[string]bool{}
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-			rows, e := pgstore.NewForTx(tx).Entities.ListActiveJiraTeamScoped(ctx, orgID, "")
+			rows, e := pgstore.NewForTx(tx, pgtest.SecretKey).Entities.ListActiveJiraTeamScoped(ctx, orgID, "")
 			if e != nil {
 				return e
 			}
@@ -375,7 +375,7 @@ func TestEntityStore_Postgres_ClassificationStatusSystem_NoClaims(t *testing.T) 
 	// q = admin pool, app = app pool — exactly the production spawner
 	// wiring (System reads hit admin). No WithUser wrap anywhere below =
 	// the claims-free background caller the bug report describes.
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 
 	ent, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "github", "owner/repo#cs", "pr", "T", "")
 	if err != nil {

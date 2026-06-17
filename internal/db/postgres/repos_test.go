@@ -22,7 +22,7 @@ import (
 // directly.
 func TestRepoStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	dbtest.RunRepoStoreConformance(t, func(t *testing.T) (db.RepoStore, string) {
 		t.Helper()
@@ -39,7 +39,7 @@ func TestRepoStore_Postgres(t *testing.T) {
 func TestRepoStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	orgA, _, _ := seedPgRepoOrg(t, h)
 	orgB, _, _ := seedPgRepoOrg(t, h)
@@ -127,7 +127,7 @@ func TestRepoStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	_ = bob
 
 	// Seed a repo in orgA via admin so the row exists.
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 	if err := stores.Repos.UpsertSystem(ctx, orgA, domain.RepoProfile{
 		ID: "octo/rls", Owner: "octo", Repo: "rls",
@@ -139,7 +139,7 @@ func TestRepoStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("same_org_user_can_read", func(t *testing.T) {
 		err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx).Repos.Get(ctx, orgA, "octo/rls")
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Repos.Get(ctx, orgA, "octo/rls")
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -155,7 +155,7 @@ func TestRepoStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("cross_org_read_filtered", func(t *testing.T) {
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx).Repos.Get(ctx, orgA, "octo/rls")
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Repos.Get(ctx, orgA, "octo/rls")
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -175,7 +175,7 @@ func TestRepoStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// WITH CHECK requires org_id = tf.current_org_id(), so 42501
 		// is the expected outcome.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			return pgstore.NewForTx(tx).Repos.Upsert(ctx, orgA, domain.RepoProfile{
+			return pgstore.NewForTx(tx, pgtest.SecretKey).Repos.Upsert(ctx, orgA, domain.RepoProfile{
 				ID: "octo/rls-write", Owner: "octo", Repo: "rls-write",
 				Description: "x", ProfileText: "x", DefaultBranch: "main",
 			})

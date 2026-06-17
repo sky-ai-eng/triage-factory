@@ -233,8 +233,9 @@ func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Read App credentials + host. The client_secret lives in Vault; the Get
-	// runs under the claims tx so the multi-mode vault wrapper can decrypt.
+	// Read App credentials + host. The client_secret lives in the SecretStore;
+	// the Get runs under the claims tx so the multi-mode org_secrets read is
+	// claims-gated (RLS) before TF decrypts it app-side.
 	var app *domain.OrgGitHubApp
 	var clientSecret string
 	var orgSet domain.OrgSettings

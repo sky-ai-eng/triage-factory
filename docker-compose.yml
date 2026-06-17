@@ -278,6 +278,10 @@ services:
       TF_PUBLIC_URL: ${TF_PUBLIC_URL:?missing TF_PUBLIC_URL (see .env.example)}
       TF_SESSION_ENCRYPTION_KEY: ${TF_SESSION_ENCRYPTION_KEY:?missing TF_SESSION_ENCRYPTION_KEY (see .env.example)}
       TF_COOKIE_SECRET: ${TF_COOKIE_SECRET:?missing TF_COOKIE_SECRET (see .env.example)}
+      # AES-GCM key for org/user integration secrets in public.org_secrets
+      # (app-encrypted at rest; not Supabase Vault — survives a postgres
+      # container recreate). See .env.example (TFAC-402).
+      TF_SECRET_ENCRYPTION_KEY: ${TF_SECRET_ENCRYPTION_KEY:?missing TF_SECRET_ENCRYPTION_KEY (see .env.example)}
       # Durable-workspace object store. Defaults target the bundled `minio`
       # service; for SaaS / BYO leave the creds and bucket as-is but set
       # TF_BLOB_ENDPOINT in .env to your hosted Supabase Storage / S3 / R2

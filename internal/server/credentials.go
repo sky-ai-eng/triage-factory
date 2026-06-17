@@ -230,8 +230,8 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// SecretStore.Load + repo count both inside the same WithTx so
-	// vault_decrypt sees request.jwt.claims and repos_select RLS runs
+	// SecretStore.Load + repo count both inside the same WithTx so the
+	// org_secrets read sees request.jwt.claims and repos_select RLS runs
 	// under the user's identity. Local mode collapses to one SQLite
 	// tx with the same shape. These feed the config-step fields
 	// (github/jira/github_repos), not the first-run gate.

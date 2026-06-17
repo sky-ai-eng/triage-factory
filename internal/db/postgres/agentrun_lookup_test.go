@@ -24,7 +24,7 @@ func TestAgentRunStore_Postgres_LookupOrgForRunSystem_ReturnsRealOrgID(t *testin
 	orgID, userID, _ := seedPgAgentRunOrg(t, h)
 	promptID := seedPgAgentRunPrompt(t, h, orgID, userID)
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	// Stage the entity + event + task + run chain so the runs row
@@ -79,7 +79,7 @@ func TestAgentRunStore_Postgres_LookupOrgForRunSystem_UnknownReturnsEmpty(t *tes
 	h := pgtest.Shared(t)
 	h.Reset(t)
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	got, err := stores.AgentRuns.LookupOrgForRunSystem(context.Background(), uuid.New().String())
 	if err != nil {
 		t.Fatalf("LookupOrgForRunSystem on unknown run: %v", err)

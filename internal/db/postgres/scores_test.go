@@ -24,7 +24,7 @@ import (
 // raw SQL on AdminDB, since TaskStore hasn't migrated yet (wave 3a).
 func TestScoreStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 
 	dbtest.RunScoreStoreConformance(t, func(t *testing.T) (db.ScoreStore, string, dbtest.ScoreSeeder) {
 		t.Helper()

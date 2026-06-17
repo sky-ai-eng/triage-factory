@@ -22,7 +22,7 @@ import (
 func TestCuratorStore_Postgres_AttributesPerUser(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgID, alice, _ := seedPgProjectOrg(t, h)
@@ -70,7 +70,7 @@ func TestCuratorStore_Postgres_AttributesPerUser(t *testing.T) {
 func TestCuratorStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgA, alice, _ := seedPgProjectOrg(t, h)
@@ -137,7 +137,7 @@ func TestCuratorStore_Postgres_CrossOrgLeakage(t *testing.T) {
 func TestCuratorStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgA, alice, _ := seedPgProjectOrg(t, h)
@@ -165,7 +165,7 @@ func TestCuratorStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("same_org_user_can_read", func(t *testing.T) {
 		err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx).Curator.GetRequest(ctx, orgA, requestA)
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Curator.GetRequest(ctx, orgA, requestA)
 			if err != nil {
 				return fmt.Errorf("GetRequest: %w", err)
 			}
@@ -181,7 +181,7 @@ func TestCuratorStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("cross_org_read_filtered", func(t *testing.T) {
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx).Curator.GetRequest(ctx, orgA, requestA)
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Curator.GetRequest(ctx, orgA, requestA)
 			if err != nil {
 				return fmt.Errorf("GetRequest: %w", err)
 			}
@@ -202,7 +202,7 @@ func TestCuratorStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// first — curator_requests_modify WITH CHECK requires
 		// org_id = tf.current_org_id() and raises 42501.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			_, e := pgstore.NewForTx(tx).Curator.CreateRequest(ctx, orgA, projectA, bob, "bob cross-org")
+			_, e := pgstore.NewForTx(tx, pgtest.SecretKey).Curator.CreateRequest(ctx, orgA, projectA, bob, "bob cross-org")
 			return e
 		})
 		pgtest.AssertRLSViolation(t, err)
@@ -221,7 +221,7 @@ func TestCuratorStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 func TestCuratorStore_Postgres_GetRequestRLS(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgID, alice, _ := seedPgProjectOrg(t, h)
@@ -287,7 +287,7 @@ func TestCuratorStore_Postgres_GetRequestRLS(t *testing.T) {
 func TestCuratorStore_Postgres_InsertPendingContext_Coalesces(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgID, alice, _ := seedPgProjectOrg(t, h)
@@ -326,7 +326,7 @@ func TestCuratorStore_Postgres_InsertPendingContext_Coalesces(t *testing.T) {
 func TestCuratorStore_Postgres_ListPendingContext_MixedConsumed(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgID, alice, _ := seedPgProjectOrg(t, h)
@@ -384,7 +384,7 @@ func TestCuratorStore_Postgres_ListPendingContext_MixedConsumed(t *testing.T) {
 func TestCuratorStore_Postgres_DeletePendingContextForSession(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgID, alice, _ := seedPgProjectOrg(t, h)
@@ -453,7 +453,7 @@ func setProjectSession(t *testing.T, h *pgtest.Harness, projectID, sessionID str
 func TestCuratorStore_Postgres_CancelOrphanedNonTerminalRequests(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgA, alice, _ := seedPgProjectOrg(t, h)

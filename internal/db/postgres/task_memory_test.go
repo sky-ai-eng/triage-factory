@@ -22,7 +22,7 @@ import (
 // the org_id filter directly.
 func TestTaskMemoryStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	dbtest.RunTaskMemoryStoreConformance(t, func(t *testing.T) (db.TaskMemoryStore, string, dbtest.TaskMemorySeeder) {
 		t.Helper()
@@ -51,7 +51,7 @@ func TestTaskMemoryStore_Postgres(t *testing.T) {
 func TestTaskMemoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	orgA, userA := seedPgTaskMemoryOrg(t, h)
 	orgB, userB := seedPgTaskMemoryOrg(t, h)
@@ -140,7 +140,7 @@ func TestTaskMemoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	_, _ = seedPgRunForTaskMemory(t, h, orgB, bob, promptB, "rls-B")
 
 	// Seed a memory row in orgA via admin so the row exists.
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgA, runA, entA, "", "orgA memory"); err != nil {
 		t.Fatalf("seed memory in orgA: %v", err)
@@ -148,7 +148,7 @@ func TestTaskMemoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("same_org_user_can_read", func(t *testing.T) {
 		err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx).TaskMemory.GetRunMemory(ctx, orgA, runA)
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).TaskMemory.GetRunMemory(ctx, orgA, runA)
 			if err != nil {
 				return fmt.Errorf("GetRunMemory: %w", err)
 			}
@@ -164,7 +164,7 @@ func TestTaskMemoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("cross_org_read_filtered", func(t *testing.T) {
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx).TaskMemory.GetRunMemory(ctx, orgA, runA)
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).TaskMemory.GetRunMemory(ctx, orgA, runA)
 			if err != nil {
 				return fmt.Errorf("GetRunMemory: %w", err)
 			}
@@ -190,7 +190,7 @@ func TestTaskMemoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// hit USING instead.
 		freshRun, freshEnt := seedPgRunForTaskMemory(t, h, orgA, alice, promptA, "rls-write")
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			return pgstore.NewForTx(tx).TaskMemory.UpsertAgentMemory(ctx, orgA, freshRun, freshEnt, "", "cross-org write")
+			return pgstore.NewForTx(tx, pgtest.SecretKey).TaskMemory.UpsertAgentMemory(ctx, orgA, freshRun, freshEnt, "", "cross-org write")
 		})
 		pgtest.AssertRLSViolation(t, err)
 	})
@@ -207,7 +207,7 @@ func TestTaskMemoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 func TestTaskMemoryStore_Postgres_BlueprintRunCrossOrgFKRejected(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgA, userA := seedPgTaskMemoryOrg(t, h)

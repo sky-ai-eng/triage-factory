@@ -23,7 +23,7 @@ func TestTeamsStore_Postgres_GetDefaultForOrgSystem_ReturnsFirstTeam(t *testing.
 	orgID := seedPgOrgForAgents(t, h)
 	wantTeamID := firstTeamForOrg(t, h, orgID)
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	got, err := stores.Teams.GetDefaultForOrgSystem(context.Background(), orgID)
 	if err != nil {
 		t.Fatalf("GetDefaultForOrgSystem: %v", err)
@@ -48,7 +48,7 @@ func TestTeamsStore_Postgres_GetDefaultForOrgSystem_NoTeamsReturnsEmpty(t *testi
 	ownerID := pgtest.SeedUser(t, h, "teamless-owner-"+uuid.New().String()[:8])
 	orgID := pgtest.SeedOrg(t, h, "teamless-"+uuid.New().String()[:8], ownerID)
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	got, err := stores.Teams.GetDefaultForOrgSystem(context.Background(), orgID)
 	if err != nil {
 		t.Fatalf("GetDefaultForOrgSystem: %v", err)
@@ -75,7 +75,7 @@ func TestTeamsStore_Postgres_GetDefaultForOrgSystem_IsolatesPerOrg(t *testing.T)
 		t.Fatalf("test seed produced the same team for two orgs (%s)", teamA)
 	}
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	gotA, err := stores.Teams.GetDefaultForOrgSystem(context.Background(), orgA)
 	if err != nil {
 		t.Fatalf("GetDefaultForOrgSystem orgA: %v", err)

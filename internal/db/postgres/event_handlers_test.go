@@ -32,7 +32,7 @@ func TestEventHandlerStore_Postgres(t *testing.T) {
 		// default team (via seedPgDefaultTeam); firstTeamForOrg picks it up
 		// by the same created_at ordering production used to do implicitly.
 		teamID := firstTeamForOrg(t, h, orgID)
-		stores := pgstore.New(h.AdminDB, h.AdminDB)
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		seed := func(t *testing.T, slugs ...string) map[string]string {
 			t.Helper()
 			out := make(map[string]string, len(slugs))

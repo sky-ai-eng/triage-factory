@@ -27,7 +27,7 @@ func TestSettingsStores_Postgres(t *testing.T) {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "settings-conf")
-		stores := pgstore.New(h.AdminDB, h.AdminDB)
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		return dbtest.SettingsStores{
 				Orgs:             stores.Orgs,
 				Teams:            stores.Teams,
@@ -59,7 +59,7 @@ func TestOrgsStore_Postgres_GetSettings_IsolatesPerOrg(t *testing.T) {
 
 	// Seed a real settings row on orgB so the negative read has
 	// something to (fail to) return.
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	if err := stores.Orgs.UpdateSettings(context.Background(), orgB, domain.OrgSettings{
 		GitHubBaseURL:       "https://b.example.com",
 		GitHubPollInterval:  5 * time.Minute,
@@ -80,7 +80,7 @@ func TestOrgsStore_Postgres_GetSettings_IsolatesPerOrg(t *testing.T) {
 	// "https://b.example.com"; under correctly-functioning RLS
 	// it stays empty (the default fallback's nullable empty).
 	err := h.WithUser(t, userA, orgA, func(tx *sql.Tx) error {
-		stores := pgstore.NewForTx(tx)
+		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
 		got, err := stores.Orgs.GetSettings(context.Background(), orgB)
 		if err != nil {
 			return err
@@ -111,7 +111,7 @@ func TestOrgsStore_Postgres_UpdateSettings_AdminGated(t *testing.T) {
 	// Seed a row as owner so the non-admin update path takes the
 	// UPDATE branch (where RLS filters out the row) rather than the
 	// INSERT branch (which 42501-errors).
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	if err := stores.Orgs.UpdateSettings(context.Background(), orgID, domain.OrgSettings{
 		GitHubBaseURL:       "https://owner-set.example.com",
 		GitHubPollInterval:  5 * time.Minute,
@@ -129,7 +129,7 @@ func TestOrgsStore_Postgres_UpdateSettings_AdminGated(t *testing.T) {
 	// cleanly and surfaces the error to the test for assertion.
 	wantPoll := 5 * time.Minute
 	memberErr := h.WithUser(t, member, orgID, func(tx *sql.Tx) error {
-		stores := pgstore.NewForTx(tx)
+		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
 		return stores.Orgs.UpdateSettings(context.Background(), orgID, domain.OrgSettings{
 			GitHubBaseURL:       "https://member-overwrite.example.com",
 			GitHubPollInterval:  9 * time.Minute,
@@ -159,7 +159,7 @@ func TestOrgsStore_Postgres_UpdateSettings_AdminGated(t *testing.T) {
 
 	// Owner can update freely — pins the positive side of the gate.
 	err = h.WithUser(t, owner, orgID, func(tx *sql.Tx) error {
-		stores := pgstore.NewForTx(tx)
+		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
 		return stores.Orgs.UpdateSettings(context.Background(), orgID, domain.OrgSettings{
 			GitHubBaseURL:       "https://owner-update.example.com",
 			GitHubPollInterval:  7 * time.Minute,
@@ -192,7 +192,7 @@ func TestJiraStatusRulesStore_Postgres_ReplaceForTeam_TeamAdminGated(t *testing.
 	pgtest.AddOrgMember(t, h, member, orgID, teamID, "member", "member")
 
 	// Owner seeds a baseline rule.
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	seed := []domain.JiraProjectStatusRules{{
 		ProjectKey:          "SKY",
 		PickupMembers:       []string{"To Do"},
@@ -207,7 +207,7 @@ func TestJiraStatusRulesStore_Postgres_ReplaceForTeam_TeamAdminGated(t *testing.
 
 	// Plain member's ReplaceForTeam must be refused.
 	err := h.WithUser(t, member, orgID, func(tx *sql.Tx) error {
-		stores := pgstore.NewForTx(tx)
+		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
 		return stores.JiraStatusRules.ReplaceForTeam(context.Background(), teamID, []domain.JiraProjectStatusRules{{
 			ProjectKey:          "ENG",
 			PickupMembers:       []string{"New"},
@@ -249,7 +249,7 @@ func TestTeamGitHubGroupsStore_Postgres_SetForTeam_TeamAdminGated(t *testing.T) 
 	member := pgtest.SeedUser(t, h, "gh-groups-plain-member")
 	pgtest.AddOrgMember(t, h, member, orgID, teamID, "member", "member")
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	seed := []domain.TeamGitHubGroup{{OrgLogin: "acme", TeamSlug: "backend"}}
 	if err := stores.TeamGitHubGroups.SetForTeam(context.Background(), teamID, seed); err != nil {
 		t.Fatalf("owner seed SetForTeam: %v", err)
@@ -259,7 +259,7 @@ func TestTeamGitHubGroupsStore_Postgres_SetForTeam_TeamAdminGated(t *testing.T) 
 	// delete-then-insert trips team_github_groups_delete (or _insert)
 	// WITH CHECK / USING under a non-admin claim.
 	err := h.WithUser(t, member, orgID, func(tx *sql.Tx) error {
-		stores := pgstore.NewForTx(tx)
+		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
 		return stores.TeamGitHubGroups.SetForTeam(context.Background(), teamID, []domain.TeamGitHubGroup{
 			{OrgLogin: "acme", TeamSlug: "frontend"},
 		})
@@ -283,7 +283,7 @@ func TestTeamGitHubGroupsStore_Postgres_SetForTeam_TeamAdminGated(t *testing.T) 
 
 	// Owner can write freely.
 	err = h.WithUser(t, owner, orgID, func(tx *sql.Tx) error {
-		stores := pgstore.NewForTx(tx)
+		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
 		return stores.TeamGitHubGroups.SetForTeam(context.Background(), teamID, []domain.TeamGitHubGroup{
 			{OrgLogin: "acme", TeamSlug: "frontend"},
 		})
@@ -304,7 +304,7 @@ func TestTeamGitHubGroupsStore_Postgres_SelectIsTeamScoped(t *testing.T) {
 	orgID, alice, teamA := pgtest.SeedOrgWithUser(t, h, "gh-groups-scope")
 	teamB := pgtest.SeedTeam(t, h, orgID, "team-b")
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	if err := stores.TeamGitHubGroups.SetForTeam(context.Background(), teamA, []domain.TeamGitHubGroup{
 		{OrgLogin: "acme", TeamSlug: "backend"},
 	}); err != nil {
@@ -318,7 +318,7 @@ func TestTeamGitHubGroupsStore_Postgres_SelectIsTeamScoped(t *testing.T) {
 
 	// Alice (member of teamA only) sees teamA's mapping but not teamB's.
 	err := h.WithUser(t, alice, orgID, func(tx *sql.Tx) error {
-		stores := pgstore.NewForTx(tx)
+		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
 		a, e := stores.TeamGitHubGroups.ListForTeam(context.Background(), teamA)
 		if e != nil {
 			return e
@@ -352,7 +352,7 @@ func TestTeamGitHubGroupsStore_Postgres_ManyToOneRouting(t *testing.T) {
 	orgID, _, teamA := pgtest.SeedOrgWithUser(t, h, "gh-groups-route")
 	teamB := pgtest.SeedTeam(t, h, orgID, "team-b")
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	if err := stores.TeamGitHubGroups.SetForTeam(context.Background(), teamA, []domain.TeamGitHubGroup{
 		{OrgLogin: "acme", TeamSlug: "backend"},
 		{OrgLogin: "acme", TeamSlug: "frontend"},
@@ -399,7 +399,7 @@ func TestTeamGitHubGroupsStore_Postgres_PruneMissingSystem_DeletionLifecycle(t *
 	orgID, _, teamA := pgtest.SeedOrgWithUser(t, h, "gh-groups-prune")
 	teamB := pgtest.SeedTeam(t, h, orgID, "team-b")
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 	// Both teams map acme/legacy (the soon-deleted team); each also keeps
 	// a distinct survivor mapping.

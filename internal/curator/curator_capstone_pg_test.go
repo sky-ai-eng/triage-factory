@@ -69,7 +69,7 @@ func TestCurator_Postgres_Multimode_FullTurn(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	multimodeEnv(t)
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
@@ -202,7 +202,7 @@ func TestCurator_Postgres_Multimode_SharedReadOnlyWorktree(t *testing.T) {
 	if !agentproc.WillSandbox() {
 		t.Skip("shared read-only worktree mounting is multi-mode + Linux only (gVisor); sandbox inactive here")
 	}
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
@@ -261,7 +261,7 @@ func TestCurator_Postgres_Multimode_BoundedEvictableCache(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	multimodeEnv(t)
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgCold, _, _ := pgtest.SeedOrgWithUser(t, h, "cold")
@@ -325,7 +325,7 @@ func TestCurator_Postgres_Multimode_CancelMidFlight(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	multimodeEnv(t)
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
@@ -367,7 +367,7 @@ func TestCurator_Postgres_Multimode_SimulatedRestartSweepsOrphans(t *testing.T) 
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	multimodeEnv(t)
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")

@@ -41,7 +41,7 @@ func TestTaskTeams_VisibilityAndClaimConsolidation(t *testing.T) {
 
 	// --- bob claims it: owner consolidates to teamB ---
 	if err := h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
-		ok, e := pgstore.NewForTx(tx).Tasks.ClaimQueuedForUser(ctx, orgA, taskID, bob)
+		ok, e := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.ClaimQueuedForUser(ctx, orgA, taskID, bob)
 		if e != nil {
 			return e
 		}
@@ -73,7 +73,7 @@ func TestTaskTeams_VisibilityAndClaimConsolidation(t *testing.T) {
 
 	// --- Second claim no-ops (CAS) ---
 	if err := h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
-		ok, e := pgstore.NewForTx(tx).Tasks.ClaimQueuedForUser(ctx, orgA, taskID, bob)
+		ok, e := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.ClaimQueuedForUser(ctx, orgA, taskID, bob)
 		if e != nil {
 			return e
 		}
@@ -108,7 +108,7 @@ func TestTaskTeams_ClaimPrefersOwnerWhenAmbiguous(t *testing.T) {
 	taskID := seedSharedTask(t, h, orgA, alice, teamA, []string{teamA, teamB})
 
 	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		ok, e := pgstore.NewForTx(tx).Tasks.ClaimQueuedForUser(ctx, orgA, taskID, alice)
+		ok, e := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.ClaimQueuedForUser(ctx, orgA, taskID, alice)
 		if e != nil {
 			return e
 		}
@@ -155,7 +155,7 @@ func TestTaskTeams_NullOwner_VisibleViaTaskTeams_ConsolidatesOnClaim(t *testing.
 
 	// alice claims → owner consolidates to teamA.
 	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		ok, e := pgstore.NewForTx(tx).Tasks.ClaimQueuedForUser(ctx, orgA, taskID, alice)
+		ok, e := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.ClaimQueuedForUser(ctx, orgA, taskID, alice)
 		if e != nil {
 			return e
 		}
@@ -182,7 +182,7 @@ func TestTaskTeams_NullOwner_VisibleViaTaskTeams_ConsolidatesOnClaim(t *testing.
 func assertVisible(t *testing.T, h *pgtest.Harness, userID, orgID, taskID string, want bool, msg string) {
 	t.Helper()
 	err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-		task, e := pgstore.NewForTx(tx).Tasks.Get(context.Background(), orgID, taskID)
+		task, e := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.Get(context.Background(), orgID, taskID)
 		if e != nil {
 			return e
 		}

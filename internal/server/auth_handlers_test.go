@@ -160,7 +160,7 @@ func newAuthRig(t *testing.T) *authRig {
 	// by session orgID end-to-end. Use the production pool split:
 	// admin for system reads, app (tf_app) for request-equivalent
 	// paths under RLS.
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	s := New(h.AdminDB, stores, 3000)
 
 	// Per-test context bound to t.Cleanup so the reaper goroutine

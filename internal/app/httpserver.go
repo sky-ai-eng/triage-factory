@@ -10,6 +10,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/aead"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
@@ -79,11 +80,11 @@ func (a *App) wireAuth(ctx context.Context) error {
 		return fmt.Errorf("build verifier: %w", err)
 	}
 
-	sessionKey, err := sessions.LoadKeyFromEnv(sessions.EnvSessionEncryptionKey)
+	sessionKey, err := aead.LoadKeyFromEnv(sessions.EnvSessionEncryptionKey)
 	if err != nil {
 		return fmt.Errorf("load session encryption key: %w", err)
 	}
-	cookieKey, err := sessions.LoadKeyFromEnv(sessions.EnvCookieSecret)
+	cookieKey, err := aead.LoadKeyFromEnv(sessions.EnvCookieSecret)
 	if err != nil {
 		return fmt.Errorf("load cookie secret: %w", err)
 	}

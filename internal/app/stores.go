@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/aead"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -86,11 +87,20 @@ func (a *App) openStores(ctx context.Context) error {
 			adminDB.Close()
 			return fmt.Errorf("ping app DB: %w", err)
 		}
+		// App-layer AES-256-GCM key for org/user integration secrets
+		// (TFAC-402). Required in multi mode — fail fast on a missing or
+		// malformed key, mirroring the session-key load in httpserver.go.
+		secretKey, err := aead.LoadKeyFromEnv(pgstore.EnvSecretEncryptionKey)
+		if err != nil {
+			appDB.Close()
+			adminDB.Close()
+			return fmt.Errorf("load secret encryption key: %w", err)
+		}
 		// Legacy *sql.DB consumers route to the admin pool for
 		// system-service reads (no JWT-claims context). Close closes both.
 		a.database = adminDB
 		a.appDB = appDB
-		a.stores = pgstore.New(adminDB, appDB)
+		a.stores = pgstore.New(adminDB, appDB, secretKey)
 
 		// Best-effort startup cleanup of orphaned sandboxes from a prior
 		// hard-crashed TF process. Never fatal — failure here just means

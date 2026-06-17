@@ -17,7 +17,7 @@ import (
 func TestRunQueueStore_Postgres_EnqueueClaim(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
@@ -66,7 +66,7 @@ func TestRunQueueStore_Postgres_EnqueueClaim(t *testing.T) {
 func TestRunQueueStore_Postgres_CancelRequestedNotClaimed(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
@@ -93,7 +93,7 @@ func TestRunQueueStore_Postgres_CancelRequestedNotClaimed(t *testing.T) {
 func TestRunQueueStore_Postgres_ConcurrentClaim(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)

@@ -525,7 +525,7 @@ func (se *settingsHandler) handleJiraStatuses(w http.ResponseWriter, r *http.Req
 	userID := ClaimsFrom(r.Context()).Subject
 	projects := r.URL.Query()["project"]
 	// Read creds + (if needed) the team's tracked-projects fallback
-	// through the app pool inside WithTx so vault_decrypt and
+	// through the app pool inside WithTx so the org_secrets read and
 	// team_settings_select run under the user's claims.
 	var creds auth.Credentials
 	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -632,8 +632,8 @@ func (se *settingsHandler) handleGitHubPreflightSSH(w http.ResponseWriter, r *ht
 	// load creds (not settings) because creds.GitHubURL is the URL the
 	// user actually authenticates against; org_settings.github_base_url
 	// mirrors it but the SecretStore copy is the source of truth.
-	// Wrapped in WithTx so vault_decrypt sees claims and the read
-	// matches the rest of the post-SKY-355 settings surface.
+	// Wrapped in WithTx so the org_secrets read sees claims and matches
+	// the rest of the post-SKY-355 settings surface.
 	orgID := OrgIDFrom(r.Context())
 	userID := ClaimsFrom(r.Context()).Subject
 	var creds auth.Credentials

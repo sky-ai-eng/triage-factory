@@ -17,6 +17,7 @@
 #   fly secrets set TF_GOTRUE_ISSUER='https://triagefactory.example.com/auth/v1'
 #   fly secrets set TF_SESSION_ENCRYPTION_KEY="$(openssl rand -hex 32)"
 #   fly secrets set TF_COOKIE_SECRET="$(openssl rand -hex 32)"
+#   fly secrets set TF_SECRET_ENCRYPTION_KEY="$(openssl rand -hex 32)"
 #   fly secrets set TF_GITHUB_APP_PRIVATE_KEY="$(cat github-app.pem)"
 #   fly secrets set TF_GITHUB_APP_ID='123456'
 #
