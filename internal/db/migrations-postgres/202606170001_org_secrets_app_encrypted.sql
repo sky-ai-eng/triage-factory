@@ -87,18 +87,20 @@ REVOKE ALL ON public.org_secrets FROM anon, authenticated, service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.org_secrets TO tf_app;
 
 -- Vault / pgsodium wrappers are dead after the rewrite. Drop all nine
--- (4 org + 5 user, including the two _system variants). The
+-- (4 org + 5 user, including the two _system variants). IF EXISTS so the
+-- migration expresses "ensure these are gone" idempotently — it won't
+-- fail on a divergent DB where one was already removed. The
 -- supabase_vault / pgsodium extensions and the vault schema stay (image-
 -- managed); only TF's wrapper functions go.
-DROP FUNCTION public.vault_put_org_secret(uuid, text, text, text);
-DROP FUNCTION public.vault_get_org_secret(uuid, text);
-DROP FUNCTION public.vault_get_org_secret_system(uuid, text);
-DROP FUNCTION public.vault_delete_org_secret(uuid, text);
-DROP FUNCTION public.vault_put_user_secret(uuid, uuid, text, text, text);
-DROP FUNCTION public.vault_get_user_secret(uuid, uuid, text);
-DROP FUNCTION public.vault_get_user_secret_system(uuid, uuid, text);
-DROP FUNCTION public.vault_delete_user_secret(uuid, uuid, text);
-DROP FUNCTION public.vault_put_user_secret_system(uuid, uuid, text, text, text);
+DROP FUNCTION IF EXISTS public.vault_put_org_secret(uuid, text, text, text);
+DROP FUNCTION IF EXISTS public.vault_get_org_secret(uuid, text);
+DROP FUNCTION IF EXISTS public.vault_get_org_secret_system(uuid, text);
+DROP FUNCTION IF EXISTS public.vault_delete_org_secret(uuid, text);
+DROP FUNCTION IF EXISTS public.vault_put_user_secret(uuid, uuid, text, text, text);
+DROP FUNCTION IF EXISTS public.vault_get_user_secret(uuid, uuid, text);
+DROP FUNCTION IF EXISTS public.vault_get_user_secret_system(uuid, uuid, text);
+DROP FUNCTION IF EXISTS public.vault_delete_user_secret(uuid, uuid, text);
+DROP FUNCTION IF EXISTS public.vault_put_user_secret_system(uuid, uuid, text, text, text);
 
 -- +goose Down
 SELECT 'down not supported';

@@ -75,26 +75,29 @@ DO UPDATE SET ciphertext  = EXCLUDED.ciphertext,
               description = EXCLUDED.description,
               updated_at  = now()`
 
-// upsert encrypts value and writes it on q. wrapErr turns an app-pool
-// grant error (42501 from a claims-less bare authenticator) into the
-// "use the *System variant" hint; the admin-pool writers pass false
-// because supabase_admin never hits that path.
-func (s *secretStore) upsert(ctx context.Context, q queryer, wrapErr bool, callsite, orgID string, userID any, key, value, description string) error {
+// upsert encrypts value and writes it on q. The error is returned raw:
+// a cross-tenant write on the app pool trips the org_secrets RLS WITH
+// CHECK and raises 42501, which is a genuine authorization failure that
+// must keep its own message — NOT be relabeled as the "missing tf_app
+// role; use *System" app-pool hint. That hint is only sound on reads,
+// where RLS filters to zero rows instead of raising (see getOne).
+func (s *secretStore) upsert(ctx context.Context, q queryer, orgID string, userID any, key, value, description string) error {
 	ct, nonce, err := s.key.Encrypt([]byte(value))
 	if err != nil {
 		return err
 	}
 	_, err = q.ExecContext(ctx, upsertSQL, orgID, userID, key, ct, nonce, description)
-	if err != nil && wrapErr {
-		return wrapAppPoolPermErr(err, callsite)
-	}
 	return err
 }
 
 // getOne runs a (ciphertext, nonce) SELECT on q, decrypts, and maps
 // no-row → ("", nil) — the SecretStore "missing is not an error"
 // contract. A decrypt failure (wrong/rotated key, tampered bytes)
-// surfaces as an error rather than garbage. wrapErr: see upsert.
+// surfaces as an error rather than garbage. wrapErr is set only for the
+// app-pool reads (Get/GetUser): on a SELECT, RLS filters to zero rows
+// rather than raising, so a 42501 there is unambiguously the
+// bare-authenticator / missing-tf_app-grant misuse the hint diagnoses.
+// Admin-pool reads (and every write/delete) pass false / return raw.
 func (s *secretStore) getOne(ctx context.Context, q queryer, wrapErr bool, callsite, query string, args ...any) (string, error) {
 	var ct, nonce []byte
 	err := q.QueryRowContext(ctx, query, args...).Scan(&ct, &nonce)
@@ -116,12 +119,13 @@ func (s *secretStore) getOne(ctx context.Context, q queryer, wrapErr bool, calls
 
 // del runs a scoped DELETE on the app pool and reports whether a row was
 // removed (ok=false on no match, matching the interface's "did the write
-// land" contract). Cross-tenant deletes are invisible to RLS, so they
-// remove zero rows and return (false, nil) rather than raising.
-func (s *secretStore) del(ctx context.Context, callsite, query string, args ...any) (bool, error) {
+// land" contract). DELETE has no WITH CHECK and RLS USING filters rather
+// than raises, so a cross-tenant delete simply removes zero rows and
+// returns (false, nil); any error is returned raw, not relabeled.
+func (s *secretStore) del(ctx context.Context, query string, args ...any) (bool, error) {
 	res, err := s.app.ExecContext(ctx, query, args...)
 	if err != nil {
-		return false, wrapAppPoolPermErr(err, callsite)
+		return false, err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
@@ -133,7 +137,7 @@ func (s *secretStore) del(ctx context.Context, callsite, query string, args ...a
 // --- Org scope: Put/Get/GetSystem/Delete ---
 
 func (s *secretStore) Put(ctx context.Context, orgID, key, value, description string) error {
-	return s.upsert(ctx, s.app, true, "secrets.Put", orgID, nil, key, value, description)
+	return s.upsert(ctx, s.app, orgID, nil, key, value, description)
 }
 
 func (s *secretStore) Get(ctx context.Context, orgID, key string) (string, error) {
@@ -154,7 +158,7 @@ func (s *secretStore) GetSystem(ctx context.Context, orgID, key string) (string,
 }
 
 func (s *secretStore) Delete(ctx context.Context, orgID, key string) (bool, error) {
-	return s.del(ctx, "secrets.Delete",
+	return s.del(ctx,
 		`DELETE FROM public.org_secrets
 		   WHERE org_id = $1::uuid AND user_id IS NULL AND key = $2::text`,
 		orgID, key)
@@ -168,7 +172,7 @@ func (s *secretStore) Delete(ctx context.Context, orgID, key string) (bool, erro
 // (the consumer composes host-scoping, e.g. "jira_token/<host>").
 
 func (s *secretStore) PutUser(ctx context.Context, orgID, userID, key, value, description string) error {
-	return s.upsert(ctx, s.app, true, "secrets.PutUser", orgID, userID, key, value, description)
+	return s.upsert(ctx, s.app, orgID, userID, key, value, description)
 }
 
 // PutUserSystem writes a per-user secret on the supabase_admin pool — RLS
@@ -176,7 +180,7 @@ func (s *secretStore) PutUser(ctx context.Context, orgID, userID, key, value, de
 // system code acting as a user (the Cloud OAuth refresh-token rotation
 // write-back, which runs claims-free).
 func (s *secretStore) PutUserSystem(ctx context.Context, orgID, userID, key, value, description string) error {
-	return s.upsert(ctx, s.admin, false, "secrets.PutUserSystem", orgID, userID, key, value, description)
+	return s.upsert(ctx, s.admin, orgID, userID, key, value, description)
 }
 
 func (s *secretStore) GetUser(ctx context.Context, orgID, userID, key string) (string, error) {
@@ -197,7 +201,7 @@ func (s *secretStore) GetUserSystem(ctx context.Context, orgID, userID, key stri
 }
 
 func (s *secretStore) DeleteUser(ctx context.Context, orgID, userID, key string) (bool, error) {
-	return s.del(ctx, "secrets.DeleteUser",
+	return s.del(ctx,
 		`DELETE FROM public.org_secrets
 		   WHERE org_id = $1::uuid AND user_id = $2::uuid AND key = $3::text`,
 		orgID, userID, key)
