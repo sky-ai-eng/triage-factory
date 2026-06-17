@@ -189,7 +189,11 @@ type PRFile struct {
 	PreviousFilename string `json:"previous_filename,omitempty"`
 	Additions        int    `json:"additions"`
 	Deletions        int    `json:"deletions"`
-	Patch            string `json:"patch,omitempty"` // unified diff hunks; absent for binary files
+	// Patch is the unified diff hunks for the file. GitHub omits it for
+	// binary files and also for oversized/truncated diffs — so an empty Patch
+	// does not by itself mean the file is binary (see isBinaryFile, which also
+	// checks the line counts).
+	Patch string `json:"patch,omitempty"`
 }
 
 // maxPRFiles caps the total number of files fetched by GetPRFiles across all pages.

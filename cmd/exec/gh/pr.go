@@ -190,8 +190,12 @@ const (
 // Two escape hatches keep the old inline behavior available:
 //   - --file <path>: targeted single-file diff stays inline (bounded). No
 //     file written.
-//   - --stdout: legacy whole-diff-to-stdout, for scripts/pipelines. No file
-//     written.
+//   - --stdout: whole-diff-to-stdout, for scripts/pipelines. No file written.
+//
+// Both inline paths share persistPRDiff's HTTP-406 ("diff too large")
+// fallback: GitHub refuses the diff media type, so we reassemble from
+// per-file patches — the whole diff for --stdout, or just the requested
+// file for --file — instead of erroring.
 func prDiff(client ghAPI, args []string) {
 	owner, repo, number := parseRepoAndNumber(args)
 	file := flagVal(args, "--file")
@@ -199,7 +203,21 @@ func prDiff(client ghAPI, args []string) {
 
 	if file != "" || stdout {
 		diff, err := client.GetPRDiff(owner, repo, number, file)
-		exitOnErr(err)
+		if err != nil {
+			if !ghclient.IsHTTP406(err) {
+				exitOnErr(err)
+			}
+			files, ferr := client.GetPRFiles(owner, repo, number)
+			exitOnErr(ferr)
+			if file != "" {
+				diff = singleFileDiff(files, file)
+				if diff == "" {
+					exitErr(fmt.Sprintf("file %q is not part of PR #%d's diff", file, number))
+				}
+			} else {
+				diff = reassembleDiff(files)
+			}
+		}
 		fmt.Print(diff)
 		return
 	}
@@ -243,12 +261,12 @@ func persistPRDiff(client ghAPI, cwd, owner, repo string, number int) (diffManif
 		return diffManifest{}, err
 	}
 
-	shaShort := pr.HeadSHA
-	if len(shaShort) > 12 {
-		shaShort = shaShort[:12]
-	}
+	// Key on the full head SHA (not a truncation) so the directory name the
+	// agent sees here matches the SHA it gets verbatim from `pr view` — no
+	// "did you mean the short form?" mismatch when it goes looking for an
+	// earlier capture.
 	dirKey := owner + "__" + repo + "__" + strconv.Itoa(number)
-	destDir, err := safeScratchSubdir(cwd, "_scratch", "pr-diffs", dirKey, shaShort)
+	destDir, err := safeScratchSubdir(cwd, "_scratch", "pr-diffs", dirKey, pr.HeadSHA)
 	if err != nil {
 		return diffManifest{}, err
 	}
@@ -289,13 +307,11 @@ func persistPRDiff(client ghAPI, cwd, owner, repo string, number int) (diffManif
 	}
 	for _, f := range files {
 		manifest.Files = append(manifest.Files, diffManifestFile{
-			Path:      f.Filename,
-			Status:    f.Status,
-			Additions: f.Additions,
-			Deletions: f.Deletions,
-			// GitHub omits the patch for binary files; a pure rename also
-			// has an empty patch but isn't binary, so exclude it.
-			Binary:           f.Patch == "" && f.Status != "renamed",
+			Path:             f.Filename,
+			Status:           f.Status,
+			Additions:        f.Additions,
+			Deletions:        f.Deletions,
+			Binary:           isBinaryFile(f),
 			PreviousFilename: f.PreviousFilename,
 		})
 	}
@@ -327,12 +343,24 @@ func fetchFullDiff(client ghAPI, owner, repo string, number int, files []ghclien
 	return reassembleDiff(files), true, nil
 }
 
+// isBinaryFile heuristically classifies a changed file as binary. GitHub
+// omits the patch field for both binary files and oversized/truncated text
+// diffs, so an empty patch alone isn't decisive — but a binary file also
+// reports zero line additions/deletions, whereas an oversized text file still
+// reports its real counts. A rename with no content change likewise has an
+// empty patch and zero counts but isn't binary, so it's excluded.
+func isBinaryFile(f ghclient.PRFile) bool {
+	return f.Patch == "" && f.Additions == 0 && f.Deletions == 0 && f.Status != "renamed"
+}
+
 // reassembleDiff synthesizes a unified diff from per-file patches (the HTTP
 // 406 fallback). GitHub's per-file patch field carries only the @@ hunks, not
 // the diff --git / --- / +++ headers, so we prepend minimal headers to keep
 // the output a recognizable unified diff. It's approximate — that's what the
 // manifest's truncated flag signals — but greppable and good enough for
-// review. Binary / patch-less files get a "Binary files differ" line.
+// review. Patch-less files get a "Binary files differ" line when they look
+// binary, or a note that the patch was omitted (too large) otherwise — never
+// a fabricated hunk.
 func reassembleDiff(files []ghclient.PRFile) string {
 	var b strings.Builder
 	for _, f := range files {
@@ -342,7 +370,11 @@ func reassembleDiff(files []ghclient.PRFile) string {
 		}
 		fmt.Fprintf(&b, "diff --git a/%s b/%s\n", prev, f.Filename)
 		if f.Patch == "" {
-			fmt.Fprintf(&b, "Binary files a/%s and b/%s differ\n", prev, f.Filename)
+			if isBinaryFile(f) {
+				fmt.Fprintf(&b, "Binary files a/%s and b/%s differ\n", prev, f.Filename)
+			} else {
+				fmt.Fprintf(&b, "# patch unavailable (diff too large to fetch); +%d -%d\n", f.Additions, f.Deletions)
+			}
 			continue
 		}
 		switch f.Status {
@@ -362,6 +394,19 @@ func reassembleDiff(files []ghclient.PRFile) string {
 		}
 	}
 	return b.String()
+}
+
+// singleFileDiff returns the synthesized diff for one file from a per-file
+// patch listing, or "" if the path isn't in the listing. It's the --file
+// inline path's HTTP-406 fallback — same reassembly as the full diff, scoped
+// to a single file.
+func singleFileDiff(files []ghclient.PRFile, path string) string {
+	for _, f := range files {
+		if f.Filename == path {
+			return reassembleDiff([]ghclient.PRFile{f})
+		}
+	}
+	return ""
 }
 
 func prFiles(client ghAPI, args []string) {

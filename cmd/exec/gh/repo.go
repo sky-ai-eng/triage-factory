@@ -57,12 +57,33 @@ func resolveRepo(args []string) (owner, repo string, err error) {
 
 // splitOwnerRepoStr splits an "owner/repo" string, returning a descriptive
 // error tied to the source (flag, env, etc.) so failures are diagnosable.
+//
+// owner and repo must each be a single path segment. GitHub names never
+// contain slashes, so rejecting them isn't a usability cost — and it's a
+// security guard: owner/repo flow into filesystem paths (e.g. the pr-diff
+// _scratch directory), where a crafted "--repo owner/../../.." would
+// otherwise let filepath.Join + Clean escape the intended directory and a
+// subsequent RemoveAll touch paths outside it.
 func splitOwnerRepoStr(value, source string) (owner, repo string, err error) {
 	parts := strings.SplitN(value, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return "", "", fmt.Errorf("invalid %s: expected owner/repo, got %q", source, value)
 	}
-	return parts[0], parts[1], nil
+	owner, repo = parts[0], parts[1]
+	if !validRepoComponent(owner) || !validRepoComponent(repo) {
+		return "", "", fmt.Errorf("invalid %s: owner and repo must each be a single path segment (no '/', '\\', or '..'), got %q", source, value)
+	}
+	return owner, repo, nil
+}
+
+// validRepoComponent reports whether s is safe to use as a single owner or
+// repo path segment: non-empty, not a directory-traversal token, and free of
+// path separators.
+func validRepoComponent(s string) bool {
+	if s == "" || s == "." || s == ".." {
+		return false
+	}
+	return !strings.ContainsAny(s, `/\`)
 }
 
 // parseGitRemoteURL extracts owner and repo from any of git's common remote

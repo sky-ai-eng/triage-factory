@@ -347,7 +347,7 @@ func TestPersistPRDiff_WritesFullDiffAndManifest(t *testing.T) {
 		t.Fatalf("persistPRDiff: %v", err)
 	}
 
-	wantDir := filepath.Join(cwd, "_scratch", "pr-diffs", "owner__repo__42", sha[:12])
+	wantDir := filepath.Join(cwd, "_scratch", "pr-diffs", "owner__repo__42", sha)
 	if m.Dir != wantDir {
 		t.Errorf("Dir = %q, want %q", m.Dir, wantDir)
 	}
@@ -412,12 +412,13 @@ func TestPersistPRDiff_406Reassembles(t *testing.T) {
 func TestPersistPRDiff_BinaryAndRename(t *testing.T) {
 	const sha = "0011223344556677"
 	files := jsonPRFiles(t, []map[string]any{
-		{"filename": "image.png", "status": "added", "additions": 0, "deletions": 0},                               // no patch → binary
+		{"filename": "image.png", "status": "added", "additions": 0, "deletions": 0},                               // no patch + zero counts → binary
 		{"filename": "new.go", "status": "renamed", "previous_filename": "old.go", "additions": 0, "deletions": 0}, // no patch but a rename
+		{"filename": "huge.go", "status": "modified", "additions": 5000, "deletions": 10},                          // no patch but real counts → oversized text, NOT binary
 		{"filename": "main.go", "status": "modified", "additions": 1, "deletions": 0, "patch": "@@ -1 +1,2 @@\n a\n+b"},
 	})
 	srv := newPRDiffServer(t, prDiffBackend{
-		prJSON:    prJSON(t, sha, "main", 1, 0, 3),
+		prJSON:    prJSON(t, sha, "main", 1, 0, 4),
 		diffBody:  "diff --git a/main.go b/main.go\n@@ -1 +1,2 @@\n a\n+b\n",
 		filesBody: files,
 	})
@@ -443,6 +444,48 @@ func TestPersistPRDiff_BinaryAndRename(t *testing.T) {
 	}
 	if byPath["main.go"].Binary {
 		t.Error("text file should not be binary")
+	}
+	if byPath["huge.go"].Binary {
+		t.Error("oversized text file (empty patch but non-zero counts) should NOT be flagged binary")
+	}
+}
+
+// TestReassembleDiff_OversizedVsBinary verifies the 406-reassembly path
+// distinguishes a genuine binary file ("Binary files differ") from an
+// oversized text file whose patch GitHub omitted (a note, never a fabricated
+// hunk or a wrong "binary" label).
+func TestReassembleDiff_OversizedVsBinary(t *testing.T) {
+	out := reassembleDiff([]ghclient.PRFile{
+		{Filename: "image.png", Status: "added", Additions: 0, Deletions: 0},
+		{Filename: "huge.go", Status: "modified", Additions: 5000, Deletions: 10},
+	})
+	if !strings.Contains(out, "Binary files a/image.png and b/image.png differ") {
+		t.Errorf("expected binary marker for image.png; got:\n%s", out)
+	}
+	if !strings.Contains(out, "patch unavailable") || !strings.Contains(out, "+5000 -10") {
+		t.Errorf("expected oversized-text note for huge.go; got:\n%s", out)
+	}
+	if strings.Contains(out, "Binary files a/huge.go") {
+		t.Errorf("oversized text file must NOT be labeled binary; got:\n%s", out)
+	}
+}
+
+// TestSingleFileDiff covers the --file inline 406 fallback: a synthesized
+// single-file diff for a present path, and "" for an absent one.
+func TestSingleFileDiff(t *testing.T) {
+	files := []ghclient.PRFile{
+		{Filename: "a.go", Status: "modified", Additions: 1, Deletions: 0, Patch: "@@ -1 +1,2 @@\n x\n+y"},
+		{Filename: "b.go", Status: "added", Additions: 1, Deletions: 0, Patch: "@@ -0,0 +1 @@\n+z"},
+	}
+	got := singleFileDiff(files, "a.go")
+	if !strings.Contains(got, "diff --git a/a.go b/a.go") || !strings.Contains(got, "+y") {
+		t.Errorf("expected a.go diff; got:\n%s", got)
+	}
+	if strings.Contains(got, "b.go") {
+		t.Errorf("single-file diff for a.go must not include b.go; got:\n%s", got)
+	}
+	if singleFileDiff(files, "missing.go") != "" {
+		t.Error("expected empty string for a path not in the file list")
 	}
 }
 

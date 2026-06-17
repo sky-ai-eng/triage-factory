@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // safeScratchSubdir resolves cwd/<parts...> with a symlink safety check at
@@ -26,6 +27,16 @@ import (
 // this is sufficient. Defending against a live race would require *at
 // syscalls with O_NOFOLLOW on every path component, which is overkill.
 func safeScratchSubdir(cwd string, parts ...string) (string, error) {
+	// Each part must be a single path segment. This is a defense-in-depth
+	// backstop to the validation callers do on their own inputs (e.g.
+	// owner/repo via splitOwnerRepoStr): without it a "../" or separator in
+	// any component would let filepath.Join + Clean escape cwd, and the
+	// caller's RemoveAll/MkdirAll would then act outside the worktree.
+	for _, p := range parts {
+		if p == "" || p == "." || p == ".." || strings.ContainsAny(p, `/\`) {
+			return "", fmt.Errorf("invalid scratch path component %q", p)
+		}
+	}
 	current := cwd
 	for _, p := range parts {
 		current = filepath.Join(current, p)
