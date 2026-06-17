@@ -80,7 +80,7 @@ fi
 # uninstall` sweeps via auth.SweepKeychain). Drift between the two means
 # stale entries linger after clean-slate; jira_display_name was the most
 # recent miss.
-for key in github_url github_pat github_username jira_url jira_pat jira_display_name; do
+for key in github_url github_pat github_username jira_url jira_pat jira_email jira_api_token jira_auth_method jira_display_name; do
   security delete-generic-password -s triagefactory -a "$key" 2>/dev/null && echo "  removed keychain: $key" || true
 done
 
