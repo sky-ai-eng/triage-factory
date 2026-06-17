@@ -1094,7 +1094,12 @@ function BindingGraphInner({
           fill: t.enabled ? 'var(--color-accent)' : 'var(--color-text-tertiary)',
           fontWeight: 600,
         },
-        labelBgStyle: { fill: 'white', fillOpacity: 0.8 },
+        // The "auto"/"disabled" label text is already theme-aware (accent /
+        // text-tertiary), but the pill behind it must be too — a hardcoded
+        // white pill glares as a bright rectangle on the dark canvas, swamping
+        // the state it's meant to read out (TFAC-400). surface-raised is white
+        // in light mode (unchanged) and the dark raised surface in dark mode.
+        labelBgStyle: { fill: 'var(--color-surface-raised)', fillOpacity: 0.8 },
       }))
 
     const sequenceEdges: Edge[] = []
