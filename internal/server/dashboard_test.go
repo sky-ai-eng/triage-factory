@@ -62,6 +62,44 @@ func TestDashboardPRs_AppModeNoPAT_ReturnsPRs(t *testing.T) {
 	}
 }
 
+// TestDashboardStats_AppModeNoPAT_ReturnsStats is the stats-endpoint half of
+// the TFAC-396 regression. handleDashboardStats shares handleDashboardPRs's
+// host-from-org_settings + bound-identity gate, so it must likewise return real
+// aggregates (not the gated empty {}) for an App-mode org with no PAT. One open,
+// non-draft PR by the bound user must count as a single "awaiting".
+func TestDashboardStats_AppModeNoPAT_ReturnsStats(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	ctx := context.Background()
+	orgID := runmode.LocalDefaultOrgID
+	userID := runmode.LocalDefaultUserID
+
+	host := dashboardTestHost(t, s, orgID, userID)
+	if err := s.users.UpsertGitHubIdentity(ctx, userID, host, "octocat", "connect_oauth"); err != nil {
+		t.Fatalf("bind identity: %v", err)
+	}
+
+	seedDashboardSnapshot(t, s, domain.PRSnapshot{
+		Number: 18, Repo: "acme/widget", Author: "octocat", State: "OPEN",
+		Title: "Fix the thing", URL: "https://github.com/acme/widget/pull/18",
+		CreatedAt: "2026-06-01T00:00:00Z", UpdatedAt: "2026-06-10T00:00:00Z",
+	})
+
+	rec := doJSON(t, s, "GET", "/api/dashboard/stats", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/dashboard/stats: got %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var stats domain.DashboardStats
+	if err := json.Unmarshal(rec.Body.Bytes(), &stats); err != nil {
+		t.Fatalf("decode body %q: %v", rec.Body.String(), err)
+	}
+	// The gated (empty-identity) path writes {} -> all-zero; a real read counts
+	// the open non-draft PR. Asserting Awaiting==1 distinguishes the two.
+	if stats.Awaiting != 1 {
+		t.Errorf("stats.Awaiting = %d, want 1 (one open non-draft PR by octocat); body=%s", stats.Awaiting, rec.Body.String())
+	}
+}
+
 // TestDashboardPRs_NoBoundIdentity_ReturnsEmpty pins the other precondition:
 // with a resolvable host but no bound identity, the handler returns an empty
 // list (not an error) — there's no "me" to filter snapshots by.
@@ -142,9 +180,9 @@ func seedDashboardSnapshot(t *testing.T, s *Server, snap domain.PRSnapshot) {
 	now := time.Now().UTC()
 	sourceID := fmt.Sprintf("%s#%d", snap.Repo, snap.Number)
 	if _, err := s.db.ExecContext(context.Background(), `
-		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, last_polled_at)
-		VALUES (?, 'github', ?, 'pr', ?, ?, ?, ?, ?)
-	`, "ent-"+sourceID, sourceID, snap.Title, snap.URL, string(blob), now, now); err != nil {
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, last_polled_at)
+		VALUES (?, ?, 'github', ?, 'pr', ?, ?, ?, ?, ?)
+	`, "ent-"+sourceID, runmode.LocalDefaultOrgID, sourceID, snap.Title, snap.URL, string(blob), now, now); err != nil {
 		t.Fatalf("seed entity %s: %v", sourceID, err)
 	}
 }
