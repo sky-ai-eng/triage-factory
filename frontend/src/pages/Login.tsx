@@ -54,7 +54,7 @@ export default function Login() {
         <button
           type="button"
           onClick={startGitHub}
-          className="w-full flex items-center justify-center gap-2 bg-text-primary hover:bg-text-primary/90 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
+          className="w-full flex items-center justify-center gap-2 bg-surface-inverse hover:bg-surface-inverse/90 text-text-inverse font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
         >
           <svg
             viewBox="0 0 16 16"

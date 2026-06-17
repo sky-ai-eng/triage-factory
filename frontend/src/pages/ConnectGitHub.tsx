@@ -131,7 +131,7 @@ export default function ConnectGitHub() {
         <button
           type="button"
           onClick={refresh}
-          className="w-full bg-text-primary hover:bg-text-primary/90 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
+          className="w-full bg-surface-inverse hover:bg-surface-inverse/90 text-text-inverse font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
         >
           Try again
         </button>
@@ -204,7 +204,7 @@ export default function ConnectGitHub() {
         <button
           type="button"
           onClick={startConnect}
-          className="w-full flex items-center justify-center gap-2 bg-text-primary hover:bg-text-primary/90 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
+          className="w-full flex items-center justify-center gap-2 bg-surface-inverse hover:bg-surface-inverse/90 text-text-inverse font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
         >
           <GitHubMark />
           Connect GitHub

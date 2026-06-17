@@ -109,7 +109,7 @@ function GitHubIdentitySection({ orgId }: { orgId: string | null }) {
               <button
                 type="button"
                 onClick={startConnect}
-                className="w-full rounded-xl bg-text-primary px-4 py-2.5 text-[13px] font-medium text-white transition-colors hover:bg-text-primary/90"
+                className="w-full rounded-xl bg-surface-inverse px-4 py-2.5 text-[13px] font-medium text-text-inverse transition-colors hover:bg-surface-inverse/90"
               >
                 Connect GitHub
               </button>
@@ -277,7 +277,7 @@ function JiraIdentitySection({ orgId }: { orgId: string | null }) {
               <button
                 type="button"
                 onClick={startConnect}
-                className="w-full rounded-xl bg-text-primary px-4 py-2.5 text-[13px] font-medium text-white transition-colors hover:bg-text-primary/90"
+                className="w-full rounded-xl bg-surface-inverse px-4 py-2.5 text-[13px] font-medium text-text-inverse transition-colors hover:bg-surface-inverse/90"
               >
                 Connect Jira
               </button>

@@ -84,7 +84,7 @@ export function JiraUserAccessStep({ state, patch, orgId, error }: StepContext) 
         <button
           type="button"
           onClick={startConnect}
-          className="flex w-full items-center justify-center gap-2 rounded-xl bg-text-primary px-4 py-2.5 text-[13px] font-medium text-white transition-colors hover:bg-text-primary/90"
+          className="flex w-full items-center justify-center gap-2 rounded-xl bg-surface-inverse px-4 py-2.5 text-[13px] font-medium text-text-inverse transition-colors hover:bg-surface-inverse/90"
         >
           <JiraMark />
           Connect Jira
