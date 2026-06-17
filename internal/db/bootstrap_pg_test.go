@@ -25,7 +25,7 @@ import (
 // The load-bearing detail of this test is the pool wiring:
 // pgstore.New(admin=AdminDB, app=AppDB). The existing SQLite test can't
 // catch the bug (no pool split, no RLS), and — the easy trap — neither
-// can a pg test wired pgstore.New(h.AdminDB, h.AdminDB) like most of the
+// can a pg test wired pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey) like most of the
 // suite: with AdminDB in the app slot the buggy app-pool lookup succeeds
 // and the test is a no-op. Only the real two-pool split, with AppDB as
 // the grant-less app pool, reproduces production and fails pre-fix.
@@ -39,7 +39,7 @@ func TestBootstrapNewOrg_Postgres_TwoPool(t *testing.T) {
 
 	// Production wiring: admin = supabase_admin (BYPASSRLS), app =
 	// authenticator (no grants outside the SET ROLE tf_app + claims tx).
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 
 	ctx := context.Background()
 	if err := db.BootstrapNewOrg(ctx, stores, orgID, teamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
@@ -86,7 +86,7 @@ func TestAppPoolRead_NoClaims_WrapsPermErr(t *testing.T) {
 
 	orgID, _, _ := pgtest.SeedOrgWithUser(t, h, "sky387")
 
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 
 	_, err := stores.Agents.GetForOrg(context.Background(), orgID)
 	if err == nil {

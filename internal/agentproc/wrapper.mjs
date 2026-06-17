@@ -25,6 +25,29 @@
 // when nothing is set, billing against their Pro/Max subscription.
 import { query } from "@anthropic-ai/claude-agent-sdk"
 import { createInterface } from "node:readline"
+import { createRequire } from "node:module"
+import { existsSync } from "node:fs"
+import { dirname, join } from "node:path"
+
+function resolveClaudeBinary() {
+  if (process.platform !== "linux") return null
+  const arch = process.arch
+  let isMusl = false
+  try {
+    isMusl = !process.report?.getReport?.()?.header?.glibcVersionRuntime
+  } catch {}
+  const glibcPkg = `@anthropic-ai/claude-agent-sdk-linux-${arch}`
+  const muslPkg = `${glibcPkg}-musl`
+  const pkgs = isMusl ? [muslPkg, glibcPkg] : [glibcPkg, muslPkg]
+  const require = createRequire(import.meta.url)
+  for (const pkg of pkgs) {
+    try {
+      const bin = join(dirname(require.resolve(`${pkg}/package.json`)), "claude")
+      if (existsSync(bin)) return bin
+    } catch {}
+  }
+  return null
+}
 
 function parseArgs(argv) {
   let prompt = ""
@@ -349,6 +372,11 @@ const { prompt, options, streamInput, permissionPrompts } = parseArgs(process.ar
 // to act on. Piping it here lands the real message in agentproc.Run's
 // stderrBuf and from there into the run's error log.
 options.stderr = (chunk) => process.stderr.write(chunk)
+
+if (!options.pathToClaudeCodeExecutable) {
+  const bin = resolveClaudeBinary()
+  if (bin) options.pathToClaudeCodeExecutable = bin
+}
 
 if (streamInput) {
   await runStreamingInput(options, permissionPrompts)

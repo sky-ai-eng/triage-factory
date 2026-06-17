@@ -2,7 +2,6 @@ package tracker
 
 import (
 	"context"
-	"log"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -91,7 +90,7 @@ func (r *storeReviewerResolver) KnownUser(login string) bool {
 	}
 	ids, err := r.users.UserIDsForGitHubLoginSystem(r.ctx, r.host, login)
 	if err != nil {
-		log.Printf("[tracker] reviewer resolve: user lookup for %q on %q: %v", login, r.host, err)
+		trackerLog.Warn("reviewer resolve: user lookup failed", "login", login, "host", r.host, "error", err)
 		return false
 	}
 	return len(ids) > 0
@@ -103,7 +102,7 @@ func (r *storeReviewerResolver) KnownTeam(orgLogin, slug string) bool {
 	}
 	teams, err := r.groups.TeamsForGroupSystem(r.ctx, r.orgID, orgLogin, slug)
 	if err != nil {
-		log.Printf("[tracker] reviewer resolve: team lookup for %q/%q in org %s: %v", orgLogin, slug, r.orgID, err)
+		trackerLog.Warn("reviewer resolve: team lookup failed", "org_login", orgLogin, "slug", slug, "org", r.orgID, "error", err)
 		return false
 	}
 	return len(teams) > 0

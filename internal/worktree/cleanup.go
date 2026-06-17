@@ -2,7 +2,6 @@ package worktree
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,9 +33,9 @@ func RemoveAt(path, runID string) error {
 	pruneAll(paths.BareCacheRoot(runmode.LocalDefaultOrg))
 
 	if runID != "" {
-		log.Printf("[worktree] removed %s (%s)", runID, path)
+		worktreeLog.Info("removed", "run_id", runID, "path", path)
 	} else {
-		log.Printf("[worktree] removed %s", path)
+		worktreeLog.Info("removed", "path", path)
 	}
 	return nil
 }
@@ -111,7 +110,7 @@ func CleanupWithOptions(opts CleanupOptions) {
 			}
 		}
 		if count > 0 {
-			log.Printf("[worktree] cleaned up %d orphaned worktrees", count)
+			worktreeLog.Info("cleaned up orphaned worktrees", "count", count)
 		}
 	}
 
@@ -135,13 +134,13 @@ func pruneAll(baseDir string) {
 		}
 		if info.IsDir() && strings.HasSuffix(path, ".git") {
 			if err := gitRun(path, "worktree", "prune"); err != nil {
-				log.Printf("[worktree] prune %s: %v", path, err)
+				worktreeLog.Warn("prune failed", "path", path, "error", err)
 			}
 			return filepath.SkipDir
 		}
 		return nil
 	}); err != nil {
-		log.Printf("[worktree] walk %s: %v", baseDir, err)
+		worktreeLog.Warn("walk failed", "dir", baseDir, "error", err)
 	}
 }
 
@@ -162,7 +161,7 @@ func pruneAll(baseDir string) {
 func removeWorktreeRegFor(bareDir, wtDir string) {
 	adminDir := filepath.Join(bareDir, "worktrees", filepath.Base(wtDir))
 	if err := os.RemoveAll(adminDir); err != nil {
-		log.Printf("[worktree] clear half-built worktree %s: %v", adminDir, err)
+		worktreeLog.Warn("clear half-built worktree failed", "dir", adminDir, "error", err)
 		return
 	}
 }
@@ -245,10 +244,10 @@ func clearStaleLockedWorktrees(bareDir string) int {
 			continue // checkout still present → live worktree, never touch
 		}
 		if err := os.RemoveAll(adminDir); err != nil {
-			log.Printf("[worktree] clear stale locked worktree %s: %v", adminDir, err)
+			worktreeLog.Warn("clear stale locked worktree failed", "dir", adminDir, "error", err)
 			continue
 		}
-		log.Printf("[worktree] cleared stale locked worktree registration %s", e.Name())
+		worktreeLog.Info("cleared stale locked worktree registration", "name", e.Name())
 		cleared++
 	}
 	return cleared
@@ -271,9 +270,9 @@ func clearStaleLockedWorktreesAll(baseDir string) {
 		}
 		return nil
 	}); err != nil {
-		log.Printf("[worktree] walk %s: %v", baseDir, err)
+		worktreeLog.Warn("walk failed", "dir", baseDir, "error", err)
 	}
 	if total > 0 {
-		log.Printf("[worktree] cleared %d stale locked worktree registration(s)", total)
+		worktreeLog.Info("cleared stale locked worktree registrations", "count", total)
 	}
 }

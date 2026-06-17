@@ -27,7 +27,7 @@ func TestGitHubAppsStore_Postgres_RoundTrip(t *testing.T) {
 	defer cancel()
 
 	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-		stores := pgstore.NewForTx(tx)
+		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
 
 		got, err := stores.GitHubApps.GetForOrg(ctx, orgID)
 		if err != nil {
@@ -91,7 +91,7 @@ func TestGitHubAppsStore_Postgres_ConflictOnDuplicate(t *testing.T) {
 	defer cancel()
 
 	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-		stores := pgstore.NewForTx(tx)
+		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
 
 		app := domain.OrgGitHubApp{
 			OrgID:            orgID,
@@ -154,7 +154,7 @@ func TestGitHubAppsStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	// User A can read their own org's app.
 	if err := h.WithUser(t, userA, orgA, func(tx *sql.Tx) error {
-		stores := pgstore.NewForTx(tx)
+		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
 		got, err := stores.GitHubApps.GetForOrg(ctx, orgA)
 		if err != nil {
 			return fmt.Errorf("userA GetForOrg(orgA): %w", err)
@@ -169,7 +169,7 @@ func TestGitHubAppsStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	// User B with claims for orgB cannot see orgA's row.
 	if err := h.WithUser(t, userB, orgB, func(tx *sql.Tx) error {
-		stores := pgstore.NewForTx(tx)
+		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
 		got, err := stores.GitHubApps.GetForOrg(ctx, orgA)
 		if err != nil {
 			return fmt.Errorf("userB GetForOrg(orgA): %w", err)
@@ -196,7 +196,7 @@ func TestGitHubAppsStore_Postgres_NonAdminWriteDenied(t *testing.T) {
 	defer cancel()
 
 	err := h.WithUser(t, memberID, orgID, func(tx *sql.Tx) error {
-		stores := pgstore.NewForTx(tx)
+		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
 		return stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
 			OrgID:            orgID,
 			AppID:            "77",
@@ -222,7 +222,7 @@ func TestGitHubAppsStore_Postgres_InstallationLifecycle(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, _ := seedPgOrgAndUserForGitHubApps(t, h)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -272,7 +272,7 @@ func TestGitHubAppsStore_Postgres_InstallationCrossOrg(t *testing.T) {
 	h.Reset(t)
 	orgA, _ := seedPgOrgAndUserForGitHubApps(t, h)
 	orgB, _ := seedPgOrgAndUserForGitHubApps(t, h)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -316,7 +316,7 @@ func TestGitHubAppsStore_Postgres_SetActiveAndDelete(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID := seedPgOrgAndUserForGitHubApps(t, h)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 

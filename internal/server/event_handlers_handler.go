@@ -2,7 +2,6 @@ package server
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 	"strings"
 
@@ -278,13 +277,13 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 		// A unique-constraint failure leaks schema/index names; translate to a
 		// generic 409 and log the raw error for operators.
 		if isUniqueViolation(err) {
-			log.Printf("[event_handlers] create conflict (kind=%s, event_type=%s): %v", h.Kind, h.EventType, err)
+			eventHandlersLog.Warn("create conflict", "kind", h.Kind, "event_type", h.EventType, "error", err)
 			writeJSON(w, http.StatusConflict, map[string]string{
 				"error": "An event handler with this configuration already exists.",
 			})
 			return
 		}
-		log.Printf("[event_handlers] create failed: %v", err)
+		eventHandlersLog.Error("create failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "Failed to create event handler.",
 		})
@@ -637,7 +636,7 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 		// the check window and hit the partial-unique index here — surface a
 		// clean 409, not a raw 500.
 		if isUniqueViolation(err) {
-			log.Printf("[event_handlers] promote conflict (blueprint already triggered): %v", err)
+			eventHandlersLog.Warn("promote conflict, blueprint already triggered", "error", err)
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
 			return
 		}
@@ -724,7 +723,7 @@ func (eh *eventHandlersHandler) handleEventHandlerRetarget(w http.ResponseWriter
 		return e
 	}); err != nil {
 		if isUniqueViolation(err) {
-			log.Printf("[event_handlers] retarget conflict (blueprint already triggered): %v", err)
+			eventHandlersLog.Warn("retarget conflict, blueprint already triggered", "error", err)
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
 			return
 		}

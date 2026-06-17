@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -115,7 +114,7 @@ func (c *Curator) cloneTokenFor(ctx context.Context, orgID, owner string) string
 	}
 	tok, err := resolver.TokenFor(ctx, orgID, owner)
 	if err != nil {
-		log.Printf("[curator] resolve clone token for org %s owner %q: %v (refresh proceeds unauthenticated)", orgID, owner, err)
+		curatorLog.Warn("resolve clone token failed, refresh proceeds unauthenticated", "org", orgID, "owner", owner, "error", err)
 		return ""
 	}
 	return tok.Value
@@ -326,13 +325,13 @@ func (c *Curator) cancelQueuedRows(orgID, projectID, reason string) {
 	ctx := context.Background()
 	queued, err := c.stores.Curator.QueuedRequestsForProjectSystem(ctx, orgID, projectID)
 	if err != nil {
-		log.Printf("[curator] warning: failed to list queued requests for project %s: %v", projectID, err)
+		curatorLog.Warn("list queued requests failed", "project", projectID, "error", err)
 		return
 	}
 	for _, req := range queued {
 		flipped, err := c.stores.Curator.MarkRequestCancelledIfActiveSystem(ctx, orgID, req.ID, reason)
 		if err != nil {
-			log.Printf("[curator] warning: cancel queued request %s: %v", req.ID, err)
+			curatorLog.Warn("cancel queued request failed", "request", req.ID, "error", err)
 			continue
 		}
 		if flipped {

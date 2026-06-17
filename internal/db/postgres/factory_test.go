@@ -30,7 +30,7 @@ func TestFactoryReadStore_Postgres(t *testing.T) {
 	// matches that intent in tests. RLS bypass is fine for behavior
 	// conformance — the cross-org leakage test below exercises the
 	// org_id WHERE filter on its own.
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	dbtest.RunFactoryReadStoreConformance(t, func(t *testing.T) (db.FactoryReadStore, string, dbtest.FactorySeeder) {
 		t.Helper()
@@ -240,7 +240,7 @@ func TestFactoryReadStore_Postgres_ExcludesUntaskedEntity(t *testing.T) {
 	noTask := seed.Entity(t, "memb-untasked")
 	seed.Event(t, noTask, "github:pr:opened", "", now, time.Time{})
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	rows, err := stores.Factory.Entities(context.Background(), orgID, 100, nil)
 	if err != nil {
 		t.Fatalf("Entities: %v", err)
@@ -274,7 +274,7 @@ func TestFactoryReadStore_Postgres_KeepsEntityAfterTaskTerminal(t *testing.T) {
 	ev := seed.Event(t, ent, "github:pr:opened", "", now, time.Time{})
 	seed.Task(t, ent, "github:pr:opened", "", ev, "done", now)
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	rows, err := stores.Factory.Entities(context.Background(), orgID, 100, nil)
 	if err != nil {
 		t.Fatalf("Entities: %v", err)
@@ -318,7 +318,7 @@ func TestFactoryReadStore_Postgres_CountersScopedToMembership(t *testing.T) {
 	seed.Event(t, untasked, "github:pr:opened", "", now.Add(-5*time.Minute), time.Time{})
 	seed.Event(t, untasked, "github:pr:merged", "", now.Add(-5*time.Minute), time.Time{})
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	since, err := stores.Factory.EventCountsSince(ctx, orgID, now.Add(-1*time.Hour))
@@ -373,7 +373,7 @@ func TestFactoryReadStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	seedA.Task(t, entA, "github:pr:opened", "", evA, "queued", now)
 	seedB.Task(t, entB, "github:pr:merged", "", evB, "queued", now)
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	// Org A's snapshot must NOT include org B's event.

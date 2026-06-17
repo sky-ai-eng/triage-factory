@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"os/exec"
 	"sync"
 	"time"
@@ -244,7 +243,7 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 	if opts.Message != "" {
 		go func() {
 			if err := l.Send(ctx, opts.Message); err != nil {
-				log.Printf("[agentproc] initial message send failed: %v", err)
+				agentprocLog.Error("initial message send failed", "error", err)
 			}
 		}()
 	}
@@ -489,7 +488,7 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 						l.sessionID = sid
 						l.mu.Unlock()
 						if err := sink.OnSession(sid); err != nil {
-							log.Printf("[agentproc] sink.OnSession failed: %v", err)
+							agentprocLog.Warn("sink on-session failed", "error", err)
 						}
 						sessionDelivered = true
 					}
@@ -497,7 +496,7 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 
 				for _, msg := range messages {
 					if err := sink.OnMessage(msg); err != nil {
-						log.Printf("[agentproc] sink.OnMessage failed: %v", err)
+						agentprocLog.Warn("sink on-message failed", "error", err)
 						continue
 					}
 				}
@@ -572,7 +571,7 @@ func (l *LiveRun) handlePermission(ctl controlLine, perms PermissionHandler) {
 		resp["updated_input"] = decision.UpdatedInput
 	}
 	if err := l.writeControl(resp); err != nil {
-		log.Printf("[agentproc] permission response write failed: %v", err)
+		agentprocLog.Error("permission response write failed", "error", err)
 	}
 }
 

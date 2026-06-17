@@ -1,7 +1,6 @@
 package server
 
 import (
-	"log"
 	"net/http"
 	"strings"
 
@@ -173,7 +172,7 @@ func (th *teamsHandler) handleTeamCreate(w http.ResponseWriter, r *http.Request)
 	// bootstrap, whereas failing the create after the row committed would
 	// orphan it.
 	if err := db.BootstrapNewTeam(r.Context(), th.allStores, orgID, created.ID); err != nil {
-		log.Printf("[teams] new team %s/%s created but bootstrap failed (prompts/rules/bot may be missing): %v", orgID, created.ID, err)
+		teamsLog.Warn("new team created but bootstrap failed, prompts/rules/bot may be missing", "org", orgID, "team", created.ID, "error", err)
 	}
 
 	// The creator is enrolled as admin (Teams.Create), so stamp the role on

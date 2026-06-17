@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -400,20 +399,20 @@ func (c *Client) GetClaimState(ctx context.Context, issueKey string) *ClaimState
 		// A cancelled/expired ctx (e.g. the requesting client disconnected)
 		// is expected, not a failure worth logging — suppress the noise.
 		if ctx.Err() == nil {
-			log.Printf("[jira] claim guard: failed to fetch %s: %v", issueKey, err)
+			jiraLog.Warn("claim guard: fetch issue failed", "issue", issueKey, "error", err)
 		}
 		return nil
 	}
 	var issue Issue
 	if err := json.Unmarshal(body, &issue); err != nil {
-		log.Printf("[jira] claim guard: failed to parse %s: %v", issueKey, err)
+		jiraLog.Warn("claim guard: parse issue failed", "issue", issueKey, "error", err)
 		return nil
 	}
 
 	myself, err := c.currentUser(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
-			log.Printf("[jira] claim guard: failed to get current user: %v", err)
+			jiraLog.Warn("claim guard: get current user failed", "error", err)
 		}
 		return nil
 	}
@@ -552,11 +551,11 @@ func (c *Client) GetChildIssues(ctx context.Context, parentKey string) ([]Issue,
 	// Query 2: Epic Link (Server/DC epic children)
 	epicField, err := c.epicLinkField(ctx)
 	if err != nil {
-		log.Printf("[jira] warning: epic link field discovery failed: %v", err)
+		jiraLog.Warn("epic link field discovery failed", "error", err)
 	} else if epicField != "" {
 		epicIssues, err := c.SearchIssues(ctx, fmt.Sprintf("cf[%s] = %s ORDER BY created ASC", extractFieldID(epicField), parentKey), nil, 100)
 		if err != nil {
-			log.Printf("[jira] warning: epic link query failed for %s: %v", parentKey, err)
+			jiraLog.Warn("epic link query failed", "parent", parentKey, "error", err)
 		} else {
 			for _, issue := range epicIssues {
 				if !seen[issue.Key] {

@@ -1,30 +1,28 @@
 package postgres_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/aead"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 )
 
 // TestSecretStore_Postgres_RoundTrip exercises the full Put / Get /
-// Delete cycle through the real public.vault_* SECURITY DEFINER
-// functions. Runs inside a WithUser tx so the vault wrappers'
-// p_org_id = tf.current_org_id() gate is satisfied — that gate is
-// what makes the secret subsystem safe against a claims-less caller
-// reading any org's data.
-//
-// We construct the store against the tx with pgstore.NewForTx(tx)
-// so every call rides the same connection that has SET LOCAL ROLE
-// tf_app + the JWT claim. Without this the vault function refuses
-// with "missing org context" — the right failure mode, but not
-// what this test covers.
+// Delete cycle against public.org_secrets (TFAC-402). Runs inside a
+// WithUser tx so the org_secrets_org RLS policy's org gate is satisfied.
+// We construct the store with pgstore.NewForTx(tx, pgtest.SecretKey) so
+// every call rides the same connection that has SET LOCAL ROLE tf_app +
+// the JWT claim, and encrypts/decrypts with the shared test key.
 func TestSecretStore_Postgres_RoundTrip(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -33,14 +31,12 @@ func TestSecretStore_Postgres_RoundTrip(t *testing.T) {
 	defer cancel()
 
 	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-		stores := pgstore.NewForTx(tx)
+		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
 
-		// Put a new secret.
 		if err := stores.Secrets.Put(ctx, orgID, "github_pat", "ghp_alice_secret_v1", "primary GitHub token"); err != nil {
 			return fmt.Errorf("Put: %w", err)
 		}
 
-		// Round-trip: Get returns the stored value.
 		got, err := stores.Secrets.Get(ctx, orgID, "github_pat")
 		if err != nil {
 			return fmt.Errorf("Get: %w", err)
@@ -49,7 +45,7 @@ func TestSecretStore_Postgres_RoundTrip(t *testing.T) {
 			t.Errorf("Get got=%q want ghp_alice_secret_v1", got)
 		}
 
-		// Rotation: Put on the same key overwrites.
+		// Rotation: Put on the same key overwrites in place.
 		if err := stores.Secrets.Put(ctx, orgID, "github_pat", "ghp_alice_secret_v2", ""); err != nil {
 			return fmt.Errorf("Put rotation: %w", err)
 		}
@@ -61,8 +57,7 @@ func TestSecretStore_Postgres_RoundTrip(t *testing.T) {
 			t.Errorf("after rotation got=%q want ghp_alice_secret_v2", got)
 		}
 
-		// Missing key: Get returns "" without an error so callers can
-		// distinguish "not configured" from "fetch failed."
+		// Missing key: Get returns "" without an error.
 		got, err = stores.Secrets.Get(ctx, orgID, "nonexistent_key")
 		if err != nil {
 			return fmt.Errorf("Get missing: %w", err)
@@ -71,7 +66,7 @@ func TestSecretStore_Postgres_RoundTrip(t *testing.T) {
 			t.Errorf("missing key got=%q want empty", got)
 		}
 
-		// Delete returns ok=true on a present key.
+		// Delete returns ok=true on a present key, ok=false when absent.
 		ok, err := stores.Secrets.Delete(ctx, orgID, "github_pat")
 		if err != nil {
 			return fmt.Errorf("Delete: %w", err)
@@ -79,8 +74,14 @@ func TestSecretStore_Postgres_RoundTrip(t *testing.T) {
 		if !ok {
 			t.Errorf("Delete ok=false for present key; want true")
 		}
+		ok, err = stores.Secrets.Delete(ctx, orgID, "github_pat")
+		if err != nil {
+			return fmt.Errorf("Delete idempotent: %w", err)
+		}
+		if ok {
+			t.Errorf("Delete on already-absent key ok=true; want false")
+		}
 
-		// Subsequent Get returns "" (the row is gone).
 		got, err = stores.Secrets.Get(ctx, orgID, "github_pat")
 		if err != nil {
 			return fmt.Errorf("Get after delete: %w", err)
@@ -94,44 +95,110 @@ func TestSecretStore_Postgres_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestSecretStore_Postgres_MismatchedOrgIDRefused pins the vault
-// wrapper's claim-vs-arg gate. Calling with an orgID that doesn't
-// match the JWT claim's org_id must fail — otherwise a session
-// for org A could read org B's secrets. The wrapper raises an
-// exception (not a NULL); we just confirm the error propagates.
-func TestSecretStore_Postgres_MismatchedOrgIDRefused(t *testing.T) {
+// TestSecretStore_Postgres_CiphertextAtRest pins the whole point of
+// TFAC-402: the stored bytes are AES ciphertext, not plaintext. A DB dump
+// (raw-select on the admin pool, RLS bypassed) yields only opaque bytes —
+// the value never appears in the column.
+func TestSecretStore_Postgres_CiphertextAtRest(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	orgA, userA := seedPgOrgAndUserForSecrets(t, h)
-	orgB, _ := seedPgOrgAndUserForSecrets(t, h)
+	orgID, userID := seedPgOrgAndUserForSecrets(t, h)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	err := h.WithUser(t, userA, orgA, func(tx *sql.Tx) error {
-		stores := pgstore.NewForTx(tx)
-		// Caller has claims for orgA, but passes orgB as the param.
-		// vault_put_org_secret must refuse — otherwise a stolen
-		// session could write to any org.
-		return stores.Secrets.Put(ctx, orgB, "github_pat", "stolen", "")
-	})
-	if err == nil {
-		t.Fatalf("Put with mismatched orgID succeeded; vault gate broken")
+	const plaintext = "ghp_super_secret_value_at_rest"
+	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+		return pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.Put(ctx, orgID, "github_pat", plaintext, "")
+	}); err != nil {
+		t.Fatalf("seed via Put: %v", err)
+	}
+
+	var ct, nonce []byte
+	if err := h.AdminDB.QueryRowContext(ctx,
+		`SELECT ciphertext, nonce FROM public.org_secrets
+		   WHERE org_id = $1::uuid AND user_id IS NULL AND key = $2::text`,
+		orgID, "github_pat",
+	).Scan(&ct, &nonce); err != nil {
+		t.Fatalf("raw select ciphertext: %v", err)
+	}
+	if len(ct) == 0 {
+		t.Fatal("ciphertext column empty")
+	}
+	if len(nonce) != 12 {
+		t.Errorf("nonce length %d, want 12 (AES-GCM)", len(nonce))
+	}
+	if bytes.Contains(ct, []byte(plaintext)) {
+		t.Errorf("ciphertext at rest contains the plaintext %q — encryption did nothing", plaintext)
+	}
+	if string(ct) == plaintext {
+		t.Error("ciphertext equals plaintext")
 	}
 }
 
-// TestSecretStore_Postgres_NonTfAppRoleRefused pins the grant matrix
-// on the public.vault_* wrappers. They are REVOKE'd from
-// anon/authenticated/service_role and GRANT'd only to tf_app — a
-// session that connects via the authenticator → tf_app path but
-// switches to a different role inside the tx must fail with
-// permission-denied (SQLSTATE 42501).
-//
-// Why this matters separately from the cross-org test: the cross-org
-// case proves the wrapper body enforces tenant isolation; this test
-// proves the wrapper itself is unreachable from any role that isn't
-// our app role. Together they bracket the surface: even if a future
-// migration introduced a Supabase-default role that ends up with a
-// pooled connection, the GRANT shape would still block the call.
+// TestSecretStore_Postgres_CrossOrgIsolation pins the org gate now that
+// it's RLS rather than a vault claim-check. A session with claims for
+// orgA cannot reach orgB's secret:
+//   - cross-org READ filters to zero rows → ("", nil) (the value is not
+//     leaked; this also satisfies the SecretStore "missing → empty"
+//     contract), and
+//   - cross-org WRITE violates the WITH CHECK → 42501.
+func TestSecretStore_Postgres_CrossOrgIsolation(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgA, userA := seedPgOrgAndUserForSecrets(t, h)
+	orgB, userB := seedPgOrgAndUserForSecrets(t, h)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// orgB seeds a secret for itself.
+	if err := h.WithUser(t, userB, orgB, func(tx *sql.Tx) error {
+		return pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.Put(ctx, orgB, "github_pat", "orgB_secret", "")
+	}); err != nil {
+		t.Fatalf("seed orgB secret: %v", err)
+	}
+
+	// Alice (claims orgA) passing orgB as the arg: RLS overrides the
+	// WHERE org_id=orgB, so the read returns empty rather than orgB's value.
+	if err := h.WithUser(t, userA, orgA, func(tx *sql.Tx) error {
+		got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.Get(ctx, orgB, "github_pat")
+		if err != nil {
+			return fmt.Errorf("cross-org Get: %w", err)
+		}
+		if got != "" {
+			t.Errorf("cross-org Get got=%q want empty (orgB secret must not leak)", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WithUser A read: %v", err)
+	}
+
+	// Cross-org WRITE: Alice (claims orgA) writing to orgB must be refused
+	// by the WITH CHECK (org_id must equal current_org_id()). Uses a key
+	// that doesn't exist in orgB so this is a pure INSERT — the WITH CHECK
+	// fires deterministically as 42501 (no ON CONFLICT path to muddy it).
+	err := h.WithUser(t, userA, orgA, func(tx *sql.Tx) error {
+		return pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.Put(ctx, orgB, "alice_steal_attempt", "stolen", "")
+	})
+	if err == nil {
+		t.Fatalf("cross-org Put succeeded; org WITH CHECK broken")
+	}
+	pgtest.AssertRLSViolation(t, err)
+
+	// orgB's secret is intact after the failed cross-org attempts.
+	got, err := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey).Secrets.GetSystem(ctx, orgB, "github_pat")
+	if err != nil {
+		t.Fatalf("GetSystem orgB readback: %v", err)
+	}
+	if got != "orgB_secret" {
+		t.Errorf("orgB secret got=%q want orgB_secret (untouched)", got)
+	}
+}
+
+// TestSecretStore_Postgres_NonTfAppRoleRefused pins the grant matrix on
+// public.org_secrets: tf_app holds SELECT/INSERT/UPDATE/DELETE; the
+// standard Supabase roles (anon/authenticated/service_role) hold NONE, so
+// a secrets table can never be reached by a PostgREST default role. This
+// replaces the dropped vault wrappers' EXECUTE-grant lockdown.
 func TestSecretStore_Postgres_NonTfAppRoleRefused(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -139,10 +206,30 @@ func TestSecretStore_Postgres_NonTfAppRoleRefused(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// authenticator is granted both tf_app (custom) and the standard
-	// Supabase roles (anon/authenticated/service_role). Switching to
-	// `authenticated` for the wrapper call exercises the REVOKE branch
-	// without needing a separate connection or password.
+	// Catalog-level pin: tf_app HAS the privileges; the denied roles
+	// have none.
+	const tbl = "public.org_secrets"
+	for _, priv := range []string{"SELECT", "INSERT", "UPDATE", "DELETE"} {
+		var tfHas bool
+		if err := h.AdminDB.QueryRow(`SELECT has_table_privilege('tf_app', $1, $2)`, tbl, priv).Scan(&tfHas); err != nil {
+			t.Fatalf("has_table_privilege(tf_app, %s): %v", priv, err)
+		}
+		if !tfHas {
+			t.Errorf("tf_app LACKS %s on %s — breaks the call path", priv, tbl)
+		}
+		for _, role := range []string{"anon", "authenticated", "service_role"} {
+			var has bool
+			if err := h.AdminDB.QueryRow(`SELECT has_table_privilege($1, $2, $3)`, role, tbl, priv).Scan(&has); err != nil {
+				t.Fatalf("has_table_privilege(%s, %s): %v", role, priv, err)
+			}
+			if has {
+				t.Errorf("%s HAS %s on %s — secrets table grant lockdown broken", role, priv, tbl)
+			}
+		}
+	}
+
+	// Behavior-level pin: calling as a denied role raises permission-
+	// denied (42501) at the privilege layer, before RLS is even reached.
 	for _, role := range []string{"anon", "authenticated", "service_role"} {
 		role := role
 		t.Run(role, func(t *testing.T) {
@@ -155,17 +242,13 @@ func TestSecretStore_Postgres_NonTfAppRoleRefused(t *testing.T) {
 			if _, err := tx.ExecContext(ctx, `SET LOCAL ROLE `+role); err != nil {
 				t.Fatalf("set role %s: %v", role, err)
 			}
-			// Claims set so the wrapper would otherwise satisfy its
-			// own gate — the permission denial must fire *before* the
-			// body ever runs.
+			// Claims set so the denial can only come from the missing
+			// table grant, not a NULL-org RLS filter.
 			claims := fmt.Sprintf(`{"sub":"%s","org_id":"%s"}`, userID, orgID)
 			if _, err := tx.ExecContext(ctx, `SELECT set_config('request.jwt.claims', $1, true)`, claims); err != nil {
 				t.Fatalf("set claims: %v", err)
 			}
 
-			// Each wrapper aborts the tx on permission denial. Wrap
-			// every call in a savepoint so the next probe runs on a
-			// clean slate and we can assert each wrapper independently.
 			probe := func(label, query string) {
 				t.Helper()
 				if _, err := tx.ExecContext(ctx, `SAVEPOINT sp`); err != nil {
@@ -177,20 +260,18 @@ func TestSecretStore_Postgres_NonTfAppRoleRefused(t *testing.T) {
 					t.Fatalf("%s: rollback to savepoint: %v", label, err)
 				}
 			}
-			probe("put", `SELECT public.vault_put_org_secret($1::uuid, 'k', 'v', NULL)`)
-			probe("get", `SELECT public.vault_get_org_secret($1::uuid, 'k')`)
-			probe("delete", `SELECT public.vault_delete_org_secret($1::uuid, 'k')`)
+			probe("select", `SELECT ciphertext FROM public.org_secrets WHERE org_id = $1::uuid`)
+			probe("insert", `INSERT INTO public.org_secrets (org_id, key, ciphertext, nonce) VALUES ($1::uuid, 'k', '\x00', '\x00')`)
+			probe("delete", `DELETE FROM public.org_secrets WHERE org_id = $1::uuid`)
 		})
 	}
 }
 
-// TestSecretStore_Postgres_GetSystem_NoClaimsRead pins the SKY-364
-// system accessor: a background/system caller with NO request.jwt.claims
-// can read an org's secret via GetSystem (admin pool →
-// vault_get_org_secret_system), while the same claims-less connection
-// hitting the claims-checked vault_get_org_secret is refused. This is
-// the "two distinct doors" proof — explicit-trusted-orgID for system
-// code, claims-checked for request handlers.
+// TestSecretStore_Postgres_GetSystem_NoClaimsRead pins the system
+// accessor: a background/system caller with NO request.jwt.claims reads an
+// org secret via GetSystem (admin pool, RLS bypassed), while a claims-less
+// tf_app session sees zero rows. This is the "two distinct doors" proof —
+// explicit-trusted-orgID for system code, claims-gated RLS for handlers.
 func TestSecretStore_Postgres_GetSystem_NoClaimsRead(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -198,17 +279,15 @@ func TestSecretStore_Postgres_GetSystem_NoClaimsRead(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Seed the secret through the claims-checked write path (the only
-	// writer — there is no _put_system).
+	// Seed through the claims-checked write path.
 	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-		return pgstore.NewForTx(tx).Secrets.Put(ctx, orgID, "github_app_pem", "-----BEGIN PEM----- v1", "App private key")
+		return pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.Put(ctx, orgID, "github_app_pem", "-----BEGIN PEM----- v1", "App private key")
 	}); err != nil {
 		t.Fatalf("seed secret via Put: %v", err)
 	}
 
-	// GetSystem routes to the admin pool. No WithUser wrap, no claims —
-	// exactly the background-caller condition.
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	// GetSystem routes to the admin pool. No WithUser wrap, no claims.
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	got, err := stores.Secrets.GetSystem(ctx, orgID, "github_app_pem")
 	if err != nil {
 		t.Fatalf("GetSystem (no claims): %v", err)
@@ -217,7 +296,7 @@ func TestSecretStore_Postgres_GetSystem_NoClaimsRead(t *testing.T) {
 		t.Errorf("GetSystem got=%q want the seeded PEM", got)
 	}
 
-	// Absent key: NULL → ("", nil), mirroring Get.
+	// Absent key: ("", nil), mirroring Get.
 	got, err = stores.Secrets.GetSystem(ctx, orgID, "nonexistent")
 	if err != nil {
 		t.Fatalf("GetSystem missing: %v", err)
@@ -226,79 +305,69 @@ func TestSecretStore_Postgres_GetSystem_NoClaimsRead(t *testing.T) {
 		t.Errorf("GetSystem missing got=%q want empty", got)
 	}
 
-	// The other door: the claims-checked vault_get_org_secret on the
-	// same claims-less connection must be refused (current_org_id() is
-	// NULL → "missing org context"). Proves GetSystem isn't just
-	// "Get without the gate" — it's a separate function the claims path
-	// can't satisfy here.
-	var sink sql.NullString
-	err = h.AdminDB.QueryRowContext(ctx,
-		`SELECT public.vault_get_org_secret($1::uuid, $2::text)`, orgID, "github_app_pem",
+	// The other door: a claims-less tf_app session reads zero rows
+	// (current_org_id() is NULL, so org_secrets_org's org gate never
+	// matches). Proves GetSystem isn't just "Get without the gate" — the
+	// app pool genuinely can't see the row without claims.
+	tx, err := h.AppDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `SET LOCAL ROLE tf_app`); err != nil {
+		t.Fatalf("set role tf_app: %v", err)
+	}
+	var sink []byte
+	err = tx.QueryRowContext(ctx,
+		`SELECT ciphertext FROM public.org_secrets WHERE org_id = $1::uuid AND user_id IS NULL AND key = $2::text`,
+		orgID, "github_app_pem",
 	).Scan(&sink)
-	if err == nil {
-		t.Fatalf("claims-checked vault_get_org_secret succeeded with no claims; gate broken")
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("claims-less tf_app read = %v, want sql.ErrNoRows (RLS should hide the row)", err)
 	}
 }
 
-// TestSecretStore_Postgres_GetSystem_TfAppDenied is the load-bearing
-// guardrail for SKY-364: the app pool (tf_app) and every standard
-// Supabase role must be unable to EXECUTE vault_get_org_secret_system.
-// The whole security argument — system reads take an explicit trusted
-// orgID, request reads stay claims-checked — rests on the app pool
-// having no door into the unchecked function. This is the inverse of
-// the existing "non-tf_app cannot execute the vault wrappers" test:
-// here it's "tf_app (and friends) cannot execute the *system* wrapper."
-func TestSecretStore_Postgres_GetSystem_TfAppDenied(t *testing.T) {
+// TestSecretStore_Postgres_WrongKeyDecryptError pins the rotation /
+// wrong-key failure mode: a value encrypted under one key, read back with
+// a different key, yields a clean decrypt error — never garbage plaintext
+// and never a silent ("", nil) that looks like "not configured". This is
+// the AEAD auth-tag guarantee surfacing through the store.
+func TestSecretStore_Postgres_WrongKeyDecryptError(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID := seedPgOrgAndUserForSecrets(t, h)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Privilege matrix sanity: tf_app LACKS EXECUTE, the admin pool's
-	// role HAS it (supabase_admin owns the function as a superuser).
-	const fn = "public.vault_get_org_secret_system(uuid, text)"
-	var tfAppHas bool
-	if err := h.AdminDB.QueryRow(`SELECT has_function_privilege('tf_app', $1, 'EXECUTE')`, fn).Scan(&tfAppHas); err != nil {
-		t.Fatalf("has_function_privilege(tf_app): %v", err)
+	var key1, key2 aead.Key
+	if _, err := rand.Read(key1[:]); err != nil {
+		t.Fatalf("seed key1: %v", err)
 	}
-	if tfAppHas {
-		t.Errorf("tf_app HAS EXECUTE on %s — must not; the system door must stay closed to the app pool", fn)
+	if _, err := rand.Read(key2[:]); err != nil {
+		t.Fatalf("seed key2: %v", err)
 	}
 
-	// tf_app + the standard Supabase roles must all be refused at call
-	// time with permission-denied (42501), before the body runs. The
-	// authenticator → tf_app / role-switch path mirrors the existing
-	// vault-wrapper denial test.
-	for _, role := range []string{"tf_app", "anon", "authenticated", "service_role"} {
-		role := role
-		t.Run(role, func(t *testing.T) {
-			tx, err := h.AppDB.BeginTx(ctx, nil)
-			if err != nil {
-				t.Fatalf("begin: %v", err)
-			}
-			defer func() { _ = tx.Rollback() }()
+	// Write under key1.
+	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+		return pgstore.NewForTx(tx, key1).Secrets.Put(ctx, orgID, "github_pat", "the_value", "")
+	}); err != nil {
+		t.Fatalf("Put under key1: %v", err)
+	}
 
-			if _, err := tx.ExecContext(ctx, `SET LOCAL ROLE `+role); err != nil {
-				t.Fatalf("set role %s: %v", role, err)
-			}
-			// Claims set so the denial can only come from the GRANT
-			// matrix, not a missing-org check inside the body.
-			claims := fmt.Sprintf(`{"sub":"%s","org_id":"%s"}`, userID, orgID)
-			if _, err := tx.ExecContext(ctx, `SELECT set_config('request.jwt.claims', $1, true)`, claims); err != nil {
-				t.Fatalf("set claims: %v", err)
-			}
-			_, err = tx.ExecContext(ctx, `SELECT public.vault_get_org_secret_system($1::uuid, 'k')`, orgID)
-			pgtest.AssertRLSViolation(t, err)
-		})
+	// Read under key2 (the "rotated the env key" scenario).
+	got, err := pgstore.New(h.AdminDB, h.AppDB, key2).Secrets.GetSystem(ctx, orgID, "github_pat")
+	if err == nil {
+		t.Fatalf("GetSystem with wrong key returned no error (got=%q); decrypt must fail", got)
+	}
+	if got != "" {
+		t.Errorf("GetSystem with wrong key returned non-empty %q alongside the error", got)
 	}
 }
 
-// TestSecretStore_Postgres_PerUser_RoundTrip exercises the full
-// PutUser / GetUser / DeleteUser cycle through the real
-// public.vault_*_user_secret SECURITY DEFINER functions, under matching
-// (org, user) claims. Mirrors the per-org round-trip but rides the
-// p_user_id = tf.current_user_id() gate too.
+// TestSecretStore_Postgres_PerUser_RoundTrip exercises PutUser / GetUser /
+// DeleteUser under matching (org, user) claims — the org_secrets_user RLS
+// policy's org+user gate — and asserts an org-scope secret and a per-user
+// secret can share the same key as distinct rows.
 func TestSecretStore_Postgres_PerUser_RoundTrip(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -310,7 +379,7 @@ func TestSecretStore_Postgres_PerUser_RoundTrip(t *testing.T) {
 	const key = "jira_token/jira.example.com"
 
 	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-		stores := pgstore.NewForTx(tx)
+		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
 
 		if err := stores.Secrets.PutUser(ctx, orgID, userID, key, "pat_v1", "DC PAT"); err != nil {
 			return fmt.Errorf("PutUser: %w", err)
@@ -324,7 +393,7 @@ func TestSecretStore_Postgres_PerUser_RoundTrip(t *testing.T) {
 			t.Errorf("GetUser got=%q want pat_v1", got)
 		}
 
-		// Rotation overwrites the same Vault row.
+		// Rotation overwrites the same row.
 		if err := stores.Secrets.PutUser(ctx, orgID, userID, key, "pat_v2", ""); err != nil {
 			return fmt.Errorf("PutUser rotation: %w", err)
 		}
@@ -336,7 +405,27 @@ func TestSecretStore_Postgres_PerUser_RoundTrip(t *testing.T) {
 			t.Errorf("after rotation got=%q want pat_v2", got)
 		}
 
-		// Missing key → ("", nil), same as Get.
+		// An org-scope secret with the SAME key is a distinct row (user_id
+		// NULL vs the user's id) — the unique index keys on the scope too.
+		if err := stores.Secrets.Put(ctx, orgID, key, "org_scope_value", ""); err != nil {
+			return fmt.Errorf("Put org-scope same key: %w", err)
+		}
+		gotUser, err := stores.Secrets.GetUser(ctx, orgID, userID, key)
+		if err != nil {
+			return fmt.Errorf("GetUser after org Put: %w", err)
+		}
+		if gotUser != "pat_v2" {
+			t.Errorf("per-user value got=%q want pat_v2 (org-scope Put must not clobber it)", gotUser)
+		}
+		gotOrg, err := stores.Secrets.Get(ctx, orgID, key)
+		if err != nil {
+			return fmt.Errorf("Get org-scope: %w", err)
+		}
+		if gotOrg != "org_scope_value" {
+			t.Errorf("org-scope value got=%q want org_scope_value", gotOrg)
+		}
+
+		// Missing key → ("", nil).
 		got, err = stores.Secrets.GetUser(ctx, orgID, userID, "nonexistent_key")
 		if err != nil {
 			return fmt.Errorf("GetUser missing: %w", err)
@@ -360,14 +449,6 @@ func TestSecretStore_Postgres_PerUser_RoundTrip(t *testing.T) {
 		if ok {
 			t.Errorf("DeleteUser on already-absent key ok=true; want false")
 		}
-
-		got, err = stores.Secrets.GetUser(ctx, orgID, userID, key)
-		if err != nil {
-			return fmt.Errorf("GetUser after delete: %w", err)
-		}
-		if got != "" {
-			t.Errorf("after DeleteUser got=%q want empty", got)
-		}
 		return nil
 	}); err != nil {
 		t.Fatalf("WithUser: %v", err)
@@ -375,14 +456,11 @@ func TestSecretStore_Postgres_PerUser_RoundTrip(t *testing.T) {
 }
 
 // TestSecretStore_Postgres_PerUser_CrossUserDenied is the load-bearing
-// test for SKY-442: two users in the SAME org, and user B must not be
-// able to read user A's secret by passing A's id as p_user_id. The
-// vault wrapper's p_user_id = tf.current_user_id() gate is the only
-// thing standing between a handler running as B and A's Jira token.
-//
-// The complement leg — B reading its OWN (absent) key returns ("", nil)
-// rather than an error — proves the denial is specifically the
-// param-vs-claim mismatch, not a blanket block on user B.
+// cross-user test: two users in the SAME org, and user B must not reach
+// user A's secret. With RLS, B's reads/deletes of A's row filter to empty
+// (the row is invisible), and B's write under A's id is refused. The
+// complement leg — B reading its OWN absent key returns ("", nil) — proves
+// the filter is the per-row user gate, not a blanket block on B.
 func TestSecretStore_Postgres_PerUser_CrossUserDenied(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -395,42 +473,52 @@ func TestSecretStore_Postgres_PerUser_CrossUserDenied(t *testing.T) {
 
 	// User A seeds a secret for itself.
 	if err := h.WithUser(t, userA, orgID, func(tx *sql.Tx) error {
-		return pgstore.NewForTx(tx).Secrets.PutUser(ctx, orgID, userA, key, "alice_pat", "")
+		return pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.PutUser(ctx, orgID, userA, key, "alice_pat", "")
 	}); err != nil {
 		t.Fatalf("seed A's secret: %v", err)
 	}
 
-	// User B (same org) tries to read A's secret by passing A's id.
-	// vault_get_user_secret must refuse — current_user_id() is B.
-	err := h.WithUser(t, userB, orgID, func(tx *sql.Tx) error {
-		_, err := pgstore.NewForTx(tx).Secrets.GetUser(ctx, orgID, userA, key)
-		return err
-	})
-	if err == nil {
-		t.Fatalf("GetUser as B reading A's secret succeeded; cross-user gate broken")
-	}
-
-	// Same for DeleteUser: B cannot delete A's secret.
-	err = h.WithUser(t, userB, orgID, func(tx *sql.Tx) error {
-		_, err := pgstore.NewForTx(tx).Secrets.DeleteUser(ctx, orgID, userA, key)
-		return err
-	})
-	if err == nil {
-		t.Fatalf("DeleteUser as B targeting A's secret succeeded; cross-user gate broken")
-	}
-
-	// ...and PutUser: B cannot write under A's id.
-	err = h.WithUser(t, userB, orgID, func(tx *sql.Tx) error {
-		return pgstore.NewForTx(tx).Secrets.PutUser(ctx, orgID, userA, key, "forged", "")
-	})
-	if err == nil {
-		t.Fatalf("PutUser as B targeting A's id succeeded; cross-user gate broken")
-	}
-
-	// Complement: B reading its OWN absent key is allowed and returns
-	// ("", nil) — the gate is the param mismatch, not a block on B.
+	// B reading A's secret: A's row is invisible to B → ("", nil), not a leak.
 	if err := h.WithUser(t, userB, orgID, func(tx *sql.Tx) error {
-		got, err := pgstore.NewForTx(tx).Secrets.GetUser(ctx, orgID, userB, key)
+		got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.GetUser(ctx, orgID, userA, key)
+		if err != nil {
+			return fmt.Errorf("GetUser as B: %w", err)
+		}
+		if got != "" {
+			t.Errorf("B reading A's secret got=%q want empty (must not leak)", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WithUser B read: %v", err)
+	}
+
+	// B deleting A's secret: A's row is invisible → 0 rows → ok=false, no error.
+	if err := h.WithUser(t, userB, orgID, func(tx *sql.Tx) error {
+		ok, err := pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.DeleteUser(ctx, orgID, userA, key)
+		if err != nil {
+			return fmt.Errorf("DeleteUser as B: %w", err)
+		}
+		if ok {
+			t.Errorf("DeleteUser as B targeting A returned ok=true; A's row must be invisible to B")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WithUser B delete: %v", err)
+	}
+
+	// B writing under A's id: WITH CHECK refuses (the new row's user_id
+	// must equal current_user_id()=B). The conflicting A row is invisible,
+	// so the UPSERT cannot silently overwrite it either — it errors.
+	err := h.WithUser(t, userB, orgID, func(tx *sql.Tx) error {
+		return pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.PutUser(ctx, orgID, userA, key, "forged", "")
+	})
+	if err == nil {
+		t.Fatalf("PutUser as B targeting A's id succeeded; cross-user write gate broken")
+	}
+
+	// Complement: B reading its OWN absent key is allowed and empty.
+	if err := h.WithUser(t, userB, orgID, func(tx *sql.Tx) error {
+		got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.GetUser(ctx, orgID, userB, key)
 		if err != nil {
 			return fmt.Errorf("GetUser for B's own key: %w", err)
 		}
@@ -442,14 +530,14 @@ func TestSecretStore_Postgres_PerUser_CrossUserDenied(t *testing.T) {
 		t.Fatalf("WithUser B own key: %v", err)
 	}
 
-	// And A's secret is still intact after the failed B attempts.
+	// A's secret is intact after B's failed attempts.
 	if err := h.WithUser(t, userA, orgID, func(tx *sql.Tx) error {
-		got, err := pgstore.NewForTx(tx).Secrets.GetUser(ctx, orgID, userA, key)
+		got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.GetUser(ctx, orgID, userA, key)
 		if err != nil {
 			return fmt.Errorf("GetUser as A: %w", err)
 		}
 		if got != "alice_pat" {
-			t.Errorf("A's secret got=%q want alice_pat (untouched by B's attempts)", got)
+			t.Errorf("A's secret got=%q want alice_pat (untouched by B)", got)
 		}
 		return nil
 	}); err != nil {
@@ -457,9 +545,9 @@ func TestSecretStore_Postgres_PerUser_CrossUserDenied(t *testing.T) {
 	}
 }
 
-// TestSecretStore_Postgres_PerUser_MismatchedOrgDenied pins the org leg
-// of the per-user gate: a session with claims for orgA passing orgB as
-// p_org_id must be refused even when p_user_id matches current_user_id().
+// TestSecretStore_Postgres_PerUser_MismatchedOrgDenied pins the org leg of
+// the per-user gate: a session with claims for orgA writing with orgB as
+// the arg is refused by WITH CHECK even when p_user_id matches.
 func TestSecretStore_Postgres_PerUser_MismatchedOrgDenied(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -469,20 +557,17 @@ func TestSecretStore_Postgres_PerUser_MismatchedOrgDenied(t *testing.T) {
 	defer cancel()
 
 	err := h.WithUser(t, userA, orgA, func(tx *sql.Tx) error {
-		// Claims are (orgA, userA); passing orgB must be refused.
-		return pgstore.NewForTx(tx).Secrets.PutUser(ctx, orgB, userA, "k", "stolen", "")
+		return pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.PutUser(ctx, orgB, userA, "k", "stolen", "")
 	})
 	if err == nil {
-		t.Fatalf("PutUser with mismatched orgID succeeded; vault gate broken")
+		t.Fatalf("PutUser with mismatched orgID succeeded; org WITH CHECK broken")
 	}
+	pgtest.AssertRLSViolation(t, err)
 }
 
 // TestSecretStore_Postgres_GetUserSystem_NoClaimsRead pins the per-user
-// system accessor: a background/system caller with NO request.jwt.claims
-// can read a user's secret via GetUserSystem (admin pool →
-// vault_get_user_secret_system) with explicit args, while the same
-// claims-less connection hitting the claims-checked vault_get_user_secret
-// is refused. The per-user mirror of the org "two distinct doors" proof.
+// system accessor: a claims-less caller reads a user's secret via
+// GetUserSystem (admin pool, RLS bypassed) with explicit args.
 func TestSecretStore_Postgres_GetUserSystem_NoClaimsRead(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -492,15 +577,13 @@ func TestSecretStore_Postgres_GetUserSystem_NoClaimsRead(t *testing.T) {
 
 	const key = "jira_token/jira.example.com"
 
-	// Seed through the claims-checked write path (the only writer).
 	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-		return pgstore.NewForTx(tx).Secrets.PutUser(ctx, orgID, userID, key, "alice_pat_v1", "DC PAT")
+		return pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.PutUser(ctx, orgID, userID, key, "alice_pat_v1", "DC PAT")
 	}); err != nil {
 		t.Fatalf("seed secret via PutUser: %v", err)
 	}
 
-	// GetUserSystem routes to the admin pool. No WithUser wrap, no claims.
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	got, err := stores.Secrets.GetUserSystem(ctx, orgID, userID, key)
 	if err != nil {
 		t.Fatalf("GetUserSystem (no claims): %v", err)
@@ -509,7 +592,6 @@ func TestSecretStore_Postgres_GetUserSystem_NoClaimsRead(t *testing.T) {
 		t.Errorf("GetUserSystem got=%q want the seeded PAT", got)
 	}
 
-	// Absent key: NULL → ("", nil), mirroring GetUser.
 	got, err = stores.Secrets.GetUserSystem(ctx, orgID, userID, "nonexistent")
 	if err != nil {
 		t.Fatalf("GetUserSystem missing: %v", err)
@@ -517,76 +599,13 @@ func TestSecretStore_Postgres_GetUserSystem_NoClaimsRead(t *testing.T) {
 	if got != "" {
 		t.Errorf("GetUserSystem missing got=%q want empty", got)
 	}
-
-	// The other door: the claims-checked vault_get_user_secret on the
-	// same claims-less connection must be refused (current_org_id() is
-	// NULL → "missing org/user context"). Proves GetUserSystem isn't just
-	// "GetUser without the gate" — it's a separate function the claims
-	// path can't satisfy here.
-	var sink sql.NullString
-	err = h.AdminDB.QueryRowContext(ctx,
-		`SELECT public.vault_get_user_secret($1::uuid, $2::uuid, $3::text)`, orgID, userID, key,
-	).Scan(&sink)
-	if err == nil {
-		t.Fatalf("claims-checked vault_get_user_secret succeeded with no claims; gate broken")
-	}
-}
-
-// TestSecretStore_Postgres_GetUserSystem_TfAppDenied is the load-bearing
-// guardrail: the app pool (tf_app) and every standard Supabase role must
-// be unable to EXECUTE vault_get_user_secret_system. The whole security
-// argument — system reads take explicit trusted args, request reads stay
-// claims-checked — rests on the app pool having no door into the unchecked
-// function. Per-user mirror of the org GetSystem_TfAppDenied test.
-func TestSecretStore_Postgres_GetUserSystem_TfAppDenied(t *testing.T) {
-	h := pgtest.Shared(t)
-	h.Reset(t)
-	orgID, userID := seedPgOrgAndUserForSecrets(t, h)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Privilege matrix sanity: tf_app LACKS EXECUTE; the admin pool's role
-	// HAS it (supabase_admin owns the function as a superuser).
-	const fn = "public.vault_get_user_secret_system(uuid, uuid, text)"
-	var tfAppHas bool
-	if err := h.AdminDB.QueryRow(`SELECT has_function_privilege('tf_app', $1, 'EXECUTE')`, fn).Scan(&tfAppHas); err != nil {
-		t.Fatalf("has_function_privilege(tf_app): %v", err)
-	}
-	if tfAppHas {
-		t.Errorf("tf_app HAS EXECUTE on %s — must not; the system door must stay closed to the app pool", fn)
-	}
-
-	// tf_app + the standard Supabase roles must all be refused at call
-	// time with permission-denied (42501), before the body runs.
-	for _, role := range []string{"tf_app", "anon", "authenticated", "service_role"} {
-		role := role
-		t.Run(role, func(t *testing.T) {
-			tx, err := h.AppDB.BeginTx(ctx, nil)
-			if err != nil {
-				t.Fatalf("begin: %v", err)
-			}
-			defer func() { _ = tx.Rollback() }()
-
-			if _, err := tx.ExecContext(ctx, `SET LOCAL ROLE `+role); err != nil {
-				t.Fatalf("set role %s: %v", role, err)
-			}
-			// Claims set so the denial can only come from the GRANT
-			// matrix, not a missing-context check inside the body.
-			claims := fmt.Sprintf(`{"sub":"%s","org_id":"%s"}`, userID, orgID)
-			if _, err := tx.ExecContext(ctx, `SELECT set_config('request.jwt.claims', $1, true)`, claims); err != nil {
-				t.Fatalf("set claims: %v", err)
-			}
-			_, err = tx.ExecContext(ctx, `SELECT public.vault_get_user_secret_system($1::uuid, $2::uuid, 'k')`, orgID, userID)
-			pgtest.AssertRLSViolation(t, err)
-		})
-	}
 }
 
 // TestSecretStore_Postgres_PutUserSystem_NoClaimsWriteBack pins the OAuth
-// rotation write-back door: a claims-less system caller can rotate a user's
-// secret via PutUserSystem (admin pool → vault_put_user_secret_system), and the
-// new value reads back through both the system door and the claims-checked one.
-// The write-side mirror of GetUserSystem_NoClaimsRead.
+// rotation write-back door: a claims-less system caller rotates a user's
+// secret via PutUserSystem (admin pool), and the new value reads back
+// through both the system door and the claims-checked one (single row, not
+// a separate bag).
 func TestSecretStore_Postgres_PutUserSystem_NoClaimsWriteBack(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -596,26 +615,22 @@ func TestSecretStore_Postgres_PutUserSystem_NoClaimsWriteBack(t *testing.T) {
 
 	const key = "jira_token/acme.atlassian.net"
 
-	// First write via the claims-checked path (the Connect callback's initial
-	// store), then ROTATE via the claims-less system door (the minter).
 	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-		return pgstore.NewForTx(tx).Secrets.PutUser(ctx, orgID, userID, key, "envelope_v1", "Jira user access token")
+		return pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.PutUser(ctx, orgID, userID, key, "envelope_v1", "Jira user access token")
 	}); err != nil {
 		t.Fatalf("seed via PutUser: %v", err)
 	}
 
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	if err := stores.Secrets.PutUserSystem(ctx, orgID, userID, key, "envelope_v2", "Jira user access token"); err != nil {
 		t.Fatalf("PutUserSystem (no claims): %v", err)
 	}
 
-	// System-door read sees the rotated value.
 	if got, err := stores.Secrets.GetUserSystem(ctx, orgID, userID, key); err != nil || got != "envelope_v2" {
 		t.Fatalf("GetUserSystem after rotation = (%q, %v), want envelope_v2", got, err)
 	}
-	// Claims-checked read sees it too (single Vault row, not a separate bag).
 	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-		got, err := pgstore.NewForTx(tx).Secrets.GetUser(ctx, orgID, userID, key)
+		got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.GetUser(ctx, orgID, userID, key)
 		if err != nil {
 			return err
 		}
@@ -628,94 +643,21 @@ func TestSecretStore_Postgres_PutUserSystem_NoClaimsWriteBack(t *testing.T) {
 	}
 }
 
-// TestSecretStore_Postgres_PutUserSystem_TfAppDenied is the write-side mirror of
-// GetUserSystem_TfAppDenied: tf_app and the standard Supabase roles must have no
-// EXECUTE on vault_put_user_secret_system, so the unchecked write door stays
-// closed to the app pool.
-func TestSecretStore_Postgres_PutUserSystem_TfAppDenied(t *testing.T) {
+// TestSecretStore_Postgres_EmptyKeyRejected pins the org_secrets_key_nonempty
+// CHECK: a secret must have a name. An empty key is a caller bug and is
+// refused at write time rather than silently stored under "".
+func TestSecretStore_Postgres_EmptyKeyRejected(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID := seedPgOrgAndUserForSecrets(t, h)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	const fn = "public.vault_put_user_secret_system(uuid, uuid, text, text, text)"
-	var tfAppHas bool
-	if err := h.AdminDB.QueryRow(`SELECT has_function_privilege('tf_app', $1, 'EXECUTE')`, fn).Scan(&tfAppHas); err != nil {
-		t.Fatalf("has_function_privilege(tf_app): %v", err)
-	}
-	if tfAppHas {
-		t.Errorf("tf_app HAS EXECUTE on %s — must not; the system write door must stay closed to the app pool", fn)
-	}
-
-	for _, role := range []string{"tf_app", "anon", "authenticated", "service_role"} {
-		role := role
-		t.Run(role, func(t *testing.T) {
-			tx, err := h.AppDB.BeginTx(ctx, nil)
-			if err != nil {
-				t.Fatalf("begin: %v", err)
-			}
-			defer func() { _ = tx.Rollback() }()
-
-			if _, err := tx.ExecContext(ctx, `SET LOCAL ROLE `+role); err != nil {
-				t.Fatalf("set role %s: %v", role, err)
-			}
-			claims := fmt.Sprintf(`{"sub":"%s","org_id":"%s"}`, userID, orgID)
-			if _, err := tx.ExecContext(ctx, `SELECT set_config('request.jwt.claims', $1, true)`, claims); err != nil {
-				t.Fatalf("set claims: %v", err)
-			}
-			_, err = tx.ExecContext(ctx, `SELECT public.vault_put_user_secret_system($1::uuid, $2::uuid, 'k', 'v', NULL)`, orgID, userID)
-			pgtest.AssertRLSViolation(t, err)
-		})
-	}
-}
-
-// TestSecretStore_Postgres_PerUser_NonTfAppRoleRefused pins the grant
-// matrix on the claims-checked per-user trio: REVOKE'd from
-// anon/authenticated/service_role, GRANT'd only to tf_app. Mirrors the
-// per-org NonTfAppRoleRefused test — proves the wrappers are unreachable
-// from any role that isn't our app role, independent of the body's gate.
-func TestSecretStore_Postgres_PerUser_NonTfAppRoleRefused(t *testing.T) {
-	h := pgtest.Shared(t)
-	h.Reset(t)
-	orgID, userID := seedPgOrgAndUserForSecrets(t, h)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	for _, role := range []string{"anon", "authenticated", "service_role"} {
-		role := role
-		t.Run(role, func(t *testing.T) {
-			tx, err := h.AppDB.BeginTx(ctx, nil)
-			if err != nil {
-				t.Fatalf("begin: %v", err)
-			}
-			defer func() { _ = tx.Rollback() }()
-
-			if _, err := tx.ExecContext(ctx, `SET LOCAL ROLE `+role); err != nil {
-				t.Fatalf("set role %s: %v", role, err)
-			}
-			// Claims set so the wrapper would otherwise satisfy its own
-			// gate — the permission denial must fire before the body runs.
-			claims := fmt.Sprintf(`{"sub":"%s","org_id":"%s"}`, userID, orgID)
-			if _, err := tx.ExecContext(ctx, `SELECT set_config('request.jwt.claims', $1, true)`, claims); err != nil {
-				t.Fatalf("set claims: %v", err)
-			}
-
-			probe := func(label, query string) {
-				t.Helper()
-				if _, err := tx.ExecContext(ctx, `SAVEPOINT sp`); err != nil {
-					t.Fatalf("%s: savepoint: %v", label, err)
-				}
-				_, err := tx.ExecContext(ctx, query, orgID, userID)
-				pgtest.AssertRLSViolation(t, err)
-				if _, err := tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT sp`); err != nil {
-					t.Fatalf("%s: rollback to savepoint: %v", label, err)
-				}
-			}
-			probe("put", `SELECT public.vault_put_user_secret($1::uuid, $2::uuid, 'k', 'v', NULL)`)
-			probe("get", `SELECT public.vault_get_user_secret($1::uuid, $2::uuid, 'k')`)
-			probe("delete", `SELECT public.vault_delete_user_secret($1::uuid, $2::uuid, 'k')`)
-		})
+	err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+		return pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.Put(ctx, orgID, "", "v", "")
+	})
+	if err == nil {
+		t.Fatalf("Put with empty key succeeded; org_secrets_key_nonempty CHECK missing")
 	}
 }
 
@@ -741,10 +683,9 @@ func seedPgOrgAndUserForSecrets(t *testing.T, h *pgtest.Harness) (orgID, userID 
 }
 
 // seedPgSecondUserInOrg seeds an additional (member-role) user into an
-// existing org so cross-user tests have two distinct principals under
-// one tenant. The vault per-user gate keys purely on JWT claims, but a
-// real users-row + membership keeps the fixture honest (valid FK target,
-// realistic shape).
+// existing org so cross-user tests have two distinct principals under one
+// tenant. The RLS per-user gate keys on JWT claims, but a real users row +
+// membership keeps the fixture honest (valid FK target, realistic shape).
 func seedPgSecondUserInOrg(t *testing.T, h *pgtest.Harness, orgID string) (userID string) {
 	t.Helper()
 	userID = uuid.New().String()

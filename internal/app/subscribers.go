@@ -3,7 +3,6 @@ package app
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -76,7 +75,7 @@ func (a *App) handlePollCompleted(evt domain.Event) {
 		Entities  int    `json:"entities"`
 	}
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
-		log.Printf("[poll-tracker] warning: failed to parse poll completion metadata: %v; raw metadata=%q", err, evt.MetadataJSON)
+		pollTrackerLog.Warn("parse poll completion metadata failed", "error", err, "raw_metadata", evt.MetadataJSON)
 		return
 	}
 	if meta.Source == "jira" {

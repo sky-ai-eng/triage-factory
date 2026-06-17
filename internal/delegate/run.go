@@ -14,7 +14,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"time"
 
@@ -84,7 +83,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			// reclaim the orphan once the worktree is gone.
 			rmErr := worktree.RemoveAt(cfg.wtPath, runID)
 			if rmErr != nil {
-				log.Printf("[delegate] worktree remove failed for %s; skipping per-PR config cleanup: %v", runID, rmErr)
+				delegateLog.Warn("worktree remove failed; skipping per-PR config cleanup", "run", runID, "error", rmErr)
 				return
 			}
 			// CleanupPRConfig uses a detached internal context so
@@ -107,7 +106,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			}
 			rows, err := s.runWorktrees.ListSystem(context.Background(), orgID, runID)
 			if err != nil {
-				log.Printf("[delegate] run %s: list run_worktrees for cleanup: %v", runID, err)
+				delegateLog.Warn("list run_worktrees for cleanup failed", "run", runID, "error", err)
 			} else {
 				// Use a detached context so cleanup is not skipped if the
 				// agent ctx has already been canceled.
@@ -116,11 +115,11 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 				for _, w := range rows {
 					rmErr := worktree.RemoveAt(w.Path, runID)
 					if rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
-						log.Printf("[delegate] run %s: remove worktree %s: %v", runID, w.Path, rmErr)
+						delegateLog.Warn("remove worktree failed", "run", runID, "path", w.Path, "error", rmErr)
 						continue
 					}
 					if delErr := s.runWorktrees.DeleteByPathSystem(cleanupCtx, orgID, runID, w.Path); delErr != nil {
-						log.Printf("[delegate] run %s: delete run_worktrees row for %s: %v", runID, w.Path, delErr)
+						delegateLog.Warn("delete run_worktrees row failed", "run", runID, "path", w.Path, "error", delErr)
 					}
 				}
 			}
@@ -181,7 +180,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// to log and continue through rather than aborting the run.
 	metadataJSON, err := s.events.GetMetadataSystem(context.Background(), orgID, task.PrimaryEventID)
 	if err != nil {
-		log.Printf("[delegate] warning: failed to load event metadata for task %s (event %s): %v — event placeholders will render empty", task.ID, task.PrimaryEventID, err)
+		delegateLog.Warn("load event metadata for task failed; event placeholders will render empty", "task", task.ID, "event", task.PrimaryEventID, "error", err)
 		metadataJSON = ""
 	}
 
@@ -258,10 +257,10 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	resumeSession := ""
 	if priorSessionID != "" && sessionTranscriptExists(claudeCwd, priorSessionID) {
 		resumeSession = priorSessionID
-		log.Printf("[delegate] run %s re-claimed mid-flight; resuming session %s", runID, priorSessionID)
+		delegateLog.Info("run re-claimed mid-flight; resuming session", "run", runID, "session", priorSessionID)
 	}
 
-	log.Printf("[delegate] claude starting for run %s (cwd: %s)", runID, claudeCwd)
+	delegateLog.Info("claude starting for run", "run", runID, "cwd", claudeCwd)
 	baseOpts := agentproc.RunOptions{
 		Cwd:            claudeCwd,
 		Model:          model,
@@ -401,15 +400,15 @@ func (s *Spawner) processCompletion(
 	// the next run's materializer folders this file under the right namespace.
 	agentContent, fileState := readAgentMemoryFile(claudeCwd, namespace, runID)
 	if err := s.taskMemory.UpsertAgentMemorySystem(context.Background(), orgID, runID, task.EntityID, blueprintRunID, agentContent); err != nil {
-		log.Printf("[delegate] warning: failed to upsert memory for run %s: %v", runID, err)
+		delegateLog.Warn("upsert memory for run failed", "run", runID, "error", err)
 	}
 	switch fileState {
 	case memoryFileMissing:
-		log.Printf("[delegate] run %s: memory file missing at termination (agent_content NULL)", runID)
+		delegateLog.Debug("memory file missing at termination (agent_content NULL)", "run", runID)
 	case memoryFileEmpty:
-		log.Printf("[delegate] run %s: memory file present but empty at termination (agent_content NULL)", runID)
+		delegateLog.Debug("memory file present but empty at termination (agent_content NULL)", "run", runID)
 	case memoryFileReadErr:
-		log.Printf("[delegate] run %s: memory file unreadable at termination (agent_content NULL)", runID)
+		delegateLog.Debug("memory file unreadable at termination (agent_content NULL)", "run", runID)
 	}
 
 	// Every run is a step of a blueprint_run now (a single prompt is a 1-step
@@ -466,14 +465,14 @@ func (s *Spawner) processCompletion(
 		// it so that failure mode is observable rather than silent.
 		pendingReview, rErr := s.reviews.ByRunIDSystem(bgCtx, orgID, runID)
 		if rErr != nil {
-			log.Printf("[delegate] warning: pending-review lookup for run %s failed; a queued review may strand outside the approval queue: %v", runID, rErr)
+			delegateLog.Warn("pending-review lookup for run failed; a queued review may strand outside the approval queue", "run", runID, "error", rErr)
 		}
 		if pendingReview != nil {
 			hasPending = true
 		} else {
 			pendingPR, pErr := s.pendingPRs.ByRunIDSystem(bgCtx, orgID, runID)
 			if pErr != nil {
-				log.Printf("[delegate] warning: pending-PR lookup for run %s failed; a queued PR may strand outside the approval queue: %v", runID, pErr)
+				delegateLog.Warn("pending-PR lookup for run failed; a queued PR may strand outside the approval queue", "run", runID, "error", pErr)
 			}
 			if pendingPR != nil {
 				hasPending = true
@@ -499,10 +498,10 @@ func (s *Spawner) processCompletion(
 		if err := s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
 			return ts.AgentRuns.Complete(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary, outcome, outcomeReason)
 		}); err != nil {
-			log.Printf("[delegate] warning: failed to record completion for run %s: %v", runID, err)
+			delegateLog.Warn("record completion for run failed", "run", runID, "error", err)
 		}
 	} else if err := s.agentRuns.CompleteSystem(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary, outcome, outcomeReason); err != nil {
-		log.Printf("[delegate] warning: failed to record completion for run %s: %v", runID, err)
+		delegateLog.Warn("record completion for run failed", "run", runID, "error", err)
 	}
 
 	s.updateBreakerCounter(task.ID, triggerType, status)
@@ -534,7 +533,7 @@ func (s *Spawner) processCompletion(
 				flippedToPending, flipErr = s.agentRuns.MarkPendingApprovalIfCompletedSystem(bgCtx, orgID, runID)
 			}
 			if flipErr != nil {
-				log.Printf("[delegate] warning: failed to set pending_approval for run %s: %v", runID, flipErr)
+				delegateLog.Warn("set pending_approval for run failed", "run", runID, "error", flipErr)
 			} else if flippedToPending {
 				status = "pending_approval"
 				// Dormant: keep the worktree as the warm cache.
@@ -551,7 +550,7 @@ func (s *Spawner) processCompletion(
 				// dropped by terminateBlueprint on approval if never resumed;
 				// retention is otherwise bounded by the TTL sweep.
 				if err := s.snapshotWorkspace(ctx, orgID, namespace, claudeCwd, sessionID); err != nil {
-					log.Printf("[delegate] warning: failed to snapshot workspace for run %s after pending_approval: %v", runID, err)
+					delegateLog.Warn("snapshot workspace for run after pending_approval failed", "run", runID, "error", err)
 				}
 			}
 		} else if domain.RunOutcome(outcome) == domain.RunOutcomeAbort {
@@ -563,7 +562,7 @@ func (s *Spawner) processCompletion(
 			// cold rehydrate from this blob is the resume path). terminateBlueprint
 			// retains the blob for an aborted terminal; the TTL sweep reaps it.
 			if err := s.snapshotWorkspace(ctx, orgID, namespace, claudeCwd, sessionID); err != nil {
-				log.Printf("[delegate] warning: failed to snapshot workspace for aborted run %s: %v", runID, err)
+				delegateLog.Warn("snapshot workspace for aborted run failed", "run", runID, "error", err)
 			}
 		}
 	}

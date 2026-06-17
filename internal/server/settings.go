@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"regexp"
 	"slices"
@@ -420,7 +419,7 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		// Log the underlying wrap-chain (SQL / vault / FK errors) for
 		// operator debugging, but return a stable user-facing message
 		// so we don't leak Postgres internals to API clients.
-		log.Printf("[settings] handleJiraConnect persist failed: %v", err)
+		settingsLog.Error("jira connect persist failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to connect Jira"})
 		return
 	}
@@ -474,7 +473,7 @@ func (se *settingsHandler) handleAnthropicConnect(w http.ResponseWriter, r *http
 			orgSet.AnthropicAPIKeyRef = ""
 			return tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet)
 		}); err != nil {
-			log.Printf("[settings] handleAnthropicConnect clear failed: %v", err)
+			settingsLog.Error("anthropic connect clear failed", "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update Claude credentials"})
 			return
 		}
@@ -510,7 +509,7 @@ func (se *settingsHandler) handleAnthropicConnect(w http.ResponseWriter, r *http
 		orgSet.AnthropicAPIKeyRef = secretKeyAnthropicAPIKey
 		return tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet)
 	}); err != nil {
-		log.Printf("[settings] handleAnthropicConnect persist failed: %v", err)
+		settingsLog.Error("anthropic connect persist failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to store Claude credentials"})
 		return
 	}
@@ -525,7 +524,7 @@ func (se *settingsHandler) handleJiraStatuses(w http.ResponseWriter, r *http.Req
 	userID := ClaimsFrom(r.Context()).Subject
 	projects := r.URL.Query()["project"]
 	// Read creds + (if needed) the team's tracked-projects fallback
-	// through the app pool inside WithTx so vault_decrypt and
+	// through the app pool inside WithTx so the org_secrets read and
 	// team_settings_select run under the user's claims.
 	var creds auth.Credentials
 	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -632,8 +631,8 @@ func (se *settingsHandler) handleGitHubPreflightSSH(w http.ResponseWriter, r *ht
 	// load creds (not settings) because creds.GitHubURL is the URL the
 	// user actually authenticates against; org_settings.github_base_url
 	// mirrors it but the SecretStore copy is the source of truth.
-	// Wrapped in WithTx so vault_decrypt sees claims and the read
-	// matches the rest of the post-SKY-355 settings surface.
+	// Wrapped in WithTx so the org_secrets read sees claims and matches
+	// the rest of the post-SKY-355 settings surface.
 	orgID := OrgIDFrom(r.Context())
 	userID := ClaimsFrom(r.Context()).Subject
 	var creds auth.Credentials
@@ -650,7 +649,7 @@ func (se *settingsHandler) handleGitHubPreflightSSH(w http.ResponseWriter, r *ht
 	defer cancel()
 
 	if err := worktree.PreflightSSH(ctx, sshHost); err != nil {
-		log.Printf("[settings] SSH preflight against %s failed: %v", sshHost, err)
+		settingsLog.Warn("ssh preflight failed", "ssh_host", sshHost, "error", err)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":     false,
 			"stderr": err.Error(),
@@ -658,6 +657,6 @@ func (se *settingsHandler) handleGitHubPreflightSSH(w http.ResponseWriter, r *ht
 		})
 		return
 	}
-	log.Printf("[settings] SSH preflight ok (%s authenticated)", sshHost)
+	settingsLog.Info("ssh preflight ok", "ssh_host", sshHost)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "host": sshHost})
 }

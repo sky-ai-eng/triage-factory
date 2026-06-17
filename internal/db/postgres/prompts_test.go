@@ -58,7 +58,7 @@ func TestPromptStore_Postgres(t *testing.T) {
 		// requires Stats / List / Get to work without JWT claims plumbing
 		// in every subtest. The admin pool bypasses RLS but still
 		// enforces FKs + NOT NULL, so we're testing the same SQL.
-		stores := pgstore.New(h.AdminDB, h.AdminDB)
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 		seeder := func(t *testing.T, promptID string, statusByOffset []string) []string {
 			t.Helper()
@@ -87,7 +87,7 @@ func TestPromptStore_Postgres_SeedOrUpdate_AdminOnly(t *testing.T) {
 	defer cancel()
 
 	// Admin-pool store — must succeed.
-	adminStores := pgstore.New(h.AdminDB, h.AdminDB)
+	adminStores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	teamID := firstTeamForOrg(t, h, orgID)
 	seededID, err := adminStores.Prompts.SeedOrUpdate(ctx, orgID, teamID, domain.Prompt{
 		SystemSlug: "sys-admin-ok", Name: "OK", Body: "x", Source: "system",
@@ -155,7 +155,7 @@ func TestPromptStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("same_org_user_can_read", func(t *testing.T) {
 		err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx).Prompts.Get(ctx, orgA, promptA)
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Prompts.Get(ctx, orgA, promptA)
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -171,7 +171,7 @@ func TestPromptStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("cross_org_read_filtered", func(t *testing.T) {
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx).Prompts.Get(ctx, orgA, promptA)
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Prompts.Get(ctx, orgA, promptA)
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -191,7 +191,7 @@ func TestPromptStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// org_id = tf.current_org_id(), so 42501 is the expected
 		// outcome.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			return pgstore.NewForTx(tx).Prompts.Create(ctx, orgA, teamA, domain.Prompt{
+			return pgstore.NewForTx(tx, pgtest.SecretKey).Prompts.Create(ctx, orgA, teamA, domain.Prompt{
 				ID: "p-rls-write-" + orgA[:8], Name: "x-write", Body: "x", Source: "user",
 			})
 		})

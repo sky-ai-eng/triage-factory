@@ -3,7 +3,6 @@ package github
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/url"
 )
 
@@ -84,7 +83,8 @@ func (c *Client) ListMyTeams() ([]string, error) {
 			break
 		}
 		if page == teamsPageCap {
-			log.Printf("[github] WARN: team membership list truncated at %d pages (%d teams max) — team-based review-request matching may miss memberships past this cap", teamsPageCap, teamsPageCap*teamsPerPage)
+			githubLog.Warn("team membership list truncated; team-based review-request matching may miss memberships past the cap",
+				"page_cap", teamsPageCap, "teams_max", teamsPageCap*teamsPerPage)
 		}
 	}
 	return out, nil
@@ -131,7 +131,8 @@ func (c *Client) ListMyTeamsDetailed() ([]UserTeam, error) {
 			break
 		}
 		if page == teamsPageCap {
-			log.Printf("[github] WARN: team membership list truncated at %d pages (%d teams max)", teamsPageCap, teamsPageCap*teamsPerPage)
+			githubLog.Warn("team membership list truncated",
+				"page_cap", teamsPageCap, "teams_max", teamsPageCap*teamsPerPage)
 		}
 	}
 	return out, nil
@@ -228,7 +229,8 @@ func (c *Client) ListUserTeamsInOrg(orgLogin, userLogin string) ([]UserTeam, err
 		c := teams.PageInfo.EndCursor
 		cursor = &c
 		if page == teamsPageCap {
-			log.Printf("[github] WARN: org %s team list truncated at %d pages for user %s", orgLogin, teamsPageCap, userLogin)
+			githubLog.Warn("org team list truncated",
+				"org", orgLogin, "page_cap", teamsPageCap, "user", userLogin)
 		}
 	}
 	return out, nil
@@ -325,7 +327,8 @@ func (c *Client) ListOrgTeamsDetailed(orgLogin string) ([]UserTeam, error) {
 		cur := teams.PageInfo.EndCursor
 		cursor = &cur
 		if page == teamsPageCap {
-			log.Printf("[github] WARN: org %s team list truncated at %d pages (%d teams max)", orgLogin, teamsPageCap, teamsPageCap*teamsPerPage)
+			githubLog.Warn("org team list truncated",
+				"org", orgLogin, "page_cap", teamsPageCap, "teams_max", teamsPageCap*teamsPerPage)
 		}
 	}
 	return out, nil
@@ -366,7 +369,8 @@ func (c *Client) ListOrgTeams(org string) ([]OrgTeam, error) {
 			break
 		}
 		if page == teamsPageCap {
-			log.Printf("[github] WARN: org %s team list truncated at %d pages (%d teams max)", org, teamsPageCap, teamsPageCap*teamsPerPage)
+			githubLog.Warn("org team list truncated",
+				"org", org, "page_cap", teamsPageCap, "teams_max", teamsPageCap*teamsPerPage)
 		}
 	}
 	return out, nil

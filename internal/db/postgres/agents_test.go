@@ -33,7 +33,7 @@ func TestAgentStore_Postgres(t *testing.T) {
 		// created this user, so the FK is satisfied without seeding
 		// another row.
 		ownerID := mustOwnerUserForOrg(t, h, orgID)
-		stores := pgstore.New(h.AdminDB, h.AdminDB)
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		return stores.Agents, orgID, ownerID
 	})
 }
@@ -53,7 +53,7 @@ func TestAgentStore_Postgres_CreateIsolatesAcrossOrgs(t *testing.T) {
 		t.Fatal("seedPgOrgForAgents returned the same orgID twice")
 	}
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	idA, err := stores.Agents.Create(ctx, orgA, domain.Agent{DisplayName: "Bot A"})
@@ -88,7 +88,7 @@ func TestAgentStore_Postgres_CreateRejectsInsideTx(t *testing.T) {
 	orgID := seedPgOrgForAgents(t, h)
 	ownerID := mustOwnerUserForOrg(t, h, orgID)
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	err := stores.Tx.WithTx(context.Background(), orgID, ownerID, func(tx db.TxStores) error {
 		_, err := tx.Agents.Create(context.Background(), orgID, domain.Agent{DisplayName: "InTx"})
 		return err
@@ -111,7 +111,7 @@ func TestAgentStore_Postgres_NonAdminCannotUpdate(t *testing.T) {
 	orgID := seedPgOrgForAgents(t, h)
 	bobID := seedPgMember(t, h, orgID, "bob", "member")
 
-	adminStores := pgstore.New(h.AdminDB, h.AdminDB)
+	adminStores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	if _, err := adminStores.Agents.Create(context.Background(), orgID, domain.Agent{DisplayName: "Org Bot"}); err != nil {
 		t.Fatalf("seed agent: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestAgentStore_Postgres_AdminCanUpdate(t *testing.T) {
 	orgID := seedPgOrgForAgents(t, h)
 	carolID := seedPgMember(t, h, orgID, "carol", "admin")
 
-	adminStores := pgstore.New(h.AdminDB, h.AdminDB)
+	adminStores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	if _, err := adminStores.Agents.Create(context.Background(), orgID, domain.Agent{DisplayName: "Org Bot"}); err != nil {
 		t.Fatalf("seed agent: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestAgentStore_Postgres_BlocksCrossOrgPATUser(t *testing.T) {
 	// bobBID is a member of orgB only — does NOT belong to orgA.
 	bobBID := mustOwnerUserForOrg(t, h, orgB)
 
-	adminStores := pgstore.New(h.AdminDB, h.AdminDB)
+	adminStores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	if _, err := adminStores.Agents.Create(context.Background(), orgA, domain.Agent{DisplayName: "Bot A"}); err != nil {
 		t.Fatalf("seed agent A: %v", err)
 	}

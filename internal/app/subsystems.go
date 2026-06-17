@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -66,13 +65,13 @@ func (a *App) buildAI() {
 		},
 	})
 	a.srv.SetScorerTrigger(a.scorer.Trigger)
-	log.Println("[ai] scorer manager ready (per-org runners, model: haiku)")
+	aiLog.Info("scorer manager ready (per-org runners)", "model", "haiku")
 
 	// Project classifier: per-poll, classify newly-discovered entities
 	// against existing projects via per-project Haiku quorum vote. Sticky —
 	// only fires on entities with classified_at IS NULL.
 	a.classifier = projectclassify.NewRunner(a.stores.Entities, a.stores.Projects, a.stores.Orgs, a.runSecrets)
-	log.Println("[classify] project classifier ready (model: haiku)")
+	classifyLog.Info("project classifier ready", "model", "haiku")
 }
 
 // buildExecution constructs the delegation spawner and the curator runtime,
@@ -118,9 +117,9 @@ func (a *App) buildExecution() error {
 	// definition stranded — cancelling it makes the user re-send rather than
 	// wait for a delayed mystery reply.
 	if n, err := a.stores.Curator.CancelOrphanedNonTerminalRequests(context.Background()); err != nil {
-		log.Printf("[curator] sweep stranded turns: %v", err)
+		curatorLog.Error("sweep stranded turns failed", "error", err)
 	} else if n > 0 {
-		log.Printf("[curator] cancelled %d stranded turn(s) from prior process", n)
+		curatorLog.Info("cancelled stranded turns from prior process", "count", n)
 	}
 	a.curator = curator.New(a.stores, a.wsHub, "")
 	a.curator.SetRunCredentialResolvers(a.ghResolver, a.runSecrets, a.modelFor)

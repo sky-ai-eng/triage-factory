@@ -22,19 +22,22 @@ import (
 //     multi. orgID must equal runmode.LocalDefaultOrg; anything else
 //     is a caller bug and rejected with an error.
 //
-//   - Multi mode: secrets are persisted via the public.vault_*
-//     wrapper functions defined in the D3 baseline. Those functions
-//     wrap Supabase Vault, enforce a creator_user_id-bound naming
-//     convention ("org/<uuid>/<key>"), and refuse calls whose
-//     request.jwt.claims.org_id doesn't match the p_org_id argument.
-//     The Postgres impl is a thin wrapper over those SQL functions.
+//   - Multi mode: secrets are AES-256-GCM-encrypted app-side (a key
+//     from TF_SECRET_ENCRYPTION_KEY, via internal/aead) and stored as
+//     opaque ciphertext in the RLS-gated public.org_secrets table
+//     (TFAC-402). RLS enforces the org gate (and, for per-user rows,
+//     the user gate) on the app pool; the admin pool bypasses RLS for
+//     the *System reads/writes. This replaced the original Supabase
+//     Vault / pgsodium wrappers, whose root key lived in the postgres
+//     container filesystem and was lost on any container recreate.
 //
 // D5 owns the consumer side (wiring real handlers + secret-name
 // catalog); D2 provides the interface and both impls.
 type SecretStore interface {
-	// Put writes (or rotates) a secret. description is optional —
-	// the wrapper coalesces NULL → "". Vault stores by name
-	// "org/<orgID>/<key>"; rotations overwrite the same row.
+	// Put writes (or rotates) an org-scoped secret. description is
+	// optional (stored as ""). The value is encrypted app-side and
+	// stored in org_secrets keyed on (orgID, NULL user, key); rotations
+	// overwrite the same row.
 	Put(ctx context.Context, orgID, key, value, description string) error
 
 	// Get returns the stored secret value, or ("", nil) when no
@@ -46,11 +49,11 @@ type SecretStore interface {
 	// GetSystem reads an org-scoped secret WITHOUT a request JWT, for
 	// background/system callers (webhook signature-verify reads, the
 	// App-PEM backfill, multi-mode polling). Takes orgID explicitly:
-	// in multi mode it runs on the system/admin pool via
-	// vault_get_org_secret_system, which trusts the passed orgID and
-	// performs no current_org_id() claims check; local mode forwards
-	// to the keychain (single-org, no RLS, no claims). Mirrors Get's
-	// ("", nil)-on-absent contract.
+	// in multi mode it runs on the admin pool (supabase_admin bypasses
+	// RLS), which trusts the passed orgID and performs no
+	// current_org_id() claims check; local mode forwards to the keychain
+	// (single-org, no RLS, no claims). Mirrors Get's ("", nil)-on-absent
+	// contract.
 	//
 	// System-code-only. Request handlers must use the claims-checked
 	// Get — same discipline as GetForOrgSystem vs GetForOrg. The one
@@ -71,9 +74,9 @@ type SecretStore interface {
 	// the Jira "act as yourself" credential (a Data Center PAT, or
 	// later a Cloud OAuth refresh token); GitHub has no per-user
 	// credential (identity-only), so this is genuinely net-new but
-	// mirrors the org quartet exactly plus a userID dimension. Vault
-	// stores by name "org/<orgID>/user/<userID>/<key>"; rotations
-	// overwrite the same row. description is optional (NULL → "").
+	// mirrors the org quartet exactly plus a userID dimension. Stored in
+	// org_secrets keyed on (orgID, userID, key); rotations overwrite the
+	// same row. description is optional (stored as "").
 	//
 	// # Key/host convention
 	//
@@ -85,26 +88,25 @@ type SecretStore interface {
 
 	// GetUser returns the stored per-user secret value, or ("", nil)
 	// when no row matches — same "not configured" vs "fetch failed"
-	// contract as Get. Claims-checked: in multi mode the vault wrapper
-	// refuses when p_org_id != current_org_id() OR p_user_id !=
-	// current_user_id(), so a handler running as user A cannot read
-	// user B's token. That cross-user gate is the load-bearing
-	// boundary this scope exists to provide.
+	// contract as Get. Claims-checked: in multi mode org_secrets RLS
+	// filters out any row whose org_id != current_org_id() OR user_id !=
+	// current_user_id(), so a handler running as user A reading user B's
+	// token simply sees no row (("", nil), not a leak). That cross-user
+	// gate is the load-bearing boundary this scope exists to provide.
 	GetUser(ctx context.Context, orgID, userID, key string) (string, error)
 
 	// GetUserSystem reads a per-user secret WITHOUT a request JWT, for
 	// system code acting as a user — the write-actor resolver building
 	// a JiraClientForUser on a background run path is the motivating
 	// caller. Takes orgID + userID explicitly: in multi mode it runs on
-	// the system/admin pool via vault_get_user_secret_system, which
-	// trusts the passed args and performs no current_org_id() /
-	// current_user_id() claims check; local mode forwards to the
-	// keychain (single-user, no RLS, no claims). Mirrors GetUser's
-	// ("", nil)-on-absent contract.
+	// the admin pool (supabase_admin bypasses RLS), which trusts the
+	// passed args and performs no current_org_id() / current_user_id()
+	// claims check; local mode forwards to the keychain (single-user, no
+	// RLS, no claims). Mirrors GetUser's ("", nil)-on-absent contract.
 	//
-	// System-code-only, same discipline as GetSystem. tf_app has no
-	// EXECUTE on the underlying system function, so request handlers
-	// cannot reach this door — they use the claims-checked GetUser.
+	// System-code-only, same discipline as GetSystem. The app pool can't
+	// reach another user's row (RLS filters it), so request handlers
+	// stay on the claims-checked GetUser.
 	GetUserSystem(ctx context.Context, orgID, userID, key string) (string, error)
 
 	// PutUserSystem writes (or rotates) a per-user secret WITHOUT a request
@@ -115,14 +117,14 @@ type SecretStore interface {
 	// and it runs on the system/background pool (the write-actor resolver holds
 	// a claims-free store), so the claims-checked PutUser is unreachable.
 	//
-	// Takes orgID + userID explicitly: in multi mode it runs on the
-	// system/admin pool via vault_put_user_secret_system, which trusts the
-	// passed args and performs no current_org_id() / current_user_id() check;
-	// local mode forwards to the keychain (single-user, no RLS, no claims).
+	// Takes orgID + userID explicitly: in multi mode it runs on the admin
+	// pool (supabase_admin bypasses RLS), which trusts the passed args and
+	// performs no current_org_id() / current_user_id() check; local mode
+	// forwards to the keychain (single-user, no RLS, no claims).
 	//
-	// System-code-only, same discipline as GetUserSystem. tf_app has no
-	// EXECUTE on the underlying system function, so request handlers cannot
-	// reach this door — they use the claims-checked PutUser.
+	// System-code-only, same discipline as GetUserSystem. The app pool's
+	// RLS WITH CHECK would reject a write under another user's id, so
+	// request handlers stay on the claims-checked PutUser.
 	PutUserSystem(ctx context.Context, orgID, userID, key, value, description string) error
 
 	// DeleteUser removes a per-user secret. Returns ok=false when no

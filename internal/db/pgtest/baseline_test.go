@@ -30,6 +30,9 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		"swipe_events", "poller_state", "repo_profiles", "pending_reviews",
 		"pending_review_comments", "preferences", "system_prompt_versions",
 		"curator_requests", "curator_messages", "curator_pending_context",
+		// org_secrets replaces the Supabase Vault secret path (TFAC-402):
+		// app-encrypted ciphertext in a normal RLS table.
+		"org_secrets",
 	}
 	for _, table := range expectedTables {
 		var n int
@@ -61,7 +64,7 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		}
 	}
 
-	for _, fn := range []string{"vault_put_org_secret", "vault_get_org_secret", "vault_get_org_secret_system", "vault_delete_org_secret", "update_project_knowledge"} {
+	for _, fn := range []string{"update_project_knowledge"} {
 		var n int
 		if err := h.AdminDB.QueryRow(
 			`SELECT COUNT(*) FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid
@@ -71,6 +74,26 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		}
 		if n == 0 {
 			t.Errorf("public.%s missing", fn)
+		}
+	}
+
+	// The public.vault_* secret wrappers are dropped by the org_secrets
+	// migration (TFAC-402). Assert they're gone so a regression that
+	// re-introduces the pgsodium secret path is caught here.
+	for _, fn := range []string{
+		"vault_put_org_secret", "vault_get_org_secret", "vault_get_org_secret_system", "vault_delete_org_secret",
+		"vault_put_user_secret", "vault_get_user_secret", "vault_get_user_secret_system", "vault_delete_user_secret",
+		"vault_put_user_secret_system",
+	} {
+		var n int
+		if err := h.AdminDB.QueryRow(
+			`SELECT COUNT(*) FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid
+			 WHERE n.nspname = 'public' AND p.proname = $1`, fn,
+		).Scan(&n); err != nil {
+			t.Fatalf("probe dropped function public.%s: %v", fn, err)
+		}
+		if n != 0 {
+			t.Errorf("public.%s still present — should be dropped by the org_secrets migration", fn)
 		}
 	}
 }
@@ -538,108 +561,6 @@ func TestRLS_CuratorChatPerUserIsolation(t *testing.T) {
 	}
 }
 
-// TestVault_PutGetDelete — happy-path round-trip on the wrapper. Cross-
-// org access is covered by TestVault_ClaimMismatchDenied, which exercises
-// the in-function p_org_id = current_org_id() gate added on top of the
-// path-prefix isolation.
-func TestVault_PutGetDelete(t *testing.T) {
-	h := Shared(t)
-	h.Reset(t)
-
-	orgA, userA, _ := SeedOrgWithUser(t, h, "alice")
-
-	err := h.WithUser(t, userA, orgA, func(tx *sql.Tx) error {
-		var id string
-		if err := tx.QueryRow(
-			`SELECT vault_put_org_secret($1, $2, $3, NULL)`, orgA, "github_pat", "ghp_alice_secret",
-		).Scan(&id); err != nil {
-			return err
-		}
-
-		var secret sql.NullString
-		if err := tx.QueryRow(
-			`SELECT vault_get_org_secret($1, $2)`, orgA, "github_pat",
-		).Scan(&secret); err != nil {
-			return err
-		}
-		if !secret.Valid || secret.String != "ghp_alice_secret" {
-			t.Errorf("get after put = %v, want ghp_alice_secret", secret)
-		}
-
-		var deleted bool
-		if err := tx.QueryRow(
-			`SELECT vault_delete_org_secret($1, $2)`, orgA, "github_pat",
-		).Scan(&deleted); err != nil {
-			return err
-		}
-		if !deleted {
-			t.Errorf("delete returned false, want true")
-		}
-
-		// Subsequent get returns NULL.
-		var afterDelete sql.NullString
-		if err := tx.QueryRow(
-			`SELECT vault_get_org_secret($1, $2)`, orgA, "github_pat",
-		).Scan(&afterDelete); err != nil {
-			return err
-		}
-		if afterDelete.Valid {
-			t.Errorf("get after delete returned %q, want NULL", afterDelete.String)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("round-trip: %v", err)
-	}
-}
-
-// TestVault_ClaimMismatchDenied — even tf_app (with EXECUTE) cannot
-// pass an arbitrary p_org_id; the wrapper checks p_org_id against
-// the JWT-claims org_id and raises 42501 on mismatch. Without this
-// in-function gate, a SECURITY DEFINER wrapper would let any caller
-// with EXECUTE retrieve secrets for any org UUID they happened to
-// know — defeating the org-prefix isolation.
-func TestVault_ClaimMismatchDenied(t *testing.T) {
-	h := Shared(t)
-	h.Reset(t)
-
-	orgA, userA, _ := SeedOrgWithUser(t, h, "alice")
-	orgB, _, _ := SeedOrgWithUser(t, h, "bob")
-
-	// Alice's session (claims org_id = orgA) tries to put a secret
-	// with p_org_id = orgB. Must error.
-	err := h.WithUser(t, userA, orgA, func(tx *sql.Tx) error {
-		var id string
-		return tx.QueryRow(
-			`SELECT vault_put_org_secret($1, $2, $3, NULL)`, orgB, "github_pat", "stolen",
-		).Scan(&id)
-	})
-	if err == nil {
-		t.Fatalf("vault_put_org_secret with mismatched org did not error — claim check broken")
-	}
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
-		t.Errorf("err = %v, want SQLSTATE 42501", err)
-	}
-
-	// Same for get + delete.
-	err = h.WithUser(t, userA, orgA, func(tx *sql.Tx) error {
-		var s sql.NullString
-		return tx.QueryRow(`SELECT vault_get_org_secret($1, $2)`, orgB, "k").Scan(&s)
-	})
-	if err == nil || !errors.As(err, &pgErr) || pgErr.Code != "42501" {
-		t.Errorf("get cross-org err = %v, want 42501", err)
-	}
-
-	err = h.WithUser(t, userA, orgA, func(tx *sql.Tx) error {
-		var b bool
-		return tx.QueryRow(`SELECT vault_delete_org_secret($1, $2)`, orgB, "k").Scan(&b)
-	})
-	if err == nil || !errors.As(err, &pgErr) || pgErr.Code != "42501" {
-		t.Errorf("delete cross-org err = %v, want 42501", err)
-	}
-}
-
 // TestRLS_UsersIsolation — public.users is org-scoped via the
 // "shares at least one org with caller" policy. Alice in orgA cannot
 // see bob in orgB; both can see themselves; co-workers in the same
@@ -803,104 +724,6 @@ func TestRLS_TeamSettingsIsTeamMemberOnly(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("alice sanity: %v", err)
-	}
-}
-
-// TestVault_GrantsLockdown — pins both the catalog state (anon /
-// authenticated / service_role lack EXECUTE on the wrappers) AND the
-// behavior (calling as one of those roles raises 42501).
-//
-// Why both: the wrappers internally raise 42501 on cross-org claim
-// mismatch (TestVault_ClaimMismatchDenied). If anon retained EXECUTE
-// via a Supabase auto-grant we missed, behavior alone (42501 raised)
-// wouldn't distinguish "permission denied at function entry" from
-// "claim check inside the function rejected." The has_function_privilege
-// assertion locks down the actual ACL state regardless of behavior.
-func TestVault_GrantsLockdown(t *testing.T) {
-	h := Shared(t)
-
-	// 1. Catalog-level pin: every restricted role lacks EXECUTE on
-	//    every wrapper. has_function_privilege checks the actual ACL.
-	//    (PUBLIC isn't a real role, so it's not a valid arg to
-	//    has_function_privilege; we cover the PUBLIC revoke by
-	//    asserting proacl has no empty-grantee entry below.)
-	wrappers := []string{
-		"vault_put_org_secret(uuid,text,text,text)",
-		"vault_get_org_secret(uuid,text)",
-		"vault_delete_org_secret(uuid,text)",
-	}
-	deniedRoles := []string{"anon", "authenticated", "service_role"}
-	for _, fn := range wrappers {
-		for _, role := range deniedRoles {
-			var has bool
-			if err := h.AdminDB.QueryRow(
-				`SELECT has_function_privilege($1, $2, 'EXECUTE')`, role, fn,
-			).Scan(&has); err != nil {
-				t.Fatalf("has_function_privilege(%s, %s): %v", role, fn, err)
-			}
-			if has {
-				t.Errorf("%s has EXECUTE on %s — lockdown broken", role, fn)
-			}
-		}
-		// Assert no PUBLIC grant. In pg_proc.proacl, PUBLIC grants
-		// render as entries with an empty grantee, e.g. "=X/owner".
-		// If any such entry exists, PUBLIC has EXECUTE.
-		var publicGranted bool
-		if err := h.AdminDB.QueryRow(`
-			SELECT EXISTS (
-			  SELECT 1 FROM (
-			    SELECT unnest(proacl)::text AS aclitem
-			      FROM pg_proc
-			     WHERE oid = ('public.' || $1)::regprocedure
-			  ) a
-			  WHERE a.aclitem LIKE '=%'
-			)
-		`, fn).Scan(&publicGranted); err != nil {
-			t.Fatalf("probe PUBLIC grant on %s: %v", fn, err)
-		}
-		if publicGranted {
-			t.Errorf("PUBLIC has a grant entry on %s — lockdown broken", fn)
-		}
-		// Sanity: tf_app DOES have EXECUTE (the only role that should).
-		var tfHas bool
-		if err := h.AdminDB.QueryRow(
-			`SELECT has_function_privilege('tf_app', $1, 'EXECUTE')`, fn,
-		).Scan(&tfHas); err != nil {
-			t.Fatalf("has_function_privilege(tf_app, %s): %v", fn, err)
-		}
-		if !tfHas {
-			t.Errorf("tf_app LACKS EXECUTE on %s — break the call path", fn)
-		}
-	}
-
-	// 2. Behavior-level pin: calling as a denied role produces a
-	//    PostgreSQL permission-denied error specifically (not the
-	//    function's own 42501 on claim mismatch). The two are
-	//    distinguishable via the error message.
-	tx, err := h.AppDB.Begin()
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer tx.Rollback()
-
-	if _, err := tx.Exec(`SET LOCAL ROLE anon`); err != nil {
-		t.Fatalf("SET LOCAL ROLE anon: %v", err)
-	}
-	_, err = tx.Exec(`SELECT vault_get_org_secret('00000000-0000-0000-0000-000000000000', 'k')`)
-	if err == nil {
-		t.Fatalf("vault_get_org_secret as 'anon' did not error — grants lockdown broken")
-	}
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
-		t.Fatalf("err = %v, want SQLSTATE 42501", err)
-	}
-	// "permission denied for function" comes from the PG executor when
-	// the role lacks EXECUTE, BEFORE the body runs. "cross-org Vault
-	// access denied" comes from inside the function. Pinning the
-	// message distinguishes catalog-level denial from in-function
-	// authorization.
-	if !strings.Contains(pgErr.Message, "permission denied for function") {
-		t.Errorf("err message = %q, want 'permission denied for function ...' (catalog-level denial, not in-function check)", pgErr.Message)
 	}
 }
 
@@ -1911,50 +1734,6 @@ func TestUpdatedAtAutoBump(t *testing.T) {
 	}
 }
 
-// TestVault_NullOrgIdRejected — passing NULL p_org_id to a Vault
-// wrapper raises 42501. Without this guard, a session with NULL
-// current_org_id could call vault_get_org_secret(NULL, 'k') and
-// slip past the IS DISTINCT FROM check (NULL IS DISTINCT FROM NULL
-// is false in Postgres).
-func TestVault_NullOrgIdRejected(t *testing.T) {
-	h := Shared(t)
-	h.Reset(t)
-
-	_, alice, _ := SeedOrgWithUser(t, h, "alice")
-	orgA, _, _ := SeedOrgWithUser(t, h, "alice2")
-	_ = alice
-	_ = orgA
-
-	_, userB, _ := SeedOrgWithUser(t, h, "bob")
-
-	// User session with NULL org_id claim (e.g., post-signup, before
-	// joining any org). Call vault wrapper with NULL p_org_id.
-	ctx := context.Background()
-	tx, err := h.AppDB.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(`SET LOCAL ROLE tf_app`); err != nil {
-		t.Fatalf("set role: %v", err)
-	}
-	if _, err := tx.Exec(
-		`SELECT set_config('request.jwt.claims', $1, true)`,
-		`{"sub":"`+userB+`","org_id":""}`,
-	); err != nil {
-		t.Fatalf("set claims: %v", err)
-	}
-	var s sql.NullString
-	err = tx.QueryRow(`SELECT vault_get_org_secret(NULL, 'k')`).Scan(&s)
-	if err == nil {
-		t.Fatalf("vault_get_org_secret(NULL, 'k') succeeded — null-org-id gate missing")
-	}
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
-		t.Errorf("err = %v, want SQLSTATE 42501", err)
-	}
-}
-
 // TestRLS_PendingReviewsInheritParentVisibility — pending_reviews
 // with a non-null run_id must inherit the run's creator-scope. Bob
 // can't read alice's draft review content via pending_reviews even
@@ -2201,10 +1980,6 @@ func TestSearchPathHardening_AllSensitiveFunctions(t *testing.T) {
 		{"tf", "user_is_team_admin"},
 		{"tf", "user_owns_org"},
 		{"tf", "user_is_org_admin_via_team"},
-		{"public", "vault_put_org_secret"},
-		{"public", "vault_get_org_secret"},
-		{"public", "vault_get_org_secret_system"},
-		{"public", "vault_delete_org_secret"},
 		{"public", "update_project_knowledge"},
 		{"tf", "set_updated_at"},
 		{"tf", "guard_org_owners"},

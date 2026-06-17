@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -146,7 +145,7 @@ func (s *projectSession) dispatch(item queueItem) {
 			// pickup. Skip; the canceller already wrote the row.
 			return
 		}
-		log.Printf("[curator] warning: mark request %s running: %v", requestID, wrapErr)
+		curatorLog.Warn("mark request running failed", "request", requestID, "error", wrapErr)
 		s.failRequest(item, fmt.Sprintf("mark running: %v", wrapErr))
 		return
 	}
@@ -323,7 +322,7 @@ func (s *projectSession) dispatch(item queueItem) {
 			_, err := ts.Curator.InsertMessage(auditCtx, item.orgID, auditMsg)
 			return err
 		}); auditErr != nil {
-			log.Printf("[curator] warning: insert context_change audit row for %s: %v", requestID, auditErr)
+			curatorLog.Warn("insert context_change audit row failed", "request", requestID, "error", auditErr)
 		}
 	}
 
@@ -351,10 +350,10 @@ func (s *projectSession) dispatch(item queueItem) {
 	// even if skill writing hits a permission glitch.
 	skillCtx := context.WithoutCancel(msgCtx)
 	if err := materializeSpecSkill(skillCtx, s.curator.stores, item.orgID, item.creatorUserID, project, cwd); err != nil {
-		log.Printf("[curator] warning: materialize spec skill for project %s: %v", s.projectID, err)
+		curatorLog.Warn("materialize spec skill failed", "project", s.projectID, "error", err)
 	}
 	if err := materializeJiraFormattingSkill(cwd); err != nil {
-		log.Printf("[curator] warning: materialize jira formatting skill for project %s: %v", s.projectID, err)
+		curatorLog.Warn("materialize jira formatting skill failed", "project", s.projectID, "error", err)
 	}
 
 	// In-sandbox exec daemon (TFAC-61). The curator envelope advertises a real
@@ -448,7 +447,7 @@ func (s *projectSession) dispatch(item queueItem) {
 		return nil
 	})
 	if completeErr != nil {
-		log.Printf("[curator] warning: complete request %s: %v", requestID, completeErr)
+		curatorLog.Warn("complete request failed", "request", requestID, "error", completeErr)
 		// We don't know whether the row landed terminal. Revert the
 		// pending rows on the conservative assumption that the agent
 		// did not see them — if the row turns out to be `done` after
@@ -469,7 +468,7 @@ func (s *projectSession) dispatch(item queueItem) {
 		// cancel landing concurrently — revert here too as a
 		// belt-and-suspenders for the "row was already cancelled
 		// before our completion write" race.
-		log.Printf("[curator] request %s already terminal, skipping completion broadcast (intended status: %s)", requestID, status)
+		curatorLog.Warn("request already terminal, skipping completion broadcast", "request", requestID, "intended_status", status)
 		s.revertPendingFor(item)
 		return
 	}
@@ -494,7 +493,7 @@ func (s *projectSession) finalizePendingFor(item queueItem) {
 	if err := s.curator.stores.Tx.SyntheticClaimsWithTx(ctx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
 		return ts.Curator.FinalizePendingContext(ctx, item.orgID, item.requestID)
 	}); err != nil {
-		log.Printf("[curator] warning: finalize pending context for %s: %v", item.requestID, err)
+		curatorLog.Warn("finalize pending context failed", "request", item.requestID, "error", err)
 	}
 }
 
@@ -514,7 +513,7 @@ func (s *projectSession) revertPendingFor(item queueItem) {
 		}
 		return nil
 	}); err != nil {
-		log.Printf("[curator] warning: revert/delete pending context for %s: %v", item.requestID, err)
+		curatorLog.Warn("revert/delete pending context failed", "request", item.requestID, "error", err)
 	}
 }
 
@@ -585,7 +584,7 @@ func (s *projectSession) markCancelled(item queueItem, reason string) {
 		return nil
 	})
 	if err != nil {
-		log.Printf("[curator] warning: cancel request %s: %v", item.requestID, err)
+		curatorLog.Warn("cancel request failed", "request", item.requestID, "error", err)
 		return
 	}
 	if flipped {
@@ -605,7 +604,7 @@ func (s *projectSession) failRequest(item queueItem, errMsg string) {
 		return nil
 	})
 	if err != nil {
-		log.Printf("[curator] warning: fail request %s: %v", item.requestID, err)
+		curatorLog.Warn("fail request failed", "request", item.requestID, "error", err)
 		return
 	}
 	if !flipped {

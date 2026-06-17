@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -52,11 +51,11 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 		var appErr error
 		app, appErr = s.githubApps.GetForOrgSystem(r.Context(), orgID)
 		if appErr != nil {
-			log.Printf("[repos] org %s: read app registration failed, falling back to PAT path: %v", orgID, appErr)
+			reposLog.Warn("read app registration failed, falling back to pat path", "org", orgID, "error", appErr)
 		}
 		insts, instsErr = s.githubApps.ListInstallationsForOrgSystem(r.Context(), orgID)
 		if instsErr != nil {
-			log.Printf("[repos] org %s: list installations failed, falling back to PAT path: %v", orgID, instsErr)
+			reposLog.Warn("list installations failed, falling back to pat path", "org", orgID, "error", instsErr)
 		}
 	}
 
@@ -66,7 +65,7 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 		repos, err = s.installationReposUnion(r.Context(), orgID, insts)
 		if err != nil {
 			if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-				log.Printf("[repos] org %s: app installed but resolver produced no credentials for any installation: %v", orgID, err)
+				reposLog.Warn("app installed but resolver produced no credentials for any installation", "org", orgID, "error", err)
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub not configured"})
 				return
 			}
@@ -105,11 +104,11 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 			// on a transient store error — so it falls through to the generic
 			// message instead.
 			if app != nil && app.Active && instsErr == nil && len(insts) == 0 {
-				log.Printf("[repos] org %s: app registered + active but installed on zero accounts, and no PAT configured", orgID)
+				reposLog.Warn("app registered and active but installed on zero accounts, and no pat configured", "org", orgID)
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub App is not installed on any account"})
 				return
 			}
-			log.Printf("[repos] org %s: GitHub not configured (no usable App installation and no PAT)", orgID)
+			reposLog.Warn("github not configured, no usable app installation and no pat", "org", orgID)
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub not configured"})
 			return
 		}
@@ -187,7 +186,7 @@ func (s *Server) installationReposUnion(ctx context.Context, orgID string, insts
 
 		repos, err := client.ListInstallationRepos()
 		if err != nil {
-			log.Printf("[repos] org %s: list installation repos for %s: %v", orgID, inst.AccountLogin, err)
+			reposLog.Warn("list installation repos failed, skipping installation", "org", orgID, "account", inst.AccountLogin, "error", err)
 			lastListErr = err
 			continue
 		}
@@ -346,7 +345,7 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 	client, err := s.ghResolver.ClientForRepo(r.Context(), orgID, owner, repo)
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-			log.Printf("[repos] org %s: GitHub not configured for %s/%s: %v", orgID, owner, repo, err)
+			reposLog.Warn("github not configured", "org", orgID, "owner", owner, "repo", repo, "error", err)
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub not configured"})
 			return
 		}

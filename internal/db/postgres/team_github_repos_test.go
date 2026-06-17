@@ -28,7 +28,7 @@ func TestTeamGitHubRepos_ReplaceForTeam_AppPath(t *testing.T) {
 	carol := pgtest.SeedUser(t, h, "carol")
 	pgtest.AddOrgMember(t, h, carol, orgA, teamB, "member", "admin")
 
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 
 	repoProfiles := func() []string {
 		t.Helper()

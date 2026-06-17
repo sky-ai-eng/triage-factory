@@ -2,7 +2,6 @@ package worktree
 
 import (
 	"context"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -90,14 +89,14 @@ func DefaultPolicy() Policy {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			p.MaxBytes = n
 		} else {
-			log.Printf("[worktree] invalid %s=%q: %v (using default %d)", envCacheMaxBytes, v, err, p.MaxBytes)
+			worktreeLog.Warn("invalid cache max bytes; using default", "env", envCacheMaxBytes, "value", v, "error", err, "default", p.MaxBytes)
 		}
 	}
 	if v := strings.TrimSpace(os.Getenv(envCacheTTL)); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			p.TTL = d
 		} else {
-			log.Printf("[worktree] invalid %s=%q: %v (using default %s)", envCacheTTL, v, err, p.TTL)
+			worktreeLog.Warn("invalid cache ttl; using default", "env", envCacheTTL, "value", v, "error", err, "default", p.TTL)
 		}
 	}
 	return p
@@ -245,8 +244,8 @@ func EnforceBudget(ctx context.Context, policy Policy) (evicted int, reclaimed i
 	}
 
 	if evicted > 0 {
-		log.Printf("[worktree] cache reaper evicted %d bare(s), reclaimed %d bytes (budget %s, ttl %s)",
-			evicted, reclaimed, budgetLabel(policy.MaxBytes), ttlLabel(policy.TTL))
+		worktreeLog.Info("cache reaper evicted bares",
+			"evicted", evicted, "reclaimed_bytes", reclaimed, "budget", budgetLabel(policy.MaxBytes), "ttl", ttlLabel(policy.TTL))
 	}
 	return evicted, reclaimed
 }
@@ -308,7 +307,7 @@ func scanBares() []bareEntry {
 				// — the safe direction for eviction (don't reclaim what you
 				// can't see), but log it so a misconfigured permissions setup
 				// is diagnosable rather than silently under-accounting disk.
-				log.Printf("[worktree] cache scan: walk %s: %v", path, err)
+				worktreeLog.Warn("cache scan walk failed", "path", path, "error", err)
 				return nil
 			}
 			if info.IsDir() && strings.HasSuffix(path, ".git") {
@@ -486,12 +485,12 @@ func evictBare(entry bareEntry) int64 {
 	removeRegisteredWorktrees(entry.dir)
 	size := dirSize(entry.dir)
 	if err := os.RemoveAll(entry.dir); err != nil {
-		log.Printf("[worktree] evict %s/%s: %v", owner, repo, err)
+		worktreeLog.Error("evict bare failed", "owner", owner, "repo", repo, "error", err)
 		return 0
 	}
 	forgetBare(entry.dir)
-	log.Printf("[worktree] evicted bare %s/%s (%d bytes, idle %s)",
-		owner, repo, size, time.Since(entry.lastUsed).Round(time.Second))
+	worktreeLog.Debug("evicted bare",
+		"owner", owner, "repo", repo, "bytes", size, "idle", time.Since(entry.lastUsed).Round(time.Second))
 	return size
 }
 
@@ -513,7 +512,7 @@ func removeRegisteredWorktrees(bareDir string) {
 			continue
 		}
 		if err := os.RemoveAll(wt); err != nil {
-			log.Printf("[worktree] evict: remove derived worktree %s: %v", wt, err)
+			worktreeLog.Warn("evict: remove derived worktree failed", "worktree", wt, "error", err)
 		}
 	}
 }

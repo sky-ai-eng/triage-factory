@@ -21,7 +21,7 @@ import (
 // org_id filter directly.
 func TestPendingFiringsStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	dbtest.RunPendingFiringsStoreConformance(t, func(t *testing.T) (db.PendingFiringsStore, string, dbtest.PendingFiringsSeeder) {
 		t.Helper()
@@ -39,7 +39,7 @@ func TestPendingFiringsStore_Postgres(t *testing.T) {
 func TestPendingFiringsStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgA, userA, _ := seedPgPendingFiringsOrg(t, h)
@@ -110,7 +110,7 @@ func TestPendingFiringsStore_Postgres_CrossOrgLeakage(t *testing.T) {
 func TestPendingFiringsStore_Postgres_EnqueueWithLocalSentinelUser(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgID, ownerUserID, _ := seedPgPendingFiringsOrg(t, h)

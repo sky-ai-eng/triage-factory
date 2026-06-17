@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strconv"
 	"strings"
 
@@ -165,7 +165,8 @@ func (r *resolver) ClientForRepo(ctx context.Context, orgID, owner, repo string)
 		}
 		// Conclusively not covered: installed on this account but this repo
 		// isn't in the grant. Fall through to the PAT, which may still reach it.
-		log.Printf("[gh-resolver] org=%s repo=%s/%s: App installed on account but repo not in grant → falling back to PAT", orgID, owner, repo)
+		ghResolverLog.Warn("app installed on account but repo not in grant; falling back to PAT",
+			"org", orgID, "owner", owner, "repo", repo)
 	}
 
 	// Tier 2 (deployment-default shared App) slots in here when it lands,
@@ -236,7 +237,8 @@ func (r *resolver) tier1AppClient(ctx context.Context, orgID, target, base strin
 func (r *resolver) tier1Token(ctx context.Context, orgID, target, base string) (githubapp.Token, bool) {
 	app, err := r.apps.GetForOrgSystem(ctx, orgID)
 	if err != nil {
-		log.Printf("[gh-resolver] org=%s: read App registration: %v (skipping tier1)", orgID, err)
+		ghResolverLog.Warn("read app registration failed; skipping tier1",
+			"org", orgID, "error", err)
 		return githubapp.Token{}, false
 	}
 	if app == nil || !app.Active {
@@ -253,10 +255,12 @@ func (r *resolver) tier1Token(ctx context.Context, orgID, target, base string) (
 		// A mint failure on an org that HAS an App is worth a louder log —
 		// it usually means a bad/rotated PEM or a revoked installation. Fall
 		// through to PAT so the user isn't hard-blocked, but make it visible.
-		log.Printf("[gh-resolver] org=%s target=%s: mint installation token (installation=%s): %v (falling back to PAT)", orgID, target, inst.InstallationID, err)
+		ghResolverLog.Warn("mint installation token failed; falling back to PAT",
+			"org", orgID, "target", target, "installation", inst.InstallationID, "error", err)
 		return githubapp.Token{}, false
 	}
-	log.Printf("[gh-resolver] org=%s target=%q → tier1 App installation=%s account=%s", orgID, target, inst.InstallationID, inst.AccountLogin)
+	ghResolverLog.Debug("resolved tier1 app installation",
+		"org", orgID, "target", target, "installation", inst.InstallationID, "account", inst.AccountLogin)
 	return tok, true
 }
 
@@ -284,7 +288,12 @@ func (r *resolver) TokenFor(ctx context.Context, orgID, target string) (githubap
 		return githubapp.Token{}, fmt.Errorf("resolve github pat for org %s: %w", orgID, err)
 	}
 	if pat != "" {
-		log.Printf("[gh-resolver] org=%s target=%q → tier3 PAT (token) user=%s", orgID, target, r.patBorrowUser(ctx, orgID))
+		// patBorrowUser does a DB read purely to label this trace line, so
+		// skip it unless Debug is actually being emitted.
+		if ghResolverLog.Enabled(ctx, slog.LevelDebug) {
+			ghResolverLog.Debug("resolved tier3 pat",
+				"org", orgID, "target", target, "user", r.patBorrowUser(ctx, orgID))
+		}
 		return githubapp.Token{Value: pat}, nil
 	}
 
@@ -307,7 +316,8 @@ func (r *resolver) BaseURLFor(ctx context.Context, orgID string) (string, error)
 func (r *resolver) installationFor(ctx context.Context, orgID, target string) (domain.OrgGitHubAppInstallation, bool) {
 	insts, err := r.apps.ListInstallationsForOrgSystem(ctx, orgID)
 	if err != nil {
-		log.Printf("[gh-resolver] org=%s: list installations: %v (skipping tier1)", orgID, err)
+		ghResolverLog.Warn("list installations failed; skipping tier1",
+			"org", orgID, "error", err)
 		return domain.OrgGitHubAppInstallation{}, false
 	}
 	if len(insts) == 0 {

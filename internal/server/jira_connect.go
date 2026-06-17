@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -155,7 +154,7 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 		// reporting connected and then failing every write at request time.
 		cred, perr := jira.ParseUserCredential(raw)
 		if perr != nil {
-			log.Printf("[jira-identity] user=%s org=%s host=%s stored credential unparsable, reporting not-connected: %v", userID, orgID, jiraHost, perr)
+			jiraIdentityLog.Warn("stored credential unparsable, reporting not-connected", "user", userID, "org", orgID, "host", jiraHost, "error", perr)
 			return nil
 		}
 		connected = cred.UsableFor(deploymentEnum)
@@ -388,7 +387,7 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 	if account == "" {
 		account = jiraUser.StableID()
 	}
-	log.Printf("[jira-identity] bound user=%s account=%s host=%s org=%s source=%s (credential stored)", userID, jiraUser.StableID(), host, orgID, source)
+	jiraIdentityLog.Info("bound user, credential stored", "user", userID, "account", jiraUser.StableID(), "host", host, "org", orgID, "source", source)
 
 	writeJSON(w, http.StatusOK, jiraIdentityCaptureResponse{Account: account, Host: host})
 }
@@ -454,7 +453,7 @@ func (s *Server) handleJiraConnectStart(w http.ResponseWriter, r *http.Request) 
 	}
 	host, okHost := resolveJiraHost(orgSet.JiraBaseURL)
 	if !okHost {
-		log.Printf("[jira-connect] invalid jira base url for org %s", orgID)
+		jiraConnectLog.Warn("invalid jira base url", "org", orgID)
 		s.redirectJiraConnect(w, r, orgID, returnTo, "bad_host")
 		return
 	}
@@ -466,7 +465,7 @@ func (s *Server) handleJiraConnectStart(w http.ResponseWriter, r *http.Request) 
 	// marker, falling back to host shape) and bounce non-Cloud orgs back to the
 	// paste path BEFORE any external round-trip.
 	if jira.DeploymentForMarker(jira.AuthMethod(authMethod), host) != jira.DeploymentCloud {
-		log.Printf("[jira-connect] connect attempted on non-cloud org %s; redirecting to paste path", orgID)
+		jiraConnectLog.Warn("connect attempted on non-cloud org, redirecting to paste path", "org", orgID)
 		s.redirectJiraConnect(w, r, orgID, returnTo, "not_cloud")
 		return
 	}
@@ -546,7 +545,7 @@ func (s *Server) handleJiraConnectCallback(w http.ResponseWriter, r *http.Reques
 	}
 	cs, err := parseConnectState(cookie.Value, s.deployCfg.hmacKey)
 	if err != nil {
-		log.Printf("[jira-connect] state cookie: %v", err)
+		jiraConnectLog.Warn("state cookie parse failed", "error", err)
 		s.redirectJiraConnect(w, r, orgID, "", "state")
 		return
 	}
@@ -562,7 +561,7 @@ func (s *Server) handleJiraConnectCallback(w http.ResponseWriter, r *http.Reques
 
 	// User denied consent (or Atlassian reported another OAuth error).
 	if oErr := r.URL.Query().Get("error"); oErr != "" {
-		log.Printf("[jira-connect] atlassian error=%s org=%s", oErr, orgID)
+		jiraConnectLog.Warn("atlassian oauth error", "atlassian_error", oErr, "org", orgID)
 		s.redirectJiraConnect(w, r, orgID, returnTo, "denied")
 		return
 	}
@@ -601,7 +600,7 @@ func (s *Server) handleJiraConnectCallback(w http.ResponseWriter, r *http.Reques
 	// resolve the cloud_id + whoami; the refresh token is what we store.
 	tok, err := s.jiraOAuthMinter.ExchangeCode(r.Context(), app, code, s.jiraConnectCallbackURL(orgID))
 	if err != nil {
-		log.Printf("[jira-connect] code exchange org=%s: %v", orgID, err)
+		jiraConnectLog.Warn("code exchange failed", "org", orgID, "error", err)
 		s.redirectJiraConnect(w, r, orgID, returnTo, "connect_failed")
 		return
 	}
@@ -611,13 +610,13 @@ func (s *Server) handleJiraConnectCallback(w http.ResponseWriter, r *http.Reques
 	// configured site that's not in the list is a clear, actionable error.
 	resources, err := s.jiraOAuthMinter.AccessibleResources(r.Context(), tok.AccessToken)
 	if err != nil {
-		log.Printf("[jira-connect] accessible-resources org=%s: %v", orgID, err)
+		jiraConnectLog.Warn("accessible-resources failed", "org", orgID, "error", err)
 		s.redirectJiraConnect(w, r, orgID, returnTo, "connect_failed")
 		return
 	}
 	cloudID, okCloud := matchCloudResource(resources, host)
 	if !okCloud {
-		log.Printf("[jira-connect] no accessible site matches host=%s for org=%s (sites=%d)", host, orgID, len(resources))
+		jiraConnectLog.Warn("no accessible site matches host", "host", host, "org", orgID, "sites", len(resources))
 		s.redirectJiraConnect(w, r, orgID, returnTo, "site_mismatch")
 		return
 	}
@@ -626,7 +625,7 @@ func (s *Server) handleJiraConnectCallback(w http.ResponseWriter, r *http.Reques
 	// freshly-minted access token — the same client shape the resolver builds.
 	jiraUser, err := auth.ValidateJira(r.Context(), jira.CloudOAuth(cloudID, tok.AccessToken))
 	if err != nil {
-		log.Printf("[jira-connect] whoami org=%s: %v", orgID, err)
+		jiraConnectLog.Warn("whoami failed", "org", orgID, "error", err)
 		s.redirectJiraConnect(w, r, orgID, returnTo, "connect_failed")
 		return
 	}
@@ -667,8 +666,8 @@ func (s *Server) handleJiraConnectCallback(w http.ResponseWriter, r *http.Reques
 	// off the just-stored refresh token rather than serve a stale cached token.
 	s.jiraTokenCache.Invalidate(orgID, userID, host)
 
-	log.Printf("[jira-connect] bound user=%s account=%s host=%s cloud_id=%s org=%s source=connect_oauth (refresh token stored)",
-		userID, jiraUser.StableID(), host, cloudID, orgID)
+	jiraConnectLog.Info("bound user, refresh token stored",
+		"user", userID, "account", jiraUser.StableID(), "host", host, "cloud_id", cloudID, "org", orgID, "source", "connect_oauth")
 	http.Redirect(w, r, returnTo, http.StatusFound)
 }
 

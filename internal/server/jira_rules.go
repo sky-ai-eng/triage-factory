@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"log"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -24,7 +23,7 @@ func lookupJiraRuleForTask(ctx context.Context, tx db.TxStores, task *domain.Tas
 	}
 	rules, err := tx.JiraStatusRules.ListForTeam(ctx, *task.TeamID)
 	if err != nil {
-		log.Printf("[jira-rule] list rules for team %s: %v", *task.TeamID, err)
+		jiraRuleLog.Warn("list rules for team failed", "team", *task.TeamID, "error", err)
 		return nil
 	}
 	return domain.RuleForProject(rules, projectFromKey(task.EntitySourceID))

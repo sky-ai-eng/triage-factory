@@ -16,7 +16,6 @@ package delegate
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -349,7 +348,7 @@ func (s *Spawner) markRunOpen(park liveParkContext) {
 		flipped, err = s.agentRuns.MarkOpenSystem(bgCtx, park.orgID, park.runID)
 	}
 	if err != nil {
-		log.Printf("[delegate] warning: mark run %s open: %v", park.runID, err)
+		delegateLog.Warn("mark run open failed", "run", park.runID, "error", err)
 		return
 	}
 	if !flipped {
@@ -373,7 +372,7 @@ func (s *Spawner) parkRunOpen(park liveParkContext, sessionID string) {
 	// without the warm worktree, so the blob must exist by the time the
 	// status commits. Best-effort — the kept warm worktree is the fast path.
 	if err := s.snapshotWorkspace(context.Background(), park.orgID, park.namespace, park.claudeCwd, sessionID); err != nil {
-		log.Printf("[delegate] warning: snapshot workspace for run %s before parking open: %v", park.runID, err)
+		delegateLog.Warn("snapshot workspace for run before parking open failed", "run", park.runID, "error", err)
 	}
 	s.markRunOpen(park)
 	toast.Info(s.wsHub, park.orgID, fmt.Sprintf("Run %s is open — resumes on the next message", shortRunID(park.runID)))

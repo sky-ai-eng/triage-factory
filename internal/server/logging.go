@@ -1,0 +1,41 @@
+package server
+
+import "github.com/sky-ai-eng/triage-factory/internal/logging"
+
+// Component loggers for the HTTP server package (see internal/logging). Each
+// var carries a component= attribute that replaces the old "[prefix]" log
+// tags. auth/server and jira/server are scoped to distinguish them from the
+// canonical auth and jira packages that own those component names.
+var (
+	approvalDiscardLog = logging.Component("approval-discard")
+	authLog            = logging.Component("auth/server")
+	backfillLog        = logging.Component("backfill")
+	dashboardLog       = logging.Component("dashboard")
+	entitiesLog        = logging.Component("entities")
+	eventHandlersLog   = logging.Component("event_handlers")
+	factoryLog         = logging.Component("factory")
+	githubAccessLog    = logging.Component("github-access")
+	githubAppLog       = logging.Component("github-app")
+	githubConnectLog   = logging.Component("github-connect")
+	githubGroupsLog    = logging.Component("github-groups")
+	githubIdentityLog  = logging.Component("github-identity")
+	jiraLog            = logging.Component("jira/server")
+	jiraAppLog         = logging.Component("jira-app")
+	jiraConnectLog     = logging.Component("jira-connect")
+	jiraIdentityLog    = logging.Component("jira-identity")
+	jiraRuleLog        = logging.Component("jira-rule")
+	membershipLog      = logging.Component("membership")
+	orgTemplateLog     = logging.Component("org_template")
+	orgsLog            = logging.Component("orgs")
+	pendingPrsLog      = logging.Component("pending-prs")
+	projectsLog        = logging.Component("projects")
+	reposLog           = logging.Component("repos")
+	reviewsLog         = logging.Component("reviews")
+	serverLog          = logging.Component("server")
+	settingsLog        = logging.Component("settings")
+	settingsOrgLog     = logging.Component("settings/org")
+	setupLog           = logging.Component("setup")
+	stockLog           = logging.Component("stock")
+	swipeLog           = logging.Component("swipe")
+	teamsLog           = logging.Component("teams")
+)

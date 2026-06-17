@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"errors"
-	"log"
 	"net/http"
 	"slices"
 
@@ -170,7 +169,7 @@ func (s *Server) swipeClaim(w http.ResponseWriter, r *http.Request, orgID, userI
 			claimOK, e = tx.Tasks.TakeoverClaimFromAgent(r.Context(), orgID, id, userID)
 			return e
 		}); err != nil {
-			log.Printf("[swipe] takeover claim flip failed on task %s: %v", id, err)
+			swipeLog.Error("takeover claim flip failed", "task", id, "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
 			return "", nil, false
 		}
@@ -188,7 +187,7 @@ func (s *Server) swipeClaim(w http.ResponseWriter, r *http.Request, orgID, userI
 			claimOK, e = tx.Tasks.ClaimQueuedForUser(r.Context(), orgID, id, userID)
 			return e
 		}); err != nil {
-			log.Printf("[swipe] user claim stamp failed on task %s: %v", id, err)
+			swipeLog.Error("user claim stamp failed", "task", id, "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
 			return "", nil, false
 		}
@@ -213,7 +212,7 @@ func (s *Server) swipeClaim(w http.ResponseWriter, r *http.Request, orgID, userI
 		return e
 	})
 	if swipeErr != nil {
-		log.Printf("[swipe] audit write failed for task %s claim: %v (claim mutation already landed)", id, swipeErr)
+		swipeLog.Warn("audit write failed for claim, claim mutation already landed", "task", id, "error", swipeErr)
 		newStatus = "queued"
 	}
 	if claimChanged {
@@ -269,13 +268,13 @@ func (s *Server) swipeDelegate(w http.ResponseWriter, r *http.Request, orgID, us
 		claimTeamID, e = tx.Tasks.ResolveClaimTeam(r.Context(), orgID, id, userID)
 		return e
 	}); err != nil {
-		log.Printf("[swipe] delegate aborted on task %s: %v", id, err)
+		swipeLog.Error("delegate aborted", "task", id, "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: " + err.Error()})
 		return "", false
 	}
 	a, enabled, err := s.agentEnabledForTeam(r.Context(), orgID, userID, claimTeamID)
 	if err != nil {
-		log.Printf("[swipe] delegate aborted on task %s: %v", id, err)
+		swipeLog.Error("delegate aborted", "task", id, "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: " + err.Error()})
 		return "", false
 	}
@@ -291,7 +290,7 @@ func (s *Server) swipeDelegate(w http.ResponseWriter, r *http.Request, orgID, us
 		result, e = tx.Tasks.HandoffAgentClaim(r.Context(), orgID, id, a.ID, userID)
 		return e
 	}); err != nil {
-		log.Printf("[swipe] failed to stamp agent claim on task %s: %v", id, err)
+		swipeLog.Error("failed to stamp agent claim", "task", id, "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
 		return "", false
 	}
@@ -313,7 +312,7 @@ func (s *Server) swipeDelegate(w http.ResponseWriter, r *http.Request, orgID, us
 		return e
 	})
 	if swipeErr != nil {
-		log.Printf("[swipe] audit write failed for task %s delegate: %v (claim mutation already landed)", id, swipeErr)
+		swipeLog.Warn("audit write failed for delegate, claim mutation already landed", "task", id, "error", swipeErr)
 		newStatus = "queued"
 	}
 	if result == db.HandoffChanged {
@@ -386,12 +385,12 @@ func (s *Server) swipeTeardownRuns(r *http.Request, orgID, userID, id, action st
 		ids, e = tx.AgentRuns.ActiveIDsForTask(cleanupCtx, orgID, id)
 		return e
 	}); err != nil {
-		log.Printf("[swipe] active-run lookup for task %s failed: %v", id, err)
+		swipeLog.Error("active-run lookup failed", "task", id, "error", err)
 		return
 	}
 	for _, runID := range ids {
 		if err := s.spawner.Cancel(orgID, runID, userID); err != nil {
-			log.Printf("[swipe] cancel run %s on %s of task %s: %v", runID, action, id, err)
+			swipeLog.Warn("cancel run failed", "run", runID, "action", action, "task", id, "error", err)
 		}
 	}
 }
@@ -420,7 +419,7 @@ func (s *Server) swipeJiraClaimSync(r *http.Request, orgID, userID, id string, j
 		return
 	}
 	if rule == nil || rule.InProgressCanonical == "" {
-		log.Printf("[jira] claim guard: no in_progress rule configured for project of %s, skipping transition", task.EntitySourceID)
+		jiraLog.Warn("claim guard: no in_progress rule configured for project, skipping transition", "ticket", task.EntitySourceID)
 		return
 	}
 	go func(issueKey string, ipMembers []string, ipCanonical string) {
@@ -433,19 +432,19 @@ func (s *Server) swipeJiraClaimSync(r *http.Request, orgID, userID, id string, j
 		needTransition := state == nil || !slices.Contains(ipMembers, state.StatusName)
 
 		if !needAssign && !needTransition {
-			log.Printf("[jira] claim guard: %s already assigned to self and already in in-progress (%q), skipping", issueKey, state.StatusName)
+			jiraLog.Info("claim guard: already assigned to self and in in-progress, skipping", "issue", issueKey, "status", state.StatusName)
 			return
 		}
 
 		if needAssign {
 			if err := jiraUserClient.AssignToSelf(bgCtx, issueKey); err != nil {
-				log.Printf("[jira] failed to assign %s: %v", issueKey, err)
+				jiraLog.Error("failed to assign", "issue", issueKey, "error", err)
 				return
 			}
 		}
 		if needTransition {
 			if err := jiraUserClient.TransitionTo(bgCtx, issueKey, ipCanonical); err != nil {
-				log.Printf("[jira] failed to transition %s to %q: %v", issueKey, ipCanonical, err)
+				jiraLog.Error("failed to transition", "issue", issueKey, "status", ipCanonical, "error", err)
 			}
 		}
 	}(task.EntitySourceID, rule.InProgressMembers, rule.InProgressCanonical)

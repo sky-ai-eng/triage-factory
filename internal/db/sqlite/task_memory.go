@@ -3,7 +3,6 @@ package sqlite
 import (
 	"context"
 	"database/sql"
-	"log"
 	"strings"
 	"time"
 
@@ -92,9 +91,9 @@ func (s *taskMemoryStore) UpdateRunMemoryHumanContent(ctx context.Context, orgID
 			// doesn't exist (cleanup race, taken-over run, etc.), the
 			// human's submit shouldn't fail. The agent-side upsert path
 			// will surface its own warning if it failed earlier.
-			log.Printf("[memory] no run_memory row for run %s; human_content not recorded", runID)
+			memoryLog.Warn("no run_memory row; human_content not recorded", "run_id", runID)
 		default:
-			log.Printf("[memory] unable to verify run_memory row for run %s after no-op human_content update: %v", runID, err)
+			memoryLog.Warn("verify run_memory row after no-op human_content update failed", "run_id", runID, "error", err)
 		}
 	}
 	return nil

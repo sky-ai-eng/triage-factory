@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -413,7 +412,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer shutdownCancel()
 				if err := proxies.Shutdown(shutdownCtx); err != nil {
-					log.Printf("[agentproc] proxy shutdown: %v", err)
+					agentprocLog.Warn("proxy shutdown failed", "error", err)
 				}
 			}
 		})
@@ -640,7 +639,7 @@ func consumeStream(stdout io.Reader, sink Sink, stream *StreamState, traceID str
 			if !sessionDelivered {
 				if sid := stream.SessionID(); sid != "" {
 					if err := sink.OnSession(sid); err != nil {
-						log.Printf("[agentproc] sink.OnSession failed: %v", err)
+						agentprocLog.Warn("sink on-session failed", "error", err)
 					}
 					sessionDelivered = true
 				}
@@ -648,7 +647,7 @@ func consumeStream(stdout io.Reader, sink Sink, stream *StreamState, traceID str
 
 			for _, msg := range messages {
 				if err := sink.OnMessage(msg); err != nil {
-					log.Printf("[agentproc] sink.OnMessage failed: %v", err)
+					agentprocLog.Warn("sink on-message failed", "error", err)
 					continue
 				}
 			}

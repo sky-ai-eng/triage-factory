@@ -3,7 +3,6 @@ package routing
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -56,7 +55,7 @@ const (
 // no-op rather than a panicking goroutine.
 func (r *Router) RunEventQueue(ctx context.Context, wake <-chan struct{}, scanInterval, pruneInterval, pruneAge time.Duration) {
 	if r.eventQueue == nil {
-		log.Printf("[router] event-queue worker not started: no EventQueueStore wired (call SetEventQueue)")
+		routerLog.Warn("event-queue worker not started: no EventQueueStore wired")
 		return
 	}
 
@@ -86,9 +85,9 @@ func (r *Router) RunEventQueue(ctx context.Context, wake <-chan struct{}, scanIn
 	// affordance (a separate ticket); it matters because the tracker's
 	// snapshot-diff is forward-only and may not re-emit a parked event.
 	if n, err := r.eventQueue.ResetProcessing(ctx); err != nil {
-		log.Printf("[router] event-queue boot recovery: reset processing rows: %v", err)
+		routerLog.Error("event-queue boot recovery: reset processing rows failed", "error", err)
 	} else if n > 0 {
-		log.Printf("[router] event-queue boot recovery: reset %d in-flight row(s) to pending", n)
+		routerLog.Info("event-queue boot recovery: reset in-flight rows to pending", "rows", n)
 	}
 
 	scan := time.NewTicker(scanInterval)
@@ -107,14 +106,14 @@ func (r *Router) RunEventQueue(ctx context.Context, wake <-chan struct{}, scanIn
 			claimFails++
 			switch {
 			case claimFails == 1:
-				log.Printf("[router] event-queue claim failed: %v (retrying on the next scan)", err)
+				routerLog.Warn("event-queue claim failed, retrying on the next scan", "error", err)
 			case claimFails == claimErrorEscalateThreshold || claimFails%claimErrorEscalateThreshold == 0:
-				log.Printf("[router] event-queue: ROUTING STALLED — %d consecutive claim failures, not progressing: %v", claimFails, err)
+				routerLog.Error("event-queue routing stalled, not progressing", "claim_failures", claimFails, "error", err)
 			}
 			return
 		}
 		if claimFails >= claimErrorEscalateThreshold {
-			log.Printf("[router] event-queue: routing recovered after %d consecutive claim failures", claimFails)
+			routerLog.Info("event-queue routing recovered", "claim_failures", claimFails)
 		}
 		claimFails = 0
 	}
@@ -131,9 +130,9 @@ func (r *Router) RunEventQueue(ctx context.Context, wake <-chan struct{}, scanIn
 			drain()
 		case <-prune.C:
 			if n, err := r.eventQueue.PruneDone(ctx, time.Now().Add(-pruneAge)); err != nil {
-				log.Printf("[router] event-queue prune: %v", err)
+				routerLog.Error("event-queue prune failed", "error", err)
 			} else if n > 0 {
-				log.Printf("[router] event-queue prune: removed %d done row(s) older than %s", n, pruneAge)
+				routerLog.Info("event-queue prune: removed done rows", "rows", n, "older_than", pruneAge)
 			}
 		}
 	}
@@ -167,8 +166,8 @@ func (r *Router) drainEventQueue(ctx context.Context) error {
 func (r *Router) processQueuedEvent(ctx context.Context, qe *domain.QueuedEvent) {
 	defer func() {
 		if rec := recover(); rec != nil {
-			log.Printf("[router] event-queue: panic routing event %s (queue id %d, attempt %d): %v",
-				qe.EventID, qe.ID, qe.Attempts, rec)
+			routerLog.Error("event-queue: panic routing event",
+				"event_id", qe.EventID, "queue_id", qe.ID, "attempt", qe.Attempts, "panic", rec)
 			r.parkOrRequeue(ctx, qe, fmt.Sprintf("panic: %v", rec))
 		}
 	}()
@@ -176,16 +175,16 @@ func (r *Router) processQueuedEvent(ctx context.Context, qe *domain.QueuedEvent)
 	ev, err := r.events.GetSystem(ctx, qe.OrgID, qe.EventID)
 	if err != nil {
 		// Transient read failure — requeue for another attempt.
-		log.Printf("[router] event-queue: load event %s (queue id %d): %v", qe.EventID, qe.ID, err)
+		routerLog.Warn("event-queue: load event failed", "event_id", qe.EventID, "queue_id", qe.ID, "error", err)
 		r.parkOrRequeue(ctx, qe, fmt.Sprintf("load event: %v", err))
 		return
 	}
 	if ev == nil {
 		// The event row is gone (e.g. its entity was cascade-deleted).
 		// Nothing to route — park it failed so the worker doesn't spin.
-		log.Printf("[router] event-queue: event %s not found for queue id %d — marking failed", qe.EventID, qe.ID)
+		routerLog.Warn("event-queue: event not found, marking failed", "event_id", qe.EventID, "queue_id", qe.ID)
 		if err := r.eventQueue.MarkFailed(ctx, qe.OrgID, qe.ID, "event row not found"); err != nil {
-			log.Printf("[router] event-queue: mark failed (missing event, queue id %d): %v", qe.ID, err)
+			routerLog.Error("event-queue: mark failed (missing event)", "queue_id", qe.ID, "error", err)
 		}
 		return
 	}
@@ -199,7 +198,7 @@ func (r *Router) processQueuedEvent(ctx context.Context, qe *domain.QueuedEvent)
 		// boot recovery resets it — at which point re-routing is dedup-
 		// safe (tasks dedup index). Rare DB anomaly; log loudly and move
 		// on rather than risk a double-route by requeuing.
-		log.Printf("[router] event-queue: mark done (queue id %d): %v — row left processing, re-route on restart is dedup-safe", qe.ID, err)
+		routerLog.Error("event-queue: mark done failed, row left processing (re-route on restart is dedup-safe)", "queue_id", qe.ID, "error", err)
 	}
 }
 
@@ -210,11 +209,11 @@ func (r *Router) parkOrRequeue(ctx context.Context, qe *domain.QueuedEvent, reas
 	if qe.Attempts >= maxEventAttempts {
 		if err := r.eventQueue.MarkFailed(ctx, qe.OrgID, qe.ID,
 			fmt.Sprintf("%s (after %d attempts)", reason, qe.Attempts)); err != nil {
-			log.Printf("[router] event-queue: mark failed (queue id %d): %v", qe.ID, err)
+			routerLog.Error("event-queue: mark failed", "queue_id", qe.ID, "error", err)
 		}
 		return
 	}
 	if err := r.eventQueue.Requeue(ctx, qe.OrgID, qe.ID, reason); err != nil {
-		log.Printf("[router] event-queue: requeue (queue id %d): %v", qe.ID, err)
+		routerLog.Error("event-queue: requeue failed", "queue_id", qe.ID, "error", err)
 	}
 }

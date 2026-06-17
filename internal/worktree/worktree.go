@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"log"
 	"net/url"
 	"os"
 	"os/exec"
@@ -63,7 +62,7 @@ func fireCloneResult(owner, repo string, err error) {
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("[worktree] onCloneResult callback panicked for %s/%s: %v", owner, repo, r)
+			worktreeLog.Error("onCloneResult callback panicked", "owner", owner, "repo", repo, "panic", r)
 		}
 	}()
 	cb(owner, repo, err)
@@ -402,7 +401,7 @@ func ensureBareCloneLocked(ctx context.Context, owner, repo, cloneURL string, au
 	// so detaching it is safe.
 	defer func() {
 		if err != nil {
-			log.Printf("[worktree] ensureBareClone %s/%s: %v", owner, repo, err)
+			worktreeLog.Error("ensureBareClone failed", "owner", owner, "repo", repo, "error", err)
 		}
 		go fireCloneResult(owner, repo, err)
 	}()
@@ -440,7 +439,7 @@ func cloneBareIfMissing(ctx context.Context, owner, repo, cloneURL string, auth 
 		if cloneURL == "" {
 			return "", fmt.Errorf("bare clone for %s/%s missing and no cloneURL provided", owner, repo)
 		}
-		log.Printf("[worktree] cloning %s/%s (first time)...", owner, repo)
+		worktreeLog.Info("cloning (first time)", "owner", owner, "repo", repo)
 		if err := os.MkdirAll(filepath.Dir(bareDir), 0755); err != nil {
 			return "", fmt.Errorf("mkdir: %w", err)
 		}
@@ -448,7 +447,7 @@ func cloneBareIfMissing(ctx context.Context, owner, repo, cloneURL string, auth 
 		if err := gitRunCtxAuth(ctx, "", auth, "clone", "--bare", "--filter=blob:none", cloneURL, bareDir); err != nil {
 			return "", fmt.Errorf("bare clone: %w", err)
 		}
-		log.Printf("[worktree] clone %s/%s completed in %s", owner, repo, time.Since(start).Round(time.Millisecond))
+		worktreeLog.Debug("clone completed", "owner", owner, "repo", repo, "duration", time.Since(start).Round(time.Millisecond))
 	}
 
 	return bareDir, nil
@@ -478,7 +477,7 @@ func repairOriginURL(ctx context.Context, bareDir, wantURL string) error {
 	if currentURL == wantURL {
 		return nil
 	}
-	log.Printf("[worktree] repairing origin url for %s: %q -> %q", bareDir, currentURL, wantURL)
+	worktreeLog.Debug("repairing origin url", "dir", bareDir, "current", currentURL, "want", wantURL)
 	return gitRunCtx(ctx, bareDir, "remote", "set-url", "origin", wantURL)
 }
 
@@ -491,11 +490,38 @@ func makeWorktreeDir(runID string) (string, error) {
 	return wtDir, nil
 }
 
+// gitBaseEnv is the parent environment every git subprocess in this package
+// runs with: the process environment with GIT_TERMINAL_PROMPT forced to 0.
+// Disabling the prompt is essential on a headless server — git can never
+// satisfy an interactive "Username for 'https://...'" prompt, so without this a
+// missing or invalid credential would block on (or fail opaquely against)
+// /dev/tty instead of returning the clear "terminal prompts disabled" error
+// fast. Crucially, the setting is inherited by any child git process too —
+// including the lazy promisor fetch git spawns inside `worktree add` / `reset
+// --hard` on a blobless bare — so a deferred-blob fetch that can't authenticate
+// fails fast as well.
+//
+// Any inherited GIT_TERMINAL_PROMPT is dropped before the =0 is appended, so a
+// parent process that preset =1 can't re-enable interactive prompts — the
+// guarantee holds regardless of how the exec layer resolves duplicate env keys.
+func gitBaseEnv() []string {
+	parent := os.Environ()
+	out := make([]string, 0, len(parent)+1)
+	for _, kv := range parent {
+		if strings.HasPrefix(kv, "GIT_TERMINAL_PROMPT=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "GIT_TERMINAL_PROMPT=0")
+}
+
 func gitOutputCtx(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	cmd.Env = gitBaseEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctx.Err() != nil {
@@ -516,15 +542,20 @@ func gitRunCtx(ctx context.Context, dir string, args ...string) error {
 
 // gitRunCtxAuth runs git, injecting auth's extraHeader into the subprocess
 // environment when auth is active (composed at the next free GIT_CONFIG index
-// — see gitConfigEnviron). An inert auth leaves the inherited environment
-// untouched, identical to gitRunCtx.
+// — see gitConfigEnviron). The env is always set, layered on gitBaseEnv() so
+// GIT_TERMINAL_PROMPT=0 reaches the subprocess (and the lazy promisor fetch it
+// spawns) whether or not auth is active; an inert auth uses that base alone,
+// behaving identically to before aside from the now-explicit prompt disable.
 func gitRunCtxAuth(ctx context.Context, dir string, auth CloneAuth, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	if env, ok := auth.gitConfigEnviron(os.Environ()); ok {
+	base := gitBaseEnv()
+	if env, ok := auth.gitConfigEnviron(base); ok {
 		cmd.Env = env
+	} else {
+		cmd.Env = base
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {

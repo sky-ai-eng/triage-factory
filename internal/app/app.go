@@ -17,12 +17,13 @@ package app
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"io/fs"
-	"log"
 	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
+	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -83,6 +84,17 @@ type App struct {
 func New(ctx context.Context, cfg Config, static fs.FS) (*App, error) {
 	a := &App{cfg: cfg, announce: newAnnouncer()}
 
+	if a.local() {
+		// Resolve (and, for the headless encrypted-file backend, construct +
+		// validate) the local secret backend up front, so a missing
+		// TF_SECRET_ENCRYPTION_KEY or an undecryptable secrets file fails the
+		// server at boot rather than on the first credential read. Multi mode
+		// uses the Postgres secret store and never touches internal/auth.
+		if err := auth.InitLocalSecretBackend(); err != nil {
+			return nil, fmt.Errorf("secret backend: %w", err)
+		}
+	}
+
 	if err := a.openStores(ctx); err != nil { // DB pool(s) + store bundle
 		return nil, err
 	}
@@ -116,7 +128,7 @@ func (a *App) Run(ctx context.Context) error {
 func (a *App) Close() error {
 	if a.appDB != nil {
 		if err := a.appDB.Close(); err != nil {
-			log.Printf("[app] close app DB pool: %v", err)
+			appLog.Error("close app db pool failed", "error", err)
 		}
 	}
 	if a.database != nil {

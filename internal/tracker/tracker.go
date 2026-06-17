@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -107,7 +106,7 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 	// stored snapshot through the Phase-2 gate without a refresh.
 	discovered, quietRepos, err := t.discoverGitHub(client, username, repos)
 	if err != nil {
-		log.Printf("[tracker] GitHub discovery error: %v", err)
+		trackerLog.Error("github discovery error", "error", err)
 	}
 
 	// Build a SourceID-keyed lookup of discovery snapshots so Phase 2 can
@@ -128,7 +127,7 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 		sid := ghSourceID(snap.Repo, snap.Number)
 		entity, created, err := t.entities.FindOrCreateSystem(context.Background(), orgID, "github", sid, "pr", snap.Title, snap.URL)
 		if err != nil {
-			log.Printf("[tracker] error creating entity for %s: %v", sid, err)
+			trackerLog.Error("create entity failed", "source_id", sid, "error", err)
 			continue
 		}
 
@@ -136,14 +135,14 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 			// Seed the discovery snapshot.
 			snapJSON, _ := json.Marshal(snap)
 			if err := t.entities.UpdateSnapshotSystem(context.Background(), orgID, entity.ID, string(snapJSON)); err != nil {
-				log.Printf("[tracker] failed to seed snapshot for %s: %v", sid, err)
+				trackerLog.Error("seed snapshot failed", "source_id", sid, "error", err)
 			}
 			// If the PR is already terminal, mark the entity closed immediately
 			// so it doesn't sit in the active refresh set forever (Phase 3
 			// won't emit a merged/closed event because prev==curr).
 			if snap.Merged || snap.State == "CLOSED" || snap.State == "MERGED" {
 				if err := t.entities.MarkClosedSystem(context.Background(), orgID, entity.ID); err != nil {
-					log.Printf("[tracker] failed to mark entity %s closed on discovery: %v", sid, err)
+					trackerLog.Error("mark entity closed on discovery failed", "source_id", sid, "error", err)
 				}
 			} else if snap.Author != username {
 				// Backfill: emit a per-reviewer review_requested event for
@@ -166,7 +165,7 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 						continue
 					}
 					if err := t.backfillReviewRequested(entity.ID, snap, login, team); err != nil {
-						log.Printf("[tracker] failed to backfill review_requested for %s (%s): %v", sid, reviewer, err)
+						trackerLog.Error("backfill review_requested failed", "source_id", sid, "reviewer", reviewer, "error", err)
 					}
 				}
 			}
@@ -179,9 +178,9 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 			// (e.g., reopened PR).
 			if !snap.Merged && snap.State != "CLOSED" && snap.State != "MERGED" && entity.State == "closed" {
 				if reactivated, err := t.entities.ReactivateSystem(context.Background(), orgID, entity.ID); err != nil {
-					log.Printf("[tracker] error reactivating %s: %v", sid, err)
+					trackerLog.Error("reactivate entity failed", "source_id", sid, "error", err)
 				} else if reactivated {
-					log.Printf("[tracker] reactivated entity %s (reopened)", sid)
+					trackerLog.Info("reactivated entity (reopened)", "source_id", sid)
 				}
 			}
 		}
@@ -275,7 +274,7 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 						MetadataJSON: string(meta),
 						OccurredAt:   time.Now(),
 					})
-					log.Printf("[tracker] reconciled: emitting review_request_removed (%s) for skipped entity %s", task.DedupKey, e.ID)
+					trackerLog.Info("reconciled: emitting review_request_removed for skipped entity", "dedup_key", task.DedupKey, "entity", e.ID)
 				}
 			}
 			skippedOpen++
@@ -285,8 +284,7 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 	}
 
 	if len(openItems) == 0 && len(terminalItems) == 0 {
-		log.Printf("[tracker] GitHub refresh: %d discovered, %d entities, %d skipped (quiet), 0 refreshed, 0 events",
-			len(discovered), len(entities), skippedOpen)
+		trackerLog.Info("github refresh", "discovered", len(discovered), "entities", len(entities), "skipped", skippedOpen, "refreshed", 0, "events", 0)
 		if len(entities) > 0 {
 			t.EmitPollComplete("github", startedAt, len(entities), 0)
 		}
@@ -341,7 +339,7 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 		// Update entity snapshot + title.
 		snapJSON, _ := json.Marshal(newSnap)
 		if err := t.entities.UpdateSnapshotSystem(context.Background(), orgID, item.entity.ID, string(snapJSON)); err != nil {
-			log.Printf("[tracker] error updating snapshot for %s: %v", item.entity.SourceID, err)
+			trackerLog.Error("update snapshot failed", "source_id", item.entity.SourceID, "error", err)
 		}
 		if item.entity.Title != newSnap.Title {
 			_ = t.entities.UpdateTitleSystem(context.Background(), orgID, item.entity.ID, newSnap.Title)
@@ -354,8 +352,7 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 		}
 	}
 
-	log.Printf("[tracker] GitHub refresh: %d discovered, %d entities, %d skipped (quiet), %d refreshed, %d events",
-		len(discovered), len(entities), skippedOpen, len(refreshed), eventsEmitted)
+	trackerLog.Info("github refresh", "discovered", len(discovered), "entities", len(entities), "skipped", skippedOpen, "refreshed", len(refreshed), "events", eventsEmitted)
 
 	if len(entities) > 0 {
 		t.EmitPollComplete("github", startedAt, len(entities), eventsEmitted)
@@ -403,7 +400,7 @@ func (t *Tracker) discoverGitHub(client *ghclient.Client, username string, repos
 		etag := ""
 		if t.repos != nil {
 			if stored, _, err := t.repos.GetPullsPollStateSystem(ctx, t.orgID, repoFull); err != nil {
-				log.Printf("[tracker] read pulls poll state for %s: %v", repoFull, err)
+				trackerLog.Error("read pulls poll state failed", "repo", repoFull, "error", err)
 			} else {
 				etag = stored
 			}
@@ -416,10 +413,10 @@ func (t *Tracker) discoverGitHub(client *ghclient.Client, username string, repos
 			// and log rather than aborting the whole sweep.
 			var he *ghclient.HTTPError
 			if errors.As(err, &he) && (he.StatusCode == 403 || he.StatusCode == 404) {
-				log.Printf("[tracker] discovery: %s unreachable (HTTP %d) — skipping", repoFull, he.StatusCode)
+				trackerLog.Warn("discovery: repo unreachable — skipping", "repo", repoFull, "status", he.StatusCode)
 				continue
 			}
-			log.Printf("[tracker] discovery: list open PRs for %s failed: %v", repoFull, err)
+			trackerLog.Error("discovery: list open PRs failed", "repo", repoFull, "error", err)
 			continue
 		}
 
@@ -449,7 +446,7 @@ func (t *Tracker) discoverGitHub(client *ghclient.Client, username string, repos
 		for _, q := range dashboardBackfillQueries(username, repos) {
 			prs, err := client.DiscoverPRs(q, 50)
 			if err != nil {
-				log.Printf("[tracker] dashboard backfill query failed: %v (query: %s)", err, q)
+				trackerLog.Error("dashboard backfill query failed", "error", err, "query", q)
 				continue
 			}
 			for _, pr := range prs {
@@ -473,7 +470,7 @@ func (t *Tracker) recordPullsPoll(ctx context.Context, repoFull, etag string) {
 		return
 	}
 	if err := t.repos.SetPullsPollStateSystem(ctx, t.orgID, repoFull, etag, time.Now()); err != nil {
-		log.Printf("[tracker] write pulls poll state for %s: %v", repoFull, err)
+		trackerLog.Error("write pulls poll state failed", "repo", repoFull, "error", err)
 	}
 }
 
@@ -654,29 +651,29 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 	// Phase 1: Discovery
 	discovered, err := t.discoverJira(client, baseURL, projects)
 	if err != nil {
-		log.Printf("[tracker] Jira discovery error: %v", err)
+		trackerLog.Error("jira discovery error", "error", err)
 	}
 
 	for _, state := range discovered {
 		snap := state.Snap
 		entity, created, err := t.entities.FindOrCreateSystem(context.Background(), orgID, "jira", snap.Key, "issue", snap.Summary, snap.URL)
 		if err != nil {
-			log.Printf("[tracker] error creating entity for %s: %v", snap.Key, err)
+			trackerLog.Error("create entity failed", "source_id", snap.Key, "error", err)
 			continue
 		}
 		if created {
 			snapJSON, _ := json.Marshal(snap)
 			if err := t.entities.UpdateSnapshotSystem(context.Background(), orgID, entity.ID, string(snapJSON)); err != nil {
-				log.Printf("[tracker] failed to seed snapshot for %s: %v", snap.Key, err)
+				trackerLog.Error("seed snapshot failed", "source_id", snap.Key, "error", err)
 			}
 			if state.Description != "" {
 				if err := t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, state.Description); err != nil {
-					log.Printf("[tracker] failed to seed description for %s: %v", snap.Key, err)
+					trackerLog.Error("seed description failed", "source_id", snap.Key, "error", err)
 				}
 			}
 			if terminal(snap) {
 				if err := t.entities.MarkClosedSystem(context.Background(), orgID, entity.ID); err != nil {
-					log.Printf("[tracker] failed to mark entity %s closed on discovery: %v", snap.Key, err)
+					trackerLog.Error("mark entity closed on discovery failed", "source_id", snap.Key, "error", err)
 				}
 			}
 		} else {
@@ -689,9 +686,9 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 			// Reactivate if a previously-closed issue reappears as open.
 			if !terminal(snap) && entity.State == "closed" {
 				if reactivated, err := t.entities.ReactivateSystem(context.Background(), orgID, entity.ID); err != nil {
-					log.Printf("[tracker] error reactivating %s: %v", snap.Key, err)
+					trackerLog.Error("reactivate entity failed", "source_id", snap.Key, "error", err)
 				} else if reactivated {
-					log.Printf("[tracker] reactivated entity %s (reopened)", snap.Key)
+					trackerLog.Info("reactivated entity (reopened)", "source_id", snap.Key)
 				}
 			}
 		}
@@ -731,7 +728,7 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		var prevSnap domain.JiraSnapshot
 		if e.SnapshotJSON != "" && e.SnapshotJSON != "{}" {
 			if err := json.Unmarshal([]byte(e.SnapshotJSON), &prevSnap); err != nil {
-				log.Printf("[tracker] corrupt jira snapshot for %s, reseeding: %v", e.SourceID, err)
+				trackerLog.Warn("corrupt jira snapshot, reseeding", "source_id", e.SourceID, "error", err)
 				snapJSON, _ := json.Marshal(newSnap)
 				_ = t.entities.UpdateSnapshotSystem(context.Background(), orgID, e.ID, string(snapJSON))
 				continue
@@ -746,7 +743,7 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 
 		snapJSON, _ := json.Marshal(newSnap)
 		if err := t.entities.UpdateSnapshotSystem(context.Background(), orgID, e.ID, string(snapJSON)); err != nil {
-			log.Printf("[tracker] error updating jira snapshot for %s: %v", e.SourceID, err)
+			trackerLog.Error("update jira snapshot failed", "source_id", e.SourceID, "error", err)
 		}
 		if e.Title != newSnap.Summary {
 			_ = t.entities.UpdateTitleSystem(context.Background(), orgID, e.ID, newSnap.Summary)
@@ -764,8 +761,7 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		}
 	}
 
-	log.Printf("[tracker] Jira refresh: %d discovered, %d entities, %d refreshed, %d events",
-		len(discovered), len(entities), len(refreshed), eventsEmitted)
+	trackerLog.Info("jira refresh", "discovered", len(discovered), "entities", len(entities), "refreshed", len(refreshed), "events", eventsEmitted)
 
 	// Always fire the sentinel — it means "a poll cycle completed," not "a
 	// poll produced work." Carry-over readiness depends on this firing even
@@ -852,7 +848,7 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 		// request-scoped deadline, matching its entity-store calls below.
 		issues, err := client.SearchIssues(context.Background(), q.jql, fields, 100)
 		if err != nil {
-			log.Printf("[tracker] Jira discovery query failed: %v", err)
+			trackerLog.Error("jira discovery query failed", "error", err)
 			continue
 		}
 		for _, issue := range issues {

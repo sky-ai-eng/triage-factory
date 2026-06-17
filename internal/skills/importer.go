@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,11 +108,11 @@ func ImportAll(ctx context.Context, database *sql.DB, prompts db.PromptStore) Im
 	if err != nil {
 		result.Errors = append(result.Errors, "deduplicate imported prompts: "+err.Error())
 	} else if hiddenDuplicates > 0 {
-		log.Printf("[skills] deduplicated %d already-imported skills (same name/body/allowed_tools)", hiddenDuplicates)
+		skillsLog.Info("deduplicated already-imported skills", "count", hiddenDuplicates)
 	}
 
 	if result.Imported > 0 {
-		log.Printf("[skills] imported %d skills (%d scanned, %d skipped)", result.Imported, result.Scanned, result.Skipped)
+		skillsLog.Info("imported skills", "imported", result.Imported, "scanned", result.Scanned, "skipped", result.Skipped)
 	}
 
 	return result
@@ -150,7 +149,7 @@ func importSkillFile(ctx context.Context, database *sql.DB, prompts db.PromptSto
 		if err := prompts.UpdateImported(ctx, runmode.LocalDefaultOrg, id, meta.Name, meta.Body, meta.AllowedTools); err != nil {
 			return err
 		}
-		log.Printf("[skills] updated %q from %s", meta.Name, path)
+		skillsLog.Info("updated skill", "name", meta.Name, "path", path)
 		return nil
 	}
 
@@ -163,7 +162,7 @@ func importSkillFile(ctx context.Context, database *sql.DB, prompts db.PromptSto
 		return err
 	}
 	if duplicateID != "" {
-		log.Printf("[skills] skipped duplicate %q from %s (already imported as %s)", meta.Name, path, duplicateID)
+		skillsLog.Info("skipped duplicate skill", "name", meta.Name, "path", path, "duplicate_id", duplicateID)
 		return errSkillDuplicate
 	}
 
@@ -179,7 +178,7 @@ func importSkillFile(ctx context.Context, database *sql.DB, prompts db.PromptSto
 		return err
 	}
 
-	log.Printf("[skills] imported %q from %s (description: %s)", meta.Name, path, meta.Description)
+	skillsLog.Info("imported skill", "name", meta.Name, "path", path, "description", meta.Description)
 	return nil
 }
 

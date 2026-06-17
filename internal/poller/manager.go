@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"log"
 	"strings"
 	"sync"
 	"time"
@@ -107,7 +106,7 @@ func (m *Manager) reviewerResolver(ctx context.Context, orgID, username string, 
 	host := ""
 	if m.orgs != nil {
 		if orgSet, err := m.orgs.GetSettingsSystem(ctx, orgID); err != nil {
-			log.Printf("[github] org %s: read settings for reviewer resolver: %v", orgID, err)
+			githubLog.Warn("read settings for reviewer resolver failed; falling back to github.com host", "org", orgID, "error", err)
 		} else {
 			// Resolve to the effective host (empty → github.com) so the
 			// reverse identity lookup matches rows captured under the
@@ -153,7 +152,7 @@ func (m *Manager) RestartJira() {
 	if m.jiraStop != nil {
 		close(m.jiraStop)
 		m.jiraStop = nil
-		log.Println("[jira] tracker stopped")
+		jiraLog.Info("tracker stopped")
 	}
 	m.mu.Unlock()
 
@@ -172,7 +171,7 @@ func (m *Manager) RestartJira() {
 func (m *Manager) loadOrgSettings(ctx context.Context, orgID string) domain.OrgSettings {
 	orgSet, err := m.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
-		log.Printf("[poller] load org settings for %s: %v (falling back to defaults)", orgID, err)
+		pollerLog.Warn("load org settings failed; falling back to defaults", "org", orgID, "error", err)
 		return domain.DefaultOrgSettings()
 	}
 	return orgSet
@@ -273,7 +272,7 @@ func (m *Manager) loadJiraRules(ctx context.Context, orgID string) []domain.Jira
 	}
 	rules, err := m.jiraRules.ListForOrgSystem(ctx, orgID)
 	if err != nil {
-		log.Printf("[poller] org %s: list jira rules (org union): %v", orgID, err)
+		pollerLog.Warn("list jira rules (org union) failed", "org", orgID, "error", err)
 		return nil
 	}
 	return rules
@@ -296,12 +295,12 @@ func (m *Manager) stopAll() {
 	if m.ghStop != nil {
 		close(m.ghStop)
 		m.ghStop = nil
-		log.Println("[github] tracker stopped")
+		githubLog.Info("tracker stopped")
 	}
 	if m.jiraStop != nil {
 		close(m.jiraStop)
 		m.jiraStop = nil
-		log.Println("[jira] tracker stopped")
+		jiraLog.Info("tracker stopped")
 	}
 }
 
@@ -342,7 +341,7 @@ func (m *Manager) startGitHub() {
 		}
 	}()
 
-	log.Printf("[github] tracker started (base tick %s, per-org cadence resolved each wake)", basePollInterval)
+	githubLog.Info("tracker started (per-org cadence resolved each wake)", "base_tick", basePollInterval)
 }
 
 // runGitHubCycle enumerates active orgs and dispatches per-org GitHub polling
@@ -357,7 +356,7 @@ func (m *Manager) runGitHubCycle() {
 	now := time.Now()
 	orgIDs, err := m.orgs.ListActiveSystem(ctx)
 	if err != nil {
-		log.Printf("[github] list active orgs: %v", err)
+		githubLog.Error("list active orgs failed", "error", err)
 		m.reportError("github", "", err)
 		return
 	}
@@ -382,7 +381,7 @@ func (m *Manager) runGitHubCycle() {
 func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	repos, err := m.repos.ListConfiguredNamesSystem(ctx, orgID)
 	if err != nil {
-		log.Printf("[github] org %s: load configured repos: %v", orgID, err)
+		githubLog.Error("load configured repos failed", "org", orgID, "error", err)
 		return
 	}
 	if len(repos) == 0 {
@@ -413,7 +412,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 
 	installs, err := m.apps.ListInstallationsForOrgSystem(ctx, orgID)
 	if err != nil {
-		log.Printf("[github] org %s: list installations: %v", orgID, err)
+		githubLog.Warn("list installations failed", "org", orgID, "error", err)
 	}
 
 	// Local-NAT bonus: webhooks don't reach a local instance, so the
@@ -422,9 +421,9 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// cycle and re-read.
 	if isLocal {
 		if berr := m.apps.BackfillInstallationsFromAPI(ctx, orgID); berr != nil {
-			log.Printf("[github] org %s: installation backfill: %v", orgID, berr)
+			githubLog.Warn("installation backfill failed", "org", orgID, "error", berr)
 		} else if installs, err = m.apps.ListInstallationsForOrgSystem(ctx, orgID); err != nil {
-			log.Printf("[github] org %s: re-list installations after backfill: %v", orgID, err)
+			githubLog.Warn("re-list installations after backfill failed", "org", orgID, "error", err)
 		}
 	}
 
@@ -433,7 +432,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// surface it and skip the cycle rather than polling as some other identity.
 	if len(installs) == 0 {
 		degraded := errors.New("github app is active but installed on no accounts")
-		log.Printf("[github] org %s: %v — skipping cycle", orgID, degraded)
+		githubLog.Error("skipping cycle", "org", orgID, "error", degraded)
 		m.reportError("github", orgID, degraded)
 		return
 	}
@@ -454,13 +453,13 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	for _, inst := range installs {
 		client, cerr := m.resolver.ClientFor(ctx, orgID, inst.AccountLogin)
 		if cerr != nil {
-			log.Printf("[github] org %s: resolve client for installation %s (%s): %v", orgID, inst.InstallationID, inst.AccountLogin, cerr)
+			githubLog.Error("resolve client for installation failed", "org", orgID, "installation", inst.InstallationID, "account", inst.AccountLogin, "error", cerr)
 			m.reportError("github", orgID, cerr)
 			continue
 		}
 		grant, gerr := client.ListInstallationRepos()
 		if gerr != nil {
-			log.Printf("[github] org %s: list installation repos for %s: %v", orgID, inst.AccountLogin, gerr)
+			githubLog.Error("list installation repos failed", "org", orgID, "account", inst.AccountLogin, "error", gerr)
 			m.reportError("github", orgID, gerr)
 			continue
 		}
@@ -472,7 +471,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		// App tokens have no "me" — drop the username axis for discovery
 		// (Sharp edge 2). Predicates still match per-PR fields downstream.
 		if _, rerr := m.trackerForOrg(orgID).RefreshGitHub(client, "", scoped, resolver); rerr != nil {
-			log.Printf("[github] org %s installation %s: tracker error: %v", orgID, inst.AccountLogin, rerr)
+			githubLog.Error("tracker error", "org", orgID, "installation", inst.AccountLogin, "error", rerr)
 			m.reportError("github", orgID, rerr)
 		}
 	}
@@ -484,7 +483,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// health and skip rather than masking it.
 	if !anyFunctional {
 		degraded := errors.New("github app is active but no installation produced a usable token")
-		log.Printf("[github] org %s: %v — skipping cycle", orgID, degraded)
+		githubLog.Error("skipping cycle", "org", orgID, "error", degraded)
 		m.reportError("github", orgID, degraded)
 		return
 	}
@@ -493,7 +492,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// installed on them. Log once so the gap is visible without being an error.
 	for _, r := range repos {
 		if !covered[r] {
-			log.Printf("[github] org %s: configured repo %s not in any App installation grant — skipping", orgID, r)
+			githubLog.Warn("configured repo not in any app installation grant; skipping", "org", orgID, "repo", r)
 		}
 	}
 }
@@ -530,13 +529,13 @@ func (m *Manager) reconcileGitHubGroups(ctx context.Context, orgID string, repos
 		client, err := m.resolver.ClientFor(ctx, orgID, owner)
 		if err != nil {
 			if !errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-				log.Printf("[github-groups] org %s: resolve client for %s: %v", orgID, owner, err)
+				githubGroupsLog.Warn("resolve client for owner failed; skipping reconcile", "org", orgID, "owner", owner, "error", err)
 			}
 			continue
 		}
 		teams, err := client.ListOrgTeams(owner)
 		if err != nil {
-			log.Printf("[github-groups] org %s: list teams for %s: %v", orgID, owner, err)
+			githubGroupsLog.Warn("list teams for owner failed; skipping reconcile", "org", orgID, "owner", owner, "error", err)
 			continue
 		}
 		slugs := make([]string, 0, len(teams))
@@ -549,9 +548,9 @@ func (m *Manager) reconcileGitHubGroups(ctx context.Context, orgID string, repos
 			continue
 		}
 		if n, err := m.githubGroups.PruneMissingSystem(ctx, orgID, owner, slugs); err != nil {
-			log.Printf("[github-groups] org %s: reconcile prune for %s: %v", orgID, owner, err)
+			githubGroupsLog.Warn("reconcile prune failed", "org", orgID, "owner", owner, "error", err)
 		} else if n > 0 {
-			log.Printf("[github-groups] org %s: pruned %d stale mapping(s) for deleted GitHub teams under %s", orgID, n, owner)
+			githubGroupsLog.Info("pruned stale mappings for deleted github teams", "org", orgID, "owner", owner, "pruned", n)
 		}
 	}
 }
@@ -571,7 +570,7 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 			return // not configured for GitHub — silent skip
 		}
-		log.Printf("[github] org %s: resolve PAT client: %v", orgID, err)
+		githubLog.Error("resolve pat client failed", "org", orgID, "error", err)
 		m.reportError("github", orgID, err)
 		return
 	}
@@ -585,16 +584,16 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 		// `...System` admin-pool variants.
 		orgSet, serr := m.orgs.GetSettingsSystem(ctx, orgID)
 		if serr != nil {
-			log.Printf("[github] org %s: read org settings: %v", orgID, serr)
+			githubLog.Error("read org settings failed", "org", orgID, "error", serr)
 			return
 		}
 		username, err = m.users.GetGitHubLoginSystem(ctx, runmode.LocalDefaultUserID, orgSet.GitHubBaseURL)
 		if err != nil {
-			log.Printf("[github] org %s: read github identity: %v", orgID, err)
+			githubLog.Error("read github identity failed", "org", orgID, "error", err)
 			return
 		}
 		if teams, terr := client.ListMyTeams(); terr != nil {
-			log.Printf("[github] org %s: list teams: %v (team-based review requests will be missed this cycle)", orgID, terr)
+			githubLog.Warn("list teams failed; team-based review requests will be missed this cycle", "org", orgID, "error", terr)
 		} else {
 			userTeams = teams
 		}
@@ -602,7 +601,7 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 
 	resolver := m.reviewerResolver(ctx, orgID, username, userTeams)
 	if _, err := m.trackerForOrg(orgID).RefreshGitHub(client, username, repos, resolver); err != nil {
-		log.Printf("[github] org %s: tracker error: %v", orgID, err)
+		githubLog.Error("tracker error", "org", orgID, "error", err)
 		m.reportError("github", orgID, err)
 	}
 }
@@ -616,7 +615,7 @@ func (m *Manager) orgHasRegisteredApp(ctx context.Context, orgID string) bool {
 	}
 	app, err := m.apps.GetForOrgSystem(ctx, orgID)
 	if err != nil {
-		log.Printf("[github] org %s: read App registration: %v", orgID, err)
+		githubLog.Warn("read app registration failed", "org", orgID, "error", err)
 		return false
 	}
 	return app != nil && app.Active
@@ -677,7 +676,7 @@ func (m *Manager) startJira() {
 		}
 	}()
 
-	log.Printf("[jira] tracker started (base tick %s, per-org cadence resolved each wake)", basePollInterval)
+	jiraLog.Info("tracker started (per-org cadence resolved each wake)", "base_tick", basePollInterval)
 }
 
 // runJiraCycle enumerates active orgs and dispatches a per-org RefreshJira for
@@ -693,7 +692,7 @@ func (m *Manager) runJiraCycle() {
 	now := time.Now()
 	orgIDs, err := m.orgs.ListActiveSystem(ctx)
 	if err != nil {
-		log.Printf("[jira] list active orgs: %v", err)
+		jiraLog.Error("list active orgs failed", "error", err)
 		m.reportError("jira", "", err)
 		return
 	}
@@ -708,7 +707,7 @@ func (m *Manager) runJiraCycle() {
 		}
 		orgSet, oerr := m.orgs.GetSettingsSystem(ctx, orgID)
 		if oerr != nil {
-			log.Printf("[jira] org %s: load settings: %v", orgID, oerr)
+			jiraLog.Error("load settings failed", "org", orgID, "error", oerr)
 			m.reportError("jira", orgID, oerr)
 			continue // leave unscheduled → retry next base tick (interval unknown)
 		}
@@ -721,7 +720,7 @@ func (m *Manager) runJiraCycle() {
 		m.schedulePoll("jira", orgID, now.Add(clampPollInterval(orgSet.JiraPollInterval)))
 		creds, lerr := integrations.LoadSystem(ctx, m.secrets, orgID)
 		if lerr != nil {
-			log.Printf("[jira] org %s: load creds: %v", orgID, lerr)
+			jiraLog.Error("load creds failed", "org", orgID, "error", lerr)
 			m.reportError("jira", orgID, lerr)
 			continue
 		}
@@ -747,13 +746,13 @@ func (m *Manager) runJiraCycle() {
 		// ErrNoJiraSystemCredential here — handle errors defensively.
 		client, cerr := sysResolver.ForSystem(ctx, orgID)
 		if cerr != nil {
-			log.Printf("[jira] org %s: resolve system client: %v", orgID, cerr)
+			jiraLog.Error("resolve system client failed", "org", orgID, "error", cerr)
 			m.reportError("jira", orgID, cerr)
 			continue
 		}
 		projects := toTrackerJiraRules(rules)
 		if _, err := m.trackerForOrg(orgID).RefreshJira(client, baseURL, projects); err != nil {
-			log.Printf("[jira] org %s: tracker error: %v", orgID, err)
+			jiraLog.Error("tracker error", "org", orgID, "error", err)
 			m.reportError("jira", orgID, err)
 		}
 	}

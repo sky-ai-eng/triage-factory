@@ -37,8 +37,22 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	"github.com/sky-ai-eng/triage-factory/internal/aead"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
+
+// SecretKey is a fixed app-layer AES-256-GCM key for pgstore.New /
+// pgstore.NewForTx in tests (TFAC-402). Most store tests never touch
+// secrets and pass it only to satisfy the constructor; the SecretStore
+// tests rely on it being stable so a value written through NewForTx reads
+// back through New. Non-zero so a "did we forget to wire the key" bug
+// can't masquerade as a passing zero-key round-trip.
+var SecretKey = aead.Key{
+	0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+	0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+	0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+	0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+}
 
 // Image is pinned to match the multi-mode prod compose stack. Drift
 // here = drift between test and prod auth/vault schemas.
@@ -237,6 +251,7 @@ var orgScopedTables = []string{
 	"preferences",
 	"user_github_identities",
 	"user_jira_identities",
+	"org_secrets",
 	// TF data:
 	"curator_pending_context", "curator_messages", "curator_requests",
 	"pending_review_comments", "pending_reviews",

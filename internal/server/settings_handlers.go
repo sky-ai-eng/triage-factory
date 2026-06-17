@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 
@@ -571,7 +570,7 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 		err := worktree.PreflightSSH(ctx, sshHost)
 		cancel()
 		if err != nil {
-			log.Printf("[settings/org] blocked SSH switch against %s: %v", sshHost, err)
+			settingsOrgLog.Warn("blocked ssh switch", "ssh_host", sshHost, "error", err)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 				"error":  fmt.Sprintf("SSH preflight against %s failed — fix your SSH setup or keep HTTPS. %s", sshHost, err.Error()),
 				"field":  "github_clone_protocol",

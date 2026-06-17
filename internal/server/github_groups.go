@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"errors"
-	"log"
 	"net/http"
 	"strings"
 
@@ -207,7 +206,7 @@ func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID, userID string
 		repos, e = tx.Repos.List(ctx, orgID)
 		return e
 	}); err != nil {
-		log.Printf("[github-groups] load configured repos: %v", err)
+		githubGroupsLog.Error("load configured repos failed", "error", err)
 		return nil, false
 	}
 
@@ -226,7 +225,7 @@ func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID, userID string
 			// install and the org has no PAT — expected, skip quietly but
 			// leave credsMissing set so an all-missing run can surface it.
 			if !errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-				log.Printf("[github-groups] resolve GitHub client for %s: %v", owner, err)
+				githubGroupsLog.Warn("resolve github client failed, skipping owner", "owner", owner, "error", err)
 				// A non-creds resolve failure is an opaque infra error, not a
 				// "reconnect GitHub" state — don't claim creds are missing.
 				credsMissing = false
@@ -238,7 +237,7 @@ func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID, userID string
 		if err != nil {
 			// The owner may be a user account (no teams) or one the org
 			// credential can't read. Skip — candidates only.
-			log.Printf("[github-groups] list teams for GitHub org %s: %v", owner, err)
+			githubGroupsLog.Warn("list teams failed, skipping owner", "owner", owner, "error", err)
 			continue
 		}
 		login := strings.ToLower(owner)
@@ -269,7 +268,7 @@ func (s *Server) annotateGitHubGroupMembership(ctx context.Context, orgID, userI
 		// errNoGitHub (local, no PAT) is the expected "can't resolve
 		// membership" case — silent. Anything else is worth a log line.
 		if !errors.Is(err, errNoGitHub) {
-			log.Printf("[github-groups] membership annotate: %v", err)
+			githubGroupsLog.Warn("membership annotate failed", "error", err)
 		}
 		return
 	}

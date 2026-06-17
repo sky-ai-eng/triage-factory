@@ -12,11 +12,11 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -36,7 +36,7 @@ func WriteJSON(w http.ResponseWriter, status int, v any) {
 // paths, internal IDs) must not leak to other tenants' browsers. scope is the
 // short subsystem tag (e.g. "tasks", "projects", "reviews").
 func InternalError(w http.ResponseWriter, scope string, err error) {
-	log.Printf("[%s] %v", scope, err)
+	logging.Component(scope).Error("handler error", "error", err)
 	msg := err.Error()
 	if runmode.Current() == runmode.ModeMulti {
 		msg = "internal server error"

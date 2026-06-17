@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -153,7 +152,7 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, blue
 			return fmt.Errorf("seed event_handler %s: unknown kind %q", h.ID, h.Kind)
 		}
 	}
-	log.Printf("[db/pg] seeded %d new event_handlers (%d already existed)", inserted, int64(len(db.ShippedEventHandlers))-inserted)
+	dbPgLog.Info("seeded event_handlers", "inserted", inserted, "existed", int64(len(db.ShippedEventHandlers))-inserted)
 	return nil
 }
 

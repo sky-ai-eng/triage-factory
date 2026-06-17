@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,6 +17,7 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -63,18 +63,16 @@ func acmeInstall() []domain.OrgGitHubAppInstallation {
 	}
 }
 
-// captureLog redirects the standard logger to a buffer for the duration of the
-// test so a handler's "GitHub not configured" log line can be asserted. It
-// restores the prior writer (not a hardcoded os.Stderr) so it composes safely
-// if anything else has already redirected the default logger. The handler
-// tests don't run in parallel and newTestServer starts no background
-// goroutines, so the global swap is safe.
+// captureLog redirects component-logger output to a buffer for the duration of
+// the test so a handler's "github not configured" log line can be asserted.
+// logging.SetOutput restores the prior destination on cleanup, so it composes
+// safely if anything else has already redirected output. The handler tests
+// don't run in parallel and newTestServer starts no background goroutines, so
+// the global swap is safe.
 func captureLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
-	prev := log.Writer()
-	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(prev) })
+	t.Cleanup(logging.SetOutput(&buf))
 	return &buf
 }
 
@@ -153,7 +151,7 @@ func TestReviewDiff_NoCredentials_503(t *testing.T) {
 		t.Fatalf("diff = %d, want 503; body=%s", rec.Code, rec.Body.String())
 	}
 	assertErrorBody(t, rec.Body.Bytes(), "GitHub credentials not configured")
-	assertLogged(t, logs, "GitHub not configured")
+	assertLogged(t, logs, "github not configured")
 }
 
 // --- review submit ---
@@ -202,7 +200,7 @@ func TestReviewSubmit_NoCredentials_503(t *testing.T) {
 		t.Fatalf("submit = %d, want 503; body=%s", rec.Code, rec.Body.String())
 	}
 	assertErrorBody(t, rec.Body.Bytes(), "GitHub credentials not configured")
-	assertLogged(t, logs, "GitHub not configured")
+	assertLogged(t, logs, "github not configured")
 }
 
 // --- pending-PR submit ---
@@ -253,7 +251,7 @@ func TestPendingPRSubmit_NoCredentials_503(t *testing.T) {
 		t.Fatalf("submit = %d, want 503; body=%s", rec.Code, rec.Body.String())
 	}
 	assertErrorBody(t, rec.Body.Bytes(), "GitHub credentials not configured")
-	assertLogged(t, logs, "GitHub not configured")
+	assertLogged(t, logs, "github not configured")
 
 	// The resolve happens BEFORE the concurrent-submit guard, so a no-creds
 	// failure must leave the row un-guarded (not stuck "in flight"). A retry
@@ -304,7 +302,7 @@ func TestRepoBranches_NoCredentials_400(t *testing.T) {
 		t.Fatalf("branches = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
 	assertErrorBody(t, rec.Body.Bytes(), "GitHub not configured")
-	assertLogged(t, logs, "GitHub not configured")
+	assertLogged(t, logs, "github not configured")
 }
 
 // --- project-bundle probe ---

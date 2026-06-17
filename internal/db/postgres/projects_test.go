@@ -24,7 +24,7 @@ import (
 // is NULL); production multi-mode under WithTx hits the first branch.
 func TestProjectStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	dbtest.RunProjectStoreConformance(t, func(t *testing.T) (db.ProjectStore, string, string) {
 		t.Helper()
 		h.Reset(t)
@@ -39,7 +39,7 @@ func TestProjectStore_Postgres(t *testing.T) {
 func TestProjectStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgA, _, _ := seedPgProjectOrg(t, h)
@@ -93,7 +93,7 @@ func TestProjectStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	teamA := firstTeamForOrg(t, h, orgA)
 
 	// Seed a project in orgA via admin so the row exists.
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 	projA, err := stores.Projects.Create(ctx, orgA, teamA, domain.Project{
 		Name: "orgA RLS project", Description: "secret",
@@ -104,7 +104,7 @@ func TestProjectStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("same_org_user_can_read", func(t *testing.T) {
 		err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx).Projects.Get(ctx, orgA, projA)
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Projects.Get(ctx, orgA, projA)
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -120,7 +120,7 @@ func TestProjectStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("cross_org_read_filtered", func(t *testing.T) {
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx).Projects.Get(ctx, orgA, projA)
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Projects.Get(ctx, orgA, projA)
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -140,7 +140,7 @@ func TestProjectStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// requires org_id = tf.current_org_id(), so 42501 is the
 		// expected outcome.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			_, e := pgstore.NewForTx(tx).Projects.Create(ctx, orgA, teamA, domain.Project{
+			_, e := pgstore.NewForTx(tx, pgtest.SecretKey).Projects.Create(ctx, orgA, teamA, domain.Project{
 				Name: "cross-org write attempt",
 			})
 			return e
@@ -159,7 +159,7 @@ func TestProjectStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 func TestProjectStore_Postgres_CreateRefusesTeamSentinel(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgID, _, _ := seedPgProjectOrg(t, h)
@@ -206,7 +206,7 @@ func TestProjectStore_Postgres_CrossTeamRLSHidesProject(t *testing.T) {
 
 	// alice (teamA) — the panel/backfill gate must see nil and bail.
 	if err := h.WithUser(t, alice, orgID, func(tx *sql.Tx) error {
-		got, e := pgstore.NewForTx(tx).Projects.Get(ctx, orgID, projB)
+		got, e := pgstore.NewForTx(tx, pgtest.SecretKey).Projects.Get(ctx, orgID, projB)
 		if e != nil {
 			return e
 		}
@@ -221,7 +221,7 @@ func TestProjectStore_Postgres_CrossTeamRLSHidesProject(t *testing.T) {
 	// bob (teamB) — same-team owner still sees it, so the gate doesn't
 	// over-restrict the legitimate viewer.
 	if err := h.WithUser(t, bob, orgID, func(tx *sql.Tx) error {
-		got, e := pgstore.NewForTx(tx).Projects.Get(ctx, orgID, projB)
+		got, e := pgstore.NewForTx(tx, pgtest.SecretKey).Projects.Get(ctx, orgID, projB)
 		if e != nil {
 			return e
 		}
@@ -279,7 +279,7 @@ func seedPgProjectOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, agentID s
 func TestProjectStore_Postgres_GetPopulatesTeamID(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgA, _, _ := seedPgProjectOrg(t, h)

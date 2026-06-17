@@ -29,7 +29,7 @@ func TestBlueprintStore_Postgres_Conformance(t *testing.T) {
 		orgID, userID := seedPgOrgForBlueprints(t, h)
 		seedPgDefaultTeam(t, h, orgID, userID)
 		teamID := firstTeamForOrg(t, h, orgID)
-		stores := pgstore.New(h.AdminDB, h.AdminDB)
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		seedPrompt := func(t *testing.T, idHint string) string {
 			t.Helper()
 			id := idHint + "-" + orgID[:8]
@@ -52,7 +52,7 @@ func TestBlueprintStore_Postgres_DuplicationConformance(t *testing.T) {
 		orgID, userID := seedPgOrgForBlueprints(t, h)
 		seedPgDefaultTeam(t, h, orgID, userID)
 		teamID := firstTeamForOrg(t, h, orgID)
-		stores := pgstore.New(h.AdminDB, h.AdminDB)
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		ctx := context.Background()
 		seed := func(t *testing.T, p domain.Prompt) string {
 			t.Helper()
@@ -94,7 +94,7 @@ func TestBlueprintStore_Postgres_DuplicatePrompts_CrossTeamRejected(t *testing.T
 	orgID, userID := seedPgOrgForBlueprints(t, h)
 	teamA := seedPgDefaultTeam(t, h, orgID, userID)
 	teamB := seedPgNamedTeam(t, h, orgID, userID, "team-b")
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	// One blueprint + step prompt per team.
@@ -140,7 +140,7 @@ func TestBlueprintStore_Postgres_ReplaceAndListSteps(t *testing.T) {
 	h.Reset(t)
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	blueprints := stores.Blueprints
 	ctx := context.Background()
 
@@ -202,7 +202,7 @@ func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 	h.Reset(t)
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	blueprints := stores.Blueprints
 	ctx := context.Background()
 
@@ -337,7 +337,7 @@ func TestBlueprintStore_Postgres_CreateRun_UnderAppPoolRLS(t *testing.T) {
 	// Wire BlueprintStore against the real admin pool (BYPASSRLS) for the
 	// event-triggered insert and the real app pool (RLS-active under
 	// tf_app via WithTx) for the manual insert.
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	// ---- Event-triggered CreateRun ----
@@ -449,7 +449,7 @@ func TestBlueprintStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	taskA := seedPgTask(t, h, orgA, userA)
 	taskB := seedPgTask(t, h, orgB, userB)
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	blueprints := stores.Blueprints
 	ctx := context.Background()
 
@@ -538,7 +538,7 @@ func TestBlueprintStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	seedPgPrompt(t, h, orgA, alice, stepIDA)
 	taskA := seedPgTask(t, h, orgA, alice)
 
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	// Seed a blueprint run in orgA via WithTx (manual path lands in
@@ -561,7 +561,7 @@ func TestBlueprintStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("same_org_user_can_read", func(t *testing.T) {
 		err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-			cr, err := pgstore.NewForTx(tx).Blueprints.GetRun(ctx, orgA, blueprintRunA)
+			cr, err := pgstore.NewForTx(tx, pgtest.SecretKey).Blueprints.GetRun(ctx, orgA, blueprintRunA)
 			if err != nil {
 				return fmt.Errorf("GetRun: %w", err)
 			}
@@ -577,7 +577,7 @@ func TestBlueprintStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("cross_org_read_filtered", func(t *testing.T) {
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			cr, err := pgstore.NewForTx(tx).Blueprints.GetRun(ctx, orgA, blueprintRunA)
+			cr, err := pgstore.NewForTx(tx, pgtest.SecretKey).Blueprints.GetRun(ctx, orgA, blueprintRunA)
 			if err != nil {
 				return fmt.Errorf("GetRun: %w", err)
 			}
@@ -597,7 +597,7 @@ func TestBlueprintStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// requires the row's org_id to match tf.current_org_id(), so
 		// 42501 is the expected outcome.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			_, e := pgstore.NewForTx(tx).Blueprints.CreateRun(ctx, orgA, domain.BlueprintRun{
+			_, e := pgstore.NewForTx(tx, pgtest.SecretKey).Blueprints.CreateRun(ctx, orgA, domain.BlueprintRun{
 				BlueprintID: blueprintIDA, TaskID: taskA,
 				TriggerType: domain.BlueprintTriggerManual, WorktreePath: "/tmp/rls-x",
 			})

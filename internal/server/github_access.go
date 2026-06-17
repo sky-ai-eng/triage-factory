@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -149,7 +148,7 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 	if err := s.githubApps.BackfillInstallationsFromAPI(ctx, orgID); err != nil {
 		// The detail (which can carry vault/keychain topology) goes to the log,
 		// not the response body — even though this is org-admin-only.
-		log.Printf("[github-app] cutover: backfill installations for org %s: %v", orgID, err)
+		githubAppLog.Error("cutover: backfill installations failed", "org", orgID, "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to sync App installations from GitHub"})
 		return
 	}
@@ -181,7 +180,7 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	log.Printf("[github-app] org %s: cutover to App app_id=%s complete (PAT deleted, app active)", orgID, app.AppID)
+	githubAppLog.Info("cutover to app complete, pat deleted and app active", "org", orgID, "app_id", app.AppID)
 
 	// The App is now live. Drop any cached installation tokens (none should
 	// exist for a previously-staged App, but be defensive) and re-resolve;
@@ -275,7 +274,7 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	log.Printf("[github-app] org %s: switched to PAT, App app_id=%s torn down locally", orgID, app.AppID)
+	githubAppLog.Info("switched to pat, app torn down locally", "org", orgID, "app_id", app.AppID)
 
 	// Per-installation cached tokens die with the teardown; drop them now
 	// rather than waiting out their ~1h expiry. onGitHubChanged re-dues polling
@@ -338,7 +337,7 @@ func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	log.Printf("[github-app] org %s: discarded staged App app_id=%s", orgID, app.AppID)
+	githubAppLog.Info("discarded staged app", "org", orgID, "app_id", app.AppID)
 
 	// Discarding a staged App doesn't change the live credential (the PAT was
 	// and stays live), so there's no poller restart — just drop any cached
@@ -352,7 +351,7 @@ func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) 
 	if base, berr := s.ghResolver.BaseURLFor(ctx, orgID); berr == nil {
 		settingsURL = base + "/settings/apps"
 	} else {
-		log.Printf("[github-app] discard: resolve github base for org %s: %v", orgID, berr)
+		githubAppLog.Warn("discard: resolve github base failed", "org", orgID, "error", berr)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -401,7 +400,7 @@ func (s *Server) handleGitHubAppCutoverPreflight(w http.ResponseWriter, r *http.
 	// a backfill failure logs and falls through to whatever's already mirrored
 	// rather than failing the preview.
 	if berr := s.githubApps.BackfillInstallationsFromAPI(ctx, orgID); berr != nil {
-		log.Printf("[github-app] cutover-preflight: backfill installations for org %s: %v (using current mirror)", orgID, berr)
+		githubAppLog.Warn("cutover-preflight: backfill installations failed, using current mirror", "org", orgID, "error", berr)
 	}
 
 	insts, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
@@ -426,7 +425,7 @@ func (s *Server) handleGitHubAppCutoverPreflight(w http.ResponseWriter, r *http.
 		if err != nil {
 			// The detail (which can carry vault/keychain topology from the PEM
 			// read) goes to the log, not the response body.
-			log.Printf("[github-app] cutover-preflight: enumerate App repos for org %s: %v", orgID, err)
+			githubAppLog.Error("cutover-preflight: enumerate app repos failed", "org", orgID, "error", err)
 			writeJSON(w, http.StatusBadGateway, map[string]string{
 				"error": "failed to enumerate App repositories",
 			})
@@ -474,17 +473,17 @@ func (s *Server) appInstallationReposUnion(ctx context.Context, orgID, base stri
 	for _, inst := range insts {
 		installID, perr := strconv.ParseInt(inst.InstallationID, 10, 64)
 		if perr != nil {
-			log.Printf("[github-app] cutover-preflight org %s: bad installation id %q: %v", orgID, inst.InstallationID, perr)
+			githubAppLog.Warn("cutover-preflight: bad installation id, skipping", "org", orgID, "installation", inst.InstallationID, "error", perr)
 			continue
 		}
 		tok, terr := minter.MintInstallationToken(ctx, installID)
 		if terr != nil {
-			log.Printf("[github-app] cutover-preflight org %s: mint token for %s: %v", orgID, inst.AccountLogin, terr)
+			githubAppLog.Warn("cutover-preflight: mint token failed, skipping", "org", orgID, "account", inst.AccountLogin, "error", terr)
 			continue
 		}
 		repos, lerr := ghclient.NewClient(base, tok.Value).ListInstallationRepos()
 		if lerr != nil {
-			log.Printf("[github-app] cutover-preflight org %s: list repos for %s: %v", orgID, inst.AccountLogin, lerr)
+			githubAppLog.Warn("cutover-preflight: list repos failed, skipping", "org", orgID, "account", inst.AccountLogin, "error", lerr)
 			continue
 		}
 		for _, repo := range repos {
@@ -552,7 +551,7 @@ func (s *Server) handleGitHubAccessPATPreflight(w http.ResponseWriter, r *http.R
 	if err != nil {
 		// The detail (ListUserRepos folds GitHub's response body into the
 		// error) goes to the log, not the response body.
-		log.Printf("[github-access] pat-preflight: enumerate repos for org %s: %v", orgID, err)
+		githubAccessLog.Error("pat-preflight: enumerate repos failed", "org", orgID, "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{
 			"error": "failed to enumerate repositories for that token",
 		})

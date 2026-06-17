@@ -28,7 +28,7 @@ func TestDashboardStore_Postgres(t *testing.T) {
 		t.Helper()
 		h.Reset(t)
 		orgID, _ := seedPgOrgAndUserForDashboard(t, h)
-		stores := pgstore.New(h.AdminDB, h.AdminDB)
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		seed := func(t *testing.T, snap domain.PRSnapshot) {
 			t.Helper()
 			seedPgPRSnapshot(t, h.AdminDB, orgID, snap)
@@ -49,7 +49,7 @@ func TestDashboardStore_Postgres_OnlyCountsRequestingUser(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, _ := seedPgOrgAndUserForDashboard(t, h)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	const me = "aidan"

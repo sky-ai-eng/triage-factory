@@ -116,11 +116,12 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		Prompts:   newTxPromptStore(tx),
 		Swipes:    newSwipeStore(tx),
 		Dashboard: newDashboardStore(tx),
-		// Secrets: app half is the claims-set tx (Put/Get/Delete →
-		// vault_* on tf_app); admin half stays the real admin pool so
-		// GetSystem can reach vault_get_org_secret_system, which tf_app
-		// has no EXECUTE on. Same pool-routing as Chains above.
-		Secrets:       newSecretStore(tx, s.admin),
+		// Secrets: app half is the claims-set tx (Put/Get/Delete +
+		// per-user trio → org_secrets under tf_app + RLS); admin half
+		// stays the real admin pool so GetSystem / GetUserSystem /
+		// PutUserSystem route around RLS. secretKey carries the same
+		// app-layer encryption key New was built with.
+		Secrets:       newSecretStore(tx, s.admin, s.secretKey),
 		EventHandlers: newTxEventHandlerStore(tx),
 		// Blueprints: composed half is tx; admin half stays the real
 		// admin pool so event-triggered CreateRun + the `...System`
@@ -209,7 +210,7 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// app half is the claims-set tx (GetForOrg / CreateForOrg);
 		// admin half stays the real admin pool so installation writes +
 		// GetForOrgSystem / backfill route outside the tx.
-		GitHubApps: newGitHubAppsStore(tx, s.admin, newSecretStore(tx, s.admin)),
+		GitHubApps: newGitHubAppsStore(tx, s.admin, newSecretStore(tx, s.admin, s.secretKey)),
 		// JiraApps: app half is the claims-set tx (GetForOrg / UpsertForOrg /
 		// DeleteForOrg); admin half stays the real admin pool so the resolver's
 		// GetForOrgSystem routes outside the tx.

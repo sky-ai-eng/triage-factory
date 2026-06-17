@@ -3,7 +3,6 @@ package github
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/url"
 	"strings"
 
@@ -447,8 +446,10 @@ func (c *Client) SubmitReview(owner, repo string, number int, commitSHA, event, 
 				positions[i] = fmt.Sprintf("%s:%d", cm.Path, cm.Line)
 			}
 		}
-		log.Printf("[github] SubmitReview failed %s/%s#%d commit=%s event=%s comments=%d [%s]: %v",
-			owner, repo, number, commitSHA, event, len(comments), strings.Join(positions, ", "), err)
+		githubLog.Error("SubmitReview failed",
+			"owner", owner, "repo", repo, "number", number,
+			"commit", commitSHA, "event", event, "comments", len(comments),
+			"positions", strings.Join(positions, ", "), "error", err)
 		return 0, event, err
 	}
 

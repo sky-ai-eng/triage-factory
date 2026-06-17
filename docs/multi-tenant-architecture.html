@@ -924,8 +924,8 @@ footer.status {
         <tr data-decision-id="anthropic-billing"><td class="area">Anthropic billing</td><td class="pick">BYO Anthropic key per org</td><td class="why">Org admin pastes key, all teams use it. No metering/Stripe complexity for v1.</td><td><button class="dpill">— click to review</button></td></tr>
         <tr data-decision-id="github-integration"><td class="area">GitHub integration</td><td class="pick">v1 (multi): <strong>GitHub App is canonical</strong> — it&apos;s the agent&apos;s identity. PAT-borrow fallback for small orgs/B2C. Local: user&apos;s PAT.</td><td class="why">The bot acts on GitHub as itself: opens PRs, comments on reviews, pushes commits. An org-installed GitHub App gives the bot a real identity — audit log shows &quot;Triage Factory Bot did X&quot;, scoped permissions, App-bucket rate limits, survives any individual user leaving. The schema also accepts <code>agents.github_pat_user_id</code> pointing at a designated user whose PAT the bot borrows — used in local mode (one user, one PAT, trivially) and as a B2C/small-org/trial fallback in multi mode (with documented audit-log caveats). PAT-only-multi-mode is supported but not the recommended path; the org-admin UI surfaces &quot;install GitHub App (recommended)&quot; on top of &quot;use a member&apos;s PAT&quot;.</td><td><button class="dpill">— click to review</button></td></tr>
         <tr data-decision-id="volume-strategy"><td class="area">Volume strategy</td><td class="pick">Named Docker volume <code>/data/</code>, holds only <strong>operational state</strong> (git worktrees) per org. Source-of-truth content lives in Postgres.</td><td class="why">Volume mounts into <strong>agent-runner</strong> only — TF web tier never has <code>/data</code>. <code>/data/orgs/&lt;id&gt;/worktrees/</code> contains bare clones (shared across runs in the org) + per-run dirs (<code>run-&lt;uuid&gt;/</code>, gVisor-bind-mounted). Project knowledge bases, agent memories, takeover state — all live as Postgres rows with RLS, materialized into worktree <code>_scratch/</code> dirs at run start and ingested back at completion. Web tier accesses content via SQL, not via internal API into agent-runner.</td><td><button class="dpill">— click to review</button></td></tr>
-        <tr data-decision-id="agent-isolation"><td class="area">Agent isolation</td><td class="pick">gVisor <code>runsc run</code> against a per-delegation OCI bundle, with the spawner owning netns/veth/iptables setup (multi) · direct subprocess (local) · agent-runner service holds the sandbox</td><td class="why">SDK <code>--add-dir</code> is advisory; bash bypasses it. Without kernel-level isolation, a delegated agent can read other orgs' worktrees on the shared disk, exfil <code>TF_SESSION_KEY</code> + <code>ANTHROPIC_API_KEY</code> via <code>/proc/&lt;tf-pid&gt;/environ</code>, and connect to Postgres directly with harvested creds (bypassing RLS). Validated 2026-05-14 on Fly Machines: <code>runsc run</code> against a per-run OCI bundle with alpine rootfs + bind-mounted worktree at <code>/work</code>, sandbox network set up via pre-created netns + veth + iptables NAT (CNI pattern — <code>runsc do</code>'s convenience auto-setup isn't available for OCI-bundle invocations). Image bundles <code>runsc</code> + <code>iptables</code> + <code>iproute2</code> + <code>procps</code>. Single mechanism across docker-compose self-host AND Fly.io hosted; Railway is incompatible (its seccomp + AppArmor profiles block the <code>/proc/self/exe</code> re-exec at the heart of gVisor's sandbox setup, and neither knob is user-tunable on the PaaS). Linux required for hosted (Mac users → local mode). Kata-RuntimeClass via K8s is the upgrade path when SaaS scale forces bare-metal.</td><td><button class="dpill">— click to review</button></td></tr>
-        <tr data-decision-id="secret-storage"><td class="area">Org secret storage</td><td class="pick">Supabase Vault (multi) via SECURITY INVOKER wrapper functions · OS keychain (local)</td><td class="why">Don't roll our own AES-GCM envelope for org-level secrets (PATs, API tokens, future GH App keys). <code>supabase_vault</code> ships with the <code>supabase/postgres</code> image, encrypts at rest via pgsodium, manages keys natively. Vault tables sit in the <code>vault</code> schema (inaccessible to PostgREST/SDK clients) — we add SECURITY INVOKER wrappers in <code>public</code> (<code>vault_put_org_secret</code>, <code>vault_get_org_secret</code>, <code>vault_delete_org_secret</code>) that org-prefix the secret name (<code>org/&lt;uuid&gt;/&lt;key&gt;</code>) and gate via grants to <code>tf_app</code> only. Pattern lifted from <code>~/Sky/skynet/src/skynet/services/vault.py</code>. <strong>Sessions stay app-layer-encrypted</strong> — too high-frequency for a vault function call per request.</td><td><button class="dpill">— click to review</button></td></tr>
+        <tr data-decision-id="agent-isolation"><td class="area">Agent isolation</td><td class="pick">gVisor <code>runsc run</code> against a per-delegation OCI bundle, with the spawner owning netns/veth/iptables setup (multi) · direct subprocess (local) · agent-runner service holds the sandbox</td><td class="why">SDK <code>--add-dir</code> is advisory; bash bypasses it. Without kernel-level isolation, a delegated agent can read other orgs' worktrees on the shared disk, exfil <code>TF_SESSION_ENCRYPTION_KEY</code> + <code>ANTHROPIC_API_KEY</code> via <code>/proc/&lt;tf-pid&gt;/environ</code>, and connect to Postgres directly with harvested creds (bypassing RLS). Validated 2026-05-14 on Fly Machines: <code>runsc run</code> against a per-run OCI bundle with alpine rootfs + bind-mounted worktree at <code>/work</code>, sandbox network set up via pre-created netns + veth + iptables NAT (CNI pattern — <code>runsc do</code>'s convenience auto-setup isn't available for OCI-bundle invocations). Image bundles <code>runsc</code> + <code>iptables</code> + <code>iproute2</code> + <code>procps</code>. Single mechanism across docker-compose self-host AND Fly.io hosted; Railway is incompatible (its seccomp + AppArmor profiles block the <code>/proc/self/exe</code> re-exec at the heart of gVisor's sandbox setup, and neither knob is user-tunable on the PaaS). Linux required for hosted (Mac users → local mode). Kata-RuntimeClass via K8s is the upgrade path when SaaS scale forces bare-metal.</td><td><button class="dpill">— click to review</button></td></tr>
+        <tr data-decision-id="secret-storage"><td class="area">Org secret storage</td><td class="pick">App-layer AES-256-GCM, key from <code>.env</code> (<code>TF_SECRET_ENCRYPTION_KEY</code>), opaque ciphertext in a normal RLS table (multi) · OS keychain (local)</td><td class="why"><strong>Superseded the original Supabase Vault decision (TFAC-402).</strong> Vault/pgsodium kept its root key at <code>/etc/postgresql-custom/pgsodium_root.key</code> in the postgres <em>container</em> filesystem — NOT on the <code>pg-data</code> volume. Any container recreate (a routine <code>docker compose down/up</code>, an image bump, a host move) regenerated that key and made every previously-stored secret permanently undecryptable — operator data-loss on a routine op, a hard blocker for a self-hostable product. Fix is structural: stop delegating secret encryption to Postgres. TF now encrypts org + per-user integration secrets (GitHub App PEM / client-secret / webhook-secret, PATs, Jira tokens) app-side with <code>TF_SECRET_ENCRYPTION_KEY</code> (same model as <code>TF_SESSION_ENCRYPTION_KEY</code>; shared <code>internal/aead</code> primitive) and stores opaque ciphertext + nonce in <code>public.org_secrets</code>, a normal table gated by RLS (<code>org_id = current_org_id()</code>, plus <code>user_id = current_user_id()</code> for per-user rows) — exactly the gates the dropped <code>vault_*</code> wrappers enforced. A DB dump then yields only AES ciphertext, and there's no Postgres-side key left to lose. The <code>supabase_vault</code>/<code>pgsodium</code> extensions stay loaded (image-managed, harmless); TF just stops using them. The same <code>SecretStore</code> interface is unchanged, so every call site is unaffected. <strong>Sessions are app-layer-encrypted too</strong> — same envelope, distinct key.</td><td><button class="dpill">— click to review</button></td></tr>
         <tr data-decision-id="multi-takeover"><td class="area">Multi-mode takeover</td><td class="pick">v1: deferred · v2: same-sandbox handover via gVisor-wrapped web shell (D18)</td><td class="why">Conceptually, takeover is &quot;transfer the task&apos;s claim from the agent to a human&quot; — the same DB transition as any task reassignment, with the agent&apos;s in-flight sandbox handed over instead of torn down. Today&apos;s takeover hands the worktree to a human with raw shell access — fundamentally outside any sandbox. In multi mode that&apos;s an instant cross-tenant escape vector (user can <code>ls /data/orgs/</code> and see every other org&apos;s worktrees). v1 ships with takeover disabled in multi mode; runs that yield surface as <code>awaiting_input</code> with text-reply resume only. v2 adds a web shell (xterm.js + websocket) that <code>runsc exec</code>&apos;s bash into the <em>same gVisor sandbox</em> the agent was running in — user inherits the agent&apos;s isolation. Tarball/local-work model rejected (loses observability, breaks org-scoped GitHub App creds).</td><td><button class="dpill">— click to review</button></td></tr>
         <tr data-decision-id="auth-providers-v1"><td class="area">Auth providers</td><td class="pick">v1: GitHub OAuth signin only · v2: Entra SAML (D16) for enterprise rollout</td><td class="why">v1 ships with GitHub OAuth as the sole signin path (every dev has a GitHub account; covers self-host + early hosted use). SAML deferred — needed when corp IT requires SSO via their identity provider, but that's a v2 enterprise-rollout concern, not a v1-ship blocker.</td><td><button class="dpill">— click to review</button></td></tr>
         <tr data-decision-id="resource-scoping"><td class="area">Resource scoping</td><td class="pick">v1: <strong>team is the default scope</strong> for tasks/runs/prompts/projects/rules/triggers/memories. Private is an escape hatch; org requires admin. Entities/events stay org-shared. Skills imported as prompts.</td><td class="why">Team-as-unit-of-work is the correct primitive. Tasks live on the team queue; team members and the team&apos;s assigned agent both claim from it. Rules/triggers/prompts/projects are configured at the team level by any team member. Org-shared resources (visibility=&apos;org&apos;) are admin-managed and exist for cross-team commonality. Private resources (visibility=&apos;private&apos;) exist for personal experimentation but aren&apos;t the default. Per-user opt-out doesn&apos;t exist as a concept — if you want different behavior, that&apos;s a different team or a predicate scope. The model collapses cleanly to local mode (N=1: one team, one human, one agent, every row is team-visible).</td><td><button class="dpill">— click to review</button></td></tr>
@@ -1048,12 +1048,12 @@ footer.status {
     <div class="split">
       <div class="panel panel--multi">
         <h4>Activation</h4>
-        <p><code>TF_MODE=multi</code>. Required env: <code>TF_DATABASE_URL</code> (Postgres), <code>TF_GOTRUE_URL</code>, <code>TF_GOTRUE_JWKS_URL</code>, <code>TF_SESSION_KEY</code> (32 bytes, AES-GCM key for session-token encryption only), <code>TF_PUBLIC_URL</code>.</p>
+        <p><code>TF_MODE=multi</code>. Required env: <code>TF_DATABASE_URL</code> (Postgres), <code>TF_GOTRUE_URL</code>, <code>TF_GOTRUE_JWKS_URL</code>, <code>TF_SESSION_ENCRYPTION_KEY</code> (32 bytes, AES-GCM key for session-token encryption), <code>TF_SECRET_ENCRYPTION_KEY</code> (32 bytes, AES-GCM key for org/user integration secrets — TFAC-402), <code>TF_PUBLIC_URL</code>.</p>
         <h4 style="margin-top: 16px;">Storage</h4>
         <ul style="margin: 0; padding-left: 18px; color: var(--muted); font-size: 13px;">
-          <li>Postgres (<code>supabase/postgres</code> image — includes vault, pgsodium) for everything: TF rows + GoTrue's <code>auth.*</code></li>
-          <li>Supabase Vault for org-level secrets (PATs, API tokens, future GH App keys) — accessed via SECURITY INVOKER wrappers</li>
-          <li>Sessions encrypted app-side with <code>TF_SESSION_KEY</code> (BYTEA + nonce in the <code>sessions</code> table) — separate from Vault because per-request RPC overhead is unacceptable</li>
+          <li>Postgres (<code>supabase/postgres</code> image — vault/pgsodium ship in it but are unused; see secret-storage decision) for everything: TF rows + GoTrue's <code>auth.*</code></li>
+          <li>Org + per-user integration secrets (PATs, API tokens, GH App keys) app-encrypted with <code>TF_SECRET_ENCRYPTION_KEY</code> as opaque ciphertext in <code>public.org_secrets</code> (RLS-gated) — <strong>not</strong> Supabase Vault, so a postgres container recreate can't lose them (TFAC-402)</li>
+          <li>Sessions encrypted app-side with <code>TF_SESSION_ENCRYPTION_KEY</code> (BYTEA + nonce in the <code>sessions</code> table) — same <code>internal/aead</code> envelope as secrets, distinct key so the two rotate independently</li>
           <li>Worktrees at <code>/data/&lt;org_id&gt;/worktrees/run-&lt;id&gt;/</code> (named Docker volume)</li>
           <li>SDK pre-installed at <code>/opt/triagefactory/sdk/</code> at image build time</li>
         </ul>
@@ -1272,7 +1272,7 @@ Set-Cookie: sid=<span class="num">a1b2c3d4-...</span>;     <span class="com">// 
   id                <span class="kw">UUID PRIMARY KEY DEFAULT</span> gen_random_uuid(),
   user_id           <span class="kw">UUID NOT NULL REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,
 
-  <span class="com">-- tokens encrypted at rest (AES-GCM envelope, master key from TF_SESSION_KEY)</span>
+  <span class="com">-- tokens encrypted at rest (AES-GCM envelope, master key from TF_SESSION_ENCRYPTION_KEY)</span>
   jwt_enc           <span class="kw">BYTEA NOT NULL</span>,                  <span class="com">-- gotrue access JWT, ciphertext</span>
   jwt_nonce         <span class="kw">BYTEA NOT NULL</span>,
   refresh_token_enc <span class="kw">BYTEA NOT NULL</span>,                  <span class="com">-- gotrue refresh token, ciphertext</span>
@@ -1423,7 +1423,7 @@ Set-Cookie: sid=<span class="num">a1b2c3d4-...</span>;     <span class="com">// 
       TF_DATABASE_URL: postgres://tf:${POSTGRES_PASSWORD}@postgres:5432/triagefactory
       TF_GOTRUE_URL: http://gotrue:9999
       TF_GOTRUE_JWKS_URL: http://gotrue:9999/.well-known/jwks.json
-      TF_SESSION_KEY: ${TF_SESSION_KEY}        <span class="com"># 32 bytes; encrypts session jwt/refresh only</span>
+      TF_SESSION_ENCRYPTION_KEY: ${TF_SESSION_ENCRYPTION_KEY}        <span class="com"># 32 bytes; encrypts session jwt/refresh only</span>
       TF_PUBLIC_URL: ${TF_PUBLIC_URL}
     volumes:
       - tf-data:/data
@@ -1585,7 +1585,7 @@ Set-Cookie: sid=<span class="num">a1b2c3d4-...</span>;     <span class="com">// 
   </pre>
 
   <div class="callout">
-    <strong>What this blocks:</strong> <code>find /</code>, <code>cat /proc/*/environ</code>, <code>nsenter</code>, kernel-CVE-based escapes, <code>psql -h 127.0.0.1</code> against the parent's Postgres — none of these reach the host kernel or services because gVisor intercepts every syscall in userspace and the sandbox's netns is isolated from the parent's. The <code>TF_SESSION_KEY</code> env var, <code>ANTHROPIC_API_KEY</code>, other orgs' worktrees, the Vault-encrypted org secrets — all live outside the sandbox. Prompt-injection attacks aimed at exfiltration cap out at "what's already in this run's working directory and what the per-run scoped credentials can reach."
+    <strong>What this blocks:</strong> <code>find /</code>, <code>cat /proc/*/environ</code>, <code>nsenter</code>, kernel-CVE-based escapes, <code>psql -h 127.0.0.1</code> against the parent's Postgres — none of these reach the host kernel or services because gVisor intercepts every syscall in userspace and the sandbox's netns is isolated from the parent's. The <code>TF_SESSION_ENCRYPTION_KEY</code> + <code>TF_SECRET_ENCRYPTION_KEY</code> env vars, <code>ANTHROPIC_API_KEY</code>, other orgs' worktrees, the app-encrypted org secrets — all live outside the sandbox. Prompt-injection attacks aimed at exfiltration cap out at "what's already in this run's working directory and what the per-run scoped credentials can reach."
   </div>
 
   <div class="callout" style="margin-top: 8px;">
@@ -1729,7 +1729,7 @@ Set-Cookie: sid=<span class="num">a1b2c3d4-...</span>;     <span class="com">// 
 <span class="kw">CREATE TABLE</span> sessions (
   id                <span class="kw">UUID PRIMARY KEY DEFAULT</span> gen_random_uuid(),
   user_id           <span class="kw">UUID NOT NULL REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,
-  jwt_enc           <span class="kw">BYTEA NOT NULL</span>,                  <span class="com">-- AES-GCM envelope, key from TF_SESSION_KEY</span>
+  jwt_enc           <span class="kw">BYTEA NOT NULL</span>,                  <span class="com">-- AES-GCM envelope, key from TF_SESSION_ENCRYPTION_KEY</span>
   jwt_nonce         <span class="kw">BYTEA NOT NULL</span>,
   refresh_token_enc <span class="kw">BYTEA NOT NULL</span>,
   refresh_nonce     <span class="kw">BYTEA NOT NULL</span>,
@@ -1759,73 +1759,44 @@ Set-Cookie: sid=<span class="num">a1b2c3d4-...</span>;     <span class="com">// 
   <span class="kw">UNIQUE</span> (org_id, kind)                              <span class="com">-- one of each per org for v1</span>
 );
 
-<span class="com">-- ===== org-level secret storage via Supabase Vault =====</span>
-<span class="com">-- We do NOT roll our own encrypted secret table. supabase_vault (a Postgres</span>
-<span class="com">-- extension that comes with the supabase/postgres image) handles encryption-</span>
-<span class="com">-- at-rest via pgsodium. Vault's tables live in the `vault` schema, which</span>
-<span class="com">-- isn't directly accessible to PostgREST/SDK clients — so we add SECURITY</span>
-<span class="com">-- INVOKER wrapper functions in `public` that the Go backend calls.</span>
+<span class="com">-- ===== org + per-user integration secrets (app-encrypted) =====</span>
+<span class="com">-- TFAC-402: we do NOT use Supabase Vault / pgsodium. Its root key lives in the</span>
+<span class="com">-- postgres *container* filesystem (not the pg-data volume), so a container</span>
+<span class="com">-- recreate regenerates it and loses every stored secret. TF encrypts app-side</span>
+<span class="com">-- instead (internal/aead, AES-256-GCM, key from TF_SECRET_ENCRYPTION_KEY) and</span>
+<span class="com">-- stores opaque ciphertext here. A DB dump yields only ciphertext; there is no</span>
+<span class="com">-- Postgres-side key to lose. vault/pgsodium stay installed but unused.</span>
 
-<span class="kw">CREATE EXTENSION IF NOT EXISTS</span> supabase_vault <span class="kw">WITH SCHEMA</span> vault;
+<span class="kw">CREATE TABLE</span> org_secrets (
+  id          <span class="kw">UUID PRIMARY KEY DEFAULT</span> gen_random_uuid(),  <span class="com">-- surrogate PK (natural key is an expr over a nullable col)</span>
+  org_id      <span class="kw">UUID NOT NULL REFERENCES</span> orgs(id) <span class="kw">ON DELETE CASCADE</span>,
+  user_id     <span class="kw">UUID REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,   <span class="com">-- NULL = org scope</span>
+  key         <span class="kw">TEXT NOT NULL</span>,                                    <span class="com">-- e.g. 'github_pat', 'jira_token/&lt;host&gt;'</span>
+  ciphertext  <span class="kw">BYTEA NOT NULL</span>,                                   <span class="com">-- AES-256-GCM</span>
+  nonce       <span class="kw">BYTEA NOT NULL</span>,                                   <span class="com">-- 12-byte GCM nonce</span>
+  description <span class="kw">TEXT NOT NULL DEFAULT</span> <span class="str">''</span>,
+  created_at  <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now(),
+  updated_at  <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now(),
+  <span class="kw">CONSTRAINT</span> org_secrets_key_nonempty   <span class="kw">CHECK</span> (key &lt;&gt; <span class="str">''</span>),
+  <span class="kw">CONSTRAINT</span> org_secrets_nonce_len      <span class="kw">CHECK</span> (octet_length(nonce) = 12),
+  <span class="kw">CONSTRAINT</span> org_secrets_ciphertext_len <span class="kw">CHECK</span> (octet_length(ciphertext) &gt;= 16)
+);
+<span class="com">-- One row per (scope, key); org scope collapses NULL user_id to the zero UUID.</span>
+<span class="kw">CREATE UNIQUE INDEX</span> org_secrets_scope_key_uniq <span class="kw">ON</span> org_secrets (
+  org_id, <span class="kw">COALESCE</span>(user_id, <span class="str">'00000000-0000-0000-0000-000000000000'</span>::uuid), key
+);
 
-<span class="com">-- Wrapper functions (callable from Go via pgx, no PostgREST needed).</span>
-<span class="com">-- Pattern lifted from skynet/sky/supabase/migrations/00000000000000_skynet_base.sql</span>
-
-<span class="kw">CREATE OR REPLACE FUNCTION</span> public.vault_put_org_secret(
-  p_org_id     <span class="kw">UUID</span>,
-  p_key        <span class="kw">TEXT</span>,                                    <span class="com">-- e.g. 'github_pat', 'jira_api_token'</span>
-  p_secret     <span class="kw">TEXT</span>,
-  p_description <span class="kw">TEXT DEFAULT NULL</span>
-) <span class="kw">RETURNS UUID</span>
-<span class="kw">LANGUAGE</span> plpgsql <span class="kw">SECURITY INVOKER</span>
-<span class="kw">SET search_path TO</span> public, vault
-<span class="kw">AS</span> $$
-<span class="kw">DECLARE</span>
-  v_full_name <span class="kw">TEXT</span> := <span class="str">'org/'</span> || p_org_id::text || <span class="str">'/'</span> || p_key;
-  v_existing  <span class="kw">UUID</span>;
-<span class="kw">BEGIN</span>
-  <span class="kw">SELECT</span> id <span class="kw">INTO</span> v_existing <span class="kw">FROM</span> vault.decrypted_secrets <span class="kw">WHERE</span> name = v_full_name;
-  <span class="kw">IF</span> v_existing <span class="kw">IS NOT NULL THEN</span>
-    <span class="kw">PERFORM</span> vault.update_secret(v_existing, p_secret, v_full_name, p_description);
-    <span class="kw">RETURN</span> v_existing;
-  <span class="kw">END IF</span>;
-  <span class="kw">RETURN</span> vault.create_secret(p_secret, v_full_name, p_description);
-<span class="kw">END</span>;
-$$;
-
-<span class="kw">CREATE OR REPLACE FUNCTION</span> public.vault_get_org_secret(p_org_id <span class="kw">UUID</span>, p_key <span class="kw">TEXT</span>)
-<span class="kw">RETURNS TEXT</span>
-<span class="kw">LANGUAGE</span> sql <span class="kw">SECURITY INVOKER STABLE</span>
-<span class="kw">SET search_path TO</span> public, vault
-<span class="kw">AS</span> $$
-  <span class="kw">SELECT</span> decrypted_secret <span class="kw">FROM</span> vault.decrypted_secrets
-  <span class="kw">WHERE</span> name = <span class="str">'org/'</span> || p_org_id::text || <span class="str">'/'</span> || p_key
-  <span class="kw">LIMIT</span> 1;
-$$;
-
-<span class="kw">CREATE OR REPLACE FUNCTION</span> public.vault_delete_org_secret(p_org_id <span class="kw">UUID</span>, p_key <span class="kw">TEXT</span>)
-<span class="kw">RETURNS VOID</span>
-<span class="kw">LANGUAGE</span> plpgsql <span class="kw">SECURITY INVOKER</span>
-<span class="kw">SET search_path TO</span> public, vault
-<span class="kw">AS</span> $$
-<span class="kw">DECLARE</span>
-  v_id <span class="kw">UUID</span>;
-<span class="kw">BEGIN</span>
-  <span class="kw">SELECT</span> id <span class="kw">INTO</span> v_id <span class="kw">FROM</span> vault.decrypted_secrets
-    <span class="kw">WHERE</span> name = <span class="str">'org/'</span> || p_org_id::text || <span class="str">'/'</span> || p_key;
-  <span class="kw">IF</span> v_id <span class="kw">IS NOT NULL THEN</span>
-    <span class="kw">DELETE FROM</span> vault.secrets <span class="kw">WHERE</span> id = v_id;
-  <span class="kw">END IF</span>;
-<span class="kw">END</span>;
-$$;
-
-<span class="com">-- Lock down execution: revoke from public, grant only to the service role TF connects as</span>
-<span class="kw">REVOKE ALL ON FUNCTION</span> public.vault_put_org_secret    <span class="kw">FROM PUBLIC</span>;
-<span class="kw">REVOKE ALL ON FUNCTION</span> public.vault_get_org_secret    <span class="kw">FROM PUBLIC</span>;
-<span class="kw">REVOKE ALL ON FUNCTION</span> public.vault_delete_org_secret <span class="kw">FROM PUBLIC</span>;
-<span class="kw">GRANT EXECUTE ON FUNCTION</span> public.vault_put_org_secret    <span class="kw">TO</span> tf_app;
-<span class="kw">GRANT EXECUTE ON FUNCTION</span> public.vault_get_org_secret    <span class="kw">TO</span> tf_app;
-<span class="kw">GRANT EXECUTE ON FUNCTION</span> public.vault_delete_org_secret <span class="kw">TO</span> tf_app;
+<span class="com">-- RLS reproduces the dropped vault_* gates exactly: org rows match on org;</span>
+<span class="com">-- per-user rows also match on user. The admin pool (supabase_admin) bypasses</span>
+<span class="com">-- RLS for the *System reads/writes. No grant to anon/authenticated/service_role.</span>
+<span class="kw">ALTER TABLE</span> org_secrets <span class="kw">ENABLE ROW LEVEL SECURITY</span>;
+<span class="kw">CREATE POLICY</span> org_secrets_org  <span class="kw">ON</span> org_secrets <span class="kw">FOR ALL TO</span> tf_app
+  <span class="kw">USING</span>      (user_id <span class="kw">IS NULL AND</span> org_id = tf.current_org_id())
+  <span class="kw">WITH CHECK</span> (user_id <span class="kw">IS NULL AND</span> org_id = tf.current_org_id());
+<span class="kw">CREATE POLICY</span> org_secrets_user <span class="kw">ON</span> org_secrets <span class="kw">FOR ALL TO</span> tf_app
+  <span class="kw">USING</span>      (user_id = tf.current_user_id() <span class="kw">AND</span> org_id = tf.current_org_id())
+  <span class="kw">WITH CHECK</span> (user_id = tf.current_user_id() <span class="kw">AND</span> org_id = tf.current_org_id());
+<span class="kw">GRANT SELECT, INSERT, UPDATE, DELETE ON</span> org_secrets <span class="kw">TO</span> tf_app;
 
 <span class="com">-- ===== resource limits =====</span>
 
@@ -2557,7 +2528,7 @@ POST /admin/sso/providers
       <ul>
         <li>New goose migration set in <code>internal/db/migrations-postgres/</code> (separate from SQLite migrations); applied only when <code>TF_MODE=multi</code></li>
         <li>Schema includes: tenancy tables (<code>orgs</code>, <code>teams</code>, <code>users</code>, <code>memberships</code>, <code>org_memberships</code>, <code>org_invites</code>), agent tables (<code>agents</code>, <code>team_agents</code>), session table (<code>sessions</code>), integration metadata (<code>integrations</code>, <code>org_limits</code>), KB store (<code>project_knowledge</code>), and the full TF surface (<code>entities</code>, <code>events</code>, <code>tasks</code>, <code>runs</code>, <code>prompts</code>, <code>projects</code>, <code>task_rules</code>, <code>prompt_triggers</code>, etc.) — all with <code>org_id NOT NULL</code> baked in from <code>CREATE TABLE</code>, plus <code>team_id</code> NOT NULL on team-scoped resources and the two-column <code>claimed_by_*</code> FK on <code>tasks</code>. No ALTER-and-backfill dance.</li>
-        <li>Vault setup: <code>CREATE EXTENSION supabase_vault</code> + the three SECURITY INVOKER wrapper functions (<code>vault_put_org_secret</code>, <code>vault_get_org_secret</code>, <code>vault_delete_org_secret</code>); permissions revoked from PUBLIC, granted to <code>tf_app</code>.</li>
+        <li>Secret storage: the <code>public.org_secrets</code> table (app-encrypted ciphertext + nonce), RLS-gated to <code>tf_app</code> on org (and, for per-user rows, user); granted only to <code>tf_app</code>. <strong>Not</strong> Supabase Vault — see the secret-storage decision (TFAC-402). vault/pgsodium stay installed (image-managed) but unused.</li>
         <li>RLS-helper functions (<code>tf.current_user_id()</code>, <code>tf.current_org_id()</code>, <code>tf.user_has_org_access()</code>) — see §9</li>
         <li>RLS policies on every org-scoped table</li>
         <li>Forward-only migrations — no down migrations past initial schema</li>
@@ -2567,7 +2538,7 @@ POST /admin/sso/providers
       <ul>
         <li>Fresh Postgres boots cleanly; first user signup creates the first org via the orgs table (no implicit default)</li>
         <li>RLS test: User A cannot see User B's tasks even when issuing raw queries that hand-set the wrong <code>org_id</code></li>
-        <li>Vault test: <code>vault_get_org_secret(orgA, 'github_pat')</code> from a session whose claims have <code>org_id = orgB</code> returns nothing (or errors, depending on enforcement model)</li>
+        <li>Secret test: a <code>tf_app</code> session whose claims have <code>org_id = orgB</code> reading orgA's <code>org_secrets</code> row returns nothing (RLS filters it); cross-org/cross-user writes are rejected by the WITH CHECK; ciphertext at rest never contains the plaintext</li>
         <li>SQLite tests untouched, still green</li>
       </ul>
     </div>
@@ -2625,8 +2596,8 @@ POST /admin/sso/providers
       <ul>
         <li>New interface <code>store.SecretStore { PutOrgSecret(orgID, key, value) / GetOrgSecret(orgID, key) / DeleteOrgSecret(orgID, key) }</code> — registered in the <code>store.Stores</code> bundle alongside the other per-resource interfaces (D2)</li>
         <li><code>KeychainStore</code> (local mode): wraps existing <code>internal/auth</code>. <code>orgID</code> ignored (always "default").</li>
-        <li><code>VaultStore</code> (multi mode): calls the SECURITY INVOKER wrapper PG functions via pgx (<code>SELECT vault_put_org_secret(...)</code>, etc.). No app-side crypto code.</li>
-        <li>Migration adds the <code>supabase_vault</code> extension + the three wrapper functions (see §7 schema)</li>
+        <li>Postgres <code>secretStore</code> (multi mode): encrypts app-side with an injected <code>aead.Key</code> (from <code>TF_SECRET_ENCRYPTION_KEY</code>) and reads/writes opaque ciphertext in <code>public.org_secrets</code> via pgx — claims-checked app pool for request handlers, admin pool (RLS-bypassed) for the <code>*System</code> reads/writes (TFAC-402)</li>
+        <li>Migration adds the <code>public.org_secrets</code> table + RLS policies and drops the now-dead <code>vault_*</code> wrappers (see §7 schema)</li>
         <li>Refactor every credential write/read in <code>internal/github</code>, <code>internal/jira</code>, <code>internal/linear</code> to go through the interface</li>
         <li>Naming convention: secrets are stored as <code>org/&lt;org_uuid&gt;/&lt;key&gt;</code> in vault (the wrapper functions handle prefixing — callers pass the unprefixed key)</li>
         <li><strong>Sessions are NOT in scope</strong> — they keep their app-layer AES-GCM encryption (D7) because vault RPC overhead per request is too expensive</li>
@@ -2700,7 +2671,7 @@ POST /admin/sso/providers
       <ul>
         <li>New endpoints: <code>GET /api/auth/oauth/&lt;provider&gt;</code>, <code>GET /api/auth/callback</code>, <code>POST /api/auth/logout</code>, <code>GET /api/me</code></li>
         <li>Middleware chain: <code>SessionMiddleware</code> (cookie → session row → decrypt JWT → JWKS verify), <code>OrgMiddleware</code> (extract <code>org_id</code> from URL path via <code>r.PathValue("org_id")</code>, validate membership)</li>
-        <li><strong>Token encryption at rest</strong> — JWT + refresh stored as <code>BYTEA</code> ciphertext via app-layer AES-GCM with key from <code>TF_SESSION_KEY</code> env. (Org secrets use Vault — D5 — but sessions are too read-heavy for Vault RPC, so they get their own thinner mechanism.)</li>
+        <li><strong>Token encryption at rest</strong> — JWT + refresh stored as <code>BYTEA</code> ciphertext via app-layer AES-GCM with key from <code>TF_SESSION_ENCRYPTION_KEY</code> env. (Org/user integration secrets use the same <code>internal/aead</code> envelope with a distinct key, <code>TF_SECRET_ENCRYPTION_KEY</code> — D5/TFAC-402 — stored as ciphertext in <code>org_secrets</code>, not Supabase Vault.)</li>
         <li><strong>Soft revocation</strong> — <code>revoked_at</code> column. Logout flips it; SessionMiddleware filters <code>WHERE revoked_at IS NULL</code>. No hard DELETE on logout.</li>
         <li><strong>Two-tier expiry</strong> — <code>jwt_expires_at</code> drives refresh; <code>expires_at</code> (session, e.g. 30d) bounds the refresh chain. Hitting session expiry forces re-login.</li>
         <li>Refresh dance: if JWT near expiry AND session not yet expired, refresh server-side via gotrue, update <code>jwt_enc</code> + <code>jwt_expires_at</code>, transparent to caller</li>
@@ -2800,7 +2771,7 @@ POST /admin/sso/providers
     </summary>
     <div class="domain__body">
       <h5>Why</h5>
-      <p>SDK <code>--add-dir</code> only restricts tool-mediated file access; bash bypasses it. In multi mode, an unsandboxed agent can read other orgs' worktrees on the shared host disk, dump <code>TF_SESSION_KEY</code> + <code>ANTHROPIC_API_KEY</code> + <code>TF_DATABASE_URL</code> from agent-runner's <code>/proc/&lt;pid&gt;/environ</code>, connect to Postgres directly with harvested credentials (bypassing RLS), and stream cross-tenant data into Anthropic's API via run logs. This domain installs gVisor's <code>runsc</code> as the per-delegation kernel-isolation layer.</p>
+      <p>SDK <code>--add-dir</code> only restricts tool-mediated file access; bash bypasses it. In multi mode, an unsandboxed agent can read other orgs' worktrees on the shared host disk, dump <code>TF_SESSION_ENCRYPTION_KEY</code> + <code>ANTHROPIC_API_KEY</code> + <code>TF_DATABASE_URL</code> from agent-runner's <code>/proc/&lt;pid&gt;/environ</code>, connect to Postgres directly with harvested credentials (bypassing RLS), and stream cross-tenant data into Anthropic's API via run logs. This domain installs gVisor's <code>runsc</code> as the per-delegation kernel-isolation layer.</p>
 
       <h5>Validated 2026-05-14</h5>
       <p>The full validation log (Dockerfile, fly.toml, probe scripts, recipe) lives at <code>docs/specs/sky-254-runsc-validation/</code>. Summary:</p>
@@ -2870,7 +2841,7 @@ POST /admin/sso/providers
       <h5>Acceptance</h5>
       <ul>
         <li><strong>Filesystem escape:</strong> agent doing <code>find /</code> sees <code>/work</code> + alpine rootfs + gVisor's synthetic <code>/proc</code> — nothing else from the host. <em>Validated.</em></li>
-        <li><strong>Env leak:</strong> <code>cat /proc/1/environ</code> from inside the sandbox shows only the per-run injected env (no <code>TF_SESSION_KEY</code>, no <code>TF_DATABASE_URL</code>, no <code>ANTHROPIC_API_KEY</code>). <em>Validated via <code>env -i</code> curation in the OCI spec.</em></li>
+        <li><strong>Env leak:</strong> <code>cat /proc/1/environ</code> from inside the sandbox shows only the per-run injected env (no <code>TF_SESSION_ENCRYPTION_KEY</code>, no <code>TF_DATABASE_URL</code>, no <code>ANTHROPIC_API_KEY</code>). <em>Validated via <code>env -i</code> curation in the OCI spec.</em></li>
         <li><strong>Cross-tenant:</strong> two parallel runs in different orgs cannot reach each other's worktrees even with hand-crafted bash escape attempts.</li>
         <li><strong>Localhost isolation:</strong> sandbox cannot reach parent's <code>127.0.0.1:5432</code> (Postgres) or any other parent loopback service. <em>Validated.</em></li>
         <li><strong>Egress allowlist:</strong> sandbox can reach <code>api.anthropic.com</code> + <code>api.github.com</code>; cannot reach attacker-controlled hosts.</li>
@@ -2898,7 +2869,7 @@ POST /admin/sso/providers
       <h5>What changes (v1)</h5>
       <ul>
         <li>Register the TF GitHub App (per environment: local-dev, staging, prod)</li>
-        <li>Store App private key in Vault (<code>vault_put_org_secret(orgID, 'github_app_private_key', pem)</code>)</li>
+        <li>Store App private key via the SecretStore (<code>Secrets.Put(orgID, 'github_app_private_key', pem)</code>) — app-encrypted into <code>public.org_secrets</code></li>
         <li>Mint installation JWT per-request, exchange for short-lived installation token, cache per <code>(org_id, installation_id)</code></li>
         <li>GitHub client construction reads <code>agents.github_app_installation_id</code> first; falls back to <code>agents.github_pat_user_id</code> → that user&apos;s PAT (via keychain in local mode, via vault in multi)</li>
         <li>Onboarding: org admin clicks &quot;Install GitHub App&quot; → GitHub OAuth → stores <code>installation_id</code> on <code>agents</code> row</li>

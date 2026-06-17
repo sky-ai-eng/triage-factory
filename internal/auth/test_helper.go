@@ -21,3 +21,22 @@ func SetAnthropicModelsURLForTest(t TestT, url string) {
 	anthropicModelsURL = url
 	t.Cleanup(func() { anthropicModelsURL = prev })
 }
+
+// ResetSecretBackendForTest clears the process-wide cached secret backend so the
+// next secret call re-resolves it from the current environment (TF_SECRETS_BACKEND
+// / TF_SECRET_ENCRYPTION_KEY / the keychain probe). The cache is global, so a test
+// that forces the file backend must call this to avoid leaking that choice into
+// later tests that expect the keychain — the t.Cleanup re-clears it on the way
+// out. Test-only; mutates a package global, so callers must not run in parallel
+// with each other.
+func ResetSecretBackendForTest(t TestT) {
+	t.Helper()
+	backendMu.Lock()
+	activeBackend = nil
+	backendMu.Unlock()
+	t.Cleanup(func() {
+		backendMu.Lock()
+		activeBackend = nil
+		backendMu.Unlock()
+	})
+}

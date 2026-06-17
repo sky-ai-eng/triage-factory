@@ -28,7 +28,7 @@ func TestAgentRunStore_Postgres(t *testing.T) {
 	// uses the app pool, but the conformance suite is about
 	// behavior, not auth; the cross-org leakage test below
 	// exercises the org_id defense-in-depth filter directly.
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	dbtest.RunAgentRunStoreConformance(t, func(t *testing.T) (db.AgentRunStore, string, string, dbtest.AgentRunSeeder) {
 		t.Helper()
@@ -231,7 +231,7 @@ func TestAgentRunStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	seedPgAgentRunPromptIn(t, h, "p_xleak_A", orgA, userA)
 	seedPgAgentRunPromptIn(t, h, "p_xleak_B", orgB, userB)
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	// Seed an entity + task + run in each org via the AdminDB so
@@ -353,7 +353,7 @@ func TestAgentRunStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("same_org_user_can_read", func(t *testing.T) {
 		err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-			run, err := pgstore.NewForTx(tx).AgentRuns.Get(ctx, orgA, runA)
+			run, err := pgstore.NewForTx(tx, pgtest.SecretKey).AgentRuns.Get(ctx, orgA, runA)
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -369,7 +369,7 @@ func TestAgentRunStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("cross_org_read_filtered", func(t *testing.T) {
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			run, err := pgstore.NewForTx(tx).AgentRuns.Get(ctx, orgA, runA)
+			run, err := pgstore.NewForTx(tx, pgtest.SecretKey).AgentRuns.Get(ctx, orgA, runA)
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -389,7 +389,7 @@ func TestAgentRunStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// WITH CHECK to reject, not a missing FK target.
 		newRunID := uuid.New().String()
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			return pgstore.NewForTx(tx).AgentRuns.Create(ctx, orgA, domain.AgentRun{
+			return pgstore.NewForTx(tx, pgtest.SecretKey).AgentRuns.Create(ctx, orgA, domain.AgentRun{
 				ID: newRunID, TaskID: taskA, PromptID: "p_rls_A",
 				Status: "running", Model: "m",
 				TriggerType: "manual", CreatorUserID: bob,
@@ -458,7 +458,7 @@ func TestAgentRunStore_Postgres_Create_UnderAppPoolRLS(t *testing.T) {
 	// under tf_app via WithTx) for request-equivalent paths. Note
 	// that pgstore.New takes (admin, app) — admin first — so
 	// passing in the order shown matches the production shape.
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 
 	// ---- Event-triggered Create (fix #5) ----
 	// No JWT claims tx needed because the admin pool is used for
@@ -572,7 +572,7 @@ func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.
 		t.Fatalf("task: %v", err)
 	}
 
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	// Seed a manual run row owned by userID — the spawner does this

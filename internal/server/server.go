@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -969,7 +968,7 @@ func (s *Server) SetStatic(f fs.FS) {
 	s.static = f
 	hashes, err := computeInlineScriptHashes(f)
 	if err != nil {
-		log.Printf("[server] inline script hash compute failed: %v (CSP will block inline scripts)", err)
+		serverLog.Warn("inline script hash compute failed; csp will block inline scripts", "error", err)
 	}
 	s.inlineScriptHashes = hashes
 }
@@ -1049,7 +1048,7 @@ func (s *Server) kickDashboardBackfill(orgID, userID, login, host string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		if err := fn(ctx, orgID, userID, login, host); err != nil {
-			log.Printf("[dashboard] backfill org=%s user=%s host=%s: %v", orgID, userID, host, err)
+			serverLog.Warn("dashboard backfill failed", "org", orgID, "user", userID, "host", host, "error", err)
 		}
 	}()
 }

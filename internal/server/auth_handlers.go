@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -221,7 +220,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	state, err := parseStateCookie(stateCookie.Value, s.deployCfg.hmacKey)
 	if err != nil {
-		log.Printf("[auth] state cookie: %v", err)
+		authLog.Warn("state cookie parse failed", "error", err)
 		http.Error(w, "invalid state", http.StatusBadRequest)
 		return
 	}
@@ -251,14 +250,14 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	// and in the encrypted session row — never on the URL bar.
 	accessToken, refreshToken, _, err := s.authDeps.gotrueExchange(r.Context(), authCode, state.CodeVerifier)
 	if err != nil {
-		log.Printf("[auth] pkce exchange: %v", err)
+		authLog.Warn("pkce exchange failed", "error", err)
 		http.Error(w, "token exchange failed", http.StatusBadRequest)
 		return
 	}
 
 	claims, err := s.authDeps.verifier.Verify(accessToken)
 	if err != nil {
-		log.Printf("[auth] verify callback jwt: %v", err)
+		authLog.Warn("verify callback jwt failed", "error", err)
 		http.Error(w, "invalid token", http.StatusUnauthorized)
 		return
 	}
@@ -270,7 +269,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := upsertUserFromClaims(r.Context(), s.db, userUUID, claims); err != nil {
-		log.Printf("[auth] upsert user %s: %v", userUUID, err)
+		authLog.Error("upsert user failed", "user", userUUID, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -285,7 +284,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	// runmode.OrgCreationEnabled() (TF_PREVENT_ORG_CREATION).
 	defaultOrg, err := s.lookupEarliestMembership(r.Context(), s.db, userUUID)
 	if err != nil {
-		log.Printf("[auth] resolve active org for user %s: %v", userUUID, err)
+		authLog.Error("resolve active org failed", "user", userUUID, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -301,7 +300,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		r.UserAgent(), clientIP(r), defaultOrg,
 	)
 	if err != nil {
-		log.Printf("[auth] create session: %v", err)
+		authLog.Error("create session failed", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -346,12 +345,12 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 			// double-logout naturally no-ops here.
 			if sess, lerr := s.authDeps.sessions.LookupSystem(r.Context(), sid); lerr == nil && sess != nil {
 				if uerr := s.authDeps.gotrueLogout(r.Context(), sess.JWT); uerr != nil {
-					log.Printf("[auth] upstream logout: %v", uerr)
+					authLog.Warn("upstream logout failed", "error", uerr)
 					// Continue — local revoke still happens.
 				}
 			}
 			if rerr := s.authDeps.sessions.RevokeSystem(r.Context(), sid); rerr != nil {
-				log.Printf("[auth] revoke session: %v", rerr)
+				authLog.Warn("revoke session failed", "error", rerr)
 			}
 		}
 	}
@@ -393,7 +392,7 @@ func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 	// of the active-set query.
 	active, err := s.authDeps.sessions.ListActiveForUserSystem(r.Context(), userID)
 	if err != nil {
-		log.Printf("[auth] logout-all list user=%s: %v", userID, err)
+		authLog.Error("logout-all list failed", "user", userID, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -405,17 +404,17 @@ func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 	// N is typically tiny (1-5) and gotrue's rate limits prefer it.
 	for _, sess := range active {
 		if uerr := s.authDeps.gotrueLogout(r.Context(), sess.JWT); uerr != nil {
-			log.Printf("[auth] upstream logout-all session: %v", uerr)
+			authLog.Warn("upstream logout-all session failed", "error", uerr)
 		}
 	}
 
 	n, err := s.authDeps.sessions.RevokeAllForUserSystem(r.Context(), userID)
 	if err != nil {
-		log.Printf("[auth] revoke-all user=%s: %v", userID, err)
+		authLog.Error("revoke-all failed", "user", userID, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	log.Printf("[auth] logout-all user=%s: revoked %d session(s)", userID, n)
+	authLog.Info("logout-all revoked sessions", "user", userID, "count", n)
 
 	// Clear the cookie on this response too — the caller's current
 	// session is one of the ones we just revoked.
@@ -455,7 +454,7 @@ func (s *Server) handleActiveOrgUpdate(w http.ResponseWriter, r *http.Request) {
 	if sess == nil {
 		// withSession is responsible for setting this; absence is a
 		// route-wiring bug, not a caller fault.
-		log.Printf("[auth] handleActiveOrgUpdate: no session in context — route missing withSession?")
+		authLog.Error("active-org update: no session in context, route missing withsession")
 		writeUnauth(w)
 		return
 	}
@@ -475,7 +474,7 @@ func (s *Server) handleActiveOrgUpdate(w http.ResponseWriter, r *http.Request) {
 
 	ok, err := s.az.UserHasOrgAccess(r.Context(), claims.Subject, orgUUID.String())
 	if err != nil {
-		log.Printf("[auth] active-org membership check %s/%s: %v", claims.Subject, orgUUID, err)
+		authLog.Error("active-org membership check failed", "user", claims.Subject, "org", orgUUID, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -493,7 +492,7 @@ func (s *Server) handleActiveOrgUpdate(w http.ResponseWriter, r *http.Request) {
 			writeUnauth(w)
 			return
 		}
-		log.Printf("[auth] update active-org sid=%s org=%s: %v", sessions.LogID(sess.ID), orgUUID, err)
+		authLog.Error("update active-org failed", "sid", sessions.LogID(sess.ID), "org", orgUUID, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -677,7 +676,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		},
 	)
 	if err != nil {
-		log.Printf("[auth] /api/me sub=%s: %v", claims.Subject, err)
+		authLog.Error("/api/me failed", "user", claims.Subject, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}

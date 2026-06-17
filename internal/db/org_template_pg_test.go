@@ -37,7 +37,7 @@ func TestOrgTemplate_Postgres_ForwardOnlyAndIsolation(t *testing.T) {
 	memberA := pgtest.SeedUser(t, h, "orgA-member")
 	pgtest.AddOrgMember(t, h, memberA, orgA, founderTeamA, "member", "member")
 
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	// Org-create seeds each org's template + founder team from the shipped lists.
@@ -52,7 +52,7 @@ func TestOrgTemplate_Postgres_ForwardOnlyAndIsolation(t *testing.T) {
 
 	// A non-admin member's template write is refused by RLS.
 	memberErr := h.WithUser(t, memberA, orgA, func(tx *sql.Tx) error {
-		return pgstore.NewForTx(tx).OrgTemplate.CreatePrompt(ctx, orgA, domain.Prompt{
+		return pgstore.NewForTx(tx, pgtest.SecretKey).OrgTemplate.CreatePrompt(ctx, orgA, domain.Prompt{
 			ID: uuid.New().String(), SystemSlug: "tmpl-member-attempt", Name: "Nope", Body: "x", Source: "user",
 		})
 	})
@@ -62,7 +62,7 @@ func TestOrgTemplate_Postgres_ForwardOnlyAndIsolation(t *testing.T) {
 
 	// The org admin (owner) edits the template — adds a house-rules prompt.
 	if err := h.WithUser(t, ownerA, orgA, func(tx *sql.Tx) error {
-		return pgstore.NewForTx(tx).OrgTemplate.CreatePrompt(ctx, orgA, domain.Prompt{
+		return pgstore.NewForTx(tx, pgtest.SecretKey).OrgTemplate.CreatePrompt(ctx, orgA, domain.Prompt{
 			ID: uuid.New().String(), SystemSlug: customSlug, Name: "Org A House Rules", Body: "house rules", Source: "user",
 		})
 	}); err != nil {
@@ -134,7 +134,7 @@ func TestOrgTemplate_Postgres_MultiStepDeepCopy(t *testing.T) {
 	memberA := pgtest.SeedUser(t, h, "orgA-deepcopy-member")
 	pgtest.AddOrgMember(t, h, memberA, orgA, founderTeamA, "member", "member")
 
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	if err := db.BootstrapNewOrg(ctx, stores, orgA, founderTeamA, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
@@ -143,7 +143,7 @@ func TestOrgTemplate_Postgres_MultiStepDeepCopy(t *testing.T) {
 
 	// A non-admin member's template-blueprint write is refused by RLS.
 	memberErr := h.WithUser(t, memberA, orgA, func(tx *sql.Tx) error {
-		return pgstore.NewForTx(tx).OrgTemplate.CreateBlueprint(ctx, orgA, domain.Blueprint{
+		return pgstore.NewForTx(tx, pgtest.SecretKey).OrgTemplate.CreateBlueprint(ctx, orgA, domain.Blueprint{
 			ID: uuid.New().String(), SystemSlug: "tmpl-member-bp", Name: "Nope", Source: "user",
 		})
 	})
@@ -158,7 +158,7 @@ func TestOrgTemplate_Postgres_MultiStepDeepCopy(t *testing.T) {
 	blueprintID := uuid.New().String()
 	var triggerSlug string
 	if err := h.WithUser(t, ownerA, orgA, func(tx *sql.Tx) error {
-		st := pgstore.NewForTx(tx).OrgTemplate
+		st := pgstore.NewForTx(tx, pgtest.SecretKey).OrgTemplate
 		if e := st.CreatePrompt(ctx, orgA, domain.Prompt{ID: promptAID, SystemSlug: "tmpl-step-a", Name: "Step A", Body: "a", Source: "user"}); e != nil {
 			return e
 		}
@@ -275,7 +275,7 @@ func TestOrgTemplate_Postgres_MergeAndSplit(t *testing.T) {
 	h.Reset(t)
 
 	orgA, ownerA, founderTeamA := pgtest.SeedOrgWithUser(t, h, "orgA-compose")
-	stores := pgstore.New(h.AdminDB, h.AppDB)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 	if err := db.BootstrapNewOrg(ctx, stores, orgA, founderTeamA, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
 		t.Fatalf("BootstrapNewOrg: %v", err)
@@ -290,7 +290,7 @@ func TestOrgTemplate_Postgres_MergeAndSplit(t *testing.T) {
 	// All composition runs on the app pool with the admin's claims (RLS allows),
 	// in one transaction — merge/split share it via withTemplateTx's *sql.Tx case.
 	if err := h.WithUser(t, ownerA, orgA, func(tx *sql.Tx) error {
-		st := pgstore.NewForTx(tx).OrgTemplate
+		st := pgstore.NewForTx(tx, pgtest.SecretKey).OrgTemplate
 		if e := st.CreatePrompt(ctx, orgA, domain.Prompt{ID: hostPrompt, SystemSlug: "compose-h", Name: "Host Step", Body: "h", Source: "user"}); e != nil {
 			return e
 		}

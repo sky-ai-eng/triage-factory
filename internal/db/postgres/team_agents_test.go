@@ -25,7 +25,7 @@ func TestTeamAgentStore_Postgres(t *testing.T) {
 		h.Reset(t)
 		orgID := seedPgOrgForAgents(t, h)
 		teamID := seedPgTeam(t, h, orgID, "default")
-		stores := pgstore.New(h.AdminDB, h.AdminDB)
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		agentID, err := stores.Agents.Create(context.Background(), orgID, domain.Agent{DisplayName: "Bot"})
 		if err != nil {
 			t.Fatalf("seed agent: %v", err)
@@ -56,7 +56,7 @@ func TestTeamAgentStore_Postgres_NonMemberCannotToggle(t *testing.T) {
 		t.Fatalf("dave platform membership: %v", err)
 	}
 
-	adminStores := pgstore.New(h.AdminDB, h.AdminDB)
+	adminStores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	agentID, err := adminStores.Agents.Create(context.Background(), orgID, domain.Agent{DisplayName: "Org Bot"})
 	if err != nil {
 		t.Fatalf("seed agent: %v", err)
@@ -144,7 +144,7 @@ func TestTeamAgentStore_Postgres_BlocksCrossOrgInsert(t *testing.T) {
 		t.Fatalf("alice team-a membership: %v", err)
 	}
 
-	adminStores := pgstore.New(h.AdminDB, h.AdminDB)
+	adminStores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	if _, err := adminStores.Agents.Create(context.Background(), orgA, domain.Agent{DisplayName: "Bot A"}); err != nil {
 		t.Fatalf("seed agent A: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestTeamAgentStore_Postgres_BlocksOtherOrgWhileInActiveOrg(t *testing.T) {
 		}
 	}
 
-	adminStores := pgstore.New(h.AdminDB, h.AdminDB)
+	adminStores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	for _, orgID := range []string{orgA, orgB} {
 		if _, err := adminStores.Agents.Create(context.Background(), orgID, domain.Agent{DisplayName: "Bot"}); err != nil {
 			t.Fatalf("seed agent for %s: %v", orgID, err)
@@ -320,7 +320,7 @@ func TestTeamAgentStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		t.Fatalf("bob team-b membership: %v", err)
 	}
 
-	adminStores := pgstore.New(h.AdminDB, h.AdminDB)
+	adminStores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	if _, err := adminStores.Agents.Create(context.Background(), orgA, domain.Agent{DisplayName: "Bot A"}); err != nil {
 		t.Fatalf("seed agent A: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestTeamAgentStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("same_org_user_can_read", func(t *testing.T) {
 		err := h.WithUser(t, aliceID, orgA, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx).TeamAgents.GetForTeam(ctx, orgA, teamA, agentA)
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).TeamAgents.GetForTeam(ctx, orgA, teamA, agentA)
 			if err != nil {
 				return fmt.Errorf("GetForTeam: %w", err)
 			}
@@ -357,7 +357,7 @@ func TestTeamAgentStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// bob in orgB asking about orgA's team_agents — RLS's
 		// team_in_current_org predicate fails (teamA.org_id != orgB).
 		err := h.WithUser(t, bobID, orgB, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx).TeamAgents.GetForTeam(ctx, orgA, teamA, agentA)
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).TeamAgents.GetForTeam(ctx, orgA, teamA, agentA)
 			if err != nil {
 				return fmt.Errorf("GetForTeam: %w", err)
 			}

@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -140,7 +139,7 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, keyID, wtPath, s
 	}
 	// Parked-window storage cost is a live sizing question; log every
 	// snapshot's real compressed footprint so it's answerable from the field.
-	log.Printf("[delegate] snapshot: wrote %s (%d bytes gzipped)", snapshotKey(orgID, keyID), fi.Size())
+	delegateLog.Info("snapshot written", "key", snapshotKey(orgID, keyID), "bytes_gzipped", fi.Size())
 	return nil
 }
 
@@ -217,7 +216,7 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 	// Rebuild at the deterministic, host-local run-root for this key (equal to
 	// run.WorktreePath on the same host; a fresh path after landing elsewhere).
 	wtDir := worktree.RunRoot(keyID)
-	if err := s.rehydrateFromSnapshot(ctx, owner, repo, cloneURL, wtDir, rc); err != nil {
+	if err := s.rehydrateFromSnapshot(ctx, orgID, owner, repo, cloneURL, wtDir, rc); err != nil {
 		return "", err
 	}
 	if wtDir != run.WorktreePath {
@@ -228,7 +227,7 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 		// warm copy and will cold-rehydrate again (correct, just slower) — log
 		// it distinctly so unexpected repeat rehydrates are diagnosable.
 		if err := s.agentRuns.SetWorktreePathSystem(context.Background(), orgID, run.ID, wtDir); err != nil {
-			log.Printf("[delegate] rehydrate: failed to persist new worktree_path %q for run %s; stale path will force a repeat cold rehydrate on the next resume: %v", wtDir, run.ID, err)
+			delegateLog.Warn("rehydrate: persist new worktree_path failed; stale path will force a repeat cold rehydrate on the next resume", "worktree_path", wtDir, "run", run.ID, "error", err)
 		}
 	}
 	return wtDir, nil
@@ -246,7 +245,7 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 // RestoreWorkspaceGit runs below), then moved into place with one rename. This
 // mirrors the snapshot side's temp-file staging so neither direction buffers a
 // large workspace whole.
-func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, owner, repo, cloneURL, wtDir string, r io.Reader) error {
+func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, orgID, owner, repo, cloneURL, wtDir string, r io.Reader) error {
 	var man snapshotManifest
 	var bundle, patch, session []byte
 
@@ -319,7 +318,15 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, owner, repo, cloneU
 
 	if man.HasGit {
 		delta := &worktree.GitDelta{Branch: man.Branch, Head: man.Head, Bundle: bundle, Patch: patch}
-		if err := worktree.RestoreWorkspaceGit(ctx, owner, repo, wtDir, delta, cloneURL); err != nil {
+		// Mint the host-side clone credential for this repo's owner, mirroring the
+		// PR-setup path (delegate.go). resolveCloneToken runs through the tiered
+		// resolver (App installation token or org PAT), and CloneAuthFor no-ops on
+		// an SSH URL / empty token, so this is inert in local SSH mode and for
+		// public clones — only a multi-mode HTTPS private repo gets the token,
+		// which authenticates both the on-demand re-clone and the checkout's lazy
+		// promisor fetch inside RestoreWorkspaceGit.
+		auth := worktree.CloneAuthFor(cloneURL, s.resolveCloneToken(ctx, orgID, owner))
+		if err := worktree.RestoreWorkspaceGit(ctx, owner, repo, wtDir, delta, cloneURL, auth); err != nil {
 			return fmt.Errorf("rehydrate: restore git: %w", err)
 		}
 	} else if err := os.MkdirAll(wtDir, 0o700); err != nil {
@@ -364,7 +371,7 @@ func (s *Spawner) discardWorkspaceSnapshot(ctx context.Context, orgID, keyID str
 		return
 	}
 	if err := blobs.Delete(ctx, snapshotKey(orgID, keyID)); err != nil {
-		log.Printf("[delegate] discard workspace snapshot %s/%s: %v", orgID, keyID, err)
+		delegateLog.Warn("discard workspace snapshot failed", "org", orgID, "key_id", keyID, "error", err)
 	}
 }
 
@@ -444,7 +451,7 @@ func readSessionTranscript(wtPath, sessionID string) ([]byte, bool) {
 	data, err := os.ReadFile(p)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			log.Printf("[delegate] snapshot: read session transcript %s: %v", p, err)
+			delegateLog.Warn("snapshot: read session transcript failed", "path", p, "error", err)
 		}
 		return nil, false
 	}

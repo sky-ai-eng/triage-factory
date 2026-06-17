@@ -5,7 +5,6 @@ package agenthost
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -117,7 +116,7 @@ func Start(stores db.Stores, info RunInfo) (*HostDaemon, sandbox.Mount, error) {
 	go func() {
 		defer close(hd.doneCh)
 		if err := server.Serve(listener); err != nil {
-			log.Printf("[agenthost] daemon serve: %v", err)
+			agenthostLog.Error("daemon serve failed", "error", err)
 		}
 	}()
 
@@ -147,7 +146,7 @@ func (h *HostDaemon) Close() error {
 	select {
 	case <-h.doneCh:
 	case <-time.After(2 * time.Second):
-		log.Printf("[agenthost] daemon accept-loop drain timed out (sock=%s)", h.sockPath)
+		agenthostLog.Warn("daemon accept-loop drain timed out", "sock", h.sockPath)
 	}
 	// Drain in-flight handlers up to a bounded budget. RPCs that are
 	// mid-DB-write commit on the host process and don't need network
@@ -156,7 +155,7 @@ func (h *HostDaemon) Close() error {
 	drainCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := h.server.Shutdown(drainCtx); err != nil {
-		log.Printf("[agenthost] daemon shutdown drain: %v", err)
+		agenthostLog.Warn("daemon shutdown drain failed", "error", err)
 	}
 	_ = os.Remove(h.sockPath)
 	return nil

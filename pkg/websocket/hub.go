@@ -3,7 +3,6 @@ package websocket
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -78,7 +77,7 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, userID, orgID str
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
-		log.Printf("[ws] accept error: %v", err)
+		wsLog.Warn("accept failed", "error", err)
 		return
 	}
 
@@ -94,7 +93,7 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, userID, orgID str
 	h.clients[c] = struct{}{}
 	h.mu.Unlock()
 
-	log.Printf("[ws] client connected (%d total)", h.clientCount())
+	wsLog.Info("client connected", "total", h.clientCount())
 
 	// Start write pump in background
 	go h.writePump(c)
@@ -113,7 +112,7 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, userID, orgID str
 	// the error (broken pipe / already-closed) is not actionable.
 	_ = conn.Close(ws.StatusNormalClosure, "")
 
-	log.Printf("[ws] client disconnected (%d total)", h.clientCount())
+	wsLog.Info("client disconnected", "total", h.clientCount())
 }
 
 // Broadcast sends an event to all connected clients, gated by the
@@ -142,7 +141,7 @@ func (h *Hub) Broadcast(evt Event) {
 	}
 	data, err := json.Marshal(evt)
 	if err != nil {
-		log.Printf("[ws] marshal error: %v", err)
+		wsLog.Error("marshal event failed", "error", err)
 		return
 	}
 
@@ -159,7 +158,7 @@ func (h *Hub) Broadcast(evt Event) {
 		select {
 		case c.send <- data:
 		default:
-			log.Println("[ws] dropping message for slow client")
+			wsLog.Warn("dropping message for slow client")
 		}
 	}
 }

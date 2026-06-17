@@ -2,7 +2,6 @@ package ai
 
 import (
 	"database/sql"
-	"log"
 	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -58,7 +57,7 @@ func NewManager(database *sql.DB, scores db.ScoreStore, entities db.EntityStore,
 // surface than paper over by routing to the local sentinel.
 func (m *Manager) Trigger(orgID string) {
 	if orgID == "" {
-		log.Printf("[ai] manager: empty orgID on Trigger — caller bug, dropping signal")
+		aiLog.Warn("empty org on trigger; dropping signal")
 		return
 	}
 	m.mu.Lock()

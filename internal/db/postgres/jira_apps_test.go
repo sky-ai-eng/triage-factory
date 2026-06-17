@@ -23,7 +23,7 @@ func TestJiraAppsStore_Postgres_UpsertGetDelete(t *testing.T) {
 	defer cancel()
 
 	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-		stores := pgstore.NewForTx(tx)
+		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
 
 		got, err := stores.JiraApps.GetForOrg(ctx, orgID)
 		if err != nil {

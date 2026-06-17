@@ -23,7 +23,7 @@ import (
 // directly.
 func TestReviewStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	dbtest.RunReviewStoreConformance(t, func(t *testing.T) (db.ReviewStore, string, dbtest.ReviewSeeder) {
 		t.Helper()
@@ -40,7 +40,7 @@ func TestReviewStore_Postgres(t *testing.T) {
 func TestReviewStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	orgA, _, _ := seedPgReviewOrg(t, h)
 	orgB, _, _ := seedPgReviewOrg(t, h)
@@ -112,7 +112,7 @@ func TestReviewStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	_ = bob
 
 	// Seed a review in orgA via admin so the row exists.
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 	revA := uuid.New().String()
 	if err := stores.Reviews.Create(ctx, orgA, domain.PendingReview{
@@ -123,7 +123,7 @@ func TestReviewStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("same_org_user_can_read", func(t *testing.T) {
 		err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx).Reviews.Get(ctx, orgA, revA)
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Reviews.Get(ctx, orgA, revA)
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -139,7 +139,7 @@ func TestReviewStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("cross_org_read_filtered", func(t *testing.T) {
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx).Reviews.Get(ctx, orgA, revA)
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Reviews.Get(ctx, orgA, revA)
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -159,7 +159,7 @@ func TestReviewStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// requires org_id = tf.current_org_id(), so 42501 is the
 		// expected outcome.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			return pgstore.NewForTx(tx).Reviews.Create(ctx, orgA, domain.PendingReview{
+			return pgstore.NewForTx(tx, pgtest.SecretKey).Reviews.Create(ctx, orgA, domain.PendingReview{
 				ID: uuid.New().String(), PRNumber: 2, Owner: "o", Repo: "r", CommitSHA: "x-write",
 			})
 		})

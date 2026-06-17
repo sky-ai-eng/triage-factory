@@ -75,7 +75,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 
 	t.Run("list_for_user_returns_both_teams", func(t *testing.T) {
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-			teams, e := pgstore.NewForTx(tx).Teams.ListForUser(ctx, orgID)
+			teams, e := pgstore.NewForTx(tx, pgtest.SecretKey).Teams.ListForUser(ctx, orgID)
 			if e != nil {
 				return e
 			}
@@ -108,7 +108,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 
 	t.Run("union_by_default_one_team_when_filtered", func(t *testing.T) {
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-			store := pgstore.NewForTx(tx).Tasks
+			store := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks
 
 			// No filter → the union of the viewer's teams (both tasks).
 			all, e := store.Queued(ctx, orgID, nil)
@@ -156,7 +156,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 			t.Fatalf("entity for taskB: %v", err)
 		}
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-			store := pgstore.NewForTx(tx).Tasks
+			store := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks
 			// Unfiltered: refs for both entities surface.
 			all, e := store.ListActiveRefsForEntities(ctx, orgID, []string{entA, entB}, nil)
 			if e != nil {
@@ -182,7 +182,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 
 	t.Run("sticky_default_round_trips", func(t *testing.T) {
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-			users := pgstore.NewForTx(tx).Users
+			users := pgstore.NewForTx(tx, pgtest.SecretKey).Users
 			if e := users.SetLastActingTeam(ctx, userID, teamB); e != nil {
 				return fmt.Errorf("set: %w", e)
 			}
@@ -220,7 +220,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		// server package; here we pin that the store honors it.
 		promptID := "p_pick_" + uuid.New().String()
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-			return pgstore.NewForTx(tx).Prompts.Create(ctx, orgID, teamB, domain.Prompt{
+			return pgstore.NewForTx(tx, pgtest.SecretKey).Prompts.Create(ctx, orgID, teamB, domain.Prompt{
 				ID:     promptID,
 				Name:   "Scoped",
 				Body:   "do the thing",
@@ -251,7 +251,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		mkPrompt := func(team, name string) string {
 			id := "p_scope_" + uuid.New().String()
 			if e := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-				return pgstore.NewForTx(tx).Prompts.Create(ctx, orgID, team, domain.Prompt{
+				return pgstore.NewForTx(tx, pgtest.SecretKey).Prompts.Create(ctx, orgID, team, domain.Prompt{
 					ID: id, Name: name, Body: "b", Source: "user",
 				})
 			}); e != nil {
@@ -270,7 +270,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 			return m
 		}
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-			store := pgstore.NewForTx(tx).Prompts
+			store := pgstore.NewForTx(tx, pgtest.SecretKey).Prompts
 			a, e := store.List(ctx, orgID, teamA)
 			if e != nil {
 				return e
@@ -309,7 +309,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		mkRule := func(team, name string) string {
 			id := uuid.New().String()
 			if e := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-				return pgstore.NewForTx(tx).EventHandlers.Create(ctx, orgID, team, domain.EventHandler{
+				return pgstore.NewForTx(tx, pgtest.SecretKey).EventHandlers.Create(ctx, orgID, team, domain.EventHandler{
 					ID:              id,
 					Kind:            domain.EventHandlerKindRule,
 					EventType:       domain.EventGitHubPRCICheckFailed,
@@ -335,7 +335,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 			return m
 		}
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-			store := pgstore.NewForTx(tx).EventHandlers
+			store := pgstore.NewForTx(tx, pgtest.SecretKey).EventHandlers
 			a, e := store.List(ctx, orgID, domain.EventHandlerKindRule, teamA)
 			if e != nil {
 				return e
@@ -368,7 +368,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 			`INSERT INTO task_teams (task_id, team_id) VALUES ($1, $2)`, shared, teamC)
 
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-			store := pgstore.NewForTx(tx).Tasks
+			store := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks
 			// Sanity: visible in the union (via A).
 			all, e := store.Queued(ctx, orgID, nil)
 			if e != nil {
@@ -405,7 +405,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 			`UPDATE tasks SET claimed_by_user_id = $2 WHERE id = $1`, claimed, userID)
 
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-			store := pgstore.NewForTx(tx).Tasks
+			store := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks
 			// Owning team A still matches.
 			onA, e := store.ByStatus(ctx, orgID, "claimed", []string{teamA})
 			if e != nil {
@@ -432,13 +432,13 @@ func TestMultiTeam_Postgres(t *testing.T) {
 	t.Run("create_enrolls_creator", func(t *testing.T) {
 		var newTeamID string
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-			created, e := pgstore.NewForTx(tx).Teams.Create(ctx, orgID, "Gamma", "gamma", userID)
+			created, e := pgstore.NewForTx(tx, pgtest.SecretKey).Teams.Create(ctx, orgID, "Gamma", "gamma", userID)
 			if e != nil {
 				return fmt.Errorf("create: %w", e)
 			}
 			newTeamID = created.ID
 			// The creator is now a member, so ListForUser sees three teams.
-			teams, e := pgstore.NewForTx(tx).Teams.ListForUser(ctx, orgID)
+			teams, e := pgstore.NewForTx(tx, pgtest.SecretKey).Teams.ListForUser(ctx, orgID)
 			if e != nil {
 				return fmt.Errorf("list after create: %w", e)
 			}
@@ -469,7 +469,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 			`INSERT INTO task_teams (task_id, team_id) VALUES ($1, $2)`, task, teamB)
 
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-			got, e := pgstore.NewForTx(tx).Tasks.ResolveClaimTeam(ctx, orgID, task, userID)
+			got, e := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks.ResolveClaimTeam(ctx, orgID, task, userID)
 			if e != nil {
 				return e
 			}

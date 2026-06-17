@@ -3,7 +3,6 @@ package ai
 import (
 	"context"
 	"database/sql"
-	"log"
 	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -137,7 +136,7 @@ func (r *Runner) run(ctx context.Context) {
 
 	tasks, err := r.scores.UnscoredTasks(ctx, r.orgID)
 	if err != nil {
-		log.Printf("[ai] error fetching unscored tasks: %v", err)
+		aiLog.Error("fetch unscored tasks failed", "error", err)
 		r.reportError(err)
 		return
 	}
@@ -146,7 +145,7 @@ func (r *Runner) run(ctx context.Context) {
 		return
 	}
 
-	log.Printf("[ai] scoring %d unscored tasks...", len(tasks))
+	aiLog.Info("scoring unscored tasks", "count", len(tasks))
 
 	// Collect task IDs for callbacks
 	taskIDs := make([]string, len(tasks))
@@ -156,7 +155,7 @@ func (r *Runner) run(ctx context.Context) {
 
 	// Persist scoring state before calling AI
 	if err := r.scores.MarkScoring(ctx, r.orgID, taskIDs); err != nil {
-		log.Printf("[ai] error marking tasks as scoring: %v", err)
+		aiLog.Error("mark tasks as scoring failed", "error", err)
 	}
 
 	if r.callbacks.OnScoringStarted != nil {
@@ -165,14 +164,14 @@ func (r *Runner) run(ctx context.Context) {
 
 	scores, skippedTasks, err := ScoreTasks(ctx, r.database, r.entities, r.orgID, tasks, r.secrets)
 	if err != nil {
-		log.Printf("[ai] scoring failed: %v", err)
+		aiLog.Error("scoring failed", "error", err)
 		r.reportError(err)
 		// Fatal scoring error — every task was MarkScoring'd but none of
 		// them will be transitioned to 'scored'. Reset the whole set back
 		// to 'pending' so the next cycle retries them; otherwise they stay
 		// stuck forever (UnscoredTasks only picks 'pending').
 		if resetErr := r.scores.ResetScoringToPending(ctx, r.orgID, taskIDs); resetErr != nil {
-			log.Printf("[ai] warning: failed to reset tasks to pending after scoring failure: %v", resetErr)
+			aiLog.Warn("reset tasks to pending after scoring failure failed", "error", resetErr)
 		}
 		return
 	}
@@ -194,7 +193,7 @@ func (r *Runner) run(ctx context.Context) {
 		}
 		if len(skippedIDs) > 0 {
 			if resetErr := r.scores.ResetScoringToPending(ctx, r.orgID, skippedIDs); resetErr != nil {
-				log.Printf("[ai] warning: failed to reset %d skipped tasks to pending: %v", len(skippedIDs), resetErr)
+				aiLog.Warn("reset skipped tasks to pending failed", "count", len(skippedIDs), "error", resetErr)
 			}
 		}
 		if r.callbacks.OnTasksSkipped != nil {
@@ -214,19 +213,19 @@ func (r *Runner) run(ctx context.Context) {
 	}
 
 	if err := r.scores.UpdateTaskScores(ctx, r.orgID, updates); err != nil {
-		log.Printf("[ai] error saving scores: %v", err)
+		aiLog.Error("save scores failed", "error", err)
 		r.reportError(err)
 		// UpdateTaskScores failing means the in-memory scores are lost AND
 		// the scored tasks are still marked 'in_progress'. Reset everything
 		// still in that state so the next cycle re-scores. Previously-reset
 		// skipped tasks are already 'pending' and the reset is idempotent.
 		if resetErr := r.scores.ResetScoringToPending(ctx, r.orgID, taskIDs); resetErr != nil {
-			log.Printf("[ai] warning: failed to reset tasks to pending after save failure: %v", resetErr)
+			aiLog.Warn("reset tasks to pending after save failure failed", "error", resetErr)
 		}
 		return
 	}
 
-	log.Printf("[ai] scored %d tasks successfully", len(updates))
+	aiLog.Info("scored tasks successfully", "count", len(updates))
 
 	if r.callbacks.OnScoringCompleted != nil {
 		r.callbacks.OnScoringCompleted(r.orgID, taskIDs)

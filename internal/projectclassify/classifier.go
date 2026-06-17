@@ -29,7 +29,6 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -147,7 +146,7 @@ func Classify(ctx context.Context, orgID string, secrets agentproc.SecretsReader
 		return nil, stage1
 	}
 
-	log.Printf("[classify] entity %s: escalating %d borderline+truncated project(s) to Stage 2", entity.ID, len(escalated))
+	classifyLog.Info("escalating borderline+truncated projects to stage 2", "entity", entity.ID, "projects", len(escalated))
 	stage2 := runVotes(ctx, orgID, secrets, escalated, entity, voteStage2)
 
 	merged := mergeStages(stage1, stage2)
@@ -228,7 +227,7 @@ func voteStage1(ctx context.Context, orgID string, secrets agentproc.SecretsRead
 
 	kb, truncated, err := readProjectKB(orgID, project.ID)
 	if err != nil {
-		log.Printf("[classify] project %s stage 1: KB read failed (%v) — voting with empty KB", project.ID, err)
+		classifyLog.Warn("stage 1 kb read failed, voting with empty kb", "project", project.ID, "error", err)
 		kb = ""
 	}
 	v.KBTruncated = truncated
@@ -344,7 +343,7 @@ func readProjectKB(orgID, projectID string) (string, bool, error) {
 		full := filepath.Join(kbDir, name)
 		info, err := os.Stat(full)
 		if err != nil {
-			log.Printf("[classify] project %s: stat KB file %s: %v", projectID, name, err)
+			classifyLog.Warn("stat kb file failed", "project", projectID, "file", name, "error", err)
 			continue
 		}
 		headerOverhead := len("## ") + len(name) + len("\n\n") + len("\n\n")
@@ -355,7 +354,7 @@ func readProjectKB(orgID, projectID string) (string, bool, error) {
 		}
 		data, err := os.ReadFile(full)
 		if err != nil {
-			log.Printf("[classify] project %s: read KB file %s: %v", projectID, name, err)
+			classifyLog.Warn("read kb file failed", "project", projectID, "file", name, "error", err)
 			continue
 		}
 		fmt.Fprintf(&buf, "## %s\n\n%s\n\n", name, data)

@@ -15,7 +15,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -80,7 +79,7 @@ func (s *Spawner) stampExecutor(orgID, runID string) {
 		return
 	}
 	if err := s.agentRuns.SetExecutorSystem(context.Background(), orgID, runID, s.executorID); err != nil {
-		log.Printf("[delegate] warning: stamp executor %s on run %s: %v", s.executorID, runID, err)
+		delegateLog.Warn("stamp executor on run failed", "executor", s.executorID, "run_id", runID, "error", err)
 	}
 }
 

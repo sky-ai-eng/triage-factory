@@ -20,7 +20,7 @@ import (
 // below exercises the org_id defense-in-depth filter directly.
 func TestEventQueueStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	dbtest.RunEventQueueStoreConformance(t, func(t *testing.T) (db.EventQueueStore, string, dbtest.EventQueueSeeder) {
 		t.Helper()
@@ -38,7 +38,7 @@ func TestEventQueueStore_Postgres(t *testing.T) {
 func TestEventQueueStore_Postgres_CrossOrg(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgA, _ := seedPgEventQueueOrg(t, h)

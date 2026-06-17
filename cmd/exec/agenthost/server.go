@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"sync"
 	"time"
@@ -138,7 +137,7 @@ const connIOTimeout = 10 * time.Second
 // failed.
 func (s *Server) handleConn(conn net.Conn) {
 	if err := conn.SetDeadline(time.Now().Add(connIOTimeout)); err != nil {
-		log.Printf("[agenthost] set deadline: %v", err)
+		agenthostLog.Warn("set deadline failed", "error", err)
 		return
 	}
 
@@ -192,11 +191,11 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 
 	if err := conn.SetWriteDeadline(time.Now().Add(connIOTimeout)); err != nil {
-		log.Printf("[agenthost] set write deadline: %v", err)
+		agenthostLog.Warn("set write deadline failed", "error", err)
 		return
 	}
 	if err := writeFrame(conn, resp); err != nil {
-		log.Printf("[agenthost] write response for %s: %v", req.Method, err)
+		agenthostLog.Warn("write response failed", "method", req.Method, "error", err)
 	}
 }
 

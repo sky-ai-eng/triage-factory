@@ -23,7 +23,7 @@ import (
 // directly.
 func TestPendingPRStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	dbtest.RunPendingPRStoreConformance(t, func(t *testing.T) (db.PendingPRStore, string, dbtest.PendingPRSeeder) {
 		t.Helper()
@@ -42,7 +42,7 @@ func TestPendingPRStore_Postgres(t *testing.T) {
 func TestPendingPRStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	orgA, userA, _ := seedPgPendingPROrg(t, h)
 	promptA := seedPgPendingPRPrompt(t, h, orgA, userA)
@@ -130,7 +130,7 @@ func TestPendingPRStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	_ = bob
 
 	// Seed a pending PR in orgA via admin so the row exists.
-	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 	seedA := newPgPendingPRSeeder(h, stores, orgA, alice, promptA)
 	runA := seedA.Run(t)
@@ -146,7 +146,7 @@ func TestPendingPRStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("same_org_user_can_read", func(t *testing.T) {
 		err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx).PendingPRs.Get(ctx, orgA, prA)
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).PendingPRs.Get(ctx, orgA, prA)
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -162,7 +162,7 @@ func TestPendingPRStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("cross_org_read_filtered", func(t *testing.T) {
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx).PendingPRs.Get(ctx, orgA, prA)
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).PendingPRs.Get(ctx, orgA, prA)
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -182,7 +182,7 @@ func TestPendingPRStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// org_id = tf.current_org_id(), so 42501 is the expected
 		// outcome.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			return pgstore.NewForTx(tx).PendingPRs.Create(ctx, orgA, domain.PendingPR{
+			return pgstore.NewForTx(tx, pgtest.SecretKey).PendingPRs.Create(ctx, orgA, domain.PendingPR{
 				ID: uuid.New().String(), RunID: runA,
 				Owner: "o", Repo: "r",
 				HeadBranch: "h2", HeadSHA: "s2", BaseBranch: "main",

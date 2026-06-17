@@ -1,7 +1,6 @@
 package server
 
 import (
-	"log"
 	"net/http"
 	"time"
 
@@ -60,7 +59,7 @@ func (pe *projectEntitiesHandler) handleProjectEntities(w http.ResponseWriter, r
 		entities, e = tx.Entities.ListProjectPanel(r.Context(), orgID, projectID)
 		return e
 	}); err != nil {
-		log.Printf("[entities] project %s: %v", projectID, err)
+		entitiesLog.Error("load project entities failed", "project", projectID, "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load project entities"})
 		return
 	}

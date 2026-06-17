@@ -1,7 +1,6 @@
 package worktree
 
 import (
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -102,7 +101,7 @@ func RemoveClaudeProjectDir(cwd string) {
 		return
 	}
 	if !strings.HasPrefix(resolved, tmpResolved) {
-		log.Printf("[worktree] refusing to clean project dir for non-tmp cwd: %s", resolved)
+		worktreeLog.Warn("refusing to clean project dir for non-tmp cwd", "cwd", resolved)
 		return
 	}
 
@@ -112,6 +111,6 @@ func RemoveClaudeProjectDir(cwd string) {
 	}
 	projectDir := filepath.Join(home, claudeProjectsDir, encodeClaudeProjectDir(resolved))
 	if err := os.RemoveAll(projectDir); err != nil {
-		log.Printf("[worktree] remove ghost project dir %s: %v", projectDir, err)
+		worktreeLog.Warn("remove ghost project dir", "dir", projectDir, "error", err)
 	}
 }

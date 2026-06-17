@@ -29,6 +29,7 @@ package postgres
 import (
 	"database/sql"
 
+	"github.com/sky-ai-eng/triage-factory/internal/aead"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
@@ -40,6 +41,12 @@ import (
 type Store struct {
 	admin *sql.DB
 	app   *sql.DB
+
+	// secretKey is the app-layer AES-256-GCM key the SecretStore
+	// encrypts org/user integration secrets with (TFAC-402). Held on
+	// the Store so txStoresFromTx can rebuild a tx-bound SecretStore
+	// with the same key inside WithTx.
+	secretKey aead.Key
 
 	stores db.Stores
 }
@@ -53,12 +60,16 @@ type Store struct {
 // because the scorer is a system service operating across all users
 // in each org. Request-handler stores (added in later waves) wire
 // against app and rely on WithTx to set per-request JWT claims.
-func New(admin, app *sql.DB) db.Stores {
-	s := &Store{admin: admin, app: app}
+//
+// secretKey is the app-layer AES-256-GCM key the SecretStore encrypts
+// org/user integration secrets with (TFAC-402); multi-mode boot loads it
+// from TF_SECRET_ENCRYPTION_KEY in internal/app/stores.go.
+func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
+	s := &Store{admin: admin, app: app, secretKey: secretKey}
 	// Built once and shared: GitHubApps.BackfillInstallationsFromAPI reads
 	// the App PEM via the same SecretStore the bundle exposes (GetSystem,
 	// admin pool).
-	secrets := newSecretStore(app, admin)
+	secrets := newSecretStore(app, admin, secretKey)
 	s.stores = db.Stores{
 		Scores: newScoreStore(admin),
 		// PromptStore needs both pools: SeedOrUpdate writes to
@@ -68,13 +79,13 @@ func New(admin, app *sql.DB) db.Stores {
 		Prompts:   newPromptStore(app, admin),
 		Swipes:    newSwipeStore(app),
 		Dashboard: newDashboardStore(app),
-		// Secrets needs both pools. Put/Get/Delete wrap the
-		// public.vault_* SECURITY DEFINER functions GRANTed to tf_app
-		// (app pool) — the caller must have set request.jwt.claims so
-		// the wrapper's p_org_id == tf.current_org_id() gate passes.
-		// GetSystem wraps vault_get_org_secret_system on the admin pool
-		// (supabase_admin) for background/system callers with no JWT;
-		// tf_app has no EXECUTE on that function.
+		// Secrets needs both pools. Put/Get/Delete + the per-user trio
+		// run on the app pool against public.org_secrets — RLS gates the
+		// org (and, for user rows, the user), so the caller must have set
+		// request.jwt.claims first. GetSystem / GetUserSystem /
+		// PutUserSystem run on the admin pool (supabase_admin bypasses
+		// RLS) for background/system callers with no JWT. Values are
+		// AES-256-GCM-encrypted app-side with secretKey (TFAC-402).
 		Secrets: secrets,
 		// EventHandlers needs both pools: Seed writes shipped rows
 		// without JWT claims, but event_handlers_insert /
@@ -299,13 +310,17 @@ func New(admin, app *sql.DB) db.Stores {
 // a compile error rather than a runtime crash. Production code
 // reaches the same wiring via Store.WithTx; this helper is the
 // test-side door into it.
-func NewForTx(tx *sql.Tx) db.TxStores {
+//
+// secretKey is the same app-layer AES-256-GCM key New takes; the
+// SecretStore round-trip tests pass a real key so Put→Get works, and
+// non-secret tests pass any key (unused). Tests share pgtest.SecretKey.
+func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 	return db.TxStores{
 		Scores:        newScoreStore(tx),
 		Prompts:       newTxPromptStore(tx),
 		Swipes:        newSwipeStore(tx),
 		Dashboard:     newDashboardStore(tx),
-		Secrets:       newSecretStore(tx, tx),
+		Secrets:       newSecretStore(tx, tx, secretKey),
 		EventHandlers: newTxEventHandlerStore(tx),
 		Blueprints:    newBlueprintStore(tx, tx),
 		Agents:        newTxAgentStore(tx),
@@ -337,8 +352,8 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		Curator:          newCuratorStore(tx, tx),
 		// Both pools collapse to tx (test door). BackfillInstallationsFromAPI's
 		// GetSystem would hit tf_app and be denied here — tests that exercise
-		// it use New(admin, app) directly, same as the SecretStore tests.
-		GitHubApps:  newGitHubAppsStore(tx, tx, newSecretStore(tx, tx)),
+		// it use New(admin, app, key) directly, same as the SecretStore tests.
+		GitHubApps:  newGitHubAppsStore(tx, tx, newSecretStore(tx, tx, secretKey)),
 		JiraApps:    newJiraAppsStore(tx, tx),
 		OrgTemplate: newTxOrgTemplateStore(tx),
 	}

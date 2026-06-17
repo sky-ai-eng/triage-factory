@@ -27,7 +27,7 @@ func TestSwipeStore_Postgres(t *testing.T) {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID := seedPgOrgAndUserForSwipes(t, h)
-		stores := pgstore.New(h.AdminDB, h.AdminDB)
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 		seed := func(t *testing.T) string {
 			t.Helper()
