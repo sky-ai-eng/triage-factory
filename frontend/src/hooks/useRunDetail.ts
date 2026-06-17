@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AgentMessage, AgentRun, Task, WSEvent } from '../types'
 import { readError } from '../lib/api'
+import { isPermissionTerminalStatus } from '../lib/runStatus'
 import { useWebSocket } from './useWebSocket'
 import { usePermissionQueues } from './usePermissionQueues'
 import type { PendingPermission, PermissionDecisionInput } from '../lib/permissions'
@@ -163,6 +164,12 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
           })
         }
         if (event.type === 'agent_run_update' && event.run_id === runID) {
+          // A run that left the running state can't act on a parked prompt —
+          // drop the queue so the dock doesn't keep a stale Allow/Deny up until
+          // the client TTL fires (mirrors the board's terminal drop).
+          if (isPermissionTerminalStatus(event.data.status)) {
+            dropRun(runID)
+          }
           fetch(`/api/agent/runs/${runID}`)
             .then((r) => (r.ok ? r.json() : null))
             .then((data: AgentRun | null) => {
@@ -177,7 +184,7 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
           forget(event)
         }
       },
-      [runID, ingest, forget],
+      [runID, ingest, forget, dropRun],
     ),
   )
 

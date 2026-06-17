@@ -10,6 +10,7 @@ import type {
 } from '../types'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { usePermissionQueues } from '../hooks/usePermissionQueues'
+import { isPermissionTerminalStatus } from '../lib/runStatus'
 import type { PendingPermission, PermissionDecisionInput } from '../lib/permissions'
 import { useTeams, useTeamFilter } from '../hooks/useTeams'
 import TeamScopeSelect from '../components/TeamScopeSelect'
@@ -479,11 +480,7 @@ export default function Board() {
           // a refetch here the card stays in its old column until a
           // manual refresh. Cheap to re-pull all five buckets — the
           // queries are indexed and short.
-          if (
-            ['completed', 'failed', 'cancelled', 'task_unsolvable', 'pending_approval'].includes(
-              event.data.status,
-            )
-          ) {
+          if (isPermissionTerminalStatus(event.data.status)) {
             // The run is no longer running a turn, so any prompt parked on it is
             // stale — drop its queue so a finished card doesn't keep an
             // unanswerable Allow/Deny control.

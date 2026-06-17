@@ -145,6 +145,10 @@ function summarizePermissionInput(tool: string, input: Record<string, unknown>):
   if (tool === 'Bash') s = str('command')
   else if (tool === 'Read' || tool === 'Write' || tool === 'Edit') s = str('file_path')
   else if (tool === 'Glob' || tool === 'Grep') s = str('pattern')
+  else if (tool === 'WebFetch') s = str('url')
+  else if (tool === 'WebSearch') s = str('query')
+  // Arbitrary tools (MCP servers, etc.) fall through to the first string field
+  // below — best-effort, since their input shape isn't known here.
   if (!s) {
     for (const v of Object.values(input)) {
       if (typeof v === 'string' && v) {

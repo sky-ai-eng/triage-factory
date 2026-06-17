@@ -11,6 +11,23 @@ export const ACTIVE_STATUSES = [
 
 export const FAILED_STATUSES = ['failed', 'cancelled', 'task_unsolvable'] as const
 
+// Statuses where a run is no longer executing a turn, so any tool-permission
+// prompt parked on it is stale and must be dropped — a finished run's Allow/Deny
+// would 404 or resolve a now-meaningless prompt. pending_approval counts: the
+// turn ended and staged a review/PR, so it isn't waiting on a tool decision.
+// Shared by the board and useRunDetail so the two surfaces drop in lockstep.
+export const PERMISSION_TERMINAL_STATUSES = [
+  'completed',
+  'failed',
+  'cancelled',
+  'task_unsolvable',
+  'pending_approval',
+] as const
+
+export function isPermissionTerminalStatus(status: string): boolean {
+  return (PERMISSION_TERMINAL_STATUSES as readonly string[]).includes(status)
+}
+
 export function isActiveRun(run: AgentRun): boolean {
   return (ACTIVE_STATUSES as readonly string[]).includes(run.Status)
 }
