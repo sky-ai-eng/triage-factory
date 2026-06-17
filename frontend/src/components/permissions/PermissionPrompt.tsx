@@ -76,7 +76,7 @@ export function PermissionPrompt({
         <PromptButton
           tone="var(--color-dismiss)"
           onClick={() => void resolve('deny')}
-          disabled={resolving}
+          disabled={resolving || !onResolve}
           icon={<X size={11} />}
         >
           Deny
@@ -85,7 +85,7 @@ export function PermissionPrompt({
           tone="var(--color-claim)"
           solid
           onClick={() => void resolve('allow')}
-          disabled={resolving}
+          disabled={resolving || !onResolve}
           icon={<Check size={11} />}
         >
           Allow

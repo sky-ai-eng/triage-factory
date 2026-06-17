@@ -1,14 +1,22 @@
 package delegate
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	ws "github.com/coder/websocket"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // waitForPending blocks until the broker has registered (runID, requestID). The
@@ -230,5 +238,106 @@ func TestBrowserPermissionHandler_ConcurrentRunsSameRequestID(t *testing.T) {
 	}
 	if d := <-gotB; d.Behavior != "deny" {
 		t.Errorf("run-B decision = %q, want deny", d.Behavior)
+	}
+}
+
+// dialHubClient stands up an httptest server that registers the dialing
+// connection with the hub (unscoped, so it receives every event) and returns the
+// live client conn. Used by the broadcast tests below to read frames off the
+// wire — the only seam into a concrete *websocket.Hub from outside its package.
+func dialHubClient(t *testing.T, h *websocket.Hub) (*ws.Conn, func()) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.HandleWS(w, r, "", "")
+	}))
+	url := strings.Replace(srv.URL, "http://", "ws://", 1)
+	conn, _, err := ws.Dial(context.Background(), url, nil)
+	if err != nil {
+		srv.Close()
+		t.Fatalf("dial hub: %v", err)
+	}
+	return conn, func() {
+		_ = conn.Close(ws.StatusNormalClosure, "")
+		srv.Close()
+	}
+}
+
+// readPermissionResolved reads frames until a permission_resolved event arrives
+// (skipping the permission_request the handler emits on registration), and
+// returns its run_id + request_id. A bounded read deadline turns a missing
+// broadcast into a clean failure instead of a hang.
+func readPermissionResolved(t *testing.T, conn *ws.Conn) (runID, requestID string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	for {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			t.Fatalf("read ws frame: %v", err)
+		}
+		var evt struct {
+			Type  string `json:"type"`
+			RunID string `json:"run_id"`
+			Data  struct {
+				RequestID string `json:"request_id"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(data, &evt); err != nil {
+			t.Fatalf("decode frame: %v (raw=%q)", err, data)
+		}
+		if evt.Type == "permission_resolved" {
+			return evt.RunID, evt.Data.RequestID
+		}
+	}
+}
+
+// TestBrowserPermissionHandler_ResolveBroadcastsResolved pins the client
+// contract: a user-answered prompt broadcasts permission_resolved(run, request)
+// so every other surface showing it drops it without waiting out its TTL.
+func TestBrowserPermissionHandler_ResolveBroadcastsResolved(t *testing.T) {
+	hub := websocket.NewHub()
+	conn, cleanup := dialHubClient(t, hub)
+	defer cleanup()
+
+	s := NewSpawner(nil, db.Stores{}, nil, hub, "")
+	h := s.BrowserPermissionHandler(runmode.LocalDefaultOrg, "run-1")
+
+	got := make(chan agentproc.PermissionDecision, 1)
+	go func() {
+		got <- h(agentproc.PermissionRequest{RequestID: "req-1", ToolName: "Bash", Input: map[string]any{"command": "ls"}})
+	}()
+
+	waitForPending(t, s, "run-1", "req-1")
+	if err := s.ResolvePermission(runmode.LocalDefaultOrg, "run-1", "req-1", agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
+		t.Fatalf("ResolvePermission: %v", err)
+	}
+	<-got // handler unblocked
+
+	runID, requestID := readPermissionResolved(t, conn)
+	if runID != "run-1" || requestID != "req-1" {
+		t.Errorf("permission_resolved = (run %q, req %q), want (run-1, req-1)", runID, requestID)
+	}
+}
+
+// TestBrowserPermissionHandler_TimeoutBroadcastsResolved pins the same contract
+// for the other terminal path: a prompt nobody answered times out and still
+// broadcasts permission_resolved so a stale card clears.
+func TestBrowserPermissionHandler_TimeoutBroadcastsResolved(t *testing.T) {
+	hub := websocket.NewHub()
+	conn, cleanup := dialHubClient(t, hub)
+	defer cleanup()
+
+	s := NewSpawner(nil, db.Stores{}, nil, hub, "")
+	s.SetIdleHibernateTimeout(100 * time.Millisecond) // permTimeout = 50ms
+
+	h := s.BrowserPermissionHandler(runmode.LocalDefaultOrg, "run-1")
+	d := h(agentproc.PermissionRequest{RequestID: "req-timeout", ToolName: "Bash"})
+	if d.Behavior != "deny" {
+		t.Fatalf("behavior = %q, want deny on timeout", d.Behavior)
+	}
+
+	runID, requestID := readPermissionResolved(t, conn)
+	if runID != "run-1" || requestID != "req-timeout" {
+		t.Errorf("permission_resolved = (run %q, req %q), want (run-1, req-timeout)", runID, requestID)
 	}
 }
