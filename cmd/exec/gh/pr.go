@@ -425,14 +425,13 @@ func singleFileDiff(files []ghclient.PRFile, path string) string {
 	return ""
 }
 
-// prFilesResult is the slim overview `pr files` prints: PR-level totals plus a
-// per-file summary, with no patch content. The diff itself is served by
-// `pr diff` — `pr files` is the cheapest "what changed, how big" look (one API
+// prFilesResult is the slim overview `pr files` prints: computed PR-level
+// totals plus a per-file summary, with no patch content. owner/repo/number are
+// deliberately omitted — the caller supplied them and `pr view` already echoes
+// them, so repeating them here is pure noise. The diff itself is served by
+// `pr diff`; `pr files` is the cheapest "what changed, how big" look (one API
 // call, no full-diff fetch, no disk write).
 type prFilesResult struct {
-	Owner        string        `json:"owner"`
-	Repo         string        `json:"repo"`
-	Number       int           `json:"number"`
 	ChangedFiles int           `json:"changed_files"`
 	Additions    int           `json:"additions"`
 	Deletions    int           `json:"deletions"`
@@ -442,11 +441,8 @@ type prFilesResult struct {
 // buildPRFilesResult assembles the slim envelope from the raw file list,
 // summing the per-file counts for the PR-level totals (so `pr files` needs no
 // extra GetPR call) and dropping the patch.
-func buildPRFilesResult(owner, repo string, number int, files []ghclient.PRFile) prFilesResult {
+func buildPRFilesResult(files []ghclient.PRFile) prFilesResult {
 	result := prFilesResult{
-		Owner:        owner,
-		Repo:         repo,
-		Number:       number,
 		ChangedFiles: len(files),
 		Files:        make([]fileSummary, 0, len(files)),
 	}
@@ -469,7 +465,7 @@ func prFiles(client ghAPI, args []string) {
 	owner, repo, number := parseRepoAndNumber(args)
 	files, err := client.GetPRFiles(owner, repo, number)
 	exitOnErr(err)
-	printJSON(buildPRFilesResult(owner, repo, number, files))
+	printJSON(buildPRFilesResult(files))
 }
 
 func prThreadView(client ghAPI, args []string) {

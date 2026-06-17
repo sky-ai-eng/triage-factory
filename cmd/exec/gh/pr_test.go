@@ -614,11 +614,8 @@ func TestBuildPRFilesResult(t *testing.T) {
 		{Filename: "image.png", Status: "added", Additions: 0, Deletions: 0},                                             // binary
 		{Filename: "new.go", Status: "renamed", PreviousFilename: "old.go", Additions: 1, Deletions: 1, Patch: "@@..@@"}, // rename w/ edits
 	}
-	got := buildPRFilesResult("owner", "repo", 42, files)
+	got := buildPRFilesResult(files)
 
-	if got.Owner != "owner" || got.Repo != "repo" || got.Number != 42 {
-		t.Errorf("envelope identity mismatch: %+v", got)
-	}
 	if got.ChangedFiles != 3 {
 		t.Errorf("changed_files = %d, want 3", got.ChangedFiles)
 	}
@@ -647,7 +644,7 @@ func TestBuildPRFilesResult(t *testing.T) {
 	}
 
 	// Empty file list → empty, non-null array (so JSON is [] not null).
-	empty := buildPRFilesResult("owner", "repo", 7, nil)
+	empty := buildPRFilesResult(nil)
 	if empty.Files == nil {
 		t.Error("Files should be an empty slice, not nil")
 	}
