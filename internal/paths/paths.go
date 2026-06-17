@@ -221,6 +221,20 @@ func ToolchainRoot() string {
 	return StateRoot()
 }
 
+// ToolchainRootErr is the error-returning form of ToolchainRoot, for
+// callers that pre-flight a write under the toolchain root (EnsureSDK,
+// the rootfs extractor) and want a missing $HOME reported cleanly rather
+// than as a panic from the error-free form. It mirrors ToolchainRoot's
+// resolution: an explicit TF_TOOLCHAIN_ROOT is a literal path with no
+// home dependency (never errors), so the only error path is the StateRoot
+// fallback in local mode with $HOME unresolvable.
+func ToolchainRootErr() (string, error) {
+	if env := strings.TrimSpace(os.Getenv(envToolchainRoot)); env != "" {
+		return env, nil
+	}
+	return StateRootErr()
+}
+
 // SandboxRootfsDir is the cached sandbox rootfs for a toolchain cache
 // key: <ToolchainRoot>/sandbox/rootfs-<cacheKey>. Mounted read-only and
 // shared across all tenants — host-global, never org-scoped (org-scoping

@@ -264,12 +264,33 @@ func TestToolchainRoot_UnsetFollowsStateRoot(t *testing.T) {
 	}
 }
 
+// TestToolchainRootErr_MatchesToolchainRoot confirms the error-returning
+// form agrees with the error-free form, and that an explicit
+// TF_TOOLCHAIN_ROOT resolves with no error (no $HOME dependency) — which
+// is what lets EnsureSDK / the rootfs extractor pre-flight it safely in
+// the container regardless of $HOME.
+func TestToolchainRootErr_MatchesToolchainRoot(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	SetForTest(t, "/s")
+
+	t.Setenv(envToolchainRoot, "/opt/triagefactory")
+	if got, err := ToolchainRootErr(); err != nil || got != "/opt/triagefactory" {
+		t.Errorf("ToolchainRootErr() = (%q, %v), want (/opt/triagefactory, nil)", got, err)
+	}
+
+	t.Setenv(envToolchainRoot, "")
+	if got, err := ToolchainRootErr(); err != nil || got != "/s" {
+		t.Errorf("ToolchainRootErr() = (%q, %v), want (/s, nil)", got, err)
+	}
+}
+
 // TestMultiOrg_Isolation is the core multi-tenant guarantee: two orgs
 // running simultaneously get non-overlapping org-scoped paths, while the
 // host-global caches stay identical regardless of org.
 func TestMultiOrg_Isolation(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	SetForTest(t, "/s")
+	t.Setenv(envToolchainRoot, "") // hermetic: the host-global asserts below go through ToolchainRoot
 
 	if a, b := BareCacheDir(realOrg, "o", "r"), BareCacheDir(otherOrg, "o", "r"); a == b {
 		t.Errorf("BareCacheDir must differ across orgs, both = %q", a)

@@ -71,7 +71,10 @@ func doEnsureRootfs(ctx context.Context) (string, error) {
 	}
 	// Surface a missing $HOME as an error (the pre-paths behavior) rather
 	// than letting the error-free SandboxRootfsDir panic underneath.
-	if _, err := paths.StateRootErr(); err != nil {
+	// Pre-flight the toolchain root specifically: with TF_TOOLCHAIN_ROOT
+	// set the cache dir resolves to a literal path with no home
+	// dependency, so this only trips in the local-mode $HOME-missing case.
+	if _, err := paths.ToolchainRootErr(); err != nil {
 		return "", fmt.Errorf("rootfs: %w", err)
 	}
 	// Host-global cache: shared read-only across all tenants, so it hangs
