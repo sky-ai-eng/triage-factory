@@ -839,6 +839,13 @@ func firstLine(s string) string {
 }
 
 // filterDiffByFile extracts the diff section for a single file.
+//
+// Matches the new-side path exactly (the token after " b/" on the
+// "diff --git a/… b/…" header) rather than a substring of the whole header.
+// A substring check would misfire on paths that merely contain the requested
+// name (e.g. asking for "foo.go" capturing "lib/b/foo.go"), and would be
+// asymmetric with the 406 fallback's exact match. Renamed files are keyed on
+// their new (b-side) path, which is what callers reference.
 func filterDiffByFile(diff, file string) string {
 	lines := strings.Split(diff, "\n")
 	var result []string
@@ -848,7 +855,7 @@ func filterDiffByFile(diff, file string) string {
 			if capturing {
 				break
 			}
-			if strings.Contains(line, "b/"+file) {
+			if parts := strings.SplitN(line, " b/", 2); len(parts) == 2 && parts[1] == file {
 				capturing = true
 			}
 		}

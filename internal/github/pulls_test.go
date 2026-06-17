@@ -443,3 +443,33 @@ func TestCreatePR_422_FieldErr(t *testing.T) {
 		t.Errorf("expected error to mention invalid head field, got %q", msg)
 	}
 }
+
+// TestFilterDiffByFile_ExactMatch verifies the file filter matches the new-side
+// path exactly and never via substring, so a request for "foo.go" can't
+// accidentally capture a different file whose path merely contains it.
+func TestFilterDiffByFile_ExactMatch(t *testing.T) {
+	diff := "diff --git a/foo.go b/foo.go\n@@ -1 +1 @@\n-a\n+b\n" +
+		"diff --git a/lib/b/foo.go b/lib/b/foo.go\n@@ -1 +1 @@\n-c\n+d\n"
+
+	got := filterDiffByFile(diff, "foo.go")
+	if !strings.Contains(got, "a/foo.go b/foo.go") || !strings.Contains(got, "+b") {
+		t.Errorf("expected the foo.go section; got:\n%s", got)
+	}
+	if strings.Contains(got, "lib/b/foo.go") || strings.Contains(got, "+d") {
+		t.Errorf("substring match leaked the lib/b/foo.go section; got:\n%s", got)
+	}
+
+	// The nested file is reachable by its exact path.
+	nested := filterDiffByFile(diff, "lib/b/foo.go")
+	if !strings.Contains(nested, "a/lib/b/foo.go b/lib/b/foo.go") || !strings.Contains(nested, "+d") {
+		t.Errorf("expected the lib/b/foo.go section by exact path; got:\n%s", nested)
+	}
+	if strings.Contains(nested, "+b") {
+		t.Errorf("nested lookup leaked the top-level foo.go section; got:\n%s", nested)
+	}
+
+	// A path not in the diff yields nothing.
+	if out := filterDiffByFile(diff, "missing.go"); out != "" {
+		t.Errorf("expected empty result for absent file; got:\n%s", out)
+	}
+}

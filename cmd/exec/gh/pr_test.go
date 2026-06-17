@@ -470,6 +470,24 @@ func TestReassembleDiff_OversizedVsBinary(t *testing.T) {
 	}
 }
 
+// TestReassembleDiff_RenameNoPatch covers the empty-patch rename case: it must
+// emit rename headers, not the misleading "patch unavailable (too large)" note
+// (a rename with no content change isn't truncated), and never a binary line.
+func TestReassembleDiff_RenameNoPatch(t *testing.T) {
+	out := reassembleDiff([]ghclient.PRFile{
+		{Filename: "new.png", PreviousFilename: "old.png", Status: "renamed", Additions: 0, Deletions: 0},
+	})
+	if !strings.Contains(out, "diff --git a/old.png b/new.png") {
+		t.Errorf("expected rename diff header; got:\n%s", out)
+	}
+	if !strings.Contains(out, "rename from old.png") || !strings.Contains(out, "rename to new.png") {
+		t.Errorf("expected rename from/to headers; got:\n%s", out)
+	}
+	if strings.Contains(out, "patch unavailable") {
+		t.Errorf("rename must not be labeled patch-unavailable/too-large; got:\n%s", out)
+	}
+}
+
 // TestSingleFileDiff covers the --file inline 406 fallback: a synthesized
 // single-file diff for a present path, and "" for an absent one.
 func TestSingleFileDiff(t *testing.T) {

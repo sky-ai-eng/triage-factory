@@ -57,5 +57,8 @@ func safeScratchSubdir(cwd string, parts ...string) (string, error) {
 			return "", fmt.Errorf("path component %s exists but is not a directory", current)
 		}
 	}
+	// Re-derive the full path from cwd+parts rather than returning `current`:
+	// the loop breaks early at the first non-existent component, so `current`
+	// holds only the path-so-far, not the complete destination.
 	return filepath.Join(append([]string{cwd}, parts...)...), nil
 }

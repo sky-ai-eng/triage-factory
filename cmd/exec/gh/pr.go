@@ -239,6 +239,11 @@ func prDiff(client ghAPI, args []string) {
 // `pr diff` overwrites the capture in place; the manifest records head_sha so
 // a reader that cares about freshness can compare it to the live head.
 func persistPRDiff(client ghAPI, cwd, owner, repo string, number int) (diffManifest, error) {
+	// Three separate REST calls follow (GetPR → GetPRFiles → GetPRDiff): the
+	// API has no transactional snapshot, so a force-push mid-sequence could
+	// leave manifest.head_sha (from GetPR) describing a different commit than
+	// full.diff. We accept that race — head_sha is recorded precisely so a
+	// reader can detect the drift — rather than adding fragile re-fetch loops.
 	pr, err := client.GetPR(owner, repo, number, false)
 	if err != nil {
 		return diffManifest{}, fmt.Errorf("fetch PR #%d: %w", number, err)
@@ -343,6 +348,12 @@ func fetchFullDiff(client ghAPI, owner, repo string, number int, files []ghclien
 // reports zero line additions/deletions, whereas an oversized text file still
 // reports its real counts. A rename with no content change likewise has an
 // empty patch and zero counts but isn't binary, so it's excluded.
+//
+// Known limitation: a binary file that is *also* renamed is indistinguishable
+// from a pure (content-unchanged) rename via the files API — both have an
+// empty patch and zero counts — so a binary rename is reported Binary=false.
+// Binary renames are rare and reassembleDiff still emits sensible rename
+// headers for them; the API exposes no flag that would let us do better.
 func isBinaryFile(f ghclient.PRFile) bool {
 	return f.Patch == "" && f.Additions == 0 && f.Deletions == 0 && f.Status != "renamed"
 }
@@ -353,8 +364,8 @@ func isBinaryFile(f ghclient.PRFile) bool {
 // the output a recognizable unified diff. It's approximate — that's what the
 // manifest's truncated flag signals — but greppable and good enough for
 // review. Patch-less files get a "Binary files differ" line when they look
-// binary, or a note that the patch was omitted (too large) otherwise — never
-// a fabricated hunk.
+// binary, "rename from/to" headers when they're a rename, or a note that the
+// patch was omitted (too large) otherwise — never a fabricated hunk.
 func reassembleDiff(files []ghclient.PRFile) string {
 	var b strings.Builder
 	for _, f := range files {
@@ -364,9 +375,16 @@ func reassembleDiff(files []ghclient.PRFile) string {
 		}
 		fmt.Fprintf(&b, "diff --git a/%s b/%s\n", prev, f.Filename)
 		if f.Patch == "" {
-			if isBinaryFile(f) {
+			switch {
+			case isBinaryFile(f):
 				fmt.Fprintf(&b, "Binary files a/%s and b/%s differ\n", prev, f.Filename)
-			} else {
+			case f.Status == "renamed":
+				// A rename with no textual patch is either a pure rename or a
+				// binary rename — the files API doesn't distinguish them. Emit
+				// rename headers, correct for the pure case and not misleading
+				// for the binary one, rather than a bogus "diff too large" note.
+				fmt.Fprintf(&b, "rename from %s\nrename to %s\n", prev, f.Filename)
+			default:
 				fmt.Fprintf(&b, "# patch unavailable (diff too large to fetch); +%d -%d\n", f.Additions, f.Deletions)
 			}
 			continue
