@@ -492,16 +492,29 @@ func makeWorktreeDir(runID string) (string, error) {
 }
 
 // gitBaseEnv is the parent environment every git subprocess in this package
-// runs with: the process environment plus GIT_TERMINAL_PROMPT=0. Disabling the
-// prompt is essential on a headless server — git can never satisfy an
-// interactive "Username for 'https://...'" prompt, so without this a missing or
-// invalid credential would block on (or fail opaquely against) /dev/tty instead
-// of returning the clear "terminal prompts disabled" error fast. Crucially, the
-// setting is inherited by any child git process too — including the lazy
-// promisor fetch git spawns inside `worktree add` / `reset --hard` on a blobless
-// bare — so a deferred-blob fetch that can't authenticate fails fast as well.
+// runs with: the process environment with GIT_TERMINAL_PROMPT forced to 0.
+// Disabling the prompt is essential on a headless server — git can never
+// satisfy an interactive "Username for 'https://...'" prompt, so without this a
+// missing or invalid credential would block on (or fail opaquely against)
+// /dev/tty instead of returning the clear "terminal prompts disabled" error
+// fast. Crucially, the setting is inherited by any child git process too —
+// including the lazy promisor fetch git spawns inside `worktree add` / `reset
+// --hard` on a blobless bare — so a deferred-blob fetch that can't authenticate
+// fails fast as well.
+//
+// Any inherited GIT_TERMINAL_PROMPT is dropped before the =0 is appended, so a
+// parent process that preset =1 can't re-enable interactive prompts — the
+// guarantee holds regardless of how the exec layer resolves duplicate env keys.
 func gitBaseEnv() []string {
-	return append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	parent := os.Environ()
+	out := make([]string, 0, len(parent)+1)
+	for _, kv := range parent {
+		if strings.HasPrefix(kv, "GIT_TERMINAL_PROMPT=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "GIT_TERMINAL_PROMPT=0")
 }
 
 func gitOutputCtx(ctx context.Context, dir string, args ...string) (string, error) {

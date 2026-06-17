@@ -93,6 +93,25 @@ func runGit(t *testing.T, args ...string) {
 	}
 }
 
+// TestGitBaseEnv_ForcesPromptDisabledOverInherited locks in the prompt-hardening
+// guarantee against an inherited GIT_TERMINAL_PROMPT: even when the parent
+// process preset =1, gitBaseEnv() must yield exactly one GIT_TERMINAL_PROMPT
+// entry set to 0, so a credential-less git op can never re-acquire an
+// interactive prompt — independent of how the exec layer resolves duplicate
+// env keys.
+func TestGitBaseEnv_ForcesPromptDisabledOverInherited(t *testing.T) {
+	t.Setenv("GIT_TERMINAL_PROMPT", "1")
+	var vals []string
+	for _, kv := range gitBaseEnv() {
+		if v, ok := strings.CutPrefix(kv, "GIT_TERMINAL_PROMPT="); ok {
+			vals = append(vals, v)
+		}
+	}
+	if len(vals) != 1 || vals[0] != "0" {
+		t.Errorf("GIT_TERMINAL_PROMPT entries = %v, want exactly [\"0\"]", vals)
+	}
+}
+
 // TestCheckoutOpsNeverUseUnauthWrapper is the static regression guard for
 // TFAC-401: the blob-materializing host-side ops (`git worktree add`, `git reset
 // --hard`) must always route through gitRunCtxAuth so the blobless bare's lazy
@@ -101,6 +120,10 @@ func runGit(t *testing.T, args ...string) {
 // "could not read Username". The scan keys on the op's argument literals on the
 // same line as the call (how every site in these files is written); note
 // `gitRunCtx(` does not match `gitRunCtxAuth(` because the next char is `A`.
+//
+// Limitation: a call wrapped so the op literal lands on a different line from
+// `gitRunCtx(` would slip through. That can't happen for these short calls under
+// gofmt (they stay single-line), so a line-scoped scan is sufficient here.
 func TestCheckoutOpsNeverUseUnauthWrapper(t *testing.T) {
 	files := []string{
 		"worktree_pr.go",

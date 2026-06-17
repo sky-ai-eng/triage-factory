@@ -152,7 +152,10 @@ func captureUncommitted(ctx context.Context, wtPath string) ([]byte, error) {
 	_ = idx.Close()
 	defer func() { _ = os.Remove(idxName) }()
 
-	env := append(os.Environ(), "GIT_INDEX_FILE="+idxName)
+	// Seed from gitBaseEnv() (not os.Environ()) so this throwaway-index env still
+	// carries GIT_TERMINAL_PROMPT=0, keeping every capture on the package's one
+	// base environment.
+	env := append(gitBaseEnv(), "GIT_INDEX_FILE="+idxName)
 	if _, err := gitCapture(ctx, wtPath, env, "read-tree", "HEAD"); err != nil {
 		return nil, fmt.Errorf("seed temp index: %w", err)
 	}
@@ -369,12 +372,12 @@ func gitCapture(ctx context.Context, dir string, env []string, args ...string) (
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	// Disable interactive prompts here too (hygiene — this capture path is
-	// local-only: rev-parse, bundle, diff against the bare/worktree). When the
-	// caller supplied an env (a throwaway GIT_INDEX_FILE), extend it; otherwise
-	// fall back to the package base env.
+	// Capture paths are local-only (rev-parse, bundle, diff against the
+	// bare/worktree), but still run with prompts disabled for consistency: a
+	// supplied env already starts from gitBaseEnv() (see captureUncommitted), and
+	// a nil env falls back to it here.
 	if env != nil {
-		cmd.Env = append(env, "GIT_TERMINAL_PROMPT=0")
+		cmd.Env = env
 	} else {
 		cmd.Env = gitBaseEnv()
 	}
