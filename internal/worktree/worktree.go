@@ -62,7 +62,7 @@ func fireCloneResult(owner, repo string, err error) {
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			worktreeLog.Error("onCloneResult callback panicked", "owner", owner, "repo", repo, "error", r)
+			worktreeLog.Error("onCloneResult callback panicked", "owner", owner, "repo", repo, "panic", r)
 		}
 	}()
 	cb(owner, repo, err)

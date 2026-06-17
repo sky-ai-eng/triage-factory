@@ -67,7 +67,6 @@ func TestComponentTagsRecords(t *testing.T) {
 func TestSetOutputRedirects(t *testing.T) {
 	var buf bytes.Buffer
 	restore := SetOutput(&buf)
-	defer restore()
 
 	// A component logger created here writes through the shared swappable
 	// writer, so SetOutput must capture it.
