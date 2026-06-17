@@ -60,13 +60,22 @@ func (m *Manager) BackfillUserDashboard(ctx context.Context, orgID, userID, logi
 	if len(repos) == 0 {
 		// Nothing configured to scope a search to — mark done so an empty org
 		// doesn't retry the (no-op) backfill on every dashboard open.
-		return m.users.MarkDashboardBackfilledSystem(ctx, userID, host)
+		return m.users.MarkDashboardBackfilledSystem(ctx, userID, host, login)
 	}
 
 	if err := m.runDashboardBackfill(ctx, orgID, login, repos); err != nil {
 		return err // leave the marker unset → next dashboard load retries
 	}
-	return m.users.MarkDashboardBackfilledSystem(ctx, userID, host)
+	// Don't stamp a cancelled/timed-out backfill: runDashboardBackfill can return
+	// nil after partially seeding before the deadline, but a marker set here would
+	// suppress the retry that fills the rest. Leave it unset so the next dashboard
+	// load completes the window.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// login-guarded: if the user rebound to a different login while this backfill
+	// was in flight, the stamp no-ops, leaving the new login to re-seed.
+	return m.users.MarkDashboardBackfilledSystem(ctx, userID, host, login)
 }
 
 // runDashboardBackfill resolves the org's GitHub client(s) like the poll cycle
@@ -88,7 +97,7 @@ func (m *Manager) runDashboardBackfill(ctx context.Context, orgID, login string,
 			}
 			return err
 		}
-		_, err = tr.BackfillDashboardHistory(client, login, repos)
+		_, err = tr.BackfillDashboardHistory(ctx, client, login, repos)
 		return err
 	}
 
@@ -118,7 +127,7 @@ func (m *Manager) runDashboardBackfill(ctx context.Context, orgID, login string,
 		if len(scoped) == 0 {
 			continue
 		}
-		if _, berr := tr.BackfillDashboardHistory(client, login, scoped); berr != nil {
+		if _, berr := tr.BackfillDashboardHistory(ctx, client, login, scoped); berr != nil {
 			lastErr = berr
 			log.Printf("[dashboard-backfill] org %s installation %s: %v", orgID, inst.AccountLogin, berr)
 			continue

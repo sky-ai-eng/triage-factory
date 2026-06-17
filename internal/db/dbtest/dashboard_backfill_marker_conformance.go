@@ -19,6 +19,9 @@ type DashboardBackfillMarkerFactory func(t *testing.T) (users db.UsersStore, see
 //
 //   - the marker starts unset on a fresh identity binding;
 //   - MarkDashboardBackfilledSystem stamps it (admin-pool / claims-free write);
+//   - the stamp is login-guarded: marking with a login that no longer matches
+//     the row no-ops, so an in-flight backfill for a since-replaced login can't
+//     strand the new login as "already backfilled";
 //   - a no-op re-bind (same login) preserves it, so an unchanged login never
 //     re-fires the search burst;
 //   - a re-bind to a DIFFERENT login clears it, so the new login's history is
@@ -49,7 +52,7 @@ func RunDashboardBackfillMarkerConformance(t *testing.T, mk DashboardBackfillMar
 		if err := users.UpsertGitHubIdentity(ctx, u, host, "octocat", "pat"); err != nil {
 			t.Fatalf("UpsertGitHubIdentity: %v", err)
 		}
-		if err := users.MarkDashboardBackfilledSystem(ctx, u, host); err != nil {
+		if err := users.MarkDashboardBackfilledSystem(ctx, u, host, "octocat"); err != nil {
 			t.Fatalf("MarkDashboardBackfilledSystem: %v", err)
 		}
 		at, err := users.DashboardBackfilledAtSystem(ctx, u, host)
@@ -67,7 +70,7 @@ func RunDashboardBackfillMarkerConformance(t *testing.T, mk DashboardBackfillMar
 		if err := users.UpsertGitHubIdentity(ctx, u, host, "octocat", "pat"); err != nil {
 			t.Fatalf("UpsertGitHubIdentity: %v", err)
 		}
-		if err := users.MarkDashboardBackfilledSystem(ctx, u, host); err != nil {
+		if err := users.MarkDashboardBackfilledSystem(ctx, u, host, "octocat"); err != nil {
 			t.Fatalf("MarkDashboardBackfilledSystem: %v", err)
 		}
 		// Re-bind with the SAME login (different source) — marker must survive.
@@ -89,7 +92,7 @@ func RunDashboardBackfillMarkerConformance(t *testing.T, mk DashboardBackfillMar
 		if err := users.UpsertGitHubIdentity(ctx, u, host, "octocat", "pat"); err != nil {
 			t.Fatalf("UpsertGitHubIdentity: %v", err)
 		}
-		if err := users.MarkDashboardBackfilledSystem(ctx, u, host); err != nil {
+		if err := users.MarkDashboardBackfilledSystem(ctx, u, host, "octocat"); err != nil {
 			t.Fatalf("MarkDashboardBackfilledSystem: %v", err)
 		}
 		// Re-bind to a DIFFERENT login — the prior login's backfill is stale, so
@@ -103,6 +106,29 @@ func RunDashboardBackfillMarkerConformance(t *testing.T, mk DashboardBackfillMar
 		}
 		if at != nil {
 			t.Errorf("marker = %v after login change; want nil (reset)", at)
+		}
+	})
+
+	t.Run("MarkWithMismatchedLoginNoOps", func(t *testing.T) {
+		users, seedUser := mk(t)
+		u := seedUser(t)
+		if err := users.UpsertGitHubIdentity(ctx, u, host, "octocat", "pat"); err != nil {
+			t.Fatalf("UpsertGitHubIdentity: %v", err)
+		}
+		// Models the in-flight race: a detached backfill that searched a
+		// since-replaced login ("octostale") tries to stamp, but the row now
+		// carries "octocat". The login-guarded write must NOT mark it done —
+		// otherwise "octocat" is treated as backfilled when its history was never
+		// seeded, and it never re-seeds.
+		if err := users.MarkDashboardBackfilledSystem(ctx, u, host, "octostale"); err != nil {
+			t.Fatalf("MarkDashboardBackfilledSystem (mismatched login): %v", err)
+		}
+		at, err := users.DashboardBackfilledAtSystem(ctx, u, host)
+		if err != nil {
+			t.Fatalf("DashboardBackfilledAtSystem: %v", err)
+		}
+		if at != nil {
+			t.Errorf("marker = %v after stamping a mismatched login; want nil (guarded no-op)", at)
 		}
 	})
 }

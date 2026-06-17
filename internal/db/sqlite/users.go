@@ -157,10 +157,14 @@ func (s *usersStore) DashboardBackfilledAtSystem(ctx context.Context, userID, gi
 	return &at.Time, nil
 }
 
-func (s *usersStore) MarkDashboardBackfilledSystem(ctx context.Context, userID, githubBaseURL string) error {
+func (s *usersStore) MarkDashboardBackfilledSystem(ctx context.Context, userID, githubBaseURL, login string) error {
+	// login in the WHERE: only stamp if the row still carries the login we
+	// actually backfilled. A re-bind to a different login mid-flight changes the
+	// row, so this no-ops rather than marking the new login done — see the
+	// interface doc.
 	if _, err := s.q.ExecContext(ctx,
-		`UPDATE user_github_identities SET dashboard_backfilled_at = CURRENT_TIMESTAMP WHERE user_id = ? AND github_base_url = ?`,
-		userID, db.NormalizeGitHubHost(githubBaseURL),
+		`UPDATE user_github_identities SET dashboard_backfilled_at = CURRENT_TIMESTAMP WHERE user_id = ? AND github_base_url = ? AND login = ?`,
+		userID, db.NormalizeGitHubHost(githubBaseURL), login,
 	); err != nil {
 		return fmt.Errorf("mark user_github_identities.dashboard_backfilled_at: %w", err)
 	}

@@ -59,11 +59,15 @@ func dashboardBackfillQueries(login string, repos []string) []string {
 // It returns an error only when EVERY search query failed (a transient outage
 // the caller should retry); a partial failure seeds what it can and returns
 // nil, since organic forward tracking will cover the rest.
-func (t *Tracker) BackfillDashboardHistory(client *ghclient.Client, login string, repos []string) (int, error) {
+//
+// ctx is the caller's (the backfill goroutine runs under a bounded timeout):
+// the entity-seed writes propagate it, and it's checked between queries so a
+// cancelled/timed-out backfill stops issuing further searches and seeds
+// promptly rather than running the full query set to completion.
+func (t *Tracker) BackfillDashboardHistory(ctx context.Context, client *ghclient.Client, login string, repos []string) (int, error) {
 	if client == nil || login == "" {
 		return 0, nil
 	}
-	ctx := context.Background()
 	queries := dashboardBackfillQueries(login, repos)
 
 	seen := map[string]bool{}
@@ -71,6 +75,11 @@ func (t *Tracker) BackfillDashboardHistory(client *ghclient.Client, login string
 	failed := 0
 	var firstErr error
 	for _, q := range queries {
+		// Honor cancellation/timeout before each query's search + seeds — the
+		// caller is a request-detached goroutine on a bounded deadline.
+		if err := ctx.Err(); err != nil {
+			return seeded, err
+		}
 		prs, err := client.DiscoverPRs(q, 50)
 		if err != nil {
 			failed++

@@ -148,12 +148,20 @@ type UsersStore interface {
 	DashboardBackfilledAtSystem(ctx context.Context, userID, githubBaseURL string) (*time.Time, error)
 
 	// MarkDashboardBackfilledSystem stamps dashboard_backfilled_at = now() for
-	// this (user, host) identity, recording that the backfill completed so it
-	// won't run again for this login. No-op (nil error) when no row exists.
-	// Admin pool / claims-free, same caller and rationale as
-	// DashboardBackfilledAtSystem. UpsertGitHubIdentity clears this marker when
-	// the bound login changes, so a rename re-backfills the new login.
-	MarkDashboardBackfilledSystem(ctx context.Context, userID, githubBaseURL string) error
+	// this (user, host) identity, recording that the backfill of login's history
+	// completed so it won't run again for that login. login guards the write:
+	// the stamp lands ONLY if the row's current login still equals it. The
+	// backfill runs detached and can outlive a re-bind — if the user rebinds to a
+	// different login mid-flight, the in-flight goroutine carries the OLD login,
+	// and stamping unconditionally would mark the NEW login backfilled when its
+	// history was never seeded, stranding it forever. The login-guarded write
+	// no-ops in that case, leaving the marker NULL so the new login re-seeds on
+	// the next trigger (TFAC-396). No-op (nil error) when no row exists or the
+	// login no longer matches. Admin pool / claims-free, same caller and
+	// rationale as DashboardBackfilledAtSystem. UpsertGitHubIdentity also clears
+	// this marker when the bound login changes (the already-completed case);
+	// together they make a rename always re-backfill the new login.
+	MarkDashboardBackfilledSystem(ctx context.Context, userID, githubBaseURL, login string) error
 
 	// GetJiraIdentitySystem mirrors GetJiraIdentity but routes through
 	// the admin pool in Postgres. The router's inline close-check on

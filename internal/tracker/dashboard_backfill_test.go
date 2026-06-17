@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -71,7 +72,7 @@ func TestBackfillDashboardHistory_SeedsTerminalEntity_NoEvents(t *testing.T) {
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
-	n, err := tr.BackfillDashboardHistory(client, "octocat", []string{"octo/repo"})
+	n, err := tr.BackfillDashboardHistory(ctx, client, "octocat", []string{"octo/repo"})
 	if err != nil {
 		t.Fatalf("BackfillDashboardHistory: %v", err)
 	}
@@ -109,12 +110,46 @@ func TestBackfillDashboardHistory_SeedsTerminalEntity_NoEvents(t *testing.T) {
 	}
 
 	// Idempotent: a second pass finds the entity already present and seeds none.
-	n2, err := tr.BackfillDashboardHistory(client, "octocat", []string{"octo/repo"})
+	n2, err := tr.BackfillDashboardHistory(ctx, client, "octocat", []string{"octo/repo"})
 	if err != nil {
 		t.Fatalf("BackfillDashboardHistory (2nd pass): %v", err)
 	}
 	if n2 != 0 {
 		t.Errorf("2nd pass seeded %d entities; want 0 (already known)", n2)
+	}
+}
+
+// TestBackfillDashboardHistory_HonorsContextCancellation is the TFAC-396 issue-2
+// guard: the backfill runs inside a request-detached goroutine on a bounded
+// deadline, so a cancelled/timed-out context must stop it before it issues
+// further searches or seed writes rather than running the full query set.
+func TestBackfillDashboardHistory_HonorsContextCancellation(t *testing.T) {
+	var graphqlCalls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&graphqlCalls, 1)
+		_, _ = w.Write([]byte(`{"data":{"search":{"nodes":[]}}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	database := newMigratedSQLite(t)
+	stores := sqlitestore.New(database)
+	org := runmode.LocalDefaultOrgID
+	pub := &recordingPublisher{}
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, org)
+	client := ghclient.NewClient(srv.URL, "tok")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled — the loop must bail before the first query
+
+	n, err := tr.BackfillDashboardHistory(ctx, client, "octocat", []string{"octo/repo"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v; want context.Canceled", err)
+	}
+	if n != 0 {
+		t.Errorf("seeded %d entities under a cancelled context; want 0", n)
+	}
+	if got := atomic.LoadInt32(&graphqlCalls); got != 0 {
+		t.Errorf("graphql calls = %d under a cancelled context; want 0 (bail before issuing searches)", got)
 	}
 }
 
