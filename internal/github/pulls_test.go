@@ -284,11 +284,11 @@ func TestGetPRFiles_CapAt1000(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPRFiles cap: %v", err)
 	}
-	if len(got) != maxPRFiles {
-		t.Errorf("expected %d files (cap), got %d", maxPRFiles, len(got))
+	if len(got) != MaxPRFiles {
+		t.Errorf("expected %d files (cap), got %d", MaxPRFiles, len(got))
 	}
-	if callCount != maxPRFiles/100 {
-		t.Errorf("expected %d API calls, got %d", maxPRFiles/100, callCount)
+	if callCount != MaxPRFiles/100 {
+		t.Errorf("expected %d API calls, got %d", MaxPRFiles/100, callCount)
 	}
 }
 

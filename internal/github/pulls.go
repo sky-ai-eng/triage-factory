@@ -196,11 +196,13 @@ type PRFile struct {
 	Patch string `json:"patch,omitempty"`
 }
 
-// maxPRFiles caps the total number of files fetched by GetPRFiles across all pages.
-const maxPRFiles = 1000
+// MaxPRFiles caps the total number of files fetched by GetPRFiles across all
+// pages. Exported so callers can detect a truncated listing (len(files) >=
+// MaxPRFiles means GetPRFiles hit the cap and the result may be incomplete).
+const MaxPRFiles = 1000
 
 // GetPRFiles lists files changed in a PR, including per-file patch content.
-// Paginates up to maxPRFiles total results.
+// Paginates up to MaxPRFiles total results.
 func (c *Client) GetPRFiles(owner, repo string, number int) ([]PRFile, error) {
 	var files []PRFile
 	for page := 1; ; page++ {
@@ -225,7 +227,7 @@ func (c *Client) GetPRFiles(owner, repo string, number int) ([]PRFile, error) {
 			})
 		}
 
-		if len(rawFiles) < 100 || len(files) >= maxPRFiles {
+		if len(rawFiles) < 100 || len(files) >= MaxPRFiles {
 			break
 		}
 	}

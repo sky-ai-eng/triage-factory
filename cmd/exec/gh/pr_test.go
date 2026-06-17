@@ -2,6 +2,7 @@ package gh
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -604,8 +605,8 @@ func TestPersistPRDiff_RejectsSymlinkedScratch(t *testing.T) {
 	}
 }
 
-// TestBuildPRFilesResult verifies the slim `pr files` envelope: totals are
-// summed from the file list, the patch is never carried, binary/rename
+// TestBuildPRFilesResult verifies the slim `pr files` envelope: no PR-level
+// totals (sizing is pr view's job), the patch is never carried, binary/rename
 // metadata is populated, and an empty file list yields an empty (non-null)
 // files array.
 func TestBuildPRFilesResult(t *testing.T) {
@@ -616,15 +617,15 @@ func TestBuildPRFilesResult(t *testing.T) {
 	}
 	got := buildPRFilesResult(files)
 
-	if got.ChangedFiles != 3 {
-		t.Errorf("changed_files = %d, want 3", got.ChangedFiles)
-	}
-	if got.Additions != 13 || got.Deletions != 4 {
-		t.Errorf("totals = +%d -%d, want +13 -4", got.Additions, got.Deletions)
+	if got.Truncated {
+		t.Error("a 3-file PR should not be flagged truncated")
 	}
 	byPath := map[string]fileSummary{}
 	for _, f := range got.Files {
 		byPath[f.Path] = f
+	}
+	if byPath["main.go"].Additions != 12 || byPath["main.go"].Deletions != 3 {
+		t.Errorf("per-file counts wrong: %+v", byPath["main.go"])
 	}
 	if !byPath["image.png"].Binary {
 		t.Error("image.png should be flagged binary")
@@ -633,14 +634,17 @@ func TestBuildPRFilesResult(t *testing.T) {
 		t.Errorf("rename row wrong: %+v", byPath["new.go"])
 	}
 
-	// The patch must never survive into the output. fileSummary has no patch
-	// field, so a round-trip through JSON must not contain any hunk text.
+	// No patch content, and no PR-level total field (changed_files), may
+	// survive into the output. additions/deletions legitimately appear
+	// per-file, so they're not banned — only the top-level rollup is.
 	blob, err := json.Marshal(got)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if strings.Contains(string(blob), "@@") || strings.Contains(string(blob), "patch") {
-		t.Errorf("serialized pr files output must not carry patch content; got:\n%s", blob)
+	for _, banned := range []string{"@@", "\"patch\"", "changed_files"} {
+		if strings.Contains(string(blob), banned) {
+			t.Errorf("pr files output must not contain %q; got:\n%s", banned, blob)
+		}
 	}
 
 	// Empty file list → empty, non-null array (so JSON is [] not null).
@@ -648,8 +652,20 @@ func TestBuildPRFilesResult(t *testing.T) {
 	if empty.Files == nil {
 		t.Error("Files should be an empty slice, not nil")
 	}
-	if empty.ChangedFiles != 0 || empty.Additions != 0 || empty.Deletions != 0 {
-		t.Errorf("empty PR totals should be zero: %+v", empty)
+	if empty.Truncated {
+		t.Error("empty file list should not be flagged truncated")
+	}
+}
+
+// TestBuildPRFilesResult_Truncated checks the cap-detection flag: a listing at
+// the GetPRFiles cap is flagged truncated so the agent falls back to pr diff.
+func TestBuildPRFilesResult_Truncated(t *testing.T) {
+	files := make([]ghclient.PRFile, ghclient.MaxPRFiles)
+	for i := range files {
+		files[i] = ghclient.PRFile{Filename: fmt.Sprintf("f%d.go", i), Status: "modified"}
+	}
+	if got := buildPRFilesResult(files); !got.Truncated {
+		t.Errorf("a listing of MaxPRFiles (%d) should be flagged truncated", ghclient.MaxPRFiles)
 	}
 }
 
