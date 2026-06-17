@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/projectclassify"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -172,6 +173,14 @@ func (a *App) buildRouting() {
 			label = "GitHub"
 		}
 		toast.ErrorTitled(a.wsHub, orgID, label, fmt.Sprintf("Poll failed: %v", err))
+	}
+
+	// Multi-mode only: let the server seed a bound user's trailing-window PR
+	// history on identity bind / first dashboard load (TFAC-396). Local mode
+	// leaves this unwired — its per-cycle Phase 1b backfill owns dashboard
+	// history and is self-healing, so an on-bind seed would be redundant.
+	if runmode.Current() == runmode.ModeMulti {
+		a.srv.SetDashboardBackfiller(a.pollerMgr.BackfillUserDashboard)
 	}
 
 	// Event router — records events, creates/bumps tasks, auto-delegates on

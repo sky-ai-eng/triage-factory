@@ -10,11 +10,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
-	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 )
 
 // dashboardHandler serves the personal dashboard endpoints: PR stats, the
@@ -25,6 +23,21 @@ import (
 type dashboardHandler struct {
 	tx         db.TxRunner
 	ghResolver ghclient.Resolver
+	// backfill kicks a one-shot dashboard-history backfill for (user, host),
+	// fire-and-forget and marker-guarded downstream. Bound to
+	// Server.kickDashboardBackfill; a no-op in local mode (per-cycle Phase 1b
+	// owns history there). Nil-safe via kickBackfill (TFAC-396).
+	backfill func(orgID, userID, login, host string)
+}
+
+// kickBackfill triggers the dashboard-history backfill for a resolved
+// (user, host), if a backfiller is wired and the identity is bound. Cheap and
+// idempotent — the marker downstream prevents re-running for an identity that's
+// already been backfilled, so calling it on every dashboard read is fine.
+func (dh *dashboardHandler) kickBackfill(orgID, userID, login, host string) {
+	if dh.backfill != nil && login != "" && host != "" {
+		dh.backfill(orgID, userID, login, host)
+	}
 }
 
 // handleDashboardStats returns aggregated PR statistics from entity snapshots.
@@ -35,20 +48,29 @@ func (dh *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	var (
-		creds    auth.Credentials
+		host     string
 		username string
 		stats    *domain.DashboardStats
 	)
 	if err := dh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var lerr error
-		creds, lerr = integrations.Load(r.Context(), tx.Secrets, orgID)
-		if lerr != nil || creds.GitHubPAT == "" {
+		// The GitHub host comes from org_settings, not an integration
+		// credential. App-mode orgs (and multi-mode org-PAT orgs) have no
+		// per-user PAT, so the pre-TFAC-396 `creds.GitHubPAT == ""` gate hid
+		// the dashboard entirely even though the poller populates snapshots via
+		// the App token. The only real preconditions are a resolvable GitHub
+		// host and a bound host-scoped identity — neither needs a PAT. Host
+		// resolution mirrors handleGitHubIdentityPAT so the (user, host) key
+		// agrees across surfaces.
+		orgSet, lerr := tx.Orgs.GetSettings(r.Context(), orgID)
+		if lerr != nil {
+			return lerr
+		}
+		ghWeb, okHost := resolveGitHubHost(orgSet.GitHubBaseURL)
+		if !okHost {
 			return nil
 		}
-		// Identity is host-scoped (SKY-396): the relevant login is the
-		// one bound to the org's GitHub host (creds.GitHubURL, which
-		// mirrors org_settings.github_base_url).
-		username, _ = tx.Users.GetGitHubLogin(r.Context(), userID, creds.GitHubURL)
+		host = ghWeb
+		username, _ = tx.Users.GetGitHubLogin(r.Context(), userID, ghWeb)
 		if username == "" {
 			return nil
 		}
@@ -64,6 +86,7 @@ func (dh *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.
 		return
 	}
 
+	dh.kickBackfill(orgID, userID, username, host)
 	writeJSON(w, http.StatusOK, stats)
 }
 
@@ -75,20 +98,24 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	var (
-		creds    auth.Credentials
+		host     string
 		username string
 		prs      []domain.PRSummaryRow
 	)
 	if err := dh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var lerr error
-		creds, lerr = integrations.Load(r.Context(), tx.Secrets, orgID)
-		if lerr != nil || creds.GitHubPAT == "" {
+		// Host from org_settings, not a PAT credential — see handleDashboardStats
+		// for the TFAC-396 rationale. App-mode / org-PAT orgs have no PAT but do
+		// have populated snapshots and a bound identity.
+		orgSet, lerr := tx.Orgs.GetSettings(r.Context(), orgID)
+		if lerr != nil {
+			return lerr
+		}
+		ghWeb, okHost := resolveGitHubHost(orgSet.GitHubBaseURL)
+		if !okHost {
 			return nil
 		}
-		// Identity is host-scoped (SKY-396): the relevant login is the
-		// one bound to the org's GitHub host (creds.GitHubURL, which
-		// mirrors org_settings.github_base_url).
-		username, _ = tx.Users.GetGitHubLogin(r.Context(), userID, creds.GitHubURL)
+		host = ghWeb
+		username, _ = tx.Users.GetGitHubLogin(r.Context(), userID, ghWeb)
 		if username == "" {
 			return nil
 		}
@@ -103,6 +130,7 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusOK, []domain.PRSummaryRow{})
 		return
 	}
+	dh.kickBackfill(orgID, userID, username, host)
 	if prs == nil {
 		prs = []domain.PRSummaryRow{}
 	}

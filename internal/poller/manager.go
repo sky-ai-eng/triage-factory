@@ -58,6 +58,14 @@ type Manager struct {
 	// Restart can briefly overlap an old and a new poll goroutine.
 	dueMu    sync.Mutex
 	nextPoll map[string]time.Time
+
+	// dashboardBackfillInflight collapses concurrent dashboard-history
+	// backfill kicks for the same (org, user, host) within this process so a
+	// burst of dashboard opens triggers at most one search pass (TFAC-396).
+	// Keys are released when the backfill finishes; the durable
+	// dashboard_backfilled_at marker is what prevents re-running across
+	// processes / restarts. Zero value is ready to use.
+	dashboardBackfillInflight sync.Map
 }
 
 func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, resolver ghclient.Resolver) *Manager {

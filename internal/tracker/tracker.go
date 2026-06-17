@@ -441,20 +441,12 @@ func (t *Tracker) discoverGitHub(client *ghclient.Client, username string, repos
 
 	// Phase 1b: merged/closed dashboard backfill (local/PAT-only). Seeds
 	// recent-history entities via user-perspective GraphQL search. App tokens
-	// have no "me", so this is skipped when username is empty.
+	// have no "me", so this is skipped when username is empty; multi-mode
+	// instead backfills per bound user via Tracker.BackfillDashboardHistory.
+	// Query construction is shared with that path (dashboardBackfillQueries) so
+	// both search for exactly the same history.
 	if username != "" {
-		since := time.Now().AddDate(0, 0, -30).Format("2006-01-02")
-		bases := []string{
-			fmt.Sprintf("is:pr is:merged author:%s merged:>=%s", username, since),
-			fmt.Sprintf("is:pr is:merged reviewed-by:%s merged:>=%s", username, since),
-			fmt.Sprintf("is:pr is:closed is:unmerged author:%s closed:>=%s", username, since),
-			fmt.Sprintf("is:pr is:closed is:unmerged reviewed-by:%s closed:>=%s", username, since),
-		}
-		var queries []string
-		for _, base := range bases {
-			queries = append(queries, scopedQueries(base, repos)...)
-		}
-		for _, q := range queries {
+		for _, q := range dashboardBackfillQueries(username, repos) {
 			prs, err := client.DiscoverPRs(q, 50)
 			if err != nil {
 				log.Printf("[tracker] dashboard backfill query failed: %v (query: %s)", err, q)

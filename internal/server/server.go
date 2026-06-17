@@ -122,6 +122,12 @@ type Server struct {
 	onGitHubChanged func(orgID string) // GitHub creds/repos changed — full restart + re-profile
 	onJiraChanged   func(orgID string) // Jira config changed — restart Jira poller only
 	scorerTrigger   func(orgID string) // invoked after non-poll task creation (e.g. carry-over) to kick the per-org scorer immediately
+	// dashboardBackfill seeds a bound user's trailing-window PR history into the
+	// entity store so the personal dashboard isn't blank for history that
+	// predates tracking (TFAC-396). Multi-mode only — wired to the poller's
+	// BackfillUserDashboard; nil in local mode, where per-cycle Phase 1b owns
+	// history. kickDashboardBackfill runs it fire-and-forget, marker-guarded.
+	dashboardBackfill func(ctx context.Context, orgID, userID, login, host string) error
 
 	// bus is the in-process event bus. The GitHub webhook receiver
 	// publishes verified deliveries here; nil until SetEventBus runs
@@ -692,7 +698,7 @@ func (s *Server) routes() {
 	// Treated as GET-equivalent — no CSRF wrap.
 	s.api("GET /api/ws", s.handleWS)
 
-	dh := &dashboardHandler{tx: s.tx, ghResolver: s.ghResolver}
+	dh := &dashboardHandler{tx: s.tx, ghResolver: s.ghResolver, backfill: s.kickDashboardBackfill}
 	s.api("GET /api/dashboard/stats", dh.handleDashboardStats)
 	s.api("GET /api/dashboard/prs", dh.handleDashboardPRs)
 	s.api("GET /api/dashboard/prs/{number}/status", dh.handleDashboardPRStatus)
@@ -1018,6 +1024,34 @@ func (s *Server) SetOnJiraChanged(fn func(orgID string)) {
 // next poll cycle.
 func (s *Server) SetScorerTrigger(fn func(orgID string)) {
 	s.scorerTrigger = fn
+}
+
+// SetDashboardBackfiller registers the per-user dashboard-history backfill
+// (the poller's BackfillUserDashboard). Wired in multi mode only — local mode
+// leaves it nil and relies on the per-cycle Phase 1b backfill, so
+// kickDashboardBackfill no-ops there (TFAC-396).
+func (s *Server) SetDashboardBackfiller(fn func(ctx context.Context, orgID, userID, login, host string) error) {
+	s.dashboardBackfill = fn
+}
+
+// kickDashboardBackfill fires a one-shot dashboard-history backfill for a bound
+// (user, host) and returns immediately — the work runs detached so it never
+// blocks the request (identity bind or dashboard read) that triggered it. The
+// backfiller is marker-guarded downstream, so repeated kicks for an
+// already-backfilled identity are cheap no-ops. No-op when unwired (local mode)
+// or when the identity isn't fully resolved.
+func (s *Server) kickDashboardBackfill(orgID, userID, login, host string) {
+	fn := s.dashboardBackfill
+	if fn == nil || login == "" || host == "" {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := fn(ctx, orgID, userID, login, host); err != nil {
+			log.Printf("[dashboard] backfill org=%s user=%s host=%s: %v", orgID, userID, host, err)
+		}
+	}()
 }
 
 // SetEventBus wires the in-process event bus so the GitHub webhook

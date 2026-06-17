@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -136,6 +137,23 @@ type UsersStore interface {
 	// RLS story, and none is needed today. SQLite collapses to one
 	// connection.
 	UserIDsForGitHubLoginSystem(ctx context.Context, githubBaseURL, login string) ([]string, error)
+
+	// DashboardBackfilledAtSystem returns when the one-shot dashboard-history
+	// backfill last completed for this (user, host) GitHub identity, or nil
+	// when it hasn't run (NULL marker) or no identity row exists. It gates the
+	// multi-mode backfill so a re-poll or repeated dashboard opens don't
+	// re-fire the per-installation search burst (TFAC-396). Admin pool /
+	// claims-free: the only caller is the background backfill worker, which
+	// runs detached from any request and carries no JWT-claims context.
+	DashboardBackfilledAtSystem(ctx context.Context, userID, githubBaseURL string) (*time.Time, error)
+
+	// MarkDashboardBackfilledSystem stamps dashboard_backfilled_at = now() for
+	// this (user, host) identity, recording that the backfill completed so it
+	// won't run again for this login. No-op (nil error) when no row exists.
+	// Admin pool / claims-free, same caller and rationale as
+	// DashboardBackfilledAtSystem. UpsertGitHubIdentity clears this marker when
+	// the bound login changes, so a rename re-backfills the new login.
+	MarkDashboardBackfilledSystem(ctx context.Context, userID, githubBaseURL string) error
 
 	// GetJiraIdentitySystem mirrors GetJiraIdentity but routes through
 	// the admin pool in Postgres. The router's inline close-check on

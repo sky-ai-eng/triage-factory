@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -47,7 +48,14 @@ func (s *usersStore) UpsertGitHubIdentity(ctx context.Context, userID, githubBas
 			login       = excluded.login,
 			source      = excluded.source,
 			verified_at = excluded.verified_at,
-			updated_at  = CURRENT_TIMESTAMP
+			updated_at  = CURRENT_TIMESTAMP,
+			-- A rename / re-bind to a different login invalidates the prior
+			-- login's dashboard backfill: clear the marker so the new login's
+			-- history is re-seeded (TFAC-396). A no-op re-bind (same login)
+			-- keeps the marker, so it never re-fires the search burst.
+			dashboard_backfilled_at = CASE
+				WHEN user_github_identities.login <> excluded.login THEN NULL
+				ELSE user_github_identities.dashboard_backfilled_at END
 	`, userID, db.NormalizeGitHubHost(githubBaseURL), login, source)
 	if err != nil {
 		return fmt.Errorf("upsert user_github_identities: %w", err)
@@ -129,6 +137,34 @@ func (s *usersStore) UserIDsForJiraAccountSystem(ctx context.Context, jiraBaseUR
 
 func (s *usersStore) GetGitHubLoginSystem(ctx context.Context, userID, githubBaseURL string) (string, error) {
 	return s.GetGitHubLogin(ctx, userID, githubBaseURL)
+}
+
+func (s *usersStore) DashboardBackfilledAtSystem(ctx context.Context, userID, githubBaseURL string) (*time.Time, error) {
+	var at sql.NullTime
+	err := s.q.QueryRowContext(ctx,
+		`SELECT dashboard_backfilled_at FROM user_github_identities WHERE user_id = ? AND github_base_url = ?`,
+		userID, db.NormalizeGitHubHost(githubBaseURL),
+	).Scan(&at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read user_github_identities.dashboard_backfilled_at: %w", err)
+	}
+	if !at.Valid {
+		return nil, nil
+	}
+	return &at.Time, nil
+}
+
+func (s *usersStore) MarkDashboardBackfilledSystem(ctx context.Context, userID, githubBaseURL string) error {
+	if _, err := s.q.ExecContext(ctx,
+		`UPDATE user_github_identities SET dashboard_backfilled_at = CURRENT_TIMESTAMP WHERE user_id = ? AND github_base_url = ?`,
+		userID, db.NormalizeGitHubHost(githubBaseURL),
+	); err != nil {
+		return fmt.Errorf("mark user_github_identities.dashboard_backfilled_at: %w", err)
+	}
+	return nil
 }
 
 func (s *usersStore) UserIDsForGitHubLoginSystem(ctx context.Context, githubBaseURL, login string) ([]string, error) {
