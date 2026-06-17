@@ -182,11 +182,14 @@ func (c *Client) GetPR(owner, repo string, number int, verbose bool) (*PRView, e
 
 // PRFile is a file changed in a PR.
 type PRFile struct {
-	Filename  string `json:"filename"`
-	Status    string `json:"status"` // added, modified, removed, renamed
-	Additions int    `json:"additions"`
-	Deletions int    `json:"deletions"`
-	Patch     string `json:"patch,omitempty"` // unified diff hunks; absent for binary files
+	Filename string `json:"filename"`
+	Status   string `json:"status"` // added, modified, removed, renamed
+	// PreviousFilename is the pre-rename path; GitHub sets it only when
+	// Status is "renamed". Empty for every other status.
+	PreviousFilename string `json:"previous_filename,omitempty"`
+	Additions        int    `json:"additions"`
+	Deletions        int    `json:"deletions"`
+	Patch            string `json:"patch,omitempty"` // unified diff hunks; absent for binary files
 }
 
 // maxPRFiles caps the total number of files fetched by GetPRFiles across all pages.
@@ -209,11 +212,12 @@ func (c *Client) GetPRFiles(owner, repo string, number int) ([]PRFile, error) {
 
 		for _, f := range rawFiles {
 			files = append(files, PRFile{
-				Filename:  strVal(f, "filename"),
-				Status:    strVal(f, "status"),
-				Additions: intVal(f, "additions"),
-				Deletions: intVal(f, "deletions"),
-				Patch:     strVal(f, "patch"),
+				Filename:         strVal(f, "filename"),
+				Status:           strVal(f, "status"),
+				PreviousFilename: strVal(f, "previous_filename"),
+				Additions:        intVal(f, "additions"),
+				Deletions:        intVal(f, "deletions"),
+				Patch:            strVal(f, "patch"),
 			})
 		}
 

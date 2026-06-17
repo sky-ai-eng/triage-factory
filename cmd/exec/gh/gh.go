@@ -10,7 +10,13 @@ import (
 // HelpText is the help output for gh commands, shared with the top-level exec help.
 const HelpText = `GitHub PR Commands:
   gh pr view <number> [--repo o/r] [-v]                  PR details + reviews + comments
-  gh pr diff <number> [--repo o/r] [--file <path>]       Raw diff (optionally per-file)
+  gh pr diff <number> [--repo o/r] [--file <path>] [--stdout]
+                                                          Persists the diff to
+                                                          ./_scratch/pr-diffs/<owner>__<repo>__<number>/<sha>/
+                                                          (full.diff + manifest.json) and prints the
+                                                          manifest JSON. Use Read/Grep on full.diff.
+                                                          --file <path>: print one file's diff inline.
+                                                          --stdout: print the whole diff inline.
   gh pr files <number> [--repo o/r]                       List changed files
   gh pr thread-view <number> <comment_id> [--page N]      Comment thread with replies
   gh pr review-view <review_id> --pr <N> [--repo o/r] [-v]  Expand a review + inline comments
