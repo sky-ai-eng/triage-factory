@@ -3,7 +3,6 @@ package github
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -531,13 +530,15 @@ func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
 			// Pagination truncation watchdog. Do not raise caps without
 			// re-running the node-budget math in prFullFragment's comment.
 			if commit.CheckSuites.PageInfo.HasNextPage {
-				log.Printf("[github] WARN: check suites truncated at 20 for %s#%d — some CI state may be missing from snapshot", snap.Repo, snap.Number)
+				githubLog.Warn("check suites truncated; some CI state may be missing from snapshot",
+					"repo", snap.Repo, "number", snap.Number, "cap", 20)
 			}
 
 			var raw []domain.CheckRun
 			for _, suite := range commit.CheckSuites.Nodes {
 				if suite.CheckRuns.PageInfo.HasNextPage {
-					log.Printf("[github] WARN: check runs truncated at 50 within a suite for %s#%d — some CI state may be missing from snapshot", snap.Repo, snap.Number)
+					githubLog.Warn("check runs within a suite truncated; some CI state may be missing from snapshot",
+						"repo", snap.Repo, "number", snap.Number, "cap", 50)
 				}
 				var workflowRunID int64
 				if suite.WorkflowRun != nil {
@@ -568,7 +569,8 @@ func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
 	// truncation so a future CODEOWNERS-spam case that trips the cap is
 	// visible rather than manifesting as missing queue items.
 	if pr.ReviewRequests.PageInfo.HasNextPage {
-		log.Printf("[github] WARN: review requests truncated at 100 for %s#%d — reviewer detection may miss users past the cap", snap.Repo, snap.Number)
+		githubLog.Warn("review requests truncated; reviewer detection may miss users past the cap",
+			"repo", snap.Repo, "number", snap.Number, "cap", 100)
 	}
 	for _, rr := range pr.ReviewRequests.Nodes {
 		if login := rr.RequestedReviewer.Login; login != "" {
