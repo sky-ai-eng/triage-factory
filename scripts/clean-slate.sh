@@ -15,6 +15,12 @@ echo "Cleaning Triage Factory local state..."
 rm -f ~/.triagefactory/triagefactory.db ~/.triagefactory/triagefactory.db-wal ~/.triagefactory/triagefactory.db-shm
 echo "  removed database"
 
+# Encrypted secret bag — the headless (no-keychain) secret backend's store.
+# Desktop installs keep secrets in the OS keychain (swept below); headless
+# installs keep them here. Harmless to remove either way.
+rm -f ~/.triagefactory/secrets.enc
+echo "  removed encrypted secret bag (if present)"
+
 # Config (settings now live in the DB above; this only removes a stale
 # pre-DB config.yaml left behind by ancient installs).
 if [ -f ~/.triagefactory/config.yaml ]; then
@@ -69,10 +75,11 @@ if [ -d ~/.triagefactory/repos ]; then
   fi
 fi
 
-# Keychain — keep this list in sync with auth.Clear() in
-# internal/auth/keychain.go (the canonical list, used by `triagefactory
-# uninstall`). Drift between the two means stale entries linger after
-# clean-slate; jira_display_name was the most recent miss.
+# Keychain — keep this list in sync with integrations.AllKeys() in
+# internal/integrations/creds.go (the canonical list `triagefactory
+# uninstall` sweeps via auth.SweepKeychain). Drift between the two means
+# stale entries linger after clean-slate; jira_display_name was the most
+# recent miss.
 for key in github_url github_pat github_username jira_url jira_pat jira_display_name; do
   security delete-generic-password -s triagefactory -a "$key" 2>/dev/null && echo "  removed keychain: $key" || true
 done

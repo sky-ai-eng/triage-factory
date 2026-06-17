@@ -8,10 +8,11 @@ import (
 )
 
 // secretStore is the SQLite-mode impl of db.SecretStore. Local mode
-// keeps long-lived credentials in the OS keychain (no DB row), so the
-// store delegates each Put/Get/Delete — and the per-user
-// PutUser/GetUser/DeleteUser — to internal/auth's keyed keychain
-// helpers. The per-user methods namespace their keychain key
+// keeps long-lived credentials outside the DB — in the OS keychain, or
+// an encrypted file when no keychain is available (internal/auth picks
+// the backend) — so the store delegates each Put/Get/Delete and the
+// per-user PutUser/GetUser/DeleteUser to internal/auth's keyed secret
+// helpers. The per-user methods namespace their key
 // ("user/<userID>/<key>") so they don't collide with per-org keys in
 // the single local bag; local mode is N=1 (one user), so there's no
 // cross-user RLS to enforce — that gate only exists in the Postgres impl.
@@ -68,16 +69,16 @@ func (*secretStore) Delete(_ context.Context, orgID, key string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
-	// The keychain helper doesn't report whether a row was actually
-	// removed, so probe before deleting to give callers the (ok bool)
-	// contract the interface promises. Use HasKeychainEntry rather
-	// than GetSecret so the probe bypasses the TRIAGE_FACTORY_* env
-	// overlay — DeleteSecret can't remove env vars, so reporting
+	// The auth secret helpers (keychain or encrypted-file backend) don't
+	// report whether a row was actually removed, so probe before deleting
+	// to give callers the (ok bool) contract the interface promises. Use
+	// HasStoredSecret rather than GetSecret so the probe bypasses the
+	// TRIAGE_FACTORY_* env overlay — DeleteSecret can't remove env vars, so reporting
 	// ok=true based on an env-supplied value would lie to the caller
 	// (subsequent Get would still return the env value). Matches the
 	// Postgres impl's behavior of returning ok=false when no row was
 	// removed.
-	if !auth.HasKeychainEntry(key) {
+	if !auth.HasStoredSecret(key) {
 		return false, nil
 	}
 	if err := auth.DeleteSecret(key); err != nil {
@@ -138,13 +139,13 @@ func (*secretStore) DeleteUser(_ context.Context, orgID, userID, key string) (bo
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
-	// Same env-overlay-aware probe as Delete: HasKeychainEntry bypasses
+	// Same env-overlay-aware probe as Delete: HasStoredSecret bypasses
 	// the TRIAGE_FACTORY_* overlay so DeleteUser reports ok=false when
 	// only an env-supplied value exists (DeleteSecret can't remove env
 	// vars). Per-user keys aren't in the well-known envKeys set today,
 	// but routing through the same probe keeps the contract identical.
 	uk := userKeychainKey(userID, key)
-	if !auth.HasKeychainEntry(uk) {
+	if !auth.HasStoredSecret(uk) {
 		return false, nil
 	}
 	if err := auth.DeleteSecret(uk); err != nil {
