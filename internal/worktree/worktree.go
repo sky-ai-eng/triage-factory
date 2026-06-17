@@ -491,11 +491,25 @@ func makeWorktreeDir(runID string) (string, error) {
 	return wtDir, nil
 }
 
+// gitBaseEnv is the parent environment every git subprocess in this package
+// runs with: the process environment plus GIT_TERMINAL_PROMPT=0. Disabling the
+// prompt is essential on a headless server — git can never satisfy an
+// interactive "Username for 'https://...'" prompt, so without this a missing or
+// invalid credential would block on (or fail opaquely against) /dev/tty instead
+// of returning the clear "terminal prompts disabled" error fast. Crucially, the
+// setting is inherited by any child git process too — including the lazy
+// promisor fetch git spawns inside `worktree add` / `reset --hard` on a blobless
+// bare — so a deferred-blob fetch that can't authenticate fails fast as well.
+func gitBaseEnv() []string {
+	return append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+}
+
 func gitOutputCtx(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	cmd.Env = gitBaseEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctx.Err() != nil {
@@ -516,15 +530,20 @@ func gitRunCtx(ctx context.Context, dir string, args ...string) error {
 
 // gitRunCtxAuth runs git, injecting auth's extraHeader into the subprocess
 // environment when auth is active (composed at the next free GIT_CONFIG index
-// — see gitConfigEnviron). An inert auth leaves the inherited environment
-// untouched, identical to gitRunCtx.
+// — see gitConfigEnviron). The env is always set, layered on gitBaseEnv() so
+// GIT_TERMINAL_PROMPT=0 reaches the subprocess (and the lazy promisor fetch it
+// spawns) whether or not auth is active; an inert auth uses that base alone,
+// behaving identically to before aside from the now-explicit prompt disable.
 func gitRunCtxAuth(ctx context.Context, dir string, auth CloneAuth, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	if env, ok := auth.gitConfigEnviron(os.Environ()); ok {
+	base := gitBaseEnv()
+	if env, ok := auth.gitConfigEnviron(base); ok {
 		cmd.Env = env
+	} else {
+		cmd.Env = base
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {

@@ -186,7 +186,13 @@ func captureUncommitted(ctx context.Context, wtPath string) ([]byte, error) {
 // owner/repo locate the bare; cloneURL seeds it only when the bare is missing
 // on this host (a fresh executor). In the local reboot / `/tmp`-wipe case the
 // bare survives under the persistent state-root, so cloneURL goes unused.
-func RestoreWorkspaceGit(ctx context.Context, owner, repo, wtDir string, d *GitDelta, cloneURL string) error {
+//
+// auth is the host-side HTTPS credential (inert in local/SSH/public). It
+// authenticates both the on-demand re-clone of a missing bare AND the lazy
+// promisor fetch the worktree-add checkout triggers on the blobless bare —
+// without it, a fresh-executor resume of a private repo fails at either step
+// with an anonymous "could not read Username" / promisor fetch error.
+func RestoreWorkspaceGit(ctx context.Context, owner, repo, wtDir string, d *GitDelta, cloneURL string, auth CloneAuth) error {
 	if d == nil {
 		return fmt.Errorf("restore: nil git delta")
 	}
@@ -207,7 +213,7 @@ func RestoreWorkspaceGit(ctx context.Context, owner, repo, wtDir string, d *GitD
 		if cloneURL == "" {
 			return fmt.Errorf("restore: bare %s missing and no clone URL to seed it", bareDir)
 		}
-		if _, err := EnsureBareClone(ctx, owner, repo, cloneURL); err != nil {
+		if _, err := EnsureBareClone(ctx, owner, repo, cloneURL, WithCloneAuth(auth)); err != nil {
 			return fmt.Errorf("restore: seed bare: %w", err)
 		}
 	default:
@@ -262,11 +268,15 @@ func RestoreWorkspaceGit(ctx context.Context, owner, repo, wtDir string, d *GitD
 		if err := os.MkdirAll(filepath.Dir(wtDir), 0o755); err != nil {
 			return fmt.Errorf("mkdir runs parent: %w", err)
 		}
+		// gitRunCtxAuth on both adds: checking out onto the blobless bare
+		// materializes deferred blobs via origin's promisor remote, so the lazy
+		// fetch carries the credential on a private repo. The bundle fetch and
+		// branch-create above stay unauth (local file / no network).
 		if branch != "" {
-			if err := gitRunCtx(ctx, bareDir, "worktree", "add", wtDir, branch); err != nil {
+			if err := gitRunCtxAuth(ctx, bareDir, auth, "worktree", "add", wtDir, branch); err != nil {
 				return fmt.Errorf("worktree add: %w", err)
 			}
-		} else if err := gitRunCtx(ctx, bareDir, "worktree", "add", "--detach", wtDir, d.Head); err != nil {
+		} else if err := gitRunCtxAuth(ctx, bareDir, auth, "worktree", "add", "--detach", wtDir, d.Head); err != nil {
 			// No branch: check out the exact commit detached, mirroring the
 			// snapshotted detached HEAD.
 			return fmt.Errorf("worktree add --detach: %w", err)
@@ -359,8 +369,14 @@ func gitCapture(ctx context.Context, dir string, env []string, args ...string) (
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	// Disable interactive prompts here too (hygiene — this capture path is
+	// local-only: rev-parse, bundle, diff against the bare/worktree). When the
+	// caller supplied an env (a throwaway GIT_INDEX_FILE), extend it; otherwise
+	// fall back to the package base env.
 	if env != nil {
-		cmd.Env = env
+		cmd.Env = append(env, "GIT_TERMINAL_PROMPT=0")
+	} else {
+		cmd.Env = gitBaseEnv()
 	}
 	var out, errb bytes.Buffer
 	cmd.Stdout = &out

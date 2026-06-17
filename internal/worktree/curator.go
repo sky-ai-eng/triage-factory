@@ -138,7 +138,12 @@ func EnsureCuratorWorktree(ctx context.Context, owner, repo, branch, projectDir 
 	wtInfo, err := os.Stat(wtDir)
 	switch {
 	case err == nil && wtInfo.IsDir():
-		if err := gitRunCtx(ctx, wtDir, "reset", "--hard", remoteRef); err != nil {
+		// gitRunCtxAuth (not gitRunCtx): reset --hard on a blobless checkout
+		// materializes deferred blobs via the bare's origin promisor remote, so
+		// the lazy fetch needs the host-scoped credential on a private repo. The
+		// reset runs in wtDir, but the worktree shares the bare's origin, so the
+		// extraHeader still applies.
+		if err := gitRunCtxAuth(ctx, wtDir, auth, "reset", "--hard", remoteRef); err != nil {
 			return "", fmt.Errorf("reset --hard %s: %w", branch, err)
 		}
 		// Also nuke untracked files so a previous dispatch's
@@ -169,7 +174,9 @@ func EnsureCuratorWorktree(ctx context.Context, owner, repo, branch, projectDir 
 	if err := os.MkdirAll(filepath.Dir(wtDir), 0o755); err != nil {
 		return "", fmt.Errorf("mkdir parent: %w", err)
 	}
-	if err := gitRunCtx(ctx, bareDir, "worktree", "add", "-B", branch, wtDir, remoteRef); err != nil {
+	// gitRunCtxAuth so the first materialization's lazy promisor fetch (deferred
+	// blobs from the blobless bare) authenticates on a private repo.
+	if err := gitRunCtxAuth(ctx, bareDir, auth, "worktree", "add", "-B", branch, wtDir, remoteRef); err != nil {
 		return "", fmt.Errorf("worktree add %s/%s %s: %w", owner, repo, branch, err)
 	}
 	log.Printf("[worktree] curator worktree %s @ %s/%s %s", wtDir, owner, repo, branch)

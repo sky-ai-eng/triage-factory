@@ -217,7 +217,7 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 	// Rebuild at the deterministic, host-local run-root for this key (equal to
 	// run.WorktreePath on the same host; a fresh path after landing elsewhere).
 	wtDir := worktree.RunRoot(keyID)
-	if err := s.rehydrateFromSnapshot(ctx, owner, repo, cloneURL, wtDir, rc); err != nil {
+	if err := s.rehydrateFromSnapshot(ctx, orgID, owner, repo, cloneURL, wtDir, rc); err != nil {
 		return "", err
 	}
 	if wtDir != run.WorktreePath {
@@ -246,7 +246,7 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 // RestoreWorkspaceGit runs below), then moved into place with one rename. This
 // mirrors the snapshot side's temp-file staging so neither direction buffers a
 // large workspace whole.
-func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, owner, repo, cloneURL, wtDir string, r io.Reader) error {
+func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, orgID, owner, repo, cloneURL, wtDir string, r io.Reader) error {
 	var man snapshotManifest
 	var bundle, patch, session []byte
 
@@ -319,7 +319,15 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, owner, repo, cloneU
 
 	if man.HasGit {
 		delta := &worktree.GitDelta{Branch: man.Branch, Head: man.Head, Bundle: bundle, Patch: patch}
-		if err := worktree.RestoreWorkspaceGit(ctx, owner, repo, wtDir, delta, cloneURL); err != nil {
+		// Mint the host-side clone credential for this repo's owner, mirroring the
+		// PR-setup path (delegate.go). resolveCloneToken runs through the tiered
+		// resolver (App installation token or org PAT), and CloneAuthFor no-ops on
+		// an SSH URL / empty token, so this is inert in local SSH mode and for
+		// public clones — only a multi-mode HTTPS private repo gets the token,
+		// which authenticates both the on-demand re-clone and the checkout's lazy
+		// promisor fetch inside RestoreWorkspaceGit.
+		auth := worktree.CloneAuthFor(cloneURL, s.resolveCloneToken(ctx, orgID, owner))
+		if err := worktree.RestoreWorkspaceGit(ctx, owner, repo, wtDir, delta, cloneURL, auth); err != nil {
 			return fmt.Errorf("rehydrate: restore git: %w", err)
 		}
 	} else if err := os.MkdirAll(wtDir, 0o700); err != nil {

@@ -104,7 +104,13 @@ func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneUR
 	// detached. `git worktree add <path> refs/heads/<name>` treats
 	// the ref path as a commit-ish and detaches; `git worktree add
 	// <path> <name>` resolves it as a branch and attaches.
-	if err := gitRunCtx(ctx, bareDir, "worktree", "add", wtDir, localBranch); err != nil {
+	//
+	// Routed through gitRunCtxAuth (not gitRunCtx) so the blobless bare's
+	// lazy promisor fetch — git materializes the working-tree blobs the
+	// partial clone deferred during checkout — carries the host-scoped
+	// credential. Without it that fetch is anonymous and fails on a private
+	// repo. origin is the upstream just cloned/fetched with this same auth.
+	if err := gitRunCtxAuth(ctx, bareDir, auth, "worktree", "add", wtDir, localBranch); err != nil {
 		// A cancelled/killed add (ctx cancel when the task closes mid-setup)
 		// leaves wtDir half-built and the bare's worktrees/<runID>/locked=
 		// initializing marker behind. Plain `worktree prune` skips locked

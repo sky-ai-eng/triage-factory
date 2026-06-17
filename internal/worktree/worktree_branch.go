@@ -86,13 +86,16 @@ func createBranchWorktreeAt(ctx context.Context, owner, repo, cloneURL, baseBran
 
 	// Create worktree — reuse the branch if it already exists (re-delegation),
 	// otherwise create a new one off the just-fetched remote-tracking ref.
+	// Both routed through gitRunCtxAuth so the blobless bare's lazy promisor
+	// fetch (working-tree blobs the partial clone deferred) authenticates
+	// against origin on a private repo; auth is inert for local/public clones.
 	if branchExists(bareDir, featureBranch) {
 		// Branch exists from a previous run — check it out
-		if err := gitRunCtx(ctx, bareDir, "worktree", "add", wtDir, featureBranch); err != nil {
+		if err := gitRunCtxAuth(ctx, bareDir, auth, "worktree", "add", wtDir, featureBranch); err != nil {
 			return "", fmt.Errorf("worktree add existing branch: %w", err)
 		}
 	} else {
-		if err := gitRunCtx(ctx, bareDir, "worktree", "add", "-b", featureBranch, wtDir, remoteRef); err != nil {
+		if err := gitRunCtxAuth(ctx, bareDir, auth, "worktree", "add", "-b", featureBranch, wtDir, remoteRef); err != nil {
 			return "", fmt.Errorf("worktree add new branch: %w", err)
 		}
 	}
