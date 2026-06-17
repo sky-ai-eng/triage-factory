@@ -87,6 +87,27 @@ func TestDashboardPRs_NoBoundIdentity_ReturnsEmpty(t *testing.T) {
 	}
 }
 
+// TestDashboardPRs_LoginLookupError_Returns5xx pins the review finding: a real
+// DB failure resolving the user's GitHub login must surface as a 5xx, not a
+// silently-empty dashboard. Only a missing row (-> "", nil) should degrade to
+// the empty response; an actual error must propagate. handleDashboardStats
+// shares the identical fix. Dropping user_github_identities forces the
+// GetGitHubLogin SELECT to error while org-settings + host resolution still
+// succeed, so the handler reaches (and must not swallow) the login lookup.
+func TestDashboardPRs_LoginLookupError_Returns5xx(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+
+	if _, err := s.db.ExecContext(context.Background(), `DROP TABLE user_github_identities`); err != nil {
+		t.Fatalf("drop user_github_identities: %v", err)
+	}
+
+	rec := doJSON(t, s, "GET", "/api/dashboard/prs", nil)
+	if rec.Code < 500 {
+		t.Fatalf("got %d, want 5xx (a DB error must not degrade to an empty dashboard); body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 // dashboardTestHost returns the GitHub web host the dashboard handler resolves
 // for the org, so a test can bind identity under the same (user, host) key the
 // handler will look up.

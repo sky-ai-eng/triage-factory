@@ -70,7 +70,13 @@ func (dh *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.
 			return nil
 		}
 		host = ghWeb
-		username, _ = tx.Users.GetGitHubLogin(r.Context(), userID, ghWeb)
+		// Propagate a real lookup failure as a 5xx; only a missing row (->
+		// "", nil) degrades to the empty-dashboard response below. Swallowing
+		// the error would turn a DB fault into a misleading empty dashboard.
+		username, lerr = tx.Users.GetGitHubLogin(r.Context(), userID, ghWeb)
+		if lerr != nil {
+			return lerr
+		}
 		if username == "" {
 			return nil
 		}
@@ -115,7 +121,13 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 			return nil
 		}
 		host = ghWeb
-		username, _ = tx.Users.GetGitHubLogin(r.Context(), userID, ghWeb)
+		// Propagate a real lookup failure as a 5xx; only a missing row (->
+		// "", nil) degrades to the empty-dashboard response below. See
+		// handleDashboardStats.
+		username, lerr = tx.Users.GetGitHubLogin(r.Context(), userID, ghWeb)
+		if lerr != nil {
+			return lerr
+		}
 		if username == "" {
 			return nil
 		}

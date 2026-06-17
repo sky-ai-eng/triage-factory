@@ -40,6 +40,13 @@ func (m *Manager) BackfillUserDashboard(ctx context.Context, orgID, userID, logi
 		return nil
 	}
 
+	// Singleflight key is per (org, user, host); the marker is per (user, host).
+	// The org is in the key deliberately: each org has its own entity store, so a
+	// backfill for the same user in org A vs org B seeds different rows and must
+	// not be collapsed. The wider marker is harmless — the marker gate below and
+	// FindOrCreate keep cross-org concurrency idempotent; the only cost is a
+	// redundant search burst if the same user opens two orgs' dashboards at once,
+	// which is rare and bounded by the marker on each org's next read.
 	key := orgID + "\x00" + userID + "\x00" + host
 	if _, inflight := m.dashboardBackfillInflight.LoadOrStore(key, struct{}{}); inflight {
 		return nil
@@ -60,6 +67,12 @@ func (m *Manager) BackfillUserDashboard(ctx context.Context, orgID, userID, logi
 	if len(repos) == 0 {
 		// Nothing configured to scope a search to — mark done so an empty org
 		// doesn't retry the (no-op) backfill on every dashboard open.
+		//
+		// Consequence: if repos are added later without a login change, the marker
+		// stays set and history is NOT seeded for already-bound users (only new
+		// binds / renames clear it). Acceptable for now — organic forward tracking
+		// fills the window from the add onward; a future "re-seed history" action
+		// would clear the marker explicitly to recover the pre-add window.
 		return m.users.MarkDashboardBackfilledSystem(ctx, userID, host, login)
 	}
 
