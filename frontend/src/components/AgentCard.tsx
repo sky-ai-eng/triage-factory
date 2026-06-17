@@ -13,13 +13,19 @@ import {
   isFailedStatus,
 } from '../lib/runStatus'
 import { AttentionRow, CardPlane, EventTag, HudHeader, SourceTag } from './board/cardChrome'
-import { compactNum, runGlow, TONE_TEXT, type StepState } from './board/cardStyle'
+import { compactNum, runGlow, TONE_TEXT, type Glow, type StepState } from './board/cardStyle'
+import { PermissionPrompt } from './permissions/PermissionPrompt'
+import type { PendingPermission, PermissionDecisionInput } from '../lib/permissions'
 
 interface Props {
   task: Task
   run: AgentRun
   chainSteps?: AgentRun[]
   messages: AgentMessage[]
+  // Unanswered tool-permission prompts for this run, head-first. When non-empty
+  // the card renders an inline Allow/Deny control and takes the attention tone.
+  pendingPermissions?: PendingPermission[]
+  onResolvePermission?: (requestID: string, decision: PermissionDecisionInput) => Promise<void>
   onRequeue?: () => void
   onReview?: () => void
   // SKY-330: caller-supplied assignee picker, rendered in the header cluster.
@@ -37,6 +43,8 @@ export default function AgentCard({
   run,
   chainSteps,
   messages,
+  pendingPermissions,
+  onResolvePermission,
   onRequeue,
   onReview,
   assigneeSlot,
@@ -67,7 +75,12 @@ export default function AgentCard({
   // A terminal run is settled — show its outcome, not a live feed.
   const isTerminal = isFailed || isCancelled || isUnsolvable || run.Status === 'completed'
 
-  const glow = runGlow(run)
+  // A parked tool-permission prompt is the card's "needs you" moment — it takes
+  // the steady amber attention glow (over the live violet of the parked turn) so
+  // it can't be missed in the column, mirroring pending_approval's tone.
+  const pending = pendingPermissions ?? []
+  const hasPending = pending.length > 0
+  const glow: Glow | null = hasPending ? { tone: 'attention', breathing: false } : runGlow(run)
   const stats = computeStats(messages, run)
 
   const hasChain = !!chainSteps && chainSteps.length > 1
@@ -166,6 +179,21 @@ export default function AgentCard({
           <ResultBlock status={run.Status} summary={run.ResultSummary} />
         ) : (
           <LiveFeed messages={messages} isActive={isActive} />
+        )}
+
+        {/* Inline tool-permission prompt — the parked turn's Allow/Deny,
+            answerable without opening the run. Head of queue + "N more". */}
+        {hasPending && (
+          <div className="mx-4 mb-2">
+            <PermissionPrompt
+              key={pending[0].request_id}
+              prompt={pending[0]}
+              remaining={pending.length - 1}
+              worktree={run.WorktreePath}
+              onResolve={onResolvePermission}
+              compact
+            />
+          </div>
         )}
 
         {/* Attention row — your move, in the canonical toned pattern. */}

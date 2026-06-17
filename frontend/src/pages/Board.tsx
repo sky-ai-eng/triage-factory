@@ -9,6 +9,8 @@ import type {
   TeamBot,
 } from '../types'
 import { useWebSocket } from '../hooks/useWebSocket'
+import { usePermissionQueues } from '../hooks/usePermissionQueues'
+import type { PendingPermission, PermissionDecisionInput } from '../lib/permissions'
 import { useTeams, useTeamFilter } from '../hooks/useTeams'
 import TeamScopeSelect from '../components/TeamScopeSelect'
 import AgentCard from '../components/AgentCard'
@@ -155,6 +157,25 @@ export default function Board() {
   useEffect(() => {
     chainStepRunsRef.current = chainStepRuns
   }, [chainStepRuns])
+
+  // Tool-permission prompts for every run on the board, keyed by run ID. The
+  // shared queue core (same one useRunDetail uses) owns dedup + per-prompt TTL
+  // timers; the board ingests `permission_request` and drops a run's queue when
+  // it finishes or leaves the board. A queuesRef mirrors the map so the
+  // leave-the-board reconciliation effect can read it without re-running on
+  // every ingest (which would race a just-ingested prompt against its
+  // not-yet-seeded run).
+  const {
+    queues: permQueueMap,
+    ingest: ingestPermission,
+    forget: forgetPermission,
+    resolve: resolvePermission,
+    dropRun: dropPermissionRun,
+  } = usePermissionQueues()
+  const queuesRef = useRef(permQueueMap)
+  useEffect(() => {
+    queuesRef.current = permQueueMap
+  }, [permQueueMap])
 
   // Team roster for the assignee picker. Includes bot when enabled.
   const [members, setMembers] = useState<TeamMember[]>([])
@@ -463,6 +484,10 @@ export default function Board() {
               event.data.status,
             )
           ) {
+            // The run is no longer running a turn, so any prompt parked on it is
+            // stale — drop its queue so a finished card doesn't keep an
+            // unanswerable Allow/Deny control.
+            dropPermissionRun(event.run_id)
             fetchTasks()
           }
 
@@ -528,11 +553,31 @@ export default function Board() {
           // scoring_completed; we only need completed since the
           // priority_score it writes is what drives ordering here.
           fetchTasks()
+        } else if (event.type === 'permission_request') {
+          // A run hit an off-allowlist tool — surface its Allow/Deny prompt on
+          // the matching card. The queue core dedups + arms the dismiss TTL.
+          ingestPermission(event)
+        } else if (event.type === 'permission_resolved') {
+          // The prompt was answered (here or elsewhere) or timed out — drop it
+          // so a sibling tab's card clears without waiting for its own TTL.
+          forgetPermission(event)
         }
       },
-      [fetchTasks, seedChainStepRuns],
+      [fetchTasks, seedChainStepRuns, ingestPermission, forgetPermission, dropPermissionRun],
     ),
   )
+
+  // Drop a run's queue when the run leaves the board (its agentRuns entry was
+  // replaced — e.g. a chain advanced to a new step, or a task got re-delegated).
+  // Keyed on agentRuns only (not the queue map) so a freshly-ingested prompt
+  // isn't dropped in the window before its run's agent_run_update seeds
+  // agentRuns. queuesRef gives the latest queue keys without that dependency.
+  useEffect(() => {
+    const live = new Set(Object.values(agentRuns).map((r) => r.ID))
+    for (const runID of Object.keys(queuesRef.current)) {
+      if (!live.has(runID)) dropPermissionRun(runID)
+    }
+  }, [agentRuns, dropPermissionRun])
 
   // Sort tasks with active runs in a meaningful order. Used for
   // In Progress and In Review where the run state matters for
@@ -543,6 +588,9 @@ export default function Board() {
       const weight = (t: Task) => {
         const run = agentRuns[t.id]
         if (!run) return 2
+        // A live tool-permission prompt is the most urgent "needs you" — same
+        // top weight as pending_approval — so it can't be missed in the column.
+        if ((permQueueMap[run.ID]?.length ?? 0) > 0) return 0
         if (run.Status === 'pending_approval') return 0
         if (
           run.Status === 'failed' ||
@@ -555,7 +603,7 @@ export default function Board() {
       }
       return [...tasks].sort((a, b) => weight(a) - weight(b))
     },
-    [agentRuns],
+    [agentRuns, permQueueMap],
   )
 
   // Resolve a task's claimee to a display name for the claimee sort. Agent
@@ -1020,6 +1068,8 @@ export default function Board() {
                     agentRuns={agentRuns}
                     agentMessages={agentMessages}
                     chainStepRuns={chainStepRuns}
+                    permQueues={permQueueMap}
+                    onResolvePermission={resolvePermission}
                     currentUserID={currentUserID}
                     members={members}
                     bot={bot}
@@ -1099,6 +1149,8 @@ function ColumnContents({
   agentRuns,
   agentMessages,
   chainStepRuns,
+  permQueues,
+  onResolvePermission,
   currentUserID,
   members,
   bot,
@@ -1115,6 +1167,12 @@ function ColumnContents({
   agentRuns: Record<string, AgentRun>
   agentMessages: Record<string, AgentMessage[]>
   chainStepRuns: Record<string, AgentRun[]>
+  permQueues: Record<string, PendingPermission[]>
+  onResolvePermission: (
+    runID: string,
+    requestID: string,
+    decision: PermissionDecisionInput,
+  ) => Promise<void>
   currentUserID: string
   members: TeamMember[]
   bot: TeamBot | null
@@ -1161,6 +1219,10 @@ function ColumnContents({
               run={run}
               chainSteps={chainStepRuns[task.id]}
               messages={agentMessages[run.ID] || []}
+              pendingPermissions={permQueues[run.ID] ?? []}
+              onResolvePermission={(requestID, decision) =>
+                onResolvePermission(run.ID, requestID, decision)
+              }
               onRequeue={() => onRequeue(task.id)}
               onReview={() => {
                 const kind: 'review' | 'pr' = run.pending_kind === 'pr' ? 'pr' : 'review'
@@ -1264,6 +1326,8 @@ function SortableAgentCard({
   run,
   chainSteps,
   messages,
+  pendingPermissions,
+  onResolvePermission,
   onRequeue,
   onReview,
   assigneeSlot,
@@ -1272,6 +1336,8 @@ function SortableAgentCard({
   run: AgentRun
   chainSteps?: AgentRun[]
   messages: AgentMessage[]
+  pendingPermissions: PendingPermission[]
+  onResolvePermission: (requestID: string, decision: PermissionDecisionInput) => Promise<void>
   onRequeue?: () => void
   onReview?: () => void
   assigneeSlot?: React.ReactNode
@@ -1311,6 +1377,8 @@ function SortableAgentCard({
         run={run}
         chainSteps={chainSteps}
         messages={messages}
+        pendingPermissions={pendingPermissions}
+        onResolvePermission={onResolvePermission}
         onRequeue={onRequeue}
         onReview={onReview}
         assigneeSlot={assigneeSlot}

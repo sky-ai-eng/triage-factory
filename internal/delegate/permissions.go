@@ -113,10 +113,31 @@ func (s *Spawner) BrowserPermissionHandler(orgID, runID string) agentproc.Permis
 			case d := <-ch:
 				return d
 			default:
+				// A genuine timeout: the prompt is no longer answerable, so
+				// tell every surface showing it to drop it now instead of
+				// waiting out its own client TTL (ResolvePermission already
+				// broadcasts for the user-answered case).
+				s.broadcastPermissionResolved(orgID, runID, req.RequestID)
 				return agentproc.PermissionDecision{Behavior: "deny", Message: "permission request timed out"}
 			}
 		}
 	}
+}
+
+// broadcastPermissionResolved tells the browser a pending prompt reached a
+// terminal resolution (answered or timed out) so every surface rendering it —
+// the board card and the run-detail dock, or two board tabs — drops it promptly
+// instead of waiting out its own client-side TTL. The client TTL stays as a
+// backstop for a dropped/missed event. Hub.Broadcast is nil-receiver-safe.
+func (s *Spawner) broadcastPermissionResolved(orgID, runID, requestID string) {
+	s.wsHub.Broadcast(websocket.Event{
+		Type:  "permission_resolved",
+		OrgID: orgID,
+		RunID: runID,
+		Data: map[string]any{
+			"request_id": requestID,
+		},
+	})
 }
 
 // ResolvePermission delivers a decision to a pending permission request,
@@ -134,16 +155,22 @@ func (s *Spawner) BrowserPermissionHandler(orgID, runID string) agentproc.Permis
 // guaranteed to observe it. A 200-acknowledged decision is never dropped.
 func (s *Spawner) ResolvePermission(orgID, runID, requestID string, d agentproc.PermissionDecision) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	p, ok := s.permPending[permKey(runID, requestID)]
 	if !ok || p.orgID != orgID {
+		s.mu.Unlock()
 		return ErrNoPendingPermission
 	}
 	select {
 	case p.ch <- d:
+		s.mu.Unlock()
+		// The decision is buffered (a real 200 promise). Tell other surfaces
+		// showing this prompt to drop it now — broadcast outside s.mu so the
+		// hub's own locking never nests under the broker mutex.
+		s.broadcastPermissionResolved(orgID, runID, requestID)
 		return nil
 	default:
 		// Slot already filled by a racing resolve — treat as no-longer-pending.
+		s.mu.Unlock()
 		return ErrNoPendingPermission
 	}
 }

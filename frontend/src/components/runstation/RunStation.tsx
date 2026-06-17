@@ -1,18 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { motion, useReducedMotion } from 'motion/react'
-import {
-  ArrowLeft,
-  Check,
-  ExternalLink,
-  Pause,
-  Send,
-  ShieldQuestion,
-  Square,
-  X,
-} from 'lucide-react'
+import { ArrowLeft, ExternalLink, Pause, Send, Square } from 'lucide-react'
 import type { AgentMessage, AgentRun, Task } from '../../types'
-import type { PendingPermission, PermissionDecisionInput } from '../../hooks/useRunDetail'
+import type { PendingPermission, PermissionDecisionInput } from '../../lib/permissions'
 import {
   isActiveStatus,
   isFailedStatus,
@@ -23,7 +14,7 @@ import {
 } from '../../lib/runStatus'
 import { EventTag, SourceTag } from '../board/cardChrome'
 import { STEP_VAR, type StepState } from '../board/cardStyle'
-import { stripWorktree } from '../../lib/worktree'
+import { PermissionPrompt } from '../permissions/PermissionPrompt'
 import ScreenTranscript from './ScreenTranscript'
 import { TelemetryRail } from './StationInstruments'
 import { liveHeat, stationState, tint } from './stationStyle'
@@ -540,91 +531,6 @@ function IntakeDock({
   )
 }
 
-// PermissionPrompt — the head of the approval queue, rendered with priority
-// because it's parking the agent's turn. Tool name + a compact input summary,
-// Deny / Allow, and an "N more" count when parallel tool calls stacked up.
-function PermissionPrompt({
-  prompt,
-  remaining,
-  worktree,
-  onResolve,
-}: {
-  prompt: PendingPermission
-  remaining: number
-  worktree?: string
-  onResolve?: (requestID: string, decision: PermissionDecisionInput) => Promise<void>
-}) {
-  const tone = 'var(--color-snooze)' // amber — a blocking "your move"
-  // Single-flight: the first click wins. Without it a quick Deny→Allow puts
-  // two resolves in flight and the broker honors whichever lands first —
-  // non-deterministic from the user's view. Resolving resets on settle so a
-  // transient failure (prompt stays up) remains answerable.
-  const [resolving, setResolving] = useState(false)
-  const resolve = async (behavior: 'allow' | 'deny') => {
-    if (resolving || !onResolve) return
-    setResolving(true)
-    try {
-      await onResolve(prompt.request_id, { behavior })
-    } finally {
-      setResolving(false)
-    }
-  }
-  // Worktree-relative paths, same as the transcript — but always the real
-  // command/input, never the agent's description: this is a security
-  // decision, so the user approves what will run, not what the agent says.
-  const summary = stripWorktree(summarizePermissionInput(prompt.tool_name, prompt.input), worktree)
-  return (
-    <div
-      className="mb-2.5 flex items-center gap-2.5 rounded-[5px] px-3 py-2"
-      style={{ background: tint(tone, 10), boxShadow: `inset 0 0 0 1px ${tint(tone, 32)}` }}
-    >
-      <ShieldQuestion size={15} className="shrink-0" style={{ color: tone }} />
-      <span
-        className="shrink-0 font-mono text-[10px] font-semibold uppercase leading-none tracking-[0.12em]"
-        style={{ color: tone }}
-      >
-        Allow {prompt.tool_name}?
-      </span>
-      {summary && (
-        <span
-          className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-text-secondary"
-          title={summary}
-        >
-          {summary}
-        </span>
-      )}
-      {!summary && <span className="min-w-0 flex-1" />}
-      {remaining > 0 && (
-        <span
-          className="shrink-0 font-mono text-[10px] tabular-nums text-text-tertiary/80"
-          title={`${remaining} more prompt${remaining === 1 ? '' : 's'} queued`}
-        >
-          +{remaining} more
-        </span>
-      )}
-      <div className="flex shrink-0 items-center gap-2">
-        <DockButton
-          tone="var(--color-dismiss)"
-          onClick={() => void resolve('deny')}
-          disabled={resolving}
-          icon={<X size={11} />}
-        >
-          Deny
-        </DockButton>
-        <DockButton
-          tone="var(--color-claim)"
-          solid
-          onClick={() => void resolve('allow')}
-          disabled={resolving}
-          icon={<Check size={11} />}
-        >
-          Allow
-        </DockButton>
-      </div>
-    </div>
-  )
-}
-
 // DockComposer — the steering input. An auto-resizing textarea (Enter sends,
 // Shift+Enter inserts a newline), with a send key lit in the run's state tone.
 // State is local; the sent text round-trips back as an agent_message, so there's
@@ -693,35 +599,6 @@ function DockComposer({
       </button>
     </div>
   )
-}
-
-// summarizePermissionInput renders a compact one-line preview of a tool call's
-// input for the permission prompt — the command for Bash, the path for file
-// tools, the pattern for search, else the first short string field or a trimmed
-// JSON blob. Collapsed whitespace, capped length.
-function summarizePermissionInput(tool: string, input: Record<string, unknown>): string {
-  const str = (k: string) => (typeof input[k] === 'string' ? (input[k] as string) : '')
-  let s = ''
-  if (tool === 'Bash') s = str('command')
-  else if (tool === 'Read' || tool === 'Write' || tool === 'Edit') s = str('file_path')
-  else if (tool === 'Glob' || tool === 'Grep') s = str('pattern')
-  if (!s) {
-    for (const v of Object.values(input)) {
-      if (typeof v === 'string' && v) {
-        s = v
-        break
-      }
-    }
-  }
-  if (!s) {
-    try {
-      s = JSON.stringify(input)
-    } catch {
-      s = ''
-    }
-  }
-  s = s.replace(/\s+/g, ' ').trim()
-  return s.length > 80 ? s.slice(0, 79) + '…' : s
 }
 
 // IntakePort — a tiny socket glyph marking this as the machine's input.

@@ -617,6 +617,15 @@ export type WSEvent =
         timeout_ms?: number
       }
     }
+  | {
+      // A pending permission prompt reached a terminal resolution (answered by
+      // someone, or timed out) — broadcast so every surface showing it (board +
+      // run-detail, or two board tabs) drops it promptly instead of waiting for
+      // its own client TTL. The client TTL stays as a backstop.
+      type: 'permission_resolved'
+      run_id: string
+      data: { request_id: string }
+    }
   | { type: 'curator_message'; project_id: string; data: CuratorMessage }
   | {
       type: 'curator_request_update'
