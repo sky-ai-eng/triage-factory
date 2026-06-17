@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 
@@ -115,7 +114,7 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 
 		sess, err := s.authDeps.sessions.LookupSystem(r.Context(), sid)
 		if err != nil {
-			log.Printf("[auth] session lookup: %v", err)
+			authLog.Error("session lookup failed", "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -130,7 +129,7 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 		// already-expired JWT and 401 anyway.
 		if needsRefresh(sess) {
 			if err := s.refreshSessionInline(r.Context(), sess); err != nil {
-				log.Printf("[auth] refresh failed for sid=%s: %v", sessions.LogID(sid), err)
+				authLog.Warn("refresh failed", "sid", sessions.LogID(sid), "error", err)
 				writeUnauth(w)
 				return
 			}
@@ -141,7 +140,7 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 			// Either the JWT decrypted cleanly but failed verification
 			// (rotated signing key, replay across issuers) — in either
 			// case the session is unrecoverable. 401.
-			log.Printf("[auth] verify failed for sid=%s: %v", sessions.LogID(sid), err)
+			authLog.Warn("verify failed", "sid", sessions.LogID(sid), "error", err)
 			writeUnauth(w)
 			return
 		}
@@ -157,7 +156,7 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 		// No JWT-claims context is needed for the UPDATE.
 		go func(id uuid.UUID) {
 			if err := s.authDeps.sessions.TouchLastSeenSystem(context.Background(), id); err != nil {
-				log.Printf("[auth] touch last_seen for sid=%s: %v", sessions.LogID(id), err)
+				authLog.Warn("touch last_seen failed", "sid", sessions.LogID(id), "error", err)
 			}
 		}(sid)
 
@@ -198,13 +197,13 @@ func (s *Server) withOrg(next http.Handler) http.Handler {
 		if claims == nil {
 			// Programmer error: withOrg mounted without withSession.
 			// Don't reveal the misconfiguration to the caller.
-			log.Printf("[auth] withOrg saw no claims — route missing withSession wrapper: %s", r.URL.Path)
+			authLog.Error("withorg saw no claims, route missing withsession wrapper", "path", r.URL.Path)
 			http.NotFound(w, r)
 			return
 		}
 		ok, err := s.az.UserHasOrgAccess(r.Context(), claims.Subject, orgID)
 		if err != nil {
-			log.Printf("[auth] membership check %s/%s: %v", claims.Subject, orgID, err)
+			authLog.Error("membership check failed", "user", claims.Subject, "org", orgID, "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}

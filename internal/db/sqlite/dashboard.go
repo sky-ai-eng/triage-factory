@@ -3,7 +3,6 @@ package sqlite
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -89,7 +88,7 @@ func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinc
 		}
 	}
 	if err := rows.Err(); err != nil {
-		log.Printf("[dashboard] stats iteration error: %v", err)
+		dashboardLog.Error("stats iteration error", "error", err)
 		return nil, err
 	}
 

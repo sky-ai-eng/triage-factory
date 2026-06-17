@@ -30,6 +30,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 )
 
 const (
@@ -51,9 +52,37 @@ const (
 // loggers that were already handed out by Component.
 var levelVar = new(slog.LevelVar)
 
+// output is the swappable destination every component logger writes through.
+// One handler is built over it at init and shared by all loggers, so SetOutput
+// can redirect output even for loggers created as package-level vars before the
+// redirect — which is what makes log output capturable in tests.
+var output = &swapWriter{w: os.Stderr}
+
 func init() {
 	levelVar.Set(ParseLevel(os.Getenv(envLevel)))
-	slog.SetDefault(slog.New(newHandler(os.Stderr)))
+	slog.SetDefault(slog.New(newHandler(output)))
+}
+
+// swapWriter is an io.Writer whose underlying destination can be replaced
+// atomically at runtime.
+type swapWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *swapWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	w := s.w
+	s.mu.Unlock()
+	return w.Write(p)
+}
+
+func (s *swapWriter) swap(w io.Writer) io.Writer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prev := s.w
+	s.w = w
+	return prev
 }
 
 // newHandler builds the configured handler over w at the shared level.
@@ -89,6 +118,15 @@ func Component(name string) *slog.Logger {
 // parsed after init). It affects loggers already handed out by Component
 // because they share the level var behind a single handler.
 func SetLevel(l slog.Level) { levelVar.Set(l) }
+
+// SetOutput redirects all log output to w and returns a function that restores
+// the previous destination. Because component loggers share one handler over a
+// swappable writer, this affects loggers already handed out by Component — so
+// it is the way tests capture and assert on log records.
+func SetOutput(w io.Writer) (restore func()) {
+	prev := output.swap(w)
+	return func() { output.swap(prev) }
+}
 
 // Level reports the current minimum level.
 func Level() slog.Level { return levelVar.Level() }

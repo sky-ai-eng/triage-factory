@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -36,7 +35,8 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 	// acting team IS the current owner still proceeds, so multiple
 	// prompts one team configured on the same event all run.
 	if task.ClaimedByAgentID != "" && actingTeamID != "" && teamIDValue(task) != actingTeamID {
-		log.Printf("[router] auto-trigger skipped on task %s: already claimed by the bot for team %s (acting team %s lost the claim)", task.ID, teamIDValue(task), actingTeamID)
+		routerLog.Info("auto-trigger skipped: task already claimed by the bot for another team",
+			"task_id", task.ID, "claimed_team", teamIDValue(task), "acting_team", actingTeamID)
 		return
 	}
 	// SKY-261 bot-disabled-team gate. If the task's team has the bot
@@ -54,14 +54,14 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 	if r.teamAgents != nil && r.agents != nil {
 		a, err := r.agents.GetForOrgSystem(context.Background(), orgID)
 		if err != nil {
-			log.Printf("[router] auto-trigger skipped: agent lookup: %v", err)
+			routerLog.Warn("auto-trigger skipped: agent lookup failed", "error", err)
 			return
 		}
 		if a == nil {
 			// No bootstrapped agent — bootstrap is now fatal at
 			// startup, so this shouldn't reach us in practice.
 			// Log + bail rather than crashing the goroutine.
-			log.Printf("[router] auto-trigger skipped on task %s: no agent bootstrapped", task.ID)
+			routerLog.Warn("auto-trigger skipped: no agent bootstrapped", "task_id", task.ID)
 			return
 		}
 		// Read the bot-enabled flag for the FIRING team — the team
@@ -80,11 +80,11 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 		}
 		ta, err := r.teamAgents.GetForTeamSystem(context.Background(), orgID, teamID, a.ID)
 		if err != nil {
-			log.Printf("[router] auto-trigger skipped on task %s: team_agents lookup: %v", task.ID, err)
+			routerLog.Warn("auto-trigger skipped: team_agents lookup failed", "task_id", task.ID, "error", err)
 			return
 		}
 		if ta == nil || !ta.Enabled {
-			log.Printf("[router] auto-trigger skipped on task %s: bot disabled for team", task.ID)
+			routerLog.Info("auto-trigger skipped: bot disabled for team", "task_id", task.ID, "team", teamID)
 			return
 		}
 	}
@@ -98,12 +98,12 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 	breakerPromptID := r.breakerPromptID(orgID, trigger.BlueprintID)
 	failures, err := r.tasks.CountConsecutiveFailedRunsSystem(context.Background(), orgID, entityID, breakerPromptID)
 	if err != nil {
-		log.Printf("[router] breaker query error for entity %s prompt %s: %v", entityID, breakerPromptID, err)
+		routerLog.Error("breaker query failed", "entity", entityID, "prompt", breakerPromptID, "error", err)
 		return
 	}
 	if failures >= breakerThreshold {
-		log.Printf("[router] breaker tripped for entity %s prompt %s (%d >= %d)",
-			entityID, breakerPromptID, failures, breakerThreshold)
+		routerLog.Info("breaker tripped",
+			"entity", entityID, "prompt", breakerPromptID, "failures", failures, "threshold", breakerThreshold)
 		// Look up prompt name for the toast — opportunistic, falls back to a
 		// generic message if the lookup fails since the breaker trip itself
 		// is the load-bearing signal. One toast per trip (happens rarely).
@@ -126,14 +126,14 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 	gateCtx := context.Background()
 	hasActive, err := r.agentRuns.HasActiveAutoRunForEntitySystem(gateCtx, orgID, entityID)
 	if err != nil {
-		log.Printf("[router] entity gate active-run query error for %s: %v", entityID, err)
+		routerLog.Error("entity gate active-run query failed", "entity", entityID, "error", err)
 		return
 	}
 	hasPending := false
 	if !hasActive {
 		hasPending, err = r.firings.HasPendingForEntity(gateCtx, orgID, entityID)
 		if err != nil {
-			log.Printf("[router] entity gate pending query error for %s: %v", entityID, err)
+			routerLog.Error("entity gate pending query failed", "entity", entityID, "error", err)
 			return
 		}
 	}
@@ -145,13 +145,13 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 		// entirely.
 		inserted, err := r.firings.Enqueue(context.Background(), orgID, "", entityID, task.ID, trigger.ID, triggeringEventID)
 		if err != nil {
-			log.Printf("[router] enqueue firing failed (entity %s task %s trigger %s): %v",
-				entityID, task.ID, trigger.ID, err)
+			routerLog.Error("enqueue firing failed",
+				"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "error", err)
 			return
 		}
 		if inserted {
-			log.Printf("[router] queued firing on entity %s (task %s, trigger %s) — entity busy",
-				entityID, task.ID, trigger.ID)
+			routerLog.Info("queued firing, entity busy",
+				"entity", entityID, "task_id", task.ID, "trigger", trigger.ID)
 			// SKY-261 D-Claims: pending firing landed in the queue,
 			// commit the task to the org's agent. Stamp here (after
 			// EnqueuePendingFiring succeeded) so a failed enqueue
@@ -161,8 +161,8 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 			// stamp needed.
 			r.stampAgentClaim(orgID, task, actingTeamID)
 		} else {
-			log.Printf("[router] firing collapsed on entity %s (task %s, trigger %s) — duplicate already queued",
-				entityID, task.ID, trigger.ID)
+			routerLog.Debug("firing collapsed, duplicate already queued",
+				"entity", entityID, "task_id", task.ID, "trigger", trigger.ID)
 		}
 		return
 	}
@@ -180,7 +180,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 	// may exist).
 	if actingTeamID != "" && actingTeamID != teamIDValue(task) {
 		if err := r.tasks.SetOwnerTeamSystem(context.Background(), orgID, task.ID, actingTeamID); err != nil {
-			log.Printf("[router] failed to consolidate owner team on task %s before fire: %v", task.ID, err)
+			routerLog.Error("failed to consolidate owner team before fire", "task_id", task.ID, "error", err)
 		} else {
 			task.TeamID = teamIDPtr(actingTeamID)
 		}
@@ -191,11 +191,11 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 		// as ErrAlreadyFired. Clean skip — the original run + its claim
 		// stand, so we must NOT re-stamp the claim or log an error.
 		if errors.Is(err, delegate.ErrAlreadyFired) {
-			log.Printf("[router] auto-delegate skipped for task %s (trigger %s): event %s already fired this trigger (replay)",
-				task.ID, trigger.ID, triggeringEventID)
+			routerLog.Info("auto-delegate skipped: event already fired this trigger (replay)",
+				"task_id", task.ID, "trigger", trigger.ID, "event_id", triggeringEventID)
 			return
 		}
-		log.Printf("[router] fire failed for task %s (trigger %s): %v", task.ID, trigger.ID, err)
+		routerLog.Error("fire failed", "task_id", task.ID, "trigger", trigger.ID, "error", err)
 		return
 	}
 	// SKY-261 D-Claims: fireDelegate succeeded (run inserted + spawner
@@ -231,7 +231,7 @@ func (r *Router) stampAgentClaim(orgID string, task *domain.Task, actingTeamID s
 	}
 	a, err := r.agents.GetForOrgSystem(context.Background(), orgID)
 	if err != nil {
-		log.Printf("[router] agent lookup failed for task %s claim stamp: %v", task.ID, err)
+		routerLog.Error("agent lookup failed for claim stamp", "task_id", task.ID, "error", err)
 		return
 	}
 	if a == nil {
@@ -239,7 +239,7 @@ func (r *Router) stampAgentClaim(orgID string, task *domain.Task, actingTeamID s
 	}
 	ok, err := r.tasks.StampAgentClaimIfUnclaimedSystem(context.Background(), orgID, task.ID, a.ID, actingTeamID)
 	if err != nil {
-		log.Printf("[router] failed to stamp agent claim on task %s: %v", task.ID, err)
+		routerLog.Error("failed to stamp agent claim", "task_id", task.ID, "error", err)
 		return
 	}
 	if !ok {
@@ -254,7 +254,7 @@ func (r *Router) stampAgentClaim(orgID string, task *domain.Task, actingTeamID s
 		// future debug session needs the breakdown, the helper can
 		// grow a tri-state return or the caller can re-read the
 		// task — neither is load-bearing for correctness.
-		log.Printf("[router] agent claim stamp on task %s was a no-op (user owns it, bot already owns it, or task is terminal)", task.ID)
+		routerLog.Debug("agent claim stamp was a no-op (user owns it, bot already owns it, or task is terminal)", "task_id", task.ID)
 		return
 	}
 	task.ClaimedByAgentID = a.ID
@@ -298,8 +298,8 @@ func (r *Router) fireDelegate(orgID string, task *domain.Task, trigger domain.Ev
 	// genuine lifecycle move (done / dismissed / snoozed). Dedup is
 	// unaffected — the partial unique index gates on status NOT IN
 	// ('done', 'dismissed'), so a queued+claimed task still matches.
-	log.Printf("[router] auto-delegating task %s (trigger %s, blueprint %s)",
-		task.ID, trigger.ID, trigger.BlueprintID)
+	routerLog.Info("auto-delegating task",
+		"task_id", task.ID, "trigger", trigger.ID, "blueprint", trigger.BlueprintID)
 
 	// Re-read task to get entity-joined display fields the spawner needs.
 	fresh, err := r.tasks.GetSystem(context.Background(), orgID, task.ID)
@@ -324,7 +324,7 @@ func (r *Router) fireDelegate(orgID string, task *domain.Task, trigger domain.Ev
 		// task in a clean unclaimed-queued state, which is correct.
 		return "", err
 	}
-	log.Printf("[router] started run %s for task %s", runID, task.ID)
+	routerLog.Info("started run for task", "run_id", runID, "task_id", task.ID)
 	return runID, nil
 }
 
@@ -358,7 +358,7 @@ func (r *Router) DrainEntity(orgID, entityID string) {
 	for {
 		firing, err := r.firings.PopForEntity(context.Background(), orgID, entityID)
 		if err != nil {
-			log.Printf("[router] drain pop error for entity %s: %v", entityID, err)
+			routerLog.Error("drain pop failed", "entity", entityID, "error", err)
 			return
 		}
 		if firing == nil {
@@ -372,8 +372,8 @@ func (r *Router) DrainEntity(orgID, entityID string) {
 			// 'skipped_stale' here would permanently drop a queued intent
 			// over a temporary problem. The periodic sweeper or the next
 			// run-terminal will retry.
-			log.Printf("[router] drain transient error on firing %d (entity %s): %v — leaving pending for retry",
-				firing.ID, entityID, transientErr)
+			routerLog.Warn("drain transient error, leaving firing pending for retry",
+				"firing_id", firing.ID, "entity", entityID, "error", transientErr)
 			return
 		}
 		if runID != "" {
@@ -392,12 +392,12 @@ func (r *Router) DrainEntity(orgID, entityID string) {
 				// firing stays 'pending' and the next drain re-fires
 				// fresh; until then the task reads as queued, which is
 				// honest.
-				log.Printf("[router] mark firing %d fired (run %s) failed: %v — rolling back: cancelling run + reverting task to queued",
-					firing.ID, runID, err)
+				routerLog.Error("mark firing fired failed, rolling back: cancelling run + reverting task to queued",
+					"firing_id", firing.ID, "run_id", runID, "error", err)
 				if r.spawner != nil {
 					if cerr := r.spawner.Cancel(orgID, runID, ""); cerr != nil {
-						log.Printf("[router] cancel run %s after mark-fired failure: %v — run may already be terminal, drain still triggers from its defer",
-							runID, cerr)
+						routerLog.Warn("cancel run after mark-fired failure (run may already be terminal, drain still triggers from its defer)",
+							"run_id", runID, "error", cerr)
 					}
 				}
 				r.revertTaskStatus(orgID, firing.TaskID, "queued")
@@ -406,10 +406,10 @@ func (r *Router) DrainEntity(orgID, entityID string) {
 		}
 		// Skipped or fire failed; record reason and continue draining.
 		if err := r.firings.MarkSkipped(context.Background(), orgID, firing.ID, skipReason); err != nil {
-			log.Printf("[router] mark firing %d skipped (%s): %v", firing.ID, skipReason, err)
+			routerLog.Error("mark firing skipped failed", "firing_id", firing.ID, "skip_reason", skipReason, "error", err)
 			return
 		}
-		log.Printf("[router] skipped firing %d on entity %s: %s", firing.ID, entityID, skipReason)
+		routerLog.Debug("skipped firing", "firing_id", firing.ID, "entity", entityID, "skip_reason", skipReason)
 	}
 }
 
@@ -448,7 +448,7 @@ func (r *Router) RunDrainSweeper(ctx context.Context, interval time.Duration) {
 			// behavior for a wiring bug at startup.
 			orgIDs, err := r.orgs.ListActiveSystem(ctx)
 			if err != nil {
-				log.Printf("[router] drain sweeper: list orgs error: %v", err)
+				routerLog.Error("drain sweeper: list orgs failed", "error", err)
 				continue
 			}
 			for _, orgID := range orgIDs {
@@ -465,13 +465,13 @@ func (r *Router) RunDrainSweeper(ctx context.Context, interval time.Duration) {
 func (r *Router) sweepOrg(ctx context.Context, orgID string) {
 	ids, err := r.firings.ListEntitiesWithPending(ctx, orgID)
 	if err != nil {
-		log.Printf("[router] drain sweeper: list error for org %s: %v", orgID, err)
+		routerLog.Error("drain sweeper: list entities with pending failed", "org", orgID, "error", err)
 		return
 	}
 	for _, eid := range ids {
 		active, err := r.agentRuns.HasActiveAutoRunForEntitySystem(ctx, orgID, eid)
 		if err != nil {
-			log.Printf("[router] drain sweeper: active-check error for %s (org %s): %v", eid, orgID, err)
+			routerLog.Error("drain sweeper: active-check failed", "entity", eid, "org", orgID, "error", err)
 			continue
 		}
 		if active {
@@ -588,7 +588,7 @@ func (r *Router) attemptDrainOne(orgID string, firing *domain.PendingFiring) (ru
 // don't go through this helper.
 func (r *Router) revertTaskStatus(orgID, taskID, status string) {
 	if err := r.tasks.SetStatusSystem(context.Background(), orgID, taskID, status); err != nil {
-		log.Printf("[router] failed to revert task %s to %s: %v", taskID, status, err)
+		routerLog.Error("failed to revert task status", "task_id", taskID, "status", status, "error", err)
 		return
 	}
 	r.ws.Broadcast(websocket.Event{

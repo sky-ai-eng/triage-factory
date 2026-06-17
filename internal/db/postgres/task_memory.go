@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"database/sql"
-	"log"
 	"strings"
 	"time"
 
@@ -115,9 +114,9 @@ func (s *taskMemoryStore) UpdateRunMemoryHumanContent(ctx context.Context, orgID
 		case nil:
 			// Row exists; UPDATE was a no-op.
 		case sql.ErrNoRows:
-			log.Printf("[memory] no run_memory row for run %s; human_content not recorded", runID)
+			memoryLog.Warn("no run_memory row; human_content not recorded", "run_id", runID)
 		default:
-			log.Printf("[memory] unable to verify run_memory row for run %s after no-op human_content update: %v", runID, err)
+			memoryLog.Warn("verify run_memory row after no-op human_content update failed", "run_id", runID, "error", err)
 		}
 	}
 	return nil

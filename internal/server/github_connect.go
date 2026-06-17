@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -129,7 +128,7 @@ func (s *Server) handleGitHubConnectStart(w http.ResponseWriter, r *http.Request
 
 	ghWeb, okHost := resolveGitHubHost(orgSet.GitHubBaseURL)
 	if !okHost {
-		log.Printf("[github-connect] invalid github base url for org %s", orgID)
+		githubConnectLog.Warn("invalid github base url", "org", orgID)
 		s.redirectConnect(w, r, orgID, returnTo, "bad_host")
 		return
 	}
@@ -204,7 +203,7 @@ func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Requ
 	}
 	cs, err := parseConnectState(cookie.Value, s.deployCfg.hmacKey)
 	if err != nil {
-		log.Printf("[github-connect] state cookie: %v", err)
+		githubConnectLog.Warn("state cookie parse failed", "error", err)
 		s.redirectConnect(w, r, orgID, "", "state")
 		return
 	}
@@ -223,7 +222,7 @@ func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Requ
 
 	// User denied consent (or GitHub reported another OAuth error).
 	if ghErr := r.URL.Query().Get("error"); ghErr != "" {
-		log.Printf("[github-connect] github error=%s org=%s", ghErr, orgID)
+		githubConnectLog.Warn("github oauth error", "github_error", ghErr, "org", orgID)
 		s.redirectConnect(w, r, orgID, returnTo, "denied")
 		return
 	}
@@ -274,13 +273,13 @@ func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Requ
 	// connect."
 	token, err := auth.ExchangeGitHubOAuthCode(r.Context(), ghWeb, app.ClientID, clientSecret, code, s.connectCallbackURL(orgID))
 	if err != nil {
-		log.Printf("[github-connect] token exchange org=%s: %v", orgID, err)
+		githubConnectLog.Warn("token exchange failed", "org", orgID, "error", err)
 		s.redirectConnect(w, r, orgID, returnTo, connectErrCode(err))
 		return
 	}
 	ghUser, err := auth.ValidateGitHub(r.Context(), ghWeb, token)
 	if err != nil {
-		log.Printf("[github-connect] whoami org=%s: %v", orgID, err)
+		githubConnectLog.Warn("whoami failed", "org", orgID, "error", err)
 		s.redirectConnect(w, r, orgID, returnTo, connectErrCode(err))
 		return
 	}
@@ -296,8 +295,8 @@ func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	log.Printf("[github-connect] bound user=%s login=%s host=%s org=%s source=connect_oauth",
-		userID, ghUser.Login, ghWeb, orgID)
+	githubConnectLog.Info("bound user",
+		"user", userID, "login", ghUser.Login, "host", ghWeb, "org", orgID, "source", "connect_oauth")
 	http.Redirect(w, r, returnTo, http.StatusFound)
 }
 
@@ -468,7 +467,7 @@ func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request)
 	}
 	// The token is intentionally not persisted anywhere — it existed only for
 	// the whoami above. Identity captured; org access untouched.
-	log.Printf("[github-identity] bound user=%s login=%s host=%s org=%s source=pat", userID, ghUser.Login, ghWeb, orgID)
+	githubIdentityLog.Info("bound user", "user", userID, "login", ghUser.Login, "host", ghWeb, "org", orgID, "source", "pat")
 
 	writeJSON(w, http.StatusOK, githubIdentityCaptureResponse{Login: ghUser.Login, Host: ghWeb})
 }

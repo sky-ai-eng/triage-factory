@@ -2,7 +2,6 @@ package auth
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"sort"
 	"sync"
@@ -169,7 +168,7 @@ func logEnvOnce() {
 			}
 		}
 		sort.Strings(names)
-		log.Printf("[auth] credentials provided via environment: %v", names)
+		authLog.Info("credentials provided via environment", "names", names)
 	})
 }
 
@@ -185,7 +184,7 @@ func probeKeychain() bool {
 		_, err := keyring.Get(service, "__probe__")
 		keychainOK = err == nil || err == keyring.ErrNotFound
 		if !keychainOK {
-			log.Printf("[auth] keychain backend unavailable: %v", err)
+			authLog.Warn("keychain backend unavailable", "error", err)
 		}
 	})
 	return keychainOK

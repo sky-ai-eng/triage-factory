@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
@@ -115,7 +114,7 @@ func (s *Spawner) terminateBlueprint(
 		_, markErr = s.blueprints.MarkRunStatusSystem(bgCtx, orgID, blueprintRunID, status, abortReason, abortedAtStep)
 	}
 	if markErr != nil {
-		log.Printf("[blueprint] FATAL: mark blueprint_run %s status=%s: %v — skipping cleanup to keep blueprint row consistent", blueprintRunID, status, markErr)
+		blueprintLog.Error("mark blueprint_run status failed; skipping cleanup to keep blueprint row consistent", "blueprint_run", blueprintRunID, "status", status, "error", markErr)
 		return
 	}
 
@@ -130,7 +129,7 @@ func (s *Spawner) terminateBlueprint(
 			closeErr = s.tasks.CloseSystem(bgCtx, orgID, taskID, "run_completed", "")
 		}
 		if closeErr != nil {
-			log.Printf("[blueprint] close task %s: %v", taskID, closeErr)
+			blueprintLog.Warn("close task failed", "task", taskID, "error", closeErr)
 		}
 
 		// TFAC-300: mirror the terminal board move onto the Jira ticket —
@@ -171,8 +170,8 @@ func (s *Spawner) terminateBlueprint(
 	}
 
 	dur := time.Since(startTime)
-	log.Printf("[blueprint] blueprint_run %s terminated status=%s reason=%q duration=%s",
-		blueprintRunID, status, abortReason, dur)
+	blueprintLog.Info("blueprint_run terminated",
+		"blueprint_run", blueprintRunID, "status", status, "reason", abortReason, "duration", dur)
 }
 
 // runBlueprintWorktreeCleanup performs the cleanup runAgent would have done
@@ -180,7 +179,7 @@ func (s *Spawner) terminateBlueprint(
 func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConfig) {
 	if cfg.hasWT {
 		if err := worktree.RemoveAt(cfg.wtPath, blueprintRunID); err != nil {
-			log.Printf("[blueprint] worktree remove failed for blueprint %s: %v", blueprintRunID, err)
+			blueprintLog.Warn("worktree remove failed", "blueprint_run", blueprintRunID, "error", err)
 			return
 		}
 		if cfg.prNumber > 0 && cfg.owner != "" && cfg.repo != "" {
@@ -194,24 +193,24 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 		// remove their reservations.
 		stepRuns, err := s.blueprints.RunsForBlueprintSystem(context.Background(), cfg.orgID, blueprintRunID)
 		if err != nil {
-			log.Printf("[blueprint] run %s: list step runs for cleanup: %v", blueprintRunID, err)
+			blueprintLog.Warn("list step runs for cleanup failed", "blueprint_run", blueprintRunID, "error", err)
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		for _, sr := range stepRuns {
 			rows, err := s.runWorktrees.ListSystem(context.Background(), cfg.orgID, sr.ID)
 			if err != nil {
-				log.Printf("[blueprint] run %s: list run_worktrees for step %s: %v", blueprintRunID, sr.ID, err)
+				blueprintLog.Warn("list run_worktrees for step failed", "blueprint_run", blueprintRunID, "step_run", sr.ID, "error", err)
 				// Log but continue to attempt DB row deletion below.
 				rows = nil
 			}
 			for _, w := range rows {
 				if err := worktree.RemoveAt(w.Path, sr.ID); err != nil && !errors.Is(err, os.ErrNotExist) {
-					log.Printf("[blueprint] run %s: remove worktree %s: %v", blueprintRunID, w.Path, err)
+					blueprintLog.Warn("remove worktree failed", "blueprint_run", blueprintRunID, "path", w.Path, "error", err)
 					// Still attempt the DB row deletion even if the worktree remove failed.
 				}
 				if err := s.runWorktrees.DeleteByPathSystem(cleanupCtx, cfg.orgID, sr.ID, w.Path); err != nil {
-					log.Printf("[blueprint] run %s: delete run_worktrees row for %s: %v", blueprintRunID, w.Path, err)
+					blueprintLog.Warn("delete run_worktrees row failed", "blueprint_run", blueprintRunID, "path", w.Path, "error", err)
 				}
 			}
 		}
@@ -225,7 +224,7 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 func taskEntityID(tasks db.TaskStore, orgID, taskID string) string {
 	t, err := tasks.GetSystem(context.Background(), orgID, taskID)
 	if err != nil {
-		log.Printf("[blueprint] taskEntityID: failed to resolve entity for task %s: %v", taskID, err)
+		blueprintLog.Warn("resolve entity for task failed", "task", taskID, "error", err)
 		return ""
 	}
 	if t == nil {
@@ -307,7 +306,7 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 	// step. This is the durable half of the cancel; the in-memory subprocess kill
 	// below is the active half.
 	if _, err := s.blueprints.RequestRunCancelSystem(context.Background(), orgID, blueprintRunID); err != nil {
-		log.Printf("[blueprint] CancelBlueprint: raise cancel signal for %s: %v", blueprintRunID, err)
+		blueprintLog.Warn("raise cancel signal failed", "blueprint_run", blueprintRunID, "error", err)
 	}
 
 	// Kill the active step's subprocess, if one is running. The dispatcher
@@ -327,7 +326,7 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 		// currently-running subprocess will run to completion (then short-circuit
 		// in the reactor on the non-running blueprint). Log so that wasteful run
 		// is diagnosable.
-		log.Printf("[blueprint] CancelBlueprint: list active step runs for %s failed; a live subprocess may run to completion: %v", blueprintRunID, err)
+		blueprintLog.Warn("list active step runs failed; a live subprocess may run to completion", "blueprint_run", blueprintRunID, "error", err)
 	} else {
 		s.mu.Lock()
 		for _, runID := range stepIDs {
@@ -351,7 +350,7 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 	// in the queue, then finalize the blueprint ourselves.
 	for _, runID := range stepIDs {
 		if _, mErr := s.agentRuns.MarkCancelledIfActiveSystem(context.Background(), orgID, runID, "user_cancelled", "Blueprint cancelled by user"); mErr != nil {
-			log.Printf("[blueprint] CancelBlueprint: mark step run %s cancelled: %v", runID, mErr)
+			blueprintLog.Warn("mark step run cancelled failed", "step_run", runID, "error", mErr)
 		}
 	}
 
@@ -360,7 +359,7 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 	// aren't persisted on blueprint_runs, so CleanupPRConfig is skipped).
 	task, err := s.tasks.GetSystem(context.Background(), orgID, cr.TaskID)
 	if err != nil || task == nil {
-		log.Printf("[blueprint] CancelBlueprint: load task for paused blueprint_run %s: %v", blueprintRunID, err)
+		blueprintLog.Warn("load task for paused blueprint_run failed", "blueprint_run", blueprintRunID, "error", err)
 		// User-initiated cancel — write under the cancelling user's
 		// synthetic claims rather than the blueprint's original trigger
 		// identity. Audit shows "user X cancelled this blueprint".
@@ -471,7 +470,7 @@ func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepRunID, userID string) {
 
 	stepRun, err := s.agentRuns.GetSystem(context.Background(), orgID, stepRunID)
 	if err != nil || stepRun == nil {
-		log.Printf("[blueprint] resume run %s: read step run: %v", stepRunID, err)
+		blueprintLog.Warn("read step run failed", "step_run", stepRunID, "error", err)
 		return
 	}
 	// Still dormant after the resume (went open again / queued an approval) → the
@@ -482,7 +481,7 @@ func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepRunID, userID string) {
 
 	task, err := s.tasks.GetSystem(context.Background(), orgID, cr.TaskID)
 	if err != nil || task == nil {
-		log.Printf("[blueprint] resume: load task for blueprint_run %s: %v", cr.ID, err)
+		blueprintLog.Warn("load task for blueprint_run failed", "blueprint_run", cr.ID, "error", err)
 		_, _ = s.markBlueprintRunStatusAsUser(context.Background(), orgID, userID, cr.ID, domain.BlueprintRunStatusFailed, "resume_task_load_failed", stepIdx)
 		return
 	}
@@ -572,7 +571,7 @@ func (s *Spawner) ResumeBlueprintAfterApproval(orgID, stepRunID, userID string) 
 
 	stepRun, err := s.agentRuns.GetSystem(context.Background(), orgID, stepRunID)
 	if err != nil || stepRun == nil {
-		log.Printf("[blueprint] approval-resume run %s: read step run: %v", stepRunID, err)
+		blueprintLog.Warn("approval-resume read step run failed", "step_run", stepRunID, "error", err)
 		return
 	}
 	// Map the approved step's recorded outcome to the blueprint's terminal shape.
@@ -590,13 +589,13 @@ func (s *Spawner) ResumeBlueprintAfterApproval(orgID, stepRunID, userID string) 
 		terminalStatus = domain.BlueprintRunStatusAborted
 		abortReason = stepRun.OutcomeReason
 	default:
-		log.Printf("[blueprint] approval-resume blueprint_run %s step run %s: outcome %q is neither finish nor abort; blueprint left running", cr.ID, stepRunID, stepRun.Outcome)
+		blueprintLog.Warn("approval-resume outcome is neither finish nor abort; blueprint left running", "blueprint_run", cr.ID, "step_run", stepRunID, "outcome", stepRun.Outcome)
 		return
 	}
 
 	task, err := s.tasks.GetSystem(context.Background(), orgID, cr.TaskID)
 	if err != nil || task == nil {
-		log.Printf("[blueprint] approval-resume blueprint_run %s: load task: %v", cr.ID, err)
+		blueprintLog.Warn("approval-resume load task failed", "blueprint_run", cr.ID, "error", err)
 		return
 	}
 

@@ -5,7 +5,6 @@ import (
 	cryptorand "crypto/rand"
 	"fmt"
 	"io/fs"
-	"log"
 	"net/url"
 	"os"
 	"time"
@@ -132,8 +131,8 @@ func newVerifierWithRetry(ctx context.Context, jwksURL, issuer, audience string)
 		if attempt == attempts {
 			break
 		}
-		log.Printf("[auth] JWKS verifier not ready (attempt %d/%d): %v; retrying in %s",
-			attempt, attempts, err, backoff)
+		authLog.Warn("jwks verifier not ready; retrying",
+			"attempt", attempt, "attempts", attempts, "error", err, "backoff", backoff)
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()

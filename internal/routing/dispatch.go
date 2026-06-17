@@ -2,7 +2,6 @@ package routing
 
 import (
 	"context"
-	"log"
 	"sort"
 	"time"
 
@@ -30,7 +29,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	// local sentinel. The check lives here at the single entry point;
 	// downstream helpers take orgID as a typed parameter and trust it.
 	if evt.OrgID == "" {
-		log.Printf("[router] dropping event %s with no OrgID — emitter bug", evt.EventType)
+		routerLog.Error("dropping event with no org id; emitter bug", "event_type", evt.EventType)
 		return
 	}
 	orgID := evt.OrgID
@@ -44,7 +43,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	if evt.ID == "" {
 		id, err := r.events.RecordSystem(context.Background(), orgID, evt)
 		if err != nil {
-			log.Printf("[router] failed to record event %s: %v", evt.EventType, err)
+			routerLog.Error("failed to record event", "event_type", evt.EventType, "error", err)
 			return
 		}
 		evt.ID = id
@@ -102,7 +101,7 @@ func (r *Router) routableEntity(orgID string, evt domain.Event) (string, bool) {
 	if evt.EntityID != nil && EntityTerminatingEvents[evt.EventType] {
 		closed, err := r.closeEntity(orgID, *evt.EntityID)
 		if err != nil {
-			log.Printf("[router] entity lifecycle error for %s: %v", *evt.EntityID, err)
+			routerLog.Error("entity lifecycle error", "entity_id", *evt.EntityID, "error", err)
 		}
 		if closed > 0 {
 			r.ws.Broadcast(websocket.Event{Type: "tasks_updated", OrgID: orgID, Data: map[string]any{}})
@@ -117,7 +116,7 @@ func (r *Router) routableEntity(orgID string, evt domain.Event) (string, bool) {
 
 	entity, err := r.entities.GetSystem(context.Background(), orgID, entityID)
 	if err != nil || entity == nil {
-		log.Printf("[router] failed to load entity %s: %v", entityID, err)
+		routerLog.Error("failed to load entity", "entity_id", entityID, "error", err)
 		return "", false
 	}
 	if entity.State != "active" {
@@ -134,7 +133,7 @@ func (r *Router) routableEntity(orgID string, evt domain.Event) (string, bool) {
 func (r *Router) matchHandlers(orgID string, evt domain.Event) (matchedRules, matchedTriggers []domain.EventHandler) {
 	handlers, err := r.handlers.GetEnabledForEventSystem(context.Background(), orgID, evt.EventType)
 	if err != nil {
-		log.Printf("[router] failed to query event_handlers for %s: %v", evt.EventType, err)
+		routerLog.Error("failed to query event_handlers", "event_type", evt.EventType, "error", err)
 	}
 
 	// scopeCache memoizes the team↔scope (e.g. team↔repo) gate per team for
@@ -148,7 +147,7 @@ func (r *Router) matchHandlers(orgID string, evt domain.Event) (matchedRules, ma
 		}
 		matched, err := matchPredicate(evt.EventType, predJSON, evt.MetadataJSON)
 		if err != nil {
-			log.Printf("[router] event_handler %s (%s) predicate error: %v", h.ID, h.Kind, err)
+			routerLog.Error("event_handler predicate error", "handler_id", h.ID, "kind", h.Kind, "error", err)
 			continue
 		}
 		if !matched {
@@ -264,7 +263,7 @@ func (r *Router) resolveTeamRouting(orgID string, evt domain.Event, entityID str
 		// unwired (scoped=false).
 		if reqTeams, scoped := r.reviewRequestVisibilityTeams(orgID, evt); scoped {
 			if len(reqTeams) == 0 {
-				log.Printf("[router] review_requested on entity %s: requested identity maps to no TF team — recording event, no task", entityID)
+				routerLog.Warn("review_requested: requested identity maps to no tf team, recording event but no task", "entity_id", entityID)
 				return eventRouting{}, false
 			}
 			visibleTeams = reqTeams
@@ -328,11 +327,11 @@ func (r *Router) upsertTaskForEvent(orgID string, evt domain.Event, entityID str
 	if evt.EventType == domain.EventJiraIssueBecameAtomic {
 		active, err := r.tasks.FindActiveByEntitySystem(context.Background(), orgID, entityID)
 		if err != nil {
-			log.Printf("[router] became_atomic: failed to check active tasks on entity %s: %v", entityID, err)
+			routerLog.Error("became_atomic: failed to check active tasks on entity", "entity_id", entityID, "error", err)
 			return nil, false
 		}
 		if len(active) > 0 {
-			log.Printf("[router] became_atomic: entity %s already has an active task, skipping duplicate creation", entityID)
+			routerLog.Warn("became_atomic: entity already has an active task, skipping duplicate creation", "entity_id", entityID)
 			return nil, false
 		}
 	}
@@ -347,7 +346,7 @@ func (r *Router) upsertTaskForEvent(orgID string, evt domain.Event, entityID str
 	}
 	task, created, err := r.tasks.FindOrCreateAtSystem(context.Background(), orgID, routing.ownerTeam, entityID, evt.EventType, evt.DedupKey, evt.ID, routing.taskPriority, createdAt)
 	if err != nil {
-		log.Printf("[router] failed to find/create task for %s on entity %s: %v", evt.EventType, entityID, err)
+		routerLog.Error("failed to find/create task", "event_type", evt.EventType, "entity_id", entityID, "error", err)
 		return nil, false
 	}
 
@@ -356,20 +355,20 @@ func (r *Router) upsertTaskForEvent(orgID string, evt domain.Event, entityID str
 	// but not fatal — the owning team_id still grants the owner visibility; a
 	// follow-up event re-attempts the wider set.
 	if err := r.tasks.SetVisibilityTeamsSystem(context.Background(), orgID, task.ID, routing.visibleTeams); err != nil {
-		log.Printf("[router] failed to set visibility teams for task %s: %v", task.ID, err)
+		routerLog.Error("failed to set visibility teams for task", "task_id", task.ID, "error", err)
 	}
 
 	if created {
 		if err := r.tasks.RecordEventSystem(context.Background(), orgID, task.ID, evt.ID, "spawned"); err != nil {
-			log.Printf("[router] failed to record spawned task_event: %v", err)
+			routerLog.Error("failed to record spawned task_event", "task_id", task.ID, "error", err)
 		}
-		log.Printf("[router] created task %s (%s) on entity %s (owner team %s, %d visible teams)", task.ID, evt.EventType, entityID, routing.ownerTeam, len(routing.visibleTeams))
+		routerLog.Info("created task", "task_id", task.ID, "event_type", evt.EventType, "entity_id", entityID, "owner_team", routing.ownerTeam, "visible_teams", len(routing.visibleTeams))
 	} else {
 		if err := r.tasks.BumpSystem(context.Background(), orgID, task.ID, evt.ID); err != nil {
-			log.Printf("[router] failed to bump task %s: %v", task.ID, err)
+			routerLog.Error("failed to bump task", "task_id", task.ID, "error", err)
 		}
 		if err := r.tasks.RecordEventSystem(context.Background(), orgID, task.ID, evt.ID, "bumped"); err != nil {
-			log.Printf("[router] failed to record bumped task_event: %v", err)
+			routerLog.Error("failed to record bumped task_event", "task_id", task.ID, "error", err)
 		}
 	}
 

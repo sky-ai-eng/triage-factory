@@ -3,7 +3,6 @@ package routing
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -26,12 +25,12 @@ func (r *Router) cancelActiveRunsForTask(orgID, taskID string) {
 	}
 	ids, err := r.agentRuns.ActiveIDsForTaskSystem(context.Background(), orgID, taskID)
 	if err != nil {
-		log.Printf("[router] active-run lookup for task %s failed: %v", taskID, err)
+		routerLog.Error("active-run lookup for task failed", "task_id", taskID, "error", err)
 		return
 	}
 	for _, id := range ids {
 		if err := r.spawner.Cancel(orgID, id, ""); err != nil {
-			log.Printf("[router] cancel run %s on close of task %s: %v", id, taskID, err)
+			routerLog.Error("cancel run on task close failed", "run_id", id, "task_id", taskID, "error", err)
 		}
 	}
 }
@@ -51,7 +50,7 @@ func (r *Router) closeEntity(orgID, entityID string) (int, error) {
 		// because we couldn't enumerate tasks for cancellation. Any
 		// orphaned runs can be cleaned up by the existing startup
 		// worktree.Cleanup pass.
-		log.Printf("[router] entity close: list active tasks for %s failed: %v", entityID, err)
+		routerLog.Error("entity close: list active tasks failed", "entity_id", entityID, "error", err)
 	} else {
 		for _, t := range tasks {
 			r.cancelActiveRunsForTask(orgID, t.ID)
@@ -66,7 +65,7 @@ func (r *Router) closeEntity(orgID, entityID string) (int, error) {
 		return closed, err
 	}
 	if closed > 0 {
-		log.Printf("[lifecycle] entity %s closed → %d tasks cascade-closed", entityID, closed)
+		lifecycleLog.Info("entity closed, tasks cascade-closed", "entity_id", entityID, "closed", closed)
 	}
 	return closed, nil
 }
@@ -154,9 +153,9 @@ func (r *Router) closeCheckCIPassed(orgID string, evt domain.Event, entityID str
 	closed := false
 	for _, t := range failedTasks {
 		if err := r.closeTaskWithAudit(orgID, t.ID, evt.ID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed); err != nil {
-			log.Printf("[router] failed to close ci_check_failed task %s: %v", t.ID, err)
+			routerLog.Error("failed to close ci_check_failed task", "task_id", t.ID, "error", err)
 		} else {
-			log.Printf("[router] inline-closed task %s (ci_check_failed → ci_check_passed)", t.ID)
+			routerLog.Info("inline-closed task", "task_id", t.ID, "reason", "ci_check_failed -> ci_check_passed")
 			closed = true
 		}
 	}
@@ -223,9 +222,9 @@ func (r *Router) closeCheckReviewResolved(orgID string, evt domain.Event, entity
 	closed := false
 	for _, t := range tasks {
 		if err := r.closeTaskWithAudit(orgID, t.ID, evt.ID, "auto_closed_by_event", evt.EventType); err != nil {
-			log.Printf("[router] failed to close changes_requested task %s: %v", t.ID, err)
+			routerLog.Error("failed to close changes_requested task", "task_id", t.ID, "error", err)
 		} else {
-			log.Printf("[router] inline-closed task %s (review resolved by %s)", t.ID, reviewer)
+			routerLog.Info("inline-closed task", "task_id", t.ID, "reason", "review resolved", "reviewer", reviewer)
 			closed = true
 		}
 	}
@@ -269,9 +268,9 @@ func (r *Router) closeReviewerRequestOnReview(orgID string, evt domain.Event, en
 			continue // a different reviewer's task — leave it open
 		}
 		if err := r.closeTaskWithAudit(orgID, t.ID, evt.ID, "auto_closed_by_event", evt.EventType); err != nil {
-			log.Printf("[router] failed to close review_requested task %s: %v", t.ID, err)
+			routerLog.Error("failed to close review_requested task", "task_id", t.ID, "error", err)
 		} else {
-			log.Printf("[router] inline-closed task %s (reviewed by %s via %s)", t.ID, m.Reviewer, evt.EventType)
+			routerLog.Info("inline-closed task", "task_id", t.ID, "reason", "reviewed", "reviewer", m.Reviewer, "event_type", evt.EventType)
 			closed = true
 		}
 	}
@@ -298,9 +297,9 @@ func (r *Router) closeCheckReviewRequestRemoved(orgID string, evt domain.Event, 
 			continue // different reviewer's task — leave it open
 		}
 		if err := r.closeTaskWithAudit(orgID, t.ID, evt.ID, "auto_closed_by_event", domain.EventGitHubPRReviewRequestRemoved); err != nil {
-			log.Printf("[router] failed to close review_requested task %s: %v", t.ID, err)
+			routerLog.Error("failed to close review_requested task", "task_id", t.ID, "error", err)
 		} else {
-			log.Printf("[router] inline-closed task %s (review request removed: %s)", t.ID, evt.DedupKey)
+			routerLog.Info("inline-closed task", "task_id", t.ID, "reason", "review request removed", "dedup_key", evt.DedupKey)
 			closed = true
 		}
 	}
@@ -383,9 +382,9 @@ func (r *Router) closeCheckJiraReassigned(orgID string, evt domain.Event, entity
 				}
 			}
 			if err := r.closeTaskWithAudit(orgID, t.ID, evt.ID, "auto_closed_by_event", domain.EventJiraIssueAssigned); err != nil {
-				log.Printf("[router] failed to close %s task %s: %v", eventType, t.ID, err)
+				routerLog.Error("failed to close task", "event_type", eventType, "task_id", t.ID, "error", err)
 			} else {
-				log.Printf("[router] inline-closed task %s (jira reassigned away)", t.ID)
+				routerLog.Info("inline-closed task", "task_id", t.ID, "reason", "jira reassigned away")
 				closed = true
 			}
 		}

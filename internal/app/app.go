@@ -18,7 +18,6 @@ import (
 	"context"
 	"database/sql"
 	"io/fs"
-	"log"
 	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -116,7 +115,7 @@ func (a *App) Run(ctx context.Context) error {
 func (a *App) Close() error {
 	if a.appDB != nil {
 		if err := a.appDB.Close(); err != nil {
-			log.Printf("[app] close app DB pool: %v", err)
+			appLog.Error("close app db pool failed", "error", err)
 		}
 	}
 	if a.database != nil {

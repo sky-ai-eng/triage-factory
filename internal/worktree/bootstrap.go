@@ -2,7 +2,6 @@ package worktree
 
 import (
 	"context"
-	"log"
 	"time"
 )
 
@@ -59,7 +58,7 @@ func BootstrapBareClones(ctx context.Context, targets []BootstrapTarget) {
 			continue
 		}
 		if _, err := EnsureBareClone(ctx, t.Owner, t.Repo, t.CloneURL); err != nil {
-			log.Printf("[worktree] warm %s/%s: %v", t.Owner, t.Repo, err)
+			worktreeLog.Warn("warm failed", "owner", t.Owner, "repo", t.Repo, "error", err)
 			failed++
 			continue
 		}
@@ -70,8 +69,7 @@ func BootstrapBareClones(ctx context.Context, targets []BootstrapTarget) {
 		SweepStaleForkPRConfig(t.Owner, t.Repo)
 		ensured++
 	}
-	log.Printf("[worktree] warm complete in %s (%d ensured, %d skipped no-url, %d failed)",
-		time.Since(start).Round(time.Millisecond), ensured, skipped, failed)
+	worktreeLog.Info("warm complete", "duration", time.Since(start).Round(time.Millisecond), "ensured", ensured, "skipped", skipped, "failed", failed)
 
 	EnforceBudget(ctx, DefaultPolicy())
 }

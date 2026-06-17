@@ -1,7 +1,6 @@
 package server
 
 import (
-	"log"
 	"net/http"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -182,7 +181,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 			}
 			matched, merr := schema.Match(predJSON, primaryEvent.MetadataJSON)
 			if merr != nil {
-				log.Printf("[factory] event_handler %s predicate error: %v", h.ID, merr)
+				factoryLog.Warn("event_handler predicate error, skipping", "event_handler", h.ID, "error", merr)
 				continue
 			}
 			if matched && *h.DefaultPriority > defaultPriority {
@@ -216,7 +215,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		// to link the existing task to.
 		if created {
 			if recErr := tx.Tasks.RecordEvent(r.Context(), orgID, task.ID, primaryEvent.ID, "spawned"); recErr != nil {
-				log.Printf("[factory] failed to record spawned task_event for %s: %v", task.ID, recErr)
+				factoryLog.Warn("failed to record spawned task_event", "task", task.ID, "error", recErr)
 			}
 		}
 		return nil
@@ -311,7 +310,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		_, e := tx.Swipes.RecordSwipe(r.Context(), orgID, task.ID, "delegate", 0)
 		return e
 	}); err != nil {
-		log.Printf("[factory] failed to record delegate swipe for task %s: %v", task.ID, err)
+		factoryLog.Warn("failed to record delegate swipe", "task", task.ID, "error", err)
 	}
 
 	// Now attempt the spawn. Delegate's failure modes (prompt not

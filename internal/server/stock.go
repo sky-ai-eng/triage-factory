@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -176,7 +175,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		}
 		var snap domain.JiraSnapshot
 		if err := json.Unmarshal([]byte(e.SnapshotJSON), &snap); err != nil {
-			log.Printf("[stock] skipping entity %s (%s): invalid snapshot: %v", e.ID, e.SourceID, err)
+			stockLog.Warn("skipping entity, invalid snapshot", "entity", e.ID, "source_id", e.SourceID, "error", err)
 			continue
 		}
 		// Subtask gate (SKY-173) applies to both buckets — a parent ticket
@@ -241,7 +240,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 			// (in-progress orphan, stale Done), or project has no
 			// configured rules — no action in carry-over.
 			if projectRule == nil {
-				log.Printf("[stock] skipping %s: project %q has no configured status rules", snap.Key, projectKey)
+				stockLog.Warn("skipping entity, project has no configured status rules", "key", snap.Key, "project", projectKey)
 			}
 			continue
 		}

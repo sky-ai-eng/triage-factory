@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 
@@ -204,8 +203,8 @@ func (pp *pendingPRsHandler) handlePendingPRDiff(w http.ResponseWriter, r *http.
 		// the response body but never logged anything, which made
 		// the "no errors in the backend" complaint accurate even
 		// when the failure was right there in `err`.
-		log.Printf("[pending-prs] diff failed for id=%s run=%s repo=%s/%s base=%s head=%s head_sha=%s: %v",
-			pr.ID, pr.RunID, pr.Owner, pr.Repo, pr.BaseBranch, pr.HeadBranch, pr.HeadSHA, err)
+		pendingPrsLog.Error("diff failed",
+			"id", pr.ID, "run", pr.RunID, "owner", pr.Owner, "repo", pr.Repo, "base", pr.BaseBranch, "head", pr.HeadBranch, "head_sha", pr.HeadSHA, "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "diff failed: " + err.Error()})
 		return
 	}
@@ -276,7 +275,7 @@ func (pp *pendingPRsHandler) handlePendingPRSubmit(w http.ResponseWriter, r *htt
 	gh, err := pp.ghResolver.ClientForRepo(r.Context(), orgID, pr.Owner, pr.Repo)
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-			log.Printf("[pending-prs] org %s: GitHub not configured for %s/%s: %v", orgID, pr.Owner, pr.Repo, err)
+			pendingPrsLog.Warn("github not configured", "org", orgID, "owner", pr.Owner, "repo", pr.Repo, "error", err)
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub credentials not configured"})
 			return
 		}
@@ -325,7 +324,7 @@ func (pp *pendingPRsHandler) handlePendingPRSubmit(w http.ResponseWriter, r *htt
 		if clearErr := pp.tx.WithTx(clearCtx, orgID, userID, func(tx db.TxStores) error {
 			return tx.PendingPRs.ClearSubmitted(clearCtx, orgID, id)
 		}); clearErr != nil {
-			log.Printf("[pending-prs] failed to release submit guard for %s after CreatePR failure: %v", id, clearErr)
+			pendingPrsLog.Warn("failed to release submit guard after createpr failure", "id", id, "error", clearErr)
 		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
 		return
@@ -352,7 +351,7 @@ func (pp *pendingPRsHandler) handlePendingPRSubmit(w http.ResponseWriter, r *htt
 		if err := pp.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
 			return tx.TaskMemory.UpdateRunMemoryHumanContent(cleanupCtx, orgID, pr.RunID, humanContent)
 		}); err != nil {
-			log.Printf("[pending-prs] warning: failed to record human verdict for run %s: %v", pr.RunID, err)
+			pendingPrsLog.Warn("failed to record human verdict", "run", pr.RunID, "error", err)
 		}
 	}
 
@@ -364,7 +363,7 @@ func (pp *pendingPRsHandler) handlePendingPRSubmit(w http.ResponseWriter, r *htt
 	if err := pp.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
 		return tx.PendingPRs.Delete(cleanupCtx, orgID, id)
 	}); err != nil {
-		log.Printf("[pending-prs] warning: failed to clean up pending PR %s after submit: %v", id, err)
+		pendingPrsLog.Warn("failed to clean up pending pr after submit", "id", id, "error", err)
 	}
 
 	// Step 3: run/task bookkeeping. Independent of the row delete
@@ -384,7 +383,7 @@ func (pp *pendingPRsHandler) handlePendingPRSubmit(w http.ResponseWriter, r *htt
 			// terminateBlueprint.
 			cr, _, blueprintLookupErr := tx.Blueprints.GetRunForRun(cleanupCtx, orgID, pr.RunID)
 			if blueprintLookupErr != nil {
-				log.Printf("[pending-prs] warning: blueprint lookup failed for run %s; skipping task closure: %v", pr.RunID, blueprintLookupErr)
+				pendingPrsLog.Warn("blueprint lookup failed, skipping task closure", "run", pr.RunID, "error", blueprintLookupErr)
 				return nil
 			}
 			blueprintRun = cr
@@ -395,15 +394,15 @@ func (pp *pendingPRsHandler) handlePendingPRSubmit(w http.ResponseWriter, r *htt
 			// the task to done.
 			run, runErr := tx.AgentRuns.Get(cleanupCtx, orgID, pr.RunID)
 			if runErr != nil || run == nil {
-				log.Printf("[pending-prs] warning: read run %s for task closure: %v", pr.RunID, runErr)
+				pendingPrsLog.Warn("read run for task closure failed", "run", pr.RunID, "error", runErr)
 				return nil
 			}
 			if err := tx.Tasks.Close(cleanupCtx, orgID, run.TaskID, "run_completed", ""); err != nil {
-				log.Printf("[pending-prs] warning: failed to close task for run %s: %v", pr.RunID, err)
+				pendingPrsLog.Warn("failed to close task for run", "run", pr.RunID, "error", err)
 			}
 			return nil
 		}); err != nil {
-			log.Printf("[pending-prs] warning: post-submit run bookkeeping for %s: %v", pr.RunID, err)
+			pendingPrsLog.Warn("post-submit run bookkeeping failed", "run", pr.RunID, "error", err)
 		}
 
 		pp.ws.Broadcast(websocket.Event{

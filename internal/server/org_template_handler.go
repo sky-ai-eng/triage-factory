@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -1423,7 +1422,7 @@ func (ot *orgTemplateHandler) handleOrgTemplateHandlerPromote(w http.ResponseWri
 		// concurrent promote onto the same template blueprint can race past the
 		// check and hit the partial-unique index — 409, not a raw 500.
 		if isUniqueViolation(err) {
-			log.Printf("[org_template] promote conflict (blueprint already triggered): %v", err)
+			orgTemplateLog.Warn("promote conflict, blueprint already triggered", "error", err)
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
 			return
 		}
@@ -1491,7 +1490,7 @@ func (ot *orgTemplateHandler) handleOrgTemplateHandlerRetarget(w http.ResponseWr
 		return e
 	}); err != nil {
 		if isUniqueViolation(err) {
-			log.Printf("[org_template] retarget conflict (blueprint already triggered): %v", err)
+			orgTemplateLog.Warn("retarget conflict, blueprint already triggered", "error", err)
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
 			return
 		}

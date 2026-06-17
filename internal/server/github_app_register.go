@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"html/template"
 	"io"
-	"log"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -349,11 +348,11 @@ func (s *Server) handleGitHubAppRegisterLaunch(w http.ResponseWriter, r *http.Re
 		case errors.Is(err, errOrgNotFound):
 			s.renderLaunchError(w, http.StatusNotFound, orgID, returnTo, "Workspace not found.")
 		case errors.Is(err, errInvalidGitHubBase):
-			log.Printf("[github-app] launch: invalid github base url for org %s", orgID)
+			githubAppLog.Error("launch: invalid github base url", "org", orgID)
 			s.renderLaunchError(w, http.StatusInternalServerError, orgID, returnTo,
 				"The configured GitHub base URL is invalid. Update it in Workspace Settings.")
 		default:
-			log.Printf("[github-app] launch: %v", err)
+			githubAppLog.Error("launch failed", "error", err)
 			s.renderLaunchError(w, http.StatusInternalServerError, orgID, returnTo,
 				"Something went wrong preparing the registration. Please try again.")
 		}
@@ -376,7 +375,7 @@ func (s *Server) handleGitHubAppRegisterLaunch(w http.ResponseWriter, r *http.Re
 		ManifestJSON:    manifestJSON,
 		OwnerLogin:      ownerLogin,
 	}); err != nil {
-		log.Printf("[github-app] render launch page: %v", err)
+		githubAppLog.Error("render launch page failed", "error", err)
 	}
 }
 
@@ -439,7 +438,7 @@ func (s *Server) renderLaunchError(w http.ResponseWriter, status int, orgID, ret
 		BackURL:   backURL,
 		BackLabel: backLabel,
 	}); err != nil {
-		log.Printf("[github-app] render launch error page: %v", err)
+		githubAppLog.Error("render launch error page failed", "error", err)
 	}
 }
 
@@ -467,7 +466,7 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 
 	state, err := parseAppRegisterState(stateRaw, s.deployCfg.hmacKey)
 	if err != nil {
-		log.Printf("[github-app] invalid state: %v", err)
+		githubAppLog.Warn("invalid state", "error", err)
 		http.Error(w, "invalid or expired state token", http.StatusUnauthorized)
 		return
 	}
@@ -514,7 +513,7 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 	conversionURL := apiBase + "/app-manifests/" + url.PathEscape(code) + "/conversions"
 	convResp, err := exchangeManifestCode(r.Context(), conversionURL)
 	if err != nil {
-		log.Printf("[github-app] manifest exchange: %v", err)
+		githubAppLog.Error("manifest exchange failed", "error", err)
 		internalError(w, "github-app", fmt.Errorf("GitHub manifest exchange failed"))
 		return
 	}
@@ -546,7 +545,7 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 		creds, _ := integrations.Load(r.Context(), tx.Secrets, orgID)
 		staged := creds.GitHubPAT != ""
 		if staged {
-			log.Printf("[github-app] org %s has a live PAT — staging app_id=%s as active=false until cutover", orgID, appIDStr)
+			githubAppLog.Info("live pat present, staging app inactive until cutover", "org", orgID, "app_id", appIDStr)
 		}
 		if err := tx.GitHubApps.CreateForOrg(r.Context(), domain.OrgGitHubApp{
 			OrgID:              orgID,
@@ -595,7 +594,7 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 		return
 	}
 
-	log.Printf("[github-app] registered app_id=%s slug=%s for org=%s", appIDStr, convResp.Slug, orgID)
+	githubAppLog.Info("registered app", "app_id", appIDStr, "slug", convResp.Slug, "org", orgID)
 
 	// Land the user back where they launched registration from. The wizard
 	// (rt=setup) returns to /setup, which resumes on the now-current "Install

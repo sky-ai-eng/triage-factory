@@ -4,7 +4,6 @@ import (
 	"context"
 	_ "embed" // required by //go:embed
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,7 +59,7 @@ func materializeSpecSkill(ctx context.Context, stores db.Stores, orgID, creatorU
 		// No usable prompt — clear any stale SKILL.md from a previous
 		// dispatch so the agent doesn't keep applying guidance that no
 		// longer matches the project's current configuration.
-		log.Printf("[curator] no spec-authorship prompt resolved for project %s; clearing stale skill if any", project.ID)
+		curatorLog.Warn("no spec-authorship prompt resolved; clearing stale skill if any", "project", project.ID)
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove stale SKILL.md: %w", err)
 		}
@@ -120,8 +119,8 @@ func resolveSpecPrompt(ctx context.Context, stores db.Stores, orgID, creatorUser
 			if b != nil {
 				bp = b
 			} else {
-				log.Printf("[curator] project %s references missing spec blueprint %s; falling back to system default",
-					project.ID, project.SpecAuthorshipBlueprintID)
+				curatorLog.Warn("project references missing spec blueprint; falling back to system default",
+					"project", project.ID, "blueprint", project.SpecAuthorshipBlueprintID)
 			}
 		}
 		if bp == nil {
@@ -141,7 +140,7 @@ func resolveSpecPrompt(ctx context.Context, stores db.Stores, orgID, creatorUser
 			return fmt.Errorf("load spec blueprint steps: %w", err)
 		}
 		if len(steps) == 0 {
-			log.Printf("[curator] spec blueprint %s has no steps; clearing stale skill if any", bp.ID)
+			curatorLog.Warn("spec blueprint has no steps; clearing stale skill if any", "blueprint", bp.ID)
 			return nil
 		}
 		p, err := ts.Prompts.Get(ctx, orgID, steps[0].StepPromptID)

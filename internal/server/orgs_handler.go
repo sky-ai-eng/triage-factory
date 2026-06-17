@@ -1,7 +1,6 @@
 package server
 
 import (
-	"log"
 	"net/http"
 	"strings"
 	"unicode/utf8"
@@ -66,7 +65,7 @@ func (s *Server) handleOrgCreate(w http.ResponseWriter, r *http.Request) {
 	sess := SessionFrom(r.Context())
 	if sess == nil {
 		// withSession sets this; absence is a route-wiring bug.
-		log.Printf("[orgs] handleOrgCreate: no session in context — route missing withSession?")
+		orgsLog.Error("org create: no session in context, route missing withsession")
 		writeUnauth(w)
 		return
 	}
@@ -115,7 +114,7 @@ func (s *Server) handleOrgCreate(w http.ResponseWriter, r *http.Request) {
 	// (auto-delegation won't fire) but repairable by re-running bootstrap,
 	// whereas failing the create after the rows committed would orphan it.
 	if err := db.BootstrapNewOrg(r.Context(), s.allStores, orgID.String(), teamID.String(), ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
-		log.Printf("[orgs] new org %s/%s created but bootstrap failed (template/bot may be missing): %v", orgID, teamID, err)
+		orgsLog.Warn("new org created but bootstrap failed, template/bot may be missing", "org", orgID, "team", teamID, "error", err)
 	}
 
 	// Point the session at the new org so the next /api/me carries it as
@@ -124,7 +123,7 @@ func (s *Server) handleOrgCreate(w http.ResponseWriter, r *http.Request) {
 	// onboarding screen's membership-appears effect still routes in; the
 	// founder can switch explicitly if this rare path failed.
 	if err := s.authDeps.sessions.UpdateActiveOrgSystem(r.Context(), sess.ID, orgID); err != nil {
-		log.Printf("[orgs] set active org sid=%s org=%s: %v", sessions.LogID(sess.ID), orgID, err)
+		orgsLog.Warn("set active org failed", "sid", sessions.LogID(sess.ID), "org", orgID, "error", err)
 	}
 
 	writeJSON(w, http.StatusCreated, orgCreateResponse{

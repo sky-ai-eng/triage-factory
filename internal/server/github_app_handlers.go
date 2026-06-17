@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"time"
 
@@ -103,7 +102,7 @@ func (s *Server) registrantDisplayName(ctx context.Context, orgID, userID string
 		name, derr = tx.Users.GetDisplayName(ctx, app.RegisteredByUserID)
 		return derr
 	}); err != nil {
-		log.Printf("[github-app] display name for %s: %v", app.RegisteredByUserID, err)
+		githubAppLog.Warn("display name lookup failed", "user", app.RegisteredByUserID, "error", err)
 		return ""
 	}
 	return name
@@ -195,7 +194,7 @@ func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *h
 	// not the request, so it's a 502 (and logged: the silent failure path is
 	// what made the original picker dead-end untraceable).
 	if err := s.githubApps.BackfillInstallationsFromAPI(ctx, orgID); err != nil {
-		log.Printf("[github-app] refresh installations for org %s: %v", orgID, err)
+		githubAppLog.Error("refresh installations failed", "org", orgID, "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}

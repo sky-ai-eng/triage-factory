@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"regexp"
 	"slices"
@@ -420,7 +419,7 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		// Log the underlying wrap-chain (SQL / vault / FK errors) for
 		// operator debugging, but return a stable user-facing message
 		// so we don't leak Postgres internals to API clients.
-		log.Printf("[settings] handleJiraConnect persist failed: %v", err)
+		settingsLog.Error("jira connect persist failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to connect Jira"})
 		return
 	}
@@ -474,7 +473,7 @@ func (se *settingsHandler) handleAnthropicConnect(w http.ResponseWriter, r *http
 			orgSet.AnthropicAPIKeyRef = ""
 			return tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet)
 		}); err != nil {
-			log.Printf("[settings] handleAnthropicConnect clear failed: %v", err)
+			settingsLog.Error("anthropic connect clear failed", "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update Claude credentials"})
 			return
 		}
@@ -510,7 +509,7 @@ func (se *settingsHandler) handleAnthropicConnect(w http.ResponseWriter, r *http
 		orgSet.AnthropicAPIKeyRef = secretKeyAnthropicAPIKey
 		return tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet)
 	}); err != nil {
-		log.Printf("[settings] handleAnthropicConnect persist failed: %v", err)
+		settingsLog.Error("anthropic connect persist failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to store Claude credentials"})
 		return
 	}
@@ -650,7 +649,7 @@ func (se *settingsHandler) handleGitHubPreflightSSH(w http.ResponseWriter, r *ht
 	defer cancel()
 
 	if err := worktree.PreflightSSH(ctx, sshHost); err != nil {
-		log.Printf("[settings] SSH preflight against %s failed: %v", sshHost, err)
+		settingsLog.Warn("ssh preflight failed", "ssh_host", sshHost, "error", err)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":     false,
 			"stderr": err.Error(),
@@ -658,6 +657,6 @@ func (se *settingsHandler) handleGitHubPreflightSSH(w http.ResponseWriter, r *ht
 		})
 		return
 	}
-	log.Printf("[settings] SSH preflight ok (%s authenticated)", sshHost)
+	settingsLog.Info("ssh preflight ok", "ssh_host", sshHost)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "host": sshHost})
 }

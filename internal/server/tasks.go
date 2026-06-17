@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 
@@ -689,7 +688,7 @@ func (s *Server) cleanupPendingApprovalRun(ctx context.Context, orgID, userID, t
 		return nil
 	})
 	if err != nil {
-		log.Printf("[approval-discard] task %s cleanup (run held in pending_approval for retry): %v", taskID, err)
+		approvalDiscardLog.Error("task cleanup failed, run held in pending_approval for retry", "task", taskID, "error", err)
 		return
 	}
 	if !flippedToDone || runID == "" {
@@ -779,9 +778,9 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 	jiraUserClient, jerr := s.jiraResolver.ForUser(ctx, orgID, userID)
 	if jerr != nil {
 		if errors.Is(jerr, jira.ErrNoJiraUserCredential) {
-			log.Printf("[jira] requeue revert: no Jira credential for user %s; skipping ticket %s", userID, task.EntitySourceID)
+			jiraLog.Warn("requeue revert: no jira credential for user, skipping ticket", "user", userID, "ticket", task.EntitySourceID)
 		} else {
-			log.Printf("[jira] requeue revert: resolve user client for %s: %v (skipping)", task.EntitySourceID, jerr)
+			jiraLog.Warn("requeue revert: resolve user client failed, skipping", "ticket", task.EntitySourceID, "error", jerr)
 		}
 		return
 	}
@@ -796,7 +795,7 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 		rule = lookupJiraRuleForTask(ctx, tx, task)
 		return nil
 	}); err != nil {
-		log.Printf("[jira] requeue rule lookup: %v (skipping revert)", err)
+		jiraLog.Warn("requeue rule lookup failed, skipping revert", "error", err)
 		return
 	}
 	var inProgressMembers []string
@@ -814,7 +813,7 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 		//   - unassigned -> skip Unassign (already unassigned), still transition
 		//   - assigned to self -> proceed normally (unassign + transition)
 		if state != nil && !state.AssignedToSelf && !state.Unassigned {
-			log.Printf("[jira] requeue guard: %s reassigned to someone else, skipping", issueKey)
+			jiraLog.Warn("requeue guard: reassigned to someone else, skipping", "issue", issueKey)
 			return
 		}
 		// Skip if the ticket has moved out of the in-progress rule
@@ -832,18 +831,18 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 				}
 			}
 			if !contains {
-				log.Printf("[jira] requeue guard: %s status is %q (not in in-progress members %v), skipping", issueKey, state.StatusName, ipMembers)
+				jiraLog.Warn("requeue guard: status not in in-progress members, skipping", "issue", issueKey, "status", state.StatusName, "in_progress_members", ipMembers)
 				return
 			}
 		}
 
 		if state == nil || state.AssignedToSelf {
 			if err := jiraUserClient.Unassign(bgCtx, issueKey); err != nil {
-				log.Printf("[jira] failed to unassign %s on requeue: %v", issueKey, err)
+				jiraLog.Error("failed to unassign on requeue", "issue", issueKey, "error", err)
 			}
 		}
 		if err := jiraUserClient.TransitionTo(bgCtx, issueKey, originalStatus); err != nil {
-			log.Printf("[jira] failed to transition %s back to %q on requeue: %v", issueKey, originalStatus, err)
+			jiraLog.Error("failed to transition back on requeue", "issue", issueKey, "status", originalStatus, "error", err)
 		}
 	}(task.EntitySourceID, task.SourceStatus, inProgressMembers)
 }

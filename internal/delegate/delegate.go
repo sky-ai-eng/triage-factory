@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 
 	"github.com/google/uuid"
@@ -214,10 +213,10 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 		if e := s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
 			return ts.Blueprints.IncrementUsage(bgCtx, orgID, blueprint.ID)
 		}); e != nil {
-			log.Printf("[delegate] warning: failed to increment usage for blueprint %s: %v", blueprint.ID, e)
+			delegateLog.Warn("increment usage for blueprint failed", "blueprint", blueprint.ID, "error", e)
 		}
 	} else if e := s.blueprints.IncrementUsageSystem(bgCtx, orgID, blueprint.ID); e != nil {
-		log.Printf("[delegate] warning: failed to increment usage for blueprint %s: %v", blueprint.ID, e)
+		delegateLog.Warn("increment usage for blueprint failed", "blueprint", blueprint.ID, "error", e)
 	}
 
 	// One dispatch path: mint the blueprint_run, then run the orchestrator
@@ -307,7 +306,7 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	// fails, mark it failed so it doesn't strand non-terminal.
 	if err := s.enqueueBlueprintStep(bgCtx, orgID, blueprintRunID, task, steps[0], stepModelOrInherit(stepPlan[0].Model, model), triggerType, creatorUserID); err != nil {
 		if _, mErr := s.blueprints.MarkRunStatusSystem(bgCtx, orgID, blueprintRunID, domain.BlueprintRunStatusFailed, "enqueue first step: "+err.Error(), nil); mErr != nil {
-			log.Printf("[delegate] warning: mark blueprint_run %s failed after enqueue error: %v", blueprintRunID, mErr)
+			delegateLog.Warn("mark blueprint_run failed after enqueue error", "blueprint_run", blueprintRunID, "error", mErr)
 		}
 		return "", fmt.Errorf("enqueue first step: %w", err)
 	}
@@ -431,7 +430,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID string, task dom
 	}
 
 	if err := s.agentRuns.SetWorktreePathSystem(context.Background(), orgID, runID, wtPath); err != nil {
-		log.Printf("[delegate] warning: failed to update worktree path for run %s: %v", runID, err)
+		delegateLog.Warn("update worktree path for run failed", "run", runID, "error", err)
 	}
 
 	// SKY-220: block briefly so the project classifier (post-poll
@@ -479,7 +478,7 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, runID string, task domai
 		return runConfig{}, fmt.Errorf("create run root: %w", err)
 	}
 	if err := s.agentRuns.SetWorktreePathSystem(context.Background(), orgID, runID, runRoot); err != nil {
-		log.Printf("[delegate] warning: failed to set worktree_path for Jira run %s: %v — resume will reject this run", runID, err)
+		delegateLog.Warn("set worktree_path for Jira run failed; resume will reject this run", "run", runID, "error", err)
 	}
 
 	// SKY-220: block briefly so the project classifier can decide this

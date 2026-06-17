@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -439,7 +438,7 @@ func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) 
 	if err := s.q.QueryRowContext(ctx,
 		`SELECT MAX(started_at) FROM runs WHERE prompt_id = ?`, promptID,
 	).Scan(&lastUsed); err != nil {
-		log.Printf("[prompt_stats] failed to scan MAX(started_at) for %s: %v", promptID, err)
+		promptStatsLog.Error("scan max started_at failed", "prompt_id", promptID, "error", err)
 	}
 	if lastUsed.Valid {
 		formatted := lastUsed.Time.Format(time.RFC3339)
@@ -469,13 +468,13 @@ func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) 
 		var day string
 		var cnt int
 		if err := rows.Scan(&day, &cnt); err != nil {
-			log.Printf("[prompt_stats] failed to scan runs-per-day row for %s: %v", promptID, err)
+			promptStatsLog.Error("scan runs-per-day row failed", "prompt_id", promptID, "error", err)
 			continue
 		}
 		dayMap[day] = cnt
 	}
 	if err := rows.Err(); err != nil {
-		log.Printf("[prompt_stats] runs-per-day iteration error for %s: %v", promptID, err)
+		promptStatsLog.Error("runs-per-day iteration error", "prompt_id", promptID, "error", err)
 	}
 
 	for i := 29; i >= 0; i-- {

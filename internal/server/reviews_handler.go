@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
@@ -158,7 +157,7 @@ func (rh *reviewsHandler) handleReviewSubmit(w http.ResponseWriter, r *http.Requ
 	gh, err := rh.ghResolver.ClientForRepo(r.Context(), orgID, review.Owner, review.Repo)
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-			log.Printf("[reviews] org %s: GitHub not configured for %s/%s: %v", orgID, review.Owner, review.Repo, err)
+			reviewsLog.Warn("github not configured", "org", orgID, "owner", review.Owner, "repo", review.Repo, "error", err)
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub credentials not configured"})
 			return
 		}
@@ -204,7 +203,7 @@ func (rh *reviewsHandler) handleReviewSubmit(w http.ResponseWriter, r *http.Requ
 		if err := rh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 			return tx.TaskMemory.UpdateRunMemoryHumanContent(r.Context(), orgID, review.RunID, humanContent)
 		}); err != nil {
-			log.Printf("[reviews] warning: failed to record human verdict for run %s: %v", review.RunID, err)
+			reviewsLog.Warn("failed to record human verdict", "run", review.RunID, "error", err)
 		}
 	}
 
@@ -228,7 +227,7 @@ func (rh *reviewsHandler) handleReviewSubmit(w http.ResponseWriter, r *http.Requ
 	if err := rh.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
 		return tx.Reviews.Delete(cleanupCtx, orgID, reviewID)
 	}); err != nil {
-		log.Printf("[reviews] warning: failed to clean up review %s: %v", reviewID, err)
+		reviewsLog.Warn("failed to clean up review", "review", reviewID, "error", err)
 	}
 
 	// Step 2: run/task bookkeeping. Independent of the delete above.
@@ -245,7 +244,7 @@ func (rh *reviewsHandler) handleReviewSubmit(w http.ResponseWriter, r *http.Requ
 			// terminateBlueprint.
 			cr, _, blueprintLookupErr := tx.Blueprints.GetRunForRun(cleanupCtx, orgID, review.RunID)
 			if blueprintLookupErr != nil {
-				log.Printf("[reviews] warning: blueprint lookup failed for run %s; skipping task closure: %v", review.RunID, blueprintLookupErr)
+				reviewsLog.Warn("blueprint lookup failed, skipping task closure", "run", review.RunID, "error", blueprintLookupErr)
 				return nil
 			}
 			blueprintRun = cr
@@ -254,15 +253,15 @@ func (rh *reviewsHandler) handleReviewSubmit(w http.ResponseWriter, r *http.Requ
 			}
 			run, runErr := tx.AgentRuns.Get(cleanupCtx, orgID, review.RunID)
 			if runErr != nil || run == nil {
-				log.Printf("[reviews] warning: read run %s for task closure: %v", review.RunID, runErr)
+				reviewsLog.Warn("read run for task closure failed", "run", review.RunID, "error", runErr)
 				return nil
 			}
 			if err := tx.Tasks.Close(cleanupCtx, orgID, run.TaskID, "run_completed", ""); err != nil {
-				log.Printf("[reviews] warning: failed to close task for run %s: %v", review.RunID, err)
+				reviewsLog.Warn("failed to close task for run", "run", review.RunID, "error", err)
 			}
 			return nil
 		}); err != nil {
-			log.Printf("[reviews] warning: post-submit run bookkeeping for %s: %v", review.RunID, err)
+			reviewsLog.Warn("post-submit run bookkeeping failed", "run", review.RunID, "error", err)
 		}
 
 		rh.ws.Broadcast(websocket.Event{
@@ -481,7 +480,7 @@ func (rh *reviewsHandler) handleReviewDiff(w http.ResponseWriter, r *http.Reques
 	gh, err := rh.ghResolver.ClientForRepo(r.Context(), orgID, review.Owner, review.Repo)
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-			log.Printf("[reviews] org %s: GitHub not configured for %s/%s: %v", orgID, review.Owner, review.Repo, err)
+			reviewsLog.Warn("github not configured", "org", orgID, "owner", review.Owner, "repo", review.Repo, "error", err)
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub credentials not configured"})
 			return
 		}

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -74,14 +73,14 @@ func (p *Profiler) Run(ctx context.Context, force bool) error {
 		}
 		repos, err := p.repos.ListConfiguredNamesSystem(ctx, orgID)
 		if err != nil {
-			log.Printf("[repoprofile] org %s: load configured repos: %v", orgID, err)
+			repoprofileLog.Error("load configured repos failed", "org", orgID, "error", err)
 			continue
 		}
 		if err := p.runOrg(ctx, orgID, repos, force); err != nil {
 			if ctx.Err() != nil {
 				return err
 			}
-			log.Printf("[repoprofile] org %s: %v", orgID, err)
+			repoprofileLog.Error("profile org failed", "org", orgID, "error", err)
 		}
 	}
 	return nil
@@ -98,7 +97,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		return nil
 	}
 
-	log.Printf("[repoprofile] org %s: profiling %d configured repos", orgID, len(repos))
+	repoprofileLog.Info("profiling configured repos", "org", orgID, "repos", len(repos))
 
 	// Resolve the clone protocol once for the whole run rather than
 	// re-reading per-org settings inside the per-repo loop. The setting
@@ -108,7 +107,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 	// semantics and avoids N redundant DB reads.
 	preferSSH := false
 	if orgSet, oErr := p.orgs.GetSettingsSystem(ctx, orgID); oErr != nil {
-		log.Printf("[repoprofile] load org settings to pick clone protocol: %v (defaulting to HTTPS)", oErr)
+		repoprofileLog.Warn("load org settings to pick clone protocol failed, defaulting to https", "org", orgID, "error", oErr)
 	} else {
 		preferSSH = orgSet.GitHubCloneProtocol == "ssh"
 	}
@@ -123,7 +122,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 
 		parts := strings.SplitN(name, "/", 2)
 		if len(parts) != 2 {
-			log.Printf("[repoprofile] skipping malformed repo name %q", name)
+			repoprofileLog.Warn("skipping malformed repo name", "repo", name)
 			continue
 		}
 		owner, repo := parts[0], parts[1]
@@ -132,13 +131,13 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		if !force {
 			existing, err := p.repos.GetSystem(ctx, orgID, name)
 			if err != nil {
-				log.Printf("[repoprofile] %s: failed to check profile: %v", name, err)
+				repoprofileLog.Warn("check existing profile failed, skipping", "repo", name, "error", err)
 				continue
 			}
 			if existing != nil && existing.ProfiledAt != nil {
 				age := time.Since(*existing.ProfiledAt)
 				if age < reprofileTTL {
-					log.Printf("[repoprofile] %s: profiled %s ago, skipping (TTL %s)", name, age.Round(time.Hour), reprofileTTL)
+					repoprofileLog.Debug("recently profiled, skipping", "repo", name, "age", age.Round(time.Hour), "ttl", reprofileTTL)
 					continue
 				}
 			}
@@ -148,7 +147,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		// skip so we don't mint a token for a repo we're about to skip.
 		client, cerr := p.resolver.ClientFor(ctx, orgID, owner)
 		if cerr != nil {
-			log.Printf("[repoprofile] %s: resolve GitHub client: %v (skipping)", name, cerr)
+			repoprofileLog.Warn("resolve github client failed, skipping", "repo", name, "error", cerr)
 			continue
 		}
 
@@ -170,7 +169,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		// that suppresses AI profiling forever. Genuine 404s (nil error, empty
 		// content) fall through; their false flags are then correct.
 		if ferr := errors.Join(readmeErr, claudeErr, agentsErr, metaErr); ferr != nil {
-			log.Printf("[repoprofile] %s: doc fetch failed, leaving row untouched for retry: %v", name, ferr)
+			repoprofileLog.Warn("doc fetch failed, leaving row untouched for retry", "repo", name, "error", ferr)
 			continue
 		}
 
@@ -198,7 +197,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 
 		// Persist docs flags immediately so the UI can show them before profiling completes
 		if err := p.repos.UpsertSystem(ctx, orgID, prof); err != nil {
-			log.Printf("[repoprofile] upsert %s (docs flags): %v", name, err)
+			repoprofileLog.Error("upsert docs flags failed", "repo", name, "error", err)
 		}
 		if p.ws != nil {
 			p.ws.Broadcast(websocket.Event{
@@ -221,7 +220,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		}
 	}
 
-	log.Printf("[repoprofile] %d repos with docs, %d without", len(withDocs), len(withoutDocs))
+	repoprofileLog.Info("doc scan complete", "with_docs", len(withDocs), "without_docs", len(withoutDocs))
 
 	// Batch-profile repos that have docs through Haiku.
 	profiled := 0
@@ -238,7 +237,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 
 		results, err := profileBatch(ctx, orgID, batch, p.secrets)
 		if err != nil {
-			log.Printf("[repoprofile] batch %d failed: %v", i/profileBatchSize+1, err)
+			repoprofileLog.Error("profile batch failed", "batch", i/profileBatchSize+1, "error", err)
 			repoNames := make([]string, len(batch))
 			for j, d := range batch {
 				repoNames[j] = d.profile.ID
@@ -247,7 +246,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			// Fallback: upsert without profile_text so the row at least exists.
 			for _, d := range batch {
 				if uErr := p.repos.UpsertSystem(ctx, orgID, d.profile); uErr != nil {
-					log.Printf("[repoprofile] upsert %s (fallback): %v", d.profile.ID, uErr)
+					repoprofileLog.Error("upsert fallback failed", "repo", d.profile.ID, "error", uErr)
 				}
 			}
 			continue
@@ -266,7 +265,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 				prof.ProfiledAt = &now
 			}
 			if err := p.repos.UpsertSystem(ctx, orgID, prof); err != nil {
-				log.Printf("[repoprofile] upsert %s: %v", prof.ID, err)
+				repoprofileLog.Error("upsert profile failed", "repo", prof.ID, "error", err)
 				continue
 			}
 			if prof.ProfileText != "" {
@@ -285,7 +284,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		}
 	}
 
-	log.Printf("[repoprofile] done: %d profiled with AI, %d without docs", profiled, len(withoutDocs))
+	repoprofileLog.Info("profile run done", "profiled_with_ai", profiled, "without_docs", len(withoutDocs))
 	return nil
 }
 

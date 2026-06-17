@@ -4,7 +4,6 @@ package sandbox
 
 import (
 	"context"
-	"log"
 	"os"
 )
 
@@ -43,7 +42,7 @@ func reapOrphansImpl(ctx context.Context) error {
 			continue
 		}
 
-		log.Printf("sandbox: reaping orphan netns %s (subnet idx %d)", name, idx)
+		sandboxLog.Info("reaping orphan netns", "netns", name, "subnet_idx", idx)
 
 		// Claim the idx before teardown so a concurrent first-call
 		// to Wrap can't allocate it mid-cleanup.

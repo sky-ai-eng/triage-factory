@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"errors"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -120,7 +119,7 @@ func (s *Server) jiraRegistrantDisplayName(ctx context.Context, orgID, userID st
 		name, derr = tx.Users.GetDisplayName(ctx, app.RegisteredByUserID)
 		return derr
 	}); err != nil {
-		log.Printf("[jira-app] display name for %s: %v", app.RegisteredByUserID, err)
+		jiraAppLog.Warn("display name lookup failed", "user", app.RegisteredByUserID, "error", err)
 		return ""
 	}
 	return name
@@ -136,7 +135,7 @@ func (s *Server) resolveOAuthAppSource(r *http.Request, orgID string) jira.OAuth
 	_, source, err := s.jiraOAuthApps.Resolve(r.Context(), orgID)
 	if err != nil {
 		if !errors.Is(err, jira.ErrNoAtlassianOAuthApp) {
-			log.Printf("[jira-app] resolve oauth app for org %s: %v", orgID, err)
+			jiraAppLog.Warn("resolve oauth app failed", "org", orgID, "error", err)
 		}
 		return jira.SourceNone
 	}
@@ -248,7 +247,7 @@ func (s *Server) handleJiraAppImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("[jira-app] stored atlassian oauth app client_id=%s for org=%s (by user=%s)", clientID, orgID, userID)
+	jiraAppLog.Info("stored atlassian oauth app", "client_id", clientID, "org", orgID, "user", userID)
 
 	// Re-read so the response reflects the freshly-persisted row, in the same
 	// shape the status GET serves. connect_available is now necessarily true.
@@ -287,10 +286,10 @@ func (s *Server) handleJiraAppDelete(w http.ResponseWriter, r *http.Request) {
 	// committed, and a lingering secret with no row pointing at it is a
 	// harmless orphan, so a best-effort delete here is the right shape.
 	if _, err := s.secrets.Delete(r.Context(), orgID, jiraOAuthClientSecretKey); err != nil {
-		log.Printf("[jira-app] delete client secret for org %s: %v", orgID, err)
+		jiraAppLog.Warn("delete client secret failed", "org", orgID, "error", err)
 	}
 
-	log.Printf("[jira-app] removed atlassian oauth app for org=%s (by user=%s)", orgID, userID)
+	jiraAppLog.Info("removed atlassian oauth app", "org", orgID, "user", userID)
 
 	// The row is gone; the payload now reflects whatever still resolves (the
 	// hosted first-party app, or nothing).

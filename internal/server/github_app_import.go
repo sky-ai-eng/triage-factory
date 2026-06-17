@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -349,7 +348,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		// The detail (status + GitHub body) goes to the log; the user sees the
 		// dominant cause. A transient GitHub outage would also land here — rare
 		// enough that the actionable message is the better default.
-		log.Printf("[github-app] import: GET /app for org %s: %v", orgID, err)
+		githubAppLog.Error("import: get app failed", "org", orgID, "error", err)
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 			"error": "App ID and private key don't match, or the key was revoked. Double-check the App ID and re-download the private key from the App's GitHub settings.",
 			"field": "app_id",
@@ -407,7 +406,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 			clientSecretValidated = true
 		case clientSecretUnknown:
 			// Store it anyway; the response flags client_secret_validated=false.
-			log.Printf("[github-app] import: client-secret check inconclusive for org %s app %d — storing unvalidated", orgID, app.ID)
+			githubAppLog.Warn("import: client-secret check inconclusive, storing unvalidated", "org", orgID, "app", app.ID)
 		}
 	}
 
@@ -446,7 +445,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		creds, _ := integrations.Load(ctx, tx.Secrets, orgID)
 		staged = creds.GitHubPAT != ""
 		if staged {
-			log.Printf("[github-app] import: org %s has a live PAT — staging app_id=%s as active=false until cutover", orgID, canonicalAppID)
+			githubAppLog.Info("import: live pat present, staging app inactive until cutover", "org", orgID, "app_id", canonicalAppID)
 		}
 		if err := tx.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
 			OrgID:              orgID,
@@ -500,8 +499,8 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("[github-app] imported app_id=%s slug=%s owner=%s/%s for org=%s (active=%v)",
-		canonicalAppID, app.Slug, app.OwnerLogin, app.OwnerType, orgID, !staged)
+	githubAppLog.Info("imported app",
+		"app_id", canonicalAppID, "slug", app.Slug, "owner_login", app.OwnerLogin, "owner_type", app.OwnerType, "org", orgID, "active", !staged)
 
 	// Post-commit hooks, same as the cutover/credentials paths: a fresh import is
 	// immediately the live credential, so re-due polling + re-profile under it. A

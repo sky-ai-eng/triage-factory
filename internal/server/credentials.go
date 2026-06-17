@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 
@@ -78,7 +77,7 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 		err := worktree.PreflightSSH(ctx, sshHost)
 		cancel()
 		if err != nil {
-			log.Printf("[auth] blocked SSH setup against %s: preflight failed: %v", sshHost, err)
+			authLog.Warn("blocked ssh setup, preflight failed", "ssh_host", sshHost, "error", err)
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 				"error":  fmt.Sprintf("SSH preflight against %s failed — set up your SSH key or pick HTTPS. %s", sshHost, err.Error()),
 				"field":  "clone_protocol",
@@ -167,7 +166,7 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 		// operator debugging, but return a stable user-facing message
 		// so we don't leak Postgres internals to API clients. Mirrors
 		// the pattern handleJiraConnect now uses.
-		log.Printf("[setup] handleIntegrationsSetup persist failed: %v", err)
+		setupLog.Error("integrations setup persist failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to store credentials"})
 		return
 	}
@@ -203,7 +202,7 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 	// the field is unused (multi gates via AuthContext).
 	org, err := s.orgs.GetOrgSystem(r.Context(), orgID)
 	if err != nil {
-		log.Printf("[setup] integrations status tenant probe: %v", err)
+		setupLog.Error("integrations status tenant probe failed", "error", err)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"configured": false,
 			"error":      "failed to load integrations status",
@@ -261,7 +260,7 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		// frontend renders a sensible "not connected" UI even when
 		// the read failed; log the underlying error server-side
 		// instead of leaking it in the response body.
-		log.Printf("[setup] integrations status read: %v", err)
+		setupLog.Error("integrations status read failed", "error", err)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"configured":     false,
 			"error":          "failed to load integrations status",
@@ -271,7 +270,7 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if credsErr != nil {
-		log.Printf("[setup] integrations status creds load: %v", credsErr)
+		setupLog.Error("integrations status creds load failed", "error", credsErr)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"configured":     false,
 			"error":          "failed to load credentials",
@@ -362,7 +361,7 @@ func (s *Server) handleSetupStart(w http.ResponseWriter, r *http.Request) {
 
 	org, err := s.orgs.GetOrgSystem(r.Context(), runmode.LocalDefaultOrgID)
 	if err != nil {
-		log.Printf("[setup] setup/start tenant probe: %v", err)
+		setupLog.Error("setup/start tenant probe failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "failed to provision local workspace",
 		})
@@ -386,7 +385,7 @@ func (s *Server) handleSetupStart(w http.ResponseWriter, r *http.Request) {
 	if org != nil {
 		agent, err := s.allStores.Agents.GetForOrgSystem(r.Context(), runmode.LocalDefaultOrg)
 		if err != nil {
-			log.Printf("[setup] setup/start agent probe: %v", err)
+			setupLog.Error("setup/start agent probe failed", "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{
 				"error": "failed to provision local workspace",
 			})
@@ -405,7 +404,7 @@ func (s *Server) handleSetupStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := db.BootstrapLocalOrg(r.Context(), s.allStores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
-		log.Printf("[setup] BootstrapLocalOrg failed: %v", err)
+		setupLog.Error("bootstrap local org failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "failed to provision local workspace",
 		})

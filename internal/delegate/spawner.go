@@ -12,7 +12,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -244,7 +243,7 @@ func (s *Spawner) useSSHCloneProtocol(ctx context.Context, orgID, runID string) 
 	}
 	settings, err := s.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
-		log.Printf("[delegate] load org settings to pick clone protocol for run %s: %v (defaulting to HTTPS)", runID, err)
+		delegateLog.Warn("load org settings to pick clone protocol failed; defaulting to HTTPS", "run", runID, "error", err)
 		return false
 	}
 	return domain.EffectiveCloneProtocol(settings.GitHubCloneProtocol, runmode.Current() == runmode.ModeMulti) == "ssh"
@@ -423,7 +422,7 @@ func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner string) *ghc
 	}
 	client, err := resolver.ClientFor(ctx, orgID, owner)
 	if err != nil {
-		log.Printf("[delegate] resolve GitHub client for org %s target %q: %v", orgID, owner, err)
+		delegateLog.Warn("resolve GitHub client failed", "org", orgID, "target", owner, "error", err)
 		return nil
 	}
 	return client
@@ -459,7 +458,7 @@ func (s *Spawner) resolveCloneToken(ctx context.Context, orgID, owner string) st
 	}
 	tok, err := resolver.TokenFor(ctx, orgID, owner)
 	if err != nil {
-		log.Printf("[delegate] resolve clone token for org %s target %q: %v", orgID, owner, err)
+		delegateLog.Warn("resolve clone token failed", "org", orgID, "target", owner, "error", err)
 		return ""
 	}
 	return tok.Value
@@ -510,7 +509,7 @@ func (s *Spawner) gitProxyConfigFor(ctx context.Context, orgID, owner string) *a
 
 	upstream := ""
 	if base, err := resolver.BaseURLFor(ctx, orgID); err != nil {
-		log.Printf("[delegate] resolve git host base for org %s: %v (leaving upstream empty; agentproc defaults to github.com)", orgID, err)
+		delegateLog.Warn("resolve git host base failed; leaving upstream empty; agentproc defaults to github.com", "org", orgID, "error", err)
 	} else {
 		upstream = base
 	}
@@ -563,7 +562,7 @@ func (s *Spawner) updateStatus(orgID, runID, status string) {
 	// non-terminal. Goroutine-internal, no JWT claims in scope, so
 	// admin pool.
 	if err := s.agentRuns.SetStatusSystem(context.Background(), orgID, runID, status); err != nil {
-		log.Printf("[delegate] warning: failed to update status for run %s: %v", runID, err)
+		delegateLog.Warn("update status for run failed", "run", runID, "error", err)
 	}
 	s.broadcastRunUpdate(orgID, runID, status)
 	// Board placement is no longer mirrored per-run from transient status here:
@@ -637,7 +636,7 @@ func (s *Spawner) recomputeTaskBoardColumn(orgID, taskID string) {
 		return
 	}
 	if err := s.tasks.SetStatusSystem(ctx, orgID, taskID, target); err != nil {
-		log.Printf("[delegate] warning: failed to set board column %q for task %s: %v", target, taskID, err)
+		delegateLog.Warn("set board column for task failed", "column", target, "task", taskID, "error", err)
 		return
 	}
 	s.broadcastTaskUpdate(orgID, taskID, target)

@@ -2,7 +2,6 @@ package curator
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -223,7 +222,7 @@ func (kw *KnowledgeWatcher) run() {
 			if !ok {
 				return
 			}
-			log.Printf("[kbwatcher] watcher error: %v", err)
+			kbwatcherLog.Warn("watcher error", "error", err)
 		}
 	}
 }
@@ -283,7 +282,7 @@ func (kw *KnowledgeWatcher) handleDirCreated(parts []string, full string) {
 		// knowledge-base dir created on its own. Watch it so file changes
 		// inside reach us; handle's fire branch emits for this create.
 		if err := kw.watcher.Add(full); err != nil {
-			log.Printf("[kbwatcher] watch new kb %s: %v", full, err)
+			kbwatcherLog.Warn("watch new kb dir failed", "dir", full, "error", err)
 		}
 	}
 }
@@ -296,7 +295,7 @@ func (kw *KnowledgeWatcher) handleDirCreated(parts []string, full string) {
 // content doesn't spuriously fire on boot.
 func (kw *KnowledgeWatcher) watchTree(dir string, depth int, fireExisting bool) {
 	if err := kw.watcher.Add(dir); err != nil {
-		log.Printf("[kbwatcher] watch %s: %v", dir, err)
+		kbwatcherLog.Warn("watch dir failed", "dir", dir, "error", err)
 		return
 	}
 	kw.descendChildren(dir, depth, fireExisting)
@@ -316,7 +315,7 @@ func (kw *KnowledgeWatcher) descendChildren(dir string, depth int, fireExisting 
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		log.Printf("[kbwatcher] read %s: %v", dir, err)
+		kbwatcherLog.Warn("read dir failed", "dir", dir, "error", err)
 		return
 	}
 	for _, e := range entries {
@@ -338,7 +337,7 @@ func (kw *KnowledgeWatcher) descendChildren(dir string, depth int, fireExisting 
 			// Children of a project dir — only knowledge-base is watched.
 			if e.Name() == kbDirName {
 				if err := kw.watcher.Add(child); err != nil {
-					log.Printf("[kbwatcher] watch %s: %v", child, err)
+					kbwatcherLog.Warn("watch dir failed", "dir", child, "error", err)
 					continue
 				}
 				if fireExisting {

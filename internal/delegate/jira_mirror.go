@@ -37,7 +37,6 @@ package delegate
 import (
 	"context"
 	"errors"
-	"log"
 	"sync"
 	"time"
 
@@ -63,7 +62,7 @@ func lookupJiraRuleForTaskSystem(ctx context.Context, jiraRules db.JiraStatusRul
 	}
 	rules, err := jiraRules.ListForTeamSystem(ctx, *task.TeamID)
 	if err != nil {
-		log.Printf("[jira] mirror: list rules for team %s: %v", *task.TeamID, err)
+		jiraLog.Warn("mirror: list status rules for team failed", "team", *task.TeamID, "error", err)
 		return nil
 	}
 	return domain.RuleForProject(rules, projectFromJiraKey(task.EntitySourceID))
@@ -94,7 +93,7 @@ func (s *Spawner) mirrorJiraInProgress(orgID string, task *domain.Task) {
 	if rule.InProgressCanonical == "" {
 		// Never guess a status. The table's CHECK keeps this non-empty for a
 		// persisted row, so this is defensive parity with the user path.
-		log.Printf("[jira] mirror: no in_progress rule for project of %s, skipping", task.EntitySourceID)
+		jiraLog.Warn("mirror: no in_progress rule for project, skipping", "issue", task.EntitySourceID)
 		return
 	}
 	go s.runJiraMirror(orgID, task.EntitySourceID, *rule, false)
@@ -110,7 +109,7 @@ func (s *Spawner) mirrorJiraDone(orgID string, task *domain.Task) {
 		return
 	}
 	if rule.DoneCanonical == "" {
-		log.Printf("[jira] mirror: no done rule for project of %s, skipping", task.EntitySourceID)
+		jiraLog.Warn("mirror: no done rule for project, skipping", "issue", task.EntitySourceID)
 		return
 	}
 	go s.runJiraMirror(orgID, task.EntitySourceID, *rule, true)
@@ -172,7 +171,7 @@ func (s *Spawner) runJiraMirror(orgID, issueKey string, rule domain.JiraProjectS
 	client, err := resolver.ForSystem(ctx, orgID)
 	if err != nil {
 		if shouldLogForSystemErr(err) {
-			log.Printf("[jira] mirror: resolve system client for org %s: %v", orgID, err)
+			jiraLog.Warn("mirror: resolve system client failed", "org", orgID, "error", err)
 		}
 		return
 	}
@@ -187,11 +186,11 @@ func (s *Spawner) runJiraMirror(orgID, issueKey string, rule domain.JiraProjectS
 		// a redundant Done→Done attempt just errors harmlessly. Moving to Done is
 		// forward, never the backward regression the in-progress skip guards.
 		if state != nil && rule.DoneContains(state.StatusName) {
-			log.Printf("[jira] mirror: %s already in done bucket (%q), skipping", issueKey, state.StatusName)
+			jiraLog.Debug("mirror: already in done bucket, skipping", "issue", issueKey, "status", state.StatusName)
 			return
 		}
 		if err := client.TransitionTo(ctx, issueKey, rule.DoneCanonical); err != nil {
-			log.Printf("[jira] mirror: transition %s to %q (done): %v", issueKey, rule.DoneCanonical, err)
+			jiraLog.Warn("mirror: transition to done failed", "issue", issueKey, "target", rule.DoneCanonical, "error", err)
 		}
 		return
 	}
@@ -204,13 +203,13 @@ func (s *Spawner) runJiraMirror(orgID, issueKey string, rule domain.JiraProjectS
 	// the backward move the per-issue lock exists to prevent. Self-heals: every
 	// board column transition re-fires the mirror, and the failed read logs.
 	if state == nil {
-		log.Printf("[jira] mirror: could not read claim state for %s; skipping in-progress mirror", issueKey)
+		jiraLog.Warn("mirror: could not read claim state; skipping in-progress mirror", "issue", issueKey)
 		return
 	}
 	// Forward-only: a concurrent done mirror may have already advanced the ticket
 	// into the Done bucket — never drag a terminal ticket back to In Progress.
 	if rule.DoneContains(state.StatusName) {
-		log.Printf("[jira] mirror: %s already advanced to done (%q), skipping in-progress mirror", issueKey, state.StatusName)
+		jiraLog.Debug("mirror: already advanced to done, skipping in-progress mirror", "issue", issueKey, "status", state.StatusName)
 		return
 	}
 	if !state.AssignedToSelf {
@@ -219,13 +218,13 @@ func (s *Spawner) runJiraMirror(orgID, issueKey string, rule domain.JiraProjectS
 			// the user-path claim guard), so a failed assign leaves the ticket
 			// untouched — To Do + unassigned — rather than "In Progress but
 			// unassigned". Self-heals on the next board transition's mirror pass.
-			log.Printf("[jira] mirror: assign %s to service account: %v", issueKey, err)
+			jiraLog.Warn("mirror: assign to service account failed", "issue", issueKey, "error", err)
 			return
 		}
 	}
 	if !rule.InProgressContains(state.StatusName) {
 		if err := client.TransitionTo(ctx, issueKey, rule.InProgressCanonical); err != nil {
-			log.Printf("[jira] mirror: transition %s to %q (in-progress): %v", issueKey, rule.InProgressCanonical, err)
+			jiraLog.Warn("mirror: transition to in-progress failed", "issue", issueKey, "target", rule.InProgressCanonical, "error", err)
 		}
 	}
 }

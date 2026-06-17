@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"log"
 	"path/filepath"
 	"time"
 
@@ -38,7 +37,7 @@ func (a *App) runStartupTasks(ctx context.Context) {
 // cancel today").
 func (a *App) startWorkers(ctx context.Context) {
 	a.classifier.Start()
-	log.Println("[classify] project classifier started (model: haiku)")
+	classifyLog.Info("project classifier started", "model", "haiku")
 
 	a.startKnowledgeWatcher()
 
@@ -89,7 +88,7 @@ func (a *App) cleanupWorktrees(ctx context.Context) {
 
 	preserveWorktrees := map[string]bool{}
 	if parkedPaths, perr := a.stores.AgentRuns.ListParkedWorktreePathsSystem(ctx, runmode.LocalDefaultOrgID); perr != nil {
-		log.Printf("[server] WARNING: failed to load parked worktree paths; parked workspaces will rehydrate from snapshot rather than reuse the warm cache: %v", perr)
+		serverLog.Warn("load parked worktree paths failed; parked workspaces will rehydrate from snapshot rather than reuse the warm cache", "error", perr)
 	} else {
 		for _, p := range parkedPaths {
 			preserveWorktrees[filepath.Base(p)] = true
@@ -109,7 +108,7 @@ func (a *App) cleanupWorktrees(ctx context.Context) {
 func (a *App) importLocalSkills(ctx context.Context) {
 	org, err := a.stores.Orgs.GetOrgSystem(ctx, runmode.LocalDefaultOrgID)
 	if err != nil {
-		log.Printf("[bootstrap] check local tenant: %v (skipping skill import)", err)
+		bootstrapLog.Warn("check local tenant failed; skipping skill import", "error", err)
 		return
 	}
 	if org == nil {
@@ -130,7 +129,7 @@ func (a *App) wireCloneStatusCallback() {
 	worktree.SetOnCloneResult(func(owner, repo string, cloneErr error) {
 		if cloneErr == nil {
 			if err := a.stores.Repos.UpdateCloneStatusSystem(context.Background(), runmode.LocalDefaultOrgID, owner, repo, "ok", "", ""); err != nil {
-				log.Printf("[clone-status] update %s/%s ok: %v", owner, repo, err)
+				cloneStatusLog.Error("update ok status failed", "owner", owner, "repo", repo, "error", err)
 			}
 			a.wsHub.Broadcast(websocket.Event{
 				Type:  "repo_profile_updated",
@@ -143,12 +142,12 @@ func (a *App) wireCloneStatusCallback() {
 			return
 		}
 
-		log.Printf("[clone-status] %s/%s clone failed: %v", owner, repo, cloneErr)
+		cloneStatusLog.Error("clone failed", "owner", owner, "repo", repo, "error", cloneErr)
 
 		kind := "other"
 		orgSet, oErr := a.stores.Orgs.GetSettingsSystem(context.Background(), runmode.LocalDefaultOrgID)
 		if oErr != nil {
-			log.Printf("[clone-status] %s/%s load org settings to classify: %v (defaulting to kind=other)", owner, repo, oErr)
+			cloneStatusLog.Warn("load org settings to classify failed; defaulting to kind=other", "owner", owner, "repo", repo, "error", oErr)
 		} else if orgSet.GitHubCloneProtocol == "ssh" {
 			// Use the configured GitHub host so GHE installs probe the right
 			// SSH endpoint, not github.com.
@@ -157,15 +156,15 @@ func (a *App) wireCloneStatusCallback() {
 			sshCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			if perr := worktree.CachedPreflightSSH(sshCtx, sshHost); perr != nil {
 				kind = "ssh"
-				log.Printf("[clone-status] %s/%s SSH preflight against %s also failed → kind=ssh: %v", owner, repo, sshHost, perr)
+				cloneStatusLog.Warn("ssh preflight also failed; kind=ssh", "owner", owner, "repo", repo, "ssh_host", sshHost, "error", perr)
 			} else {
-				log.Printf("[clone-status] %s/%s SSH preflight against %s passed → kind=other (clone error is on the git side)", owner, repo, sshHost)
+				cloneStatusLog.Info("ssh preflight passed; kind=other (clone error is on the git side)", "owner", owner, "repo", repo, "ssh_host", sshHost)
 			}
 			cancel()
 		}
 
 		if err := a.stores.Repos.UpdateCloneStatusSystem(context.Background(), runmode.LocalDefaultOrgID, owner, repo, "failed", cloneErr.Error(), kind); err != nil {
-			log.Printf("[clone-status] update %s/%s failed: %v", owner, repo, err)
+			cloneStatusLog.Error("update failed status failed", "owner", owner, "repo", repo, "error", err)
 		}
 		a.wsHub.Broadcast(websocket.Event{
 			Type:  "repo_profile_updated",
@@ -191,19 +190,19 @@ func (a *App) startKnowledgeWatcher() {
 	resolveOrgForProject := func(projectID string) string {
 		orgID, err := a.stores.Projects.ResolveOrgSystem(context.Background(), projectID)
 		if err != nil {
-			log.Printf("[kbwatcher] resolve org for project %s: %v (dropping live update)", projectID, err)
+			kbwatcherLog.Warn("resolve org for project failed; dropping live update", "project", projectID, "error", err)
 			return ""
 		}
 		if orgID == "" {
-			log.Printf("[kbwatcher] no org for project %s — stale dir or unresolved row (dropping live update)", projectID)
+			kbwatcherLog.Warn("no org for project; stale dir or unresolved row, dropping live update", "project", projectID)
 			return ""
 		}
 		return orgID
 	}
 	if root, err := curator.ProjectsWatchRoot(); err != nil {
-		log.Printf("[kbwatcher] resolve projects root: %v (live KB updates disabled)", err)
+		kbwatcherLog.Warn("resolve projects root failed; live kb updates disabled", "error", err)
 	} else if _, err := curator.NewKnowledgeWatcher(a.wsHub, root, resolveOrgForProject); err != nil {
-		log.Printf("[kbwatcher] start: %v (live KB updates disabled)", err)
+		kbwatcherLog.Warn("start failed; live kb updates disabled", "error", err)
 	}
 }
 
@@ -216,7 +215,7 @@ func (a *App) startKnowledgeWatcher() {
 func bootstrapBareClones(repos db.RepoStore) {
 	profiles, err := repos.ListSystem(context.Background(), runmode.LocalDefaultOrgID)
 	if err != nil {
-		log.Printf("[worktree] bootstrap: load profiles: %v", err)
+		worktreeLog.Warn("bootstrap: load profiles failed", "error", err)
 		return
 	}
 	targets := make([]worktree.BootstrapTarget, 0, len(profiles))

@@ -3,7 +3,6 @@ package routing
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"sort"
 	"strings"
 	"time"
@@ -88,7 +87,7 @@ func (r *Router) teamTracksEventRepo(evt domain.Event, teamID string) bool {
 	}
 	tracks, err := r.teamRepos.TracksRepoSystem(context.Background(), teamID, owner, name)
 	if err != nil {
-		log.Printf("[router] team↔repo gate lookup failed for team %s repo %s: %v — allowing", teamID, m.Repo, err)
+		routerLog.Warn("team-repo gate lookup failed, allowing", "team_id", teamID, "repo", m.Repo, "error", err)
 		return true
 	}
 	return tracks
@@ -111,7 +110,7 @@ func (r *Router) teamTracksEventProject(evt domain.Event, teamID string) bool {
 	}
 	tracks, err := r.jiraRules.TracksProjectSystem(context.Background(), teamID, m.Project)
 	if err != nil {
-		log.Printf("[router] team↔project gate lookup failed for team %s project %s: %v — allowing", teamID, m.Project, err)
+		routerLog.Warn("team-project gate lookup failed, allowing", "team_id", teamID, "project", m.Project, "error", err)
 		return true
 	}
 	return tracks
@@ -130,7 +129,7 @@ func handlerTeamID(h domain.EventHandler) string {
 	if h.TeamID != "" {
 		return h.TeamID
 	}
-	log.Printf("[router] WARNING handler %s (%s) has no team_id — falling back to LocalDefaultTeamID; check that EventHandlerStore.Seed was called with a real teamID", h.ID, h.Kind)
+	routerLog.Warn("handler has no team_id, falling back to LocalDefaultTeamID; check that EventHandlerStore.Seed was called with a real teamID", "handler_id", h.ID, "kind", h.Kind)
 	return runmode.LocalDefaultTeamID
 }
 
@@ -189,7 +188,7 @@ func (r *Router) reviewRequestVisibilityTeams(orgID string, evt domain.Event) (t
 		}
 		tids, err := r.githubGroups.TeamsForGroupSystem(context.Background(), orgID, orgLogin, slug)
 		if err != nil {
-			log.Printf("[router] review_requested: github-team mapping lookup for %s: %v", meta.RequestedTeam, err)
+			routerLog.Error("review_requested: github-team mapping lookup failed", "requested_team", meta.RequestedTeam, "error", err)
 			return nil, true
 		}
 		for _, t := range tids {
@@ -201,7 +200,7 @@ func (r *Router) reviewRequestVisibilityTeams(orgID string, evt domain.Event) (t
 		}
 		orgSet, err := r.orgs.GetSettingsSystem(context.Background(), orgID)
 		if err != nil {
-			log.Printf("[router] review_requested: read org settings for host: %v", err)
+			routerLog.Error("review_requested: read org settings for host failed", "error", err)
 			return nil, true
 		}
 		// Resolve to the effective host (empty → github.com) so the reverse
@@ -211,13 +210,13 @@ func (r *Router) reviewRequestVisibilityTeams(orgID string, evt domain.Event) (t
 		host := dbpkg.EffectiveGitHubHost(orgSet.GitHubBaseURL)
 		userIDs, err := r.users.UserIDsForGitHubLoginSystem(context.Background(), host, meta.RequestedLogin)
 		if err != nil {
-			log.Printf("[router] review_requested: reverse login lookup for %s: %v", meta.RequestedLogin, err)
+			routerLog.Error("review_requested: reverse login lookup failed", "requested_login", meta.RequestedLogin, "error", err)
 			return nil, true
 		}
 		for _, uid := range userIDs {
 			tids, terr := r.teams.TeamIDsForUserInOrgSystem(context.Background(), orgID, uid)
 			if terr != nil {
-				log.Printf("[router] review_requested: teams for user %s: %v", uid, terr)
+				routerLog.Error("review_requested: teams for user lookup failed", "user_id", uid, "error", terr)
 				continue
 			}
 			for _, t := range tids {
@@ -256,7 +255,7 @@ func (r *Router) authorCentricOwner(orgID string, evt domain.Event, entityID str
 	// team-visibility project's team). One store query.
 	if r.entities != nil {
 		if t, err := r.entities.OwningTeamForEntitySystem(context.Background(), orgID, entityID); err != nil {
-			log.Printf("[router] author-centric owner: structural lookup for entity %s: %v", entityID, err)
+			routerLog.Error("author-centric owner: structural lookup failed", "entity_id", entityID, "error", err)
 		} else if t != "" {
 			return t, []string{t}
 		}
@@ -268,7 +267,7 @@ func (r *Router) authorCentricOwner(orgID string, evt domain.Event, entityID str
 	// can't fall into the review-first trap or be anchored by an unowned task.
 	if r.tasks != nil {
 		if t, err := r.tasks.OwnerTeamForLatestTaskInTypesSystem(context.Background(), orgID, entityID, authorCentricGitHubEventTypes); err != nil {
-			log.Printf("[router] author-centric owner: prior-task lookup for entity %s: %v", entityID, err)
+			routerLog.Error("author-centric owner: prior-task lookup failed", "entity_id", entityID, "error", err)
 		} else if t != "" {
 			return t, []string{t}
 		}
@@ -304,7 +303,7 @@ func (r *Router) authorTeams(orgID string, evt domain.Event) []string {
 	}
 	orgSet, err := r.orgs.GetSettingsSystem(context.Background(), orgID)
 	if err != nil {
-		log.Printf("[router] author-centric owner: read org settings for host: %v", err)
+		routerLog.Error("author-centric owner: read org settings for host failed", "error", err)
 		return nil
 	}
 	// Effective host (empty → github.com) so the reverse lookup matches
@@ -313,14 +312,14 @@ func (r *Router) authorTeams(orgID string, evt domain.Event) []string {
 	host := dbpkg.EffectiveGitHubHost(orgSet.GitHubBaseURL)
 	userIDs, err := r.users.UserIDsForGitHubLoginSystem(context.Background(), host, m.Author)
 	if err != nil {
-		log.Printf("[router] author-centric owner: reverse login lookup for %s: %v", m.Author, err)
+		routerLog.Error("author-centric owner: reverse login lookup failed", "author", m.Author, "error", err)
 		return nil
 	}
 	set := map[string]struct{}{}
 	for _, uid := range userIDs {
 		tids, terr := r.teams.TeamIDsForUserInOrgSystem(context.Background(), orgID, uid)
 		if terr != nil {
-			log.Printf("[router] author-centric owner: teams for user %s: %v", uid, terr)
+			routerLog.Error("author-centric owner: teams for user lookup failed", "user_id", uid, "error", terr)
 			continue
 		}
 		for _, t := range tids {
@@ -364,7 +363,7 @@ func (r *Router) assigneeCentricJiraOwner(orgID string, evt domain.Event, entity
 	// Tier 1 — structural owner (owning_team_id override). One store query.
 	if r.entities != nil {
 		if t, err := r.entities.OwningTeamForEntitySystem(context.Background(), orgID, entityID); err != nil {
-			log.Printf("[router] assignee-centric owner: structural lookup for entity %s: %v", entityID, err)
+			routerLog.Error("assignee-centric owner: structural lookup failed", "entity_id", entityID, "error", err)
 		} else if t != "" {
 			return t, []string{t}
 		}
@@ -419,7 +418,7 @@ func (r *Router) assigneeTeams(orgID string, evt domain.Event) []string {
 	}
 	orgSet, err := r.orgs.GetSettingsSystem(context.Background(), orgID)
 	if err != nil {
-		log.Printf("[router] assignee-centric owner: read org settings for host: %v", err)
+		routerLog.Error("assignee-centric owner: read org settings for host failed", "error", err)
 		return nil
 	}
 	// The reverse lookup normalizes the host (db.NormalizeJiraHost) the same
@@ -437,14 +436,14 @@ func (r *Router) assigneeTeams(orgID string, evt domain.Event) []string {
 	// nobody, correctly: there are no member identities to route to.
 	userIDs, err := r.users.UserIDsForJiraAccountSystem(context.Background(), orgSet.JiraBaseURL, m.AssigneeAccountID)
 	if err != nil {
-		log.Printf("[router] assignee-centric owner: reverse account lookup for %s: %v", m.AssigneeAccountID, err)
+		routerLog.Error("assignee-centric owner: reverse account lookup failed", "assignee_account_id", m.AssigneeAccountID, "error", err)
 		return nil
 	}
 	set := map[string]struct{}{}
 	for _, uid := range userIDs {
 		tids, terr := r.teams.TeamIDsForUserInOrgSystem(context.Background(), orgID, uid)
 		if terr != nil {
-			log.Printf("[router] assignee-centric owner: teams for user %s: %v", uid, terr)
+			routerLog.Error("assignee-centric owner: teams for user lookup failed", "user_id", uid, "error", terr)
 			continue
 		}
 		for _, t := range tids {
@@ -500,7 +499,7 @@ func ownerLadderRouting(owner string, ownerSet []string, matchedRules []domain.E
 func (r *Router) latestActiveOwnedTaskTeam(orgID, entityID string, types map[string]bool) string {
 	active, err := r.tasks.FindActiveByEntitySystem(context.Background(), orgID, entityID)
 	if err != nil {
-		log.Printf("[router] assignee-centric owner: active-task lookup for entity %s: %v", entityID, err)
+		routerLog.Error("assignee-centric owner: active-task lookup failed", "entity_id", entityID, "error", err)
 		return ""
 	}
 	best := ""

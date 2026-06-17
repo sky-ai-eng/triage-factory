@@ -2,7 +2,6 @@ package routing
 
 import (
 	"context"
-	"log"
 	"sync"
 
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
@@ -168,7 +167,8 @@ func (r *Router) autoDelegateEnabledForTeam(ctx context.Context, teamID string) 
 	}
 	settings, err := r.teams.GetSettingsSystem(ctx, teamID)
 	if err != nil {
-		log.Printf("[router] auto_delegate gate: team %s settings read: %v (defaulting to disabled)", teamID, err)
+		routerLog.Warn("auto_delegate gate: team settings read failed, defaulting to disabled",
+			"team", teamID, "error", err)
 		return false
 	}
 	return settings.AutoDelegateEnabled

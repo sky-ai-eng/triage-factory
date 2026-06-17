@@ -3,7 +3,6 @@ package worktree
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -121,7 +120,7 @@ func EnsureCuratorWorktree(ctx context.Context, owner, repo, branch, projectDir 
 	if err := gitRunCtxAuth(ctx, bareDir, auth, "fetch", "origin", branchRefspec); err != nil {
 		return "", fmt.Errorf("fetch %s/%s %s: %w", owner, repo, branch, err)
 	}
-	log.Printf("[worktree] curator fetch %s/%s %s in %s", owner, repo, branch, time.Since(start).Round(time.Millisecond))
+	worktreeLog.Debug("curator fetch", "owner", owner, "repo", repo, "branch", branch, "duration", time.Since(start).Round(time.Millisecond))
 
 	// Worktree already there → refresh in place. Reset hard to the
 	// just-fetched remote-tracking ref makes the curator's view of
@@ -146,7 +145,7 @@ func EnsureCuratorWorktree(ctx context.Context, owner, repo, branch, projectDir 
 		if err := gitRunCtx(ctx, wtDir, "clean", "-fdx"); err != nil {
 			// Non-fatal: the agent will still see a current tracked
 			// state. Log and continue.
-			log.Printf("[worktree] curator clean %s/%s: %v", owner, repo, err)
+			worktreeLog.Warn("curator clean failed", "owner", owner, "repo", repo, "error", err)
 		}
 		return wtDir, nil
 	case err == nil && !wtInfo.IsDir():
@@ -172,7 +171,7 @@ func EnsureCuratorWorktree(ctx context.Context, owner, repo, branch, projectDir 
 	if err := gitRunCtx(ctx, bareDir, "worktree", "add", "-B", branch, wtDir, remoteRef); err != nil {
 		return "", fmt.Errorf("worktree add %s/%s %s: %w", owner, repo, branch, err)
 	}
-	log.Printf("[worktree] curator worktree %s @ %s/%s %s", wtDir, owner, repo, branch)
+	worktreeLog.Debug("curator worktree", "dir", wtDir, "owner", owner, "repo", repo, "branch", branch)
 	return wtDir, nil
 }
 
@@ -193,7 +192,7 @@ func PruneCuratorBare(owner, repo string) {
 
 	bareDir, err := repoDir(owner, repo)
 	if err != nil {
-		log.Printf("[worktree] curator prune resolve %s/%s: %v", owner, repo, err)
+		worktreeLog.Warn("curator prune resolve failed", "owner", owner, "repo", repo, "error", err)
 		return
 	}
 	if _, err := os.Stat(bareDir); err != nil {
@@ -201,6 +200,6 @@ func PruneCuratorBare(owner, repo string) {
 		return
 	}
 	if err := gitRun(bareDir, "worktree", "prune"); err != nil {
-		log.Printf("[worktree] curator prune %s/%s: %v", owner, repo, err)
+		worktreeLog.Warn("curator prune failed", "owner", owner, "repo", repo, "error", err)
 	}
 }

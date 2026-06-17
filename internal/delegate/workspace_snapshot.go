@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -140,7 +139,7 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, keyID, wtPath, s
 	}
 	// Parked-window storage cost is a live sizing question; log every
 	// snapshot's real compressed footprint so it's answerable from the field.
-	log.Printf("[delegate] snapshot: wrote %s (%d bytes gzipped)", snapshotKey(orgID, keyID), fi.Size())
+	delegateLog.Info("snapshot written", "key", snapshotKey(orgID, keyID), "bytes_gzipped", fi.Size())
 	return nil
 }
 
@@ -228,7 +227,7 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 		// warm copy and will cold-rehydrate again (correct, just slower) — log
 		// it distinctly so unexpected repeat rehydrates are diagnosable.
 		if err := s.agentRuns.SetWorktreePathSystem(context.Background(), orgID, run.ID, wtDir); err != nil {
-			log.Printf("[delegate] rehydrate: failed to persist new worktree_path %q for run %s; stale path will force a repeat cold rehydrate on the next resume: %v", wtDir, run.ID, err)
+			delegateLog.Warn("rehydrate: persist new worktree_path failed; stale path will force a repeat cold rehydrate on the next resume", "worktree_path", wtDir, "run", run.ID, "error", err)
 		}
 	}
 	return wtDir, nil
@@ -364,7 +363,7 @@ func (s *Spawner) discardWorkspaceSnapshot(ctx context.Context, orgID, keyID str
 		return
 	}
 	if err := blobs.Delete(ctx, snapshotKey(orgID, keyID)); err != nil {
-		log.Printf("[delegate] discard workspace snapshot %s/%s: %v", orgID, keyID, err)
+		delegateLog.Warn("discard workspace snapshot failed", "org", orgID, "key_id", keyID, "error", err)
 	}
 }
 
@@ -444,7 +443,7 @@ func readSessionTranscript(wtPath, sessionID string) ([]byte, bool) {
 	data, err := os.ReadFile(p)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			log.Printf("[delegate] snapshot: read session transcript %s: %v", p, err)
+			delegateLog.Warn("snapshot: read session transcript failed", "path", p, "error", err)
 		}
 		return nil, false
 	}

@@ -11,7 +11,6 @@ package delegate
 
 import (
 	"context"
-	"log"
 	"time"
 )
 
@@ -57,7 +56,7 @@ func (s *Spawner) snapshotRetention() time.Duration {
 // internal/app. A nil store or blob store makes it a logged no-op.
 func (s *Spawner) RunSnapshotReaper(ctx context.Context, interval time.Duration) {
 	if s.agentRuns == nil || s.Storage() == nil {
-		log.Printf("[delegate] snapshot reaper not started: no store / blob store wired")
+		delegateLog.Warn("snapshot reaper not started: no store / blob store wired")
 		return
 	}
 	// time.NewTicker panics on a non-positive duration; default rather than
@@ -92,13 +91,13 @@ func (s *Spawner) ReapExpiredSnapshots(ctx context.Context) {
 	cutoff := time.Now().Add(-s.snapshotRetention())
 	keys, err := s.agentRuns.ListReapableSnapshotKeysSystem(ctx, cutoff)
 	if err != nil {
-		log.Printf("[delegate] snapshot reaper: list reapable keys: %v", err)
+		delegateLog.Warn("snapshot reaper: list reapable keys failed", "error", err)
 		return
 	}
 	for _, k := range keys {
 		s.discardWorkspaceSnapshot(ctx, k.OrgID, k.BlueprintRunID)
 	}
 	if len(keys) > 0 {
-		log.Printf("[delegate] snapshot reaper: discarded %d expired workspace snapshot(s)", len(keys))
+		delegateLog.Info("snapshot reaper: discarded expired workspace snapshots", "count", len(keys))
 	}
 }

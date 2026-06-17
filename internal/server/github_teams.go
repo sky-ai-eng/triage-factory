@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"errors"
-	"log"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
@@ -127,7 +126,7 @@ func (s *Server) userTeamsMulti(ctx context.Context, orgID, userID string) ([]gh
 			// backend failure worth a log line rather than a silent empty
 			// list. Mirrors gitHubGroupCandidates.
 			if !errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-				log.Printf("[membership] resolve GitHub client for %s: %v", owner, err)
+				membershipLog.Warn("resolve github client failed, skipping owner", "owner", owner, "error", err)
 			}
 			continue
 		}
@@ -135,7 +134,7 @@ func (s *Server) userTeamsMulti(ctx context.Context, orgID, userID string) ([]gh
 		if err != nil {
 			// The owner may be a user account, or one we lack org-members
 			// read on — skip, candidates only.
-			log.Printf("[membership] list teams for %s in org %s: %v", login, owner, err)
+			membershipLog.Warn("list teams failed, skipping owner", "user", login, "owner", owner, "error", err)
 			continue
 		}
 		for _, t := range teams {

@@ -2,7 +2,6 @@ package sandbox
 
 import (
 	"context"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,7 +33,7 @@ func reapBundleOrphans(_ context.Context) error {
 		}
 		path := filepath.Join(os.TempDir(), e.Name())
 		if err := os.RemoveAll(path); err != nil {
-			log.Printf("sandbox: reap bundle %s: %v", path, err)
+			sandboxLog.Warn("reap bundle failed", "path", path, "error", err)
 		}
 	}
 	return nil

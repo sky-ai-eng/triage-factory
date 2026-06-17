@@ -3,7 +3,6 @@ package server
 import (
 	"database/sql"
 	"errors"
-	"log"
 	"net/http"
 	"strings"
 
@@ -130,7 +129,7 @@ func (bf *backfillHandler) handleBackfillCandidates(w http.ResponseWriter, r *ht
 		}
 		return nil
 	}); err != nil {
-		log.Printf("[backfill] candidates: %v", err)
+		backfillLog.Error("load candidates failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load backfill candidates"})
 		return
 	}

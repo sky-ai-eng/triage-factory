@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -200,8 +199,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, deps addDe
 			}
 			// Stale: reservation outlived its creator without a
 			// completed worktree. Drop and fall through to re-reserve.
-			log.Printf("workspace add: dropping stale reservation for run %s repo %s (path %s missing, row age %s exceeds threshold %s)",
-				info.RunID, repoID, existing.Path, age, staleReservationAge)
+			workspaceLog.Warn("dropping stale reservation; path missing and row age exceeds threshold", "run_id", info.RunID, "repo", repoID, "path", existing.Path, "age", age, "threshold", staleReservationAge)
 			if delErr := host.DeleteRunWorktreeByRepo(ctx, repoID); delErr != nil {
 				return "", fmt.Errorf("workspace add: delete stale reservation: %w", delErr)
 			}
@@ -269,7 +267,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, deps addDe
 		// Delete failures are logged but don't shadow the create error
 		// the caller actually needs.
 		if delErr := host.DeleteRunWorktreeByRepo(ctx, repoID); delErr != nil {
-			log.Printf("workspace add: release reservation after create failure: %v", delErr)
+			workspaceLog.Warn("release reservation after create failure failed", "error", delErr)
 		}
 		return "", fmt.Errorf("workspace add: create worktree: %w", err)
 	}
@@ -279,7 +277,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, deps addDe
 		// worktree library changed and our reservation path no longer
 		// matches reality. Surface loudly rather than silently storing
 		// the wrong path.
-		log.Printf("workspace add: created path %q diverges from reserved %q (run=%s repo=%s); investigate", gotPath, wtPath, info.RunID, repoID)
+		workspaceLog.Warn("created path diverges from reserved; investigate", "got_path", gotPath, "reserved_path", wtPath, "run_id", info.RunID, "repo", repoID)
 	}
 
 	return wtPath, nil

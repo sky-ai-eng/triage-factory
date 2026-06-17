@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"testing"
 )
 
@@ -61,4 +62,26 @@ func TestComponentTagsRecords(t *testing.T) {
 		t.Fatalf("info record emitted at error level: %q", buf.String())
 	}
 	SetLevel(slog.LevelInfo)
+}
+
+func TestSetOutputRedirects(t *testing.T) {
+	var buf bytes.Buffer
+	restore := SetOutput(&buf)
+	defer restore()
+
+	// A component logger created here writes through the shared swappable
+	// writer, so SetOutput must capture it.
+	Component("widget").Info("hello", "k", "v")
+	out := buf.String()
+	if !strings.Contains(out, "hello") || !strings.Contains(out, "component=widget") {
+		t.Fatalf("SetOutput did not capture component log: %q", out)
+	}
+
+	// After restore, the buffer no longer receives records.
+	restore()
+	buf.Reset()
+	Component("widget").Info("after restore")
+	if buf.Len() != 0 {
+		t.Fatalf("output still captured after restore: %q", buf.String())
+	}
 }

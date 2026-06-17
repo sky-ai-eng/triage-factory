@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -137,7 +136,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		specBlueprintID := ""
 		def, defErr := tx.Blueprints.GetBySystemSlug(r.Context(), orgID, teamID, domain.SystemTicketSpecPromptID)
 		if defErr != nil {
-			log.Printf("handleProjectCreate: failed to load default spec-authorship blueprint %q: %v", domain.SystemTicketSpecPromptID, defErr)
+			projectsLog.Warn("create: failed to load default spec-authorship blueprint", "slug", domain.SystemTicketSpecPromptID, "error", defErr)
 		} else if def != nil {
 			specBlueprintID = def.ID
 		}
@@ -160,7 +159,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
-		log.Printf("handleProjectCreate: %v", err)
+		projectsLog.Error("create failed", "error", err)
 		internalError(w, "projects", err)
 		return
 	}
@@ -299,7 +298,7 @@ func (s *Server) handleProjectExport(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", projectBundleFilename(project.Name)))
 	if _, err := io.Copy(w, stream); err != nil {
-		log.Printf("[projects] export stream %s: %v", id, err)
+		projectsLog.Error("export stream failed", "project", id, "error", err)
 	}
 }
 
@@ -546,7 +545,7 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 				teamRules, rerr = tx.JiraStatusRules.ListForTeam(r.Context(), existing.TeamID)
 				return rerr
 			}); err != nil {
-				log.Printf("[projects] patch: jira rules load: %v", err)
+				projectsLog.Error("patch: jira rules load failed", "error", err)
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load Jira rules"})
 				return
 			}
@@ -648,7 +647,7 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 			queuePendingContextChanges(r.Context(), tx.Curator, orgID, *existing, updated)
 			return nil
 		}); err != nil {
-			log.Printf("[projects] queue pending context for %s: %v", id, err)
+			projectsLog.Warn("queue pending context failed", "project", id, "error", err)
 		}
 	}
 	var fresh *domain.Project
@@ -740,11 +739,11 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	dir, dirErr := curator.KnowledgeDir(orgID, id)
 	switch {
 	case dirErr != nil:
-		log.Printf("[projects] cannot resolve knowledge dir for project %s; on-disk cleanup skipped: %v", id, dirErr)
+		projectsLog.Warn("cannot resolve knowledge dir, on-disk cleanup skipped", "project", id, "error", dirErr)
 		w.Header().Set("X-Cleanup-Warning", cleanupWarning)
 	default:
 		if rmErr := os.RemoveAll(dir); rmErr != nil && !os.IsNotExist(rmErr) {
-			log.Printf("[projects] cleanup of project %s knowledge dir %q failed: %v", id, dir, rmErr)
+			projectsLog.Warn("cleanup of project knowledge dir failed", "project", id, "dir", dir, "error", rmErr)
 			w.Header().Set("X-Cleanup-Warning", cleanupWarning)
 		}
 	}
@@ -915,25 +914,25 @@ func queuePendingContextChanges(ctx context.Context, curatorStore db.CuratorStor
 	if !pinnedReposSetEqual(before.PinnedRepos, after.PinnedRepos) {
 		baseline, err := curator.EncodeStringSliceBaseline(before.PinnedRepos)
 		if err != nil {
-			log.Printf("[projects] encode pinned-repos baseline for %s: %v", before.ID, err)
+			projectsLog.Warn("encode pinned-repos baseline failed", "project", before.ID, "error", err)
 		} else if err := curatorStore.InsertPendingContext(ctx, orgID, before.ID, sessionID, domain.ChangeTypePinnedRepos, baseline); err != nil {
-			log.Printf("[projects] queue pinned-repos pending context for %s: %v", before.ID, err)
+			projectsLog.Warn("queue pinned-repos pending context failed", "project", before.ID, "error", err)
 		}
 	}
 	if before.JiraProjectKey != after.JiraProjectKey {
 		baseline, err := curator.EncodeNullableStringBaseline(before.JiraProjectKey)
 		if err != nil {
-			log.Printf("[projects] encode jira baseline for %s: %v", before.ID, err)
+			projectsLog.Warn("encode jira baseline failed", "project", before.ID, "error", err)
 		} else if err := curatorStore.InsertPendingContext(ctx, orgID, before.ID, sessionID, domain.ChangeTypeJiraProjectKey, baseline); err != nil {
-			log.Printf("[projects] queue jira pending context for %s: %v", before.ID, err)
+			projectsLog.Warn("queue jira pending context failed", "project", before.ID, "error", err)
 		}
 	}
 	if before.LinearProjectKey != after.LinearProjectKey {
 		baseline, err := curator.EncodeNullableStringBaseline(before.LinearProjectKey)
 		if err != nil {
-			log.Printf("[projects] encode linear baseline for %s: %v", before.ID, err)
+			projectsLog.Warn("encode linear baseline failed", "project", before.ID, "error", err)
 		} else if err := curatorStore.InsertPendingContext(ctx, orgID, before.ID, sessionID, domain.ChangeTypeLinearProjectKey, baseline); err != nil {
-			log.Printf("[projects] queue linear pending context for %s: %v", before.ID, err)
+			projectsLog.Warn("queue linear pending context failed", "project", before.ID, "error", err)
 		}
 	}
 }
@@ -1046,7 +1045,7 @@ func (s *Server) handleProjectKnowledge(w http.ResponseWriter, r *http.Request) 
 		project, e = tx.Projects.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		log.Printf("[projects] knowledge list: db get %s: %v", id, err)
+		projectsLog.Error("knowledge list: db get failed", "project", id, "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load project"})
 		return
 	}
@@ -1056,14 +1055,14 @@ func (s *Server) handleProjectKnowledge(w http.ResponseWriter, r *http.Request) 
 	}
 	root, err := curator.KnowledgeDir(orgID, id)
 	if err != nil {
-		log.Printf("[projects] knowledge list: resolve dir for %s: %v", id, err)
+		projectsLog.Error("knowledge list: resolve dir failed", "project", id, "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read knowledge base"})
 		return
 	}
 	kbDir := filepath.Join(root, "knowledge-base")
 	files, err := readKnowledgeFiles(kbDir)
 	if err != nil {
-		log.Printf("[projects] knowledge list: read %s: %v", kbDir, err)
+		projectsLog.Error("knowledge list: read dir failed", "dir", kbDir, "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read knowledge base"})
 		return
 	}
@@ -1286,7 +1285,7 @@ func sanitizeKnowledgeFilename(raw string) (string, string) {
 func resolveKnowledgePath(orgID, projectID, rawPath string) (string, string, int, string) {
 	root, err := curator.KnowledgeDir(orgID, projectID)
 	if err != nil {
-		log.Printf("[projects] resolve knowledge dir for %s: %v", projectID, err)
+		projectsLog.Error("resolve knowledge dir failed", "project", projectID, "error", err)
 		return "", "", http.StatusInternalServerError, "failed to resolve knowledge dir"
 	}
 	kbDir := filepath.Join(root, "knowledge-base")
@@ -1333,7 +1332,7 @@ func (s *Server) handleProjectKnowledgeFile(w http.ResponseWriter, r *http.Reque
 		project, e = tx.Projects.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		log.Printf("[projects] knowledge fetch: db get %s: %v", id, err)
+		projectsLog.Error("knowledge fetch: db get failed", "project", id, "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load project"})
 		return
 	}
@@ -1352,7 +1351,7 @@ func (s *Server) handleProjectKnowledgeFile(w http.ResponseWriter, r *http.Reque
 			notFound(w, "file")
 			return
 		}
-		log.Printf("[projects] knowledge fetch: lstat %s: %v", full, err)
+		projectsLog.Error("knowledge fetch: lstat failed", "path", full, "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read file"})
 		return
 	}
@@ -1378,7 +1377,7 @@ func (s *Server) handleProjectKnowledgeFile(w http.ResponseWriter, r *http.Reque
 		// 500 so the operator can spot them — collapsing all
 		// failures to "not a regular file" 400 would mask real
 		// production issues behind a misleading client error.
-		log.Printf("[projects] knowledge fetch: open %s: %v", full, err)
+		projectsLog.Error("knowledge fetch: open failed", "path", full, "error", err)
 		if isSymlinkRejection(err) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "not a regular file"})
 			return
@@ -1443,7 +1442,7 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 		project, e = tx.Projects.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		log.Printf("[projects] knowledge upload: db get %s: %v", id, err)
+		projectsLog.Error("knowledge upload: db get failed", "project", id, "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load project"})
 		return
 	}
@@ -1453,13 +1452,13 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 	}
 	root, err := curator.KnowledgeDir(orgID, id)
 	if err != nil {
-		log.Printf("[projects] knowledge upload: resolve dir for %s: %v", id, err)
+		projectsLog.Error("knowledge upload: resolve dir failed", "project", id, "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to resolve knowledge dir"})
 		return
 	}
 	kbDir := filepath.Join(root, "knowledge-base")
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
-		log.Printf("[projects] knowledge upload: mkdir %s: %v", kbDir, err)
+		projectsLog.Error("knowledge upload: mkdir failed", "dir", kbDir, "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create knowledge dir"})
 		return
 	}
@@ -1476,7 +1475,7 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 	defer func() {
 		if r.MultipartForm != nil {
 			if err := r.MultipartForm.RemoveAll(); err != nil {
-				log.Printf("[projects] knowledge upload: cleanup multipart form for %s: %v", id, err)
+				projectsLog.Warn("knowledge upload: cleanup multipart form failed", "project", id, "error", err)
 			}
 		}
 	}()
@@ -1533,7 +1532,7 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 			// and the user expects the response to reflect that.
 			// The activity timestamp is a hint for follow-on display,
 			// not part of the upload's correctness contract.
-			log.Printf("[projects] knowledge upload: bump updated_at for %s: %v", id, err)
+			projectsLog.Warn("knowledge upload: bump updated_at failed", "project", id, "error", err)
 		}
 	}
 
@@ -1626,7 +1625,7 @@ func writeUploadedFile(fh *multipart.FileHeader, dst string) string {
 		// Failed to remove the temp name post-link. dst is correct;
 		// the orphan is just a leading-dot file the listing will
 		// filter out. Log and move on.
-		log.Printf("[projects] knowledge upload: remove temp %s: %v", tmpName, err)
+		projectsLog.Warn("knowledge upload: remove temp failed", "path", tmpName, "error", err)
 	}
 	return ""
 }
@@ -1659,7 +1658,7 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 		project, e = tx.Projects.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		log.Printf("[projects] knowledge delete: db get %s: %v", id, err)
+		projectsLog.Error("knowledge delete: db get failed", "project", id, "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load project"})
 		return
 	}
@@ -1677,14 +1676,14 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 			notFound(w, "file")
 			return
 		}
-		log.Printf("[projects] knowledge delete: remove %s: %v", full, err)
+		projectsLog.Error("knowledge delete: remove failed", "path", full, "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to remove file"})
 		return
 	}
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		return tx.Projects.BumpUpdatedAt(r.Context(), orgID, id)
 	}); err != nil {
-		log.Printf("[projects] knowledge delete: bump updated_at for %s: %v", id, err)
+		projectsLog.Error("knowledge delete: bump updated_at failed", "project", id, "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update project state"})
 		return
 	}

@@ -15,7 +15,6 @@ package delegate
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -58,7 +57,7 @@ func (s *Spawner) wakeDispatcher() {
 // is cancelled. A nil RunQueueStore makes this a logged no-op.
 func (s *Spawner) RunDispatcher(ctx context.Context, scanInterval time.Duration) {
 	if s.runQueue == nil {
-		log.Printf("[dispatch] run-queue dispatcher not started: no RunQueueStore wired")
+		dispatchLog.Warn("run-queue dispatcher not started: no RunQueueStore wired")
 		return
 	}
 
@@ -92,11 +91,11 @@ func (s *Spawner) reconcileRunQueue(ctx context.Context) {
 	// br.StepPlan), so the resumed step runs the same program it was minted with.
 	n, err := s.runQueue.ResetProcessingRuns(ctx)
 	if err != nil {
-		log.Printf("[dispatch] boot reconcile: reset in-flight runs: %v", err)
+		dispatchLog.Error("boot reconcile: reset in-flight runs failed", "error", err)
 		return
 	}
 	if n > 0 {
-		log.Printf("[dispatch] boot reconcile: re-queued %d in-flight run(s) stranded by a crash", n)
+		dispatchLog.Info("boot reconcile: re-queued in-flight runs stranded by a crash", "count", n)
 	}
 }
 
@@ -132,7 +131,7 @@ func (s *Spawner) drainRunQueue(ctx context.Context) {
 		run, err := s.runQueue.ClaimNextRun(ctx)
 		if err != nil {
 			<-sem
-			log.Printf("[dispatch] claim next run: %v (retrying on the next scan)", err)
+			dispatchLog.Warn("claim next run failed; retrying on the next scan", "error", err)
 			return
 		}
 		if run == nil {
@@ -194,7 +193,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 	// terminal disposition, not abortable by shutdown.
 	if br.Status != domain.BlueprintRunStatusRunning || br.CancelRequested {
 		if _, mErr := s.agentRuns.MarkCancelledIfActiveSystem(context.Background(), orgID, run.ID, "user_cancelled", "Blueprint cancelled by user"); mErr != nil {
-			log.Printf("[dispatch] warning: mark raced-cancel step %s cancelled: %v", run.ID, mErr)
+			dispatchLog.Warn("mark raced-cancel step cancelled failed", "run", run.ID, "error", mErr)
 		}
 		s.broadcastRunUpdate(orgID, run.ID, "cancelled")
 		if br.Status == domain.BlueprintRunStatusRunning {
@@ -256,16 +255,16 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 		if e := s.tx.SyntheticClaimsWithTx(ctx, orgID, run.CreatorUserID, func(ts db.TxStores) error {
 			return ts.Prompts.IncrementUsage(ctx, orgID, stepPrompt.ID)
 		}); e != nil {
-			log.Printf("[dispatch] warning: increment usage for step prompt %s: %v", stepPrompt.ID, e)
+			dispatchLog.Warn("increment usage for step prompt failed", "prompt", stepPrompt.ID, "error", e)
 		}
 	} else if e := s.prompts.IncrementUsageSystem(ctx, orgID, stepPrompt.ID); e != nil {
-		log.Printf("[dispatch] warning: increment usage for step prompt %s: %v", stepPrompt.ID, e)
+		dispatchLog.Warn("increment usage for step prompt failed", "prompt", stepPrompt.ID, "error", e)
 	}
 
 	// Materialize this step's skill, wiping any prior step's so step N only sees
 	// its own SKILL.md.
 	if err := skills.WipeBlueprintSkills(cfg.wtPath); err != nil {
-		log.Printf("[dispatch] run %s step %d: wipe skills: %v", run.ID, stepIdx, err)
+		dispatchLog.Warn("wipe skills failed", "run", run.ID, "step", stepIdx, "error", err)
 	}
 	slug := skills.SlugForBlueprintStep(stepIdx, stepPrompt.Name)
 	if err := skills.MaterializeStepSkill(cfg.wtPath, slug, stepPrompt, step.Brief); err != nil {
@@ -344,7 +343,7 @@ func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, ste
 	// snapshot in the blob store for the resume path. The aggregate column lands
 	// the task in_review.
 	if stepRun.Status == "open" || stepRun.Status == "pending_approval" {
-		log.Printf("[dispatch] blueprint_run %s step %d paused at status=%s; blueprint remains running", br.ID, stepIdx, stepRun.Status)
+		dispatchLog.Info("blueprint_run step paused; blueprint remains running", "blueprint_run", br.ID, "step", stepIdx, "status", stepRun.Status)
 		s.recomputeTaskBoardColumn(orgID, br.TaskID)
 		return
 	}
@@ -355,7 +354,7 @@ func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, ste
 	// pre-agent br: a cancel raised in this narrow window could then be missed and
 	// enqueue one extra step (the documented claim-window trade-off), so log it.
 	if fresh, err := s.blueprints.GetRunSystem(context.Background(), orgID, br.ID); err != nil {
-		log.Printf("[dispatch] reactor: refresh blueprint_run %s for cancel check failed; proceeding with pre-agent state (a cancel in this window may enqueue one extra step): %v", br.ID, err)
+		dispatchLog.Warn("reactor: refresh blueprint_run for cancel check failed; proceeding with pre-agent state (a cancel in this window may enqueue one extra step)", "blueprint_run", br.ID, "error", err)
 	} else if fresh != nil {
 		br = fresh
 	}
@@ -412,7 +411,7 @@ func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, ste
 		// enqueue leaves current_step_index naming the step the boot reconcile
 		// would re-drive.
 		if err := s.blueprints.SetRunCurrentStepSystem(context.Background(), orgID, br.ID, next); err != nil {
-			log.Printf("[dispatch] warning: set current_step_index for blueprint_run %s: %v", br.ID, err)
+			dispatchLog.Warn("set current_step_index for blueprint_run failed", "blueprint_run", br.ID, "error", err)
 		}
 		if err := s.enqueueBlueprintStep(context.Background(), orgID, br.ID, *task, plan[next].Step(br.BlueprintID), stepModelOrInherit(plan[next].Model, stepRun.Model), triggerType, creatorUserID); err != nil {
 			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
@@ -509,7 +508,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// Stamp the shared worktree path onto the blueprint_run so later steps
 		// (and the resume/cancel cleanup) can reconstruct it.
 		if e := s.blueprints.SetRunWorktreePathSystem(context.Background(), orgID, br.ID, cfg.wtPath); e != nil {
-			log.Printf("[dispatch] warning: set worktree_path for blueprint_run %s: %v", br.ID, e)
+			dispatchLog.Warn("set worktree_path for blueprint_run failed", "blueprint_run", br.ID, "error", e)
 		}
 		return cfg, nil
 	}
@@ -564,23 +563,23 @@ func parseGitHubTask(task domain.Task) (owner, repo string, prNumber int) {
 // budget (poison pill). The shared worktree, if partially built, stays on disk.
 func (s *Spawner) handleStepSetupError(orgID string, br *domain.BlueprintRun, run domain.AgentRun, setupErr error) {
 	if run.Attempts >= maxRunAttempts {
-		log.Printf("[dispatch] run %s: workspace setup failed after %d attempts; failing blueprint: %v", run.ID, run.Attempts, setupErr)
+		dispatchLog.Error("workspace setup failed after attempts; failing blueprint", "run", run.ID, "attempts", run.Attempts, "error", setupErr)
 		s.terminateBlueprint(orgID, br.ID, run.TaskID, run.TriggerType, run.CreatorUserID, time.Now(),
 			runConfig{orgID: orgID, wtPath: br.WorktreePath, hasWT: br.WorktreePath != ""},
 			domain.BlueprintRunStatusFailed, "workspace setup: "+setupErr.Error(), run.BlueprintStepIndex, false)
 		return
 	}
-	log.Printf("[dispatch] run %s: workspace setup failed (attempt %d), requeuing: %v", run.ID, run.Attempts, setupErr)
+	dispatchLog.Warn("workspace setup failed, requeuing", "run", run.ID, "attempt", run.Attempts, "error", setupErr)
 	if err := s.runQueue.RequeueRun(context.Background(), orgID, run.ID, "workspace setup: "+setupErr.Error()); err != nil {
-		log.Printf("[dispatch] warning: requeue run %s after setup failure: %v", run.ID, err)
+		dispatchLog.Warn("requeue run after setup failure failed", "run", run.ID, "error", err)
 	}
 }
 
 // failClaimedRun marks an orphaned claimed run failed (its blueprint_run
 // vanished, so there is nothing to drive). Best-effort.
 func (s *Spawner) failClaimedRun(orgID string, run *domain.AgentRun, reason string) {
-	log.Printf("[dispatch] run %s: %s — marking failed", run.ID, reason)
+	dispatchLog.Error("marking run failed", "run", run.ID, "reason", reason)
 	if _, err := s.agentRuns.MarkFailedIfActiveSystem(context.Background(), orgID, run.ID); err != nil {
-		log.Printf("[dispatch] warning: mark orphaned run %s failed: %v", run.ID, err)
+		dispatchLog.Warn("mark orphaned run failed", "run", run.ID, "error", err)
 	}
 }

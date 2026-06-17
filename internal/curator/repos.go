@@ -2,7 +2,6 @@ package curator
 
 import (
 	"context"
-	"log"
 	"path/filepath"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -41,7 +40,7 @@ func materializePinnedRepos(ctx context.Context, repos db.RepoStore, tokenFor fu
 		}
 		owner, repo, ok := splitOwnerRepo(slug)
 		if !ok {
-			log.Printf("[curator] project %s: malformed pinned repo %q (skipping)", projectID, slug)
+			curatorLog.Warn("malformed pinned repo, skipping", "project", projectID, "repo", slug)
 			continue
 		}
 		// GetSystem: this dispatch goroutine holds no synthetic-claims tx,
@@ -51,11 +50,11 @@ func materializePinnedRepos(ctx context.Context, repos db.RepoStore, tokenFor fu
 		// like the spawner's *System reads from its detached goroutines. TFAC-65.
 		profile, err := repos.GetSystem(ctx, orgID, slug)
 		if err != nil {
-			log.Printf("[curator] project %s: load profile for %s: %v (skipping)", projectID, slug, err)
+			curatorLog.Warn("load pinned repo profile failed, skipping", "project", projectID, "repo", slug, "error", err)
 			continue
 		}
 		if profile == nil {
-			log.Printf("[curator] project %s: no profile for pinned repo %s — repo was removed from config after pinning (skipping)", projectID, slug)
+			curatorLog.Warn("no profile for pinned repo, removed from config after pinning, skipping", "project", projectID, "repo", slug)
 			continue
 		}
 		branch := profile.BaseBranch
@@ -63,7 +62,7 @@ func materializePinnedRepos(ctx context.Context, repos db.RepoStore, tokenFor fu
 			branch = profile.DefaultBranch
 		}
 		if branch == "" {
-			log.Printf("[curator] project %s: %s has no branch in profile (skipping)", projectID, slug)
+			curatorLog.Warn("pinned repo has no branch in profile, skipping", "project", projectID, "repo", slug)
 			continue
 		}
 		var auth worktree.CloneAuth
@@ -77,7 +76,7 @@ func materializePinnedRepos(ctx context.Context, repos db.RepoStore, tokenFor fu
 		// nil/no-op over the existing anon/SSH path in local.
 		if _, err := worktree.EnsureCuratorWorktree(ctx, owner, repo, branch, projectDir,
 			worktree.WithCloneAuth(auth), worktree.WithCloneURL(profile.CloneURL)); err != nil {
-			log.Printf("[curator] project %s: materialize %s @ %s failed: %v (skipping)", projectID, slug, branch, err)
+			curatorLog.Warn("materialize pinned repo failed, skipping", "project", projectID, "repo", slug, "branch", branch, "error", err)
 			continue
 		}
 	}
@@ -122,7 +121,7 @@ func materializeSharedPinnedRepos(ctx context.Context, repos db.RepoStore, token
 		seen[slug] = true
 		owner, repo, ok := splitOwnerRepo(slug)
 		if !ok {
-			log.Printf("[curator] project %s: malformed pinned repo %q (skipping)", projectID, slug)
+			curatorLog.Warn("malformed pinned repo, skipping", "project", projectID, "repo", slug)
 			continue
 		}
 		// GetSystem: this dispatch goroutine holds no synthetic-claims tx,
@@ -132,11 +131,11 @@ func materializeSharedPinnedRepos(ctx context.Context, repos db.RepoStore, token
 		// like the spawner's *System reads from its detached goroutines. TFAC-65.
 		profile, err := repos.GetSystem(ctx, orgID, slug)
 		if err != nil {
-			log.Printf("[curator] project %s: load profile for %s: %v (skipping)", projectID, slug, err)
+			curatorLog.Warn("load pinned repo profile failed, skipping", "project", projectID, "repo", slug, "error", err)
 			continue
 		}
 		if profile == nil {
-			log.Printf("[curator] project %s: no profile for pinned repo %s — repo was removed from config after pinning (skipping)", projectID, slug)
+			curatorLog.Warn("no profile for pinned repo, removed from config after pinning, skipping", "project", projectID, "repo", slug)
 			continue
 		}
 		branch := profile.BaseBranch
@@ -144,7 +143,7 @@ func materializeSharedPinnedRepos(ctx context.Context, repos db.RepoStore, token
 			branch = profile.DefaultBranch
 		}
 		if branch == "" {
-			log.Printf("[curator] project %s: %s has no branch in profile (skipping)", projectID, slug)
+			curatorLog.Warn("pinned repo has no branch in profile, skipping", "project", projectID, "repo", slug)
 			continue
 		}
 		var auth worktree.CloneAuth
@@ -154,7 +153,7 @@ func materializeSharedPinnedRepos(ctx context.Context, repos db.RepoStore, token
 		wtDir, release, err := worktree.EnsureSharedCuratorWorktree(ctx, orgID, owner, repo, branch,
 			worktree.WithCloneAuth(auth), worktree.WithCloneURL(profile.CloneURL))
 		if err != nil {
-			log.Printf("[curator] project %s: materialize shared %s @ %s failed: %v (skipping)", projectID, slug, branch, err)
+			curatorLog.Warn("materialize shared pinned repo failed, skipping", "project", projectID, "repo", slug, "branch", branch, "error", err)
 			continue
 		}
 		releases = append(releases, release)

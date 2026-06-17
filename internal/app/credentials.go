@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"log"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -52,20 +51,20 @@ func resolveAIModelForTeam(ctx context.Context, stores db.Stores, orgID, teamID 
 		teamID, err = stores.Teams.GetDefaultForOrgSystem(ctx, orgID)
 		if err != nil || teamID == "" {
 			if err != nil {
-				log.Printf("[app] resolve default team for org %s: %v (using default model %q)", orgID, err, fallback)
+				appLog.Warn("resolve default team failed; using default model", "org", orgID, "error", err, "model", fallback)
 			}
 			return fallback
 		}
 	}
 	teamSet, err := stores.Teams.GetSettingsSystem(ctx, teamID)
 	if err != nil {
-		log.Printf("[app] read team settings %s: %v (using default model %q)", teamID, err, fallback)
+		appLog.Warn("read team settings failed; using default model", "team", teamID, "error", err, "model", fallback)
 		return fallback
 	}
 
 	var maxTier string
 	if orgSet, err := stores.Orgs.GetSettingsSystem(ctx, orgID); err != nil {
-		log.Printf("[app] read org settings %s: %v (applying no model cap)", orgID, err)
+		appLog.Warn("read org settings failed; applying no model cap", "org", orgID, "error", err)
 	} else {
 		maxTier = orgSet.MaxLLMModelTier
 	}

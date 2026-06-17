@@ -2,7 +2,6 @@ package routing
 
 import (
 	"context"
-	"log"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -68,14 +67,14 @@ func (r *Router) reDeriveTask(orgID, taskID string) {
 	// kind-discriminated here.
 	handlers, err := r.handlers.GetEnabledForEventSystem(context.Background(), orgID, task.EventType)
 	if err != nil {
-		log.Printf("[router] re-derive: failed to query event_handlers for %s: %v", task.EventType, err)
+		routerLog.Error("re-derive: failed to query event_handlers", "event_type", task.EventType, "error", err)
 		return
 	}
 
 	// Fetch the primary event's metadata for predicate matching.
 	metadata, err := r.events.GetMetadataSystem(context.Background(), orgID, task.PrimaryEventID)
 	if err != nil {
-		log.Printf("[router] re-derive: failed to fetch event metadata for %s: %v", task.PrimaryEventID, err)
+		routerLog.Error("re-derive: failed to fetch event metadata", "event_id", task.PrimaryEventID, "error", err)
 		return
 	}
 
@@ -88,7 +87,7 @@ func (r *Router) reDeriveTask(orgID, taskID string) {
 	// The owner team_id always grants visibility, so it qualifies too.
 	visibleTeams, err := r.tasks.VisibilityTeamsSystem(context.Background(), orgID, taskID)
 	if err != nil {
-		log.Printf("[router] re-derive: failed to fetch visibility teams for task %s: %v", taskID, err)
+		routerLog.Error("re-derive: failed to fetch visibility teams for task", "task_id", taskID, "error", err)
 		return
 	}
 	visibleSet := map[string]struct{}{}
@@ -131,8 +130,7 @@ func (r *Router) reDeriveTask(orgID, taskID string) {
 
 		// Autonomy gate.
 		if *task.AutonomySuitability < minAutonomy {
-			log.Printf("[router] re-derive: task %s suitability %.2f < trigger %s threshold %.2f, skipping",
-				taskID, *task.AutonomySuitability, trigger.ID, minAutonomy)
+			routerLog.Debug("re-derive: task suitability below trigger threshold, skipping", "task_id", taskID, "suitability", *task.AutonomySuitability, "trigger_id", trigger.ID, "threshold", minAutonomy)
 			continue
 		}
 
@@ -143,15 +141,14 @@ func (r *Router) reDeriveTask(orgID, taskID string) {
 		}
 		matched, err := matchPredicate(task.EventType, predJSON, metadata)
 		if err != nil {
-			log.Printf("[router] re-derive: trigger %s predicate error: %v", trigger.ID, err)
+			routerLog.Error("re-derive: trigger predicate error", "trigger_id", trigger.ID, "error", err)
 			continue
 		}
 		if !matched {
 			continue
 		}
 
-		log.Printf("[router] re-derive: task %s suitability %.2f >= trigger %s threshold %.2f, firing",
-			taskID, *task.AutonomySuitability, trigger.ID, minAutonomy)
+		routerLog.Info("re-derive: task suitability meets trigger threshold, firing", "task_id", taskID, "suitability", *task.AutonomySuitability, "trigger_id", trigger.ID, "threshold", minAutonomy)
 		// Triggering event for the queued firing is the task's primary
 		// event — that's the one whose match scored autonomously above
 		// threshold. Real-event provenance keeps the audit trail honest

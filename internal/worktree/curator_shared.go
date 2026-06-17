@@ -3,7 +3,6 @@ package worktree
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -150,7 +149,7 @@ func EnsureSharedCuratorWorktree(ctx context.Context, orgID, owner, repo, branch
 	if err := gitRunCtxAuth(ctx, bareDir, auth, "fetch", "origin", branchRefspec); err != nil {
 		return "", nil, fmt.Errorf("fetch %s/%s %s: %w", owner, repo, branch, err)
 	}
-	log.Printf("[worktree] shared curator fetch %s/%s %s in %s", owner, repo, branch, time.Since(start).Round(time.Millisecond))
+	worktreeLog.Debug("shared curator fetch", "owner", owner, "repo", repo, "branch", branch, "duration", time.Since(start).Round(time.Millisecond))
 
 	wtInfo, statErr := os.Stat(wtDir)
 	switch {
@@ -161,7 +160,7 @@ func EnsureSharedCuratorWorktree(ctx context.Context, orgID, owner, repo, branch
 			return "", nil, fmt.Errorf("reset --hard %s: %w", branch, err)
 		}
 		if err := gitRunCtx(ctx, wtDir, "clean", "-fdx"); err != nil {
-			log.Printf("[worktree] shared curator clean %s/%s: %v", owner, repo, err)
+			worktreeLog.Warn("shared curator clean failed", "owner", owner, "repo", repo, "error", err)
 		}
 	case statErr == nil && !wtInfo.IsDir():
 		return "", nil, fmt.Errorf("shared worktree path %s exists but is not a directory", wtDir)
@@ -189,7 +188,7 @@ func EnsureSharedCuratorWorktree(ctx context.Context, orgID, owner, repo, branch
 		if err := gitRunCtx(ctx, bareDir, "worktree", "add", "--detach", wtDir, remoteRef); err != nil {
 			return "", nil, fmt.Errorf("worktree add %s/%s %s: %w", owner, repo, branch, err)
 		}
-		log.Printf("[worktree] shared curator worktree %s @ %s/%s %s", wtDir, owner, repo, branch)
+		worktreeLog.Debug("shared curator worktree", "dir", wtDir, "owner", owner, "repo", repo, "branch", branch)
 	}
 
 	sharedReadersInc(wtDir)

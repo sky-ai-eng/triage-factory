@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"time"
 
@@ -96,7 +95,7 @@ func (a *App) openStores(ctx context.Context) error {
 		// hard-crashed TF process. Never fatal — failure here just means
 		// orphaned resources stick around until the next boot.
 		if err := sandbox.ReapOrphans(ctx); err != nil {
-			log.Printf("sandbox: reap orphans at boot: %v", err)
+			sandboxLog.Warn("reap orphans at boot failed", "error", err)
 		}
 
 	default:

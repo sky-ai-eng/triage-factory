@@ -3,7 +3,6 @@ package projectclassify
 import (
 	"context"
 	"errors"
-	"log"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -58,7 +57,7 @@ func WaitFor(ctx context.Context, runner *Runner, orgID, entityID string, timeou
 	}
 	done, gone := classificationState(ctx, runner.entities, orgID, entityID)
 	if gone {
-		log.Printf("[classify] WaitFor: entity %s not found — returning early", entityID)
+		classifyLog.Info("waitfor entity not found, returning early", "entity", entityID)
 		return
 	}
 	if done {
@@ -80,12 +79,12 @@ func WaitFor(ctx context.Context, runner *Runner, orgID, entityID string, timeou
 		case <-ctx.Done():
 			return
 		case <-timer.C:
-			log.Printf("[classify] WaitFor timed out for entity %s after %s — proceeding without project context", entityID, timeout)
+			classifyLog.Warn("waitfor timed out, proceeding without project context", "entity", entityID, "timeout", timeout)
 			return
 		case <-ticker.C:
 			done, gone := classificationState(ctx, runner.entities, orgID, entityID)
 			if gone {
-				log.Printf("[classify] WaitFor: entity %s vanished mid-wait — returning early", entityID)
+				classifyLog.Info("waitfor entity vanished mid-wait, returning early", "entity", entityID)
 				return
 			}
 			if done {
@@ -115,7 +114,7 @@ func classificationState(ctx context.Context, entities db.EntityStore, orgID, en
 	classified, exists, err := entities.ClassificationStatusSystem(ctx, orgID, entityID)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-			log.Printf("[classify] WaitFor: transient read error for entity %s: %v", entityID, err)
+			classifyLog.Warn("waitfor transient read error", "entity", entityID, "error", err)
 		}
 		return false, false
 	}

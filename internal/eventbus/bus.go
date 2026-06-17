@@ -29,7 +29,6 @@
 package eventbus
 
 import (
-	"log"
 	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -160,7 +159,7 @@ func (b *Bus) Publish(evt domain.Event) {
 		select {
 		case entry.ch <- evt:
 		default:
-			log.Printf("[eventbus] dropping event %s for slow subscriber %s", evt.EventType, entry.sub.Name)
+			eventbusLog.Warn("dropping event for slow subscriber", "event_type", evt.EventType, "subscriber", entry.sub.Name)
 		}
 	}
 }

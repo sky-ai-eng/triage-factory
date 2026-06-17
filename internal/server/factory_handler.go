@@ -2,7 +2,6 @@ package server
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 	"time"
 
@@ -388,7 +387,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 					ej.Additions = snap.Additions
 					ej.Deletions = snap.Deletions
 				} else {
-					log.Printf("[factory] entity %s has malformed snapshot_json: %v", row.Entity.ID, err)
+					factoryLog.Warn("entity has malformed snapshot_json", "entity", row.Entity.ID, "error", err)
 				}
 			}
 			ej.Mine = ghUsername != "" && ej.Author == ghUsername

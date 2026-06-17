@@ -6,7 +6,6 @@ package ingest
 
 import (
 	"context"
-	"log"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -62,8 +61,7 @@ func (i *Ingestor) Publish(evt domain.Event) {
 			// push a phantom live update that has no durable backing for
 			// the frontend to correlate against. Dropping it (the next poll
 			// re-emits) is cleaner than a broadcast we can't stand behind.
-			log.Printf("[ingest] durable enqueue failed for %s (org %s): %v — dropping (next poll re-diffs)",
-				evt.EventType, evt.OrgID, err)
+			ingestLog.Error("durable enqueue failed; dropping (next poll re-diffs)", "event_type", evt.EventType, "org", evt.OrgID, "error", err)
 			return
 		}
 		evt.ID = id // so the bus event and the queue row agree on the id

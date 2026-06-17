@@ -3,13 +3,12 @@ package tracker
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 )
 
 func mustJSON(v any) string {
 	data, err := json.Marshal(v)
 	if err != nil {
-		log.Printf("[tracker] mustJSON marshal error: %v", err)
+		trackerLog.Error("mustJSON marshal error", "error", err)
 		return "{}"
 	}
 	return string(data)

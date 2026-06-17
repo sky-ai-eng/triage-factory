@@ -9,7 +9,6 @@ package delegate
 import (
 	"context"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,7 +73,7 @@ func readAgentMemoryFile(cwd, namespace, runID string) (string, memoryFileState)
 		if os.IsNotExist(err) {
 			return "", memoryFileMissing
 		}
-		log.Printf("[delegate] warning: failed to read memory file %s: %v", path, err)
+		delegateLog.Warn("read memory file failed", "path", path, "error", err)
 		return "", memoryFileReadErr
 	}
 	content := string(data)
@@ -118,13 +117,13 @@ func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, cwd, entityI
 	// when this entity has no prior memories.
 	ownDir := filepath.Join(cwd, "_scratch", "entity-memory", namespace)
 	if err := os.MkdirAll(ownDir, 0755); err != nil {
-		log.Printf("[delegate] warning: failed to create entity-memory namespace dir at %s: %v", ownDir, err)
+		delegateLog.Warn("create entity-memory namespace dir failed", "path", ownDir, "error", err)
 		return
 	}
 
 	memories, err := taskMemory.GetMemoriesForEntitySystem(context.Background(), orgID, entityID)
 	if err != nil {
-		log.Printf("[delegate] warning: failed to load prior memories for entity %s: %v", entityID, err)
+		delegateLog.Warn("load prior memories for entity failed", "entity", entityID, "error", err)
 		return
 	}
 	if len(memories) == 0 {
@@ -135,18 +134,18 @@ func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, cwd, entityI
 	for _, m := range memories {
 		dir := filepath.Join(cwd, "_scratch", "entity-memory", memoryNamespace(m.BlueprintRunID, m.RunID))
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			log.Printf("[delegate] warning: failed to create entity-memory namespace dir at %s: %v", dir, err)
+			delegateLog.Warn("create entity-memory namespace dir failed", "path", dir, "error", err)
 			continue
 		}
 		filename := filepath.Join(dir, m.RunID+".md")
 		if err := os.WriteFile(filename, []byte(m.Content), 0644); err != nil {
-			log.Printf("[delegate] warning: failed to materialize task memory %s: %v", filename, err)
+			delegateLog.Warn("materialize task memory failed", "path", filename, "error", err)
 			continue
 		}
 		written++
 	}
 	if written > 0 {
-		log.Printf("[delegate] materialized %d prior memories for entity %s", written, entityID)
+		delegateLog.Info("materialized prior memories for entity", "count", written, "entity", entityID)
 	}
 }
 
@@ -157,7 +156,7 @@ func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, cwd, entityI
 func lookupEntityProjectID(entities db.EntityStore, orgID, entityID string) *string {
 	entity, err := entities.GetSystem(context.Background(), orgID, entityID)
 	if err != nil {
-		log.Printf("[delegate] warning: failed to load entity %s for project lookup: %v", entityID, err)
+		delegateLog.Warn("load entity for project lookup failed", "entity", entityID, "error", err)
 		return nil
 	}
 	if entity == nil {
@@ -212,7 +211,7 @@ func streamCopyFile(src, dst string) (int64, error) {
 func materializeProjectKnowledge(orgID, cwd string, projectID *string) {
 	dir := filepath.Join(cwd, "_scratch", "project-knowledge")
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		log.Printf("[delegate] warning: failed to create project-knowledge dir at %s: %v", dir, err)
+		delegateLog.Warn("create project-knowledge dir failed", "path", dir, "error", err)
 		return
 	}
 
@@ -221,7 +220,7 @@ func materializeProjectKnowledge(orgID, cwd string, projectID *string) {
 	}
 
 	if _, err := paths.StateRootErr(); err != nil {
-		log.Printf("[delegate] warning: resolve knowledge dir for project %s: %v", *projectID, err)
+		delegateLog.Warn("resolve knowledge dir for project failed", "project", *projectID, "error", err)
 		return
 	}
 	kbRoot := paths.ProjectKBDir(orgID, *projectID)
@@ -230,7 +229,7 @@ func materializeProjectKnowledge(orgID, cwd string, projectID *string) {
 	entries, err := os.ReadDir(srcDir)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			log.Printf("[delegate] warning: read project knowledge-base %s: %v", srcDir, err)
+			delegateLog.Warn("read project knowledge-base failed", "path", srcDir, "error", err)
 		}
 		return
 	}
@@ -245,7 +244,7 @@ func materializeProjectKnowledge(orgID, cwd string, projectID *string) {
 		dst := filepath.Join(dir, e.Name())
 		n, err := streamCopyFile(src, dst)
 		if err != nil {
-			log.Printf("[delegate] warning: copy project knowledge file %s -> %s: %v", src, dst, err)
+			delegateLog.Warn("copy project knowledge file failed", "src", src, "dst", dst, "error", err)
 			continue
 		}
 		written++
@@ -253,9 +252,9 @@ func materializeProjectKnowledge(orgID, cwd string, projectID *string) {
 	}
 
 	if totalBytes > projectKnowledgeWarnBytes {
-		log.Printf("[delegate] project %s knowledge-base is %d bytes — over the %d soft cap; consider trimming", *projectID, totalBytes, projectKnowledgeWarnBytes)
+		delegateLog.Warn("project knowledge-base over the soft cap; consider trimming", "project", *projectID, "bytes", totalBytes, "soft_cap", projectKnowledgeWarnBytes)
 	}
 	if written > 0 {
-		log.Printf("[delegate] materialized %d project-knowledge files for project %s", written, *projectID)
+		delegateLog.Info("materialized project-knowledge files for project", "count", written, "project", *projectID)
 	}
 }

@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"database/sql"
-	"log"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
@@ -66,12 +65,12 @@ func newReloader(a *App) *reloader {
 // evt.OrgID). The one-shot toast stays a local-mode (N=1) affordance.
 func (r *reloader) onGitHubChanged(orgID string) {
 	if runmode.Current() != runmode.ModeLocal {
-		log.Printf("[server] GitHub config changed for org %s: multi-mode re-dues that org only (no fleet restart)", orgID)
+		serverLog.Info("github config changed; multi-mode re-dues that org only (no fleet restart)", "org", orgID)
 		r.pollerMgr.PollSoon("github", orgID)
 		return
 	}
 
-	log.Println("[server] GitHub config changed, full restart...")
+	serverLog.Info("github config changed, full restart")
 	// Local mode restarts both pollers below (N=1, no fleet to stampede), so arm
 	// the one-shot "config took effect" toast for each; the first post-restart
 	// completion of each source clears its flag.
@@ -91,7 +90,7 @@ func (r *reloader) onGitHubChanged(orgID string) {
 		// a read failure leaves the App signal off and the PAT branch still
 		// stands. Worth a log — an App-only org silently failing here would
 		// reintroduce the TFAC-331 "never profiles" symptom this fix closes.
-		log.Printf("[server] org %s: read GitHub App registration: %v (treating as no App)", orgID, appErr)
+		serverLog.Warn("read github app registration failed; treating as no app", "org", orgID, "error", appErr)
 	}
 
 	if githubConfigured(creds, app) {
@@ -121,12 +120,12 @@ func (r *reloader) onGitHubChanged(orgID string) {
 // (N=1) affordance.
 func (r *reloader) onJiraChanged(orgID string) {
 	if runmode.Current() != runmode.ModeLocal {
-		log.Printf("[server] Jira config changed for org %s: multi-mode re-dues that org only (no fleet restart)", orgID)
+		serverLog.Info("jira config changed; multi-mode re-dues that org only (no fleet restart)", "org", orgID)
 		r.pollerMgr.PollSoon("jira", orgID)
 		return
 	}
 
-	log.Println("[server] Jira config changed, restarting Jira poller...")
+	serverLog.Info("jira config changed, restarting jira poller")
 	r.announce.setPending("jira")
 	// SKY-463: the server no longer holds a process-global Jira write client —
 	// user writes resolve per-user via jira.Resolver, system reads via the
@@ -156,12 +155,12 @@ func (r *reloader) initialPoll(ctx context.Context) {
 	creds, _ := integrations.Load(ctx, r.stores.Secrets, orgID)
 	app, appErr := r.stores.GitHubApps.GetForOrgSystem(ctx, orgID)
 	if appErr != nil {
-		log.Printf("[delegate] org %s: read GitHub App registration: %v (treating as no App)", orgID, appErr)
+		delegateLog.Warn("read github app registration failed; treating as no app", "org", orgID, "error", appErr)
 	}
 	repoCount, _ := r.stores.Repos.CountConfiguredSystem(ctx, orgID)
 
 	if githubConfigured(creds, app) && repoCount > 0 {
-		log.Printf("[delegate] spawner ready (%d repos configured)", repoCount)
+		delegateLog.Info("spawner ready", "repos", repoCount)
 		// invalidate=false (fresh boot, profiles may still be warm);
 		// pollSoon=false (the restarted loop polls on its own schedule).
 		r.reprofileRestartAndScore(orgID, false, false)
@@ -182,7 +181,7 @@ func (r *reloader) reprofileRestartAndScore(orgID string, invalidate, pollSoon b
 	go func() {
 		profiler := repoprofile.NewProfiler(r.ghResolver, r.runSecrets, r.database, r.stores.Repos, r.stores.Orgs, r.wsHub)
 		if err := profiler.Run(context.Background(), invalidate); err != nil {
-			log.Printf("[repoprofile] profiling failed: %v", err)
+			repoprofileLog.Error("profiling failed", "error", err)
 		}
 		r.pollerMgr.RestartAll()
 		if pollSoon {

@@ -2,7 +2,6 @@ package projectclassify
 
 import (
 	"context"
-	"log"
 	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -89,7 +88,7 @@ func (r *Runner) run(ctx context.Context) {
 
 	orgIDs, err := r.orgs.ListActiveSystem(ctx)
 	if err != nil {
-		log.Printf("[classify] list active orgs: %v", err)
+		classifyLog.Error("list active orgs failed", "error", err)
 		return
 	}
 	for _, orgID := range orgIDs {
@@ -105,7 +104,7 @@ func (r *Runner) run(ctx context.Context) {
 func (r *Runner) runOrg(ctx context.Context, orgID string) {
 	entities, err := r.entities.ListUnclassifiedSystem(ctx, orgID)
 	if err != nil {
-		log.Printf("[classify] org %s: list unclassified entities: %v", orgID, err)
+		classifyLog.Error("list unclassified entities failed", "org", orgID, "error", err)
 		return
 	}
 	if len(entities) == 0 {
@@ -114,7 +113,7 @@ func (r *Runner) runOrg(ctx context.Context, orgID string) {
 
 	projects, err := r.projects.ListSystem(ctx, orgID)
 	if err != nil {
-		log.Printf("[classify] org %s: list projects: %v", orgID, err)
+		classifyLog.Error("list projects failed", "org", orgID, "error", err)
 		return
 	}
 
@@ -125,13 +124,13 @@ func (r *Runner) runOrg(ctx context.Context, orgID string) {
 		// projects exist.
 		for _, e := range entities {
 			if err := r.entities.AssignProjectSystem(ctx, orgID, e.ID, nil, ""); err != nil {
-				log.Printf("[classify] org %s: stamp classified_at for %s: %v", orgID, e.ID, err)
+				classifyLog.Warn("stamp classified_at failed", "org", orgID, "entity", e.ID, "error", err)
 			}
 		}
 		return
 	}
 
-	log.Printf("[classify] org %s: classifying %d entities against %d projects", orgID, len(entities), len(projects))
+	classifyLog.Info("classifying entities against projects", "org", orgID, "entities", len(entities), "projects", len(projects))
 
 	assigned := 0
 	skipped := 0
@@ -143,12 +142,12 @@ func (r *Runner) runOrg(ctx context.Context, orgID string) {
 		// failure (claude CLI unavailable, transient network) clears.
 		if allErrored(votes) {
 			skipped++
-			log.Printf("[classify] %s: all %d votes errored — leaving unclassified for retry", e.ID, len(votes))
+			classifyLog.Warn("all votes errored, leaving unclassified for retry", "entity", e.ID, "votes", len(votes))
 			continue
 		}
 		rationale := bestRationale(votes)
 		if winner != nil {
-			log.Printf("[classify] %s -> project %s (winning vote)", e.ID, *winner)
+			classifyLog.Info("entity classified to project", "entity", e.ID, "project", *winner)
 			assigned++
 		} else {
 			best := -1
@@ -157,13 +156,13 @@ func (r *Runner) runOrg(ctx context.Context, orgID string) {
 					best = v.Score
 				}
 			}
-			log.Printf("[classify] %s unassigned (best score: %d, threshold: %d)", e.ID, best, ConfidenceThreshold)
+			classifyLog.Info("entity unassigned, best score below threshold", "entity", e.ID, "best_score", best, "threshold", ConfidenceThreshold)
 		}
 		if err := r.entities.AssignProjectSystem(ctx, orgID, e.ID, winner, rationale); err != nil {
-			log.Printf("[classify] assign %s: %v", e.ID, err)
+			classifyLog.Error("assign entity failed", "entity", e.ID, "error", err)
 		}
 	}
-	log.Printf("[classify] org %s: cycle complete: %d/%d assigned, %d retried-next-cycle", orgID, assigned, len(entities), skipped)
+	classifyLog.Info("cycle complete", "org", orgID, "assigned", assigned, "total", len(entities), "retried_next_cycle", skipped)
 }
 
 // allErrored returns true iff there's at least one vote and every vote

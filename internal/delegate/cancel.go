@@ -7,7 +7,6 @@ package delegate
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -151,7 +150,7 @@ func (s *Spawner) handleCancelled(orgID, runID string, startTime time.Time, wtPa
 		completeErr = s.agentRuns.CompleteSystem(bgCtx, orgID, runID, "cancelled", 0, elapsed, 0, "cancelled", "Cancelled by user", "", "")
 	}
 	if completeErr != nil {
-		log.Printf("[delegate] warning: failed to record cancellation for run %s: %v", runID, completeErr)
+		delegateLog.Warn("failed to record cancellation", "run_id", runID, "error", completeErr)
 	}
 	s.broadcastRunUpdate(orgID, runID, "cancelled")
 	if wtPath != "" {
@@ -161,7 +160,7 @@ func (s *Spawner) handleCancelled(orgID, runID string, startTime time.Time, wtPa
 }
 
 func (s *Spawner) failRun(orgID, runID, taskID, triggerType, creatorUserID, errMsg string) {
-	log.Printf("[delegate] run %s failed: %s", runID, errMsg)
+	delegateLog.Error("run failed", "run_id", runID, "error", errMsg)
 
 	bgCtx := context.Background()
 
@@ -178,7 +177,7 @@ func (s *Spawner) failRun(orgID, runID, taskID, triggerType, creatorUserID, errM
 		_, markErr = s.agentRuns.MarkFailedIfActiveSystem(bgCtx, orgID, runID)
 	}
 	if markErr != nil {
-		log.Printf("[delegate] warning: failed to mark run %s as failed: %v", runID, markErr)
+		delegateLog.Warn("failed to mark run as failed", "run_id", runID, "error", markErr)
 	}
 
 	failMsg := &domain.AgentMessage{
@@ -198,7 +197,7 @@ func (s *Spawner) failRun(orgID, runID, taskID, triggerType, creatorUserID, errM
 		_, insertErr = s.agentRuns.InsertMessageSystem(bgCtx, orgID, failMsg)
 	}
 	if insertErr != nil {
-		log.Printf("[delegate] warning: failed to record failure message for run %s: %v", runID, insertErr)
+		delegateLog.Warn("failed to record failure message", "run_id", runID, "error", insertErr)
 	}
 
 	s.updateBreakerCounter(taskID, triggerType, "failed")

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -352,11 +351,11 @@ func (s *Store) RunReaper(ctx context.Context, interval, retention time.Duration
 				// Filter out ctx-cancelled errors (those are just
 				// shutdown noise). Real DB errors get logged for
 				// the operator to investigate.
-				log.Printf("[sessions] reaper: %v", err)
+				sessionsLog.Warn("reaper failed", "error", err)
 				continue
 			}
 			if n > 0 {
-				log.Printf("[sessions] reaper: deleted %d rows", n)
+				sessionsLog.Info("reaper deleted rows", "count", n)
 			}
 		}
 	}

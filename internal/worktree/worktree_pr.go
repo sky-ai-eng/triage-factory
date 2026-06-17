@@ -3,7 +3,6 @@ package worktree
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -92,7 +91,7 @@ func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneUR
 	if err := gitRunCtxAuth(ctx, bareDir, auth, "fetch", "origin", branchRef, mirrorRef); err != nil {
 		return "", fmt.Errorf("fetch PR #%d head into %s: %w", prNumber, localBranch, err)
 	}
-	log.Printf("[worktree] fetch PR #%d (refs/pull/%d/head -> %s) completed in %s", prNumber, prNumber, localBranch, time.Since(start).Round(time.Millisecond))
+	worktreeLog.Debug("fetch PR head completed", "number", prNumber, "branch", localBranch, "duration", time.Since(start).Round(time.Millisecond))
 
 	wtDir, err := makeWorktreeDir(runID)
 	if err != nil {
@@ -149,7 +148,7 @@ func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneUR
 		// as the push target here would silently push to upstream:
 		// refs/heads/<headBranch>, creating a stray branch that has
 		// nothing to do with the closed PR.
-		log.Printf("[worktree] PR #%d head repository is unavailable (deleted fork); worktree is read-only", prNumber)
+		worktreeLog.Warn("PR head repository unavailable (deleted fork); worktree is read-only", "number", prNumber)
 	}
 
 	if err := writeLocalExcludes(wtDir); err != nil {
@@ -163,7 +162,7 @@ func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneUR
 		return "", fmt.Errorf("write local git excludes: %w", err)
 	}
 
-	log.Printf("[worktree] PR worktree at %s (local branch: %s, head: %s, fork: %v)", wtDir, localBranch, headBranch, isFork)
+	worktreeLog.Info("PR worktree created", "dir", wtDir, "branch", localBranch, "head", headBranch, "fork", isFork)
 	return wtDir, nil
 }
 
@@ -184,7 +183,7 @@ func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneUR
 // confusing later runs.
 func rollbackPRSetupLocked(ctx context.Context, bareDir, wtDir, runID, headBranch string, prNumber int) {
 	if rmErr := RemoveAt(wtDir, runID); rmErr != nil {
-		log.Printf("[worktree] rollback PR setup: remove worktree: %v", rmErr)
+		worktreeLog.Warn("rollback PR setup: remove worktree failed", "error", rmErr)
 	}
 
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
@@ -393,7 +392,7 @@ func SweepStaleForkPRConfig(owner, repo string) {
 		reclaimed++
 	}
 	if reclaimed > 0 {
-		log.Printf("[worktree] swept %d stale per-PR config block(s) from %s", reclaimed, bareDir)
+		worktreeLog.Warn("swept stale per-PR config blocks", "count", reclaimed, "dir", bareDir)
 	}
 }
 

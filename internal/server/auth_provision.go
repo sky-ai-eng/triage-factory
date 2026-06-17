@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"log"
 
 	"github.com/google/uuid"
 )
@@ -161,7 +160,7 @@ func (s *Server) provisionOrg(ctx context.Context, userID uuid.UUID, name, slugB
 		return uuid.Nil, uuid.Nil, "", fmt.Errorf("commit: %w", err)
 	}
 
-	log.Printf("[orgs] provisioned org=%s team=%s owner=%s slug=%s", orgID, teamID, userID, slug)
+	orgsLog.Info("provisioned org", "org", orgID, "team", teamID, "owner", userID, "slug", slug)
 	return orgID, teamID, slug, nil
 }
 

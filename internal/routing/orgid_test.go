@@ -3,13 +3,13 @@ package routing
 import (
 	"bytes"
 	"context"
-	"log"
 	"strings"
 	"testing"
 	"time"
 
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -33,12 +33,11 @@ func TestHandleEvent_EmptyOrgID_Dropped(t *testing.T) {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 
-	// Capture the warning log line. log.Default goes to stderr by
-	// default; redirect to a buffer for the duration of the test.
+	// Capture the warning log line. Component loggers write through the
+	// logging package's swappable writer; redirect it to a buffer for the
+	// duration of the test.
 	var logBuf bytes.Buffer
-	origWriter := log.Writer()
-	log.SetOutput(&logBuf)
-	t.Cleanup(func() { log.SetOutput(origWriter) })
+	t.Cleanup(logging.SetOutput(&logBuf))
 
 	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#empty-org", "pr", "PR", "https://example.com/empty")
 	if err != nil {

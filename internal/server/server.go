@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -963,7 +962,7 @@ func (s *Server) SetStatic(f fs.FS) {
 	s.static = f
 	hashes, err := computeInlineScriptHashes(f)
 	if err != nil {
-		log.Printf("[server] inline script hash compute failed: %v (CSP will block inline scripts)", err)
+		serverLog.Warn("inline script hash compute failed; csp will block inline scripts", "error", err)
 	}
 	s.inlineScriptHashes = hashes
 }

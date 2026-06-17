@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"log"
 	"net/url"
 	"os"
 	"os/exec"
@@ -63,7 +62,7 @@ func fireCloneResult(owner, repo string, err error) {
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("[worktree] onCloneResult callback panicked for %s/%s: %v", owner, repo, r)
+			worktreeLog.Error("onCloneResult callback panicked", "owner", owner, "repo", repo, "error", r)
 		}
 	}()
 	cb(owner, repo, err)
@@ -402,7 +401,7 @@ func ensureBareCloneLocked(ctx context.Context, owner, repo, cloneURL string, au
 	// so detaching it is safe.
 	defer func() {
 		if err != nil {
-			log.Printf("[worktree] ensureBareClone %s/%s: %v", owner, repo, err)
+			worktreeLog.Error("ensureBareClone failed", "owner", owner, "repo", repo, "error", err)
 		}
 		go fireCloneResult(owner, repo, err)
 	}()
@@ -440,7 +439,7 @@ func cloneBareIfMissing(ctx context.Context, owner, repo, cloneURL string, auth 
 		if cloneURL == "" {
 			return "", fmt.Errorf("bare clone for %s/%s missing and no cloneURL provided", owner, repo)
 		}
-		log.Printf("[worktree] cloning %s/%s (first time)...", owner, repo)
+		worktreeLog.Info("cloning (first time)", "owner", owner, "repo", repo)
 		if err := os.MkdirAll(filepath.Dir(bareDir), 0755); err != nil {
 			return "", fmt.Errorf("mkdir: %w", err)
 		}
@@ -448,7 +447,7 @@ func cloneBareIfMissing(ctx context.Context, owner, repo, cloneURL string, auth 
 		if err := gitRunCtxAuth(ctx, "", auth, "clone", "--bare", "--filter=blob:none", cloneURL, bareDir); err != nil {
 			return "", fmt.Errorf("bare clone: %w", err)
 		}
-		log.Printf("[worktree] clone %s/%s completed in %s", owner, repo, time.Since(start).Round(time.Millisecond))
+		worktreeLog.Debug("clone completed", "owner", owner, "repo", repo, "duration", time.Since(start).Round(time.Millisecond))
 	}
 
 	return bareDir, nil
@@ -478,7 +477,7 @@ func repairOriginURL(ctx context.Context, bareDir, wantURL string) error {
 	if currentURL == wantURL {
 		return nil
 	}
-	log.Printf("[worktree] repairing origin url for %s: %q -> %q", bareDir, currentURL, wantURL)
+	worktreeLog.Debug("repairing origin url", "dir", bareDir, "current", currentURL, "want", wantURL)
 	return gitRunCtx(ctx, bareDir, "remote", "set-url", "origin", wantURL)
 }
 

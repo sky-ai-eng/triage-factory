@@ -80,6 +80,15 @@ Jira uses a two-stage flow in Settings:
 
 All credentials (GitHub PAT, Jira PAT) are stored in your OS keychain, never on disk. Token fields in Settings show "leave blank to keep current" when a token is already stored.
 
+### Logging
+
+Logs are structured (Go's `log/slog`) and written to stderr. Two environment variables tune output:
+
+- `TF_LOG_LEVEL` — minimum level: `debug`, `info` (default), `warn`, or `error`.
+- `TF_LOG_FORMAT` — `text` (human-readable, the default in local mode) or `json` (machine-parseable, the default when `TF_MODE=multi`).
+
+Every line carries a `component` field (e.g. `component=router`) naming the subsystem — the structured replacement for the old `[router]` prefixes. Verbose steady-state traces (such as per-poll credential-tier resolution) log at `debug`, so set `TF_LOG_LEVEL=debug` to surface them.
+
 ## GitHub polling
 
 The poller tracks PRs across several categories:

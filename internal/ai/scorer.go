@@ -7,7 +7,6 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 
@@ -120,7 +119,7 @@ func ScoreTasks(ctx context.Context, database *sql.DB, entities db.EntityStore, 
 		// (SKY-296) so Postgres multi-mode doesn't degrade every
 		// scored task to title-only context under RLS.
 		if descs, err := entities.DescriptionsSystem(ctx, orgID, entityIDs); err != nil {
-			log.Printf("[ai] warning: failed to load entity descriptions for scoring: %v", err)
+			aiLog.Warn("load entity descriptions for scoring failed", "error", err)
 		} else {
 			descriptions = descs
 		}
@@ -181,7 +180,7 @@ func ScoreTasks(ctx context.Context, database *sql.DB, entities db.EntityStore, 
 	skipped := 0
 	for i, r := range results {
 		if r.err != nil {
-			log.Printf("[ai] batch %d/%d failed (%d tasks skipped): %v", i+1, len(batches), len(batches[i]), r.err)
+			aiLog.Warn("scoring batch failed; tasks skipped", "batch", i+1, "batches", len(batches), "skipped", len(batches[i]), "error", r.err)
 			skipped += len(batches[i])
 			continue
 		}
