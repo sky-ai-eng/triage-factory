@@ -113,6 +113,11 @@ func (a *App) wireAuth(ctx context.Context) error {
 // transient window, surface the real error if it never resolves. A
 // cancelled ctx (SIGTERM during boot) aborts immediately.
 func newVerifierWithRetry(ctx context.Context, jwksURL, issuer, audience string) (*verify.Verifier, error) {
+	// Preserve fail-fast behavior for clear configuration errors.
+	if jwksURL == "" || issuer == "" || audience == "" {
+		return verify.NewVerifier(ctx, jwksURL, issuer, audience)
+	}
+
 	const (
 		attempts = 30
 		backoff  = 2 * time.Second
