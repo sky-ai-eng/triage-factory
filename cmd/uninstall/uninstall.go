@@ -410,7 +410,7 @@ func gitHubAppKeychainKeys(dbPath string) ([]string, error) {
 		if appID == "" {
 			continue
 		}
-		keys = append(keys, integrations.GitHubAppKeys(appID)...)
+		keys = append(keys, integrations.GitHubAppKeysFor(appID).All()...)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate org_github_apps: %w", err)

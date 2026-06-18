@@ -69,10 +69,14 @@ const legacyGitHubUsername = "github_username"
 //
 // Literals are duplicated here because integrations can't import server /
 // agentproc (server imports integrations — cycle), the same constraint that
-// forces the hand-copied Jira keys above. Keep in sync with:
-//   - KeyAnthropicAPIKey:       internal/server.secretKeyAnthropicAPIKey and
-//     internal/agentproc.secretAnthropicAPIKey (TestSecretKeyLiteralsMatchIntegrations pins it).
-//   - KeyJiraOAuthClientSecret: internal/server.jiraOAuthClientSecretKey.
+// forces the hand-copied Jira keys above. Each duplicate is drift-pinned from
+// the consuming package (which can import integrations) against these exports:
+//   - KeyAnthropicAPIKey: internal/server.secretKeyAnthropicAPIKey (the write
+//     path, pinned by server.TestSecretKeyLiteralsMatchIntegrations) and
+//     internal/agentproc.secretAnthropicAPIKey (the read path, pinned by
+//     agentproc.TestAnthropicKeyMatchesIntegrations).
+//   - KeyJiraOAuthClientSecret: internal/server.jiraOAuthClientSecretKey
+//     (pinned by server.TestSecretKeyLiteralsMatchIntegrations).
 //
 // agentproc's anthropic_auth_token / anthropic_base_url are intentionally NOT
 // here: they are read-only resolver inputs with no local-mode write path (no
@@ -110,26 +114,40 @@ func AllKeys() []string {
 //
 // Dynamic per-GitHub-App keys (github_app_<id>_{pem,client_secret,webhook_secret})
 // can't live in a static list; uninstall enumerates configured App ids from
-// org_github_apps and appends GitHubAppKeys for each before sweeping. Keep
-// scripts/clean-slate.sh's hardcoded keychain list in sync with this function.
+// org_github_apps and appends GitHubAppKeysFor(id).All() for each before
+// sweeping. Keep scripts/clean-slate.sh's hardcoded keychain list in sync with
+// this function.
 func AllLocalSweepKeys() []string {
 	return append(AllKeys(), KeyAnthropicAPIKey, KeyJiraOAuthClientSecret)
 }
 
-// GitHubAppKeys returns the three keychain/vault keys a single registered
-// GitHub App custodies its secrets under: the PEM private key, the OAuth client
-// secret, and the webhook secret. The shape is composed per App id, so it can't
-// be a static list — a full local uninstall enumerates configured App ids from
-// org_github_apps and calls this for each.
-//
-// Keep the format in sync with the write paths that compose these same keys:
-// internal/server/github_app_import.go and internal/server/github_app_register.go.
-func GitHubAppKeys(appID string) []string {
-	return []string{
-		"github_app_" + appID + "_pem",
-		"github_app_" + appID + "_client_secret",
-		"github_app_" + appID + "_webhook_secret",
+// GitHubAppKeyset is the trio of keychain/vault keys one registered GitHub App
+// custodies its secrets under: the PEM private key, the OAuth client secret, and
+// the webhook secret. Composed per App id (no static list possible).
+type GitHubAppKeyset struct {
+	PEM           string
+	ClientSecret  string
+	WebhookSecret string
+}
+
+// GitHubAppKeysFor composes an App's secret-key names from its id. This is the
+// single source of truth for the github_app_<id>_* shape: the write paths that
+// store the secrets (internal/server/github_app_import.go and
+// github_app_register.go) and the uninstall sweep both compose through here, so
+// the names they write and the names they later remove can't drift.
+func GitHubAppKeysFor(appID string) GitHubAppKeyset {
+	return GitHubAppKeyset{
+		PEM:           "github_app_" + appID + "_pem",
+		ClientSecret:  "github_app_" + appID + "_client_secret",
+		WebhookSecret: "github_app_" + appID + "_webhook_secret",
 	}
+}
+
+// All returns the keyset as a slice (PEM, client secret, webhook secret) for the
+// uninstall keychain sweep, which deletes all three regardless of which the App
+// actually populated — a Delete of an absent key is a no-op.
+func (k GitHubAppKeyset) All() []string {
+	return []string{k.PEM, k.ClientSecret, k.WebhookSecret}
 }
 
 // Load reads the four well-known integration secrets for orgID via

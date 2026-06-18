@@ -519,8 +519,11 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 	}
 
 	appIDStr := fmt.Sprintf("%d", convResp.ID)
-	clientSecretKey := "github_app_" + appIDStr + "_client_secret"
-	pemKey := "github_app_" + appIDStr + "_pem"
+	// Compose the secret-key names through integrations so the names written here
+	// match the names the uninstall sweep later removes (single source of truth).
+	appKeys := integrations.GitHubAppKeysFor(appIDStr)
+	clientSecretKey := appKeys.ClientSecret
+	pemKey := appKeys.PEM
 
 	secretKeys := []string{clientSecretKey, pemKey}
 
@@ -530,7 +533,7 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 	hasWebhookSecret := strings.TrimSpace(convResp.WebhookSecret) != ""
 	var webhookSecretKey string
 	if hasWebhookSecret {
-		webhookSecretKey = "github_app_" + appIDStr + "_webhook_secret"
+		webhookSecretKey = appKeys.WebhookSecret
 		secretKeys = append(secretKeys, webhookSecretKey)
 	}
 

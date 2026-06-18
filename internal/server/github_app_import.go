@@ -414,9 +414,12 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	hasWebhookSecret := webhookSecret != ""
 
 	canonicalAppID := strconv.FormatInt(app.ID, 10)
-	pemKey := "github_app_" + canonicalAppID + "_pem"
-	clientSecretKey := "github_app_" + canonicalAppID + "_client_secret"
-	webhookSecretKey := "github_app_" + canonicalAppID + "_webhook_secret"
+	// Compose the secret-key names through integrations so the names written here
+	// match the names the uninstall sweep later removes (single source of truth).
+	appKeys := integrations.GitHubAppKeysFor(canonicalAppID)
+	pemKey := appKeys.PEM
+	clientSecretKey := appKeys.ClientSecret
+	webhookSecretKey := appKeys.WebhookSecret
 
 	clientSecretRef := ""
 	if hasClientSecret {
