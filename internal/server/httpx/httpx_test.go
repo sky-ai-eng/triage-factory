@@ -53,9 +53,11 @@ func TestDecodeJSON_RejectsTrailingData(t *testing.T) {
 }
 
 // TestIsClientGone pins which errors read as "the caller disconnected": a
-// canceled or deadline-exceeded context, including when wrapped via %w (the
-// shape db.WithTx + the handlers produce). A real error and nil are not
-// client-gone.
+// canceled context, including when wrapped via %w (the shape db.WithTx + the
+// handlers produce). DeadlineExceeded is deliberately NOT client-gone — it
+// almost always signals a server-imposed timeout, which must keep its 500 +
+// error log rather than be masked as a 499. A real error and nil aren't
+// client-gone either.
 func TestIsClientGone(t *testing.T) {
 	cases := []struct {
 		name string
@@ -63,10 +65,10 @@ func TestIsClientGone(t *testing.T) {
 		want bool
 	}{
 		{"canceled", context.Canceled, true},
-		{"deadline", context.DeadlineExceeded, true},
 		{"wrapped canceled", fmt.Errorf("set request.jwt.claims: %w", context.Canceled), true},
-		{"wrapped deadline", fmt.Errorf("team-in-org check: %w", context.DeadlineExceeded), true},
 		{"double wrapped", fmt.Errorf("outer: %w", fmt.Errorf("inner: %w", context.Canceled)), true},
+		{"deadline excluded", context.DeadlineExceeded, false},
+		{"wrapped deadline excluded", fmt.Errorf("team-in-org check: %w", context.DeadlineExceeded), false},
 		{"real error", errors.New("boom"), false},
 		{"nil", nil, false},
 	}
@@ -92,7 +94,8 @@ func TestInternalError_ClientGone(t *testing.T) {
 	}{
 		{"canceled", context.Canceled, StatusClientClosedRequest, false},
 		{"wrapped canceled", fmt.Errorf("set request.jwt.claims: %w", context.Canceled), StatusClientClosedRequest, false},
-		{"deadline", context.DeadlineExceeded, StatusClientClosedRequest, false},
+		// A server-imposed deadline is NOT client-gone — it stays a logged 500.
+		{"deadline still 500", context.DeadlineExceeded, http.StatusInternalServerError, true},
 		{"real error", errors.New("boom"), http.StatusInternalServerError, true},
 	}
 	for _, tc := range cases {
