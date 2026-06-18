@@ -282,6 +282,10 @@ func TestScanBares_MissingRootSilentStillFindsExisting(t *testing.T) {
 		t.Fatalf("precondition: sentinel root %s should be absent, stat err=%v", sentinel, err)
 	}
 
+	prevLevel := logging.Level()
+	logging.SetLevel(logging.ParseLevel("info"))
+	defer logging.SetLevel(prevLevel)
+
 	var buf bytes.Buffer
 	restore := logging.SetOutput(&buf)
 	defer restore()
