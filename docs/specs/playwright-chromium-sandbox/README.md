@@ -58,12 +58,13 @@ independent blockers. Four of them are dissolved by the non-goals above:
 | Chromium's setuid/namespace sandbox can't init (zero caps, `noNewPrivileges`, non-root UID) | Moot — we run `--no-sandbox`; gVisor is the real boundary (§4) |
 | Egress is proxy-only — can't reach websites or even DNS | Moot — loopback only; the dev server is *in* the sandbox (§3) |
 | musl/Alpine vs Playwright's glibc browser download | Solved by the Alpine `chromium` apk + skip-download (§5.1), with one pinning gotcha |
-| Seccomp profile omits `clone`/`clone3` | Real, needs verify + likely a one-line add (§5.4) |
+| Seccomp profile omits `clone`/`clone3` | Non-issue — `runsc` doesn't enforce the OCI seccomp profile (§5.4, validated; TFAC-299) |
 | No `/dev/shm`, low rlimits | Real, spec tuning (§5.3) |
 
-So the remaining work is **rootfs composition + a handful of spec/seccomp/
-allowlist tweaks + a container-tier model + a Fly smoke test.** No architectural
-fight with the egress/credential model.
+So the remaining work is **rootfs composition + a handful of spec/allowlist
+tweaks + a container-tier model**, all now backed by the local `runsc`
+validation in §8. No architectural fight with the egress/credential model, and
+no seccomp change.
 
 ---
 
@@ -106,9 +107,9 @@ Running `--no-sandbox --disable-setuid-sandbox` is the right answer because
 **gVisor is already the security boundary.** Disabling Chromium's inner sandbox
 removes a layer that couldn't function anyway; the gVisor user-mode kernel (T3/T4
 in the SKY-254 threat model) is what actually contains an RCE. A bonus: with
-`--no-sandbox`, Chromium never attempts `unshare`/`CLONE_NEWUSER`, so we do not
-have to allow namespace-creation syscalls — the seccomp delta in §5.4 stays
-narrow.
+`--no-sandbox`, Chromium never attempts `unshare`/`CLONE_NEWUSER` — moot anyway
+since `runsc` doesn't enforce the OCI seccomp profile (§5.4), but it keeps the
+namespace-creation surface closed regardless.
 
 Launch flag set we expect to ship:
 
@@ -286,7 +287,7 @@ Introduce a sandbox **profile** selected per-run:
 
 - **`base`** — today's toolchain (`apkPackages`). Unchanged.
 - **`browser`** — `base` + `browserExtraPackages` (§5.1) + Playwright +
-  browser-sized rlimits/shm (§5.3) + the seccomp delta (§5.4).
+  browser-sized rlimits/shm (§5.3). No seccomp change (§5.4).
 
 Implementation shape:
 
@@ -298,8 +299,8 @@ Implementation shape:
   collision.
 - `buildSpec` branches on profile for rlimits, the `/dev/shm` mount, and the
   browser env vars.
-- The seccomp `clone`/`clone3` add can be global (harmless for `base`) or
-  profile-scoped; global is simpler if §8 shows it's needed.
+- No `syscalls.go` change — `runsc` doesn't enforce the OCI seccomp profile
+  (§5.4 / TFAC-299), so there's nothing to add for either profile.
 
 ### 6.2 Who picks the profile
 
@@ -404,8 +405,10 @@ screenshots; revisit for video/many-tabs).
   credential model are untouched (§3).
 - **`--no-sandbox` is not a regression** — gVisor is the boundary; Chromium's
   inner sandbox couldn't run under our caps/UID posture anyway (§4).
-- **Seccomp stays narrow** — we add at most `clone`/`clone3`, not namespace
-  creation, because `--no-sandbox` removes Chromium's need for `unshare` (§5.4).
+- **The OCI seccomp profile is not a layer here** — `runsc` doesn't apply it
+  (§5.4, validated; TFAC-299). Containment is the gVisor Sentry + the
+  zero-caps / non-root-UID / `noNewPrivileges` posture, left fully intact. No
+  seccomp change is made or needed.
 - **Added attack surface is the browser binary + fonts + ffmpeg + Playwright** in
   the rootfs. These are read-only in the sandbox (`spec.go:62`) and run as the
   unprivileged worktree UID. The marginal risk is "a malicious page exploits
@@ -425,11 +428,11 @@ screenshots; revisit for video/many-tabs).
 | `internal/sandbox/rootfs_linux.go` | `npm i -g playwright` step in the browser chroot build |
 | `internal/sandbox/sandbox.go` | `Config.Profile` field |
 | `internal/sandbox/spec.go` | profile-conditional rlimits, optional `/dev/shm`, browser env vars |
-| `internal/sandbox/syscalls.go` | `clone`/`clone3` (pending §8 verification) |
+| `internal/sandbox/syscalls.go` | **no change** — OCI seccomp isn't enforced under gVisor (§5.4 / TFAC-299) |
 | `internal/agentproc/allowlist.go` | Playwright wrapper / CLI allow + dev-server orchestration |
 | `internal/delegate/spawner.go` (+ trigger config) | select profile + machine class per task |
 | `docker/Dockerfile`, `fly.toml` | pre-baked browser rootfs; larger Machine class for the browser tier |
-| `docs/specs/playwright-chromium-sandbox/probe-browser.sh` | the §8 Fly smoke test |
+| `docs/specs/playwright-chromium-sandbox/probe-browser.sh` | the §8 local `runsc` validation (already run) |
 
 ---
 
@@ -440,3 +443,7 @@ screenshots; revisit for video/many-tabs).
 - `docs/specs/sky-254-perf-benchmark/results.md` — gVisor overhead numbers (§7).
 - `docs/isolation-tiers.md` — the tier model the §6 upcharge slots into.
 - `internal/sandbox/doc.go` — Property-A/B invariants the loopback scope preserves.
+- **TFAC-299** (Done) — establishes that `runsc` does not apply the OCI seccomp
+  profile; the basis for §5.4 being a non-issue.
+- **TFAC-408** — the parent "configurable sandbox fleet" epic this profile is the
+  first instance of.

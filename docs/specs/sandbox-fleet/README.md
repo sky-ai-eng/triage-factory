@@ -10,8 +10,9 @@ This generalizes the Playwright/Chromium work
 (`docs/specs/playwright-chromium-sandbox/`) — a "browser" profile becomes *one
 instance* of this model rather than a special case.
 
-Status: **proposal**. No code written yet. Parent context: the SKY-254 sandbox
-epic (`internal/sandbox`).
+Status: **proposal**. No code written yet. Tracked as **TFAC-408** (post-v1;
+deliberately not under the v1 multi-tenant epic TFAC-51). Parent context: the
+SKY-254 sandbox epic (`internal/sandbox`).
 
 Scope note: this targets the **multi modes only** (self-host multi and shared
 SaaS). Local mode (Tier 4, N=1) has one user, one trust boundary, and no
