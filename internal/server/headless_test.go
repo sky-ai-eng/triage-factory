@@ -339,6 +339,63 @@ func TestRunHeadlessBootstrap_UnsetIdentityPATsWarn(t *testing.T) {
 	}
 }
 
+// TestRunHeadlessBootstrap_JiraBotCredsWithoutConfigWarns covers the case where
+// the Jira bot credentials are set but the project/status config is missing:
+// GitHub still provisions, Jira is skipped, and the operator gets an
+// incomplete-config WARN rather than silently discovering an empty Jira page.
+func TestRunHeadlessBootstrap_JiraBotCredsWithoutConfigWarns(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	auth.ResetSecretBackendForTest(t)
+
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/user" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"login":"octocat"}`))
+	}))
+	t.Cleanup(gh.Close)
+
+	t.Setenv(envHeadless, "1")
+	t.Setenv("TRIAGE_FACTORY_GITHUB_URL", gh.URL)
+	t.Setenv("TRIAGE_FACTORY_GITHUB_BOT_PAT", "bot-token")
+	t.Setenv(envRepos, "acme/api")
+	// Jira bot creds present, but no project/status config.
+	t.Setenv("TRIAGE_FACTORY_JIRA_URL", "https://jira.example.com")
+	t.Setenv("TRIAGE_FACTORY_JIRA_BOT_PAT", "jira-bot")
+
+	var logs bytes.Buffer
+	restore := logging.SetOutput(&logs)
+	t.Cleanup(restore)
+
+	s := newTestServer(t)
+	ctx := t.Context()
+	clearLocalProvisioningSeed(t, s)
+
+	if err := s.RunHeadlessBootstrap(ctx); err != nil {
+		t.Fatalf("RunHeadlessBootstrap: %v", err)
+	}
+
+	repos, err := s.allStores.TeamGitHubRepos.ListForTeamSystem(ctx, runmode.LocalDefaultTeamID)
+	if err != nil {
+		t.Fatalf("ListForTeamSystem: %v", err)
+	}
+	if len(repos) != 1 {
+		t.Errorf("GitHub should still provision, got %d repos", len(repos))
+	}
+	rules, err := s.allStores.JiraStatusRules.ListForTeamSystem(ctx, runmode.LocalDefaultTeamID)
+	if err != nil {
+		t.Fatalf("JiraStatusRules.ListForTeamSystem: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Errorf("Jira should be skipped without project config, got %d rules", len(rules))
+	}
+	if !strings.Contains(logs.String(), "Jira config is incomplete") {
+		t.Errorf("expected an incomplete-Jira WARN when bot creds are set without config; logs:\n%s", logs.String())
+	}
+}
+
 // clearLocalProvisioningSeed drops the agent rows newTestServer pre-seeds, so
 // the org no longer reads as fully provisioned and a test can exercise a real
 // fresh provision. Raw SQL because agents/team_agents are bootstrap-only (no

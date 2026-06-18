@@ -230,7 +230,12 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 	// Jira readiness: the bot URL/PAT plus a complete status config. The host is
 	// resolved only when we'll actually use it.
 	jiraReady := creds.JiraURL != "" && creds.JiraPAT != "" && cfg.jiraComplete()
-	if cfg.jiraIntent() && !jiraReady {
+	// "Intent to use Jira" includes the bot URL/PAT, not just the headless seed
+	// vars — so an operator who set the Jira credentials but forgot the
+	// project/status config still gets told why Jira wasn't configured, rather
+	// than silently discovering an empty Jira page.
+	jiraIntended := creds.JiraURL != "" || creds.JiraPAT != "" || cfg.jiraIntent()
+	if jiraIntended && !jiraReady {
 		headlessLog.Warn("Jira config is incomplete; skipping Jira setup (need TRIAGE_FACTORY_JIRA_URL + _JIRA_BOT_PAT + _JIRA_PROJECTS + _JIRA_PICKUP_STATUSES + _JIRA_INPROGRESS_STATUS + _JIRA_DONE_STATUS)")
 	}
 	var jiraHost string
@@ -258,6 +263,8 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 	// 5. Provision the tenant (idempotent), then seed in one tx. Reached only when
 	//    not already provisioned, so the seed always runs; the per-item "only if
 	//    empty" guards below are belt-and-suspenders against a partial prior provision.
+	// The alreadyProvisioned bool is intentionally discarded: the read-only probe
+	// at step 2 already returned early if it were true, so here it's always false.
 	if _, err := s.ensureLocalOrgProvisioned(ctx); err != nil {
 		return err
 	}
