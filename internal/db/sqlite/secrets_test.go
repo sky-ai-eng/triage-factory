@@ -27,7 +27,7 @@ func TestSecretStore_SQLite_KeychainRoundTrip(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	if err := stores.Secrets.Put(ctx, org, "anthropic_api_key", "sk-ant-test-v1", "local-mode test secret"); err != nil {
 		t.Fatalf("Put: %v", err)
@@ -101,7 +101,7 @@ func TestSecretStore_SQLite_GetSystemEqualsGet(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	if err := stores.Secrets.Put(ctx, org, "github_app_pem", "-----BEGIN-----v1", ""); err != nil {
 		t.Fatalf("Put: %v", err)
@@ -148,7 +148,7 @@ func TestSecretStore_SQLite_DeleteWithOnlyEnvOverlay(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	// Set the env overlay but write nothing to the keychain.
 	t.Setenv("TRIAGE_FACTORY_GITHUB_PAT", "env-only-token")
@@ -219,7 +219,7 @@ func TestSecretStore_SQLite_PerUserKeychainRoundTrip(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 	const userID = "11111111-1111-1111-1111-111111111111"
 
 	// Consumer composes a host-scoped key (the store treats it opaquely).
@@ -317,7 +317,7 @@ func TestSecretStore_SQLite_PerUserKeyNamespacing(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 	const (
 		userA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 		userB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"

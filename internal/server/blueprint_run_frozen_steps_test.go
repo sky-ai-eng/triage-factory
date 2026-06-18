@@ -31,13 +31,13 @@ func TestBlueprintRunGet_ProjectsFrozenStepsNotLive(t *testing.T) {
 		t.Fatalf("seed entity: %v", err)
 	}
 	eid := entity.ID
-	evtID, err := s.events.Record(ctx, runmode.LocalDefaultOrg, domain.Event{
+	evtID, err := s.events.Record(ctx, runmode.LocalDefaultOrgID, domain.Event{
 		EntityID: &eid, EventType: domain.EventGitHubPRCICheckFailed,
 	})
 	if err != nil {
 		t.Fatalf("record event: %v", err)
 	}
-	task, _, err := s.tasks.FindOrCreate(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID, domain.EventGitHubPRCICheckFailed, "", evtID, 0.5)
+	task, _, err := s.tasks.FindOrCreate(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entity.ID, domain.EventGitHubPRCICheckFailed, "", evtID, 0.5)
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestBlueprintRunGet_ProjectsFrozenStepsNotLive(t *testing.T) {
 	// does at mint — snapshot the single resolved step. Cancelled mirrors the
 	// repro (the run was cancelled before the blueprint was edited).
 	const brID = "br-frozen"
-	if _, err := sqlitestore.New(s.db).Blueprints.CreateRun(ctx, runmode.LocalDefaultOrg, domain.BlueprintRun{
+	if _, err := sqlitestore.New(s.db).Blueprints.CreateRun(ctx, runmode.LocalDefaultOrgID, domain.BlueprintRun{
 		ID:           brID,
 		BlueprintID:  bpID,
 		TaskID:       task.ID,

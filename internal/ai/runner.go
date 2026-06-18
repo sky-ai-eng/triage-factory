@@ -53,7 +53,7 @@ type Runner struct {
 	database  *sql.DB
 	scores    db.ScoreStore
 	entities  db.EntityStore          // SKY-284: scorer bulk-loads entity descriptions for prompt context
-	orgID     string                  // scoring context org — runmode.LocalDefaultOrg in local mode
+	orgID     string                  // scoring context org — runmode.LocalDefaultOrgID in local mode
 	secrets   agentproc.SecretsReader // per-org LLM-credential reader (nil in local → ambient subscription; system-door reader in multi). SKY-389.
 	callbacks RunnerCallbacks
 	trigger   chan struct{}

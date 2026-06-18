@@ -34,7 +34,7 @@ func TestTaskMemoryStore_SQLite(t *testing.T) {
 				return seedSQLiteBlueprintRunForTaskMemory(t, conn, suffix)
 			},
 		}
-		return stores.TaskMemory, runmode.LocalDefaultOrg, seed
+		return stores.TaskMemory, runmode.LocalDefaultOrgID, seed
 	})
 }
 

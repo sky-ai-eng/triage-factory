@@ -137,7 +137,7 @@ func importSkillFile(ctx context.Context, database *sql.DB, prompts db.PromptSto
 	id := promptIDForPath(canonicalPath)
 
 	// Check if already exists
-	existing, err := prompts.Get(ctx, runmode.LocalDefaultOrg, id)
+	existing, err := prompts.Get(ctx, runmode.LocalDefaultOrgID, id)
 	if err != nil {
 		return err
 	}
@@ -146,7 +146,7 @@ func importSkillFile(ctx context.Context, database *sql.DB, prompts db.PromptSto
 		if existing.Body == meta.Body && existing.Name == meta.Name && existing.AllowedTools == meta.AllowedTools {
 			return errSkillUnchanged
 		}
-		if err := prompts.UpdateImported(ctx, runmode.LocalDefaultOrg, id, meta.Name, meta.Body, meta.AllowedTools); err != nil {
+		if err := prompts.UpdateImported(ctx, runmode.LocalDefaultOrgID, id, meta.Name, meta.Body, meta.AllowedTools); err != nil {
 			return err
 		}
 		skillsLog.Info("updated skill", "name", meta.Name, "path", path)
@@ -174,7 +174,7 @@ func importSkillFile(ctx context.Context, database *sql.DB, prompts db.PromptSto
 		AllowedTools: meta.AllowedTools,
 	}
 
-	if err := prompts.Create(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, prompt); err != nil {
+	if err := prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, prompt); err != nil {
 		return err
 	}
 
@@ -419,7 +419,7 @@ func hideDuplicateImportedPrompts(ctx context.Context, database *sql.DB, prompts
 		  AND p.org_id = ?
 		GROUP BY p.id, p.name, p.body, p.allowed_tools, p.updated_at, p.created_at
 		ORDER BY trigger_count DESC, p.updated_at DESC, p.created_at DESC, p.id ASC
-	`, runmode.LocalDefaultOrg)
+	`, runmode.LocalDefaultOrgID)
 	if err != nil {
 		return 0, err
 	}
@@ -465,7 +465,7 @@ func hideDuplicateImportedPrompts(ctx context.Context, database *sql.DB, prompts
 
 	hiddenCount := 0
 	for _, id := range idsToHide {
-		if err := prompts.Hide(ctx, runmode.LocalDefaultOrg, id); err != nil {
+		if err := prompts.Hide(ctx, runmode.LocalDefaultOrgID, id); err != nil {
 			return hiddenCount, err
 		}
 		hiddenCount++

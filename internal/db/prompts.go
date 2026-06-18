@@ -25,7 +25,7 @@ import (
 // one method that touches that sidecar, so the Postgres impl routes
 // it to the admin pool internally; every other method runs on the
 // app pool. SQLite has no role concept; both pools collapse to one
-// connection and assertLocalOrg pins orgID to LocalDefaultOrg.
+// connection and assertLocalOrg pins orgID to LocalDefaultOrgID.
 type PromptStore interface {
 	// SeedOrUpdate inserts a shipped system prompt as the team's own copy
 	// if missing, or updates it when the shipped (name, body, source) hash

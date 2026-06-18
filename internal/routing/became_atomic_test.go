@@ -22,7 +22,7 @@ import (
 func TestHandleEvent_BecameAtomic_ExistingTask_NoDuplicate(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
-	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
+	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 
@@ -43,7 +43,7 @@ func TestHandleEvent_BecameAtomic_ExistingTask_NoDuplicate(t *testing.T) {
 		Summary:           "Epic",
 	}
 	assignedJSON, _ := json.Marshal(assignedMeta)
-	assignedEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
+	assignedEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
 		EventType:    domain.EventJiraIssueAssigned,
 		EntityID:     &entity.ID,
 		MetadataJSON: string(assignedJSON),
@@ -52,7 +52,7 @@ func TestHandleEvent_BecameAtomic_ExistingTask_NoDuplicate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record assigned event: %v", err)
 	}
-	existingTask, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID,
+	existingTask, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entity.ID,
 		domain.EventJiraIssueAssigned, "", assignedEventID, 0.5)
 	if err != nil {
 		t.Fatalf("create existing task: %v", err)
@@ -78,11 +78,11 @@ func TestHandleEvent_BecameAtomic_ExistingTask_NoDuplicate(t *testing.T) {
 		EntityID:     &entity.ID,
 		MetadataJSON: string(atomicJSON),
 		CreatedAt:    time.Now(),
-		OrgID:        runmode.LocalDefaultOrg,
+		OrgID:        runmode.LocalDefaultOrgID,
 	})
 
 	// Verify: still exactly one active task on the entity.
-	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrg, entity.ID)
+	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil {
 		t.Fatalf("list active tasks: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestHandleEvent_BecameAtomic_NoExistingTask_CreatesTask(t *testing.T) {
 	// flow.
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
-	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
+	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 	// became_atomic now routes by assignee (the owning-team ladder), so the
@@ -135,10 +135,10 @@ func TestHandleEvent_BecameAtomic_NoExistingTask_CreatesTask(t *testing.T) {
 		EntityID:     &entity.ID,
 		MetadataJSON: string(metaJSON),
 		CreatedAt:    time.Now(),
-		OrgID:        runmode.LocalDefaultOrg,
+		OrgID:        runmode.LocalDefaultOrgID,
 	})
 
-	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrg, entity.ID)
+	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil {
 		t.Fatalf("list active tasks: %v", err)
 	}

@@ -87,7 +87,7 @@ func seedReviewRule(t *testing.T, database *sql.DB, teamID string) {
 			 scope_predicate_json, enabled, source, name, default_priority, sort_order,
 			 created_at, updated_at)
 		VALUES (?, ?, ?, ?, 'rule', ?, NULL, 1, 'user', ?, 0.6, 100, ?, ?)
-	`, id, runmode.LocalDefaultOrg, teamID, runmode.LocalDefaultUserID,
+	`, id, runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID,
 		domain.EventGitHubPRReviewRequested, "review rule "+teamID[:8], time.Now(), time.Now()); err != nil {
 		t.Fatalf("seed review rule for team %s: %v", teamID, err)
 	}
@@ -110,13 +110,13 @@ func emitReviewRequested(router *Router, entityID, dedupKey string, meta events.
 		DedupKey:     dedupKey,
 		MetadataJSON: string(metaJSON),
 		OccurredAt:   time.Now(),
-		OrgID:        runmode.LocalDefaultOrg,
+		OrgID:        runmode.LocalDefaultOrgID,
 	})
 }
 
 func visTeamsOf(t *testing.T, database *sql.DB, taskID string) []string {
 	t.Helper()
-	vis, err := testTaskStore(database).VisibilityTeams(context.Background(), runmode.LocalDefaultOrg, taskID)
+	vis, err := testTaskStore(database).VisibilityTeams(context.Background(), runmode.LocalDefaultOrgID, taskID)
 	if err != nil {
 		t.Fatalf("VisibilityTeams: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestReviewRequested_UserRoutesToRequestedUsersTeams(t *testing.T) {
 		Author: "carol", Repo: "owner/repo", PRNumber: 1, RequestedLogin: "alice",
 	})
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
 	}
@@ -176,7 +176,7 @@ func TestReviewRequested_EmptyOrgHost_DefaultsToGitHubCom(t *testing.T) {
 		Author: "carol", Repo: "owner/repo", PRNumber: 9, RequestedLogin: "alice",
 	})
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task even with empty org github_base_url, got %d (err=%v)", len(active), err)
 	}
@@ -207,7 +207,7 @@ func TestReviewRequested_SharedLoginUnionsTeams(t *testing.T) {
 		Author: "carol", Repo: "owner/repo", PRNumber: 2, RequestedLogin: "sharedbot",
 	})
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
 	}
@@ -241,7 +241,7 @@ func TestReviewRequested_TeamRoutesToMappedTFTeams(t *testing.T) {
 		Author: "carol", Repo: "owner/repo", PRNumber: 3, RequestedTeam: "acme/backend",
 	})
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
 	}
@@ -280,7 +280,7 @@ func TestReviewRequested_PerReviewerDistinctTasks(t *testing.T) {
 	emitReviewRequested(router, entityID, "team:acme/backend", events.GitHubPRReviewRequestedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 4, RequestedTeam: "acme/backend"})
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
 		t.Fatalf("list tasks: %v", err)
 	}
@@ -317,7 +317,7 @@ func TestReviewRequested_UnknownIdentity_NoTask(t *testing.T) {
 		Author: "carol", Repo: "owner/repo", PRNumber: 5, RequestedLogin: "ghost",
 	})
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
 		t.Fatalf("list tasks: %v", err)
 	}
@@ -356,10 +356,10 @@ func TestReviewByReviewer_ClosesOnlyTheirTask(t *testing.T) {
 		EventType:    domain.EventGitHubPRReviewApproved,
 		EntityID:     &entityID,
 		MetadataJSON: string(subMeta),
-		OrgID:        runmode.LocalDefaultOrg,
+		OrgID:        runmode.LocalDefaultOrgID,
 	})
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
 		t.Fatalf("list tasks: %v", err)
 	}
@@ -401,10 +401,10 @@ func TestReviewRequestRemoved_ClosesOnlyMatchingReviewer(t *testing.T) {
 		EntityID:     &entityID,
 		DedupKey:     "user:alice",
 		MetadataJSON: string(removedMeta),
-		OrgID:        runmode.LocalDefaultOrg,
+		OrgID:        runmode.LocalDefaultOrgID,
 	})
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
 		t.Fatalf("list tasks: %v", err)
 	}

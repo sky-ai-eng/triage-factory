@@ -272,7 +272,7 @@ func repoDir(owner, repo string) (string, error) {
 	if _, err := paths.StateRootErr(); err != nil {
 		return "", err
 	}
-	return paths.BareCacheDir(runmode.LocalDefaultOrg, owner, repo), nil
+	return paths.BareCacheDir(runmode.LocalDefaultOrgID, owner, repo), nil
 }
 
 // RepoDir is the exported variant for callers outside the worktree

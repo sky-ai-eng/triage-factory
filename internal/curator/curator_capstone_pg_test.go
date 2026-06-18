@@ -101,7 +101,7 @@ func TestCurator_Postgres_Multimode_FullTurn(t *testing.T) {
 	waitForStatus(t, h, reqID, "done")
 
 	// --- TFAC-62: the pinned bare seeded on demand; auth path resolved ---
-	bareDir := paths.BareCacheDir(runmode.LocalDefaultOrg, owner, repo)
+	bareDir := paths.BareCacheDir(runmode.LocalDefaultOrgID, owner, repo)
 	if !dirExists(bareDir) {
 		t.Errorf("pinned-repo bare was not seeded at %s — the GetSystem profile read or on-demand seed failed", bareDir)
 	}
@@ -242,9 +242,9 @@ func TestCurator_Postgres_Multimode_SharedReadOnlyWorktree(t *testing.T) {
 		}
 	}
 	// Exactly one linked worktree backs the bare even with two live readers.
-	// LocalDefaultOrg (not orgA): the bare cache is org-global until SKY-406;
+	// LocalDefaultOrgID (not orgA): the bare cache is org-global until SKY-406;
 	// the org-scoped shared worktree is what isolates tenants, not the bare.
-	if n := linkedWorktreeCount(t, paths.BareCacheDir(runmode.LocalDefaultOrg, owner, repo)); n != 1 {
+	if n := linkedWorktreeCount(t, paths.BareCacheDir(runmode.LocalDefaultOrgID, owner, repo)); n != 1 {
 		t.Errorf("linked worktrees against the bare = %d, want 1 (single shared checkout for 2 sessions)", n)
 	}
 
@@ -284,13 +284,13 @@ func TestCurator_Postgres_Multimode_BoundedEvictableCache(t *testing.T) {
 	_, coldRelease := materializeSharedPinnedRepos(ctx, stores.Repos, noToken, orgCold, "proj-cold", []string{"acme/cold"})
 	coldRelease()
 
-	// LocalDefaultOrg, not orgCold/orgHot: the bare cache is still org-global
+	// LocalDefaultOrgID, not orgCold/orgHot: the bare cache is still org-global
 	// (repoDir resolves the sentinel org until SKY-406), so both orgs' bares
 	// live under the one <state-root>/repos tree. The shared *worktree* each
 	// session mounts is org-scoped — that's the tenant-isolation boundary, not
 	// the bare — which is why eviction here keys on the global bare path.
-	coldBare := paths.BareCacheDir(runmode.LocalDefaultOrg, "acme", "cold")
-	hotBare := paths.BareCacheDir(runmode.LocalDefaultOrg, "acme", "hot")
+	coldBare := paths.BareCacheDir(runmode.LocalDefaultOrgID, "acme", "cold")
+	hotBare := paths.BareCacheDir(runmode.LocalDefaultOrgID, "acme", "hot")
 	if !dirExists(coldBare) || !dirExists(hotBare) {
 		t.Fatalf("precondition: both bares should be seeded (cold=%v hot=%v)", dirExists(coldBare), dirExists(hotBare))
 	}

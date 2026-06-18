@@ -28,7 +28,7 @@ func TestBlueprintStore_SQLite_Conformance(t *testing.T) {
 			insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: id, Name: id, Body: "x", Source: "user"})
 			return id
 		}
-		return stores.Blueprints, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, seedPrompt
+		return stores.Blueprints, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, seedPrompt
 	})
 }
 
@@ -42,7 +42,7 @@ func TestBlueprintStore_SQLite_DuplicationConformance(t *testing.T) {
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
 		ctx := context.Background()
-		org, team := runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID
+		org, team := runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
 		seed := func(t *testing.T, p domain.Prompt) string {
 			t.Helper()
 			if p.Source == "system" {
@@ -92,7 +92,7 @@ func insertPromptForBlueprintTest(t *testing.T, conn *sql.DB, p domain.Prompt) {
 // blueprint id is the supplied id (tests reference it directly).
 func insertBlueprintForTest(t *testing.T, conn *sql.DB, id, name string) {
 	t.Helper()
-	if err := sqlitestore.New(conn).Blueprints.Create(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Blueprint{
+	if err := sqlitestore.New(conn).Blueprints.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
 		ID: id, Name: name, Source: "user", TeamID: runmode.LocalDefaultTeamID,
 	}); err != nil {
 		t.Fatalf("seed blueprint %s: %v", id, err)
@@ -109,7 +109,7 @@ func seedEntityEventTask(t *testing.T, conn *sql.DB, suffix string) *domain.Task
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
-	eventID, err := sqlitestore.New(conn).Events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
+	eventID, err := sqlitestore.New(conn).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
 		EventType:    domain.EventGitHubPRCICheckFailed,
 		EntityID:     &entity.ID,
 		MetadataJSON: `{"check_name":"build"}`,
@@ -117,7 +117,7 @@ func seedEntityEventTask(t *testing.T, conn *sql.DB, suffix string) *domain.Task
 	if err != nil {
 		t.Fatalf("record event: %v", err)
 	}
-	task, _, err := sqlitestore.New(conn).Tasks.FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID,
+	task, _, err := sqlitestore.New(conn).Tasks.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entity.ID,
 		domain.EventGitHubPRCICheckFailed, suffix, eventID, 0.5)
 	if err != nil {
 		t.Fatalf("create task: %v", err)
@@ -131,7 +131,7 @@ func TestBlueprintStore_SQLite_RunsForBlueprint_RoundTrip(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	blueprints := sqlitestore.New(conn).Blueprints
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	task := seedEntityEventTask(t, conn, "blueprint-rt")
 	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "step-prompt-1", Name: "Step 1", Body: "do step 1", Source: "user"})
@@ -163,7 +163,7 @@ func TestBlueprintStore_SQLite_RunsForBlueprint_RoundTrip(t *testing.T) {
 		{ID: "blueprint-step-run-0", TaskID: task.ID, PromptID: "step-prompt-1", Status: "initializing", Model: "claude-sonnet-4-6", BlueprintRunID: "blueprint-run-rt", BlueprintStepIndex: &step0},
 		{ID: "blueprint-step-run-1", TaskID: task.ID, PromptID: "step-prompt-2", Status: "initializing", Model: "claude-sonnet-4-6", BlueprintRunID: "blueprint-run-rt", BlueprintStepIndex: &step1},
 	} {
-		if err := sqlitestore.New(conn).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, run); err != nil {
+		if err := sqlitestore.New(conn).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrgID, run); err != nil {
 			t.Fatalf("create agent run %s: %v", run.ID, err)
 		}
 	}
@@ -200,7 +200,7 @@ func TestBlueprintStore_SQLite_StepPlanRoundTrip(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	blueprints := sqlitestore.New(conn).Blueprints
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	task := seedEntityEventTask(t, conn, "stepplan-rt")
 	insertBlueprintForTest(t, conn, "sp-bp", "Plan BP")
@@ -256,7 +256,7 @@ func TestBlueprintStore_SQLite_RunsForBlueprint_SurfacesOutcome(t *testing.T) {
 	stores := sqlitestore.New(conn)
 	blueprints := stores.Blueprints
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	task := seedEntityEventTask(t, conn, "blueprint-outcome")
 	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "op-step", Name: "OP Step", Body: "x", Source: "user"})
@@ -301,7 +301,7 @@ func TestBlueprintStore_SQLite_MarkRunStatus_Guarded(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	blueprints := sqlitestore.New(conn).Blueprints
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	task := seedEntityEventTask(t, conn, "blueprint-guard")
 	insertBlueprintForTest(t, conn, "guard-blueprint", "Guard Blueprint")
@@ -347,7 +347,7 @@ func TestBlueprintStore_SQLite_ReopenRunForResume(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	blueprints := sqlitestore.New(conn).Blueprints
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	task := seedEntityEventTask(t, conn, "reopen")
 	insertBlueprintForTest(t, conn, "reopen-blueprint", "Reopen Blueprint")
@@ -401,7 +401,7 @@ func TestBlueprintStore_SQLite_CreateRun_RequiresTriggerType(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	blueprints := sqlitestore.New(conn).Blueprints
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	task := seedEntityEventTask(t, conn, "ttype")
 	insertBlueprintForTest(t, conn, "ttype-blueprint", "T")
@@ -415,7 +415,7 @@ func TestBlueprintStore_SQLite_CreateRun_RequiresTriggerType(t *testing.T) {
 }
 
 // TestBlueprintStore_SQLite_AssertsLocalOrg pins the local-org guard: any
-// orgID other than runmode.LocalDefaultOrg must fail loudly.
+// orgID other than runmode.LocalDefaultOrgID must fail loudly.
 func TestBlueprintStore_SQLite_AssertsLocalOrg(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	blueprints := sqlitestore.New(conn).Blueprints

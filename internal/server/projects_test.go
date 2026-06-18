@@ -354,7 +354,7 @@ func TestProjectPatch_RejectsEmptyName(t *testing.T) {
 // accepted.
 func TestProjectPatch_SpecBlueprintAcceptsVisible(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.blueprints.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID,
+	if err := s.blueprints.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
 		domain.Blueprint{ID: "spec-ok", Name: "Spec", Source: "user", TeamID: runmode.LocalDefaultTeamID}); err != nil {
 		t.Fatalf("seed blueprint: %v", err)
 	}

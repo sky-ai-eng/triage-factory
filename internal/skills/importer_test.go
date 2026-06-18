@@ -173,7 +173,7 @@ func TestImportAll_HidesExistingDuplicateImportedPrompts(t *testing.T) {
 	body := "Triage and prioritize incoming work."
 	prompts := testPromptStore(database)
 	ctx := t.Context()
-	if err := prompts.Create(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Prompt{
+	if err := prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{
 		ID:     "imported-duplicate-a",
 		Name:   "triage",
 		Body:   body,
@@ -181,7 +181,7 @@ func TestImportAll_HidesExistingDuplicateImportedPrompts(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create first duplicate prompt: %v", err)
 	}
-	if err := prompts.Create(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Prompt{
+	if err := prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{
 		ID:     "imported-duplicate-b",
 		Name:   "triage",
 		Body:   body,
@@ -251,7 +251,7 @@ func TestImportAll_DoesNotHideDuplicatePromptReferencedByTrigger(t *testing.T) {
 
 	prompts := testPromptStore(database)
 	ctx := t.Context()
-	if err := prompts.Create(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Prompt{
+	if err := prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{
 		ID:     keepID,
 		Name:   "triage",
 		Body:   body,
@@ -259,7 +259,7 @@ func TestImportAll_DoesNotHideDuplicatePromptReferencedByTrigger(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create triggered duplicate prompt: %v", err)
 	}
-	if err := prompts.Create(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Prompt{
+	if err := prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{
 		ID:     hideID,
 		Name:   "triage",
 		Body:   body,
@@ -291,7 +291,7 @@ func TestImportAll_DoesNotHideDuplicatePromptReferencedByTrigger(t *testing.T) {
 	}
 	// The trigger now references a blueprint wrapping keepID; resolve through
 	// its first step to confirm it still points at the kept prompt.
-	steps, err := sqlitestore.New(database).Blueprints.ListSteps(t.Context(), runmode.LocalDefaultOrg, storedTrigger.BlueprintID)
+	steps, err := sqlitestore.New(database).Blueprints.ListSteps(t.Context(), runmode.LocalDefaultOrgID, storedTrigger.BlueprintID)
 	if err != nil || len(steps) == 0 {
 		t.Fatalf("resolve trigger blueprint steps: steps=%v err=%v", steps, err)
 	}

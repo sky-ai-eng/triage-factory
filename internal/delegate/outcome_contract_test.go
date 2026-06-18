@@ -85,7 +85,7 @@ func TestNonterminalFragmentFramesContinueAsDefault(t *testing.T) {
 
 func loadRun(t *testing.T, s *Spawner, runID string) *domain.AgentRun {
 	t.Helper()
-	r, err := s.agentRuns.GetSystem(context.Background(), runmode.LocalDefaultOrg, runID)
+	r, err := s.agentRuns.GetSystem(context.Background(), runmode.LocalDefaultOrgID, runID)
 	if err != nil || r == nil {
 		t.Fatalf("load run %s: err=%v", runID, err)
 	}
@@ -94,7 +94,7 @@ func loadRun(t *testing.T, s *Spawner, runID string) *domain.AgentRun {
 
 func loadTask(t *testing.T, s *Spawner, taskID string) domain.Task {
 	t.Helper()
-	tk, err := s.tasks.GetSystem(context.Background(), runmode.LocalDefaultOrg, taskID)
+	tk, err := s.tasks.GetSystem(context.Background(), runmode.LocalDefaultOrgID, taskID)
 	if err != nil || tk == nil {
 		t.Fatalf("load task %s: err=%v", taskID, err)
 	}
@@ -111,7 +111,7 @@ func TestProcessCompletion_FinishRecordsOutcome(t *testing.T) {
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, bpr, task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, task,
 		res(`{"outcome":"finish","summary":"shipped it"}`), cwd, "", "event", "")
 
 	run := loadRun(t, s, runID)
@@ -137,7 +137,7 @@ func TestProcessCompletion_AbortLeavesTaskOpen(t *testing.T) {
 	before := readTaskStatus(t, database, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, bpr, task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, task,
 		res(`{"outcome":"abort","summary":"investigated the failure","reason":"needs a human to rotate the token"}`),
 		cwd, "", "event", "")
 
@@ -172,7 +172,7 @@ func TestProcessCompletion_AbortMissingReasonFails(t *testing.T) {
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, bpr, task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, task,
 		res(`{"outcome":"abort","summary":"stopped, couldn't proceed"}`), cwd, "", "event", "")
 
 	run := loadRun(t, s, runID)
@@ -195,7 +195,7 @@ func TestProcessCompletion_NoConclusionParksOpen(t *testing.T) {
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, bpr, task,
+	parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, task,
 		res(`this is not a JSON envelope`), cwd, "", "event", "")
 
 	if !parked {
@@ -221,7 +221,7 @@ func TestProcessCompletion_InvalidEnvelopeFails(t *testing.T) {
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, bpr, task,
+	parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, task,
 		res(`{"outcome":"finish"}`), cwd, "", "event", "")
 
 	if parked {
@@ -242,7 +242,7 @@ func TestProcessCompletion_InvalidEnvelopeFails(t *testing.T) {
 // covered in blueprint_advance_test.go).
 func TestProcessCompletion_FinishReturnsNotParked(t *testing.T) {
 	s, _, runID, taskID := setupAdvanceFixture(t, "pc-finish")
-	if parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, "",
+	if parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, "",
 		loadTask(t, s, taskID), res(`{"outcome":"finish","summary":"done"}`),
 		t.TempDir(), "", "event", ""); parked {
 		t.Error("processCompletion(finish) = true; want false (terminal, not parked)")
@@ -257,8 +257,8 @@ func TestTerminateBlueprint_CompletedClosesTask(t *testing.T) {
 	stampBotClaim(t, database, taskID)
 	bpr := blueprintRunIDForRun(t, database, runID)
 
-	s.terminateBlueprint(runmode.LocalDefaultOrg, bpr, taskID, "manual", runmode.LocalDefaultUserID,
-		time.Now(), runConfig{orgID: runmode.LocalDefaultOrg}, domain.BlueprintRunStatusCompleted, "", nil, true)
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "manual", runmode.LocalDefaultUserID,
+		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCompleted, "", nil, true)
 
 	if got := readTaskStatus(t, database, taskID); got != "done" {
 		t.Errorf("task.status = %q, want done (terminateBlueprint closes on completed)", got)
@@ -282,8 +282,8 @@ func TestTerminateBlueprint_AbortLeavesTaskOpen(t *testing.T) {
 	}
 	bpr := blueprintRunIDForRun(t, database, runID)
 
-	s.terminateBlueprint(runmode.LocalDefaultOrg, bpr, taskID, "manual", runmode.LocalDefaultUserID,
-		time.Now(), runConfig{orgID: runmode.LocalDefaultOrg}, domain.BlueprintRunStatusAborted, "needs a human", nil, true)
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "manual", runmode.LocalDefaultUserID,
+		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusAborted, "needs a human", nil, true)
 
 	if got := readTaskStatus(t, database, taskID); got == "done" {
 		t.Errorf("task.status = %q; abort must leave the task open", got)

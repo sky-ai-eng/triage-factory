@@ -30,7 +30,7 @@ func RemoveAt(path, runID string) error {
 	if _, err := paths.StateRootErr(); err != nil {
 		return err
 	}
-	pruneAll(paths.BareCacheRoot(runmode.LocalDefaultOrg))
+	pruneAll(paths.BareCacheRoot(runmode.LocalDefaultOrgID))
 
 	if runID != "" {
 		worktreeLog.Info("removed", "run_id", runID, "path", path)
@@ -122,7 +122,7 @@ func CleanupWithOptions(opts CleanupOptions) {
 	if _, err := paths.StateRootErr(); err != nil {
 		return
 	}
-	reposRoot := paths.BareCacheRoot(runmode.LocalDefaultOrg)
+	reposRoot := paths.BareCacheRoot(runmode.LocalDefaultOrgID)
 	clearStaleLockedWorktreesAll(reposRoot)
 	pruneAll(reposRoot)
 }

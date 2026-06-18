@@ -42,7 +42,7 @@ func TestScoreStore_SQLite(t *testing.T) {
 			t.Helper()
 			return seedSQLiteTasks(t, conn, n)
 		}
-		return stores.Scores, runmode.LocalDefaultOrg, seeder
+		return stores.Scores, runmode.LocalDefaultOrgID, seeder
 	})
 }
 
@@ -122,7 +122,7 @@ func TestScoreStore_SQLite_UpdateTaskScores_ChunksLargeBatch(t *testing.T) {
 	}
 
 	stores := sqlitestore.New(conn)
-	if err := stores.Scores.UpdateTaskScores(context.Background(), runmode.LocalDefaultOrg, updates); err != nil {
+	if err := stores.Scores.UpdateTaskScores(context.Background(), runmode.LocalDefaultOrgID, updates); err != nil {
 		t.Fatalf("UpdateTaskScores: %v", err)
 	}
 

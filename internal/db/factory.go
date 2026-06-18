@@ -11,7 +11,7 @@ import (
 
 // FactoryReadStore is the read-only projection that backs the
 // /api/factory/snapshot handler. Every method is scoped to one org;
-// in local mode callers pass runmode.LocalDefaultOrg.
+// in local mode callers pass runmode.LocalDefaultOrgID.
 //
 // Wired against the admin pool in Postgres: the factory snapshot is
 // a system-level view (no per-user identity required) and needs to

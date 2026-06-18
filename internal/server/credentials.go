@@ -383,7 +383,7 @@ func (s *Server) handleSetupStart(w http.ResponseWriter, r *http.Request) {
 	// GetForOrg today — but it keeps the function correct if the local-only
 	// gate is ever lifted onto Postgres, where the app pool would fault.
 	if org != nil {
-		agent, err := s.allStores.Agents.GetForOrgSystem(r.Context(), runmode.LocalDefaultOrg)
+		agent, err := s.allStores.Agents.GetForOrgSystem(r.Context(), runmode.LocalDefaultOrgID)
 		if err != nil {
 			setupLog.Error("setup/start agent probe failed", "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{

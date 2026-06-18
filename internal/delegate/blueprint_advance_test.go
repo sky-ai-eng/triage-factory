@@ -84,7 +84,7 @@ func TestProcessCompletion_BlueprintStepExternalActionCoercesToFinish(t *testing
 	s, database, runID, taskID := setupAdvanceFixture(t, "bp-coerce")
 	makeRunBlueprintStep(t, database, runID, taskID)
 	// Queue a PR for human approval so the run has a pending external action.
-	if err := s.pendingPRs.CreateSystem(context.Background(), runmode.LocalDefaultOrg, domain.PendingPR{
+	if err := s.pendingPRs.CreateSystem(context.Background(), runmode.LocalDefaultOrgID, domain.PendingPR{
 		ID: "pp-" + runID, RunID: runID, Owner: "o", Repo: "r",
 		HeadBranch: "h", HeadSHA: "sha", BaseBranch: "main", Title: "queued PR",
 	}); err != nil {
@@ -93,7 +93,7 @@ func TestProcessCompletion_BlueprintStepExternalActionCoercesToFinish(t *testing
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, "bpr-"+runID, task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, "bpr-"+runID, task,
 		res(`{"outcome":"continue","summary":"opened a PR"}`), cwd, "", "event", "")
 
 	run := loadRun(t, s, runID)
@@ -115,7 +115,7 @@ func TestProcessCompletion_BlueprintStepContinueNoPendingStaysContinue(t *testin
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, "bpr-"+runID, task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, "bpr-"+runID, task,
 		res(`{"outcome":"continue","summary":"did step work"}`), cwd, "", "event", "")
 
 	run := loadRun(t, s, runID)
@@ -156,10 +156,10 @@ func TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow(t *testing.T) 
 
 	// No session id → the gate can't (and needn't) retry; the staged file plus
 	// a valid continue outcome already satisfy it.
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, "bpr-"+runID, task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, "bpr-"+runID, task,
 		res(`{"outcome":"continue","summary":"did step work"}`), cwd, "", "event", "")
 
-	mem, err := sqlitestore.New(database).TaskMemory.GetRunMemory(context.Background(), runmode.LocalDefaultOrg, runID)
+	mem, err := sqlitestore.New(database).TaskMemory.GetRunMemory(context.Background(), runmode.LocalDefaultOrgID, runID)
 	if err != nil || mem == nil {
 		t.Fatalf("GetRunMemory: mem=%v err=%v", mem, err)
 	}
@@ -187,14 +187,14 @@ func TestResumeBlueprintAfterApproval_AbortFinalizesBlueprintTaskOpen(t *testing
 	// Queue a PR for approval, then conclude the same turn with abort: the step
 	// lands pending_approval with outcome=abort (no continue→finish coercion —
 	// abort is the exception the run.go coercion exempts).
-	if err := s.pendingPRs.CreateSystem(context.Background(), runmode.LocalDefaultOrg, domain.PendingPR{
+	if err := s.pendingPRs.CreateSystem(context.Background(), runmode.LocalDefaultOrgID, domain.PendingPR{
 		ID: "pp-" + runID, RunID: runID, Owner: "o", Repo: "r",
 		HeadBranch: "h", HeadSHA: "sha", BaseBranch: "main", Title: "queued PR",
 	}); err != nil {
 		t.Fatalf("seed pending PR: %v", err)
 	}
 	task := loadTask(t, s, taskID)
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, blueprintRunID, task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, blueprintRunID, task,
 		res(`{"outcome":"abort","summary":"opened a draft PR","reason":"approach is wrong; needs a human"}`),
 		t.TempDir(), "", "event", "")
 
@@ -204,10 +204,10 @@ func TestResumeBlueprintAfterApproval_AbortFinalizesBlueprintTaskOpen(t *testing
 
 	// Approve: the handler flips pending_approval → completed, then resumes the
 	// blueprint. With the fix, abort is a legal terminal shape (not a strand).
-	if _, err := s.agentRuns.MarkCompletedIfPendingApproval(context.Background(), runmode.LocalDefaultOrg, runID); err != nil {
+	if _, err := s.agentRuns.MarkCompletedIfPendingApproval(context.Background(), runmode.LocalDefaultOrgID, runID); err != nil {
 		t.Fatalf("flip pending_approval → completed: %v", err)
 	}
-	s.ResumeBlueprintAfterApproval(runmode.LocalDefaultOrg, runID, runmode.LocalDefaultUserID)
+	s.ResumeBlueprintAfterApproval(runmode.LocalDefaultOrgID, runID, runmode.LocalDefaultUserID)
 
 	// Blueprint reaches a terminal status (aborted), never stranded running, with
 	// the step's abort reason recorded in the terminal note.
@@ -233,7 +233,7 @@ func TestResumeBlueprintAfterApproval_AbortFinalizesBlueprintTaskOpen(t *testing
 // advance-task chain-step guard test uses.
 func makeRunBlueprintStep(t *testing.T, database *sql.DB, runID, taskID string) {
 	t.Helper()
-	if err := sqlitestore.New(database).Blueprints.Create(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Blueprint{
+	if err := sqlitestore.New(database).Blueprints.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
 		ID: "bp-" + runID, Name: "bp-" + runID, Source: "user", TeamID: runmode.LocalDefaultTeamID,
 	}); err != nil {
 		t.Fatalf("seed blueprint: %v", err)

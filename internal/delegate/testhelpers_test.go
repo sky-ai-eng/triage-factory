@@ -39,7 +39,7 @@ func newDelegateTestDB(t *testing.T) *sql.DB {
 func seedRunBlueprint(t *testing.T, database *sql.DB, suffix, taskID string) string {
 	t.Helper()
 	bpID := "seedbp-" + suffix
-	if err := sqlitestore.New(database).Blueprints.Create(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Blueprint{
+	if err := sqlitestore.New(database).Blueprints.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
 		ID: bpID, Name: bpID, Source: "user", TeamID: runmode.LocalDefaultTeamID,
 	}); err != nil {
 		t.Fatalf("seed blueprint: %v", err)
@@ -65,7 +65,7 @@ func seedRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath stri
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
-	eventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
+	eventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
 		EventType:    domain.EventGitHubPRCICheckFailed,
 		EntityID:     &entity.ID,
 		MetadataJSON: `{"check_name":"build"}`,
@@ -73,14 +73,14 @@ func seedRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath stri
 	if err != nil {
 		t.Fatalf("record event: %v", err)
 	}
-	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID, domain.EventGitHubPRCICheckFailed, runID, eventID, 0.5)
+	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entity.ID, domain.EventGitHubPRCICheckFailed, runID, eventID, 0.5)
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
 	ensureTestPrompt(t, database, domain.Prompt{ID: "test-prompt", Name: "T", Body: "x", Source: "user"})
 	brID := seedRunBlueprint(t, database, runID, task.ID)
 	stepIdx := 0
-	if err := sqlitestore.New(database).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
+	if err := sqlitestore.New(database).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrgID, domain.AgentRun{
 		ID:                 runID,
 		TaskID:             task.ID,
 		PromptID:           "test-prompt",
@@ -106,7 +106,7 @@ func seedJiraRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath 
 	if err != nil {
 		t.Fatalf("create jira entity: %v", err)
 	}
-	eventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
+	eventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
 		EventType:    domain.EventJiraIssueAssigned,
 		EntityID:     &entity.ID,
 		MetadataJSON: `{}`,
@@ -114,14 +114,14 @@ func seedJiraRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath 
 	if err != nil {
 		t.Fatalf("record event: %v", err)
 	}
-	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID, domain.EventJiraIssueAssigned, runID, eventID, 0.5)
+	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entity.ID, domain.EventJiraIssueAssigned, runID, eventID, 0.5)
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
 	ensureTestPrompt(t, database, domain.Prompt{ID: "test-prompt", Name: "T", Body: "x", Source: "user"})
 	brID := seedRunBlueprint(t, database, runID, task.ID)
 	stepIdx := 0
-	if err := sqlitestore.New(database).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
+	if err := sqlitestore.New(database).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrgID, domain.AgentRun{
 		ID: runID, TaskID: task.ID, PromptID: "test-prompt",
 		Status: "running", Model: "claude-sonnet-4-6", WorktreePath: worktreePath,
 		BlueprintRunID: brID, BlueprintStepIndex: &stepIdx,

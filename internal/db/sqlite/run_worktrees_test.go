@@ -37,7 +37,7 @@ func TestRunWorktreeStore_SQLite(t *testing.T) {
 				}
 			},
 		}
-		return stores.RunWorktrees, runmode.LocalDefaultOrg, seed
+		return stores.RunWorktrees, runmode.LocalDefaultOrgID, seed
 	})
 }
 

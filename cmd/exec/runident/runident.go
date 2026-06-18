@@ -55,7 +55,7 @@ var ErrRunIdentityNotFound = errors.New("TRIAGE_FACTORY_RUN_ID points at a run t
 type RunIdentity struct {
 	// OrgID is the run's owning org, read from the agent_runs row
 	// keyed by TRIAGE_FACTORY_RUN_ID. In local mode this collapses
-	// to runmode.LocalDefaultOrg (the single seeded tenant); in
+	// to runmode.LocalDefaultOrgID (the single seeded tenant); in
 	// multi mode it carries the real tenant UUID so every
 	// subcommand write attributes to the correct org.
 	OrgID string

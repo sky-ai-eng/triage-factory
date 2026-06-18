@@ -59,7 +59,7 @@ func TestBootstrapLocalOrg_FreshInstall(t *testing.T) {
 	}
 
 	// Agent + enabled team membership.
-	agent, err := stores.Agents.GetForOrg(ctx, runmode.LocalDefaultOrg)
+	agent, err := stores.Agents.GetForOrg(ctx, runmode.LocalDefaultOrgID)
 	if err != nil {
 		t.Fatalf("GetForOrg: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestBootstrapLocalOrg_FreshInstall(t *testing.T) {
 	if agent.DisplayName != "Triage Factory Bot" {
 		t.Errorf("DisplayName=%q want Triage Factory Bot", agent.DisplayName)
 	}
-	ta, err := stores.TeamAgents.GetForTeam(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, agent.ID)
+	ta, err := stores.TeamAgents.GetForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, agent.ID)
 	if err != nil {
 		t.Fatalf("GetForTeam: %v", err)
 	}
@@ -159,19 +159,19 @@ func TestBootstrapLocalOrg_PreservesUserDisable(t *testing.T) {
 	if err := db.BootstrapLocalOrg(ctx, stores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
 		t.Fatalf("first provision: %v", err)
 	}
-	agent, _ := stores.Agents.GetForOrg(ctx, runmode.LocalDefaultOrg)
+	agent, _ := stores.Agents.GetForOrg(ctx, runmode.LocalDefaultOrgID)
 	if agent == nil {
 		t.Fatal("no agent after provision")
 	}
 	// User disables the bot.
-	if err := stores.TeamAgents.SetEnabled(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, agent.ID, false); err != nil {
+	if err := stores.TeamAgents.SetEnabled(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, agent.ID, false); err != nil {
 		t.Fatalf("SetEnabled false: %v", err)
 	}
 	// Re-provision.
 	if err := db.BootstrapLocalOrg(ctx, stores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
 		t.Fatalf("second provision: %v", err)
 	}
-	ta, _ := stores.TeamAgents.GetForTeam(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, agent.ID)
+	ta, _ := stores.TeamAgents.GetForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, agent.ID)
 	if ta == nil {
 		t.Fatal("team_agents row vanished")
 	}
@@ -188,7 +188,7 @@ func TestBootstrapTeamAgent_ErrorsWhenOrgHasNoAgent(t *testing.T) {
 	stores := sqlitestore.New(conn)
 	ctx := t.Context()
 
-	err := db.BootstrapTeamAgent(ctx, stores, runmode.LocalDefaultOrg, "some-team")
+	err := db.BootstrapTeamAgent(ctx, stores, runmode.LocalDefaultOrgID, "some-team")
 	if err == nil {
 		t.Fatal("BootstrapTeamAgent without prior org bootstrap returned nil; want explicit error")
 	}
@@ -214,7 +214,7 @@ func TestBootstrapNewTeam_SeedsPerTeamDefaults(t *testing.T) {
 	// Org-create seeds the agent + the org template + the founder's (sentinel)
 	// team. The 2nd team then copies the same template.
 	if err := db.BootstrapNewOrg(ctx, stores,
-		runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints(),
+		runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints(),
 	); err != nil {
 		t.Fatalf("BootstrapNewOrg: %v", err)
 	}
@@ -223,21 +223,21 @@ func TestBootstrapNewTeam_SeedsPerTeamDefaults(t *testing.T) {
 	const newTeamID = "00000000-0000-0000-0000-0000000000b2"
 	if _, err := conn.ExecContext(ctx,
 		`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, 'beta', 'Beta')`,
-		newTeamID, runmode.LocalDefaultOrg,
+		newTeamID, runmode.LocalDefaultOrgID,
 	); err != nil {
 		t.Fatalf("insert second team: %v", err)
 	}
 
-	if err := db.BootstrapNewTeam(ctx, stores, runmode.LocalDefaultOrg, newTeamID); err != nil {
+	if err := db.BootstrapNewTeam(ctx, stores, runmode.LocalDefaultOrgID, newTeamID); err != nil {
 		t.Fatalf("BootstrapNewTeam: %v", err)
 	}
 
 	// team_agents row, default-enabled — manual delegation works.
-	agent, err := stores.Agents.GetForOrg(ctx, runmode.LocalDefaultOrg)
+	agent, err := stores.Agents.GetForOrg(ctx, runmode.LocalDefaultOrgID)
 	if err != nil {
 		t.Fatalf("GetForOrg: %v", err)
 	}
-	ta, err := stores.TeamAgents.GetForTeam(ctx, runmode.LocalDefaultOrg, newTeamID, agent.ID)
+	ta, err := stores.TeamAgents.GetForTeam(ctx, runmode.LocalDefaultOrgID, newTeamID, agent.ID)
 	if err != nil {
 		t.Fatalf("GetForTeam: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestBootstrapNewTeam_SeedsPerTeamDefaults(t *testing.T) {
 	var n int
 	if err := conn.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM event_handlers WHERE org_id = ? AND team_id = ? AND source = 'system'`,
-		runmode.LocalDefaultOrg, newTeamID,
+		runmode.LocalDefaultOrgID, newTeamID,
 	).Scan(&n); err != nil {
 		t.Fatalf("count handlers: %v", err)
 	}
@@ -260,7 +260,7 @@ func TestBootstrapNewTeam_SeedsPerTeamDefaults(t *testing.T) {
 	var np int
 	if err := conn.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM prompts WHERE org_id = ? AND team_id = ? AND source = 'system'`,
-		runmode.LocalDefaultOrg, newTeamID,
+		runmode.LocalDefaultOrgID, newTeamID,
 	).Scan(&np); err != nil {
 		t.Fatalf("count prompts: %v", err)
 	}
@@ -281,17 +281,17 @@ func TestBootstrapNewOrg_SeedsFullStack(t *testing.T) {
 	ctx := t.Context()
 
 	if err := db.BootstrapNewOrg(ctx, stores,
-		runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints(),
+		runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints(),
 	); err != nil {
 		t.Fatalf("BootstrapNewOrg: %v", err)
 	}
 
 	// Agent + enabled team membership.
-	agent, err := stores.Agents.GetForOrg(ctx, runmode.LocalDefaultOrg)
+	agent, err := stores.Agents.GetForOrg(ctx, runmode.LocalDefaultOrgID)
 	if err != nil || agent == nil {
 		t.Fatalf("GetForOrg: agent=%v err=%v", agent, err)
 	}
-	ta, err := stores.TeamAgents.GetForTeam(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, agent.ID)
+	ta, err := stores.TeamAgents.GetForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, agent.ID)
 	if err != nil {
 		t.Fatalf("GetForTeam: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestBootstrapNewOrg_SeedsFullStack(t *testing.T) {
 
 	// Prompts seeded. The id is a random UUID per team copy now (SKY-380),
 	// so resolve by system_slug rather than by id.
-	got, err := stores.Prompts.GetBySystemSlug(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, "system-pr-review-security")
+	got, err := stores.Prompts.GetBySystemSlug(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, "system-pr-review-security")
 	if err != nil {
 		t.Fatalf("Get prompt: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestBootstrapNewOrg_SeedsFullStack(t *testing.T) {
 	var n int
 	if err := conn.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM event_handlers WHERE org_id = ? AND source = 'system'`,
-		runmode.LocalDefaultOrg,
+		runmode.LocalDefaultOrgID,
 	).Scan(&n); err != nil {
 		t.Fatalf("count handlers: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestOrgTemplate_ForwardOnly(t *testing.T) {
 	conn := openInMemorySQLite(t)
 	stores := sqlitestore.New(conn)
 	ctx := t.Context()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	// Org-create: agent + template + founder's (sentinel) team materialized
 	// from the template-as-shipped.
@@ -547,7 +547,7 @@ func countSystemHandlers(t *testing.T, conn *sql.DB, teamID string) int {
 	var n int
 	if err := conn.QueryRow(
 		`SELECT COUNT(*) FROM event_handlers WHERE org_id = ? AND team_id = ? AND source = 'system'`,
-		runmode.LocalDefaultOrg, teamID,
+		runmode.LocalDefaultOrgID, teamID,
 	).Scan(&n); err != nil {
 		t.Fatalf("count system handlers: %v", err)
 	}

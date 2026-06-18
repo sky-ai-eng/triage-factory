@@ -13,7 +13,7 @@ import (
 // RunTaskStoreConformance. The factory returns:
 //   - the wired TaskStore impl
 //   - the orgID to pass to every method (sqlite returns
-//     runmode.LocalDefaultOrg, postgres returns a fresh org UUID)
+//     runmode.LocalDefaultOrgID, postgres returns a fresh org UUID)
 //   - the teamID — caller-supplied team_id for FindOrCreate
 //     (SKY-295). SQLite returns runmode.LocalDefaultTeamID; Postgres
 //     returns the seeded default team's UUID.

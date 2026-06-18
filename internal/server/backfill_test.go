@@ -32,7 +32,7 @@ func TestBackfillCandidates_ScopesByPinnedReposAndJiraKey(t *testing.T) {
 	seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
 	seedConfiguredRepo(t, s, "sky-ai-eng", "other-repo")
 
-	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Project{
+	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
 		Name:           "Auth",
 		PinnedRepos:    []string{"sky-ai-eng/triage-factory"},
 		JiraProjectKey: "SKY",
@@ -83,7 +83,7 @@ func TestBackfillCandidates_ScopesByPinnedReposAndJiraKey(t *testing.T) {
 // anything from the unconfigured project.
 func TestBackfillCandidates_EmptyConfigShowsAll(t *testing.T) {
 	s := newTestServer(t)
-	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Project{Name: "Misc"})
+	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "Misc"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,11 +112,11 @@ func TestBackfillCandidates_EmptyConfigShowsAll(t *testing.T) {
 func TestBackfillCandidates_ExcludesAlreadyInProject(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "owner", "repo")
-	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
+	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	other, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Project{Name: "Other", PinnedRepos: []string{"owner/repo"}})
+	other, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "Other", PinnedRepos: []string{"owner/repo"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestBackfillCandidates_ExcludesAlreadyInProject(t *testing.T) {
 func TestBackfill_BulkAssignPartialSuccess(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "owner", "repo")
-	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
+	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestBackfill_RejectsOutOfScopeAndClosed(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "owner", "in-scope")
 	seedConfiguredRepo(t, s, "owner", "out-of-scope")
-	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Project{
+	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
 		Name:           "P",
 		PinnedRepos:    []string{"owner/in-scope"},
 		JiraProjectKey: "SKY",
@@ -283,7 +283,7 @@ func TestBackfill_RejectsOutOfScopeAndClosed(t *testing.T) {
 func TestBackfill_StampsClassifiedAt(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "owner", "repo")
-	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
+	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}

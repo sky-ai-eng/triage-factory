@@ -108,7 +108,7 @@ func startGitHubDaemon(t *testing.T, resolver ghclient.Resolver, info RunInfo) *
 // else on the bundle, so a zero Stores proves the methods don't reach for it.
 func emptyStores() db.Stores { return db.Stores{} }
 
-func ghInfo() RunInfo { return RunInfo{OrgID: runmode.LocalDefaultOrg, RunID: "run-1"} }
+func ghInfo() RunInfo { return RunInfo{OrgID: runmode.LocalDefaultOrgID, RunID: "run-1"} }
 
 // TestServer_GithubAddComment_RoutesHostSide is the Property-B test: the
 // IPCClient (the sandbox's view) holds no credential, yet the call lands at

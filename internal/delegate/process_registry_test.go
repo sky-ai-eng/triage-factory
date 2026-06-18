@@ -88,7 +88,7 @@ func TestStampExecutor_WritesExecutorID(t *testing.T) {
 	seedRun(t, database, "r-exec", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	s.stampExecutor(runmode.LocalDefaultOrg, "r-exec")
+	s.stampExecutor(runmode.LocalDefaultOrgID, "r-exec")
 
 	var got sql.NullString
 	if err := database.QueryRow(`SELECT executor_id FROM runs WHERE id='r-exec'`).Scan(&got); err != nil {
@@ -109,7 +109,7 @@ func TestCancel_ActiveRun_RoutesThroughController(t *testing.T) {
 	fired := make(chan struct{}, 1)
 	s.cancels["r-active"] = func() { fired <- struct{}{} }
 
-	if err := s.Cancel(runmode.LocalDefaultOrg, "r-active", runmode.LocalDefaultUserID); err != nil {
+	if err := s.Cancel(runmode.LocalDefaultOrgID, "r-active", runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 	select {

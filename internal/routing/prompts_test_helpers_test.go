@@ -33,7 +33,7 @@ func testEventHandlerStore(database *sql.DB) db.EventHandlerStore {
 
 // testTaskStore returns a SQLite-backed TaskStore for routing tests.
 // SKY-283 — Router takes one store for task lifecycle/claim/queue
-// queries; the per-method orgID arg defaults to LocalDefaultOrg.
+// queries; the per-method orgID arg defaults to LocalDefaultOrgID.
 func testTaskStore(database *sql.DB) db.TaskStore {
 	if database == nil {
 		return nil
@@ -62,13 +62,13 @@ func blueprintWrappingPrompt(t *testing.T, database *sql.DB, promptID, teamID st
 	blueprintID := "bp-" + promptID
 	store := sqlitestore.New(database).Blueprints
 	ctx := context.Background()
-	if existing, _ := store.Get(ctx, runmode.LocalDefaultOrg, blueprintID); existing == nil {
-		if err := store.Create(ctx, runmode.LocalDefaultOrg, teamID, domain.Blueprint{
+	if existing, _ := store.Get(ctx, runmode.LocalDefaultOrgID, blueprintID); existing == nil {
+		if err := store.Create(ctx, runmode.LocalDefaultOrgID, teamID, domain.Blueprint{
 			ID: blueprintID, Name: blueprintID, Source: "user", TeamID: teamID,
 		}); err != nil {
 			t.Fatalf("blueprintWrappingPrompt create %s (team %s): %v", blueprintID, teamID, err)
 		}
-		if err := store.ReplaceSteps(ctx, runmode.LocalDefaultOrg, blueprintID, []string{promptID}, nil); err != nil {
+		if err := store.ReplaceSteps(ctx, runmode.LocalDefaultOrgID, blueprintID, []string{promptID}, nil); err != nil {
 			t.Fatalf("blueprintWrappingPrompt steps %s: %v", blueprintID, err)
 		}
 	}
@@ -93,14 +93,14 @@ func createTriggerForTestRouting(t *testing.T, database *sql.DB, trig domain.Eve
 	if trig.BlueprintID != "" {
 		trig.BlueprintID = blueprintWrappingPrompt(t, database, trig.BlueprintID, runmode.LocalDefaultTeamID)
 	}
-	if err := testEventHandlerStore(database).Create(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, trig); err != nil {
+	if err := testEventHandlerStore(database).Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, trig); err != nil {
 		t.Fatalf("createTriggerForTestRouting %s: %v", trig.ID, err)
 	}
 }
 
 func setTriggerEnabledForTestRouting(t *testing.T, database *sql.DB, id string, enabled bool) {
 	t.Helper()
-	if err := testEventHandlerStore(database).SetEnabled(context.Background(), runmode.LocalDefaultOrg, id, enabled); err != nil {
+	if err := testEventHandlerStore(database).SetEnabled(context.Background(), runmode.LocalDefaultOrgID, id, enabled); err != nil {
 		t.Fatalf("setTriggerEnabledForTestRouting %s: %v", id, err)
 	}
 }
@@ -114,7 +114,7 @@ func setTriggerEnabledForTestRouting(t *testing.T, database *sql.DB, id string, 
 func createTestPrompt(t *testing.T, database *sql.DB, p domain.Prompt) {
 	t.Helper()
 	store := testPromptStore(database)
-	if err := store.Create(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, p); err != nil {
+	if err := store.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, p); err != nil {
 		t.Fatalf("createTestPrompt %s: %v", p.ID, err)
 	}
 }
@@ -129,7 +129,7 @@ func insertPromptForTeam(t *testing.T, database *sql.DB, id, teamID string) {
 	if _, err := database.Exec(`
 		INSERT INTO prompts (id, org_id, team_id, creator_user_id, source, name, body, created_at, updated_at)
 		VALUES (?, ?, ?, ?, 'user', ?, 'x', datetime('now'), datetime('now'))
-	`, id, runmode.LocalDefaultOrg, teamID, runmode.LocalDefaultUserID, id); err != nil {
+	`, id, runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID, id); err != nil {
 		t.Fatalf("insertPromptForTeam %s (team %s): %v", id, teamID, err)
 	}
 }
@@ -145,7 +145,7 @@ func insertBlueprintForTeam(t *testing.T, database *sql.DB, blueprintID, promptI
 	if _, err := database.Exec(`
 		INSERT INTO blueprints (id, org_id, team_id, creator_user_id, source, name, created_at, updated_at)
 		VALUES (?, ?, ?, ?, 'user', ?, datetime('now'), datetime('now'))
-	`, blueprintID, runmode.LocalDefaultOrg, teamID, runmode.LocalDefaultUserID, blueprintID); err != nil {
+	`, blueprintID, runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID, blueprintID); err != nil {
 		t.Fatalf("insertBlueprintForTeam %s (team %s): %v", blueprintID, teamID, err)
 	}
 	if _, err := database.Exec(`
@@ -188,17 +188,17 @@ func seedHandlerFKTargets(t *testing.T, database *sql.DB) map[string]string {
 	}
 	out := map[string]string{}
 	for _, s := range slugs {
-		promptID, err := prompts.SeedOrUpdate(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID,
+		promptID, err := prompts.SeedOrUpdate(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
 			domain.Prompt{SystemSlug: s.slug, Name: s.name, Body: "x", Source: "system"})
 		if err != nil {
 			t.Fatalf("seed prompt %s: %v", s.slug, err)
 		}
-		bpID, err := blueprints.SeedOrUpdate(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID,
+		bpID, err := blueprints.SeedOrUpdate(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
 			domain.Blueprint{SystemSlug: s.slug, Name: s.name, Source: "system"})
 		if err != nil {
 			t.Fatalf("seed blueprint %s: %v", s.slug, err)
 		}
-		if err := blueprints.ReplaceSteps(ctx, runmode.LocalDefaultOrg, bpID, []string{promptID}, nil); err != nil {
+		if err := blueprints.ReplaceSteps(ctx, runmode.LocalDefaultOrgID, bpID, []string{promptID}, nil); err != nil {
 			t.Fatalf("seed blueprint steps %s: %v", s.slug, err)
 		}
 		out[s.slug] = bpID

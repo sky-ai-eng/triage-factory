@@ -14,7 +14,7 @@ import (
 // RunBlueprintStoreConformance. It returns:
 //   - the wired BlueprintStore impl
 //   - the orgID to pass to every method (SQLite returns
-//     runmode.LocalDefaultOrg, Postgres a fresh org UUID)
+//     runmode.LocalDefaultOrgID, Postgres a fresh org UUID)
 //   - the teamID Create/SeedOrUpdate should attribute blueprints to (every
 //     blueprint is team-scoped)
 //   - a PromptSeeder hook the harness invokes to materialize step prompts. A

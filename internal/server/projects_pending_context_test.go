@@ -18,7 +18,7 @@ import (
 
 func seedProjectWithSessionForPatch(t *testing.T, s *Server) (id, sessionID string) {
 	t.Helper()
-	id, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	id, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestProjectPatch_QueuesPinnedRepoChange(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
 
-	rows, err := s.curatorStore.ListPendingContext(t.Context(), runmode.LocalDefaultOrg, id)
+	rows, err := s.curatorStore.ListPendingContext(t.Context(), runmode.LocalDefaultOrgID, id)
 	if err != nil {
 		t.Fatalf("list pending: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestProjectPatch_QueuesPinnedRepoChange(t *testing.T) {
 func TestProjectPatch_NoQueueWithoutSession(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
-	id, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	id, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestProjectPatch_NoQueueWithoutSession(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
-	rows, _ := s.curatorStore.ListPendingContext(t.Context(), runmode.LocalDefaultOrg, id)
+	rows, _ := s.curatorStore.ListPendingContext(t.Context(), runmode.LocalDefaultOrgID, id)
 	if len(rows) != 0 {
 		t.Errorf("expected 0 pending rows for session-less project, got %d (%+v)", len(rows), rows)
 	}
@@ -92,7 +92,7 @@ func TestProjectPatch_NoQueueWhenNothingChanged(t *testing.T) {
 
 	// Seed an initial pinned repo via direct DB write, then PATCH the
 	// same value back. The diff should fold to "no change."
-	if err := s.projects.Update(t.Context(), runmode.LocalDefaultOrg, domain.Project{
+	if err := s.projects.Update(t.Context(), runmode.LocalDefaultOrgID, domain.Project{
 		ID:               id,
 		Name:             "P",
 		PinnedRepos:      []string{"sky-ai-eng/triage-factory"},
@@ -107,7 +107,7 @@ func TestProjectPatch_NoQueueWhenNothingChanged(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
-	rows, _ := s.curatorStore.ListPendingContext(t.Context(), runmode.LocalDefaultOrg, id)
+	rows, _ := s.curatorStore.ListPendingContext(t.Context(), runmode.LocalDefaultOrgID, id)
 	if len(rows) != 0 {
 		t.Errorf("no-op PATCH queued %d rows: %+v", len(rows), rows)
 	}
@@ -141,7 +141,7 @@ func TestProjectPatch_CoalescesRepeatedPATCHes(t *testing.T) {
 		t.Fatalf("second patch: %d %s", rec.Code, rec.Body.String())
 	}
 
-	rows, _ := s.curatorStore.ListPendingContext(t.Context(), runmode.LocalDefaultOrg, id)
+	rows, _ := s.curatorStore.ListPendingContext(t.Context(), runmode.LocalDefaultOrgID, id)
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 coalesced row, got %d (%+v)", len(rows), rows)
 	}
@@ -196,7 +196,7 @@ func TestProjectPatch_NoQueueOnPureReorder(t *testing.T) {
 
 	// Seed a known order via direct DB write so the comparison below
 	// is unambiguously a reorder.
-	if err := s.projects.Update(t.Context(), runmode.LocalDefaultOrg, domain.Project{
+	if err := s.projects.Update(t.Context(), runmode.LocalDefaultOrgID, domain.Project{
 		ID:               id,
 		Name:             "P",
 		PinnedRepos:      []string{"sky-ai-eng/triage-factory", "sky-ai-eng/another"},
@@ -213,7 +213,7 @@ func TestProjectPatch_NoQueueOnPureReorder(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
 
-	rows, _ := s.curatorStore.ListPendingContext(t.Context(), runmode.LocalDefaultOrg, id)
+	rows, _ := s.curatorStore.ListPendingContext(t.Context(), runmode.LocalDefaultOrgID, id)
 	if len(rows) != 0 {
 		t.Errorf("reorder PATCH queued %d rows (set semantics broken): %+v", len(rows), rows)
 	}
@@ -244,7 +244,7 @@ func TestProjectPatch_QueuesJiraChange(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
 
-	rows, _ := s.curatorStore.ListPendingContext(t.Context(), runmode.LocalDefaultOrg, id)
+	rows, _ := s.curatorStore.ListPendingContext(t.Context(), runmode.LocalDefaultOrgID, id)
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 pending row, got %d", len(rows))
 	}

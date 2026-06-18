@@ -67,7 +67,7 @@ func TestTaskStore_SQLite(t *testing.T) {
 			}
 			return id
 		}
-		return stores.Tasks, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, runmode.LocalDefaultAgentID, runmode.LocalDefaultUserID, seeder, teamSeeder
+		return stores.Tasks, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultAgentID, runmode.LocalDefaultUserID, seeder, teamSeeder
 	})
 }
 
@@ -109,7 +109,7 @@ func seedSQLiteTaskChain(t *testing.T, conn *sql.DB, suffix string) (entityID, e
 
 // TestTaskStore_SQLite_AssertLocalOrg covers the local-only invariant
 // that's specific to the SQLite impl — the orgID guard at every
-// method entry refuses anything other than LocalDefaultOrg. The
+// method entry refuses anything other than LocalDefaultOrgID. The
 // conformance suite already exercises the happy path; this test
 // pins the SQLite-specific rejection.
 func TestTaskStore_SQLite_AssertLocalOrg(t *testing.T) {
@@ -125,10 +125,10 @@ func TestTaskStore_SQLite_AssertLocalOrg(t *testing.T) {
 	}
 	store := sqlitestore.New(conn).Tasks
 
-	// Queued must refuse non-LocalDefaultOrg even though the underlying
+	// Queued must refuse non-LocalDefaultOrgID even though the underlying
 	// SQL would happily run — the guard is the only place that catches
 	// a "I think I'm in multi mode" caller.
 	if _, err := store.Queued(t.Context(), "some-other-org", nil); err == nil {
-		t.Error("Queued accepted non-LocalDefaultOrg without error")
+		t.Error("Queued accepted non-LocalDefaultOrgID without error")
 	}
 }

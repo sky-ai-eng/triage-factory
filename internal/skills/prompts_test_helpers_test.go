@@ -40,13 +40,13 @@ func blueprintWrappingPromptForSkills(t *testing.T, database *sql.DB, promptID s
 	blueprintID := "bp-" + promptID
 	store := sqlitestore.New(database).Blueprints
 	ctx := context.Background()
-	if existing, _ := store.Get(ctx, runmode.LocalDefaultOrg, blueprintID); existing == nil {
-		if err := store.Create(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Blueprint{
+	if existing, _ := store.Get(ctx, runmode.LocalDefaultOrgID, blueprintID); existing == nil {
+		if err := store.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
 			ID: blueprintID, Name: blueprintID, Source: "user", TeamID: runmode.LocalDefaultTeamID,
 		}); err != nil {
 			t.Fatalf("blueprintWrappingPromptForSkills create %s: %v", blueprintID, err)
 		}
-		if err := store.ReplaceSteps(ctx, runmode.LocalDefaultOrg, blueprintID, []string{promptID}, nil); err != nil {
+		if err := store.ReplaceSteps(ctx, runmode.LocalDefaultOrgID, blueprintID, []string{promptID}, nil); err != nil {
 			t.Fatalf("blueprintWrappingPromptForSkills steps %s: %v", blueprintID, err)
 		}
 	}
@@ -67,14 +67,14 @@ func createTriggerForTestSkills(t *testing.T, database *sql.DB, trig domain.Even
 	if trig.BlueprintID != "" {
 		trig.BlueprintID = blueprintWrappingPromptForSkills(t, database, trig.BlueprintID)
 	}
-	if err := testEventHandlerStore(database).Create(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, trig); err != nil {
+	if err := testEventHandlerStore(database).Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, trig); err != nil {
 		t.Fatalf("createTriggerForTestSkills %s: %v", trig.ID, err)
 	}
 }
 
 func getTriggerForTestSkills(t *testing.T, database *sql.DB, id string) *domain.EventHandler {
 	t.Helper()
-	got, err := testEventHandlerStore(database).Get(context.Background(), runmode.LocalDefaultOrg, id)
+	got, err := testEventHandlerStore(database).Get(context.Background(), runmode.LocalDefaultOrgID, id)
 	if err != nil {
 		t.Fatalf("getTriggerForTestSkills %s: %v", id, err)
 	}

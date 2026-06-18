@@ -34,7 +34,7 @@ func TestHandleFactoryDelegate_ServiceUnavailableWithoutSpawner(t *testing.T) {
 		t.Fatalf("seed entity: %v", err)
 	}
 	eid := entity.ID
-	if _, err := s.events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
+	if _, err := s.events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
 		EntityID:  &eid,
 		EventType: domain.EventGitHubPRCICheckPassed,
 	}); err != nil {
@@ -103,7 +103,7 @@ func TestHandleFactoryDelegate_409OnClosedEntity(t *testing.T) {
 		t.Fatalf("close entity: %v", err)
 	}
 	eid := entity.ID
-	if _, err := s.events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
+	if _, err := s.events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
 		EntityID:  &eid,
 		EventType: domain.EventGitHubPRMerged,
 	}); err != nil {
@@ -168,7 +168,7 @@ func TestHandleFactoryDelegate_DelegateErrorPreservesClaim(t *testing.T) {
 		t.Fatalf("seed entity: %v", err)
 	}
 	eid := entity.ID
-	if _, err := s.events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
+	if _, err := s.events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
 		EntityID:  &eid,
 		EventType: domain.EventGitHubPRCICheckPassed,
 	}); err != nil {
@@ -207,7 +207,7 @@ func TestHandleFactoryDelegate_DelegateErrorPreservesClaim(t *testing.T) {
 
 	// Verify the claim survives in the DB — the FE relies on this to
 	// surface the bot-claimed-with-failed-run state.
-	task, err := s.tasks.Get(t.Context(), runmode.LocalDefaultOrg, resp.TaskID)
+	task, err := s.tasks.Get(t.Context(), runmode.LocalDefaultOrgID, resp.TaskID)
 	if err != nil || task == nil {
 		t.Fatalf("read task back: task=%v err=%v", task, err)
 	}
@@ -268,7 +268,7 @@ func TestHandleFactoryDelegate_RefusedWhenBotDisabled(t *testing.T) {
 		t.Fatalf("seed entity: %v", err)
 	}
 	eid := entity.ID
-	if _, err := s.events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
+	if _, err := s.events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
 		EntityID:  &eid,
 		EventType: domain.EventGitHubPRCICheckPassed,
 	}); err != nil {
@@ -332,14 +332,14 @@ func TestHandleFactoryDelegate_PendingTasksRoundtrip(t *testing.T) {
 		t.Fatalf("seed entity: %v", err)
 	}
 	eid := entity.ID
-	evtID, err := s.events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
+	evtID, err := s.events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
 		EntityID:  &eid,
 		EventType: domain.EventGitHubPRCICheckPassed,
 	})
 	if err != nil {
 		t.Fatalf("record event: %v", err)
 	}
-	task, _, err := s.tasks.FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID, domain.EventGitHubPRCICheckPassed, "", evtID, 0.5)
+	task, _, err := s.tasks.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entity.ID, domain.EventGitHubPRCICheckPassed, "", evtID, 0.5)
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}

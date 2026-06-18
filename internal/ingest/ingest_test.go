@@ -94,7 +94,7 @@ func TestIngestor_RouterBoundEvent_DurablyEnqueuedAndPublished(t *testing.T) {
 
 	eid := entityID
 	ing.Publish(domain.Event{
-		OrgID:        runmode.LocalDefaultOrg,
+		OrgID:        runmode.LocalDefaultOrgID,
 		EntityID:     &eid,
 		EventType:    domain.EventGitHubPRCICheckFailed,
 		DedupKey:     "build",
@@ -103,7 +103,7 @@ func TestIngestor_RouterBoundEvent_DurablyEnqueuedAndPublished(t *testing.T) {
 
 	// Durable path is synchronous: one pending queue row with a real
 	// event id (the FK proves the events audit row landed too).
-	rows, err := queue.ListForEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	rows, err := queue.ListForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
 		t.Fatalf("ListForEntity: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestIngestor_SystemEvent_BusOnly(t *testing.T) {
 	ing := ingest.New(bus, queue, func() { atomic.AddInt32(&wakes, 1) })
 
 	ing.Publish(domain.Event{
-		OrgID:        runmode.LocalDefaultOrg,
+		OrgID:        runmode.LocalDefaultOrgID,
 		EventType:    domain.EventSystemPollCompleted,
 		MetadataJSON: `{"source":"github"}`,
 	})
@@ -171,7 +171,7 @@ func TestIngestor_NilQueue_BusOnly(t *testing.T) {
 
 	eid := entityID
 	ing.Publish(domain.Event{
-		OrgID:     runmode.LocalDefaultOrg,
+		OrgID:     runmode.LocalDefaultOrgID,
 		EntityID:  &eid,
 		EventType: domain.EventGitHubPRCICheckFailed,
 	})
@@ -215,7 +215,7 @@ func TestIngestor_EnqueueFailure_DropsNoBusPhantom(t *testing.T) {
 
 	eid := "entity-x"
 	ing.Publish(domain.Event{
-		OrgID:     runmode.LocalDefaultOrg,
+		OrgID:     runmode.LocalDefaultOrgID,
 		EntityID:  &eid,
 		EventType: domain.EventGitHubPRCICheckFailed,
 	})

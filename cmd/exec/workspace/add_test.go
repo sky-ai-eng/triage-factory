@@ -119,7 +119,7 @@ func seedJiraRun(t *testing.T, database *db.DB, runID, issueKey string) {
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}
-	evt, err := sqlitestore.New(database.Conn).Events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
+	evt, err := sqlitestore.New(database.Conn).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
 		EventType:    domain.EventJiraIssueAssigned,
 		EntityID:     &entity.ID,
 		MetadataJSON: `{}`,
@@ -127,14 +127,14 @@ func seedJiraRun(t *testing.T, database *db.DB, runID, issueKey string) {
 	if err != nil {
 		t.Fatalf("event: %v", err)
 	}
-	task, _, err := sqlitestore.New(database.Conn).Tasks.FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID, domain.EventJiraIssueAssigned, runID, evt, 0.5)
+	task, _, err := sqlitestore.New(database.Conn).Tasks.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entity.ID, domain.EventJiraIssueAssigned, runID, evt, 0.5)
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}
-	if err := sqlitestore.New(database.Conn).Prompts.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
+	if err := sqlitestore.New(database.Conn).Prompts.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
-	if err := sqlitestore.New(database.Conn).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
+	if err := sqlitestore.New(database.Conn).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrgID, domain.AgentRun{
 		ID: runID, TaskID: task.ID, PromptID: "p-" + runID,
 		Status: "running", Model: "m",
 		BlueprintRunID: seedBlueprintRun(t, database.Conn, task.ID),
@@ -149,7 +149,7 @@ func seedGitHubRun(t *testing.T, database *db.DB, runID string) {
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}
-	evt, err := sqlitestore.New(database.Conn).Events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
+	evt, err := sqlitestore.New(database.Conn).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
 		EventType:    domain.EventGitHubPRCICheckFailed,
 		EntityID:     &entity.ID,
 		MetadataJSON: `{}`,
@@ -157,14 +157,14 @@ func seedGitHubRun(t *testing.T, database *db.DB, runID string) {
 	if err != nil {
 		t.Fatalf("event: %v", err)
 	}
-	task, _, err := sqlitestore.New(database.Conn).Tasks.FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID, domain.EventGitHubPRCICheckFailed, runID, evt, 0.5)
+	task, _, err := sqlitestore.New(database.Conn).Tasks.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entity.ID, domain.EventGitHubPRCICheckFailed, runID, evt, 0.5)
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}
-	if err := sqlitestore.New(database.Conn).Prompts.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
+	if err := sqlitestore.New(database.Conn).Prompts.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
-	if err := sqlitestore.New(database.Conn).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
+	if err := sqlitestore.New(database.Conn).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrgID, domain.AgentRun{
 		ID: runID, TaskID: task.ID, PromptID: "p-" + runID,
 		Status: "running", Model: "m",
 		BlueprintRunID: seedBlueprintRun(t, database.Conn, task.ID),
@@ -443,7 +443,7 @@ func TestMaterializeWorkspace_SuccessfulFirstAdd(t *testing.T) {
 	}
 
 	// Verify the row landed with the deterministic path.
-	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrg, "r1", "sky/core")
+	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core")
 	if err != nil {
 		t.Fatalf("GetRunWorktreeByRepo: %v", err)
 	}
@@ -514,7 +514,7 @@ func TestMaterializeWorkspace_RaceLossAtReservation(t *testing.T) {
 	// the winning row directly, with a distinguishable path so we can
 	// confirm the loser returns IT and not its own pre-computed path.
 	winnerPath := "/tmp/somewhere-else/winner"
-	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrg, domain.RunWorktree{
+	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.RunWorktree{
 		RunID: "r1", RepoID: "sky/core",
 		Path: winnerPath, FeatureBranch: "feature/SKY-1",
 	}); err != nil {
@@ -554,7 +554,7 @@ func TestMaterializeWorkspace_TrustsReservationEvenWhenDirMissing(t *testing.T) 
 	seedRepoProfile(t, database, "sky", "core", "https://x", "main")
 
 	winnerPath := expectedPath("r1", "sky", "core")
-	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrg, domain.RunWorktree{
+	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.RunWorktree{
 		RunID: "r1", RepoID: "sky/core",
 		Path: winnerPath, FeatureBranch: "feature/SKY-1",
 	}); err != nil {
@@ -577,7 +577,7 @@ func TestMaterializeWorkspace_TrustsReservationEvenWhenDirMissing(t *testing.T) 
 	}
 	// And the row must still be present — the loser must not have
 	// deleted it.
-	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrg, "r1", "sky/core")
+	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core")
 	if err != nil {
 		t.Fatalf("GetRunWorktreeByRepo: %v", err)
 	}
@@ -595,7 +595,7 @@ func TestMaterializeWorkspace_LiveDirShortCircuitsAgeCheck(t *testing.T) {
 	seedRepoProfile(t, database, "sky", "core", "https://x", "main")
 	wantPath := expectedPath("r1", "sky", "core")
 
-	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrg, domain.RunWorktree{
+	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.RunWorktree{
 		RunID: "r1", RepoID: "sky/core",
 		Path: wantPath, FeatureBranch: "feature/SKY-1",
 	}); err != nil {
@@ -635,7 +635,7 @@ func TestMaterializeWorkspace_StaleReservationReclaimed(t *testing.T) {
 
 	// Seed the stale row (path won't exist on disk; default stub
 	// statPath returns ErrNotExist for everything not in liveDirs).
-	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrg, domain.RunWorktree{
+	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.RunWorktree{
 		RunID: "r1", RepoID: "sky/core",
 		Path: wantPath, FeatureBranch: "feature/SKY-1",
 	}); err != nil {
@@ -657,7 +657,7 @@ func TestMaterializeWorkspace_StaleReservationReclaimed(t *testing.T) {
 		t.Errorf("createCalls = %d, want 1; stale reservation should not block recreate", stub.createCalls)
 	}
 	// And a fresh row exists post-reclaim.
-	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrg, "r1", "sky/core")
+	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core")
 	if err != nil || row == nil {
 		t.Fatalf("expected fresh row after reclaim; got row=%v err=%v", row, err)
 	}
@@ -672,7 +672,7 @@ func TestMaterializeWorkspace_FreshRowMissingDirIsInFlight(t *testing.T) {
 	seedRepoProfile(t, database, "sky", "core", "https://x", "main")
 	wantPath := expectedPath("r1", "sky", "core")
 
-	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrg, domain.RunWorktree{
+	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.RunWorktree{
 		RunID: "r1", RepoID: "sky/core",
 		Path: wantPath, FeatureBranch: "feature/SKY-1",
 	}); err != nil {
@@ -682,7 +682,7 @@ func TestMaterializeWorkspace_FreshRowMissingDirIsInFlight(t *testing.T) {
 	// Force `now` to be well within the threshold (real time may have
 	// drifted since the seed; pin to a value tied to the row's
 	// created_at via a re-read).
-	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrg, "r1", "sky/core")
+	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core")
 	if err != nil || row == nil {
 		t.Fatalf("re-read row: %v", err)
 	}
@@ -723,7 +723,7 @@ func TestMaterializeWorkspace_CreateFailureReleasesReservation(t *testing.T) {
 
 	// The reservation must have been released so the next attempt
 	// can re-reserve. Verify the row is gone.
-	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrg, "r1", "sky/core")
+	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core")
 	if err != nil {
 		t.Fatalf("GetRunWorktreeByRepo: %v", err)
 	}
@@ -791,7 +791,7 @@ func seedEventTriggeredJiraRun(t *testing.T, database *db.DB, runID, issueKey st
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}
-	evt, err := sqlitestore.New(database.Conn).Events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
+	evt, err := sqlitestore.New(database.Conn).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
 		EventType:    domain.EventJiraIssueAssigned,
 		EntityID:     &entity.ID,
 		MetadataJSON: `{}`,
@@ -799,17 +799,17 @@ func seedEventTriggeredJiraRun(t *testing.T, database *db.DB, runID, issueKey st
 	if err != nil {
 		t.Fatalf("event: %v", err)
 	}
-	task, _, err := sqlitestore.New(database.Conn).Tasks.FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID, domain.EventJiraIssueAssigned, runID, evt, 0.5)
+	task, _, err := sqlitestore.New(database.Conn).Tasks.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entity.ID, domain.EventJiraIssueAssigned, runID, evt, 0.5)
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}
-	if err := sqlitestore.New(database.Conn).Prompts.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
+	if err := sqlitestore.New(database.Conn).Prompts.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
 	// trigger_type='event' + CreatorUserID="" → schema CHECK
 	// requires creator_user_id IS NULL; Create's SQLite impl maps
 	// the empty string to SQL NULL when trigger_type='event'.
-	if err := sqlitestore.New(database.Conn).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
+	if err := sqlitestore.New(database.Conn).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrgID, domain.AgentRun{
 		ID: runID, TaskID: task.ID, PromptID: "p-" + runID,
 		Status: "running", Model: "m",
 		TriggerType:    "event",
@@ -844,7 +844,7 @@ func TestMaterializeWorkspace_EventTriggeredRunRoutingSKY302(t *testing.T) {
 		t.Errorf("createCalls = %d, want 1; event-triggered path should reserve + create", stub.createCalls)
 	}
 	// Verify the reservation row landed.
-	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrg, "e1", "sky/core")
+	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrgID, "e1", "sky/core")
 	if err != nil || row == nil {
 		t.Fatalf("expected run_worktrees row from event-triggered insert; got row=%v err=%v", row, err)
 	}
@@ -867,7 +867,7 @@ func TestMaterializeWorkspace_EventTriggeredCreateFailureReleasesSKY302(t *testi
 		t.Fatal("expected error from create failure, got nil")
 	}
 	// Reservation must be released so a retry can re-reserve.
-	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrg, "e2", "sky/core")
+	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrgID, "e2", "sky/core")
 	if err != nil {
 		t.Fatalf("GetRunWorktreeByRepo: %v", err)
 	}

@@ -28,12 +28,12 @@ func TestPromptStore_SQLite(t *testing.T) {
 			t.Helper()
 			return seedSQLiteRunsForStats(t, conn, promptID, statusByOffset)
 		}
-		return stores.Prompts, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, seeder
+		return stores.Prompts, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, seeder
 	})
 }
 
 // TestPromptStore_SQLite_SeedOrUpdate_AssertsLocalOrg pins the local-org
-// guard: any orgID other than runmode.LocalDefaultOrg must fail loudly
+// guard: any orgID other than runmode.LocalDefaultOrgID must fail loudly
 // rather than silently writing to a table with no org_id column.
 func TestPromptStore_SQLite_SeedOrUpdate_AssertsLocalOrg(t *testing.T) {
 	conn := openSQLiteForTest(t)

@@ -112,7 +112,7 @@ func (s *Spawner) resolveBlueprintSteps(orgID, blueprintID, triggerType, creator
 //     the agent would run under it.
 //
 // In SQLite (local mode), SyntheticClaimsWithTx is essentially a pass-
-// through (asserts orgID == LocalDefaultOrg, ignores userID), so the
+// through (asserts orgID == LocalDefaultOrgID, ignores userID), so the
 // "manual" branch resolves identically to the "event" branch. The
 // routing only changes behavior under Postgres + RLS.
 //

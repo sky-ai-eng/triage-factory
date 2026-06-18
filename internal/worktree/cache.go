@@ -347,7 +347,7 @@ func bareCacheRoots() []string {
 	if _, err := paths.StateRootErr(); err != nil {
 		return nil
 	}
-	roots := []string{paths.BareCacheRoot(runmode.LocalDefaultOrg)}
+	roots := []string{paths.BareCacheRoot(runmode.LocalDefaultOrgID)}
 	if runmode.Current() == runmode.ModeMulti {
 		if matches, err := filepath.Glob(filepath.Join(paths.StateRoot(), "orgs", "*", "repos")); err == nil {
 			roots = append(roots, matches...)
@@ -364,7 +364,7 @@ func curatorSharedRoots() []string {
 	if _, err := paths.StateRootErr(); err != nil {
 		return nil
 	}
-	roots := []string{paths.CuratorSharedReposRoot(runmode.LocalDefaultOrg)}
+	roots := []string{paths.CuratorSharedReposRoot(runmode.LocalDefaultOrgID)}
 	if runmode.Current() == runmode.ModeMulti {
 		if matches, err := filepath.Glob(filepath.Join(paths.StateRoot(), "orgs", "*", "curator-repos")); err == nil {
 			roots = append(roots, matches...)

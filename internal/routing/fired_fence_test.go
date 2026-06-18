@@ -84,9 +84,9 @@ func recordFenceEvent(t *testing.T, database *sql.DB, entityID string) domain.Ev
 		DedupKey:     "build",
 		MetadataJSON: string(metaJSON),
 		CreatedAt:    time.Now(),
-		OrgID:        runmode.LocalDefaultOrg,
+		OrgID:        runmode.LocalDefaultOrgID,
 	}
-	id, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrg, evt)
+	id, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, evt)
 	if err != nil {
 		t.Fatalf("record event: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestDrainEntity_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 		t.Fatalf("resolve blueprint id: %v", err)
 	}
 	priorBlueprintRunID := uuid.New().String()
-	inserted, err := sqlitestore.New(database).Blueprints.CreateRunIfNotFiredSystem(t.Context(), runmode.LocalDefaultOrg, domain.BlueprintRun{
+	inserted, err := sqlitestore.New(database).Blueprints.CreateRunIfNotFiredSystem(t.Context(), runmode.LocalDefaultOrgID, domain.BlueprintRun{
 		ID:                priorBlueprintRunID,
 		BlueprintID:       blueprintID,
 		TaskID:            taskID,
@@ -223,7 +223,7 @@ func TestDrainEntity_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 		t.Fatalf("seed prior blueprint_run: inserted=%v err=%v", inserted, err)
 	}
 	stepIdx := 0
-	if err := sqlitestore.New(database).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
+	if err := sqlitestore.New(database).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrgID, domain.AgentRun{
 		ID:                 uuid.New().String(),
 		TaskID:             taskID,
 		PromptID:           "p-drain",
@@ -237,14 +237,14 @@ func TestDrainEntity_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 	}
 
 	// Queue a firing carrying the same triggering event.
-	if _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, entityID, taskID, triggerID, eventID); err != nil {
+	if _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, entityID, taskID, triggerID, eventID); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
 	router := fenceRouter(database, stub)
-	router.DrainEntity(runmode.LocalDefaultOrg, entityID)
+	router.DrainEntity(runmode.LocalDefaultOrgID, entityID)
 
-	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrg, entityID)
+	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

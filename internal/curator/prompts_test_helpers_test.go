@@ -39,19 +39,19 @@ func seedTestPrompt(t *testing.T, database *sql.DB, p domain.Prompt) {
 		if p.SystemSlug == "" {
 			p.SystemSlug = p.ID
 		}
-		if existing, _ := store.GetBySystemSlug(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, p.SystemSlug); existing != nil {
+		if existing, _ := store.GetBySystemSlug(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, p.SystemSlug); existing != nil {
 			return
 		}
-		if _, err := store.SeedOrUpdate(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, p); err != nil {
+		if _, err := store.SeedOrUpdate(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, p); err != nil {
 			t.Fatalf("seedTestPrompt %s: %v", p.SystemSlug, err)
 		}
 		return
 	}
-	existing, _ := store.Get(ctx, runmode.LocalDefaultOrg, p.ID)
+	existing, _ := store.Get(ctx, runmode.LocalDefaultOrgID, p.ID)
 	if existing != nil {
 		return
 	}
-	if err := store.Create(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, p); err != nil {
+	if err := store.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, p); err != nil {
 		t.Fatalf("seedTestPrompt %s: %v", p.ID, err)
 	}
 }
@@ -65,7 +65,7 @@ func resolvePromptID(t *testing.T, database *sql.DB, source, idOrSlug string) st
 	store := testPromptStore(database)
 	ctx := context.Background()
 	if source == "system" {
-		p, err := store.GetBySystemSlug(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, idOrSlug)
+		p, err := store.GetBySystemSlug(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, idOrSlug)
 		if err != nil || p == nil {
 			t.Fatalf("resolvePromptID system %s: p=%v err=%v", idOrSlug, p, err)
 		}
@@ -86,7 +86,7 @@ func seedTestBlueprint(t *testing.T, database *sql.DB, promptID, systemSlug stri
 	ctx := context.Background()
 	var blueprintID string
 	if systemSlug != "" {
-		id, err := stores.Blueprints.SeedOrUpdate(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Blueprint{
+		id, err := stores.Blueprints.SeedOrUpdate(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
 			SystemSlug: systemSlug, Name: systemSlug, Source: "system",
 		})
 		if err != nil {
@@ -95,13 +95,13 @@ func seedTestBlueprint(t *testing.T, database *sql.DB, promptID, systemSlug stri
 		blueprintID = id
 	} else {
 		blueprintID = "bp-" + promptID
-		if err := stores.Blueprints.Create(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Blueprint{
+		if err := stores.Blueprints.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
 			ID: blueprintID, Name: "bp-" + promptID, Source: "user", TeamID: runmode.LocalDefaultTeamID,
 		}); err != nil {
 			t.Fatalf("seedTestBlueprint user %s: %v", promptID, err)
 		}
 	}
-	if err := stores.Blueprints.ReplaceSteps(ctx, runmode.LocalDefaultOrg, blueprintID, []string{promptID}, nil); err != nil {
+	if err := stores.Blueprints.ReplaceSteps(ctx, runmode.LocalDefaultOrgID, blueprintID, []string{promptID}, nil); err != nil {
 		t.Fatalf("seedTestBlueprint replace steps %s: %v", blueprintID, err)
 	}
 	return blueprintID

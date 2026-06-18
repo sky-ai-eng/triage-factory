@@ -69,7 +69,7 @@ func Handle(args []string) {
 	// boundary, then thread them into the (pure) plan helpers. Safe to use
 	// the error-free resolvers now that the StateRootErr pre-flight above
 	// succeeded.
-	projectsDir := paths.ProjectsRoot(runmode.LocalDefaultOrg)
+	projectsDir := paths.ProjectsRoot(runmode.LocalDefaultOrgID)
 	linkPath := defaultInstallLink()
 
 	plan := buildPlan(dataDir, projectsDir, linkPath)

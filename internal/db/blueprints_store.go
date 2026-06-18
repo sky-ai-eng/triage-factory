@@ -164,7 +164,7 @@ func DedupPreserveOrder(ids []string) []string {
 // rows on creator_user_id = tf.current_user_id() for manual runs, org-visible
 // for event runs). The Postgres impl threads org_id through every WHERE for
 // defense in depth and lets RLS enforce the rest; SQLite collapses orgID to
-// runmode.LocalDefaultOrg via assertLocalOrg.
+// runmode.LocalDefaultOrgID via assertLocalOrg.
 //
 // SeedOrUpdate routes through the admin pool (claims-less system rows);
 // every other method runs on the app pool.

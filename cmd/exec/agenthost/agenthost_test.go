@@ -147,7 +147,7 @@ func TestProtocol_OversizedFrameRejected(t *testing.T) {
 func TestIPCClient_MultiCall_PerCallDial(t *testing.T) {
 	stores, _ := newTestDB(t)
 	info := RunInfo{
-		OrgID:  runmode.LocalDefaultOrg,
+		OrgID:  runmode.LocalDefaultOrgID,
 		UserID: "user-1",
 		RunID:  "run-multi",
 	}
@@ -184,7 +184,7 @@ func TestIPCClient_MultiCall_PerCallDial(t *testing.T) {
 func TestServer_LookupRun_RoundTrip(t *testing.T) {
 	stores, _ := newTestDB(t)
 	info := RunInfo{
-		OrgID:            runmode.LocalDefaultOrg,
+		OrgID:            runmode.LocalDefaultOrgID,
 		UserID:           "user-1",
 		RunID:            "run-1",
 		IsEventTriggered: false,
@@ -295,8 +295,8 @@ func TestServer_UnknownMethod_RejectsCleanly(t *testing.T) {
 // sandboxed runs operating in parallel.
 func TestServer_ConcurrentSockets_NoCrossContamination(t *testing.T) {
 	stores, _ := newTestDB(t)
-	infoA := RunInfo{OrgID: runmode.LocalDefaultOrg, RunID: "run-A", UserID: "user-A"}
-	infoB := RunInfo{OrgID: runmode.LocalDefaultOrg, RunID: "run-B", UserID: "user-B", IsEventTriggered: true}
+	infoA := RunInfo{OrgID: runmode.LocalDefaultOrgID, RunID: "run-A", UserID: "user-A"}
+	infoB := RunInfo{OrgID: runmode.LocalDefaultOrgID, RunID: "run-B", UserID: "user-B", IsEventTriggered: true}
 
 	startDaemon := func(info RunInfo) (string, func()) {
 		sockPath := tempSocket(t)
@@ -352,7 +352,7 @@ func TestLocalClient_RoutingByTriggerType_Manual(t *testing.T) {
 	seedAgentRun(t, stores, conn, "run-1", runmode.LocalDefaultUserID, "manual")
 
 	info := RunInfo{
-		OrgID:            runmode.LocalDefaultOrg,
+		OrgID:            runmode.LocalDefaultOrgID,
 		UserID:           runmode.LocalDefaultUserID,
 		RunID:            "run-1",
 		IsEventTriggered: false,
@@ -391,7 +391,7 @@ func TestLocalClient_RoutingByTriggerType_Event(t *testing.T) {
 	seedAgentRun(t, stores, conn, "run-2", "", "event")
 
 	info := RunInfo{
-		OrgID:            runmode.LocalDefaultOrg,
+		OrgID:            runmode.LocalDefaultOrgID,
 		UserID:           "",
 		RunID:            "run-2",
 		IsEventTriggered: true,
@@ -458,7 +458,7 @@ func TestAutoDetect_NoSocket_LocalClient(t *testing.T) {
 // successfully even though no new connections can be opened.
 func TestServer_GracefulShutdown_CompletesInFlight(t *testing.T) {
 	stores, _ := newTestDB(t)
-	info := RunInfo{OrgID: runmode.LocalDefaultOrg, RunID: "run-graceful"}
+	info := RunInfo{OrgID: runmode.LocalDefaultOrgID, RunID: "run-graceful"}
 	sockPath := tempSocket(t)
 	listener, err := net.Listen("unix", sockPath)
 	if err != nil {

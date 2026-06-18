@@ -15,7 +15,7 @@ import (
 // the local-default sentinel keeps paths.OrgRoot collapsed onto the test HOME
 // (withTestHome) so the checkout lands under the tempdir without flipping
 // runmode into multi.
-const sharedOrg = runmode.LocalDefaultOrg
+const sharedOrg = runmode.LocalDefaultOrgID
 
 // TestEnsureSharedCuratorWorktree_FreshMaterializesAtSharedPath pins the
 // org-scoped shared layout: <OrgRoot>/curator-repos/<owner>/<repo>, a real

@@ -20,11 +20,11 @@ func TestTeamAgentStore_SQLite(t *testing.T) {
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
 		ctx := t.Context()
-		agentID, err := stores.Agents.Create(ctx, runmode.LocalDefaultOrg, domain.Agent{})
+		agentID, err := stores.Agents.Create(ctx, runmode.LocalDefaultOrgID, domain.Agent{})
 		if err != nil {
 			t.Fatalf("seed agent: %v", err)
 		}
-		return stores.TeamAgents, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, agentID
+		return stores.TeamAgents, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, agentID
 	})
 }
 

@@ -24,7 +24,7 @@ func TestProcessCompletion_PendingApprovalWritesSnapshot(t *testing.T) {
 	wireBlobStore(t, s)
 	bpr := blueprintRunIDForRun(t, database, runID)
 
-	if err := s.pendingPRs.CreateSystem(context.Background(), runmode.LocalDefaultOrg, domain.PendingPR{
+	if err := s.pendingPRs.CreateSystem(context.Background(), runmode.LocalDefaultOrgID, domain.PendingPR{
 		ID: "pp-" + runID, RunID: runID, Owner: "o", Repo: "r",
 		HeadBranch: "h", HeadSHA: "sha", BaseBranch: "main", Title: "queued PR",
 	}); err != nil {
@@ -32,7 +32,7 @@ func TestProcessCompletion_PendingApprovalWritesSnapshot(t *testing.T) {
 	}
 
 	task := loadTask(t, s, taskID)
-	parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, bpr, task,
+	parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, task,
 		res(`{"outcome":"continue","summary":"opened a PR"}`), t.TempDir(), "", "event", "")
 
 	if !parked {
@@ -55,7 +55,7 @@ func TestProcessCompletion_PlainAbortWritesSnapshot(t *testing.T) {
 	bpr := blueprintRunIDForRun(t, database, runID)
 
 	task := loadTask(t, s, taskID)
-	parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, bpr, task,
+	parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, task,
 		res(`{"outcome":"abort","summary":"looked into it","reason":"needs a human to rotate the token"}`),
 		t.TempDir(), "", "event", "")
 
@@ -77,7 +77,7 @@ func TestProcessCompletion_FinishNoPendingWritesNoSnapshot(t *testing.T) {
 	bpr := blueprintRunIDForRun(t, database, runID)
 
 	task := loadTask(t, s, taskID)
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrg, runID, bpr, task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, task,
 		res(`{"outcome":"finish","summary":"shipped it"}`), t.TempDir(), "", "event", "")
 
 	assertSnapshotPresent(t, s, bpr, false)
@@ -93,8 +93,8 @@ func TestTerminateBlueprint_AbortRetainsSnapshot(t *testing.T) {
 	bpr := blueprintRunIDForRun(t, database, runID)
 	putTestSnapshot(t, s, bpr)
 
-	s.terminateBlueprint(runmode.LocalDefaultOrg, bpr, taskID, "event", "", time.Now(),
-		runConfig{orgID: runmode.LocalDefaultOrg}, domain.BlueprintRunStatusAborted, "needs a human", nil, true)
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
+		runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusAborted, "needs a human", nil, true)
 
 	assertSnapshotPresent(t, s, bpr, true)
 }
@@ -108,8 +108,8 @@ func TestTerminateBlueprint_FinishDiscardsSnapshot(t *testing.T) {
 	bpr := blueprintRunIDForRun(t, database, runID)
 	putTestSnapshot(t, s, bpr)
 
-	s.terminateBlueprint(runmode.LocalDefaultOrg, bpr, taskID, "event", "", time.Now(),
-		runConfig{orgID: runmode.LocalDefaultOrg}, domain.BlueprintRunStatusCompleted, "", nil, true)
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
+		runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCompleted, "", nil, true)
 
 	assertSnapshotPresent(t, s, bpr, false)
 }
@@ -168,8 +168,8 @@ func TestListReapableSnapshotKeys_ExcludesFinishAndInTTL(t *testing.T) {
 	if len(keys) != 1 || keys[0].BlueprintRunID != abortBpr {
 		t.Fatalf("reapable keys = %+v, want exactly the old abort key %s (finish excluded, fresh open excluded)", keys, abortBpr)
 	}
-	if keys[0].OrgID != runmode.LocalDefaultOrg {
-		t.Errorf("key org = %q, want %q", keys[0].OrgID, runmode.LocalDefaultOrg)
+	if keys[0].OrgID != runmode.LocalDefaultOrgID {
+		t.Errorf("key org = %q, want %q", keys[0].OrgID, runmode.LocalDefaultOrgID)
 	}
 }
 
@@ -208,14 +208,14 @@ func TestMarkOpenResuming_StampsAndClearsParkedAt(t *testing.T) {
 	s, database, run, _ := setupAdvanceFixture(t, "parked-stamp")
 	ctx := context.Background()
 
-	if _, err := s.agentRuns.MarkOpen(ctx, runmode.LocalDefaultOrg, run); err != nil {
+	if _, err := s.agentRuns.MarkOpen(ctx, runmode.LocalDefaultOrgID, run); err != nil {
 		t.Fatalf("MarkOpen: %v", err)
 	}
 	if !parkedAtSet(t, database, run) {
 		t.Error("MarkOpen did not stamp parked_at")
 	}
 
-	if _, err := s.agentRuns.MarkResuming(ctx, runmode.LocalDefaultOrg, run); err != nil {
+	if _, err := s.agentRuns.MarkResuming(ctx, runmode.LocalDefaultOrgID, run); err != nil {
 		t.Fatalf("MarkResuming: %v", err)
 	}
 	if parkedAtSet(t, database, run) {
@@ -290,14 +290,14 @@ func wireBlobStore(t *testing.T, s *Spawner) {
 
 func putTestSnapshot(t *testing.T, s *Spawner, keyID string) {
 	t.Helper()
-	if err := s.Storage().Put(context.Background(), snapshotKey(runmode.LocalDefaultOrg, keyID), strings.NewReader("snapshot")); err != nil {
+	if err := s.Storage().Put(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, keyID), strings.NewReader("snapshot")); err != nil {
 		t.Fatalf("seed snapshot: %v", err)
 	}
 }
 
 func assertSnapshotPresent(t *testing.T, s *Spawner, keyID string, want bool) {
 	t.Helper()
-	ok, err := s.Storage().Exists(context.Background(), snapshotKey(runmode.LocalDefaultOrg, keyID))
+	ok, err := s.Storage().Exists(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, keyID))
 	if err != nil {
 		t.Fatalf("Exists(%s): %v", keyID, err)
 	}

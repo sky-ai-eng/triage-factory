@@ -107,7 +107,7 @@ type RunOptions struct {
 	// subprocess's env, stripping credential-bearing keys from the
 	// inherited env so a misconfigured operator-level env var can't
 	// leak across tenants. In local mode an empty OrgID — or the
-	// LocalDefaultOrg sentinel with no configured per-org override —
+	// LocalDefaultOrgID sentinel with no configured per-org override —
 	// falls back to the host's Claude Code subscription via the
 	// inherited env (no env injection or filtering).
 	//

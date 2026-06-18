@@ -68,7 +68,7 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 	// run_memory: agent finished and wrote its self-report (the
 	// SKY-204 termination upsert). We assert below that
 	// human_content lands without trampling agent_content.
-	if err := sqlitestore.New(database).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrg, "r_pa", "e_pa", "", "agent self-report"); err != nil {
+	if err := sqlitestore.New(database).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "r_pa", "e_pa", "", "agent self-report"); err != nil {
 		t.Fatalf("UpsertAgentMemory: %v", err)
 	}
 
@@ -176,7 +176,7 @@ func assertPendingApprovalCleanedUp(
 	// Read-side check: GetRunMemory's materialization must produce
 	// the heading exactly once, anchoring the boundary the next
 	// agent's prompt parser scans for.
-	mem, err := sqlitestore.New(database).TaskMemory.GetRunMemory(context.Background(), runmode.LocalDefaultOrg, runID)
+	mem, err := sqlitestore.New(database).TaskMemory.GetRunMemory(context.Background(), runmode.LocalDefaultOrgID, runID)
 	if err != nil {
 		t.Fatalf("GetRunMemory: %v", err)
 	}
@@ -1077,7 +1077,7 @@ func TestHandleRequeue_404OnMissingTask(t *testing.T) {
 func TestRequeueTask_OkFalseOnMissingID(t *testing.T) {
 	s := newTestServer(t)
 
-	ok, err := s.swipes.RequeueTask(t.Context(), runmode.LocalDefaultOrg, "no-such-task")
+	ok, err := s.swipes.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, "no-such-task")
 	if err != nil {
 		t.Fatalf("RequeueTask: %v", err)
 	}
@@ -1215,7 +1215,7 @@ func TestCleanupPendingApprovalRun_Idempotent(t *testing.T) {
 	s := newTestServer(t)
 	taskID, runID, _ := pendingApprovalFixture(t, s.db)
 
-	s.cleanupPendingApprovalRun(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
+	s.cleanupPendingApprovalRun(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
 
 	var humanContentBefore sql.NullString
 	var completedAtBefore sql.NullTime
@@ -1231,7 +1231,7 @@ func TestCleanupPendingApprovalRun_Idempotent(t *testing.T) {
 	}
 
 	// Second call: different outcome, must not take effect.
-	s.cleanupPendingApprovalRun(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, taskID, discardOutcomeDismissed)
+	s.cleanupPendingApprovalRun(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeDismissed)
 
 	var humanContentAfter sql.NullString
 	var completedAtAfter sql.NullTime
@@ -1283,7 +1283,7 @@ func TestCleanupPendingApprovalRun_DeleteFailureHoldsRunForRetry(t *testing.T) {
 		t.Fatalf("rename comments table: %v", err)
 	}
 
-	s.cleanupPendingApprovalRun(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
+	s.cleanupPendingApprovalRun(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
 
 	// Run must still be pending_approval — the delete failed and
 	// MarkAgentRunDiscarded must have been skipped.
@@ -1302,7 +1302,7 @@ func TestCleanupPendingApprovalRun_DeleteFailureHoldsRunForRetry(t *testing.T) {
 		t.Fatalf("restore comments table: %v", err)
 	}
 
-	s.cleanupPendingApprovalRun(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
+	s.cleanupPendingApprovalRun(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
 
 	if err := s.db.QueryRow(`SELECT status FROM runs WHERE id = ?`, runID).Scan(&runStatus); err != nil {
 		t.Fatalf("scan run after retry: %v", err)
@@ -1338,7 +1338,7 @@ func TestCleanupPendingApprovalRun_AgentContentNullSurvives(t *testing.T) {
 		t.Fatalf("force null agent_content: %v", err)
 	}
 
-	s.cleanupPendingApprovalRun(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
+	s.cleanupPendingApprovalRun(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
 
 	var agentContent, humanContent sql.NullString
 	if err := s.db.QueryRow(

@@ -9,7 +9,7 @@ import (
 )
 
 // WithTx runs fn inside a single SQLite transaction. orgID must equal
-// runmode.LocalDefaultOrg in local mode — anything else indicates a
+// runmode.LocalDefaultOrgID in local mode — anything else indicates a
 // caller that thinks it's in multi mode and would silently misbehave
 // against SQLite (no org column to enforce isolation). userID is
 // accepted for signature parity with the Postgres impl but otherwise
@@ -26,7 +26,7 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 // SyntheticClaimsWithTx mirrors WithTx for callers that have an
 // authoritative (orgID, userID) identity but no request context. In
 // local mode the assertion is the same as WithTx — orgID must equal
-// runmode.LocalDefaultOrg, userID is ignored, no JWT-claims setup is
+// runmode.LocalDefaultOrgID, userID is ignored, no JWT-claims setup is
 // needed because SQLite has no auth concept. Signature parity with
 // the Postgres impl is the only reason this exists on SQLite at all.
 // See SKY-296.
@@ -41,8 +41,8 @@ func (s *Store) SyntheticClaimsWithTx(ctx context.Context, orgID, userID string,
 // JWT claims differently.
 func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
 	_ = userID // accepted for signature parity; SQLite has no auth concept
-	if orgID != runmode.LocalDefaultOrg {
-		return fmt.Errorf("sqlite WithTx: orgID must be %q in local mode, got %q", runmode.LocalDefaultOrg, orgID)
+	if orgID != runmode.LocalDefaultOrgID {
+		return fmt.Errorf("sqlite WithTx: orgID must be %q in local mode, got %q", runmode.LocalDefaultOrgID, orgID)
 	}
 	tx, err := s.conn.BeginTx(ctx, nil)
 	if err != nil {

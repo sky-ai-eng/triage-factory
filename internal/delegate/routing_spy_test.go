@@ -93,7 +93,7 @@ func TestResolvePrompt_ManualBranchesThroughSyntheticClaims(t *testing.T) {
 
 	ensureTestPrompt(t, database, domain.Prompt{ID: "p-manual", Name: "Manual prompt", Body: "x", Source: "user"})
 
-	got, err := s.resolvePrompt(runmode.LocalDefaultOrg, domain.Task{ID: "t"}, "p-manual", "manual", "00000000-0000-0000-0000-000000000aaa")
+	got, err := s.resolvePrompt(runmode.LocalDefaultOrgID, domain.Task{ID: "t"}, "p-manual", "manual", "00000000-0000-0000-0000-000000000aaa")
 	if err != nil {
 		t.Fatalf("resolvePrompt: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestResolvePrompt_EventStaysOnAdminPool(t *testing.T) {
 
 	// Event-triggered runs carry creatorUserID="" — the router has
 	// no user. The routing must NOT depend on creatorUserID being set.
-	got, err := s.resolvePrompt(runmode.LocalDefaultOrg, domain.Task{ID: "t"}, "p-event", "event", "")
+	got, err := s.resolvePrompt(runmode.LocalDefaultOrgID, domain.Task{ID: "t"}, "p-event", "event", "")
 	if err != nil {
 		t.Fatalf("resolvePrompt: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestCancel_UserInitiated_PreflightUsesSyntheticClaims(t *testing.T) {
 	// No goroutine registered in s.cancels — Cancel will fall through
 	// to the DB path. The preflight runs first; the assertion is the
 	// synth call.
-	_ = s.Cancel(runmode.LocalDefaultOrg, runID, callerID)
+	_ = s.Cancel(runmode.LocalDefaultOrgID, runID, callerID)
 
 	if len(tx.synthCalls) < 1 {
 		t.Fatalf("SyntheticClaimsWithTx called %d times; want at least 1 (preflight must route through synth claims)", len(tx.synthCalls))
@@ -197,7 +197,7 @@ func TestCancel_SystemInitiated_PreflightSkipsSynthClaims(t *testing.T) {
 	stores.Tx = tx
 	s := NewSpawner(database, stores, nil, nil, "")
 
-	_ = s.Cancel(runmode.LocalDefaultOrg, runID, "")
+	_ = s.Cancel(runmode.LocalDefaultOrgID, runID, "")
 
 	if len(tx.synthCalls) != 0 {
 		t.Errorf("SyntheticClaimsWithTx called %d times; want 0 for system-initiated cancel (must use admin pool, not synth claims)", len(tx.synthCalls))

@@ -28,7 +28,7 @@ import (
 func TestBlueprintRun_StepPlanFrozenAgainstMidFlightEdit(t *testing.T) {
 	database := newDelegateTestDB(t)
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 	stores := sqlitestore.New(database)
 
 	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "owner/repo#freeze", "pr", "T", "https://x/freeze")

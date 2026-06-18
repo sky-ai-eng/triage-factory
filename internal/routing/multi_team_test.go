@@ -57,7 +57,7 @@ func TestHandleEvent_MultipleTeams_OneTask(t *testing.T) {
 			        NULL, 1, 'user',
 			        ?, 0.7, 100,
 			        ?, ?)
-		`, ruleID, runmode.LocalDefaultOrg, teamID, runmode.LocalDefaultUserID, domain.EventGitHubPRCICheckFailed,
+		`, ruleID, runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID, domain.EventGitHubPRCICheckFailed,
 			"CI rule "+teamID[:8], time.Now(), time.Now()); err != nil {
 			t.Fatalf("seed rule for team %s: %v", teamID, err)
 		}
@@ -79,10 +79,10 @@ func TestHandleEvent_MultipleTeams_OneTask(t *testing.T) {
 		DedupKey:     "build",
 		MetadataJSON: string(metaJSON),
 		CreatedAt:    time.Now(),
-		OrgID:        runmode.LocalDefaultOrg,
+		OrgID:        runmode.LocalDefaultOrgID,
 	})
 
-	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrg, entity.ID)
+	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil {
 		t.Fatalf("list active tasks: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestHandleEvent_MultipleTeams_OneTask(t *testing.T) {
 	}
 
 	// Both teams are in the visibility set.
-	vis, err := testTaskStore(database).VisibilityTeams(t.Context(), runmode.LocalDefaultOrg, active[0].ID)
+	vis, err := testTaskStore(database).VisibilityTeams(t.Context(), runmode.LocalDefaultOrgID, active[0].ID)
 	if err != nil {
 		t.Fatalf("VisibilityTeams: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestHandleEvent_MultipleTeams_OneTask(t *testing.T) {
 func TestHandleEvent_BackfillCreatedAt_PreservesOccurredAt(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
-	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
+	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 
@@ -148,10 +148,10 @@ func TestHandleEvent_BackfillCreatedAt_PreservesOccurredAt(t *testing.T) {
 		EntityID:     &entity.ID,
 		MetadataJSON: string(metaJSON),
 		OccurredAt:   occurred,
-		OrgID:        runmode.LocalDefaultOrg,
+		OrgID:        runmode.LocalDefaultOrgID,
 	})
 
-	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrg, entity.ID)
+	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 active task, got %d (err=%v)", len(active), err)
 	}
@@ -167,7 +167,7 @@ func TestHandleEvent_BackfillCreatedAt_PreservesOccurredAt(t *testing.T) {
 func TestHandleEvent_NoOccurredAt_FallsBackToNow(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
-	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
+	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 	setReviewHost(t, database)
@@ -194,10 +194,10 @@ func TestHandleEvent_NoOccurredAt_FallsBackToNow(t *testing.T) {
 		DedupKey:     "build",
 		MetadataJSON: string(metaJSON),
 		// OccurredAt deliberately zero.
-		OrgID: runmode.LocalDefaultOrg,
+		OrgID: runmode.LocalDefaultOrgID,
 	})
 
-	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrg, entity.ID)
+	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 active task, got %d (err=%v)", len(active), err)
 	}
@@ -230,7 +230,7 @@ func TestHandleEvent_BecameAtomic_Suppressed(t *testing.T) {
 	}
 
 	// Pre-seed: an assigned task already exists on this entity.
-	priorEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
+	priorEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
 		EventType:    domain.EventJiraIssueAssigned,
 		EntityID:     &entity.ID,
 		MetadataJSON: `{}`,
@@ -238,7 +238,7 @@ func TestHandleEvent_BecameAtomic_Suppressed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record prior event: %v", err)
 	}
-	if _, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, teamA, entity.ID, domain.EventJiraIssueAssigned, "", priorEventID, 0.5); err != nil {
+	if _, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, teamA, entity.ID, domain.EventJiraIssueAssigned, "", priorEventID, 0.5); err != nil {
 		t.Fatalf("create prior assigned task: %v", err)
 	}
 
@@ -254,7 +254,7 @@ func TestHandleEvent_BecameAtomic_Suppressed(t *testing.T) {
 			VALUES (?, ?, ?, ?, 'rule', ?,
 			        NULL, 1, 'user',
 			        ?, 0.7, 100, ?, ?)
-		`, ruleID, runmode.LocalDefaultOrg, teamID, runmode.LocalDefaultUserID, domain.EventJiraIssueBecameAtomic,
+		`, ruleID, runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID, domain.EventJiraIssueBecameAtomic,
 			"became_atomic "+teamID[:8], time.Now(), time.Now()); err != nil {
 			t.Fatalf("seed rule for team %s: %v", teamID, err)
 		}
@@ -273,10 +273,10 @@ func TestHandleEvent_BecameAtomic_Suppressed(t *testing.T) {
 		EventType:    domain.EventJiraIssueBecameAtomic,
 		EntityID:     &entity.ID,
 		MetadataJSON: string(atomicJSON),
-		OrgID:        runmode.LocalDefaultOrg,
+		OrgID:        runmode.LocalDefaultOrgID,
 	})
 
-	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrg, entity.ID)
+	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil {
 		t.Fatalf("list active tasks: %v", err)
 	}
@@ -315,13 +315,13 @@ func TestTryAutoDelegate_PerTeamBotGate(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed agent: %v", err)
 	}
-	if err := stores.TeamAgents.AddForTeam(t.Context(), runmode.LocalDefaultOrg, teamA, runmode.LocalDefaultAgentID); err != nil {
+	if err := stores.TeamAgents.AddForTeam(t.Context(), runmode.LocalDefaultOrgID, teamA, runmode.LocalDefaultAgentID); err != nil {
 		t.Fatalf("add agent to team A: %v", err)
 	}
-	if err := stores.TeamAgents.AddForTeam(t.Context(), runmode.LocalDefaultOrg, teamB, runmode.LocalDefaultAgentID); err != nil {
+	if err := stores.TeamAgents.AddForTeam(t.Context(), runmode.LocalDefaultOrgID, teamB, runmode.LocalDefaultAgentID); err != nil {
 		t.Fatalf("add agent to team B: %v", err)
 	}
-	if err := stores.TeamAgents.SetEnabled(t.Context(), runmode.LocalDefaultOrg, teamB, runmode.LocalDefaultAgentID, false); err != nil {
+	if err := stores.TeamAgents.SetEnabled(t.Context(), runmode.LocalDefaultOrgID, teamB, runmode.LocalDefaultAgentID, false); err != nil {
 		t.Fatalf("disable agent for team B: %v", err)
 	}
 
@@ -331,7 +331,7 @@ func TestTryAutoDelegate_PerTeamBotGate(t *testing.T) {
 		t.Fatalf("create entity: %v", err)
 	}
 	createTestPrompt(t, database, domain.Prompt{ID: "p-gate", Name: "Gate", Body: "x", Source: "user"})
-	eventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
+	eventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
 		EventType:    domain.EventGitHubPRCICheckFailed,
 		EntityID:     &entity.ID,
 		DedupKey:     "build",
@@ -340,7 +340,7 @@ func TestTryAutoDelegate_PerTeamBotGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record event: %v", err)
 	}
-	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, teamA, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
+	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, teamA, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
@@ -371,13 +371,13 @@ func TestTryAutoDelegate_PerTeamBotGate(t *testing.T) {
 	// Fire the trigger as team B (bot disabled) — must be blocked — and
 	// as team A (bot enabled) — must delegate. Order doesn't matter:
 	// team B's gate returns before the entity gate.
-	router.tryAutoDelegate(runmode.LocalDefaultOrg, task, trigger, entity.ID, eventID, teamB)
-	router.tryAutoDelegate(runmode.LocalDefaultOrg, task, trigger, entity.ID, eventID, teamA)
+	router.tryAutoDelegate(runmode.LocalDefaultOrgID, task, trigger, entity.ID, eventID, teamB)
+	router.tryAutoDelegate(runmode.LocalDefaultOrgID, task, trigger, entity.ID, eventID, teamA)
 
 	if stub.calls != 1 {
 		t.Fatalf("expected exactly 1 Delegate call (team A only); got %d", stub.calls)
 	}
-	got, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrg, task.ID)
+	got, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, task.ID)
 	if got.ClaimedByAgentID == "" {
 		t.Errorf("task: ClaimedByAgentID empty; expected agent claim after team A's successful fire")
 	}
@@ -420,10 +420,10 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 	if _, err := database.Exec(`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`, runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("seed agent: %v", err)
 	}
-	if err := stores.TeamAgents.AddForTeam(t.Context(), runmode.LocalDefaultOrg, teamA, runmode.LocalDefaultAgentID); err != nil {
+	if err := stores.TeamAgents.AddForTeam(t.Context(), runmode.LocalDefaultOrgID, teamA, runmode.LocalDefaultAgentID); err != nil {
 		t.Fatalf("add agent to team A: %v", err)
 	}
-	if err := stores.TeamAgents.AddForTeam(t.Context(), runmode.LocalDefaultOrg, teamB, runmode.LocalDefaultAgentID); err != nil {
+	if err := stores.TeamAgents.AddForTeam(t.Context(), runmode.LocalDefaultOrgID, teamB, runmode.LocalDefaultAgentID); err != nil {
 		t.Fatalf("add agent to team B: %v", err)
 	}
 
@@ -456,7 +456,7 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 			 blueprint_id, breaker_threshold, min_autonomy_suitability,
 			 created_at, updated_at)
 		VALUES (?, ?, ?, ?, 'trigger', ?, NULL, 1, 'user', ?, 4, 0, datetime('now'), datetime('now'))
-	`, "trigger-B-onerun", runmode.LocalDefaultOrg, teamB, runmode.LocalDefaultUserID,
+	`, "trigger-B-onerun", runmode.LocalDefaultOrgID, teamB, runmode.LocalDefaultUserID,
 		domain.EventJiraIssueAvailable, bpOnerunB); err != nil {
 		t.Fatalf("seed team B trigger: %v", err)
 	}
@@ -469,10 +469,10 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 
 	router.HandleEvent(domain.Event{
 		EventType: domain.EventJiraIssueAvailable, EntityID: &entity.ID,
-		MetadataJSON: string(metaJSON), OrgID: runmode.LocalDefaultOrg,
+		MetadataJSON: string(metaJSON), OrgID: runmode.LocalDefaultOrgID,
 	})
 
-	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrg, entity.ID)
+	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
 	}
@@ -487,7 +487,7 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 	}
 	// The losing team (B) must not have left a queued firing that would
 	// later drain into a duplicate run.
-	firings, err := stores.PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrg, entity.ID)
+	firings, err := stores.PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil {
 		t.Fatalf("list firings: %v", err)
 	}
@@ -527,10 +527,10 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 	if _, err := database.Exec(`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`, runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("seed agent: %v", err)
 	}
-	if err := stores.TeamAgents.AddForTeam(t.Context(), runmode.LocalDefaultOrg, teamA, runmode.LocalDefaultAgentID); err != nil {
+	if err := stores.TeamAgents.AddForTeam(t.Context(), runmode.LocalDefaultOrgID, teamA, runmode.LocalDefaultAgentID); err != nil {
 		t.Fatalf("add agent to team A: %v", err)
 	}
-	if err := stores.TeamAgents.AddForTeam(t.Context(), runmode.LocalDefaultOrg, teamB, runmode.LocalDefaultAgentID); err != nil {
+	if err := stores.TeamAgents.AddForTeam(t.Context(), runmode.LocalDefaultOrgID, teamB, runmode.LocalDefaultAgentID); err != nil {
 		t.Fatalf("add agent to team B: %v", err)
 	}
 
@@ -549,7 +549,7 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 			(id, org_id, team_id, creator_user_id, kind, event_type,
 			 scope_predicate_json, enabled, source, name, default_priority, sort_order, created_at, updated_at)
 		VALUES (?, ?, ?, ?, 'rule', ?, NULL, 1, 'user', 'A rule', 0.9, 100, datetime('now'), datetime('now'))
-	`, "rule-A-attr", runmode.LocalDefaultOrg, teamA, runmode.LocalDefaultUserID, domain.EventJiraIssueAvailable); err != nil {
+	`, "rule-A-attr", runmode.LocalDefaultOrgID, teamA, runmode.LocalDefaultUserID, domain.EventJiraIssueAvailable); err != nil {
 		t.Fatalf("seed team A rule: %v", err)
 	}
 	createTriggerForTestRouting(t, database, domain.EventHandler{
@@ -565,7 +565,7 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 			(id, org_id, team_id, creator_user_id, kind, event_type,
 			 scope_predicate_json, enabled, source, blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
 		VALUES (?, ?, ?, ?, 'trigger', ?, NULL, 1, 'user', ?, 4, 0, datetime('now'), datetime('now'))
-	`, "trigger-B-attr", runmode.LocalDefaultOrg, teamB, runmode.LocalDefaultUserID,
+	`, "trigger-B-attr", runmode.LocalDefaultOrgID, teamB, runmode.LocalDefaultUserID,
 		domain.EventJiraIssueAvailable, bpAttrB); err != nil {
 		t.Fatalf("seed team B trigger: %v", err)
 	}
@@ -578,7 +578,7 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 
 	router.HandleEvent(domain.Event{
 		EventType: domain.EventJiraIssueAvailable, EntityID: &entity.ID,
-		MetadataJSON: string(metaJSON), OrgID: runmode.LocalDefaultOrg,
+		MetadataJSON: string(metaJSON), OrgID: runmode.LocalDefaultOrgID,
 	})
 
 	if stub.calls != 1 {
@@ -592,7 +592,7 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 	if fired != teamB {
 		t.Errorf("run fired with task owner team %q, want teamB %q (owner must consolidate before the run is created)", fired, teamB)
 	}
-	active, _ := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrg, entity.ID)
+	active, _ := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrgID, entity.ID)
 	if len(active) != 1 {
 		t.Fatalf("expected 1 task, got %d", len(active))
 	}
@@ -611,7 +611,7 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 func TestHandleEvent_SingleTeam_OneTask(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
-	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
+	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 	// The local author is bound to the one team, so author-centric routing
@@ -640,10 +640,10 @@ func TestHandleEvent_SingleTeam_OneTask(t *testing.T) {
 		DedupKey:     "build",
 		MetadataJSON: string(metaJSON),
 		CreatedAt:    time.Now(),
-		OrgID:        runmode.LocalDefaultOrg,
+		OrgID:        runmode.LocalDefaultOrgID,
 	})
 
-	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrg, entity.ID)
+	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil {
 		t.Fatalf("list active tasks: %v", err)
 	}

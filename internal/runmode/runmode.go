@@ -16,7 +16,7 @@
 // TF_MODE) is ModeLocal so existing local installs see no behavior
 // change.
 //
-// LocalDefaultOrg also lives here even though it's not strictly mode
+// LocalDefaultOrgID also lives here even though it's not strictly mode
 // state — it's the synthetic org-context value local-mode passes
 // everywhere D2/D4b/D9 expect a real orgID. Belongs with the mode
 // primitives because it only makes sense in concert with them.
@@ -67,14 +67,6 @@ const (
 	LocalDefaultUserID  = "00000000-0000-0000-0000-000000000100"
 	LocalDefaultAgentID = "00000000-0000-0000-0000-000000001000"
 )
-
-// LocalDefaultOrg is the pre-SKY-269 spelling — kept as an alias of
-// LocalDefaultOrgID so call sites that already reference the old name
-// keep compiling. New code should reference LocalDefaultOrgID directly.
-// Slated for removal once the in-tree sweep completes; see the
-// project memory entry under team-agent-reframe / D-LocalParity for
-// status.
-const LocalDefaultOrg = LocalDefaultOrgID
 
 // currentMode + initialized + modeMu form the package's mutable state.
 // Reads through Current() take an RLock — cheap, contention-free for

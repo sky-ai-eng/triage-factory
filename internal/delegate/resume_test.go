@@ -16,7 +16,7 @@ import (
 // claims). No DB touched.
 func TestResumeOpenRun_EmptyUserID(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	if err := s.ResumeOpenRun(runmode.LocalDefaultOrg, "any", "msg", ""); err == nil {
+	if err := s.ResumeOpenRun(runmode.LocalDefaultOrgID, "any", "msg", ""); err == nil {
 		t.Fatal("expected an error for an empty user id")
 	}
 }
@@ -47,7 +47,7 @@ func TestResumeOpenRun_ValidationGuards(t *testing.T) {
 			}
 			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-			err := s.ResumeOpenRun(runmode.LocalDefaultOrg, "r-guard", "msg", runmode.LocalDefaultUserID)
+			err := s.ResumeOpenRun(runmode.LocalDefaultOrgID, "r-guard", "msg", runmode.LocalDefaultUserID)
 			if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
 				t.Errorf("err = %v, want one mentioning %q", err, tc.wantSub)
 			}
@@ -67,7 +67,7 @@ func TestResumeOpenRun_NotResumable(t *testing.T) {
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-	err := s.ResumeOpenRun(runmode.LocalDefaultOrg, "r-term", "msg", runmode.LocalDefaultUserID)
+	err := s.ResumeOpenRun(runmode.LocalDefaultOrgID, "r-term", "msg", runmode.LocalDefaultUserID)
 	if !errors.Is(err, ErrRunNotResumable) {
 		t.Errorf("err = %v, want ErrRunNotResumable", err)
 	}
@@ -88,7 +88,7 @@ func TestResumeOpenRun_ExpiredWorkspace(t *testing.T) {
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	wireBlobStore(t, s) // store wired, but no snapshot for this run → expired
 
-	err := s.ResumeOpenRun(runmode.LocalDefaultOrg, "r-exp", "go on", runmode.LocalDefaultUserID)
+	err := s.ResumeOpenRun(runmode.LocalDefaultOrgID, "r-exp", "go on", runmode.LocalDefaultUserID)
 	if !errors.Is(err, ErrWorkspaceExpired) {
 		t.Fatalf("err = %v, want ErrWorkspaceExpired", err)
 	}
@@ -120,7 +120,7 @@ func TestResumeOpenRun_InitiatesResume(t *testing.T) {
 	wireBlobStore(t, s)
 	putTestSnapshot(t, s, blueprintRunIDForRun(t, database, "r-wake"))
 
-	if err := s.ResumeOpenRun(runmode.LocalDefaultOrg, "r-wake", "the answer", runmode.LocalDefaultUserID); err != nil {
+	if err := s.ResumeOpenRun(runmode.LocalDefaultOrgID, "r-wake", "the answer", runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("ResumeOpenRun: %v", err)
 	}
 
@@ -174,7 +174,7 @@ func TestResumeOpenRun_EarlyExitFinalizesBlueprint(t *testing.T) {
 		t.Fatalf("park pending_approval: %v", err)
 	}
 
-	if err := s.ResumeOpenRun(runmode.LocalDefaultOrg, run, "carry on", runmode.LocalDefaultUserID); err != nil {
+	if err := s.ResumeOpenRun(runmode.LocalDefaultOrgID, run, "carry on", runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("ResumeOpenRun: %v", err)
 	}
 	awaitResumeGoroutine(t, s, run)

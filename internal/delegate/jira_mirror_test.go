@@ -211,7 +211,7 @@ func TestRunJiraMirror_InProgress_AssignsAndTransitions(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", mirrorRule(), false)
 
 	assigns, transitions := fake.snapshot()
 	if assigns != 1 {
@@ -229,7 +229,7 @@ func TestRunJiraMirror_Done_TransitionsOnly_NoAssign(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), true)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", mirrorRule(), true)
 
 	assigns, transitions := fake.snapshot()
 	if assigns != 0 {
@@ -248,7 +248,7 @@ func TestRunJiraMirror_Idempotent_AlreadyInBucket_NoWrites(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", mirrorRule(), false)
 
 	assigns, transitions := fake.snapshot()
 	if assigns != 0 || len(transitions) != 0 {
@@ -265,9 +265,9 @@ func TestRunJiraMirror_InReviewCollapsesToInProgress_NoDistinctMove(t *testing.T
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
 	// First in-progress (board in_progress) — assign + transition.
-	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", mirrorRule(), false)
 	// Board bounces to in_review, which also maps to InProgressCanonical.
-	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", mirrorRule(), false)
 
 	assigns, transitions := fake.snapshot()
 	if assigns != 1 {
@@ -283,7 +283,7 @@ func TestRunJiraMirror_InReviewCollapsesToInProgress_NoDistinctMove(t *testing.T
 func TestRunJiraMirror_NoResolver_NoOp(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	// No SetJiraResolver → getJiraResolver returns nil.
-	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", mirrorRule(), false)
 	// Reaching here without a panic / outbound call is the assertion.
 }
 
@@ -296,7 +296,7 @@ func TestRunJiraMirror_InProgress_SkipsWhenAlreadyDone(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", mirrorRule(), false)
 
 	if assigns, transitions := fake.snapshot(); assigns != 0 || len(transitions) != 0 {
 		t.Errorf("assigns=%d transitions=%v, want no writes (forward-only: a Done ticket is never moved back)", assigns, transitions)
@@ -318,8 +318,8 @@ func TestRunJiraMirror_ConcurrentInProgressAndDone_EndsInDone(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", rule, false) }()
-	go func() { defer wg.Done(); s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", rule, true) }()
+	go func() { defer wg.Done(); s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", rule, false) }()
+	go func() { defer wg.Done(); s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", rule, true) }()
 	wg.Wait()
 
 	if got := fake.currentStatus(); got != "Done" {
@@ -359,7 +359,7 @@ func TestRunJiraMirror_InProgress_SkipsOnUnreadableState(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", mirrorRule(), false)
 
 	if assigns, transitions := fake.snapshot(); assigns != 0 || len(transitions) != 0 {
 		t.Errorf("assigns=%d transitions=%v, want no writes (unreadable state must not regress a possibly-Done ticket)", assigns, transitions)
@@ -377,7 +377,7 @@ func TestRunJiraMirror_Done_ProceedsWhenStateUnreadable(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), true)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", mirrorRule(), true)
 
 	if _, transitions := fake.snapshot(); len(transitions) != 1 || transitions[0] != "Done" {
 		t.Errorf("transitions = %v, want [Done] (unreadable state must not prevent the done transition)", transitions)
@@ -393,7 +393,7 @@ func TestRunJiraMirror_InProgress_AssignFails_SkipsTransition(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrg, "SKY-1", mirrorRule(), false)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", mirrorRule(), false)
 
 	if _, transitions := fake.snapshot(); len(transitions) != 0 {
 		t.Errorf("transitions = %v, want none (a failed assign must skip the transition)", transitions)
@@ -512,7 +512,7 @@ func TestRecomputeBoard_JiraTask_MirrorsInProgress(t *testing.T) {
 	s, database, _, taskID, fake, res := setupJiraMirrorFixture(t, "ip", "To Do", "")
 	stampBotClaim(t, database, taskID)
 
-	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
 		t.Fatalf("board status = %q, want in_progress", got)
@@ -537,7 +537,7 @@ func TestRecomputeBoard_UserClaimedJiraTask_NoMirror(t *testing.T) {
 	stampUserClaim(t, database, taskID)
 	setRunStatus(t, database, runID, "pending_approval")
 
-	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 
 	if n := res.systemCalls(); n != 0 {
 		t.Errorf("ForSystem calls = %d, want 0 (user-claimed task: bot must not mirror)", n)
@@ -556,7 +556,7 @@ func TestRecomputeBoard_GitHubTask_NoMirror(t *testing.T) {
 	res := &fakeJiraResolver{client: fake.client()}
 	s.SetJiraResolver(res)
 
-	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
 		t.Fatalf("board status = %q, want in_progress", got)
@@ -574,8 +574,8 @@ func TestTerminateBlueprint_CompletedJiraTask_MirrorsDone(t *testing.T) {
 	stampBotClaim(t, database, taskID)
 	bpr := blueprintRunIDForRun(t, database, runID)
 
-	s.terminateBlueprint(runmode.LocalDefaultOrg, bpr, taskID, "event", "",
-		time.Now(), runConfig{orgID: runmode.LocalDefaultOrg}, domain.BlueprintRunStatusCompleted, "", nil, true)
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "",
+		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCompleted, "", nil, true)
 
 	if got := readTaskStatus(t, database, taskID); got != "done" {
 		t.Fatalf("task status = %q, want done", got)
@@ -600,8 +600,8 @@ func TestTerminateBlueprint_AbortedJiraTask_NoMirror(t *testing.T) {
 	stampBotClaim(t, database, taskID)
 	bpr := blueprintRunIDForRun(t, database, runID)
 
-	s.terminateBlueprint(runmode.LocalDefaultOrg, bpr, taskID, "event", "",
-		time.Now(), runConfig{orgID: runmode.LocalDefaultOrg}, domain.BlueprintRunStatusAborted, "needs a human", nil, true)
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "",
+		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusAborted, "needs a human", nil, true)
 
 	if n := res.systemCalls(); n != 0 {
 		t.Errorf("ForSystem calls = %d, want 0 (aborted run must not move the ticket to Done)", n)
@@ -618,8 +618,8 @@ func TestTerminateBlueprint_CompletedButUserTookOver_NoMirror(t *testing.T) {
 	stampUserClaim(t, database, taskID) // takeover flipped the claim to the user
 	bpr := blueprintRunIDForRun(t, database, runID)
 
-	s.terminateBlueprint(runmode.LocalDefaultOrg, bpr, taskID, "event", "",
-		time.Now(), runConfig{orgID: runmode.LocalDefaultOrg}, domain.BlueprintRunStatusCompleted, "", nil, true)
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "",
+		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCompleted, "", nil, true)
 
 	if n := res.systemCalls(); n != 0 {
 		t.Errorf("ForSystem calls = %d, want 0 (user takeover: bot must not mirror the done transition)", n)

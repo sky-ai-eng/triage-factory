@@ -23,7 +23,7 @@ import (
 func newQueueWorkerRouter(t *testing.T, database *sql.DB) *Router {
 	t.Helper()
 	st := sqlitestore.New(database)
-	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
+	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 	seedMatchAllCIRule(t, database, runmode.LocalDefaultTeamID)
@@ -37,8 +37,8 @@ func newQueueWorkerRouter(t *testing.T, database *sql.DB) *Router {
 func enqueueCIFailed(t *testing.T, database *sql.DB, entityID string) {
 	t.Helper()
 	eid := entityID
-	if _, err := sqlitestore.New(database).EventQueue.Enqueue(context.Background(), runmode.LocalDefaultOrg, domain.Event{
-		OrgID:        runmode.LocalDefaultOrg,
+	if _, err := sqlitestore.New(database).EventQueue.Enqueue(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
+		OrgID:        runmode.LocalDefaultOrgID,
 		EntityID:     &eid,
 		EventType:    domain.EventGitHubPRCICheckFailed,
 		DedupKey:     "build",
@@ -141,7 +141,7 @@ func TestEventQueue_SurvivesRestart(t *testing.T) {
 		t.Errorf("done queue rows = %d, want 3 (buffered work must survive restart)", done)
 	}
 	for _, eid := range entityIDs {
-		active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrg, eid)
+		active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrgID, eid)
 		if err != nil {
 			t.Fatalf("list active for %s: %v", eid, err)
 		}

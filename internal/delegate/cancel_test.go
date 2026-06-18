@@ -60,7 +60,7 @@ func TestCancel_OpenAutoRun_DrainsQueue(t *testing.T) {
 	drainer := newFakeDrainer()
 	s.SetQueueDrainer(drainer)
 
-	if err := s.Cancel(runmode.LocalDefaultOrg, "r1", ""); err != nil {
+	if err := s.Cancel(runmode.LocalDefaultOrgID, "r1", ""); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 
@@ -78,8 +78,8 @@ func TestCancel_OpenAutoRun_DrainsQueue(t *testing.T) {
 	if calls[0].entityID == "" {
 		t.Errorf("DrainEntity called with empty entityID")
 	}
-	if calls[0].orgID != runmode.LocalDefaultOrg {
-		t.Errorf("DrainEntity orgID = %q, want %q", calls[0].orgID, runmode.LocalDefaultOrg)
+	if calls[0].orgID != runmode.LocalDefaultOrgID {
+		t.Errorf("DrainEntity orgID = %q, want %q", calls[0].orgID, runmode.LocalDefaultOrgID)
 	}
 }
 
@@ -100,7 +100,7 @@ func TestCancel_OpenManualRun_NoDrain(t *testing.T) {
 	drainer := newFakeDrainer()
 	s.SetQueueDrainer(drainer)
 
-	if err := s.Cancel(runmode.LocalDefaultOrg, "r-manual", ""); err != nil {
+	if err := s.Cancel(runmode.LocalDefaultOrgID, "r-manual", ""); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 
@@ -133,7 +133,7 @@ func TestCancel_AlreadyTerminal_NoDrain(t *testing.T) {
 	drainer := newFakeDrainer()
 	s.SetQueueDrainer(drainer)
 
-	if err := s.Cancel(runmode.LocalDefaultOrg, "r-done", ""); err == nil {
+	if err := s.Cancel(runmode.LocalDefaultOrgID, "r-done", ""); err == nil {
 		t.Fatal("expected 'no active run' error on terminal row")
 	}
 
@@ -160,7 +160,7 @@ func TestCancel_OpenStep_FinalizesBlueprintRun(t *testing.T) {
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	// User-initiated cancel.
-	if err := s.Cancel(runmode.LocalDefaultOrg, "r-step", runmode.LocalDefaultUserID); err != nil {
+	if err := s.Cancel(runmode.LocalDefaultOrgID, "r-step", runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 

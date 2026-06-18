@@ -145,12 +145,12 @@ func (s *scoreStore) UnscoredTasks(ctx context.Context, orgID string) ([]domain.
 }
 
 // assertLocalOrg returns an error if the caller passed anything other
-// than runmode.LocalDefaultOrg. Local-mode SQLite tables have no org_id
+// than runmode.LocalDefaultOrgID. Local-mode SQLite tables have no org_id
 // column, so any non-default value indicates a confused caller and
 // must be rejected loudly.
 func assertLocalOrg(orgID string) error {
-	if orgID != runmode.LocalDefaultOrg {
-		return fmt.Errorf("sqlite store: orgID must be %q in local mode, got %q", runmode.LocalDefaultOrg, orgID)
+	if orgID != runmode.LocalDefaultOrgID {
+		return fmt.Errorf("sqlite store: orgID must be %q in local mode, got %q", runmode.LocalDefaultOrgID, orgID)
 	}
 	return nil
 }

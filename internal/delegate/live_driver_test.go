@@ -188,7 +188,7 @@ func TestDriveLiveRun_IdleHibernates(t *testing.T) {
 	}
 	proc := newFakeLiveProc("sess-idle")
 	park := liveParkContext{
-		orgID: runmode.LocalDefaultOrg, runID: "r-idle", taskID: taskID,
+		orgID: runmode.LocalDefaultOrgID, runID: "r-idle", taskID: taskID,
 		namespace: "seedbpr-r-idle", claudeCwd: "/tmp/wt-idle",
 		triggerType: "manual", creatorUserID: runmode.LocalDefaultUserID,
 	}
@@ -398,7 +398,7 @@ func TestDriveLiveRun_NoneFlipsStatusOpen(t *testing.T) {
 	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
 	results <- want
 	park := liveParkContext{
-		orgID: runmode.LocalDefaultOrg, runID: "r-none", taskID: taskID,
+		orgID: runmode.LocalDefaultOrgID, runID: "r-none", taskID: taskID,
 		namespace: "seedbpr-r-none", claudeCwd: "/tmp/wt-none",
 		triggerType: "manual", creatorUserID: runmode.LocalDefaultUserID,
 	}
@@ -440,7 +440,7 @@ func TestDriveLiveRun_InterruptParksOpenNotTerminal(t *testing.T) {
 	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
 	results <- want
 	park := liveParkContext{
-		orgID: runmode.LocalDefaultOrg, runID: "r-pause", taskID: taskID,
+		orgID: runmode.LocalDefaultOrgID, runID: "r-pause", taskID: taskID,
 		namespace: "seedbpr-r-pause", claudeCwd: "/tmp/wt-pause",
 		triggerType: "manual", creatorUserID: runmode.LocalDefaultUserID,
 	}
@@ -468,7 +468,7 @@ func TestDriveLiveRun_ErrorWithoutInterruptStaysTerminal(t *testing.T) {
 	r := &agentproc.Result{IsError: true, Subtype: "error_during_execution"}
 	results <- r
 
-	out := s.driveLiveRun(context.Background(), liveParkContext{orgID: runmode.LocalDefaultOrg, runID: "r-err"}, proc, results, make(chan struct{}), time.Minute)
+	out := s.driveLiveRun(context.Background(), liveParkContext{orgID: runmode.LocalDefaultOrgID, runID: "r-err"}, proc, results, make(chan struct{}), time.Minute)
 	if out.result != r {
 		t.Fatalf("expected the error result back, got %+v", out)
 	}
@@ -486,7 +486,7 @@ func TestDriveLiveRun_InterruptBoundedResumeParksOpen(t *testing.T) {
 
 	results := make(chan *agentproc.Result, 1)
 	results <- &agentproc.Result{IsError: true, Subtype: "error_during_execution", Interrupted: true}
-	out := s.driveLiveRun(context.Background(), liveParkContext{orgID: runmode.LocalDefaultOrg, runID: "r-bounded"}, proc, results, make(chan struct{}), 0)
+	out := s.driveLiveRun(context.Background(), liveParkContext{orgID: runmode.LocalDefaultOrgID, runID: "r-bounded"}, proc, results, make(chan struct{}), 0)
 	if !out.hibernated {
 		t.Fatalf("bounded-resume pause should park open (hibernated), got %+v", out)
 	}

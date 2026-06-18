@@ -13,7 +13,7 @@ func TestRunQueueStore_SQLite_EnqueueClaim(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	task := seedEntityEventTask(t, conn, "rq-claim")
 	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "rq-p0", Name: "Step 0", Body: "b", Source: "user"})
@@ -80,7 +80,7 @@ func TestRunQueueStore_SQLite_CancelRequestedNotClaimed(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	task := seedEntityEventTask(t, conn, "rq-cancel")
 	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "rqc-p0", Name: "Step 0", Body: "b", Source: "user"})
@@ -127,7 +127,7 @@ func TestRunQueueStore_SQLite_RequeueAndReset(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	task := seedEntityEventTask(t, conn, "rq-reset")
 	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "rqr-p0", Name: "Step 0", Body: "b", Source: "user"})
@@ -191,7 +191,7 @@ func TestRunQueueStore_SQLite_ResetLeavesDormantAlone(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	task := seedEntityEventTask(t, conn, "rq-dormant")
 	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "rqd-p0", Name: "Step 0", Body: "b", Source: "user"})
@@ -233,7 +233,7 @@ func TestRunQueueStore_SQLite_SetCurrentStep(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	task := seedEntityEventTask(t, conn, "rq-step")
 	insertBlueprintForTest(t, conn, "rqs-bp", "RQ Step Blueprint")

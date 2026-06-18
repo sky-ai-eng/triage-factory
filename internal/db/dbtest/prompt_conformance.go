@@ -13,7 +13,7 @@ import (
 // RunPromptStoreConformance. The factory returns:
 //   - the wired PromptStore impl
 //   - the orgID to pass to every method (sqlite returns
-//     runmode.LocalDefaultOrg, postgres returns a fresh org UUID)
+//     runmode.LocalDefaultOrgID, postgres returns a fresh org UUID)
 //   - the teamID Create/SeedOrUpdate should attribute prompts to. Every
 //     prompt is team-scoped post-SKY-380, so the seeder threads it; SQLite
 //     pins the local sentinel, Postgres binds the test team.

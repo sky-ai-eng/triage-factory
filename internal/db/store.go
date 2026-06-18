@@ -37,7 +37,7 @@ type Stores struct {
 	// SQLite impl delegates to internal/auth's keychain helpers so
 	// callers see the same Put/Get/Delete shape in either mode.
 	// orgID is required and enforced — vault wrapper rejects on a
-	// claim/arg mismatch in multi, sqlite asserts LocalDefaultOrg.
+	// claim/arg mismatch in multi, sqlite asserts LocalDefaultOrgID.
 	Secrets SecretStore
 
 	// EventHandlers owns the unified event_handlers table (post-SKY-259):
@@ -313,7 +313,7 @@ type TxStores struct {
 // before fn so RLS policies see the right (orgID, userID) claims for
 // this transaction. set_config(..., true) scopes to the tx and does
 // not leak to other pool connections. SQLite impl ignores orgID /
-// userID beyond asserting orgID == runmode.LocalDefaultOrg.
+// userID beyond asserting orgID == runmode.LocalDefaultOrgID.
 //
 // Callers always pass orgID + userID explicitly — D7 will replace
 // the explicit pass with extraction from a request-scoped context,
@@ -326,7 +326,7 @@ type TxStores struct {
 // structural difference from WithTx is the source of the claims
 // values: request context vs caller-supplied. The Postgres impl
 // shares its body with WithTx via a private helper; the SQLite
-// impl asserts orgID == runmode.LocalDefaultOrg and ignores
+// impl asserts orgID == runmode.LocalDefaultOrgID and ignores
 // userID (no auth concept in local mode).
 //
 // userID is required and must reference a real users row in

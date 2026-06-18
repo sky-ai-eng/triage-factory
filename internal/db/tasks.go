@@ -13,7 +13,7 @@ import (
 // swipe-triggered transitions, plus the run-history queries that
 // power the auto-delegate breaker.
 //
-// All methods take orgID. Local mode passes runmode.LocalDefaultOrg
+// All methods take orgID. Local mode passes runmode.LocalDefaultOrgID
 // (asserted by the SQLite impl). Multi mode passes the per-request
 // org context; the Postgres impl includes org_id in WHERE clauses as
 // defense in depth alongside RLS.

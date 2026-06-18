@@ -17,7 +17,7 @@ import (
 // TestSyntheticClaimsWithTx_SQLite_AcceptsLocalOrg pins the SKY-296
 // SQLite contract: SyntheticClaimsWithTx delegates to the same body as
 // WithTx in local mode (no auth concept), so passing
-// runmode.LocalDefaultOrg + any userID runs fn inside a tx and commits
+// runmode.LocalDefaultOrgID + any userID runs fn inside a tx and commits
 // on nil-error.
 func TestSyntheticClaimsWithTx_SQLite_AcceptsLocalOrg(t *testing.T) {
 	conn := newSQLiteForTxTest(t)
@@ -26,12 +26,12 @@ func TestSyntheticClaimsWithTx_SQLite_AcceptsLocalOrg(t *testing.T) {
 	called := false
 	if err := stores.Tx.SyntheticClaimsWithTx(
 		context.Background(),
-		runmode.LocalDefaultOrg,
+		runmode.LocalDefaultOrgID,
 		runmode.LocalDefaultUserID,
 		func(tx db.TxStores) error {
 			called = true
 			// Sanity: the bound stores are usable inside the closure.
-			if _, err := tx.Repos.List(context.Background(), runmode.LocalDefaultOrg); err != nil {
+			if _, err := tx.Repos.List(context.Background(), runmode.LocalDefaultOrgID); err != nil {
 				return err
 			}
 			return nil
@@ -62,7 +62,7 @@ func TestSyntheticClaimsWithTx_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if err == nil {
 		t.Fatal("SyntheticClaimsWithTx with non-local org returned nil; want assertion error")
 	}
-	if !strings.Contains(err.Error(), runmode.LocalDefaultOrg) {
+	if !strings.Contains(err.Error(), runmode.LocalDefaultOrgID) {
 		t.Errorf("error %q does not mention the local-org assertion", err.Error())
 	}
 }
@@ -76,15 +76,15 @@ func TestSyntheticClaimsWithTx_SQLite_RollsBackOnError(t *testing.T) {
 	ctx := context.Background()
 
 	// Seed a repo via the non-tx path so we have a baseline row count.
-	if err := stores.Repos.SetConfigured(ctx, runmode.LocalDefaultOrg, []string{"baseline/repo"}); err != nil {
+	if err := stores.Repos.SetConfigured(ctx, runmode.LocalDefaultOrgID, []string{"baseline/repo"}); err != nil {
 		t.Fatalf("seed baseline: %v", err)
 	}
 
 	sentinel := errors.New("forced rollback")
-	err := stores.Tx.SyntheticClaimsWithTx(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultUserID,
+	err := stores.Tx.SyntheticClaimsWithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID,
 		func(tx db.TxStores) error {
 			// Insert a row that should roll back.
-			if err := tx.Repos.SetConfigured(ctx, runmode.LocalDefaultOrg, []string{"baseline/repo", "rolled/back"}); err != nil {
+			if err := tx.Repos.SetConfigured(ctx, runmode.LocalDefaultOrgID, []string{"baseline/repo", "rolled/back"}); err != nil {
 				return err
 			}
 			return sentinel
@@ -93,7 +93,7 @@ func TestSyntheticClaimsWithTx_SQLite_RollsBackOnError(t *testing.T) {
 		t.Fatalf("expected sentinel error, got %v", err)
 	}
 
-	got, err := stores.Repos.ListConfiguredNames(ctx, runmode.LocalDefaultOrg)
+	got, err := stores.Repos.ListConfiguredNames(ctx, runmode.LocalDefaultOrgID)
 	if err != nil {
 		t.Fatalf("ListConfiguredNames: %v", err)
 	}

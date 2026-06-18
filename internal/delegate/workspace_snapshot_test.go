@@ -36,7 +36,7 @@ func TestEnsureWorkspace_WarmPath_NoRehydrate(t *testing.T) {
 	const sessionID = "sess-warm"
 	writeSession(t, wtPath, sessionID, `{"type":"summary"}`)
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrg, runID, wtPath, sessionID); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, wtPath, sessionID); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -46,7 +46,7 @@ func TestEnsureWorkspace_WarmPath_NoRehydrate(t *testing.T) {
 	writeFile(t, marker, "warm")
 
 	run := &domain.AgentRun{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
-	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrg, run, owner, repo, "")
+	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, owner, repo, "")
 	if err != nil {
 		t.Fatalf("ensureWorkspace (warm): %v", err)
 	}
@@ -91,7 +91,7 @@ func TestEnsureWorkspace_ColdPath_RehydratesFromSnapshot(t *testing.T) {
 	const sessionID = "sess-cold"
 	sessPath := writeSession(t, wtPath, sessionID, `{"type":"summary","sid":"cold"}`)
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrg, runID, wtPath, sessionID); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, wtPath, sessionID); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -113,7 +113,7 @@ func TestEnsureWorkspace_ColdPath_RehydratesFromSnapshot(t *testing.T) {
 	gitT(t, bareDir, "branch", "-D", "feature")
 
 	run := &domain.AgentRun{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
-	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrg, run, owner, repo, "")
+	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, owner, repo, "")
 	if err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
 	}
@@ -152,11 +152,11 @@ func TestSnapshotWorkspace_StoresGzip(t *testing.T) {
 	writeFile(t, filepath.Join(wtPath, "_scratch", "notes.txt"), "scratch note")
 
 	const runID = "wt-gzip"
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrg, runID, wtPath, ""); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, wtPath, ""); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
-	rc, err := s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrg, runID))
+	rc, err := s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, runID))
 	if err != nil {
 		t.Fatalf("get snapshot blob: %v", err)
 	}
@@ -185,13 +185,13 @@ func TestEnsureWorkspace_ColdPath_CorruptGzipChecksumErrors(t *testing.T) {
 	const runID = "wt-corrupt"
 	src := t.TempDir()
 	writeFile(t, filepath.Join(src, "_scratch", "ci-logs", "x.log"), "log bytes the gzip trailer checksums over")
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrg, runID, src, ""); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, src, ""); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
 	// Flip a byte in the gzip footer's CRC-32 (the last 8 bytes are CRC-32 +
 	// ISIZE) so the decompressed bytes no longer match the stored checksum.
-	key := snapshotKey(runmode.LocalDefaultOrg, runID)
+	key := snapshotKey(runmode.LocalDefaultOrgID, runID)
 	rc, err := s.Storage().Get(context.Background(), key)
 	if err != nil {
 		t.Fatalf("get snapshot blob: %v", err)
@@ -212,7 +212,7 @@ func TestEnsureWorkspace_ColdPath_CorruptGzipChecksumErrors(t *testing.T) {
 	// Cold path: the warm worktree is absent, so the resume can only come from
 	// the (now corrupt) blob — which must surface as an error.
 	run := &domain.AgentRun{ID: runID, WorktreePath: filepath.Join(t.TempDir(), "gone"), BlueprintRunID: runID}
-	if _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrg, run, "", "", ""); err == nil {
+	if _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, "", "", ""); err == nil {
 		t.Fatal("ensureWorkspace accepted a snapshot with a corrupted gzip checksum; want an integrity error")
 	}
 }
@@ -237,10 +237,10 @@ func TestSnapshotWorkspace_CompressionShrinksTranscriptHeavyBlob(t *testing.T) {
 		strings.Repeat("=== RUN   TestSomething\n--- PASS: TestSomething (0.01s)\n", 2000))
 
 	const runID = "wt-fat"
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrg, runID, wtPath, sessionID); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, wtPath, sessionID); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
-	rc, err := s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrg, runID))
+	rc, err := s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, runID))
 	if err != nil {
 		t.Fatalf("get snapshot blob: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestEnsureWorkspace_ColdPath_DetachedHead(t *testing.T) {
 	writeFile(t, filepath.Join(wtPath, "README.md"), "hello\ndetached edit\n")
 	headSHA := strings.TrimSpace(gitOut(t, wtPath, "rev-parse", "HEAD"))
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrg, runID, wtPath, ""); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, wtPath, ""); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -297,7 +297,7 @@ func TestEnsureWorkspace_ColdPath_DetachedHead(t *testing.T) {
 	gitT(t, bareDir, "branch", "-D", "feature")
 
 	run := &domain.AgentRun{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
-	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrg, run, owner, repo, "")
+	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, owner, repo, "")
 	if err != nil {
 		t.Fatalf("ensureWorkspace (detached): %v", err)
 	}
@@ -328,7 +328,7 @@ func TestEnsureWorkspace_ColdPath_NeverPushedBranchNoCommits(t *testing.T) {
 	writeFile(t, filepath.Join(wtPath, "README.md"), "hello\nwork in progress\n")
 	headSHA := strings.TrimSpace(gitOut(t, wtPath, "rev-parse", "HEAD"))
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrg, runID, wtPath, ""); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, wtPath, ""); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -346,7 +346,7 @@ func TestEnsureWorkspace_ColdPath_NeverPushedBranchNoCommits(t *testing.T) {
 	gitT(t, bareDir, "branch", "-D", "feature")
 
 	run := &domain.AgentRun{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
-	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrg, run, owner, repo, "")
+	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, owner, repo, "")
 	if err != nil {
 		t.Fatalf("ensureWorkspace (never-pushed branch): %v", err)
 	}
@@ -368,7 +368,7 @@ func TestEnsureWorkspace_ColdPath_NoSnapshotErrors(t *testing.T) {
 	s := newStorageSpawner(t)
 
 	run := &domain.AgentRun{ID: "wt-missing", WorktreePath: filepath.Join(t.TempDir(), "gone")}
-	if _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrg, run, "o", "r", ""); err == nil {
+	if _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, "o", "r", ""); err == nil {
 		t.Fatal("ensureWorkspace should error when neither the worktree nor a snapshot exists")
 	}
 }
@@ -387,14 +387,14 @@ func TestFailRun_DiscardsWorkspaceSnapshot(t *testing.T) {
 	s.SetStorage(blobs)
 
 	ctx := context.Background()
-	key := snapshotKey(runmode.LocalDefaultOrg, runID)
+	key := snapshotKey(runmode.LocalDefaultOrgID, runID)
 	if err := blobs.Put(ctx, key, strings.NewReader("snapshot")); err != nil {
 		t.Fatalf("seed snapshot: %v", err)
 	}
 
 	// triggerType "event" so failRun routes through the admin-pool System
 	// methods (no synthetic-claims tx needed in the fixture).
-	s.failRun(runmode.LocalDefaultOrg, runID, taskID, "event", "", "boom")
+	s.failRun(runmode.LocalDefaultOrgID, runID, taskID, "event", "", "boom")
 
 	if ok, _ := blobs.Exists(ctx, key); ok {
 		t.Error("failRun did not discard the workspace snapshot — blob orphaned on failure")

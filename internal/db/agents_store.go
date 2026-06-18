@@ -46,7 +46,7 @@ import (
 //     as the agents row — at the agents-insert moment, the founder
 //     isn't yet an admin per RLS's lookup.
 //
-// SQLite has one connection; assertLocalOrg pins orgID to LocalDefaultOrg.
+// SQLite has one connection; assertLocalOrg pins orgID to LocalDefaultOrgID.
 type AgentStore interface {
 	// GetForOrg returns the org's agent row, or (nil, nil) if not yet
 	// bootstrapped. Callers reading credentials handle the nil case

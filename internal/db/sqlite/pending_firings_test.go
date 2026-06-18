@@ -116,12 +116,12 @@ func newSQLitePendingFiringsSeeder(conn *sql.DB) dbtest.PendingFiringsSeeder {
 		// blueprint (+ step): the trigger's blueprint_id FKs to
 		// blueprints(id, org_id) AND the same-team blueprints(id, team_id),
 		// so it needs a real team-owned blueprint wrapping the prompt above.
-		if err := sqlitestore.New(conn).Blueprints.Create(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Blueprint{
+		if err := sqlitestore.New(conn).Blueprints.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
 			ID: blueprintID, Name: "Test BP", Source: "user", TeamID: runmode.LocalDefaultTeamID,
 		}); err != nil {
 			t.Fatalf("seed blueprint: %v", err)
 		}
-		if err := sqlitestore.New(conn).Blueprints.ReplaceSteps(context.Background(), runmode.LocalDefaultOrg, blueprintID, []string{promptID}, nil); err != nil {
+		if err := sqlitestore.New(conn).Blueprints.ReplaceSteps(context.Background(), runmode.LocalDefaultOrgID, blueprintID, []string{promptID}, nil); err != nil {
 			t.Fatalf("seed blueprint step: %v", err)
 		}
 

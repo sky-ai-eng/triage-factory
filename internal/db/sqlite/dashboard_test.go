@@ -30,7 +30,7 @@ func TestDashboardStore_SQLite(t *testing.T) {
 			t.Helper()
 			seedSQLitePRSnapshot(t, conn, snap)
 		}
-		return stores.Dashboard, runmode.LocalDefaultOrg, seed
+		return stores.Dashboard, runmode.LocalDefaultOrgID, seed
 	})
 }
 

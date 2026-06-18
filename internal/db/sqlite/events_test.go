@@ -30,7 +30,7 @@ func TestEventStore_SQLite(t *testing.T) {
 				return seedSQLiteEntityForEvents(t, conn, suffix)
 			},
 		}
-		return stores.Events, runmode.LocalDefaultOrg, seed
+		return stores.Events, runmode.LocalDefaultOrgID, seed
 	})
 }
 

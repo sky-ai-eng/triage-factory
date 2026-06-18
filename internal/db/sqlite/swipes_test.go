@@ -36,7 +36,7 @@ func TestSwipeStore_SQLite(t *testing.T) {
 			t.Helper()
 			return readSQLiteSwipeAudit(t, conn, taskID)
 		}
-		return stores.Swipes, runmode.LocalDefaultOrg, seed, read, readAudit
+		return stores.Swipes, runmode.LocalDefaultOrgID, seed, read, readAudit
 	})
 }
 

@@ -34,7 +34,7 @@ func seedTeam(t *testing.T, s *Server, orgID, slug string) string {
 func TestResolveActingTeam_ReturnsSoleTeam(t *testing.T) {
 	s := newTestServer(t)
 
-	got, err := teamscope.ResolveActing(t.Context(), s.teams, s.users, runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, "")
+	got, err := teamscope.ResolveActing(t.Context(), s.teams, s.users, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "")
 	if err != nil {
 		t.Fatalf("resolveActingTeam: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestResolveActingTeam_AmbiguousWithoutPick(t *testing.T) {
 	s := newTestServer(t)
 	seedTeam(t, s, runmode.LocalDefaultOrgID, "second")
 
-	_, err := teamscope.ResolveActing(t.Context(), s.teams, s.users, runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, "")
+	_, err := teamscope.ResolveActing(t.Context(), s.teams, s.users, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "")
 	if err == nil {
 		t.Fatalf("resolveActingTeam with ≥2 teams and no pick returned nil error; want errActingTeamRequired")
 	}
@@ -83,7 +83,7 @@ func TestResolveActingTeam_ExplicitPickHonored(t *testing.T) {
 	s := newTestServer(t)
 	second := seedTeam(t, s, runmode.LocalDefaultOrgID, "second")
 
-	got, err := teamscope.ResolveActing(t.Context(), s.teams, s.users, runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, second)
+	got, err := teamscope.ResolveActing(t.Context(), s.teams, s.users, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, second)
 	if err != nil {
 		t.Fatalf("resolveActingTeam: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestResolveActingTeam_PickForeignTeamRejected(t *testing.T) {
 	s := newTestServer(t)
 	foreign := uuid.New().String() // never in the caller's team set
 
-	_, err := teamscope.ResolveActing(t.Context(), s.teams, s.users, runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, foreign)
+	_, err := teamscope.ResolveActing(t.Context(), s.teams, s.users, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, foreign)
 	if err == nil {
 		t.Fatalf("picking a non-member team returned nil error; want errActingTeamForbidden")
 	}
@@ -118,7 +118,7 @@ func TestResolveActingTeam_StickyDefaultSeedsAmbiguous(t *testing.T) {
 		t.Fatalf("set last-acting team: %v", err)
 	}
 
-	got, err := teamscope.ResolveActing(t.Context(), s.teams, s.users, runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, "")
+	got, err := teamscope.ResolveActing(t.Context(), s.teams, s.users, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "")
 	if err != nil {
 		t.Fatalf("resolveActingTeam: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestResolveReadTeam_DefaultsNeverBlock(t *testing.T) {
 	seedTeam(t, s, runmode.LocalDefaultOrgID, "second")
 
 	// No filter, no sticky → first (oldest) team = the local default.
-	got, err := teamscope.ResolveRead(t.Context(), s.teams, s.users, runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, "")
+	got, err := teamscope.ResolveRead(t.Context(), s.teams, s.users, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "")
 	if err != nil {
 		t.Fatalf("resolveReadTeam: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestResolveReadTeam_DefaultsNeverBlock(t *testing.T) {
 	}
 
 	// A bogus filter value is ignored, not an error.
-	got, err = teamscope.ResolveRead(t.Context(), s.teams, s.users, runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, "not-a-real-team")
+	got, err = teamscope.ResolveRead(t.Context(), s.teams, s.users, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "not-a-real-team")
 	if err != nil {
 		t.Fatalf("resolveReadTeam with stale filter: %v", err)
 	}

@@ -39,7 +39,7 @@ import (
 //     reasoning as AgentStore.Create: bootstrap runs without claims.
 //
 // SQLite collapses both pools to one connection; assertLocalOrg pins
-// orgID to LocalDefaultOrg.
+// orgID to LocalDefaultOrgID.
 type TeamAgentStore interface {
 	// GetForTeam returns the row for (team_id, agent_id), or (nil, nil)
 	// if absent. The router calls this on every trigger fire to gate

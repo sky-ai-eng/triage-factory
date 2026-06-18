@@ -46,7 +46,7 @@ func TestFactoryReadStore_SQLite(t *testing.T) {
 
 		seed := newSQLiteFactorySeeder(conn)
 		stores := sqlitestore.New(conn)
-		return stores.Factory, runmode.LocalDefaultOrg, seed
+		return stores.Factory, runmode.LocalDefaultOrgID, seed
 	})
 }
 
@@ -157,7 +157,7 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 
 // TestFactoryReadStore_SQLite_AssertLocalOrg pins the local-only
 // invariant that's specific to the SQLite impl — the orgID guard at
-// every method entry refuses anything other than LocalDefaultOrg.
+// every method entry refuses anything other than LocalDefaultOrgID.
 // The conformance suite exercises the happy path; this test pins
 // the SQLite-specific rejection.
 func TestFactoryReadStore_SQLite_AssertLocalOrg(t *testing.T) {
@@ -174,7 +174,7 @@ func TestFactoryReadStore_SQLite_AssertLocalOrg(t *testing.T) {
 	store := sqlitestore.New(conn).Factory
 
 	if _, err := store.EventCountsSince(t.Context(), "some-other-org", time.Now()); err == nil {
-		t.Error("EventCountsSince accepted non-LocalDefaultOrg without error")
+		t.Error("EventCountsSince accepted non-LocalDefaultOrgID without error")
 	}
 }
 
@@ -214,7 +214,7 @@ func TestFactoryReadStore_SQLite_ShowsUntaskedEntities(t *testing.T) {
 	}
 
 	store := sqlitestore.New(conn).Factory
-	rows, err := store.Entities(t.Context(), runmode.LocalDefaultOrg, 100, nil)
+	rows, err := store.Entities(t.Context(), runmode.LocalDefaultOrgID, 100, nil)
 	if err != nil {
 		t.Fatalf("Entities: %v", err)
 	}
@@ -264,14 +264,14 @@ func TestFactoryReadStore_SQLite_CountersUnscoped(t *testing.T) {
 	store := sqlitestore.New(conn).Factory
 	ctx := t.Context()
 
-	since, err := store.EventCountsSince(ctx, runmode.LocalDefaultOrg, time.Now().Add(-1*time.Hour))
+	since, err := store.EventCountsSince(ctx, runmode.LocalDefaultOrgID, time.Now().Add(-1*time.Hour))
 	if err != nil {
 		t.Fatalf("EventCountsSince: %v", err)
 	}
 	if since["github:pr:opened"] != 1 {
 		t.Errorf("EventCountsSince[opened] = %d, want 1 (local mode must not scope by membership)", since["github:pr:opened"])
 	}
-	life, err := store.LifetimeDistinctByEventType(ctx, runmode.LocalDefaultOrg)
+	life, err := store.LifetimeDistinctByEventType(ctx, runmode.LocalDefaultOrgID)
 	if err != nil {
 		t.Fatalf("LifetimeDistinctByEventType: %v", err)
 	}

@@ -42,7 +42,7 @@ func TestListWorkspaces_AvailableFiltersOutMaterialized(t *testing.T) {
 	seedRepoProfile(t, database, "owner", "gamma", "https://x", "main")
 
 	// Materialize one of the three.
-	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrg, domain.RunWorktree{
+	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.RunWorktree{
 		RunID: "r1", RepoID: "owner/beta",
 		Path: "/tmp/wt/beta", FeatureBranch: "feature/SKY-1",
 	}); err != nil {
@@ -100,7 +100,7 @@ func TestListWorkspaces_ScopedToRun(t *testing.T) {
 	seedJiraRun(t, database, "r2", "SKY-2")
 	seedRepoProfile(t, database, "owner", "shared", "https://x", "main")
 
-	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrg, domain.RunWorktree{
+	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.RunWorktree{
 		RunID: "r2", RepoID: "owner/shared",
 		Path: "/tmp/wt/r2/owner/shared", FeatureBranch: "feature/SKY-2",
 	}); err != nil {

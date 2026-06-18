@@ -52,7 +52,7 @@ func seedMatchAllCIRule(t *testing.T, database *sql.DB, teamID string) {
 			 scope_predicate_json, enabled, source, name, default_priority, sort_order,
 			 created_at, updated_at)
 		VALUES (?, ?, ?, ?, 'rule', ?, NULL, 1, 'user', ?, 0.7, 100, ?, ?)
-	`, ruleID, runmode.LocalDefaultOrg, teamID, runmode.LocalDefaultUserID,
+	`, ruleID, runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID,
 		domain.EventGitHubPRCICheckFailed, "CI rule "+teamID[:8], time.Now(), time.Now()); err != nil {
 		t.Fatalf("seed rule for team %s: %v", teamID, err)
 	}
@@ -70,7 +70,7 @@ func ciEvent(t *testing.T, entityID, repo string) domain.Event {
 		DedupKey:     "build",
 		MetadataJSON: string(metaJSON),
 		CreatedAt:    time.Now(),
-		OrgID:        runmode.LocalDefaultOrg,
+		OrgID:        runmode.LocalDefaultOrgID,
 	}
 }
 
@@ -97,10 +97,10 @@ func TestGate_DisjointRepos_DropsUntrackingTeam(t *testing.T) {
 	teamA := runmode.LocalDefaultTeamID
 	teamB := seedGateTeam(t, dbh, "team-b")
 
-	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrg, teamA, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo-a"}}); err != nil {
+	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo-a"}}); err != nil {
 		t.Fatalf("teamA track: %v", err)
 	}
-	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrg, teamB, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo-b"}}); err != nil {
+	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamB, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo-b"}}); err != nil {
 		t.Fatalf("teamB track: %v", err)
 	}
 
@@ -120,14 +120,14 @@ func TestGate_DisjointRepos_DropsUntrackingTeam(t *testing.T) {
 
 	gateRouter(dbh).HandleEvent(ciEvent(t, entity.ID, "owner/repo-b"))
 
-	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrg, entity.ID)
+	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil {
 		t.Fatalf("list active: %v", err)
 	}
 	if len(active) != 1 {
 		t.Fatalf("expected 1 task, got %d", len(active))
 	}
-	vis, err := testTaskStore(dbh).VisibilityTeams(ctx, runmode.LocalDefaultOrg, active[0].ID)
+	vis, err := testTaskStore(dbh).VisibilityTeams(ctx, runmode.LocalDefaultOrgID, active[0].ID)
 	if err != nil {
 		t.Fatalf("VisibilityTeams: %v", err)
 	}
@@ -149,10 +149,10 @@ func TestGate_SharedRepo_VisibleToBoth(t *testing.T) {
 	teamA := runmode.LocalDefaultTeamID
 	teamB := seedGateTeam(t, dbh, "team-b")
 	shared := []domain.TeamGitHubRepo{{Owner: "owner", Repo: "shared"}}
-	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrg, teamA, shared); err != nil {
+	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, shared); err != nil {
 		t.Fatalf("teamA track: %v", err)
 	}
-	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrg, teamB, shared); err != nil {
+	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamB, shared); err != nil {
 		t.Fatalf("teamB track: %v", err)
 	}
 	seedMatchAllCIRule(t, dbh, teamA)
@@ -164,11 +164,11 @@ func TestGate_SharedRepo_VisibleToBoth(t *testing.T) {
 	}
 	gateRouter(dbh).HandleEvent(ciEvent(t, entity.ID, "owner/shared"))
 
-	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrg, entity.ID)
+	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
 	}
-	vis, err := testTaskStore(dbh).VisibilityTeams(ctx, runmode.LocalDefaultOrg, active[0].ID)
+	vis, err := testTaskStore(dbh).VisibilityTeams(ctx, runmode.LocalDefaultOrgID, active[0].ID)
 	if err != nil {
 		t.Fatalf("VisibilityTeams: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestGate_EscapeHatches(t *testing.T) {
 	jiraEvt := domain.Event{
 		EventType:    domain.EventJiraIssueAssigned,
 		MetadataJSON: `{"project":"SKY"}`,
-		OrgID:        runmode.LocalDefaultOrg,
+		OrgID:        runmode.LocalDefaultOrgID,
 	}
 
 	// (2) teamRepos + jiraRules unwired (nil) → pre-ticket behavior, never
@@ -219,14 +219,14 @@ func TestGate_EscapeHatches(t *testing.T) {
 
 	// (3) Unknown source → ungated even with a gate-active router + a real
 	// team that tracks nothing.
-	otherEvt := domain.Event{EventType: "system:poll:done", MetadataJSON: `{}`, OrgID: runmode.LocalDefaultOrg}
+	otherEvt := domain.Event{EventType: "system:poll:done", MetadataJSON: `{}`, OrgID: runmode.LocalDefaultOrgID}
 	if !r.handlerScopeMatchesEvent(otherEvt, domain.EventHandler{TeamID: "some-real-team"}, map[string]bool{}) {
 		t.Error("non-github/jira event should skip the scope gate")
 	}
 
 	// (4) Malformed/empty project metadata on a gate-active router →
 	// fail-open (no drop), same policy as the GitHub branch.
-	emptyProjEvt := domain.Event{EventType: domain.EventJiraIssueAssigned, MetadataJSON: `{}`, OrgID: runmode.LocalDefaultOrg}
+	emptyProjEvt := domain.Event{EventType: domain.EventJiraIssueAssigned, MetadataJSON: `{}`, OrgID: runmode.LocalDefaultOrgID}
 	if !r.handlerScopeMatchesEvent(emptyProjEvt, domain.EventHandler{TeamID: "some-real-team"}, map[string]bool{}) {
 		t.Error("jira event with no project should fail open (skip the gate)")
 	}
@@ -278,14 +278,14 @@ func TestJiraGate_DisjointProjects_DropsUntrackingTeam(t *testing.T) {
 
 	gateRouter(dbh).HandleEvent(jiraAssignedEvent(t, entity.ID, "SKY"))
 
-	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrg, entity.ID)
+	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil {
 		t.Fatalf("list active: %v", err)
 	}
 	if len(active) != 1 {
 		t.Fatalf("expected 1 task, got %d", len(active))
 	}
-	vis, err := testTaskStore(dbh).VisibilityTeams(ctx, runmode.LocalDefaultOrg, active[0].ID)
+	vis, err := testTaskStore(dbh).VisibilityTeams(ctx, runmode.LocalDefaultOrgID, active[0].ID)
 	if err != nil {
 		t.Fatalf("VisibilityTeams: %v", err)
 	}
@@ -310,7 +310,7 @@ func seedMatchAllJiraAssignedRule(t *testing.T, database *sql.DB, teamID string)
 			 scope_predicate_json, enabled, source, name, default_priority, sort_order,
 			 created_at, updated_at)
 		VALUES (?, ?, ?, ?, 'rule', ?, NULL, 1, 'user', ?, 0.7, 100, ?, ?)
-	`, ruleID, runmode.LocalDefaultOrg, teamID, runmode.LocalDefaultUserID,
+	`, ruleID, runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID,
 		domain.EventJiraIssueAssigned, "Jira rule "+teamID[:8], time.Now(), time.Now()); err != nil {
 		t.Fatalf("seed jira rule for team %s: %v", teamID, err)
 	}
@@ -327,7 +327,7 @@ func jiraAssignedEvent(t *testing.T, entityID, project string) domain.Event {
 		EntityID:     &entityID,
 		MetadataJSON: string(metaJSON),
 		CreatedAt:    time.Now(),
-		OrgID:        runmode.LocalDefaultOrg,
+		OrgID:        runmode.LocalDefaultOrgID,
 	}
 }
 
@@ -340,7 +340,7 @@ func TestGate_LocalN1_NoOp(t *testing.T) {
 	ctx := context.Background()
 
 	teamA := runmode.LocalDefaultTeamID
-	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrg, teamA, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo"}}); err != nil {
+	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo"}}); err != nil {
 		t.Fatalf("teamA track: %v", err)
 	}
 	// N=1: the local author is on the one team, so the author-centric ladder
@@ -355,7 +355,7 @@ func TestGate_LocalN1_NoOp(t *testing.T) {
 	}
 	gateRouter(dbh).HandleEvent(ciEvent(t, entity.ID, "owner/repo"))
 
-	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrg, entity.ID)
+	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
 	}

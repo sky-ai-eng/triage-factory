@@ -19,10 +19,10 @@ import (
 func seedBlueprintForTrigger(t *testing.T, s *Server, id string) {
 	t.Helper()
 	ctx := t.Context()
-	if existing, _ := s.blueprints.Get(ctx, runmode.LocalDefaultOrg, id); existing != nil {
+	if existing, _ := s.blueprints.Get(ctx, runmode.LocalDefaultOrgID, id); existing != nil {
 		return
 	}
-	if err := s.blueprints.Create(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Blueprint{
+	if err := s.blueprints.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
 		ID: id, Name: id, Source: "user", TeamID: runmode.LocalDefaultTeamID,
 	}); err != nil {
 		t.Fatalf("seed blueprint %s: %v", id, err)

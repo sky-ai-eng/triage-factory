@@ -9,7 +9,7 @@ import (
 
 // TeamAgentStoreFactory returns the wired store + orgID + teamID +
 // agentID, all pre-seeded so FKs into orgs/teams/agents are satisfied.
-// SQLite ignores orgID (asserts LocalDefaultOrg) and accepts arbitrary
+// SQLite ignores orgID (asserts LocalDefaultOrgID) and accepts arbitrary
 // strings for teamID/agentID; Postgres requires real UUIDs that already
 // exist in the respective tables.
 type TeamAgentStoreFactory func(t *testing.T) (store db.TeamAgentStore, orgID, teamID, agentID string)

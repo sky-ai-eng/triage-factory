@@ -16,7 +16,7 @@ import (
 // agentRunStore is the SQLite impl of db.AgentRunStore. SQL bodies
 // are ported from the pre-D2 internal/db/agent.go; the only
 // behavioral change is the orgID assertion at each method entry
-// (SQLite is single-tenant; any non-LocalDefaultOrg value is a
+// (SQLite is single-tenant; any non-LocalDefaultOrgID value is a
 // confused caller).
 //
 // The constructor takes a single queryer (SQLite has one connection)

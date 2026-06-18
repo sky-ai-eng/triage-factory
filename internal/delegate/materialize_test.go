@@ -32,7 +32,7 @@ func TestMaterializePriorMemories_CreatesDirEvenWithNoPriors(t *testing.T) {
 	}
 
 	// Sanity: no memories for this entity yet.
-	mems, err := stores.TaskMemory.GetMemoriesForEntity(context.Background(), runmode.LocalDefaultOrg, entity.ID)
+	mems, err := stores.TaskMemory.GetMemoriesForEntity(context.Background(), runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil {
 		t.Fatalf("GetMemoriesForEntity: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestMaterializePriorMemories_CreatesDirEvenWithNoPriors(t *testing.T) {
 	}
 
 	const namespace = "run-noprior"
-	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrg, cwd, entity.ID, namespace)
+	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, cwd, entity.ID, namespace)
 
 	// The current run's namespace folder is created even with no priors.
 	nsDir := filepath.Join(cwd, "_scratch", "entity-memory", namespace)
@@ -75,13 +75,13 @@ func TestMaterializePriorMemories_WritesPriors(t *testing.T) {
 		t.Fatalf("entity: %v", err)
 	}
 	// Seed task + run + memory chain so GetMemoriesForEntity returns one row.
-	evt, err := stores.Events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
+	evt, err := stores.Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
 		EventType: domain.EventJiraIssueAssigned, EntityID: &entity.ID, MetadataJSON: `{}`,
 	})
 	if err != nil {
 		t.Fatalf("event: %v", err)
 	}
-	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID, domain.EventJiraIssueAssigned, "", evt, 0.5)
+	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entity.ID, domain.EventJiraIssueAssigned, "", evt, 0.5)
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestMaterializePriorMemories_WritesPriors(t *testing.T) {
 	// namespaced by its blueprint_run_id. Seed that row (runs.blueprint_run_id is
 	// NOT NULL and the run_memory FK needs it).
 	const priorBlueprintRunID = "bpr-prior"
-	if err := stores.Blueprints.Create(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Blueprint{
+	if err := stores.Blueprints.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
 		ID: "bp-prior", Name: "BP", Source: "user", TeamID: runmode.LocalDefaultTeamID,
 	}); err != nil {
 		t.Fatalf("blueprint: %v", err)
@@ -101,16 +101,16 @@ func TestMaterializePriorMemories_WritesPriors(t *testing.T) {
 	); err != nil {
 		t.Fatalf("blueprint_run: %v", err)
 	}
-	if err := stores.AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
+	if err := stores.AgentRuns.Create(t.Context(), runmode.LocalDefaultOrgID, domain.AgentRun{
 		ID: "prior-run", TaskID: task.ID, PromptID: "p1", Status: "completed", Model: "m", BlueprintRunID: priorBlueprintRunID,
 	}); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if err := stores.TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrg, "prior-run", entity.ID, priorBlueprintRunID, "what i did last time"); err != nil {
+	if err := stores.TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "prior-run", entity.ID, priorBlueprintRunID, "what i did last time"); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
 
-	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrg, cwd, entity.ID, "current-run")
+	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, cwd, entity.ID, "current-run")
 
 	// The prior's namespace is its blueprint_run_id — the file lands under
 	// <blueprint_run_id>/<run_id>.md, never at the top level.
@@ -139,13 +139,13 @@ func TestMaterializePriorMemories_BlueprintSiblingsShareFolder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}
-	evt, err := stores.Events.Record(ctx, runmode.LocalDefaultOrg, domain.Event{
+	evt, err := stores.Events.Record(ctx, runmode.LocalDefaultOrgID, domain.Event{
 		EventType: domain.EventJiraIssueAssigned, EntityID: &entity.ID, MetadataJSON: `{}`,
 	})
 	if err != nil {
 		t.Fatalf("event: %v", err)
 	}
-	task, _, err := testTaskStore(database).FindOrCreate(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID, domain.EventJiraIssueAssigned, "", evt, 0.5)
+	task, _, err := testTaskStore(database).FindOrCreate(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entity.ID, domain.EventJiraIssueAssigned, "", evt, 0.5)
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestMaterializePriorMemories_BlueprintSiblingsShareFolder(t *testing.T) {
 	// Seed the blueprint + blueprint_run the two step runs share. The
 	// run_memory.blueprint_run_id FK (ON DELETE SET NULL) needs this row.
 	const blueprintRunID = "bpr-shared"
-	if err := stores.Blueprints.Create(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Blueprint{
+	if err := stores.Blueprints.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
 		ID: "bp1", Name: "BP", Source: "user", TeamID: runmode.LocalDefaultTeamID,
 	}); err != nil {
 		t.Fatalf("blueprint: %v", err)
@@ -167,18 +167,18 @@ func TestMaterializePriorMemories_BlueprintSiblingsShareFolder(t *testing.T) {
 	}
 
 	// Step 1 runs and writes its memory under the shared blueprint namespace.
-	if err := stores.AgentRuns.Create(ctx, runmode.LocalDefaultOrg, domain.AgentRun{
+	if err := stores.AgentRuns.Create(ctx, runmode.LocalDefaultOrgID, domain.AgentRun{
 		ID: "step1-run", TaskID: task.ID, PromptID: "p1", Status: "completed", Model: "m", BlueprintRunID: blueprintRunID,
 	}); err != nil {
 		t.Fatalf("step1 run: %v", err)
 	}
-	if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrg, "step1-run", entity.ID, blueprintRunID, "step 1 findings"); err != nil {
+	if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, "step1-run", entity.ID, blueprintRunID, "step 1 findings"); err != nil {
 		t.Fatalf("step1 memory: %v", err)
 	}
 
 	// Step 2 starts: materialize priors under step 2's own namespace (the same
 	// shared blueprint_run_id). Step 1's memory must land in that folder.
-	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrg, cwd, entity.ID, blueprintRunID)
+	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, cwd, entity.ID, blueprintRunID)
 
 	step1Path := filepath.Join(cwd, "_scratch", "entity-memory", blueprintRunID, "step1-run.md")
 	body, err := os.ReadFile(step1Path)

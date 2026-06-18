@@ -161,7 +161,7 @@ func TestHandleAgentPermission_ResolvesLiveRequest(t *testing.T) {
 	// Park a permission prompt for the run: the broker registers synchronously,
 	// then the handler blocks until resolved (or it times out).
 	got := make(chan agentproc.PermissionDecision, 1)
-	h := spawner.BrowserPermissionHandler(runmode.LocalDefaultOrg, runID)
+	h := spawner.BrowserPermissionHandler(runmode.LocalDefaultOrgID, runID)
 	go func() { got <- h(agentproc.PermissionRequest{RequestID: "req-1", ToolName: "Bash"}) }()
 
 	// Registration races the POST, so retry until the broker has the entry (404

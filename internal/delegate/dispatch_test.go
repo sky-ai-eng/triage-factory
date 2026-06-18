@@ -20,7 +20,7 @@ func reactorFixture(t *testing.T, suffix string, nSteps int, step0Status, step0O
 	t.Helper()
 	database := newDelegateTestDB(t)
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 	stores := sqlitestore.New(database)
 
 	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "owner/repo#"+suffix, "pr", "T", "https://x/"+suffix)
@@ -109,7 +109,7 @@ func queuedStepRuns(t *testing.T, database *sql.DB, brID string) []int {
 // blueprint running.
 func TestReactor_AdvanceEnqueuesNextStep(t *testing.T) {
 	s, database, brID, _, run0 := reactorFixture(t, "adv", 2, "completed", "continue")
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	stepRun, _ := s.agentRuns.GetSystem(context.Background(), org, run0)
 	stepRun.TriggerType = "manual"
@@ -132,7 +132,7 @@ func TestReactor_AdvanceEnqueuesNextStep(t *testing.T) {
 // terminates the blueprint completed and closes the task.
 func TestReactor_FinalStepFinishCompletes(t *testing.T) {
 	s, database, brID, taskID, run0 := reactorFixture(t, "fin", 1, "completed", "finish")
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	stepRun, _ := s.agentRuns.GetSystem(context.Background(), org, run0)
 	stepRun.TriggerType = "manual"
@@ -155,7 +155,7 @@ func TestReactor_FinalStepFinishCompletes(t *testing.T) {
 // blueprint does NOT advance — it finalizes the blueprint cancelled.
 func TestReactor_CancelRequestedTerminates(t *testing.T) {
 	s, database, brID, _, run0 := reactorFixture(t, "can", 2, "completed", "continue")
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 	if _, err := s.blueprints.RequestRunCancelSystem(context.Background(), org, brID); err != nil {
 		t.Fatalf("RequestRunCancelSystem: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestReactor_CancelRequestedTerminates(t *testing.T) {
 // blueprint running and enqueues nothing (resume drives it later).
 func TestReactor_ParkedStepLeavesRunning(t *testing.T) {
 	s, database, brID, _, run0 := reactorFixture(t, "park", 2, "open", "")
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	stepRun, _ := s.agentRuns.GetSystem(context.Background(), org, run0)
 	stepRun.TriggerType = "manual"

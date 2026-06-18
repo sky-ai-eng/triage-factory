@@ -53,9 +53,9 @@ func TestSendMessage_LiveRoutesToSteer(t *testing.T) {
 	// getProc is SendMessage's liveness gate; register a handle so it routes to
 	// the live path. The handle's LiveRun is never touched — the fake controller
 	// stands in for the real Steer.
-	s.registerProc(runmode.LocalDefaultOrg, "run-live", &agentproc.LiveRun{})
+	s.registerProc(runmode.LocalDefaultOrgID, "run-live", &agentproc.LiveRun{})
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrg, "run-live", runmode.LocalDefaultUserID, "hello"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "run-live", runmode.LocalDefaultUserID, "hello"); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	if fc.steerCalls != 1 || fc.steerRunID != "run-live" || fc.steerText != "hello" {
@@ -79,7 +79,7 @@ func TestSendMessage_OpenRoutesToResume(t *testing.T) {
 	wireBlobStore(t, s)
 	putTestSnapshot(t, s, blueprintRunIDForRun(t, database, "r-open"))
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrg, "r-open", runmode.LocalDefaultUserID, "go on"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-open", runmode.LocalDefaultUserID, "go on"); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 
@@ -116,7 +116,7 @@ func TestSendMessage_TerminalNotSteerable(t *testing.T) {
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrg, "r-done", runmode.LocalDefaultUserID, "hi")
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-done", runmode.LocalDefaultUserID, "hi")
 	if !errors.Is(err, ErrRunNotSteerable) {
 		t.Errorf("err = %v, want ErrRunNotSteerable", err)
 	}
@@ -160,7 +160,7 @@ func TestSendMessage_PendingApprovalIsResumable(t *testing.T) {
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrg, "r-pa", runmode.LocalDefaultUserID, "carry on")
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-pa", runmode.LocalDefaultUserID, "carry on")
 	if errors.Is(err, ErrRunNotSteerable) {
 		t.Errorf("pending_approval run rejected at the steerable gate: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestSendMessage_CompletedAbortIsResumable(t *testing.T) {
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrg, "r-ab", runmode.LocalDefaultUserID, "pick it back up")
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-ab", runmode.LocalDefaultUserID, "pick it back up")
 	if errors.Is(err, ErrRunNotSteerable) {
 		t.Errorf("completed+abort run rejected at the steerable gate: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestSendMessage_CompletedFinishNotSteerable(t *testing.T) {
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrg, "r-fin", runmode.LocalDefaultUserID, "more please")
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-fin", runmode.LocalDefaultUserID, "more please")
 	if !errors.Is(err, ErrRunNotSteerable) {
 		t.Errorf("err = %v, want ErrRunNotSteerable (finish runs are excluded from resume)", err)
 	}
@@ -226,7 +226,7 @@ func TestSendMessage_MissingRunNotSteerable(t *testing.T) {
 	database := newDelegateTestDB(t)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrg, "ghost", runmode.LocalDefaultUserID, "hi")
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "ghost", runmode.LocalDefaultUserID, "hi")
 	if !errors.Is(err, ErrRunNotSteerable) {
 		t.Errorf("err = %v, want ErrRunNotSteerable", err)
 	}

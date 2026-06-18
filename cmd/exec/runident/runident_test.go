@@ -66,7 +66,7 @@ func seedRun(t *testing.T, stores db.Stores, conn *sql.DB, runID, triggerType st
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}
-	evt, err := stores.Events.Record(ctx, runmode.LocalDefaultOrg, domain.Event{
+	evt, err := stores.Events.Record(ctx, runmode.LocalDefaultOrgID, domain.Event{
 		EventType:    domain.EventJiraIssueAssigned,
 		EntityID:     &entity.ID,
 		MetadataJSON: `{}`,
@@ -74,14 +74,14 @@ func seedRun(t *testing.T, stores db.Stores, conn *sql.DB, runID, triggerType st
 	if err != nil {
 		t.Fatalf("event: %v", err)
 	}
-	task, _, err := stores.Tasks.FindOrCreate(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID, domain.EventJiraIssueAssigned, runID, evt, 0.5)
+	task, _, err := stores.Tasks.FindOrCreate(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entity.ID, domain.EventJiraIssueAssigned, runID, evt, 0.5)
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}
-	if err := stores.Prompts.Create(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
+	if err := stores.Prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
-	if err := stores.AgentRuns.Create(ctx, runmode.LocalDefaultOrg, domain.AgentRun{
+	if err := stores.AgentRuns.Create(ctx, runmode.LocalDefaultOrgID, domain.AgentRun{
 		ID: runID, TaskID: task.ID, PromptID: "p-" + runID,
 		Status: "running", Model: "m",
 		TriggerType:    triggerType,

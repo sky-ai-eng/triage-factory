@@ -130,7 +130,7 @@ func TestServer_JiraGetIssue_RoutesHostSide(t *testing.T) {
 	defer jira.Close()
 
 	client := startJiraDaemon(t, jiraStores(jira.URL, "org-pat"),
-		RunInfo{OrgID: runmode.LocalDefaultOrg, RunID: "run-1"})
+		RunInfo{OrgID: runmode.LocalDefaultOrgID, RunID: "run-1"})
 
 	issue, err := client.JiraGetIssue(context.Background(), "PROJ-1")
 	if err != nil {
@@ -154,7 +154,7 @@ func TestServer_JiraCreateIssue_RoundTrip(t *testing.T) {
 	defer jira.Close()
 
 	client := startJiraDaemon(t, jiraStores(jira.URL, "org-pat"),
-		RunInfo{OrgID: runmode.LocalDefaultOrg, RunID: "run-1"})
+		RunInfo{OrgID: runmode.LocalDefaultOrgID, RunID: "run-1"})
 
 	key, err := client.JiraCreateIssue(context.Background(), "PROJ", "Task", "do a thing", "", "", "")
 	if err != nil {
@@ -174,7 +174,7 @@ func TestServer_JiraSearchIssues_RoundTrip(t *testing.T) {
 	defer jira.Close()
 
 	client := startJiraDaemon(t, jiraStores(jira.URL, "org-pat"),
-		RunInfo{OrgID: runmode.LocalDefaultOrg, RunID: "run-1"})
+		RunInfo{OrgID: runmode.LocalDefaultOrgID, RunID: "run-1"})
 
 	issues, err := client.JiraSearchIssues(context.Background(), "project = PROJ", nil, 50)
 	if err != nil {
@@ -197,7 +197,7 @@ func TestServer_JiraUpdateIssue_FieldsCrossWire(t *testing.T) {
 	defer jira.Close()
 
 	client := startJiraDaemon(t, jiraStores(jira.URL, "org-pat"),
-		RunInfo{OrgID: runmode.LocalDefaultOrg, RunID: "run-1"})
+		RunInfo{OrgID: runmode.LocalDefaultOrgID, RunID: "run-1"})
 
 	newSummary := "rewritten summary"
 	err := client.JiraUpdateIssue(context.Background(), "PROJ-1", jiraclient.UpdateIssueFields{Summary: &newSummary})
@@ -224,7 +224,7 @@ func TestServer_JiraTransition_ClientSideRejectionPropagates(t *testing.T) {
 	defer jira.Close()
 
 	client := startJiraDaemon(t, jiraStores(jira.URL, "org-pat"),
-		RunInfo{OrgID: runmode.LocalDefaultOrg, RunID: "run-1"})
+		RunInfo{OrgID: runmode.LocalDefaultOrgID, RunID: "run-1"})
 
 	err := client.JiraTransitionTo(context.Background(), "PROJ-1", "Done")
 	if err == nil {
@@ -251,7 +251,7 @@ func TestServer_JiraTransition_APIErrorPropagates(t *testing.T) {
 	defer jira.Close()
 
 	client := startJiraDaemon(t, jiraStores(jira.URL, "org-pat"),
-		RunInfo{OrgID: runmode.LocalDefaultOrg, RunID: "run-1"})
+		RunInfo{OrgID: runmode.LocalDefaultOrgID, RunID: "run-1"})
 
 	err := client.JiraTransitionTo(context.Background(), "PROJ-1", "Done")
 	if err == nil {
@@ -275,7 +275,7 @@ func TestLocalClient_JiraGetIssue_DirectPath(t *testing.T) {
 	defer jira.Close()
 
 	client := NewLocal(jiraStores(jira.URL, "org-pat"),
-		RunInfo{OrgID: runmode.LocalDefaultOrg, RunID: "run-1"})
+		RunInfo{OrgID: runmode.LocalDefaultOrgID, RunID: "run-1"})
 
 	issue, err := client.JiraGetIssue(context.Background(), "PROJ-7")
 	if err != nil {
@@ -294,7 +294,7 @@ func TestLocalClient_JiraGetIssue_DirectPath(t *testing.T) {
 // CLI printed pre-refactor — in local mode directly, and over IPC as the
 // response error string.
 func TestJira_NotConfigured_BothModes(t *testing.T) {
-	info := RunInfo{OrgID: runmode.LocalDefaultOrg, RunID: "run-1"}
+	info := RunInfo{OrgID: runmode.LocalDefaultOrgID, RunID: "run-1"}
 
 	// Assert on the actionable "run triagefactory" guidance: it's absent
 	// from the raw resolver sentinel ("jira: no system credential for

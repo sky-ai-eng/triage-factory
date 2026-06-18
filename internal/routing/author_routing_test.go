@@ -34,7 +34,7 @@ func emitCI(router *Router, entityID, author string) {
 		DedupKey:     "build",
 		MetadataJSON: string(metaJSON),
 		OccurredAt:   time.Now(),
-		OrgID:        runmode.LocalDefaultOrg,
+		OrgID:        runmode.LocalDefaultOrgID,
 	})
 }
 
@@ -52,7 +52,7 @@ func seedSystemRule(t *testing.T, database *sql.DB, teamID, eventType string) {
 			 system_slug, scope_predicate_json, enabled, source, name, default_priority, sort_order,
 			 created_at, updated_at)
 		VALUES (?, ?, ?, NULL, 'rule', ?, ?, '{"author_in":[]}', 1, 'system', 'sys rule', 0.75, 0, ?, ?)
-	`, "sys-"+key, runmode.LocalDefaultOrg, teamID,
+	`, "sys-"+key, runmode.LocalDefaultOrgID, teamID,
 		eventType, "system-rule-"+key, time.Now(), time.Now()); err != nil {
 		t.Fatalf("seed system rule (%s) for team %s: %v", eventType, teamID, err)
 	}
@@ -79,7 +79,7 @@ func TestAuthorCentric_StrangerPR_NoTask(t *testing.T) {
 	entityID := reviewEntity(t, database, "owner/repo#stranger")
 	emitCI(reviewRouter(database), entityID, "stranger") // not a TF user
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
 		t.Fatalf("list tasks: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestAuthorCentric_LocalUserPR_OneTeam(t *testing.T) {
 	entityID := reviewEntity(t, database, "owner/repo#mine")
 	emitCI(reviewRouter(database), entityID, "aidan")
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task on the local user's PR, got %d (err=%v)", len(active), err)
 	}
@@ -129,7 +129,7 @@ func TestAuthorCentric_AuthorOnOneTeam_OwnedByThatTeam(t *testing.T) {
 	entityID := reviewEntity(t, database, "owner/repo#aonly")
 	emitCI(reviewRouter(database), entityID, "aidan")
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
 	}
@@ -160,7 +160,7 @@ func TestAuthorCentric_AuthorOnTwoTeams_NullOwnerVisibleBoth(t *testing.T) {
 	entityID := reviewEntity(t, database, "owner/repo#both")
 	emitCI(reviewRouter(database), entityID, "aidan")
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
 	}
@@ -196,17 +196,17 @@ func TestAuthorCentric_ProjectOwned_OwnerIsProjectTeam(t *testing.T) {
 	if _, err := database.Exec(`
 		INSERT INTO projects (id, name, pinned_repos, org_id, team_id, creator_user_id, visibility, created_at, updated_at)
 		VALUES (?, 'Proj', '[]', ?, ?, ?, 'team', datetime('now'), datetime('now'))
-	`, projectID, runmode.LocalDefaultOrg, teamProject, runmode.LocalDefaultUserID); err != nil {
+	`, projectID, runmode.LocalDefaultOrgID, teamProject, runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("create project: %v", err)
 	}
 	entityID := reviewEntity(t, database, "owner/repo#proj")
-	if err := st.Entities.AssignProject(context.Background(), runmode.LocalDefaultOrg, entityID, &projectID, "test"); err != nil {
+	if err := st.Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, entityID, &projectID, "test"); err != nil {
 		t.Fatalf("assign project: %v", err)
 	}
 
 	emitCI(reviewRouter(database), entityID, "aidan") // author on teamAuthor
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
 	}
@@ -235,7 +235,7 @@ func TestAuthorCentric_OverrideOwningTeam(t *testing.T) {
 
 	emitCI(reviewRouter(database), entityID, "aidan")
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
 	}
@@ -274,10 +274,10 @@ func TestAuthorCentric_PriorTaskAnchorsOwner(t *testing.T) {
 		EventType:    domain.EventGitHubPRConflicts,
 		EntityID:     &entityID,
 		MetadataJSON: string(conflictMeta),
-		OrgID:        runmode.LocalDefaultOrg,
+		OrgID:        runmode.LocalDefaultOrgID,
 	})
 
-	conflictTasks, err := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrg, entityID, domain.EventGitHubPRConflicts)
+	conflictTasks, err := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrgID, entityID, domain.EventGitHubPRConflicts)
 	if err != nil || len(conflictTasks) != 1 {
 		t.Fatalf("expected 1 conflicts task, got %d (err=%v)", len(conflictTasks), err)
 	}
@@ -314,7 +314,7 @@ func TestAuthorCentric_ReviewFirstTrap_CIFallsToAuthor(t *testing.T) {
 	// don't confer entity ownership — so it falls to the author (teamAuthor).
 	emitCI(router, entityID, "aidan")
 
-	ci, err := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrg, entityID, domain.EventGitHubPRCICheckFailed)
+	ci, err := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrgID, entityID, domain.EventGitHubPRCICheckFailed)
 	if err != nil || len(ci) != 1 {
 		t.Fatalf("expected 1 CI task, got %d (err=%v)", len(ci), err)
 	}
@@ -338,7 +338,7 @@ func TestAuthorCentric_ExternalAuthor_WatchRuleSurfaces(t *testing.T) {
 	entityID := reviewEntity(t, database, "owner/repo#dependabot")
 	emitCI(reviewRouter(database), entityID, "dependabot[bot]") // not a TF user
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task from the watch rule, got %d (err=%v)", len(active), err)
 	}
@@ -373,7 +373,7 @@ func TestAuthorCentric_NullOwner_NoAutoFire(t *testing.T) {
 		t.Fatalf("seed agent: %v", err)
 	}
 	for _, tm := range []string{teamA, teamB} {
-		if err := st.TeamAgents.AddForTeam(context.Background(), runmode.LocalDefaultOrg, tm, runmode.LocalDefaultAgentID); err != nil {
+		if err := st.TeamAgents.AddForTeam(context.Background(), runmode.LocalDefaultOrgID, tm, runmode.LocalDefaultAgentID); err != nil {
 			t.Fatalf("add agent to %s: %v", tm, err)
 		}
 		pid := "p-nf-" + tm[:8]
@@ -384,7 +384,7 @@ func TestAuthorCentric_NullOwner_NoAutoFire(t *testing.T) {
 				(id, org_id, team_id, creator_user_id, kind, event_type,
 				 scope_predicate_json, enabled, source, blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
 			VALUES (?, ?, ?, ?, 'trigger', ?, NULL, 1, 'user', ?, 4, 0, datetime('now'), datetime('now'))
-		`, "trig-nf-"+tm[:8], runmode.LocalDefaultOrg, tm, runmode.LocalDefaultUserID,
+		`, "trig-nf-"+tm[:8], runmode.LocalDefaultOrgID, tm, runmode.LocalDefaultUserID,
 			domain.EventGitHubPRCICheckFailed, bp); err != nil {
 			t.Fatalf("seed trigger for %s: %v", tm, err)
 		}
@@ -398,7 +398,7 @@ func TestAuthorCentric_NullOwner_NoAutoFire(t *testing.T) {
 
 	emitCI(router, entityID, "aidan")
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
 	}

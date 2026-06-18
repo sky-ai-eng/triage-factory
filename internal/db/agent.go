@@ -23,7 +23,7 @@ var ErrFenceRequiresEventAndTrigger = errors.New("db: CreateIfNotFiredSystem req
 // AgentRunStore owns the runs / run_messages tables — agent run
 // lifecycle, transcript messages, and the derived queries the delegate
 // spawner + agent handler + chains depend on. All methods take orgID;
-// local mode passes runmode.LocalDefaultOrg.
+// local mode passes runmode.LocalDefaultOrgID.
 //
 // Wired against the app pool in Postgres (RLS-active): every
 // consumer is request-equivalent or runs inside a delegate spawner

@@ -15,7 +15,7 @@ import (
 // task lifecycle and so the AI scorer (the sole production caller)
 // can depend on a 4-method surface instead of the full task surface.
 //
-// All methods take orgID. Local mode passes runmode.LocalDefaultOrg
+// All methods take orgID. Local mode passes runmode.LocalDefaultOrgID
 // (asserted by the SQLite impl). Multi mode passes the scorer's
 // current org context; the Postgres impl includes org_id in WHERE
 // clauses as defense in depth alongside RLS.

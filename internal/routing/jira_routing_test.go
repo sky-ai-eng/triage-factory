@@ -70,7 +70,7 @@ func seedSystemJiraRule(t *testing.T, database *sql.DB, teamID, eventType string
 			 system_slug, scope_predicate_json, enabled, source, name, default_priority, sort_order,
 			 created_at, updated_at)
 		VALUES (?, ?, ?, NULL, 'rule', ?, ?, '{"assignee_in":[]}', 1, 'system', 'sys jira rule', 0.75, 0, ?, ?)
-	`, "sysj-"+key, runmode.LocalDefaultOrg, teamID,
+	`, "sysj-"+key, runmode.LocalDefaultOrgID, teamID,
 		eventType, "system-jira-rule-"+key, time.Now(), time.Now()); err != nil {
 		t.Fatalf("seed system jira rule (%s) for team %s: %v", eventType, teamID, err)
 	}
@@ -87,7 +87,7 @@ func seedUserJiraRule(t *testing.T, database *sql.DB, teamID, eventType string) 
 			 scope_predicate_json, enabled, source, name, default_priority, sort_order,
 			 created_at, updated_at)
 		VALUES (?, ?, ?, ?, 'rule', ?, '{"assignee_in":[]}', 1, 'user', ?, 0.7, 100, ?, ?)
-	`, uuid.New().String(), runmode.LocalDefaultOrg, teamID, runmode.LocalDefaultUserID,
+	`, uuid.New().String(), runmode.LocalDefaultOrgID, teamID, runmode.LocalDefaultUserID,
 		eventType, "user jira rule "+teamID[:8], time.Now(), time.Now()); err != nil {
 		t.Fatalf("seed user jira rule (%s) for team %s: %v", eventType, teamID, err)
 	}
@@ -115,7 +115,7 @@ func emitJiraAssigned(router *Router, entityID, accountID string) {
 		EntityID:     &entityID,
 		MetadataJSON: string(metaJSON),
 		OccurredAt:   time.Now(),
-		OrgID:        runmode.LocalDefaultOrg,
+		OrgID:        runmode.LocalDefaultOrgID,
 	})
 }
 
@@ -133,7 +133,7 @@ func TestAssigneeCentric_NonMemberAssignee_NoTask(t *testing.T) {
 	entityID := jiraEntity(t, database, "SKY-stranger")
 	emitJiraAssigned(reviewRouter(database), entityID, "acct-stranger") // not a TF user
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
 		t.Fatalf("list tasks: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestAssigneeCentric_LocalUserAssignee_OneTeam(t *testing.T) {
 	entityID := jiraEntity(t, database, "SKY-mine")
 	emitJiraAssigned(reviewRouter(database), entityID, "acct-aidan")
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task on the local user's issue, got %d (err=%v)", len(active), err)
 	}
@@ -181,7 +181,7 @@ func TestAssigneeCentric_AssigneeOnOneTeam_OwnedByThatTeam(t *testing.T) {
 	entityID := jiraEntity(t, database, "SKY-aonly")
 	emitJiraAssigned(reviewRouter(database), entityID, "acct-aidan")
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
 	}
@@ -213,7 +213,7 @@ func TestAssigneeCentric_AssigneeOnTwoTeams_NullOwnerVisibleBoth(t *testing.T) {
 	entityID := jiraEntity(t, database, "SKY-both")
 	emitJiraAssigned(reviewRouter(database), entityID, "acct-shared")
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
 	}
@@ -291,10 +291,10 @@ func TestAssigneeCentric_NonAssignedTypes_RouteByAssignee(t *testing.T) {
 				DedupKey:     tc.dedup,
 				MetadataJSON: tc.metaJSON("acct-aidan"),
 				OccurredAt:   time.Now(),
-				OrgID:        runmode.LocalDefaultOrg,
+				OrgID:        runmode.LocalDefaultOrgID,
 			})
 
-			active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+			active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 			if err != nil || len(active) != 1 {
 				t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
 			}
@@ -323,7 +323,7 @@ func TestAssigneeCentric_ExternalAssignee_WatchRuleSurfaces(t *testing.T) {
 	entityID := jiraEntity(t, database, "SKY-external")
 	emitJiraAssigned(reviewRouter(database), entityID, "acct-outsider") // not a TF user
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task from the watch rule, got %d (err=%v)", len(active), err)
 	}
@@ -362,10 +362,10 @@ func TestAssigneeCentric_CommenterNotARoutingDriver(t *testing.T) {
 		EntityID:     &entityID,
 		MetadataJSON: string(metaJSON),
 		OccurredAt:   time.Now(),
-		OrgID:        runmode.LocalDefaultOrg,
+		OrgID:        runmode.LocalDefaultOrgID,
 	})
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
 		t.Fatalf("list tasks: %v", err)
 	}
@@ -394,7 +394,7 @@ func TestAssigneeCentric_OverrideOwningTeam(t *testing.T) {
 
 	emitJiraAssigned(reviewRouter(database), entityID, "acct-aidan")
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
 	}
@@ -437,10 +437,10 @@ func TestAssigneeCentric_PriorTaskAnchorsOwner(t *testing.T) {
 		DedupKey:     "In Progress",
 		MetadataJSON: string(statusMeta),
 		OccurredAt:   time.Now(),
-		OrgID:        runmode.LocalDefaultOrg,
+		OrgID:        runmode.LocalDefaultOrgID,
 	})
 
-	statusTasks, err := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrg, entityID, domain.EventJiraIssueStatusChanged)
+	statusTasks, err := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrgID, entityID, domain.EventJiraIssueStatusChanged)
 	if err != nil || len(statusTasks) != 1 {
 		t.Fatalf("expected 1 status_changed task, got %d (err=%v)", len(statusTasks), err)
 	}
@@ -469,10 +469,10 @@ func TestAssigneeCentric_Available_StillCreatesTeamPoolTask(t *testing.T) {
 		EntityID:     &entityID,
 		MetadataJSON: string(metaJSON),
 		OccurredAt:   time.Now(),
-		OrgID:        runmode.LocalDefaultOrg,
+		OrgID:        runmode.LocalDefaultOrgID,
 	})
 
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected 1 team-pool task from available, got %d (err=%v)", len(active), err)
 	}
@@ -503,7 +503,7 @@ func TestAssigneeCentric_ReassignToMember_PriorOwnerCloses_NewOwnerMinted(t *tes
 	emitJiraAssigned(router, entityID, "acct-aidan")
 	emitJiraAssigned(router, entityID, "acct-bob")
 
-	active, err := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrg, entityID, domain.EventJiraIssueAssigned)
+	active, err := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrgID, entityID, domain.EventJiraIssueAssigned)
 	if err != nil || len(active) != 1 {
 		t.Fatalf("expected exactly 1 active assigned task after reassignment, got %d (err=%v)", len(active), err)
 	}
@@ -537,23 +537,23 @@ func TestAssigneeCentric_AssignClosesAvailablePoolTask(t *testing.T) {
 		EntityID:     &entityID,
 		MetadataJSON: string(availMeta),
 		OccurredAt:   time.Now(),
-		OrgID:        runmode.LocalDefaultOrg,
+		OrgID:        runmode.LocalDefaultOrgID,
 	})
-	if avail, _ := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrg, entityID, domain.EventJiraIssueAvailable); len(avail) != 1 {
+	if avail, _ := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrgID, entityID, domain.EventJiraIssueAvailable); len(avail) != 1 {
 		t.Fatalf("setup: expected 1 available pool task, got %d", len(avail))
 	}
 
 	// Now assigned to aidan, a member of teamA (the pool task's owner).
 	emitJiraAssigned(router, entityID, "acct-aidan")
 
-	avail, err := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrg, entityID, domain.EventJiraIssueAvailable)
+	avail, err := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrgID, entityID, domain.EventJiraIssueAvailable)
 	if err != nil {
 		t.Fatalf("list available tasks: %v", err)
 	}
 	if len(avail) != 0 {
 		t.Errorf("available pool task should retire on assignment, still %d active", len(avail))
 	}
-	all, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
+	all, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(all) != 1 {
 		t.Fatalf("expected exactly 1 active task (the assigned one), got %d (err=%v)", len(all), err)
 	}
@@ -579,14 +579,14 @@ func TestAssigneeCentric_ReassignSameMember_NoChurn(t *testing.T) {
 	router := reviewRouter(database)
 
 	emitJiraAssigned(router, entityID, "acct-aidan")
-	first, err := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrg, entityID, domain.EventJiraIssueAssigned)
+	first, err := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrgID, entityID, domain.EventJiraIssueAssigned)
 	if err != nil || len(first) != 1 {
 		t.Fatalf("expected 1 task after first assign, got %d (err=%v)", len(first), err)
 	}
 
 	emitJiraAssigned(router, entityID, "acct-aidan") // re-emit, same member
 
-	second, err := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrg, entityID, domain.EventJiraIssueAssigned)
+	second, err := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrgID, entityID, domain.EventJiraIssueAssigned)
 	if err != nil || len(second) != 1 {
 		t.Fatalf("expected still 1 task after re-emit, got %d (err=%v)", len(second), err)
 	}

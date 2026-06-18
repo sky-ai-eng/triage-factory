@@ -38,7 +38,7 @@ func openStores(t *testing.T) db.Stores {
 func TestLoadSave_Roundtrip(t *testing.T) {
 	stores := openStores(t)
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	want := auth.Credentials{
 		GitHubURL: "https://github.example.com",
@@ -61,7 +61,7 @@ func TestLoadSave_Roundtrip(t *testing.T) {
 func TestSave_SkipsEmptyValues(t *testing.T) {
 	stores := openStores(t)
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	// Seed existing GitHub PAT then call Save with only Jira fields
 	// populated. The GitHub PAT must survive — empty values mean
@@ -93,7 +93,7 @@ func TestSave_SkipsEmptyValues(t *testing.T) {
 func TestClearGitHub_LeavesJira(t *testing.T) {
 	stores := openStores(t)
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
 		GitHubURL: "https://github.example.com",
@@ -121,7 +121,7 @@ func TestClearGitHub_LeavesJira(t *testing.T) {
 func TestClearJira_LeavesGitHub(t *testing.T) {
 	stores := openStores(t)
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
 		GitHubURL: "https://github.example.com",
@@ -152,7 +152,7 @@ func TestClearJira_LeavesGitHub(t *testing.T) {
 func TestLoadSave_CloudRoundtrip(t *testing.T) {
 	stores := openStores(t)
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	want := auth.Credentials{
 		JiraURL:        "https://acme.atlassian.net",
@@ -178,7 +178,7 @@ func TestLoadSave_CloudRoundtrip(t *testing.T) {
 func TestClearJira_SweepsCloudKeys(t *testing.T) {
 	stores := openStores(t)
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
 		GitHubURL:      "https://github.example.com",
@@ -213,7 +213,7 @@ func TestClearJiraOtherScheme(t *testing.T) {
 	t.Run("cloud in use clears the DC PAT", func(t *testing.T) {
 		stores := openStores(t)
 		ctx := context.Background()
-		org := runmode.LocalDefaultOrg
+		org := runmode.LocalDefaultOrgID
 
 		// Org was DC, now reconnected as Cloud: both schemes' secrets present.
 		if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
@@ -241,7 +241,7 @@ func TestClearJiraOtherScheme(t *testing.T) {
 	t.Run("dc in use clears the Cloud pair", func(t *testing.T) {
 		stores := openStores(t)
 		ctx := context.Background()
-		org := runmode.LocalDefaultOrg
+		org := runmode.LocalDefaultOrgID
 
 		if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
 			JiraURL: "https://jira.corp.example", JiraPAT: "dc-pat",
@@ -269,7 +269,7 @@ func TestClearJiraOtherScheme(t *testing.T) {
 func TestClear_WipesEverything(t *testing.T) {
 	stores := openStores(t)
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
 		GitHubURL: "https://github.example.com",
@@ -364,7 +364,7 @@ func TestJiraSystemConfig(t *testing.T) {
 func TestLoad_EnvOverlayWins(t *testing.T) {
 	stores := openStores(t)
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
 		GitHubURL: "https://kept-keychain.example.com",
@@ -391,7 +391,7 @@ func TestLoad_EnvOverlayWins(t *testing.T) {
 func TestLoadSystem_Roundtrip(t *testing.T) {
 	stores := openStores(t)
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	want := auth.Credentials{
 		GitHubURL:      "https://github.example.com",
@@ -450,7 +450,7 @@ func (r *recordingSecrets) GetSystem(_ context.Context, _ string, key string) (s
 // invariant.
 func TestLoadSystem_SameKeySetAsLoad(t *testing.T) {
 	ctx := context.Background()
-	org := runmode.LocalDefaultOrg
+	org := runmode.LocalDefaultOrgID
 
 	rec := &recordingSecrets{}
 	if _, err := integrations.Load(ctx, rec, org); err != nil {

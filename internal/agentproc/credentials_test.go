@@ -240,11 +240,11 @@ func TestResolveCredentials_MultiModeOrgWithNoKey(t *testing.T) {
 // identically in local-as-N=1 and multi mode.
 func TestResolveCredentials_LocalModeOrgWithKey(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
-	secrets := newFakeSecrets(runmode.LocalDefaultOrg, map[string]string{
+	secrets := newFakeSecrets(runmode.LocalDefaultOrgID, map[string]string{
 		"anthropic_api_key": "sk-ant-local-configured",
 	})
 
-	env, err := resolveCredentials(context.Background(), secrets, runmode.LocalDefaultOrg)
+	env, err := resolveCredentials(context.Background(), secrets, runmode.LocalDefaultOrgID)
 	if err != nil {
 		t.Fatalf("resolveCredentials: %v", err)
 	}

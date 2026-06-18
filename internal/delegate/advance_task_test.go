@@ -22,7 +22,7 @@ func TestRecomputeBoard_RunningSetsInProgress(t *testing.T) {
 	s, database, _, taskID := setupAdvanceFixture(t, "ip")
 	stampBotClaim(t, database, taskID)
 
-	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
 		t.Errorf("task.status = %q, want in_progress (an unparked active run)", got)
@@ -35,7 +35,7 @@ func TestRecomputeBoard_OpenSetsInReview(t *testing.T) {
 	stampBotClaim(t, database, taskID)
 	setRunStatus(t, database, runID, "open")
 
-	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 
 	if got := readTaskStatus(t, database, taskID); got != "in_review" {
 		t.Errorf("task.status = %q, want in_review (open parks → needs 👀)", got)
@@ -49,7 +49,7 @@ func TestRecomputeBoard_PendingApprovalSetsInReview(t *testing.T) {
 	stampBotClaim(t, database, taskID)
 	setRunStatus(t, database, runID, "pending_approval")
 
-	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 
 	if got := readTaskStatus(t, database, taskID); got != "in_review" {
 		t.Errorf("task.status = %q, want in_review (pending_approval → needs 👀)", got)
@@ -63,25 +63,25 @@ func TestRecomputeBoard_BouncesAcrossInteractionPoints(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "bounce")
 	stampBotClaim(t, database, taskID)
 
-	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
 		t.Fatalf("initial: status = %q, want in_progress", got)
 	}
 
 	setRunStatus(t, database, runID, "open")
-	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 	if got := readTaskStatus(t, database, taskID); got != "in_review" {
 		t.Fatalf("after open: status = %q, want in_review", got)
 	}
 
 	setRunStatus(t, database, runID, "running")
-	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
 		t.Fatalf("after resume: status = %q, want in_progress", got)
 	}
 
 	setRunStatus(t, database, runID, "pending_approval")
-	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 	if got := readTaskStatus(t, database, taskID); got != "in_review" {
 		t.Fatalf("after second park: status = %q, want in_review", got)
 	}
@@ -98,14 +98,14 @@ func TestRecomputeBoard_MultiStepAggregate(t *testing.T) {
 	setRunStatus(t, database, runID, "completed")
 	addStepRun(t, database, brID, taskID, "step1-multi", 1, "running")
 
-	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
 		t.Errorf("all-unparked: status = %q, want in_progress", got)
 	}
 
 	// Now step 1 parks → in_review (any parked run flips the aggregate).
 	setRunStatus(t, database, "step1-multi", "pending_approval")
-	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 	if got := readTaskStatus(t, database, taskID); got != "in_review" {
 		t.Errorf("step parked: status = %q, want in_review", got)
 	}
@@ -118,7 +118,7 @@ func TestRecomputeBoard_UserClaimedTaskNeutral(t *testing.T) {
 	stampUserClaim(t, database, taskID)
 	setRunStatus(t, database, runID, "pending_approval")
 
-	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 
 	if got := readTaskStatus(t, database, taskID); got != "queued" {
 		t.Errorf("status = %q, want queued (user-claimed task must not auto-move)", got)
@@ -129,7 +129,7 @@ func TestRecomputeBoard_UserClaimedTaskNeutral(t *testing.T) {
 func TestRecomputeBoard_UnclaimedTaskNeutral(t *testing.T) {
 	s, database, _, taskID := setupAdvanceFixture(t, "unclaimed")
 
-	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 
 	if got := readTaskStatus(t, database, taskID); got != "queued" {
 		t.Errorf("status = %q, want queued (unclaimed task must not move)", got)
@@ -145,7 +145,7 @@ func TestRecomputeBoard_AlreadyTerminalNeutral(t *testing.T) {
 	}
 	setRunStatus(t, database, runID, "pending_approval")
 
-	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 
 	if got := readTaskStatus(t, database, taskID); got != "dismissed" {
 		t.Errorf("status = %q, want dismissed (terminal task must not flip)", got)
@@ -168,7 +168,7 @@ func TestRecomputeBoard_NoActiveBlueprintRunNeutral(t *testing.T) {
 	}
 	setRunStatus(t, database, runID, "completed")
 
-	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrg, taskID)
+	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
 		t.Errorf("status = %q, want in_progress (no active blueprint_run → recompute is a no-op)", got)

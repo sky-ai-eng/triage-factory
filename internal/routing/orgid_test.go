@@ -29,7 +29,7 @@ import (
 func TestHandleEvent_EmptyOrgID_Dropped(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
-	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
+	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 
@@ -64,7 +64,7 @@ func TestHandleEvent_EmptyOrgID_Dropped(t *testing.T) {
 	}
 
 	// No task created for the orphaned entity.
-	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrg, entity.ID)
+	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil {
 		t.Fatalf("list active tasks: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestHandleEvent_EmptyOrgID_Dropped(t *testing.T) {
 func TestHandleEvent_OrgIDThreaded(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
-	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
+	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 	// An explicit team-owned watch rule so the author-centric CI event creates
@@ -115,7 +115,7 @@ func TestHandleEvent_OrgIDThreaded(t *testing.T) {
 		DedupKey:     "build",
 		MetadataJSON: `{"check_name":"build"}`,
 		CreatedAt:    time.Now(),
-		OrgID:        runmode.LocalDefaultOrg,
+		OrgID:        runmode.LocalDefaultOrgID,
 	})
 
 	// The recorded event row must carry the same org_id the caller
@@ -125,13 +125,13 @@ func TestHandleEvent_OrgIDThreaded(t *testing.T) {
 	if err := database.QueryRow(`SELECT org_id FROM events WHERE entity_id = ?`, entity.ID).Scan(&recordedOrgID); err != nil {
 		t.Fatalf("read recorded event: %v", err)
 	}
-	if recordedOrgID != runmode.LocalDefaultOrg {
-		t.Errorf("recorded org_id = %q, want %q", recordedOrgID, runmode.LocalDefaultOrg)
+	if recordedOrgID != runmode.LocalDefaultOrgID {
+		t.Errorf("recorded org_id = %q, want %q", recordedOrgID, runmode.LocalDefaultOrgID)
 	}
 
 	// And the downstream task should be attributable to the same
 	// tenant via the store's orgID-scoped read.
-	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrg, entity.ID)
+	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil {
 		t.Fatalf("list active: %v", err)
 	}

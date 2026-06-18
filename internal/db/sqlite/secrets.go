@@ -24,12 +24,12 @@ import (
 // that don't want to branch on runmode — most importantly the per-org
 // credential resolver SKY-322 will add — can issue one Get call and
 // have it work in either mode. In local mode there's a single org
-// (runmode.LocalDefaultOrg) and a single keychain bag; orgID is
+// (runmode.LocalDefaultOrgID) and a single keychain bag; orgID is
 // asserted to match the sentinel and otherwise ignored.
 //
 // # orgID validation
 //
-// orgID MUST equal runmode.LocalDefaultOrg in local mode. A mismatched
+// orgID MUST equal runmode.LocalDefaultOrgID in local mode. A mismatched
 // orgID is a caller bug (probably forgot to extract the request orgID
 // via the SKY-316 accessor), and silently writing to the wrong bag
 // would be a footgun. The error surfaces the caller mistake instead.
@@ -93,7 +93,7 @@ func (*secretStore) Delete(_ context.Context, orgID, key string) (bool, error) {
 // it keeps per-user keys from colliding with per-org ones in the same
 // bag and mirrors the multi-mode Vault name shape
 // ("org/<org>/user/<user>/<key>" vs the local "user/<user>/<key>",
-// orgID being the implicit LocalDefaultOrg sentinel).
+// orgID being the implicit LocalDefaultOrgID sentinel).
 func userKeychainKey(userID, key string) string {
 	return "user/" + userID + "/" + key
 }

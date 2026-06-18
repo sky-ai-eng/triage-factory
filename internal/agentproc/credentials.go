@@ -200,12 +200,12 @@ var credentialEnvKeys = []string{
 //
 // Local-mode behavior:
 //
-//   - empty OrgID OR OrgID == LocalDefaultOrg with no Anthropic /
+//   - empty OrgID OR OrgID == LocalDefaultOrgID with no Anthropic /
 //     Bedrock secret set → returns an empty map. The subprocess
 //     inherits the host's env unchanged (preserves the existing
 //     "Claude Code subscription handles auth" flow + the
 //     TRIAGE_FACTORY_*-style env-overlay paths some users rely on).
-//   - LocalDefaultOrg with a configured Anthropic / Bedrock key →
+//   - LocalDefaultOrgID with a configured Anthropic / Bedrock key →
 //     returns the matching env map; Run filters credentialEnvKeys
 //     from os.Environ so a stale shell var can't override the
 //     keychain value.

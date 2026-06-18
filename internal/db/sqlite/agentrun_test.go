@@ -24,7 +24,7 @@ func TestAgentRunStore_SQLite(t *testing.T) {
 		conn := newSQLiteForAgentRunTest(t)
 		seed := newSQLiteAgentRunSeeder(conn)
 		stores := sqlitestore.New(conn)
-		return stores.AgentRuns, runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, seed
+		return stores.AgentRuns, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, seed
 	})
 }
 
@@ -173,13 +173,13 @@ func newSQLiteAgentRunSeeder(conn *sql.DB) dbtest.AgentRunSeeder {
 }
 
 // TestAgentRunStore_SQLite_AssertLocalOrg pins the local-only invariant:
-// the orgID guard at every method entry refuses non-LocalDefaultOrg.
+// the orgID guard at every method entry refuses non-LocalDefaultOrgID.
 // The conformance suite exercises the happy path; this test pins the
 // SQLite-specific rejection.
 func TestAgentRunStore_SQLite_AssertLocalOrg(t *testing.T) {
 	conn := newSQLiteForAgentRunTest(t)
 	store := sqlitestore.New(conn).AgentRuns
 	if _, err := store.HasActiveForTask(t.Context(), "some-other-org", uuid.New().String()); err == nil {
-		t.Error("HasActiveForTask accepted non-LocalDefaultOrg without error")
+		t.Error("HasActiveForTask accepted non-LocalDefaultOrgID without error")
 	}
 }

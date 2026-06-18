@@ -23,7 +23,7 @@ import (
 // RunScoreStoreConformance. The factory returns:
 //   - the wired ScoreStore impl
 //   - the orgID to pass to every method (sqlite returns
-//     runmode.LocalDefaultOrg, postgres returns a fresh org UUID)
+//     runmode.LocalDefaultOrgID, postgres returns a fresh org UUID)
 //   - a seed function that creates the underlying task rows the
 //     conformance suite needs. The harness doesn't know how to
 //     create tasks directly (TaskStore lands in a later wave); the

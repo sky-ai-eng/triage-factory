@@ -19,7 +19,7 @@ import (
 //     delegates Put/Get/Delete to auth.PutSecret/GetSecret/DeleteSecret
 //     so callers that want one credential interface across modes
 //     (local-equals-multi-at-N=1) get the same shape they'd get in
-//     multi. orgID must equal runmode.LocalDefaultOrg; anything else
+//     multi. orgID must equal runmode.LocalDefaultOrgID; anything else
 //     is a caller bug and rejected with an error.
 //
 //   - Multi mode: secrets are AES-256-GCM-encrypted app-side (a key
