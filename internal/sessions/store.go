@@ -271,6 +271,7 @@ func (s *Store) ListActiveForUserSystem(ctx context.Context, userID uuid.UUID) (
 	defer rows.Close()
 
 	var out []Session
+	var skipped int
 	for rows.Next() {
 		var (
 			sess                               Session
@@ -287,15 +288,22 @@ func (s *Store) ListActiveForUserSystem(ctx context.Context, userID uuid.UUID) (
 		// Decrypt per row. If one row fails to decrypt (post-key-rotation
 		// state), skip it rather than failing the whole list — the caller
 		// will revoke it locally regardless, and we'd rather drop a
-		// stale row than 500 the logout-everywhere flow.
+		// stale row than 500 the logout-everywhere flow. The drop is
+		// otherwise silent, so count it and log once below: after a key
+		// rotation an operator sees the active list shrink with a reason.
 		jwtBytes, jerr := s.key.Decrypt(jwtEnc, jwtNonce, nil)
 		refBytes, rerr := s.key.Decrypt(refEnc, refNonce, nil)
 		if jerr != nil || rerr != nil {
+			skipped++
 			continue
 		}
 		sess.JWT = string(jwtBytes)
 		sess.RefreshToken = string(refBytes)
 		out = append(out, sess)
+	}
+	if skipped > 0 {
+		sessionsLog.Warn("dropped undecryptable sessions from active list (key rotated?)",
+			"user", userID, "skipped", skipped, "returned", len(out))
 	}
 	return out, rows.Err()
 }

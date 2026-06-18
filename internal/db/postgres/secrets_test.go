@@ -643,9 +643,10 @@ func TestSecretStore_Postgres_PutUserSystem_NoClaimsWriteBack(t *testing.T) {
 	}
 }
 
-// TestSecretStore_Postgres_EmptyKeyRejected pins the org_secrets_key_nonempty
-// CHECK: a secret must have a name. An empty key is a caller bug and is
-// refused at write time rather than silently stored under "".
+// TestSecretStore_Postgres_EmptyKeyRejected pins both gates on an empty
+// key: the app layer (secretAAD) refuses it before any DB write, and the
+// org_secrets_key_nonempty CHECK refuses it even on a raw write that
+// bypasses the app layer. A secret must have a name.
 func TestSecretStore_Postgres_EmptyKeyRejected(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -653,11 +654,23 @@ func TestSecretStore_Postgres_EmptyKeyRejected(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	// App layer: Put rejects an empty key in secretAAD before touching the DB.
 	err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 		return pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.Put(ctx, orgID, "", "v", "")
 	})
 	if err == nil {
-		t.Fatalf("Put with empty key succeeded; org_secrets_key_nonempty CHECK missing")
+		t.Fatalf("Put with empty key succeeded; secretAAD must reject an empty key")
+	}
+
+	// Schema backstop: a raw admin-pool insert (bypassing secretAAD, with
+	// all other columns valid so the empty key is the only violation) is
+	// refused by the org_secrets_key_nonempty CHECK.
+	if _, rawErr := h.AdminDB.ExecContext(ctx,
+		`INSERT INTO public.org_secrets (org_id, user_id, key, ciphertext, nonce, description)
+		 VALUES ($1::uuid, NULL, '', '\x00', '\x00', '')`,
+		orgID,
+	); rawErr == nil {
+		t.Fatalf("raw insert with empty key succeeded; org_secrets_key_nonempty CHECK missing")
 	}
 }
 
@@ -796,6 +809,71 @@ func TestSecretStore_Postgres_AADRelocation_OrgToUser(t *testing.T) {
 	}
 	if gotOrg != secretVal {
 		t.Errorf("org-scope readback got=%q want %q", gotOrg, secretVal)
+	}
+}
+
+// TestSecretStore_Postgres_AADRelocation_CrossUser completes the relocation
+// triad: user A's per-user blob relocated into user B's row within the SAME
+// org and key fails to decrypt — the within-tenant cross-user case. AAD
+// binds to the user_id, so B's read computes a different tag and never
+// recovers A's plaintext.
+func TestSecretStore_Postgres_AADRelocation_CrossUser(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userA := seedPgOrgAndUserForSecrets(t, h)
+	userB := seedPgSecondUserInOrg(t, h, orgID)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const key = "jira_token/jira.example.com"
+	const secretVal = "alice_only_value"
+
+	// User A writes its per-user secret through the claims-checked path.
+	if err := h.WithUser(t, userA, orgID, func(tx *sql.Tx) error {
+		return pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.PutUser(ctx, orgID, userA, key, secretVal, "")
+	}); err != nil {
+		t.Fatalf("seed A's secret: %v", err)
+	}
+
+	// Pull A's exact opaque blob via the admin pool.
+	var ct, nonce []byte
+	if err := h.AdminDB.QueryRowContext(ctx,
+		`SELECT ciphertext, nonce FROM public.org_secrets
+		   WHERE org_id = $1::uuid AND user_id = $2::uuid AND key = $3::text`,
+		orgID, userA, key,
+	).Scan(&ct, &nonce); err != nil {
+		t.Fatalf("read A's blob: %v", err)
+	}
+
+	// Relocate A's blob into B's row (same org, same key, B's user_id).
+	if _, err := h.AdminDB.ExecContext(ctx,
+		`INSERT INTO public.org_secrets (org_id, user_id, key, ciphertext, nonce, description)
+		 VALUES ($1::uuid, $2::uuid, $3::text, $4, $5, 'relocated')`,
+		orgID, userB, key, ct, nonce,
+	); err != nil {
+		t.Fatalf("relocate blob into B's row: %v", err)
+	}
+
+	// B reads its row: same key + deployment key, but the AAD binds to B's
+	// user_id, so gcm.Open's auth tag fails — A's plaintext never surfaces.
+	got, err := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey).Secrets.GetUserSystem(ctx, orgID, userB, key)
+	if err == nil {
+		t.Fatalf("GetUserSystem(B) returned no error (got=%q); a cross-user relocated blob must fail its auth tag", got)
+	}
+	if got != "" {
+		t.Errorf("GetUserSystem(B) returned %q alongside the error; must never surface a value", got)
+	}
+	if got == secretVal {
+		t.Fatalf("SECURITY: user B decrypted user A's secret via relocation")
+	}
+
+	// Control: A still reads its own secret on its home row.
+	gotA, err := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey).Secrets.GetUserSystem(ctx, orgID, userA, key)
+	if err != nil {
+		t.Fatalf("GetUserSystem(A) on its own row: %v", err)
+	}
+	if gotA != secretVal {
+		t.Errorf("A readback got=%q want %q (home row must still decrypt)", gotA, secretVal)
 	}
 }
 

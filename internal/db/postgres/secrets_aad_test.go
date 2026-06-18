@@ -136,12 +136,20 @@ func TestSecretAAD_Layout(t *testing.T) {
 	}
 }
 
-func TestSecretAAD_InvalidUUIDErrors(t *testing.T) {
+func TestSecretAAD_RejectsInvalidArgs(t *testing.T) {
 	if _, err := secretAAD("not-a-uuid", "", "key"); err == nil {
 		t.Error("invalid org_id accepted")
 	}
 	if _, err := secretAAD(uuid.New().String(), "not-a-uuid", "key"); err == nil {
 		t.Error("invalid user_id accepted")
+	}
+	// Empty key is a caller bug (also barred by org_secrets_key_nonempty);
+	// secretAAD rejects it so the binding always has a real key segment.
+	if _, err := secretAAD(uuid.New().String(), "", ""); err == nil {
+		t.Error("empty key accepted (org scope)")
+	}
+	if _, err := secretAAD(uuid.New().String(), uuid.New().String(), ""); err == nil {
+		t.Error("empty key accepted (user scope)")
 	}
 }
 

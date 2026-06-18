@@ -110,6 +110,13 @@ DO UPDATE SET ciphertext  = EXCLUDED.ciphertext,
 // semantics. A real GoTrue user id is never the nil UUID; the check just
 // makes the invariant explicit (enforced) rather than assumed.
 func secretAAD(orgID, userID, key string) ([]byte, error) {
+	// key non-empty is also enforced by the org_secrets_key_nonempty CHECK;
+	// guarding here keeps secretAAD's invariants self-contained (a binding
+	// is always orgUUID || userUUID || a real key) rather than deferring
+	// the only check to the DB.
+	if key == "" {
+		return nil, fmt.Errorf("secret aad: key must not be empty")
+	}
 	org, err := uuid.Parse(orgID)
 	if err != nil {
 		return nil, fmt.Errorf("secret aad: invalid org_id %q: %w", orgID, err)
