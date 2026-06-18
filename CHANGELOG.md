@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.12.2](https://github.com/sky-ai-eng/triage-factory/compare/v1.12.1...v1.12.2) (2026-06-18)
+
+
+### Bug Fixes
+
+* **agentmeta:** sum blueprint time across all steps in the footer ([#430](https://github.com/sky-ai-eng/triage-factory/issues/430)) ([1f54d09](https://github.com/sky-ai-eng/triage-factory/commit/1f54d0910012291eb08584f406c3b2b9f2440284))
+* **agentproc:** TF_CLAUDE_BINARY override for the Claude binary (TFAC-413) ([#433](https://github.com/sky-ai-eng/triage-factory/issues/433)) ([a089074](https://github.com/sky-ai-eng/triage-factory/commit/a089074ec386241d0648db57be8c0f8f6ed9e615))
+
 ## [1.12.1](https://github.com/sky-ai-eng/triage-factory/compare/v1.12.0...v1.12.1) (2026-06-18)
 
 
