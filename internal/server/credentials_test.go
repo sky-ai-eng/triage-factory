@@ -32,7 +32,7 @@ func TestHandleIntegrationsClear_SurfacesEnvOverlayWarning(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 	t.Setenv("TRIAGE_FACTORY_GITHUB_URL", "https://env.example.com")
-	t.Setenv("TRIAGE_FACTORY_GITHUB_PAT", "env-pat")
+	t.Setenv("TRIAGE_FACTORY_GITHUB_BOT_PAT", "env-pat")
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/integrations", nil)
 	rec := httptest.NewRecorder()
@@ -112,7 +112,7 @@ func TestHandleIntegrationsDeleteJira_SurfacesJiraOnlyWarning(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 	t.Setenv("TRIAGE_FACTORY_JIRA_URL", "https://env.example.com")
-	t.Setenv("TRIAGE_FACTORY_JIRA_PAT", "env-jira-pat")
+	t.Setenv("TRIAGE_FACTORY_JIRA_BOT_PAT", "env-jira-pat")
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/integrations/jira", nil)
 	rec := httptest.NewRecorder()

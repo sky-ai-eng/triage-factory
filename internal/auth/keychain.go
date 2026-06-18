@@ -21,11 +21,16 @@ const (
 )
 
 // Environment variable names (TRIAGE_FACTORY_ prefix matches existing convention).
+// The PAT vars name the org/bot access credential (PAT_1) — distinct from
+// the per-user identity credential (PAT_2), which the headless bootstrap
+// reads from TRIAGE_FACTORY_{GITHUB,JIRA}_USER_PAT (see internal/server's
+// headless bootstrap). The URL vars carry the shared host and are not
+// actor-specific, so they keep their plain names.
 var envKeys = map[string]string{
 	keyGitHubURL: "TRIAGE_FACTORY_GITHUB_URL",
-	keyGitHubPAT: "TRIAGE_FACTORY_GITHUB_PAT",
+	keyGitHubPAT: "TRIAGE_FACTORY_GITHUB_BOT_PAT",
 	keyJiraURL:   "TRIAGE_FACTORY_JIRA_URL",
-	keyJiraPAT:   "TRIAGE_FACTORY_JIRA_PAT",
+	keyJiraPAT:   "TRIAGE_FACTORY_JIRA_BOT_PAT",
 }
 
 // Credentials holds the stored ORG auth configuration (PAT_1, the bot

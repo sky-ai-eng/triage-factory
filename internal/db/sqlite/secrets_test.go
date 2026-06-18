@@ -151,7 +151,7 @@ func TestSecretStore_SQLite_DeleteWithOnlyEnvOverlay(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 
 	// Set the env overlay but write nothing to the keychain.
-	t.Setenv("TRIAGE_FACTORY_GITHUB_PAT", "env-only-token")
+	t.Setenv("TRIAGE_FACTORY_GITHUB_BOT_PAT", "env-only-token")
 
 	// Get reflects the env value (existing behavior — env wins).
 	got, err := stores.Secrets.Get(ctx, org, "github_pat")

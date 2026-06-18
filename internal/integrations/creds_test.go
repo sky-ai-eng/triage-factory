@@ -372,7 +372,7 @@ func TestLoad_EnvOverlayWins(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	t.Setenv("TRIAGE_FACTORY_GITHUB_PAT", "env-overrides")
+	t.Setenv("TRIAGE_FACTORY_GITHUB_BOT_PAT", "env-overrides")
 	got, err := integrations.Load(ctx, stores.Secrets, org)
 	if err != nil {
 		t.Fatalf("Load: %v", err)

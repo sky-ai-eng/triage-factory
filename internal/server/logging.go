@@ -19,6 +19,7 @@ var (
 	githubConnectLog   = logging.Component("github-connect")
 	githubGroupsLog    = logging.Component("github-groups")
 	githubIdentityLog  = logging.Component("github-identity")
+	headlessLog        = logging.Component("headless")
 	jiraLog            = logging.Component("jira/server")
 	jiraAppLog         = logging.Component("jira-app")
 	jiraConnectLog     = logging.Component("jira-connect")

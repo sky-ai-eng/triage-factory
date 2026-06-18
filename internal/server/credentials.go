@@ -359,69 +359,65 @@ func (s *Server) handleSetupStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	org, err := s.orgs.GetOrgSystem(r.Context(), runmode.LocalDefaultOrgID)
+	alreadyProvisioned, err := s.ensureLocalOrgProvisioned(r.Context())
 	if err != nil {
-		setupLog.Error("setup/start tenant probe failed", "error", err)
+		setupLog.Error("setup/start provision failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "failed to provision local workspace",
 		})
 		return
 	}
 
-	// Non-resurrection guard: once the agents row exists, BootstrapNewOrg
-	// completed at least through its first step, meaning the user may have
-	// made changes to shipped defaults. Stop here rather than re-seeding.
-	//
-	// If the org row exists but no agents row, this is a crash-mid-provision
-	// state — fall through to re-run BootstrapLocalOrg.
-	//
-	// Probe via the System (admin-pool) variant to match the org probe
-	// above and the rest of the bootstrap chain: a provisioning-state read
-	// is a claims-free system read, not a user-RLS-scoped one. SQLite (the
-	// only backend this local-gated handler ever runs against) collapses
-	// both pools to one connection, so this is behaviorally identical to
-	// GetForOrg today — but it keeps the function correct if the local-only
-	// gate is ever lifted onto Postgres, where the app pool would fault.
-	if org != nil {
-		agent, err := s.allStores.Agents.GetForOrgSystem(r.Context(), runmode.LocalDefaultOrgID)
-		if err != nil {
-			setupLog.Error("setup/start agent probe failed", "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": "failed to provision local workspace",
-			})
-			return
-		}
-		if agent != nil {
-			writeJSON(w, http.StatusOK, map[string]any{
-				"provisioned":         true,
-				"already_provisioned": true,
-				"org_id":              runmode.LocalDefaultOrgID,
-				"team_id":             runmode.LocalDefaultTeamID,
-			})
-			return
-		}
-		// org exists, no agent: partial provision; fall through to complete it.
-	}
-
-	if err := db.BootstrapLocalOrg(r.Context(), s.allStores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
-		setupLog.Error("bootstrap local org failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to provision local workspace",
-		})
-		return
-	}
-
-	// Return the provisioned tenant. The IDs are the stable sentinels, but
-	// echoing them keeps the response shape parallel to multi-mode's
-	// org-create response and gives the onboarding UI something to confirm
-	// against. already_provisioned=false signals "we just provisioned it
-	// (fresh install or partial-provision recovery)".
+	// Echo the (stable sentinel) IDs to keep the response shape parallel to
+	// multi-mode's org-create response and give the onboarding UI something to
+	// confirm against. already_provisioned=false signals "we just provisioned
+	// it (fresh install or partial-provision recovery)".
 	writeJSON(w, http.StatusOK, map[string]any{
 		"provisioned":         true,
-		"already_provisioned": false,
+		"already_provisioned": alreadyProvisioned,
 		"org_id":              runmode.LocalDefaultOrgID,
 		"team_id":             runmode.LocalDefaultTeamID,
 	})
+}
+
+// ensureLocalOrgProvisioned idempotently provisions the local-mode tenant —
+// the runmode.LocalDefault* sentinel rows plus the shipped
+// agent/prompts/blueprints/handlers — by running the shared
+// db.BootstrapLocalOrg chain when needed. It is the common core of the
+// "Start your factory" action (handleSetupStart) and the headless bootstrap
+// (RunHeadlessBootstrap), so the two share one provisioning path.
+//
+// Returns alreadyProvisioned=true when the org AND its agents row already
+// exist: BootstrapNewOrg got at least through its first step, so the user may
+// have edited shipped defaults — don't re-seed (the non-resurrection guard).
+// When the org row exists but the agents row doesn't, that's a
+// crash-mid-provision state with no user actions yet, so re-running
+// BootstrapLocalOrg is safe and reaches the same end state.
+//
+// Probes via the System (admin-pool) variants to match the rest of the
+// bootstrap chain: provisioning-state reads are claims-free system reads.
+// SQLite (the only backend this local-only path runs against) collapses both
+// pools to one connection. BootstrapLocalOrg creates the synthetic sentinel
+// rows and must run OUTSIDE any WithTx (admin-pool seeders).
+func (s *Server) ensureLocalOrgProvisioned(ctx context.Context) (alreadyProvisioned bool, err error) {
+	org, err := s.orgs.GetOrgSystem(ctx, runmode.LocalDefaultOrgID)
+	if err != nil {
+		return false, fmt.Errorf("tenant probe: %w", err)
+	}
+	if org != nil {
+		agent, aerr := s.allStores.Agents.GetForOrgSystem(ctx, runmode.LocalDefaultOrgID)
+		if aerr != nil {
+			return false, fmt.Errorf("agent probe: %w", aerr)
+		}
+		if agent != nil {
+			return true, nil
+		}
+		// org exists, no agent: partial provision; fall through to complete it.
+	}
+	if err := db.BootstrapLocalOrg(ctx, s.allStores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+		return false, fmt.Errorf("bootstrap local org: %w", err)
+	}
+	return false, nil
 }
 
 // DELETE /api/integrations — clears all integration credentials (GitHub
@@ -483,7 +479,7 @@ func (s *Server) handleIntegrationsDeleteJira(w http.ResponseWriter, r *http.Req
 		envs := auth.EnvProvided()
 		for _, e := range envs {
 			if e == "jira" {
-				resp["warning"] = "env vars (TRIAGE_FACTORY_JIRA_URL/PAT) still supply this credential — unset them in your shell to fully clear"
+				resp["warning"] = "env vars (TRIAGE_FACTORY_JIRA_URL/BOT_PAT) still supply this credential — unset them in your shell to fully clear"
 				resp["env_provided"] = []string{"jira"}
 				break
 			}

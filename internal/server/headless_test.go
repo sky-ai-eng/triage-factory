@@ -1,0 +1,266 @@
+package server
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"testing"
+
+	"github.com/zalando/go-keyring"
+
+	"github.com/sky-ai-eng/triage-factory/internal/auth"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+)
+
+func TestParseCSV(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"", nil},
+		{"   ", nil},
+		{"a", []string{"a"}},
+		{"a,b,c", []string{"a", "b", "c"}},
+		{" a , b ,, c ", []string{"a", "b", "c"}}, // trim + drop empties
+		{"In Progress,Backlog", []string{"In Progress", "Backlog"}},
+	}
+	for _, c := range cases {
+		if got := parseCSV(c.in); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("parseCSV(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestParseRepos(t *testing.T) {
+	got := parseRepos(" acme/api , acme/web ,bogus, /no-owner , no-repo/ ,octo/cat")
+	want := []domain.TeamGitHubRepo{
+		{Owner: "acme", Repo: "api"},
+		{Owner: "acme", Repo: "web"},
+		{Owner: "octo", Repo: "cat"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("parseRepos = %v, want %v", got, want)
+	}
+	if parseRepos("") != nil {
+		t.Errorf("parseRepos(\"\") should be nil")
+	}
+}
+
+func TestHeadlessJiraRules(t *testing.T) {
+	cfg := headlessConfig{
+		jiraProjects:         []string{"SKY", "TFAC"},
+		jiraPickupStatuses:   []string{"To Do", "Backlog"},
+		jiraInProgressStatus: "In Progress",
+		jiraDoneStatus:       "Done",
+	}
+	rules := headlessJiraRules(cfg)
+	if len(rules) != 2 {
+		t.Fatalf("want 2 rules (one per project), got %d", len(rules))
+	}
+	for i, key := range []string{"SKY", "TFAC"} {
+		r := rules[i]
+		if r.ProjectKey != key {
+			t.Errorf("rule[%d].ProjectKey = %q, want %q", i, r.ProjectKey, key)
+		}
+		// The same global mapping is applied to every project.
+		if !reflect.DeepEqual(r.PickupMembers, []string{"To Do", "Backlog"}) {
+			t.Errorf("rule[%d].PickupMembers = %v", i, r.PickupMembers)
+		}
+		// CHECK constraints want non-empty members + canonical for both write targets.
+		if r.InProgressCanonical != "In Progress" || !reflect.DeepEqual(r.InProgressMembers, []string{"In Progress"}) {
+			t.Errorf("rule[%d] in-progress = %q/%v", i, r.InProgressCanonical, r.InProgressMembers)
+		}
+		if r.DoneCanonical != "Done" || !reflect.DeepEqual(r.DoneMembers, []string{"Done"}) {
+			t.Errorf("rule[%d] done = %q/%v", i, r.DoneCanonical, r.DoneMembers)
+		}
+	}
+}
+
+func TestHeadlessConfig_JiraCompleteAndIntent(t *testing.T) {
+	full := headlessConfig{
+		jiraProjects:         []string{"SKY"},
+		jiraPickupStatuses:   []string{"To Do"},
+		jiraInProgressStatus: "In Progress",
+		jiraDoneStatus:       "Done",
+	}
+	if !full.jiraComplete() || !full.jiraIntent() {
+		t.Errorf("full config should be complete and show intent")
+	}
+	// Missing the done status → intent but not complete.
+	partial := full
+	partial.jiraDoneStatus = ""
+	if partial.jiraComplete() {
+		t.Errorf("partial config should not be complete")
+	}
+	if !partial.jiraIntent() {
+		t.Errorf("partial config still shows intent (worth a warn)")
+	}
+	// Nothing Jira-related → neither.
+	var none headlessConfig
+	if none.jiraComplete() || none.jiraIntent() {
+		t.Errorf("empty config should show no intent and not be complete")
+	}
+	// Only a user PAT counts as intent (the operator meant to wire Jira).
+	onlyPAT := headlessConfig{jiraUserPAT: "x"}
+	if !onlyPAT.jiraIntent() || onlyPAT.jiraComplete() {
+		t.Errorf("user-PAT-only should show intent but not be complete")
+	}
+}
+
+func TestHeadlessEnabled(t *testing.T) {
+	t.Setenv(envHeadless, "")
+	if HeadlessEnabled() {
+		t.Errorf("empty TF_HEADLESS should be disabled")
+	}
+	t.Setenv(envHeadless, "1")
+	if !HeadlessEnabled() {
+		t.Errorf("TF_HEADLESS=1 should be enabled")
+	}
+}
+
+// TestRunHeadlessBootstrap_MultiModeNoOp pins the load-bearing invariant: even
+// if invoked directly in multi mode, the bootstrap is a no-op and never touches
+// a tenant. A bare &Server{} is safe because the guard returns before any field
+// is read.
+func TestRunHeadlessBootstrap_MultiModeNoOp(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	s := &Server{}
+	if err := s.RunHeadlessBootstrap(context.Background()); err != nil {
+		t.Fatalf("multi-mode RunHeadlessBootstrap should be a nil-error no-op, got %v", err)
+	}
+}
+
+// TestRunHeadlessBootstrap_NoGitHubCredsSkips verifies that with no GitHub bot
+// credentials in env, the bootstrap warns and skips before seeding — even when
+// repo seed vars are present.
+func TestRunHeadlessBootstrap_NoGitHubCredsSkips(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	auth.ResetSecretBackendForTest(t)
+	s := newTestServer(t)
+	ctx := t.Context()
+
+	// Seed vars present, but no GitHub URL/PAT → must skip everything.
+	t.Setenv(envHeadless, "1")
+	t.Setenv(envRepos, "acme/api")
+
+	if err := s.RunHeadlessBootstrap(ctx); err != nil {
+		t.Fatalf("RunHeadlessBootstrap: %v", err)
+	}
+	repos, err := s.allStores.TeamGitHubRepos.ListForTeamSystem(ctx, runmode.LocalDefaultTeamID)
+	if err != nil {
+		t.Fatalf("ListForTeamSystem: %v", err)
+	}
+	if len(repos) != 0 {
+		t.Errorf("expected no repos seeded when GitHub creds are absent, got %d", len(repos))
+	}
+	orgSet, err := s.orgs.GetSettingsSystem(ctx, runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("GetSettingsSystem: %v", err)
+	}
+	if orgSet.GitHubBaseURL != "" {
+		t.Errorf("expected GitHubBaseURL untouched, got %q", orgSet.GitHubBaseURL)
+	}
+}
+
+// TestRunHeadlessBootstrap_HappyPath drives a full env-only provision against a
+// stubbed GitHub host: tenant provisioned, repos tracked, identity bound — then
+// asserts idempotency and that a later UI edit is never clobbered.
+func TestRunHeadlessBootstrap_HappyPath(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	auth.ResetSecretBackendForTest(t)
+
+	// Stub GitHub: ValidateGitHub (bot + user) hits {host}/api/v3/user.
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/user" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"login":"octocat"}`))
+	}))
+	t.Cleanup(gh.Close)
+
+	t.Setenv(envHeadless, "1")
+	t.Setenv("TRIAGE_FACTORY_GITHUB_URL", gh.URL)
+	t.Setenv("TRIAGE_FACTORY_GITHUB_BOT_PAT", "bot-token")
+	t.Setenv(envGitHubUserPAT, "user-token")
+	t.Setenv(envRepos, "acme/api,acme/web")
+
+	s := newTestServer(t)
+	ctx := t.Context()
+
+	// newTestServer pre-seeds the agent row, which would make the org look
+	// already-provisioned (justProvisioned=false → seed skipped). Drop it so the
+	// bootstrap exercises a real first provision, exactly as a fresh DB would.
+	if _, err := s.db.ExecContext(ctx, "DELETE FROM team_agents"); err != nil {
+		t.Fatalf("clear team_agents: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, "DELETE FROM agents"); err != nil {
+		t.Fatalf("clear agents: %v", err)
+	}
+
+	if err := s.RunHeadlessBootstrap(ctx); err != nil {
+		t.Fatalf("RunHeadlessBootstrap: %v", err)
+	}
+
+	// Tenant provisioned.
+	if org, err := s.orgs.GetOrgSystem(ctx, runmode.LocalDefaultOrgID); err != nil || org == nil {
+		t.Fatalf("expected tenant provisioned, org=%v err=%v", org, err)
+	}
+
+	// Org settings: GitHub base URL set, clone protocol pinned to https.
+	orgSet, err := s.orgs.GetSettingsSystem(ctx, runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("GetSettingsSystem: %v", err)
+	}
+	if orgSet.GitHubBaseURL != gh.URL {
+		t.Errorf("GitHubBaseURL = %q, want %q", orgSet.GitHubBaseURL, gh.URL)
+	}
+	if orgSet.GitHubCloneProtocol != "https" {
+		t.Errorf("GitHubCloneProtocol = %q, want https", orgSet.GitHubCloneProtocol)
+	}
+
+	// Repos tracked.
+	repos, err := s.allStores.TeamGitHubRepos.ListForTeamSystem(ctx, runmode.LocalDefaultTeamID)
+	if err != nil {
+		t.Fatalf("ListForTeamSystem: %v", err)
+	}
+	if len(repos) != 2 {
+		t.Fatalf("want 2 tracked repos, got %d (%v)", len(repos), repos)
+	}
+
+	// GitHub identity bound from the user PAT.
+	ghWeb, _ := resolveGitHubHost(gh.URL)
+	login, err := s.users.GetGitHubLogin(ctx, runmode.LocalDefaultUserID, ghWeb)
+	if err != nil {
+		t.Fatalf("GetGitHubLogin: %v", err)
+	}
+	if login != "octocat" {
+		t.Errorf("github identity login = %q, want octocat", login)
+	}
+
+	// Idempotent re-run: already provisioned → no error, no change.
+	if err := s.RunHeadlessBootstrap(ctx); err != nil {
+		t.Fatalf("re-run RunHeadlessBootstrap: %v", err)
+	}
+
+	// Never-overwrite: simulate a UI edit (drop to one repo), re-run, and
+	// confirm the env set is NOT re-applied over the operator's change.
+	if err := s.allStores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, []domain.TeamGitHubRepo{{Owner: "acme", Repo: "api"}}); err != nil {
+		t.Fatalf("simulate UI edit: %v", err)
+	}
+	if err := s.RunHeadlessBootstrap(ctx); err != nil {
+		t.Fatalf("re-run after edit: %v", err)
+	}
+	repos, err = s.allStores.TeamGitHubRepos.ListForTeamSystem(ctx, runmode.LocalDefaultTeamID)
+	if err != nil {
+		t.Fatalf("ListForTeamSystem after edit: %v", err)
+	}
+	if len(repos) != 1 {
+		t.Errorf("never-overwrite violated: want 1 repo after UI edit + re-run, got %d", len(repos))
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server"
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -23,6 +24,19 @@ import (
 func (a *App) runStartupTasks(ctx context.Context) {
 	if a.local() {
 		a.wireCloneStatusCallback()
+		// Headless env-driven provisioning (TFAC-411): when TF_HEADLESS is set,
+		// provision the local tenant and seed repos / Jira / identity from env so
+		// a keychain-less, browser-less install reaches setup_complete. Runs
+		// before startPolling → bootstrapBareClones so the seeded repos clone on
+		// the first cycle. Local-mode only; if the seed vars are set without the
+		// trigger, warn rather than silently ignore them.
+		if server.HeadlessEnabled() {
+			if err := a.srv.RunHeadlessBootstrap(ctx); err != nil {
+				bootstrapLog.Error("headless bootstrap failed", "error", err)
+			}
+		} else {
+			server.WarnIfHeadlessSeedVarsOrphaned()
+		}
 	}
 	a.cleanupWorktrees(ctx)
 	if a.local() {

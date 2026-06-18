@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -393,6 +394,28 @@ type githubIdentityCaptureResponse struct {
 	Host  string `json:"host"`
 }
 
+// errGitHubNoLogin is returned by validateGitHubIdentityPAT when the host
+// accepts the token but yields no username — distinct from a rejected token so
+// callers can render the right message.
+var errGitHubNoLogin = errors.New("github returned no username for the token")
+
+// validateGitHubIdentityPAT proves a PAT against the org's resolved GitHub host
+// (GET /user) and returns the bound @login, WITHOUT storing the token. It is the
+// shared validation core of the PAT-capture HTTP handler and the headless
+// bootstrap; each caller writes user_github_identities in its own tx (the tx
+// context differs). Errors wrap auth.ValidateGitHub's (callers can
+// errors.Is auth.ErrGitHubHostUnreachable) or are errGitHubNoLogin.
+func validateGitHubIdentityPAT(ctx context.Context, ghWeb, pat string) (string, error) {
+	ghUser, err := auth.ValidateGitHub(ctx, ghWeb, pat)
+	if err != nil {
+		return "", err
+	}
+	if ghUser.Login == "" {
+		return "", errGitHubNoLogin
+	}
+	return ghUser.Login, nil
+}
+
 // handleGitHubIdentityPAT binds the caller's GitHub identity from a personal
 // access token they supply, WITHOUT storing the token. It validates the PAT
 // against the org's resolved host (GET /user), writes
@@ -439,7 +462,7 @@ func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	ghUser, err := auth.ValidateGitHub(r.Context(), ghWeb, pat)
+	login, err := validateGitHubIdentityPAT(r.Context(), ghWeb, pat)
 	if err != nil {
 		// Keep the two failure shapes distinct, like the Connect flow: a host we
 		// couldn't reach (infra) vs. a token the host rejected (your action).
@@ -450,33 +473,33 @@ func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request)
 			})
 			return
 		}
+		if errors.Is(err, errGitHubNoLogin) {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+				"error": "GitHub didn't return a username for that token.",
+				"field": "github_pat",
+			})
+			return
+		}
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 			"error": "That token didn't validate against " + ghWeb + ". Double-check it and try again.",
 			"field": "github_pat",
 		})
 		return
 	}
-	if ghUser.Login == "" {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "GitHub didn't return a username for that token.",
-			"field": "github_pat",
-		})
-		return
-	}
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.Users.UpsertGitHubIdentity(r.Context(), userID, ghWeb, ghUser.Login, "pat")
+		return tx.Users.UpsertGitHubIdentity(r.Context(), userID, ghWeb, login, "pat")
 	}); err != nil {
 		internalError(w, "github-identity", err)
 		return
 	}
 	// The token is intentionally not persisted anywhere — it existed only for
 	// the whoami above. Identity captured; org access untouched.
-	githubIdentityLog.Info("bound user", "user", userID, "login", ghUser.Login, "host", ghWeb, "org", orgID, "source", "pat")
+	githubIdentityLog.Info("bound user", "user", userID, "login", login, "host", ghWeb, "org", orgID, "source", "pat")
 	// Seed this login's trailing-window PR history for the dashboard (TFAC-396).
-	s.kickDashboardBackfill(orgID, userID, ghUser.Login, ghWeb)
+	s.kickDashboardBackfill(orgID, userID, login, ghWeb)
 
-	writeJSON(w, http.StatusOK, githubIdentityCaptureResponse{Login: ghUser.Login, Host: ghWeb})
+	writeJSON(w, http.StatusOK, githubIdentityCaptureResponse{Login: login, Host: ghWeb})
 }
 
 // redirectConnect bounces a failed/aborted Connect flow back to the FE gate
