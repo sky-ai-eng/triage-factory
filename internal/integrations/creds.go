@@ -49,17 +49,86 @@ const (
 // keychain row.
 const legacyJiraDisplayName = "jira_display_name"
 
-// AllKeys returns every credential key the SecretStore manages for an
-// integration tenant — the four well-known keys plus any legacy keys
-// still swept on Clear. Exposed so callers without a SecretStore /
-// DB context (e.g. cmd/uninstall) can wipe the same key set
-// integrations.Clear would clear, without duplicating the literal
-// list and risking drift as new keys land.
+// legacyGitHubUsername is the legacy key that held the org bot's GitHub login
+// in the keychain. SKY-264 moved GitHub identity into the users.github_username
+// DB column, so nothing writes this key anymore — but AllKeys still sweeps it so
+// an upgrade from a pre-SKY-264 install leaves no orphan keychain row (same
+// rationale as legacyJiraDisplayName). It has no companion DB ref, so it's safe
+// on the per-org Clear path.
+const legacyGitHubUsername = "github_username"
+
+// Org-level secret keys that are NOT GitHub/Jira service credentials but DO
+// live in the same keychain/vault, so a full local uninstall must still sweep
+// them. They are deliberately excluded from AllKeys: AllKeys drives the per-org
+// integrations.Clear ("Clear All Tokens"), and each of these keys has companion
+// DB state (org_settings.anthropic_api_key_ref / the org_jira_apps row) that
+// Clear does not reconcile — sweeping the secret there would dangle the ref (the
+// UI would report "configured" against a key that's gone). They belong only in
+// the full-wipe AllLocalSweepKeys (uninstall / clean-slate, where the whole DB
+// is removed anyway).
+//
+// Literals are duplicated here because integrations can't import server /
+// agentproc (server imports integrations — cycle), the same constraint that
+// forces the hand-copied Jira keys above. Keep in sync with:
+//   - KeyAnthropicAPIKey:       internal/server.secretKeyAnthropicAPIKey and
+//     internal/agentproc.secretAnthropicAPIKey (TestSecretKeyLiteralsMatchIntegrations pins it).
+//   - KeyJiraOAuthClientSecret: internal/server.jiraOAuthClientSecretKey.
+//
+// agentproc's anthropic_auth_token / anthropic_base_url are intentionally NOT
+// here: they are read-only resolver inputs with no local-mode write path (no
+// SecretStore.Put), so there's never a keychain row to sweep.
+const (
+	KeyAnthropicAPIKey       = "anthropic_api_key"
+	KeyJiraOAuthClientSecret = "jira_oauth_client_secret"
+)
+
+// AllKeys returns the integration-credential keys the SecretStore manages for a
+// tenant — the GitHub + Jira well-known keys plus legacy keys still swept on
+// Clear. This is exactly the set integrations.Clear ("Clear All Tokens") wipes,
+// so it stays scoped to credentials Clear can fully reconcile.
+//
+// It is NOT the full uninstall sweep: org-level secrets that live in the same
+// keychain but aren't integration credentials (the Anthropic API key, the
+// Atlassian OAuth client secret) and the dynamic per-GitHub-App keys are
+// deliberately excluded — see AllLocalSweepKeys, which a full local uninstall /
+// clean-slate uses instead.
 func AllKeys() []string {
 	return []string{
 		KeyGitHubURL, KeyGitHubPAT,
 		KeyJiraURL, KeyJiraPAT, KeyJiraEmail, KeyJiraAPIToken, KeyJiraAuthMethod,
-		legacyJiraDisplayName,
+		legacyJiraDisplayName, legacyGitHubUsername,
+	}
+}
+
+// AllLocalSweepKeys returns every STATIC keychain key a full local uninstall /
+// clean-slate must remove: the per-org integration set (AllKeys) plus the
+// org-level secrets that share the keychain but aren't integration credentials
+// (the Anthropic API key, the Atlassian OAuth client secret). It is a SUPERSET
+// of AllKeys, used only by the full-wipe paths (cmd/uninstall, clean-slate.sh)
+// — never by the per-org integrations.Clear, which can't reconcile those keys'
+// companion DB refs (see the KeyAnthropicAPIKey/KeyJiraOAuthClientSecret note).
+//
+// Dynamic per-GitHub-App keys (github_app_<id>_{pem,client_secret,webhook_secret})
+// can't live in a static list; uninstall enumerates configured App ids from
+// org_github_apps and appends GitHubAppKeys for each before sweeping. Keep
+// scripts/clean-slate.sh's hardcoded keychain list in sync with this function.
+func AllLocalSweepKeys() []string {
+	return append(AllKeys(), KeyAnthropicAPIKey, KeyJiraOAuthClientSecret)
+}
+
+// GitHubAppKeys returns the three keychain/vault keys a single registered
+// GitHub App custodies its secrets under: the PEM private key, the OAuth client
+// secret, and the webhook secret. The shape is composed per App id, so it can't
+// be a static list — a full local uninstall enumerates configured App ids from
+// org_github_apps and calls this for each.
+//
+// Keep the format in sync with the write paths that compose these same keys:
+// internal/server/github_app_import.go and internal/server/github_app_register.go.
+func GitHubAppKeys(appID string) []string {
+	return []string{
+		"github_app_" + appID + "_pem",
+		"github_app_" + appID + "_client_secret",
+		"github_app_" + appID + "_webhook_secret",
 	}
 }
 

@@ -27,6 +27,7 @@ package uninstall
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -36,6 +37,7 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -82,7 +84,9 @@ func Handle(args []string) {
 			os.Exit(1)
 		}
 
-		if err := clearAllSecrets(); err != nil {
+		// No data dir ⇒ no DB ⇒ no GitHub App ids to enumerate; the static
+		// AllLocalSweepKeys set is the whole sweep here.
+		if err := clearAllSecrets(nil); err != nil {
 			fmt.Fprintf(os.Stderr, "  warn: clear keychain: %v\n", err)
 			fmt.Println()
 			fmt.Println("triagefactory uninstall: completed with warnings (see above).")
@@ -108,6 +112,20 @@ func Handle(args []string) {
 	}
 
 	failed := false
+
+	// Enumerate the per-GitHub-App keychain keys BEFORE the data-dir wipe
+	// removes the DB the App ids live in (org_github_apps). Best-effort: a read
+	// failure just means those keys (if any) go unswept — warn and continue. No
+	// DB / no Apps yields an empty list, the common case.
+	var appKeys []string
+	if plan.hasDataDir {
+		var err error
+		appKeys, err = gitHubAppKeychainKeys(paths.DBPath())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  warn: enumerate GitHub App keychain keys: %v\n", err)
+			failed = true
+		}
+	}
 
 	// Order: enumerate the curator dirs and clear their Claude project
 	// entries BEFORE removing the trees, otherwise we lose the inputs
@@ -137,7 +155,7 @@ func Handle(args []string) {
 		}
 	}
 
-	if err := clearAllSecrets(); err != nil {
+	if err := clearAllSecrets(appKeys); err != nil {
 		fmt.Fprintf(os.Stderr, "  warn: clear keychain: %v\n", err)
 		failed = true
 	} else {
@@ -227,7 +245,7 @@ func (p uninstallPlan) summary() []string {
 	if p.hasProjects {
 		lines = append(lines, "Claude Code session entries under ~/.claude/projects/ for any curator projects")
 	}
-	lines = append(lines, "stored integration credentials (GitHub + Jira tokens) — OS keychain on desktop, or the encrypted secrets file (removed with the data dir above) on headless")
+	lines = append(lines, "stored credentials (GitHub + Jira tokens, Anthropic API key, GitHub App keys) — OS keychain on desktop, or the encrypted secrets file (removed with the data dir above) on headless")
 	if p.hasInstallLink {
 		lines = append(lines, fmt.Sprintf("install symlink at %s", p.linkPath))
 	}
@@ -335,13 +353,15 @@ func plural(n int, singular, plural string) string {
 	return plural
 }
 
-// clearAllSecrets removes every credential key the SecretStore
-// manages plus any legacy keys still swept on Clear. Uninstall is
-// single-process, local-only, with no DB context, so it bypasses the
-// SecretStore seam and calls the low-level keychain helpers directly
-// — but the key list comes from integrations.AllKeys() so this stays
-// in sync as new keys land.
-func clearAllSecrets() error {
+// clearAllSecrets removes every static keychain key a full local wipe touches
+// (integrations.AllLocalSweepKeys — the integration credentials plus the
+// org-level Anthropic / Atlassian-OAuth secrets) together with the dynamic
+// per-GitHub-App keys the caller enumerated from the DB. Uninstall is
+// single-process, local-only, with no DB context for the sweep itself, so it
+// bypasses the SecretStore seam and calls the low-level keychain helpers
+// directly — the static list comes from integrations so it stays in sync as new
+// keys land. appKeys is nil when there's no DB / no configured Apps.
+func clearAllSecrets(appKeys []string) error {
 	// Sweep the OS keychain directly, independent of the runtime backend
 	// selection: a box may still hold keychain rows from an earlier
 	// keychain-backed run even if TF_SECRETS_BACKEND=file is set now (and the
@@ -350,7 +370,52 @@ func clearAllSecrets() error {
 	// headless file backend's bag lives under the state root and is already
 	// removed by the data-dir RemoveAll above, so it needs no sweep here (and
 	// uninstall never needs TF_SECRET_ENCRYPTION_KEY).
-	return auth.SweepKeychain(integrations.AllKeys())
+	return auth.SweepKeychain(append(integrations.AllLocalSweepKeys(), appKeys...))
+}
+
+// gitHubAppKeychainKeys enumerates the dynamic per-App keychain keys to sweep on
+// uninstall. Each registered GitHub App custodies three secrets under
+// github_app_<id>_{pem,client_secret,webhook_secret}; the App ids live in the
+// org_github_apps table, which is still on disk here (we run before the data-dir
+// wipe). Returns nil when there's no DB yet or no App is configured. Best-effort:
+// any open/query failure is returned so Handle can warn, but it never blocks the
+// rest of the uninstall — at worst a rare App key lingers, which the user can
+// remove by hand.
+func gitHubAppKeychainKeys(dbPath string) ([]string, error) {
+	if _, err := os.Stat(dbPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil // no DB — nothing to enumerate
+		}
+		return nil, fmt.Errorf("stat %s: %w", dbPath, err)
+	}
+
+	conn, err := db.OpenAt(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", dbPath, err)
+	}
+	defer conn.Close()
+
+	rows, err := conn.QueryContext(context.Background(), `SELECT app_id FROM org_github_apps`)
+	if err != nil {
+		return nil, fmt.Errorf("query org_github_apps: %w", err)
+	}
+	defer rows.Close()
+
+	var keys []string
+	for rows.Next() {
+		var appID string
+		if err := rows.Scan(&appID); err != nil {
+			return nil, fmt.Errorf("scan app_id: %w", err)
+		}
+		if appID == "" {
+			continue
+		}
+		keys = append(keys, integrations.GitHubAppKeys(appID)...)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate org_github_apps: %w", err)
+	}
+	return keys, nil
 }
 
 func fail(format string, args ...any) {

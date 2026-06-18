@@ -11,6 +11,32 @@ set -euo pipefail
 
 echo "Cleaning Triage Factory local state..."
 
+# Keychain keys to sweep at the end. The static list mirrors
+# integrations.AllLocalSweepKeys() in internal/integrations/creds.go (the
+# canonical set `triagefactory uninstall` sweeps via auth.SweepKeychain) —
+# integration creds, the legacy github_username / jira_display_name keys, and the
+# org-level anthropic_api_key + jira_oauth_client_secret. Drift between the two
+# leaves stale entries after clean-slate (TFAC-405 was the most recent miss).
+# Per-GitHub-App keys (github_app_<id>_*) are dynamic, so we enumerate App ids
+# from the DB below — this MUST run before the DB is removed.
+keychain_keys=(
+  github_url github_pat github_username
+  jira_url jira_pat jira_email jira_api_token jira_auth_method jira_display_name
+  anthropic_api_key jira_oauth_client_secret
+)
+
+# Enumerate per-App keys from org_github_apps before the DB is deleted. Needs
+# sqlite3 (not always present in dev) and the DB file; best-effort otherwise.
+db=~/.triagefactory/triagefactory.db
+if command -v sqlite3 >/dev/null 2>&1 && [ -f "$db" ]; then
+  while IFS= read -r app_id; do
+    [ -n "$app_id" ] || continue
+    keychain_keys+=("github_app_${app_id}_pem" "github_app_${app_id}_client_secret" "github_app_${app_id}_webhook_secret")
+  done < <(sqlite3 "$db" 'SELECT app_id FROM org_github_apps;' 2>/dev/null || true)
+elif [ -f "$db" ]; then
+  echo "  note: sqlite3 not found; skipping GitHub App keychain enumeration (github_app_<id>_* may linger)"
+fi
+
 # Database
 rm -f ~/.triagefactory/triagefactory.db ~/.triagefactory/triagefactory.db-wal ~/.triagefactory/triagefactory.db-shm
 echo "  removed database"
@@ -75,12 +101,10 @@ if [ -d ~/.triagefactory/repos ]; then
   fi
 fi
 
-# Keychain — keep this list in sync with integrations.AllKeys() in
-# internal/integrations/creds.go (the canonical list `triagefactory
-# uninstall` sweeps via auth.SweepKeychain). Drift between the two means
-# stale entries linger after clean-slate; jira_display_name was the most
-# recent miss.
-for key in github_url github_pat github_username jira_url jira_pat jira_email jira_api_token jira_auth_method jira_display_name; do
+# Keychain — sweep the keys assembled at the top of this script (static list
+# mirrors integrations.AllLocalSweepKeys(), plus any enumerated github_app_<id>_*
+# keys). macOS `security` only; on Linux this loop is a harmless no-op.
+for key in "${keychain_keys[@]}"; do
   security delete-generic-password -s triagefactory -a "$key" 2>/dev/null && echo "  removed keychain: $key" || true
 done
 

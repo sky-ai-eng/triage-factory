@@ -472,3 +472,61 @@ func TestLoadSystem_SameKeySetAsLoad(t *testing.T) {
 		t.Errorf("LoadSystem key set drifted from Load:\n  LoadSystem (GetSystem) = %v\n  Load       (Get)       = %v", systemKeys, loadKeys)
 	}
 }
+
+// TestAllKeys_IncludesLegacyKeychainKeys pins that the per-org Clear set still
+// sweeps the two legacy keychain keys (github_username from SKY-264,
+// jira_display_name from SKY-397). They have no companion DB ref, so they're
+// safe on the Clear path, and keeping them here keeps scripts/clean-slate.sh —
+// which lists both — in sync with AllKeys.
+func TestAllKeys_IncludesLegacyKeychainKeys(t *testing.T) {
+	for _, k := range []string{"github_username", "jira_display_name"} {
+		if !slices.Contains(integrations.AllKeys(), k) {
+			t.Errorf("AllKeys missing legacy keychain key %q (clean-slate.sh sweeps it; the two must stay in sync)", k)
+		}
+	}
+}
+
+// TestStaticOrgSecretsExcludedFromAllKeys pins the TFAC-405 design decision: the
+// org-level Anthropic / Atlassian-OAuth secrets must NOT ride the per-org Clear
+// path. AllKeys feeds integrations.Clear ("Clear All Tokens"), which doesn't
+// reconcile their companion DB refs (org_settings.anthropic_api_key_ref / the
+// org_jira_apps row) — sweeping them there would dangle the ref. They belong
+// only in AllLocalSweepKeys (the full uninstall wipe, where the DB is gone too).
+func TestStaticOrgSecretsExcludedFromAllKeys(t *testing.T) {
+	for _, k := range []string{integrations.KeyAnthropicAPIKey, integrations.KeyJiraOAuthClientSecret} {
+		if slices.Contains(integrations.AllKeys(), k) {
+			t.Errorf("%q must NOT be in AllKeys: it would ride the per-org Clear path, which can't reconcile its companion DB ref", k)
+		}
+	}
+}
+
+// TestAllLocalSweepKeys_IsAllKeysPlusStaticOrgSecrets pins that the uninstall
+// sweep set is exactly AllKeys plus the org-level secrets — a superset that
+// covers everything Clear covers and nothing it can't reconcile.
+func TestAllLocalSweepKeys_IsAllKeysPlusStaticOrgSecrets(t *testing.T) {
+	sweep := integrations.AllLocalSweepKeys()
+	for _, k := range integrations.AllKeys() {
+		if !slices.Contains(sweep, k) {
+			t.Errorf("AllLocalSweepKeys missing AllKeys entry %q (must be a superset)", k)
+		}
+	}
+	for _, k := range []string{integrations.KeyAnthropicAPIKey, integrations.KeyJiraOAuthClientSecret} {
+		if !slices.Contains(sweep, k) {
+			t.Errorf("AllLocalSweepKeys missing org-level secret %q", k)
+		}
+	}
+	if got, want := len(sweep), len(integrations.AllKeys())+2; got != want {
+		t.Errorf("AllLocalSweepKeys has %d keys, want %d (AllKeys + the 2 org secrets, no dupes)", got, want)
+	}
+}
+
+// TestGitHubAppKeys_Format pins the per-App key shape the uninstall sweep
+// composes against the same format the server write paths use
+// (github_app_<id>_{pem,client_secret,webhook_secret}).
+func TestGitHubAppKeys_Format(t *testing.T) {
+	got := integrations.GitHubAppKeys("42")
+	want := []string{"github_app_42_pem", "github_app_42_client_secret", "github_app_42_webhook_secret"}
+	if !slices.Equal(got, want) {
+		t.Errorf("GitHubAppKeys(42) = %v, want %v", got, want)
+	}
+}
