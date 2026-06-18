@@ -96,11 +96,15 @@ export default function TeamSettings({
   const [projects, setProjects] = useState<JiraProjectConfig[]>([])
   const [defaultModel, setDefaultModel] = useState('sonnet')
   const [autoDelegate, setAutoDelegate] = useState(true)
+  // Presence-gated absent auto-deny (TFAC-392).
+  const [absentAutodeny, setAbsentAutodeny] = useState(true)
+  const [absentGraceSeconds, setAbsentGraceSeconds] = useState(15)
 
   const [savingRepos, setSavingRepos] = useState(false)
   const [savingProjects, setSavingProjects] = useState(false)
   const [savingDefaults, setSavingDefaults] = useState(false)
   const [savingGroups, setSavingGroups] = useState(false)
+  const [savingPrompts, setSavingPrompts] = useState(false)
 
   // Bumped on a successful repos save to remount GitHubTeamGroup so it refetches
   // its candidate list (which is derived live from the tracked-repo owners).
@@ -134,6 +138,8 @@ export default function TeamSettings({
         setProjects(form.jira_projects)
         setDefaultModel(form.default_model)
         setAutoDelegate(form.auto_delegate_enabled)
+        setAbsentAutodeny(form.permission_absent_autodeny_enabled)
+        setAbsentGraceSeconds(form.permission_absent_grace_seconds)
         setRepos(teamRepos ?? [])
         setReposLoaded(teamRepos !== null)
         setJiraConnected(!!integ?.jira && !!integ?.jira_url)
@@ -257,11 +263,43 @@ export default function TeamSettings({
     }
   }
 
+  // ── Unattended prompts: absent auto-deny (rides team-settings POST) ──
+  const promptsDirty =
+    absentAutodeny !== baseline.permission_absent_autodeny_enabled ||
+    absentGraceSeconds !== baseline.permission_absent_grace_seconds
+  // A 0/blank grace is invalid (the backend floors it at 1s, but block the save
+  // so the persisted value matches what the user sees).
+  const promptsBlocked =
+    absentAutodeny && (!Number.isFinite(absentGraceSeconds) || absentGraceSeconds < 1)
+  const savePrompts = async (): Promise<boolean> => {
+    setSavingPrompts(true)
+    try {
+      const res = await saveTeamSettings(teamId, {
+        ...baseline,
+        permission_absent_autodeny_enabled: absentAutodeny,
+        permission_absent_grace_seconds: absentGraceSeconds,
+      })
+      if (!res.ok) {
+        toast.error(res.error)
+        return false
+      }
+      setBaseline((b) => ({
+        ...b,
+        permission_absent_autodeny_enabled: absentAutodeny,
+        permission_absent_grace_seconds: absentGraceSeconds,
+      }))
+      toast.success('Unattended-prompt settings saved')
+      return true
+    } finally {
+      setSavingPrompts(false)
+    }
+  }
+
   // Switching teams reloads the selected team's config behind the loading
   // overlay, which would silently drop unsaved edits in any expanded section —
   // the TeamSwitch fires outside SettingsSection's collapse guard. Confirm
   // first when any section is dirty (mirrors the per-section discard guard).
-  const anyDirty = reposDirty || groupsDirty || projectsDirty || defaultsDirty
+  const anyDirty = reposDirty || groupsDirty || projectsDirty || defaultsDirty || promptsDirty
   const switchTeam = (id: string) => {
     if (id === selectedTeamId) return
     if (anyDirty && !window.confirm('Discard unsaved changes and switch teams?')) return
@@ -420,6 +458,73 @@ export default function TeamSettings({
                 />
               </button>
             </div>
+          </SettingsSection>
+
+          <SettingsSection
+            title="Unattended prompts"
+            summary={
+              absentAutodeny
+                ? `Fast-deny after ${baseline.permission_absent_grace_seconds}s when nobody's watching`
+                : 'Always wait the full timeout'
+            }
+            dirty={promptsDirty}
+            saving={savingPrompts}
+            saveDisabled={promptsBlocked}
+            onSave={savePrompts}
+            onCancel={() => {
+              setAbsentAutodeny(baseline.permission_absent_autodeny_enabled)
+              setAbsentGraceSeconds(baseline.permission_absent_grace_seconds)
+            }}
+          >
+            <p className="text-[13px] leading-relaxed text-text-tertiary">
+              When a delegated run needs permission for an off-allowlist tool and no one has the
+              board or that run open and focused, deny after a short grace instead of parking the
+              run for the full timeout. If someone opens or focuses the board (or the run) during
+              the grace, the prompt waits the full timeout so they can answer.
+            </p>
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-[13px] text-text-primary">Fast-deny when unattended</p>
+                <p className="mt-0.5 text-[11px] text-text-tertiary">
+                  Off keeps the full-timeout behavior for every prompt
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={absentAutodeny}
+                onClick={() => setAbsentAutodeny((v) => !v)}
+                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
+                  absentAutodeny ? 'bg-accent' : 'bg-black/[0.08]'
+                }`}
+              >
+                <span
+                  className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform ${
+                    absentAutodeny ? 'translate-x-4' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+            {absentAutodeny && (
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-[13px] text-text-primary">Grace window</p>
+                  <p className="mt-0.5 text-[11px] text-text-tertiary">
+                    How long to wait for someone to appear before denying
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="number"
+                    min={1}
+                    value={Number.isFinite(absentGraceSeconds) ? absentGraceSeconds : ''}
+                    onChange={(e) => setAbsentGraceSeconds(parseInt(e.target.value, 10))}
+                    className="w-16 rounded-md border border-border-subtle bg-transparent px-2 py-1 text-right text-[13px] text-text-primary focus:border-accent focus:outline-none"
+                  />
+                  <span className="text-[12px] text-text-tertiary">seconds</span>
+                </div>
+              </div>
+            )}
           </SettingsSection>
         </div>
       )}

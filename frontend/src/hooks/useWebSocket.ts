@@ -11,6 +11,63 @@ type Handler = (event: WSEvent) => void
 let globalWs: WebSocket | null = null
 const listeners = new Set<Handler>()
 
+// --- Presence (TFAC-392) ---
+// We report, over the same socket, whether this tab is on an answer-capable
+// surface (the board or a run's detail page) AND focused. The backend uses it
+// to fast-deny an unattended permission prompt instead of waiting the full
+// timeout. The "viewing" surface is set by the page components (Board /
+// RunDetail) via setPresenceView; "visible" tracks the Page Visibility + focus
+// state. Both live at module scope so they survive navigations and reconnects —
+// the current state is (re)sent on every (re)connect so presence is correct
+// after a dropped socket.
+type PresenceView = 'board' | `run:${string}` | 'other'
+
+const presence: { viewing: PresenceView; visible: boolean } = {
+  viewing: 'other',
+  visible: computeVisible(),
+}
+
+// computeVisible folds the Page Visibility API and window focus into one
+// "answer-capable right now" bit: a backgrounded tab (hidden) or a blurred
+// window does not count as present. Guarded for non-browser/test environments
+// where document may be undefined.
+function computeVisible(): boolean {
+  if (typeof document === 'undefined') return false
+  return document.visibilityState === 'visible' && document.hasFocus()
+}
+
+function sendPresence() {
+  if (globalWs && globalWs.readyState === WebSocket.OPEN) {
+    globalWs.send(
+      JSON.stringify({ type: 'presence', viewing: presence.viewing, visible: presence.visible }),
+    )
+  }
+}
+
+/**
+ * setPresenceView records which surface this tab is on and pushes the update to
+ * the server. Page components call it on mount ('board' / 'run:<id>') and on
+ * unmount ('other'). We always re-send (even for an unchanged value) so a focus
+ * change that raced a navigation still lands.
+ */
+export function setPresenceView(viewing: PresenceView) {
+  presence.viewing = viewing
+  sendPresence()
+}
+
+// Re-evaluate visibility on tab background/foreground and window focus/blur,
+// re-sending the current surface so the server's view stays live. Registered
+// once at module load (browser only).
+if (typeof window !== 'undefined') {
+  const onVisibilityChange = () => {
+    presence.visible = computeVisible()
+    sendPresence()
+  }
+  document.addEventListener('visibilitychange', onVisibilityChange)
+  window.addEventListener('focus', onVisibilityChange)
+  window.addEventListener('blur', onVisibilityChange)
+}
+
 // Track per-repo clone_status across WS events so we only fire the
 // "clone failed" toast on the *transition* into 'failed', not on every
 // repo_profile_updated event with the same failed status. Module-level
@@ -28,6 +85,14 @@ function ensureConnected() {
 
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const ws = new WebSocket(`${proto}//${window.location.host}/api/ws`)
+
+  // Re-send presence on every (re)connect so the server's view of this tab's
+  // surface + focus survives a dropped socket. visible is recomputed here in
+  // case focus changed while disconnected.
+  ws.onopen = () => {
+    presence.visible = computeVisible()
+    sendPresence()
+  }
 
   ws.onmessage = (e) => {
     try {

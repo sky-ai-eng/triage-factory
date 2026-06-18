@@ -48,6 +48,10 @@ export interface TeamConfigForm {
   // a save can't silently reset them. A future ticket adds the controls.
   ai_reprioritize_threshold: number
   ai_preference_update_interval: number
+  // Presence-gated absent auto-deny (TFAC-392). The grace is held in SECONDS on
+  // the form (the UI input is seconds); teamConfig maps it to/from the stored ms.
+  permission_absent_autodeny_enabled: boolean
+  permission_absent_grace_seconds: number
   jira_projects: JiraProjectConfig[]
   // repos and github_groups load from their own endpoints (separate from the
   // team-settings GET), so they carry a third state: `undefined` means "not
@@ -71,6 +75,8 @@ export interface TeamSettingsData {
     AIPreferenceUpdateInterval: number
     DefaultModel: string
     AutoDelegateEnabled: boolean
+    PermissionAbsentGraceMS: number
+    PermissionAbsentAutodenyEnabled: boolean
   }
   jira_projects: JiraProjectConfig[]
   member_count: number
@@ -134,6 +140,8 @@ export const emptyTeamConfig = (): TeamConfigForm => ({
   auto_delegate_enabled: true,
   ai_reprioritize_threshold: 0,
   ai_preference_update_interval: 0,
+  permission_absent_autodeny_enabled: true,
+  permission_absent_grace_seconds: 15,
   jira_projects: [],
 })
 
@@ -148,6 +156,12 @@ export function teamConfigFromSettings(data: TeamSettingsData): TeamConfigForm {
     auto_delegate_enabled: data.team_settings.AutoDelegateEnabled,
     ai_reprioritize_threshold: data.team_settings.AIReprioritizeThreshold,
     ai_preference_update_interval: data.team_settings.AIPreferenceUpdateInterval,
+    permission_absent_autodeny_enabled: data.team_settings.PermissionAbsentAutodenyEnabled,
+    // Stored as ms; the form (and the input) work in whole seconds.
+    permission_absent_grace_seconds: Math.max(
+      1,
+      Math.round((data.team_settings.PermissionAbsentGraceMS ?? 15000) / 1000),
+    ),
     jira_projects: data.jira_projects ?? [],
   }
 }
@@ -201,6 +215,8 @@ export async function saveTeamSettings(teamId: string, form: TeamConfigForm): Pr
       ai_auto_delegate_enabled: form.auto_delegate_enabled,
       ai_reprioritize_threshold: form.ai_reprioritize_threshold,
       ai_preference_update_interval: form.ai_preference_update_interval,
+      permission_absent_autodeny_enabled: form.permission_absent_autodeny_enabled,
+      permission_absent_grace_seconds: form.permission_absent_grace_seconds,
       jira_projects: projects,
     }),
   })

@@ -174,6 +174,12 @@ type teamSettingsUpdate struct {
 	AIReprioritizeThreshold    *int                   `json:"ai_reprioritize_threshold,omitempty"`
 	AIPreferenceUpdateInterval *int                   `json:"ai_preference_update_interval,omitempty"`
 	JiraProjects               *[]jiraProjectSettings `json:"jira_projects,omitempty"`
+	// Presence-gated absent auto-deny knobs (TFAC-392). Pointers so an
+	// unrelated save (e.g. editing projects) that omits them leaves the
+	// stored values untouched. Grace is in seconds on the wire (the UI input
+	// is seconds); it's stored as ms and the spawner clamps it at run time.
+	PermissionAbsentAutodenyEnabled *bool `json:"permission_absent_autodeny_enabled,omitempty"`
+	PermissionAbsentGraceSeconds    *int  `json:"permission_absent_grace_seconds,omitempty"`
 }
 
 func (s *Server) handleTeamSettingsPost(w http.ResponseWriter, r *http.Request) {
@@ -234,6 +240,20 @@ func (s *Server) handleTeamSettingsPost(w http.ResponseWriter, r *http.Request) 
 		}
 		if req.AIPreferenceUpdateInterval != nil {
 			teamSet.AIPreferenceUpdateInterval = *req.AIPreferenceUpdateInterval
+		}
+		if req.PermissionAbsentAutodenyEnabled != nil {
+			teamSet.PermissionAbsentAutodenyEnabled = *req.PermissionAbsentAutodenyEnabled
+		}
+		if req.PermissionAbsentGraceSeconds != nil {
+			// Accept seconds from the UI; store ms. Floor at 1s so a 0/negative
+			// input can't disable the grace by collapsing it — the spawner also
+			// clamps to [1s, permTimeout()) at run time, but a sane floor here
+			// keeps the persisted value honest.
+			secs := *req.PermissionAbsentGraceSeconds
+			if secs < 1 {
+				secs = 1
+			}
+			teamSet.PermissionAbsentGraceMS = secs * 1000
 		}
 
 		if req.JiraProjects != nil {

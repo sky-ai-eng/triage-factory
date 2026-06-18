@@ -16,12 +16,30 @@
 package delegate
 
 import (
+	"context"
 	"errors"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
+
+// The two terminal deny messages a surfaced prompt can resolve to without a
+// user answer. They're kept distinct so the absent path (nobody could answer)
+// is separable from the present-but-unanswered path (someone was watching but
+// never clicked) in run transcripts and downstream tooling (TFAC-392).
+const (
+	msgPermTimedOut = "permission request timed out"
+	msgNoOperator   = "no operator available"
+)
+
+// defaultPresencePollInterval is how often the presence-gated wait re-checks
+// whether an answer-capable, focused tab is present in the run's org. 1s is
+// fine-grained enough for a 15s-default grace while staying cheap (an RLock +
+// map scan over the hub's clients). Tests inject a shorter value via
+// SetPresencePollInterval to drive the absent/present paths deterministically.
+const defaultPresencePollInterval = time.Second
 
 // ErrNoPendingPermission is returned by ResolvePermission when no in-flight
 // request matches (orgID, runID, requestID) — it was already answered, timed
@@ -56,13 +74,78 @@ func (s *Spawner) permTimeout() time.Duration {
 	return s.idleTimeout() / 2
 }
 
+// AbsentAutoDeny captures the per-run, presence-gated fast-deny policy
+// (TFAC-392), resolved once at spawn time (resolveAbsentAutoDeny) and captured
+// in the handler closure so there's no per-prompt DB read.
+//
+//   - enabled == false → today's behavior exactly: the prompt waits the full
+//     permTimeout() regardless of presence (a safe no-op when the team has the
+//     toggle off).
+//   - enabled == true → an unattended prompt (no answer-capable, focused tab in
+//     the run's org) is denied after grace instead of the full window; presence
+//     re-arms the wait to the full timeout. grace is pre-clamped to
+//     [1s, permTimeout()) so the absent path can never exceed the full window —
+//     the "total wait < idleTimeout()" invariant holds either way.
+type AbsentAutoDeny struct {
+	enabled bool
+	grace   time.Duration
+}
+
+// resolveAbsentAutoDeny reads the run's team settings once (admin pool — the run
+// goroutine has no JWT claims) and clamps the grace to a sane range. A nil teams
+// store, empty teamID, or read failure falls back to the schema defaults, so the
+// handler is always built with a usable policy. Called at spawn time, not per
+// prompt.
+func (s *Spawner) resolveAbsentAutoDeny(ctx context.Context, teamID string) AbsentAutoDeny {
+	ts := domain.DefaultTeamSettings()
+	if s.teams != nil && teamID != "" {
+		if loaded, err := s.teams.GetSettingsSystem(ctx, teamID); err == nil {
+			ts = loaded
+		} else {
+			delegateLog.Warn("load team settings for absent-auto-deny failed; using defaults", "team", teamID, "error", err)
+		}
+	}
+	if !ts.PermissionAbsentAutodenyEnabled {
+		return AbsentAutoDeny{enabled: false}
+	}
+	grace := time.Duration(ts.PermissionAbsentGraceMS) * time.Millisecond
+	return AbsentAutoDeny{enabled: true, grace: clampGrace(grace, s.permTimeout())}
+}
+
+// clampGrace keeps the absent-deny grace in [1s, full) so it can neither
+// collapse to an instant deny on a bad value nor invert the load-bearing
+// "absent wait ≤ full ≤ permTimeout() < idleTimeout()" ordering. full is
+// permTimeout() (minutes in production), so the upper guard only ever bites a
+// misconfigured value; the lower floor of 1s mirrors the HTTP-layer floor.
+func clampGrace(grace, full time.Duration) time.Duration {
+	const minGrace = time.Second
+	if grace < minGrace {
+		grace = minGrace
+	}
+	if grace >= full {
+		// full is unusually short (only realistic under a test's tiny injected
+		// idle). Pull grace strictly below it; never return a non-positive value.
+		grace = full - full/10
+		if grace <= 0 {
+			grace = full / 2
+		}
+	}
+	return grace
+}
+
 // BrowserPermissionHandler returns a PermissionHandler that surfaces each
 // canUseTool prompt to the browser and parks the agent's turn until the user
-// answers (ResolvePermission) or permTimeout() elapses (deny). Safe to call
-// from the agentproc reader goroutine: it registers a 1-buffered channel keyed
-// by the request id, broadcasts a `permission_request`, waits, and always
-// deregisters.
-func (s *Spawner) BrowserPermissionHandler(orgID, runID string) agentproc.PermissionHandler {
+// answers (ResolvePermission) or the bounded wait denies it. Safe to call from
+// the agentproc reader goroutine: it registers a 1-buffered channel keyed by the
+// request id, broadcasts a `permission_request`, waits, and always deregisters.
+//
+// absent is the presence-gated fast-deny policy (TFAC-392). With it disabled the
+// wait is exactly the legacy full-permTimeout() select; with it enabled an
+// unattended prompt denies after the grace window with reason "no operator
+// available", while a present, focused board/run tab extends the wait to the
+// full window. Either way the total wait never exceeds permTimeout() and a
+// 200-acknowledged decision is never dropped.
+func (s *Spawner) BrowserPermissionHandler(orgID, runID string, absent AbsentAutoDeny) agentproc.PermissionHandler {
 	return func(req agentproc.PermissionRequest) agentproc.PermissionDecision {
 		key := permKey(runID, req.RequestID)
 		ch := make(chan agentproc.PermissionDecision, 1)
@@ -79,8 +162,11 @@ func (s *Spawner) BrowserPermissionHandler(orgID, runID string) agentproc.Permis
 		// hub-less test spawner. timeout_ms is the prompt's server-side
 		// deadline, sent relative so the client derives its dismiss TTL from
 		// the payload instead of mirroring this Go constant (and so clock
-		// skew between server and browser doesn't matter).
-		timeout := s.permTimeout()
+		// skew between server and browser doesn't matter). It stays the FULL
+		// window even when absent-deny may fire sooner: the card's client TTL
+		// is a backstop, and an absent-deny eagerly broadcasts
+		// permission_resolved to drop the card the moment it fires.
+		full := s.permTimeout()
 		s.wsHub.Broadcast(websocket.Event{
 			Type:  "permission_request",
 			OrgID: orgID,
@@ -89,39 +175,129 @@ func (s *Spawner) BrowserPermissionHandler(orgID, runID string) agentproc.Permis
 				"request_id": req.RequestID,
 				"tool_name":  req.ToolName,
 				"input":      req.Input,
-				"timeout_ms": timeout.Milliseconds(),
+				"timeout_ms": full.Milliseconds(),
 			},
 		})
 
+		decision, got, reason := s.awaitPermission(ch, orgID, runID, full, absent)
+		if got {
+			return decision
+		}
+		// A deadline fired (full timeout, or the absent grace). Deregister
+		// BEFORE deciding, then drain once: a decision already in the buffer
+		// was acknowledged with a 200 (ResolvePermission sends under s.mu while
+		// the entry is present), so honor it — covering both the instant where
+		// the resolve and the deadline were simultaneously ready and the gap
+		// before the deferred delete. After the delete, a late resolve reliably
+		// misses (404).
+		s.mu.Lock()
+		delete(s.permPending, key)
+		s.mu.Unlock()
 		select {
 		case d := <-ch:
 			return d
-		case <-time.After(timeout):
-			// Nobody answered before the bounded wait — deny so the turn
-			// resolves ahead of idle-hibernate. A generous allowlist keeps
-			// this rare. Deregister BEFORE deciding, then drain once: a
-			// decision already in the buffer was acknowledged with a 200
-			// (ResolvePermission sends under s.mu while the entry is
-			// present), so honor it — covering both the instant where the
-			// resolve and the timer were simultaneously ready and select
-			// picked the timer, and the gap before the deferred delete.
-			// After the delete, a late resolve reliably misses (404).
-			s.mu.Lock()
-			delete(s.permPending, key)
-			s.mu.Unlock()
-			select {
-			case d := <-ch:
-				return d
-			default:
-				// A genuine timeout: the prompt is no longer answerable, so
-				// tell every surface showing it to drop it now instead of
-				// waiting out its own client TTL (ResolvePermission already
-				// broadcasts for the user-answered case).
-				s.broadcastPermissionResolved(orgID, runID, req.RequestID)
-				return agentproc.PermissionDecision{Behavior: "deny", Message: "permission request timed out"}
+		default:
+			// The prompt is no longer answerable, so tell every surface showing
+			// it to drop it now instead of waiting out its own client TTL
+			// (ResolvePermission already broadcasts for the user-answered case).
+			s.broadcastPermissionResolved(orgID, runID, req.RequestID)
+			return agentproc.PermissionDecision{Behavior: "deny", Message: reason}
+		}
+	}
+}
+
+// awaitPermission blocks until the prompt is answered or a deadline fires. It
+// returns (decision, true, "") when a decision arrives on ch — the caller
+// returns it verbatim — and (zero, false, reason) when a deadline elapses, where
+// reason is the deny message the caller uses after its deregister-then-drain.
+//
+// With absent.enabled false this is the exact legacy select: ch vs the full
+// window. With it enabled the wait polls presence on a short ticker and tracks
+// two deadlines: the full window (always), and absentSince+grace (only while no
+// answer-capable, focused tab is present in the run's org). The effective
+// deadline is whichever is sooner; presence flipping to present re-arms the wait
+// to the full window (clears absentSince), and flipping back resets the grace
+// clock. The grace deadline never exceeds the full window (clampGrace), so the
+// total wait is bounded by permTimeout() in every branch.
+func (s *Spawner) awaitPermission(ch chan agentproc.PermissionDecision, orgID, runID string, full time.Duration, absent AbsentAutoDeny) (agentproc.PermissionDecision, bool, string) {
+	start := time.Now()
+	fullDeadline := start.Add(full)
+
+	if !absent.enabled {
+		select {
+		case d := <-ch:
+			return d, true, ""
+		case <-time.After(full):
+			return agentproc.PermissionDecision{}, false, msgPermTimedOut
+		}
+	}
+
+	ticker := time.NewTicker(s.presencePollInterval())
+	defer ticker.Stop()
+
+	// absentSince is the timestamp the run went continuously unattended; zero
+	// while present. Seed it from the presence reading at prompt time so a
+	// prompt that arrives already-unattended starts its grace clock now (not a
+	// tick late).
+	present := s.presentFor(orgID, runID)
+	var absentSince time.Time
+	if !present {
+		absentSince = start
+	}
+
+	for {
+		select {
+		case d := <-ch:
+			return d, true, ""
+		case now := <-ticker.C:
+			present = s.presentFor(orgID, runID)
+			if present {
+				absentSince = time.Time{}
+			} else if absentSince.IsZero() {
+				// present→absent edge (or first absent reading): (re)start grace.
+				absentSince = now
+			}
+			// The full window is the hard ceiling regardless of presence. A
+			// prompt that sat watched-but-unanswered for the whole window is the
+			// legacy timeout — present-but-unanswered.
+			if !now.Before(fullDeadline) {
+				return agentproc.PermissionDecision{}, false, msgPermTimedOut
+			}
+			// While unattended, the grace deadline can fire sooner. clampGrace
+			// guarantees absentSince+grace ≤ fullDeadline, so reaching it means
+			// genuinely nobody could answer.
+			if !present && !now.Before(absentSince.Add(absent.grace)) {
+				return agentproc.PermissionDecision{}, false, msgNoOperator
 			}
 		}
 	}
+}
+
+// presentFor reports whether any answer-capable, focused tab in orgID is on the
+// board or this run's detail page (TFAC-392). Delegates to the hub, which is
+// nil-receiver-safe (the hub-less test spawner reads as "nobody present").
+func (s *Spawner) presentFor(orgID, runID string) bool {
+	return s.wsHub.PresentFor(orgID, runID)
+}
+
+// presencePollInterval is the absent-deny presence poll cadence, falling back to
+// the default when unset. Tests inject a short value via SetPresencePollInterval.
+func (s *Spawner) presencePollInterval() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.permPresencePoll > 0 {
+		return s.permPresencePoll
+	}
+	return defaultPresencePollInterval
+}
+
+// SetPresencePollInterval overrides the absent-deny presence poll cadence. Tests
+// inject a short value to drive the absent/present paths deterministically; the
+// in-flight handler reads it through presencePollInterval() at wait start.
+func (s *Spawner) SetPresencePollInterval(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.permPresencePoll = d
 }
 
 // broadcastPermissionResolved tells the browser a pending prompt reached a

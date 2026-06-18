@@ -82,6 +82,12 @@ type Spawner struct {
 	// NewSpawner — a plain store ref like s.tasks, set once and never
 	// mutated, so it needs no mu guard (its sibling seam jiraResolver does).
 	jiraRules db.JiraStatusRulesStore
+	// teams reads per-team settings under the admin pool (GetSettingsSystem)
+	// at spawn time — currently the TFAC-392 presence-gated absent-auto-deny
+	// knobs (grace window + on/off toggle). Resolved once per run when the
+	// permission handler is built, not per prompt. A plain store ref like
+	// s.tasks/s.jiraRules; nil-safe (the helper falls back to defaults).
+	teams db.TeamsStore
 	// tx runs synthetic-claims write batches for manual runs (the
 	// run's creator_user_id is the synthetic claim subject, so RLS
 	// policies on the writes pass under tf_app). Event-triggered runs
@@ -169,6 +175,11 @@ type Spawner struct {
 	// DefaultIdleHibernateTimeout; tests inject a short value via
 	// SetIdleHibernateTimeout. Read through idleTimeout().
 	idleHibernateTimeout time.Duration
+	// permPresencePoll is how often the TFAC-392 presence-gated permission wait
+	// re-checks for an answer-capable, focused tab. Zero means use
+	// defaultPresencePollInterval; tests inject a short value via
+	// SetPresencePollInterval. Read through presencePollInterval().
+	permPresencePoll time.Duration
 	// snapshotRetentionTTL bounds how long a parked/aborted run's durable
 	// workspace snapshot is kept before the retention reaper discards it. Zero
 	// means use DefaultSnapshotRetentionTTL; tests inject a short value via
@@ -215,6 +226,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		runWorktrees: stores.RunWorktrees,
 		orgs:         stores.Orgs,
 		jiraRules:    stores.JiraStatusRules,
+		teams:        stores.Teams,
 		tx:           stores.Tx,
 		ghClient:     ghClient,
 		wsHub:        wsHub,

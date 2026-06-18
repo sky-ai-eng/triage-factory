@@ -66,6 +66,8 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 		aiThreshold, aiInterval int
 		defaultModel            string
 		autoDelegate            bool
+		permAbsentGraceMS       int
+		permAbsentAutodeny      bool
 	)
 	// array_to_json(...)::text round-trips text[] as a JSON literal.
 	// database/sql + pgx stdlib doesn't ship a scanner for *[]string,
@@ -74,11 +76,13 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 	err := q.QueryRowContext(ctx, `
 		SELECT array_to_json(jira_projects)::text,
 		       ai_reprioritize_threshold, ai_preference_update_interval,
-		       default_model, auto_delegate_enabled
+		       default_model, auto_delegate_enabled,
+		       permission_absent_grace_ms, permission_absent_autodeny_enabled
 		FROM team_settings WHERE team_id = $1
 	`, teamID).Scan(
 		&projectsJSON, &aiThreshold, &aiInterval,
 		&defaultModel, &autoDelegate,
+		&permAbsentGraceMS, &permAbsentAutodeny,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		// See OrgsStore for the rationale. Matches team_settings'
@@ -98,11 +102,13 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 		}
 	}
 	return domain.TeamSettings{
-		JiraProjects:               projects,
-		AIReprioritizeThreshold:    aiThreshold,
-		AIPreferenceUpdateInterval: aiInterval,
-		DefaultModel:               defaultModel,
-		AutoDelegateEnabled:        autoDelegate,
+		JiraProjects:                    projects,
+		AIReprioritizeThreshold:         aiThreshold,
+		AIPreferenceUpdateInterval:      aiInterval,
+		DefaultModel:                    defaultModel,
+		AutoDelegateEnabled:             autoDelegate,
+		PermissionAbsentGraceMS:         permAbsentGraceMS,
+		PermissionAbsentAutodenyEnabled: permAbsentAutodeny,
 	}, nil
 }
 
@@ -204,18 +210,22 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 		INSERT INTO team_settings (
 			team_id, jira_projects, ai_reprioritize_threshold,
 			ai_preference_update_interval, default_model, auto_delegate_enabled,
+			permission_absent_grace_ms, permission_absent_autodeny_enabled,
 			updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, now())
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
 		ON CONFLICT (team_id) DO UPDATE SET
 			jira_projects = EXCLUDED.jira_projects,
 			ai_reprioritize_threshold = EXCLUDED.ai_reprioritize_threshold,
 			ai_preference_update_interval = EXCLUDED.ai_preference_update_interval,
 			default_model = EXCLUDED.default_model,
 			auto_delegate_enabled = EXCLUDED.auto_delegate_enabled,
+			permission_absent_grace_ms = EXCLUDED.permission_absent_grace_ms,
+			permission_absent_autodeny_enabled = EXCLUDED.permission_absent_autodeny_enabled,
 			updated_at = now()
 	`,
 		teamID, projects, u.AIReprioritizeThreshold,
 		u.AIPreferenceUpdateInterval, u.DefaultModel, u.AutoDelegateEnabled,
+		u.PermissionAbsentGraceMS, u.PermissionAbsentAutodenyEnabled,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert team_settings: %w", err)
