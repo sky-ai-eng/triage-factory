@@ -159,6 +159,16 @@ Logs are structured (Go's `log/slog`) and written to stderr. Two environment var
 
 Every line carries a `component` field (e.g. `component=router`) naming the subsystem — the structured replacement for the old `[router]` prefixes. Verbose steady-state traces (such as per-poll credential-tier resolution) log at `debug`, so set `TF_LOG_LEVEL=debug` to surface them.
 
+### Claude binary
+
+By default the Agent SDK launches the Claude binary bundled with Triage Factory. To point it at a specific `claude` instead — a locally-built, pinned, or debug binary — set `TF_CLAUDE_BINARY` to its path:
+
+```bash
+export TF_CLAUDE_BINARY=/path/to/claude
+```
+
+The path is validated at spawn (it must exist and be executable), so a wrong path fails the run with a clear error rather than falling back silently. **Local mode only** — the sandboxed multi-tenant path runs the image-baked binary and ignores this variable.
+
 ## GitHub polling
 
 The poller tracks PRs across several categories:

@@ -69,6 +69,12 @@ function parseArgs(argv) {
       case "--model":
         opts.model = next()
         break
+      case "--claude-bin":
+        // Explicit Claude binary (local-mode TF_CLAUDE_BINARY override). The Go
+        // side validates the path and only passes this on the non-sandbox path,
+        // so it wins over resolveClaudeBinary() below.
+        opts.pathToClaudeCodeExecutable = next()
+        break
       case "--allowedTools":
         opts.allowedTools = next().split(",").filter(Boolean)
         break
