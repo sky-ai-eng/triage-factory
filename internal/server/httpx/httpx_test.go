@@ -110,6 +110,11 @@ func TestInternalError_ClientGone(t *testing.T) {
 			if rec.Code != tc.wantStatus {
 				t.Errorf("status = %d, want %d", rec.Code, tc.wantStatus)
 			}
+			// The 499 path is a pure no-op: WriteHeader and return, no body.
+			// Pin that so an accidental body write can't creep in.
+			if tc.wantStatus == StatusClientClosedRequest && rec.Body.Len() != 0 {
+				t.Errorf("499 response should have no body, got %q", rec.Body.String())
+			}
 			// "handler error" is the error-level line; a client-gone abort
 			// must never emit it (the debug breadcrumb is below the default
 			// level and so absent from the buffer too).
