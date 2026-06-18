@@ -4,9 +4,13 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 func TestClaudeBinaryOverride(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+
 	// Unset → no override, no error.
 	t.Run("unset", func(t *testing.T) {
 		t.Setenv(envClaudeBinary, "")
@@ -59,6 +63,22 @@ func TestClaudeBinaryOverride(t *testing.T) {
 		t.Setenv(envClaudeBinary, f)
 		if _, err := claudeBinaryOverride(); err == nil {
 			t.Error("non-executable file should error")
+		}
+	})
+
+	// Multi mode ignores the override entirely — even a valid binary — so it
+	// can't undercut the image-baked binary regardless of sandbox routing.
+	t.Run("multi mode ignored", func(t *testing.T) {
+		runmode.SetForTest(t, runmode.ModeMulti)
+		dir := t.TempDir()
+		bin := filepath.Join(dir, "claude")
+		if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(envClaudeBinary, bin)
+		got, err := claudeBinaryOverride()
+		if err != nil || got != "" {
+			t.Fatalf("multi mode: got (%q, %v), want (\"\", nil)", got, err)
 		}
 	})
 }

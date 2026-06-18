@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
@@ -620,6 +621,15 @@ const envClaudeBinary = "TF_CLAUDE_BINARY"
 // an explicit override that's wrong should fail the spawn loudly rather than
 // silently fall back to the bundled binary and mask the misconfiguration.
 func claudeBinaryOverride() (string, error) {
+	// Local mode only — independent of the sandbox routing. shouldSandbox() is
+	// (ModeMulti && Linux), so a multi-mode process on a non-Linux host would
+	// otherwise take the direct spawn path and honor this global override,
+	// undercutting the image-baked-binary assumption. Gating on the mode here
+	// keeps the behavior matching the docs and survives any change to where the
+	// sandbox/direct split is drawn.
+	if runmode.Current() != runmode.ModeLocal {
+		return "", nil
+	}
 	raw := strings.TrimSpace(os.Getenv(envClaudeBinary))
 	if raw == "" {
 		return "", nil
