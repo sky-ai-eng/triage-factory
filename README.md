@@ -20,7 +20,7 @@
 
 Triage Factory tracks everything that needs your attention across GitHub and Jira, scores it with AI, and routes it through an automation engine visualized as a factory floor. In Triage view, swipe to claim, dismiss, snooze, or delegate tasks to Claude. You decide exactly what gets automated, and you can take over any agent's run when needed. The things you delegate get done how you want them done using prompts you write or skills imported from Claude Code. PR reviews, Jira implementations, CI failures, and merge conflict resolution are all handled automatically in isolated worktrees, streaming results to a centralized dashboard in real time.
 
-It runs as a single Go binary on your machine. No hosted service, no team rollout, no DevOps. Credentials live in the OS keychain (or an encrypted file on headless Linux installs), and the only things that leave your machine are API calls to GitHub, Jira, and Claude.
+It runs as a single Go binary on your machine. No hosted service, no team rollout, no DevOps. Credentials live in the OS keychain — or, when no keychain is reachable (a container, a headless server), an encrypted file on disk — and the only things that leave your machine are API calls to GitHub, Jira, and Claude.
 
 ## What it does
 
