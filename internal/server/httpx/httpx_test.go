@@ -1,9 +1,16 @@
 package httpx
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 )
 
 // TestDecodeJSON_RejectsTrailingData pins the contract that DecodeJSON
@@ -40,6 +47,71 @@ func TestDecodeJSON_RejectsTrailingData(t *testing.T) {
 			}
 			if !tc.wantAccept && rec.Code != 400 {
 				t.Errorf("DecodeJSON(%q) rejected but status=%d, want 400", tc.body, rec.Code)
+			}
+		})
+	}
+}
+
+// TestIsClientGone pins which errors read as "the caller disconnected": a
+// canceled or deadline-exceeded context, including when wrapped via %w (the
+// shape db.WithTx + the handlers produce). A real error and nil are not
+// client-gone.
+func TestIsClientGone(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"canceled", context.Canceled, true},
+		{"deadline", context.DeadlineExceeded, true},
+		{"wrapped canceled", fmt.Errorf("set request.jwt.claims: %w", context.Canceled), true},
+		{"wrapped deadline", fmt.Errorf("team-in-org check: %w", context.DeadlineExceeded), true},
+		{"double wrapped", fmt.Errorf("outer: %w", fmt.Errorf("inner: %w", context.Canceled)), true},
+		{"real error", errors.New("boom"), false},
+		{"nil", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsClientGone(tc.err); got != tc.want {
+				t.Errorf("IsClientGone(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestInternalError_ClientGone is the regression for TFAC-398: a request the
+// client aborted mid-flight must NOT log at error level or return a 500 — it
+// records a 499 instead, so client-abort noise stays out of 5xx logs and
+// metrics. A genuine error still logs and 500s.
+func TestInternalError_ClientGone(t *testing.T) {
+	cases := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantErrLog bool
+	}{
+		{"canceled", context.Canceled, StatusClientClosedRequest, false},
+		{"wrapped canceled", fmt.Errorf("set request.jwt.claims: %w", context.Canceled), StatusClientClosedRequest, false},
+		{"deadline", context.DeadlineExceeded, StatusClientClosedRequest, false},
+		{"real error", errors.New("boom"), http.StatusInternalServerError, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			restore := logging.SetOutput(&logs)
+			defer restore()
+
+			rec := httptest.NewRecorder()
+			InternalError(rec, "test", tc.err)
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d", rec.Code, tc.wantStatus)
+			}
+			// "handler error" is the error-level line; a client-gone abort
+			// must never emit it (the debug breadcrumb is below the default
+			// level and so absent from the buffer too).
+			if gotErrLog := strings.Contains(logs.String(), "handler error"); gotErrLog != tc.wantErrLog {
+				t.Errorf("error-level log present = %v, want %v (logs=%q)", gotErrLog, tc.wantErrLog, logs.String())
 			}
 		})
 	}

@@ -336,6 +336,12 @@ type resolveError struct {
 
 func (e *resolveError) Error() string { return e.err.Error() }
 
+// Unwrap exposes the underlying cause so errors.Is/As traverse it. In
+// particular it lets httpx.InternalError's client-gone check (reached via
+// WriteResolveError) see a context.Canceled that surfaced from ResolveTeamID's
+// default-team lookup, instead of logging the abort as a 500.
+func (e *resolveError) Unwrap() error { return e.err }
+
 // WriteResolveError renders a ResolveTeamID failure: 404 "team not found" for a
 // missing/invalid team, otherwise a redacted 500 logged under scope.
 func WriteResolveError(w http.ResponseWriter, scope string, err error) {
