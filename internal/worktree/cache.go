@@ -303,10 +303,21 @@ func scanBares() []bareEntry {
 	for _, root := range bareCacheRoots() {
 		_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
-				// A walk error on a subdir skips whatever bares live under it
-				// — the safe direction for eviction (don't reclaim what you
-				// can't see), but log it so a misconfigured permissions setup
-				// is diagnosable rather than silently under-accounting disk.
+				// A missing root is the normal "this cache tier has no bares
+				// yet" state, not an error — e.g. the sentinel-org root
+				// (<StateRoot>/repos = /data/repos) in multi mode, where real
+				// orgs' bares live under orgs/<id>/repos and the sentinel tier
+				// never materializes. filepath.Walk surfaces that as an
+				// IsNotExist on the root itself; skip it silently rather than
+				// logging boot + per-tick noise (TFAC-397).
+				if path == root && os.IsNotExist(err) {
+					return nil
+				}
+				// A walk error on a subdir that exists but can't be read skips
+				// whatever bares live under it — the safe direction for
+				// eviction (don't reclaim what you can't see), but log it so a
+				// misconfigured permissions setup is diagnosable rather than
+				// silently under-accounting disk.
 				worktreeLog.Warn("cache scan walk failed", "path", path, "error", err)
 				return nil
 			}

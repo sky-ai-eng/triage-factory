@@ -1,12 +1,16 @@
 package worktree
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -246,6 +250,56 @@ func TestEnforceBudget_TTLPassDropsExternallyDeletedSize(t *testing.T) {
 	}
 	if _, err := os.Stat(warm); err != nil {
 		t.Errorf("warm bare over-evicted due to inflated total: %v", err)
+	}
+}
+
+// TestScanBares_MissingRootSilentStillFindsExisting is the TFAC-397
+// regression: in multi mode bareCacheRoots() always includes the
+// sentinel-org root (<StateRoot>/repos), which never materializes because
+// real orgs' bares live under orgs/<id>/repos. scanBares must treat that
+// missing tier as "empty, skip silently" — no "cache scan walk failed"
+// noise on boot + every reaper tick — while still accounting the bares
+// that do exist under the org tier.
+func TestScanBares_MissingRootSilentStillFindsExisting(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	stateRoot := t.TempDir()
+	paths.SetForTest(t, stateRoot)
+
+	// A real org-tier bare. The sentinel root (<StateRoot>/repos) is
+	// deliberately never created — that absent tier is what logged noise.
+	orgBare := filepath.Join(stateRoot, "orgs", "org-1", "repos", "o", "repo.git")
+	if err := os.MkdirAll(orgBare, 0o755); err != nil {
+		t.Fatalf("mkdir org bare: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(orgBare, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatalf("write HEAD: %v", err)
+	}
+
+	// Precondition: the sentinel root really is absent, so a naive walk over
+	// it errors with IsNotExist — exactly the case the fix must swallow.
+	sentinel := paths.BareCacheRoot(runmode.LocalDefaultOrgID)
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Fatalf("precondition: sentinel root %s should be absent, stat err=%v", sentinel, err)
+	}
+
+	var buf bytes.Buffer
+	restore := logging.SetOutput(&buf)
+	defer restore()
+
+	entries := scanBares()
+
+	if strings.Contains(buf.String(), "cache scan walk failed") {
+		t.Errorf("scanBares logged a walk failure for the absent sentinel root:\n%s", buf.String())
+	}
+
+	var found bool
+	for _, e := range entries {
+		if e.dir == orgBare {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("scanBares did not return the org-tier bare %s; got %+v", orgBare, entries)
 	}
 }
 
