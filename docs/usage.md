@@ -133,7 +133,9 @@ Local mode runs fine on a headless server (no desktop, no browser, no OS keychai
 
 #### Zero-touch provisioning (`TF_HEADLESS`)
 
-To skip the browser entirely — for a reproducible container or an unattended deploy — set `TF_HEADLESS=1`. On first start (local mode only) the server provisions itself from the environment: it creates the workspace, tracks the listed repos, optionally configures Jira (Data Center), and binds your identity — landing directly on the app with no setup wizard.
+To skip the browser entirely — for a reproducible container, a CI runner, or any unattended deploy — set `TF_HEADLESS=1`. On first start (local mode only) the server provisions itself from the environment: it creates the workspace, tracks the listed repos, optionally configures Jira (Data Center), and binds your identity — landing directly on the app with no setup wizard.
+
+This is **not Linux-specific** — it works the same on macOS (a laptop, a mac CI runner). On any machine with a working OS keychain, secrets go to the keychain as usual, so `TF_SECRET_ENCRYPTION_KEY` (step 2 above) isn't needed — that key is only for the keychain-less file backend. The rest of the flow is identical.
 
 | Variable | Purpose |
 | --- | --- |
