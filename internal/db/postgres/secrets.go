@@ -103,10 +103,12 @@ DO UPDATE SET ciphertext  = EXCLUDED.ciphertext,
 // to their canonical 16-byte form so the binding is independent of how the
 // caller spelled them (case, dashes, braces), and the two fixed-width
 // prefixes make the encoding unambiguous — no two distinct identities can
-// produce the same AAD bytes. Org-scope rows use the all-zero UUID for
-// user_id, matching org_secrets_scope_key_uniq's COALESCE sentinel, so
-// they can never collide with a real per-user row (an empty userID means
-// org scope).
+// produce the same AAD bytes. Org scope (an empty userID) binds to the
+// all-zero UUID, matching org_secrets_scope_key_uniq's COALESCE sentinel.
+// To keep that sentinel unambiguous, the all-zero UUID is rejected as an
+// explicit per-user id below — so a per-user row can never alias org-scope
+// semantics. A real GoTrue user id is never the nil UUID; the check just
+// makes the invariant explicit (enforced) rather than assumed.
 func secretAAD(orgID, userID, key string) ([]byte, error) {
 	org, err := uuid.Parse(orgID)
 	if err != nil {
@@ -117,6 +119,14 @@ func secretAAD(orgID, userID, key string) ([]byte, error) {
 		usr, err = uuid.Parse(userID)
 		if err != nil {
 			return nil, fmt.Errorf("secret aad: invalid user_id %q: %w", userID, err)
+		}
+		// The all-zero UUID is reserved as the org-scope sentinel (the
+		// COALESCE default in org_secrets_scope_key_uniq). Allowing it as a
+		// real per-user id would let a (org, 0000…, key) row produce the
+		// same AAD as the org-scope row, so reject it rather than relying on
+		// the assumption that no caller ever supplies it.
+		if usr == uuid.Nil {
+			return nil, fmt.Errorf("secret aad: user_id must not be the all-zero UUID (reserved as the org-scope sentinel)")
 		}
 	}
 	aad := make([]byte, 0, len(org)+len(usr)+len(key))

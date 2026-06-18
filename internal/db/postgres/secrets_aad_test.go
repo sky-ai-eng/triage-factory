@@ -91,16 +91,30 @@ func TestSecretAAD_NormalizesUUIDFormatting(t *testing.T) {
 	}
 }
 
-// TestSecretAAD_OrgScopeUsesAllZeroSentinel pins that an empty userID (org
-// scope) binds to the all-zero UUID, matching org_secrets_scope_key_uniq's
-// COALESCE(user_id, '000…'). A real user is never the zero UUID, so this
-// can't collide with a per-user row.
-func TestSecretAAD_OrgScopeUsesAllZeroSentinel(t *testing.T) {
-	org := uuid.New().String()
-	orgScope := mustAAD(t, org, "", "key")
-	explicitZero := mustAAD(t, org, "00000000-0000-0000-0000-000000000000", "key")
-	if !bytes.Equal(orgScope, explicitZero) {
-		t.Error("org-scope AAD must equal the all-zero-user AAD (matches the unique-index COALESCE sentinel)")
+// TestSecretAAD_OrgScopeSentinel pins both halves of the sentinel
+// invariant: org scope (empty userID) binds to the all-zero UUID — the
+// same value org_secrets_scope_key_uniq's COALESCE uses — AND the all-zero
+// UUID is rejected as an explicit per-user id, so the sentinel stays
+// unambiguous and a per-user row can never alias org-scope semantics.
+func TestSecretAAD_OrgScopeSentinel(t *testing.T) {
+	org := uuid.New()
+
+	// Org scope: the user segment (bytes 16..32) is the all-zero sentinel.
+	orgScope := mustAAD(t, org.String(), "", "key")
+	if userSeg := orgScope[16:32]; !bytes.Equal(userSeg, make([]byte, 16)) {
+		t.Errorf("org-scope user segment = %x, want 16 zero bytes (the COALESCE sentinel)", userSeg)
+	}
+
+	// The all-zero UUID must NOT be accepted as an explicit per-user id —
+	// otherwise a (org, 0000…, key) row would share the org-scope AAD.
+	for _, nilForm := range []string{
+		"00000000-0000-0000-0000-000000000000",
+		uuid.Nil.String(),
+		"{00000000-0000-0000-0000-000000000000}",
+	} {
+		if _, err := secretAAD(org.String(), nilForm, "key"); err == nil {
+			t.Errorf("secretAAD accepted all-zero user_id %q; it must be reserved for the org-scope sentinel", nilForm)
+		}
 	}
 }
 
