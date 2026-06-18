@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.1](https://github.com/sky-ai-eng/triage-factory/compare/v1.12.0...v1.12.1) (2026-06-18)
+
+
+### Bug Fixes
+
+* **headless:** env-driven local-mode bootstrap (TFAC-411) ([#428](https://github.com/sky-ai-eng/triage-factory/issues/428)) ([43007af](https://github.com/sky-ai-eng/triage-factory/commit/43007af44271efdbcd9cf4e0cbd4026fd9637457))
+
 ## [1.12.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.11.0...v1.12.0) (2026-06-18)
 
 
