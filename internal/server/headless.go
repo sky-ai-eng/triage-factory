@@ -184,57 +184,68 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 		headlessLog.Warn("GitHub URL is misconfigured; skipping bootstrap", "url", creds.GitHubURL)
 		return nil
 	}
-	// 2. Validate the bot credential before provisioning — don't stand up an org
-	//    around a token the host rejects.
+	// 2. If the tenant is already fully provisioned there's nothing to seed —
+	//    return BEFORE the bot-credential network call. Otherwise a steady-state
+	//    restart (TF_HEADLESS still set) would make an outbound GitHub request on
+	//    every boot, and an expired bot token would log an alarming "skipping
+	//    bootstrap" even though the bootstrap had nothing to do. Read-only probe,
+	//    no provisioning side effect.
+	if provisioned, perr := s.localOrgProvisioned(ctx); perr != nil {
+		return perr
+	} else if provisioned {
+		headlessLog.Info("tenant already provisioned; headless bootstrap left existing config untouched")
+		return nil
+	}
+
+	// 3. Validate the bot credential BEFORE provisioning — don't stand up an org
+	//    around a token the host rejects. Validating first means fixing the token
+	//    and restarting recovers cleanly; provisioning an empty tenant first would
+	//    trip the never-overwrite gate and the seed would never run.
 	if _, err := auth.ValidateGitHub(ctx, creds.GitHubURL, creds.GitHubPAT); err != nil {
 		headlessLog.Warn("GitHub bot credential failed validation; skipping bootstrap", "host", ghWeb, "error", err)
 		return nil
 	}
 
-	// 3. Provision the tenant (idempotent). justProvisioned is true on a fresh
-	//    install AND on crash-mid-provision recovery; false in steady state — it
-	//    is the gate that makes the seed below one-time.
-	alreadyProvisioned, err := s.ensureLocalOrgProvisioned(ctx)
-	if err != nil {
-		return err
-	}
-	justProvisioned := !alreadyProvisioned
-
 	// 4. Pre-tx network validations for the per-user identities, so the write tx
 	//    holds only DB writes (mirrors the HTTP handlers' validate-then-write).
+	//    We're here only when not yet provisioned (fresh or crash-recovery), so
+	//    these always run.
 	var githubIdentityLogin string
-	if justProvisioned {
-		switch {
-		case cfg.githubUserPAT != "":
-			login, verr := validateGitHubIdentityPAT(ctx, ghWeb, cfg.githubUserPAT)
-			if verr != nil {
-				headlessLog.Warn("TRIAGE_FACTORY_GITHUB_USER_PAT failed validation; GitHub identity not bound (you'll be asked to Connect)", "host", ghWeb, "error", verr)
-			} else {
-				githubIdentityLogin = login
-			}
-		default:
-			// The GitHub identity gate is a hard redirect in local mode, so a
-			// provision without this token lands the operator on the Connect page
-			// rather than the app. Warn so a half-configured headless deploy is
-			// diagnosable instead of mysteriously gated.
-			headlessLog.Warn("TRIAGE_FACTORY_GITHUB_USER_PAT is unset; GitHub identity won't be bound and you'll be prompted to Connect in the UI. Set it (often the same value as the bot PAT) for a no-browser boot.")
+	switch {
+	case cfg.githubUserPAT != "":
+		login, verr := validateGitHubIdentityPAT(ctx, ghWeb, cfg.githubUserPAT)
+		if verr != nil {
+			headlessLog.Warn("TRIAGE_FACTORY_GITHUB_USER_PAT failed validation; GitHub identity not bound (you'll be asked to Connect)", "host", ghWeb, "error", verr)
+		} else {
+			githubIdentityLogin = login
+		}
+	default:
+		// The GitHub identity gate is a hard redirect in local mode, so a
+		// provision without this token lands the operator on the Connect page
+		// rather than the app. Warn so a half-configured headless deploy is
+		// diagnosable instead of mysteriously gated.
+		headlessLog.Warn("TRIAGE_FACTORY_GITHUB_USER_PAT is unset; GitHub identity won't be bound and you'll be prompted to Connect in the UI. Set it (often the same value as the bot PAT) for a no-browser boot.")
+	}
+
+	// Jira readiness: the bot URL/PAT plus a complete status config. The host is
+	// resolved only when we'll actually use it.
+	jiraReady := creds.JiraURL != "" && creds.JiraPAT != "" && cfg.jiraComplete()
+	if cfg.jiraIntent() && !jiraReady {
+		headlessLog.Warn("Jira config is incomplete; skipping Jira setup (need TRIAGE_FACTORY_JIRA_URL + _JIRA_BOT_PAT + _JIRA_PROJECTS + _JIRA_PICKUP_STATUSES + _JIRA_INPROGRESS_STATUS + _JIRA_DONE_STATUS)")
+	}
+	var jiraHost string
+	if jiraReady {
+		host, ok := resolveJiraHost(creds.JiraURL)
+		if !ok {
+			headlessLog.Warn("Jira URL is misconfigured; skipping Jira setup", "url", creds.JiraURL)
+			jiraReady = false
+		} else {
+			jiraHost = host
 		}
 	}
 
-	// Jira readiness: the bot URL/PAT plus a complete status config.
-	jiraReady := creds.JiraURL != "" && creds.JiraPAT != "" && cfg.jiraComplete()
-	jiraHost, jiraHostOK := resolveJiraHost(creds.JiraURL)
-	if cfg.jiraIntent() && !jiraReady {
-		headlessLog.Warn("Jira config is incomplete; skipping Jira setup (need TRIAGE_FACTORY_JIRA_URL + _JIRA_BOT_PAT + _JIRA_PROJECTS + _JIRA_PICKUP_STATUSES + _JIRA_INPROGRESS_STATUS + _JIRA_DONE_STATUS)")
-		jiraReady = false
-	}
-	if jiraReady && !jiraHostOK {
-		headlessLog.Warn("Jira URL is misconfigured; skipping Jira setup", "url", creds.JiraURL)
-		jiraReady = false
-	}
-
 	var jiraIdentity *jiraDCIdentity
-	if justProvisioned && jiraReady {
+	if jiraReady {
 		if cfg.jiraUserPAT != "" {
 			jiraIdentity = s.validateJiraDCIdentity(ctx, jiraHost, cfg.jiraUserPAT)
 		} else {
@@ -244,14 +255,19 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 		}
 	}
 
-	// 5. Apply the one-time seed in a single tx. Skip entirely once provisioned
-	//    so we never overwrite the operator's later edits.
-	if !justProvisioned {
-		headlessLog.Info("tenant already provisioned; headless bootstrap left existing config untouched")
-		return nil
+	// 5. Provision the tenant (idempotent), then seed in one tx. Reached only when
+	//    not already provisioned, so the seed always runs; the per-item "only if
+	//    empty" guards below are belt-and-suspenders against a partial prior provision.
+	if _, err := s.ensureLocalOrgProvisioned(ctx); err != nil {
+		return err
 	}
 
-	summary := map[string]any{"github_host": ghWeb}
+	var (
+		seededRepos        int
+		seededJiraProjects int
+		boundGitHubLogin   string
+		boundJiraName      string
+	)
 	if err := s.tx.WithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(tx db.TxStores) error {
 		// org-settings host URLs + clone protocol. The freshly-provisioned row
 		// carries empty base URLs and the "ssh" default; headless has no SSH
@@ -281,7 +297,7 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 				if rerr := tx.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, cfg.repos); rerr != nil {
 					return rerr
 				}
-				summary["repos"] = len(cfg.repos)
+				seededRepos = len(cfg.repos)
 			}
 		}
 
@@ -303,7 +319,7 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 				if rerr := tx.JiraStatusRules.ReplaceForTeam(ctx, runmode.LocalDefaultTeamID, headlessJiraRules(cfg)); rerr != nil {
 					return rerr
 				}
-				summary["jira_projects"] = len(cfg.jiraProjects)
+				seededJiraProjects = len(cfg.jiraProjects)
 			}
 		}
 
@@ -317,7 +333,7 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 				if uerr := tx.Users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, ghWeb, githubIdentityLogin, "pat"); uerr != nil {
 					return uerr
 				}
-				summary["github_identity"] = githubIdentityLogin
+				boundGitHubLogin = githubIdentityLogin
 			}
 		}
 
@@ -334,7 +350,7 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 				if uerr := tx.Users.UpsertJiraIdentity(ctx, runmode.LocalDefaultUserID, jiraIdentity.host, jiraIdentity.accountID, jiraIdentity.displayName, "pat"); uerr != nil {
 					return uerr
 				}
-				summary["jira_identity"] = jiraIdentity.displayName
+				boundJiraName = jiraIdentity.displayName
 			}
 		}
 		return nil
@@ -342,7 +358,21 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 		return err
 	}
 
-	headlessLog.Info("headless bootstrap complete", logKVs(summary)...)
+	// Deterministic field order (slog reads the slice positionally).
+	args := []any{"github_host", ghWeb}
+	if seededRepos > 0 {
+		args = append(args, "repos", seededRepos)
+	}
+	if seededJiraProjects > 0 {
+		args = append(args, "jira_projects", seededJiraProjects)
+	}
+	if boundGitHubLogin != "" {
+		args = append(args, "github_identity", boundGitHubLogin)
+	}
+	if boundJiraName != "" {
+		args = append(args, "jira_identity", boundJiraName)
+	}
+	headlessLog.Info("headless bootstrap complete", args...)
 	return nil
 }
 
@@ -393,13 +423,4 @@ func headlessJiraRules(cfg headlessConfig) []domain.JiraProjectStatusRules {
 		})
 	}
 	return rules
-}
-
-// logKVs flattens a map into the alternating key/value slice slog wants.
-func logKVs(m map[string]any) []any {
-	out := make([]any, 0, len(m)*2)
-	for k, v := range m {
-		out = append(out, k, v)
-	}
-	return out
 }

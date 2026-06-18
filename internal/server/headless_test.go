@@ -195,16 +195,7 @@ func TestRunHeadlessBootstrap_HappyPath(t *testing.T) {
 
 	s := newTestServer(t)
 	ctx := t.Context()
-
-	// newTestServer pre-seeds the agent row, which would make the org look
-	// already-provisioned (justProvisioned=false → seed skipped). Drop it so the
-	// bootstrap exercises a real first provision, exactly as a fresh DB would.
-	if _, err := s.db.ExecContext(ctx, "DELETE FROM team_agents"); err != nil {
-		t.Fatalf("clear team_agents: %v", err)
-	}
-	if _, err := s.db.ExecContext(ctx, "DELETE FROM agents"); err != nil {
-		t.Fatalf("clear agents: %v", err)
-	}
+	clearLocalProvisioningSeed(t, s)
 
 	if err := s.RunHeadlessBootstrap(ctx); err != nil {
 		t.Fatalf("RunHeadlessBootstrap: %v", err)
@@ -306,12 +297,7 @@ func TestRunHeadlessBootstrap_UnsetIdentityPATsWarn(t *testing.T) {
 
 	s := newTestServer(t)
 	ctx := t.Context()
-	if _, err := s.db.ExecContext(ctx, "DELETE FROM team_agents"); err != nil {
-		t.Fatalf("clear team_agents: %v", err)
-	}
-	if _, err := s.db.ExecContext(ctx, "DELETE FROM agents"); err != nil {
-		t.Fatalf("clear agents: %v", err)
-	}
+	clearLocalProvisioningSeed(t, s)
 
 	if err := s.RunHeadlessBootstrap(ctx); err != nil {
 		t.Fatalf("RunHeadlessBootstrap: %v", err)
@@ -350,5 +336,19 @@ func TestRunHeadlessBootstrap_UnsetIdentityPATsWarn(t *testing.T) {
 	}
 	if !strings.Contains(out, "TRIAGE_FACTORY_JIRA_USER_PAT is unset") {
 		t.Errorf("expected a WARN about the unset Jira identity PAT; logs:\n%s", out)
+	}
+}
+
+// clearLocalProvisioningSeed drops the agent rows newTestServer pre-seeds, so
+// the org no longer reads as fully provisioned and a test can exercise a real
+// fresh provision. Raw SQL because agents/team_agents are bootstrap-only (no
+// delete store method) — kept in one place so a future table rename is a single
+// fix rather than silent no-ops scattered across tests.
+func clearLocalProvisioningSeed(t *testing.T, s *Server) {
+	t.Helper()
+	for _, table := range []string{"team_agents", "agents"} {
+		if _, err := s.db.Exec("DELETE FROM " + table); err != nil {
+			t.Fatalf("clear %s seed: %v", table, err)
+		}
 	}
 }

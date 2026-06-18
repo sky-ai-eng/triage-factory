@@ -400,24 +400,44 @@ func (s *Server) handleSetupStart(w http.ResponseWriter, r *http.Request) {
 // pools to one connection. BootstrapLocalOrg creates the synthetic sentinel
 // rows and must run OUTSIDE any WithTx (admin-pool seeders).
 func (s *Server) ensureLocalOrgProvisioned(ctx context.Context) (alreadyProvisioned bool, err error) {
-	org, err := s.orgs.GetOrgSystem(ctx, runmode.LocalDefaultOrgID)
+	provisioned, err := s.localOrgProvisioned(ctx)
 	if err != nil {
-		return false, fmt.Errorf("tenant probe: %w", err)
+		return false, err
 	}
-	if org != nil {
-		agent, aerr := s.allStores.Agents.GetForOrgSystem(ctx, runmode.LocalDefaultOrgID)
-		if aerr != nil {
-			return false, fmt.Errorf("agent probe: %w", aerr)
-		}
-		if agent != nil {
-			return true, nil
-		}
-		// org exists, no agent: partial provision; fall through to complete it.
+	if provisioned {
+		return true, nil
 	}
+	// Not (fully) provisioned — fresh install, or org row exists without an
+	// agents row (crash-mid-provision). Re-running BootstrapLocalOrg reaches the
+	// same end state either way.
 	if err := db.BootstrapLocalOrg(ctx, s.allStores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
 		return false, fmt.Errorf("bootstrap local org: %w", err)
 	}
 	return false, nil
+}
+
+// localOrgProvisioned reports whether the local tenant is *fully* provisioned —
+// the org row AND its agents row both exist (the same condition
+// ensureLocalOrgProvisioned treats as "already provisioned"). A read-only probe
+// with no provisioning side effect, so a caller can branch on it before
+// deciding whether to do work that should only happen on a real provision
+// (e.g. the headless bootstrap skips its bot-credential network call and its
+// seed when this is already true). Org row but no agents row reads as
+// not-provisioned: that's a crash-mid-provision state the caller should
+// complete. System (admin-pool) reads; SQLite collapses the pool split.
+func (s *Server) localOrgProvisioned(ctx context.Context) (bool, error) {
+	org, err := s.orgs.GetOrgSystem(ctx, runmode.LocalDefaultOrgID)
+	if err != nil {
+		return false, fmt.Errorf("tenant probe: %w", err)
+	}
+	if org == nil {
+		return false, nil
+	}
+	agent, err := s.allStores.Agents.GetForOrgSystem(ctx, runmode.LocalDefaultOrgID)
+	if err != nil {
+		return false, fmt.Errorf("agent probe: %w", err)
+	}
+	return agent != nil, nil
 }
 
 // DELETE /api/integrations — clears all integration credentials (GitHub
