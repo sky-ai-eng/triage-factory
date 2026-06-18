@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/sky-ai-eng/triage-factory/releases">
-    <img src="https://img.shields.io/github/v/release/sky-ai-eng/triage-factory?include_prereleases&sort=semver&label=latest%20pre-release" alt="Latest pre-release" />
+    <img src="https://img.shields.io/github/v/release/sky-ai-eng/triage-factory?sort=semver&label=latest%20release" alt="Latest release" />
   </a>
   <a href="https://github.com/sky-ai-eng/triage-factory/actions/workflows/test.yml">
     <img src="https://github.com/sky-ai-eng/triage-factory/actions/workflows/test.yml/badge.svg?branch=main" alt="Test" />

@@ -6,7 +6,7 @@
   "bump-minor-pre-major": true,
   "bump-patch-for-minor-pre-major": false,
   "draft": false,
-  "prerelease": true,
+  "prerelease": false,
   "packages": {
     ".": {
       "package-name": "triagefactory",

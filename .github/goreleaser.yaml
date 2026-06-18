@@ -59,7 +59,12 @@ release:
   # goreleaser to upload artifacts to that existing release rather than
   # erroring on "release already exists".
   mode: append
-  prerelease: true
+  # Ship full releases, not prereleases. Must match release-please-config.json's
+  # "prerelease": false — release-please creates the release, goreleaser appends
+  # to it, and a mismatch here would re-stamp it prerelease on artifact upload.
+  prerelease: false
+  # Promote the newest tag to GitHub's "Latest" automatically (also the default).
+  make_latest: "true"
   draft: false
   header: |
     ## triagefactory {{ .Tag }}
