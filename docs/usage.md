@@ -93,7 +93,7 @@ The headless file backend **requires `TF_SECRET_ENCRYPTION_KEY`** — 32 bytes, 
 
 ### Running headless on a Linux server
 
-Local mode runs fine on a headless server (no desktop, no browser, no OS keychain). This is **single-user local mode** — *not* the multi-tenant deployment in [self-host setup](self-host-setup.md), which is the only thing that needs Postgres, GoTrue, or Docker. All you need here is the binary and a few environment variables.
+Local mode runs fine on a headless server (no desktop, no browser, no OS keychain). This is **single-user local mode** — *not* the multi-tenant deployment in [self-host setup](self-host-setup.md), which is the only thing that needs Postgres, GoTrue, or Docker. There are two ways to set it up: run it and reach the UI once over a tunnel, or provision everything from environment variables (zero-touch — see below).
 
 1. **Install the binary** (Homebrew or `go build` — see the [README](../README.md)). `$HOME` must be set; state lands in `~/.triagefactory/`.
 
@@ -105,19 +105,7 @@ Local mode runs fine on a headless server (no desktop, no browser, no OS keychai
 
    Persist it where the process reads its environment (a systemd unit's `Environment=`, an `.env`, your shell profile). The server refuses to start headless without it, and losing or changing it means re-entering your credentials.
 
-3. **Supply credentials via environment variables** instead of typing them in the UI:
-
-   ```bash
-   export TRIAGE_FACTORY_GITHUB_URL=https://github.com
-   export TRIAGE_FACTORY_GITHUB_BOT_PAT=ghp_…     # the org/bot access token
-   # optional Jira (Data Center):
-   export TRIAGE_FACTORY_JIRA_URL=https://jira.example.com
-   export TRIAGE_FACTORY_JIRA_BOT_PAT=…
-   ```
-
-   These overlay the secret store on every read (they work on desktop too).
-
-4. **Run without a browser**, reachable from where you'll use it:
+3. **Run without a browser**, reachable from where you'll use it:
 
    ```bash
    ./triagefactory --no-browser --host 0.0.0.0
@@ -129,7 +117,7 @@ Local mode runs fine on a headless server (no desktop, no browser, no OS keychai
    ssh -L 3000:localhost:3000 you@server   # then open http://localhost:3000
    ```
 
-5. **Finish setup in the browser** (the tunneled or exposed URL) — pick your repos and bind your identity. Everything you enter persists (encrypted) across restarts.
+4. **Finish setup in the browser** (the tunneled or exposed URL) — paste your GitHub / Jira / Anthropic credentials, pick your repos, and bind your identity. Everything you enter persists (encrypted) across restarts.
 
 #### Zero-touch provisioning (`TF_HEADLESS`)
 
