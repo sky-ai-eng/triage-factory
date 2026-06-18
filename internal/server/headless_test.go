@@ -51,6 +51,23 @@ func TestParseRepos(t *testing.T) {
 	}
 }
 
+func TestParseCloneProtocol(t *testing.T) {
+	cases := map[string]string{
+		"":        "https", // default
+		"https":   "https",
+		"HTTPS":   "https",
+		"  ssh  ": "ssh",
+		"SSH":     "ssh",
+		"git":     "https", // invalid → fall back to https
+		"http":    "https", // invalid → fall back to https
+	}
+	for in, want := range cases {
+		if got := parseCloneProtocol(in); got != want {
+			t.Errorf("parseCloneProtocol(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestHeadlessJiraRules(t *testing.T) {
 	cfg := headlessConfig{
 		jiraProjects:         []string{"SKY", "TFAC"},
@@ -256,6 +273,47 @@ func TestRunHeadlessBootstrap_HappyPath(t *testing.T) {
 	}
 	if len(repos) != 1 {
 		t.Errorf("never-overwrite violated: want 1 repo after UI edit + re-run, got %d", len(repos))
+	}
+}
+
+// TestRunHeadlessBootstrap_CloneProtocolSSHOverride verifies that
+// TRIAGE_FACTORY_CLONE_PROTOCOL=ssh makes the headless seed pin ssh instead of
+// the https default, for an operator whose headless box has an SSH agent.
+func TestRunHeadlessBootstrap_CloneProtocolSSHOverride(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	auth.ResetSecretBackendForTest(t)
+
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/user" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"login":"octocat"}`))
+	}))
+	t.Cleanup(gh.Close)
+
+	t.Setenv(envHeadless, "1")
+	t.Setenv("TRIAGE_FACTORY_GITHUB_URL", gh.URL)
+	t.Setenv("TRIAGE_FACTORY_GITHUB_BOT_PAT", "bot-token")
+	t.Setenv(envGitHubUserPAT, "user-token")
+	t.Setenv(envRepos, "acme/api")
+	t.Setenv(envCloneProtocol, "ssh")
+
+	s := newTestServer(t)
+	ctx := t.Context()
+	clearLocalProvisioningSeed(t, s)
+
+	if err := s.RunHeadlessBootstrap(ctx); err != nil {
+		t.Fatalf("RunHeadlessBootstrap: %v", err)
+	}
+	orgSet, err := s.orgs.GetSettingsSystem(ctx, runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("GetSettingsSystem: %v", err)
+	}
+	if orgSet.GitHubCloneProtocol != "ssh" {
+		t.Errorf("GitHubCloneProtocol = %q, want ssh", orgSet.GitHubCloneProtocol)
 	}
 }
 

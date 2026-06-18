@@ -44,6 +44,7 @@ const (
 	envJiraPickupStatuses   = "TRIAGE_FACTORY_JIRA_PICKUP_STATUSES"
 	envJiraInProgressStatus = "TRIAGE_FACTORY_JIRA_INPROGRESS_STATUS"
 	envJiraDoneStatus       = "TRIAGE_FACTORY_JIRA_DONE_STATUS"
+	envCloneProtocol        = "TRIAGE_FACTORY_CLONE_PROTOCOL"
 )
 
 // headlessSeedVars are the bootstrap-only env vars — read solely by the
@@ -52,6 +53,7 @@ const (
 var headlessSeedVars = []string{
 	envRepos, envGitHubUserPAT, envJiraUserPAT, envJiraProjects,
 	envJiraPickupStatuses, envJiraInProgressStatus, envJiraDoneStatus,
+	envCloneProtocol,
 }
 
 // HeadlessEnabled reports whether TF_HEADLESS requests the env-driven bootstrap.
@@ -86,6 +88,7 @@ type headlessConfig struct {
 	jiraPickupStatuses   []string
 	jiraInProgressStatus string
 	jiraDoneStatus       string
+	cloneProtocol        string // "https" (default) or "ssh"
 }
 
 // jiraIntent reports whether the operator expressed any intent to configure
@@ -112,6 +115,25 @@ func loadHeadlessConfig() headlessConfig {
 		jiraPickupStatuses:   parseCSV(os.Getenv(envJiraPickupStatuses)),
 		jiraInProgressStatus: strings.TrimSpace(os.Getenv(envJiraInProgressStatus)),
 		jiraDoneStatus:       strings.TrimSpace(os.Getenv(envJiraDoneStatus)),
+		cloneProtocol:        parseCloneProtocol(os.Getenv(envCloneProtocol)),
+	}
+}
+
+// parseCloneProtocol normalizes the clone-protocol override. Headless pins
+// https by default because a headless box (Docker, CI, bare server) usually has
+// no SSH agent or keys loaded, and the bot PAT — used over https — is the
+// credential it's guaranteed to have. An operator who HAS an SSH agent on the
+// box can set TRIAGE_FACTORY_CLONE_PROTOCOL=ssh to clone over SSH instead. An
+// unrecognized value warns and falls back to https rather than failing boot.
+func parseCloneProtocol(raw string) string {
+	switch v := strings.ToLower(strings.TrimSpace(raw)); v {
+	case "", "https":
+		return "https"
+	case "ssh":
+		return "ssh"
+	default:
+		headlessLog.Warn("ignoring invalid TRIAGE_FACTORY_CLONE_PROTOCOL (want ssh|https); using https", "value", raw)
+		return "https"
 	}
 }
 
@@ -277,8 +299,9 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 	)
 	if err := s.tx.WithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(tx db.TxStores) error {
 		// org-settings host URLs + clone protocol. The freshly-provisioned row
-		// carries empty base URLs and the "ssh" default; headless has no SSH
-		// agent, so pin https.
+		// carries empty base URLs and the "ssh" default; headless defaults to
+		// https (no SSH agent on a typical headless box), overridable via
+		// TRIAGE_FACTORY_CLONE_PROTOCOL for a box that does have SSH set up.
 		orgSet, gerr := tx.Orgs.GetSettings(ctx, runmode.LocalDefaultOrgID)
 		if gerr != nil {
 			return gerr
@@ -289,7 +312,7 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 		if jiraReady && orgSet.JiraBaseURL == "" {
 			orgSet.JiraBaseURL = creds.JiraURL
 		}
-		orgSet.GitHubCloneProtocol = "https"
+		orgSet.GitHubCloneProtocol = cfg.cloneProtocol
 		if uerr := tx.Orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, orgSet); uerr != nil {
 			return uerr
 		}

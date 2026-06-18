@@ -132,6 +132,7 @@ This is **not Linux-specific** — it works the same on macOS (a laptop, a mac C
 | `TRIAGE_FACTORY_GITHUB_BOT_PAT` | The org/bot access token the factory polls and runs autonomous work with. |
 | `TRIAGE_FACTORY_GITHUB_USER_PAT` | *Your* identity token. Required for a no-browser boot — without it you'll be asked to connect your GitHub identity in the UI. Usually the same value as the bot PAT for a solo operator. |
 | `TRIAGE_FACTORY_REPOS` | Comma-separated `owner/repo` list to track. Without at least one, the factory has nothing to poll. |
+| `TRIAGE_FACTORY_CLONE_PROTOCOL` | `https` (default) or `ssh` — how repos are cloned to the box. Optional. |
 | `TRIAGE_FACTORY_JIRA_URL` | Jira (Data Center) host. Optional. |
 | `TRIAGE_FACTORY_JIRA_BOT_PAT` | Jira service token. Optional. |
 | `TRIAGE_FACTORY_JIRA_USER_PAT` | Your Jira identity token. Required whenever Jira is configured. |
@@ -142,6 +143,8 @@ This is **not Linux-specific** — it works the same on macOS (a laptop, a mac C
 | `ANTHROPIC_API_KEY` | Claude credential — local mode inherits it from the environment for scoring and delegation. |
 
 The Jira variables apply one global status mapping to every tracked project. Jira here is optional and Data Center only; Jira Cloud onboarding stays in the UI.
+
+Headless defaults to **HTTPS** cloning, authenticated with the bot PAT — a headless box usually has no SSH agent, so HTTPS is the credential-bearing path that works out of the box (private repos included). Set `TRIAGE_FACTORY_CLONE_PROTOCOL=ssh` only if the box has an SSH agent with a loaded key for your GitHub host; SSH clones authenticate through that agent, not the PAT.
 
 Provisioning is a **one-time seed**: it runs only on the first start and never overwrites anything you later change in the UI, so editing repos or statuses in the app sticks across restarts. If `TF_HEADLESS` is unset but the seed variables are present, they're ignored with a warning. Missing or invalid GitHub credentials skip the whole bootstrap; an incomplete Jira block skips just Jira — both log a warning rather than failing the server.
 

@@ -192,7 +192,7 @@ func (r *reloader) reprofileRestartAndScore(orgID string, invalidate, pollSoon b
 			r.pollerMgr.PollSoon("jira", orgID)
 		}
 		r.scorer.Trigger(orgID)
-		bootstrapBareClones(r.stores.Repos)
+		bootstrapBareClones(r.stores.Repos, r.stores.Secrets)
 	}()
 }
 

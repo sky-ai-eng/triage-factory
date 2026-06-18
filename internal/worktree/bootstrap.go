@@ -15,6 +15,15 @@ type BootstrapTarget struct {
 	Owner    string
 	Repo     string
 	CloneURL string
+	// Token is the bearer half of the HTTPS credential for this target's host
+	// (the org bot PAT in local mode). It's wrapped in CloneAuthFor, which
+	// no-ops on an SSH-form CloneURL or an empty token — so the SSH (local
+	// default) and public-repo paths stay byte-for-byte unchanged, and the
+	// token is consumed only for HTTPS clones of private repos. Without it,
+	// an HTTPS warm clone of a private repo fails with git prompting for a
+	// username (terminal prompts are disabled), which is exactly the failure
+	// a headless install (clone protocol pinned to https) would hit.
+	Token string
 }
 
 // BootstrapBareClones is the budget-aware warmer: it pre-populates the
@@ -57,7 +66,7 @@ func BootstrapBareClones(ctx context.Context, targets []BootstrapTarget) {
 			skipped++
 			continue
 		}
-		if _, err := EnsureBareClone(ctx, t.Owner, t.Repo, t.CloneURL); err != nil {
+		if _, err := EnsureBareClone(ctx, t.Owner, t.Repo, t.CloneURL, WithCloneAuth(CloneAuthFor(t.CloneURL, t.Token))); err != nil {
 			worktreeLog.Warn("warm failed", "owner", t.Owner, "repo", t.Repo, "error", err)
 			failed++
 			continue
