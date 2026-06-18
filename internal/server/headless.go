@@ -203,12 +203,21 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 	// 4. Pre-tx network validations for the per-user identities, so the write tx
 	//    holds only DB writes (mirrors the HTTP handlers' validate-then-write).
 	var githubIdentityLogin string
-	if justProvisioned && cfg.githubUserPAT != "" {
-		login, verr := validateGitHubIdentityPAT(ctx, ghWeb, cfg.githubUserPAT)
-		if verr != nil {
-			headlessLog.Warn("TRIAGE_FACTORY_GITHUB_USER_PAT failed validation; GitHub identity not bound (you'll be asked to Connect)", "host", ghWeb, "error", verr)
-		} else {
-			githubIdentityLogin = login
+	if justProvisioned {
+		switch {
+		case cfg.githubUserPAT != "":
+			login, verr := validateGitHubIdentityPAT(ctx, ghWeb, cfg.githubUserPAT)
+			if verr != nil {
+				headlessLog.Warn("TRIAGE_FACTORY_GITHUB_USER_PAT failed validation; GitHub identity not bound (you'll be asked to Connect)", "host", ghWeb, "error", verr)
+			} else {
+				githubIdentityLogin = login
+			}
+		default:
+			// The GitHub identity gate is a hard redirect in local mode, so a
+			// provision without this token lands the operator on the Connect page
+			// rather than the app. Warn so a half-configured headless deploy is
+			// diagnosable instead of mysteriously gated.
+			headlessLog.Warn("TRIAGE_FACTORY_GITHUB_USER_PAT is unset; GitHub identity won't be bound and you'll be prompted to Connect in the UI. Set it (often the same value as the bot PAT) for a no-browser boot.")
 		}
 	}
 
@@ -225,8 +234,14 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 	}
 
 	var jiraIdentity *jiraDCIdentity
-	if justProvisioned && jiraReady && cfg.jiraUserPAT != "" {
-		jiraIdentity = s.validateJiraDCIdentity(ctx, jiraHost, cfg.jiraUserPAT)
+	if justProvisioned && jiraReady {
+		if cfg.jiraUserPAT != "" {
+			jiraIdentity = s.validateJiraDCIdentity(ctx, jiraHost, cfg.jiraUserPAT)
+		} else {
+			// Same gate problem as GitHub: configuring Jira projects without a
+			// per-user token leaves the operator stuck at the Jira Connect page.
+			headlessLog.Warn("Jira is configured but TRIAGE_FACTORY_JIRA_USER_PAT is unset; Jira identity won't be bound and you'll be prompted to connect Jira in the UI. Set it for a no-browser boot.")
+		}
 	}
 
 	// 5. Apply the one-time seed in a single tx. Skip entirely once provisioned

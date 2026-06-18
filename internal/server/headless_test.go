@@ -1,16 +1,19 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/zalando/go-keyring"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -262,5 +265,90 @@ func TestRunHeadlessBootstrap_HappyPath(t *testing.T) {
 	}
 	if len(repos) != 1 {
 		t.Errorf("never-overwrite violated: want 1 repo after UI edit + re-run, got %d", len(repos))
+	}
+}
+
+// TestRunHeadlessBootstrap_UnsetIdentityPATsWarn verifies that when the access
+// side is fully configured but the per-user identity PATs are omitted, the
+// bootstrap still provisions repos + Jira config yet leaves both identities
+// unbound — and logs a WARN for each, so a half-configured headless deploy
+// stuck at the Connect gate is diagnosable. The Jira bot credential isn't
+// network-validated, so no Jira stub is needed.
+func TestRunHeadlessBootstrap_UnsetIdentityPATsWarn(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	auth.ResetSecretBackendForTest(t)
+
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/user" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"login":"octocat"}`))
+	}))
+	t.Cleanup(gh.Close)
+
+	// Access fully configured (GitHub + Jira DC), identity PATs deliberately omitted.
+	t.Setenv(envHeadless, "1")
+	t.Setenv("TRIAGE_FACTORY_GITHUB_URL", gh.URL)
+	t.Setenv("TRIAGE_FACTORY_GITHUB_BOT_PAT", "bot-token")
+	t.Setenv(envRepos, "acme/api")
+	t.Setenv("TRIAGE_FACTORY_JIRA_URL", "https://jira.example.com")
+	t.Setenv("TRIAGE_FACTORY_JIRA_BOT_PAT", "jira-bot")
+	t.Setenv(envJiraProjects, "SKY")
+	t.Setenv(envJiraPickupStatuses, "To Do")
+	t.Setenv(envJiraInProgressStatus, "In Progress")
+	t.Setenv(envJiraDoneStatus, "Done")
+
+	var logs bytes.Buffer
+	restore := logging.SetOutput(&logs)
+	t.Cleanup(restore)
+
+	s := newTestServer(t)
+	ctx := t.Context()
+	if _, err := s.db.ExecContext(ctx, "DELETE FROM team_agents"); err != nil {
+		t.Fatalf("clear team_agents: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, "DELETE FROM agents"); err != nil {
+		t.Fatalf("clear agents: %v", err)
+	}
+
+	if err := s.RunHeadlessBootstrap(ctx); err != nil {
+		t.Fatalf("RunHeadlessBootstrap: %v", err)
+	}
+
+	// Access config still seeded.
+	repos, err := s.allStores.TeamGitHubRepos.ListForTeamSystem(ctx, runmode.LocalDefaultTeamID)
+	if err != nil {
+		t.Fatalf("ListForTeamSystem: %v", err)
+	}
+	if len(repos) != 1 {
+		t.Errorf("want repos seeded despite missing identity PAT, got %d", len(repos))
+	}
+	rules, err := s.allStores.JiraStatusRules.ListForTeamSystem(ctx, runmode.LocalDefaultTeamID)
+	if err != nil {
+		t.Fatalf("JiraStatusRules.ListForTeamSystem: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Errorf("want Jira rules seeded despite missing identity PAT, got %d", len(rules))
+	}
+
+	// Identities left unbound.
+	ghWeb, _ := resolveGitHubHost(gh.URL)
+	if login, _ := s.users.GetGitHubLogin(ctx, runmode.LocalDefaultUserID, ghWeb); login != "" {
+		t.Errorf("GitHub identity should be unbound, got %q", login)
+	}
+	jiraHost, _ := resolveJiraHost("https://jira.example.com")
+	if acct, _, _ := s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID, jiraHost); acct != "" {
+		t.Errorf("Jira identity should be unbound, got %q", acct)
+	}
+
+	// Each missing identity PAT warned.
+	out := logs.String()
+	if !strings.Contains(out, "TRIAGE_FACTORY_GITHUB_USER_PAT is unset") {
+		t.Errorf("expected a WARN about the unset GitHub identity PAT; logs:\n%s", out)
+	}
+	if !strings.Contains(out, "TRIAGE_FACTORY_JIRA_USER_PAT is unset") {
+		t.Errorf("expected a WARN about the unset Jira identity PAT; logs:\n%s", out)
 	}
 }
