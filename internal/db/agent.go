@@ -343,4 +343,14 @@ type AgentRunStore interface {
 	// it. Routes through the admin pool in Postgres — the footer builds
 	// from claims-less contexts (agent subprocess, post-approval submit).
 	BlueprintSiblingCostUSDSystem(ctx context.Context, orgID, blueprintRunID, excludeRunID string) (float64, error)
+
+	// BlueprintSiblingDurationMsSystem sums runs.duration_ms across every
+	// run in blueprintRunID EXCEPT excludeRunID, counting only settled
+	// (non-NULL) durations. agentmeta.Build adds this to the authoring
+	// run's own duration so a multi-step blueprint's published review/PR
+	// discloses the total time spent across all steps, not just the step
+	// that authored it — the time analog of BlueprintSiblingCostUSDSystem.
+	// Routes through the admin pool in Postgres (footer builds from
+	// claims-less contexts).
+	BlueprintSiblingDurationMsSystem(ctx context.Context, orgID, blueprintRunID, excludeRunID string) (int, error)
 }

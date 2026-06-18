@@ -75,7 +75,7 @@ func Build(agentRuns db.AgentRunStore, orgID, runID, kind string) string {
 		return bare
 	}
 
-	elapsed := elapsedFromRun(run)
+	elapsed := elapsedFromRun(ctx, agentRuns, orgID, runID, run)
 	cost, costPrefix := costFromRun(ctx, agentRuns, orgID, runID, run)
 
 	return fmt.Sprintf(
@@ -84,22 +84,48 @@ func Build(agentRuns db.AgentRunStore, orgID, runID, kind string) string {
 	)
 }
 
-// elapsedFromRun returns the human-readable run duration. Prefers the
-// stored DurationMs (populated by CompleteAgentRun); falls back to
-// CompletedAt-StartedAt; final fallback is "now - StartedAt" for
-// still-running standalone-CLI cases. "?" only on a run with no
-// StartedAt, which shouldn't happen in practice.
-func elapsedFromRun(run *domain.AgentRun) string {
+// elapsedFromRun returns the human-readable total time across the run's
+// whole blueprint: the authoring run's own elapsed time plus the settled
+// duration of every sibling step in the same blueprint_run. This is the
+// time analog of costFromRun — a published review/PR discloses the total
+// time the multi-step blueprint spent, not just the step that authored
+// it. Steps run sequentially, so summed per-step durations read as the
+// blueprint's working time. Sibling steps are all terminal by the time a
+// footer is built, so their duration_ms is settled; a failed sibling read
+// just omits their contribution rather than blocking the submit.
+//
+// "?" only on a run with no own duration AND no StartedAt, which
+// shouldn't happen in practice.
+func elapsedFromRun(ctx context.Context, agentRuns db.AgentRunStore, orgID, runID string, run *domain.AgentRun) string {
+	own, ok := ownDurationMs(run)
+	if !ok {
+		return "?"
+	}
+	total := own
+	if run.BlueprintRunID != "" {
+		if siblings, err := agentRuns.BlueprintSiblingDurationMsSystem(ctx, orgID, run.BlueprintRunID, runID); err == nil {
+			total += siblings
+		}
+	}
+	return prettyDurationMs(total)
+}
+
+// ownDurationMs resolves a single run's own elapsed milliseconds. Prefers
+// the stored DurationMs (populated by CompleteAgentRun); falls back to
+// CompletedAt-StartedAt; final fallback is "now - StartedAt" for the
+// still-running standalone-CLI case. ok=false only when the run has no
+// duration and no StartedAt.
+func ownDurationMs(run *domain.AgentRun) (int, bool) {
 	if run.DurationMs != nil {
-		return prettyDurationMs(*run.DurationMs)
+		return *run.DurationMs, true
 	}
 	if run.CompletedAt != nil {
-		return prettyDurationMs(int(run.CompletedAt.Sub(run.StartedAt).Milliseconds()))
+		return int(run.CompletedAt.Sub(run.StartedAt).Milliseconds()), true
 	}
 	if !run.StartedAt.IsZero() {
-		return prettyDurationMs(int(time.Since(run.StartedAt).Milliseconds()))
+		return int(time.Since(run.StartedAt).Milliseconds()), true
 	}
-	return "?"
+	return 0, false
 }
 
 // costFromRun resolves the total cost USD across the run's whole

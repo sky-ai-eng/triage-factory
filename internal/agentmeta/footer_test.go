@@ -267,6 +267,44 @@ func TestBuild_SumsCostAcrossBlueprintSteps(t *testing.T) {
 	}
 }
 
+// TestBuild_SumsTimeAcrossBlueprintSteps is the time analog of
+// TestBuild_SumsCostAcrossBlueprintSteps: the footer for the authoring
+// step reports the total time across every step of the blueprint, not
+// just its own. Two sibling runs share one blueprint_run; the authoring
+// run's footer reports their combined duration.
+func TestBuild_SumsTimeAcrossBlueprintSteps(t *testing.T) {
+	database := newTestDB(t)
+
+	// Step 1 mints the shared blueprint_run; read its id back so step 2
+	// (the authoring step) attaches to the same run.
+	step1Dur := 30_000 // 30s
+	seedFooterRun(t, database, runFooterFixture{
+		ID:         "bpt-step-1",
+		Model:      "claude-haiku-4-5",
+		StartedAt:  time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
+		DurationMs: &step1Dur,
+	})
+	var brID string
+	if err := database.QueryRow(`SELECT blueprint_run_id FROM runs WHERE id = ?`, "bpt-step-1").Scan(&brID); err != nil {
+		t.Fatalf("read blueprint_run_id: %v", err)
+	}
+
+	step2Dur := 90_000 // 1m 30s
+	seedFooterRun(t, database, runFooterFixture{
+		ID:             "bpt-step-2",
+		Model:          "claude-opus-4-8",
+		StartedAt:      time.Date(2026, 1, 1, 12, 0, 30, 0, time.UTC),
+		DurationMs:     &step2Dur,
+		BlueprintRunID: brID,
+	})
+
+	got := Build(sqlitestore.New(database).AgentRuns, runmode.LocalDefaultOrgID, "bpt-step-2", "review")
+	// 30s (step 1) + 1m 30s (authoring step 2) = 2m 0s.
+	if !strings.Contains(got, "Time: 2m 0s") {
+		t.Errorf("expected summed time across blueprint steps (Time: 2m 0s): %q", got)
+	}
+}
+
 // TestPrettyDurationMs covers the format breakpoints (s / m s / h m).
 func TestPrettyDurationMs(t *testing.T) {
 	cases := map[int]string{

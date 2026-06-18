@@ -786,6 +786,22 @@ func (s *agentRunStore) BlueprintSiblingCostUSDSystem(ctx context.Context, orgID
 	return cost.Float64, nil
 }
 
+func (s *agentRunStore) BlueprintSiblingDurationMsSystem(ctx context.Context, orgID, blueprintRunID, excludeRunID string) (int, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return 0, err
+	}
+	var ms sql.NullInt64
+	err := s.q.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(duration_ms), 0)
+		FROM runs
+		WHERE blueprint_run_id = ? AND id <> ?
+	`, blueprintRunID, excludeRunID).Scan(&ms)
+	if err != nil {
+		return 0, err
+	}
+	return int(ms.Int64), nil
+}
+
 // --- Helpers ---
 
 func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {

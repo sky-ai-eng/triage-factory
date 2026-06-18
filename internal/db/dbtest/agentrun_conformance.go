@@ -994,6 +994,74 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
+	t.Run("BlueprintSiblingDurationMsSystem_SumsSettledExcludingSelf", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "bp-dur")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		brID := seed.BlueprintRun(t, taskID)
+
+		// Two runs sharing one blueprint_run — sibling steps.
+		step1, step2 := uuid.New().String(), uuid.New().String()
+		for _, id := range []string{step1, step2} {
+			if err := store.Create(ctx, orgID, domain.AgentRun{
+				ID: id, TaskID: taskID, PromptID: agentRunTestPrompt(t),
+				Status: "running", Model: "m", BlueprintRunID: brID,
+			}); err != nil {
+				t.Fatalf("Create %s: %v", id, err)
+			}
+		}
+		// Complete's 6th/7th args are durationMs / numTurns.
+		if err := store.Complete(ctx, orgID, step1, "completed", 0.01, 1000, 1, "ok", "", "finish", ""); err != nil {
+			t.Fatalf("Complete step1: %v", err)
+		}
+		if err := store.Complete(ctx, orgID, step2, "completed", 0.02, 2000, 1, "ok", "", "finish", ""); err != nil {
+			t.Fatalf("Complete step2: %v", err)
+		}
+
+		// Querying for step2 returns step1's settled duration only (self excluded).
+		ms, err := store.BlueprintSiblingDurationMsSystem(ctx, orgID, brID, step2)
+		if err != nil {
+			t.Fatalf("BlueprintSiblingDurationMsSystem(step2): %v", err)
+		}
+		if ms != 1000 {
+			t.Errorf("sibling duration excluding step2 = %d, want 1000 (step1 only)", ms)
+		}
+		// Symmetric: querying for step1 returns step2's duration.
+		ms, err = store.BlueprintSiblingDurationMsSystem(ctx, orgID, brID, step1)
+		if err != nil {
+			t.Fatalf("BlueprintSiblingDurationMsSystem(step1): %v", err)
+		}
+		if ms != 2000 {
+			t.Errorf("sibling duration excluding step1 = %d, want 2000 (step2 only)", ms)
+		}
+		// A blueprint_run with no other runs sums to 0, not an error.
+		ms, err = store.BlueprintSiblingDurationMsSystem(ctx, orgID, uuid.New().String(), step1)
+		if err != nil {
+			t.Fatalf("BlueprintSiblingDurationMsSystem(empty): %v", err)
+		}
+		if ms != 0 {
+			t.Errorf("sibling duration for empty blueprint_run = %d, want 0", ms)
+		}
+		// An unsettled sibling (created, never completed → NULL duration_ms)
+		// contributes 0: SUM skips the NULL, COALESCE floors at 0.
+		step3 := uuid.New().String()
+		if err := store.Create(ctx, orgID, domain.AgentRun{
+			ID: step3, TaskID: taskID, PromptID: agentRunTestPrompt(t),
+			Status: "running", Model: "m", BlueprintRunID: brID,
+		}); err != nil {
+			t.Fatalf("Create step3: %v", err)
+		}
+		ms, err = store.BlueprintSiblingDurationMsSystem(ctx, orgID, brID, step2)
+		if err != nil {
+			t.Fatalf("BlueprintSiblingDurationMsSystem(step2, unsettled sibling): %v", err)
+		}
+		if ms != 1000 {
+			t.Errorf("sibling duration with an unsettled step = %d, want 1000 (NULL omitted)", ms)
+		}
+	})
+
 	t.Run("MemoryMissing_DerivedFromRunMemoryJOIN", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
