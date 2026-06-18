@@ -98,7 +98,7 @@ func (fb *fileBackend) load() error {
 	if env.Version != secretsFileVersion {
 		return fmt.Errorf("secrets file %s has unsupported version %d (want %d) — written by a newer or incompatible build", fb.path, env.Version, secretsFileVersion)
 	}
-	plain, err := fb.key.Decrypt(env.Ciphertext, env.Nonce)
+	plain, err := fb.key.Decrypt(env.Ciphertext, env.Nonce, nil)
 	if err != nil {
 		return fmt.Errorf("decrypt secrets file %s (wrong %s or corrupt file): %w", fb.path, EnvSecretEncryptionKey, err)
 	}
@@ -150,7 +150,12 @@ func (fb *fileBackend) persist() error {
 	if err != nil {
 		return fmt.Errorf("marshal secrets: %w", err)
 	}
-	ct, nonce, err := fb.key.Encrypt(plain)
+	// No AAD (nil): the file backend stores the whole secret bag as a
+	// single encrypted blob with no per-row identity to bind to, so the
+	// org_secrets row-identity AAD binding doesn't apply. Pass
+	// nil explicitly so the shared aead-primitive change is a conscious
+	// no-op here.
+	ct, nonce, err := fb.key.Encrypt(plain, nil)
 	if err != nil {
 		return fmt.Errorf("encrypt secrets: %w", err)
 	}

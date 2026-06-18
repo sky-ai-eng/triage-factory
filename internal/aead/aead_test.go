@@ -22,7 +22,7 @@ func TestEncryptDecrypt_Roundtrip(t *testing.T) {
 	k := mustKey(t)
 	plaintext := []byte("eyJhbGciOiJIUzI1NiJ9.fake.jwt")
 
-	ct, nonce, err := k.Encrypt(plaintext)
+	ct, nonce, err := k.Encrypt(plaintext, nil)
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestEncryptDecrypt_Roundtrip(t *testing.T) {
 		t.Fatalf("nonce length %d, want 12", len(nonce))
 	}
 
-	got, err := k.Decrypt(ct, nonce)
+	got, err := k.Decrypt(ct, nonce, nil)
 	if err != nil {
 		t.Fatalf("Decrypt: %v", err)
 	}
@@ -49,11 +49,11 @@ func TestEncrypt_NoncesDistinct(t *testing.T) {
 	// it explicitly even though the implementation reads from crypto/rand.
 	k := mustKey(t)
 	plaintext := []byte("same input")
-	_, n1, err := k.Encrypt(plaintext)
+	_, n1, err := k.Encrypt(plaintext, nil)
 	if err != nil {
 		t.Fatalf("Encrypt #1: %v", err)
 	}
-	_, n2, err := k.Encrypt(plaintext)
+	_, n2, err := k.Encrypt(plaintext, nil)
 	if err != nil {
 		t.Fatalf("Encrypt #2: %v", err)
 	}
@@ -65,47 +65,144 @@ func TestEncrypt_NoncesDistinct(t *testing.T) {
 func TestDecrypt_WrongKey(t *testing.T) {
 	k1 := mustKey(t)
 	k2 := mustKey(t)
-	ct, nonce, err := k1.Encrypt([]byte("secret"))
+	ct, nonce, err := k1.Encrypt([]byte("secret"), nil)
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
-	if _, err := k2.Decrypt(ct, nonce); err == nil {
+	if _, err := k2.Decrypt(ct, nonce, nil); err == nil {
 		t.Fatal("decrypt with wrong key succeeded")
 	}
 }
 
 func TestDecrypt_TamperedCiphertext(t *testing.T) {
 	k := mustKey(t)
-	ct, nonce, err := k.Encrypt([]byte("authentic"))
+	ct, nonce, err := k.Encrypt([]byte("authentic"), nil)
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
 	ct[0] ^= 0x01
-	if _, err := k.Decrypt(ct, nonce); err == nil {
+	if _, err := k.Decrypt(ct, nonce, nil); err == nil {
 		t.Fatal("decrypt of tampered ciphertext succeeded")
 	}
 }
 
 func TestDecrypt_WrongNonce(t *testing.T) {
 	k := mustKey(t)
-	ct, _, err := k.Encrypt([]byte("plaintext"))
+	ct, _, err := k.Encrypt([]byte("plaintext"), nil)
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
 	wrongNonce := make([]byte, 12) // all-zeros
-	if _, err := k.Decrypt(ct, wrongNonce); err == nil {
+	if _, err := k.Decrypt(ct, wrongNonce, nil); err == nil {
 		t.Fatal("decrypt with wrong nonce succeeded")
 	}
 }
 
 func TestDecrypt_WrongNonceLength(t *testing.T) {
 	k := mustKey(t)
-	ct, _, err := k.Encrypt([]byte("plaintext"))
+	ct, _, err := k.Encrypt([]byte("plaintext"), nil)
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
-	if _, err := k.Decrypt(ct, []byte{0x00}); err == nil {
+	if _, err := k.Decrypt(ct, []byte{0x00}, nil); err == nil {
 		t.Fatal("decrypt with 1-byte nonce succeeded")
+	}
+}
+
+// TestEncryptDecrypt_AAD_Roundtrip pins the happy path for additional
+// authenticated data: a ciphertext sealed under an aad decrypts
+// only when the same aad is supplied. The aad is authenticated, not
+// encrypted, so it never appears in the ciphertext.
+func TestEncryptDecrypt_AAD_Roundtrip(t *testing.T) {
+	k := mustKey(t)
+	plaintext := []byte("ghp_token_value")
+	aad := []byte("org-123|user-0|github_pat")
+
+	ct, nonce, err := k.Encrypt(plaintext, aad)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	if bytes.Contains(ct, aad) {
+		t.Fatal("ciphertext contains the aad — aad must be authenticated, not embedded")
+	}
+
+	got, err := k.Decrypt(ct, nonce, aad)
+	if err != nil {
+		t.Fatalf("Decrypt with matching aad: %v", err)
+	}
+	if !bytes.Equal(got, plaintext) {
+		t.Fatalf("roundtrip mismatch:\n got %q\nwant %q", got, plaintext)
+	}
+}
+
+// TestDecrypt_WrongAAD is the load-bearing relocation case: a ciphertext
+// sealed under one aad must fail to open under a different one, even with
+// the correct key and nonce. This is what makes a secret-row ciphertext
+// non-portable to a different (org, user, key) identity.
+func TestDecrypt_WrongAAD(t *testing.T) {
+	k := mustKey(t)
+	ct, nonce, err := k.Encrypt([]byte("secret"), []byte("orgA|github_pat"))
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	if _, err := k.Decrypt(ct, nonce, []byte("orgB|github_pat")); err == nil {
+		t.Fatal("decrypt under a different aad succeeded — relocation guard broken")
+	}
+}
+
+// TestDecrypt_MissingAAD: a ciphertext sealed WITH an aad must not open
+// when the reader supplies none (nil). Guards a caller that forgets to
+// thread the aad through on the read path.
+func TestDecrypt_MissingAAD(t *testing.T) {
+	k := mustKey(t)
+	ct, nonce, err := k.Encrypt([]byte("secret"), []byte("bound-context"))
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	if _, err := k.Decrypt(ct, nonce, nil); err == nil {
+		t.Fatal("decrypt of aad-bound ciphertext with nil aad succeeded")
+	}
+}
+
+// TestDecrypt_UnexpectedAAD: the mirror of MissingAAD — a ciphertext
+// sealed with NO aad must not open when the reader supplies one.
+func TestDecrypt_UnexpectedAAD(t *testing.T) {
+	k := mustKey(t)
+	ct, nonce, err := k.Encrypt([]byte("secret"), nil)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	if _, err := k.Decrypt(ct, nonce, []byte("unexpected")); err == nil {
+		t.Fatal("decrypt of no-aad ciphertext with a non-nil aad succeeded")
+	}
+}
+
+// TestEncrypt_NilAndEmptyAADEquivalent pins the crypto/cipher contract the
+// session + file backends rely on: nil and an empty (non-nil) aad are the
+// same to GCM. So an explicit nil reader-side opens a writer-side empty
+// slice and vice versa — the "no associated data" envelope is stable.
+func TestEncrypt_NilAndEmptyAADEquivalent(t *testing.T) {
+	k := mustKey(t)
+	plaintext := []byte("plaintext")
+
+	ct, nonce, err := k.Encrypt(plaintext, nil)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	got, err := k.Decrypt(ct, nonce, []byte{})
+	if err != nil {
+		t.Fatalf("Decrypt nil-sealed with empty aad: %v", err)
+	}
+	if !bytes.Equal(got, plaintext) {
+		t.Fatalf("got %q want %q", got, plaintext)
+	}
+
+	ct2, nonce2, err := k.Encrypt(plaintext, []byte{})
+	if err != nil {
+		t.Fatalf("Encrypt empty aad: %v", err)
+	}
+	if _, err := k.Decrypt(ct2, nonce2, nil); err != nil {
+		t.Fatalf("Decrypt empty-sealed with nil aad: %v", err)
 	}
 }
 

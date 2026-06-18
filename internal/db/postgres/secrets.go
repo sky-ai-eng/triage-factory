@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/aead"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
@@ -18,7 +20,7 @@ import (
 // ignores it.
 const EnvSecretEncryptionKey = "TF_SECRET_ENCRYPTION_KEY"
 
-// secretStore is the Postgres impl of db.SecretStore (TFAC-402). It
+// secretStore is the Postgres impl of db.SecretStore. It
 // encrypts each secret app-side with an injected aead.Key and stores the
 // opaque ciphertext + nonce in public.org_secrets — a normal RLS-gated
 // table. This replaces the previous thin wrapper over the public.vault_*
@@ -51,12 +53,17 @@ const EnvSecretEncryptionKey = "TF_SECRET_ENCRYPTION_KEY"
 // *read* shifts from "raise" to "empty", which actually matches the
 // SecretStore "missing → ("", nil)" contract.
 //
-// The AES-GCM envelope is intentionally NOT bound to its row identity via
-// additional authenticated data, so a direct-DB-write attacker bypassing
-// the app layer could relocate a ciphertext between rows. That's outside
-// the primary threat model (the SecretStore API only ever encrypts a
-// supplied plaintext, and RLS gates the normal paths) and is tracked as a
-// hardening follow-up in TFAC-403.
+// The AES-GCM envelope is bound to its row identity via additional
+// authenticated data: every Put/Get derives a canonical AAD
+// from (org_id, user_id, key) — see secretAAD — and threads it through
+// aead.Encrypt/Decrypt. A (ciphertext, nonce) blob therefore only decrypts
+// in the exact row it was written to. A direct-DB-write attacker who
+// bypasses the app layer (a SQL-injection write, a compromised admin
+// connection, a malicious operator) cannot relocate a valid blob from one
+// row into another — e.g. org A's PAT ciphertext into org B's row — and
+// have it decrypt: the relocated blob fails its GCM auth tag. This is
+// defense-in-depth beyond the primary threat model (the SecretStore API
+// only ever encrypts a supplied plaintext, and RLS gates the normal paths).
 type secretStore struct {
 	app   queryer
 	admin queryer
@@ -84,30 +91,84 @@ DO UPDATE SET ciphertext  = EXCLUDED.ciphertext,
               description = EXCLUDED.description,
               updated_at  = now()`
 
-// upsert encrypts value and writes it on q. The error is returned raw:
-// a cross-tenant write on the app pool trips the org_secrets RLS WITH
-// CHECK and raises 42501, which is a genuine authorization failure that
-// must keep its own message — NOT be relabeled as the "missing tf_app
-// role; use *System" app-pool hint. That hint is only sound on reads,
-// where RLS filters to zero rows instead of raising (see getOne).
-func (s *secretStore) upsert(ctx context.Context, q queryer, orgID string, userID any, key, value, description string) error {
-	ct, nonce, err := s.key.Encrypt([]byte(value))
+// secretAAD builds the canonical associated-data that binds a secret
+// row's AES-GCM envelope to its (org_id, user_id, key) identity.
+// It is fed to aead.Encrypt/Decrypt as additional authenticated data, so a
+// (ciphertext, nonce) blob written under one row only decrypts when read
+// back under that same row: a blob relocated to a different org, user, or
+// key by a direct-DB writer fails its auth tag instead of yielding the
+// original plaintext.
+//
+// Layout is orgUUID(16) || userUUID(16) || key. The two UUIDs are parsed
+// to their canonical 16-byte form so the binding is independent of how the
+// caller spelled them (case, dashes, braces), and the two fixed-width
+// prefixes make the encoding unambiguous — no two distinct identities can
+// produce the same AAD bytes. Org-scope rows use the all-zero UUID for
+// user_id, matching org_secrets_scope_key_uniq's COALESCE sentinel, so
+// they can never collide with a real per-user row (an empty userID means
+// org scope).
+func secretAAD(orgID, userID, key string) ([]byte, error) {
+	org, err := uuid.Parse(orgID)
+	if err != nil {
+		return nil, fmt.Errorf("secret aad: invalid org_id %q: %w", orgID, err)
+	}
+	var usr uuid.UUID // zero value == the all-zero org-scope sentinel
+	if userID != "" {
+		usr, err = uuid.Parse(userID)
+		if err != nil {
+			return nil, fmt.Errorf("secret aad: invalid user_id %q: %w", userID, err)
+		}
+	}
+	aad := make([]byte, 0, len(org)+len(usr)+len(key))
+	aad = append(aad, org[:]...)
+	aad = append(aad, usr[:]...)
+	aad = append(aad, key...)
+	return aad, nil
+}
+
+// nullableUUID maps the org-scope empty userID to a SQL NULL (stored as
+// user_id IS NULL, the COALESCE sentinel in org_secrets_scope_key_uniq)
+// and a per-user id to the id itself. Centralizes the one spot that has to
+// translate the store's "" == org-scope convention into the column's NULL.
+func nullableUUID(userID string) any {
+	if userID == "" {
+		return nil
+	}
+	return userID
+}
+
+// upsert encrypts value and writes it on q. userID is "" for org scope
+// (stored NULL) or the user's id for a per-user row; the AAD binds the
+// ciphertext to that exact (org, user, key) identity. The error is
+// returned raw: a cross-tenant write on the app pool trips the org_secrets
+// RLS WITH CHECK and raises 42501, which is a genuine authorization
+// failure that must keep its own message — NOT be relabeled as the
+// "missing tf_app role; use *System" app-pool hint. That hint is only
+// sound on reads, where RLS filters to zero rows instead of raising (see
+// getOne).
+func (s *secretStore) upsert(ctx context.Context, q queryer, orgID, userID, key, value, description string) error {
+	aad, err := secretAAD(orgID, userID, key)
 	if err != nil {
 		return err
 	}
-	_, err = q.ExecContext(ctx, upsertSQL, orgID, userID, key, ct, nonce, description)
+	ct, nonce, err := s.key.Encrypt([]byte(value), aad)
+	if err != nil {
+		return err
+	}
+	_, err = q.ExecContext(ctx, upsertSQL, orgID, nullableUUID(userID), key, ct, nonce, description)
 	return err
 }
 
-// getOne runs a (ciphertext, nonce) SELECT on q, decrypts, and maps
-// no-row → ("", nil) — the SecretStore "missing is not an error"
-// contract. A decrypt failure (wrong/rotated key, tampered bytes)
-// surfaces as an error rather than garbage. wrapErr is set only for the
-// app-pool reads (Get/GetUser): on a SELECT, RLS filters to zero rows
-// rather than raising, so a 42501 there is unambiguously the
-// bare-authenticator / missing-tf_app-grant misuse the hint diagnoses.
-// Admin-pool reads (and every write/delete) pass false / return raw.
-func (s *secretStore) getOne(ctx context.Context, q queryer, wrapErr bool, callsite, query string, args ...any) (string, error) {
+// getOne runs a (ciphertext, nonce) SELECT on q, decrypts under aad, and
+// maps no-row → ("", nil) — the SecretStore "missing is not an error"
+// contract. A decrypt failure (wrong/rotated key, tampered bytes, or a
+// blob relocated from another row so the aad no longer matches) surfaces
+// as an error rather than garbage. wrapErr is set only for the app-pool
+// reads (Get/GetUser): on a SELECT, RLS filters to zero rows rather than
+// raising, so a 42501 there is unambiguously the bare-authenticator /
+// missing-tf_app-grant misuse the hint diagnoses. Admin-pool reads (and
+// every write/delete) pass false / return raw.
+func (s *secretStore) getOne(ctx context.Context, q queryer, wrapErr bool, callsite string, aad []byte, query string, args ...any) (string, error) {
 	var ct, nonce []byte
 	err := q.QueryRowContext(ctx, query, args...).Scan(&ct, &nonce)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -119,11 +180,39 @@ func (s *secretStore) getOne(ctx context.Context, q queryer, wrapErr bool, calls
 		}
 		return "", err
 	}
-	plain, err := s.key.Decrypt(ct, nonce)
+	plain, err := s.key.Decrypt(ct, nonce, aad)
 	if err != nil {
 		return "", err
 	}
 	return string(plain), nil
+}
+
+// getOrg / getUser are the two read shapes. Each derives the row-identity
+// AAD and the matching WHERE clause from the SAME (org[, user], key) args
+// in one place, so the binding can never drift from the row it reads — the
+// AAD passed to Decrypt always describes exactly the row the SELECT
+// targeted. Get/GetSystem differ only in pool + wrapErr; likewise
+// GetUser/GetUserSystem.
+func (s *secretStore) getOrg(ctx context.Context, q queryer, wrapErr bool, callsite, orgID, key string) (string, error) {
+	aad, err := secretAAD(orgID, "", key)
+	if err != nil {
+		return "", err
+	}
+	return s.getOne(ctx, q, wrapErr, callsite, aad,
+		`SELECT ciphertext, nonce FROM public.org_secrets
+		   WHERE org_id = $1::uuid AND user_id IS NULL AND key = $2::text`,
+		orgID, key)
+}
+
+func (s *secretStore) getUser(ctx context.Context, q queryer, wrapErr bool, callsite, orgID, userID, key string) (string, error) {
+	aad, err := secretAAD(orgID, userID, key)
+	if err != nil {
+		return "", err
+	}
+	return s.getOne(ctx, q, wrapErr, callsite, aad,
+		`SELECT ciphertext, nonce FROM public.org_secrets
+		   WHERE org_id = $1::uuid AND user_id = $2::uuid AND key = $3::text`,
+		orgID, userID, key)
 }
 
 // del runs a scoped DELETE on the app pool and reports whether a row was
@@ -146,24 +235,18 @@ func (s *secretStore) del(ctx context.Context, query string, args ...any) (bool,
 // --- Org scope: Put/Get/GetSystem/Delete ---
 
 func (s *secretStore) Put(ctx context.Context, orgID, key, value, description string) error {
-	return s.upsert(ctx, s.app, orgID, nil, key, value, description)
+	return s.upsert(ctx, s.app, orgID, "", key, value, description)
 }
 
 func (s *secretStore) Get(ctx context.Context, orgID, key string) (string, error) {
-	return s.getOne(ctx, s.app, true, "secrets.Get",
-		`SELECT ciphertext, nonce FROM public.org_secrets
-		   WHERE org_id = $1::uuid AND user_id IS NULL AND key = $2::text`,
-		orgID, key)
+	return s.getOrg(ctx, s.app, true, "secrets.Get", orgID, key)
 }
 
 // GetSystem reads an org-scoped secret on the supabase_admin pool — RLS
 // bypassed, the passed orgID trusted. The admin-pool route is the system
 // door; request handlers use the claims-checked Get.
 func (s *secretStore) GetSystem(ctx context.Context, orgID, key string) (string, error) {
-	return s.getOne(ctx, s.admin, false, "secrets.GetSystem",
-		`SELECT ciphertext, nonce FROM public.org_secrets
-		   WHERE org_id = $1::uuid AND user_id IS NULL AND key = $2::text`,
-		orgID, key)
+	return s.getOrg(ctx, s.admin, false, "secrets.GetSystem", orgID, key)
 }
 
 func (s *secretStore) Delete(ctx context.Context, orgID, key string) (bool, error) {
@@ -193,20 +276,14 @@ func (s *secretStore) PutUserSystem(ctx context.Context, orgID, userID, key, val
 }
 
 func (s *secretStore) GetUser(ctx context.Context, orgID, userID, key string) (string, error) {
-	return s.getOne(ctx, s.app, true, "secrets.GetUser",
-		`SELECT ciphertext, nonce FROM public.org_secrets
-		   WHERE org_id = $1::uuid AND user_id = $2::uuid AND key = $3::text`,
-		orgID, userID, key)
+	return s.getUser(ctx, s.app, true, "secrets.GetUser", orgID, userID, key)
 }
 
 // GetUserSystem reads a per-user secret on the supabase_admin pool — RLS
 // bypassed, args trusted. System door for code acting as a user (the
 // write-actor resolver building a JiraClientForUser on a background path).
 func (s *secretStore) GetUserSystem(ctx context.Context, orgID, userID, key string) (string, error) {
-	return s.getOne(ctx, s.admin, false, "secrets.GetUserSystem",
-		`SELECT ciphertext, nonce FROM public.org_secrets
-		   WHERE org_id = $1::uuid AND user_id = $2::uuid AND key = $3::text`,
-		orgID, userID, key)
+	return s.getUser(ctx, s.admin, false, "secrets.GetUserSystem", orgID, userID, key)
 }
 
 func (s *secretStore) DeleteUser(ctx context.Context, orgID, userID, key string) (bool, error) {

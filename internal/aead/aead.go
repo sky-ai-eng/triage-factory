@@ -7,7 +7,7 @@
 //   - internal/sessions — the at-rest envelope for GoTrue access +
 //     refresh tokens in public.sessions (multi mode only).
 //   - internal/db/postgres — the at-rest envelope for org/user
-//     integration secrets in public.org_secrets (TFAC-402). Factoring
+//     integration secrets in public.org_secrets. Factoring
 //     the primitive out here is what lets the Postgres secret store
 //     encrypt app-side without internal/db/postgres importing
 //     internal/sessions.
@@ -75,7 +75,16 @@ func decodeKey(s string) ([]byte, error) {
 // pairs. We hand back the nonce as a separate value rather than prefixing
 // the ciphertext so callers can store it in its own column (the schema
 // stays self-describing).
-func (k Key) Encrypt(plaintext []byte) (ciphertext, nonce []byte, err error) {
+//
+// aad is additional authenticated data: folded into the GCM auth tag but
+// neither encrypted nor returned (the caller does not store it). Pass it
+// to bind a ciphertext to its context — e.g. the (org_id, user_id, key)
+// row identity of a stored secret — so a blob copied into a different
+// context fails Decrypt's auth-tag check instead of yielding its
+// plaintext. Decrypt must be called with byte-identical aad. Callers that
+// need no binding pass nil; nil and an empty slice are equivalent to GCM,
+// so nil reproduces the plain "no associated data" envelope.
+func (k Key) Encrypt(plaintext, aad []byte) (ciphertext, nonce []byte, err error) {
 	block, err := aes.NewCipher(k[:])
 	if err != nil {
 		return nil, nil, fmt.Errorf("aes cipher: %w", err)
@@ -88,16 +97,18 @@ func (k Key) Encrypt(plaintext []byte) (ciphertext, nonce []byte, err error) {
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, nil, fmt.Errorf("nonce: %w", err)
 	}
-	ciphertext = gcm.Seal(nil, nonce, plaintext, nil)
+	ciphertext = gcm.Seal(nil, nonce, plaintext, aad)
 	return ciphertext, nonce, nil
 }
 
-// Decrypt inverts Encrypt. Returns an error on either auth-tag failure
-// (tampered ciphertext) or wrong-key — AEAD doesn't distinguish those,
-// which is the point. Callers render a generic failure ("session
-// invalid", "secret undecryptable") rather than surfacing the underlying
-// error to the user.
-func (k Key) Decrypt(ciphertext, nonce []byte) ([]byte, error) {
+// Decrypt inverts Encrypt. Returns an error on auth-tag failure — a
+// tampered ciphertext, the wrong key, OR aad that doesn't byte-match the
+// value passed to Encrypt. AEAD doesn't distinguish those, which is the
+// point: a relocated ciphertext (right key, wrong context) fails exactly
+// like a forged one. Callers render a generic failure ("session invalid",
+// "secret undecryptable") rather than surfacing the underlying error to
+// the user. Pass the same aad that was given to Encrypt (nil if none).
+func (k Key) Decrypt(ciphertext, nonce, aad []byte) ([]byte, error) {
 	block, err := aes.NewCipher(k[:])
 	if err != nil {
 		return nil, fmt.Errorf("aes cipher: %w", err)
@@ -109,7 +120,7 @@ func (k Key) Decrypt(ciphertext, nonce []byte) ([]byte, error) {
 	if len(nonce) != gcm.NonceSize() {
 		return nil, fmt.Errorf("nonce length %d, want %d", len(nonce), gcm.NonceSize())
 	}
-	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, aad)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt: %w", err)
 	}

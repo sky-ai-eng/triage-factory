@@ -18,7 +18,7 @@ import (
 )
 
 // TestSecretStore_Postgres_RoundTrip exercises the full Put / Get /
-// Delete cycle against public.org_secrets (TFAC-402). Runs inside a
+// Delete cycle against public.org_secrets. Runs inside a
 // WithUser tx so the org_secrets_org RLS policy's org gate is satisfied.
 // We construct the store with pgstore.NewForTx(tx, pgtest.SecretKey) so
 // every call rides the same connection that has SET LOCAL ROLE tf_app +
@@ -95,8 +95,8 @@ func TestSecretStore_Postgres_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestSecretStore_Postgres_CiphertextAtRest pins the whole point of
-// TFAC-402: the stored bytes are AES ciphertext, not plaintext. A DB dump
+// TestSecretStore_Postgres_CiphertextAtRest pins the whole point:
+// the stored bytes are AES ciphertext, not plaintext. A DB dump
 // (raw-select on the admin pool, RLS bypassed) yields only opaque bytes —
 // the value never appears in the column.
 func TestSecretStore_Postgres_CiphertextAtRest(t *testing.T) {
@@ -658,6 +658,144 @@ func TestSecretStore_Postgres_EmptyKeyRejected(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("Put with empty key succeeded; org_secrets_key_nonempty CHECK missing")
+	}
+}
+
+// TestSecretStore_Postgres_AADRelocation_CrossOrg is the load-bearing
+// relocation test: a (ciphertext, nonce) blob is cryptographically bound to
+// its (org_id, user_id, key) row identity via AES-GCM AAD, so a direct-DB
+// writer who bypasses the app layer cannot relocate org A's blob into org
+// B's row and have it decrypt. We simulate the attacker with the admin
+// pool (RLS bypassed): copy org A's exact opaque blob into org B's row,
+// then assert GetSystem(orgB) errors (auth-tag failure) instead of
+// surfacing org A's plaintext.
+func TestSecretStore_Postgres_AADRelocation_CrossOrg(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgA, userA := seedPgOrgAndUserForSecrets(t, h)
+	orgB, _ := seedPgOrgAndUserForSecrets(t, h)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const key = "github_pat"
+	const secretVal = "ghp_orgA_only_value"
+
+	// Org A writes its secret through the claims-checked path.
+	if err := h.WithUser(t, userA, orgA, func(tx *sql.Tx) error {
+		return pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.Put(ctx, orgA, key, secretVal, "")
+	}); err != nil {
+		t.Fatalf("seed orgA secret: %v", err)
+	}
+
+	// Pull org A's exact opaque (ciphertext, nonce) via the admin pool.
+	var ct, nonce []byte
+	if err := h.AdminDB.QueryRowContext(ctx,
+		`SELECT ciphertext, nonce FROM public.org_secrets
+		   WHERE org_id = $1::uuid AND user_id IS NULL AND key = $2::text`,
+		orgA, key,
+	).Scan(&ct, &nonce); err != nil {
+		t.Fatalf("read orgA blob: %v", err)
+	}
+
+	// Relocation attack: drop org A's blob verbatim into org B's row,
+	// bypassing the app layer entirely (the SecretStore API can't inject
+	// raw ciphertext; this is the SQL-injection / compromised-admin /
+	// malicious-operator vector).
+	if _, err := h.AdminDB.ExecContext(ctx,
+		`INSERT INTO public.org_secrets (org_id, user_id, key, ciphertext, nonce, description)
+		 VALUES ($1::uuid, NULL, $2::text, $3, $4, 'relocated')`,
+		orgB, key, ct, nonce,
+	); err != nil {
+		t.Fatalf("relocate blob into orgB: %v", err)
+	}
+
+	// org B reads its row: same key, same deployment key, but the AAD is
+	// bound to org B's identity, so gcm.Open's auth tag fails. The error
+	// must never degrade into org A's plaintext.
+	got, err := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey).Secrets.GetSystem(ctx, orgB, key)
+	if err == nil {
+		t.Fatalf("GetSystem(orgB) returned no error (got=%q); a relocated blob must fail its auth tag", got)
+	}
+	if got != "" {
+		t.Errorf("GetSystem(orgB) returned %q alongside the error; must never surface a value", got)
+	}
+	if got == secretVal {
+		t.Fatalf("SECURITY: org B decrypted org A's secret via ciphertext relocation")
+	}
+
+	// Control: org A still reads its own secret fine — the blob is valid,
+	// it just refuses to decrypt anywhere but its home row. Proves the
+	// failure above is the AAD binding, not a generally-corrupt blob.
+	gotA, err := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey).Secrets.GetSystem(ctx, orgA, key)
+	if err != nil {
+		t.Fatalf("GetSystem(orgA) on its own row: %v", err)
+	}
+	if gotA != secretVal {
+		t.Errorf("orgA readback got=%q want %q (home row must still decrypt)", gotA, secretVal)
+	}
+}
+
+// TestSecretStore_Postgres_AADRelocation_OrgToUser pins the scope leg of
+// the binding: an org-scope blob (AAD user_id = the all-zero sentinel)
+// relocated into a per-user row of the SAME org + key fails to decrypt,
+// because the user-scope read binds AAD to the real user_id. Guards
+// against a within-tenant scope-confusion relocation.
+func TestSecretStore_Postgres_AADRelocation_OrgToUser(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID := seedPgOrgAndUserForSecrets(t, h)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const key = "jira_token/jira.example.com"
+	const secretVal = "org_scope_only_value"
+
+	// Write an ORG-scope secret (user_id NULL → AAD uses the all-zero
+	// sentinel).
+	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+		return pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.Put(ctx, orgID, key, secretVal, "")
+	}); err != nil {
+		t.Fatalf("seed org-scope secret: %v", err)
+	}
+
+	var ct, nonce []byte
+	if err := h.AdminDB.QueryRowContext(ctx,
+		`SELECT ciphertext, nonce FROM public.org_secrets
+		   WHERE org_id = $1::uuid AND user_id IS NULL AND key = $2::text`,
+		orgID, key,
+	).Scan(&ct, &nonce); err != nil {
+		t.Fatalf("read org-scope blob: %v", err)
+	}
+
+	// Relocate the org-scope blob into a USER-scope row (same org, same
+	// key, real user_id). The user read binds AAD to (org, userID, key),
+	// distinct from (org, 0-sentinel, key), so the tag fails.
+	if _, err := h.AdminDB.ExecContext(ctx,
+		`INSERT INTO public.org_secrets (org_id, user_id, key, ciphertext, nonce, description)
+		 VALUES ($1::uuid, $2::uuid, $3::text, $4, $5, 'relocated')`,
+		orgID, userID, key, ct, nonce,
+	); err != nil {
+		t.Fatalf("relocate blob into user row: %v", err)
+	}
+
+	got, err := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey).Secrets.GetUserSystem(ctx, orgID, userID, key)
+	if err == nil {
+		t.Fatalf("GetUserSystem returned no error (got=%q); an org→user relocated blob must fail its auth tag", got)
+	}
+	if got != "" {
+		t.Errorf("GetUserSystem returned %q alongside the error; must never surface a value", got)
+	}
+	if got == secretVal {
+		t.Fatalf("SECURITY: user-scope read decrypted the org-scope secret via relocation")
+	}
+
+	// Control: the org-scope row still decrypts on its home identity.
+	gotOrg, err := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey).Secrets.GetSystem(ctx, orgID, key)
+	if err != nil {
+		t.Fatalf("GetSystem org-scope home row: %v", err)
+	}
+	if gotOrg != secretVal {
+		t.Errorf("org-scope readback got=%q want %q", gotOrg, secretVal)
 	}
 }
 
