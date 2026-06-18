@@ -1,5 +1,40 @@
 # Changelog
 
+## [1.12.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.11.0...v1.12.0) (2026-06-18)
+
+
+### Features
+
+* **board:** surface permission prompts inline (TFAC-391) ([#407](https://github.com/sky-ai-eng/triage-factory/issues/407)) ([7cf7829](https://github.com/sky-ai-eng/triage-factory/commit/7cf78291de853bb20d9d5f6ac89beebc0fe34f03))
+* **exec:** persist pr diff to a file + manifest (TFAC-390) ([#406](https://github.com/sky-ai-eng/triage-factory/issues/406)) ([fbba7f1](https://github.com/sky-ai-eng/triage-factory/commit/fbba7f1fc2cbdffe14bf7d04c268969b7431fbfa))
+* **exec:** slim pr files to a summary envelope (TFAC-393) ([#408](https://github.com/sky-ai-eng/triage-factory/issues/408)) ([f3782c8](https://github.com/sky-ai-eng/triage-factory/commit/f3782c88b8a6658b63677db59bbb1b0ce00f991a))
+* **jira:** Atlassian OAuth app config (TFAC-337) ([#399](https://github.com/sky-ai-eng/triage-factory/issues/399)) ([0c19768](https://github.com/sky-ai-eng/triage-factory/commit/0c19768c460b1cc8ad910a0dda35d32fb8f3f460))
+* **jira:** cloud org service onboarding (TFAC-336 & TFAC-340) ([#393](https://github.com/sky-ai-eng/triage-factory/issues/393)) ([539ea57](https://github.com/sky-ai-eng/triage-factory/commit/539ea57368f940401182e5531696a3c2c4eccefc))
+* **jira:** Cloud per-user API-token bind (TFAC-338) ([#400](https://github.com/sky-ai-eng/triage-factory/issues/400)) ([fc8ef8c](https://github.com/sky-ai-eng/triage-factory/commit/fc8ef8c3257496c4a84ee77d4bd7bcb9bda4a5fc))
+* **jira:** Cloud per-user OAuth 3LO "Connect" (TFAC-339) ([#401](https://github.com/sky-ai-eng/triage-factory/issues/401)) ([3e372f8](https://github.com/sky-ai-eng/triage-factory/commit/3e372f80fdcdde5d7bae997cd01bb276784f25ce))
+* **jira:** multi-mode background polling (TFAC-387) ([#403](https://github.com/sky-ai-eng/triage-factory/issues/403)) ([6163a19](https://github.com/sky-ai-eng/triage-factory/commit/6163a1953b80d770920f6f8a557b5fb9da7bef13))
+* **secrets:** app-layer AEAD secret store, replacing Supabase Vault (TFAC-402) ([#415](https://github.com/sky-ai-eng/triage-factory/issues/415)) ([f1c8db1](https://github.com/sky-ai-eng/triage-factory/commit/f1c8db1c3fa3cb6f8959252ef232c262385d4755))
+* **secrets:** bind org_secrets ciphertext to its row identity (TFAC-403) ([#421](https://github.com/sky-ai-eng/triage-factory/issues/421)) ([c2aa29c](https://github.com/sky-ai-eng/triage-factory/commit/c2aa29cd8600fa69f69e46111d52b7eb24080167))
+* **secrets:** local headless encrypted file secret backend (TFAC-404) ([#417](https://github.com/sky-ai-eng/triage-factory/issues/417)) ([9f124d6](https://github.com/sky-ai-eng/triage-factory/commit/9f124d608bdcf26ff6dde88ec30bf8525f50b910))
+* **settings:** org Claude credentials (TFAC-386) ([#402](https://github.com/sky-ai-eng/triage-factory/issues/402)) ([a4d0dba](https://github.com/sky-ai-eng/triage-factory/commit/a4d0dbac825422244581ab76f01d54fd8b214afa))
+
+
+### Bug Fixes
+
+* **agentmeta:** sum blueprint cost across all steps, drop model name (TFAC-388) ([#404](https://github.com/sky-ai-eng/triage-factory/issues/404)) ([9691333](https://github.com/sky-ai-eng/triage-factory/commit/9691333edd80959e617ad23f7f7bb266f10bb16c))
+* **agentproc:** pin libc-matched native binary in SDK wrapper ([#418](https://github.com/sky-ai-eng/triage-factory/issues/418)) ([5cc65b1](https://github.com/sky-ai-eng/triage-factory/commit/5cc65b1f67c9843d9cdc29c73e2cc42af522064d))
+* **dashboard:** show PRs/stats for App-mode orgs; seed history (TFAC-396) ([#413](https://github.com/sky-ai-eng/triage-factory/issues/413)) ([d20b87c](https://github.com/sky-ai-eng/triage-factory/commit/d20b87cc26e8069de5e8b8f9f1011a787ea570f4))
+* **db:** dedupe goose migration version collision on main (202606170001) ([77fcfbd](https://github.com/sky-ai-eng/triage-factory/commit/77fcfbde16c0e07301a562f0596dff0bf7d76630))
+* **httpx:** treat client-canceled requests as 499, not 500 (TFAC-398) ([#426](https://github.com/sky-ai-eng/triage-factory/issues/426)) ([a68b8c9](https://github.com/sky-ai-eng/triage-factory/commit/a68b8c97ac5d0aa29e28744479dc08e1d00878a8))
+* **paths:** decouple image-baked toolchain from the data state root (TFAC-394) ([#409](https://github.com/sky-ai-eng/triage-factory/issues/409)) ([6edd1f8](https://github.com/sky-ai-eng/triage-factory/commit/6edd1f80f694265e9b466ef658b7a474fa331ce8))
+* **prompts:** theme-aware trigger-label pill on the binding canvas (TFAC-400) ([#410](https://github.com/sky-ai-eng/triage-factory/issues/410)) ([8677801](https://github.com/sky-ai-eng/triage-factory/commit/867780181eced00484aa135ea616ff84d53266ce))
+* **review:** mechanize --severity so badges render (TFAC-389) ([#405](https://github.com/sky-ai-eng/triage-factory/issues/405)) ([e3d0003](https://github.com/sky-ai-eng/triage-factory/commit/e3d0003d147016645a6ebfcc4124fd68bd388291))
+* **sandbox:** launch runsc with --host-uds=open (TFAC-407) ([#424](https://github.com/sky-ai-eng/triage-factory/issues/424)) ([3a37bd7](https://github.com/sky-ai-eng/triage-factory/commit/3a37bd7a3f1e4df254d8d2587d67139b98070ffc))
+* **ui:** theme-aware primary button fill for dark mode (TFAC-395) ([#411](https://github.com/sky-ai-eng/triage-factory/issues/411)) ([34b0dba](https://github.com/sky-ai-eng/triage-factory/commit/34b0dbab71334539e82fa502d7f1d4fea9d2ccad))
+* **uninstall:** sweep anthropic + jira-oauth + GitHub App keychain keys (TFAC-405) ([#422](https://github.com/sky-ai-eng/triage-factory/issues/422)) ([d253f1e](https://github.com/sky-ai-eng/triage-factory/commit/d253f1efd93144856073dec4d76afe20e19ea2b6))
+* **worktree:** authenticate host-side blobless checkout's promisor fetch (TFAC-401) ([#412](https://github.com/sky-ai-eng/triage-factory/issues/412)) ([41886cb](https://github.com/sky-ai-eng/triage-factory/commit/41886cb9e5049788cb564a5bb92c8a62613776da))
+* **worktree:** stop logging an absent cache tier as a scan walk error (TFAC-397) ([#420](https://github.com/sky-ai-eng/triage-factory/issues/420)) ([fd8e925](https://github.com/sky-ai-eng/triage-factory/commit/fd8e925344626642edd6a9355f33c870cf604c81))
+
 ## [1.11.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.10.1...v1.11.0) (2026-06-15)
 
 
