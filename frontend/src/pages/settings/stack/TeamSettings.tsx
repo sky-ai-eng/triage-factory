@@ -274,19 +274,29 @@ export default function TeamSettings({
   const savePrompts = async (): Promise<boolean> => {
     setSavingPrompts(true)
     try {
+      // Coerce a cleared/NaN input to a finite value before it touches the
+      // wire or baseline. When fast-deny is off the grace input is hidden and
+      // promptsBlocked can't guard it, so a stale NaN would otherwise persist
+      // into baseline (and serialize as null). Fall back to the last-saved
+      // grace so baseline never goes invalid; also normalize the visible input.
+      const grace =
+        Number.isFinite(absentGraceSeconds) && absentGraceSeconds >= 1
+          ? absentGraceSeconds
+          : baseline.permission_absent_grace_seconds
       const res = await saveTeamSettings(teamId, {
         ...baseline,
         permission_absent_autodeny_enabled: absentAutodeny,
-        permission_absent_grace_seconds: absentGraceSeconds,
+        permission_absent_grace_seconds: grace,
       })
       if (!res.ok) {
         toast.error(res.error)
         return false
       }
+      setAbsentGraceSeconds(grace)
       setBaseline((b) => ({
         ...b,
         permission_absent_autodeny_enabled: absentAutodeny,
-        permission_absent_grace_seconds: absentGraceSeconds,
+        permission_absent_grace_seconds: grace,
       }))
       toast.success('Unattended-prompt settings saved')
       return true

@@ -58,7 +58,7 @@ export function setPresenceView(viewing: PresenceView) {
 // Re-evaluate visibility on tab background/foreground and window focus/blur,
 // re-sending the current surface so the server's view stays live. Registered
 // once at module load (browser only).
-if (typeof window !== 'undefined') {
+if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const onVisibilityChange = () => {
     presence.visible = computeVisible()
     sendPresence()

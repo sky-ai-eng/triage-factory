@@ -220,9 +220,6 @@ func (s *Spawner) BrowserPermissionHandler(orgID, runID string, absent AbsentAut
 // clock. The grace deadline never exceeds the full window (clampGrace), so the
 // total wait is bounded by permTimeout() in every branch.
 func (s *Spawner) awaitPermission(ch chan agentproc.PermissionDecision, orgID, runID string, full time.Duration, absent AbsentAutoDeny) (agentproc.PermissionDecision, bool, string) {
-	start := time.Now()
-	fullDeadline := start.Add(full)
-
 	if !absent.enabled {
 		select {
 		case d := <-ch:
@@ -232,45 +229,74 @@ func (s *Spawner) awaitPermission(ch chan agentproc.PermissionDecision, orgID, r
 		}
 	}
 
+	// Explicit timers fire the deadlines exactly (no up-to-one-tick overshoot):
+	//   - fullTimer is the hard ceiling, armed for the whole window so the total
+	//     wait never exceeds permTimeout() — the load-bearing "< idleTimeout()"
+	//     invariant holds precisely, not within a poll interval.
+	//   - graceTimer is the absent deadline, armed only while unattended. The
+	//     ticker's sole job is to re-read presence and arm/disarm + reset this
+	//     timer on the present↔absent edges (so a present→absent flip restarts
+	//     the grace clock from that moment, matching "absentSince resets to now").
+	fullTimer := time.NewTimer(full)
+	defer fullTimer.Stop()
 	ticker := time.NewTicker(s.presencePollInterval())
 	defer ticker.Stop()
 
-	// absentSince is the timestamp the run went continuously unattended; zero
-	// while present. Seed it from the presence reading at prompt time so a
-	// prompt that arrives already-unattended starts its grace clock now (not a
-	// tick late).
 	present := s.presentFor(orgID, runID)
-	var absentSince time.Time
-	if !present {
-		absentSince = start
+	graceTimer := time.NewTimer(absent.grace)
+	defer graceTimer.Stop()
+	if present {
+		// Present at prompt time: disarm the grace clock until/unless the tab
+		// leaves. clampGrace keeps grace < full, so a fresh-absent run's grace
+		// deadline is always strictly inside the full window.
+		stopTimer(graceTimer)
 	}
 
 	for {
 		select {
 		case d := <-ch:
 			return d, true, ""
-		case now := <-ticker.C:
-			present = s.presentFor(orgID, runID)
-			if present {
-				absentSince = time.Time{}
-			} else if absentSince.IsZero() {
-				// present→absent edge (or first absent reading): (re)start grace.
-				absentSince = now
+		case <-fullTimer.C:
+			// Watched-but-unanswered for the whole window (or grace never fired
+			// because presence kept re-arming) — the legacy timeout.
+			return agentproc.PermissionDecision{}, false, msgPermTimedOut
+		case <-graceTimer.C:
+			// Only armed while unattended, so reaching it means genuinely nobody
+			// could answer within the grace.
+			return agentproc.PermissionDecision{}, false, msgNoOperator
+		case <-ticker.C:
+			now := s.presentFor(orgID, runID)
+			switch {
+			case now && !present:
+				// became present: stop the absent clock, re-arm to full window.
+				stopTimer(graceTimer)
+			case !now && present:
+				// became absent: restart the grace clock from now.
+				resetTimer(graceTimer, absent.grace)
 			}
-			// The full window is the hard ceiling regardless of presence. A
-			// prompt that sat watched-but-unanswered for the whole window is the
-			// legacy timeout — present-but-unanswered.
-			if !now.Before(fullDeadline) {
-				return agentproc.PermissionDecision{}, false, msgPermTimedOut
-			}
-			// While unattended, the grace deadline can fire sooner. clampGrace
-			// guarantees absentSince+grace ≤ fullDeadline, so reaching it means
-			// genuinely nobody could answer.
-			if !present && !now.Before(absentSince.Add(absent.grace)) {
-				return agentproc.PermissionDecision{}, false, msgNoOperator
-			}
+			present = now
 		}
 	}
+}
+
+// stopTimer halts a timer and drains a pending fire so a later Reset starts
+// clean. Safe because awaitPermission is the timer's sole reader and only calls
+// this from the ticker branch — a path it cannot reach after the timer already
+// fired (that returns).
+func stopTimer(t *time.Timer) {
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+}
+
+// resetTimer re-arms a (possibly already-fired) timer to d, draining any pending
+// fire first so the new deadline is measured from now.
+func resetTimer(t *time.Timer, d time.Duration) {
+	stopTimer(t)
+	t.Reset(d)
 }
 
 // presentFor reports whether any answer-capable, focused tab in orgID is on the
