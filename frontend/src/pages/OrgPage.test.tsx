@@ -12,9 +12,13 @@ vi.mock('../lib/apiClient', async (importOriginal) => {
   return { ...actual, apiJSON: apiMocks.apiJSON, apiFetch: apiMocks.apiFetch }
 })
 
-// Admin viewer in a concrete active org.
+// Admin viewer in a concrete active org, with org-template access — so the
+// People tab (these tests' subject) and the admin tabs all gate open.
 vi.mock('../hooks/useOrgRole', () => ({
   useOrgRole: () => ({ role: 'admin', isAdmin: true, loading: false }),
+}))
+vi.mock('../hooks/useTemplateScope', () => ({
+  useTemplateScope: () => ({ available: true, ready: true, loading: false }),
 }))
 vi.mock('../contexts/OrgContext', () => ({ useActiveOrgId: () => 'org-1' }))
 vi.mock('../hooks/useTeams', () => ({

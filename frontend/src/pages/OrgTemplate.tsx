@@ -16,7 +16,12 @@ import type { TriggerHandler, RuleHandler } from '../types'
 // from (SKY-381). It is the SAME binding-graph editor as /prompts, at template
 // scope — but deliberately, unmistakably NOT a team: no TeamSwitch, a distinct
 // header + a persistent forward-only banner + an accent frame on the canvas.
-export default function OrgTemplate() {
+//
+// `embedded` is the /org Template-tab mode (TFAC-419): OrgPage already supplies
+// the page header + tab strip and a height-constrained flex parent, so the
+// component drops its own standalone title block (no double header) and fills
+// the parent via flex instead of its standalone `calc(100vh - …)` height.
+export default function OrgTemplate({ embedded = false }: { embedded?: boolean }) {
   const orgHref = useOrgHref()
   const { available, ready, loading } = useTemplateScope()
 
@@ -86,22 +91,32 @@ export default function OrgTemplate() {
   }
 
   return (
-    <div className="flex flex-col" style={{ height: 'calc(100vh - 120px)' }}>
-      {/* Distinct header — never reads as a live team's /prompts. */}
+    <div
+      className={`flex flex-col ${embedded ? 'min-h-0 flex-1' : ''}`}
+      style={embedded ? undefined : { height: 'calc(100vh - 120px)' }}
+    >
+      {/* Header. Standalone shows the distinct title block (never reads as a
+          live team's /prompts); embedded drops it — OrgPage's page header + tab
+          strip already title the surface — keeping just the New Prompt action,
+          right-aligned. */}
       <div className="flex items-center justify-between mb-3 shrink-0">
-        <div className="flex items-center gap-2.5">
-          <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent-soft text-accent">
-            <Layers size={15} />
-          </span>
-          <div>
-            <h1 className="text-[17px] font-semibold text-text-primary leading-tight">
-              Org Template — Defaults for New Teams
-            </h1>
-            <p className="text-[11px] text-text-tertiary leading-tight">
-              The prompts, rules, and triggers every new team starts with.
-            </p>
+        {embedded ? (
+          <span />
+        ) : (
+          <div className="flex items-center gap-2.5">
+            <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent-soft text-accent">
+              <Layers size={15} />
+            </span>
+            <div>
+              <h1 className="text-[17px] font-semibold text-text-primary leading-tight">
+                Org Template — Defaults for New Teams
+              </h1>
+              <p className="text-[11px] text-text-tertiary leading-tight">
+                The prompts, rules, and triggers every new team starts with.
+              </p>
+            </div>
           </div>
-        </div>
+        )}
         <button
           onClick={openNew}
           className="text-[13px] font-semibold text-white bg-accent hover:bg-accent/90 px-4 py-2 rounded-full transition-colors"

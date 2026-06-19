@@ -5,6 +5,7 @@ import * as Switch from '@radix-ui/react-switch'
 import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { useActiveOrgId } from '../contexts/OrgContext'
 import { useOrgRole } from '../hooks/useOrgRole'
+import { useTemplateScope } from '../hooks/useTemplateScope'
 import { useInvites } from '../hooks/useInvites'
 import MemberRoster from '../components/MemberRoster'
 import InviteModal from '../components/InviteModal'
@@ -116,22 +117,38 @@ export default function OrgPage() {
 // — and survive a refresh.
 function OrgPageBody({ orgId }: { orgId: string }) {
   const { isAdmin } = useOrgRole()
+  // Gate Template on the SAME hook OrgTemplate uses to decide render-vs-redirect
+  // (and that Shell's "Org template" nav entry uses), not just isAdmin — so a
+  // visible Template tab can never click through to OrgTemplate's non-admin
+  // redirect. Today templateAvailable === isAdmin, but keeping the gate on one
+  // hook keeps the tab and the surface it opens from ever drifting apart.
+  const { available: templateAvailable } = useTemplateScope()
   const [searchParams, setSearchParams] = useSearchParams()
-  const tab = resolveTab(searchParams.get('tab'), isAdmin)
+  const tab = resolveTab(searchParams.get('tab'), isAdmin, templateAvailable)
   // People owns the bare URL (drop the param); the admin tabs carry an explicit
   // ?tab=. replace so flipping tabs doesn't pile up history entries.
   const setTab = (t: OrgTab) => setSearchParams(t === 'people' ? {} : { tab: t }, { replace: true })
 
-  // People (the roster) is everyone's; only admins get the relocated Settings +
-  // Template surfaces, so non-admins see just the one tab. /org is multi-mode
-  // only (no local route), so OrgSettings always renders multi (isLocal=false).
-  const tabs = isAdmin ? TABS : TABS.filter((t) => t.id === 'people')
+  // People (the roster) is everyone's; Settings is org-admin; Template needs
+  // template access. Non-admins see just People, and an admin without template
+  // access never gets a Template tab that would bounce them on click. /org is
+  // multi-mode only (no local route), so OrgSettings always renders multi
+  // (isLocal=false).
+  const tabs = isAdmin
+    ? TABS.filter((t) => t.id !== 'template' || templateAvailable)
+    : TABS.filter((t) => t.id === 'people')
 
   return (
-    // Template is a full binding-graph canvas, so widen the column for it;
-    // People + Settings stay a narrow centered settings column.
-    <div className={`mx-auto ${tab === 'template' ? 'max-w-6xl' : 'max-w-3xl'}`}>
-      <div className="mb-5 flex items-center gap-2.5">
+    // Template is a full binding-graph canvas: give it a viewport-tall flex
+    // column (nav + page padding ≈ 8rem) so the embedded editor fills the space
+    // below the header + tab strip instead of overflowing. People + Settings
+    // stay a narrow auto-height settings column.
+    <div
+      className={`mx-auto ${
+        tab === 'template' ? 'flex h-[calc(100vh-8rem)] max-w-6xl flex-col' : 'max-w-3xl'
+      }`}
+    >
+      <div className="mb-5 flex shrink-0 items-center gap-2.5">
         <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent-soft text-accent">
           <Users size={15} />
         </span>
@@ -145,7 +162,7 @@ function OrgPageBody({ orgId }: { orgId: string }) {
         </div>
       </div>
 
-      <div className="mb-5 flex gap-1 border-b border-border-subtle">
+      <div className="mb-5 flex shrink-0 gap-1 border-b border-border-subtle">
         {tabs.map((t) => (
           <button
             key={t.id}
@@ -164,17 +181,18 @@ function OrgPageBody({ orgId }: { orgId: string }) {
 
       {tab === 'people' && <OrgPeople orgId={orgId} canManage={isAdmin} />}
       {tab === 'settings' && <OrgSettings orgId={orgId} isLocal={false} />}
-      {tab === 'template' && <OrgTemplate />}
+      {tab === 'template' && <OrgTemplate embedded />}
     </div>
   )
 }
 
-// resolveTab maps the ?tab= param to a concrete tab. People is the default and
-// the floor for non-admins: a stale or hand-typed ?tab=settings|template from a
-// member resolves back to People so the admin surfaces never render for them
-// (belt-and-suspenders to the tab-strip filter that hides those tabs).
-function resolveTab(raw: string | null, isAdmin: boolean): OrgTab {
-  if ((raw === 'settings' || raw === 'template') && isAdmin) return raw
+// resolveTab maps the ?tab= param to a concrete tab, gating each admin tab on
+// its own access (Settings → org admin, Template → template access) so a stale
+// or hand-typed ?tab= can't surface a tab the viewer can't use. People is the
+// default + floor — belt-and-suspenders to the tab-strip filter.
+function resolveTab(raw: string | null, isAdmin: boolean, templateAvailable: boolean): OrgTab {
+  if (raw === 'settings' && isAdmin) return 'settings'
+  if (raw === 'template' && templateAvailable) return 'template'
   return 'people'
 }
 
