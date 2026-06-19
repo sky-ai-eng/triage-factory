@@ -36,6 +36,50 @@ type membershipQueryer interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
+// execer is the minimal write surface shared by *sql.Tx and *sql.DB so
+// grantOrgMembership can run against whichever pool the caller controls —
+// provisionOrg passes its own tx; invite-accept passes the admin *sql.DB
+// (or an admin-pool tx). Mirrors database/sql's ExecContext signature.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// grantOrgMembership inserts the org_memberships row and, when teamID is
+// valid, the team memberships row. Runs against the passed execer (a
+// *sql.Tx or the admin *sql.DB) so callers control the pool — provisionOrg
+// uses its own tx; invite-accept uses the admin pool (BYPASSRLS) because
+// the invitee has no standing to insert their own membership under RLS.
+// ON CONFLICT DO NOTHING keeps it idempotent (re-redeeming a token, or a
+// JIT/SCIM re-grant later, is a no-op).
+//
+// This is the seam SSO/JIT and SCIM graft onto later (TFAC-414): the one
+// code path that turns "this user belongs to this org (and maybe this
+// team), with this role" into rows.
+//
+// teamID NULL → only the org_memberships row is written: the deliberate
+// "org member, zero teams" state an org-only invite produces.
+func grantOrgMembership(ctx context.Context, ex execer,
+	userID, orgID uuid.UUID, orgRole string,
+	teamID uuid.NullUUID, teamRole string) error {
+	if _, err := ex.ExecContext(ctx, `
+		INSERT INTO public.org_memberships (user_id, org_id, role)
+		VALUES ($1, $2, $3)
+		ON CONFLICT DO NOTHING
+	`, userID, orgID, orgRole); err != nil {
+		return fmt.Errorf("insert org_memberships: %w", err)
+	}
+	if teamID.Valid {
+		if _, err := ex.ExecContext(ctx, `
+			INSERT INTO public.memberships (user_id, team_id, role)
+			VALUES ($1, $2, $3)
+			ON CONFLICT DO NOTHING
+		`, userID, teamID.UUID, teamRole); err != nil {
+			return fmt.Errorf("insert memberships: %w", err)
+		}
+	}
+	return nil
+}
+
 // lookupEarliestMembership returns the user's earliest org membership
 // (created_at ASC, org_id ASC as deterministic tiebreak), or
 // uuid.NullUUID{Valid: false} if the user has zero memberships.
@@ -138,18 +182,13 @@ func (s *Server) provisionOrg(ctx context.Context, userID uuid.UUID, name, slugB
 		return uuid.Nil, uuid.Nil, "", fmt.Errorf("insert teams: %w", err)
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO public.org_memberships (user_id, org_id, role)
-		VALUES ($1, $2, 'owner')
-	`, userID, orgID); err != nil {
-		return uuid.Nil, uuid.Nil, "", fmt.Errorf("insert org_memberships: %w", err)
-	}
-
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO public.memberships (user_id, team_id, role)
-		VALUES ($1, $2, 'admin')
-	`, userID, teamID); err != nil {
-		return uuid.Nil, uuid.Nil, "", fmt.Errorf("insert memberships: %w", err)
+	// Founder gets org-level 'owner' + team-level 'admin' on the Default
+	// team, through the shared primitive invite-accept (and later JIT/SCIM)
+	// also use. The org + team were just created in this tx, so the
+	// ON CONFLICT DO NOTHING inside never trips here — behaviour unchanged.
+	if err := grantOrgMembership(ctx, tx, userID, orgID, "owner",
+		uuid.NullUUID{UUID: teamID, Valid: true}, "admin"); err != nil {
+		return uuid.Nil, uuid.Nil, "", err
 	}
 
 	if err := seedSettingsRows(ctx, tx, orgID, teamID); err != nil {

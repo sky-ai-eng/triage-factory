@@ -249,6 +249,14 @@ type Stores struct {
 	// in local mode for the local-supplied BYO app.
 	JiraApps JiraAppsStore
 
+	// Invites owns the org_invites table — TF-owned, link-based org
+	// invitations (TFAC-416). App pool for the admin-facing create/list/
+	// revoke (RLS gates on org-admin); admin pool for the redeem reads
+	// (GetByTokenHashSystem + IsOrgMemberSystem), whose actor is a
+	// token-bearing outsider with no membership. Multi-mode only; the
+	// SQLite impl is a stub returning ErrNotApplicableInLocal.
+	Invites InvitesStore
+
 	// OrgTemplate owns org_template_prompts + org_template_handlers — the
 	// per-org, org-admin-editable template BootstrapNewOrg/NewTeam copy into
 	// each new team's prompts + event_handlers (SKY-381). App pool for the
@@ -303,6 +311,7 @@ type TxStores struct {
 	GitHubApps       GitHubAppsStore
 	JiraApps         JiraAppsStore
 	OrgTemplate      OrgTemplateStore
+	Invites          InvitesStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres

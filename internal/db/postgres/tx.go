@@ -220,5 +220,11 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// to run inside WithTx (admin-pool bootstrap work) — the bootstrap
 		// path reaches them through the non-tx stores.OrgTemplate instead.
 		OrgTemplate: newTxOrgTemplateStore(tx),
+		// Invites: app-side writes (Create/Revoke) route through the tx so
+		// they compose with the surrounding claims tx; admin half stays
+		// pinned to s.admin so the redeem reads (GetByTokenHashSystem +
+		// IsOrgMemberSystem) inside WithTx route outside the tx — those are
+		// by-design claims-less (the redeem actor has no membership).
+		Invites: newInvitesStore(tx, s.admin),
 	}
 }
