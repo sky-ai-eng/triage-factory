@@ -269,6 +269,10 @@ func (s *Spawner) awaitPermission(ch chan agentproc.PermissionDecision, orgID, r
 			switch {
 			case now && !present:
 				// became present: stop the absent clock, re-arm to full window.
+				// If graceTimer.C was simultaneously ready and select happened to
+				// pick this branch, stopTimer drains that pending fire — a "grace
+				// elapsed exactly as someone arrived" resolves as still-attended,
+				// which is the right call.
 				stopTimer(graceTimer)
 			case !now && present:
 				// became absent: restart the grace clock from now.

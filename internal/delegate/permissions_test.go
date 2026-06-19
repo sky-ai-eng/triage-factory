@@ -402,6 +402,43 @@ func TestBrowserPermissionHandler_PresenceDuringGraceExtends(t *testing.T) {
 	<-got
 }
 
+// TestBrowserPermissionHandler_PresentThenAbsentDeniesAfterGrace covers the
+// third critical transition: a prompt that arrives attended but loses its tab
+// mid-wait (present→absent) restarts the grace clock from the moment of
+// departure and then denies once it elapses.
+func TestBrowserPermissionHandler_PresentThenAbsentDeniesAfterGrace(t *testing.T) {
+	hub := websocket.NewHub()
+	conn, cleanup := dialHubClientOrg(t, hub, presenceTestOrg)
+	defer cleanup()
+
+	s := NewSpawner(nil, db.Stores{}, nil, hub, "")
+	s.SetIdleHibernateTimeout(30 * time.Second) // permTimeout = 15s (far above grace)
+	s.SetPresencePollInterval(5 * time.Millisecond)
+
+	// Present at prompt time, so only the full window is armed.
+	sendPresence(t, conn, hub, presenceTestOrg, "run-1", "board", true, true)
+
+	h := s.BrowserPermissionHandler(presenceTestOrg, "run-1", AbsentAutoDeny{enabled: true, grace: 100 * time.Millisecond})
+	got := make(chan agentproc.PermissionDecision, 1)
+	go func() {
+		got <- h(agentproc.PermissionRequest{RequestID: "req-leave", ToolName: "Bash"})
+	}()
+
+	// The operator leaves: present→absent restarts the grace clock from now.
+	time.Sleep(30 * time.Millisecond)
+	sendPresence(t, conn, hub, presenceTestOrg, "run-1", "board", false, false)
+
+	// The grace fires and denies — nowhere near the 15s full window.
+	select {
+	case d := <-got:
+		if d.Behavior != "deny" || d.Message != msgNoOperator {
+			t.Errorf("decision = %q/%q, want deny/%q", d.Behavior, d.Message, msgNoOperator)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("prompt not denied after presence left and the grace elapsed")
+	}
+}
+
 // TestBrowserPermissionHandler_PresentOtherOrgDenies pins org scoping: a focused
 // board tab in a DIFFERENT org does not keep this run's prompt alive — it still
 // fast-denies as unattended.
