@@ -189,9 +189,13 @@ func (h *orgMembersHandler) handleOrgMemberRemove(w http.ResponseWriter, r *http
 	// scoped to THIS org (TFAC-75). The org filter leaves a multi-org
 	// user's connections to their other orgs alone. The client refreshes
 	// and re-handshakes; handleWS's stale-active-org gate then stops it
-	// from re-scoping back to the org it just lost.
-	h.ws.CloseUserConnections(targetID, "", orgID,
+	// from re-scoping back to the org it just lost. Logged for the
+	// revocation audit trail (SOC2).
+	n := h.ws.CloseUserConnections(targetID, "", orgID,
 		websocket.CloseMembershipChanged, "membership changed")
+	membershipLog.Info("kicked ws connections on membership removal",
+		"user", targetID, "org", orgID,
+		"code", int(websocket.CloseMembershipChanged), "n", n)
 	w.WriteHeader(http.StatusNoContent)
 }
 

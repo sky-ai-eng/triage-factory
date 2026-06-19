@@ -359,9 +359,13 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 			// (TFAC-75) so the event stream stops on revoke instead of
 			// lingering until the socket drops. Scoped to this sid so the
 			// user's other sessions (other devices) keep their sockets.
+			// Logged for the revocation audit trail (SOC2).
 			if sess != nil {
-				s.ws.CloseUserConnections(sess.UserID.String(), sid.String(), "",
+				n := s.ws.CloseUserConnections(sess.UserID.String(), sid.String(), "",
 					websocket.CloseSessionRevoked, "session revoked")
+				authLog.Info("kicked ws connections on logout",
+					"user", sess.UserID, "sid", sessions.LogID(sid),
+					"code", int(websocket.CloseSessionRevoked), "n", n)
 			}
 		}
 	}
@@ -429,9 +433,12 @@ func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 
 	// Every session is now revoked, so close ALL of this user's live
 	// websocket connections (TFAC-75) — no sid/org filter. Each device's
-	// client sees the session-revoked code and routes to /login.
-	s.ws.CloseUserConnections(userID.String(), "", "",
+	// client sees the session-revoked code and routes to /login. Logged
+	// for the revocation audit trail (SOC2).
+	kicked := s.ws.CloseUserConnections(userID.String(), "", "",
 		websocket.CloseSessionRevoked, "session revoked")
+	authLog.Info("kicked ws connections on logout-all",
+		"user", userID, "code", int(websocket.CloseSessionRevoked), "n", kicked)
 
 	// Clear the cookie on this response too — the caller's current
 	// session is one of the ones we just revoked.
