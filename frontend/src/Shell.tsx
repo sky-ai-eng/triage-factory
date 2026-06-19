@@ -40,12 +40,17 @@ export default function Shell() {
   // the page owns the whole viewport — it's a focused, open-in-new-tab surface.
   const fullBleed = /\/runs\/[^/]+\/?$/.test(location.pathname)
 
-  // "Org" and "Org template" both live on the /org surface (Template is a tab,
+  // "Org" and "Org template" both resolve to the /org surface (Template is a tab,
   // deep-linked via ?tab=template), so NavLink's pathname-only active match would
   // light up both at once. Derive each entry's active state from the tab param so
-  // exactly one highlights — hence plain Links with a hand-rolled pill class.
+  // exactly one highlights — hence plain Links with a hand-rolled pill class. The
+  // standalone /org-template route still exists (direct links / bookmarks), so it
+  // counts as the Template pill's surface too — otherwise neither pill lights up
+  // there.
   const onOrg = location.pathname === orgHref('/org')
-  const onOrgTemplate = onOrg && new URLSearchParams(location.search).get('tab') === 'template'
+  const onOrgTemplate =
+    location.pathname === orgHref('/org-template') ||
+    (onOrg && new URLSearchParams(location.search).get('tab') === 'template')
   const pill = (active: boolean) =>
     `text-[13px] font-medium px-4 py-1.5 rounded-full transition-all duration-200 ${
       active
