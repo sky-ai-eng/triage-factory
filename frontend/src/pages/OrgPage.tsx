@@ -72,17 +72,26 @@ const TABS: { id: OrgTab; label: string }[] = [
 // ticket fills with the existing OrgSettings / OrgTemplate content.
 export default function OrgPage() {
   const orgId = useActiveOrgId()
-  const { isAdmin } = useOrgRole()
-  const [tab, setTab] = useState<OrgTab>('people')
-  const adapter = useOrgRosterAdapter(orgId ?? '')
 
   // OrgPage mounts under /orgs/:org_id, so the active org is effectively always
-  // resolved; guard the cold-load window anyway so MemberRoster (the adapter's
-  // only caller) never renders with an empty orgId — which would slip past
-  // apiClient's org prefix and hit a bare /members.
+  // resolved; guard the cold-load window so the body never renders without a
+  // concrete org. key={orgId} remounts the body on an org switch (the route
+  // stays mounted across a :org_id change), which resets the selected tab and
+  // refetches the roster for the newly-active org.
   if (!orgId) {
     return <p className="mx-auto max-w-3xl text-[13px] text-text-tertiary">Loading organization…</p>
   }
+  return <OrgPageBody key={orgId} orgId={orgId} />
+}
+
+// OrgPageBody is the org shell, rendered once the active org is known and keyed
+// on orgId by the parent — so switching orgs remounts it from scratch, with no
+// stale tab selection or roster carried across, and the adapter always gets a
+// concrete orgId.
+function OrgPageBody({ orgId }: { orgId: string }) {
+  const { isAdmin } = useOrgRole()
+  const [tab, setTab] = useState<OrgTab>('people')
+  const adapter = useOrgRosterAdapter(orgId)
 
   return (
     <div className="mx-auto max-w-3xl">

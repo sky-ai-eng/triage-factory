@@ -155,6 +155,9 @@ func TestOrgMembersList_AnyMemberReads(t *testing.T) {
 	if byID[r.admin].IsCurrentUser {
 		t.Errorf("admin row is_current_user = true, want false")
 	}
+	if byID[r.owner].IsCurrentUser {
+		t.Errorf("owner row is_current_user = true, want false")
+	}
 	// Identity readiness: the admin's seeded login resolves; a member with no
 	// binding reads as null ("Not connected").
 	if byID[r.admin].GitHubUsername == nil || *byID[r.admin].GitHubUsername != "admin-gh" {
