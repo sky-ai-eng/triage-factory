@@ -109,11 +109,14 @@ func TestInvitesStore_Postgres_ListActiveExcludesTerminal(t *testing.T) {
 	orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "inv-list")
 	exp := time.Now().Add(7 * 24 * time.Hour)
 
-	// pending, accepted, revoked — three distinct emails (active-unique is
+	// pending, accepted, revoked, expired — distinct emails (active-unique is
 	// per (org, lower(email)), so terminal rows don't block re-use here).
+	// Only the live pending one is "active": accepted/revoked are terminal and
+	// the expired one is past its window (excluded even though un-revoked).
 	mustInsertInvite(t, h, orgID, "pending@x.com", hashOf("t-pending"), exp, false, false)
 	mustInsertInvite(t, h, orgID, "accepted@x.com", hashOf("t-accepted"), exp, true, false)
 	mustInsertInvite(t, h, orgID, "revoked@x.com", hashOf("t-revoked"), exp, false, true)
+	mustInsertInvite(t, h, orgID, "expired@x.com", hashOf("t-expired"), time.Now().Add(-1*time.Hour), false, false)
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()

@@ -94,6 +94,18 @@ func (ih *invitesHandler) handleInviteCreate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// The accept_url is the whole point of this endpoint, so refuse early if
+	// the deployment's public base isn't configured — better a clear 500 than
+	// handing back a relative path the recipient can't use. Matches the
+	// s.deployCfg == nil guard on the other public-URL handlers (github_app,
+	// jira_connect, github_connect). In practice SetDeployConfig runs at boot
+	// before requests are served, so this should never fire.
+	base := strings.TrimRight(ih.publicURL(), "/")
+	if base == "" {
+		internalError(w, "invites", fmt.Errorf("public URL not configured"))
+		return
+	}
+
 	var body createInviteRequest
 	if !decodeJSON(w, r, &body, "") {
 		return
@@ -185,7 +197,13 @@ func (ih *invitesHandler) handleInviteCreate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	base := strings.TrimRight(ih.publicURL(), "/")
+	// base was validated non-empty above, before any row was written. The raw
+	// token rides in the query string — standard for copy/paste link invites
+	// and the right call for v1 (no SMTP), but it means the token can land in
+	// access logs, browser history, and Referer headers. When the frontend
+	// slice + deploy docs land, note that operators should scrub log patterns
+	// for /invite/accept. Mitigations already in place: 7-day expiry and
+	// single-use (accepted_at stamped on redeem).
 	acceptURL := base + "/invite/accept?token=" + rawToken
 	writeJSON(w, http.StatusCreated, createInviteResponse{
 		ID:        inviteID,
@@ -442,7 +460,10 @@ func (ih *invitesHandler) handleInviteAccept(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Idempotent "already a member": stamp the accept (audit) and land them
-	// in the org without re-granting.
+	// in the org without re-granting. NOTE: this does NOT upgrade the existing
+	// membership's role — an existing 'member' who accepts an 'admin' invite
+	// stays a 'member' (see grantOrgMembership's LIMITATION note). Re-roling an
+	// existing member is the org roster's job, not the invite flow's.
 	alreadyMember, err := ih.invites.IsOrgMemberSystem(r.Context(), claims.Subject, invite.OrgID)
 	if err != nil {
 		internalError(w, "invites", err)

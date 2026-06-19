@@ -316,10 +316,268 @@ func sha256Of(token string) []byte {
 	return h[:]
 }
 
+// ---------- admin-surface handler tests (create/list/revoke/preview) ----------
+
+// TestInviteCreate_HappyPath: an org admin mints an invite and gets back a
+// usable accept_url carrying the raw token + an expiry.
+func TestInviteCreate_HappyPath(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+	owner := r.seedUser()
+	orgID, _ := r.seedOrg(owner, "create-happy")
+	sid := r.signInAs(owner) // earliest-membership → session active org = orgID
+
+	resp := doInviteReq(r, http.MethodPost, "/api/invites", sid,
+		map[string]string{"email": "Newbie@Example.com", "role": "member"})
+	raw := readBody(resp)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d; want 201 (body=%s)", resp.StatusCode, raw)
+	}
+	var body struct {
+		ID        string `json:"id"`
+		AcceptURL string `json:"accept_url"`
+		ExpiresAt string `json:"expires_at"`
+	}
+	if err := json.Unmarshal([]byte(raw), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.ID == "" || body.ExpiresAt == "" {
+		t.Errorf("missing id/expires_at: %s", raw)
+	}
+	if !strings.Contains(body.AcceptURL, "/invite/accept?token=") {
+		t.Errorf("accept_url = %q; want it to carry the token path", body.AcceptURL)
+	}
+	// Stored email is lower-cased; exactly one active invite exists.
+	var n int
+	if err := r.h.AdminDB.QueryRow(
+		`SELECT count(*) FROM org_invites WHERE org_id=$1 AND email='newbie@example.com'`, orgID,
+	).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("stored invites = %d; want 1 (lower-cased)", n)
+	}
+}
+
+// TestInviteCreate_CrossOrgTargetTeam_400: a target_team_id from a DIFFERENT
+// org is rejected (400) and mints nothing — the cross-org membership-leak
+// guard. RLS gates org-admin on insert but not that the team is in-org, so
+// this app-side check is the actual boundary.
+func TestInviteCreate_CrossOrgTargetTeam_400(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+	ownerA := r.seedUser()
+	orgA, _ := r.seedOrg(ownerA, "create-orga")
+	ownerB := r.seedUser()
+	_, teamB := r.seedOrg(ownerB, "create-orgb")
+	sid := r.signInAs(ownerA)
+
+	resp := doInviteReq(r, http.MethodPost, "/api/invites", sid, map[string]string{
+		"email": "x@example.com", "role": "member", "target_team_id": teamB.String(),
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d; want 400 (body=%s)", resp.StatusCode, readBody(resp))
+	}
+	var n int
+	if err := r.h.AdminDB.QueryRow(`SELECT count(*) FROM org_invites WHERE org_id=$1`, orgA).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("invites created = %d; want 0 (cross-org team rejected before insert)", n)
+	}
+}
+
+// TestInviteCreate_PendingDup_409: a second pending invite to the same
+// address is a 409.
+func TestInviteCreate_PendingDup_409(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+	owner := r.seedUser()
+	r.seedOrg(owner, "create-dup")
+	sid := r.signInAs(owner)
+
+	first := doInviteReq(r, http.MethodPost, "/api/invites", sid,
+		map[string]string{"email": "dup@example.com", "role": "member"})
+	if first.StatusCode != http.StatusCreated {
+		t.Fatalf("first create status = %d; want 201 (body=%s)", first.StatusCode, readBody(first))
+	}
+	second := doInviteReq(r, http.MethodPost, "/api/invites", sid,
+		map[string]string{"email": "dup@example.com", "role": "admin"})
+	if second.StatusCode != http.StatusConflict {
+		t.Fatalf("second create status = %d; want 409 (body=%s)", second.StatusCode, readBody(second))
+	}
+}
+
+// TestInviteCreate_NonAdmin_404: a plain member can't create invites — 404
+// (non-disclosure), no row.
+func TestInviteCreate_NonAdmin_404(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+	owner := r.seedUser()
+	orgID, teamID := r.seedOrg(owner, "create-nonadmin")
+	member := r.seedUser()
+	pgtest.AddOrgMember(t, r.h, member.String(), orgID.String(), teamID.String(), "member", "member")
+	sid := r.signInAs(member)
+
+	resp := doInviteReq(r, http.MethodPost, "/api/invites", sid,
+		map[string]string{"email": "x@example.com", "role": "member"})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d; want 404 (non-admin); body=%s", resp.StatusCode, readBody(resp))
+	}
+}
+
+// TestInviteList_ReturnsActive: GET /api/invites surfaces the just-created
+// invite for the admin's org.
+func TestInviteList_ReturnsActive(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+	owner := r.seedUser()
+	r.seedOrg(owner, "list-active")
+	sid := r.signInAs(owner)
+
+	_ = doInviteReq(r, http.MethodPost, "/api/invites", sid,
+		map[string]string{"email": "listed@example.com", "role": "member"})
+
+	resp := doInviteReq(r, http.MethodGet, "/api/invites", sid, nil)
+	raw := readBody(resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d; want 200 (body=%s)", resp.StatusCode, raw)
+	}
+	var list []struct {
+		Email string `json:"email"`
+	}
+	if err := json.Unmarshal([]byte(raw), &list); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(list) != 1 || list[0].Email != "listed@example.com" {
+		t.Errorf("list = %+v; want one entry for listed@example.com", list)
+	}
+}
+
+// TestInviteRevoke_RemovesFromList: revoking a pending invite returns 200 and
+// drops it from the active list.
+func TestInviteRevoke_RemovesFromList(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+	owner := r.seedUser()
+	r.seedOrg(owner, "revoke-http")
+	sid := r.signInAs(owner)
+
+	createResp := doInviteReq(r, http.MethodPost, "/api/invites", sid,
+		map[string]string{"email": "rev@example.com", "role": "member"})
+	var created struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal([]byte(readBody(createResp)), &created)
+
+	revResp := doInviteReq(r, http.MethodPost, "/api/invites/"+created.ID+"/revoke", sid, nil)
+	if revResp.StatusCode != http.StatusOK {
+		t.Fatalf("revoke status = %d; want 200 (body=%s)", revResp.StatusCode, readBody(revResp))
+	}
+	listResp := doInviteReq(r, http.MethodGet, "/api/invites", sid, nil)
+	var list []json.RawMessage
+	_ = json.Unmarshal([]byte(readBody(listResp)), &list)
+	if len(list) != 0 {
+		t.Errorf("active invites after revoke = %d; want 0", len(list))
+	}
+}
+
+// TestInvitePreview_ValidAndUnknown: the unauthenticated preview resolves a
+// live token to status=valid with the org name, and an unknown token to
+// status=not_found with nothing leaked.
+func TestInvitePreview_ValidAndUnknown(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+	owner := r.seedUser()
+	r.seedOrg(owner, "preview-http")
+	sid := r.signInAs(owner)
+
+	createResp := doInviteReq(r, http.MethodPost, "/api/invites", sid,
+		map[string]string{"email": "prev@example.com", "role": "member"})
+	var created struct {
+		AcceptURL string `json:"accept_url"`
+	}
+	_ = json.Unmarshal([]byte(readBody(createResp)), &created)
+	token := tokenFromAcceptURL(t, created.AcceptURL)
+
+	// Preview is unauthenticated — no sid.
+	resp := doInviteReq(r, http.MethodGet, "/api/invites/preview?token="+url.QueryEscape(token), "", nil)
+	raw := readBody(resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d; want 200 (body=%s)", resp.StatusCode, raw)
+	}
+	var pv struct {
+		OrgName string `json:"org_name"`
+		Status  string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(raw), &pv); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if pv.Status != "valid" {
+		t.Errorf("status = %q; want valid", pv.Status)
+	}
+	if pv.OrgName == "" {
+		t.Error("org_name empty; want the org's name for the token holder")
+	}
+
+	unknown := doInviteReq(r, http.MethodGet, "/api/invites/preview?token=garbage", "", nil)
+	var upv struct {
+		OrgName string `json:"org_name"`
+		Status  string `json:"status"`
+	}
+	_ = json.Unmarshal([]byte(readBody(unknown)), &upv)
+	if upv.Status != "not_found" {
+		t.Errorf("unknown token status = %q; want not_found", upv.Status)
+	}
+	if upv.OrgName != "" {
+		t.Errorf("unknown token leaked org_name = %q; want empty", upv.OrgName)
+	}
+}
+
+// ---------- helpers ----------
+
 // signInAs completes the OAuth callback for userID with the default claims
 // (email = userID@test) and returns the sid cookie value.
 func (r *authRig) signInAs(userID uuid.UUID) string {
 	return r.signInWithClaims(userID, validClaimsFor(userID))
+}
+
+// doInviteReq fires a request at the mux with an optional sid cookie + a
+// same-origin Origin header (so mutating routes pass the CSRF check) and an
+// optional JSON body.
+func doInviteReq(r *authRig, method, path, sid string, body any) *http.Response {
+	r.t.Helper()
+	var rdr *bytes.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		rdr = bytes.NewReader(b)
+	} else {
+		rdr = bytes.NewReader(nil)
+	}
+	req := httptest.NewRequest(method, path, rdr)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", r.srv.deployCfg.publicURL)
+	if sid != "" {
+		req.AddCookie(&http.Cookie{Name: r.srv.sidCookieName(), Value: sid})
+	}
+	rec := httptest.NewRecorder()
+	r.srv.mux.ServeHTTP(rec, req)
+	return rec.Result()
+}
+
+// tokenFromAcceptURL pulls the ?token= value out of a create response's
+// accept_url.
+func tokenFromAcceptURL(t *testing.T, acceptURL string) string {
+	t.Helper()
+	u, err := url.Parse(acceptURL)
+	if err != nil {
+		t.Fatalf("parse accept_url %q: %v", acceptURL, err)
+	}
+	tok := u.Query().Get("token")
+	if tok == "" {
+		t.Fatalf("accept_url %q carried no token", acceptURL)
+	}
+	return tok
 }
 
 // signInWithClaims mirrors driveCallback but lets the caller shape the JWT
@@ -345,16 +603,8 @@ func (r *authRig) signInWithClaims(userID uuid.UUID, claims jwt.MapClaims) strin
 
 func postAccept(r *authRig, sid, token string) *http.Response {
 	r.t.Helper()
-	b, _ := json.Marshal(map[string]string{"token": token})
-	req := httptest.NewRequest(http.MethodPost, "/api/invites/accept", bytes.NewReader(b))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", r.srv.deployCfg.publicURL)
-	if sid != "" {
-		req.AddCookie(&http.Cookie{Name: r.srv.sidCookieName(), Value: sid})
-	}
-	rec := httptest.NewRecorder()
-	r.srv.mux.ServeHTTP(rec, req)
-	return rec.Result()
+	return doInviteReq(r, http.MethodPost, "/api/invites/accept", sid,
+		map[string]string{"token": token})
 }
 
 func readBody(resp *http.Response) string {

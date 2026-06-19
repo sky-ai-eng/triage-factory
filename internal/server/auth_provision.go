@@ -52,6 +52,16 @@ type execer interface {
 // ON CONFLICT DO NOTHING keeps it idempotent (re-redeeming a token, or a
 // JIT/SCIM re-grant later, is a no-op).
 //
+// LIMITATION — this GRANTS membership, it does not UPGRADE it. If the user is
+// already an org member, ON CONFLICT DO NOTHING swallows the row, so the
+// orgRole passed here is NOT applied to the existing membership. An existing
+// 'member' who accepts an 'admin' invite stays a 'member' (accept still
+// returns 200 — "already a member"). Role *changes* on an existing membership
+// are a distinct operation (the org People-roster role-change path, TFAC-414's
+// roster sub-issue) and deliberately out of scope for the invite/JIT grant.
+// The invite flow's job is onboarding net-new members, not re-roling existing
+// ones.
+//
 // This is the seam SSO/JIT and SCIM graft onto later (TFAC-414): the one
 // code path that turns "this user belongs to this org (and maybe this
 // team), with this role" into rows.

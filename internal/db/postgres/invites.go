@@ -71,6 +71,7 @@ func (s *invitesStore) ListActive(ctx context.Context, orgID string) ([]domain.O
 		       expires_at, created_at
 		FROM org_invites
 		WHERE org_id = $1 AND accepted_at IS NULL AND revoked_at IS NULL
+		  AND expires_at > now()
 		ORDER BY created_at DESC, id ASC
 	`, orgID)
 	if err != nil {

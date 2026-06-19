@@ -50,9 +50,11 @@ type InvitesStore interface {
 	// App pool.
 	Create(ctx context.Context, p domain.CreateInviteParams) (string, error)
 
-	// ListActive returns the org's active invites (accepted_at IS NULL AND
-	// revoked_at IS NULL), newest first. Drives the pending-ghost-rows UI
-	// (a follow-up ticket). App pool.
+	// ListActive returns the org's *redeemable* invites — un-accepted,
+	// un-revoked, AND not past expires_at — newest first. Expired rows are
+	// excluded so the list matches its name (they linger un-revoked until a
+	// re-invite's auto-revoke in Create reclaims them). Drives the
+	// pending-ghost-rows UI (a follow-up ticket). App pool.
 	ListActive(ctx context.Context, orgID string) ([]domain.OrgInvite, error)
 
 	// Revoke marks a pending invite revoked in the given org and reports the
