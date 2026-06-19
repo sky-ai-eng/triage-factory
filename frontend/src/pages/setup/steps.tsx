@@ -253,11 +253,25 @@ export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
 // and saving it would clobber the stored base URL / intervals / cap. The
 // GitHub step shows a retry when its load fails, so this guard only trips if
 // the user reaches a later org step while that load is still broken.
-async function persistOrg(state: WizardState): Promise<void> {
+//
+// It also scrubs a lingering org PAT (`state.org.github_pat`) whenever a GitHub
+// App is registered (staged OR live): GitHub access is App XOR PAT, and the
+// backend 409s ("use the switch flow") on a non-empty PAT while an App exists.
+// A wizard session that tried the PAT path first — typed a token, failed/abandoned
+// the connect, then switched to the App path — leaves that token lingering in the
+// in-memory form (it was never stored; `handleIntegrationsSetup` validates before
+// writing). Re-sending it on an unrelated whole-form save (the poll-interval /
+// model steps after the App steps) would trip the XOR guard and dead-end the
+// wizard (TFAC-410). The App is the live credential here, so the PAT field is
+// moot — switching TO a PAT is the dedicated switch flow's job, never a bulk org
+// save. Blank ('') rides saveOrgConfig's "leave blank to keep current" contract,
+// so a staged App's still-live stored PAT is left untouched.
+export async function persistOrg(state: WizardState): Promise<void> {
   if (!state.orgLoaded) {
     throw new Error('Settings didn’t load — reopen the GitHub step and retry before saving.')
   }
-  const result = await saveOrgConfig(state.org)
+  const org = state.githubAppRegistered ? { ...state.org, github_pat: '' } : state.org
+  const result = await saveOrgConfig(org)
   if (!result.ok) throw new Error(result.error)
 }
 
