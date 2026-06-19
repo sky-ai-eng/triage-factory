@@ -348,6 +348,36 @@ func TestInvitesStore_Postgres_RLS_AdminVsNonAdmin(t *testing.T) {
 	}
 }
 
+// TestInvitesStore_Postgres_CrossOrgTargetTeamRejectedBySchema: the
+// tenant-scoped composite FK (target_team_id, org_id) → teams(id, org_id)
+// makes a cross-org target team impossible to store, even via the admin pool
+// (which bypasses RLS). This is the backstop beneath the handler's app-layer
+// 400 — it holds on every write path, including the BYPASSRLS redeem/grant
+// pool and any future JIT/SCIM writer.
+func TestInvitesStore_Postgres_CrossOrgTargetTeamRejectedBySchema(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgA, _, _ := pgtest.SeedOrgWithUser(t, h, "inv-xorg-a")
+	_, _, teamB := pgtest.SeedOrgWithUser(t, h, "inv-xorg-b")
+
+	// Same-org team inserts fine (control); cross-org team is refused.
+	teamA := pgtest.SeedTeam(t, h, orgA, "team-a-2")
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO org_invites (org_id, email, role, target_team_id, token_hash, expires_at)
+		VALUES ($1, 'ok@x.com', 'member', $2, $3, now() + interval '1 day')
+	`, orgA, teamA, hashOf("xorg-ok")); err != nil {
+		t.Fatalf("same-org target team insert should succeed: %v", err)
+	}
+
+	_, err := h.AdminDB.Exec(`
+		INSERT INTO org_invites (org_id, email, role, target_team_id, token_hash, expires_at)
+		VALUES ($1, 'bad@x.com', 'member', $2, $3, now() + interval '1 day')
+	`, orgA, teamB, hashOf("xorg-bad"))
+	if err == nil {
+		t.Fatal("cross-org target_team_id insert succeeded; want FK violation")
+	}
+}
+
 // TestInvitesStore_Postgres_IsOrgMemberSystem: true for a member, false for
 // an outsider.
 func TestInvitesStore_Postgres_IsOrgMemberSystem(t *testing.T) {
