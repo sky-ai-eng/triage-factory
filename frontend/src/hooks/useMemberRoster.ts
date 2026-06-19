@@ -35,6 +35,13 @@ export interface MemberRosterAdapter {
   fetchMembers(): Promise<RosterMember[]>
   changeRole(userId: string, role: string): Promise<void>
   remove(userId: string): Promise<void>
+  // transferOwnership, when present, enables the owner-only "Transfer
+  // ownership" flow (TFAC-420): hand the protected role to another member.
+  // The org adapter wires it to POST .../transfer-ownership; the team adapter
+  // leaves it undefined (teams have no ownership-transfer concept), so the
+  // roster shows no transfer affordance there. Resolves on 204; throws
+  // HttpError on the backend's 403/409/422 so the picker can surface it.
+  transferOwnership?(newOwnerUserId: string): Promise<void>
   addAffordance?: ReactNode
   extraRows?: ReactNode
 }
@@ -135,8 +142,9 @@ export function useMemberRoster(adapter: MemberRosterAdapter): MemberRosterState
 
 // messageFrom prefers the server's JSON { error } message (so the last-owner
 // 409's friendly text reaches the user verbatim) and falls back to the error's
-// own message, then a generic line.
-function messageFrom(e: unknown, fallback: string): string {
+// own message, then a generic line. Exported so the transfer-ownership picker
+// surfaces the same backend errors (403/409/422) the inline roster mutations do.
+export function messageFrom(e: unknown, fallback: string): string {
   if (e instanceof HttpError) {
     try {
       const body = JSON.parse(e.body) as { error?: unknown }

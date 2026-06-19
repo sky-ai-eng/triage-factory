@@ -183,6 +183,111 @@ func (h *orgMembersHandler) handleOrgMemberRemove(w http.ResponseWriter, r *http
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// transferOwnershipRequest is the POST body for the ownership-transfer
+// endpoint: the user id of the member who becomes the new owner.
+type transferOwnershipRequest struct {
+	NewOwnerUserID string `json:"new_owner_user_id"`
+}
+
+// handleOrgOwnershipTransfer hands org ownership to another member. Owner-only:
+// the founder sentinel orgs.owner_user_id is the authority (checked up front
+// via tf.user_owns_org and re-enforced by the guard_org_owner_transfer
+// trigger), so a plain org admin can't reassign it. The work runs in one
+// app-pool transaction AS THE CALLER so the trigger sees the owner's claims in
+// tf.current_user_id(): promote the target to 'owner', repoint
+// orgs.owner_user_id, then demote the former owner to 'admin' (the ordering
+// the trigger demands — see OrgMembershipsStore.TransferOwnership).
+//
+// Multi-mode only (404 in local). Failure modes: 403 a non-owner caller, 400 a
+// malformed/self target, 422 a target that isn't an org member, 409 a write
+// that would leave the org without an owner.
+//
+// POST /api/orgs/{org_id}/transfer-ownership  body: { "new_owner_user_id": "<uuid>" }
+func (h *orgMembersHandler) handleOrgOwnershipTransfer(w http.ResponseWriter, r *http.Request) {
+	if runmode.Current() == runmode.ModeLocal {
+		http.NotFound(w, r)
+		return
+	}
+	// Floor: a non-member 404s (no existence leak). Membership is checked
+	// before ownership so a stranger never learns the org exists.
+	orgID, userID, ok := h.az.RequireOrgMember(w, r)
+	if !ok {
+		return
+	}
+	// Owner-only. A non-owner *member* can already read the roster, so 403
+	// (not 404) is honest here — and it matches the guard trigger's 42501.
+	owns, err := h.az.UserOwnsOrg(r.Context(), userID, orgID)
+	if err != nil {
+		internalError(w, "org-transfer", err)
+		return
+	}
+	if !owns {
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "only the current owner can transfer ownership",
+		})
+		return
+	}
+
+	var body transferOwnershipRequest
+	if !decodeJSON(w, r, &body, "") {
+		return
+	}
+	newOwner := strings.TrimSpace(body.NewOwnerUserID)
+	if _, err := uuid.Parse(newOwner); err != nil {
+		badRequest(w, "new_owner_user_id must be a valid user id")
+		return
+	}
+	if newOwner == userID {
+		// Without this guard a self-transfer would promote-then-demote the same
+		// row and trip guard_org_owners (a confusing 409). Reject it plainly.
+		badRequest(w, "you already own this org")
+		return
+	}
+
+	// The target must already be an org member (else 422 — the picker only
+	// offers members, so this is the defensive path). UserHasOrgAccess answers
+	// "is newOwner a member of orgID"; pre-checking gives the friendly 422
+	// rather than a rolled-back transaction.
+	isMember, err := h.az.UserHasOrgAccess(r.Context(), newOwner, orgID)
+	if err != nil {
+		internalError(w, "org-transfer", err)
+		return
+	}
+	if !isMember {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+			"error": "the new owner must be a member of this org",
+		})
+		return
+	}
+
+	// Run as the owner: guard_org_owner_transfer reads tf.current_user_id(),
+	// so the owner's claims must be in context (the app pool, not admin).
+	err = h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		return tx.OrgMemberships.TransferOwnership(r.Context(), orgID, userID, newOwner)
+	})
+	switch {
+	case err == nil:
+		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, db.ErrNotOrgOwner):
+		// The front gate caught the common case; this is the trigger's 42501
+		// surfacing through a between-check-and-write ownership race.
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "only the current owner can transfer ownership",
+		})
+	case errors.Is(err, db.ErrLastOwnerGuard):
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "transfer would leave the org without an owner",
+		})
+	case errors.Is(err, db.ErrOrgMemberNotFound):
+		// Raced: the target left the org between the pre-check and the tx.
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+			"error": "the new owner must be a member of this org",
+		})
+	default:
+		internalError(w, "org-transfer", err)
+	}
+}
+
 // orgMemberPathID extracts and validates the {user_id} path value. A
 // malformed UUID is a 404 (same response as "no such member") so a bad path
 // can't surface as a 500 from the uuid cast in the store query.

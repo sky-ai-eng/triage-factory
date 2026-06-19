@@ -14,13 +14,24 @@ import (
 // zero-row result past that gate means the target simply isn't in the org.
 var ErrOrgMemberNotFound = errors.New("db: org member not found")
 
-// ErrLastOwnerGuard is returned by OrgMembershipsStore.UpdateRole / Remove
-// when the write would leave the org with no 'owner' role. The authority is
-// the tf.guard_org_owners statement trigger (Postgres baseline), which
-// raises SQLSTATE 23514; the store translates that into this sentinel so the
-// handler can answer 409 without importing the pg driver. The invariant is
-// never re-implemented in Go — the DB is the single source of truth.
+// ErrLastOwnerGuard is returned by OrgMembershipsStore.UpdateRole / Remove /
+// TransferOwnership when the write would leave the org with no 'owner' role.
+// The authority is the tf.guard_org_owners statement trigger (Postgres
+// baseline), which raises SQLSTATE 23514; the store translates that into this
+// sentinel so the handler can answer 409 without importing the pg driver. The
+// invariant is never re-implemented in Go — the DB is the single source of
+// truth.
 var ErrLastOwnerGuard = errors.New("db: each org must retain at least one owner")
+
+// ErrNotOrgOwner is returned by OrgMembershipsStore.TransferOwnership when the
+// caller isn't the org's current owner. The authority is the
+// tf.guard_org_owner_transfer trigger (Postgres baseline), which raises
+// SQLSTATE 42501 on an UPDATE of orgs.owner_user_id by anyone other than the
+// present owner; the store translates that into this sentinel so the handler
+// can answer 403 without importing the pg driver. The transfer handler also
+// front-gates on tf.user_owns_org, so this is the defense-in-depth backstop
+// for a between-check-and-write ownership race.
+var ErrNotOrgOwner = errors.New("db: only the current org owner can transfer ownership")
 
 // OrgMembershipsStore owns the org_memberships table — the (user_id, org_id,
 // role) rows that place a human in an org with an org-level role
@@ -72,4 +83,22 @@ type OrgMembershipsStore interface {
 	// ErrLastOwnerGuard when removing the org's last owner (guard trigger),
 	// and ErrOrgMemberNotFound when no row matches.
 	Remove(ctx context.Context, orgID, userID string) error
+
+	// TransferOwnership hands org ownership from currentOwnerID to newOwnerID
+	// in a single transaction, in the order the tf.guard_org_owner_transfer
+	// trigger demands: (1) promote newOwnerID to 'owner' in org_memberships,
+	// (2) repoint orgs.owner_user_id to newOwnerID, (3) demote currentOwnerID
+	// to 'admin'. The BEFORE-UPDATE trigger on orgs refuses to repoint
+	// owner_user_id to anyone who doesn't already hold role='owner', so the
+	// promote MUST land first; it also requires the caller to be the present
+	// owner, so this MUST run under the current owner's claims (the handler
+	// calls it inside WithTx as the owner, on the app pool — not the admin
+	// pool, whose claims-less connection would make tf.current_user_id() NULL).
+	//
+	// Returns ErrNotOrgOwner when the caller isn't the current owner (the
+	// trigger's SQLSTATE 42501), ErrLastOwnerGuard when an owner-count
+	// invariant trips (23514, from either guard), and ErrOrgMemberNotFound
+	// when newOwnerID isn't a member (the promote matches no row). App pool;
+	// multi-mode only.
+	TransferOwnership(ctx context.Context, orgID, currentOwnerID, newOwnerID string) error
 }

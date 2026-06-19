@@ -155,6 +155,49 @@ func (s *orgMembershipsStore) Remove(ctx context.Context, orgID, userID string) 
 	return assertOneRow(res, "delete org_membership")
 }
 
+// TransferOwnership runs the three ordered writes the ownership-transfer
+// trigger pair requires, all on the app pool inside the caller's WithTx (which
+// binds the *current owner's* claims — tf.guard_org_owner_transfer reads
+// tf.current_user_id()). The order is load-bearing: the BEFORE-UPDATE trigger
+// on orgs refuses to repoint owner_user_id to a user who isn't already
+// role='owner', so step 1 promotes the target before step 2 moves the sentinel.
+func (s *orgMembershipsStore) TransferOwnership(ctx context.Context, orgID, currentOwnerID, newOwnerID string) error {
+	// 1. Promote the new owner. A 0-row result means newOwnerID isn't a member
+	//    (ErrOrgMemberNotFound → the handler's 422). The org keeps its existing
+	//    owner row throughout, so guard_org_owners stays satisfied here.
+	res, err := s.app.ExecContext(ctx, `
+		UPDATE org_memberships SET role = 'owner'::org_role
+		WHERE org_id = $1 AND user_id = $2
+	`, orgID, newOwnerID)
+	if err != nil {
+		return translateTransferGuard(fmt.Errorf("promote new org owner: %w", err))
+	}
+	if e := assertOneRow(res, "promote new org owner"); e != nil {
+		return e
+	}
+
+	// 2. Repoint the founder sentinel. guard_org_owner_transfer checks the
+	//    caller is the current owner (42501) and the new owner already holds
+	//    role=owner (23514) — both satisfied by the handler gate + step 1.
+	if _, err := s.app.ExecContext(ctx, `
+		UPDATE orgs SET owner_user_id = $2 WHERE id = $1
+	`, orgID, newOwnerID); err != nil {
+		return translateTransferGuard(fmt.Errorf("reassign org owner: %w", err))
+	}
+
+	// 3. Demote the former owner. A new owner exists by now, so guard_org_owners
+	//    stays satisfied. currentOwnerID is the gated caller — always a member —
+	//    so this matches exactly one row.
+	res, err = s.app.ExecContext(ctx, `
+		UPDATE org_memberships SET role = 'admin'::org_role
+		WHERE org_id = $1 AND user_id = $2
+	`, orgID, currentOwnerID)
+	if err != nil {
+		return translateTransferGuard(fmt.Errorf("demote former org owner: %w", err))
+	}
+	return assertOneRow(res, "demote former org owner")
+}
+
 // translateOwnerGuard maps the tf.guard_org_owners trigger's SQLSTATE 23514
 // to db.ErrLastOwnerGuard so the handler answers 409 without importing the
 // pg driver. guard_org_owners is the only 23514 source on org_memberships
@@ -165,6 +208,28 @@ func translateOwnerGuard(err error) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23514" {
 		return errors.Join(db.ErrLastOwnerGuard, err)
+	}
+	return err
+}
+
+// translateTransferGuard maps the ownership-transfer trigger SQLSTATEs to db
+// sentinels so the handler renders the right status without importing the pg
+// driver. tf.guard_org_owner_transfer raises 42501 when the caller isn't the
+// current owner (→ ErrNotOrgOwner, a 403) and 23514 when the new owner isn't
+// yet role=owner; tf.guard_org_owners raises 23514 when a write would zero an
+// org's owners. Both 23514 sources fold to ErrLastOwnerGuard (a 409) — the
+// transfer orders its writes to avoid tripping either, so a 23514 surfacing
+// here is a genuine invariant violation worth a clean 409, not a routine
+// outcome. Any other error passes through.
+func translateTransferGuard(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "42501":
+			return errors.Join(db.ErrNotOrgOwner, err)
+		case "23514":
+			return errors.Join(db.ErrLastOwnerGuard, err)
+		}
 	}
 	return err
 }

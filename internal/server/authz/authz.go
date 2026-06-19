@@ -230,6 +230,25 @@ func (az *Checker) UserIsOrgAdmin(ctx context.Context, userID, orgID string) (bo
 	return ok, err
 }
 
+// UserOwnsOrg returns true when the calling user is the founder/owner of the
+// given org — the holder of orgs.owner_user_id. Mirrors UserIsOrgAdmin but
+// delegates to tf.user_owns_org rather than tf.user_is_org_admin, because
+// ownership transfer is owner-only: a plain org admin can't reassign the
+// founder sentinel. Like the other raw probes it always runs the tf.* helper
+// via db.WithTx (no local-mode short-circuit), so callers must gate local mode
+// out before reaching it.
+func (az *Checker) UserOwnsOrg(ctx context.Context, userID, orgID string) (bool, error) {
+	var ok bool
+	err := db.WithTx(ctx, az.db, db.Claims{Sub: userID},
+		func(tx *sql.Tx) error {
+			return tx.QueryRowContext(ctx,
+				`SELECT tf.user_owns_org($1::uuid)`, orgID,
+			).Scan(&ok)
+		},
+	)
+	return ok, err
+}
+
 // RequireOrgMember validates {org_id} from the URL path and checks the caller
 // is a member of that org (any role). Returns (orgID, userID, true) on success;
 // writes an error and returns ("", "", false) on failure. The read-only sibling

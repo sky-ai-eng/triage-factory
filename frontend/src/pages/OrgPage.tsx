@@ -53,6 +53,17 @@ function useOrgRosterAdapter(orgId: string): MemberRosterAdapter {
       async remove(userId) {
         await apiFetch(`/members/${userId}`, { org: orgId, method: 'DELETE' })
       },
+      async transferOwnership(newOwnerUserId) {
+        // Owner-only on the backend (gated on tf.user_owns_org + the
+        // guard_org_owner_transfer trigger). 204 on success; apiFetch throws
+        // HttpError on 403/409/422 so the picker surfaces the friendly message.
+        await apiFetch('/transfer-ownership', {
+          org: orgId,
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ new_owner_user_id: newOwnerUserId }),
+        })
+      },
     }),
     [orgId],
   )

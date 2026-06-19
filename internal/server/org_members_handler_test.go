@@ -104,6 +104,28 @@ func (r *orgMembersRig) isMember(t *testing.T, userID string) bool {
 	return n > 0
 }
 
+// ownerUserID reads the org's founder sentinel (orgs.owner_user_id) so the
+// transfer tests can assert it moved (or didn't).
+func (r *orgMembersRig) ownerUserID(t *testing.T) string {
+	t.Helper()
+	var id string
+	if err := r.h.AdminDB.QueryRow(
+		`SELECT owner_user_id::text FROM orgs WHERE id = $1`, r.orgID,
+	).Scan(&id); err != nil {
+		t.Fatalf("read owner_user_id: %v", err)
+	}
+	return id
+}
+
+// transferReq builds a POST to the transfer-ownership handler as callerID with
+// the { new_owner_user_id } body. It reuses req's path-value + claims wiring;
+// the cosmetic "/members" path is irrelevant since the test invokes the
+// handler method directly (it reads org_id from the path value + the body, not
+// a {user_id} segment).
+func (r *orgMembersRig) transferReq(callerID, newOwnerID string) *http.Request {
+	return r.req(http.MethodPost, callerID, "", map[string]string{"new_owner_user_id": newOwnerID})
+}
+
 // TestOrgMembersList_AnyMemberReads: a plain member (no admin role) can GET
 // the full roster, and each row carries its org role + host-scoped identity
 // readiness — the admin's seeded GitHub login resolves; the others read as
@@ -290,6 +312,118 @@ func TestOrgMemberRemove_NonAdminCantRemoveOther(t *testing.T) {
 	}
 }
 
+// TestOrgMemberRemove_SoleOwnerSelfLeaveIs409: the sole owner clicking Leave
+// (a self-delete) trips guard_org_owners — 409, owner still present. This is
+// the dead-end TFAC-420's frontend turns into a "transfer ownership first"
+// prompt instead of a bare error.
+func TestOrgMemberRemove_SoleOwnerSelfLeaveIs409(t *testing.T) {
+	r := newOrgMembersRig(t)
+
+	rec := httptest.NewRecorder()
+	r.omh.handleOrgMemberRemove(rec, r.req(http.MethodDelete, r.owner, r.owner, nil))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (sole-owner self-leave); body=%s", rec.Code, rec.Body.String())
+	}
+	if !r.isMember(t, r.owner) {
+		t.Errorf("owner removed despite last-owner guard, want still a member")
+	}
+}
+
+// TestOrgOwnershipTransfer_PromotesReassignsDemotes: the owner hands ownership
+// to the admin. The endpoint promotes the target to owner, repoints the
+// founder sentinel orgs.owner_user_id, and demotes the former owner to admin —
+// all in one transaction.
+func TestOrgOwnershipTransfer_PromotesReassignsDemotes(t *testing.T) {
+	r := newOrgMembersRig(t)
+
+	rec := httptest.NewRecorder()
+	r.omh.handleOrgOwnershipTransfer(rec, r.transferReq(r.owner, r.admin))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := r.roleOf(t, r.admin); got != "owner" {
+		t.Errorf("new owner membership role = %q, want owner", got)
+	}
+	if got := r.roleOf(t, r.owner); got != "admin" {
+		t.Errorf("former owner membership role = %q, want admin", got)
+	}
+	if got := r.ownerUserID(t); got != r.admin {
+		t.Errorf("orgs.owner_user_id = %q, want %q (new owner)", got, r.admin)
+	}
+}
+
+// TestOrgOwnershipTransfer_NonOwnerIs403: an org *admin* (not the owner) can't
+// transfer ownership — the owner-only gate answers 403, and nothing moves.
+func TestOrgOwnershipTransfer_NonOwnerIs403(t *testing.T) {
+	r := newOrgMembersRig(t)
+
+	rec := httptest.NewRecorder()
+	r.omh.handleOrgOwnershipTransfer(rec, r.transferReq(r.admin, r.memb))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (non-owner caller); body=%s", rec.Code, rec.Body.String())
+	}
+	if got := r.ownerUserID(t); got != r.owner {
+		t.Errorf("orgs.owner_user_id = %q, want %q (unchanged)", got, r.owner)
+	}
+	if got := r.roleOf(t, r.memb); got != "member" {
+		t.Errorf("target role = %q, want member (untouched)", got)
+	}
+}
+
+// TestOrgOwnershipTransfer_NonMemberIs422: transferring to a user who isn't in
+// the org is a 422, and ownership is unchanged.
+func TestOrgOwnershipTransfer_NonMemberIs422(t *testing.T) {
+	r := newOrgMembersRig(t)
+	outsider := pgtest.SeedUser(t, r.h, "outsider")
+
+	rec := httptest.NewRecorder()
+	r.omh.handleOrgOwnershipTransfer(rec, r.transferReq(r.owner, outsider))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (non-member target); body=%s", rec.Code, rec.Body.String())
+	}
+	if got := r.ownerUserID(t); got != r.owner {
+		t.Errorf("orgs.owner_user_id = %q, want %q (unchanged)", got, r.owner)
+	}
+}
+
+// TestOrgOwnershipTransfer_SelfIs400: transferring to yourself is rejected up
+// front (it would otherwise promote-then-demote the same row into a confusing
+// last-owner 409).
+func TestOrgOwnershipTransfer_SelfIs400(t *testing.T) {
+	r := newOrgMembersRig(t)
+
+	rec := httptest.NewRecorder()
+	r.omh.handleOrgOwnershipTransfer(rec, r.transferReq(r.owner, r.owner))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (self-transfer); body=%s", rec.Code, rec.Body.String())
+	}
+	if got := r.roleOf(t, r.owner); got != "owner" {
+		t.Errorf("owner role = %q after self-transfer, want owner (unchanged)", got)
+	}
+}
+
+// TestOrgOwnershipTransfer_ThenFormerOwnerCanLeave: the guard only blocks the
+// *sole* owner. After transferring, the former owner is a plain admin and can
+// leave cleanly — the UX the transfer prompt unblocks.
+func TestOrgOwnershipTransfer_ThenFormerOwnerCanLeave(t *testing.T) {
+	r := newOrgMembersRig(t)
+
+	rec := httptest.NewRecorder()
+	r.omh.handleOrgOwnershipTransfer(rec, r.transferReq(r.owner, r.admin))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("transfer status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	r.omh.handleOrgMemberRemove(rec, r.req(http.MethodDelete, r.owner, r.owner, nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("former-owner leave status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	if r.isMember(t, r.owner) {
+		t.Errorf("former owner still present after leave, want removed")
+	}
+}
+
 // TestOrgMembers_LocalIs404: the whole surface is hosted-only — every method
 // 404s in local mode regardless of identity.
 func TestOrgMembers_LocalIs404(t *testing.T) {
@@ -306,6 +440,7 @@ func TestOrgMembers_LocalIs404(t *testing.T) {
 		{"list", http.MethodGet, r.omh.handleOrgMembersList, "", nil},
 		{"role", http.MethodPatch, r.omh.handleOrgMemberRoleChange, r.memb, map[string]string{"role": "admin"}},
 		{"remove", http.MethodDelete, r.omh.handleOrgMemberRemove, r.memb, nil},
+		{"transfer", http.MethodPost, r.omh.handleOrgOwnershipTransfer, "", map[string]string{"new_owner_user_id": r.admin}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()

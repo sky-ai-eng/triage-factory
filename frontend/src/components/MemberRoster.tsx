@@ -1,6 +1,7 @@
-import { useState } from 'react'
-import { Check, LogOut, Trash2 } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { ArrowLeftRight, Check, LogOut, Trash2 } from 'lucide-react'
 import { useMemberRoster, type MemberRosterAdapter } from '../hooks/useMemberRoster'
+import TransferOwnershipModal from './TransferOwnershipModal'
 
 interface MemberRosterProps {
   // adapter MUST be memoized by the caller (see useMemberRoster).
@@ -16,13 +17,38 @@ interface MemberRosterProps {
 // the last-privileged guard, and the Leave/Remove split; everything tier-
 // specific (role vocab, the add control, extra rows) comes through the adapter.
 export default function MemberRoster({ adapter, canManage }: MemberRosterProps) {
-  const { members, loading, error, pendingId, actionError, changeRole, remove, clearActionError } =
-    useMemberRoster(adapter)
+  const {
+    members,
+    loading,
+    error,
+    pendingId,
+    actionError,
+    changeRole,
+    remove,
+    reload,
+    clearActionError,
+  } = useMemberRoster(adapter)
+
+  // transfer holds the open transfer-ownership modal's reason, or null when
+  // closed. 'manual' = the owner clicked "Transfer ownership"; 'leave' = the
+  // sole owner clicked Leave and must hand off first.
+  const [transfer, setTransfer] = useState<'manual' | 'leave' | null>(null)
 
   // The last holder of the protected role can't be demoted or removed — the
   // frontend mirror of the backend's last-owner 409 (disables the control so
   // the user never hits the error in the common case).
   const protectedCount = members.filter((m) => m.role === adapter.protectedRole).length
+
+  // Ownership transfer is owner-only and org-only: the adapter supplies
+  // transferOwnership (org yes, team no), the viewer must hold the protected
+  // role, and there must be someone to hand off to. The viewer's own row
+  // carries their role, so owner-ness is derived from the list rather than a
+  // second fetch. The backend re-checks ownership (tf.user_owns_org), so this
+  // is just the UI gate.
+  const viewer = members.find((m) => m.isCurrentUser)
+  const viewerIsOwner = !!viewer && viewer.role === adapter.protectedRole
+  const transferTargets = useMemo(() => members.filter((m) => !m.isCurrentUser), [members])
+  const canTransfer = !!adapter.transferOwnership && viewerIsOwner && transferTargets.length > 0
 
   if (loading) {
     return <p className="text-[13px] text-text-tertiary">Loading members…</p>
@@ -46,25 +72,61 @@ export default function MemberRoster({ adapter, canManage }: MemberRosterProps) 
         </div>
       )}
 
+      {canTransfer && (
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={() => setTransfer('manual')}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border-glass bg-surface px-3 py-1.5 text-[12px] font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-accent"
+          >
+            <ArrowLeftRight size={13} />
+            Transfer ownership
+          </button>
+        </div>
+      )}
+
       <div className="overflow-hidden rounded-2xl border border-border-subtle">
         <ul className="divide-y divide-border-subtle">
-          {members.map((m) => (
-            <MemberRow
-              key={m.userId}
-              member={m}
-              roles={adapter.roles}
-              canManage={canManage}
-              isLastProtected={m.role === adapter.protectedRole && protectedCount <= 1}
-              busy={pendingId !== null}
-              onChangeRole={(role) => changeRole(m.userId, role)}
-              onRemove={() => remove(m.userId)}
-            />
-          ))}
+          {members.map((m) => {
+            const isLastProtected = m.role === adapter.protectedRole && protectedCount <= 1
+            // A sole owner clicking Leave shouldn't hit a dead disabled button
+            // (the backend would 409): route them to "transfer ownership
+            // first" instead — but only when there's an eligible recipient
+            // (canTransfer). With nobody to hand off to, Leave stays disabled;
+            // dissolving the org is a separate concern.
+            const leaveNeedsTransfer = m.isCurrentUser && isLastProtected && canTransfer
+            return (
+              <MemberRow
+                key={m.userId}
+                member={m}
+                roles={adapter.roles}
+                canManage={canManage}
+                isLastProtected={isLastProtected}
+                busy={pendingId !== null}
+                onChangeRole={(role) => changeRole(m.userId, role)}
+                onRemove={() => remove(m.userId)}
+                onLeaveNeedsTransfer={leaveNeedsTransfer ? () => setTransfer('leave') : undefined}
+              />
+            )
+          })}
           {adapter.extraRows}
         </ul>
       </div>
 
       {adapter.addAffordance}
+
+      {transfer && adapter.transferOwnership && (
+        <TransferOwnershipModal
+          candidates={transferTargets}
+          reason={transfer}
+          transfer={adapter.transferOwnership}
+          onDone={() => {
+            setTransfer(null)
+            reload()
+          }}
+          onClose={() => setTransfer(null)}
+        />
+      )}
     </div>
   )
 }
@@ -80,6 +142,10 @@ interface MemberRowProps {
   busy: boolean
   onChangeRole: (role: string) => void
   onRemove: () => void
+  // onLeaveNeedsTransfer, when set, marks this (current-user) row as the sole
+  // owner: Leave routes to the transfer-ownership picker instead of removing
+  // the row. Undefined for everyone else.
+  onLeaveNeedsTransfer?: () => void
 }
 
 function MemberRow({
@@ -90,12 +156,14 @@ function MemberRow({
   busy,
   onChangeRole,
   onRemove,
+  onLeaveNeedsTransfer,
 }: MemberRowProps) {
   // Self role-changes don't go through this control: stepping down / handing
-  // off ownership is the ownership-transfer flow (a later ticket), and a
-  // self-demote here risks an accidental lock-out. So the <select> is disabled
-  // for the caller's own row, the protected last holder, any non-admin, and
-  // while any mutation is in flight (busy) — one change at a time.
+  // off ownership is the dedicated ownership-transfer flow (the "Transfer
+  // ownership" action, or the sole-owner Leave prompt), and a self-demote here
+  // risks an accidental lock-out. So the <select> is disabled for the caller's
+  // own row, the protected last holder, any non-admin, and while any mutation
+  // is in flight (busy) — one change at a time.
   const roleLocked = !canManage || member.isCurrentUser || isLastProtected || busy
   const initial = (member.displayName.trim()[0] ?? '?').toUpperCase()
 
@@ -154,7 +222,11 @@ function MemberRow({
 
       <div className="w-[88px] shrink-0 text-right">
         {member.isCurrentUser ? (
-          <LeaveButton disabled={isLastProtected || busy} onConfirm={onRemove} />
+          <LeaveButton
+            disabled={isLastProtected || busy}
+            onConfirm={onRemove}
+            onNeedsTransfer={onLeaveNeedsTransfer}
+          />
         ) : canManage ? (
           <button
             type="button"
@@ -174,8 +246,34 @@ function MemberRow({
 
 // LeaveButton is a two-step inline confirm so a misclick doesn't drop the
 // caller out of the org. First click arms it; second confirms.
-function LeaveButton({ disabled, onConfirm }: { disabled: boolean; onConfirm: () => void }) {
+//
+// onNeedsTransfer overrides that entirely for the sole owner: a single click
+// opens the transfer-ownership picker (no destructive removal happens here, so
+// no two-step confirm) instead of leaving the button disabled at a dead 409.
+function LeaveButton({
+  disabled,
+  onConfirm,
+  onNeedsTransfer,
+}: {
+  disabled: boolean
+  onConfirm: () => void
+  onNeedsTransfer?: () => void
+}) {
   const [confirming, setConfirming] = useState(false)
+
+  if (onNeedsTransfer) {
+    return (
+      <button
+        type="button"
+        onClick={onNeedsTransfer}
+        title="Transfer ownership before leaving"
+        className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] font-medium text-text-tertiary transition-colors hover:bg-dismiss/[0.06] hover:text-dismiss"
+      >
+        <LogOut size={13} />
+        Leave
+      </button>
+    )
+  }
 
   if (confirming) {
     return (

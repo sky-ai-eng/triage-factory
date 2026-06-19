@@ -651,6 +651,10 @@ func (s *Server) routes() {
 	s.api("GET /api/orgs/{org_id}/members", omh.handleOrgMembersList)
 	s.apiMutating("PATCH /api/orgs/{org_id}/members/{user_id}", omh.handleOrgMemberRoleChange)
 	s.apiMutating("DELETE /api/orgs/{org_id}/members/{user_id}", omh.handleOrgMemberRemove)
+	// Ownership transfer: owner-only (gated on tf.user_owns_org + the
+	// guard_org_owner_transfer trigger). Promotes the target, repoints the
+	// owner sentinel, demotes the former owner — all in one tx as the owner.
+	s.apiMutating("POST /api/orgs/{org_id}/transfer-ownership", omh.handleOrgOwnershipTransfer)
 
 	// Org invites (multi-mode only — each handler 404s in local).
 	// The admin-facing create/list/revoke gate on org-admin and write

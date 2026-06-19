@@ -32,3 +32,7 @@ func (*orgMembershipsStore) UpdateRole(_ context.Context, _, _, _ string) error 
 func (*orgMembershipsStore) Remove(_ context.Context, _, _ string) error {
 	return db.ErrNotApplicableInLocal
 }
+
+func (*orgMembershipsStore) TransferOwnership(_ context.Context, _, _, _ string) error {
+	return db.ErrNotApplicableInLocal
+}
