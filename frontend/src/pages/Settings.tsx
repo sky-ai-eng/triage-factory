@@ -4,18 +4,19 @@
 // leaves its neighbours — before AND after — collapsed and visible, and each
 // section saves independently. No linear flow, no "road ahead" hiding.
 //
-// Sections are role-gated into two groups, mirroring the wizard's Team → User
-// order:
+// Sections are role-gated, mirroring the wizard's Org → Team → User order:
+//   • Org   — LOCAL MODE ONLY. Multi mode relocates the org-scoped sections
+//             (GitHub/Jira connection, polling, model cap, Claude credentials,
+//             danger zone) + the org template to the dedicated /org page
+//             (TFAC-419); but /org has no local route, so N=1 keeps them here —
+//             Settings is local mode's only post-setup org-config surface.
 //   • Team  — rendered when the viewer admins ≥1 team; a selector (admin'd
 //             teams only) picks which one. Subsumes per-non-default-team config.
 //   • User  — always (personal identity + device prefs).
-// The org-scoped sections (GitHub/Jira connection, polling, model cap, Claude
-// credentials, danger zone, org template) relocated to the /org page's Settings
-// + Template tabs (TFAC-419); Settings keeps only Team + User. The team gate
-// mirrors the backend's role gates: an org admin does NOT inherit team-admin, so
-// a team they don't admin won't appear in their Team selector. Local / N=1 is
-// admin of everything, so both groups render with no selector and no role
-// probes.
+// The team gate mirrors the backend's role gates: an org admin does NOT inherit
+// team-admin, so a team they don't admin won't appear in their Team selector.
+// Local / N=1 is admin of everything, so its groups render with no selector and
+// no role probes.
 
 import { GlassBackdrop } from './setup/glass'
 import { SectionDivider } from './setup/parts'
@@ -23,13 +24,15 @@ import { useOptionalAuth } from '../contexts/AuthContext'
 import { useActiveOrgId } from '../contexts/OrgContext'
 import { LOCAL_DEFAULT_ORG_ID } from '../lib/githubApp'
 import { useTeams } from '../hooks/useTeams'
+import OrgSettings from './settings/stack/OrgSettings'
 import TeamSettings from './settings/stack/TeamSettings'
 import UserSettings from './settings/stack/UserSettings'
 
 export default function Settings() {
   // useOptionalAuth is null in local mode (no AuthProvider) — the degenerate
-  // single-user world, admin of everything. Here it's used only to tell local
-  // from multi (isLocal); the org-admin gate moved to /org with OrgSettings.
+  // single-user world, admin of everything. isLocal both tells local from multi
+  // and gates the Org group: multi relocates it to /org, local (no /org route)
+  // keeps it here.
   const auth = useOptionalAuth()
   const isLocal = auth === null
   // Org-scoped endpoints (the App panel, identity) take the id in the path.
@@ -63,6 +66,16 @@ export default function Settings() {
         </h1>
 
         <div className="space-y-8">
+          {/* Org group — local mode only. Multi mode relocates it to the /org
+              page; local has no /org route, so N=1 edits org config here (it's
+              always org admin, so isLocal alone gates it). */}
+          {isLocal && (
+            <section aria-labelledby="settings-section-org">
+              <SectionDivider id="settings-section-org" title="Organization" />
+              <OrgSettings orgId={orgId} isLocal={isLocal} />
+            </section>
+          )}
+
           {/* Render the Team group once teams resolve and the viewer admins
               one — keeps it from flashing in before the role set is known. */}
           {teamsLoaded && showTeam && (
