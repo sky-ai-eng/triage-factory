@@ -3,6 +3,7 @@ import { Settings } from 'lucide-react'
 import { useOrgHref } from './hooks/useOrgHref'
 import { useOptionalAuth } from './contexts/AuthContext'
 import { useTemplateScope } from './hooks/useTemplateScope'
+import { useOrgRole } from './hooks/useOrgRole'
 import OrgPicker from './components/OrgPicker'
 import UserMenu from './components/UserMenu'
 
@@ -29,6 +30,10 @@ export default function Shell() {
   // renders only for owners/admins in multi mode (useTemplateScope is false in
   // local mode). It is deliberately a distinct entry — never the TeamSwitch.
   const { available: templateAvailable } = useTemplateScope()
+  // The /org surface is admin-gated in the nav (owner/admin of the active
+  // org). Non-admins can still deep-link to it for a read-only roster + Leave,
+  // but it doesn't earn a nav slot for them. False in local mode (no auth).
+  const { isAdmin: orgAdmin } = useOrgRole()
 
   // Full-bleed routes (the agent run station) drop the app nav + main padding so
   // the page owns the whole viewport — it's a focused, open-in-new-tab surface.
@@ -59,6 +64,20 @@ export default function Shell() {
                 {item.label}
               </NavLink>
             ))}
+            {orgAdmin && (
+              <NavLink
+                to={orgHref('/org')}
+                className={({ isActive }) =>
+                  `text-[13px] font-medium px-4 py-1.5 rounded-full transition-all duration-200 ${
+                    isActive
+                      ? 'bg-accent-soft text-accent'
+                      : 'text-text-tertiary hover:text-text-secondary hover:bg-black/[0.03]'
+                  }`
+                }
+              >
+                Org
+              </NavLink>
+            )}
             {templateAvailable && (
               <NavLink
                 to={orgHref('/org-template')}

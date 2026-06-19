@@ -639,6 +639,15 @@ func (s *Server) routes() {
 	s.api("GET /api/teams", th.handleTeamsList)
 	s.apiMutating("POST /api/teams", th.handleTeamCreate)
 
+	// Org People roster (TFAC-417): list members + change role + remove.
+	// Multi-mode only (each handler 404s in local). GET is any-member;
+	// PATCH/DELETE gate org-admin (DELETE also allows a self-leave). The
+	// last-owner guard is a DB trigger surfaced as a 409.
+	omh := &orgMembersHandler{tx: s.tx, az: s.az}
+	s.api("GET /api/orgs/{org_id}/members", omh.handleOrgMembersList)
+	s.apiMutating("PATCH /api/orgs/{org_id}/members/{user_id}", omh.handleOrgMemberRoleChange)
+	s.apiMutating("DELETE /api/orgs/{org_id}/members/{user_id}", omh.handleOrgMemberRemove)
+
 	s.api("GET /api/queue", s.handleQueue)
 	s.api("GET /api/tasks", s.handleTasks)
 	s.api("GET /api/tasks/{id}", s.handleTaskGet)

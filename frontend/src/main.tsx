@@ -21,6 +21,7 @@ import Brief from './pages/Brief'
 import Settings from './pages/Settings'
 import Prompts from './pages/Prompts'
 import OrgTemplate from './pages/OrgTemplate'
+import OrgPage from './pages/OrgPage'
 import Repos from './pages/Repos'
 import Factory from './pages/Factory'
 import Projects from './pages/Projects'
@@ -238,6 +239,10 @@ function MultiRoutes() {
             <Route path="projects" element={<Projects />} />
             <Route path="projects/:id" element={<ProjectDetail />} />
             <Route path="brief" element={<Brief />} />
+            {/* Org surface (TFAC-417) — multi-mode only; mounted under the
+                /orgs/:org_id parent. Non-admins reaching it directly get a
+                read-only roster (OrgPage gates management on org role). */}
+            <Route path="org" element={<OrgPage />} />
             <Route path="settings" element={<Settings />} />
           </Route>
           <Route

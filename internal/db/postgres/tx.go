@@ -175,6 +175,12 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// GetSettingsSystem inside WithTx route outside the tx (those
 		// reads are by-design cross-tenant / claims-less).
 		Orgs: newOrgsStore(tx, s.admin),
+		// OrgMemberships: app half is the claims-set tx so the RLS-gated
+		// roster read + role/remove mutations compose with the surrounding
+		// transaction; admin half stays pinned to s.admin so the cross-member
+		// identity enrichment routes outside the tx (it bypasses the
+		// self-only identity RLS, scoped to the org by a membership join).
+		OrgMemberships: newOrgMembershipsStore(tx, s.admin),
 		// Teams: app-side writes route through the tx so per-team
 		// settings upserts compose with the surrounding claims tx;
 		// admin half stays pinned to s.admin so GetDefaultForOrgSystem

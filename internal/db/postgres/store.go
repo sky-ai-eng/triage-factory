@@ -228,6 +228,11 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// app for GetSettings + UpdateSettings (request-handler
 		// reads/writes gated by org_settings_* RLS policies).
 		Orgs: newOrgsStore(app, admin),
+		// OrgMemberships holds both pools: app for the RLS-gated roster read +
+		// the role/remove mutations, admin for the cross-member GitHub/Jira
+		// identity enrichment the self-only identity RLS can't express (scoped
+		// to the org by a membership join). See the store comment.
+		OrgMemberships: newOrgMembershipsStore(app, admin),
 		// Teams holds both pools: admin for GetDefaultForOrgSystem +
 		// GetSettingsSystem (boot-time pollers/scorer/delegation
 		// without JWT claims) and app for GetSettings +
@@ -345,6 +350,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		TaskMemory:       newTaskMemoryStore(tx, tx),
 		RunWorktrees:     newRunWorktreeStore(tx, tx),
 		Orgs:             newOrgsStore(tx, tx),
+		OrgMemberships:   newOrgMembershipsStore(tx, tx),
 		Teams:            newTeamsStore(tx, tx),
 		JiraStatusRules:  newJiraStatusRulesStore(tx, tx),
 		TeamGitHubGroups: newTeamGitHubGroupsStore(tx, tx),

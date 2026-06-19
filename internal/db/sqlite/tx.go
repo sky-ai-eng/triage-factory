@@ -75,6 +75,7 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		TaskMemory:       newTaskMemoryStore(tx, tx),
 		RunWorktrees:     newRunWorktreeStore(tx, tx),
 		Orgs:             newOrgsStore(tx, tx),
+		OrgMemberships:   newOrgMembershipsStore(),
 		Teams:            newTeamsStore(tx, tx),
 		JiraStatusRules:  newJiraStatusRulesStore(tx, tx),
 		TeamGitHubGroups: newTeamGitHubGroupsStore(tx, tx),

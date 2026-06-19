@@ -189,6 +189,14 @@ type Stores struct {
 	// a cross-org system-service read.
 	Orgs OrgsStore
 
+	// OrgMemberships owns the org_memberships table — the (user, org,
+	// role) roster the org People surface (TFAC-417) lists and mutates.
+	// App pool in Postgres: reads gate on org membership, writes on org
+	// admin (or self-delete), and the tf.guard_org_owners trigger is the
+	// authority on the last-owner invariant. Multi-mode only in practice;
+	// the SQLite impl is a stub satisfying the interface.
+	OrgMemberships OrgMembershipsStore
+
 	// Teams owns the teams table — the membership unit inside an
 	// org. Request handlers synthesizing tasks / projects / prompts
 	// resolve `team_id` for the requesting org via
@@ -295,6 +303,7 @@ type TxStores struct {
 	TaskMemory       TaskMemoryStore
 	RunWorktrees     RunWorktreeStore
 	Orgs             OrgsStore
+	OrgMemberships   OrgMembershipsStore
 	Teams            TeamsStore
 	JiraStatusRules  JiraStatusRulesStore
 	TeamGitHubGroups TeamGitHubGroupsStore
