@@ -191,10 +191,13 @@ type Stores struct {
 
 	// OrgMemberships owns the org_memberships table — the (user, org,
 	// role) roster the org People surface (TFAC-417) lists and mutates.
-	// App pool in Postgres: reads gate on org membership, writes on org
-	// admin (or self-delete), and the tf.guard_org_owners trigger is the
-	// authority on the last-owner invariant. Multi-mode only in practice;
-	// the SQLite impl is a stub satisfying the interface.
+	// Postgres holds both pools: the app pool for the RLS-gated roster read
+	// (reads gate on org membership) and the role/remove writes (org admin,
+	// or self-delete), with the tf.guard_org_owners trigger as the authority
+	// on the last-owner invariant; the admin pool for the cross-member
+	// GitHub/Jira identity enrichment, which the self-only identity-table RLS
+	// can't express (scoped back to the org by a membership join). Multi-mode
+	// only in practice; the SQLite impl is a stub satisfying the interface.
 	OrgMemberships OrgMembershipsStore
 
 	// Teams owns the teams table — the membership unit inside an

@@ -66,13 +66,20 @@ func (s *orgMembershipsStore) ListWithIdentity(ctx context.Context, orgID, githu
 	}
 
 	// 2. Identity enrichment on the admin pool, scoped to this org's members.
-	//    Hosts are normalized the same way the per-user readers/writers key.
+	//    Resolve to the host identities are actually keyed under — the same
+	//    reverse-lookup rule the poller + review routing use. GitHub: an unset
+	//    github_base_url resolves to github.com (EffectiveGitHubHost), where
+	//    those identities live — a raw NormalizeGitHubHost would key host=""
+	//    and miss every github.com binding, so the whole roster would read
+	//    "Not connected". Jira has no public default host, so an unset
+	//    jira_base_url normalizes to "" and matches nothing — correct, since
+	//    that org has no Jira configured.
 	ghMap, err := s.identityMap(ctx, `
 		SELECT gh.user_id::text, gh.login
 		FROM user_github_identities gh
 		JOIN org_memberships om ON om.user_id = gh.user_id AND om.org_id = $1
 		WHERE gh.github_base_url = $2
-	`, orgID, db.NormalizeGitHubHost(githubBaseURL))
+	`, orgID, db.EffectiveGitHubHost(githubBaseURL))
 	if err != nil {
 		return nil, fmt.Errorf("list org member github identities: %w", err)
 	}

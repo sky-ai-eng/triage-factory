@@ -28,12 +28,17 @@ var ErrLastOwnerGuard = errors.New("db: each org must retain at least one owner"
 // set via ListWithIdentity; the role-change / remove affordances mutate it
 // via UpdateRole / Remove.
 //
-// Postgres routes every method through the app pool: the org_memberships_*
-// RLS policies gate reads on org membership (org_memberships_select) and
-// writes on org admin (org_memberships_update) or self-OR-admin
-// (org_memberships_delete). The tf.guard_org_owners statement trigger is the
-// sole authority on the last-owner invariant — UpdateRole / Remove surface
-// its SQLSTATE 23514 as ErrLastOwnerGuard rather than pre-checking in Go.
+// Postgres uses both pools. The app pool carries the RLS-gated work: the
+// org_memberships_* policies gate the roster read on org membership
+// (org_memberships_select) and the writes on org admin (org_memberships_update)
+// or self-OR-admin (org_memberships_delete), and the tf.guard_org_owners
+// statement trigger is the sole authority on the last-owner invariant —
+// UpdateRole / Remove surface its SQLSTATE 23514 as ErrLastOwnerGuard rather
+// than pre-checking in Go. The admin pool carries ONLY ListWithIdentity's
+// cross-member GitHub/Jira identity enrichment: the user_*_identities select
+// policies are self-only, so a member can't read a peer's identity under RLS;
+// the enrichment bypasses that but stays scoped to the org by a membership
+// join, so it surfaces only the same members the RLS roster already returned.
 //
 // Multi-mode only in practice: the /org surface is hosted-only and its
 // handlers 404 in local mode. The SQLite impl exists so the local store
@@ -42,11 +47,14 @@ type OrgMembershipsStore interface {
 	// ListWithIdentity returns every member of orgID with their org role
 	// and host-scoped identity readiness, ordered by display name then
 	// user id for a stable roster. githubBaseURL / jiraBaseURL are the
-	// org's configured hosts (read from org_settings by the caller);
-	// identity is resolved per (user, host) the same way the per-user
-	// GitHub/Jira lookups key, so a member's GitHubUsername / JiraAccountID
-	// is nil when they hold no binding on the org's host. App pool
-	// (org_memberships_select RLS gates by org membership).
+	// org's configured hosts (raw, read from org_settings by the caller) —
+	// the impl resolves them to the host identities are actually keyed under
+	// (EffectiveGitHubHost: an unset github_base_url resolves to github.com,
+	// where most identities live; Jira has no default host, so an unset one
+	// matches nothing, which is correct). A member's GitHubUsername /
+	// JiraAccountID is nil when they hold no binding on that host. The roster
+	// reads under the app pool (org_memberships_select RLS); the identity
+	// enrichment reads under the admin pool (see the type doc).
 	ListWithIdentity(ctx context.Context, orgID, githubBaseURL, jiraBaseURL string) ([]domain.OrgMember, error)
 
 	// UpdateRole sets userID's org role in orgID to role
