@@ -55,7 +55,7 @@ export default function MemberRoster({ adapter, canManage }: MemberRosterProps) 
               roles={adapter.roles}
               canManage={canManage}
               isLastProtected={m.role === adapter.protectedRole && protectedCount <= 1}
-              pending={pendingId === m.userId}
+              busy={pendingId !== null}
               onChangeRole={(role) => changeRole(m.userId, role)}
               onRemove={() => remove(m.userId)}
             />
@@ -74,7 +74,10 @@ interface MemberRowProps {
   roles: string[]
   canManage: boolean
   isLastProtected: boolean
-  pending: boolean
+  // busy is true while ANY row's mutation is in flight — every row's
+  // mutating control disables, so a second mutation can't start and race the
+  // first's refetch/error (the hook serializes to one change at a time).
+  busy: boolean
   onChangeRole: (role: string) => void
   onRemove: () => void
 }
@@ -84,15 +87,16 @@ function MemberRow({
   roles,
   canManage,
   isLastProtected,
-  pending,
+  busy,
   onChangeRole,
   onRemove,
 }: MemberRowProps) {
   // Self role-changes don't go through this control: stepping down / handing
   // off ownership is the ownership-transfer flow (a later ticket), and a
   // self-demote here risks an accidental lock-out. So the <select> is disabled
-  // for the caller's own row, the protected last holder, and any non-admin.
-  const roleLocked = !canManage || member.isCurrentUser || isLastProtected || pending
+  // for the caller's own row, the protected last holder, any non-admin, and
+  // while any mutation is in flight (busy) — one change at a time.
+  const roleLocked = !canManage || member.isCurrentUser || isLastProtected || busy
   const initial = (member.displayName.trim()[0] ?? '?').toUpperCase()
 
   return (
@@ -150,12 +154,12 @@ function MemberRow({
 
       <div className="w-[88px] shrink-0 text-right">
         {member.isCurrentUser ? (
-          <LeaveButton disabled={isLastProtected || pending} onConfirm={onRemove} />
+          <LeaveButton disabled={isLastProtected || busy} onConfirm={onRemove} />
         ) : canManage ? (
           <button
             type="button"
             onClick={onRemove}
-            disabled={isLastProtected || pending}
+            disabled={isLastProtected || busy}
             title={isLastProtected ? `Can't remove the last ${member.role}` : 'Remove from org'}
             className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] font-medium text-text-tertiary transition-colors hover:bg-dismiss/[0.06] hover:text-dismiss disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-text-tertiary"
           >
@@ -178,11 +182,15 @@ function LeaveButton({ disabled, onConfirm }: { disabled: boolean; onConfirm: ()
       <span className="inline-flex items-center gap-1">
         <button
           type="button"
+          // Gate Confirm on disabled too: if the user armed Leave and then
+          // became the last owner (or a mutation started), the armed Confirm
+          // must not stay clickable. Cancel stays enabled so they can back out.
+          disabled={disabled}
           onClick={() => {
             setConfirming(false)
             onConfirm()
           }}
-          className="rounded-lg bg-dismiss px-2 py-1.5 text-[11px] font-semibold text-white transition-colors hover:bg-dismiss/90"
+          className="rounded-lg bg-dismiss px-2 py-1.5 text-[11px] font-semibold text-white transition-colors hover:bg-dismiss/90 disabled:cursor-not-allowed disabled:opacity-40"
         >
           Confirm
         </button>

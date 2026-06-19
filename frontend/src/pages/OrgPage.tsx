@@ -76,6 +76,14 @@ export default function OrgPage() {
   const [tab, setTab] = useState<OrgTab>('people')
   const adapter = useOrgRosterAdapter(orgId ?? '')
 
+  // OrgPage mounts under /orgs/:org_id, so the active org is effectively always
+  // resolved; guard the cold-load window anyway so MemberRoster (the adapter's
+  // only caller) never renders with an empty orgId — which would slip past
+  // apiClient's org prefix and hit a bare /members.
+  if (!orgId) {
+    return <p className="mx-auto max-w-3xl text-[13px] text-text-tertiary">Loading organization…</p>
+  }
+
   return (
     <div className="mx-auto max-w-3xl">
       <div className="mb-5 flex items-center gap-2.5">
@@ -109,12 +117,7 @@ export default function OrgPage() {
         ))}
       </div>
 
-      {tab === 'people' &&
-        (orgId ? (
-          <MemberRoster adapter={adapter} canManage={isAdmin} />
-        ) : (
-          <p className="text-[13px] text-text-tertiary">Loading organization…</p>
-        ))}
+      {tab === 'people' && <MemberRoster adapter={adapter} canManage={isAdmin} />}
 
       {tab === 'settings' && (
         <TabStub title="Org settings move here">

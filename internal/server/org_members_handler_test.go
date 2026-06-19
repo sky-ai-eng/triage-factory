@@ -256,6 +256,22 @@ func TestOrgMemberRemove_SelfLeaveNonOwner(t *testing.T) {
 	}
 }
 
+// TestOrgMemberRemove_AdminRemovesMember: the happy path through the admin
+// branch — an org admin removes a non-owner member (not themselves) — 204 and
+// the member is gone.
+func TestOrgMemberRemove_AdminRemovesMember(t *testing.T) {
+	r := newOrgMembersRig(t)
+
+	rec := httptest.NewRecorder()
+	r.omh.handleOrgMemberRemove(rec, r.req(http.MethodDelete, r.admin, r.memb, nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204 (admin removes member); body=%s", rec.Code, rec.Body.String())
+	}
+	if r.isMember(t, r.memb) {
+		t.Errorf("member still present after admin removal, want removed")
+	}
+}
+
 // TestOrgMemberRemove_NonAdminCantRemoveOther: a plain member removing a
 // *different* user is 404 (not self, not admin) and the target stays.
 func TestOrgMemberRemove_NonAdminCantRemoveOther(t *testing.T) {
