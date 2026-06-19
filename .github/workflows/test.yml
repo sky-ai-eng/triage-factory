@@ -32,6 +32,11 @@ jobs:
       - name: Build frontend
         run: cd frontend && npm ci && npm run build
 
+      # Frontend unit/component tests (vitest + Testing Library, jsdom).
+      # Runs after the build step so node_modules from its `npm ci` is reused.
+      - name: Frontend tests
+        run: cd frontend && npm run test:run
+
       - name: Go build
         run: go build ./...
 

@@ -1,9 +1,20 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // Vitest: jsdom component/integration tests under src/**/*.test.tsx. globals
+  // off (explicit imports keep the app's type surface clean); CSS skipped (the
+  // tests assert on text/roles, not Tailwind output). setup wires jest-dom
+  // matchers + per-test cleanup.
+  test: {
+    environment: 'jsdom',
+    globals: false,
+    css: false,
+    setupFiles: ['./src/test/setup.ts'],
+    include: ['src/**/*.test.{ts,tsx}'],
+  },
   server: {
     proxy: {
       '/api/ws': { target: 'ws://localhost:3000', ws: true },

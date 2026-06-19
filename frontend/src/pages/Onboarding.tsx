@@ -83,6 +83,13 @@ export default function Onboarding() {
   // just-created org goes to the /setup wizard (the single create-time flow,
   // org resolved from OrgContext's server-active pick); an invite-driven
   // membership goes straight into the app.
+  //
+  // The primary invite entry is the public /invite/accept page (TFAC-418),
+  // which refreshes /me and routes into the joined org itself. This effect is
+  // the coherent fallback: a user sitting on this "wait for an invite" screen
+  // who accepts in another tab (or whose membership otherwise lands) and hits
+  // Refresh flows through here — createdOrgId is null, so they go straight into
+  // the org rather than the founder's /setup wizard.
   useEffect(() => {
     if (auth.status !== 'authed' || auth.orgs.length === 0) return
     if (createdOrgId && auth.orgs.some((o) => o.id === createdOrgId)) {

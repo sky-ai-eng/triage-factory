@@ -1,10 +1,16 @@
-import { useMemo, useState } from 'react'
-import { Users } from 'lucide-react'
-import { apiFetch, apiJSON } from '../lib/apiClient'
+import { useCallback, useMemo, useState } from 'react'
+import { Plus, Users } from 'lucide-react'
+import * as Switch from '@radix-ui/react-switch'
+import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { useActiveOrgId } from '../contexts/OrgContext'
 import { useOrgRole } from '../hooks/useOrgRole'
+import { useInvites } from '../hooks/useInvites'
 import MemberRoster from '../components/MemberRoster'
+import InviteModal from '../components/InviteModal'
+import PendingInviteRow from '../components/PendingInviteRow'
+import { toast } from '../components/Toast/toastStore'
 import type { MemberRosterAdapter, RosterMember } from '../hooks/useMemberRoster'
+import type { PendingInvite } from '../types'
 
 // OrgMemberApiRow is the wire shape of GET /api/orgs/{org}/members rows.
 interface OrgMemberApiRow {
@@ -18,12 +24,14 @@ interface OrgMemberApiRow {
 
 const ORG_ROLES = ['owner', 'admin', 'member']
 
-// useOrgRosterAdapter is the org-tier MemberRosterAdapter (TFAC-417): role
-// vocab owner|admin|member, protected role owner, and the §1 endpoints wired
-// through apiClient's org prefix (/api/orgs/{org}/members…). The add affordance
-// (invite-by-email) and extra rows are deliberately left empty here — the
-// invite ticket fills addAffordance, and the org tier has no bot row. Memoized
-// on orgId so MemberRoster's hook doesn't re-fetch every render.
+// useOrgRosterAdapter is the org-tier MemberRosterAdapter's DATA layer
+// (TFAC-417): role vocab owner|admin|member, protected role owner, and the
+// member endpoints wired through apiClient's org prefix (/api/orgs/{org}/
+// members…). addAffordance + extraRows are left empty here and composed on top
+// by OrgPeople (TFAC-418) — the invite modal slot + the pending ghost rows.
+// Memoized on orgId so MemberRoster's hook doesn't re-fetch every render; the
+// composed wrapper keeps these fetch/mutate methods referentially stable so
+// adding the live invite slots can't trigger a roster refetch loop.
 function useOrgRosterAdapter(orgId: string): MemberRosterAdapter {
   return useMemo<MemberRosterAdapter>(
     () => ({
@@ -91,7 +99,6 @@ export default function OrgPage() {
 function OrgPageBody({ orgId }: { orgId: string }) {
   const { isAdmin } = useOrgRole()
   const [tab, setTab] = useState<OrgTab>('people')
-  const adapter = useOrgRosterAdapter(orgId)
 
   return (
     <div className="mx-auto max-w-3xl">
@@ -126,7 +133,7 @@ function OrgPageBody({ orgId }: { orgId: string }) {
         ))}
       </div>
 
-      {tab === 'people' && <MemberRoster adapter={adapter} canManage={isAdmin} />}
+      {tab === 'people' && <OrgPeople orgId={orgId} canManage={isAdmin} />}
 
       {tab === 'settings' && (
         <TabStub title="Org settings move here">
@@ -141,6 +148,117 @@ function OrgPageBody({ orgId }: { orgId: string }) {
           it remains on its own Org template page.
         </TabStub>
       )}
+    </div>
+  )
+}
+
+// OrgPeople is the People tab body: the shared member roster plus the
+// org-adapter-specific invite surface (TFAC-418) — the "+ Invite" modal in the
+// roster's addAffordance slot, the pending-invite ghost rows in extraRows, and
+// the "Show invited" header toggle. The whole invite surface is gated on
+// canManage: non-admins get a 404 on GET /api/invites (non-disclosure), so the
+// hook stays inert for them and they see a plain read-only roster.
+function OrgPeople({ orgId, canManage }: { orgId: string; canManage: boolean }) {
+  const base = useOrgRosterAdapter(orgId)
+  const { invites, error, create, revoke, resend } = useInvites(canManage)
+  // Default shown (per the ticket). Hidden only collapses the ghost rows; the
+  // invites still exist and the "+ Invite" button stays put.
+  const [showInvited, setShowInvited] = useState(true)
+  const [modalOpen, setModalOpen] = useState(false)
+  // The invite id with a revoke/resend in flight — disables that row's controls
+  // so a second action can't race the reload. One at a time, like the roster.
+  const [busyId, setBusyId] = useState<string | null>(null)
+  // Fresh accept links from resends, keyed by the NEW invite id (resend rotates
+  // to a new row). Revealed inline on that row so the admin can copy the link.
+  const [resentLinks, setResentLinks] = useState<Record<string, string>>({})
+
+  const handleRevoke = useCallback(
+    async (id: string) => {
+      setBusyId(id)
+      try {
+        await revoke(id)
+      } catch (e) {
+        toast.error(httpErrorMessage(e, 'Could not revoke the invite.'))
+      } finally {
+        setBusyId(null)
+      }
+    },
+    [revoke],
+  )
+
+  const handleResend = useCallback(
+    async (invite: PendingInvite) => {
+      setBusyId(invite.id)
+      try {
+        const res = await resend(invite)
+        setResentLinks((m) => ({ ...m, [res.id]: res.accept_url }))
+        toast.success('Invite link rotated — copy the new one below.')
+      } catch (e) {
+        toast.error(httpErrorMessage(e, 'Could not resend the invite.'))
+      } finally {
+        setBusyId(null)
+      }
+    },
+    [resend],
+  )
+
+  // Pending ghost rows for the roster's extraRows slot — only when the viewer
+  // can manage and the toggle is on. Plain <li>s so they slot into the <ul>.
+  const extraRows =
+    canManage && showInvited
+      ? invites.map((inv) => (
+          <PendingInviteRow
+            key={inv.id}
+            invite={inv}
+            freshLink={resentLinks[inv.id]}
+            busy={busyId === inv.id}
+            onRevoke={() => void handleRevoke(inv.id)}
+            onResend={() => void handleResend(inv)}
+          />
+        ))
+      : null
+
+  const addAffordance = canManage ? (
+    <div className="flex justify-end pt-1">
+      <button
+        type="button"
+        onClick={() => setModalOpen(true)}
+        className="inline-flex items-center gap-1.5 rounded-full border border-border-subtle bg-white/60 px-3.5 py-2 text-[13px] font-medium text-text-secondary transition-colors hover:bg-white hover:text-text-primary"
+      >
+        <Plus size={14} />
+        Invite
+      </button>
+    </div>
+  ) : null
+
+  // Compose the live invite slots onto the memoized base adapter. The spread is
+  // a fresh object each render, but base.fetchMembers/changeRole/remove keep
+  // their identity, so useMemberRoster's load effect (keyed on those) never
+  // refires from a changing addAffordance/extraRows.
+  const adapter: MemberRosterAdapter = { ...base, addAffordance, extraRows }
+
+  return (
+    <div className="space-y-3">
+      {canManage && invites.length > 0 && (
+        <div className="flex items-center justify-end">
+          <label className="flex cursor-pointer items-center gap-2 text-[12px] text-text-tertiary">
+            Show invited
+            <Switch.Root
+              checked={showInvited}
+              onCheckedChange={setShowInvited}
+              className="relative h-[18px] w-8 rounded-full transition-colors data-[state=checked]:bg-accent data-[state=unchecked]:bg-black/10"
+            >
+              <Switch.Thumb className="block h-[14px] w-[14px] rounded-full bg-white shadow transition-transform data-[state=checked]:translate-x-[14px] data-[state=unchecked]:translate-x-[2px]" />
+            </Switch.Root>
+          </label>
+        </div>
+      )}
+
+      {canManage && error && <p className="text-[12px] text-dismiss">{error}</p>}
+
+      <MemberRoster adapter={adapter} canManage={canManage} />
+
+      {modalOpen && <InviteModal create={create} onClose={() => setModalOpen(false)} />}
     </div>
   )
 }

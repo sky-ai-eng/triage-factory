@@ -89,3 +89,19 @@ export async function apiJSON<T>(path: string, options: ApiFetchOptions = {}): P
   const resp = await apiFetch(path, options)
   return (await resp.json()) as T
 }
+
+/** httpErrorMessage extracts a user-facing string from a caught error,
+ *  preferring the server's JSON `{ error }` body (so a backend message — e.g.
+ *  the invite 409 "already pending" or the last-owner guard — reaches the user
+ *  verbatim), then the error's own message, then the supplied fallback. */
+export function httpErrorMessage(e: unknown, fallback: string): string {
+  if (e instanceof HttpError) {
+    try {
+      const body = JSON.parse(e.body) as { error?: unknown }
+      if (typeof body.error === 'string' && body.error) return body.error
+    } catch {
+      // body wasn't JSON — fall through to the generic handling below.
+    }
+  }
+  return e instanceof Error ? e.message : fallback
+}
