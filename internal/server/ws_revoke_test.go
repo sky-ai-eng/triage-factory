@@ -54,27 +54,41 @@ func dialServerWS(t *testing.T, baseURL, cookieName, sid string) *ws.Conn {
 	return conn
 }
 
-// waitWSReady blocks until the connection is registered with the hub, by
-// broadcasting a sentinel to its org and waiting for it to land. This
-// removes the (microsecond) race between ws.Dial returning and HandleWS
-// registering the client, making the revoke assertions below
-// deterministic rather than timing-dependent.
-func waitWSReady(t *testing.T, hub *websocket.Hub, conn *ws.Conn, orgID string) {
+// waitWSRegistered blocks until the dialed conn is registered in the
+// hub's per-user index, so a revoke issued right after can actually find
+// it. It absorbs the (microsecond, but nonzero) race between ws.Dial
+// returning and HandleWS registering the client.
+//
+// Registration is detected WITHOUT reading the conn: the client sends one
+// presence frame and we poll PresentFor, which reports hub state set by
+// readPump. readPump only runs after the client is registered (HandleWS
+// registers under the mutex, then starts the pumps), so a true result
+// guarantees byUser is populated. We deliberately don't read the conn to
+// probe readiness — coder/websocket closes a connection when a Read's
+// context is cancelled, so a short-timeout read in a retry loop would
+// tear the socket down on the first slow delivery; and any frame read
+// here would also sit ahead of the close frame the test then asserts on.
+func waitWSRegistered(t *testing.T, hub *websocket.Hub, conn *ws.Conn, orgID string) {
 	t.Helper()
+	// One-shot presence write (its own context, cancelled once the write
+	// returns — same shape as presence_test.go's writer).
+	func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := conn.Write(ctx, ws.MessageText,
+			[]byte(`{"type":"presence","viewing":"board","visible":true}`)); err != nil {
+			t.Fatalf("write presence frame: %v", err)
+		}
+	}()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		hub.Broadcast(websocket.Event{Type: "__ready", OrgID: orgID})
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		_, _, err := conn.Read(ctx)
-		cancel()
-		if err == nil {
+		// viewing="board" satisfies PresentFor for any runID in the org.
+		if hub.PresentFor(orgID, "registration-probe") {
 			return
 		}
-		if code := ws.CloseStatus(err); code != -1 {
-			t.Fatalf("connection closed during ready wait (code %d)", code)
-		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatal("ws never received its readiness broadcast — registration likely failed")
+	t.Fatal("ws never registered with the hub (PresentFor stayed false)")
 }
 
 // expectServerCloseCode asserts the conn is closed with want within 1s —
@@ -105,7 +119,7 @@ func TestWS_LogoutClosesSocket(t *testing.T) {
 
 	base := r.liveServer(t)
 	conn := dialServerWS(t, base, r.srv.sidCookieName(), sid)
-	waitWSReady(t, r.srv.ws, conn, orgID.String())
+	waitWSRegistered(t, r.srv.ws, conn, orgID.String())
 
 	// Revoke the session via the normal logout endpoint (same sid cookie).
 	if got := r.requestWithSid("POST", "/api/auth/logout", sid).StatusCode; got != http.StatusNoContent {
@@ -143,7 +157,7 @@ func TestWS_MembershipRemovalClosesSocket(t *testing.T) {
 
 	base := r.liveServer(t)
 	conn := dialServerWS(t, base, r.srv.sidCookieName(), sid)
-	waitWSReady(t, r.srv.ws, conn, orgID.String())
+	waitWSRegistered(t, r.srv.ws, conn, orgID.String())
 
 	// Self-leave: DELETE the membership through the org-members endpoint.
 	path := "/api/orgs/" + orgID.String() + "/members/" + userID.String()
