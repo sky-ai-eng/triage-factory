@@ -104,4 +104,31 @@ describe('InviteModal', () => {
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent(/already pending/i)
   })
+
+  it('traps Tab focus within the dialog (WCAG 2.1.2)', () => {
+    render(<InviteModal create={vi.fn()} onClose={vi.fn()} />)
+    const dialog = screen.getByRole('dialog')
+
+    // Focus lands inside on open (the email field's autoFocus).
+    expect(dialog.contains(document.activeElement)).toBe(true)
+
+    const focusables = Array.from(
+      dialog.querySelectorAll<HTMLElement>(
+        'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])',
+      ),
+    )
+    const first = focusables[0]
+    const last = focusables[focusables.length - 1]
+    expect(first).not.toBe(last)
+
+    // Tab off the last focusable wraps to the first…
+    last.focus()
+    fireEvent.keyDown(dialog, { key: 'Tab' })
+    expect(document.activeElement).toBe(first)
+
+    // …and Shift+Tab off the first wraps back to the last.
+    first.focus()
+    fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(last)
+  })
 })

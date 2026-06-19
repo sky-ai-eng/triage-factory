@@ -252,6 +252,9 @@ function OrgPeople({ orgId, canManage }: { orgId: string; canManage: boolean }) 
           <label className="flex cursor-pointer items-center gap-2 text-[12px] text-text-tertiary">
             Show invited
             <Switch.Root
+              // Radix renders a <button role="switch">, and a wrapping <label>
+              // doesn't reliably name a button — so name it explicitly.
+              aria-label="Show invited"
               checked={showInvited}
               onCheckedChange={setShowInvited}
               className="relative h-[18px] w-8 rounded-full transition-colors data-[state=checked]:bg-accent data-[state=unchecked]:bg-black/10"

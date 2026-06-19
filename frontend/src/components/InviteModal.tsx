@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Check, Copy, X } from 'lucide-react'
 import { httpErrorMessage } from '../lib/apiClient'
+import { useFocusTrap } from '../hooks/useFocusTrap'
 import { useOrgRole } from '../hooks/useOrgRole'
 import { useTeams } from '../hooks/useTeams'
 import type { CreateInviteResponse } from '../types'
@@ -49,6 +50,13 @@ export default function InviteModal({ create, onClose }: Props) {
   // copy-the-link success state.
   const [created, setCreated] = useState<CreateInviteResponse | null>(null)
 
+  // Trap keyboard focus inside the dialog while it's open and restore it to the
+  // trigger on close (WCAG 2.1.2). Initial focus lands on the email field; the
+  // container carries tabIndex={-1} for the empty-container fallback.
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const emailRef = useRef<HTMLInputElement>(null)
+  useFocusTrap(dialogRef, { initialFocus: emailRef })
+
   // Keep the selected role valid if the available set is narrower than the
   // default (defensive — both owner and admin currently see 'member').
   useEffect(() => {
@@ -96,6 +104,8 @@ export default function InviteModal({ create, onClose }: Props) {
       onClick={handleBackdrop}
     >
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         className="relative w-full max-w-md overflow-y-auto rounded-2xl border border-border-glass bg-gradient-to-br from-white/95 via-white/90 to-white/85 p-6 shadow-xl shadow-black/[0.08] backdrop-blur-xl"
         role="dialog"
         aria-modal="true"
@@ -146,11 +156,11 @@ export default function InviteModal({ create, onClose }: Props) {
           <form onSubmit={handleSubmit} className="space-y-4">
             <Field label="Email" htmlFor="invite-email" required>
               <input
+                ref={emailRef}
                 id="invite-email"
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                autoFocus
                 required
                 placeholder="person@example.com"
                 className="w-full rounded-lg border border-border-subtle bg-white/60 px-3 py-2 text-[13px] text-text-primary placeholder:text-text-tertiary focus:border-accent focus:bg-white focus:outline-none"

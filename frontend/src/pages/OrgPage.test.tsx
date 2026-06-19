@@ -85,7 +85,7 @@ describe('OrgPage — pending invites', () => {
     render(<OrgPage />)
     await screen.findByText('bob@example.com')
 
-    const toggle = screen.getByRole('switch')
+    const toggle = screen.getByRole('switch', { name: /show invited/i })
     fireEvent.click(toggle)
     await waitFor(() => expect(screen.queryByText('bob@example.com')).not.toBeInTheDocument())
 
