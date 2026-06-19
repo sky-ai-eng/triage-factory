@@ -1,9 +1,12 @@
-import { useMemo, useState } from 'react'
+import { useMemo } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Users } from 'lucide-react'
 import { apiFetch, apiJSON } from '../lib/apiClient'
 import { useActiveOrgId } from '../contexts/OrgContext'
 import { useOrgRole } from '../hooks/useOrgRole'
 import MemberRoster from '../components/MemberRoster'
+import OrgSettings from './settings/stack/OrgSettings'
+import OrgTemplate from './OrgTemplate'
 import type { MemberRosterAdapter, RosterMember } from '../hooks/useMemberRoster'
 
 // OrgMemberApiRow is the wire shape of GET /api/orgs/{org}/members rows.
@@ -78,17 +81,19 @@ const TABS: { id: OrgTab; label: string }[] = [
 ]
 
 // OrgPage is the multi-mode org surface: the [People · Settings · Template]
-// shell. This ticket (TFAC-417) ships the shell + the People tab (the shared
-// roster); the Settings and Template tabs are placeholders the relocation
-// ticket fills with the existing OrgSettings / OrgTemplate content.
+// shell. People is the shared roster (TFAC-417); Settings and Template host the
+// relocated OrgSettings / OrgTemplate surfaces (TFAC-419) — the org-scoped
+// config moved off the global Settings page, and the template new teams inherit
+// moved off the standalone Org template route. The active tab is URL-driven so
+// the relocated surfaces stay deep-linkable.
 export default function OrgPage() {
   const orgId = useActiveOrgId()
 
   // OrgPage mounts under /orgs/:org_id, so the active org is effectively always
   // resolved; guard the cold-load window so the body never renders without a
   // concrete org. key={orgId} remounts the body on an org switch (the route
-  // stays mounted across a :org_id change), which resets the selected tab and
-  // refetches the roster for the newly-active org.
+  // stays mounted across a :org_id change), refetching the roster for the
+  // newly-active org.
   if (!orgId) {
     return <p className="mx-auto max-w-3xl text-[13px] text-text-tertiary">Loading organization…</p>
   }
@@ -96,16 +101,28 @@ export default function OrgPage() {
 }
 
 // OrgPageBody is the org shell, rendered once the active org is known and keyed
-// on orgId by the parent — so switching orgs remounts it from scratch, with no
-// stale tab selection or roster carried across, and the adapter always gets a
-// concrete orgId.
+// on orgId by the parent — so switching orgs remounts it from scratch and the
+// adapter always gets a concrete orgId. The active tab is URL-driven (?tab=) so
+// the relocated Settings/Template surfaces are deep-linkable — the "Org
+// template" nav entry points straight at ?tab=template — and survive a refresh.
 function OrgPageBody({ orgId }: { orgId: string }) {
   const { isAdmin } = useOrgRole()
-  const [tab, setTab] = useState<OrgTab>('people')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const tab = resolveTab(searchParams.get('tab'), isAdmin)
+  // People owns the bare URL (drop the param); the admin tabs carry an explicit
+  // ?tab=. replace so flipping tabs doesn't pile up history entries.
+  const setTab = (t: OrgTab) => setSearchParams(t === 'people' ? {} : { tab: t }, { replace: true })
   const adapter = useOrgRosterAdapter(orgId)
 
+  // People (the roster) is everyone's; only admins get the relocated Settings +
+  // Template surfaces, so non-admins see just the one tab. /org is multi-mode
+  // only (no local route), so OrgSettings always renders multi (isLocal=false).
+  const tabs = isAdmin ? TABS : TABS.filter((t) => t.id === 'people')
+
   return (
-    <div className="mx-auto max-w-3xl">
+    // Template is a full binding-graph canvas, so widen the column for it;
+    // People + Settings stay a narrow centered settings column.
+    <div className={`mx-auto ${tab === 'template' ? 'max-w-6xl' : 'max-w-3xl'}`}>
       <div className="mb-5 flex items-center gap-2.5">
         <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent-soft text-accent">
           <Users size={15} />
@@ -121,7 +138,7 @@ function OrgPageBody({ orgId }: { orgId: string }) {
       </div>
 
       <div className="mb-5 flex gap-1 border-b border-border-subtle">
-        {TABS.map((t) => (
+        {tabs.map((t) => (
           <button
             key={t.id}
             type="button"
@@ -138,33 +155,17 @@ function OrgPageBody({ orgId }: { orgId: string }) {
       </div>
 
       {tab === 'people' && <MemberRoster adapter={adapter} canManage={isAdmin} />}
-
-      {tab === 'settings' && (
-        <TabStub title="Org settings move here">
-          Connection, polling, model cap, Claude credentials, and the danger zone relocate to this
-          tab in a follow-up. For now they remain under Settings.
-        </TabStub>
-      )}
-
-      {tab === 'template' && (
-        <TabStub title="Org template moves here">
-          The org-wide prompt graph new teams inherit relocates to this tab in a follow-up. For now
-          it remains on its own Org template page.
-        </TabStub>
-      )}
+      {tab === 'settings' && <OrgSettings orgId={orgId} isLocal={false} />}
+      {tab === 'template' && <OrgTemplate />}
     </div>
   )
 }
 
-// TabStub is the placeholder body for the Settings / Template tabs until the
-// relocation ticket moves their real content here.
-function TabStub({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="rounded-2xl border border-dashed border-border-subtle px-5 py-8 text-center">
-      <p className="text-[13px] font-medium text-text-secondary">{title}</p>
-      <p className="mx-auto mt-1.5 max-w-md text-[12px] leading-relaxed text-text-tertiary">
-        {children}
-      </p>
-    </div>
-  )
+// resolveTab maps the ?tab= param to a concrete tab. People is the default and
+// the floor for non-admins: a stale or hand-typed ?tab=settings|template from a
+// member resolves back to People so the admin surfaces never render for them
+// (belt-and-suspenders to the tab-strip filter that hides those tabs).
+function resolveTab(raw: string | null, isAdmin: boolean): OrgTab {
+  if ((raw === 'settings' || raw === 'template') && isAdmin) return raw
+  return 'people'
 }
