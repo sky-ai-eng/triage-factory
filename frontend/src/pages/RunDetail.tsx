@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import type { AgentRun } from '../types'
+import { setPresenceView } from '../hooks/useWebSocket'
 import { useRunDetail } from '../hooks/useRunDetail'
 import { useOrgHref } from '../hooks/useOrgHref'
 import { isActiveRun } from '../lib/runStatus'
@@ -35,6 +36,15 @@ export default function RunDetail() {
   const [now, setNow] = useState(() => Date.now())
   const [interruptPending, setInterruptPending] = useState(false)
   const [approval, setApproval] = useState<{ runID: string; kind: 'review' | 'pr' } | null>(null)
+
+  // Presence (TFAC-392): this run's detail page is an answer-capable surface for
+  // ITS run's permission prompts. Report run:<id> while mounted (re-firing if the
+  // runID changes) and fall back to 'other' on unmount.
+  useEffect(() => {
+    if (!runID) return
+    setPresenceView(`run:${runID}`)
+    return () => setPresenceView('other')
+  }, [runID])
 
   // Tick while live so elapsed + the vent-heat flare stay current.
   useEffect(() => {

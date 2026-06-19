@@ -84,6 +84,7 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		GitHubApps:       newGitHubAppsStore(tx, newSecretStore()),
 		JiraApps:         newJiraAppsStore(tx),
 		OrgTemplate:      newOrgTemplateStore(tx),
+		Invites:          newInvitesStore(tx, tx),
 	}
 	if err := fn(txStores); err != nil {
 		return err

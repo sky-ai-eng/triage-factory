@@ -170,11 +170,13 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 	t.Run("TeamSettings_RoundTripsEveryField", func(t *testing.T) {
 		stores, ids := factory(t)
 		want := domain.TeamSettings{
-			JiraProjects:               []string{"SKY", "ENG", "OPS"},
-			AIReprioritizeThreshold:    7,
-			AIPreferenceUpdateInterval: 30,
-			DefaultModel:               "opus",
-			AutoDelegateEnabled:        true,
+			JiraProjects:                    []string{"SKY", "ENG", "OPS"},
+			AIReprioritizeThreshold:         7,
+			AIPreferenceUpdateInterval:      30,
+			DefaultModel:                    "opus",
+			AutoDelegateEnabled:             true,
+			PermissionAbsentGraceMS:         30000,
+			PermissionAbsentAutodenyEnabled: false,
 		}
 		if err := stores.Teams.UpdateSettings(ctx, ids.TeamID, want); err != nil {
 			t.Fatalf("UpdateSettings: %v", err)

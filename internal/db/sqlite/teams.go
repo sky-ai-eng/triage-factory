@@ -66,14 +66,18 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 		aiThreshold, aiInterval int
 		defaultModel            string
 		autoDelegate            bool
+		permAbsentGraceMS       int
+		permAbsentAutodeny      bool
 	)
 	err := q.QueryRowContext(ctx, `
 		SELECT jira_projects, ai_reprioritize_threshold, ai_preference_update_interval,
-		       default_model, auto_delegate_enabled
+		       default_model, auto_delegate_enabled,
+		       permission_absent_grace_ms, permission_absent_autodeny_enabled
 		FROM team_settings WHERE team_id = ?
 	`, teamID).Scan(
 		&projectsJSON, &aiThreshold, &aiInterval,
 		&defaultModel, &autoDelegate,
+		&permAbsentGraceMS, &permAbsentAutodeny,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		// See OrgsStore for the rationale: defaults here are the
@@ -92,11 +96,13 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 		}
 	}
 	return domain.TeamSettings{
-		JiraProjects:               projects,
-		AIReprioritizeThreshold:    aiThreshold,
-		AIPreferenceUpdateInterval: aiInterval,
-		DefaultModel:               defaultModel,
-		AutoDelegateEnabled:        autoDelegate,
+		JiraProjects:                    projects,
+		AIReprioritizeThreshold:         aiThreshold,
+		AIPreferenceUpdateInterval:      aiInterval,
+		DefaultModel:                    defaultModel,
+		AutoDelegateEnabled:             autoDelegate,
+		PermissionAbsentGraceMS:         permAbsentGraceMS,
+		PermissionAbsentAutodenyEnabled: permAbsentAutodeny,
 	}, nil
 }
 
@@ -191,18 +197,22 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 		INSERT INTO team_settings (
 			team_id, jira_projects, ai_reprioritize_threshold,
 			ai_preference_update_interval, default_model, auto_delegate_enabled,
+			permission_absent_grace_ms, permission_absent_autodeny_enabled,
 			updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(team_id) DO UPDATE SET
 			jira_projects = excluded.jira_projects,
 			ai_reprioritize_threshold = excluded.ai_reprioritize_threshold,
 			ai_preference_update_interval = excluded.ai_preference_update_interval,
 			default_model = excluded.default_model,
 			auto_delegate_enabled = excluded.auto_delegate_enabled,
+			permission_absent_grace_ms = excluded.permission_absent_grace_ms,
+			permission_absent_autodeny_enabled = excluded.permission_absent_autodeny_enabled,
 			updated_at = CURRENT_TIMESTAMP
 	`,
 		teamID, projectsJSON, u.AIReprioritizeThreshold,
 		u.AIPreferenceUpdateInterval, u.DefaultModel, u.AutoDelegateEnabled,
+		u.PermissionAbsentGraceMS, u.PermissionAbsentAutodenyEnabled,
 	); err != nil {
 		return fmt.Errorf("upsert team_settings: %w", err)
 	}

@@ -242,6 +242,7 @@ var orgScopedTables = []string{
 	"sessions",
 	"memberships",
 	"org_memberships",
+	"org_invites",
 	"teams",
 	"orgs",
 	// users + auth.users handled separately (auth.users is image-owned).

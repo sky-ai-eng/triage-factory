@@ -108,7 +108,11 @@ func New(conn *sql.DB) db.Stores {
 		// db-package bootstrap tests can run without Postgres. Local mode
 		// never seeds or reads it.
 		OrgTemplate: newOrgTemplateStore(conn),
-		Tx:          s,
+		// Invites is multi-mode only; the SQLite stub returns
+		// ErrNotApplicableInLocal. Wired so the bundle is complete in both
+		// modes — local never mounts the invite routes.
+		Invites: newInvitesStore(conn, conn),
+		Tx:      s,
 	}
 	return s.stores
 }

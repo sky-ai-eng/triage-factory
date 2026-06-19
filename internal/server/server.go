@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -568,6 +569,9 @@ func (s *Server) routes() {
 	//   POST /api/webhooks/github/{org_id} — GitHub App webhook receiver;
 	//        GitHub has no session, and the handler verifies the HMAC
 	//        signature against the org's stored webhook secret itself.
+	//   GET  /api/invites/preview          — invite-token preview; the
+	//        recipient hasn't authenticated yet, so this can't gate on a
+	//        session. Runs on the admin pool; the token is the bearer secret.
 	//   /auth/v1/                        — GoTrue reverse proxy; auth
 	//        happens upstream, not in our middleware.
 	//   /                                — SPA fallback; static-file
@@ -639,7 +643,7 @@ func (s *Server) routes() {
 	s.api("GET /api/teams", th.handleTeamsList)
 	s.apiMutating("POST /api/teams", th.handleTeamCreate)
 
-	// Org People roster (TFAC-417): list members + change role + remove.
+	// Org People roster: list members + change role + remove.
 	// Multi-mode only (each handler 404s in local). GET is any-member;
 	// PATCH/DELETE gate org-admin (DELETE also allows a self-leave). The
 	// last-owner guard is a DB trigger surfaced as a 409.
@@ -647,6 +651,41 @@ func (s *Server) routes() {
 	s.api("GET /api/orgs/{org_id}/members", omh.handleOrgMembersList)
 	s.apiMutating("PATCH /api/orgs/{org_id}/members/{user_id}", omh.handleOrgMemberRoleChange)
 	s.apiMutating("DELETE /api/orgs/{org_id}/members/{user_id}", omh.handleOrgMemberRemove)
+
+	// Org invites (multi-mode only — each handler 404s in local).
+	// The admin-facing create/list/revoke gate on org-admin and write
+	// through the app pool; preview + accept are the redeem surfaces and run
+	// on the admin pool (the redeem actor holds a token but no membership).
+	// publicURL + setActiveOrg are read lazily because deployCfg/authDeps
+	// land after routes() runs. GET /api/invites/preview is intentionally
+	// pre-auth (the recipient hasn't authenticated yet) — see the
+	// preAuthAllowlist note below + routes_coverage_test.
+	ih := &invitesHandler{
+		tx:      s.tx,
+		az:      s.az,
+		admin:   s.db,
+		invites: s.allStores.Invites,
+		publicURL: func() string {
+			if s.deployCfg == nil {
+				return ""
+			}
+			return s.deployCfg.publicURL
+		},
+		setActiveOrg: func(ctx context.Context, sessID, orgID uuid.UUID) error {
+			if s.authDeps == nil {
+				return errors.New("auth not wired")
+			}
+			return s.authDeps.sessions.UpdateActiveOrgSystem(ctx, sessID, orgID)
+		},
+	}
+	s.api("GET /api/invites", ih.handleInviteList)
+	s.apiMutating("POST /api/invites", ih.handleInviteCreate)
+	s.apiMutating("POST /api/invites/{id}/revoke", ih.handleInviteRevoke)
+	s.apiMutating("POST /api/invites/accept", ih.handleInviteAccept)
+	// Pre-auth: the invitee previews the token before signing in. The handler
+	// runs on the admin pool and discloses only org name + role to the token
+	// holder. Listed in preAuthAllowlist.
+	s.mux.HandleFunc("GET /api/invites/preview", ih.handleInvitePreview)
 
 	s.api("GET /api/queue", s.handleQueue)
 	s.api("GET /api/tasks", s.handleTasks)

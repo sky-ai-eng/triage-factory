@@ -53,6 +53,27 @@ type client struct {
 	// kicks in when both event and client carry values.
 	userID string
 	orgID  string
+	// viewing + visible are the client's self-reported presence (TFAC-392),
+	// updated from inbound "presence" control frames in readPump. viewing is
+	// "board", "run:<runID>", or "other" (the latter for any non-answer-capable
+	// surface); visible mirrors the Page Visibility / focus state of the tab.
+	// Both are guarded by the hub mutex (written in readPump under h.mu, read in
+	// PresentFor under the RLock). Zero value ("", false) is "not on an
+	// answer-capable surface / not focused" — a fresh connection counts as absent
+	// until it reports otherwise.
+	viewing string
+	visible bool
+}
+
+// presenceMsg is the inbound client→server control frame shape for presence
+// reporting (TFAC-392). The frontend sends one on navigation and on
+// visibility/focus change so the hub can answer PresentFor without polling the
+// client. Unknown message types decode into this struct with Type != "presence"
+// and are ignored (forward-compat), as are non-JSON frames (pings).
+type presenceMsg struct {
+	Type    string `json:"type"`
+	Viewing string `json:"viewing"`
+	Visible bool   `json:"visible"`
 }
 
 // NewHub creates a new websocket hub.
@@ -165,11 +186,54 @@ func (h *Hub) Broadcast(evt Event) {
 
 func (h *Hub) readPump(c *client) {
 	for {
-		_, _, err := c.conn.Read(context.Background())
+		_, data, err := c.conn.Read(context.Background())
 		if err != nil {
 			return
 		}
+		// Inbound client frames are presence reports (TFAC-392). Decode
+		// tolerantly: a non-JSON frame (ping/keepalive) or an unknown message
+		// type is silently ignored so the client→server channel stays
+		// forward-compatible. Only a well-formed "presence" frame mutates state.
+		var msg presenceMsg
+		if json.Unmarshal(data, &msg) != nil || msg.Type != "presence" {
+			continue
+		}
+		h.mu.Lock()
+		c.viewing = msg.Viewing
+		c.visible = msg.Visible
+		h.mu.Unlock()
 	}
+}
+
+// PresentFor reports whether any connected client is "present" for a prompt
+// raised by runID in orgID (TFAC-392): an answer-capable, focused tab. A client
+// qualifies iff it is in the run's org (or unscoped, matching Broadcast's
+// tolerance for pre-auth / test clients) AND its tab is visible/focused AND it
+// is viewing the board or this run's own detail page. A backgrounded tab, or a
+// tab on Settings (viewing "other"), never qualifies.
+//
+// Nil-receiver-safe (returns false) so the hub-less test spawner and any
+// conditionally-wired caller read as "nobody present" without guarding the call
+// site, consistent with Broadcast.
+func (h *Hub) PresentFor(orgID, runID string) bool {
+	if h == nil {
+		return false
+	}
+	runView := "run:" + runID
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for c := range h.clients {
+		if orgID != "" && c.orgID != "" && c.orgID != orgID {
+			continue
+		}
+		if !c.visible {
+			continue
+		}
+		if c.viewing == "board" || c.viewing == runView {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Hub) writePump(c *client) {

@@ -101,6 +101,17 @@ type TeamSettings struct {
 	AIPreferenceUpdateInterval int
 	DefaultModel               string // "haiku" | "sonnet" | "opus"
 	AutoDelegateEnabled        bool
+
+	// PermissionAbsentGraceMS + PermissionAbsentAutodenyEnabled gate the
+	// presence-aware fast auto-deny for unattended permission prompts (TFAC-392).
+	// When the toggle is on and a delegated run raises an off-allowlist tool
+	// prompt with no answer-capable, focused tab present in the run's org, the
+	// backend denies after this grace window (ms) instead of waiting the full
+	// permTimeout(). When off, the prompt keeps the full-timeout behavior exactly.
+	// The grace is clamped at spawn to [1s, permTimeout()) so it can never invert
+	// the "total wait < idleTimeout()" invariant.
+	PermissionAbsentGraceMS         int
+	PermissionAbsentAutodenyEnabled bool
 }
 
 // DefaultTeamSettings returns the NOT NULL DEFAULT values from the
@@ -115,10 +126,12 @@ type TeamSettings struct {
 // delegation on out of the box.
 func DefaultTeamSettings() TeamSettings {
 	return TeamSettings{
-		AIReprioritizeThreshold:    5,
-		AIPreferenceUpdateInterval: 20,
-		DefaultModel:               DefaultModel,
-		AutoDelegateEnabled:        false,
+		AIReprioritizeThreshold:         5,
+		AIPreferenceUpdateInterval:      20,
+		DefaultModel:                    DefaultModel,
+		AutoDelegateEnabled:             false,
+		PermissionAbsentGraceMS:         15000,
+		PermissionAbsentAutodenyEnabled: true,
 	}
 }
 

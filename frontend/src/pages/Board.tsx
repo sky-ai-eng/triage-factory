@@ -8,7 +8,7 @@ import type {
   TeamMember,
   TeamBot,
 } from '../types'
-import { useWebSocket } from '../hooks/useWebSocket'
+import { useWebSocket, setPresenceView } from '../hooks/useWebSocket'
 import { usePermissionQueues } from '../hooks/usePermissionQueues'
 import { isPermissionTerminalStatus } from '../lib/runStatus'
 import type { PendingPermission, PermissionDecisionInput } from '../lib/permissions'
@@ -147,6 +147,15 @@ export default function Board() {
   const [inReview, setInReview] = useState<Task[]>([])
   const [done, setDone] = useState<Task[]>([])
   const [loading, setLoading] = useState(true)
+
+  // Presence (TFAC-392): the board is an answer-capable surface for permission
+  // prompts (it renders + answers them inline), so report it while mounted and
+  // fall back to 'other' on unmount so an unattended run fast-denies once the
+  // operator leaves the board.
+  useEffect(() => {
+    setPresenceView('board')
+    return () => setPresenceView('other')
+  }, [])
 
   // Agent run state — runs render on cards regardless of which column
   // the card is in (a user-claimed in_progress task can also have a

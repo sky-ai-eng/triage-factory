@@ -288,7 +288,13 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// prompts/event_handlers/system_prompt_versions). The impl picks
 		// per-method internally — same split as PromptStore.
 		OrgTemplate: newOrgTemplateStore(app, admin),
-		Tx:          s,
+		// Invites needs both pools: app for the admin-facing create/list/
+		// revoke (org_invites_{select,insert,update} RLS gates on org-admin),
+		// admin for the redeem reads (GetByTokenHashSystem +
+		// IsOrgMemberSystem), whose actor is a token-bearing outsider with no
+		// membership. Same pool-split pattern as TeamsStore.
+		Invites: newInvitesStore(app, admin),
+		Tx:      s,
 	}
 	return s.stores
 }
@@ -362,5 +368,6 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		GitHubApps:  newGitHubAppsStore(tx, tx, newSecretStore(tx, tx, secretKey)),
 		JiraApps:    newJiraAppsStore(tx, tx),
 		OrgTemplate: newTxOrgTemplateStore(tx),
+		Invites:     newInvitesStore(tx, tx),
 	}
 }

@@ -327,11 +327,16 @@ func (s *Spawner) ResumeOpenRun(orgID, runID, agentMessage, userID string) error
 		// arm. The captured triggerType local (above) stays in scope
 		// for the goroutine's notifyDrainer defer — event-triggered
 		// runs still drive the per-entity firing queue on terminal.
+		resumeTeamID := ""
+		if taskCopy.TeamID != nil {
+			resumeTeamID = *taskCopy.TeamID
+		}
 		outcome, err := s.ResumeWithMessage(ctx, orgID, runID, sessionID, cwd, agentMessage, ResumeOptions{
 			Model:             model,
 			RepoEnv:           repoEnv,
 			ExtraAllowedTools: extraTools,
 			Namespace:         namespace,
+			TeamID:            resumeTeamID,
 		}, "manual", userID)
 		if ctx.Err() != nil {
 			// User cancelled mid-resume. ResumeWithMessage SIGKILLed
@@ -430,6 +435,12 @@ type ResumeOptions struct {
 	// Required for the resume to stay consistent with the initial env; callers
 	// capture it from the run (ResumeOpenRun → run.BlueprintRunID).
 	Namespace string
+
+	// TeamID is the run's owning team, used to resolve the presence-gated
+	// absent-auto-deny policy for the resumed run's permission prompts
+	// (TFAC-392). Empty falls back to the schema defaults. ResumeOpenRun
+	// captures it from the task (taskCopy.TeamID).
+	TeamID string
 }
 
 // ResumeOutcome bundles what ResumeWithMessage returns: the raw
@@ -566,14 +577,19 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	}
 	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)
 
+	// Resolve the presence-gated absent-auto-deny policy for the run's team
+	// (TFAC-392), matching the initial run; opts.TeamID falls back to defaults
+	// when empty.
+	absentDeny := s.resolveAbsentAutoDeny(ctx, opts.TeamID)
+
 	// Resume executes as a LiveRun (re-registered in procs, so a resumed run
 	// is interruptible/steerable), falling back to the one-shot sandbox path
 	// in multi mode. idleTimeout 0 disables hibernation AND the driver's
 	// multi-turn loop: a resume is a bounded re-invoke that drives to one
 	// terminal result, not a fresh long-lived autonomous run. The browser
 	// permission handler matches the initial run: an off-allowlist tool
-	// surfaces a permission_request to watchers, denied at permTimeout if
-	// unanswered.
+	// surfaces a permission_request to watchers, denied at permTimeout (or the
+	// absent grace) if unanswered.
 	var out liveOutcome
 	if agentproc.InteractiveSupported() {
 		out = s.runLiveAndDrive(ctx, liveRunSpec{
@@ -590,7 +606,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 				creatorUserID: creatorUserID,
 			},
 			opts:        baseOpts,
-			perms:       s.BrowserPermissionHandler(orgID, runID),
+			perms:       s.BrowserPermissionHandler(orgID, runID, absentDeny),
 			sink:        sink,
 			idleTimeout: 0,
 		})
