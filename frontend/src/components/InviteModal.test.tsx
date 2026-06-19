@@ -100,6 +100,8 @@ describe('InviteModal', () => {
     fireEvent.change(screen.getByLabelText(/email/i), { target: { value: 'dupe@example.com' } })
     fireEvent.click(screen.getByRole('button', { name: /send invite/i }))
 
-    expect(await screen.findByText(/already pending/i)).toBeInTheDocument()
+    // Surfaced inline AND announced to assistive tech (role="alert").
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(/already pending/i)
   })
 })

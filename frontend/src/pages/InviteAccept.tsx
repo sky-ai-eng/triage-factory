@@ -189,7 +189,11 @@ export default function InviteAccept() {
             <PrimaryButton onClick={() => void handleAccept()} disabled={accepting}>
               {accepting ? 'Accepting…' : 'Accept invitation'}
             </PrimaryButton>
-            {acceptError && <p className="mt-3 text-[12px] text-dismiss">{acceptError}</p>}
+            {acceptError && (
+              <p role="alert" className="mt-3 text-[12px] text-dismiss">
+                {acceptError}
+              </p>
+            )}
           </>
         ) : (
           <>

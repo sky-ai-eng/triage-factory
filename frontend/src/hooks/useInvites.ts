@@ -85,21 +85,30 @@ export function useInvites(enabled: boolean): UseInvites {
   const resend = useCallback(
     async (invite: PendingInvite): Promise<CreateInviteResponse> => {
       // Revoke the live invite first to free the (org, email) active-unique
-      // index, then create afresh — a single reload after both lands the new
-      // row (a NEW id, since the old one is now revoked and drops out of the
-      // active list).
-      await apiFetch(`/api/invites/${invite.id}/revoke`, { method: 'POST' })
-      const res = await apiJSON<CreateInviteResponse>('/api/invites', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: invite.email,
-          role: invite.role,
-          target_team_id: invite.target_team_id ?? '',
-        }),
-      })
-      await load()
-      return res
+      // index, then create afresh — the new row gets a NEW id, since the old
+      // one is now revoked and drops out of the active list.
+      //
+      // load() is in `finally` so the list ALWAYS reconciles, even on a partial
+      // failure: if the revoke succeeds but the create then throws (a network
+      // blip), the invite is already gone server-side. Without the reload the UI
+      // would keep rendering a stale "pending" ghost row, and a retry would 404
+      // the already-revoked id. Reloading drops the ghost row so the admin can
+      // re-invite cleanly. load() captures its own errors (never throws), so it
+      // can't mask the original failure that propagates to the caller.
+      try {
+        await apiFetch(`/api/invites/${invite.id}/revoke`, { method: 'POST' })
+        return await apiJSON<CreateInviteResponse>('/api/invites', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: invite.email,
+            role: invite.role,
+            target_team_id: invite.target_team_id ?? '',
+          }),
+        })
+      } finally {
+        await load()
+      }
     },
     [load],
   )

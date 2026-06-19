@@ -189,7 +189,10 @@ export default function InviteModal({ create, onClose }: Props) {
             </Field>
 
             {error && (
-              <p className="rounded-lg border border-dismiss/30 bg-dismiss/[0.06] px-3 py-2 text-[12px] text-dismiss">
+              <p
+                role="alert"
+                className="rounded-lg border border-dismiss/30 bg-dismiss/[0.06] px-3 py-2 text-[12px] text-dismiss"
+              >
                 {error}
               </p>
             )}

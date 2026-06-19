@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { HttpError } from '../lib/apiClient'
 import type { PendingInvite } from '../types'
 
 // Mock the apiClient I/O but keep HttpError + httpErrorMessage real (the page's
@@ -119,6 +120,34 @@ describe('OrgPage — pending invites', () => {
       '/api/invites',
       expect.objectContaining({ method: 'POST' }),
     )
+  })
+
+  it('reconciles the list when resend revokes but the re-create then fails', async () => {
+    // Partial failure: the revoke lands (the invite is gone server-side), but
+    // the follow-up create throws. The list must still reconcile (load() runs in
+    // `finally`) so the stale ghost row doesn't linger as falsely "pending".
+    apiMocks.apiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/invites/inv-1/revoke') {
+        invitesState = [] // revoked server-side
+      }
+      return undefined as unknown as Response
+    })
+    apiMocks.apiJSON.mockImplementation(async (path: string, opts?: { method?: string }) => {
+      if (path === '/members') return { members: [OWNER_ROW] }
+      if (path === '/api/invites') {
+        if (opts?.method === 'POST') throw new HttpError(500, 'boom') // re-create fails
+        return invitesState // GET reflects the now-empty (revoked) state
+      }
+      throw new Error('unexpected apiJSON path: ' + path)
+    })
+
+    render(<OrgPage />)
+    await screen.findByText('bob@example.com')
+
+    fireEvent.click(screen.getByRole('button', { name: /resend/i }))
+
+    await waitFor(() => expect(screen.queryByText('bob@example.com')).not.toBeInTheDocument())
+    expect(apiMocks.apiFetch).toHaveBeenCalledWith('/api/invites/inv-1/revoke', { method: 'POST' })
   })
 
   it('opens the invite modal from the + Invite affordance', async () => {

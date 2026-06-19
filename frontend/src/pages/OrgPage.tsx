@@ -202,6 +202,14 @@ function OrgPeople({ orgId, canManage }: { orgId: string; canManage: boolean }) 
     [resend],
   )
 
+  // Only surface fresh links for invites still in the list. Derived (no effect):
+  // the rows iterate `invites` anyway, so this just bounds what's read and keeps
+  // a long session's resends from passing dead entries down.
+  const activeIds = new Set(invites.map((i) => i.id))
+  const visibleResentLinks = Object.fromEntries(
+    Object.entries(resentLinks).filter(([id]) => activeIds.has(id)),
+  )
+
   // Pending ghost rows for the roster's extraRows slot — only when the viewer
   // can manage and the toggle is on. Plain <li>s so they slot into the <ul>.
   const extraRows =
@@ -210,7 +218,7 @@ function OrgPeople({ orgId, canManage }: { orgId: string; canManage: boolean }) 
           <PendingInviteRow
             key={inv.id}
             invite={inv}
-            freshLink={resentLinks[inv.id]}
+            freshLink={visibleResentLinks[inv.id]}
             busy={busyId === inv.id}
             onRevoke={() => void handleRevoke(inv.id)}
             onResend={() => void handleResend(inv)}
@@ -254,7 +262,11 @@ function OrgPeople({ orgId, canManage }: { orgId: string; canManage: boolean }) 
         </div>
       )}
 
-      {canManage && error && <p className="text-[12px] text-dismiss">{error}</p>}
+      {canManage && error && (
+        <p role="alert" className="text-[12px] text-dismiss">
+          {error}
+        </p>
+      )}
 
       <MemberRoster adapter={adapter} canManage={canManage} />
 
