@@ -427,8 +427,8 @@ func (ih *invitesHandler) handleInviteAccept(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error": fmt.Sprintf(
 				"This invitation was sent to %s, but you're signed in as %s. "+
-					"Ask your admin to re-invite %s, or sign in with that account.",
-				invite.Email, displayEmail(callerEmail), displayEmail(callerEmail),
+					"Sign in with %s to accept it, or ask your admin to re-invite %s.",
+				invite.Email, displayEmail(callerEmail), invite.Email, invite.Email,
 			),
 			"invited_email": invite.Email,
 		})

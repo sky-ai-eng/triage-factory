@@ -42,9 +42,12 @@ const (
 // grantOrgMembership primitive with the org_invites UPDATE atomically; it
 // is deliberately not a store method.
 type InvitesStore interface {
-	// Create inserts a pending invite and returns its id. A second pending
-	// invite to the same (org, lower(email)) trips the partial-unique index
-	// (org_invites_active_uniq) — the handler maps that to 409. App pool.
+	// Create inserts a pending invite and returns its id. A second *live*
+	// pending invite to the same (org, lower(email)) trips the partial-unique
+	// index (org_invites_active_uniq) — the handler maps that to 409. An
+	// *expired* pending invite to the same address does not block: Create
+	// first revokes it (same tx) so expiry behaves terminally for re-invite.
+	// App pool.
 	Create(ctx context.Context, p domain.CreateInviteParams) (string, error)
 
 	// ListActive returns the org's active invites (accepted_at IS NULL AND

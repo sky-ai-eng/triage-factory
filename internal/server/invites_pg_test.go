@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -234,15 +235,26 @@ func TestInviteAccept_EmailMismatch_409(t *testing.T) {
 
 	sid := r.signInAs(invitee) // JWT email = invitee@test ≠ someone-else@test
 	resp := postAccept(r, sid, token)
+	raw := readBody(resp)
 	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("status = %d; want 409 (body=%s)", resp.StatusCode, readBody(resp))
+		t.Fatalf("status = %d; want 409 (body=%s)", resp.StatusCode, raw)
 	}
 	var body struct {
+		Error        string `json:"error"`
 		InvitedEmail string `json:"invited_email"`
 	}
-	_ = json.Unmarshal([]byte(readBody(resp)), &body)
+	_ = json.Unmarshal([]byte(raw), &body)
 	if body.InvitedEmail != "someone-else@test" {
 		t.Errorf("invited_email = %q; want someone-else@test", body.InvitedEmail)
+	}
+	// The actionable message must steer toward the INVITED address, not the
+	// caller's — re-inviting the account they're wrongly signed in as is the
+	// misleading direction.
+	if !strings.Contains(body.Error, "re-invite someone-else@test") {
+		t.Errorf("error message %q; want it to re-invite the invited address", body.Error)
+	}
+	if strings.Contains(body.Error, "re-invite "+invitee.String()+"@test") {
+		t.Errorf("error message re-invites the caller's address (misleading): %q", body.Error)
 	}
 	if n := countOrgMemberships(t, r.h, invitee.String(), orgID.String()); n != 0 {
 		t.Errorf("org_memberships = %d; want 0 on mismatch", n)

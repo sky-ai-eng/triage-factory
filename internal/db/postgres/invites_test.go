@@ -228,6 +228,55 @@ func TestInvitesStore_Postgres_ActivePartialUnique(t *testing.T) {
 	}
 }
 
+// TestInvitesStore_Postgres_ReinviteAfterExpiry: an *expired* pending invite
+// doesn't block a re-invite — Create revokes it first (so the active-unique
+// slot frees) and the new row lands, leaving exactly one active invite.
+func TestInvitesStore_Postgres_ReinviteAfterExpiry(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "inv-expiry")
+
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	create := func(email, token string, expiresAt time.Time) error {
+		return stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+			_, e := tx.Invites.Create(ctx, domain.CreateInviteParams{
+				OrgID: orgID, Email: email, Role: "member",
+				TokenHash: hashOf(token), InvitedBy: userID, ExpiresAt: expiresAt,
+			})
+			return e
+		})
+	}
+
+	// First invite is already expired.
+	if err := create("stale@x.com", "tok-old", time.Now().Add(-1*time.Hour)); err != nil {
+		t.Fatalf("create expired: %v", err)
+	}
+	// Re-invite succeeds despite the expired row still being un-revoked.
+	if err := create("stale@x.com", "tok-new", time.Now().Add(24*time.Hour)); err != nil {
+		t.Fatalf("re-invite after expiry: %v", err)
+	}
+
+	// The expired row was revoked, the new one is the sole active invite.
+	var active int
+	if err := h.AdminDB.QueryRow(`
+		SELECT count(*) FROM org_invites
+		WHERE org_id=$1 AND lower(email)='stale@x.com'
+		  AND accepted_at IS NULL AND revoked_at IS NULL
+	`, orgID).Scan(&active); err != nil {
+		t.Fatalf("count active: %v", err)
+	}
+	if active != 1 {
+		t.Errorf("active invites for stale@x.com = %d; want 1 (expired revoked, new pending)", active)
+	}
+
+	// And a live pending invite still blocks (the freeing is expiry-only).
+	if err := create("stale@x.com", "tok-third", time.Now().Add(24*time.Hour)); err == nil {
+		t.Error("re-invite against a live pending invite succeeded; want unique violation")
+	}
+}
+
 // TestInvitesStore_Postgres_RLS_AdminVsNonAdmin: the org_invites policies
 // gate every app-pool operation on org-admin. A plain member sees nothing,
 // can't insert, can't update; an org admin can.

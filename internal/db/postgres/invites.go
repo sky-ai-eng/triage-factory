@@ -31,6 +31,24 @@ func newInvitesStore(app, admin queryer) db.InvitesStore {
 var _ db.InvitesStore = (*invitesStore)(nil)
 
 func (s *invitesStore) Create(ctx context.Context, p domain.CreateInviteParams) (string, error) {
+	// Free the active-unique slot from a stale row first. The partial-unique
+	// index (org_invites_active_uniq) keys only on accepted_at/revoked_at, so
+	// an *expired* pending invite still occupies the slot and would block a
+	// re-invite with a unique violation until someone revoked it by hand.
+	// Revoking the expired row here (same tx, same org-admin claims) makes
+	// expiry behave terminally for re-invite purposes: a live pending invite
+	// is untouched (and the INSERT below still 409s against it), but an
+	// expired one yields. ON CONFLICT can't express "ignore only the expired
+	// duplicate", so this is a pre-step rather than an upsert.
+	if _, err := s.app.ExecContext(ctx, `
+		UPDATE org_invites SET revoked_at = now()
+		WHERE org_id = $1 AND lower(email) = lower($2)
+		  AND accepted_at IS NULL AND revoked_at IS NULL
+		  AND expires_at <= now()
+	`, p.OrgID, p.Email); err != nil {
+		return "", fmt.Errorf("revoke expired invite: %w", err)
+	}
+
 	var id string
 	err := s.app.QueryRowContext(ctx, `
 		INSERT INTO org_invites (org_id, email, role, target_team_id, token_hash, invited_by, expires_at)
