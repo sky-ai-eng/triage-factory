@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // orgMembersHandler serves /api/orgs/{org_id}/members — the org People
@@ -28,6 +29,10 @@ import (
 type orgMembersHandler struct {
 	tx db.TxRunner
 	az *authz.Checker
+	// ws is the websocket hub, used to actively close a removed member's
+	// org-scoped connections (TFAC-75) so their event stream stops at
+	// removal rather than lingering until the socket drops.
+	ws *websocket.Hub
 }
 
 // orgMemberRow is one roster row. github_username / jira_account_id are null
@@ -180,6 +185,13 @@ func (h *orgMembersHandler) handleOrgMemberRemove(w http.ResponseWriter, r *http
 	if !writeOrgMemberMutationResult(w, "org-members", err) {
 		return
 	}
+	// Removal committed: actively close the removed member's connections
+	// scoped to THIS org (TFAC-75). The org filter leaves a multi-org
+	// user's connections to their other orgs alone. The client refreshes
+	// and re-handshakes; handleWS's stale-active-org gate then stops it
+	// from re-scoping back to the org it just lost.
+	h.ws.CloseUserConnections(targetID, "", orgID,
+		websocket.CloseMembershipChanged, "membership changed")
 	w.WriteHeader(http.StatusNoContent)
 }
 

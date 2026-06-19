@@ -11,6 +11,23 @@ type Handler = (event: WSEvent) => void
 let globalWs: WebSocket | null = null
 const listeners = new Set<Handler>()
 
+// --- Auth close-code bridge (TFAC-75) ---
+// The server actively closes a socket when the session behind it is
+// revoked or the user loses membership in the org it's scoped to. Those
+// kicks ride application close codes (4000-4999), which the browser
+// surfaces verbatim on the CloseEvent so we can distinguish them from a
+// network drop. The socket lives outside React, so AuthContext registers
+// a handler here and useWebSocket just forwards the code — keeping this
+// module auth-agnostic.
+export const WS_CLOSE_SESSION_REVOKED = 4001
+export const WS_CLOSE_MEMBERSHIP_CHANGED = 4002
+
+type AuthCloseHandler = (code: number) => void
+let authCloseHandler: AuthCloseHandler | null = null
+export function setWsAuthCloseHandler(fn: AuthCloseHandler | null) {
+  authCloseHandler = fn
+}
+
 // --- Presence (TFAC-392) ---
 // We report, over the same socket, whether this tab is on an answer-capable
 // surface (the board or a run's detail page) AND focused. The backend uses it
@@ -141,8 +158,22 @@ function ensureConnected() {
     }
   }
 
-  ws.onclose = () => {
+  ws.onclose = (e) => {
     globalWs = null
+    // Session revoked (logout elsewhere, admin kill): hand off to the
+    // auth layer to clear state and route to /login, and do NOT
+    // reconnect — the cookie is dead, so a retry would 401-loop.
+    if (e.code === WS_CLOSE_SESSION_REVOKED) {
+      authCloseHandler?.(e.code)
+      return
+    }
+    // Removed from the org this socket was scoped to: refresh the session
+    // view (active org may be gone) so the app re-routes, then fall
+    // through to the normal reconnect so a still-valid session re-scopes
+    // to a remaining org (or the handshake 409s until one is picked).
+    if (e.code === WS_CLOSE_MEMBERSHIP_CHANGED) {
+      authCloseHandler?.(e.code)
+    }
     // Only reconnect if there are still listeners
     if (listeners.size > 0) {
       setTimeout(ensureConnected, 2000)

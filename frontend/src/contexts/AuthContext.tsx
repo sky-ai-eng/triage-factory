@@ -6,6 +6,11 @@
    plumbing. */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch, apiJSON, HttpError, setUnauthHandler } from '../lib/apiClient'
+import {
+  setWsAuthCloseHandler,
+  WS_CLOSE_MEMBERSHIP_CHANGED,
+  WS_CLOSE_SESSION_REVOKED,
+} from '../hooks/useWebSocket'
 import type { AuthOrg, MeResponse } from '../types'
 
 /**
@@ -118,6 +123,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     })
     return () => setUnauthHandler(null)
   }, [])
+
+  // Register the websocket auth-kick hook (TFAC-75). The server closes a
+  // socket when its session is revoked or the user loses the org it's
+  // scoped to; the hook maps that to the same state transitions a 401
+  // (revoked) or an org change (membership) would drive — so revocation
+  // takes effect without waiting for the next HTTP round-trip.
+  useEffect(() => {
+    setWsAuthCloseHandler((code) => {
+      if (code === WS_CLOSE_SESSION_REVOKED) {
+        // Mirror a 401: drop the user and let MultiAuthGate send us to
+        // /login. Guard against a redundant flip if we're already unauth.
+        if (statusRef.current === 'unauth') return
+        setMe(null)
+        setStatus('unauth')
+      } else if (code === WS_CLOSE_MEMBERSHIP_CHANGED) {
+        // Active org may be gone — re-fetch /api/me so the gates re-route
+        // (a remaining org, or /onboarding if none are left).
+        void refresh()
+      }
+    })
+    return () => setWsAuthCloseHandler(null)
+  }, [refresh])
 
   const value = useMemo<AuthContextValue>(
     () => ({

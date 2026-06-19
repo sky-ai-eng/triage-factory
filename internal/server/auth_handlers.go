@@ -25,6 +25,7 @@ import (
 	tfdb "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sessions"
+	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // tfdb is aliased (rather than imported as `db`) to avoid colliding
@@ -341,9 +342,11 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		if sid, perr := uuid.Parse(cookie.Value); perr == nil {
 			// Look up the session so we have the access token for
-			// the upstream call. Lookup ignores revoked rows, so a
-			// double-logout naturally no-ops here.
-			if sess, lerr := s.authDeps.sessions.LookupSystem(r.Context(), sid); lerr == nil && sess != nil {
+			// the upstream call (and the user id for the socket kick
+			// below). Lookup ignores revoked rows, so a double-logout
+			// naturally no-ops here — sess is nil and we skip both.
+			sess, lerr := s.authDeps.sessions.LookupSystem(r.Context(), sid)
+			if lerr == nil && sess != nil {
 				if uerr := s.authDeps.gotrueLogout(r.Context(), sess.JWT); uerr != nil {
 					authLog.Warn("upstream logout failed", "error", uerr)
 					// Continue — local revoke still happens.
@@ -351,6 +354,14 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 			}
 			if rerr := s.authDeps.sessions.RevokeSystem(r.Context(), sid); rerr != nil {
 				authLog.Warn("revoke session failed", "error", rerr)
+			}
+			// Actively close this session's live websocket connections
+			// (TFAC-75) so the event stream stops on revoke instead of
+			// lingering until the socket drops. Scoped to this sid so the
+			// user's other sessions (other devices) keep their sockets.
+			if sess != nil {
+				s.ws.CloseUserConnections(sess.UserID.String(), sid.String(), "",
+					websocket.CloseSessionRevoked, "session revoked")
 			}
 		}
 	}
@@ -415,6 +426,12 @@ func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	authLog.Info("logout-all revoked sessions", "user", userID, "count", n)
+
+	// Every session is now revoked, so close ALL of this user's live
+	// websocket connections (TFAC-75) — no sid/org filter. Each device's
+	// client sees the session-revoked code and routes to /login.
+	s.ws.CloseUserConnections(userID.String(), "", "",
+		websocket.CloseSessionRevoked, "session revoked")
 
 	// Clear the cookie on this response too — the caller's current
 	// session is one of the ones we just revoked.

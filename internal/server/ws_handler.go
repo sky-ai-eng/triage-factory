@@ -27,6 +27,17 @@ import "net/http"
 //     unscoped carveout exists for the no-identity path, not for
 //     authenticated callers with no org. Without this gate such a
 //     client would receive every tenant's broadcasts.
+//
+// Stale-active-org gate (TFAC-75): withSession resolves orgID from the
+// session's active_org_id WITHOUT re-checking membership (the FK only
+// references orgs(id), and the HTTP hot path leaves that compensation
+// to /api/me). On the WebSocket upgrade — a rare event, unlike every
+// HTTP request — we can afford the membership check, and it's
+// load-bearing here: after an admin removes the user from their active
+// org we actively close the socket, and this gate stops the immediate
+// auto-reconnect from re-scoping to (and re-streaming) the org the user
+// no longer belongs to. A non-member active org is treated as
+// no_active_org, the same 409 the FE handles by re-picking.
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	var userID string
 	if claims := ClaimsFrom(r.Context()); claims != nil {
@@ -34,11 +45,37 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	orgID := OrgIDFrom(r.Context())
 	if userID != "" && orgID == "" {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error":   "no_active_org",
-			"message": "websocket handshake requires an active org; call POST /api/me/active-org to choose one",
-		})
+		s.writeNoActiveOrg(w)
 		return
 	}
-	s.ws.HandleWS(w, r, userID, orgID)
+	// Multi-mode only (authDeps != nil): re-validate that the resolved
+	// active org is still one the user belongs to. Local mode's sentinel
+	// org has no membership row and never revokes, so skip it there.
+	if s.authDeps != nil && userID != "" && orgID != "" {
+		ok, err := s.az.UserHasOrgAccess(r.Context(), userID, orgID)
+		if err != nil {
+			internalError(w, "ws", err)
+			return
+		}
+		if !ok {
+			s.writeNoActiveOrg(w)
+			return
+		}
+	}
+
+	var sid string
+	if sess := SessionFrom(r.Context()); sess != nil {
+		sid = sess.ID.String()
+	}
+	s.ws.HandleWS(w, r, userID, orgID, sid)
+}
+
+// writeNoActiveOrg renders the 409 the FE treats as "this connection has
+// no usable org — re-pick one." Shared by the NULL-active-org case and
+// the stale-membership gate so both speak the same shape to the client.
+func (s *Server) writeNoActiveOrg(w http.ResponseWriter) {
+	writeJSON(w, http.StatusConflict, map[string]string{
+		"error":   "no_active_org",
+		"message": "websocket handshake requires an active org; call POST /api/me/active-org to choose one",
+	})
 }

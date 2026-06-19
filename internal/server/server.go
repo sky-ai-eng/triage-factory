@@ -647,7 +647,7 @@ func (s *Server) routes() {
 	// Multi-mode only (each handler 404s in local). GET is any-member;
 	// PATCH/DELETE gate org-admin (DELETE also allows a self-leave). The
 	// last-owner guard is a DB trigger surfaced as a 409.
-	omh := &orgMembersHandler{tx: s.tx, az: s.az}
+	omh := &orgMembersHandler{tx: s.tx, az: s.az, ws: s.ws}
 	s.api("GET /api/orgs/{org_id}/members", omh.handleOrgMembersList)
 	s.apiMutating("PATCH /api/orgs/{org_id}/members/{user_id}", omh.handleOrgMemberRoleChange)
 	s.apiMutating("DELETE /api/orgs/{org_id}/members/{user_id}", omh.handleOrgMemberRemove)

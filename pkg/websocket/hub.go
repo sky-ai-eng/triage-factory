@@ -36,10 +36,35 @@ type Event struct {
 	Data      any    `json:"data"`
 }
 
+// Close codes the hub sends when it actively kicks a connection
+// (TFAC-75). They live in the private application range (4000-4999) so
+// the browser surfaces them verbatim on the CloseEvent, letting the
+// client distinguish a deliberate kick from a network drop.
+//
+//   - CloseSessionRevoked: the session backing this connection was
+//     revoked (logout / logout-all). The client should clear local auth
+//     state and route to /login WITHOUT reconnecting.
+//   - CloseMembershipChanged: the user lost membership in the org this
+//     connection was scoped to. The client should refresh its session
+//     view (active org may be gone) and re-handshake, but stay logged
+//     in — it may still be a member of other orgs.
+const (
+	CloseSessionRevoked    ws.StatusCode = 4001
+	CloseMembershipChanged ws.StatusCode = 4002
+)
+
 // Hub manages websocket connections and broadcasts events to all clients.
 type Hub struct {
 	mu      sync.RWMutex
 	clients map[*client]struct{}
+	// byUser indexes the live connections of each authenticated user so
+	// a revoke / membership-removal can actively close them (TFAC-75)
+	// without scanning every client. Keyed by userID; the inner set is
+	// the user's connections (a user may hold several — tabs, devices).
+	// Unscoped clients (empty userID — pre-auth / test harness) are not
+	// indexed: they carry no identity to target. Guarded by mu, same as
+	// clients.
+	byUser map[string]map[*client]struct{}
 }
 
 type client struct {
@@ -53,6 +78,13 @@ type client struct {
 	// kicks in when both event and client carry values.
 	userID string
 	orgID  string
+	// sid is the opaque session id backing this connection (TFAC-75),
+	// captured at handshake. It lets the revoke path close exactly the
+	// connections of ONE session (single-device logout) without kicking
+	// the same user's other still-valid sessions. Empty for unscoped /
+	// local-mode clients (no session), which the revoke path never
+	// targets.
+	sid string
 	// viewing + visible are the client's self-reported presence (TFAC-392),
 	// updated from inbound "presence" control frames in readPump. viewing is
 	// "board", "run:<runID>", or "other" (the latter for any non-answer-capable
@@ -80,6 +112,7 @@ type presenceMsg struct {
 func NewHub() *Hub {
 	return &Hub{
 		clients: make(map[*client]struct{}),
+		byUser:  make(map[string]map[*client]struct{}),
 	}
 }
 
@@ -93,7 +126,7 @@ func NewHub() *Hub {
 // Empty values are tolerated: tests that hit the hub directly without
 // the server pipeline get an "unscoped" client that receives every
 // event (matching pre-D9b behavior).
-func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, userID, orgID string) {
+func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, userID, orgID, sid string) {
 	conn, err := ws.Accept(w, r, &ws.AcceptOptions{
 		InsecureSkipVerify: true,
 	})
@@ -108,10 +141,12 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, userID, orgID str
 		closed: make(chan struct{}),
 		userID: userID,
 		orgID:  orgID,
+		sid:    sid,
 	}
 
 	h.mu.Lock()
 	h.clients[c] = struct{}{}
+	h.indexLocked(c)
 	h.mu.Unlock()
 
 	wsLog.Info("client connected", "total", h.clientCount())
@@ -122,11 +157,13 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, userID, orgID str
 	// Read pump (blocks until disconnect)
 	h.readPump(c)
 
-	// Cleanup: remove from map first (under write lock so Broadcast can't
-	// see this client), then signal writePump to exit via closed channel.
-	// We never close c.send — writePump drains it naturally.
+	// Cleanup: remove from maps first (under write lock so Broadcast and
+	// CloseUserConnections can't see this client), then signal writePump
+	// to exit via closed channel. We never close c.send — writePump
+	// drains it naturally.
 	h.mu.Lock()
 	delete(h.clients, c)
+	h.deindexLocked(c)
 	h.mu.Unlock()
 	close(c.closed)
 	// Best-effort close; the client is already gone in most cases so
@@ -182,6 +219,92 @@ func (h *Hub) Broadcast(evt Event) {
 			wsLog.Warn("dropping message for slow client")
 		}
 	}
+}
+
+// indexLocked adds c to the per-user index. Caller holds h.mu. Unscoped
+// clients (empty userID) are not indexed — they carry no identity for
+// the revoke path to target.
+func (h *Hub) indexLocked(c *client) {
+	if c.userID == "" {
+		return
+	}
+	set := h.byUser[c.userID]
+	if set == nil {
+		set = make(map[*client]struct{})
+		h.byUser[c.userID] = set
+	}
+	set[c] = struct{}{}
+}
+
+// deindexLocked removes c from the per-user index, dropping the user's
+// bucket once empty so the map doesn't accumulate dead keys. Caller
+// holds h.mu. A no-op for unscoped clients (never indexed).
+func (h *Hub) deindexLocked(c *client) {
+	if c.userID == "" {
+		return
+	}
+	set := h.byUser[c.userID]
+	if set == nil {
+		return
+	}
+	delete(set, c)
+	if len(set) == 0 {
+		delete(h.byUser, c.userID)
+	}
+}
+
+// CloseUserConnections actively closes a user's live websocket
+// connections with an application close code (TFAC-75), so a revoke or
+// membership removal severs the stream immediately rather than waiting
+// for the connection to drop on its own.
+//
+// The match is narrowed by optional filters (empty == wildcard):
+//
+//   - sid != "" restricts to the connections of a single session. The
+//     single-device logout path passes the revoked session's id so a
+//     user's OTHER still-valid sessions keep their sockets.
+//   - orgID != "" restricts to connections scoped to one org. The
+//     membership-removal path passes the lost org so a multi-org user's
+//     connections to other orgs are untouched.
+//
+// Returns the number of connections matched (and thus being closed).
+// The close itself is performed per-connection in its own goroutine:
+// coder/websocket's Close runs the close handshake with up to a 10s
+// budget, which must not block the revoking request or hold h.mu. The
+// handshake unblocks the connection's readPump, whose normal cleanup
+// path then deindexes it — we deliberately don't touch the maps here.
+//
+// Nil-receiver-safe, matching Broadcast: a conditionally-wired hub
+// (tests, local-mode paths) drops the call instead of panicking.
+func (h *Hub) CloseUserConnections(userID, sid, orgID string, code ws.StatusCode, reason string) int {
+	if h == nil || userID == "" {
+		return 0
+	}
+	h.mu.RLock()
+	var targets []*client
+	for c := range h.byUser[userID] {
+		if sid != "" && c.sid != sid {
+			continue
+		}
+		if orgID != "" && c.orgID != orgID {
+			continue
+		}
+		targets = append(targets, c)
+	}
+	h.mu.RUnlock()
+
+	for _, c := range targets {
+		go func(c *client) {
+			// Best-effort: an already-closing connection (peer dropped,
+			// self-disconnect racing us) returns an error we can't act
+			// on — the deindex happens on its own readPump exit either
+			// way. coder/websocket's Close is idempotent, so a later
+			// normal-closure from that cleanup is a no-op and our code
+			// is the one the client sees.
+			_ = c.conn.Close(code, reason)
+		}(c)
+	}
+	return len(targets)
 }
 
 func (h *Hub) readPump(c *client) {
