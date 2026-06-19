@@ -50,6 +50,12 @@ export default function MemberRoster({ adapter, canManage }: MemberRosterProps) 
   const transferTargets = useMemo(() => members.filter((m) => !m.isCurrentUser), [members])
   const canTransfer = !!adapter.transferOwnership && viewerIsOwner && transferTargets.length > 0
 
+  // busy = a row mutation (role change / remove) is in flight. The hook
+  // serializes to one change at a time; every mutating affordance — including
+  // both transfer entry points (the action below and the sole-owner Leave) —
+  // disables on it so a second write can't start and race the first's refetch.
+  const busy = pendingId !== null
+
   if (loading) {
     return <p className="text-[13px] text-text-tertiary">Loading members…</p>
   }
@@ -77,7 +83,11 @@ export default function MemberRoster({ adapter, canManage }: MemberRosterProps) 
           <button
             type="button"
             onClick={() => setTransfer('manual')}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-border-glass bg-surface px-3 py-1.5 text-[12px] font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-accent"
+            // Transfer is itself a mutation — disable it while another row
+            // change is in flight so it can't race the hook's serialized writes.
+            disabled={busy}
+            title={busy ? 'Another change is in progress…' : undefined}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border-glass bg-surface px-3 py-1.5 text-[12px] font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-border-glass disabled:hover:text-text-secondary"
           >
             <ArrowLeftRight size={13} />
             Transfer ownership
@@ -102,7 +112,7 @@ export default function MemberRoster({ adapter, canManage }: MemberRosterProps) 
                 roles={adapter.roles}
                 canManage={canManage}
                 isLastProtected={isLastProtected}
-                busy={pendingId !== null}
+                busy={busy}
                 onChangeRole={(role) => changeRole(m.userId, role)}
                 onRemove={() => remove(m.userId)}
                 onLeaveNeedsTransfer={leaveNeedsTransfer ? () => setTransfer('leave') : undefined}
@@ -223,6 +233,7 @@ function MemberRow({
       <div className="w-[88px] shrink-0 text-right">
         {member.isCurrentUser ? (
           <LeaveButton
+            busy={busy}
             disabled={isLastProtected || busy}
             onConfirm={onRemove}
             onNeedsTransfer={onLeaveNeedsTransfer}
@@ -251,10 +262,12 @@ function MemberRow({
 // opens the transfer-ownership picker (no destructive removal happens here, so
 // no two-step confirm) instead of leaving the button disabled at a dead 409.
 function LeaveButton({
+  busy,
   disabled,
   onConfirm,
   onNeedsTransfer,
 }: {
+  busy: boolean
   disabled: boolean
   onConfirm: () => void
   onNeedsTransfer?: () => void
@@ -262,12 +275,18 @@ function LeaveButton({
   const [confirming, setConfirming] = useState(false)
 
   if (onNeedsTransfer) {
+    // Sole owner: Leave opens the transfer picker instead of removing the row.
+    // Opening it starts a transfer (a mutation), so it stays disabled while
+    // another change is in flight (busy) — but NOT on `disabled`'s
+    // isLastProtected component, since being the last owner is exactly the
+    // case this path exists to handle.
     return (
       <button
         type="button"
         onClick={onNeedsTransfer}
-        title="Transfer ownership before leaving"
-        className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] font-medium text-text-tertiary transition-colors hover:bg-dismiss/[0.06] hover:text-dismiss"
+        disabled={busy}
+        title={busy ? 'Another change is in progress…' : 'Transfer ownership before leaving'}
+        className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] font-medium text-text-tertiary transition-colors hover:bg-dismiss/[0.06] hover:text-dismiss disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-text-tertiary"
       >
         <LogOut size={13} />
         Leave

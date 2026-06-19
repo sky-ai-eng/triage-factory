@@ -191,7 +191,7 @@ type transferOwnershipRequest struct {
 
 // handleOrgOwnershipTransfer hands org ownership to another member. Owner-only:
 // the founder sentinel orgs.owner_user_id is the authority (checked up front
-// via tf.user_owns_org and re-enforced by the guard_org_owner_transfer
+// via tf.user_owns_org and reinforced by the guard_org_owner_transfer
 // trigger), so a plain org admin can't reassign it. The work runs in one
 // app-pool transaction AS THE CALLER so the trigger sees the owner's claims in
 // tf.current_user_id(): promote the target to 'owner', repoint
