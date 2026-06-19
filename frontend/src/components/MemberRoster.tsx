@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { ArrowLeftRight, Check, LogOut, Trash2 } from 'lucide-react'
 import { useMemberRoster, type MemberRosterAdapter } from '../hooks/useMemberRoster'
 import TransferOwnershipModal from './TransferOwnershipModal'
@@ -55,6 +55,14 @@ export default function MemberRoster({ adapter, canManage }: MemberRosterProps) 
   // both transfer entry points (the action below and the sole-owner Leave) —
   // disables on it so a second write can't start and race the first's refetch.
   const busy = pendingId !== null
+
+  // Stable modal callbacks so the modal's Escape-handler effect doesn't
+  // re-register on every MemberRoster render (e.g. each time busy flips).
+  const closeTransfer = useCallback(() => setTransfer(null), [])
+  const finishTransfer = useCallback(() => {
+    setTransfer(null)
+    reload()
+  }, [reload])
 
   if (loading) {
     return <p className="text-[13px] text-text-tertiary">Loading members…</p>
@@ -130,11 +138,8 @@ export default function MemberRoster({ adapter, canManage }: MemberRosterProps) 
           candidates={transferTargets}
           reason={transfer}
           transfer={adapter.transferOwnership}
-          onDone={() => {
-            setTransfer(null)
-            reload()
-          }}
-          onClose={() => setTransfer(null)}
+          onDone={finishTransfer}
+          onClose={closeTransfer}
         />
       )}
     </div>

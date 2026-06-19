@@ -127,6 +127,13 @@ export function useMemberRoster(adapter: MemberRosterAdapter): MemberRosterState
     [runMutation, adapterRemove],
   )
 
+  // reload re-fetches the roster. Memoized so its identity is stable across
+  // renders (load only changes when the adapter's fetchMembers does), letting
+  // consumers use it as an effect / useCallback dependency without churn.
+  const reload = useCallback(() => {
+    void load()
+  }, [load])
+
   return {
     members,
     loading,
@@ -135,7 +142,7 @@ export function useMemberRoster(adapter: MemberRosterAdapter): MemberRosterState
     actionError,
     changeRole,
     remove,
-    reload: () => void load(),
+    reload,
     clearActionError: () => setActionError(null),
   }
 }

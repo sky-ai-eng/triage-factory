@@ -352,21 +352,34 @@ func TestOrgOwnershipTransfer_PromotesReassignsDemotes(t *testing.T) {
 	}
 }
 
-// TestOrgOwnershipTransfer_NonOwnerIs403: an org *admin* (not the owner) can't
-// transfer ownership — the owner-only gate answers 403, and nothing moves.
+// TestOrgOwnershipTransfer_NonOwnerIs403: a non-owner caller can't transfer
+// ownership — whether they're an org admin or a plain member, both hit the same
+// UserOwnsOrg gate, get 403, and nothing moves. (Ownership is the founder
+// sentinel, not the admin role — being an org admin is not enough.)
 func TestOrgOwnershipTransfer_NonOwnerIs403(t *testing.T) {
-	r := newOrgMembersRig(t)
+	for _, tc := range []struct {
+		name   string
+		caller func(*orgMembersRig) (callerID, targetID, wantRole string)
+	}{
+		{"admin caller", func(r *orgMembersRig) (string, string, string) { return r.admin, r.memb, "member" }},
+		{"member caller", func(r *orgMembersRig) (string, string, string) { return r.memb, r.admin, "admin" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newOrgMembersRig(t)
+			caller, target, wantRole := tc.caller(r)
 
-	rec := httptest.NewRecorder()
-	r.omh.handleOrgOwnershipTransfer(rec, r.transferReq(r.admin, r.memb))
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403 (non-owner caller); body=%s", rec.Code, rec.Body.String())
-	}
-	if got := r.ownerUserID(t); got != r.owner {
-		t.Errorf("orgs.owner_user_id = %q, want %q (unchanged)", got, r.owner)
-	}
-	if got := r.roleOf(t, r.memb); got != "member" {
-		t.Errorf("target role = %q, want member (untouched)", got)
+			rec := httptest.NewRecorder()
+			r.omh.handleOrgOwnershipTransfer(rec, r.transferReq(caller, target))
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403 (non-owner caller); body=%s", rec.Code, rec.Body.String())
+			}
+			if got := r.ownerUserID(t); got != r.owner {
+				t.Errorf("orgs.owner_user_id = %q, want %q (unchanged)", got, r.owner)
+			}
+			if got := r.roleOf(t, target); got != wantRole {
+				t.Errorf("target role = %q, want %q (untouched)", got, wantRole)
+			}
+		})
 	}
 }
 

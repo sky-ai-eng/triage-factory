@@ -186,8 +186,12 @@ func (s *orgMembershipsStore) TransferOwnership(ctx context.Context, orgID, curr
 	}
 
 	// 3. Demote the former owner. A new owner exists by now, so guard_org_owners
-	//    stays satisfied. currentOwnerID is the gated caller — always a member —
-	//    so this matches exactly one row.
+	//    stays satisfied. currentOwnerID is the gated caller who held role=owner
+	//    through steps 1–2, so this matches exactly one row — a zero-row result
+	//    is an invariant violation (their membership vanished mid-tx), NOT the
+	//    "target isn't a member" case. Return a plain error so it surfaces as a
+	//    500, not assertOneRow's ErrOrgMemberNotFound (which the handler maps to
+	//    a 422 about the *new* owner — wrong subject, wrong status).
 	res, err = s.app.ExecContext(ctx, `
 		UPDATE org_memberships SET role = 'admin'::org_role
 		WHERE org_id = $1 AND user_id = $2
@@ -195,7 +199,14 @@ func (s *orgMembershipsStore) TransferOwnership(ctx context.Context, orgID, curr
 	if err != nil {
 		return translateTransferGuard(fmt.Errorf("demote former org owner: %w", err))
 	}
-	return assertOneRow(res, "demote former org owner")
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("demote former org owner: rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("demote former org owner: no row affected for %s (membership vanished mid-transaction)", currentOwnerID)
+	}
+	return nil
 }
 
 // translateOwnerGuard maps the tf.guard_org_owners trigger's SQLSTATE 23514
