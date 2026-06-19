@@ -420,6 +420,69 @@ export interface JiraIdentityStatus {
   deployment?: 'cloud' | 'data_center'
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// Org invites (TFAC-418, consuming the TFAC-416 backend). Multi-mode only.
+// The admin surfaces (create/list/revoke) are session-org-scoped — the
+// backend resolves the org from the session's active org, so the frontend
+// calls the literal /api/invites paths WITHOUT an org prefix (same as
+// /api/teams), never via apiClient's `org` option.
+// ──────────────────────────────────────────────────────────────────────
+
+/** One pending invite from GET /api/invites — the rows the org People
+ *  roster renders as muted "ghost" rows beneath real members. `created_at`
+ *  drives the "invited {relative time}" label; `expires_at` is the 7-day TTL. */
+export interface PendingInvite {
+  id: string
+  email: string
+  role: string
+  /** Set when the invite targets a specific team; omitted for an org-only
+   *  invite (member of the org, on zero teams). */
+  target_team_id?: string
+  invited_by?: string
+  created_at: string
+  expires_at: string
+}
+
+/** POST /api/invites 201 response. `accept_url` is the single-use link shown
+ *  ONCE (the raw token is never returned again — copy/paste IS the delivery
+ *  in v1, no SMTP). */
+export interface CreateInviteResponse {
+  id: string
+  accept_url: string
+  expires_at: string
+}
+
+/** The redeemability of an invite token, from GET /api/invites/preview.
+ *  Only `valid` is acceptable; the rest are terminal states the accept page
+ *  renders as a dead end. */
+export type InvitePreviewStatus = 'valid' | 'expired' | 'revoked' | 'accepted' | 'not_found'
+
+/** GET /api/invites/preview?token=… response (unauthenticated). The token is
+ *  the bearer secret, so org name + role to its holder is fine; everything
+ *  but `status` is omitted for the terminal states. */
+export interface InvitePreview {
+  org_name?: string
+  role?: string
+  invited_by_name?: string
+  expires_at?: string
+  status: InvitePreviewStatus
+}
+
+/** POST /api/invites/accept 200 response — the org the recipient just joined
+ *  (the backend has already pointed their session at it). */
+export interface AcceptInviteResponse {
+  org_id: string
+}
+
+/** The body the accept endpoint returns on the 409 wrong-identity case: the
+ *  recipient is signed in as someone other than the invited address. Carries
+ *  the actionable message plus the address the invite was sent to so the page
+ *  can offer "log out and sign in as {invited_email}". */
+export interface AcceptInviteMismatch {
+  error: string
+  invited_email: string
+}
+
 /** GET /api/team/members row. Backs Variant B's searchable multi-select.
  *  Local mode returns a single-entry array containing the synthetic
  *  LocalDefaultUserID; multi mode (post-SKY-251) returns the active

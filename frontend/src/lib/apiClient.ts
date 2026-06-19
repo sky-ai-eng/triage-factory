@@ -89,3 +89,26 @@ export async function apiJSON<T>(path: string, options: ApiFetchOptions = {}): P
   const resp = await apiFetch(path, options)
   return (await resp.json()) as T
 }
+
+/** httpErrorMessage extracts a user-facing string from a caught error,
+ *  preferring the server's JSON `{ error }` body (so a backend message — e.g.
+ *  the invite 409 "already pending" or the last-owner guard — reaches the user
+ *  verbatim), then the supplied fallback.
+ *
+ *  An HttpError WITHOUT a usable JSON `{ error }` returns the fallback, not its
+ *  own `.message`: that message embeds the raw response body (`HTTP <status>:
+ *  <body>`), which for a non-JSON failure (a 500 HTML page, a proxy error) is
+ *  large/unfriendly and must never reach the UI. Only a non-HttpError Error
+ *  (a thrown TypeError, an abort) surfaces its `.message`. */
+export function httpErrorMessage(e: unknown, fallback: string): string {
+  if (e instanceof HttpError) {
+    try {
+      const body = JSON.parse(e.body) as { error?: unknown }
+      if (typeof body.error === 'string' && body.error) return body.error
+    } catch {
+      // body wasn't JSON — fall through to the fallback below.
+    }
+    return fallback
+  }
+  return e instanceof Error ? e.message : fallback
+}

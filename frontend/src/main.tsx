@@ -28,6 +28,7 @@ import Projects from './pages/Projects'
 import ProjectDetail from './pages/ProjectDetail'
 import Login from './pages/Login'
 import Onboarding from './pages/Onboarding'
+import InviteAccept from './pages/InviteAccept'
 import Wizard from './pages/setup/Wizard'
 import ConnectGitHub from './pages/ConnectGitHub'
 import ConnectJira from './pages/ConnectJira'
@@ -173,6 +174,11 @@ function MultiRoutes() {
           {/* Unified zero-membership onboarding entry (create-or-invite).
               /no-orgs is kept as a redirect for any stale links. */}
           <Route path="/onboarding" element={<Onboarding />} />
+          {/* Public invite-redemption page (TFAC-418). OUTSIDE every AuthGate
+              — a brand-new invitee has no org/membership — but inside
+              AuthProvider so it can tell signed-in from signed-out. It reads
+              ?token=, previews unauthenticated, and accepts once signed in. */}
+          <Route path="/invite/accept" element={<InviteAccept />} />
           <Route path="/no-orgs" element={<Navigate to="/onboarding" replace />} />
           {/* The setup wizard — the single create-time flow the mandatory-setup
               gate redirects incomplete users to. Outside RequireSetupComplete /
