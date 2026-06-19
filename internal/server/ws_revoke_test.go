@@ -12,6 +12,7 @@ import (
 
 	ws "github.com/coder/websocket"
 
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -109,6 +110,7 @@ func expectServerCloseCode(t *testing.T, conn *ws.Conn, want ws.StatusCode) {
 // with code 4001 (session revoked) within 1s — instead of streaming the
 // org's events until it happens to drop.
 func TestWS_LogoutClosesSocket(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
 
 	userID := r.seedUser()
@@ -136,6 +138,7 @@ func TestWS_LogoutClosesSocket(t *testing.T) {
 // (they may still belong to other orgs) and re-handshakes rather than
 // being logged out.
 func TestWS_MembershipRemovalClosesSocket(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
 
 	// Org owned by someone else so removing our member doesn't trip the
