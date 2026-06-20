@@ -42,11 +42,10 @@ func (a *App) runStartupTasks(ctx context.Context) {
 		// configured Entra SAML provider with GoTrue. Runs after buildServer →
 		// wireAuth has confirmed GoTrue is reachable (the JWKS verifier blocks
 		// on it), so the admin call lands on a live GoTrue. Opt-in (no-op
-		// without the Entra env), idempotent, and never aborts boot — a
-		// misconfig warns and skips.
-		if err := a.srv.RunSAMLProviderBootstrap(ctx); err != nil {
-			bootstrapLog.Error("saml provider bootstrap failed", "error", err)
-		}
+		// without the Entra env), idempotent, and best-effort — it absorbs
+		// every failure into a WARN and never aborts boot, so there's no error
+		// to handle here.
+		a.srv.RunSAMLProviderBootstrap(ctx)
 	}
 	a.cleanupWorktrees(ctx)
 	if a.local() {

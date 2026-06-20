@@ -100,13 +100,7 @@ On every subsequent restart you'll instead see:
 Entra SAML provider already registered; left untouched (idempotent)  provider_id=<uuid> ...
 ```
 
-You can also list it directly from GoTrue's admin API (the `provider_id` above is the `id`):
-
-```sh
-# Mint a short-lived service_role token (same kind TF uses) and list providers.
-# Substitute your GOTRUE_JWT_SECRET from .env.
-docker compose exec gotrue sh -c 'wget -qO- --header="Authorization: Bearer $SERVICE_TOKEN" http://localhost:9999/admin/sso/providers'
-```
+The boot log above is the intended check — the `provider_id` it prints is GoTrue's `id`, and TF re-derives it by domain on every restart, so you never have to record it by hand. GoTrue's `GET /admin/sso/providers` can list providers directly too, but the endpoint requires a `service_role` bearer token (an HS256 JWT with `"role": "service_role"` signed with your `GOTRUE_JWT_SECRET` — the same credential TF mints internally), so it isn't a copy-paste one-liner; mint one with your JWT tooling if you want to query it directly.
 
 > **The `provider_id` is the bridge to TF's authorization tables.** TF owns the org/role binding for an SSO login in its own `sso_connections` table (a later ticket), and that row references this GoTrue `provider_id`. It's logged on every boot and always re-derivable from the admin API by domain, so you don't have to record it by hand — but it's the value the login-flow wiring keys on.
 

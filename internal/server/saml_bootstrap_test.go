@@ -333,9 +333,7 @@ func TestRunSAMLProviderBootstrap_LocalModeNoOp(t *testing.T) {
 	t.Setenv(envGoTrueJWTSecret, testJWTSecret)
 
 	s := &Server{authCfg: &authConfig{gotrueURL: fake.srv.URL}}
-	if err := s.RunSAMLProviderBootstrap(context.Background()); err != nil {
-		t.Fatalf("RunSAMLProviderBootstrap: %v", err)
-	}
+	s.RunSAMLProviderBootstrap(context.Background())
 	if fake.posts() != 0 {
 		t.Errorf("local mode hit GoTrue %d times, want 0", fake.posts())
 	}
@@ -350,9 +348,7 @@ func TestRunSAMLProviderBootstrap_OptInNoOp(t *testing.T) {
 	t.Setenv(envGoTrueJWTSecret, testJWTSecret)
 
 	s := &Server{authCfg: &authConfig{gotrueURL: fake.srv.URL}}
-	if err := s.RunSAMLProviderBootstrap(context.Background()); err != nil {
-		t.Fatalf("RunSAMLProviderBootstrap: %v", err)
-	}
+	s.RunSAMLProviderBootstrap(context.Background())
 	if fake.posts() != 0 {
 		t.Errorf("opt-in no-op hit GoTrue %d times, want 0", fake.posts())
 	}
@@ -366,9 +362,7 @@ func TestRunSAMLProviderBootstrap_MissingJWTSecretNoOp(t *testing.T) {
 	t.Setenv(envGoTrueJWTSecret, "") // can't authenticate -> warn + skip
 
 	s := &Server{authCfg: &authConfig{gotrueURL: fake.srv.URL}}
-	if err := s.RunSAMLProviderBootstrap(context.Background()); err != nil {
-		t.Fatalf("RunSAMLProviderBootstrap: %v", err)
-	}
+	s.RunSAMLProviderBootstrap(context.Background())
 	if fake.posts() != 0 {
 		t.Errorf("missing-secret path hit GoTrue %d times, want 0", fake.posts())
 	}
@@ -382,9 +376,7 @@ func TestRunSAMLProviderBootstrap_HappyPath(t *testing.T) {
 	t.Setenv(envGoTrueJWTSecret, testJWTSecret)
 
 	s := &Server{authCfg: &authConfig{gotrueURL: fake.srv.URL}}
-	if err := s.RunSAMLProviderBootstrap(context.Background()); err != nil {
-		t.Fatalf("RunSAMLProviderBootstrap: %v", err)
-	}
+	s.RunSAMLProviderBootstrap(context.Background())
 	if fake.providerCount() != 1 {
 		t.Fatalf("GoTrue has %d providers, want 1", fake.providerCount())
 	}
@@ -393,9 +385,7 @@ func TestRunSAMLProviderBootstrap_HappyPath(t *testing.T) {
 	}
 
 	// Re-run is idempotent end-to-end (restart): still one provider, no new POST.
-	if err := s.RunSAMLProviderBootstrap(context.Background()); err != nil {
-		t.Fatalf("re-run RunSAMLProviderBootstrap: %v", err)
-	}
+	s.RunSAMLProviderBootstrap(context.Background())
 	if fake.providerCount() != 1 {
 		t.Errorf("after re-run GoTrue has %d providers, want 1", fake.providerCount())
 	}

@@ -80,14 +80,16 @@ type samlBootstrapConfig struct {
 // RunSAMLProviderBootstrap registers the single Entra SAML provider with GoTrue
 // via its admin SSO API. Multi-mode only; the caller (app.runStartupTasks)
 // invokes it on the multi-mode boot path after auth is wired. Idempotent and
-// never-overwriting (see the file doc). Returns an error only for an unexpected
-// failure the caller should log; every "couldn't register" case is handled
-// in-band with a WARN.
-func (s *Server) RunSAMLProviderBootstrap(ctx context.Context) error {
+// never-overwriting (see the file doc). Best-effort and returns nothing: every
+// failure — a missing secret, an unreachable GoTrue, a rejected registration —
+// is absorbed into a WARN and skipped, so boot is never aborted. (The pure
+// inner registerSAMLProvider surfaces errors; this is the policy layer that
+// turns them into a WARN.)
+func (s *Server) RunSAMLProviderBootstrap(ctx context.Context) {
 	// Defense in depth: GoTrue/SAML are multi-mode only. The caller already
 	// branches on mode, but a hard guard here makes a stray call a no-op.
 	if runmode.Current() != runmode.ModeMulti {
-		return nil
+		return
 	}
 
 	metadataURL := strings.TrimSpace(os.Getenv(envSAMLMetadataURL))
@@ -99,23 +101,23 @@ func (s *Server) RunSAMLProviderBootstrap(ctx context.Context) error {
 		if len(domains) > 0 {
 			samlLog.Warn("TF_SAML_ENTRA_DOMAINS is set but TF_SAML_ENTRA_METADATA_URL is empty; no SAML provider registered (set the Entra App Federation Metadata URL to enable SSO)")
 		}
-		return nil
+		return
 	}
 	if len(domains) == 0 {
 		samlLog.Warn("TF_SAML_ENTRA_METADATA_URL is set but TF_SAML_ENTRA_DOMAINS is empty; skipping SAML provider registration (set the org email domain, e.g. acme.com)")
-		return nil
+		return
 	}
 
 	jwtSecret := strings.TrimSpace(os.Getenv(envGoTrueJWTSecret))
 	if jwtSecret == "" {
 		samlLog.Warn("SAML SSO is configured but GOTRUE_JWT_SECRET is unset; cannot authenticate to GoTrue's admin API — skipping provider registration")
-		return nil
+		return
 	}
 
 	gotrueURL := s.gotrueAdminBaseURL()
 	if gotrueURL == "" {
 		samlLog.Warn("SAML SSO is configured but the GoTrue URL is unknown (auth not wired?); skipping provider registration")
-		return nil
+		return
 	}
 
 	cfg := samlBootstrapConfig{
@@ -127,7 +129,7 @@ func (s *Server) RunSAMLProviderBootstrap(ctx context.Context) error {
 	providerID, created, err := registerSAMLProvider(ctx, samlHTTPClient, cfg)
 	if err != nil {
 		samlLog.Warn("Entra SAML provider registration failed; SSO will be unavailable until resolved", "domains", domains, "error", err)
-		return nil
+		return
 	}
 	if created {
 		// provider_id is logged so the operator can pin it / the login-flow
@@ -137,7 +139,6 @@ func (s *Server) RunSAMLProviderBootstrap(ctx context.Context) error {
 	} else {
 		samlLog.Info("Entra SAML provider already registered; left untouched (idempotent)", "provider_id", providerID, "domains", domains)
 	}
-	return nil
 }
 
 // gotrueAdminBaseURL returns the in-network GoTrue base URL for admin calls,
