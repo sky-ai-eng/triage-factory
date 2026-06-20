@@ -345,6 +345,27 @@ func TestSSOConnectionGet_ReturnsSPValues(t *testing.T) {
 	}
 }
 
+// TestSSOConnectionGet_NoPublicURL_500: a missing deployment public URL is a
+// server misconfiguration — the handler fails fast with a 500 rather than
+// emitting relative SP paths (e.g. "/auth/v1/sso/saml/metadata") into the
+// response. Uses GET (no CSRF) so a blanked publicURL doesn't trip the
+// same-origin check.
+func TestSSOConnectionGet_NoPublicURL_500(t *testing.T) {
+	r, _ := newSSORig(t)
+	owner := r.seedUser()
+	r.seedOrg(owner, "sso-no-public-url")
+	sid := r.signInAs(owner)
+
+	// Blank the public URL after sign-in (the rig wired it for the OAuth flow);
+	// publicURL() now returns "".
+	r.srv.deployCfg.publicURL = ""
+
+	resp := doInviteReq(r, http.MethodGet, "/api/sso/connection", sid, nil)
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d; want 500 when public URL unconfigured (body=%s)", resp.StatusCode, readBody(resp))
+	}
+}
+
 // TestSSOConnection_LocalMode404: every route 404s in local mode (N=1, no IdP).
 // adminGate checks runmode before touching any dependency, so this is a pure
 // unit test — no rig, no GoTrue, no store needed. (In production withSession

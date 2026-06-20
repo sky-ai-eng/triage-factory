@@ -141,20 +141,22 @@ services:
       # /api/sso/connection endpoint (per-org, not env — TF is one multi-org
       # build). This is deployment-wide infra (one GoTrue), so it lives here.
       #
+      # GOTRUE_SAML_ENABLED is GoTrue's own feature switch — it mounts the SAML
+      # routes (incl. the /admin/sso/providers admin API TF calls to register a
+      # provider) and is what makes the private key load-bearing; GoTrue does
+      # NOT infer enablement from the key's presence. It defaults OFF so a fresh
+      # `docker compose up` boots on GitHub-OAuth login alone (the bootstrap
+      # floor) with no SAML key required — SSO is a deliberate opt-in. To enable:
+      # set GOTRUE_SAML_ENABLED=true AND provide the key below.
+      #
       # GOTRUE_SAML_PRIVATE_KEY signs outbound SAML AuthnRequests. It is an
       # RSA key in DER form, base64-encoded — NOT ES256 (confirmed by the
       # TFAC-423 spike) — and is SEPARATE from the session-JWT keys above.
-      # Generate ONCE and keep it stable in .env (rotating it invalidates
-      # every registered provider). With SAML enabled GoTrue REFUSES TO BOOT
-      # without a valid key. See docs/sso-entra.md + .env.example.
-      #
-      # Set GOTRUE_SAML_ENABLED=false in .env to opt a deployment out of SSO
-      # entirely (the private key is then ignored, and may be left blank).
-      # The key is `:-` (optional), not `:?` (required): it's required only
-      # WHEN SAML is enabled — a conditional GoTrue enforces at boot — so a
-      # blank value with SAML on yields GoTrue's own "SAML requires a private
-      # key" boot error, while SAML off boots fine with it blank.
-      GOTRUE_SAML_ENABLED: ${GOTRUE_SAML_ENABLED:-true}
+      # Generate ONCE and keep it stable in .env (rotating it invalidates every
+      # registered provider). It's `:-` (optional) because it's required only
+      # WHEN SAML is enabled, a conditional GoTrue enforces at boot (enabled +
+      # blank key → GoTrue refuses to boot). See docs/sso-entra.md + .env.example.
+      GOTRUE_SAML_ENABLED: ${GOTRUE_SAML_ENABLED:-false}
       GOTRUE_SAML_PRIVATE_KEY: ${GOTRUE_SAML_PRIVATE_KEY:-}
       GOTRUE_SITE_URL: ${TF_PUBLIC_URL}
       GOTRUE_URI_ALLOW_LIST: ${TF_PUBLIC_URL}

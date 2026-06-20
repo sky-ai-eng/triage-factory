@@ -145,6 +145,24 @@ func spValues(publicURL string) (entityID, acsURL string) {
 	return base + "/auth/v1/sso/saml/metadata", base + "/auth/v1/sso/saml/acs"
 }
 
+// spValuesOr500 resolves the SP Entity-ID/ACS values for the response, or writes
+// a 500 and returns ok=false when the deployment's public URL isn't configured.
+// A missing public URL (TF_PUBLIC_URL unset, or deployCfg unwired) is a server
+// misconfiguration — not a client error — and emitting the relative paths
+// spValues("") would produce ("/auth/v1/sso/saml/metadata", …) into the
+// response would mislead an operator pasting them into Entra. TF_PUBLIC_URL is
+// `:?`-required in compose, so this is a defensive guard for a state a correct
+// multi-mode deploy never reaches; we fail fast rather than emit a bad value.
+func (h *ssoConnectionHandler) spValuesOr500(w http.ResponseWriter) (entityID, acsURL string, ok bool) {
+	pub := h.publicURL()
+	if pub == "" {
+		internalError(w, "sso", fmt.Errorf("deployment public URL not configured (TF_PUBLIC_URL); cannot build SAML SP values"))
+		return "", "", false
+	}
+	entityID, acsURL = spValues(pub)
+	return entityID, acsURL, true
+}
+
 // currentConnection returns the org's connection, or (nil, nil) when none is
 // registered. The endpoint treats SSO as singular per org; ListByOrg returns
 // newest-first, so the head is "the" connection. App pool under the caller's
@@ -202,12 +220,15 @@ func (h *ssoConnectionHandler) handleSSOConnectionGet(w http.ResponseWriter, r *
 	if !ok {
 		return
 	}
+	entityID, acsURL, ok := h.spValuesOr500(w)
+	if !ok {
+		return
+	}
 	conn, err := h.currentConnection(r.Context(), orgID, userID)
 	if err != nil {
 		internalError(w, "sso", err)
 		return
 	}
-	entityID, acsURL := spValues(h.publicURL())
 	writeJSON(w, http.StatusOK, ssoConnectionResponse{
 		Connection: toSSOConnectionView(conn),
 		EntityID:   entityID,
@@ -243,6 +264,11 @@ func (h *ssoConnectionHandler) handleSSOConnectionCreate(w http.ResponseWriter, 
 		return
 	}
 
+	entityID, acsURL, ok := h.spValuesOr500(w)
+	if !ok {
+		return
+	}
+
 	// Serialize registration per org: two concurrent POSTs must not both pass
 	// the existing-connection check below and mint duplicate GoTrue providers
 	// (the schema allows >1 connection per org for a future multi-IdP world, so
@@ -250,8 +276,6 @@ func (h *ssoConnectionHandler) handleSSOConnectionCreate(w http.ResponseWriter, 
 	mu := h.regMutex(orgID)
 	mu.Lock()
 	defer mu.Unlock()
-
-	entityID, acsURL := spValues(h.publicURL())
 
 	// Idempotent reuse: if a connection already exists, return it untouched.
 	existing, err := h.currentConnection(r.Context(), orgID, userID)
@@ -353,6 +377,11 @@ func (h *ssoConnectionHandler) handleSSOConnectionUpdate(w http.ResponseWriter, 
 		return
 	}
 
+	entityID, acsURL, ok := h.spValuesOr500(w)
+	if !ok {
+		return
+	}
+
 	existing, err := h.currentConnection(r.Context(), orgID, userID)
 	if err != nil {
 		internalError(w, "sso", err)
@@ -380,7 +409,6 @@ func (h *ssoConnectionHandler) handleSSOConnectionUpdate(w http.ResponseWriter, 
 		return
 	}
 
-	entityID, acsURL := spValues(h.publicURL())
 	writeJSON(w, http.StatusOK, ssoConnectionResponse{
 		Connection: toSSOConnectionView(updated),
 		EntityID:   entityID,

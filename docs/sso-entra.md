@@ -82,10 +82,14 @@ GOTRUE_SAML_PRIVATE_KEY=<the base64 blob from above>
 > provider** (GoTrue's SP signing identity changes), so generate it once and
 > keep it — treat it like the rest of your signing material.
 >
-> With `GOTRUE_SAML_ENABLED=true`, GoTrue **requires** a valid
-> `GOTRUE_SAML_PRIVATE_KEY` and refuses to boot without one. To run a
-> deployment without SSO, set `GOTRUE_SAML_ENABLED=false` (the key is then
-> ignored).
+> **SSO is off by default.** `GOTRUE_SAML_ENABLED` defaults to `false` in the
+> compose stack, so a fresh deployment boots on GitHub-OAuth login alone — the
+> bootstrap floor — with no SAML key required. Enabling SSO is the deliberate
+> opt-in above: set the flag to `true` **and** provide the key. GoTrue gates the
+> whole SAML feature on this flag (including the `/admin/sso/providers` admin API
+> TF registers providers through); it does **not** infer enablement from the
+> key's presence, so the key alone does nothing. With the flag on, GoTrue
+> **requires** a valid key and refuses to boot without one.
 
 ## 1.2 Confirm the shared admin secret reaches Triage Factory
 
