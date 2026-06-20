@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -201,6 +202,39 @@ func TestSSODomainVerify_MatchAndMismatch(t *testing.T) {
 	reresp := doInviteReq(r, http.MethodPost, "/api/sso/domains/"+good.ID+"/verify", sid, nil)
 	if reresp.StatusCode != http.StatusOK {
 		t.Errorf("re-verify status = %d; want 200 idempotent (body=%s)", reresp.StatusCode, readBody(reresp))
+	}
+}
+
+// TestSSODomainVerify_ResolverError_RetryableConflict: a resolver failure
+// (not just a missing record) is surfaced as the same retryable 409, and the
+// claim stays pending — a transient DNS/resolver outage must not hard-fail.
+func TestSSODomainVerify_ResolverError_RetryableConflict(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+	owner := r.seedUser()
+	orgID, _ := r.seedOrg(owner, "sso-resolver-err")
+	seedSSOConnForTest(t, r.h, orgID.String())
+	sid := r.signInAs(owner)
+
+	_, claim, _ := ssoClaim(r, sid, "errdom.com")
+
+	// Every lookup fails (resolver down), exercising the lookupErr != nil branch.
+	r.srv.ssoDomains.resolver = &fakeTXTResolver{err: errors.New("resolver unavailable")}
+
+	resp := doInviteReq(r, http.MethodPost, "/api/sso/domains/"+claim.ID+"/verify", sid, nil)
+	raw := readBody(resp)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("verify status = %d; want 409 (resolver error); body=%s", resp.StatusCode, raw)
+	}
+	if !strings.Contains(raw, "propagation") {
+		t.Errorf("409 body = %q; want the retry/propagation message", raw)
+	}
+	var ver sql.NullTime
+	if err := r.h.AdminDB.QueryRow(`SELECT verified_at FROM sso_domains WHERE id=$1`, claim.ID).Scan(&ver); err != nil {
+		t.Fatalf("read verified_at: %v", err)
+	}
+	if ver.Valid {
+		t.Error("claim should stay pending after a resolver error")
 	}
 }
 

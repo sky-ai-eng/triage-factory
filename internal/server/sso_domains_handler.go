@@ -206,10 +206,19 @@ func (h *ssoDomainsHandler) handleDomainClaim(w http.ResponseWriter, r *http.Req
 				}
 				return nil
 			})
-			if reErr == nil && raced.ID != "" {
+			if reErr != nil {
+				// The re-read itself failed — surface that, not the (now
+				// stale) unique violation, so the logs name the real cause.
+				internalError(w, "sso", reErr)
+				return
+			}
+			if raced.ID != "" {
 				writeJSON(w, http.StatusOK, raced)
 				return
 			}
+			// Unique violation but no matching row on re-read — shouldn't
+			// happen (the violation means a row exists). Fall through and
+			// report the original error.
 		}
 		internalError(w, "sso", err)
 		return
@@ -358,6 +367,10 @@ func (h *ssoDomainsHandler) handleDomainVerify(w http.ResponseWriter, r *http.Re
 		http.NotFound(w, r)
 		return
 	}
+	// Verification is a security-meaningful event: this domain now routes
+	// logins to this org and is reserved deployment-wide. Log it at Info so
+	// the proof-of-ownership lands in the production audit trail.
+	ssoLog.Info("sso domain verified", "org", orgID, "domain", verified.Domain, "id", verified.ID)
 	writeJSON(w, http.StatusOK, ssoDomainToJSON(verified))
 }
 
@@ -410,6 +423,12 @@ func findOrgDomain(ctx context.Context, tx db.TxStores, orgID, domainName string
 		return nil, err
 	}
 	for i := range list {
+		// EqualFold (not ==) on purpose: the dedup must mirror the DB's
+		// sso_domains_org_domain_uniq index, which is on lower(domain). The
+		// handler always stores a normalized (lower-cased) domain, so == would
+		// agree today — but if a mixed-case row ever reached the table by
+		// another path, == would miss it here and then trip that index on
+		// Create, turning an idempotent re-claim into a confusing 500.
 		if strings.EqualFold(list[i].Domain, domainName) {
 			return &list[i], nil
 		}
