@@ -93,6 +93,11 @@ CREATE TABLE public.sso_domains (
     created_at    timestamptz NOT NULL DEFAULT now(),
     updated_at    timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT sso_domains_domain_nonempty CHECK (domain <> ''),
+    -- A claim with an empty verification token is nonsensical — it would
+    -- yield `_triagefactory-verification.<domain> ""` in the DNS-TXT
+    -- challenge (TFAC-428). NOT NULL alone permits ''; mirror the domain
+    -- non-empty guard.
+    CONSTRAINT sso_domains_token_nonempty CHECK (token <> ''),
     -- Tenant-scoped composite FK: a domain's (connection_id, org_id) must
     -- match a real sso_connections (id, org_id) pair, so connection_id is
     -- forced into the same org as org_id. Both columns are NOT NULL, so
@@ -117,6 +122,14 @@ CREATE UNIQUE INDEX sso_domains_org_domain_uniq ON public.sso_domains (org_id, l
 -- handlers map it to a "domain already claimed" without naming the holder).
 CREATE UNIQUE INDEX sso_domains_verified_global_uniq
     ON public.sso_domains (lower(domain)) WHERE verified_at IS NOT NULL;
+
+-- Index the FK's referencing column: Postgres doesn't auto-index it, and the
+-- ON DELETE CASCADE from sso_connections must find a connection's domains
+-- without a seq scan (the org_domain index leads with org_id, so it can't
+-- serve a connection_id lookup). Also serves a future "domains for this
+-- connection" read. Matches the baseline's index-the-FK-column pattern
+-- (idx_tasks_entity, idx_runs_task, ...).
+CREATE INDEX sso_domains_connection_idx ON public.sso_domains (connection_id);
 
 -- BEFORE-UPDATE triggers keep updated_at fresh, matching every other table.
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.sso_connections

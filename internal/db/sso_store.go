@@ -36,8 +36,10 @@ type SSOConnectionStore interface {
 	// ListByOrg returns the org's connections, newest first. App pool.
 	ListByOrg(ctx context.Context, orgID string) ([]domain.SSOConnection, error)
 
-	// Update sets the mutable management fields (default_role, enabled) on
-	// the org's connection. A no-op (no error) when no row matches. App pool.
+	// Update sets the mutable management fields on the org's connection.
+	// Enabled is always applied; an empty DefaultRole leaves the stored role
+	// unchanged (so a disable-only call can't silently downgrade it). A no-op
+	// (no error) when no row matches. App pool.
 	Update(ctx context.Context, orgID, id string, p domain.UpdateSSOConnectionParams) error
 
 	// Delete removes the org's connection (cascading its sso_domains rows).

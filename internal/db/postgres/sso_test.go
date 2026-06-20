@@ -86,6 +86,21 @@ func TestSSOConnectionStore_Postgres_CRUDRoundTrip(t *testing.T) {
 		t.Errorf("post-update binding = %+v; want default_role=admin enabled=false", b)
 	}
 
+	// A disable-only Update (empty DefaultRole) must NOT downgrade the role —
+	// it leaves the stored 'admin' intact and just flips enabled back on.
+	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
+		return tx.SSOConnections.Update(ctx, orgID, connID, domain.UpdateSSOConnectionParams{
+			Enabled: true, // DefaultRole left empty → keep existing
+		})
+	})
+	b, err = stores.SSOConnections.GetByProviderID(ctx, providerID)
+	if err != nil {
+		t.Fatalf("GetByProviderID after role-preserving update: %v", err)
+	}
+	if b == nil || b.DefaultRole != "admin" || !b.Enabled {
+		t.Errorf("post-update binding = %+v; want default_role=admin (preserved) enabled=true", b)
+	}
+
 	// Delete removes the row.
 	mustWithUser(t, stores, ctx, orgID, userID, func(tx db.TxStores) error {
 		return tx.SSOConnections.Delete(ctx, orgID, connID)
@@ -405,13 +420,23 @@ func TestSSOStores_Postgres_RLS_AdminVsNonAdmin(t *testing.T) {
 		t.Fatalf("member select tx: %v", err)
 	}
 
-	// Non-admin member: INSERT is rejected by the WITH CHECK.
+	// Non-admin member: INSERT is rejected by the WITH CHECK on both tables.
+	// (The sso_domains insert uses the real connID/orgID so the composite FK
+	// is satisfied — RLS is what rejects it, not a dangling reference.)
 	if err := h.WithUser(t, memberID, orgID, func(tx *sql.Tx) error {
 		_, e := tx.Exec(`INSERT INTO sso_connections (org_id, provider_id) VALUES ($1, $2)`,
 			orgID, uuid.NewString())
 		return e
 	}); err == nil {
 		t.Error("member INSERT into sso_connections succeeded; want RLS rejection")
+	}
+	if err := h.WithUser(t, memberID, orgID, func(tx *sql.Tx) error {
+		_, e := tx.Exec(
+			`INSERT INTO sso_domains (connection_id, org_id, domain, token) VALUES ($1, $2, 'member.com', 'tok')`,
+			connID, orgID)
+		return e
+	}); err == nil {
+		t.Error("member INSERT into sso_domains succeeded; want RLS rejection")
 	}
 
 	// Non-admin member: UPDATE / DELETE match no rows (USING hides them).

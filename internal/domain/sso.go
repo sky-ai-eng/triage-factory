@@ -34,8 +34,10 @@ type CreateSSOConnectionParams struct {
 }
 
 // UpdateSSOConnectionParams is the input to SSOConnectionStore.Update — the
-// mutable management fields. ProviderID and Kind are not updatable here
-// (rotating a provider is a deferred concern, TFAC-422 out-of-scope).
+// mutable management fields. An empty DefaultRole leaves the stored role
+// unchanged (a disable-only update passes just Enabled). ProviderID and Kind
+// are not updatable here (rotating a provider is a deferred concern,
+// TFAC-422 out-of-scope).
 type UpdateSSOConnectionParams struct {
 	DefaultRole string
 	Enabled     bool

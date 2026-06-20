@@ -104,14 +104,17 @@ func (s *ssoConnectionStore) ListByOrg(ctx context.Context, orgID string) ([]dom
 }
 
 func (s *ssoConnectionStore) Update(ctx context.Context, orgID, id string, p domain.UpdateSSOConnectionParams) error {
-	role := p.DefaultRole
-	if role == "" {
-		role = "member"
-	}
+	// An empty DefaultRole means "leave the role unchanged" — COALESCE
+	// preserves the stored value. (Create's "" → 'member' fallback is right
+	// for a brand-new row, but reusing it here would silently downgrade an
+	// 'admin' default to 'member' on a call that only meant to flip enabled.)
+	// A non-empty 'owner' still trips the sso_connections_role_not_owner CHECK.
 	if _, err := s.app.ExecContext(ctx, `
-		UPDATE sso_connections SET default_role = $1, enabled = $2
+		UPDATE sso_connections
+		SET default_role = COALESCE(NULLIF($1, '')::public.org_role, default_role),
+		    enabled = $2
 		WHERE id = $3 AND org_id = $4
-	`, role, p.Enabled, id, orgID); err != nil {
+	`, p.DefaultRole, p.Enabled, id, orgID); err != nil {
 		return fmt.Errorf("update sso_connection: %w", err)
 	}
 	return nil
