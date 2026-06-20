@@ -294,7 +294,14 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 		// IsOrgMemberSystem), whose actor is a token-bearing outsider with no
 		// membership. Same pool-split pattern as TeamsStore.
 		Invites: newInvitesStore(app, admin),
-		Tx:      s,
+		// SSOConnections / SSODomains need both pools: app for the
+		// admin-facing CRUD (sso_connections_* / sso_domains_* RLS gate on
+		// org-admin), admin for the login-time reads (GetByProviderID /
+		// GetVerifiedByDomain), whose actor is pre-login with no membership.
+		// Same pool-split pattern as Invites.
+		SSOConnections: newSSOConnectionStore(app, admin),
+		SSODomains:     newSSODomainStore(app, admin),
+		Tx:             s,
 	}
 	return s.stores
 }
@@ -365,9 +372,11 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		// Both pools collapse to tx (test door). BackfillInstallationsFromAPI's
 		// GetSystem would hit tf_app and be denied here — tests that exercise
 		// it use New(admin, app, key) directly, same as the SecretStore tests.
-		GitHubApps:  newGitHubAppsStore(tx, tx, newSecretStore(tx, tx, secretKey)),
-		JiraApps:    newJiraAppsStore(tx, tx),
-		OrgTemplate: newTxOrgTemplateStore(tx),
-		Invites:     newInvitesStore(tx, tx),
+		GitHubApps:     newGitHubAppsStore(tx, tx, newSecretStore(tx, tx, secretKey)),
+		JiraApps:       newJiraAppsStore(tx, tx),
+		OrgTemplate:    newTxOrgTemplateStore(tx),
+		Invites:        newInvitesStore(tx, tx),
+		SSOConnections: newSSOConnectionStore(tx, tx),
+		SSODomains:     newSSODomainStore(tx, tx),
 	}
 }

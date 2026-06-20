@@ -112,7 +112,12 @@ func New(conn *sql.DB) db.Stores {
 		// ErrNotApplicableInLocal. Wired so the bundle is complete in both
 		// modes — local never mounts the invite routes.
 		Invites: newInvitesStore(conn, conn),
-		Tx:      s,
+		// SSOConnections / SSODomains are multi-mode only; the SQLite stubs
+		// return ErrNotApplicableInLocal. Wired so the bundle is complete in
+		// both modes — local never mounts the SSO routes.
+		SSOConnections: newSSOConnectionStore(conn, conn),
+		SSODomains:     newSSODomainStore(conn, conn),
+		Tx:             s,
 	}
 	return s.stores
 }

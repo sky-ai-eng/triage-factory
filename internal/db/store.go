@@ -278,6 +278,23 @@ type Stores struct {
 	// bootstrap tests can run without Postgres.
 	OrgTemplate OrgTemplateStore
 
+	// SSOConnections owns the sso_connections table — the TF-owned org↔IdP
+	// binding (TFAC-425). App pool for the admin-facing CRUD
+	// (sso_connections_* RLS gates on org-admin); admin pool for the
+	// login-time GetByProviderID JIT read, whose actor has no membership in
+	// the target org yet (the provider_id is the authorization). Multi-mode
+	// only; the SQLite impl is a stub returning ErrNotApplicableInLocal.
+	SSOConnections SSOConnectionStore
+
+	// SSODomains owns the sso_domains table — the verified email domains that
+	// route identifier-first SSO login (TFAC-425). App pool for the
+	// admin-facing claim/verify/CRUD (sso_domains_* RLS gates on org-admin);
+	// admin pool for the routing GetVerifiedByDomain read, whose actor is
+	// pre-login (the verified domain is the authorization). The
+	// verified-domain global-uniqueness index is the cross-org isolation
+	// linchpin. Multi-mode only; the SQLite impl is a stub.
+	SSODomains SSODomainStore
+
 	// Tx is the transaction runner — handlers that need atomic
 	// multi-store writes call Tx.WithTx and receive a TxStores with
 	// every field tx-bound. Postgres impl also sets the JWT claims
@@ -324,6 +341,8 @@ type TxStores struct {
 	JiraApps         JiraAppsStore
 	OrgTemplate      OrgTemplateStore
 	Invites          InvitesStore
+	SSOConnections   SSOConnectionStore
+	SSODomains       SSODomainStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres
