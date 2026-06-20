@@ -91,13 +91,29 @@ GOTRUE_SAML_PRIVATE_KEY=<the base64 blob from above>
 > key's presence, so the key alone does nothing. With the flag on, GoTrue
 > **requires** a valid key and refuses to boot without one.
 
-## 1.2 Confirm the shared admin secret reaches Triage Factory
+## 1.2 The service-role admin token
 
-When an org admin registers a connection, the TF binary calls GoTrue's admin SSO
-API authenticated with a short-lived `service_role` JWT it mints from
-`GOTRUE_JWT_SECRET`. The compose stack already passes that secret (written by
-`triagefactory jwk-init --write-env .env`) to **both** the `gotrue` and
-`triagefactory` services — no extra step, just don't strip it.
+When an org admin registers a connection, TF calls GoTrue's admin SSO API
+authenticated with a **pre-minted RS256 `service_role` token**,
+`TF_GOTRUE_SERVICE_ROLE_TOKEN`. `triagefactory jwk-init --write-env .env` mints
+it for you (signed with the same RSA key as `GOTRUE_JWT_KEYS`) and appends it to
+`.env`; the compose stack passes it to the `triagefactory` service. No extra
+step beyond running `jwk-init` — just don't strip it.
+
+> **Why a pre-minted token, not TF signing its own?** Under the production
+> `GOTRUE_JWT_ALGORITHM=RS256` config, GoTrue **rejects** an HS256 token signed
+> with `GOTRUE_JWT_SECRET` ("signing method HS256 is invalid") and accepts only
+> an RS256 token carrying `role:service_role`. Signing that requires GoTrue's
+> private key — which must live in exactly one process. So `jwk-init` (which
+> already holds the freshly generated key) mints the token, and TF holds **only
+> the token**, never the key, and contains no JWT-minting code. Rotating the
+> keypair (re-running `jwk-init`) regenerates this token with it. `aud`/`iss`
+> aren't enforced by GoTrue on the admin token but are stamped for hygiene.
+>
+> The token is **optional but required for SSO**: a deployment that never
+> registers an SSO connection needn't set it. If it's missing when an admin
+> tries to register, TF returns a clear "SSO admin token not configured — run
+> `triagefactory jwk-init`" error rather than a generic failure.
 
 ## 1.3 Bring up the stack
 
@@ -188,7 +204,7 @@ Content-Type: application/json
 { "metadata_url": "https://login.microsoftonline.com/<tenant-id>/.../federationmetadata.xml?appid=<app-id>" }
 ```
 
-Triage Factory mints a `service_role` token, asks GoTrue to register the SAML
+Triage Factory presents its service-role token, asks GoTrue to register the SAML
 provider (GoTrue fetches the metadata server-side), and writes the org↔provider
 binding with a default role of `member`. The response carries the new
 connection (including its `provider_id`) plus your `entity_id` / `acs_url`:
@@ -240,14 +256,20 @@ tickets, not configured here):
 
 ## Troubleshooting
 
+- **`POST /api/sso/connection` returns 503 "SSO admin token not configured".**
+  `TF_GOTRUE_SERVICE_ROLE_TOKEN` isn't set on the `triagefactory` service. Run
+  `triagefactory jwk-init --write-env .env` (it appends the token) and recreate
+  the container with `docker compose up -d` so it picks up the new env.
 - **`POST /api/sso/connection` returns 500 mentioning GoTrue.** Common causes:
   - *Provider registration failed with a metadata error* — GoTrue couldn't
     fetch the metadata URL. Check the gotrue container has **outbound** access
     to `login.microsoftonline.com`, and that you pasted the *App Federation
     Metadata Url* (not the raw IdP metadata of a different app).
-  - *`GOTRUE_JWT_SECRET is unset`* — the TF service needs it to authenticate to
-    GoTrue's admin API. It's the same value `jwk-init` wrote; make sure both the
-    `gotrue` and `triagefactory` services still receive it.
+  - *403 from GoTrue's admin API* — the `TF_GOTRUE_SERVICE_ROLE_TOKEN` doesn't
+    match GoTrue's current signing key (its `kid` must resolve in
+    `GOTRUE_JWT_KEYS`). This happens if the keypair was rotated without
+    regenerating the token: re-run `triagefactory jwk-init` so both are minted
+    together, then recreate the `gotrue` and `triagefactory` containers.
 - **`POST /api/sso/connection` returns 404.** You're not an org admin in the
   active org (the endpoint is non-disclosing — it 404s rather than 403s), or the
   deployment is in local mode (SSO is multi-mode only).

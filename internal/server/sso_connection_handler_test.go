@@ -2,43 +2,45 @@ package server
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// ssoTestJWTSecret is the shared HS256 admin secret the fake GoTrue validates
-// the minted service_role token against. Distinct, deterministic value so a
-// test never depends on the operator's real secret.
-const ssoTestJWTSecret = "test-gotrue-jwt-secret-deadbeefdeadbeefdeadbeefdeadbeef"
+// ssoTestServiceToken is the static service-role bearer the tests configure via
+// TF_GOTRUE_SERVICE_ROLE_TOKEN; the fake GoTrue checks TF forwards it verbatim.
+// Opaque here — TF treats the token as opaque and just presents it, so the
+// handler test only needs to prove forwarding. (jwk-init's own tests cover that
+// the real token is a valid RS256 service-role JWT with a matching kid.)
+const ssoTestServiceToken = "test-service-role-token-deadbeefdeadbeefdeadbeefdeadbeef"
 
-// ssoFakeGoTrue is a minimal stand-in for GoTrue's admin SSO API. It validates
-// the service_role bearer token, records the POST it receives, and returns a
-// fresh provider id (a UUID) on 201 — the shape createSAMLProvider reads.
+// ssoFakeGoTrue is a minimal stand-in for GoTrue's admin SSO API. It checks the
+// bearer matches the configured service-role token, records the POST it
+// receives, and returns a fresh provider id (a UUID) on 201 — the shape
+// createSAMLProvider reads.
 type ssoFakeGoTrue struct {
-	srv    *httptest.Server
-	secret string
+	srv       *httptest.Server
+	wantToken string
 
 	mu        sync.Mutex
 	postCount int
 	lastBody  map[string]any
 }
 
-func newSSOFakeGoTrue(t *testing.T, secret string) *ssoFakeGoTrue {
+func newSSOFakeGoTrue(t *testing.T, wantToken string) *ssoFakeGoTrue {
 	t.Helper()
-	f := &ssoFakeGoTrue{secret: secret}
+	f := &ssoFakeGoTrue{wantToken: wantToken}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/admin/sso/providers", func(w http.ResponseWriter, r *http.Request) {
-		if !f.checkServiceRole(r) {
+		// GoTrue authenticates the admin call by the service-role token; here we
+		// assert TF presented exactly the configured static token.
+		if r.Header.Get("Authorization") != "Bearer "+f.wantToken {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -62,26 +64,6 @@ func newSSOFakeGoTrue(t *testing.T, secret string) *ssoFakeGoTrue {
 	return f
 }
 
-// checkServiceRole mirrors GoTrue's admin auth: a HS256 bearer with
-// role=service_role signed by the shared secret.
-func (f *ssoFakeGoTrue) checkServiceRole(r *http.Request) bool {
-	raw, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok {
-		return false
-	}
-	tok, err := jwt.Parse(raw, func(tok *jwt.Token) (any, error) {
-		if _, ok := tok.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", tok.Header["alg"])
-		}
-		return []byte(f.secret), nil
-	})
-	if err != nil || !tok.Valid {
-		return false
-	}
-	claims, ok := tok.Claims.(jwt.MapClaims)
-	return ok && claims["role"] == "service_role"
-}
-
 func (f *ssoFakeGoTrue) posts() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -95,18 +77,39 @@ func (f *ssoFakeGoTrue) lastPostBody() map[string]any {
 }
 
 // newSSORig builds a multi-mode auth rig wired to point GoTrue admin calls at a
-// fake, with the admin secret set in the env. Returns the rig + the fake so
-// tests can assert what TF sent to GoTrue.
+// fake, with the service-role token set in the env. Returns the rig + the fake
+// so tests can assert what TF sent to GoTrue.
 func newSSORig(t *testing.T) (*authRig, *ssoFakeGoTrue) {
 	t.Helper()
 	runmode.SetForTest(t, runmode.ModeMulti)
-	fake := newSSOFakeGoTrue(t, ssoTestJWTSecret)
-	t.Setenv(envGoTrueJWTSecret, ssoTestJWTSecret)
+	fake := newSSOFakeGoTrue(t, ssoTestServiceToken)
+	t.Setenv(envServiceRoleToken, ssoTestServiceToken)
 	r := newAuthRig(t)
 	// The rig wires SetAuthDeps with an unused GoTrue URL; repoint it at the
 	// fake. The handler reads it lazily via s.gotrueAdminBaseURL on each call.
 	r.srv.authCfg.gotrueURL = fake.srv.URL
 	return r, fake
+}
+
+// TestSSOConnectionCreate_NoServiceToken_503: with TF_GOTRUE_SERVICE_ROLE_TOKEN
+// unset, registration returns a clear 503 (operator must run jwk-init) and never
+// calls GoTrue — the deployment simply isn't set up for SSO.
+func TestSSOConnectionCreate_NoServiceToken_503(t *testing.T) {
+	r, fake := newSSORig(t)
+	owner := r.seedUser()
+	r.seedOrg(owner, "sso-no-token")
+	sid := r.signInAs(owner)
+
+	t.Setenv(envServiceRoleToken, "") // override: token not configured
+
+	resp := doInviteReq(r, http.MethodPost, "/api/sso/connection", sid,
+		map[string]string{"metadata_url": "https://idp/metadata.xml"})
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d; want 503 when service-role token unset (body=%s)", resp.StatusCode, readBody(resp))
+	}
+	if fake.posts() != 0 {
+		t.Errorf("GoTrue POSTs = %d; want 0 (no token → no admin call)", fake.posts())
+	}
 }
 
 // TestSSOConnectionCreate_HappyPath: an org admin registers a connection →
