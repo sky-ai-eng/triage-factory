@@ -366,6 +366,96 @@ func TestSSOConnectionGet_NoPublicURL_500(t *testing.T) {
 	}
 }
 
+// TestSSOConnectionCreate_NonHTTPSMetadata_400: metadata_url must be a valid
+// https URL — SSRF defense-in-depth, since GoTrue fetches it server-side from
+// inside the compose network. Non-https / malformed values are rejected before
+// any GoTrue call or row write.
+func TestSSOConnectionCreate_NonHTTPSMetadata_400(t *testing.T) {
+	r, fake := newSSORig(t)
+	owner := r.seedUser()
+	orgID, _ := r.seedOrg(owner, "sso-ssrf")
+	sid := r.signInAs(owner)
+
+	for _, bad := range []string{
+		"http://postgres:5432/",
+		"http://169.254.169.254/latest/meta-data/",
+		"ftp://idp/metadata.xml",
+		"not a url",
+	} {
+		resp := doInviteReq(r, http.MethodPost, "/api/sso/connection", sid,
+			map[string]string{"metadata_url": bad})
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("metadata_url=%q: status = %d; want 400", bad, resp.StatusCode)
+		}
+	}
+	if fake.posts() != 0 {
+		t.Errorf("GoTrue POSTs = %d; want 0 (rejected before registration)", fake.posts())
+	}
+	var n int
+	if err := r.h.AdminDB.QueryRow(`SELECT count(*) FROM sso_connections WHERE org_id=$1`, orgID.String()).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("rows = %d; want 0", n)
+	}
+}
+
+// TestSSOConnection_OrgIsolation: org B's admin can neither see nor modify org
+// A's connection. This is the cross-org isolation boundary TFAC-426's JIT trusts
+// (provider_id → exactly one org), enforced by RLS + requireOrg + the org-scoped
+// store reads — the non-admin 404 covers privilege, this covers tenancy.
+func TestSSOConnection_OrgIsolation(t *testing.T) {
+	r, _ := newSSORig(t)
+	ownerA := r.seedUser()
+	orgA, _ := r.seedOrg(ownerA, "sso-iso-a")
+	ownerB := r.seedUser()
+	orgB, _ := r.seedOrg(ownerB, "sso-iso-b")
+
+	// Org A registers a connection.
+	sidA := r.signInAs(ownerA)
+	if resp := doInviteReq(r, http.MethodPost, "/api/sso/connection", sidA,
+		map[string]string{"metadata_url": "https://idp-a/metadata.xml"}); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("org A create status = %d (body=%s)", resp.StatusCode, readBody(resp))
+	}
+
+	sidB := r.signInAs(ownerB)
+
+	// Org B's GET must not surface org A's connection (RLS-scoped read).
+	getB := doInviteReq(r, http.MethodGet, "/api/sso/connection", sidB, nil)
+	if getB.StatusCode != http.StatusOK {
+		t.Fatalf("org B get status = %d (body=%s)", getB.StatusCode, readBody(getB))
+	}
+	var bResp ssoConnectionResponse
+	_ = json.Unmarshal([]byte(readBody(getB)), &bResp)
+	if bResp.Connection != nil {
+		t.Errorf("org B sees connection %+v; want nil (org A's must be invisible)", bResp.Connection)
+	}
+
+	// Org B's PATCH finds no connection in its own org → 404; it cannot reach A.
+	if resp := doInviteReq(r, http.MethodPatch, "/api/sso/connection", sidB,
+		map[string]bool{"enabled": false}); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("org B patch status = %d; want 404 (no connection in B)", resp.StatusCode)
+	}
+
+	// Org A's connection is untouched (still enabled) after B's attempts.
+	var enabled bool
+	if err := r.h.AdminDB.QueryRow(
+		`SELECT enabled FROM sso_connections WHERE org_id=$1`, orgA.String()).Scan(&enabled); err != nil {
+		t.Fatalf("read org A connection: %v", err)
+	}
+	if !enabled {
+		t.Error("org A connection disabled by org B's PATCH — isolation breach")
+	}
+	var bCount int
+	if err := r.h.AdminDB.QueryRow(
+		`SELECT count(*) FROM sso_connections WHERE org_id=$1`, orgB.String()).Scan(&bCount); err != nil {
+		t.Fatalf("count org B: %v", err)
+	}
+	if bCount != 0 {
+		t.Errorf("org B has %d connections; want 0", bCount)
+	}
+}
+
 // TestSSOConnection_LocalMode404: every route 404s in local mode (N=1, no IdP).
 // adminGate checks runmode before touching any dependency, so this is a pure
 // unit test — no rig, no GoTrue, no store needed. (In production withSession

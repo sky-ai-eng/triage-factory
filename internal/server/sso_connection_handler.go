@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -263,6 +264,16 @@ func (h *ssoConnectionHandler) handleSSOConnectionCreate(w http.ResponseWriter, 
 		badRequest(w, "metadata_url is required")
 		return
 	}
+	// Defense-in-depth against SSRF: GoTrue fetches this URL server-side from
+	// inside the compose network, so constrain it to a well-formed https URL
+	// (Entra's federation metadata is always https). Blocks an org admin from
+	// pointing GoTrue at an internal plaintext service — http://169.254.169.254/…
+	// or http://postgres:5432/ — for port-scanning. Admins are already trusted,
+	// so this is hardening, not the trust boundary.
+	if u, err := url.Parse(metadataURL); err != nil || u.Scheme != "https" || u.Host == "" {
+		badRequest(w, "metadata_url must be a valid https URL")
+		return
+	}
 
 	entityID, acsURL, ok := h.spValuesOr500(w)
 	if !ok {
@@ -332,16 +343,22 @@ func (h *ssoConnectionHandler) handleSSOConnectionCreate(w http.ResponseWriter, 
 		created, e = tx.SSOConnections.GetByID(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		ssoLog.Warn("GoTrue SAML provider created but sso_connections write failed; provider is orphaned",
-			"org", orgID, "provider_id", providerID, "error", err)
 		if isUniqueViolation(err) {
 			// provider_id already bound to some org (global-unique index). The
-			// holder is opaque cross-org; surface a generic conflict.
+			// holder is opaque cross-org; surface a generic conflict. Effectively
+			// unreachable — provider_id is a freshly minted GoTrue UUID — so this
+			// is the expected-conflict path, not an orphan: don't log a WARN that
+			// would make a routine 409 look like a silent failure.
 			writeJSON(w, http.StatusConflict, map[string]string{
 				"error": "this identity provider is already registered",
 			})
 			return
 		}
+		// A genuine write failure (transient/RLS/etc.): the GoTrue provider was
+		// created but couldn't be bound, so it's orphaned. Log the provider_id so
+		// an operator can reconcile it (connection delete/rotate is deferred).
+		ssoLog.Warn("GoTrue SAML provider created but sso_connections write failed; provider is orphaned",
+			"org", orgID, "provider_id", providerID, "error", err)
 		internalError(w, "sso", err)
 		return
 	}
@@ -433,6 +450,13 @@ func (s *Server) gotrueAdminBaseURL() string {
 // GoTrue accepts this symmetric token for /admin even under RS256 session JWTs.
 // Short TTL because it's used immediately and never persisted; iat is nudged
 // back a touch for clock-skew tolerance (mirrors the githubapp mint).
+//
+// The token deliberately carries only role/iat/exp — the minimal set the pinned
+// GoTrue (supabase/gotrue:v2.189.0) admin middleware checks; it does not require
+// iss/aud on the service_role bearer. Adding those speculatively could regress
+// the spike-validated path, so we don't. If the pinned GoTrue version is bumped,
+// re-validate admin auth still accepts this shape (a newer version could begin
+// enforcing GOTRUE_JWT_ISSUER / GOTRUE_JWT_AUD here).
 func mintServiceRoleJWT(secret string) (string, error) {
 	now := timeNow()
 	claims := jwt.MapClaims{
