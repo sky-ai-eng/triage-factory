@@ -37,6 +37,16 @@ func (a *App) runStartupTasks(ctx context.Context) {
 		} else {
 			server.WarnIfHeadlessSeedVarsOrphaned()
 		}
+	} else {
+		// Multi-mode SSO bootstrap (TFAC-424): register the statically-
+		// configured Entra SAML provider with GoTrue. Runs after buildServer →
+		// wireAuth has confirmed GoTrue is reachable (the JWKS verifier blocks
+		// on it), so the admin call lands on a live GoTrue. Opt-in (no-op
+		// without the Entra env), idempotent, and never aborts boot — a
+		// misconfig warns and skips.
+		if err := a.srv.RunSAMLProviderBootstrap(ctx); err != nil {
+			bootstrapLog.Error("saml provider bootstrap failed", "error", err)
+		}
 	}
 	a.cleanupWorktrees(ctx)
 	if a.local() {

@@ -100,6 +100,10 @@ echo "$TOKEN" | TF_GOTRUE_JWKS_URL=http://localhost:9999/.well-known/jwks.json \
 
 You should see the parsed claims printed as JSON (`Subject`, `Email`, `Provider`, etc.). This requires a local TF binary on the host — useful when the in-container TF service is misbehaving and you want to isolate the Verifier path from the rest of the server.
 
+## 7. (Optional) Single sign-on with Microsoft Entra (SAML)
+
+GitHub OAuth is the baseline login for every multi-mode deployment. If your org runs Microsoft Entra (Azure AD) and wants the My Apps tile, you can additionally wire single-tenant SAML SSO. It's off by default — turning it on means generating an RSA SAML signing key, enabling SAML in GoTrue, and registering one Entra connection (TF does the registration for you at startup). See **[Single-tenant SSO with Microsoft Entra](sso-entra.md)** for the full walkthrough and the exact values to paste into the Entra enterprise app.
+
 ## Durable workspace storage (MinIO)
 
 A blueprint's workspace — the git worktree plus the scratch space its steps hand off through — must survive the executor that created it (an open run can outlast the process; an executor can scale down mid-run). The TF binary snapshots that workspace to an **S3-compatible object store** and rehydrates it on resume; the host worktree is only a warm cache.

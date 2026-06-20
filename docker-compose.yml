@@ -154,6 +154,23 @@ services:
       # *not* the TF callback handler (which D7 sets per-request via the
       # `redirect_to` query param on /authorize).
       GOTRUE_EXTERNAL_GITHUB_REDIRECT_URI: ${TF_PUBLIC_URL}/auth/v1/callback
+      # Single-tenant Entra SAML SSO (TFAC-424) — OPT-IN. Off by default so a
+      # GitHub-OAuth-only self-host needs none of this. To turn it on, set
+      # GOTRUE_SAML_ENABLED=true AND GOTRUE_SAML_PRIVATE_KEY in .env (see
+      # .env.example / docs/sso-entra.md). With SAML enabled GoTrue REQUIRES the
+      # key and will refuse to boot without it.
+      #
+      # The key is RSA (NOT the ES256/RS256 session-JWT key — this one signs
+      # GoTrue's outbound SAML AuthnRequests), DER, base64-encoded:
+      #   openssl genpkey -algorithm rsa -pkeyopt rsa_keygen_bits:2048 -outform DER | base64 -w0
+      # It lives in .env like the GoTrue signing material, so it survives a
+      # container recreate; regenerating it invalidates the registered provider,
+      # so generate once and keep it. TF registers the one Entra provider with
+      # GoTrue's admin API at startup (TF_SAML_ENTRA_* on the triagefactory
+      # service below); GoTrue fetches the Entra metadata server-side, so this
+      # container needs outbound network to login.microsoftonline.com.
+      GOTRUE_SAML_ENABLED: ${GOTRUE_SAML_ENABLED:-false}
+      GOTRUE_SAML_PRIVATE_KEY: ${GOTRUE_SAML_PRIVATE_KEY:-}
     ports:
       # Exposed so the host-side TF binary can reach JWKS and so GitHub
       # OAuth callbacks can land. D7's reverse proxy moves this behind TF.
@@ -275,6 +292,20 @@ services:
       TF_GOTRUE_URL: http://gotrue:9999
       TF_GOTRUE_JWKS_URL: http://gotrue:9999/.well-known/jwks.json
       TF_GOTRUE_ISSUER: ${TF_PUBLIC_URL}/auth/v1
+      # Used only by the optional Entra SAML SSO bootstrap (TFAC-424): TF signs
+      # a short-lived service_role JWT with this to register the SAML provider
+      # via GoTrue's admin API at startup. Same value the gotrue service reads
+      # (jwk-init always writes it), so it's already present; non-SAML deploys
+      # never use it.
+      GOTRUE_JWT_SECRET: ${GOTRUE_JWT_SECRET:?missing GOTRUE_JWT_SECRET (run ./triagefactory jwk-init --write-env .env)}
+      # Optional single-tenant Entra SAML SSO (TFAC-424). Leave unset to run
+      # GitHub-OAuth-only. When TF_SAML_ENTRA_METADATA_URL is set, TF registers
+      # this one SAML provider with GoTrue at startup (idempotent + never
+      # overwritten). TF_SAML_ENTRA_METADATA_URL is Entra's App Federation
+      # Metadata URL (GoTrue fetches it server-side); TF_SAML_ENTRA_DOMAINS is
+      # the org email domain(s), comma-separated. See docs/sso-entra.md.
+      TF_SAML_ENTRA_METADATA_URL: ${TF_SAML_ENTRA_METADATA_URL:-}
+      TF_SAML_ENTRA_DOMAINS: ${TF_SAML_ENTRA_DOMAINS:-}
       TF_PUBLIC_URL: ${TF_PUBLIC_URL:?missing TF_PUBLIC_URL (see .env.example)}
       TF_SESSION_ENCRYPTION_KEY: ${TF_SESSION_ENCRYPTION_KEY:?missing TF_SESSION_ENCRYPTION_KEY (see .env.example)}
       TF_COOKIE_SECRET: ${TF_COOKIE_SECRET:?missing TF_COOKIE_SECRET (see .env.example)}
