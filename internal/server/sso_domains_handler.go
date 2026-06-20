@@ -417,15 +417,21 @@ func findOrgDomain(ctx context.Context, tx db.TxStores, orgID, domainName string
 	return nil, nil
 }
 
-// normalizeSSODomain lower-cases + trims a claimed domain, drops a trailing
-// FQDN dot, and rejects obvious non-domains (empty, an email, a URL, anything
-// with whitespace, or a single label with no dot). Returns (normalized, true)
-// on success. Routing (TFAC-427) matches the exact email domain against the
-// stored value, so normalization here is what makes "Corp.com" and "corp.com."
-// both route as "corp.com".
+// normalizeSSODomain lower-cases + trims a claimed domain, drops any trailing
+// FQDN-root dots, and rejects non-domains: empty, an email, a URL, anything
+// with whitespace, a single label (localhost), or a malformed label structure
+// (a leading or doubled dot, e.g. ".corp.com" / "corp..com" — these can never
+// match an email domain and would only mint a dead claim). Returns
+// (normalized, true) on success. Routing (TFAC-427) matches the exact email
+// domain against the stored value, so normalization here is what makes
+// "Corp.com", "corp.com.", and "corp.com.." all route as "corp.com".
 func normalizeSSODomain(raw string) (string, bool) {
 	d := strings.ToLower(strings.TrimSpace(raw))
-	d = strings.TrimSuffix(d, ".")
+	// Tolerate any number of trailing FQDN-root dots ("corp.com." /
+	// "corp.com..") — strip them all so the stored value matches a bare email
+	// domain and yields the right TXT host. TrimSuffix would peel only one,
+	// leaving "corp.com." to pass and route as a domain it never should.
+	d = strings.TrimRight(d, ".")
 	if d == "" {
 		return "", false
 	}
@@ -434,10 +440,17 @@ func normalizeSSODomain(raw string) (string, bool) {
 	if strings.ContainsAny(d, " \t\r\n@/:\\") {
 		return "", false
 	}
-	// A real email domain is always multi-label (corp.com), never a single
-	// label (localhost) — require at least one dot.
-	if !strings.Contains(d, ".") {
+	// A real email domain is always ≥2 non-empty labels: reject a single
+	// label (localhost) and any empty label from a leading or doubled dot
+	// (.corp.com, corp..com).
+	labels := strings.Split(d, ".")
+	if len(labels) < 2 {
 		return "", false
+	}
+	for _, l := range labels {
+		if l == "" {
+			return "", false
+		}
 	}
 	return d, true
 }

@@ -39,7 +39,8 @@ func TestNormalizeSSODomain(t *testing.T) {
 		{"corp.com", "corp.com"},
 		{"  Corp.Com  ", "corp.com"},
 		{"EXAMPLE.CO.UK", "example.co.uk"},
-		{"corp.com.", "corp.com"}, // trailing FQDN dot stripped
+		{"corp.com.", "corp.com"},  // single trailing FQDN dot stripped
+		{"corp.com..", "corp.com"}, // all trailing dots stripped (not just one)
 		{"eng.corp.com", "eng.corp.com"},
 	}
 	for _, tc := range ok {
@@ -58,6 +59,10 @@ func TestNormalizeSSODomain(t *testing.T) {
 		"corp.com/path",    // path
 		"corp .com",        // embedded space
 		"corp\tcom.com",    // embedded tab
+		".",                // dot(s) only → empty after strip
+		"..",               // dot(s) only → empty after strip
+		".corp.com",        // leading dot → empty first label
+		"corp..com",        // doubled internal dot → empty middle label
 	}
 	for _, in := range bad {
 		if got, valid := normalizeSSODomain(in); valid {
