@@ -345,32 +345,33 @@ func TestSSOConnectionGet_ReturnsSPValues(t *testing.T) {
 	}
 }
 
-// TestSSOConnection_LocalMode404: every route 404s in local mode (N=1, no IdP),
-// before any GoTrue or store work.
+// TestSSOConnection_LocalMode404: every route 404s in local mode (N=1, no IdP).
+// adminGate checks runmode before touching any dependency, so this is a pure
+// unit test — no rig, no GoTrue, no store needed. (In production withSession
+// injects sentinel claims in local mode and the handler then 404s the same way;
+// the multi-mode auth rig can't represent local mode because it always wires
+// authDeps, so it's tested directly here instead.)
 func TestSSOConnection_LocalMode404(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
-	fake := newSSOFakeGoTrue(t, ssoTestJWTSecret)
-	t.Setenv(envGoTrueJWTSecret, ssoTestJWTSecret)
-	r := newAuthRig(t)
-	r.srv.authCfg.gotrueURL = fake.srv.URL
+	h := &ssoConnectionHandler{}
 
 	cases := []struct {
 		method string
-		body   any
+		fn     func(http.ResponseWriter, *http.Request)
 	}{
-		{http.MethodGet, nil},
-		{http.MethodPost, map[string]string{"metadata_url": "https://idp/metadata.xml"}},
-		{http.MethodPatch, map[string]bool{"enabled": false}},
+		{http.MethodGet, h.handleSSOConnectionGet},
+		{http.MethodPost, h.handleSSOConnectionCreate},
+		{http.MethodPatch, h.handleSSOConnectionUpdate},
 	}
 	for _, tc := range cases {
 		t.Run(tc.method, func(t *testing.T) {
-			resp := doInviteReq(r, tc.method, "/api/sso/connection", "", tc.body)
-			if resp.StatusCode != http.StatusNotFound {
-				t.Fatalf("%s status = %d; want 404 in local mode", tc.method, resp.StatusCode)
+			// Body is irrelevant — adminGate 404s before it's read.
+			req := httptest.NewRequest(tc.method, "/api/sso/connection", nil)
+			rec := httptest.NewRecorder()
+			tc.fn(rec, req)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("%s status = %d; want 404 in local mode", tc.method, rec.Code)
 			}
 		})
-	}
-	if fake.posts() != 0 {
-		t.Errorf("GoTrue POSTs = %d; want 0 in local mode", fake.posts())
 	}
 }
