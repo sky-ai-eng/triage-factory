@@ -269,7 +269,10 @@ tickets, not configured here):
     match GoTrue's current signing key (its `kid` must resolve in
     `GOTRUE_JWT_KEYS`). This happens if the keypair was rotated without
     regenerating the token: re-run `triagefactory jwk-init` so both are minted
-    together, then recreate the `gotrue` and `triagefactory` containers.
+    together, then recreate the `gotrue` and `triagefactory` containers. Note
+    `--write-env` *appends* — delete the old `GOTRUE_JWT_KEYS` /
+    `GOTRUE_JWT_SECRET` / `TF_GOTRUE_SERVICE_ROLE_TOKEN` lines so the new ones
+    win (env files take the last value, but stale duplicates are confusing).
 - **`POST /api/sso/connection` returns 404.** You're not an org admin in the
   active org (the endpoint is non-disclosing — it 404s rather than 403s), or the
   deployment is in local mode (SSO is multi-mode only).

@@ -324,7 +324,11 @@ NOTES
   Treat it as a secret. Set TF_PUBLIC_URL before running so the token's iss
   claim matches the deployment (optional — iss isn't enforced by GoTrue).
 
-  Re-running rotates the key (and the service-role token with it); recreate the
-  GoTrue container (docker compose up -d gotrue — NOT docker compose start) to
-  pick up the new env.
+  Re-running rotates the key (and the service-role token with it). --write-env
+  APPENDS new values rather than editing in place, so delete the prior
+  GOTRUE_JWT_KEYS / GOTRUE_JWT_SECRET / TF_GOTRUE_SERVICE_ROLE_TOKEN lines before
+  re-running to avoid stale duplicates (env files take the last value, so the
+  stack still works — the old lines are just noise). Recreate the GoTrue
+  container (docker compose up -d gotrue — NOT docker compose start) to pick up
+  the new env.
 `
