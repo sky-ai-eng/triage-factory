@@ -241,11 +241,17 @@ func (s *ssoDomainStore) GetVerifiedByDomain(ctx context.Context, domainName str
 	// Exact lower(domain) match, verified rows only — no suffix / longest-
 	// match (corp.com never matches eng.corp.com). The verified-global-
 	// unique index guarantees at most one row, so no ordering/limit needed.
+	//
+	// The join also pins c.org_id = d.org_id: the sso_domains_connection_fkey
+	// composite FK already guarantees the pair is consistent, so this is
+	// defense-in-depth — a belt-and-suspenders guard that a mismatched row
+	// (from a future bug or manual write) can never route a verified domain
+	// to a connection in a different org.
 	var r domain.SSODomainRoute
 	err := s.admin.QueryRowContext(ctx, `
 		SELECT d.connection_id::text, d.org_id::text, c.provider_id, c.enabled
 		FROM sso_domains d
-		JOIN sso_connections c ON c.id = d.connection_id
+		JOIN sso_connections c ON c.id = d.connection_id AND c.org_id = d.org_id
 		WHERE lower(d.domain) = lower($1) AND d.verified_at IS NOT NULL
 	`, domainName).Scan(&r.ConnectionID, &r.OrgID, &r.ProviderID, &r.Enabled)
 	if errors.Is(err, sql.ErrNoRows) {

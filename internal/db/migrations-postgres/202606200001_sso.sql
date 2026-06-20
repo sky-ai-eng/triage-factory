@@ -56,19 +56,31 @@ CREATE TABLE public.sso_connections (
 -- "provider_id → org" a function, not a relation.
 CREATE UNIQUE INDEX sso_connections_provider_uniq ON public.sso_connections (provider_id);
 
+-- (id, org_id) is trivially unique (id is already the PK), declared so
+-- sso_domains can FK the *pair* and pin a domain to its connection's own org
+-- at the schema level — the same (id, org_id)-unique + composite-FK pattern
+-- the rest of the schema uses (agents, entities, runs, tasks, blueprint_runs,
+-- teams). RLS gates the org_id *column* on write, but only this FK keeps a
+-- domain's connection_id in the same org as its org_id.
+ALTER TABLE public.sso_connections ADD CONSTRAINT sso_connections_id_org_id_key UNIQUE (id, org_id);
+
 CREATE TABLE public.sso_domains (
     id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    connection_id uuid NOT NULL REFERENCES public.sso_connections(id) ON DELETE CASCADE,
+    -- connection_id carries no standalone FK: it's the lead column of the
+    -- composite FK below, which ties (connection_id, org_id) to the parent's
+    -- (id, org_id) so a domain can only ever point at a connection in its own
+    -- org.
+    connection_id uuid NOT NULL,
     -- Denormalized from the parent connection for two reasons: the RLS
-    -- policies gate directly on org_id (no join to the parent on every
-    -- row check), and the routing read carries it without a second hop.
-    -- Every write to this table is app-pool + RLS-gated, and the INSERT
-    -- WITH CHECK pins org_id = tf.current_org_id(), so the denormalized
-    -- value can only ever be the writer's own org — there is no admin-pool
-    -- write path that could store a mismatched org_id (unlike org_invites,
-    -- whose redeem/grant runs BYPASSRLS and therefore needed a composite
-    -- FK backstop). The claim's connection_id is itself only knowable to
-    -- the owning org (RLS hides sibling orgs' connections).
+    -- policies gate directly on org_id (no join to the parent on every row
+    -- check), and the routing read carries it without a second hop. RLS's
+    -- INSERT WITH CHECK pins this column to tf.current_org_id() (the writer's
+    -- own org) — but that alone does NOT stop a self-org row from pointing
+    -- connection_id at another org's connection (a UUID RLS hides but which
+    -- an admin/system writer could still supply). The composite FK below is
+    -- what closes that gap: it's the load-bearing cross-org guard, and it
+    -- holds on every write path including any future admin-pool / JIT / SCIM
+    -- writer, the same backstop org_invites' composite target_team FK gives.
     org_id        uuid NOT NULL REFERENCES public.orgs(id) ON DELETE CASCADE,
     domain        text NOT NULL,
     -- DNS-TXT verification token (_triagefactory-verification.<domain>).
@@ -80,7 +92,15 @@ CREATE TABLE public.sso_domains (
     verified_at   timestamptz NULL,
     created_at    timestamptz NOT NULL DEFAULT now(),
     updated_at    timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT sso_domains_domain_nonempty CHECK (domain <> '')
+    CONSTRAINT sso_domains_domain_nonempty CHECK (domain <> ''),
+    -- Tenant-scoped composite FK: a domain's (connection_id, org_id) must
+    -- match a real sso_connections (id, org_id) pair, so connection_id is
+    -- forced into the same org as org_id. Both columns are NOT NULL, so
+    -- MATCH SIMPLE always checks. ON DELETE CASCADE retires a connection's
+    -- domains with it (the behavior the old single-column FK had).
+    CONSTRAINT sso_domains_connection_fkey
+        FOREIGN KEY (connection_id, org_id) REFERENCES public.sso_connections (id, org_id)
+        ON DELETE CASCADE
 );
 
 -- One pending/active claim per (org, domain) — dedups a re-claim within

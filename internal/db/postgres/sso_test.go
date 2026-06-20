@@ -286,6 +286,39 @@ func TestSSODomainStore_Postgres_VerifiedGlobalUnique(t *testing.T) {
 	}
 }
 
+// TestSSODomainStore_Postgres_CrossOrgConnectionRejectedBySchema: the
+// tenant-scoped composite FK (connection_id, org_id) → sso_connections
+// (id, org_id) makes a domain pointing at another org's connection
+// impossible to store, even via the admin pool (which bypasses RLS). This is
+// the backstop beneath the RLS INSERT WITH CHECK: RLS pins org_id to the
+// writer's own org but can't stop a self-org row from referencing a foreign
+// connection_id — only this FK can, and it holds on every write path.
+func TestSSODomainStore_Postgres_CrossOrgConnectionRejectedBySchema(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgA, _, _ := pgtest.SeedOrgWithUser(t, h, "sso-xorg-a")
+	orgB, _, _ := pgtest.SeedOrgWithUser(t, h, "sso-xorg-b")
+	connA, _ := mustSeedConn(t, h, orgA)
+	connB, _ := mustSeedConn(t, h, orgB)
+
+	// Same-org domain inserts fine (control).
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO sso_domains (connection_id, org_id, domain, token)
+		VALUES ($1, $2, 'ok.com', 'tok')
+	`, connA, orgA); err != nil {
+		t.Fatalf("same-org domain insert should succeed: %v", err)
+	}
+
+	// Cross-org: org A's domain pointing at org B's connection is refused by
+	// the composite FK, even on the admin pool.
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO sso_domains (connection_id, org_id, domain, token)
+		VALUES ($1, $2, 'bad.com', 'tok')
+	`, connB, orgA); err == nil {
+		t.Fatal("cross-org connection_id insert succeeded; want composite-FK violation")
+	}
+}
+
 // TestSSODomainStore_Postgres_GetVerifiedByDomain_ExactMatch: the routing
 // read is exact (corp.com never matches eng.corp.com), case-insensitive, and
 // ignores pending rows.
