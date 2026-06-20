@@ -691,6 +691,29 @@ func (s *Server) routes() {
 	// holder. Listed in preAuthAllowlist.
 	s.mux.HandleFunc("GET /api/invites/preview", ih.handleInvitePreview)
 
+	// Per-org SSO connection (TFAC-424, epic TFAC-422) — org-admin-gated,
+	// multi-mode only (each handler 404s in local). POST registers the org's
+	// IdP connection with GoTrue (minting a service_role token server-side)
+	// and writes the TF-owned sso_connections binding; GET returns it plus
+	// the SP Entity-ID/ACS values the operator pastes into Entra; PATCH
+	// enables/disables it. gotrueURL + publicURL are read lazily because
+	// authCfg/deployCfg land after routes() runs.
+	ssoc := &ssoConnectionHandler{
+		tx:        s.tx,
+		az:        s.az,
+		client:    ssoHTTPClient,
+		gotrueURL: s.gotrueAdminBaseURL,
+		publicURL: func() string {
+			if s.deployCfg == nil {
+				return ""
+			}
+			return s.deployCfg.publicURL
+		},
+	}
+	s.api("GET /api/sso/connection", ssoc.handleSSOConnectionGet)
+	s.apiMutating("POST /api/sso/connection", ssoc.handleSSOConnectionCreate)
+	s.apiMutating("PATCH /api/sso/connection", ssoc.handleSSOConnectionUpdate)
+
 	s.api("GET /api/queue", s.handleQueue)
 	s.api("GET /api/tasks", s.handleTasks)
 	s.api("GET /api/tasks/{id}", s.handleTaskGet)

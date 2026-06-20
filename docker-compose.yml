@@ -136,6 +136,26 @@ services:
       GOTRUE_JWT_SECRET: ${GOTRUE_JWT_SECRET:?missing GOTRUE_JWT_SECRET (run ./triagefactory jwk-init --write-env .env)}
       GOTRUE_JWT_AUD: authenticated
       GOTRUE_JWT_ISSUER: ${TF_PUBLIC_URL}/auth/v1
+      # SAML Service-Provider enablement (TFAC-424). GoTrue acts as the SAML
+      # SP; org admins register their own IdP connection at runtime via TF's
+      # /api/sso/connection endpoint (per-org, not env — TF is one multi-org
+      # build). This is deployment-wide infra (one GoTrue), so it lives here.
+      #
+      # GOTRUE_SAML_PRIVATE_KEY signs outbound SAML AuthnRequests. It is an
+      # RSA key in DER form, base64-encoded — NOT ES256 (confirmed by the
+      # TFAC-423 spike) — and is SEPARATE from the session-JWT keys above.
+      # Generate ONCE and keep it stable in .env (rotating it invalidates
+      # every registered provider). With SAML enabled GoTrue REFUSES TO BOOT
+      # without a valid key. See docs/sso-entra.md + .env.example.
+      #
+      # Set GOTRUE_SAML_ENABLED=false in .env to opt a deployment out of SSO
+      # entirely (the private key is then ignored, and may be left blank).
+      # The key is `:-` (optional), not `:?` (required): it's required only
+      # WHEN SAML is enabled — a conditional GoTrue enforces at boot — so a
+      # blank value with SAML on yields GoTrue's own "SAML requires a private
+      # key" boot error, while SAML off boots fine with it blank.
+      GOTRUE_SAML_ENABLED: ${GOTRUE_SAML_ENABLED:-true}
+      GOTRUE_SAML_PRIVATE_KEY: ${GOTRUE_SAML_PRIVATE_KEY:-}
       GOTRUE_SITE_URL: ${TF_PUBLIC_URL}
       GOTRUE_URI_ALLOW_LIST: ${TF_PUBLIC_URL}
       GOTRUE_DISABLE_SIGNUP: "false"
@@ -275,6 +295,12 @@ services:
       TF_GOTRUE_URL: http://gotrue:9999
       TF_GOTRUE_JWKS_URL: http://gotrue:9999/.well-known/jwks.json
       TF_GOTRUE_ISSUER: ${TF_PUBLIC_URL}/auth/v1
+      # The TF binary mints a short-lived service_role JWT (HS256 over this
+      # secret) to call GoTrue's admin SSO API when an org admin registers an
+      # IdP connection (TFAC-424). The SAME secret the gotrue service reads
+      # above; the spike (TFAC-423 #4) confirmed GoTrue accepts this symmetric
+      # admin token even under RS256 session JWTs.
+      GOTRUE_JWT_SECRET: ${GOTRUE_JWT_SECRET:?missing GOTRUE_JWT_SECRET (run ./triagefactory jwk-init --write-env .env)}
       TF_PUBLIC_URL: ${TF_PUBLIC_URL:?missing TF_PUBLIC_URL (see .env.example)}
       TF_SESSION_ENCRYPTION_KEY: ${TF_SESSION_ENCRYPTION_KEY:?missing TF_SESSION_ENCRYPTION_KEY (see .env.example)}
       TF_COOKIE_SECRET: ${TF_COOKIE_SECRET:?missing TF_COOKIE_SECRET (see .env.example)}
