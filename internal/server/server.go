@@ -75,6 +75,11 @@ type Server struct {
 	ws        *websocket.Hub
 	spawner   *delegate.Spawner
 	curator   *curator.Curator
+	// ssoDomains is the per-org SSO domain claim/verify handler, retained on
+	// the Server (rather than scoped to routes()) so tests can swap its
+	// injected DNS resolver for a fake — the verify path's only external
+	// dependency. Production wiring leaves it on the stdlib net.DefaultResolver.
+	ssoDomains *ssoDomainsHandler
 	// ghResolver picks the right GitHub credential (org App installation
 	// token → PAT) per request, given the org + target account. The per-repo
 	// handler operations migrated off the old process-global PAT client —
@@ -690,6 +695,18 @@ func (s *Server) routes() {
 	// runs on the admin pool and discloses only org name + role to the token
 	// holder. Listed in preAuthAllowlist.
 	s.mux.HandleFunc("GET /api/invites/preview", ih.handleInvitePreview)
+
+	// Per-org SSO domain claim + DNS-TXT verification (multi-mode only — each
+	// handler 404s in local). All four routes gate on org-admin and write
+	// through the app pool (sso_domains_* RLS). Verify additionally does a
+	// live DNS TXT lookup via the stdlib resolver; only a verified domain
+	// routes logins, and the verify path enforces deployment-wide
+	// verified-domain uniqueness (the cross-org isolation linchpin).
+	s.ssoDomains = newSSODomainsHandler(s.tx, s.az)
+	s.api("GET /api/sso/domains", s.ssoDomains.handleDomainList)
+	s.apiMutating("POST /api/sso/domains", s.ssoDomains.handleDomainClaim)
+	s.apiMutating("POST /api/sso/domains/{id}/verify", s.ssoDomains.handleDomainVerify)
+	s.apiMutating("DELETE /api/sso/domains/{id}", s.ssoDomains.handleDomainDelete)
 
 	s.api("GET /api/queue", s.handleQueue)
 	s.api("GET /api/tasks", s.handleTasks)
