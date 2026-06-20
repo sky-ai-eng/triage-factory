@@ -439,7 +439,8 @@ func TestSSOStores_Postgres_RLS_AdminVsNonAdmin(t *testing.T) {
 		t.Error("member INSERT into sso_domains succeeded; want RLS rejection")
 	}
 
-	// Non-admin member: UPDATE / DELETE match no rows (USING hides them).
+	// Non-admin member: UPDATE / DELETE match no rows (USING hides them) —
+	// both verbs on both tables, the full 2x2.
 	if err := h.WithUser(t, memberID, orgID, func(tx *sql.Tx) error {
 		res, e := tx.Exec(`UPDATE sso_connections SET enabled = false WHERE id = $1`, connID)
 		if e != nil {
@@ -448,12 +449,26 @@ func TestSSOStores_Postgres_RLS_AdminVsNonAdmin(t *testing.T) {
 		if n, _ := res.RowsAffected(); n != 0 {
 			t.Errorf("member UPDATE sso_connections affected %d rows; want 0", n)
 		}
+		res, e = tx.Exec(`UPDATE sso_domains SET verified_at = now() WHERE id = $1`, domID)
+		if e != nil {
+			return e
+		}
+		if n, _ := res.RowsAffected(); n != 0 {
+			t.Errorf("member UPDATE sso_domains affected %d rows; want 0", n)
+		}
 		res, e = tx.Exec(`DELETE FROM sso_domains WHERE id = $1`, domID)
 		if e != nil {
 			return e
 		}
 		if n, _ := res.RowsAffected(); n != 0 {
 			t.Errorf("member DELETE sso_domains affected %d rows; want 0", n)
+		}
+		res, e = tx.Exec(`DELETE FROM sso_connections WHERE id = $1`, connID)
+		if e != nil {
+			return e
+		}
+		if n, _ := res.RowsAffected(); n != 0 {
+			t.Errorf("member DELETE sso_connections affected %d rows; want 0", n)
 		}
 		return nil
 	}); err != nil {
