@@ -44,6 +44,20 @@ var _ = tfdb.Claims{}
 // reaper, future async revoke).
 var gotrueHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
+// gotrueSSOClient drives the SP-initiated SAML start (POST /sso). Unlike
+// gotrueHTTPClient it must NOT follow redirects: GoTrue answers /sso with a 303
+// whose Location is the signed SAML AuthnRequest URL at the IdP, and TF forwards
+// that Location to the browser rather than fetching the IdP server-side.
+// http.ErrUseLastResponse makes Do() return the 303 itself instead of chasing
+// it (which would have TF GET login.microsoftonline.com from inside the
+// network). Same bounded timeout rationale as gotrueHTTPClient.
+var gotrueSSOClient = &http.Client{
+	Timeout: 30 * time.Second,
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
+
 // deployConfig holds deployment-identity configuration that is
 // meaningful in both local and multi mode. Populated at boot via
 // SetDeployConfig (local mode) or SetAuthDeps (multi mode, which
@@ -118,6 +132,7 @@ func (s *Server) SetAuthDeps(
 		sessions:       sessionStore,
 		gotrueRefresh:  s.gotrueRefreshFunc(cfg),
 		gotrueExchange: s.gotrueExchangeFunc(cfg),
+		gotrueSSO:      s.gotrueSSOFunc(cfg),
 		gotrueLogout:   s.gotrueLogoutFunc(cfg),
 	}
 
@@ -130,52 +145,84 @@ func (s *Server) SetAuthDeps(
 	return nil
 }
 
-// handleOAuthStart redirects the browser to gotrue's /authorize with
-// the PKCE parameters set. The state cookie carries the CSRF token,
-// the PKCE code_verifier, and the return_to path through the OAuth
-// roundtrip so the callback handler can complete the dance with no
-// per-flow database row.
+// handleOAuthStart begins a login flow. Both providers share one PKCE
+// state cookie — the CSRF token, the PKCE code_verifier, the return_to
+// path (and, for SAML, the provider_id) ride through the roundtrip so the
+// callback completes the dance with no per-flow database row.
 //
 // PKCE (RFC 7636) means tokens never traverse the URL bar — gotrue
 // hands back an opaque `code`, which the callback exchanges via a
 // server-to-server POST. Tokens stay off referer headers, server
 // access logs, and browser history.
 //
+//   - github → browser-redirect to gotrue's /authorize (the OAuth dance).
+//   - saml   → handleSAMLStart: server-side POST to gotrue's public /sso,
+//     forwarding the 303 to the IdP (the SP-initiated SAML dance).
+//
 // GET /api/auth/oauth/{provider}?return_to=/some/path
+// GET /api/auth/oauth/saml?provider_id=<gotrue-uuid>&return_to=/some/path
 func (s *Server) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 	if s.authDeps == nil {
 		http.NotFound(w, r)
 		return
 	}
 	provider := r.PathValue("provider")
-	if provider != "github" {
-		http.Error(w, "unsupported provider", http.StatusNotFound)
-		return
-	}
-
 	returnTo := normalizeReturnTo(r.URL.Query().Get("return_to"))
 
+	switch provider {
+	case "github":
+		codeVerifier, csrf, ok := s.issueOAuthStateCookie(w, r, returnTo, "")
+		if !ok {
+			return
+		}
+		q := url.Values{}
+		q.Set("provider", provider)
+		// PKCE wiring: gotrue accepts code_challenge + code_challenge_method
+		// and flow_type=pkce on /authorize. After the provider dance, gotrue
+		// redirects to redirect_to with ?code=<authcode>, which the callback
+		// trades for tokens via /token?grant_type=pkce.
+		q.Set("code_challenge", pkceChallenge(codeVerifier))
+		q.Set("code_challenge_method", "S256")
+		q.Set("flow_type", "pkce")
+		q.Set("redirect_to", s.deployCfg.publicURL+"/api/auth/callback?state="+csrf)
+		target := s.deployCfg.publicURL + "/auth/v1/authorize?" + q.Encode()
+		http.Redirect(w, r, target, http.StatusFound)
+	case "saml":
+		s.handleSAMLStart(w, r, returnTo)
+	default:
+		http.Error(w, "unsupported provider", http.StatusNotFound)
+	}
+}
+
+// issueOAuthStateCookie generates a fresh CSRF token + PKCE verifier, signs
+// them into the HMAC state cookie (with the optional SSO provider_id), and
+// sets it. Returns the verifier (to derive the code_challenge) and the CSRF
+// token (to stitch into redirect_to). On a crypto/marshal failure it writes a
+// 500 and returns ok=false — the caller just returns. Shared by the GitHub and
+// SAML start paths so the state-cookie contract is defined once.
+func (s *Server) issueOAuthStateCookie(w http.ResponseWriter, r *http.Request, returnTo, providerID string) (codeVerifier, csrf string, ok bool) {
 	csrfRaw := make([]byte, 16)
 	if _, err := rand.Read(csrfRaw); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
+		return "", "", false
 	}
 	codeVerifier, err := generatePKCEVerifier()
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
+		return "", "", false
 	}
-
+	csrf = hex.EncodeToString(csrfRaw)
 	state := stateClaims{
 		ReturnTo:     returnTo,
-		CSRF:         hex.EncodeToString(csrfRaw),
+		CSRF:         csrf,
 		CodeVerifier: codeVerifier,
+		ProviderID:   providerID,
 		ExpiresAt:    timeNow().Add(10 * time.Minute).Unix(),
 	}
 	signed, err := state.sign(s.deployCfg.hmacKey)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
+		return "", "", false
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     stateCookieName,
@@ -186,20 +233,69 @@ func (s *Server) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   600,
 	})
+	return codeVerifier, csrf, true
+}
 
-	q := url.Values{}
-	q.Set("provider", provider)
-	// PKCE wiring: gotrue accepts code_challenge + code_challenge_method
-	// and flow_type=pkce on /authorize. After the provider dance, gotrue
-	// redirects to redirect_to with ?code=<authcode>, which the callback
-	// trades for tokens via /token?grant_type=pkce.
-	q.Set("code_challenge", pkceChallenge(codeVerifier))
-	q.Set("code_challenge_method", "S256")
-	q.Set("flow_type", "pkce")
-	q.Set("redirect_to", s.deployCfg.publicURL+"/api/auth/callback?state="+state.CSRF)
-	target := s.deployCfg.publicURL + "/auth/v1/authorize?" + q.Encode()
+// handleSAMLStart drives GoTrue's SP-initiated SAML flow. Given a TF-registered
+// provider_id, it server-side POSTs to GoTrue's public /sso endpoint and
+// forwards GoTrue's 303 Location (the signed SAML AuthnRequest redirect to the
+// IdP) to the browser. The Entra "My Apps" bookmark tile points here as a plain
+// GET link, and TFAC-427's identifier-first login UX redirects here after the
+// email→connection lookup; both share this one endpoint.
+//
+// The provider_id is validated against TF's own sso_connections binding (written
+// by TFAC-424) BEFORE initiating: an unknown or disabled provider 404s, so TF
+// never starts a SAML flow for a connection it doesn't own, and a raw GET with a
+// guessed provider_id can't coax TF into an open redirect to GoTrue/the IdP.
+//
+// PKCE composes with SP-initiated SAML (TFAC-423 spike): the same CSRF +
+// code_verifier + return_to state cookie the GitHub path uses carries through,
+// plus the provider_id — so the callback resolves the JIT org binding from TF's
+// OWN signed state, never from the GoTrue assertion.
+//
+// GET /api/auth/oauth/saml?provider_id=<gotrue-provider-uuid>&return_to=/path
+func (s *Server) handleSAMLStart(w http.ResponseWriter, r *http.Request, returnTo string) {
+	providerID := strings.TrimSpace(r.URL.Query().Get("provider_id"))
+	if providerID == "" {
+		http.Error(w, "missing provider_id", http.StatusBadRequest)
+		return
+	}
 
-	http.Redirect(w, r, target, http.StatusFound)
+	// Validate against TF's binding before initiating. Admin pool: the actor is
+	// pre-login with no membership (the provider_id is the lookup key, same
+	// posture as the callback's JIT read). Unknown/disabled → 404 (non-
+	// disclosure; don't reveal which provider_ids are registered or enabled).
+	binding, err := s.allStores.SSOConnections.GetByProviderID(r.Context(), providerID)
+	if err != nil {
+		authLog.Error("saml start: provider lookup failed", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if binding == nil || !binding.Enabled {
+		http.NotFound(w, r)
+		return
+	}
+
+	codeVerifier, csrf, ok := s.issueOAuthStateCookie(w, r, returnTo, providerID)
+	if !ok {
+		return
+	}
+
+	// redirect_to is TF's own callback (same one GitHub uses) carrying the CSRF;
+	// after the IdP posts the assertion to GoTrue's ACS, GoTrue redirects the
+	// browser here with ?code=<authcode> for the PKCE exchange.
+	redirectTo := s.deployCfg.publicURL + "/api/auth/callback?state=" + csrf
+	location, err := s.authDeps.gotrueSSO(r.Context(), providerID, redirectTo, pkceChallenge(codeVerifier))
+	if err != nil {
+		// GoTrue is in-network and on the request critical path; a failure here
+		// is an upstream/config fault, not a client error.
+		authLog.Warn("saml start: gotrue /sso failed", "error", err)
+		http.Error(w, "sso start failed", http.StatusBadGateway)
+		return
+	}
+	// Forward GoTrue's 303 target (the signed AuthnRequest URL at the IdP) to
+	// the browser. 303 so the browser GETs the IdP regardless of method.
+	http.Redirect(w, r, location, http.StatusSeeOther)
 }
 
 // handleOAuthCallback completes the PKCE dance: validates state,
@@ -269,25 +365,80 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := upsertUserFromClaims(r.Context(), s.db, userUUID, claims); err != nil {
+	// The provider_id in TF's OWN signed state (set by handleSAMLStart) is the
+	// authoritative "this login is SSO" signal. We deliberately do NOT read the
+	// GoTrue JWT's provider / app_metadata / amr to detect SSO or recover the
+	// provider — those are GoTrue-internal and version-fragile. GoTrue also
+	// keeps a SAML identity as its own auth.users (SSO is excluded from GoTrue
+	// account linking), so claims.Subject is the SAML user and there is no
+	// GitHub↔Entra merge to perform here.
+	isSSO := state.ProviderID != ""
+
+	if err := upsertUserFromClaims(r.Context(), s.db, userUUID, claims, isSSO); err != nil {
 		authLog.Error("upsert user failed", "user", userUUID, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	// Signup provisions nothing. Org creation is a deliberate user
-	// action (the onboarding "Start your Factory" CTA → the create-org
-	// flow), so the callback never mints a tenant. Resolve which org the
-	// session should default to — the user's earliest existing
-	// membership, or NULL for a first-time user, who lands at the
-	// zero-membership onboarding entry. Whether that screen's create
-	// affordance is enabled is governed separately by
-	// runmode.OrgCreationEnabled() (TF_PREVENT_ORG_CREATION).
-	defaultOrg, err := s.lookupEarliestMembership(r.Context(), s.db, userUUID)
-	if err != nil {
-		authLog.Error("resolve active org failed", "user", userUUID, "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
+	// JIT provisioning (TFAC-426). The provider_id → org binding IS the
+	// cross-org isolation boundary: a user authenticated through provider X is
+	// provisioned into the org that registered X, and only that org's admin
+	// could have bound X (TFAC-424; provider_id is globally unique). So a
+	// connection can never JIT users into an org its admin doesn't control —
+	// and the binding is keyed on TF's signed state, not on anything the
+	// assertion carries. Resolve + grant on the ADMIN pool: the JIT actor has
+	// no membership in the target org yet, so RLS can't express the read
+	// (same rationale as invite-accept).
+	var defaultOrg uuid.NullUUID
+	if isSSO {
+		binding, lerr := s.allStores.SSOConnections.GetByProviderID(r.Context(), state.ProviderID)
+		if lerr != nil {
+			authLog.Error("jit: provider lookup failed", "user", userUUID, "error", lerr)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		// A disabled or vanished connection provisions nothing — an existing
+		// member still lands in their org via the earliest-membership fallback
+		// below; a net-new user falls through to onboarding.
+		if binding != nil && binding.Enabled {
+			orgUUID, perr := uuid.Parse(binding.OrgID)
+			if perr != nil {
+				authLog.Error("jit: bad org id in binding", "org", binding.OrgID, "error", perr)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			// teamID NULL → "org member, zero teams" (mirrors an org-only
+			// invite). Idempotent (ON CONFLICT DO NOTHING): a returning member's
+			// row already exists, so this GRANTS but never re-roles — an admin's
+			// later promotion via the roster is preserved across logins.
+			if gerr := grantOrgMembership(r.Context(), s.db, userUUID, orgUUID,
+				binding.DefaultRole, uuid.NullUUID{}, ""); gerr != nil {
+				authLog.Error("jit: grant membership failed", "user", userUUID, "org", orgUUID, "error", gerr)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			// The SSO org is THIS session's active org: the user arrived through
+			// its IdP, so route them into the app (not onboarding) there, even
+			// if they also belong to other orgs.
+			defaultOrg = uuid.NullUUID{UUID: orgUUID, Valid: true}
+			authLog.Info("jit provisioned sso login", "user", userUUID, "org", orgUUID, "role", binding.DefaultRole)
+		}
+	}
+
+	// Non-SSO login (or SSO with no active binding): default the session to the
+	// user's earliest existing membership, or NULL for a first-time user, who
+	// lands at the zero-membership onboarding entry. Signup provisions nothing —
+	// org creation is a deliberate user action (the onboarding "Start your
+	// Factory" CTA → the create-org flow), so the callback never mints a tenant.
+	// Whether that screen's create affordance is enabled is governed separately
+	// by runmode.OrgCreationEnabled() (TF_PREVENT_ORG_CREATION).
+	if !defaultOrg.Valid {
+		defaultOrg, err = s.lookupEarliestMembership(r.Context(), s.db, userUUID)
+		if err != nil {
+			authLog.Error("resolve active org failed", "user", userUUID, "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	// Trust the JWT's exp claim. The exchange response also carries
@@ -742,7 +893,14 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 // function creating it. Both writes target the *verified-JWT* user's own rows
 // (userID = claims.Subject), so the RLS bypass carries no untrusted target —
 // the same trust model the retired github_username column write already used.
-func upsertUserFromClaims(ctx context.Context, db *sql.DB, userID uuid.UUID, claims *verify.Claims) error {
+//
+// isSSO marks a SAML (SSO) login — TF-derived from its own signed state, never
+// from the JWT. When set, the GitHub-identity write below is skipped entirely:
+// an Entra SAML assertion can surface a preferred_username (a UPN/email, NOT a
+// github.com handle), and mirroring it as a github_username would mint a bogus
+// github identity row against github.com (TFAC-426 §2). The only non-SSO login
+// is the GitHub bootstrap floor, so !isSSO ⟺ a genuine GitHub login.
+func upsertUserFromClaims(ctx context.Context, db *sql.DB, userID uuid.UUID, claims *verify.Claims, isSSO bool) error {
 	var displayName, avatarURL, ghUsername string
 	if claims.UserMetadata != nil {
 		displayName, _ = claims.UserMetadata["full_name"].(string)
@@ -790,7 +948,10 @@ func upsertUserFromClaims(ctx context.Context, db *sql.DB, userID uuid.UUID, cla
 	// The hardcoded host is already in NormalizeGitHubHost form; mirror
 	// UsersStore.UpsertGitHubIdentity (verified_at = now(), upsert on the host
 	// key) if that store method ever grows logic beyond the SQL.
-	if ghUsername != "" {
+	// Gated on !isSSO so a SAML login never writes a github.com identity row
+	// (see the func doc) — preserving any previously-captured identity and
+	// honoring the NULL-degrades contract.
+	if !isSSO && ghUsername != "" {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO public.user_github_identities
 				(user_id, github_base_url, login, source, verified_at, created_at, updated_at)
@@ -859,6 +1020,50 @@ func (s *Server) gotrueExchangeFunc(cfg *authConfig) func(context.Context, strin
 		}
 		req.Header.Set("Content-Type", "application/json")
 		return decodeTokenResponse(req, "exchange")
+	}
+}
+
+// gotrueSSOFunc — SP-initiated SAML start. POST /sso (a PUBLIC GoTrue endpoint:
+// send NO Authorization header — the TF_GOTRUE_SERVICE_ROLE_TOKEN bearer is for
+// the /admin/* API only, used by TFAC-424) with the PKCE code_challenge so the
+// same /token?grant_type=pkce exchange the GitHub flow uses completes the
+// callback (TFAC-423 spike: PKCE composes with SP-initiated SAML). GoTrue
+// answers 303 with the IdP redirect in Location; this returns that Location for
+// handleSAMLStart to forward to the browser.
+func (s *Server) gotrueSSOFunc(cfg *authConfig) func(context.Context, string, string, string) (string, error) {
+	return func(ctx context.Context, providerID, redirectTo, codeChallenge string) (string, error) {
+		// JSON body (GoTrue's /sso decodes SingleSignOnParams from JSON).
+		// code_challenge_method is case-insensitive in GoTrue (lowercased
+		// before parse); send the canonical "s256".
+		payload, err := json.Marshal(map[string]string{
+			"provider_id":           providerID,
+			"redirect_to":           redirectTo,
+			"code_challenge":        codeChallenge,
+			"code_challenge_method": "s256",
+		})
+		if err != nil {
+			return "", err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			cfg.gotrueURL+"/sso", bytes.NewReader(payload))
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := gotrueSSOClient.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("sso start http: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusSeeOther {
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+			return "", fmt.Errorf("sso start http %d: %s", resp.StatusCode, bytes.TrimSpace(b))
+		}
+		loc := resp.Header.Get("Location")
+		if loc == "" {
+			return "", errors.New("sso start: 303 with no Location header")
+		}
+		return loc, nil
 	}
 }
 
@@ -955,7 +1160,16 @@ type stateClaims struct {
 	// (HttpOnly, scoped to /api/auth/, 10-minute TTL). Never persisted
 	// server-side and never leaves the cookie.
 	CodeVerifier string `json:"cv"`
-	ExpiresAt    int64  `json:"exp"`
+	// ProviderID is the GoTrue SSO provider_id when this is a SAML
+	// SP-initiated flow (set by handleSAMLStart), empty for the GitHub
+	// OAuth flow. It rides in TF's OWN signed state — NOT read back from
+	// the GoTrue JWT — so the callback's JIT step resolves the org binding
+	// from a value TF chose, never from anything the assertion carries
+	// (the GoTrue provider claims are version-fragile; see handleSAMLStart).
+	// Its non-empty presence at the callback is the authoritative "this
+	// login is SSO" signal.
+	ProviderID string `json:"pid,omitempty"`
+	ExpiresAt  int64  `json:"exp"`
 }
 
 func (sc stateClaims) sign(key [32]byte) (string, error) {

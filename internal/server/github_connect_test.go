@@ -567,15 +567,15 @@ func TestGitHubConnect_IdentityPersistsAcrossLoginProvider(t *testing.T) {
 		t.Fatalf("seed connect identity: %v", err)
 	}
 
-	// Re-login under a non-GitHub provider (e.g. Entra SAML): claims carry no
-	// user_name, so upsertUserFromClaims writes the users row but no identity
-	// row — the login_claim writer's deliberate no-op.
+	// Re-login under a non-GitHub provider (Entra SAML): isSSO=true, so
+	// upsertUserFromClaims writes the users row but never touches the github
+	// identity row — preserving the connect_oauth binding captured above.
 	claims := &verify.Claims{
 		Subject:      alice.String(),
 		Email:        "alice@corp.example",
 		UserMetadata: map[string]any{"full_name": "Alice Example"}, // no user_name
 	}
-	if err := upsertUserFromClaims(context.Background(), rig.h.AdminDB, alice, claims); err != nil {
+	if err := upsertUserFromClaims(context.Background(), rig.h.AdminDB, alice, claims, true); err != nil {
 		t.Fatalf("upsertUserFromClaims: %v", err)
 	}
 

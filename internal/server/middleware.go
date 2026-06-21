@@ -61,6 +61,12 @@ type authDeps struct {
 	// jwtExpiresAtUnix). Called from handleOAuthCallback.
 	gotrueExchange func(ctx context.Context, authCode, codeVerifier string) (accessToken string, refreshToken string, jwtExpiresAtUnix int64, err error)
 
+	// gotrueSSO drives the SP-initiated SAML start: POST gotrue's public
+	// /sso and return the 303 Location (the IdP redirect) to forward to
+	// the browser. Called from handleSAMLStart. SAML-only; the GitHub flow
+	// uses a plain /authorize browser redirect, not this.
+	gotrueSSO func(ctx context.Context, providerID, redirectTo, codeChallenge string) (location string, err error)
+
 	// gotrueLogout asks gotrue to invalidate the refresh-token family
 	// upstream. Called from handleLogout as best-effort — if it fails
 	// we still revoke the row locally and clear the cookie.

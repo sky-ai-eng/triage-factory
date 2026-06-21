@@ -162,7 +162,7 @@ Name it (e.g. "Triage Factory"), then open **Single sign-on** → **SAML**.
 | --- | --- |
 | **Identifier (Entity ID)** | `{TF_PUBLIC_URL}/auth/v1/sso/saml/metadata` |
 | **Reply URL (Assertion Consumer Service URL)** | `{TF_PUBLIC_URL}/auth/v1/sso/saml/acs` |
-| **Sign on URL** | `{TF_PUBLIC_URL}/sso` — TF's SP-initiated start endpoint (path finalized by TFAC-426/427) |
+| **Sign on URL** | `{TF_PUBLIC_URL}/api/auth/oauth/saml?provider_id=<your-provider_id>` — TF's SP-initiated start endpoint |
 
 The **Identifier** and **Reply URL** are GoTrue's SAML SP endpoints — fixed, and
 what make the federation work. The **Sign on URL** is what the My Apps tile
@@ -170,8 +170,15 @@ links to: setting it makes the tile do an **SP-initiated** redirect into Triage
 Factory rather than firing an unsolicited IdP-initiated assertion. SP-initiated
 binds the assertion to a request TF made in *this* browser session, which closes
 the login-CSRF hole that true IdP-initiated SAML leaves open — same one-click
-tile UX, safer flow. (The start endpoint itself ships with TFAC-426/427; until
-then, leave the Sign on URL set to the value above.)
+tile UX, safer flow.
+
+> **You'll fill in `<your-provider_id>` after step 2.5** — it's the `provider_id`
+> the registration call returns (also shown by `GET /api/sso/connection`). The
+> start endpoint validates it against your org's connection and rejects an
+> unknown or disabled one, so TF only ever initiates a flow for a connection you
+> registered. (Once the identifier-first login UX lands in TFAC-427, users can
+> also reach this endpoint by typing their email on the login screen — the
+> bookmark tile is the zero-typing path.)
 
 Leave Relay State and Logout Url blank.
 
@@ -238,17 +245,32 @@ Only org admins can reach these endpoints (a non-admin gets a 404), and a
 connection is always bound to the caller's own org — so it can never be attached
 to an org you don't administer.
 
+## The login flow (TFAC-426, shipped)
+
+Once the connection is registered, the SP-initiated login works end to end:
+
+1. The browser hits the **Sign on URL** above (the My Apps tile, or a direct
+   link): `GET {TF_PUBLIC_URL}/api/auth/oauth/saml?provider_id=<provider_id>`.
+2. TF validates the `provider_id` against your connection, then server-side POSTs
+   to GoTrue's public `/sso` and forwards the 303 to Entra (carrying a PKCE
+   challenge + TF's signed state — the `provider_id` rides in *TF's* state, never
+   read back from the assertion).
+3. Entra authenticates the user and posts the assertion to GoTrue's ACS; GoTrue
+   redirects back to TF's callback with a one-time `code`.
+4. TF exchanges the `code` for a verified session and, for a **first-time** SSO
+   user, **JIT-provisions** them as a `member` of the org that owns the
+   `provider_id` — the cross-org isolation boundary. The user lands in the app;
+   no onboarding, no manual invite. Promote them later via the roster (TFAC-417).
+
+A SAML login is always its own account — GoTrue does not link it to a GitHub
+login even at a matching email — and TF writes no GitHub identity row for it.
+
 ## What's next
 
-This page registers the provider and the connection. Still to come (separate
-tickets, not configured here):
+Still to come (separate tickets, not configured here):
 
-- **The `/sso` start endpoint + callback** that drives the SP-initiated flow and
-  consumes the assertion (TFAC-426).
-- **JIT provisioning + account merge** — a first SSO login mints a `member`
-  membership; a returning GitHub user with the same verified email merges to one
-  account (TFAC-426).
-- **Identifier-first login + the "Sign in with SSO" button** (TFAC-427).
+- **Identifier-first login + the "Sign in with SSO" button** (TFAC-427) — so
+  users reach the start endpoint by typing their email, not just via the tile.
 - **Email-domain claim + DNS-TXT verification** — proves an org owns a domain
   and routes that domain's logins to its connection, with verified-domain global
   uniqueness as the cross-org isolation linchpin (TFAC-428).
