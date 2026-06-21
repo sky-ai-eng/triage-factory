@@ -121,7 +121,7 @@ func (ih *invitesHandler) handleInviteCreate(w http.ResponseWriter, r *http.Requ
 	// dedups invite-vs-invite, not invite-vs-existing-member — so without this
 	// an admin could mint a pending invite for a current member: a dead ghost
 	// row whose sole outcome on accept is the idempotent "you're already a
-	// member" short-circuit (:467-484). We match on a *verified* identity email,
+	// member" short-circuit in handleInviteAccept. We match on a *verified* identity email,
 	// mirroring the principal-link rule: if it WOULD link on accept, block on
 	// create; an unverified identity email isn't a reliable dedup key. Scoped to
 	// THIS org only — inviting an existing TF user who belongs to another org is
