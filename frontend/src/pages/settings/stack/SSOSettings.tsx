@@ -21,7 +21,7 @@
 // Every endpoint resolves the org from the session's active org (no /api/orgs/
 // prefix), so the apiClient calls pass no `org` option.
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, Copy, Trash2 } from 'lucide-react'
 import * as Switch from '@radix-ui/react-switch'
 import { apiFetch, apiJSON, httpErrorMessage } from '../../../lib/apiClient'
@@ -34,27 +34,37 @@ export default function SSOSettings() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [resp, setResp] = useState<SSOConnectionResponse | null>(null)
   const [domains, setDomains] = useState<SSODomain[]>([])
-
-  const load = useCallback(async () => {
-    setLoading(true)
-    setLoadError(null)
-    try {
-      const conn = await apiJSON<SSOConnectionResponse>('/api/sso/connection')
-      // Domains attach to a connection, so skip the (always-empty) list fetch
-      // when none is registered yet.
-      const doms = conn.connection ? await apiJSON<SSODomain[]>('/api/sso/domains') : []
-      setResp(conn)
-      setDomains(doms)
-    } catch (e) {
-      setLoadError(httpErrorMessage(e, 'Could not load SSO settings.'))
-    } finally {
-      setLoading(false)
-    }
-  }, [])
+  // Bumping reloadKey re-runs the load effect; its cleanup cancels any in-flight
+  // load first, so a rapid Retry (or an unmount mid-load) can't let a stale
+  // completion win or setState on an unmounted component — mirrors the
+  // cancelled-flag guard in the sibling OrgSettings.load.
+  const [reloadKey, setReloadKey] = useState(0)
+  const reload = () => setReloadKey((k) => k + 1)
 
   useEffect(() => {
-    void load()
-  }, [load])
+    let cancelled = false
+    setLoading(true)
+    setLoadError(null)
+    void (async () => {
+      try {
+        const conn = await apiJSON<SSOConnectionResponse>('/api/sso/connection')
+        // Domains attach to a connection, so skip the (always-empty) list fetch
+        // when none is registered yet.
+        const doms = conn.connection ? await apiJSON<SSODomain[]>('/api/sso/domains') : []
+        if (cancelled) return
+        setResp(conn)
+        setDomains(doms)
+      } catch (e) {
+        if (cancelled) return
+        setLoadError(httpErrorMessage(e, 'Could not load SSO settings.'))
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [reloadKey])
 
   if (loading) {
     return <p className="text-[13px] text-text-tertiary">Loading SSO settings…</p>
@@ -63,7 +73,7 @@ export default function SSOSettings() {
     return (
       <div className="text-[13px] text-text-secondary">
         {loadError ?? 'Could not load SSO settings.'}{' '}
-        <button type="button" onClick={() => void load()} className="text-accent underline">
+        <button type="button" onClick={reload} className="text-accent underline">
           Retry
         </button>
       </div>
@@ -289,7 +299,7 @@ function DomainsBlock({
   return (
     <div className="space-y-3">
       <BlockHeader
-        title="Verified domains"
+        title="Email domains"
         hint="Claim each email domain your members sign in with, then prove control by publishing the DNS record shown. Only a verified domain routes sign-in to your organization."
       />
 
@@ -467,11 +477,21 @@ function StatusBadge({ verified }: { verified: boolean }) {
 // labels itself "Copy {label}".
 function CopyField({ label, value, hint }: { label: string; value: string; hint?: string }) {
   const [copied, setCopied] = useState(false)
+  // Hold the "Copied" reset timer so an unmount (or a rapid re-copy) clears it
+  // rather than firing setCopied on a gone component.
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(
+    () => () => {
+      if (timerRef.current) clearTimeout(timerRef.current)
+    },
+    [],
+  )
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(value)
       setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
+      if (timerRef.current) clearTimeout(timerRef.current)
+      timerRef.current = setTimeout(() => setCopied(false), 1500)
     } catch {
       // Clipboard denied — the value is still selectable in the field.
     }

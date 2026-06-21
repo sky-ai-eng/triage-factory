@@ -490,14 +490,17 @@ export interface AcceptInviteMismatch {
  *  the org↔provider binding — `provider_id` is the bridge, and these carry no
  *  IdP secrets (the signing material lives in GoTrue). */
 
+/** The IdP protocol of a connection. SAML today; OIDC is a sibling for later
+ *  (picked per the customer's IdP). */
+export type SSOConnectionKind = 'saml' | 'oidc'
+
 /** One registered IdP connection, from the `connection` field of
  *  GET/POST/PATCH /api/sso/connection (null until one is registered). A freshly
  *  registered connection is created enabled; disabling pauses SSO sign-in
  *  without removing the binding. */
 export interface SSOConnection {
   id: string
-  /** 'saml' | 'oidc' — today always 'saml'. */
-  kind: string
+  kind: SSOConnectionKind
   /** GoTrue sso_providers.id (UUID); opaque to TF, globally unique. */
   provider_id: string
   /** The org_role JIT-provisioned users get: 'admin' | 'member' (never owner). */
