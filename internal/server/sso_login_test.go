@@ -160,6 +160,21 @@ func (r *authRig) membershipCount(userID, orgID uuid.UUID) int {
 	return n
 }
 
+// principalOf resolves a GoTrue login identity (auth.users id) to its principal
+// (public.users id) via the user_identities link the callback writes. A genuine
+// first login mints a fresh principal, so memberships land on the principal, not
+// the auth identity — assertions must key on this.
+func (r *authRig) principalOf(authUserID uuid.UUID) uuid.UUID {
+	r.t.Helper()
+	var pid uuid.UUID
+	if err := r.h.AdminDB.QueryRow(
+		`SELECT user_id FROM user_identities WHERE auth_user_id = $1`, authUserID,
+	).Scan(&pid); err != nil {
+		r.t.Fatalf("resolve principal for identity %s: %v", authUserID, err)
+	}
+	return pid
+}
+
 // ---------- callback / JIT tests ----------
 
 // Existing member via SAML → session, lands in their org.
@@ -215,12 +230,13 @@ func TestSSOLogin_NewUser_JITProvisionsMember(t *testing.T) {
 	}
 	sid := r.sidFromResp(resp)
 
-	if got := r.membershipCount(user, uuid.Nil); got != 1 {
+	principal := r.principalOf(user)
+	if got := r.membershipCount(principal, uuid.Nil); got != 1 {
 		t.Fatalf("memberships=%d, want exactly 1", got)
 	}
 	var gotOrg, gotRole string
 	if err := r.h.AdminDB.QueryRow(
-		`SELECT org_id::text, role FROM org_memberships WHERE user_id=$1`, user,
+		`SELECT org_id::text, role FROM org_memberships WHERE user_id=$1`, principal,
 	).Scan(&gotOrg, &gotRole); err != nil {
 		t.Fatalf("read membership: %v", err)
 	}
@@ -260,10 +276,11 @@ func TestSSOLogin_Isolation_ProviderBoundToANeverProvisionsB(t *testing.T) {
 	}
 	sid := r.sidFromResp(resp)
 
-	if got := r.membershipCount(user, orgA); got != 1 {
+	principal := r.principalOf(user)
+	if got := r.membershipCount(principal, orgA); got != 1 {
 		t.Errorf("org A memberships=%d, want 1", got)
 	}
-	if got := r.membershipCount(user, orgB); got != 0 {
+	if got := r.membershipCount(principal, orgB); got != 0 {
 		t.Errorf("LEAK: org B memberships=%d, want 0 — A's provider provisioned into B", got)
 	}
 	if me := r.me(sid); me.ActiveOrgID != orgA.String() {

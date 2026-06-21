@@ -1545,7 +1545,7 @@ CREATE TABLE public.user_settings (
 --
 
 CREATE TABLE public.users (
-    id uuid NOT NULL,
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
     display_name text,
     avatar_url text,
     timezone text DEFAULT 'UTC'::text NOT NULL,
@@ -3582,11 +3582,14 @@ ALTER TABLE ONLY public.users
 
 
 --
--- Name: users users_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- public.users is the PRINCIPAL table (one row per human) and is intentionally
+-- NOT foreign-keyed to auth.users: one principal can hold several GoTrue login
+-- identities (GitHub + N SSO providers), since GoTrue mints a distinct
+-- auth.users per SSO provider and refuses to link them. The bridge to GoTrue
+-- lives on public.user_identities.auth_user_id; identities resolve to one
+-- principal via verified-email linking at login. See the principal identity
+-- model near the end of this file.
 --
-
-ALTER TABLE ONLY public.users
-    ADD CONSTRAINT users_id_fkey FOREIGN KEY (id) REFERENCES auth.users(id) ON DELETE CASCADE;
 
 
 --
@@ -6269,6 +6272,674 @@ REVOKE ALL ON FUNCTION public.vault_delete_user_secret(p_org_id uuid, p_user_id 
 REVOKE ALL ON FUNCTION public.vault_delete_user_secret(p_org_id uuid, p_user_id uuid, p_key text) FROM anon, authenticated, service_role;
 GRANT ALL ON FUNCTION public.vault_delete_user_secret(p_org_id uuid, p_user_id uuid, p_key text) TO postgres;
 GRANT ALL ON FUNCTION public.vault_delete_user_secret(p_org_id uuid, p_user_id uuid, p_key text) TO tf_app;
+
+
+--
+-- consolidated from 202606150001_org_jira_apps.sql
+--
+
+-- Per-org Atlassian OAuth (3LO) app registration — the (client_id,
+-- client_secret) of the Atlassian app the per-user "Connect Jira"
+-- authorize/token flow runs against. Mirrors org_github_apps but far simpler:
+-- an Atlassian OAuth app has no installations, no PEM, and no webhook secret,
+-- only the OAuth client credentials.
+--
+-- This row is the per-org OVERRIDE in credential precedence: an org with no
+-- row uses the deployment first-party app (read from operator config). The
+-- client_secret_ref column holds a Vault secret-name pointer (the actual
+-- client_secret is written via the vault helpers) so the app secret never
+-- lives in the relational schema — same discipline as org_github_apps.
+
+CREATE TABLE public.org_jira_apps (
+    org_id uuid NOT NULL,
+    client_id text NOT NULL,
+    client_secret_ref text NOT NULL,
+    registered_at timestamp with time zone DEFAULT now() NOT NULL,
+    registered_by_user_id uuid
+);
+
+ALTER TABLE ONLY public.org_jira_apps
+    ADD CONSTRAINT org_jira_apps_pkey PRIMARY KEY (org_id);
+
+ALTER TABLE ONLY public.org_jira_apps
+    ADD CONSTRAINT org_jira_apps_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.org_jira_apps
+    ADD CONSTRAINT org_jira_apps_registered_by_user_id_fkey FOREIGN KEY (registered_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+ALTER TABLE public.org_jira_apps ENABLE ROW LEVEL SECURITY;
+
+-- Writes are admin-only (registering / rotating an OAuth app is a sensitive
+-- workspace gesture). Reads open to any org member so the OAuth-app resolver
+-- running on the app pool can see whether the org has its own app on the read
+-- path. Mirrors the org_github_apps policies.
+CREATE POLICY org_jira_apps_select ON public.org_jira_apps FOR SELECT TO tf_app
+    USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+
+CREATE POLICY org_jira_apps_insert ON public.org_jira_apps FOR INSERT TO tf_app
+    WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+
+CREATE POLICY org_jira_apps_update ON public.org_jira_apps FOR UPDATE TO tf_app
+    USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)))
+    WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+
+CREATE POLICY org_jira_apps_delete ON public.org_jira_apps FOR DELETE TO tf_app
+    USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+
+GRANT ALL ON TABLE public.org_jira_apps TO postgres;
+GRANT ALL ON TABLE public.org_jira_apps TO anon;
+GRANT ALL ON TABLE public.org_jira_apps TO authenticated;
+GRANT ALL ON TABLE public.org_jira_apps TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_jira_apps TO tf_app;
+
+
+--
+-- consolidated from 202606160001_jira_identity_cloud_source.sql
+--
+
+-- Widen user_jira_identities.source to admit 'cloud_api_token' — the provenance
+-- marker the Cloud per-user API-token bind records (the paste counterpart of the
+-- Data Center 'pat'). The value set stays closed (identity provenance is
+-- security-relevant); this only adds the one Cloud paste method. Cloud OAuth
+-- ('connect_oauth') was already allowed by the baseline.
+ALTER TABLE public.user_jira_identities DROP CONSTRAINT user_jira_identities_source_check;
+ALTER TABLE public.user_jira_identities ADD CONSTRAINT user_jira_identities_source_check
+    CHECK ((source = ANY (ARRAY['pat'::text, 'connect_oauth'::text, 'scim'::text, 'cloud_api_token'::text])));
+
+
+--
+-- consolidated from 202606160002_vault_put_user_secret_system.sql
+--
+
+-- vault_put_user_secret_system — the write-side mirror of
+-- vault_get_user_secret_system: persist a per-user secret WITHOUT a request JWT,
+-- for system/background code acting as a user. The motivating caller is the
+-- Cloud OAuth access-token minter — Atlassian rotates the refresh token on every
+-- refresh, so the minter must write the new refresh token back into the user's
+-- credential envelope while running on the claims-free admin pool (the
+-- write-actor resolver holds no JWT). The claims-checked vault_put_user_secret
+-- is unreachable there, exactly as the read path needs the _system door.
+--
+-- Same name convention as the rest of the per-user vault wrappers:
+-- 'org/<org_id>/user/<user_id>/<key>'. No current_org_id()/current_user_id()
+-- gate — p_org_id + p_user_id are trusted because the EXECUTE grant restricts
+-- this to the admin/system pool (tf_app has none). A NULL org/user is a caller
+-- bug, refused explicitly rather than building a malformed name.
+
+-- +goose StatementBegin
+CREATE FUNCTION public.vault_put_user_secret_system(p_org_id uuid, p_user_id uuid, p_key text, p_secret text, p_description text DEFAULT NULL::text) RETURNS uuid
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+  v_full_name TEXT := 'org/' || p_org_id::text || '/user/' || p_user_id::text || '/' || p_key;
+  v_existing  UUID;
+  v_desc      TEXT := COALESCE(p_description, '');
+BEGIN
+  IF p_org_id IS NULL OR p_user_id IS NULL THEN
+    RAISE EXCEPTION 'system Vault access denied: p_org_id or p_user_id is NULL'
+      USING ERRCODE = '22004';
+  END IF;
+  SELECT id INTO v_existing FROM vault.decrypted_secrets WHERE name = v_full_name;
+  IF v_existing IS NOT NULL THEN
+    PERFORM vault.update_secret(v_existing, p_secret, v_full_name, v_desc);
+    RETURN v_existing;
+  END IF;
+  RETURN vault.create_secret(p_secret, v_full_name, v_desc);
+END;
+$$;
+-- +goose StatementEnd
+
+-- System/admin pool ONLY. Deliberately NOT granted to tf_app: the app pool must
+-- stay on the claims-checked vault_put_user_secret. Mirrors the
+-- vault_get_user_secret_system grant matrix exactly.
+REVOKE ALL ON FUNCTION public.vault_put_user_secret_system(p_org_id uuid, p_user_id uuid, p_key text, p_secret text, p_description text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.vault_put_user_secret_system(p_org_id uuid, p_user_id uuid, p_key text, p_secret text, p_description text) FROM anon, authenticated, service_role;
+GRANT ALL ON FUNCTION public.vault_put_user_secret_system(p_org_id uuid, p_user_id uuid, p_key text, p_secret text, p_description text) TO postgres;
+
+
+--
+-- consolidated from 202606170001_org_secrets_app_encrypted.sql
+--
+
+--
+-- TFAC-402: replace Supabase Vault / pgsodium secret storage with
+-- app-layer AES-256-GCM. The Vault root key lives in the postgres
+-- container filesystem (/etc/postgresql-custom/pgsodium_root.key), NOT
+-- on the pg-data volume, so any container recreate regenerates it and
+-- renders every previously-stored secret permanently undecryptable —
+-- operator data-loss on a routine `docker compose down/up`.
+--
+-- The fix is structural: stop delegating secret encryption to Postgres.
+-- The TF binary now encrypts org/user integration secrets app-side with
+-- TF_SECRET_ENCRYPTION_KEY (a .env key, same model as
+-- TF_SESSION_ENCRYPTION_KEY) and stores opaque ciphertext in this normal
+-- RLS-gated table. A DB dump then yields only AES ciphertext, and there
+-- is no Postgres-side key left to lose.
+--
+-- Fresh-installs-only (multi mode hasn't shipped): no data migration. The
+-- supabase_vault / pgsodium extensions stay loaded (image-managed,
+-- harmless) — TF simply stops using them, so the vault_* wrapper
+-- functions are dropped at the bottom of this migration.
+
+CREATE TABLE public.org_secrets (
+    -- Surrogate PK. The natural key (org_id, COALESCE(user_id, …), key) can't
+    -- serve as one — it's an expression over a nullable column — so a surrogate
+    -- id carries the PK that the rest of this schema, logical replication / CDC,
+    -- and the Supabase tooling all expect. The unique index below is what
+    -- actually dedups and what the UPSERTs target.
+    id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id      uuid NOT NULL REFERENCES public.orgs(id) ON DELETE CASCADE,
+    -- NULL for org-scope secrets; the owning user's id for per-user
+    -- secrets (the Jira "act as yourself" credential). The two scopes
+    -- share one table, discriminated by user_id, mirroring the
+    -- vault_*_org_secret / vault_*_user_secret split.
+    user_id     uuid NULL REFERENCES public.users(id) ON DELETE CASCADE,
+    key         text NOT NULL,
+    -- AES-256-GCM ciphertext + its 12-byte nonce, produced by
+    -- internal/aead. Stored as separate columns so the schema is
+    -- self-describing (the nonce is not prefixed onto the ciphertext).
+    ciphertext  bytea NOT NULL,
+    nonce       bytea NOT NULL,
+    description text NOT NULL DEFAULT '',
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    updated_at  timestamptz NOT NULL DEFAULT now(),
+    -- Schema-level invariants (defense-in-depth — the app is the only writer
+    -- and always satisfies them). A secret must have a name; AES-256-GCM uses a
+    -- 12-byte nonce and appends a 16-byte auth tag, so ciphertext is never
+    -- shorter than the tag. Corruption or a manual mis-insert trips here at
+    -- write time instead of surfacing as a decrypt failure much later.
+    CONSTRAINT org_secrets_key_nonempty CHECK (key <> ''),
+    CONSTRAINT org_secrets_nonce_len CHECK (octet_length(nonce) = 12),
+    CONSTRAINT org_secrets_ciphertext_len CHECK (octet_length(ciphertext) >= 16)
+);
+
+-- At most one row per (scope, key). user_id NULL (org scope) collapses to
+-- the all-zero sentinel UUID so org-scope and per-user rows can't collide
+-- and a partial unique index is unnecessary. The Put/PutUser UPSERTs name
+-- this exact expression in their ON CONFLICT target.
+CREATE UNIQUE INDEX org_secrets_scope_key_uniq
+    ON public.org_secrets (
+        org_id,
+        COALESCE(user_id, '00000000-0000-0000-0000-000000000000'::uuid),
+        key
+    );
+
+ALTER TABLE public.org_secrets ENABLE ROW LEVEL SECURITY;
+
+-- Two permissive policies, scoped to tf_app, that reproduce the dropped
+-- vault_* gates exactly. Permissive policies combine with OR, so the
+-- effective gate is:
+--   (org-scope row AND org matches) OR (own user-scope row AND org matches)
+-- The admin pool (supabase_admin) bypasses RLS entirely and is the only
+-- path to the *System reads/writes — it trusts the explicit org_id /
+-- user_id args, exactly as vault_get_org_secret_system did.
+
+-- Org-scope rows (user_id IS NULL): gate on org only, mirroring
+-- vault_get_org_secret's `p_org_id = current_org_id()` check.
+CREATE POLICY org_secrets_org ON public.org_secrets
+    FOR ALL
+    TO tf_app
+    USING (user_id IS NULL AND org_id = tf.current_org_id())
+    WITH CHECK (user_id IS NULL AND org_id = tf.current_org_id());
+
+-- Per-user rows: gate on org AND user, mirroring vault_get_user_secret's
+-- additional `p_user_id = current_user_id()` check. This is the
+-- load-bearing cross-user boundary — a session acting as user A cannot
+-- see user B's secret.
+CREATE POLICY org_secrets_user ON public.org_secrets
+    FOR ALL
+    TO tf_app
+    USING (user_id = tf.current_user_id() AND org_id = tf.current_org_id())
+    WITH CHECK (user_id = tf.current_user_id() AND org_id = tf.current_org_id());
+
+-- supabase_admin's ALTER DEFAULT PRIVILEGES auto-grants public-schema
+-- tables to anon/authenticated/service_role at CREATE time. Strip them: a
+-- secrets table must be reachable only by tf_app, even if RLS were ever
+-- misconfigured (the dropped vault_* wrappers were REVOKE'd from these
+-- roles for exactly this reason). supabase_admin (admin pool) owns the
+-- table as superuser and bypasses RLS for the *System methods.
+REVOKE ALL ON public.org_secrets FROM PUBLIC;
+REVOKE ALL ON public.org_secrets FROM anon, authenticated, service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.org_secrets TO tf_app;
+
+-- Vault / pgsodium wrappers are dead after the rewrite. Drop all nine
+-- (4 org + 5 user, including the two _system variants). IF EXISTS so the
+-- migration expresses "ensure these are gone" idempotently — it won't
+-- fail on a divergent DB where one was already removed. The
+-- supabase_vault / pgsodium extensions and the vault schema stay (image-
+-- managed); only TF's wrapper functions go.
+DROP FUNCTION IF EXISTS public.vault_put_org_secret(uuid, text, text, text);
+DROP FUNCTION IF EXISTS public.vault_get_org_secret(uuid, text);
+DROP FUNCTION IF EXISTS public.vault_get_org_secret_system(uuid, text);
+DROP FUNCTION IF EXISTS public.vault_delete_org_secret(uuid, text);
+DROP FUNCTION IF EXISTS public.vault_put_user_secret(uuid, uuid, text, text, text);
+DROP FUNCTION IF EXISTS public.vault_get_user_secret(uuid, uuid, text);
+DROP FUNCTION IF EXISTS public.vault_get_user_secret_system(uuid, uuid, text);
+DROP FUNCTION IF EXISTS public.vault_delete_user_secret(uuid, uuid, text);
+DROP FUNCTION IF EXISTS public.vault_put_user_secret_system(uuid, uuid, text, text, text);
+
+
+--
+-- consolidated from 202606170002_dashboard_backfill_marker.sql
+--
+
+-- dashboard_backfilled_at marks that the one-shot trailing-window dashboard
+-- history backfill has run for this (user, host) GitHub identity (TFAC-396).
+-- See the SQLite sibling migration for the full rationale. NULL = eligible; a
+-- timestamp = done. Written by the claims-free backfill worker through the
+-- admin pool (MarkDashboardBackfilledSystem), so it carries no RLS policy of
+-- its own beyond the table's existing per-user gates.
+ALTER TABLE public.user_github_identities ADD COLUMN dashboard_backfilled_at timestamp with time zone;
+
+
+--
+-- consolidated from 202606180001_permission_absent_autodeny.sql
+--
+
+-- Presence-gated fast auto-deny for unattended permission prompts (TFAC-392).
+-- See the SQLite sibling migration for the full rationale. permission_absent_grace_ms
+-- is the grace window (ms) an unattended prompt waits before denying with
+-- "no operator available"; permission_absent_autodeny_enabled is the master toggle
+-- (false = today's full-permTimeout() behavior, byte-for-byte). Both ship NOT NULL
+-- with the same defaults as the SQLite tree and domain.DefaultTeamSettings().
+ALTER TABLE public.team_settings ADD COLUMN permission_absent_grace_ms integer NOT NULL DEFAULT 15000;
+ALTER TABLE public.team_settings ADD COLUMN permission_absent_autodeny_enabled boolean NOT NULL DEFAULT true;
+
+
+--
+-- consolidated from 202606180002_org_invites.sql
+--
+
+--
+-- TFAC-416: TF-owned, link-based org invites. An org admin creates an
+-- invite (email + role + optional target team) and gets back a one-time
+-- accept_url; the recipient authenticates (GitHub OAuth today, SSO later)
+-- and redeems the raw token, which mints their org_memberships row via the
+-- shared grantOrgMembership primitive. GoTrue stays a pure identity
+-- provider — TF owns the org/role/team binding.
+--
+-- Postgres only: local mode (N=1) never mounts the invite routes, so there
+-- is no SQLite twin.
+--
+-- The raw token is NEVER stored. create-invite generates 32 random bytes,
+-- hands the base64url token back once in the accept_url, and persists only
+-- sha256(token) in token_hash. Redeem hashes the presented token and looks
+-- it up by that hash.
+
+-- Tenant-scoped FK target for target_team_id below. teams.id is already the
+-- PK, so (id, org_id) is trivially unique; declaring it lets org_invites FK
+-- the *pair* and pin a target team to the invite's own org at the schema
+-- level — the same (id, org_id)-unique + composite-FK pattern the rest of the
+-- schema uses (agents, entities, runs, tasks, blueprint_runs, …). teams is
+-- just the one parent that never needed it until now.
+ALTER TABLE public.teams ADD CONSTRAINT teams_id_org_id_key UNIQUE (id, org_id);
+
+CREATE TABLE public.org_invites (
+    id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id         uuid NOT NULL REFERENCES public.orgs(id)  ON DELETE CASCADE,
+    email          text NOT NULL,               -- stored lower-cased (app normalizes)
+    role           public.org_role NOT NULL DEFAULT 'member',
+    target_team_id uuid NULL,                   -- NULL = org-only; composite FK below pins it to org_id
+    token_hash     bytea NOT NULL,              -- sha256(raw token); raw token is NEVER stored
+    invited_by     uuid NULL REFERENCES public.users(id) ON DELETE SET NULL, -- audit only
+    expires_at     timestamptz NOT NULL,
+    accepted_at    timestamptz NULL,
+    accepted_by    uuid NULL REFERENCES public.users(id) ON DELETE SET NULL, -- who redeemed (audit)
+    revoked_at     timestamptz NULL,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    updated_at     timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT org_invites_email_nonempty CHECK (email <> ''),
+    -- owner is the orgs.owner_user_id sentinel, managed by the ownership-transfer
+    -- ticket (#5), never granted via invite. Encodes the role ceiling at the schema.
+    CONSTRAINT org_invites_role_not_owner CHECK (role <> 'owner'),
+    -- Tenant-scoped FK: a non-NULL target_team_id MUST belong to this invite's
+    -- own org. This is the load-bearing cross-org guard — the redeem/grant path
+    -- runs on the admin pool (BYPASSRLS), so RLS can't protect it; only the
+    -- integrity of this stored row can. MATCH SIMPLE means a NULL
+    -- target_team_id skips the check (org-only invites). ON DELETE SET NULL
+    -- (target_team_id) nulls just the team ref when a team is deleted, leaving
+    -- the NOT NULL org_id intact (same pg15 column-list form blueprint_runs
+    -- uses). The app layer validates this too, for a friendly 400 instead of a
+    -- raw FK violation; this is the backstop that holds on every write path.
+    CONSTRAINT org_invites_target_team_fkey
+        FOREIGN KEY (target_team_id, org_id) REFERENCES public.teams (id, org_id)
+        ON DELETE SET NULL (target_team_id)
+);
+
+-- Redeem lookup is by token hash.
+CREATE UNIQUE INDEX org_invites_token_hash_uniq ON public.org_invites (token_hash);
+
+-- At most ONE active (un-accepted, un-revoked) invite per (org, email). Re-inviting
+-- an accepted/revoked address is allowed (a new row); a second *pending* invite to
+-- the same address conflicts. Matches the tasks-dedup partial-unique pattern.
+CREATE UNIQUE INDEX org_invites_active_uniq
+    ON public.org_invites (org_id, lower(email))
+    WHERE accepted_at IS NULL AND revoked_at IS NULL;
+
+-- BEFORE-UPDATE trigger keeps updated_at fresh, matching other tables.
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.org_invites
+    FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+
+ALTER TABLE public.org_invites ENABLE ROW LEVEL SECURITY;
+
+-- The admin-facing surface (create/list/revoke) is gated to org-admin in
+-- the current org, mirroring the org_memberships admin policies. The redeem
+-- surface (preview/accept) is NOT expressible in RLS — the actor is an
+-- outsider holding a token, with no membership — so those run on the admin
+-- pool (BYPASSRLS), with the token itself as the authorization.
+CREATE POLICY org_invites_select ON public.org_invites FOR SELECT
+  USING ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id));
+
+CREATE POLICY org_invites_insert ON public.org_invites FOR INSERT
+  WITH CHECK ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id));
+
+CREATE POLICY org_invites_update ON public.org_invites FOR UPDATE
+  USING ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id))
+  WITH CHECK ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id));
+
+-- supabase_admin's ALTER DEFAULT PRIVILEGES auto-grants public-schema
+-- tables to anon/authenticated/service_role at CREATE time. Strip them so
+-- the table is reachable only by tf_app (under RLS) and the admin pool
+-- (which owns it as superuser and bypasses RLS for the redeem paths) —
+-- same posture as org_secrets.
+REVOKE ALL ON public.org_invites FROM PUBLIC;
+REVOKE ALL ON public.org_invites FROM anon, authenticated, service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.org_invites TO tf_app;
+
+
+--
+-- consolidated from 202606180003_guard_org_owners_security_definer.sql
+--
+
+-- guard_org_owners is the global invariant "every org must retain ≥1 owner",
+-- fired by AFTER UPDATE/DELETE statement triggers on org_memberships. The
+-- baseline created it SECURITY INVOKER (the default), so its owner-existence
+-- check ran under the mutating caller's RLS context — fine for an admin
+-- removing/demoting someone (the admin still satisfies org_memberships_select
+-- and sees every row), but BROKEN for a self-leave: the DELETE removes the
+-- caller's own membership row, and org_memberships_select gates peer rows on
+-- tf.user_has_org_access(), which now returns false for the just-departed
+-- caller. The check then sees zero rows, concludes the org has no owner, and
+-- raises a false 23514 — so a non-owner could never leave.
+--
+-- A global-invariant guard must evaluate the TRUE org state, not the caller's
+-- RLS-filtered view. Make it SECURITY DEFINER (matching every other tf.*
+-- helper) so the owner count is read past RLS. The body is otherwise the
+-- baseline's verbatim; search_path stays pinned, so the definer rights are
+-- safe. Behavior for admin-context mutations is unchanged (they already saw
+-- the full set); this only repairs the self-delete case.
+
+-- +goose StatementBegin
+CREATE OR REPLACE FUNCTION tf.guard_org_owners() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM affected ao
+    WHERE NOT EXISTS (
+      SELECT 1 FROM org_memberships
+       WHERE org_id = ao.org_id AND role = 'owner'
+    )
+  ) THEN
+    RAISE EXCEPTION 'each org must retain at least one owner role'
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NULL;
+END;
+$$;
+-- +goose StatementEnd
+
+
+--
+-- consolidated from 202606200001_sso.sql
+--
+
+--
+-- TFAC-425 (epic TFAC-422): the TF-owned SSO binding tables. Two tables,
+-- both multi-org from the start because app.triagefactory.com runs the
+-- identical image as a self-host and its orgs are mutually-distrusting
+-- paying customers:
+--
+--   - sso_connections — an org↔IdP-provider binding. Protocol-agnostic
+--     core (SAML today, OIDC a sibling later). The provider_id column is
+--     the ONE bridge to GoTrue (its sso_providers.id, a UUID — confirmed
+--     by the TFAC-423 spike). TF owns authorization (the org + default
+--     role); GoTrue owns authN + the provider registry. The binding lives
+--     HERE, not in auth.users.app_metadata, because RLS reads roles from
+--     TF tables, roles are per-(user,org), and authz writes must be
+--     transactional.
+--
+--   - sso_domains — verified email domains used to route an identifier-
+--     first login (email → connection). DNS-TXT verification (the WorkOS
+--     pattern); the token column is published publicly by design. The
+--     load-bearing isolation guarantee is sso_domains_verified_global_uniq:
+--     a *verified* domain belongs to at most one org across the whole
+--     deployment. Pending claims are non-exclusive; first-to-verify wins.
+--
+-- Postgres only: SSO is a multi-mode concept. Local mode (N=1) never
+-- registers a connection, so there is no SQLite twin — the SQLite store
+-- impls are stubs returning ErrNotApplicableInLocal.
+--
+-- Follows the org_invites / org_secrets style: goose Up/Down, Down is a
+-- no-op, public-schema default grants stripped down to tf_app + the admin
+-- pool.
+
+CREATE TABLE public.sso_connections (
+    id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id       uuid NOT NULL REFERENCES public.orgs(id) ON DELETE CASCADE,
+    kind         text NOT NULL DEFAULT 'saml',
+    -- GoTrue sso_providers.id (a UUID), stored as text: TF treats it as an
+    -- opaque handle — no FK into GoTrue's schema, no UUID operations on it.
+    -- This is the ONLY bridge to GoTrue; everything else (org, role) is
+    -- TF-owned. Globally unique (the index below) so one GoTrue provider
+    -- maps to exactly one org — the JIT isolation boundary (TFAC-426).
+    provider_id  text NOT NULL,
+    -- The role JIT provisioning grants a first-time SSO user. Everyone
+    -- starts 'member'; promotion is manual via the roster (TFAC-417). The
+    -- CHECK encodes the ceiling at the schema: 'owner' is the orgs.owner_
+    -- user_id sentinel, never granted via SSO.
+    default_role public.org_role NOT NULL DEFAULT 'member',
+    enabled      boolean NOT NULL DEFAULT true,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    updated_at   timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT sso_connections_kind_chk       CHECK (kind IN ('saml','oidc')),
+    CONSTRAINT sso_connections_role_not_owner CHECK (default_role <> 'owner')
+);
+
+-- One org per GoTrue provider, deployment-wide. The login-time JIT read
+-- (GetByProviderID) looks up by this key; uniqueness is what makes
+-- "provider_id → org" a function, not a relation.
+CREATE UNIQUE INDEX sso_connections_provider_uniq ON public.sso_connections (provider_id);
+
+-- (id, org_id) is trivially unique (id is already the PK), declared so
+-- sso_domains can FK the *pair* and pin a domain to its connection's own org
+-- at the schema level — the same (id, org_id)-unique + composite-FK pattern
+-- the rest of the schema uses (agents, entities, runs, tasks, blueprint_runs,
+-- teams). RLS gates the org_id *column* on write, but only this FK keeps a
+-- domain's connection_id in the same org as its org_id.
+ALTER TABLE public.sso_connections ADD CONSTRAINT sso_connections_id_org_id_key UNIQUE (id, org_id);
+
+CREATE TABLE public.sso_domains (
+    id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    -- connection_id carries no standalone FK: it's the lead column of the
+    -- composite FK below, which ties (connection_id, org_id) to the parent's
+    -- (id, org_id) so a domain can only ever point at a connection in its own
+    -- org.
+    connection_id uuid NOT NULL,
+    -- Denormalized from the parent connection for two reasons: the RLS
+    -- policies gate directly on org_id (no join to the parent on every row
+    -- check), and the routing read carries it without a second hop. RLS's
+    -- INSERT WITH CHECK pins this column to tf.current_org_id() (the writer's
+    -- own org) — but that alone does NOT stop a self-org row from pointing
+    -- connection_id at another org's connection (a UUID RLS hides but which
+    -- an admin/system writer could still supply). The composite FK below is
+    -- what closes that gap: it's the load-bearing cross-org guard, and it
+    -- holds on every write path including any future admin-pool / JIT / SCIM
+    -- writer, the same backstop org_invites' composite target_team FK gives.
+    org_id        uuid NOT NULL REFERENCES public.orgs(id) ON DELETE CASCADE,
+    domain        text NOT NULL,
+    -- DNS-TXT verification token (_triagefactory-verification.<domain>).
+    -- Published publicly by design — it proves control of the DNS zone,
+    -- it is not a secret.
+    token         text NOT NULL,
+    -- NULL until the DNS-TXT check passes (TFAC-428). A row is inert until
+    -- verified: pending claims don't route and don't reserve the domain.
+    verified_at   timestamptz NULL,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    updated_at    timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT sso_domains_domain_nonempty CHECK (domain <> ''),
+    -- A claim with an empty verification token is nonsensical — it would
+    -- yield `_triagefactory-verification.<domain> ""` in the DNS-TXT
+    -- challenge (TFAC-428). NOT NULL alone permits ''; mirror the domain
+    -- non-empty guard.
+    CONSTRAINT sso_domains_token_nonempty CHECK (token <> ''),
+    -- Tenant-scoped composite FK: a domain's (connection_id, org_id) must
+    -- match a real sso_connections (id, org_id) pair, so connection_id is
+    -- forced into the same org as org_id. Both columns are NOT NULL, so
+    -- MATCH SIMPLE always checks. ON DELETE CASCADE retires a connection's
+    -- domains with it (the behavior the old single-column FK had).
+    CONSTRAINT sso_domains_connection_fkey
+        FOREIGN KEY (connection_id, org_id) REFERENCES public.sso_connections (id, org_id)
+        ON DELETE CASCADE
+);
+
+-- One pending/active claim per (org, domain) — dedups a re-claim within
+-- an org. Case-insensitive (lower(domain)) because domains are.
+CREATE UNIQUE INDEX sso_domains_org_domain_uniq ON public.sso_domains (org_id, lower(domain));
+
+-- THE isolation guarantee: a VERIFIED domain belongs to <=1 org across the
+-- whole deployment. Pending claims are non-exclusive (two orgs can both
+-- hold a pending row for the same domain via the per-org index above);
+-- first-to-verify wins, and the loser's set-verified trips THIS partial
+-- index. Enforced at the index/heap level regardless of RLS, so the
+-- guarantee holds even though neither org can SELECT the other's row — the
+-- collision is opaque (a generic unique violation; the routing/claim
+-- handlers map it to a "domain already claimed" without naming the holder).
+CREATE UNIQUE INDEX sso_domains_verified_global_uniq
+    ON public.sso_domains (lower(domain)) WHERE verified_at IS NOT NULL;
+
+-- Index the FK's referencing column: Postgres doesn't auto-index it, and the
+-- ON DELETE CASCADE from sso_connections must find a connection's domains
+-- without a seq scan (the org_domain index leads with org_id, so it can't
+-- serve a connection_id lookup). Also serves a future "domains for this
+-- connection" read. Matches the baseline's index-the-FK-column pattern
+-- (idx_tasks_entity, idx_runs_task, ...).
+CREATE INDEX sso_domains_connection_idx ON public.sso_domains (connection_id);
+
+-- BEFORE-UPDATE triggers keep updated_at fresh, matching every other table.
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.sso_connections
+    FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.sso_domains
+    FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+
+ALTER TABLE public.sso_connections ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sso_domains ENABLE ROW LEVEL SECURITY;
+
+-- Management surface (the TFAC-424 connection CRUD + TFAC-428 domain
+-- claim/verify) is org-admin-gated in the current org, mirroring
+-- org_invites / org_memberships. SELECT is admin-gated too (an SSO config
+-- is an admin concern, not a member-visible one).
+--
+-- DELETE has its own policy because both stores expose a delete primitive
+-- (domain removal; connection removal) that runs on the app pool — without
+-- a DELETE policy those would silently affect zero rows under RLS.
+--
+-- NOT expressible in RLS, and deliberately absent here: the two login-time
+-- reads. sso_connections.GetByProviderID (JIT, TFAC-426) and
+-- sso_domains.GetVerifiedByDomain (routing, TFAC-427) cross the tenant
+-- boundary — the actor has no membership yet — so they run on the admin
+-- pool (BYPASSRLS), with the provider_id / verified domain itself as the
+-- lookup authorization, not an RLS predicate.
+
+CREATE POLICY sso_connections_select ON public.sso_connections FOR SELECT
+  USING ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id));
+
+CREATE POLICY sso_connections_insert ON public.sso_connections FOR INSERT
+  WITH CHECK ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id));
+
+CREATE POLICY sso_connections_update ON public.sso_connections FOR UPDATE
+  USING ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id))
+  WITH CHECK ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id));
+
+CREATE POLICY sso_connections_delete ON public.sso_connections FOR DELETE
+  USING ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id));
+
+CREATE POLICY sso_domains_select ON public.sso_domains FOR SELECT
+  USING ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id));
+
+CREATE POLICY sso_domains_insert ON public.sso_domains FOR INSERT
+  WITH CHECK ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id));
+
+CREATE POLICY sso_domains_update ON public.sso_domains FOR UPDATE
+  USING ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id))
+  WITH CHECK ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id));
+
+CREATE POLICY sso_domains_delete ON public.sso_domains FOR DELETE
+  USING ((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id));
+
+-- supabase_admin's ALTER DEFAULT PRIVILEGES auto-grants public-schema
+-- tables to anon/authenticated/service_role at CREATE time. Strip them so
+-- each table is reachable only by tf_app (under RLS) and the admin pool
+-- (which owns it as superuser and bypasses RLS for the login-time reads) —
+-- same posture as org_invites / org_secrets.
+REVOKE ALL ON public.sso_connections FROM PUBLIC;
+REVOKE ALL ON public.sso_connections FROM anon, authenticated, service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.sso_connections TO tf_app;
+
+REVOKE ALL ON public.sso_domains FROM PUBLIC;
+REVOKE ALL ON public.sso_domains FROM anon, authenticated, service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.sso_domains TO tf_app;
+
+
+--
+-- Principal identity model. public.users is the PRINCIPAL (one row per human);
+-- this table maps each GoTrue auth.users login identity to its principal. A
+-- human can hold several identities (a GitHub login plus N SSO providers); on
+-- login they resolve to one principal — an identity links to an existing
+-- principal when its VERIFIED email matches that principal's, otherwise a new
+-- principal is minted. auth_user_id is the bridge to GoTrue and the natural key
+-- (one principal per login identity). provider_subject keeps the IdP's stable
+-- subject / SAML NameID so a re-link need not trust email alone.
+--
+-- Resolution + linking run only on the admin pool at login (the actor has no
+-- claims context yet), so this table is deliberately not granted to tf_app and
+-- exposes no app-role policy; RLS is enabled as a denied-by-default backstop.
+--
+
+CREATE TABLE public.user_identities (
+    auth_user_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    provider text NOT NULL,
+    provider_subject text,
+    email text,
+    email_verified boolean DEFAULT false NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+ALTER TABLE ONLY public.user_identities
+    ADD CONSTRAINT user_identities_pkey PRIMARY KEY (auth_user_id);
+
+ALTER TABLE ONLY public.user_identities
+    ADD CONSTRAINT user_identities_auth_user_id_fkey FOREIGN KEY (auth_user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.user_identities
+    ADD CONSTRAINT user_identities_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+CREATE INDEX user_identities_user_id_idx ON public.user_identities USING btree (user_id);
+
+-- The verified-email auto-link lookup at login: find the principal that already
+-- owns this verified email so a second identity attaches to the same human.
+CREATE INDEX user_identities_link_lookup_idx ON public.user_identities USING btree (lower(email)) WHERE email_verified;
+
+CREATE TRIGGER user_identities_set_updated_at BEFORE UPDATE ON public.user_identities FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+
+ALTER TABLE public.user_identities ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.user_identities FROM PUBLIC;
+REVOKE ALL ON public.user_identities FROM anon, authenticated, service_role;
 
 
 -- +goose Down

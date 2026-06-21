@@ -359,7 +359,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userUUID, err := uuid.Parse(claims.Subject)
+	authUserID, err := uuid.Parse(claims.Subject)
 	if err != nil {
 		http.Error(w, "invalid sub", http.StatusBadRequest)
 		return
@@ -368,14 +368,18 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	// The provider_id in TF's OWN signed state (set by handleSAMLStart) is the
 	// authoritative "this login is SSO" signal. We deliberately do NOT read the
 	// GoTrue JWT's provider / app_metadata / amr to detect SSO or recover the
-	// provider — those are GoTrue-internal and version-fragile. GoTrue also
-	// keeps a SAML identity as its own auth.users (SSO is excluded from GoTrue
-	// account linking), so claims.Subject is the SAML user and there is no
-	// GitHub↔Entra merge to perform here.
+	// provider — those are GoTrue-internal and version-fragile.
 	isSSO := state.ProviderID != ""
 
-	if err := upsertUserFromClaims(r.Context(), s.db, userUUID, claims, isSSO); err != nil {
-		authLog.Error("upsert user failed", "user", userUUID, "error", err)
+	// Resolve the GoTrue login identity to its PRINCIPAL (the public.users row).
+	// A new identity links to an existing principal when its verified email
+	// matches, else mints one — GoTrue keeps each SAML login as its own
+	// auth.users (it excludes SSO from account linking), so TF unifies a human's
+	// identities here. From this point userUUID is the principal: memberships,
+	// JIT, and the session all key on the human, not the per-provider identity.
+	userUUID, err := resolveOrCreatePrincipal(r.Context(), s.db, authUserID, claims, isSSO)
+	if err != nil {
+		authLog.Error("resolve principal failed", "identity", authUserID, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -879,29 +883,44 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// upsertUserFromClaims mirrors the user's identity from JWT claims into
-// public.users + public.user_github_identities. COALESCE preserves any field
-// the claims happen to be missing — provider responses are inconsistent.
+// resolveOrCreatePrincipal maps a GoTrue login identity (authUserID = the JWT
+// sub) to its TF principal — the public.users row that memberships, ownership,
+// and the session all key on — and returns the principal id.
 //
-// Runs on the admin pool (main.go routes the raw *sql.DB to adminDB): the
-// auth-callback PROVISIONING layer that *creates* the users row this login
-// maps to (FK users.id → auth.users.id). That sits below the RLS/app-pool/
-// store model on purpose — it mints the identity tf.current_user_id() later
-// keys on. It can't route through UsersStore.UpsertGitHubIdentity even in
-// principle: that runs under a claims tx requiring the users row to already
-// exist (FK target; the runner rejects a userID with no row), and this is the
-// function creating it. Both writes target the *verified-JWT* user's own rows
-// (userID = claims.Subject), so the RLS bypass carries no untrusted target —
-// the same trust model the retired github_username column write already used.
+// One human can hold several login identities: a GitHub login plus N SSO
+// providers, because GoTrue mints a distinct auth.users per SSO provider and
+// refuses to link them. TF unifies them in public.user_identities:
 //
-// isSSO marks a SAML (SSO) login — TF-derived from its own signed state, never
-// from the JWT. When set, the GitHub-identity write below is skipped entirely:
-// an Entra SAML assertion can surface a preferred_username (a UPN/email, NOT a
-// github.com handle), and mirroring it as a github_username would mint a bogus
-// github identity row against github.com (TFAC-426 §2). The only non-SSO login
-// is the GitHub bootstrap floor, so !isSSO ⟺ a genuine GitHub login.
-func upsertUserFromClaims(ctx context.Context, db *sql.DB, userID uuid.UUID, claims *verify.Claims, isSSO bool) error {
-	var displayName, avatarURL, ghUsername string
+//   - returning identity (auth_user_id already linked) → its principal;
+//   - new identity whose VERIFIED email matches an existing principal → link to
+//     that principal (this is how a later SSO login attaches to the same human
+//     as an earlier GitHub login — no duplicate account, no migration);
+//   - otherwise → a fresh principal.
+//
+// Linking is gated on a *verified* email only: an unverified or absent email
+// never links (the safe default is a separate principal). A per-email advisory
+// lock serializes concurrent first-logins for the same verified email so a race
+// can't fork one human into two principals — the only way the "one principal
+// per verified email" invariant could otherwise break.
+//
+// Runs on the admin pool (the actor has no membership/claims yet, so RLS can't
+// express these reads/writes — same rationale as org provisioning).
+//
+// isSSO marks a SAML login (TF-derived from its own signed state, never the
+// JWT). It controls only the GitHub-INTEGRATION write — a separate axis: which
+// GitHub account the agent acts as. A GitHub login mirrors that as a
+// convenience binding (source='login_claim'); a SAML login writes none (an SSO
+// user binds GitHub later via PAT/Connect). An Entra assertion can carry a
+// preferred_username that is a UPN/email, not a github.com handle, so mirroring
+// it would mint a bogus identity — hence the !isSSO gate.
+func resolveOrCreatePrincipal(ctx context.Context, db *sql.DB, authUserID uuid.UUID, claims *verify.Claims, isSSO bool) (uuid.UUID, error) {
+	provider := "github"
+	if isSSO {
+		provider = "saml"
+	}
+	email := strings.ToLower(strings.TrimSpace(claims.Email))
+
+	var displayName, avatarURL, ghUsername, providerSubject string
 	if claims.UserMetadata != nil {
 		displayName, _ = claims.UserMetadata["full_name"].(string)
 		if displayName == "" {
@@ -912,45 +931,92 @@ func upsertUserFromClaims(ctx context.Context, db *sql.DB, userID uuid.UUID, cla
 		if ghUsername == "" {
 			ghUsername, _ = claims.UserMetadata["preferred_username"].(string)
 		}
+		// Best-effort: the IdP's own stable subject (GitHub numeric id / SAML
+		// NameID). Non-load-bearing insurance for a future re-link that doesn't
+		// trust email; null when the provider doesn't surface one.
+		providerSubject, _ = claims.UserMetadata["provider_id"].(string)
+		if providerSubject == "" {
+			providerSubject, _ = claims.UserMetadata["sub"].(string)
+		}
 	}
 
-	// One admin-pool tx for both inserts so a users row never lands without
-	// its identity row (or vice-versa); a mid-way failure rolls back and the
-	// next login re-runs the idempotent upsert.
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin user provisioning tx: %w", err)
+		return uuid.Nil, fmt.Errorf("begin principal tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op once Commit succeeds
 
-	// Mirror display_name + avatar_url onto the users row. github_username
-	// moved out to user_github_identities (SKY-396); see the identity upsert
-	// below.
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO public.users (id, display_name, avatar_url, created_at, updated_at)
-		VALUES ($1, NULLIF($2, ''), NULLIF($3, ''), now(), now())
-		ON CONFLICT (id) DO UPDATE
-		   SET display_name = COALESCE(EXCLUDED.display_name, public.users.display_name),
-		       avatar_url   = COALESCE(EXCLUDED.avatar_url,   public.users.avatar_url),
-		       updated_at   = now()
-	`, userID, displayName, avatarURL); err != nil {
-		return fmt.Errorf("upsert user: %w", err)
+	// Serialize concurrent first-logins sharing a verified email. A missing or
+	// unverified email skips the lock — those never link, so they can't race
+	// into a shared principal.
+	if email != "" && claims.EmailVerified {
+		if _, err := tx.ExecContext(ctx,
+			`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, email); err != nil {
+			return uuid.Nil, fmt.Errorf("acquire email lock: %w", err)
+		}
 	}
 
-	// GitHub-login claim → host-scoped identity row. The GoTrue
-	// GitHub social provider is hardwired to github.com, so this binding is
-	// always against github.com with source='login_claim' — the landmine the
-	// Connect capture flow demotes (it silently NULLs the day login becomes
-	// Entra SAML, but Connect/PAT fill the row when this can't). Skip when the
-	// claim carries no username (non-GitHub login provider): the row stays
-	// absent, preserving any previously-captured identity and honoring the
-	// NULL-degrades contract.
-	// The hardcoded host is already in NormalizeGitHubHost form; mirror
-	// UsersStore.UpsertGitHubIdentity (verified_at = now(), upsert on the host
-	// key) if that store method ever grows logic beyond the SQL.
-	// Gated on !isSSO so a SAML login never writes a github.com identity row
-	// (see the func doc) — preserving any previously-captured identity and
-	// honoring the NULL-degrades contract.
+	var principalID uuid.UUID
+	lookupErr := tx.QueryRowContext(ctx,
+		`SELECT user_id FROM public.user_identities WHERE auth_user_id = $1`, authUserID,
+	).Scan(&principalID)
+	switch {
+	case lookupErr == nil:
+		// Returning identity — fall through to the profile/email refresh below.
+	case errors.Is(lookupErr, sql.ErrNoRows):
+		// New identity. Link to an existing principal by verified email, else mint.
+		if email != "" && claims.EmailVerified {
+			if lerr := tx.QueryRowContext(ctx, `
+				SELECT user_id FROM public.user_identities
+				 WHERE lower(email) = $1 AND email_verified
+				 LIMIT 1`, email,
+			).Scan(&principalID); lerr != nil && !errors.Is(lerr, sql.ErrNoRows) {
+				return uuid.Nil, fmt.Errorf("verified-email link lookup: %w", lerr)
+			}
+		}
+		if principalID == uuid.Nil {
+			if err := tx.QueryRowContext(ctx, `
+				INSERT INTO public.users (display_name, avatar_url, created_at, updated_at)
+				VALUES (NULLIF($1, ''), NULLIF($2, ''), now(), now())
+				RETURNING id`, displayName, avatarURL,
+			).Scan(&principalID); err != nil {
+				return uuid.Nil, fmt.Errorf("create principal: %w", err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO public.user_identities
+				(auth_user_id, user_id, provider, provider_subject, email, email_verified, created_at, updated_at)
+			VALUES ($1, $2, $3, NULLIF($4, ''), NULLIF($5, ''), $6, now(), now())
+		`, authUserID, principalID, provider, providerSubject, email, claims.EmailVerified); err != nil {
+			return uuid.Nil, fmt.Errorf("link identity: %w", err)
+		}
+	default:
+		return uuid.Nil, fmt.Errorf("identity lookup: %w", lookupErr)
+	}
+
+	// Refresh the principal's profile + this identity's email on every login
+	// (provider responses drift; COALESCE keeps a field we already have when the
+	// claim omits it).
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE public.users
+		   SET display_name = COALESCE(NULLIF($2, ''), display_name),
+		       avatar_url   = COALESCE(NULLIF($3, ''), avatar_url),
+		       updated_at   = now()
+		 WHERE id = $1
+	`, principalID, displayName, avatarURL); err != nil {
+		return uuid.Nil, fmt.Errorf("refresh principal: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE public.user_identities
+		   SET email = NULLIF($2, ''), email_verified = $3, updated_at = now()
+		 WHERE auth_user_id = $1
+	`, authUserID, email, claims.EmailVerified); err != nil {
+		return uuid.Nil, fmt.Errorf("refresh identity: %w", err)
+	}
+
+	// GitHub-INTEGRATION binding (which github account the agent acts as) — a
+	// separate axis from the login identity. Only a real GitHub login mirrors it
+	// (source='login_claim'); a SAML login writes none. Keyed on the principal.
 	if !isSSO && ghUsername != "" {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO public.user_github_identities
@@ -961,15 +1027,15 @@ func upsertUserFromClaims(ctx context.Context, db *sql.DB, userID uuid.UUID, cla
 			       source      = EXCLUDED.source,
 			       verified_at = EXCLUDED.verified_at,
 			       updated_at  = now()
-		`, userID, ghUsername); err != nil {
-			return fmt.Errorf("upsert github identity from login claim: %w", err)
+		`, principalID, ghUsername); err != nil {
+			return uuid.Nil, fmt.Errorf("upsert github login identity: %w", err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit user provisioning tx: %w", err)
+		return uuid.Nil, fmt.Errorf("commit principal tx: %w", err)
 	}
-	return nil
+	return principalID, nil
 }
 
 // gotrueRefreshFunc — POST /token?grant_type=refresh_token.

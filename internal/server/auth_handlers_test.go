@@ -207,6 +207,14 @@ func (r *authRig) seedUser() uuid.UUID {
 		`INSERT INTO users (id, display_name) VALUES ($1, $2)`, idStr, "tester"); err != nil {
 		r.t.Fatalf("seed public.users: %v", err)
 	}
+	// Link the GoTrue auth identity to this principal so a simulated login
+	// (driveCallback) resolves back to this user instead of minting a fresh
+	// principal. In tests the auth.users id and principal id are the same value.
+	if _, err := r.h.AdminDB.Exec(`
+		INSERT INTO user_identities (auth_user_id, user_id, provider, email, email_verified)
+		VALUES ($1, $1, 'github', $2, true)`, idStr, idStr+"@test"); err != nil {
+		r.t.Fatalf("seed user identity: %v", err)
+	}
 	return uuid.MustParse(idStr)
 }
 
@@ -498,6 +506,13 @@ func TestAuthFlow_Me_SentinelSubjectInMultiMode_HitsDBPath(t *testing.T) {
 		sentinelID.String(), "sentinel-collision",
 	); err != nil {
 		t.Fatalf("seed sentinel public.users: %v", err)
+	}
+	// Link the login identity to this principal so the callback resolves back to
+	// it rather than minting a fresh principal.
+	if _, err := r.h.AdminDB.Exec(`
+		INSERT INTO user_identities (auth_user_id, user_id, provider, email, email_verified)
+		VALUES ($1, $1, 'github', $2, true)`, sentinelID.String(), sentinelID.String()+"@test"); err != nil {
+		t.Fatalf("seed sentinel identity: %v", err)
 	}
 	orgID, _ := r.seedOrg(sentinelID, "real-org-for-sentinel")
 

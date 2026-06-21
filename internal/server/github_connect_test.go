@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -567,16 +568,30 @@ func TestGitHubConnect_IdentityPersistsAcrossLoginProvider(t *testing.T) {
 		t.Fatalf("seed connect identity: %v", err)
 	}
 
-	// Re-login under a non-GitHub provider (Entra SAML): isSSO=true, so
-	// upsertUserFromClaims writes the users row but never touches the github
-	// identity row — preserving the connect_oauth binding captured above.
+	// A DISTINCT Entra SAML login identity for the same human, linked to alice's
+	// principal (her github login identity already occupies auth_user_id=alice).
+	samlID := uuid.New()
+	rig.h.SeedAuthUser(t, samlID.String(), "alice@corp.example")
+	if _, err := rig.h.AdminDB.Exec(`
+		INSERT INTO user_identities (auth_user_id, user_id, provider, email, email_verified)
+		VALUES ($1, $2, 'saml', 'alice@corp.example', true)`, samlID, alice); err != nil {
+		t.Fatalf("seed saml identity: %v", err)
+	}
+
+	// Re-login under that non-GitHub provider (Entra SAML): isSSO=true resolves to
+	// alice's principal but must never touch the github identity row —
+	// preserving the connect_oauth binding captured above.
 	claims := &verify.Claims{
-		Subject:      alice.String(),
+		Subject:      samlID.String(),
 		Email:        "alice@corp.example",
 		UserMetadata: map[string]any{"full_name": "Alice Example"}, // no user_name
 	}
-	if err := upsertUserFromClaims(context.Background(), rig.h.AdminDB, alice, claims, true); err != nil {
-		t.Fatalf("upsertUserFromClaims: %v", err)
+	got, err := resolveOrCreatePrincipal(context.Background(), rig.h.AdminDB, samlID, claims, true)
+	if err != nil {
+		t.Fatalf("resolveOrCreatePrincipal: %v", err)
+	}
+	if got != alice {
+		t.Fatalf("SAML re-login resolved to principal %v, want alice %v", got, alice)
 	}
 
 	var login, source string

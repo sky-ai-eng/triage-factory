@@ -166,6 +166,12 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 			}
 		}(sid)
 
+		// The verified JWT's sub is the GoTrue login IDENTITY; TF authorizes on
+		// the PRINCIPAL. The session carries the principal (resolved at the OAuth
+		// callback), so key RLS + every handler on it. claims.Email stays the
+		// identity's email, for display.
+		claims.Subject = sess.UserID.String()
+
 		ctx := httpx.WithClaims(r.Context(), claims)
 		ctx = context.WithValue(ctx, ctxKeySession, sess)
 		// SKY-313: surface the session's active org so OrgIDFrom() works

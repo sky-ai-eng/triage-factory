@@ -27,12 +27,13 @@ import (
 // Raw maps are kept addressable so downstream callers (D7 /api/me, public.users
 // sync) can pull provider-specific fields without re-parsing.
 type Claims struct {
-	Subject      string
-	Email        string
-	Provider     string
-	UserMetadata map[string]any
-	AppMetadata  map[string]any
-	ExpiresAt    time.Time
+	Subject       string
+	Email         string
+	EmailVerified bool
+	Provider      string
+	UserMetadata  map[string]any
+	AppMetadata   map[string]any
+	ExpiresAt     time.Time
 }
 
 // Verifier validates signed JWTs against a remote JWKS. Safe for concurrent use.
