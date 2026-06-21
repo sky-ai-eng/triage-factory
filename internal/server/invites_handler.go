@@ -121,15 +121,16 @@ func (ih *invitesHandler) handleInviteCreate(w http.ResponseWriter, r *http.Requ
 	// dedups invite-vs-invite, not invite-vs-existing-member — so without this
 	// an admin could mint a pending invite for a current member: a dead ghost
 	// row whose sole outcome on accept is the idempotent "you're already a
-	// member" short-circuit in handleInviteAccept. We match on a *verified* identity email,
-	// mirroring the principal-link rule: if it WOULD link on accept, block on
-	// create; an unverified identity email isn't a reliable dedup key. Scoped to
-	// THIS org only — inviting an existing TF user who belongs to another org is
-	// legitimate, and accept grants them a fresh membership. This is fail-fast
-	// UX, not a correctness gate: the accept-time member check in handleInviteAccept stays
-	// as the TOCTOU backstop for an email JIT-provisioned between create and
-	// accept. Runs on the admin pool for the same reason as the target-team
-	// check below — user_identities is admin-pool-only.
+	// member" short-circuit in handleInviteAccept. We match on a *verified*
+	// identity email, mirroring the principal-link rule: if it WOULD link on
+	// accept, block on create; an unverified identity email isn't a reliable
+	// dedup key. Scoped to THIS org only — inviting an existing TF user who
+	// belongs to another org is legitimate, and accept grants them a fresh
+	// membership. This is fail-fast UX, not a correctness gate: the accept-time
+	// member check in handleInviteAccept stays as the TOCTOU backstop for an
+	// email JIT-provisioned between create and accept. Runs on the admin pool
+	// for the same reason as the target-team check below — user_identities is
+	// admin-pool-only.
 	var alreadyMember bool
 	if err := ih.admin.QueryRowContext(r.Context(),
 		`SELECT EXISTS (
