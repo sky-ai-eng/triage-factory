@@ -932,8 +932,8 @@ footer.status {
         <tr data-decision-id="per-org-limits"><td class="area">Per-org limits</td><td class="pick">Concurrent runs cap from day 1</td><td class="why">Required to ship. Without it, one org can starve a shared host.</td><td><button class="dpill">— click to review</button></td></tr>
         <tr data-decision-id="reverse-proxy"><td class="area">Reverse proxy</td><td class="pick">Caddy in <code>--profile https</code> opt-in. Default: TF on a port.</td><td class="why">Most self-hosters have their own ingress (nginx, traefik). Caddy bundled for users who don&apos;t.</td><td><button class="dpill">— click to review</button></td></tr>
         <tr data-decision-id="agent-identity"><td class="area">Agent identity</td><td class="pick">One <code>agents</code> row per org. Separate domain from <code>users</code>. Team-assigned via <code>team_agents</code>, default-enabled at team creation.</td><td class="why">The bot is a workload identity, not a flavor of human. Putting it in the <code>users</code> table would either pollute Supabase&apos;s <code>auth.users</code> with synthetic auth rows or break the FK invariant that every public.users row maps to a real authenticated identity. Instead: <code>agents</code> table holds bot metadata (display name, default model, default autonomy) and credentials (<code>github_app_installation_id</code> preferred, <code>github_pat_user_id</code> fallback). <code>team_agents</code> is the per-team membership row with optional config overrides (per-team model, per-team autonomy threshold). Tasks reference the agent via a dedicated <code>claimed_by_agent_id</code> FK alongside <code>claimed_by_user_id</code> with a CHECK XOR — no polymorphic discriminator column needed, audit trail stays uniform.</td><td><button class="dpill">— click to review</button></td></tr>
-        <tr data-decision-id="rule-vs-trigger-semantics"><td class="area">Rule vs trigger semantics</td><td class="pick">Rule = unclaimed task (human triage). Trigger = task with <code>claimed_by_agent_id</code> stamped at creation (pre-committed autonomy). No race window.</td><td class="why">Sharpens an existing distinction. A <code>task_rule</code> match creates a row on the team queue with <code>claimed_by_*</code> NULL — humans triage. A <code>prompt_trigger</code> match creates the row AND stamps <code>claimed_by_agent_id</code> in the same transaction — the bot owns it from t=0. The choice of rule-vs-trigger IS the choice of who claims; there&apos;s never a moment when both might race for the same row. Bot-disabled team + trigger fires: task is created unclaimed with the trigger&apos;s <code>prompt_id</code> pre-filled on the row, so a human swipe-to-delegate re-uses the same configuration. <a href="https://linear.app/sky-ai-eng/issue/SKY-259">SKY-259</a> will eventually consolidate <code>task_rules</code> + <code>prompt_triggers</code> into one <code>event_handlers</code> table with <code>kind ∈ ('rule','trigger')</code> — the semantics above are the design that consolidation will inherit.</td><td><button class="dpill">— click to review</button></td></tr>
-        <tr data-decision-id="task-state-axes"><td class="area">Task state axes</td><td class="pick">Three orthogonal columns: <code>status</code> (lifecycle), <code>claimed_by_*_id</code> (responsibility, user-XOR-agent), <code>runs.actor_agent_id</code> (audit). The triage queue is a <strong>team-scoped derived filter</strong>, not a status enum value.</td><td class="why">Status enums track lifecycle macro-states (<code>queued</code>, <code>snoozed</code>, <code>done</code>, <code>dismissed</code>). Claim columns track who&apos;s currently responsible (one nullable FK per kind, XOR via CHECK). <code>runs.actor_agent_id</code> records who actually ran each run, immutable. The triage queue is then a derived filter: <code>WHERE team membership AND claim cols all NULL AND status NOT IN ('done','dismissed','snoozed')</code> — team-scoped, not user-scoped. A user claiming a queued task is a claim-column transition, not a status change — no <code>'user_claimed'</code> enum value needed. Claim columns stay populated past completion for audit (&quot;who finished this&quot;); status tracks completion independently; <code>runs.actor_agent_id</code> stays immutable per-run history. Three answers, three axes, no combinatorial enum growth. This makes the Board&apos;s per-member filter symmetric across bot and human teammates: same query shape, different parameters, returns &quot;tasks they currently own + tasks they&apos;ve ever acted on.&quot; <a href="https://linear.app/sky-ai-eng/issue/SKY-261">SKY-261</a> (D-Claims) lands the schema columns; the team-scoped Board view UX itself is a separate call (the schema is forward-compatible either way).</td><td><button class="dpill">— click to review</button></td></tr>
+        <tr data-decision-id="rule-vs-trigger-semantics"><td class="area">Rule vs trigger semantics</td><td class="pick">Rule = unclaimed task (human triage). Trigger = task with <code>claimed_by_agent_id</code> stamped at creation (pre-committed autonomy). No race window.</td><td class="why">Sharpens an existing distinction. A <code>task_rule</code> match creates a row on the team queue with <code>claimed_by_*</code> NULL — humans triage. A <code>prompt_trigger</code> match creates the row AND stamps <code>claimed_by_agent_id</code> in the same transaction — the bot owns it from t=0. The choice of rule-vs-trigger IS the choice of who claims; there&apos;s never a moment when both might race for the same row. Bot-disabled team + trigger fires: task is created unclaimed with the trigger&apos;s <code>prompt_id</code> pre-filled on the row, so a human swipe-to-delegate re-uses the same configuration. <a href="https://linear.app/sky-ai-eng/issue/TFAC-279">TFAC-279</a> will eventually consolidate <code>task_rules</code> + <code>prompt_triggers</code> into one <code>event_handlers</code> table with <code>kind ∈ ('rule','trigger')</code> — the semantics above are the design that consolidation will inherit.</td><td><button class="dpill">— click to review</button></td></tr>
+        <tr data-decision-id="task-state-axes"><td class="area">Task state axes</td><td class="pick">Three orthogonal columns: <code>status</code> (lifecycle), <code>claimed_by_*_id</code> (responsibility, user-XOR-agent), <code>runs.actor_agent_id</code> (audit). The triage queue is a <strong>team-scoped derived filter</strong>, not a status enum value.</td><td class="why">Status enums track lifecycle macro-states (<code>queued</code>, <code>snoozed</code>, <code>done</code>, <code>dismissed</code>). Claim columns track who&apos;s currently responsible (one nullable FK per kind, XOR via CHECK). <code>runs.actor_agent_id</code> records who actually ran each run, immutable. The triage queue is then a derived filter: <code>WHERE team membership AND claim cols all NULL AND status NOT IN ('done','dismissed','snoozed')</code> — team-scoped, not user-scoped. A user claiming a queued task is a claim-column transition, not a status change — no <code>'user_claimed'</code> enum value needed. Claim columns stay populated past completion for audit (&quot;who finished this&quot;); status tracks completion independently; <code>runs.actor_agent_id</code> stays immutable per-run history. Three answers, three axes, no combinatorial enum growth. This makes the Board&apos;s per-member filter symmetric across bot and human teammates: same query shape, different parameters, returns &quot;tasks they currently own + tasks they&apos;ve ever acted on.&quot; <a href="https://linear.app/sky-ai-eng/issue/TFAC-171">TFAC-171</a> (D-Claims) lands the schema columns; the team-scoped Board view UX itself is a separate call (the schema is forward-compatible either way).</td><td><button class="dpill">— click to review</button></td></tr>
         <tr data-decision-id="local-equals-multi-n1"><td class="area">Local mode = multi mode at N=1</td><td class="pick">One schema, one model, one set of routing rules. Local mode is an N=1 deployment of the same primitives — not a different shape.</td><td class="why">The earlier framing of &quot;local has no orgs/teams/memberships, multi has them&quot; created complexity at every seam (do we have a team_id? is creator_user_id required? whose PAT does the bot use?). The team reframe collapses both modes onto identical schema: one org, one team, one user, one agent, all bootstrapped at install. The agent borrows the user&apos;s PAT via <code>agents.github_pat_user_id</code>. Visibility=&apos;team&apos; rows are visible to the lone user. RLS-equivalent guards still run (<code>assertLocalOrg</code> in SQLite stores). Onboarding/UI hides team controls when N=1 — same code path everywhere else.</td><td><button class="dpill">— click to review</button></td></tr>
         <tr data-decision-id="b2c-support"><td class="area">B2C / single-member org</td><td class="pick">Supported on hosted SaaS via same schema. Single-member onboarding hides team UI; visibility defaults degrade naturally to &quot;you and the bot&quot;.</td><td class="why">A solo user on <code>app.triagefactory.com</code> is just a single-member multi-mode org. Schema is identical to a team install. The agent uses either a GitHub App install (recommended even for solo) or a PAT-borrow from the lone user. The frontend detects N=1 membership and hides &quot;invite teammates&quot; / team-picker UI by default; it&apos;s available behind a &quot;grow my team&quot; CTA. This is also exactly what local mode looks like; the two converge.</td><td><button class="dpill">— click to review</button></td></tr>
       </tbody>
@@ -2443,7 +2443,7 @@ POST /admin/sso/providers
   <details class="domain" open>
     <summary>
       <span class="num">D1</span>
-      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/SKY-245" target="_blank" rel="noopener">SKY-245</a>
+      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/TFAC-181" target="_blank" rel="noopener">TFAC-181</a>
       <svg class="chev" viewBox="0 0 16 16" fill="currentColor"><path d="M5 4l6 4-6 4z"/></svg>
       <span class="title">Migration tooling — adopt goose</span>
       <span class="badge badge--green">S</span>
@@ -2476,7 +2476,7 @@ POST /admin/sso/providers
   <details class="domain">
     <summary>
       <span class="num">D2</span>
-      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/SKY-246" target="_blank" rel="noopener">SKY-246</a>
+      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/TFAC-123" target="_blank" rel="noopener">TFAC-123</a>
       <svg class="chev" viewBox="0 0 16 16" fill="currentColor"><path d="M5 4l6 4-6 4z"/></svg>
       <span class="title">Store layer abstraction</span>
       <span class="badge badge--violet">L</span>
@@ -2489,7 +2489,7 @@ POST /admin/sso/providers
       <p>Today every callsite touches <code>internal/db/*.go</code> directly. Multi-tenant needs a swap point so SQLite stays for local and Postgres handles multi. Without this, every callsite duplicates the dialect/scoping logic.</p>
       <h5>What changes</h5>
       <ul>
-        <li>New package <code>internal/store</code> with <strong>per-resource interfaces</strong> (one interface per type — <code>TaskStore</code>, <code>RunStore</code>, <code>OrgStore</code>, <code>MembershipStore</code>, <code>OrgMembershipStore</code>, <code>SessionStore</code>, <code>EntityStore</code>, <code>EventStore</code>, <code>PromptStore</code>, <code>ProjectStore</code>, <code>MemoryStore</code>, <code>KBStore</code>, <code>TaskRuleStore</code>, <code>TriggerStore</code> (later unified per <a href="https://linear.app/sky-ai-eng/issue/SKY-259">SKY-259</a>), <code>AgentStore</code>, <code>TeamAgentStore</code>, plus <code>SecretStore</code> from D5). See §8.</li>
+        <li>New package <code>internal/store</code> with <strong>per-resource interfaces</strong> (one interface per type — <code>TaskStore</code>, <code>RunStore</code>, <code>OrgStore</code>, <code>MembershipStore</code>, <code>OrgMembershipStore</code>, <code>SessionStore</code>, <code>EntityStore</code>, <code>EventStore</code>, <code>PromptStore</code>, <code>ProjectStore</code>, <code>MemoryStore</code>, <code>KBStore</code>, <code>TaskRuleStore</code>, <code>TriggerStore</code> (later unified per <a href="https://linear.app/sky-ai-eng/issue/TFAC-279">TFAC-279</a>), <code>AgentStore</code>, <code>TeamAgentStore</code>, plus <code>SecretStore</code> from D5). See §8.</li>
         <li>Bundled <code>store.Stores</code> struct holds one instance of each — for DI wiring at startup only.</li>
         <li>Subpackage layout: <code>internal/store/sqlite/</code> + <code>internal/store/postgres/</code>, one file per resource per backend</li>
         <li>Tx wrapper: <code>postgres.WithTx(ctx, db, fn)</code> hands the closure tx-bound versions of every store, applies <code>SET LOCAL request.jwt.claims</code> for RLS</li>
@@ -2513,7 +2513,7 @@ POST /admin/sso/providers
   <details class="domain">
     <summary>
       <span class="num">D3</span>
-      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/SKY-247" target="_blank" rel="noopener">SKY-247</a>
+      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/TFAC-122" target="_blank" rel="noopener">TFAC-122</a>
       <svg class="chev" viewBox="0 0 16 16" fill="currentColor"><path d="M5 4l6 4-6 4z"/></svg>
       <span class="title">Multi-tenant schema (Postgres)</span>
       <span class="badge badge--violet">L</span>
@@ -2547,7 +2547,7 @@ POST /admin/sso/providers
   <details class="domain">
     <summary>
       <span class="num">D4</span>
-      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/SKY-248" target="_blank" rel="noopener">SKY-248</a>
+      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/TFAC-179" target="_blank" rel="noopener">TFAC-179</a>
       <svg class="chev" viewBox="0 0 16 16" fill="currentColor"><path d="M5 4l6 4-6 4z"/></svg>
       <span class="title">Mode flag + path scoping</span>
       <span class="badge badge--green">S</span>
@@ -2577,7 +2577,7 @@ POST /admin/sso/providers
   <details class="domain">
     <summary>
       <span class="num">D5</span>
-      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/SKY-249" target="_blank" rel="noopener">SKY-249</a>
+      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/TFAC-178" target="_blank" rel="noopener">TFAC-178</a>
       <svg class="chev" viewBox="0 0 16 16" fill="currentColor"><path d="M5 4l6 4-6 4z"/></svg>
       <span class="title">Secret store interface (Vault-backed in multi)</span>
       <span class="badge badge--green">S</span>
@@ -2624,7 +2624,7 @@ POST /admin/sso/providers
   <details class="domain">
     <summary>
       <span class="num">D6</span>
-      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/SKY-250" target="_blank" rel="noopener">SKY-250</a>
+      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/TFAC-166" target="_blank" rel="noopener">TFAC-166</a>
       <svg class="chev" viewBox="0 0 16 16" fill="currentColor"><path d="M5 4l6 4-6 4z"/></svg>
       <span class="title">GoTrue integration + JWKS verify</span>
       <span class="badge badge--cyan">M</span>
@@ -2656,7 +2656,7 @@ POST /admin/sso/providers
   <details class="domain">
     <summary>
       <span class="num">D7</span>
-      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/SKY-251" target="_blank" rel="noopener">SKY-251</a>
+      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/TFAC-167" target="_blank" rel="noopener">TFAC-167</a>
       <svg class="chev" viewBox="0 0 16 16" fill="currentColor"><path d="M5 4l6 4-6 4z"/></svg>
       <span class="title">Auth middleware + sessions</span>
       <span class="badge badge--cyan">M</span>
@@ -2694,7 +2694,7 @@ POST /admin/sso/providers
   <details class="domain">
     <summary>
       <span class="num">D8</span>
-      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/SKY-252" target="_blank" rel="noopener">SKY-252</a>
+      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/TFAC-177" target="_blank" rel="noopener">TFAC-177</a>
       <svg class="chev" viewBox="0 0 16 16" fill="currentColor"><path d="M5 4l6 4-6 4z"/></svg>
       <span class="title">Frontend auth integration</span>
       <span class="badge badge--green">S</span>
@@ -2728,7 +2728,7 @@ POST /admin/sso/providers
   <details class="domain">
     <summary>
       <span class="num">D9</span>
-      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/SKY-253" target="_blank" rel="noopener">SKY-253</a>
+      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/TFAC-168" target="_blank" rel="noopener">TFAC-168</a>
       <svg class="chev" viewBox="0 0 16 16" fill="currentColor"><path d="M5 4l6 4-6 4z"/></svg>
       <span class="title">Org-scoping pass — touch every existing handler</span>
       <span class="badge badge--violet">L</span>
@@ -2761,7 +2761,7 @@ POST /admin/sso/providers
   <details class="domain">
     <summary>
       <span class="num">D10</span>
-      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/SKY-254" target="_blank" rel="noopener">SKY-254</a>
+      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/TFAC-169" target="_blank" rel="noopener">TFAC-169</a>
       <svg class="chev" viewBox="0 0 16 16" fill="currentColor"><path d="M5 4l6 4-6 4z"/></svg>
       <span class="title">Agent runner with gVisor sandboxing</span>
       <span class="badge badge--cyan">M</span>
@@ -2855,7 +2855,7 @@ POST /admin/sso/providers
   <details class="domain">
     <summary>
       <span class="num">D11</span>
-      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/SKY-263" target="_blank" rel="noopener">SKY-263</a>
+      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/TFAC-39" target="_blank" rel="noopener">TFAC-39</a>
       <svg class="chev" viewBox="0 0 16 16" fill="currentColor"><path d="M5 4l6 4-6 4z"/></svg>
       <span class="title">GitHub App for multi-tenant — agent identity (v1)</span>
       <span class="badge badge--cyan">M</span>
@@ -2891,7 +2891,7 @@ POST /admin/sso/providers
   <details class="domain">
     <summary>
       <span class="num">D-Agent</span>
-      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/SKY-260" target="_blank" rel="noopener">SKY-260</a>
+      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/TFAC-170" target="_blank" rel="noopener">TFAC-170</a>
       <svg class="chev" viewBox="0 0 16 16" fill="currentColor"><path d="M5 4l6 4-6 4z"/></svg>
       <span class="title">Agent identity primitive — <code>agents</code> + <code>team_agents</code></span>
       <span class="badge badge--cyan">M</span>
@@ -2926,7 +2926,7 @@ POST /admin/sso/providers
   <details class="domain">
     <summary>
       <span class="num">D-Claims</span>
-      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/SKY-261" target="_blank" rel="noopener">SKY-261</a>
+      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/TFAC-171" target="_blank" rel="noopener">TFAC-171</a>
       <svg class="chev" viewBox="0 0 16 16" fill="currentColor"><path d="M5 4l6 4-6 4z"/></svg>
       <span class="title">Task claim semantics — user-or-agent FK + state machine</span>
       <span class="badge badge--cyan">M</span>
@@ -2961,7 +2961,7 @@ POST /admin/sso/providers
   <details class="domain">
     <summary>
       <span class="num">D-TeamDefault</span>
-      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/SKY-262" target="_blank" rel="noopener">SKY-262</a>
+      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/TFAC-172" target="_blank" rel="noopener">TFAC-172</a>
       <svg class="chev" viewBox="0 0 16 16" fill="currentColor"><path d="M5 4l6 4-6 4z"/></svg>
       <span class="title">Team-default visibility + RLS team branch</span>
       <span class="badge badge--cyan">M</span>
@@ -2971,8 +2971,8 @@ POST /admin/sso/providers
     </summary>
     <div class="domain__body">
       <h5>Why</h5>
-      <p>The team reframe makes team the canonical scope across all shareable resources. The current Postgres baseline (<a href="https://linear.app/sky-ai-eng/issue/SKY-247">SKY-247</a>) defaults <code>visibility='private'</code>; this domain flips defaults + extends RLS to handle the three-branch (private / team / org) shape uniformly.</p>
-      <p>Already shipped piecemeal in <a href="https://linear.app/sky-ai-eng/issue/SKY-246">SKY-246</a> PR #146 for <code>task_rules</code> + <code>prompts</code>: nullable <code>creator_user_id</code> on system rows, <code>visibility='org'</code> on shipped seeds, admin-only writes on org-visible rows. What&apos;s left: add the team branch, flip schema defaults, add the <code>tf.user_in_team()</code> RLS helper, sweep <code>prompt_triggers</code> and <code>projects</code> to match.</p>
+      <p>The team reframe makes team the canonical scope across all shareable resources. The current Postgres baseline (<a href="https://linear.app/sky-ai-eng/issue/TFAC-122">TFAC-122</a>) defaults <code>visibility='private'</code>; this domain flips defaults + extends RLS to handle the three-branch (private / team / org) shape uniformly.</p>
+      <p>Already shipped piecemeal in <a href="https://linear.app/sky-ai-eng/issue/TFAC-123">TFAC-123</a> PR #146 for <code>task_rules</code> + <code>prompts</code>: nullable <code>creator_user_id</code> on system rows, <code>visibility='org'</code> on shipped seeds, admin-only writes on org-visible rows. What&apos;s left: add the team branch, flip schema defaults, add the <code>tf.user_in_team()</code> RLS helper, sweep <code>prompt_triggers</code> and <code>projects</code> to match.</p>
       <h5>What changes</h5>
       <ul>
         <li><strong>Amendment migration</strong> flips defaults from <code>'private'</code> → <code>'team'</code> on tasks, runs, prompts, projects, task_rules, prompt_triggers, memories (when its work lands)</li>
@@ -2995,7 +2995,7 @@ POST /admin/sso/providers
   <details class="domain">
     <summary>
       <span class="num">D-Predicate</span>
-      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/SKY-264" target="_blank" rel="noopener">SKY-264</a>
+      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/TFAC-173" target="_blank" rel="noopener">TFAC-173</a>
       <svg class="chev" viewBox="0 0 16 16" fill="currentColor"><path d="M5 4l6 4-6 4z"/></svg>
       <span class="title">Predicate semantics in team mode — <code>author_in</code></span>
       <span class="badge badge--green">S</span>
@@ -3027,7 +3027,7 @@ POST /admin/sso/providers
   <details class="domain">
     <summary>
       <span class="num">D12</span>
-      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/SKY-255" target="_blank" rel="noopener">SKY-255</a>
+      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/TFAC-81" target="_blank" rel="noopener">TFAC-81</a>
       <svg class="chev" viewBox="0 0 16 16" fill="currentColor"><path d="M5 4l6 4-6 4z"/></svg>
       <span class="title">Per-org resource limits</span>
       <span class="badge badge--green">S</span>
@@ -3056,7 +3056,7 @@ POST /admin/sso/providers
   <details class="domain">
     <summary>
       <span class="num">D13</span>
-      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/SKY-256" target="_blank" rel="noopener">SKY-256</a>
+      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/TFAC-176" target="_blank" rel="noopener">TFAC-176</a>
       <svg class="chev" viewBox="0 0 16 16" fill="currentColor"><path d="M5 4l6 4-6 4z"/></svg>
       <span class="title">Containerization</span>
       <span class="badge badge--cyan">M</span>
@@ -3090,7 +3090,7 @@ POST /admin/sso/providers
   <details class="domain">
     <summary>
       <span class="num">D14</span>
-      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/SKY-257" target="_blank" rel="noopener">SKY-257</a>
+      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/TFAC-174" target="_blank" rel="noopener">TFAC-174</a>
       <svg class="chev" viewBox="0 0 16 16" fill="currentColor"><path d="M5 4l6 4-6 4z"/></svg>
       <span class="title">Org admin UI</span>
       <span class="badge badge--cyan">M</span>
@@ -3119,7 +3119,7 @@ POST /admin/sso/providers
   <details class="domain">
     <summary>
       <span class="num">D15</span>
-      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/SKY-265" target="_blank" rel="noopener">SKY-265</a>
+      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/TFAC-79" target="_blank" rel="noopener">TFAC-79</a>
       <svg class="chev" viewBox="0 0 16 16" fill="currentColor"><path d="M5 4l6 4-6 4z"/></svg>
       <span class="title">Webhooks (v2 fast-follow)</span>
       <span class="badge badge--gray">M</span>
@@ -3146,7 +3146,7 @@ POST /admin/sso/providers
   <details class="domain">
     <summary>
       <span class="num">D16</span>
-      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/SKY-266" target="_blank" rel="noopener">SKY-266</a>
+      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/TFAC-78" target="_blank" rel="noopener">TFAC-78</a>
       <svg class="chev" viewBox="0 0 16 16" fill="currentColor"><path d="M5 4l6 4-6 4z"/></svg>
       <span class="title">Entra SAML SSO (v2 enterprise rollout)</span>
       <span class="badge badge--cyan">M</span>
@@ -3176,7 +3176,7 @@ POST /admin/sso/providers
   <details class="domain">
     <summary>
       <span class="num">D17</span>
-      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/SKY-267" target="_blank" rel="noopener">SKY-267</a>
+      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/TFAC-95" target="_blank" rel="noopener">TFAC-95</a>
       <svg class="chev" viewBox="0 0 16 16" fill="currentColor"><path d="M5 4l6 4-6 4z"/></svg>
       <span class="title">SCIM provisioning (v3)</span>
       <span class="badge badge--gray">M</span>
@@ -3201,7 +3201,7 @@ POST /admin/sso/providers
   <details class="domain">
     <summary>
       <span class="num">D18</span>
-      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/SKY-268" target="_blank" rel="noopener">SKY-268</a>
+      <a class="linear-ticket" href="https://linear.app/sky-ai-eng/issue/TFAC-77" target="_blank" rel="noopener">TFAC-77</a>
       <svg class="chev" viewBox="0 0 16 16" fill="currentColor"><path d="M5 4l6 4-6 4z"/></svg>
       <span class="title">Web takeover terminal — same-sandbox handover (v2 fast-follow)</span>
       <span class="badge badge--cyan">M</span>
