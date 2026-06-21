@@ -80,30 +80,42 @@ export default function SSOSettings() {
 }
 
 // ── Part 1: SP details to paste into the IdP ────────────────────────────────
+
+// SP_METADATA_SUFFIX is the fixed GoTrue SP metadata path the backend appends
+// to the deployment's full public URL to build the Entity ID (see spValues in
+// internal/server/sso_connection_handler.go). Stripping it from entity_id
+// recovers the deployment base — INCLUDING any sub-path — which is the right
+// base for TF's SP-initiated start endpoint too (TF's API and GoTrue's SP
+// endpoints sit under the same public base).
+const SP_METADATA_SUFFIX = '/auth/v1/sso/saml/metadata'
+
+// ssoStartURLFrom builds the SP-initiated start URL (the My Apps bookmark /
+// Entra "Sign-on URL") from the backend-provided Entity ID + the connection's
+// provider_id. It derives the base by stripping the fixed metadata suffix —
+// NOT via URL().origin, which would drop a sub-path and produce a wrong Sign-on
+// URL for a deployment hosted under one (e.g. https://example.com/tf). The
+// provider_id-before-return_to order + %2F encoding mirror the backend's
+// ssoStartURL so the displayed value matches what TF actually serves. Returns
+// '' when entity_id doesn't match the expected shape (a guessed URL is worse
+// than none) — the backend contract guarantees the suffix in practice.
+function ssoStartURLFrom(entityID: string, providerID: string): string {
+  if (!entityID.endsWith(SP_METADATA_SUFFIX)) return ''
+  const base = entityID.slice(0, -SP_METADATA_SUFFIX.length)
+  const q = new URLSearchParams()
+  q.set('provider_id', providerID)
+  q.set('return_to', '/')
+  return `${base}/api/auth/oauth/saml?${q.toString()}`
+}
+
 function SPDetails({ resp }: { resp: SSOConnectionResponse }) {
-  // The My Apps bookmark / Entra "Sign-on URL" is TF's SP-initiated start
-  // endpoint carrying the connection's provider_id — the same URL the
-  // identifier-first login path (TFAC-427) and the tile both target. Only
-  // buildable once a connection exists (it needs the provider_id). The
-  // provider_id-before-return_to order + %2F encoding mirror the backend's
-  // ssoStartURL so the displayed value matches what TF actually serves. The
-  // origin is taken from the backend-provided SP values (built from
-  // TF_PUBLIC_URL), not window.location, so it shares the exact public base the
-  // operator pastes for the Entity ID / ACS — even if the admin reached the UI
-  // via a different host.
-  const bookmarkURL = useMemo(() => {
-    if (!resp.connection) return ''
-    let origin: string
-    try {
-      origin = new URL(resp.entity_id).origin
-    } catch {
-      origin = window.location.origin
-    }
-    const q = new URLSearchParams()
-    q.set('provider_id', resp.connection.provider_id)
-    q.set('return_to', '/')
-    return `${origin}/api/auth/oauth/saml?${q.toString()}`
-  }, [resp.connection, resp.entity_id])
+  // The Sign-on URL is the TF SP-initiated start endpoint carrying the
+  // connection's provider_id — the same URL the identifier-first login path
+  // (TFAC-427) and the tile both target. Only buildable once a connection
+  // exists (it needs the provider_id).
+  const bookmarkURL = useMemo(
+    () => (resp.connection ? ssoStartURLFrom(resp.entity_id, resp.connection.provider_id) : ''),
+    [resp.connection, resp.entity_id],
+  )
 
   return (
     <div className="space-y-3">

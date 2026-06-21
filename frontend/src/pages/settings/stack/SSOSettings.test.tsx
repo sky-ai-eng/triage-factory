@@ -52,9 +52,10 @@ let domainList: SSODomain[]
 let verifyError: HttpError | null
 
 // seedConnected primes the load with an existing connection (+ optional domains)
-// so a test starts past the register step.
-function seedConnected(domains: SSODomain[] = []) {
-  connState = { connection: makeConnection(), entity_id: SP.entity_id, acs_url: SP.acs_url }
+// so a test starts past the register step. entityID is overridable to exercise
+// Sign-on URL derivation (e.g. a sub-pathed deployment public URL).
+function seedConnected(domains: SSODomain[] = [], entityID: string = SP.entity_id) {
+  connState = { connection: makeConnection(), entity_id: entityID, acs_url: SP.acs_url }
   domainList = domains
 }
 
@@ -144,6 +145,32 @@ describe('SSOSettings — SP details + connection', () => {
     // Copy the Entity ID writes it to the clipboard.
     fireEvent.click(screen.getByRole('button', { name: /copy identifier/i }))
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith(SP.entity_id)
+
+    // The Sign-on URL needs a provider_id, so it's absent until connected.
+    expect(screen.queryByLabelText('Sign-on URL')).not.toBeInTheDocument()
+  })
+
+  it('derives the Sign-on URL from the Entity ID once connected', async () => {
+    seedConnected()
+    render(<SSOSettings />)
+
+    const signOn = (await screen.findByLabelText('Sign-on URL')) as HTMLInputElement
+    expect(signOn.value).toBe(
+      'https://tf.example.com/api/auth/oauth/saml?provider_id=prov-uuid-123&return_to=%2F',
+    )
+  })
+
+  it('preserves a sub-path in the public URL when deriving the Sign-on URL', async () => {
+    // A deployment hosted under a sub-path (TF_PUBLIC_URL = https://example.com/tf)
+    // carries it in entity_id; the Sign-on URL must keep it. Deriving from
+    // URL().origin would drop /tf and break the My Apps tile — this guards that.
+    seedConnected([], 'https://example.com/tf/auth/v1/sso/saml/metadata')
+    render(<SSOSettings />)
+
+    const signOn = (await screen.findByLabelText('Sign-on URL')) as HTMLInputElement
+    expect(signOn.value).toBe(
+      'https://example.com/tf/api/auth/oauth/saml?provider_id=prov-uuid-123&return_to=%2F',
+    )
   })
 
   it('registers a connection and reflects the enabled state', async () => {
