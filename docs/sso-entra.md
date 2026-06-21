@@ -95,9 +95,21 @@ GOTRUE_SAML_PRIVATE_KEY=<the base64 blob from above>
 When an org admin registers a connection, TF calls GoTrue's admin SSO API
 authenticated with a **pre-minted RS256 `service_role` token**,
 `TF_GOTRUE_SERVICE_ROLE_TOKEN`. `triagefactory jwk-init --write-env .env` mints
-it for you (signed with the same RSA key as `GOTRUE_JWT_KEYS`) and appends it to
+it for you (signed with the same RSA key as `GOTRUE_JWT_KEYS`) and writes it to
 `.env`; the compose stack passes it to the `triagefactory` service. No extra
 step beyond running `jwk-init` — just don't strip it.
+
+> **Enabling SSO on an already-running deployment (no key rotation).** If you
+> bootstrapped on GitHub-OAuth alone, your `.env` has a `GOTRUE_JWT_KEYS` but no
+> `TF_GOTRUE_SERVICE_ROLE_TOKEN`. To acquire the token, just re-run
+> `triagefactory jwk-init --write-env .env`. The command is **idempotent**: it
+> detects the existing `GOTRUE_JWT_KEYS`, **reuses that keypair** to sign the
+> token, and writes **only** the `TF_GOTRUE_SERVICE_ROLE_TOKEN` line — it does
+> **not** rotate the signing key, so every active session keeps verifying and no
+> one is forced to re-authenticate. Then recreate the `triagefactory` service
+> (`docker compose up -d triagefactory`) to load the new token. (Pass `--rotate`
+> only if you actually want to roll the signing key — that *does* force a re-auth
+> for everyone; see [Rotating the signing key](self-host-setup.md#rotating-the-signing-key).)
 
 > **Why a pre-minted token, not TF signing its own?** Under the production
 > `GOTRUE_JWT_ALGORITHM=RS256` config, GoTrue **rejects** an HS256 token signed
@@ -105,9 +117,11 @@ step beyond running `jwk-init` — just don't strip it.
 > an RS256 token carrying `role:service_role`. Signing that requires GoTrue's
 > private key — which must live in exactly one process. So `jwk-init` (which
 > already holds the freshly generated key) mints the token, and TF holds **only
-> the token**, never the key, and contains no JWT-minting code. Rotating the
-> keypair (re-running `jwk-init`) regenerates this token with it. `aud`/`iss`
-> aren't enforced by GoTrue on the admin token but are stamped for hygiene.
+> the token**, never the key, and contains no JWT-minting code. Re-running
+> `jwk-init` reuses the existing keypair and re-mints this token against it;
+> rotating the keypair (`--rotate`) regenerates the token with the new key.
+> `aud`/`iss` aren't enforced by GoTrue on the admin token but are stamped for
+> hygiene.
 >
 > The token is **optional but required for SSO**: a deployment that never
 > registers an SSO connection needn't set it. If it's missing when an admin
@@ -313,8 +327,10 @@ Still in progress (not configured here yet):
 
 - **`POST /api/sso/connection` returns 503 "SSO admin token not configured".**
   `TF_GOTRUE_SERVICE_ROLE_TOKEN` isn't set on the `triagefactory` service. Run
-  `triagefactory jwk-init --write-env .env` (it appends the token) and recreate
-  the container with `docker compose up -d` so it picks up the new env.
+  `triagefactory jwk-init --write-env .env` — it reuses your existing
+  `GOTRUE_JWT_KEYS` to mint the token (no keypair rotation, no forced re-auth)
+  and writes only the token line — then recreate the container with
+  `docker compose up -d triagefactory` so it picks up the new env.
 - **`POST /api/sso/connection` returns 500 mentioning GoTrue.** Common causes:
   - *Provider registration failed with a metadata error* — GoTrue couldn't
     fetch the metadata URL. Check the gotrue container has **outbound** access
@@ -323,11 +339,10 @@ Still in progress (not configured here yet):
   - *403 from GoTrue's admin API* — the `TF_GOTRUE_SERVICE_ROLE_TOKEN` doesn't
     match GoTrue's current signing key (its `kid` must resolve in
     `GOTRUE_JWT_KEYS`). This happens if the keypair was rotated without
-    regenerating the token: re-run `triagefactory jwk-init` so both are minted
-    together, then recreate the `gotrue` and `triagefactory` containers. Note
-    `--write-env` *appends* — delete the old `GOTRUE_JWT_KEYS` /
-    `GOTRUE_JWT_SECRET` / `TF_GOTRUE_SERVICE_ROLE_TOKEN` lines so the new ones
-    win (env files take the last value, but stale duplicates are confusing).
+    re-minting the token: re-run `triagefactory jwk-init --write-env .env`, which
+    reuses the current `GOTRUE_JWT_KEYS` to re-mint the token against it (it
+    upserts the line in place — no stale duplicates to hand-delete), then
+    recreate the `triagefactory` container.
 - **`POST /api/sso/connection` returns 404.** You're not an org admin in the
   active org (the endpoint is non-disclosing — it 404s rather than 403s), or the
   deployment is in local mode (SSO is multi-mode only).

@@ -39,9 +39,9 @@ Fill in:
 ./triagefactory jwk-init --write-env .env
 ```
 
-This generates a fresh RS256 keypair, formats it as a JWKS containing both private and public material, and appends both `GOTRUE_JWT_KEYS=<json>` and `GOTRUE_JWT_SECRET=...` to `.env`. The private side stays in `.env` (read only by GoTrue); only the public side is published at GoTrue's `/.well-known/jwks.json` endpoint. The generated `GOTRUE_JWT_SECRET` is also required by the compose stack, so if you manage these values manually, do not omit it.
+This generates a fresh RS256 keypair, formats it as a JWKS containing both private and public material, and writes `GOTRUE_JWT_KEYS=<json>`, `GOTRUE_JWT_SECRET=...`, and `TF_GOTRUE_SERVICE_ROLE_TOKEN=...` to `.env`. The private side stays in `.env` (read only by GoTrue); only the public side is published at GoTrue's `/.well-known/jwks.json` endpoint. The generated `GOTRUE_JWT_SECRET` is also required by the compose stack, so if you manage these values manually, do not omit it. (`TF_GOTRUE_SERVICE_ROLE_TOKEN` is only needed once you enable SSO — see [the SSO guide](sso-entra.md) — but it's harmless to mint up front.)
 
-Re-running `jwk-init --write-env .env` appends a *second* line, which works (GoTrue picks the last one) but is messy — clear the existing line first if you're rotating.
+`jwk-init --write-env` is **idempotent and upserts in place** — it replaces each variable's line rather than appending, collapsing any stale duplicates, so re-running is clean. Crucially, if `.env` already has a `GOTRUE_JWT_KEYS`, jwk-init **reuses that keypair** and writes only the service-role token; it does **not** rotate the signing key. To deliberately rotate the keypair, pass `--rotate` (see [Rotating the signing key](#rotating-the-signing-key)).
 
 ## 4. Bring up the stack
 
@@ -135,11 +135,10 @@ TF_BLOB_REGION=us-east-1
 
 ## Rotating the signing key
 
-The current tooling supports **single-key replacement** only:
+The current tooling supports **single-key replacement** only. Because the default `jwk-init --write-env` reuses an existing keypair, rotation is an explicit opt-in via `--rotate`:
 
-1. Remove the existing `GOTRUE_JWT_KEYS=` and `GOTRUE_JWT_SECRET=` lines from `.env`
-2. `./triagefactory jwk-init --write-env .env`
-3. Recreate GoTrue so it picks up the new env: `docker compose up -d gotrue`
+1. `./triagefactory jwk-init --write-env .env --rotate` — regenerates the keypair, secret, and service-role token, replacing the old lines in place (no manual deletion needed)
+2. Recreate GoTrue so it picks up the new env: `docker compose up -d gotrue`
 
 `docker compose up -d` (without `stop`/`start`) detects the env diff against the existing container and recreates it. `docker compose start gotrue` would reuse the cached env from container creation and the new key would NOT be loaded — this is a common foot-gun. The Verifier picks up the new key automatically on the next unknown-`kid` lookup — no TF restart needed.
 
