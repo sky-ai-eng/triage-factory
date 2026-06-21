@@ -372,15 +372,23 @@ func parseSigningKey(jwtKeysJSON string) (*rsa.PrivateKey, string, error) {
 }
 
 // jwkHasSignOp reports whether a JWK's key_ops array contains "sign" — the
-// marker generateGoTrueKeys stamps on the private member of the set.
+// marker generateGoTrueKeys stamps on the private member of the set. It handles
+// both the []any that json.Unmarshal produces (the production caller's input)
+// and the []string of a JWK built directly in Go, so a non-round-tripped JWK
+// (e.g. from a test) isn't silently treated as having no signing op.
 func jwkHasSignOp(jwk map[string]any) bool {
-	ops, ok := jwk["key_ops"].([]any)
-	if !ok {
-		return false
-	}
-	for _, op := range ops {
-		if s, _ := op.(string); s == "sign" {
-			return true
+	switch ops := jwk["key_ops"].(type) {
+	case []any:
+		for _, op := range ops {
+			if s, _ := op.(string); s == "sign" {
+				return true
+			}
+		}
+	case []string:
+		for _, op := range ops {
+			if op == "sign" {
+				return true
+			}
 		}
 	}
 	return false

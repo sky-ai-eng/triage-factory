@@ -145,6 +145,24 @@ func TestParseSigningKey_NoSigningKey(t *testing.T) {
 	}
 }
 
+// TestJWKHasSignOp_BothArrayTypes: the sign-op check works on a JWK built
+// directly in Go (key_ops as []string) as well as one round-tripped through
+// json.Unmarshal (key_ops as []any).
+func TestJWKHasSignOp_BothArrayTypes(t *testing.T) {
+	if !jwkHasSignOp(map[string]any{"key_ops": []string{"sign"}}) {
+		t.Error("[]string{\"sign\"} not recognized")
+	}
+	if !jwkHasSignOp(map[string]any{"key_ops": []any{"sign"}}) {
+		t.Error("[]any{\"sign\"} not recognized")
+	}
+	if jwkHasSignOp(map[string]any{"key_ops": []string{"verify"}}) {
+		t.Error("verify-only key_ops wrongly reported as a signing key")
+	}
+	if jwkHasSignOp(map[string]any{}) {
+		t.Error("missing key_ops wrongly reported as a signing key")
+	}
+}
+
 // TestParseSigningKey_OutOfRangeExponent: a hand-edited "e" too large for an int
 // is rejected before the narrowing conversion can truncate it into a bogus
 // (or negative) exponent that might slip past Validate.
@@ -238,7 +256,7 @@ func TestRunGenerate_RotateReplacesKeypair(t *testing.T) {
 	}
 	assertNoDuplicateKeys(t, path)
 
-	// New token must NOT verify against the old key (it's a real rotation).
+	// New token must NOT verify against the old key (it's a real rotation)...
 	oldPriv, _, err := parseSigningKey(keys1)
 	if err != nil {
 		t.Fatalf("parseSigningKey(old): %v", err)
@@ -246,6 +264,15 @@ func TestRunGenerate_RotateReplacesKeypair(t *testing.T) {
 	token2 := envValue(t, path, "TF_GOTRUE_SERVICE_ROLE_TOKEN")
 	if _, err := jwt.Parse(token2, func(*jwt.Token) (any, error) { return &oldPriv.PublicKey, nil }); err == nil {
 		t.Error("rotated token still verifies against the old key; want rotation")
+	}
+	// ...but it MUST verify against the new key, proving it's a valid JWT signed
+	// by the rotated keypair (not just an unparseable string).
+	newPriv, _, err := parseSigningKey(keys2)
+	if err != nil {
+		t.Fatalf("parseSigningKey(new): %v", err)
+	}
+	if _, err := jwt.Parse(token2, func(*jwt.Token) (any, error) { return &newPriv.PublicKey, nil }); err != nil {
+		t.Fatalf("rotated token does not verify against the new key: %v", err)
 	}
 }
 
@@ -338,6 +365,9 @@ func TestUpsertEnvFile_PreservesExportPrefix(t *testing.T) {
 }
 
 // envValue returns the last value assigned to key in the .env at path, or "".
+// Unlike production readExistingJWTKeys, it does NOT run unquoteEnvValue — the
+// values jwk-init writes are unquoted, so the tests never need it; a test that
+// writes a quoted value would have to strip the quotes itself.
 func envValue(t *testing.T, path, key string) string {
 	t.Helper()
 	b, err := os.ReadFile(path)
