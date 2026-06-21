@@ -1,8 +1,10 @@
 package jwkinit
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -139,6 +141,26 @@ func TestParseSigningKey_RoundTrips(t *testing.T) {
 func TestParseSigningKey_NoSigningKey(t *testing.T) {
 	if _, _, err := parseSigningKey(`[{"kty":"RSA","kid":"x","use":"sig"}]`); err == nil {
 		t.Fatal("want error for a set with no signing key")
+	}
+}
+
+// TestParseSigningKey_OutOfRangeExponent: a hand-edited "e" too large for an int
+// is rejected before the narrowing conversion can truncate it into a bogus
+// (or negative) exponent that might slip past Validate.
+func TestParseSigningKey_OutOfRangeExponent(t *testing.T) {
+	keys, _, _, err := generateGoTrueKeys()
+	if err != nil {
+		t.Fatalf("generateGoTrueKeys: %v", err)
+	}
+	// Replace e with 2^96 — well past math.MaxInt on any platform.
+	huge := new(big.Int).Lsh(big.NewInt(1), 96)
+	keys[0]["e"] = base64.RawURLEncoding.EncodeToString(huge.Bytes())
+	encoded, err := json.Marshal(keys)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, _, err := parseSigningKey(string(encoded)); err == nil {
+		t.Fatal("want error for an out-of-range RSA exponent")
 	}
 }
 

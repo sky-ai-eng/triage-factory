@@ -47,6 +47,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -409,6 +410,13 @@ func jwkToPrivateKey(jwk map[string]any) (*rsa.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The public exponent must fit in an int and be positive — guard before the
+	// narrowing conversion so a malformed/hand-edited "e" can't silently truncate
+	// into a wrong (or negative) exponent that slips past Validate. A real RSA e
+	// is small (commonly 65537), so anything that overflows MaxInt is bogus.
+	if !e.IsInt64() || e.Int64() < 2 || e.Int64() > int64(math.MaxInt) {
+		return nil, fmt.Errorf("JWK exponent %q is out of range for an RSA public exponent", e.String())
+	}
 	priv := &rsa.PrivateKey{
 		PublicKey: rsa.PublicKey{N: n, E: int(e.Int64())},
 		D:         d,
@@ -483,8 +491,10 @@ func upsertEnvFile(path string, vars []envVar) error {
 }
 
 // envLineKey returns the variable name a .env line assigns, or "" for blank
-// lines, comments, and continuations. Tolerates a leading `export ` and
-// surrounding whitespace so hand-edited files round-trip cleanly.
+// lines, comments, and any line with no `=`. Tolerates a leading `export ` and
+// surrounding whitespace so hand-edited files round-trip cleanly. The
+// compose env_file format this targets is strictly one KEY=value per line — no
+// line continuations or multi-line values — so each line stands alone here.
 func envLineKey(line string) string {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
@@ -519,13 +529,16 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("create temp env file: %w", err)
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // no-op once the rename succeeds
+	// Best-effort cleanup; a no-op once the rename succeeds (and an orphaned
+	// temp in the .env's dir is harmless), so the remove error is intentionally
+	// ignored.
+	defer func() { _ = os.Remove(tmpName) }()
 	if err := tmp.Chmod(perm); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("chmod temp env file: %w", err)
 	}
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("write temp env file: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
